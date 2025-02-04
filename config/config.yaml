@@ -1,0 +1,13 @@
+name: versus
+host: 0.0.0.0
+port: 3000
+
+alert:
+  slack:
+    enable: true
+    token: ${SLACK_TOKEN}
+    channel_id: ${SLACK_CHANNEL_ID}
+    template_path: "config/slack_message.tmpl"
+  
+  telegram:
+    enable: false
