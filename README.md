@@ -287,7 +287,7 @@ curl -X POST http://localhost:3000/api/incidents \
 
 ## Roadmap
 
-- [ ] Add Telegram support
+- [x] Add Telegram support
 - [ ] Add MS Team support
 - [ ] Add support error logs for listeners from the queue (AWS SNS, GCP Cloud Pub/Sub, Azure Service Bus)
 - [ ] Incident status tracking
