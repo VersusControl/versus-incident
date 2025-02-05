@@ -25,7 +25,11 @@ func (f *ProviderFactory) CreateProviders() ([]core.AlertProvider, error) {
 	}
 
 	if f.cfg.Alert.Telegram.Enable {
-		// Add similar logic for Telegram
+		telegramProvider, err := f.createTelegramProvider()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Telegram provider: %w", err)
+		}
+		providers = append(providers, telegramProvider)
 	}
 
 	return providers, nil
@@ -41,5 +45,18 @@ func (f *ProviderFactory) createSlackProvider() (core.AlertProvider, error) {
 		Token:        sc.Token,
 		ChannelID:    sc.ChannelID,
 		TemplatePath: sc.TemplatePath,
+	}), nil
+}
+
+func (f *ProviderFactory) createTelegramProvider() (core.AlertProvider, error) {
+	tc := f.cfg.Alert.Telegram
+	if tc.BotToken == "" || tc.ChatID == "" || tc.TemplatePath == "" {
+		return nil, fmt.Errorf("missing required Telegram configuration")
+	}
+
+	return NewTelegramProvider(TelegramConfig{
+		BotToken:     tc.BotToken,
+		ChatID:       tc.ChatID,
+		TemplatePath: tc.TemplatePath,
 	}), nil
 }

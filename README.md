@@ -13,6 +13,7 @@ An open-source incident management system with multi-channel alerting capabiliti
   - [Prerequisites](#prerequisites)
   - [Installation](#installation)
 - [Configuration](#configuration)
+- [Environment Variables](#environment-variables)
 - [Custom Alert Templates](#custom-alert-templates)
 - [Development](#development)
   - [Docker](#docker)
@@ -54,7 +55,7 @@ go build -o versus ./cmd/main.go
 
 # Or run with Docker
 docker build -t versus-incident .
-docker run -p 3000:3000 -e SLACK_TOKEN=your_token -e SLACK_CHANNEL_ID=your_channel versus-incident
+docker run -p 3000:3000 -e SLACK_ENABLE=true -e SLACK_TOKEN=your_token -e SLACK_CHANNEL_ID=your_channel versus-incident
 ```
 
 ## Configuration
@@ -68,17 +69,41 @@ port: 3000
 
 alert:
   slack:
-    enable: true
+    enable: false  # Default value, will be overridden by SLACK_ENABLE env var
     token: ${SLACK_TOKEN}            # From environment
     channel_id: ${SLACK_CHANNEL_ID}  # From environment
     template_path: "config/slack_message.tmpl"
 
   telegram:
-    enable: false
+    enable: false  # Default value, will be overridden by TELEGRAM_ENABLE env var
+    bot_token: ${TELEGRAM_BOT_TOKEN} # From environment
+    chat_id: ${TELEGRAM_CHAT_ID} # From environment
+    template_path: "config/telegram_message.tmpl"
+
 ```
+## Environment Variables
+
+The application relies on several environment variables to configure alerting services. Below is an explanation of each variable:
+
+### Slack Configuration
+| Variable          | Description |
+|------------------|-------------|
+| `SLACK_ENABLE`   | Set to `true` to enable Slack notifications. |
+| `SLACK_TOKEN`    | The authentication token for your Slack bot. |
+| `SLACK_CHANNEL_ID` | The ID of the Slack channel where alerts will be sent. |
+
+### Telegram Configuration
+| Variable              | Description |
+|----------------------|-------------|
+| `TELEGRAM_ENABLE`    | Set to `true` to enable Telegram notifications. |
+| `TELEGRAM_BOT_TOKEN` | The authentication token for your Telegram bot. |
+| `TELEGRAM_CHAT_ID`   | The chat ID where alerts will be sent. |
+
+Ensure these environment variables are properly set before running the application. You can configure them in your `.env` file, Docker environment variables, or Kubernetes secrets.
 
 ## Custom Alert Templates
 
+### Slack Template
 Create your Slack message template, for example `config/slack_message.tmpl`:
 
 ```
@@ -89,6 +114,16 @@ Error Details:
 ----------
 Owner <@{{.UserID}}> please investigate
 ```
+### Telegram Template
+
+For Telegram, you can use HTML formatting. Create your Telegram message template, for example `config/telegram_message.tmpl`:
+```
+🚨 <b>Critical Error Detected!</b> 🚨
+📌 <b>Service:</b> {{.ServiceName}}
+⚠️ <b>Error Details:</b>
+{{.Logs}}
+```
+This template will be parsed with HTML tags when sending the alert to Telegram.
 
 ## Development
 
@@ -102,6 +137,7 @@ docker build -t versus-incident .
 # Run container
 docker run -d \
   -p 3000:3000 \
+  -e SLACK_ENABLE=true \
   -e SLACK_TOKEN=your_slack_token \
   -e SLACK_CHANNEL_ID=your_channel_id \
   --name versus \
@@ -130,6 +166,7 @@ cp your-custom-template.tmpl ./config/slack_message.tmpl
 docker run -d \
   -p 3000:3000 \
   -v $(pwd)/config:/app/config \
+  -e SLACK_ENABLE=true \
   -e SLACK_TOKEN=your_slack_token \
   -e SLACK_CHANNEL_ID=your_channel_id \
   --name versus \
@@ -147,6 +184,7 @@ docker exec versus ls -l /app/config
 ```bash
 # Create secret
 kubectl create secret generic versus-secrets \
+  --from-literal=slack_enable=$SLACK_ENABLE
   --from-literal=slack_token=$SLACK_TOKEN \
   --from-literal=slack_channel_id=$SLACK_CHANNEL_ID
 
@@ -240,11 +278,16 @@ curl -X POST http://localhost:3000/api/incidents \
 ```
 
 **Result:**
+
+***Slack***
 ![Slack Alert](./docs/images/slack_alert.png)
+
+***Telegram***
+![Telegram Alert](./docs/images/telegram_alert.png)
 
 ## Roadmap
 
-- [ ] Add Telegram support
+- [x] Add Telegram support
 - [ ] Add MS Team support
 - [ ] Add support error logs for listeners from the queue (AWS SNS, GCP Cloud Pub/Sub, Azure Service Bus)
 - [ ] Incident status tracking

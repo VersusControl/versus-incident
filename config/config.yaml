@@ -4,10 +4,13 @@ port: 3000
 
 alert:
   slack:
-    enable: true
+    enable: false
     token: ${SLACK_TOKEN}
     channel_id: ${SLACK_CHANNEL_ID}
     template_path: "config/slack_message.tmpl"
   
   telegram:
     enable: false
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+    template_path: "config/telegram_message.tmpl"
