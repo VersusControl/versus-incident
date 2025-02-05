@@ -280,9 +280,11 @@ curl -X POST http://localhost:3000/api/incidents \
 **Result:**
 
 ***Slack***
+
 ![Slack Alert](./docs/images/slack_alert.png)
 
 ***Telegram***
+
 ![Telegram Alert](./docs/images/telegram_alert.png)
 
 ## Roadmap
