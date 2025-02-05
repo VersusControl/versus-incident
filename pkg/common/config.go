@@ -29,7 +29,10 @@ type SlackConfig struct {
 }
 
 type TelegramConfig struct {
-	Enable bool
+	Enable       bool
+	BotToken     string `mapstructure:"bot_token"`
+	ChatID       string `mapstructure:"chat_id"`
+	TemplatePath string `mapstructure:"template_path"`
 }
 
 var (
