@@ -63,9 +63,18 @@ func LoadConfig(path string) error {
 			return
 		}
 
+		if slackEnable := os.Getenv("SLACK_ENABLE"); slackEnable != "" {
+			cfg.Alert.Slack.Enable = strings.ToLower(slackEnable) == "true"
+		}
+		if telegramEnable := os.Getenv("TELEGRAM_ENABLE"); telegramEnable != "" {
+			cfg.Alert.Telegram.Enable = strings.ToLower(telegramEnable) == "true"
+		}
+
 		// Manual replacement for environment variables in strings
 		cfg.Alert.Slack.Token = expandEnv(cfg.Alert.Slack.Token)
 		cfg.Alert.Slack.ChannelID = expandEnv(cfg.Alert.Slack.ChannelID)
+		cfg.Alert.Telegram.BotToken = expandEnv(cfg.Alert.Telegram.BotToken)
+		cfg.Alert.Telegram.ChatID = expandEnv(cfg.Alert.Telegram.ChatID)
 	})
 
 	return err

@@ -13,6 +13,7 @@ An open-source incident management system with multi-channel alerting capabiliti
   - [Prerequisites](#prerequisites)
   - [Installation](#installation)
 - [Configuration](#configuration)
+- [Environment Variables](#environment-variables)
 - [Custom Alert Templates](#custom-alert-templates)
 - [Development](#development)
   - [Docker](#docker)
@@ -68,13 +69,13 @@ port: 3000
 
 alert:
   slack:
-    enable: ${SLACK_ENABLE}
+    enable: false  # Default value, will be overridden by SLACK_ENABLE env var
     token: ${SLACK_TOKEN}            # From environment
     channel_id: ${SLACK_CHANNEL_ID}  # From environment
     template_path: "config/slack_message.tmpl"
 
   telegram:
-    enable: ${TELEGRAM_ENABLE}
+    enable: false  # Default value, will be overridden by TELEGRAM_ENABLE env var
     bot_token: ${TELEGRAM_BOT_TOKEN} # From environment
     chat_id: ${TELEGRAM_CHAT_ID} # From environment
     template_path: "config/telegram_message.tmpl"
