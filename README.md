@@ -46,6 +46,12 @@ An open-source incident management system with multi-channel alerting capabiliti
 ### Installation
 
 ```bash
+docker run -p 3000:3000 -e SLACK_ENABLE=true -e SLACK_TOKEN=your_token -e SLACK_CHANNEL_ID=your_channel ghcr.io/versuscontrol/versus-incident
+```
+
+### Build from source
+
+```bash
 # Clone the repository
 git clone https://github.com/yourusername/versus.git
 cd versus
@@ -55,6 +61,7 @@ go build -o versus ./cmd/main.go
 
 # Or run with Docker
 docker build -t versus-incident .
+
 docker run -p 3000:3000 -e SLACK_ENABLE=true -e SLACK_TOKEN=your_token -e SLACK_CHANNEL_ID=your_channel versus-incident
 ```
 
