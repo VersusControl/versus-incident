@@ -1,40 +1,3 @@
-# Versus Incident Management System
-
-![Versus Incident](src/docs/images/versus-incident-l.png)
-
-[![Go Report Card](https://goreportcard.com/badge/github.com/yourusername/versus)](https://goreportcard.com/report/github.com/yourusername/versus)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-An open-source incident management system with multi-channel alerting capabilities. Designed for modern DevOps teams to quickly respond to production incidents.
-
-## Table of Contents
-- [Features](#features)
-- [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-- [Configuration](#configuration)
-- [Environment Variables](#environment-variables)
-- [Custom Alert Templates](#custom-alert-templates)
-- [Development](#development)
-  - [Docker](#docker)
-    - [Basic Deployment](#basic-deployment)
-    - [With Custom Templates](#with-custom-templates)
-  - [Kubernetes](#kubernetes)
-    - [Basic Deployment](#basic-deployment-1)
-    - [With Custom Templates](#with-custom-templates-1)
-- [API Usage](#api-usage)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [License](#license)
-- [Acknowledgments](#acknowledgments)
-
-## Features
-
-- 🚨 **Multi-channel Alerts**: Send incident notifications to Slack (more channels coming!)
-- 📝 **Custom Templates**: Define your own alert messages using Go templates
-- 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
-- 📡 **REST API**: Simple HTTP interface for incident management
-
 ## Getting Started
 
 ### Prerequisites
@@ -281,40 +244,8 @@ curl -X POST http://localhost:3000/api/incidents \
 
 ***Slack***
 
-![Slack Alert](src/docs/images/slack_alert.png)
+![Slack Alert](docs/images/slack_alert.png)
 
 ***Telegram***
 
-![Telegram Alert](src/docs/images/telegram_alert.png)
-
-## Roadmap
-
-- [x] Add Telegram support
-- [ ] Add MS Team support
-- [ ] Add Email support
-- [ ] Add support error logs for listeners from the queue (AWS SQS, AWS SNS, GCP Cloud Pub/Sub, Azure Service Bus)
-- [ ] Support multiple templates with query params
-- [ ] Incident status tracking
-- [ ] Webhook integrations
-- [ ] Authentication/Authorization
-- [ ] Prometheus metrics
-
-## Contributing
-
-We welcome contributions! Please follow these steps:
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-Distributed under the MIT License. See `LICENSE` for more information.
-
-## Acknowledgments
-
-- Inspired by modern SRE practices
-- Built with [Go Fiber](https://gofiber.io/)
-- Slack integration using [slack-go](https://github.com/slack-go/slack)
+![Telegram Alert](docs/images/telegram_alert.png)
