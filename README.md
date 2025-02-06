@@ -291,7 +291,9 @@ curl -X POST http://localhost:3000/api/incidents \
 
 - [x] Add Telegram support
 - [ ] Add MS Team support
-- [ ] Add support error logs for listeners from the queue (AWS SNS, GCP Cloud Pub/Sub, Azure Service Bus)
+- [ ] Add Email support
+- [ ] Add support error logs for listeners from the queue (AWS SQS, AWS SNS, GCP Cloud Pub/Sub, Azure Service Bus)
+- [ ] Support multiple templates with query params
 - [ ] Incident status tracking
 - [ ] Webhook integrations
 - [ ] Authentication/Authorization

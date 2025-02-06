@@ -14,3 +14,19 @@ alert:
     bot_token: ${TELEGRAM_BOT_TOKEN}
     chat_id: ${TELEGRAM_CHAT_ID}
     template_path: "config/telegram_message.tmpl"
+
+queue:
+  enable: true
+  # AWS SNS
+  sns:
+    enable: false
+  # AWS SQS
+  sqs:
+    enable: false
+    queue_url: your_sqs_queue_url
+  # GCP Pub Sub
+  pubsub:
+    enable: false
+  # Azure Event Bus
+  azbus:
+    enable: false

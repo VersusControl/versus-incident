@@ -5,6 +5,7 @@ import (
 	"versus-incident/pkg/core"
 )
 
+// Alert Provider
 type ProviderFactory struct {
 	cfg *Config
 }
@@ -58,5 +59,52 @@ func (f *ProviderFactory) createTelegramProvider() (core.AlertProvider, error) {
 		BotToken:     tc.BotToken,
 		ChatID:       tc.ChatID,
 		TemplatePath: tc.TemplatePath,
+	}), nil
+}
+
+// Listener
+type ListenerFactory struct {
+	cfg *Config
+}
+
+func NewListenerFactory(cfg *Config) *ListenerFactory {
+	return &ListenerFactory{cfg: cfg}
+}
+
+func (f *ListenerFactory) CreateListeners() ([]core.QueueListener, error) {
+	var listeners []core.QueueListener
+
+	if f.cfg.Queue.SQS.Enable {
+		sqsListener, err := f.createSQSListener()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create SQS listener: %w", err)
+		}
+		listeners = append(listeners, sqsListener)
+	}
+
+	if f.cfg.Queue.SNS.Enable {
+		return nil, fmt.Errorf("SNS listener not implemented")
+	}
+
+	if f.cfg.Queue.PubSub.Enable {
+		return nil, fmt.Errorf("GCP Pub/Sub listener not implemented")
+	}
+
+	if f.cfg.Queue.AzBus.Enable {
+		return nil, fmt.Errorf("AZURE Service Bus listener not implemented")
+	}
+
+	return listeners, nil
+}
+
+func (f *ListenerFactory) createSQSListener() (core.QueueListener, error) {
+	sc := f.cfg.Queue.SQS
+	if sc.QueueURL == "" {
+		return nil, fmt.Errorf("missing required SQS configuration")
+	}
+
+	return NewSQSListener(SQSConfig{
+		Enable:   sc.Enable,
+		QueueURL: sc.QueueURL,
 	}), nil
 }
