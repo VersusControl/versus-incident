@@ -14,6 +14,7 @@ type Config struct {
 	Host  string
 	Port  int
 	Alert AlertConfig
+	Queue QueueConfig
 }
 
 type AlertConfig struct {
@@ -33,6 +34,31 @@ type TelegramConfig struct {
 	BotToken     string `mapstructure:"bot_token"`
 	ChatID       string `mapstructure:"chat_id"`
 	TemplatePath string `mapstructure:"template_path"`
+}
+
+type QueueConfig struct {
+	Enable bool         `mapstructure:"enable"`
+	SNS    SNSConfig    `mapstructure:"sns"`
+	SQS    SQSConfig    `mapstructure:"sqs"`
+	PubSub PubSubConfig `mapstructure:"pubsub"`
+	AzBus  AzBusConfig  `mapstructure:"azbus"`
+}
+
+type SNSConfig struct {
+	Enable bool `mapstructure:"enable"`
+}
+
+type SQSConfig struct {
+	Enable   bool   `mapstructure:"enable"`
+	QueueURL string `mapstructure:"queue_url"`
+}
+
+type PubSubConfig struct {
+	Enable bool `mapstructure:"enable"`
+}
+
+type AzBusConfig struct {
+	Enable bool `mapstructure:"enable"`
 }
 
 var (
