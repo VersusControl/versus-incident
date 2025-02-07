@@ -89,11 +89,11 @@ alert:
 
   email:
     enable: false # Default value, will be overridden by EMAIL_ENABLE env var
-    smtp_host: ${SMTP_HOST} 
-    smtp_port: ${SMTP_PORT}
-    username: ${SMTP_USERNAME}
-    password: ${SMTP_PASSWORD}
-    to: ${EMAIL_TO}
+    smtp_host: ${SMTP_HOST} # From environment
+    smtp_port: ${SMTP_PORT} # From environment
+    username: ${SMTP_USERNAME} # From environment
+    password: ${SMTP_PASSWORD} # From environment
+    to: ${EMAIL_TO} # From environment
     template_path: "config/email_message.tmpl"
 
 ```
