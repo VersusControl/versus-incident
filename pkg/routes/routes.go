@@ -7,7 +7,11 @@ import (
 )
 
 func SetupRoutes(app *fiber.App) {
-	api := app.Group("/api") // /api
+	// Health check endpoint
+	app.Get("/healthz", controllers.HealthCheck)
+
+	// API routes
+	api := app.Group("/api")
 
 	incidents := api.Group("/incidents")
 	incidents.Post("/", controllers.CreateIncident)
