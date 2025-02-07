@@ -17,11 +17,7 @@ An open-source incident management system with multi-channel alerting capabiliti
 - [Custom Alert Templates](#custom-alert-templates)
 - [Development](#development)
   - [Docker](#docker)
-    - [Basic Deployment](#basic-deployment)
-    - [With Custom Templates](#with-custom-templates)
   - [Kubernetes](#kubernetes)
-    - [Basic Deployment](#basic-deployment-1)
-    - [With Custom Templates](#with-custom-templates-1)
 - [API Usage](#api-usage)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
@@ -187,57 +183,100 @@ docker exec versus ls -l /app/config
 
 ### Kubernetes
 
-#### Basic Deployment
+1. Create a secret for Slack:
 ```bash
 # Create secret
 kubectl create secret generic versus-secrets \
-  --from-literal=slack_enable=$SLACK_ENABLE
   --from-literal=slack_token=$SLACK_TOKEN \
   --from-literal=slack_channel_id=$SLACK_CHANNEL_ID
-
-# Create deployment
-kubectl apply -f versus-deployment.yaml
 ```
 
-#### With Custom Templates
+2. Create ConfigMap for config and template file, for example `versus-config.yaml`:
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: versus-config
+data:
+  config.yaml: |
+    name: versus
+    host: 0.0.0.0
+    port: 3000
 
-1. Create ConfigMap from template file:
+    alert:
+      slack:
+        enable: true
+        token: ${SLACK_TOKEN}
+        channel_id: ${SLACK_CHANNEL_ID}
+        template_path: "/app/config/slack_message.tmpl"
+
+      telegram:
+        enable: false
+
+  slack_message.tmpl: |
+    *Critical Error in {{.ServiceName}}*
+    ----------
+    Error Details:
+    ```
+    {{.Logs}}
+    ```
+    ----------
+    Owner <@{{.UserID}}> please investigate
+
+```
+
 ```bash
-kubectl create configmap versus-templates \
-  --from-file=slack_message.tmpl=./config/slack_message.tmpl
+kubectl apply -f versus-config.yaml
 ```
 
-2. Update `versus-deployment.yaml`:
+3. Create `versus-deployment.yaml`:
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: versus
+  name: versus-incident
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: versus
+      app: versus-incident
   template:
     metadata:
       labels:
-        app: versus
+        app: versus-incident
     spec:
       containers:
-      - name: versus
-        image: versus-incident:latest
+      - name: versus-incident
+        image: ghcr.io/versuscontrol/versus-incident:v1.0.0
         ports:
         - containerPort: 3000
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 3000
+        env:
+          - name: SLACK_CHANNEL_ID
+            valueFrom:
+              secretKeyRef:
+                name: versus-secrets
+                key: slack_channel_id
+          - name: SLACK_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: versus-secrets
+                key: slack_token
         volumeMounts:
-        - name: config-volume
-          mountPath: /app/config
-        envFrom:
-        - secretRef:
-            name: versus-secrets
+        - name: versus-config
+          mountPath: /app/config/config.yaml
+          subPath: config.yaml
+        - name: versus-config
+          mountPath: /app/config/slack_message.tmpl
+          subPath: slack_message.tmpl
       volumes:
-      - name: config-volume
+      - name: versus-config
         configMap:
-          name: versus-templates
+          name: versus-config
+
 ---
 apiVersion: v1
 kind: Service
@@ -248,17 +287,16 @@ spec:
     app: versus
   ports:
     - protocol: TCP
-      port: 80
+      port: 3000
       targetPort: 3000
-  type: LoadBalancer
 ```
 
-3. Apply changes:
+4. Apply changes:
 ```bash
 kubectl apply -f versus-deployment.yaml
 ```
 
-4. Verify template mounting:
+5. Verify template mounting:
 ```bash
 kubectl exec -it <pod-name> -- ls -l /app/config
 ```
