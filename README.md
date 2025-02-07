@@ -42,28 +42,49 @@ An open-source incident management system with multi-channel alerting capabiliti
 ### Installation
 
 ```bash
-docker run -p 3000:3000 -e SLACK_ENABLE=true -e SLACK_TOKEN=your_token -e SLACK_CHANNEL_ID=your_channel ghcr.io/versuscontrol/versus-incident
+docker run -p 3000:3000 \
+  -e SLACK_ENABLE=true \
+  -e SLACK_TOKEN=your_token \
+  -e SLACK_CHANNEL_ID=your_channel \
+  ghcr.io/versuscontrol/versus-incident
 ```
 
 ### Build from source
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/versus.git
-cd versus
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
 
 # Build with Go
-go build -o versus ./cmd/main.go
+go build -o versus-incident ./cmd/main.go
+chmod +x versus-incident
+```
 
-# Or run with Docker
+Create `run.sh`:
+```bash
+#!/bin/bash
+export SLACK_ENABLE=true
+export SLACK_TOKEN=your_token
+export SLACK_CHANNEL_ID=your_channel
+
+./versus-incident
+```
+
+Or run with Docker:
+```
 docker build -t versus-incident .
 
-docker run -p 3000:3000 -e SLACK_ENABLE=true -e SLACK_TOKEN=your_token -e SLACK_CHANNEL_ID=your_channel versus-incident
+docker run -p 3000:3000 \
+  -e SLACK_ENABLE=true \
+  -e SLACK_TOKEN=your_token \
+  -e SLACK_CHANNEL_ID=your_channel \
+  versus-incident
 ```
 
 ## Configuration
 
-Edit `config/config.yaml`:
+A sample configuration file is located at `config/config.yaml`:
 
 ```yaml
 name: versus
