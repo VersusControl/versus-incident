@@ -87,6 +87,15 @@ alert:
     chat_id: ${TELEGRAM_CHAT_ID} # From environment
     template_path: "config/telegram_message.tmpl"
 
+  email:
+    enable: false # Default value, will be overridden by EMAIL_ENABLE env var
+    smtp_host: ${SMTP_HOST} # From environment
+    smtp_port: ${SMTP_PORT} # From environment
+    username: ${SMTP_USERNAME} # From environment
+    password: ${SMTP_PASSWORD} # From environment
+    to: ${EMAIL_TO} # From environment
+    template_path: "config/email_message.tmpl"
+
 ```
 ## Environment Variables
 
@@ -105,6 +114,16 @@ The application relies on several environment variables to configure alerting se
 | `TELEGRAM_ENABLE`    | Set to `true` to enable Telegram notifications. |
 | `TELEGRAM_BOT_TOKEN` | The authentication token for your Telegram bot. |
 | `TELEGRAM_CHAT_ID`   | The chat ID where alerts will be sent. |
+
+### Email Configuration
+| Variable          | Description |
+|------------------|-------------|
+| `EMAIL_ENABLE`   | Set to `true` to enable email notifications. |
+| `SMTP_HOST`      | The SMTP server hostname (e.g., smtp.gmail.com). |
+| `SMTP_PORT`      | The SMTP server port (e.g., 587 for TLS). |
+| `SMTP_USERNAME`  | The username/email for SMTP authentication. |
+| `SMTP_PASSWORD`  | The password or app-specific password for SMTP authentication. |
+| `EMAIL_TO`       | The recipient email address for incident notifications. |
 
 Ensure these environment variables are properly set before running the application. You can configure them in your `.env` file, Docker environment variables, or Kubernetes secrets.
 
@@ -131,6 +150,25 @@ For Telegram, you can use HTML formatting. Create your Telegram message template
 {{.Logs}}
 ```
 This template will be parsed with HTML tags when sending the alert to Telegram.
+
+### Email Template
+Create your email message template, for example `config/email_message.tmpl`:
+
+```
+Subject: Critical Error Alert - {{.ServiceName}}
+
+Critical Error Detected in {{.ServiceName}}
+----------------------------------------
+
+Error Details:
+{{.Logs}}
+
+Please investigate this issue immediately.
+
+Best regards,
+Versus Incident Management System
+```
+This template supports both plain text and HTML formatting for email notifications.
 
 ## Development
 
@@ -294,11 +332,16 @@ curl -X POST http://localhost:3000/api/incidents \
 
 ![Telegram Alert](src/docs/images/telegram_alert.png)
 
+***Email***
+
+![Email Alert](src/docs/images/email_alert.png)
+
+
 ## Roadmap
 
 - [x] Add Telegram support
 - [ ] Add MS Team support
-- [ ] Add Email support
+- [x] Add Email support
 - [ ] Add support error logs for listeners from the queue (AWS SQS, AWS SNS, GCP Cloud Pub/Sub, Azure Service Bus)
 - [ ] Support multiple templates with query params
 - [ ] Incident status tracking
