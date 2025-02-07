@@ -11,5 +11,6 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o run cmd/main.go
 # Moving the binary to the 'final Image' to make it smaller
 FROM alpine
 WORKDIR /app
+COPY --from=build /build/config config
 COPY --from=build /build/run .
 CMD ["/app/run"]
