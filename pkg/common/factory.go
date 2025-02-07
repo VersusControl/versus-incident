@@ -33,6 +33,14 @@ func (f *ProviderFactory) CreateProviders() ([]core.AlertProvider, error) {
 		providers = append(providers, telegramProvider)
 	}
 
+	if f.cfg.Alert.Email.Enable {
+		emailProvider, err := f.createEmailProvider()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Email provider: %w", err)
+		}
+		providers = append(providers, emailProvider)
+	}
+
 	return providers, nil
 }
 
@@ -59,6 +67,22 @@ func (f *ProviderFactory) createTelegramProvider() (core.AlertProvider, error) {
 		BotToken:     tc.BotToken,
 		ChatID:       tc.ChatID,
 		TemplatePath: tc.TemplatePath,
+	}), nil
+}
+
+func (f *ProviderFactory) createEmailProvider() (core.AlertProvider, error) {
+	ec := f.cfg.Alert.Email
+	if ec.SMTPHost == "" || ec.Username == "" || ec.Password == "" || ec.To == "" || ec.TemplatePath == "" {
+		return nil, fmt.Errorf("missing required Email configuration")
+	}
+
+	return NewEmailProvider(EmailConfig{
+		SMTPHost:     ec.SMTPHost,
+		SMTPPort:     ec.SMTPPort,
+		Username:     ec.Username,
+		Password:     ec.Password,
+		To:           ec.To,
+		TemplatePath: ec.TemplatePath,
 	}), nil
 }
 

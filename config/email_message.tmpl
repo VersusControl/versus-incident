@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Incident Alert</title>
+</head>
+<body style="font-family: Arial, sans-serif;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h1 style="color: #d9534f;">🚨 Critical Error Detected!</h1>
+        <div style="background-color: #f8f9fa; padding: 15px; border-radius: 4px;">
+            <h2 style="color: #333;">Service: {{.ServiceName}}</h2>
+            <div style="background-color: #fff; padding: 15px; border-radius: 4px; margin-top: 10px;">
+                <h3 style="color: #666;">Error Details:</h3>
+                <pre style="background-color: #f5f5f5; padding: 10px; border-radius: 4px;">{{.Logs}}</pre>
+            </div>
+        </div>
+    </div>
+</body>
+</html> 

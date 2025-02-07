@@ -20,6 +20,7 @@ type Config struct {
 type AlertConfig struct {
 	Slack    SlackConfig
 	Telegram TelegramConfig
+	Email    EmailConfig
 }
 
 type SlackConfig struct {
@@ -33,6 +34,16 @@ type TelegramConfig struct {
 	Enable       bool
 	BotToken     string `mapstructure:"bot_token"`
 	ChatID       string `mapstructure:"chat_id"`
+	TemplatePath string `mapstructure:"template_path"`
+}
+
+type EmailConfig struct {
+	Enable       bool
+	SMTPHost     string `mapstructure:"smtp_host"`
+	SMTPPort     string `mapstructure:"smtp_port"`
+	Username     string
+	Password     string
+	To           string
 	TemplatePath string `mapstructure:"template_path"`
 }
 
@@ -73,8 +84,6 @@ func LoadConfig(path string) error {
 		v := viper.New()
 		v.SetConfigFile(path)
 		v.SetConfigType("yaml")
-		v.AutomaticEnv()
-		v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 
 		// Replace ${VAR} with environment variables
 		v.SetTypeByDefaultValue(true)
@@ -84,30 +93,34 @@ func LoadConfig(path string) error {
 			return
 		}
 
+		for _, k := range v.AllKeys() {
+			if value, ok := v.Get(k).(string); ok {
+				v.Set(k, os.ExpandEnv(value))
+			}
+		}
+
+		v.AutomaticEnv()
+		v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
+		v.AllowEmptyEnv(true)
+		v.SetTypeByDefaultValue(true)
+
 		if err = v.Unmarshal(&cfg); err != nil {
 			err = fmt.Errorf("failed to unmarshal config: %w", err)
 			return
 		}
 
-		if slackEnable := os.Getenv("SLACK_ENABLE"); slackEnable != "" {
-			cfg.Alert.Slack.Enable = strings.ToLower(slackEnable) == "true"
-		}
-		if telegramEnable := os.Getenv("TELEGRAM_ENABLE"); telegramEnable != "" {
-			cfg.Alert.Telegram.Enable = strings.ToLower(telegramEnable) == "true"
+		setEnableFromEnv := func(envVar string, config *bool) {
+			if value := os.Getenv(envVar); value != "" {
+				*config = strings.ToLower(value) == "true"
+			}
 		}
 
-		// Manual replacement for environment variables in strings
-		cfg.Alert.Slack.Token = expandEnv(cfg.Alert.Slack.Token)
-		cfg.Alert.Slack.ChannelID = expandEnv(cfg.Alert.Slack.ChannelID)
-		cfg.Alert.Telegram.BotToken = expandEnv(cfg.Alert.Telegram.BotToken)
-		cfg.Alert.Telegram.ChatID = expandEnv(cfg.Alert.Telegram.ChatID)
+		setEnableFromEnv("SLACK_ENABLE", &cfg.Alert.Slack.Enable)
+		setEnableFromEnv("TELEGRAM_ENABLE", &cfg.Alert.Telegram.Enable)
+		setEnableFromEnv("EMAIL_ENABLE", &cfg.Alert.Email.Enable)
 	})
 
 	return err
-}
-
-func expandEnv(s string) string {
-	return os.ExpandEnv(s)
 }
 
 func GetConfig() *Config {

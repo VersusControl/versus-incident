@@ -15,6 +15,15 @@ alert:
     chat_id: ${TELEGRAM_CHAT_ID}
     template_path: "config/telegram_message.tmpl"
 
+  email:
+    enable: false
+    smtp_host: ${SMTP_HOST}
+    smtp_port: ${SMTP_PORT}
+    username: ${SMTP_USERNAME}
+    password: ${SMTP_PASSWORD}
+    to: ${EMAIL_TO}
+    template_path: "config/email_message.tmpl"
+
 queue:
   enable: true
   # AWS SNS
