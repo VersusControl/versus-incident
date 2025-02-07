@@ -332,6 +332,11 @@ curl -X POST http://localhost:3000/api/incidents \
 
 ![Telegram Alert](src/docs/images/telegram_alert.png)
 
+***Email***
+
+![Email Alert](src/docs/images/email_alert.png)
+
+
 ## Roadmap
 
 - [x] Add Telegram support
