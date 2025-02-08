@@ -94,6 +94,7 @@ alert:
     username: ${SMTP_USERNAME} # From environment
     password: ${SMTP_PASSWORD} # From environment
     to: ${EMAIL_TO} # From environment
+    subject: ${EMAIL_SUBJECT} # From environment
     template_path: "config/email_message.tmpl"
 
 ```
@@ -124,6 +125,7 @@ The application relies on several environment variables to configure alerting se
 | `SMTP_USERNAME`  | The username/email for SMTP authentication. |
 | `SMTP_PASSWORD`  | The password or app-specific password for SMTP authentication. |
 | `EMAIL_TO`       | The recipient email address for incident notifications. |
+| `EMAIL_SUBJECT`  | The subject line for email notifications. |
 
 Ensure these environment variables are properly set before running the application. You can configure them in your `.env` file, Docker environment variables, or Kubernetes secrets.
 

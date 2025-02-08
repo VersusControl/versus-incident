@@ -82,6 +82,7 @@ func (f *ProviderFactory) createEmailProvider() (core.AlertProvider, error) {
 		Username:     ec.Username,
 		Password:     ec.Password,
 		To:           ec.To,
+		Subject:      ec.Subject,
 		TemplatePath: ec.TemplatePath,
 	}), nil
 }

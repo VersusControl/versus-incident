@@ -16,6 +16,7 @@ type EmailProvider struct {
 	username     string
 	password     string
 	to           string
+	subject      string
 	templatePath string
 }
 
@@ -26,6 +27,7 @@ func NewEmailProvider(cfg EmailConfig) *EmailProvider {
 		username:     cfg.Username,
 		password:     cfg.Password,
 		to:           cfg.To,
+		subject:      cfg.Subject,
 		templatePath: cfg.TemplatePath,
 	}
 }
@@ -46,7 +48,7 @@ func (e *EmailProvider) SendAlert(i *m.Incident) error {
 	// Set email headers
 	headers := make(map[string]string)
 	headers["To"] = e.to
-	headers["Subject"] = "Critical Incident Alert"
+	headers["Subject"] = e.subject
 	headers["MIME-Version"] = "1.0"
 	headers["Content-Type"] = "text/html; charset=UTF-8"
 

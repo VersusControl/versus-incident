@@ -44,6 +44,7 @@ type EmailConfig struct {
 	Username     string
 	Password     string
 	To           string
+	Subject      string
 	TemplatePath string `mapstructure:"template_path"`
 }
 
