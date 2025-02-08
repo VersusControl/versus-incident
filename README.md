@@ -195,17 +195,13 @@ This template supports both plain text and HTML formatting for email notificatio
 
 #### Basic Deployment
 ```bash
-# Build image
-docker build -t versus-incident .
-
-# Run container
 docker run -d \
   -p 3000:3000 \
   -e SLACK_ENABLE=true \
   -e SLACK_TOKEN=your_slack_token \
   -e SLACK_CHANNEL_ID=your_channel_id \
   --name versus \
-  versus-incident
+  ghcr.io/versuscontrol/versus-incident
 ```
 
 #### With Custom Templates
@@ -383,20 +379,9 @@ curl -X POST http://localhost:3000/api/incidents \
 }
 ```
 
-**Result:**
+## Result
 
-***Slack***
-
-![Slack Alert](src/docs/images/slack_alert.png)
-
-***Telegram***
-
-![Telegram Alert](src/docs/images/telegram_alert.png)
-
-***Email***
-
-![Email Alert](src/docs/images/email_alert.png)
-
+![Slack Alert](src/docs/images/versus-result.png)
 
 ## Roadmap
 

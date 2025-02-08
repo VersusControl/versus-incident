@@ -71,6 +71,16 @@ alert:
     chat_id: ${TELEGRAM_CHAT_ID} # From environment
     template_path: "config/telegram_message.tmpl"
 
+  email:
+    enable: false # Default value, will be overridden by EMAIL_ENABLE env var
+    smtp_host: ${SMTP_HOST} # From environment
+    smtp_port: ${SMTP_PORT} # From environment
+    username: ${SMTP_USERNAME} # From environment
+    password: ${SMTP_PASSWORD} # From environment
+    to: ${EMAIL_TO} # From environment
+    subject: ${EMAIL_SUBJECT} # From environment
+    template_path: "config/email_message.tmpl"
+
 ```
 ## Environment Variables
 
@@ -89,6 +99,17 @@ The application relies on several environment variables to configure alerting se
 | `TELEGRAM_ENABLE`    | Set to `true` to enable Telegram notifications. |
 | `TELEGRAM_BOT_TOKEN` | The authentication token for your Telegram bot. |
 | `TELEGRAM_CHAT_ID`   | The chat ID where alerts will be sent. |
+
+### Email Configuration
+| Variable          | Description |
+|------------------|-------------|
+| `EMAIL_ENABLE`   | Set to `true` to enable email notifications. |
+| `SMTP_HOST`      | The SMTP server hostname (e.g., smtp.gmail.com). |
+| `SMTP_PORT`      | The SMTP server port (e.g., 587 for TLS). |
+| `SMTP_USERNAME`  | The username/email for SMTP authentication. |
+| `SMTP_PASSWORD`  | The password or app-specific password for SMTP authentication. |
+| `EMAIL_TO`       | The recipient email address for incident notifications. |
+| `EMAIL_SUBJECT`  | The subject line for email notifications. |
 
 Ensure these environment variables are properly set before running the application. You can configure them in your `.env` file, Docker environment variables, or Kubernetes secrets.
 
@@ -116,23 +137,38 @@ For Telegram, you can use HTML formatting. Create your Telegram message template
 ```
 This template will be parsed with HTML tags when sending the alert to Telegram.
 
+### Email Template
+Create your email message template, for example `config/email_message.tmpl`:
+
+```
+Subject: Critical Error Alert - {{.ServiceName}}
+
+Critical Error Detected in {{.ServiceName}}
+----------------------------------------
+
+Error Details:
+{{.Logs}}
+
+Please investigate this issue immediately.
+
+Best regards,
+Versus Incident Management System
+```
+This template supports both plain text and HTML formatting for email notifications.
+
 ## Development
 
 ### Docker
 
 #### Basic Deployment
 ```bash
-# Build image
-docker build -t versus-incident .
-
-# Run container
 docker run -d \
   -p 3000:3000 \
   -e SLACK_ENABLE=true \
   -e SLACK_TOKEN=your_slack_token \
   -e SLACK_CHANNEL_ID=your_channel_id \
   --name versus \
-  versus-incident
+  ghcr.io/versuscontrol/versus-incident
 ```
 
 #### With Custom Templates
@@ -310,12 +346,6 @@ curl -X POST http://localhost:3000/api/incidents \
 }
 ```
 
-**Result:**
+## Result
 
-***Slack***
-
-![Slack Alert](docs/images/slack_alert.png)
-
-***Telegram***
-
-![Telegram Alert](docs/images/telegram_alert.png)
+![Slack Alert](docs/images/versus-result.png)
