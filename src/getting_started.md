@@ -59,6 +59,8 @@ host: 0.0.0.0
 port: 3000
 
 alert:
+  debug_body: true  # Default value, will be overridden by DEBUG_BODY env var
+
   slack:
     enable: false  # Default value, will be overridden by SLACK_ENABLE env var
     token: ${SLACK_TOKEN}            # From environment
@@ -85,6 +87,11 @@ alert:
 ## Environment Variables
 
 The application relies on several environment variables to configure alerting services. Below is an explanation of each variable:
+
+### Common
+| Variable          | Description |
+|------------------|-------------|
+| `DEBUG_BODY`   | Set to `true` to enable print body send to Versus Incident. |
 
 ### Slack Configuration
 | Variable          | Description |
