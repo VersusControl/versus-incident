@@ -204,7 +204,7 @@ docker run -d \
   -e SLACK_TOKEN=your_slack_token \
   -e SLACK_CHANNEL_ID=your_channel_id \
   --name versus \
-  versus-incident
+  ghcr.io/versuscontrol/versus-incident
 ```
 
 3. Verify template mounting:
