@@ -18,9 +18,10 @@ type Config struct {
 }
 
 type AlertConfig struct {
-	Slack    SlackConfig
-	Telegram TelegramConfig
-	Email    EmailConfig
+	DebugBody bool `mapstructure:"debug_body"`
+	Slack     SlackConfig
+	Telegram  TelegramConfig
+	Email     EmailConfig
 }
 
 type SlackConfig struct {
@@ -116,6 +117,7 @@ func LoadConfig(path string) error {
 			}
 		}
 
+		setEnableFromEnv("DEBUG_BODY", &cfg.Alert.DebugBody)
 		setEnableFromEnv("SLACK_ENABLE", &cfg.Alert.Slack.Enable)
 		setEnableFromEnv("TELEGRAM_ENABLE", &cfg.Alert.Telegram.Enable)
 		setEnableFromEnv("EMAIL_ENABLE", &cfg.Alert.Email.Enable)
