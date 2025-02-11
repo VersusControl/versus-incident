@@ -390,6 +390,13 @@ curl -X POST http://localhost:3000/api/incidents \
 
 ![Slack Alert](src/docs/images/versus-result.png)
 
+## Advanced API Usage
+We provide a way to overwrite configuration values using query parameters, allowing you to send alerts to different channel IDs based on the service.
+
+| Query          | Description |
+|------------------|-------------|
+| `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_vaule>` |
+
 ## Roadmap
 
 - [x] Add Telegram support

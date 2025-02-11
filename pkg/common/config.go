@@ -132,3 +132,14 @@ func GetConfig() *Config {
 	}
 	return cfg
 }
+
+func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
+	// Clone the global cfg
+	clonedCfg := cloneConfig(cfg)
+
+	if v := (*paramsOverwrite)["slack_channel_id"]; v != "" {
+		clonedCfg.Alert.Slack.ChannelID = v
+	}
+
+	return clonedCfg
+}
