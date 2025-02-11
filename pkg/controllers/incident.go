@@ -24,7 +24,16 @@ func CreateIncident(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid input"})
 	}
 
-	err := services.CreateIncident("", body)
+	var err error
+
+	// If query parameters exist, get the value to overwrite the default configuration
+	if len(c.Queries()) > 0 {
+		overwriteVaule := c.Queries()
+		err = services.CreateIncident("", body, &overwriteVaule)
+	} else {
+		err = services.CreateIncident("", body)
+	}
+
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}

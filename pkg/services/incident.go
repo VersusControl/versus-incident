@@ -7,9 +7,16 @@ import (
 	m "versus-incident/pkg/models"
 )
 
-func CreateIncident(teamID string, content interface{}) error {
+func CreateIncident(teamID string, content interface{}, params ...*map[string]string) error {
+	var cfg *common.Config
+
+	if len(params) > 0 {
+		cfg = common.GetConfigWitParamsOverwrite(params[0])
+	} else {
+		cfg = common.GetConfig()
+	}
+
 	incident := m.NewIncident(teamID, content)
-	cfg := common.GetConfig()
 
 	factory := common.NewProviderFactory(cfg)
 	providers, err := factory.CreateProviders()
