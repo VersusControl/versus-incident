@@ -99,16 +99,20 @@ func NewListenerFactory(cfg *Config) *ListenerFactory {
 func (f *ListenerFactory) CreateListeners() ([]core.QueueListener, error) {
 	var listeners []core.QueueListener
 
+	if f.cfg.Queue.SNS.Enable {
+		snsListener, err := f.createSNSListener()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create SNS listener: %w", err)
+		}
+		listeners = append(listeners, snsListener)
+	}
+
 	if f.cfg.Queue.SQS.Enable {
 		sqsListener, err := f.createSQSListener()
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SQS listener: %w", err)
 		}
 		listeners = append(listeners, sqsListener)
-	}
-
-	if f.cfg.Queue.SNS.Enable {
-		return nil, fmt.Errorf("SNS listener not implemented")
 	}
 
 	if f.cfg.Queue.PubSub.Enable {
@@ -120,6 +124,23 @@ func (f *ListenerFactory) CreateListeners() ([]core.QueueListener, error) {
 	}
 
 	return listeners, nil
+}
+
+func (f *ListenerFactory) createSNSListener() (core.QueueListener, error) {
+	sc := f.cfg.Queue.SNS
+	if sc.TopicARN == "" || sc.EndpointPath == "" {
+		return nil, fmt.Errorf("missing SNS configuration")
+	}
+
+	// If the user configures an HTTPS endpoint, then an SNS subscription will be automatically created
+	autoCreateSubscription := (f.cfg.Queue.SNS.Endpoint != "")
+
+	endpointURL := f.cfg.Queue.SNS.Endpoint + f.cfg.Queue.SNS.EndpointPath
+	fmt.Printf("SNS endpoint subscription %s", endpointURL)
+
+	return NewSNSListener(SNSConfig{
+		TopicARN: sc.TopicARN,
+	}, endpointURL, autoCreateSubscription), nil
 }
 
 func (f *ListenerFactory) createSQSListener() (core.QueueListener, error) {

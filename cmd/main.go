@@ -34,6 +34,10 @@ func main() {
 			log.Fatalf("Failed to create queue listeners: %v", err)
 		}
 
+		if cfg.Queue.SNS.Enable {
+			app.Post(cfg.Queue.SNS.EndpointPath)
+		}
+
 		for _, listener := range listeners {
 			go func(l core.QueueListener) {
 				if err := l.StartListening(handleQueueMessage); err != nil {
