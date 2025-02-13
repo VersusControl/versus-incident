@@ -4,6 +4,7 @@ import (
 	"log"
 	"strconv"
 	"versus-incident/pkg/common"
+	"versus-incident/pkg/controllers"
 	"versus-incident/pkg/core"
 	"versus-incident/pkg/middleware"
 	"versus-incident/pkg/routes"
@@ -35,7 +36,7 @@ func main() {
 		}
 
 		if cfg.Queue.SNS.Enable {
-			app.Post(cfg.Queue.SNS.EndpointPath)
+			app.Post(cfg.Queue.SNS.EndpointPath, controllers.SNS)
 		}
 
 		for _, listener := range listeners {
