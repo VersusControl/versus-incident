@@ -19,6 +19,9 @@ An open-source incident management system with multi-channel alerting capabiliti
   - [Docker](#docker)
   - [Kubernetes](#kubernetes)
 - [API Usage](#api-usage)
+- [Advanced API Usage](#advanced-api-usage)
+- [SNS Usage](#sns-usage)
+- [Example](#example)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
@@ -116,6 +119,16 @@ alert:
     subject: ${EMAIL_SUBJECT} # From environment
     template_path: "config/email_message.tmpl"
 
+queue:
+  enable: true
+
+  # AWS SNS
+  sns:
+    enable: false
+    topic_arn: ${SNS_TOPIC_ARN}
+    https_endpoint_subscription: ${SNS_HTTPS_ENDPOINT_SUBSCRIPTION} # If the user configures an HTTPS endpoint, then an SNS subscription will be automatically created, e.g. https://your-domain.com
+    https_endpoint_subscription_path: /sns # URI to receive SNS messages, e.g. https://your-domain.com/sns
+
 ```
 ## Environment Variables
 
@@ -150,6 +163,13 @@ The application relies on several environment variables to configure alerting se
 | `SMTP_PASSWORD`  | The password or app-specific password for SMTP authentication. |
 | `EMAIL_TO`       | The recipient email address for incident notifications. |
 | `EMAIL_SUBJECT`  | The subject line for email notifications. |
+
+### AWS SNS Configuration
+| Variable                     | Description |
+|-----------------------------|-------------|
+| `SNS_ENABLE`             | Set to `true` to enable receive Alert Messages from SNS. |
+| `SNS_TOPIC_ARN`             | AWS ARN of the SNS topic to subscribe to |
+| `SNS_HTTPS_ENDPOINT_SUBSCRIPTION`             | This specifies the HTTPS endpoint to which SNS sends messages. When an HTTPS endpoint is configured, an SNS subscription is automatically created. If no endpoint is configured, you must create the SNS subscription manually using the CLI or AWS Console. E.g. `https://your-domain.com` |
 
 Ensure these environment variables are properly set before running the application. You can configure them in your `.env` file, Docker environment variables, or Kubernetes secrets.
 
@@ -386,16 +406,46 @@ curl -X POST http://localhost:3000/api/incidents \
 }
 ```
 
-## Result
-
-![Slack Alert](src/docs/images/versus-result.png)
-
 ## Advanced API Usage
 We provide a way to overwrite configuration values using query parameters, allowing you to send alerts to different channel IDs based on the service.
 
 | Query          | Description |
 |------------------|-------------|
 | `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_vaule>` |
+
+## SNS Usage
+```bash
+docker run -d \
+  -p 3000:3000 \
+  -e SLACK_ENABLE=true \
+  -e SLACK_TOKEN=your_slack_token \
+  -e SLACK_CHANNEL_ID=your_channel_id \
+  -e SNS_TOPIC_ARN=$SNS_TOPIC_ARN \
+  -e SNS_HTTPS_ENDPOINT_SUBSCRIPTION=https://your-domain.com \
+  -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY \
+  -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_KEY \
+  --name versus \
+  ghcr.io/versuscontrol/versus-incident
+```
+
+Send test message using AWS CLI:
+```
+aws sns publish \
+  --topic-arn $SNS_TOPIC_ARN \
+  --message '{"ServiceName":"test-service","Logs":"[ERROR] Test error","UserID":"U12345"}' \
+  --region $AWS_REGION
+```
+
+**A key real-world application of Amazon SNS** involves integrating it with CloudWatch Alarms. This allows CloudWatch to publish messages to an SNS topic when an alarm state changes (e.g., from OK to ALARM), which can then trigger notifications to Slack, Telegram, or Email via Versus Incident with a custom template
+
+## Result
+
+![Slack Alert](src/docs/images/versus-result.png)
+
+## Example
+
+1. [Configuring Fluent Bit to Send Error Logs to Versus Incident](https://medium.com/@hmquan08011996/configuring-fluent-bit-to-send-error-logs-to-slack-and-telegram-89d11968bc30)
+2. Configuring CloudWath Alert and SNS to Send Error Logs to Versus Incident: We will provide an example soon.
 
 ## Roadmap
 

@@ -29,9 +29,14 @@ alert:
 
 queue:
   enable: true
+
   # AWS SNS
   sns:
     enable: false
+    topic_arn: ${SNS_TOPIC_ARN}
+    https_endpoint_subscription: ${SNS_HTTPS_ENDPOINT_SUBSCRIPTION} # If the user configures an HTTPS endpoint, then an SNS subscription will be automatically created, e.g. https://your-domain.com
+    https_endpoint_subscription_path: /sns # URI to receive SNS messages, e.g. https://your-domain.com/sns
+
   # AWS SQS
   sqs:
     enable: false

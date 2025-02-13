@@ -353,13 +353,36 @@ curl -X POST http://localhost:3000/api/incidents \
 }
 ```
 
-## Result
-
-![Slack Alert](docs/images/versus-result.png)
-
 ## Advanced API Usage
 We provide a way to overwrite configuration values using query parameters, allowing you to send alerts to different channel IDs based on the service.
 
 | Query          | Description |
 |------------------|-------------|
 | `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_vaule>` |
+
+## SNS Usage
+```bash
+docker run -d \
+  -p 3000:3000 \
+  -e SLACK_ENABLE=true \
+  -e SLACK_TOKEN=your_slack_token \
+  -e SLACK_CHANNEL_ID=your_channel_id \
+  -e SNS_TOPIC_ARN=$SNS_TOPIC_ARN \
+  -e SNS_HTTPS_ENDPOINT_SUBSCRIPTION=https://your-domain.com \
+  -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY \
+  -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_KEY \
+  --name versus \
+  ghcr.io/versuscontrol/versus-incident
+```
+
+Send test message using AWS CLI:
+```
+aws sns publish \
+  --topic-arn $SNS_TOPIC_ARN \
+  --message '{"ServiceName":"test-service","Logs":"[ERROR] Test error","UserID":"U12345"}' \
+  --region $AWS_REGION
+```
+
+## Result
+
+![Slack Alert](src/docs/images/versus-result.png)

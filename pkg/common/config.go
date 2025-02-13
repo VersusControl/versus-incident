@@ -58,7 +58,10 @@ type QueueConfig struct {
 }
 
 type SNSConfig struct {
-	Enable bool `mapstructure:"enable"`
+	Enable       bool   `mapstructure:"enable"`
+	TopicARN     string `mapstructure:"topic_arn"`
+	Endpoint     string `mapstructure:"https_endpoint_subscription"`
+	EndpointPath string `mapstructure:"https_endpoint_subscription_path"`
 }
 
 type SQSConfig struct {
@@ -121,6 +124,7 @@ func LoadConfig(path string) error {
 		setEnableFromEnv("SLACK_ENABLE", &cfg.Alert.Slack.Enable)
 		setEnableFromEnv("TELEGRAM_ENABLE", &cfg.Alert.Telegram.Enable)
 		setEnableFromEnv("EMAIL_ENABLE", &cfg.Alert.Email.Enable)
+		setEnableFromEnv("SNS_ENABLE", &cfg.Queue.SNS.Enable)
 	})
 
 	return err
