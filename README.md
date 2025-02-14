@@ -125,9 +125,10 @@ queue:
   # AWS SNS
   sns:
     enable: false
-    topic_arn: ${SNS_TOPIC_ARN}
+    https_endpoint_subscription_path: /sns # URI to receive SNS messages, e.g. ${host}:${port}/sns or ${https_endpoint_subscription}/sns
+    # Options If you want to automatically create an sns subscription
     https_endpoint_subscription: ${SNS_HTTPS_ENDPOINT_SUBSCRIPTION} # If the user configures an HTTPS endpoint, then an SNS subscription will be automatically created, e.g. https://your-domain.com
-    https_endpoint_subscription_path: /sns # URI to receive SNS messages, e.g. https://your-domain.com/sns
+    topic_arn: ${SNS_TOPIC_ARN}
 
 ```
 ## Environment Variables
@@ -168,8 +169,8 @@ The application relies on several environment variables to configure alerting se
 | Variable                     | Description |
 |-----------------------------|-------------|
 | `SNS_ENABLE`             | Set to `true` to enable receive Alert Messages from SNS. |
-| `SNS_TOPIC_ARN`             | AWS ARN of the SNS topic to subscribe to |
 | `SNS_HTTPS_ENDPOINT_SUBSCRIPTION`             | This specifies the HTTPS endpoint to which SNS sends messages. When an HTTPS endpoint is configured, an SNS subscription is automatically created. If no endpoint is configured, you must create the SNS subscription manually using the CLI or AWS Console. E.g. `https://your-domain.com` |
+| `SNS_TOPIC_ARN`             | AWS ARN of the SNS topic to subscribe to |
 
 Ensure these environment variables are properly set before running the application. You can configure them in your `.env` file, Docker environment variables, or Kubernetes secrets.
 
