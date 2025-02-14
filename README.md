@@ -420,6 +420,7 @@ docker run -d \
   -e SLACK_ENABLE=true \
   -e SLACK_TOKEN=your_slack_token \
   -e SLACK_CHANNEL_ID=your_channel_id \
+  -e SNS_ENABLE=true \
   -e SNS_TOPIC_ARN=$SNS_TOPIC_ARN \
   -e SNS_HTTPS_ENDPOINT_SUBSCRIPTION=https://your-domain.com \
   -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY \

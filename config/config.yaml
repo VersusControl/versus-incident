@@ -29,6 +29,7 @@ alert:
 
 queue:
   enable: true
+  debug_body: true
 
   # AWS SNS
   sns:

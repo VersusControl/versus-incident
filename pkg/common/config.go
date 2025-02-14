@@ -50,11 +50,12 @@ type EmailConfig struct {
 }
 
 type QueueConfig struct {
-	Enable bool         `mapstructure:"enable"`
-	SNS    SNSConfig    `mapstructure:"sns"`
-	SQS    SQSConfig    `mapstructure:"sqs"`
-	PubSub PubSubConfig `mapstructure:"pubsub"`
-	AzBus  AzBusConfig  `mapstructure:"azbus"`
+	Enable    bool         `mapstructure:"enable"`
+	DebugBody bool         `mapstructure:"debug_body"`
+	SNS       SNSConfig    `mapstructure:"sns"`
+	SQS       SQSConfig    `mapstructure:"sqs"`
+	PubSub    PubSubConfig `mapstructure:"pubsub"`
+	AzBus     AzBusConfig  `mapstructure:"azbus"`
 }
 
 type SNSConfig struct {
@@ -121,6 +122,8 @@ func LoadConfig(path string) error {
 		}
 
 		setEnableFromEnv("DEBUG_BODY", &cfg.Alert.DebugBody)
+		setEnableFromEnv("DEBUG_BODY", &cfg.Queue.DebugBody)
+
 		setEnableFromEnv("SLACK_ENABLE", &cfg.Alert.Slack.Enable)
 		setEnableFromEnv("TELEGRAM_ENABLE", &cfg.Alert.Telegram.Enable)
 		setEnableFromEnv("EMAIL_ENABLE", &cfg.Alert.Email.Enable)
