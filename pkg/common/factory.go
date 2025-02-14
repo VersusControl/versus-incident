@@ -128,12 +128,16 @@ func (f *ListenerFactory) CreateListeners() ([]core.QueueListener, error) {
 
 func (f *ListenerFactory) createSNSListener() (core.QueueListener, error) {
 	sc := f.cfg.Queue.SNS
-	if sc.TopicARN == "" || sc.EndpointPath == "" {
-		return nil, fmt.Errorf("missing SNS configuration")
+	if sc.EndpointPath == "" {
+		return nil, fmt.Errorf("missing SNS endpoint path configuration")
 	}
 
 	// If the user configures an HTTPS endpoint, then an SNS subscription will be automatically created
 	autoCreateSubscription := (f.cfg.Queue.SNS.Endpoint != "")
+
+	if autoCreateSubscription && sc.TopicARN == "" {
+		return nil, fmt.Errorf("missing SNS topic ARN configuration")
+	}
 
 	endpointURL := f.cfg.Queue.SNS.Endpoint + f.cfg.Queue.SNS.EndpointPath
 	fmt.Printf("SNS endpoint subscription %s", endpointURL)

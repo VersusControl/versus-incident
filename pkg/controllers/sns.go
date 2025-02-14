@@ -5,25 +5,40 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"versus-incident/pkg/common"
 	"versus-incident/pkg/services"
 
 	"github.com/gofiber/fiber/v2"
 )
 
-func SNS(c *fiber.Ctx) error {
-	var msg struct {
-		Type         string `json:"Type"`
-		Message      string `json:"Message"`
-		SubscribeURL string `json:"SubscribeURL"`
-	}
+type SNSMessage struct {
+	Type             string `json:"Type"`
+	MessageId        string `json:"MessageId"`
+	Token            string `json:"Token,omitempty"` // Omit empty for Notification type
+	TopicArn         string `json:"TopicArn"`
+	Message          string `json:"Message"`
+	SubscribeURL     string `json:"SubscribeURL,omitempty"` // Omit empty for Notification type
+	Timestamp        string `json:"Timestamp"`
+	SignatureVersion string `json:"SignatureVersion"`
+	Signature        string `json:"Signature"`
+	SigningCertURL   string `json:"SigningCertURL"`
+}
 
-	if err := c.BodyParser(&msg); err != nil {
-		return c.Status(400).SendString("Invalid SNS message")
+func SNS(c *fiber.Ctx) error {
+	cfg := common.GetConfig()
+
+	var msg SNSMessage
+
+	rawBody := c.Body()
+
+	if err := json.Unmarshal(rawBody, &msg); err != nil {
+		return c.Status(400).SendString("Invalid SNS message: " + err.Error())
 	}
 
 	switch msg.Type {
 	case "SubscriptionConfirmation":
 		{
+
 			resp, err := http.Get(msg.SubscribeURL)
 
 			if err != nil {
@@ -36,6 +51,11 @@ func SNS(c *fiber.Ctx) error {
 
 	case "Notification":
 		{
+			if cfg.Queue.DebugBody {
+				// Log the raw queue message for debugging purposes
+				fmt.Println("Queue Message:", msg.Message)
+			}
+
 			content := &map[string]interface{}{}
 
 			if err := json.Unmarshal([]byte(msg.Message), content); err != nil {
