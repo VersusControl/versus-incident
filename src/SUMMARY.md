@@ -7,4 +7,4 @@
 # How to Send Error Logs to Versus Incident
 
 - [Use FluentBit](./fluent-bit.md)
-- [CloudWatch Alarm](./cloudwatch-alarm-sns.md)
+- [Use CloudWatch Alarm](./cloudwatch-alarm-sns.md)

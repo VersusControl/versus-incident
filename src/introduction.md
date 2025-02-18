@@ -12,7 +12,9 @@ An open-source incident management system with multi-channel alerting capabiliti
 - 🚨 **Multi-channel Alerts**: Send incident notifications to Slack (more channels coming!)
 - 📝 **Custom Templates**: Define your own alert messages using Go templates
 - 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
-- 📡 **REST API**: Simple HTTP interface for incident management
+- 📡 **REST API**: Simple HTTP interface to receive alerts
+
+![Slack Alert](docs/images/versus-result.png)
 
 ### Contributing
 
