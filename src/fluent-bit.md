@@ -148,7 +148,7 @@ Raw Request Body: {"date":1738999456.96342,"Logs":"[2023/01/22 09:46:49] [ ERROR
 2025/02/08 14:24:18 POST /api/incidents 201 127.0.0.1 Fluent-Bit
 ```
 
-## **Conclusion**
+## Conclusion
 
 By following the steps above, you can configure Fluent Bit to filter error logs and send them to the Versus Incident Management System. This integration enables automated incident management, ensuring that critical errors are promptly addressed by your DevOps team.
 

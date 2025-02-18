@@ -118,6 +118,13 @@ The application relies on several environment variables to configure alerting se
 | `EMAIL_TO`       | The recipient email address for incident notifications. |
 | `EMAIL_SUBJECT`  | The subject line for email notifications. |
 
+### AWS SNS Configuration
+| Variable                     | Description |
+|-----------------------------|-------------|
+| `SNS_ENABLE`             | Set to `true` to enable receive Alert Messages from SNS. |
+| `SNS_HTTPS_ENDPOINT_SUBSCRIPTION`             | This specifies the HTTPS endpoint to which SNS sends messages. When an HTTPS endpoint is configured, an SNS subscription is automatically created. If no endpoint is configured, you must create the SNS subscription manually using the CLI or AWS Console. E.g. `https://your-domain.com` |
+| `SNS_TOPIC_ARN`             | AWS ARN of the SNS topic to subscribe to |
+
 Ensure these environment variables are properly set before running the application. You can configure them in your `.env` file, Docker environment variables, or Kubernetes secrets.
 
 ## Custom Alert Templates
@@ -382,6 +389,8 @@ aws sns publish \
   --message '{"ServiceName":"test-service","Logs":"[ERROR] Test error","UserID":"U12345"}' \
   --region $AWS_REGION
 ```
+
+**A key real-world application of Amazon SNS** involves integrating it with CloudWatch Alarms. This allows CloudWatch to publish messages to an SNS topic when an alarm state changes (e.g., from OK to ALARM), which can then trigger notifications to Slack, Telegram, or Email via Versus Incident with a custom template
 
 ## Result
 
