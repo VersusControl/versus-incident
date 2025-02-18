@@ -32,7 +32,9 @@ An open-source incident management system with multi-channel alerting capabiliti
 - 🚨 **Multi-channel Alerts**: Send incident notifications to Slack (more channels coming!)
 - 📝 **Custom Templates**: Define your own alert messages using Go templates
 - 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
-- 📡 **REST API**: Simple HTTP interface for incident management
+- 📡 **REST API**: Simple HTTP interface to receive alerts
+
+![Slack Alert](src/docs/images/versus-result.png)
 
 ## Getting Started
 
@@ -440,21 +442,18 @@ aws sns publish \
 
 **A key real-world application of Amazon SNS** involves integrating it with CloudWatch Alarms. This allows CloudWatch to publish messages to an SNS topic when an alarm state changes (e.g., from OK to ALARM), which can then trigger notifications to Slack, Telegram, or Email via Versus Incident with a custom template
 
-## Result
-
-![Slack Alert](src/docs/images/versus-result.png)
-
 ## Example
 
 1. [Configuring Fluent Bit to Send Error Logs to Versus Incident](https://medium.com/@hmquan08011996/configuring-fluent-bit-to-send-error-logs-to-slack-and-telegram-89d11968bc30)
-2. Configuring CloudWath Alert and SNS to Send Error Logs to Versus Incident: We will provide an example soon.
+2. [Configuring AWS CloudWatch to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/configuring-aws-cloudwatch-to-send-alerts-to-slack-and-telegram-ae0b8c077fc6)
 
 ## Roadmap
 
 - [x] Add Telegram support
-- [ ] Add MS Team support
 - [x] Add Email support
-- [ ] Add support error logs for listeners from the queue (AWS SQS, AWS SNS, GCP Cloud Pub/Sub, Azure Service Bus)
+- [x] Add SNS subscription
+- [ ] Add MS Team support
+- [ ] Add support error logs for listeners from the queue (AWS SQS, GCP Cloud Pub/Sub, Azure Service Bus)
 - [ ] Support multiple templates with query params
 - [ ] Incident status tracking
 - [ ] Webhook integrations
