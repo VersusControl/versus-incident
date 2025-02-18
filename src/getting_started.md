@@ -394,4 +394,4 @@ aws sns publish \
 
 ## Result
 
-![Slack Alert](src/docs/images/versus-result.png)
+![Slack Alert](docs/images/versus-result.png)
