@@ -2,6 +2,7 @@ package common
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"text/template"
 	m "versus-incident/pkg/models"
@@ -24,7 +25,11 @@ func NewSlackProvider(cfg SlackConfig) *SlackProvider {
 }
 
 func (s *SlackProvider) SendAlert(i *m.Incident) error {
-	tmpl, err := template.ParseFiles(s.templatePath)
+	funcMapContains := template.FuncMap{
+		"contains": strings.Contains,
+	}
+
+	tmpl, err := template.New(filepath.Base(s.templatePath)).Funcs(funcMapContains).ParseFiles(s.templatePath)
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}

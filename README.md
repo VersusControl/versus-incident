@@ -22,6 +22,7 @@ An open-source incident management system with multi-channel alerting capabiliti
 - [Advanced API Usage](#advanced-api-usage)
 - [SNS Usage](#sns-usage)
 - [Example](#example)
+- [Template Syntax](https://versuscontrol.github.io/versus-incident/template_syntax.html)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)

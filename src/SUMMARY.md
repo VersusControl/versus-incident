@@ -3,6 +3,7 @@
 
 # User Guide
 - [Getting Started](./getting_started.md)
+- [Template Syntax](./template_syntax.md)
 
 # How to Send Error Logs to Versus Incident
 

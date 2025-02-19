@@ -37,7 +37,11 @@ func (t *TelegramProvider) SendAlert(i *m.Incident) error {
 		"replaceAll": strings.ReplaceAll,
 	}
 
-	tmpl, err := template.New(filepath.Base(t.templatePath)).Funcs(funcMap).ParseFiles(t.templatePath)
+	funcMapContains := template.FuncMap{
+		"contains": strings.Contains,
+	}
+
+	tmpl, err := template.New(filepath.Base(t.templatePath)).Funcs(funcMap).Funcs(funcMapContains).ParseFiles(t.templatePath)
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}
