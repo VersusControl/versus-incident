@@ -62,7 +62,21 @@ func SNS(c *fiber.Ctx) error {
 				return c.Status(400).SendString("Invalid message content")
 			}
 
-			return services.CreateIncident("", content) // teamID as empty string
+			// If query parameters exist, get the value to overwrite the default configuration
+			var err error
+
+			if len(c.Queries()) > 0 {
+				overwriteVaule := c.Queries()
+				err = services.CreateIncident("", content, &overwriteVaule)
+			} else {
+				err = services.CreateIncident("", content)
+			}
+
+			if err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			}
+
+			return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "Incident created"})
 		}
 	}
 
