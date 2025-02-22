@@ -336,7 +336,7 @@ spec:
     spec:
       containers:
       - name: versus-incident
-        image: ghcr.io/versuscontrol/versus-incident:v1.0.0
+        image: ghcr.io/versuscontrol/versus-incident
         ports:
         - containerPort: 3000
         livenessProbe:

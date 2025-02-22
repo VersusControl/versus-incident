@@ -83,6 +83,17 @@ alert:
     subject: ${EMAIL_SUBJECT} # From environment
     template_path: "config/email_message.tmpl"
 
+queue:
+  enable: true
+
+  # AWS SNS
+  sns:
+    enable: false
+    https_endpoint_subscription_path: /sns # URI to receive SNS messages, e.g. ${host}:${port}/sns or ${https_endpoint_subscription}/sns
+    # Options If you want to automatically create an sns subscription
+    https_endpoint_subscription: ${SNS_HTTPS_ENDPOINT_SUBSCRIPTION} # If the user configures an HTTPS endpoint, then an SNS subscription will be automatically created, e.g. https://your-domain.com
+    topic_arn: ${SNS_TOPIC_ARN}
+
 ```
 ## Environment Variables
 
@@ -285,7 +296,7 @@ spec:
     spec:
       containers:
       - name: versus-incident
-        image: ghcr.io/versuscontrol/versus-incident:v1.0.0
+        image: ghcr.io/versuscontrol/versus-incident
         ports:
         - containerPort: 3000
         livenessProbe:
