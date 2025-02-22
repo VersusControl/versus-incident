@@ -23,6 +23,7 @@ An open-source incident management system with multi-channel alerting capabiliti
 - [SNS Usage](#sns-usage)
 - [Example](#example)
 - [Template Syntax](https://versuscontrol.github.io/versus-incident/template_syntax.html)
+- [Template Example](https://versuscontrol.github.io/versus-incident/slack-template-aws-sns.html)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
