@@ -455,12 +455,18 @@ aws sns publish \
 - [x] Add Email support
 - [x] Add SNS subscription
 - [ ] Add MS Team support
+- [ ] Add Viber support
+- [ ] Add Lark support
 - [ ] Add support error logs for listeners from the queue (AWS SQS, GCP Cloud Pub/Sub, Azure Service Bus)
-- [ ] Support multiple templates with query params
-- [ ] Incident status tracking
-- [ ] Webhook integrations
-- [ ] Authentication/Authorization
+- [x] Support multiple templates
+- [ ] API Server for Incident Management
+- [ ] Web UI
+- [ ] On-call integrations (AWS Incident Manager)
 - [ ] Prometheus metrics
+
+Complete Project Diagram
+
+![Versus Control](src/docs/images/road-map.svg)
 
 ## Contributing
 

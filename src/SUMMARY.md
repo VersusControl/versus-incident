@@ -13,3 +13,4 @@
 # Example
 
 - [Slack Template for AWS SNS](./slack-template-aws-sns.md)
+- [Advanced Template Tips](./advanced-template-tips.md)
