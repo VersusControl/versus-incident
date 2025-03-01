@@ -6,7 +6,7 @@
 - Docker 20.10+ (optional)
 - Slack workspace (for Slack notifications)
 
-### Installation
+### Easy Installation with Docker
 
 ```bash
 docker run -p 3000:3000 \
@@ -16,7 +16,7 @@ docker run -p 3000:3000 \
   ghcr.io/versuscontrol/versus-incident
 ```
 
-### Build from source
+### Or Build from source
 
 ```bash
 # Clone the repository
@@ -36,17 +36,6 @@ export SLACK_TOKEN=your_token
 export SLACK_CHANNEL_ID=your_channel
 
 ./versus-incident
-```
-
-Or run with Docker:
-```bash
-docker build -t versus-incident .
-
-docker run -p 3000:3000 \
-  -e SLACK_ENABLE=true \
-  -e SLACK_TOKEN=your_token \
-  -e SLACK_CHANNEL_ID=your_channel \
-  versus-incident
 ```
 
 ## Configuration
@@ -85,6 +74,7 @@ alert:
 
 queue:
   enable: true
+  debug_body: true
 
   # AWS SNS
   sns:
@@ -138,20 +128,121 @@ The application relies on several environment variables to configure alerting se
 
 Ensure these environment variables are properly set before running the application. You can configure them in your `.env` file, Docker environment variables, or Kubernetes secrets.
 
-## Custom Alert Templates
+## Development
 
-### Slack Template
+### Docker
+
+#### Basic Deployment
+
+```bash
+docker run -d \
+  -p 3000:3000 \
+  -e SLACK_ENABLE=true \
+  -e SLACK_TOKEN=your_slack_token \
+  -e SLACK_CHANNEL_ID=your_channel_id \
+  --name versus \
+  ghcr.io/versuscontrol/versus-incident
+```
+
+#### With Custom Templates
+
+Create a configuration file:
+
+```
+mkdir -p ./config && touch config.yaml
+```
+
+`config.yaml`:
+```yaml
+name: versus
+host: 0.0.0.0
+port: 3000
+
+alert:
+  slack:
+    enable: true
+    token: ${SLACK_TOKEN}
+    channel_id: ${SLACK_CHANNEL_ID}
+    template_path: "/app/config/slack_message.tmpl"
+
+  telegram:
+    enable: false
+```
+
+**Configuration Notes**
+
+Ensure `template_path` in `config.yaml` matches container path:
+```yaml
+alert:
+  slack:
+    template_path: "/app/config/slack_message.tmpl" # For containerized env
+```
+
+**Slack Template**
+
 Create your Slack message template, for example `config/slack_message.tmpl`:
 
 ```
-*Critical Error in {{.ServiceName}}*
-----------
-Error Details:
-{{.Logs}}
-----------
+🔥 *Critical Error in {{.ServiceName}}*
+
+❌ Error Details:
+```{{.Logs}}```
+
 Owner <@{{.UserID}}> please investigate
 ```
-### Telegram Template
+
+**Run with volume mount:**
+
+```bash
+docker run -d \
+  -p 3000:3000 \
+  -v $(pwd)/config:/app/config \
+  -e SLACK_ENABLE=true \
+  -e SLACK_TOKEN=your_slack_token \
+  -e SLACK_CHANNEL_ID=your_channel_id \
+  --name versus \
+  ghcr.io/versuscontrol/versus-incident
+```
+
+Verify template mounting:
+
+```bash
+docker exec versus ls -l /app/config
+```
+
+To test, simply send an incident to Versus:
+
+```bash
+curl -X POST http://localhost:3000/api/incidents \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] This is an error log from User Service that we can obtain using Fluent Bit.",
+    "ServiceName": "order-service",
+    "UserID": "SLACK_USER_ID"
+  }'
+```
+
+Response:
+
+```json
+{
+    "status":"Incident created"
+}
+```
+
+**Result:**
+
+![Slack Alert](docs/images/versus-result.png)
+
+**For a real-world example, visit here:**
+
+1. [Configuring Fluent Bit to Send Error Logs to Versus Incident](https://medium.com/@hmquan08011996/configuring-fluent-bit-to-send-error-logs-to-slack-and-telegram-89d11968bc30)
+2. [Configuring AWS CloudWatch to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/configuring-aws-cloudwatch-to-send-alerts-to-slack-and-telegram-ae0b8c077fc6)
+
+
+#### Other Templates
+
+**Telegram Template**
 
 For Telegram, you can use HTML formatting. Create your Telegram message template, for example `config/telegram_message.tmpl`:
 ```
@@ -160,9 +251,11 @@ For Telegram, you can use HTML formatting. Create your Telegram message template
 ⚠️ <b>Error Details:</b>
 {{.Logs}}
 ```
+
 This template will be parsed with HTML tags when sending the alert to Telegram.
 
-### Email Template
+**Email Template**
+
 Create your email message template, for example `config/email_message.tmpl`:
 
 ```
@@ -179,56 +272,8 @@ Please investigate this issue immediately.
 Best regards,
 Versus Incident Management System
 ```
+
 This template supports both plain text and HTML formatting for email notifications.
-
-## Development
-
-### Docker
-
-#### Basic Deployment
-```bash
-docker run -d \
-  -p 3000:3000 \
-  -e SLACK_ENABLE=true \
-  -e SLACK_TOKEN=your_slack_token \
-  -e SLACK_CHANNEL_ID=your_channel_id \
-  --name versus \
-  ghcr.io/versuscontrol/versus-incident
-```
-
-#### With Custom Templates
-
-**Configuration Notes**
-- Ensure `template_path` in config.yaml matches container path:
-  ```yaml
-  alert:
-    slack:
-      template_path: "/app/config/slack_message.tmpl" # For containerized env
-  ```
-- File permissions: Templates must be readable by the app user (UID 1000 in Dockerfile)
-
-1. Create local config directory with your templates:
-```bash
-mkdir -p ./config
-cp your-custom-template.tmpl ./config/slack_message.tmpl
-```
-
-2. Run with volume mount:
-```bash
-docker run -d \
-  -p 3000:3000 \
-  -v $(pwd)/config:/app/config \
-  -e SLACK_ENABLE=true \
-  -e SLACK_TOKEN=your_slack_token \
-  -e SLACK_CHANNEL_ID=your_channel_id \
-  --name versus \
-  ghcr.io/versuscontrol/versus-incident
-```
-
-3. Verify template mounting:
-```bash
-docker exec versus ls -l /app/config
-```
 
 ### Kubernetes
 
@@ -340,7 +385,7 @@ spec:
       targetPort: 3000
 ```
 
-4. Apply changes:
+4. Apply:
 ```bash
 kubectl apply -f versus-deployment.yaml
 ```
@@ -348,27 +393,6 @@ kubectl apply -f versus-deployment.yaml
 5. Verify template mounting:
 ```bash
 kubectl exec -it <pod-name> -- ls -l /app/config
-```
-
-## API Usage
-
-Create an incident:
-
-```bash
-curl -X POST http://localhost:3000/api/incidents \
-  -H "Content-Type: application/json" \
-  -d '{
-    "Logs": "[ERROR] This is an error log from User Service that we can obtain using Fluent Bit.",
-    "ServiceName": "order-service",
-    "UserID": "SLACK_USER_ID"
-  }'
-```
-
-**Response:**
-```json
-{
-    "status":"Incident created"
-}
 ```
 
 ## Advanced API Usage
@@ -401,8 +425,4 @@ aws sns publish \
   --region $AWS_REGION
 ```
 
-**A key real-world application of Amazon SNS** involves integrating it with CloudWatch Alarms. This allows CloudWatch to publish messages to an SNS topic when an alarm state changes (e.g., from OK to ALARM), which can then trigger notifications to Slack, Telegram, or Email via Versus Incident with a custom template
-
-## Result
-
-![Slack Alert](docs/images/versus-result.png)
+**A key real-world application of Amazon SNS** involves integrating it with CloudWatch Alarms. This allows CloudWatch to publish messages to an SNS topic when an alarm state changes (e.g., from OK to ALARM), which can then trigger notifications to Slack, Telegram, or Email via Versus Incident with a custom template.

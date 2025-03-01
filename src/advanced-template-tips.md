@@ -17,6 +17,24 @@ Handle multiple alerts in one template:
 🔗 *Details*: {{.detail | toJson}}
 ```
 
+If the field does not exist when passed to the template, let's use the template's `printf` function to handle it.
+
+```
+{{ if contains (printf "%v" .source) "aws.glue" }}
+🔥 *Glue Job Failed*: {{.detail.jobName}}
+
+❌ Error: 
+```{{.detail.errorMessage}}```
+{{ else }}
+🔥 *Critical Error in {{.ServiceName}}*
+
+❌ Error Details:
+```{{.Logs}}```
+
+Owner <@{{.UserID}}> please investigate
+{{ end }}
+```
+
 ### Conditional Formatting
 
 Highlight critical issues:
