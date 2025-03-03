@@ -1,4 +1,4 @@
-# Versus Incident Management System
+# Versus Incident
 
 ![Versus Incident](src/docs/images/versus-incident-l.png)
 
@@ -462,8 +462,9 @@ aws sns publish \
 
 ## Example
 
-1. [Configuring Fluent Bit to Send Error Logs to Versus Incident](https://medium.com/@hmquan08011996/configuring-fluent-bit-to-send-error-logs-to-slack-and-telegram-89d11968bc30)
-2. [Configuring AWS CloudWatch to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/configuring-aws-cloudwatch-to-send-alerts-to-slack-and-telegram-ae0b8c077fc6)
+1. [How to Customize Alert Messages from Alertmanager to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-customize-alert-messages-from-alertmanager-to-slack-and-telegram-786525713689)
+2. [Configuring Fluent Bit to Send Error Logs to Versus Incident](https://medium.com/@hmquan08011996/configuring-fluent-bit-to-send-error-logs-to-slack-and-telegram-89d11968bc30)
+3. [Configuring AWS CloudWatch to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/configuring-aws-cloudwatch-to-send-alerts-to-slack-and-telegram-ae0b8c077fc6)
 
 ## Roadmap
 
