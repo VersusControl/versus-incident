@@ -29,7 +29,7 @@ An open-source incident management system with multi-channel alerting capabiliti
 
 ## Features
 
-- 🚨 **Multi-channel Alerts**: Send incident notifications to Slack (more channels coming!)
+- 🚨 **Multi-channel Alerts**: Send incident notifications to Slack, Microsoft Teams, Telegram, and Email (more channels coming!)
 - 📝 **Custom Templates**: Define your own alert messages using Go templates
 - 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
 - 📡 **REST API**: Simple HTTP interface to receive alerts
@@ -76,96 +76,6 @@ export SLACK_CHANNEL_ID=your_channel
 ./versus-incident
 ```
 
-## Configuration
-
-A sample configuration file is located at `config/config.yaml`:
-
-```yaml
-name: versus
-host: 0.0.0.0
-port: 3000
-
-alert:
-  debug_body: true  # Default value, will be overridden by DEBUG_BODY env var
-
-  slack:
-    enable: false  # Default value, will be overridden by SLACK_ENABLE env var
-    token: ${SLACK_TOKEN}            # From environment
-    channel_id: ${SLACK_CHANNEL_ID}  # From environment
-    template_path: "config/slack_message.tmpl"
-
-  telegram:
-    enable: false  # Default value, will be overridden by TELEGRAM_ENABLE env var
-    bot_token: ${TELEGRAM_BOT_TOKEN} # From environment
-    chat_id: ${TELEGRAM_CHAT_ID} # From environment
-    template_path: "config/telegram_message.tmpl"
-
-  email:
-    enable: false # Default value, will be overridden by EMAIL_ENABLE env var
-    smtp_host: ${SMTP_HOST} # From environment
-    smtp_port: ${SMTP_PORT} # From environment
-    username: ${SMTP_USERNAME} # From environment
-    password: ${SMTP_PASSWORD} # From environment
-    to: ${EMAIL_TO} # From environment
-    subject: ${EMAIL_SUBJECT} # From environment
-    template_path: "config/email_message.tmpl"
-
-queue:
-  enable: true
-  debug_body: true
-
-  # AWS SNS
-  sns:
-    enable: false
-    https_endpoint_subscription_path: /sns # URI to receive SNS messages, e.g. ${host}:${port}/sns or ${https_endpoint_subscription}/sns
-    # Options If you want to automatically create an sns subscription
-    https_endpoint_subscription: ${SNS_HTTPS_ENDPOINT_SUBSCRIPTION} # If the user configures an HTTPS endpoint, then an SNS subscription will be automatically created, e.g. https://your-domain.com
-    topic_arn: ${SNS_TOPIC_ARN}
-
-```
-## Environment Variables
-
-The application relies on several environment variables to configure alerting services. Below is an explanation of each variable:
-
-### Common
-| Variable          | Description |
-|------------------|-------------|
-| `DEBUG_BODY`   | Set to `true` to enable print body send to Versus Incident. |
-
-### Slack Configuration
-| Variable          | Description |
-|------------------|-------------|
-| `SLACK_ENABLE`   | Set to `true` to enable Slack notifications. |
-| `SLACK_TOKEN`    | The authentication token for your Slack bot. |
-| `SLACK_CHANNEL_ID` | The ID of the Slack channel where alerts will be sent. |
-
-### Telegram Configuration
-| Variable              | Description |
-|----------------------|-------------|
-| `TELEGRAM_ENABLE`    | Set to `true` to enable Telegram notifications. |
-| `TELEGRAM_BOT_TOKEN` | The authentication token for your Telegram bot. |
-| `TELEGRAM_CHAT_ID`   | The chat ID where alerts will be sent. |
-
-### Email Configuration
-| Variable          | Description |
-|------------------|-------------|
-| `EMAIL_ENABLE`   | Set to `true` to enable email notifications. |
-| `SMTP_HOST`      | The SMTP server hostname (e.g., smtp.gmail.com). |
-| `SMTP_PORT`      | The SMTP server port (e.g., 587 for TLS). |
-| `SMTP_USERNAME`  | The username/email for SMTP authentication. |
-| `SMTP_PASSWORD`  | The password or app-specific password for SMTP authentication. |
-| `EMAIL_TO`       | The recipient email address for incident notifications. |
-| `EMAIL_SUBJECT`  | The subject line for email notifications. |
-
-### AWS SNS Configuration
-| Variable                     | Description |
-|-----------------------------|-------------|
-| `SNS_ENABLE`             | Set to `true` to enable receive Alert Messages from SNS. |
-| `SNS_HTTPS_ENDPOINT_SUBSCRIPTION`             | This specifies the HTTPS endpoint to which SNS sends messages. When an HTTPS endpoint is configured, an SNS subscription is automatically created. If no endpoint is configured, you must create the SNS subscription manually using the CLI or AWS Console. E.g. `https://your-domain.com` |
-| `SNS_TOPIC_ARN`             | AWS ARN of the SNS topic to subscribe to |
-
-Ensure these environment variables are properly set before running the application. You can configure them in your `.env` file, Docker environment variables, or Kubernetes secrets.
-
 ## Development
 
 ### Docker
@@ -204,6 +114,9 @@ alert:
     template_path: "/app/config/slack_message.tmpl"
 
   telegram:
+    enable: false
+
+  msteams:
     enable: false
 ```
 
@@ -306,6 +219,20 @@ Versus Incident Management System
 ```
 
 This template supports both plain text and HTML formatting for email notifications.
+
+**Microsoft Teams Template**
+
+Create your Teams message template, for example `config/msteams_message.tmpl`:
+
+```
+**Critical Error in {{.ServiceName}}**
+ 
+**Error Details:**
+
+```{{.Logs}}```
+
+Please investigate immediately
+```
 
 ### Kubernetes
 
@@ -460,6 +387,107 @@ aws sns publish \
 
 **A key real-world application of Amazon SNS** involves integrating it with CloudWatch Alarms. This allows CloudWatch to publish messages to an SNS topic when an alarm state changes (e.g., from OK to ALARM), which can then trigger notifications to Slack, Telegram, or Email via Versus Incident with a custom template
 
+## Full Configuration
+
+A sample configuration file is located at `config/config.yaml`:
+
+```yaml
+name: versus
+host: 0.0.0.0
+port: 3000
+
+alert:
+  debug_body: true  # Default value, will be overridden by DEBUG_BODY env var
+
+  slack:
+    enable: false  # Default value, will be overridden by SLACK_ENABLE env var
+    token: ${SLACK_TOKEN}            # From environment
+    channel_id: ${SLACK_CHANNEL_ID}  # From environment
+    template_path: "config/slack_message.tmpl"
+
+  telegram:
+    enable: false  # Default value, will be overridden by TELEGRAM_ENABLE env var
+    bot_token: ${TELEGRAM_BOT_TOKEN} # From environment
+    chat_id: ${TELEGRAM_CHAT_ID} # From environment
+    template_path: "config/telegram_message.tmpl"
+
+  email:
+    enable: false # Default value, will be overridden by EMAIL_ENABLE env var
+    smtp_host: ${SMTP_HOST} # From environment
+    smtp_port: ${SMTP_PORT} # From environment
+    username: ${SMTP_USERNAME} # From environment
+    password: ${SMTP_PASSWORD} # From environment
+    to: ${EMAIL_TO} # From environment
+    subject: ${EMAIL_SUBJECT} # From environment
+    template_path: "config/email_message.tmpl"
+
+  msteams:
+    enable: false # Default value, will be overridden by MSTEAMS_ENABLE env var
+    webhook_url: ${MSTEAMS_WEBHOOK_URL}
+    template_path: "config/msteams_message.tmpl"
+
+queue:
+  enable: true
+  debug_body: true
+
+  # AWS SNS
+  sns:
+    enable: false
+    https_endpoint_subscription_path: /sns # URI to receive SNS messages, e.g. ${host}:${port}/sns or ${https_endpoint_subscription}/sns
+    # Options If you want to automatically create an sns subscription
+    https_endpoint_subscription: ${SNS_HTTPS_ENDPOINT_SUBSCRIPTION} # If the user configures an HTTPS endpoint, then an SNS subscription will be automatically created, e.g. https://your-domain.com
+    topic_arn: ${SNS_TOPIC_ARN}
+
+```
+## Environment Variables
+
+The application relies on several environment variables to configure alerting services. Below is an explanation of each variable:
+
+### Common
+| Variable          | Description |
+|------------------|-------------|
+| `DEBUG_BODY`   | Set to `true` to enable print body send to Versus Incident. |
+
+### Slack Configuration
+| Variable          | Description |
+|------------------|-------------|
+| `SLACK_ENABLE`   | Set to `true` to enable Slack notifications. |
+| `SLACK_TOKEN`    | The authentication token for your Slack bot. |
+| `SLACK_CHANNEL_ID` | The ID of the Slack channel where alerts will be sent. |
+
+### Telegram Configuration
+| Variable              | Description |
+|----------------------|-------------|
+| `TELEGRAM_ENABLE`    | Set to `true` to enable Telegram notifications. |
+| `TELEGRAM_BOT_TOKEN` | The authentication token for your Telegram bot. |
+| `TELEGRAM_CHAT_ID`   | The chat ID where alerts will be sent. |
+
+### Email Configuration
+| Variable          | Description |
+|------------------|-------------|
+| `EMAIL_ENABLE`   | Set to `true` to enable email notifications. |
+| `SMTP_HOST`      | The SMTP server hostname (e.g., smtp.gmail.com). |
+| `SMTP_PORT`      | The SMTP server port (e.g., 587 for TLS). |
+| `SMTP_USERNAME`  | The username/email for SMTP authentication. |
+| `SMTP_PASSWORD`  | The password or app-specific password for SMTP authentication. |
+| `EMAIL_TO`       | The recipient email address for incident notifications. |
+| `EMAIL_SUBJECT`  | The subject line for email notifications. |
+
+### Microsoft Teams Configuration
+| Variable          | Description |
+|------------------|-------------|
+| `MSTEAMS_ENABLE`   | Set to `true` to enable Microsoft Teams notifications. |
+| `MSTEAMS_WEBHOOK_URL` | The incoming webhook URL for your Teams channel. |
+
+### AWS SNS Configuration
+| Variable                     | Description |
+|-----------------------------|-------------|
+| `SNS_ENABLE`             | Set to `true` to enable receive Alert Messages from SNS. |
+| `SNS_HTTPS_ENDPOINT_SUBSCRIPTION`             | This specifies the HTTPS endpoint to which SNS sends messages. When an HTTPS endpoint is configured, an SNS subscription is automatically created. If no endpoint is configured, you must create the SNS subscription manually using the CLI or AWS Console. E.g. `https://your-domain.com` |
+| `SNS_TOPIC_ARN`             | AWS ARN of the SNS topic to subscribe to |
+
+Ensure these environment variables are properly set before running the application. You can configure them in your `.env` file, Docker environment variables, or Kubernetes secrets.
+
 ## Example
 
 1. [How to Customize Alert Messages from Alertmanager to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-customize-alert-messages-from-alertmanager-to-slack-and-telegram-786525713689)
@@ -471,7 +499,7 @@ aws sns publish \
 - [x] Add Telegram support
 - [x] Add Email support
 - [x] Add SNS subscription
-- [ ] Add MS Team support
+- [x] Add MS Team support
 - [ ] Add Viber support
 - [ ] Add Lark support
 - [ ] Add support error logs for listeners from the queue (AWS SQS, GCP Cloud Pub/Sub, Azure Service Bus)

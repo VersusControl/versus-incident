@@ -41,6 +41,14 @@ func (f *ProviderFactory) CreateProviders() ([]core.AlertProvider, error) {
 		providers = append(providers, emailProvider)
 	}
 
+	if f.cfg.Alert.MSTeams.Enable {
+		msteamsProvider, err := f.createMSTeamsProvider()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create MS Teams provider: %w", err)
+		}
+		providers = append(providers, msteamsProvider)
+	}
+
 	return providers, nil
 }
 
@@ -84,6 +92,18 @@ func (f *ProviderFactory) createEmailProvider() (core.AlertProvider, error) {
 		To:           ec.To,
 		Subject:      ec.Subject,
 		TemplatePath: ec.TemplatePath,
+	}), nil
+}
+
+func (f *ProviderFactory) createMSTeamsProvider() (core.AlertProvider, error) {
+	msc := f.cfg.Alert.MSTeams
+	if msc.WebhookURL == "" || msc.TemplatePath == "" {
+		return nil, fmt.Errorf("missing required MS Teams configuration")
+	}
+
+	return NewMSTeamsProvider(MSTeamsConfig{
+		WebhookURL:   msc.WebhookURL,
+		TemplatePath: msc.TemplatePath,
 	}), nil
 }
 
