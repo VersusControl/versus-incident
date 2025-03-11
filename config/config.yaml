@@ -27,6 +27,11 @@ alert:
     subject: ${EMAIL_SUBJECT}
     template_path: "config/email_message.tmpl"
 
+  msteams:
+    enable: false
+    webhook_url: ${MSTEAMS_WEBHOOK_URL}
+    template_path: "config/msteams_message.tmpl"
+
 queue:
   enable: true
   debug_body: true

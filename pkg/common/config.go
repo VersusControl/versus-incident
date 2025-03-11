@@ -22,6 +22,7 @@ type AlertConfig struct {
 	Slack     SlackConfig
 	Telegram  TelegramConfig
 	Email     EmailConfig
+	MSTeams   MSTeamsConfig
 }
 
 type SlackConfig struct {
@@ -46,6 +47,12 @@ type EmailConfig struct {
 	Password     string
 	To           string
 	Subject      string
+	TemplatePath string `mapstructure:"template_path"`
+}
+
+type MSTeamsConfig struct {
+	Enable       bool
+	WebhookURL   string `mapstructure:"webhook_url"`
 	TemplatePath string `mapstructure:"template_path"`
 }
 
@@ -127,6 +134,7 @@ func LoadConfig(path string) error {
 		setEnableFromEnv("SLACK_ENABLE", &cfg.Alert.Slack.Enable)
 		setEnableFromEnv("TELEGRAM_ENABLE", &cfg.Alert.Telegram.Enable)
 		setEnableFromEnv("EMAIL_ENABLE", &cfg.Alert.Email.Enable)
+		setEnableFromEnv("MSTEAMS_ENABLE", &cfg.Alert.MSTeams.Enable)
 		setEnableFromEnv("SNS_ENABLE", &cfg.Queue.SNS.Enable)
 	})
 
