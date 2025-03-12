@@ -9,23 +9,21 @@ An open-source incident management system with multi-channel alerting capabiliti
 
 ## Table of Contents
 - [Features](#features)
-- [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-- [Configuration](#configuration)
-- [Environment Variables](#environment-variables)
+- [Getting Started](#get-started-in-60-seconds)
 - [Development](#development)
   - [Docker](#docker)
   - [Kubernetes](#kubernetes)
 - [Advanced API Usage](#advanced-api-usage)
 - [SNS Usage](#sns-usage)
-- [Example](#example)
+- [Configuration](#complete-configuration)
+- [Environment Variables](#environment-variables)
+- [How to](#how-to)
 - [Template Syntax](https://versuscontrol.github.io/versus-incident/template_syntax.html)
 - [Template Example](https://versuscontrol.github.io/versus-incident/slack-template-aws-sns.html)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
-- [Acknowledgments](#acknowledgments)
+- [Support This Project](#support-this-project)
 
 ## Features
 
@@ -36,13 +34,7 @@ An open-source incident management system with multi-channel alerting capabiliti
 
 ![Slack Alert](src/docs/images/versus-result.png)
 
-## Getting Started
-
-### Prerequisites
-
-- Go 1.20+
-- Docker 20.10+ (optional)
-- Slack workspace (for Slack notifications)
+## Get Started in 60 Seconds
 
 ### Easy Installation with Docker
 
@@ -387,7 +379,7 @@ aws sns publish \
 
 **A key real-world application of Amazon SNS** involves integrating it with CloudWatch Alarms. This allows CloudWatch to publish messages to an SNS topic when an alarm state changes (e.g., from OK to ALARM), which can then trigger notifications to Slack, Telegram, or Email via Versus Incident with a custom template
 
-## Full Configuration
+## Complete Configuration
 
 A sample configuration file is located at `config/config.yaml`:
 
@@ -488,12 +480,13 @@ The application relies on several environment variables to configure alerting se
 
 Ensure these environment variables are properly set before running the application. You can configure them in your `.env` file, Docker environment variables, or Kubernetes secrets.
 
-## Example
+## How to
 
 1. [How to Customize Alert Messages from Alertmanager to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-customize-alert-messages-from-alertmanager-to-slack-and-telegram-786525713689)
 2. [Configuring Fluent Bit to Send Error Logs to Versus Incident](https://medium.com/@hmquan08011996/configuring-fluent-bit-to-send-error-logs-to-slack-and-telegram-89d11968bc30)
 3. [Configuring AWS CloudWatch to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/configuring-aws-cloudwatch-to-send-alerts-to-slack-and-telegram-ae0b8c077fc6)
 4. [How to Configure Sentry to Send Alerts to MS Teams](https://medium.com/@hmquan08011996/how-to-configure-sentry-to-send-alerts-to-ms-teams-08e0969f8578)
+5. [Replace Opsgenie with this open-source alert router (save $2,280/year)](https://dev.to/devopsvn/replace-opsgenie-with-this-open-source-alert-router-save-1995month-2nj5)
 
 ## Roadmap
 
@@ -528,8 +521,12 @@ We welcome contributions! Please follow these steps:
 
 Distributed under the MIT License. See `LICENSE` for more information.
 
-## Acknowledgments
+## Support This Project
 
-- Inspired by modern SRE practices
-- Built with [Go Fiber](https://gofiber.io/)
-- Slack integration using [slack-go](https://github.com/slack-go/slack)
+Help us maintain Versus Incident! Your sponsorship:
+
+🔧 Funds critical infrastructure
+
+🚀 Accelerates new features like Viber/Lark integration, Web UI and On-call integrations
+
+[![GitHub Sponsors](https://img.shields.io/github/sponsors/YourUsername?style=for-the-badge)](https://github.com/hoalongnatsu)
