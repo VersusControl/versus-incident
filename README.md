@@ -493,6 +493,7 @@ Ensure these environment variables are properly set before running the applicati
 1. [How to Customize Alert Messages from Alertmanager to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-customize-alert-messages-from-alertmanager-to-slack-and-telegram-786525713689)
 2. [Configuring Fluent Bit to Send Error Logs to Versus Incident](https://medium.com/@hmquan08011996/configuring-fluent-bit-to-send-error-logs-to-slack-and-telegram-89d11968bc30)
 3. [Configuring AWS CloudWatch to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/configuring-aws-cloudwatch-to-send-alerts-to-slack-and-telegram-ae0b8c077fc6)
+4. [How to Configure Sentry to Send Alerts to MS Teams](https://medium.com/@hmquan08011996/how-to-configure-sentry-to-send-alerts-to-ms-teams-08e0969f8578)
 
 ## Roadmap
 
