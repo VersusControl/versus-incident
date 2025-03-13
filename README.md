@@ -13,10 +13,10 @@ An open-source incident management system with multi-channel alerting capabiliti
 - [Development](#development)
   - [Docker](#docker)
   - [Kubernetes](#kubernetes)
-- [Advanced API Usage](#advanced-api-usage)
 - [SNS Usage](#sns-usage)
 - [Configuration](#complete-configuration)
 - [Environment Variables](#environment-variables)
+- [Advanced API Usage](#advanced-api-usage)
 - [How to](#how-to)
 - [Template Syntax](https://versuscontrol.github.io/versus-incident/template_syntax.html)
 - [Template Example](https://versuscontrol.github.io/versus-incident/slack-template-aws-sns.html)
@@ -512,7 +512,7 @@ alert:
 | `MSTEAMS_OTHER_WEBHOOK_URL_OPS` | (Optional) Webhook URL for the Ops team channel. |
 | `MSTEAMS_OTHER_WEBHOOK_URL_DEV` | (Optional) Webhook URL for the Dev team channel. |
 
-*Notes: The MSTEAMS_WEBHOOK_URL is the primary webhook URL, while the MSTEAMS_OTHER_WEBHOOK_URL_* variables are optional and allow routing alerts to specific Teams channels based on the msteams_other_webhook_url query parameter.*
+*Notes: The `MSTEAMS_WEBHOOK_URL` is the primary webhook URL, while the `MSTEAMS_OTHER_WEBHOOK_URL_*` variables are optional and allow routing alerts to specific Teams channels based on the msteams_other_webhook_url query parameter.*
 
 **Example:**
 
