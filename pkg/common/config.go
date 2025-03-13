@@ -56,9 +56,10 @@ type EmailConfig struct {
 }
 
 type MSTeamsConfig struct {
-	Enable       bool
-	WebhookURL   string `mapstructure:"webhook_url"`
-	TemplatePath string `mapstructure:"template_path"`
+	Enable          bool
+	WebhookURL      string            `mapstructure:"webhook_url"`
+	TemplatePath    string            `mapstructure:"template_path"`
+	OtherWebhookURL map[string]string `mapstructure:"other_webhook_url"`
 }
 
 type QueueConfig struct {
@@ -159,6 +160,16 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 
 	if v := (*paramsOverwrite)["slack_channel_id"]; v != "" {
 		clonedCfg.Alert.Slack.ChannelID = v
+	}
+
+	if v := (*paramsOverwrite)["msteams_other_webhook_url"]; v != "" {
+		if clonedCfg.Alert.MSTeams.OtherWebhookURL != nil {
+			webhook := clonedCfg.Alert.MSTeams.OtherWebhookURL[v]
+
+			if webhook != "" {
+				clonedCfg.Alert.MSTeams.WebhookURL = webhook
+			}
+		}
 	}
 
 	return clonedCfg

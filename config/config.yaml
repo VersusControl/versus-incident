@@ -31,6 +31,8 @@ alert:
     enable: false
     webhook_url: ${MSTEAMS_WEBHOOK_URL}
     template_path: "config/msteams_message.tmpl"
+    other_webhook_url: # Optional: Enable overriding the default Microsoft Teams channel using query parameters, eg /api/incidents?msteams_other_webhook_url=qc
+      qc: ${MSTEAMS_OTHER_WEBHOOK_URL_QC}
 
 queue:
   enable: true
