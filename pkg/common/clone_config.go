@@ -24,6 +24,7 @@ func cloneAlertConfig(src AlertConfig) AlertConfig {
 		Slack:     cloneSlackConfig(src.Slack),
 		Telegram:  cloneTelegramConfig(src.Telegram),
 		Email:     cloneEmailConfig(src.Email),
+		MSTeams:   cloneMSTeamsConfig(src.MSTeams),
 	}
 }
 
@@ -58,6 +59,16 @@ func cloneEmailConfig(src EmailConfig) EmailConfig {
 		To:           src.To,
 		Subject:      src.Subject,
 		TemplatePath: src.TemplatePath,
+	}
+}
+
+// Helper function to deep clone the MSTeamsConfig struct
+func cloneMSTeamsConfig(src MSTeamsConfig) MSTeamsConfig {
+	return MSTeamsConfig{
+		Enable:          src.Enable,
+		WebhookURL:      src.WebhookURL,
+		TemplatePath:    src.TemplatePath,
+		OtherWebhookURL: src.OtherWebhookURL,
 	}
 }
 

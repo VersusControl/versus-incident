@@ -346,13 +346,6 @@ kubectl apply -f versus-deployment.yaml
 kubectl exec -it <pod-name> -- ls -l /app/config
 ```
 
-## Advanced API Usage
-We provide a way to overwrite configuration values using query parameters, allowing you to send alerts to different channel IDs based on the service.
-
-| Query          | Description |
-|------------------|-------------|
-| `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_vaule>` |
-
 ## SNS Usage
 ```bash
 docker run -d \
@@ -479,6 +472,61 @@ The application relies on several environment variables to configure alerting se
 | `SNS_TOPIC_ARN`             | AWS ARN of the SNS topic to subscribe to |
 
 Ensure these environment variables are properly set before running the application. You can configure them in your `.env` file, Docker environment variables, or Kubernetes secrets.
+
+## Advanced API Usage
+We provide a way to overwrite configuration values using query parameters, allowing you to send alerts to different channel IDs based on the service.
+
+| Query          | Description |
+|------------------|-------------|
+| `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_vaule>` |
+| `msteams_other_webhook_url`   | (Optional) Overrides the default Microsoft Teams channel by specifying an alternative webhook key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_webhook_url=qc` |
+
+**Optional: Define additional webhook URLs for multiple MS Teams channels**
+
+```yaml
+name: versus
+host: 0.0.0.0
+port: 3000
+
+alert:
+  debug_body: true  # Default value, will be overridden by DEBUG_BODY env var
+
+  slack:
+    enable: false  # Default value, will be overridden by SLACK_ENABLE env var
+
+  msteams:
+    enable: false # Default value, will be overridden by MSTEAMS_ENABLE env var
+    webhook_url: ${MSTEAMS_WEBHOOK_URL} # Default webhook URL for MS Teams
+    template_path: "config/msteams_message.tmpl"
+    other_webhook_url: # Optional: Define additional webhook URLs for multiple MS Teams channels
+      qc: ${MSTEAMS_OTHER_WEBHOOK_URL_QC} # Webhook for QC team
+      ops: ${MSTEAMS_OTHER_WEBHOOK_URL_OPS} # Webhook for Ops team
+      dev: ${MSTEAMS_OTHER_WEBHOOK_URL_DEV} # Webhook for Dev team
+```
+
+**Microsoft Teams Configuration**
+| Variable          | Description |
+|------------------|-------------|
+| `MSTEAMS_WEBHOOK_URL` | The incoming webhook URL for your Teams channel. |
+| `MSTEAMS_OTHER_WEBHOOK_URL_QC`  | (Optional) Webhook URL for the QC team channel. |
+| `MSTEAMS_OTHER_WEBHOOK_URL_OPS` | (Optional) Webhook URL for the Ops team channel. |
+| `MSTEAMS_OTHER_WEBHOOK_URL_DEV` | (Optional) Webhook URL for the Dev team channel. |
+
+*Notes: The MSTEAMS_WEBHOOK_URL is the primary webhook URL, while the MSTEAMS_OTHER_WEBHOOK_URL_* variables are optional and allow routing alerts to specific Teams channels based on the msteams_other_webhook_url query parameter.*
+
+**Example:**
+
+To send an alert to the QC team’s Microsoft Teams channel:
+
+```
+curl -X POST http://localhost:3000/api/incidents?msteams_other_webhook_url=qc \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Quality check failed.",
+    "ServiceName": "qa-service",
+    "UserID": "U12345"
+  }'
+```
 
 ## How to
 
