@@ -7,7 +7,6 @@ import (
 	"net/smtp"
 	"path/filepath"
 	"strconv"
-	"strings"
 	m "versus-incident/pkg/models"
 )
 
@@ -34,12 +33,10 @@ func NewEmailProvider(cfg EmailConfig) *EmailProvider {
 }
 
 func (e *EmailProvider) SendAlert(i *m.Incident) error {
-	funcMapContains := template.FuncMap{
-		"contains": strings.Contains,
-	}
+	funcMaps := GetTemplateFuncMaps()
 
 	// Parse template
-	tmpl, err := template.New(filepath.Base(e.templatePath)).Funcs(funcMapContains).ParseFiles(e.templatePath)
+	tmpl, err := template.New(filepath.Base(e.templatePath)).Funcs(funcMaps).ParseFiles(e.templatePath)
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}
