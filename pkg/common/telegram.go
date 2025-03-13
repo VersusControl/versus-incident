@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
-	"strings"
 	"text/template"
 	m "versus-incident/pkg/models"
 )
@@ -33,15 +32,9 @@ func NewTelegramProvider(cfg TelegramConfig) *TelegramProvider {
 }
 
 func (t *TelegramProvider) SendAlert(i *m.Incident) error {
-	funcMap := template.FuncMap{
-		"replaceAll": strings.ReplaceAll,
-	}
+	funcMaps := GetTemplateFuncMaps()
 
-	funcMapContains := template.FuncMap{
-		"contains": strings.Contains,
-	}
-
-	tmpl, err := template.New(filepath.Base(t.templatePath)).Funcs(funcMap).Funcs(funcMapContains).ParseFiles(t.templatePath)
+	tmpl, err := template.New(filepath.Base(t.templatePath)).Funcs(funcMaps).ParseFiles(t.templatePath)
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}

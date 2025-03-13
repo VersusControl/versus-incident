@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
-	"strings"
 	"text/template"
 	m "versus-incident/pkg/models"
 )
@@ -29,11 +28,9 @@ func NewMSTeamsProvider(cfg MSTeamsConfig) *MSTeamsProvider {
 }
 
 func (m *MSTeamsProvider) SendAlert(i *m.Incident) error {
-	funcMapContains := template.FuncMap{
-		"contains": strings.Contains,
-	}
+	funcMaps := GetTemplateFuncMaps()
 
-	tmpl, err := template.New(filepath.Base(m.templatePath)).Funcs(funcMapContains).ParseFiles(m.templatePath)
+	tmpl, err := template.New(filepath.Base(m.templatePath)).Funcs(funcMaps).ParseFiles(m.templatePath)
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}
@@ -63,7 +60,7 @@ func (m *MSTeamsProvider) SendAlert(i *m.Incident) error {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Microsoft Teams API returned %d status code: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("MS Teams API returned %d status code: %s", resp.StatusCode, string(body))
 	}
 
 	return nil

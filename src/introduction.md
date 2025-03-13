@@ -30,8 +30,12 @@ We welcome contributions! Please follow these steps:
 
 Distributed under the MIT License. See `LICENSE` for more information.
 
-### Acknowledgments
+### Support This Project
 
-- Inspired by modern SRE practices
-- Built with [Go Fiber](https://gofiber.io/)
-- Slack integration using [slack-go](https://github.com/slack-go/slack)
+Help us maintain Versus Incident! Your sponsorship:
+
+🔧 Funds critical infrastructure
+
+🚀 Accelerates new features like Viber/Lark integration, Web UI and On-call integrations
+
+[![GitHub Sponsors](https://img.shields.io/github/sponsors/YourUsername?style=for-the-badge)](https://github.com/hoalongnatsu)

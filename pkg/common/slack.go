@@ -25,11 +25,9 @@ func NewSlackProvider(cfg SlackConfig) *SlackProvider {
 }
 
 func (s *SlackProvider) SendAlert(i *m.Incident) error {
-	funcMapContains := template.FuncMap{
-		"contains": strings.Contains,
-	}
+	funcMaps := GetTemplateFuncMaps()
 
-	tmpl, err := template.New(filepath.Base(s.templatePath)).Funcs(funcMapContains).ParseFiles(s.templatePath)
+	tmpl, err := template.New(filepath.Base(s.templatePath)).Funcs(funcMaps).ParseFiles(s.templatePath)
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}
