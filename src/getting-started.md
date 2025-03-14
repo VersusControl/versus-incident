@@ -475,6 +475,7 @@ alert:
 ```
 
 **Microsoft Teams Configuration**
+
 | Variable          | Description |
 |------------------|-------------|
 | `MSTEAMS_WEBHOOK_URL` | The incoming webhook URL for your Teams channel. |
