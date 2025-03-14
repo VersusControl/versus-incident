@@ -8,7 +8,7 @@
   "detail": {
     "jobName": "etl-pipeline",
     "state": "FAILED",
-    "errorMessage": "OutOfMemoryError: Java heap space"
+    "message": "OutOfMemoryError: Java heap space"
   }
 }
 ```
@@ -18,7 +18,7 @@
 {{ if eq .source "aws.glue" }}
 🔥 *Glue Job Failed*: {{.detail.jobName}}
 ❌ Error: 
-```{{.detail.errorMessage}}```
+```{{.detail.message}}```
 {{ end }}
 ```
 
