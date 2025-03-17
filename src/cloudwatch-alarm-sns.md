@@ -85,7 +85,40 @@ queue:
     https_endpoint_subscription_path: /sns
 ```
 
-Create Slack and Telegram templates, e.g. config/slack_message.tmpl:
+When your RDS_CPU_High alarm triggers, SNS will send a notification to your HTTP endpoint. The message will be a JSON object wrapped in an SNS envelope. Here’s an example of what the JSON payload of `Message field` might look like:
+
+```
+{
+  "AlarmName": "RDS_CPU_High",
+  "AlarmDescription": "RDS CPU utilization over 80%",
+  "AWSAccountId": "123456789012",
+  "NewStateValue": "ALARM",
+  "NewStateReason": "Threshold Crossed: 1 out of the last 1 datapoints was greater than the threshold (80.0). The most recent datapoint: 85.3.",
+  "StateChangeTime": "2025-03-17T12:34:56.789Z",
+  "Region": "US East (N. Virginia)",
+  "OldStateValue": "OK",
+  "Trigger": {
+    "MetricName": "CPUUtilization",
+    "Namespace": "AWS/RDS",
+    "StatisticType": "Statistic",
+    "Statistic": "AVERAGE",
+    "Unit": "Percent",
+    "Period": 300,
+    "EvaluationPeriods": 1,
+    "ComparisonOperator": "GreaterThanThreshold",
+    "Threshold": 80.0,
+    "TreatMissingData": "missing",
+    "Dimensions": [
+      {
+        "Name": "DBInstanceIdentifier",
+        "Value": "my-rds-instance"
+      }
+    ]
+  }
+}
+```
+
+Create Slack and Telegram templates, e.g. `config/slack_message.tmpl`:
 
 ```tmpl
 *🚨 CloudWatch Alarm: {{.AlarmName}}*
@@ -97,7 +130,7 @@ Timestamp: {{.StateChangeTime}}
 Owner <@${USERID}>: Investigate immediately!
 ```
 
-config/telegram_message.tmpl:
+`config/telegram_message.tmpl`:
 
 ```tmpl
 🚨 <b>{{.AlarmName}}</b>
