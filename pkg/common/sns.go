@@ -7,6 +7,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
+
+	c "github.com/VersusControl/versus-incident/pkg/config"
 )
 
 type SNSListener struct {
@@ -15,7 +17,7 @@ type SNSListener struct {
 	autoCreateSubscription bool
 }
 
-func NewSNSListener(cfg SNSConfig, endpointURL string, autoCreateSubscription bool) *SNSListener {
+func NewSNSListener(cfg c.SNSConfig, endpointURL string, autoCreateSubscription bool) *SNSListener {
 	return &SNSListener{
 		topicARN:               cfg.TopicARN,
 		endpointURL:            endpointURL,
@@ -23,7 +25,7 @@ func NewSNSListener(cfg SNSConfig, endpointURL string, autoCreateSubscription bo
 	}
 }
 
-func (l *SNSListener) StartListening(handler func(content map[string]interface{}) error) error {
+func (l *SNSListener) StartListening(handler func(content *map[string]interface{}) error) error {
 	if l.autoCreateSubscription {
 		ctx := context.Background()
 		awsCfg, err := config.LoadDefaultConfig(ctx)

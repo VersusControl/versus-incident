@@ -1,7 +1,7 @@
 package core
 
 import (
-	m "versus-incident/pkg/models"
+	m "github.com/VersusControl/versus-incident/pkg/models"
 )
 
 // AlertProvider interface remains the same

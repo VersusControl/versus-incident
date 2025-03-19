@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"path/filepath"
 	"text/template"
-	m "versus-incident/pkg/models"
+
+	"github.com/VersusControl/versus-incident/pkg/config"
+	m "github.com/VersusControl/versus-incident/pkg/models"
 )
 
 type MSTeamsProvider struct {
@@ -20,7 +22,7 @@ type MSTeamsMessage struct {
 	Text string `json:"text"`
 }
 
-func NewMSTeamsProvider(cfg MSTeamsConfig) *MSTeamsProvider {
+func NewMSTeamsProvider(cfg config.MSTeamsConfig) *MSTeamsProvider {
 	return &MSTeamsProvider{
 		webhookURL:   cfg.WebhookURL,
 		templatePath: cfg.TemplatePath,

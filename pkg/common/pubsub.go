@@ -3,7 +3,7 @@ package common
 import (
 	"fmt"
 
-	"versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/core"
 )
 
 type PubSubListener struct{}

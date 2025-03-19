@@ -1,6 +1,7 @@
 name: versus
 host: 0.0.0.0
 port: 3000
+public_host: https://your-host.example
 
 alert:
   debug_body: true
@@ -56,3 +57,17 @@ queue:
   # Azure Event Bus
   azbus:
     enable: false
+
+oncall:
+  enable: false
+
+  aws_incident_manager:
+    response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
+    wait_minutes: 5
+
+redis: # Options If you want enable on-call
+  insecure_skip_verify: true # dev only
+  host: ${REDIS_HOST}
+  port: ${REDIS_PORT}
+  password: ${REDIS_PASSWORD}
+  db: 0
