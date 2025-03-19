@@ -31,7 +31,9 @@ func main() {
 
 	cfg := c.GetConfig()
 
-	app := fiber.New()
+	app := fiber.New(fiber.Config{
+		DisableStartupMessage: true, // Disable the default Fiber banner
+	})
 
 	app.Use(middleware.Logger())
 
@@ -80,9 +82,32 @@ func main() {
 
 	addr := cfg.Host + ":" + strconv.Itoa(cfg.Port)
 
+	printCustomBanner()
 	if err := app.Listen(addr); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+func printCustomBanner() {
+	cfg := c.GetConfig()
+
+	log.Printf(`
+
+V       V   EEEEE   RRRRR   SSSSS   U       U   SSSSS
+V       V   E       R   R   S       U       U   S    
+V       V   EEEEE   RRRRR   SSSSS   U       U   SSSSS
+ V V V V    E       R  R         S  U       U        S
+   V V      EEEEE   R   R   SSSSS    UUUUUUU    SSSSS
+
+┌───────────────────────────────────────────────────┐
+│                Versus Incident v1                 │
+│       (bound on host %s and port %d)       │
+└───────────────────────────────────────────────────┘
+
+/api/incidents -> receive incident data
+/api%s       -> receive alerts from AWS SNS
+/api/ack       -> acknowledge on-call alerts
+`, cfg.Host, cfg.Port, cfg.Queue.SNS.EndpointPath)
 }
 
 func handleQueueMessage(content *map[string]interface{}) error {
