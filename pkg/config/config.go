@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -93,12 +94,12 @@ type AzBusConfig struct {
 
 type OnCallConfig struct {
 	Enable             bool
-	AwsIncidentManager AwsIncidentManagerConfig
+	WaitMinutes        int                      `mapstructure:"wait_minutes"`
+	AwsIncidentManager AwsIncidentManagerConfig `mapstructure:"aws_incident_manager"`
 }
 
 type AwsIncidentManagerConfig struct {
-	ResponsePlanARN string `mapstructure:"response_plan_arn"`
-	WaitMinutes     int    `mapstructure:"wait_minutes"`
+	ResponsePlanArn string `mapstructure:"response_plan_arn"`
 }
 
 type RedisConfig struct {
@@ -192,8 +193,20 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 		}
 	}
 
+	if v := (*paramsOverwrite)["oncall_enable"]; v != "" {
+		if parsedBool, err := strconv.ParseBool(v); err == nil {
+			clonedCfg.OnCall.Enable = parsedBool
+		}
+	}
+
+	if v := (*paramsOverwrite)["oncall_wait_minutes"]; v != "" {
+		if waitMinutesFloat, err := strconv.ParseFloat(v, 64); err == nil {
+			clonedCfg.OnCall.WaitMinutes = int(waitMinutesFloat) // Truncates to 3 if v is "3.14"
+		}
+	}
+
 	if v := (*paramsOverwrite)["awsim_response_plan_arn"]; v != "" {
-		clonedCfg.OnCall.AwsIncidentManager.ResponsePlanARN = v
+		clonedCfg.OnCall.AwsIncidentManager.ResponsePlanArn = v
 	}
 
 	return clonedCfg

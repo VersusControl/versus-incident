@@ -117,6 +117,7 @@ func cloneAzBusConfig(src AzBusConfig) AzBusConfig {
 func cloneOnCallConfig(src OnCallConfig) OnCallConfig {
 	return OnCallConfig{
 		Enable:             src.Enable,
+		WaitMinutes:        src.WaitMinutes,
 		AwsIncidentManager: cloneAwsIncidentManagerConfig(src.AwsIncidentManager),
 	}
 }
@@ -124,7 +125,6 @@ func cloneOnCallConfig(src OnCallConfig) OnCallConfig {
 // Helper function to deep clone the AwsIncidentManagerConfig struct
 func cloneAwsIncidentManagerConfig(src AwsIncidentManagerConfig) AwsIncidentManagerConfig {
 	return AwsIncidentManagerConfig{
-		ResponsePlanARN: src.ResponsePlanARN,
-		WaitMinutes:     src.WaitMinutes,
+		ResponsePlanArn: src.ResponsePlanArn,
 	}
 }

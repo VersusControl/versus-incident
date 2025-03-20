@@ -36,7 +36,7 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	alert := core.NewAlert(providers...)
 
 	if cfg.OnCall.Enable {
-		ackURL := fmt.Sprintf("http://%s/ack?incident=%s", cfg.PublicHost, incident.ID)
+		ackURL := fmt.Sprintf("%s/api/ack/%s", cfg.PublicHost, incident.ID)
 		contentClone["AckURL"] = ackURL
 
 		incident.Content = contentClone
@@ -49,7 +49,7 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	if cfg.OnCall.Enable {
 		workflow := core.GetOnCallWorkflow()
 
-		if err := workflow.Start(incident.ID, cfg.OnCall.AwsIncidentManager); err != nil {
+		if err := workflow.Start(incident.ID, cfg.OnCall); err != nil {
 			return err
 		}
 	}

@@ -39,8 +39,8 @@ func GetOnCallWorkflow() *OnCallWorkflow {
 	return workflow
 }
 
-func (w *OnCallWorkflow) Start(incidentID string, imc config.AwsIncidentManagerConfig) error {
-	if imc.ResponsePlanARN == "" {
+func (w *OnCallWorkflow) Start(incidentID string, oc config.OnCallConfig) error {
+	if oc.AwsIncidentManager.ResponsePlanArn == "" {
 		return fmt.Errorf("missing Response Plan ARN configuration")
 	}
 
@@ -50,15 +50,34 @@ func (w *OnCallWorkflow) Start(incidentID string, imc config.AwsIncidentManagerC
 
 	ctx := context.Background()
 
-	// Store incident in Redis with expiration (wait time + buffer)
-	expiration := time.Duration(imc.WaitMinutes)*time.Minute + 1*time.Minute
+	// To do, move this code into the factory or function
+	// If WaitMinutes is 0, it means there’s no need to check for an acknowledgment, and the on-call will trigger immediately
+	if oc.WaitMinutes == 0 {
+		title := "Incident id " + incidentID
+		input := &ssmincidents.StartIncidentInput{
+			ResponsePlanArn: aws.String(oc.AwsIncidentManager.ResponsePlanArn),
+			Title:           aws.String(title),
+		}
+
+		if _, err := w.client.StartIncident(ctx, input); err != nil {
+			return fmt.Errorf("failed to start AWS incident: %v", err)
+		}
+
+		log.Printf("Incident escalated: %s", title)
+		return nil
+	}
+
+	// If WaitMinutes isn't 0, store incident in Redis with expiration (wait time + buffer)
+	expiration := time.Duration(oc.WaitMinutes)*time.Minute + 1*time.Minute
 	if err := w.redisClient.Set(ctx, incidentID, "pending", expiration).Err(); err != nil {
 		return fmt.Errorf("failed to store incident %s in Redis: %v", incidentID, err)
 	}
 
+	log.Printf("Incident On Call Workflow: %s", incidentID)
+
 	// Start timer to check for acknowledgment
 	go func() {
-		<-time.After(time.Duration(imc.WaitMinutes) * time.Minute)
+		<-time.After(time.Duration(oc.WaitMinutes) * time.Minute)
 
 		// Check if the incident is still pending
 		exists, err := w.redisClient.Exists(ctx, incidentID).Result()
@@ -71,7 +90,7 @@ func (w *OnCallWorkflow) Start(incidentID string, imc config.AwsIncidentManagerC
 			// Trigger AWS Incident Manager
 			title := "Incident id " + incidentID
 			input := &ssmincidents.StartIncidentInput{
-				ResponsePlanArn: aws.String(imc.ResponsePlanARN),
+				ResponsePlanArn: aws.String(oc.AwsIncidentManager.ResponsePlanArn),
 				Title:           aws.String(title),
 			}
 
@@ -106,6 +125,8 @@ func (w *OnCallWorkflow) Ack(incidentID string) error {
 		if err := w.redisClient.Del(ctx, incidentID).Err(); err != nil {
 			return fmt.Errorf("failed to acknowledge incident %s: %v", incidentID, err)
 		}
+
+		return nil
 	}
 
 	return fmt.Errorf("incident does not exist or acknowledged")
