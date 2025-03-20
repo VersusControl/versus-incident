@@ -62,7 +62,7 @@ oncall:
   ### Enable overriding using query parameters
   # /api/incidents?oncall_enable=false => disable oncall for specify alert
   # /api/incidents?oncall_wait_minutes=0 => no need to check for an acknowledgment, trigger immediately
-  enable: true
+  enable: false
   wait_minutes: 3 # If you set it to 0, it means there’s no need to check for an acknowledgment, and the on-call will trigger immediately
 
   aws_incident_manager:
