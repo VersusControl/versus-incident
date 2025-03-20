@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"path/filepath"
 	"text/template"
-	m "versus-incident/pkg/models"
+
+	"github.com/VersusControl/versus-incident/pkg/config"
+	m "github.com/VersusControl/versus-incident/pkg/models"
 )
 
 type TelegramProvider struct {
@@ -23,7 +25,7 @@ type TelegramMessage struct {
 	ParseMode string `json:"parse_mode"`
 }
 
-func NewTelegramProvider(cfg TelegramConfig) *TelegramProvider {
+func NewTelegramProvider(cfg config.TelegramConfig) *TelegramProvider {
 	return &TelegramProvider{
 		botToken:     cfg.BotToken,
 		chatID:       cfg.ChatID,

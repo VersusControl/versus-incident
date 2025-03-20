@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
-	m "versus-incident/pkg/models"
+
+	"github.com/VersusControl/versus-incident/pkg/config"
+	m "github.com/VersusControl/versus-incident/pkg/models"
 
 	"github.com/slack-go/slack"
 )
@@ -16,7 +18,7 @@ type SlackProvider struct {
 	templatePath string
 }
 
-func NewSlackProvider(cfg SlackConfig) *SlackProvider {
+func NewSlackProvider(cfg config.SlackConfig) *SlackProvider {
 	return &SlackProvider{
 		client:       slack.New(cfg.Token),
 		channelID:    cfg.ChannelID,

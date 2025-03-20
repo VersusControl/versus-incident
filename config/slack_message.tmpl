@@ -1,8 +1,11 @@
 *Critical Error in {{.ServiceName}}*
 ----------
-Error Details:
 ```
 {{.Logs}}
 ```
-----------
+
 Owner <@{{.UserID}}> please investigate
+{{ if .AckURL }}
+----------
+<{{.AckURL}}|Click here to acknowledge>
+{{ end }}

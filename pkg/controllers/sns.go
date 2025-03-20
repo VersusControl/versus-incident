@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"versus-incident/pkg/common"
-	"versus-incident/pkg/services"
+
+	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/services"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -25,7 +26,7 @@ type SNSMessage struct {
 }
 
 func SNS(c *fiber.Ctx) error {
-	cfg := common.GetConfig()
+	cfg := config.GetConfig()
 
 	var msg SNSMessage
 

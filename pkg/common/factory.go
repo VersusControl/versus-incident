@@ -2,15 +2,17 @@ package common
 
 import (
 	"fmt"
-	"versus-incident/pkg/core"
+
+	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/core"
 )
 
 // Alert Provider
 type ProviderFactory struct {
-	cfg *Config
+	cfg *config.Config
 }
 
-func NewProviderFactory(cfg *Config) *ProviderFactory {
+func NewProviderFactory(cfg *config.Config) *ProviderFactory {
 	return &ProviderFactory{cfg: cfg}
 }
 
@@ -58,7 +60,7 @@ func (f *ProviderFactory) createSlackProvider() (core.AlertProvider, error) {
 		return nil, fmt.Errorf("missing required Slack configuration")
 	}
 
-	return NewSlackProvider(SlackConfig{
+	return NewSlackProvider(config.SlackConfig{
 		Token:        sc.Token,
 		ChannelID:    sc.ChannelID,
 		TemplatePath: sc.TemplatePath,
@@ -71,7 +73,7 @@ func (f *ProviderFactory) createTelegramProvider() (core.AlertProvider, error) {
 		return nil, fmt.Errorf("missing required Telegram configuration")
 	}
 
-	return NewTelegramProvider(TelegramConfig{
+	return NewTelegramProvider(config.TelegramConfig{
 		BotToken:     tc.BotToken,
 		ChatID:       tc.ChatID,
 		TemplatePath: tc.TemplatePath,
@@ -84,7 +86,7 @@ func (f *ProviderFactory) createEmailProvider() (core.AlertProvider, error) {
 		return nil, fmt.Errorf("missing required Email configuration")
 	}
 
-	return NewEmailProvider(EmailConfig{
+	return NewEmailProvider(config.EmailConfig{
 		SMTPHost:     ec.SMTPHost,
 		SMTPPort:     ec.SMTPPort,
 		Username:     ec.Username,
@@ -101,7 +103,7 @@ func (f *ProviderFactory) createMSTeamsProvider() (core.AlertProvider, error) {
 		return nil, fmt.Errorf("missing required MS Teams configuration")
 	}
 
-	return NewMSTeamsProvider(MSTeamsConfig{
+	return NewMSTeamsProvider(config.MSTeamsConfig{
 		WebhookURL:   msc.WebhookURL,
 		TemplatePath: msc.TemplatePath,
 	}), nil
@@ -109,10 +111,10 @@ func (f *ProviderFactory) createMSTeamsProvider() (core.AlertProvider, error) {
 
 // Listener
 type ListenerFactory struct {
-	cfg *Config
+	cfg *config.Config
 }
 
-func NewListenerFactory(cfg *Config) *ListenerFactory {
+func NewListenerFactory(cfg *config.Config) *ListenerFactory {
 	return &ListenerFactory{cfg: cfg}
 }
 
@@ -160,9 +162,9 @@ func (f *ListenerFactory) createSNSListener() (core.QueueListener, error) {
 	}
 
 	endpointURL := f.cfg.Queue.SNS.Endpoint + f.cfg.Queue.SNS.EndpointPath
-	fmt.Printf("SNS endpoint subscription %s", endpointURL)
+	fmt.Printf("SNS endpoint subscription %s\n", endpointURL)
 
-	return NewSNSListener(SNSConfig{
+	return NewSNSListener(config.SNSConfig{
 		TopicARN: sc.TopicARN,
 	}, endpointURL, autoCreateSubscription), nil
 }
@@ -173,7 +175,7 @@ func (f *ListenerFactory) createSQSListener() (core.QueueListener, error) {
 		return nil, fmt.Errorf("missing required SQS configuration")
 	}
 
-	return NewSQSListener(SQSConfig{
+	return NewSQSListener(config.SQSConfig{
 		Enable:   sc.Enable,
 		QueueURL: sc.QueueURL,
 	}), nil

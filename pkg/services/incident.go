@@ -2,18 +2,27 @@ package services
 
 import (
 	"fmt"
-	"versus-incident/pkg/common"
-	"versus-incident/pkg/core"
-	m "versus-incident/pkg/models"
+
+	"github.com/VersusControl/versus-incident/pkg/common"
+	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/core"
+
+	m "github.com/VersusControl/versus-incident/pkg/models"
 )
 
-func CreateIncident(teamID string, content interface{}, params ...*map[string]string) error {
-	var cfg *common.Config
+func CreateIncident(teamID string, content *map[string]interface{}, params ...*map[string]string) error {
+	var cfg *config.Config
 
 	if len(params) > 0 {
-		cfg = common.GetConfigWitParamsOverwrite(params[0])
+		cfg = config.GetConfigWitParamsOverwrite(params[0])
 	} else {
-		cfg = common.GetConfig()
+		cfg = config.GetConfig()
+	}
+
+	// Dereference the Pointer and add AckURL if needed
+	contentClone := make(map[string]interface{})
+	for k, v := range *content {
+		contentClone[k] = v
 	}
 
 	incident := m.NewIncident(teamID, content)
@@ -26,5 +35,24 @@ func CreateIncident(teamID string, content interface{}, params ...*map[string]st
 
 	alert := core.NewAlert(providers...)
 
-	return alert.SendAlert(incident)
+	if cfg.OnCall.Enable {
+		ackURL := fmt.Sprintf("%s/api/ack/%s", cfg.PublicHost, incident.ID)
+		contentClone["AckURL"] = ackURL
+
+		incident.Content = contentClone
+	}
+
+	if err := alert.SendAlert(incident); err != nil {
+		return err
+	}
+
+	if cfg.OnCall.Enable {
+		workflow := core.GetOnCallWorkflow()
+
+		if err := workflow.Start(incident.ID, cfg.OnCall); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

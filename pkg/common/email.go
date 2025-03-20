@@ -7,7 +7,9 @@ import (
 	"net/smtp"
 	"path/filepath"
 	"strconv"
-	m "versus-incident/pkg/models"
+
+	"github.com/VersusControl/versus-incident/pkg/config"
+	m "github.com/VersusControl/versus-incident/pkg/models"
 )
 
 type EmailProvider struct {
@@ -20,7 +22,7 @@ type EmailProvider struct {
 	templatePath string
 }
 
-func NewEmailProvider(cfg EmailConfig) *EmailProvider {
+func NewEmailProvider(cfg config.EmailConfig) *EmailProvider {
 	return &EmailProvider{
 		smtpHost:     cfg.SMTPHost,
 		smtpPort:     cfg.SMTPPort,

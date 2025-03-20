@@ -1,25 +1,26 @@
-package common
+package config
 
 import (
 	"fmt"
-	"html/template"
-	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/spf13/viper"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
 )
 
 type Config struct {
-	Name  string
-	Host  string
-	Port  int
-	Alert AlertConfig
-	Queue QueueConfig
+	Name       string
+	Host       string
+	Port       int
+	PublicHost string `mapstructure:"public_host"`
+
+	Alert  AlertConfig
+	Queue  QueueConfig
+	OnCall OnCallConfig
+
+	Redis RedisConfig `mapstructure:"redis"`
 }
 
 type AlertConfig struct {
@@ -91,6 +92,24 @@ type AzBusConfig struct {
 	Enable bool `mapstructure:"enable"`
 }
 
+type OnCallConfig struct {
+	Enable             bool
+	WaitMinutes        int                      `mapstructure:"wait_minutes"`
+	AwsIncidentManager AwsIncidentManagerConfig `mapstructure:"aws_incident_manager"`
+}
+
+type AwsIncidentManagerConfig struct {
+	ResponsePlanArn string `mapstructure:"response_plan_arn"`
+}
+
+type RedisConfig struct {
+	Host               string `mapstructure:"host"`
+	Port               int    `mapstructure:"port"`
+	Password           string `mapstructure:"password"`
+	DB                 int    `mapstructure:"db"`
+	InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"`
+}
+
 var (
 	cfg     *Config
 	cfgOnce sync.Once
@@ -142,6 +161,8 @@ func LoadConfig(path string) error {
 		setEnableFromEnv("EMAIL_ENABLE", &cfg.Alert.Email.Enable)
 		setEnableFromEnv("MSTEAMS_ENABLE", &cfg.Alert.MSTeams.Enable)
 		setEnableFromEnv("SNS_ENABLE", &cfg.Queue.SNS.Enable)
+
+		setEnableFromEnv("ONCALL_ENABLE", &cfg.OnCall.Enable)
 	})
 
 	return err
@@ -172,69 +193,21 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 		}
 	}
 
-	return clonedCfg
-}
-
-func GetTemplateFuncMaps() template.FuncMap {
-	funcMaps := template.FuncMap{
-		"replaceAll": strings.ReplaceAll,
-		"contains":   strings.Contains,
-		"upper":      strings.ToUpper,
-		"lower":      strings.ToLower,
-		"title": func(s string) string {
-			return cases.Title(language.English).String(s)
-		},
-		"default": func(val, def interface{}) interface{} {
-			// If val is nil or empty string, return def
-			switch v := val.(type) {
-			case string:
-				if v == "" {
-					return def
-				}
-			case nil:
-				return def
-			}
-			return val
-		},
-		"slice": func(s interface{}, start, end int) string {
-			// Handle string slicing
-			switch v := s.(type) {
-			case string:
-				if start < 0 || end > len(v) || start > end {
-					return v // Return original if indices are invalid
-				}
-				return v[start:end]
-			}
-			return "" // Return empty string for unsupported types
-		},
-		"replace":    strings.ReplaceAll,
-		"trimPrefix": strings.TrimPrefix,
-		"trimSuffix": strings.TrimSuffix,
-		"len": func(s interface{}) int {
-			// Return length of string or slice
-			switch v := s.(type) {
-			case string:
-				return len(v)
-			case []string:
-				return len(v)
-			}
-			return 0
-		},
-		"urlquery": url.QueryEscape,
-		"truncate": func(s string, n int) string {
-			if len(s) <= n {
-				return s
-			}
-			return s[:n]
-		},
-		"formatTime": func(s string) string {
-			t, err := time.Parse(time.RFC3339, s)
-			if err != nil {
-				return "Invalid time"
-			}
-			return t.Format("2006-01-02 15:04:05") // Formats as "YYYY-MM-DD HH:MM:SS"
-		},
+	if v := (*paramsOverwrite)["oncall_enable"]; v != "" {
+		if parsedBool, err := strconv.ParseBool(v); err == nil {
+			clonedCfg.OnCall.Enable = parsedBool
+		}
 	}
 
-	return funcMaps
+	if v := (*paramsOverwrite)["oncall_wait_minutes"]; v != "" {
+		if waitMinutesFloat, err := strconv.ParseFloat(v, 64); err == nil {
+			clonedCfg.OnCall.WaitMinutes = int(waitMinutesFloat) // Truncates to 3 if v is "3.14"
+		}
+	}
+
+	if v := (*paramsOverwrite)["awsim_response_plan_arn"]; v != "" {
+		clonedCfg.OnCall.AwsIncidentManager.ResponsePlanArn = v
+	}
+
+	return clonedCfg
 }

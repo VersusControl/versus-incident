@@ -1,4 +1,4 @@
-package common
+package config
 
 func cloneConfig(src *Config) *Config {
 	if src == nil {
@@ -7,11 +7,12 @@ func cloneConfig(src *Config) *Config {
 
 	// Create a new Config and copy all fields
 	cloned := &Config{
-		Name:  src.Name,
-		Host:  src.Host,
-		Port:  src.Port,
-		Alert: cloneAlertConfig(src.Alert),
-		Queue: cloneQueueConfig(src.Queue),
+		Name:   src.Name,
+		Host:   src.Host,
+		Port:   src.Port,
+		Alert:  cloneAlertConfig(src.Alert),
+		Queue:  cloneQueueConfig(src.Queue),
+		OnCall: cloneOnCallConfig(src.OnCall),
 	}
 
 	return cloned
@@ -109,5 +110,21 @@ func clonePubSubConfig(src PubSubConfig) PubSubConfig {
 func cloneAzBusConfig(src AzBusConfig) AzBusConfig {
 	return AzBusConfig{
 		Enable: src.Enable,
+	}
+}
+
+// Helper function to deep clone the OnCallConfig struct
+func cloneOnCallConfig(src OnCallConfig) OnCallConfig {
+	return OnCallConfig{
+		Enable:             src.Enable,
+		WaitMinutes:        src.WaitMinutes,
+		AwsIncidentManager: cloneAwsIncidentManagerConfig(src.AwsIncidentManager),
+	}
+}
+
+// Helper function to deep clone the AwsIncidentManagerConfig struct
+func cloneAwsIncidentManagerConfig(src AwsIncidentManagerConfig) AwsIncidentManagerConfig {
+	return AwsIncidentManagerConfig{
+		ResponsePlanArn: src.ResponsePlanArn,
 	}
 }
