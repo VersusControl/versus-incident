@@ -210,7 +210,7 @@ groups:
       severity: warning
     annotations:
       summary: "High error rate detected in {{ $labels.service }}"
-      description: "{{ $labels.service }} has an error rate above 0.05 for 5 minutes."
+      description: "{{ $labels.service }} has an error rate above 0.1 for 5 minutes."
 
   - alert: HighErrorRate
     expr: rate(http_requests_total{status="500"}[5m]) > 0.5
@@ -219,16 +219,16 @@ groups:
       severity: critical
     annotations:
       summary: "Very high error rate detected in {{ $labels.service }}"
-      description: "{{ $labels.service }} has an error rate above 0.10 for 2 minutes."
+      description: "{{ $labels.service }} has an error rate above 0.5 for 2 minutes."
 
   - alert: HighErrorRate
-    expr: rate(http_requests_total{status="500"}[5m]) > 0.80
+    expr: rate(http_requests_total{status="500"}[5m]) > 0.8
     for: 1m
     labels:
       severity: urgent
     annotations:
       summary: "Extremely high error rate detected in {{ $labels.service }}"
-      description: "{{ $labels.service }} has an error rate above 0.20 for 1 minute."
+      description: "{{ $labels.service }} has an error rate above 0.8 for 1 minute."
 ```
 
 ### Alert Manager Routing Configuration
