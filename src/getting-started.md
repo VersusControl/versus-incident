@@ -391,6 +391,7 @@ A sample configuration file is located at `config/config.yaml`:
 name: versus
 host: 0.0.0.0
 port: 3000
+public_host: https://your-ack-host.example # Required for on-call ack
 
 alert:
   debug_body: true  # Default value, will be overridden by DEBUG_BODY env var
