@@ -14,6 +14,7 @@ An open-source incident management system with multi-channel alerting capabiliti
   - [Docker](#docker)
   - [Kubernetes](#kubernetes)
 - [SNS Usage](#sns-usage)
+- [On-call](#on-call)
 - [Configuration](#complete-configuration)
 - [Environment Variables](#environment-variables)
 - [Advanced API Usage](#advanced-api-usage)
@@ -370,7 +371,48 @@ aws sns publish \
   --region $AWS_REGION
 ```
 
-**A key real-world application of Amazon SNS** involves integrating it with CloudWatch Alarms. This allows CloudWatch to publish messages to an SNS topic when an alarm state changes (e.g., from OK to ALARM), which can then trigger notifications to Slack, Telegram, or Email via Versus Incident with a custom template
+**A key real-world application of Amazon SNS** involves integrating it with CloudWatch Alarms. This allows CloudWatch to publish messages to an SNS topic when an alarm state changes (e.g., from OK to ALARM), which can then trigger notifications to Slack, Telegram, or Email via Versus Incident with a custom template.
+
+## On-call
+
+Currently, Versus support On-call integrations with AWS Incident Manager. Updated configuration example with on-call features:
+
+```yaml
+name: versus
+host: 0.0.0.0
+port: 3000
+public_host: https://your-ack-host.example # Required for on-call ack
+
+# ... existing alert configurations ...
+
+oncall:
+  ### Enable overriding using query parameters
+  # /api/incidents?oncall_enable=false => Set to `true` or `false` to enable or disable on-call for a specific alert
+  # /api/incidents?oncall_wait_minutes=0 => Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately
+  enable: false
+  wait_minutes: 3 # If you set it to 0, it means there’s no need to check for an acknowledgment, and the on-call will trigger immediately
+
+  aws_incident_manager:
+    response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
+
+redis: # Required for on-call functionality
+  insecure_skip_verify: true # dev only
+  host: ${REDIS_HOST}
+  port: ${REDIS_PORT}
+  password: ${REDIS_PASSWORD}
+  db: 0
+```
+
+**Explanation:**
+
+The `oncall` section includes:
+1. `enable`: A boolean to toggle on-call functionality (default: `false`).
+2. `wait_minutes`: Time in minutes to wait for an acknowledgment before escalating (default: `3`). Setting it to `0` triggers the on-call immediately.
+3. `aws_incident_manager`: Contains the `response_plan_arn`, which links to an AWS Incident Manager response plan via an environment variable.
+
+The `redis` section is required when `oncall.enable` is `true`. It configures the Redis instance used for state management or queuing, with settings like `host`, `port`, `password`, and `db`.
+
+For detailed information on integration, please refer to the document here: [On-call setup with Versus]().
 
 ## Complete Configuration
 
@@ -423,6 +465,22 @@ queue:
     https_endpoint_subscription: ${SNS_HTTPS_ENDPOINT_SUBSCRIPTION} # If the user configures an HTTPS endpoint, then an SNS subscription will be automatically created, e.g. https://your-domain.com
     topic_arn: ${SNS_TOPIC_ARN}
 
+oncall:
+  ### Enable overriding using query parameters
+  # /api/incidents?oncall_enable=false => Set to `true` or `false` to enable or disable on-call for a specific alert
+  # /api/incidents?oncall_wait_minutes=0 => Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately
+  enable: false
+  wait_minutes: 3 # If you set it to 0, it means there’s no need to check for an acknowledgment, and the on-call will trigger immediately
+
+  aws_incident_manager:
+    response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
+
+redis: # Required for on-call functionality
+  insecure_skip_verify: true # dev only
+  host: ${REDIS_HOST}
+  port: ${REDIS_PORT}
+  password: ${REDIS_PASSWORD}
+  db: 0
 ```
 ## Environment Variables
 
@@ -468,18 +526,33 @@ The application relies on several environment variables to configure alerting se
 | Variable                     | Description |
 |-----------------------------|-------------|
 | `SNS_ENABLE`             | Set to `true` to enable receive Alert Messages from SNS. |
-| `SNS_HTTPS_ENDPOINT_SUBSCRIPTION`             | This specifies the HTTPS endpoint to which SNS sends messages. When an HTTPS endpoint is configured, an SNS subscription is automatically created. If no endpoint is configured, you must create the SNS subscription manually using the CLI or AWS Console. E.g. `https://your-domain.com` |
-| `SNS_TOPIC_ARN`             | AWS ARN of the SNS topic to subscribe to |
+| `SNS_HTTPS_ENDPOINT_SUBSCRIPTION`             | This specifies the HTTPS endpoint to which SNS sends messages. When an HTTPS endpoint is configured, an SNS subscription is automatically created. If no endpoint is configured, you must create the SNS subscription manually using the CLI or AWS Console. E.g. `https://your-domain.com`. |
+| `SNS_TOPIC_ARN`             | AWS ARN of the SNS topic to subscribe to. |
 
-Ensure these environment variables are properly set before running the application. You can configure them in your `.env` file, Docker environment variables, or Kubernetes secrets.
+### On-Call Configuration
+| Variable                          | Description |
+|----------------------------------|-------------|
+| `ONCALL_ENABLE`             | Set to `true` to enable on-call functionality. |
+| `AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN` | The ARN of the AWS Incident Manager response plan to use for on-call escalations. Required if on-call is enabled. |
+
+### Redis Configuration
+| Variable          | Description |
+|------------------|-------------|
+| `REDIS_HOST`     | The hostname or IP address of the Redis server. Required if on-call is enabled. |
+| `REDIS_PORT`     | The port number of the Redis server. Required if on-call is enabled. |
+| `REDIS_PASSWORD` | The password for authenticating with the Redis server. Required if on-call is enabled and Redis requires authentication. |
+
+Ensure these environment variables are properly set before running the application.
 
 ## Advanced API Usage
 We provide a way to overwrite configuration values using query parameters, allowing you to send alerts to different channel IDs based on the service.
 
 | Query          | Description |
 |------------------|-------------|
-| `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_vaule>` |
-| `msteams_other_webhook_url`   | (Optional) Overrides the default Microsoft Teams channel by specifying an alternative webhook key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_webhook_url=qc` |
+| `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_vaule>`. |
+| `msteams_other_webhook_url`   | (Optional) Overrides the default Microsoft Teams channel by specifying an alternative webhook key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_webhook_url=qc`. |
+| `oncall_enable`          | Set to `true` or `false` to enable or disable on-call for a specific alert. Use: `/api/incidents?oncall_enable=false`. |
+| `oncall_wait_minutes`    | Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately. Use: `/api/incidents?oncall_wait_minutes=0`. |
 
 **Optional: Define additional webhook URLs for multiple MS Teams channels**
 
@@ -505,6 +578,7 @@ alert:
 ```
 
 **Microsoft Teams Configuration**
+
 | Variable          | Description |
 |------------------|-------------|
 | `MSTEAMS_WEBHOOK_URL` | The incoming webhook URL for your Teams channel. |
@@ -514,7 +588,7 @@ alert:
 
 *Notes: The `MSTEAMS_WEBHOOK_URL` is the primary webhook URL, while the `MSTEAMS_OTHER_WEBHOOK_URL_*` variables are optional and allow routing alerts to specific Teams channels based on the msteams_other_webhook_url query parameter.*
 
-**Example:**
+**Example MS Teams:**
 
 To send an alert to the QC team’s Microsoft Teams channel:
 
@@ -524,6 +598,32 @@ curl -X POST http://localhost:3000/api/incidents?msteams_other_webhook_url=qc \
   -d '{
     "Logs": "[ERROR] Quality check failed.",
     "ServiceName": "qa-service",
+    "UserID": "U12345"
+  }'
+```
+
+**Example On-call:**
+
+To disable on-call for a specific alert:
+
+```bash
+curl -X POST http://localhost:3000/api/incidents?oncall_enable=false \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] This is a test error.",
+    "ServiceName": "test-service",
+    "UserID": "U12345"
+  }'
+```
+
+To trigger on-call immediately without waiting:
+
+```bash
+curl -X POST http://localhost:3000/api/incidents?oncall_wait_minutes=0 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Urgent issue detected.",
+    "ServiceName": "urgent-service",
     "UserID": "U12345"
   }'
 ```
@@ -548,7 +648,7 @@ curl -X POST http://localhost:3000/api/incidents?msteams_other_webhook_url=qc \
 - [x] Support multiple templates
 - [ ] API Server for Incident Management
 - [ ] Web UI
-- [ ] On-call integrations (AWS Incident Manager)
+- [x] On-call integrations (AWS Incident Manager)
 - [ ] Prometheus metrics
 
 Complete Project Diagram
