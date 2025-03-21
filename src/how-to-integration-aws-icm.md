@@ -242,7 +242,7 @@ receivers:
 - name: 'versus-no-oncall'
   webhook_configs:
   - url: 'http://versus-service:3000/api/incidents?oncall_enable=false'
-    send_resolved: true
+    send_resolved: false
 
 route:
   receiver: 'versus-no-oncall'
@@ -260,7 +260,7 @@ receivers:
 - name: 'versus-with-ack'
   webhook_configs:
   - url: 'http://versus-service:3000/api/incidents?oncall_wait_minutes=5'
-    send_resolved: true
+    send_resolved: false
 
 route:
   routes:
@@ -278,7 +278,7 @@ receivers:
 - name: 'versus-immediate'
   webhook_configs:
   - url: 'http://versus-service:3000/api/incidents?oncall_wait_minutes=0'
-    send_resolved: true
+    send_resolved: false
 
 route:
   routes:
