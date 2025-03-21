@@ -5,7 +5,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/yourusername/versus)](https://goreportcard.com/report/github.com/yourusername/versus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-An open-source incident management system with multi-channel alerting capabilities. Designed for modern DevOps teams to quickly respond to production incidents.
+An open-source incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Designed for modern DevOps teams to quickly respond to production incidents.
 
 ## Table of Contents
 - [Features](#features)
@@ -32,6 +32,7 @@ An open-source incident management system with multi-channel alerting capabiliti
 - 📝 **Custom Templates**: Define your own alert messages using Go templates
 - 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
 - 📡 **REST API**: Simple HTTP interface to receive alerts
+- 📡 **On-call**: On-call integrations with AWS Incident Manager
 
 ![Slack Alert](src/docs/images/versus-result.png)
 
