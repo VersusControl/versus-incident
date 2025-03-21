@@ -60,15 +60,15 @@ queue:
 
 oncall:
   ### Enable overriding using query parameters
-  # /api/incidents?oncall_enable=false => disable oncall for specify alert
-  # /api/incidents?oncall_wait_minutes=0 => no need to check for an acknowledgment, trigger immediately
+  # /api/incidents?oncall_enable=false => Set to `true` or `false` to enable or disable on-call for a specific alert
+  # /api/incidents?oncall_wait_minutes=0 => Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately
   enable: false
   wait_minutes: 3 # If you set it to 0, it means there’s no need to check for an acknowledgment, and the on-call will trigger immediately
 
   aws_incident_manager:
     response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
 
-redis: # Options If you want enable on-call
+redis: # Required for on-call functionality
   insecure_skip_verify: true # dev only
   host: ${REDIS_HOST}
   port: ${REDIS_PORT}
