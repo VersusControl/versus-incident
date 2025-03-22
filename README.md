@@ -34,7 +34,7 @@ An open-source incident management tool that supports alerting across multiple c
 - 📡 **REST API**: Simple HTTP interface to receive alerts
 - 📡 **On-call**: On-call integrations with AWS Incident Manager
 
-![Slack Alert](src/docs/images/versus-result.png)
+![Versus](src/docs/images/versus-architecture.svg)
 
 ## Get Started in 60 Seconds
 
