@@ -637,7 +637,8 @@ curl -X POST http://localhost:3000/api/incidents?oncall_wait_minutes=0 \
 2. [Configuring Fluent Bit to Send Error Logs to Versus Incident](https://medium.com/@hmquan08011996/configuring-fluent-bit-to-send-error-logs-to-slack-and-telegram-89d11968bc30)
 3. [Configuring AWS CloudWatch to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/configuring-aws-cloudwatch-to-send-alerts-to-slack-and-telegram-ae0b8c077fc6)
 4. [How to Configure Sentry to Send Alerts to MS Teams](https://medium.com/@hmquan08011996/how-to-configure-sentry-to-send-alerts-to-ms-teams-08e0969f8578)
-5. [Replace Opsgenie with this open-source alert router (save $2,280/year)](https://dev.to/devopsvn/replace-opsgenie-with-this-open-source-alert-router-save-1995month-2nj5)
+5. [How to Configure Kibana to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-configure-kibana-to-send-alerts-to-slack-and-telegram-40e882e29bb4)
+6. [Replace Opsgenie with this open-source alert router (save $2,280/year)](https://dev.to/devopsvn/replace-opsgenie-with-this-open-source-alert-router-save-1995month-2nj5)
 
 ## Roadmap
 
