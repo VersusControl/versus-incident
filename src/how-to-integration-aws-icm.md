@@ -46,7 +46,7 @@ RunBooks automate incident resolution steps. For this guide, we’ll skip RunBoo
 A response plan ties contacts and escalation plans into a structured response.
 1. Go to Incident Manager > Response plans > Create response plan.
 2. Name it (e.g., "CriticalIncidentResponse").
-3. Define two stages:
+3. Choose an **Escalation Plan** we had created, which defines two stages:
 + Stage 1: Engage "TeamA_Escalation" (Natsu, Zeref, and Igneel) with a 5-minute timeout.
 + Stage 2: If unacknowledged, engage "TeamB_Escalation" (Gray, Gajeel, and Laxus).
 4. Save the plan and note its ARN (e.g., `arn:aws:ssm-incidents::111122223333:response-plan/CriticalIncidentResponse`).
@@ -298,6 +298,10 @@ This triggers the response plan immediately without waiting.
 + In Incident Manager > Incidents, verify that an incident starts and Team A is engaged.
 + After 5 more minutes, confirm Team B is engaged.
 4. Immediate Trigger Test: Send an urgent alert and confirm the response plan triggers instantly.
+
+Result
+
+![Versus On-Call Result](docs/images/on-call-result.png)
 
 ### Conclusion
 
