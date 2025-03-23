@@ -10,6 +10,7 @@
 - [Use FluentBit](./fluent-bit.md)
 - [Use CloudWatch Alarm](./cloudwatch-alarm-sns.md)
 - [Use Sentry](./sentry.md)
+- [Use Kibana](./kibana.md)
 
 # On Call
 - [Introduction](./on-call-introduction.md)
