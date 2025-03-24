@@ -7,12 +7,13 @@ func cloneConfig(src *Config) *Config {
 
 	// Create a new Config and copy all fields
 	cloned := &Config{
-		Name:   src.Name,
-		Host:   src.Host,
-		Port:   src.Port,
-		Alert:  cloneAlertConfig(src.Alert),
-		Queue:  cloneQueueConfig(src.Queue),
-		OnCall: cloneOnCallConfig(src.OnCall),
+		Name:       src.Name,
+		Host:       src.Host,
+		Port:       src.Port,
+		PublicHost: src.PublicHost,
+		Alert:      cloneAlertConfig(src.Alert),
+		Queue:      cloneQueueConfig(src.Queue),
+		OnCall:     cloneOnCallConfig(src.OnCall),
 	}
 
 	return cloned
