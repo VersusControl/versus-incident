@@ -5,7 +5,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/yourusername/versus)](https://goreportcard.com/report/github.com/yourusername/versus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-An open-source incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Designed for modern DevOps teams to quickly respond to production incidents.
+An open-source incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Compatible with any tool supporting webhook alerts, it’s designed for modern DevOps teams to quickly respond to production incidents.
 
 ### Features
 

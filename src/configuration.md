@@ -57,7 +57,7 @@ oncall:
   enable: false
   wait_minutes: 3 # If you set it to 0, it means there’s no need to check for an acknowledgment, and the on-call will trigger immediately
 
-  aws_incident_manager:
+  aws_incident_manager: # Overrides the default AWS Incident Manager response plan ARN for a specific alert /api/incidents?awsim_response_plan_arn=arn:aws:ssm-incidents::111122223333:response-plan/example-response-plan
     response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
 
 redis: # Required for on-call functionality
@@ -139,6 +139,7 @@ We provide a way to overwrite configuration values using query parameters, allow
 | `msteams_other_webhook_url`   | (Optional) Overrides the default Microsoft Teams channel by specifying an alternative webhook key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_webhook_url=qc`. |
 | `oncall_enable`          | Set to `true` or `false` to enable or disable on-call for a specific alert. Use: `/api/incidents?oncall_enable=false`. |
 | `oncall_wait_minutes`    | Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately. Use: `/api/incidents?oncall_wait_minutes=0`. |
+| `awsim_response_plan_arn`    | Overrides the default AWS Incident Manager response plan ARN for a specific alert. Use: `/api/incidents?awsim_response_plan_arn=arn:aws:ssm-incidents::111122223333:response-plan/example-response-plan`. |
 
 **Optional: Define additional webhook URLs for multiple MS Teams channels**
 
@@ -210,6 +211,18 @@ curl -X POST http://localhost:3000/api/incidents?oncall_wait_minutes=0 \
   -d '{
     "Logs": "[ERROR] Urgent issue detected.",
     "ServiceName": "urgent-service",
+    "UserID": "U12345"
+  }'
+```
+
+To use a specific AWS Incident Manager response plan for an alert:
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?awsim_response_plan_arn=arn:aws:ssm-incidents::111122223333:response-plan/example-response-plan" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Critical system failure.",
+    "ServiceName": "core-service",
     "UserID": "U12345"
   }'
 ```
