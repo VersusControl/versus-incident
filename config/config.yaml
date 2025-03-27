@@ -65,7 +65,7 @@ oncall:
   enable: false
   wait_minutes: 3 # If you set it to 0, it means there’s no need to check for an acknowledgment, and the on-call will trigger immediately
 
-  aws_incident_manager:
+  aws_incident_manager: # Overrides the default AWS Incident Manager response plan ARN for a specific alert /api/incidents?awsim_response_plan_arn=arn:aws:ssm-incidents::111122223333:response-plan/example-response-plan
     response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
 
 redis: # Required for on-call functionality
