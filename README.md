@@ -5,7 +5,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/yourusername/versus)](https://goreportcard.com/report/github.com/yourusername/versus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-An open-source incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Compatible with any tool supporting webhook alerts, it’s designed for modern DevOps teams to quickly respond to production incidents.
+An incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Compatible with any tool supporting webhook alerts, it’s designed for modern DevOps teams to quickly respond to production incidents.
 
 ## Table of Contents
 - [Features](#features)
@@ -18,7 +18,6 @@ An open-source incident management tool that supports alerting across multiple c
 - [Configuration](#complete-configuration)
 - [Environment Variables](#environment-variables)
 - [Advanced API Usage](#advanced-api-usage)
-- [How to](#how-to)
 - [Template Syntax](https://versuscontrol.github.io/versus-incident/template_syntax.html)
 - [Template Example](https://versuscontrol.github.io/versus-incident/slack-template-aws-sns.html)
 - [Roadmap](#roadmap)
@@ -74,20 +73,6 @@ export SLACK_CHANNEL_ID=your_channel
 
 ### Docker
 
-#### Basic Deployment
-
-```bash
-docker run -d \
-  -p 3000:3000 \
-  -e SLACK_ENABLE=true \
-  -e SLACK_TOKEN=your_slack_token \
-  -e SLACK_CHANNEL_ID=your_channel_id \
-  --name versus \
-  ghcr.io/versuscontrol/versus-incident
-```
-
-#### With Custom Templates
-
 Create a configuration file:
 
 ```
@@ -105,22 +90,13 @@ alert:
     enable: true
     token: ${SLACK_TOKEN}
     channel_id: ${SLACK_CHANNEL_ID}
-    template_path: "/app/config/slack_message.tmpl"
+    template_path: "/app/config/slack_message.tmpl" # For containerized env
 
   telegram:
     enable: false
 
   msteams:
     enable: false
-```
-
-**Configuration Notes**
-
-Ensure `template_path` in `config.yaml` matches container path:
-```yaml
-alert:
-  slack:
-    template_path: "/app/config/slack_message.tmpl" # For containerized env
 ```
 
 **Slack Template**
@@ -149,12 +125,6 @@ docker run -d \
   ghcr.io/versuscontrol/versus-incident
 ```
 
-Verify template mounting:
-
-```bash
-docker exec versus ls -l /app/config
-```
-
 To test, simply send an incident to Versus:
 
 ```bash
@@ -178,6 +148,16 @@ Response:
 **Result:**
 
 ![Slack Alert](src/docs/images/versus-result.png)
+
+#### More examples
+
+1. [How to Customize Alert Messages from Alertmanager to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-customize-alert-messages-from-alertmanager-to-slack-and-telegram-786525713689)
+2. [Configuring Fluent Bit to Send Error Logs to Versus Incident](https://medium.com/@hmquan08011996/configuring-fluent-bit-to-send-error-logs-to-slack-and-telegram-89d11968bc30)
+3. [Configuring AWS CloudWatch to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/configuring-aws-cloudwatch-to-send-alerts-to-slack-and-telegram-ae0b8c077fc6)
+4. [How to Configure Sentry to Send Alerts to MS Teams](https://medium.com/@hmquan08011996/how-to-configure-sentry-to-send-alerts-to-ms-teams-08e0969f8578)
+5. [How to Configure Kibana to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-configure-kibana-to-send-alerts-to-slack-and-telegram-40e882e29bb4)
+6. [How to Configure Grafana to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-configure-grafana-to-send-alerts-to-slack-and-telegram-b11a784369b8)
+7. [How to Configure OpenSearch to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-configure-opensearch-to-send-alerts-to-slack-and-telegram-43d177d36791)
 
 #### Other Templates
 
@@ -341,11 +321,6 @@ spec:
 4. Apply:
 ```bash
 kubectl apply -f versus-deployment.yaml
-```
-
-5. Verify template mounting:
-```bash
-kubectl exec -it <pod-name> -- ls -l /app/config
 ```
 
 ## SNS Usage
@@ -643,17 +618,6 @@ curl -X POST "http://localhost:3000/api/incidents?awsim_response_plan_arn=arn:aw
     "UserID": "U12345"
   }'
 ```
-
-## How to
-
-1. [Replace Opsgenie with this open-source alert router (save $2,280/year)](https://dev.to/devopsvn/replace-opsgenie-with-this-open-source-alert-router-save-1995month-2nj5)
-2. [How to Customize Alert Messages from Alertmanager to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-customize-alert-messages-from-alertmanager-to-slack-and-telegram-786525713689)
-3. [Configuring Fluent Bit to Send Error Logs to Versus Incident](https://medium.com/@hmquan08011996/configuring-fluent-bit-to-send-error-logs-to-slack-and-telegram-89d11968bc30)
-4. [Configuring AWS CloudWatch to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/configuring-aws-cloudwatch-to-send-alerts-to-slack-and-telegram-ae0b8c077fc6)
-5. [How to Configure Sentry to Send Alerts to MS Teams](https://medium.com/@hmquan08011996/how-to-configure-sentry-to-send-alerts-to-ms-teams-08e0969f8578)
-6. [How to Configure Kibana to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-configure-kibana-to-send-alerts-to-slack-and-telegram-40e882e29bb4)
-7. [How to Configure Grafana to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-configure-grafana-to-send-alerts-to-slack-and-telegram-b11a784369b8)
-8. [How to Configure OpenSearch to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-configure-opensearch-to-send-alerts-to-slack-and-telegram-43d177d36791)
 
 ## Roadmap
 
