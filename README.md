@@ -5,7 +5,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/yourusername/versus)](https://goreportcard.com/report/github.com/yourusername/versus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-An open-source incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Compatible with any tool supporting webhook alerts, it’s designed for modern DevOps teams to quickly respond to production incidents.
+An incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Compatible with any tool supporting webhook alerts, it’s designed for modern DevOps teams to quickly respond to production incidents.
 
 ## Table of Contents
 - [Features](#features)
@@ -74,20 +74,6 @@ export SLACK_CHANNEL_ID=your_channel
 
 ### Docker
 
-#### Basic Deployment
-
-```bash
-docker run -d \
-  -p 3000:3000 \
-  -e SLACK_ENABLE=true \
-  -e SLACK_TOKEN=your_slack_token \
-  -e SLACK_CHANNEL_ID=your_channel_id \
-  --name versus \
-  ghcr.io/versuscontrol/versus-incident
-```
-
-#### With Custom Templates
-
 Create a configuration file:
 
 ```
@@ -105,22 +91,13 @@ alert:
     enable: true
     token: ${SLACK_TOKEN}
     channel_id: ${SLACK_CHANNEL_ID}
-    template_path: "/app/config/slack_message.tmpl"
+    template_path: "/app/config/slack_message.tmpl" # For containerized env
 
   telegram:
     enable: false
 
   msteams:
     enable: false
-```
-
-**Configuration Notes**
-
-Ensure `template_path` in `config.yaml` matches container path:
-```yaml
-alert:
-  slack:
-    template_path: "/app/config/slack_message.tmpl" # For containerized env
 ```
 
 **Slack Template**
@@ -147,12 +124,6 @@ docker run -d \
   -e SLACK_CHANNEL_ID=your_channel_id \
   --name versus \
   ghcr.io/versuscontrol/versus-incident
-```
-
-Verify template mounting:
-
-```bash
-docker exec versus ls -l /app/config
 ```
 
 To test, simply send an incident to Versus:
@@ -341,11 +312,6 @@ spec:
 4. Apply:
 ```bash
 kubectl apply -f versus-deployment.yaml
-```
-
-5. Verify template mounting:
-```bash
-kubectl exec -it <pod-name> -- ls -l /app/config
 ```
 
 ## SNS Usage

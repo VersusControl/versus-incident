@@ -42,20 +42,6 @@ export SLACK_CHANNEL_ID=your_channel
 
 ### Docker
 
-#### Basic Deployment
-
-```bash
-docker run -d \
-  -p 3000:3000 \
-  -e SLACK_ENABLE=true \
-  -e SLACK_TOKEN=your_slack_token \
-  -e SLACK_CHANNEL_ID=your_channel_id \
-  --name versus \
-  ghcr.io/versuscontrol/versus-incident
-```
-
-#### With Custom Templates
-
 Create a configuration file:
 
 ```
@@ -115,12 +101,6 @@ docker run -d \
   -e SLACK_CHANNEL_ID=your_channel_id \
   --name versus \
   ghcr.io/versuscontrol/versus-incident
-```
-
-Verify template mounting:
-
-```bash
-docker exec versus ls -l /app/config
 ```
 
 To test, simply send an incident to Versus:
@@ -309,11 +289,6 @@ spec:
 4. Apply:
 ```bash
 kubectl apply -f versus-deployment.yaml
-```
-
-5. Verify template mounting:
-```bash
-kubectl exec -it <pod-name> -- ls -l /app/config
 ```
 
 ## SNS Usage
