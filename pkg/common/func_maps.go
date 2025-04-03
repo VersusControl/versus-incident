@@ -45,6 +45,7 @@ func GetTemplateFuncMaps() template.FuncMap {
 		"replace":    strings.ReplaceAll,
 		"trimPrefix": strings.TrimPrefix,
 		"trimSuffix": strings.TrimSuffix,
+		"split":      strings.Split,
 		"len": func(s interface{}) int {
 			// Return length of string or slice
 			switch v := s.(type) {

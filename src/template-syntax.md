@@ -107,6 +107,17 @@ Pipelines allow you to chain together multiple actions or functions. The result 
 uri /search?q={{ .Query | urlquery }}
 ```
 
+**split**: splits a string into array using a separator.
+
+```
+{{ $parts := split "apple,banana,cherry" "," }}
+
+{{/* Iterate over split results */}}
+{{ range $parts }}
+  {{ . }}
+{{ end }}
+```
+
 **You can chain multiple pipes together**:
 
 ```
