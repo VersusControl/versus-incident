@@ -1,6 +1,6 @@
-## Introduction
-
-![Versus Incident](docs/images/versus-incident-l.png)
+<h1 align="center" style="border-bottom: none">
+  <img alt="Versus" src="docs/images/versus.svg">
+</h1>
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/yourusername/versus)](https://goreportcard.com/report/github.com/yourusername/versus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
