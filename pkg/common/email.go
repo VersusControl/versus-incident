@@ -2,11 +2,12 @@ package common
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"html/template"
 	"net/smtp"
 	"path/filepath"
-	"strconv"
+	"strings"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	m "github.com/VersusControl/versus-incident/pkg/models"
@@ -22,6 +23,33 @@ type EmailProvider struct {
 	templatePath string
 }
 
+// loginAuth implements smtp.Auth for Office365's LOGIN authentication
+type loginAuth struct {
+	username, password string
+}
+
+func LoginAuth(username, password string) smtp.Auth {
+	return &loginAuth{username, password}
+}
+
+func (a *loginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	return "LOGIN", nil, nil
+}
+
+func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
+	if more {
+		switch string(fromServer) {
+		case "Username:":
+			return []byte(a.username), nil
+		case "Password:":
+			return []byte(a.password), nil
+		default:
+			return nil, fmt.Errorf("unexpected server challenge: %s", fromServer)
+		}
+	}
+	return nil, nil
+}
+
 func NewEmailProvider(cfg config.EmailConfig) *EmailProvider {
 	return &EmailProvider{
 		smtpHost:     cfg.SMTPHost,
@@ -32,6 +60,17 @@ func NewEmailProvider(cfg config.EmailConfig) *EmailProvider {
 		subject:      cfg.Subject,
 		templatePath: cfg.TemplatePath,
 	}
+}
+
+func (e *EmailProvider) getAuth() smtp.Auth {
+	// Use LOGIN auth for Office365/Outlook
+	if strings.Contains(e.smtpHost, "office365.com") ||
+		strings.Contains(e.smtpHost, "outlook.com") ||
+		strings.Contains(e.smtpHost, "microsoft.com") {
+		return LoginAuth(e.username, e.password)
+	}
+	// Use PLAIN auth for Gmail and others
+	return smtp.PlainAuth("", e.username, e.password, e.smtpHost)
 }
 
 func (e *EmailProvider) SendAlert(i *m.Incident) error {
@@ -51,6 +90,7 @@ func (e *EmailProvider) SendAlert(i *m.Incident) error {
 
 	// Set email headers
 	headers := make(map[string]string)
+	headers["From"] = e.username
 	headers["To"] = e.to
 	headers["Subject"] = e.subject
 	headers["MIME-Version"] = "1.0"
@@ -64,19 +104,59 @@ func (e *EmailProvider) SendAlert(i *m.Incident) error {
 	message.WriteString("\r\n")
 	message.Write(body.Bytes())
 
-	// Authentication
-	auth := smtp.PlainAuth("", e.username, e.password, e.smtpHost)
+	// Get appropriate auth based on SMTP host
+	auth := e.getAuth()
 
-	// Convert port from string to int
-	port, err := strconv.Atoi(e.smtpPort)
+	// Create a custom SMTP client with TLS
+	addr := fmt.Sprintf("%s:%s", e.smtpHost, e.smtpPort)
+	conn, err := smtp.Dial(addr)
 	if err != nil {
-		return fmt.Errorf("invalid SMTP port number: %w", err)
+		return fmt.Errorf("failed to dial SMTP server: %w", err)
+	}
+	defer conn.Close()
+
+	// Only use STARTTLS if not using port 465 (SSL)
+	if e.smtpPort != "465" {
+		tlsConfig := &tls.Config{
+			ServerName: e.smtpHost,
+		}
+		if err := conn.StartTLS(tlsConfig); err != nil {
+			return fmt.Errorf("failed to start TLS: %w", err)
+		}
 	}
 
-	// Send email without from address
-	addr := fmt.Sprintf("%s:%d", e.smtpHost, port)
-	if err := smtp.SendMail(addr, auth, e.username, []string{e.to}, message.Bytes()); err != nil {
-		return fmt.Errorf("failed to send email: %w", err)
+	// Authenticate
+	if err := conn.Auth(auth); err != nil {
+		return fmt.Errorf("failed to authenticate: %w", err)
+	}
+
+	// Send the email
+	if err := conn.Mail(e.username); err != nil {
+		return fmt.Errorf("failed to set sender: %w", err)
+	}
+
+	if err := conn.Rcpt(e.to); err != nil {
+		return fmt.Errorf("failed to set recipient: %w", err)
+	}
+
+	w, err := conn.Data()
+	if err != nil {
+		return fmt.Errorf("failed to open data connection: %w", err)
+	}
+
+	_, err = w.Write(message.Bytes())
+	if err != nil {
+		return fmt.Errorf("failed to write message: %w", err)
+	}
+
+	err = w.Close()
+	if err != nil {
+		return fmt.Errorf("failed to close data connection: %w", err)
+	}
+
+	// Quit the connection
+	if err := conn.Quit(); err != nil {
+		return fmt.Errorf("failed to quit connection: %w", err)
 	}
 
 	return nil
