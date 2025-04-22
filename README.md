@@ -528,6 +528,8 @@ We provide a way to overwrite configuration values using query parameters, allow
 | Query          | Description |
 |------------------|-------------|
 | `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_vaule>`. |
+| `email_to`   | Overrides the default recipient email address for email notifications. Use: `/api/incidents?email_to=<recipient_email>`. |
+| `email_subject`   | Overrides the default subject line for email notifications. Use: `/api/incidents?email_subject=<custom_subject>`. |
 | `msteams_other_webhook_url`   | (Optional) Overrides the default Microsoft Teams channel by specifying an alternative webhook key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_webhook_url=qc`. |
 | `oncall_enable`          | Set to `true` or `false` to enable or disable on-call for a specific alert. Use: `/api/incidents?oncall_enable=false`. |
 | `oncall_wait_minutes`    | Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately. Use: `/api/incidents?oncall_wait_minutes=0`. |
@@ -571,12 +573,26 @@ alert:
 
 To send an alert to the QC team’s Microsoft Teams channel:
 
-```
+```bash
 curl -X POST http://localhost:3000/api/incidents?msteams_other_webhook_url=qc \
   -H "Content-Type: application/json" \
   -d '{
     "Logs": "[ERROR] Quality check failed.",
     "ServiceName": "qa-service",
+    "UserID": "U12345"
+  }'
+```
+
+**Example Email:**
+
+To send an email alert to a specific recipient with a custom subject:
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?email_to=alerts@yourdomain.com&email_subject=Urgent%20Incident%20Notification" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Critical system failure.",
+    "ServiceName": "core-service",
     "UserID": "U12345"
   }'
 ```

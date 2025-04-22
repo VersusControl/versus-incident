@@ -183,6 +183,14 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 		clonedCfg.Alert.Slack.ChannelID = v
 	}
 
+	if v := (*paramsOverwrite)["email_to"]; v != "" {
+		clonedCfg.Alert.Email.To = v
+	}
+
+	if v := (*paramsOverwrite)["email_subject"]; v != "" {
+		clonedCfg.Alert.Email.Subject = v
+	}
+
 	if v := (*paramsOverwrite)["msteams_other_webhook_url"]; v != "" {
 		if clonedCfg.Alert.MSTeams.OtherWebhookURL != nil {
 			webhook := clonedCfg.Alert.MSTeams.OtherWebhookURL[v]
