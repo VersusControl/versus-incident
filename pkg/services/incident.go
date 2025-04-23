@@ -2,6 +2,7 @@ package services
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/VersusControl/versus-incident/pkg/common"
 	"github.com/VersusControl/versus-incident/pkg/config"
@@ -19,14 +20,7 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 		cfg = config.GetConfig()
 	}
 
-	// Dereference the Pointer and add AckURL if needed
-	contentClone := make(map[string]interface{})
-	for k, v := range *content {
-		contentClone[k] = v
-	}
-
-	incident := m.NewIncident(teamID, content)
-
+	// Initialization of providers and alert
 	factory := common.NewProviderFactory(cfg)
 	providers, err := factory.CreateProviders()
 	if err != nil {
@@ -35,24 +29,52 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 
 	alert := core.NewAlert(providers...)
 
-	if cfg.OnCall.Enable {
+	// Skip AckURL and On-Call if resolved alert
+	resolved := isResolved(*content)
+
+	incident := m.NewIncident(teamID, content, resolved)
+
+	// Dereference the Pointer and add AckURL if needed
+	contentClone := make(map[string]interface{})
+	for k, v := range *content {
+		contentClone[k] = v
+	}
+
+	if !resolved && cfg.OnCall.Enable {
 		ackURL := fmt.Sprintf("%s/api/ack/%s", cfg.PublicHost, incident.ID)
 		contentClone["AckURL"] = ackURL
 
-		incident.Content = contentClone
+		incident.Content = &contentClone
 	}
 
 	if err := alert.SendAlert(incident); err != nil {
 		return err
 	}
 
-	if cfg.OnCall.Enable {
+	if !resolved && cfg.OnCall.Enable {
 		workflow := core.GetOnCallWorkflow()
-
 		if err := workflow.Start(incident.ID, cfg.OnCall); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// isResolved checks if the alert is resolved by checking common status fields
+func isResolved(content map[string]interface{}) bool {
+	// List of common field names that might indicate status
+	statusFields := []string{"status", "state", "alertState"}
+
+	for _, field := range statusFields {
+		if val, ok := content[field]; ok {
+			if strVal, isString := val.(string); isString {
+				// Case-insensitive check for "resolved"
+				return strings.EqualFold(strVal, "resolved")
+			}
+		}
+	}
+
+	// Not resolved (trigger On-Call)
+	return false
 }

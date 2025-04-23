@@ -39,11 +39,16 @@ func (s *SlackProvider) SendAlert(i *m.Incident) error {
 		return fmt.Errorf("failed to execute template: %w", err)
 	}
 
+	color := "#C70039" // Red
+	if i.Resolved {
+		color = "#36A64F" // Green
+	}
+
 	_, _, err = s.client.PostMessage(
 		s.channelID,
 		slack.MsgOptionAttachments(slack.Attachment{
 			Text:  message.String(),
-			Color: "#C70039",
+			Color: color,
 		}),
 	)
 
