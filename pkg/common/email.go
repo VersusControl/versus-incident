@@ -88,6 +88,12 @@ func (e *EmailProvider) SendAlert(i *m.Incident) error {
 		return fmt.Errorf("failed to execute template: %w", err)
 	}
 
+	// Parse recipients (support multiple comma-separated email addresses)
+	recipients := parseRecipients(e.to)
+	if len(recipients) == 0 {
+		return fmt.Errorf("no valid email recipients found")
+	}
+
 	// Set email headers
 	headers := make(map[string]string)
 	headers["From"] = e.username
@@ -135,8 +141,11 @@ func (e *EmailProvider) SendAlert(i *m.Incident) error {
 		return fmt.Errorf("failed to set sender: %w", err)
 	}
 
-	if err := conn.Rcpt(e.to); err != nil {
-		return fmt.Errorf("failed to set recipient: %w", err)
+	// Add all recipients to the email
+	for _, recipient := range recipients {
+		if err := conn.Rcpt(recipient); err != nil {
+			return fmt.Errorf("failed to set recipient %s: %w", recipient, err)
+		}
 	}
 
 	w, err := conn.Data()
@@ -160,4 +169,26 @@ func (e *EmailProvider) SendAlert(i *m.Incident) error {
 	}
 
 	return nil
+}
+
+// parseRecipients splits a comma-separated list of email addresses
+// and returns a slice of trimmed email addresses
+func parseRecipients(to string) []string {
+	if to == "" {
+		return nil
+	}
+
+	// Split the string by commas
+	emails := strings.Split(to, ",")
+
+	// Trim whitespace from each email address
+	var validEmails []string
+	for _, email := range emails {
+		trimmedEmail := strings.TrimSpace(email)
+		if trimmedEmail != "" {
+			validEmails = append(validEmails, trimmedEmail)
+		}
+	}
+
+	return validEmails
 }
