@@ -7,6 +7,8 @@
 
 An incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Compatible with any tool supporting webhook alerts, it’s designed for modern DevOps teams to quickly respond to production incidents.
 
+🚀 Boost Your SRE Skills with the Book: [On-Call in Action](https://a.co/d/4A8zrWR).
+
 ## Table of Contents
 - [Features](#features)
 - [Getting Started](#get-started-in-60-seconds)
@@ -23,7 +25,6 @@ An incident management tool that supports alerting across multiple channels with
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
-- [Support This Project](#support-this-project)
 
 ## Features
 
@@ -667,13 +668,3 @@ We welcome contributions! Please follow these steps:
 ## License
 
 Distributed under the MIT License. See `LICENSE` for more information.
-
-## Support This Project
-
-Help us maintain Versus Incident! Your sponsorship:
-
-🔧 Funds critical infrastructure
-
-🚀 Accelerates new features like Viber/Lark integration, Web UI and On-call integrations
-
-[![GitHub Sponsors](https://img.shields.io/github/sponsors/YourUsername?style=for-the-badge)](https://github.com/hoalongnatsu)
