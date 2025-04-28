@@ -3,30 +3,52 @@
 This guide will show you how to route Sentry alerts through Versus Incident to Microsoft Teams, enabling your team to respond to application issues quickly and efficiently.
 
 **Prerequisites**
-1. Microsoft Teams channel with webhook permissions
+1. Microsoft Teams channel with Power Automate or webhook permissions
 2. Sentry account with project owner permissions
 
-### Set Up an MS Teams Webhook
+### Set Up Microsoft Teams Integration (2025 Update)
 
-First, create an incoming webhook in MS Teams to receive alerts from Versus Incident.
+Microsoft has announced the retirement of Office 365 Connectors (including Incoming Webhooks) by the end of 2025. Versus Incident supports both the legacy webhook method and the new Power Automate Workflows method. We recommend using Power Automate Workflows for all new deployments.
+
+#### Option 1: Set Up a Power Automate Workflow (Recommended)
+
+Follow these steps to create a Power Automate workflow to receive alerts in Microsoft Teams:
+
+1. Sign in to [Power Automate](https://flow.microsoft.com/)
+2. Click **Create** and select **Instant cloud flow**
+3. Name your flow (e.g., "Versus Incident Alerts")
+4. Select **When a HTTP request is received** as the trigger and click **Create**
+5. In the HTTP trigger, you'll see a generated HTTP POST URL. Copy this URL - you'll need it later
+6. Click **+ New step** and search for "Teams"
+7. Select **Post a message in a chat or channel** (under Microsoft Teams)
+8. Configure the action:
+   - Choose **Channel** as the Post as option
+   - Select your **Team** and **Channel**
+   - For the **Message** field, add:
+   ```
+   @{triggerBody()?['messageText']}
+   ```
+9. Click **Save** to save your flow
+
+#### Option 2: Set Up an MS Teams Webhook (Legacy Method)
+
+For backward compatibility, Versus still supports the traditional webhook method (being retired by end of 2025):
 
 1. Open MS Teams and go to the channel where you want alerts to appear.
 2. Click the three dots `(…)` next to the channel name and select Connectors.
 3. Find Incoming Webhook, click Add, then Add again in the popup.
 4. Name your webhook (e.g., Sentry Alerts) and optionally upload an image.
-5. Click Create, then copy the generated webhook URL. Save this URL — you’ll need it later.
+5. Click Create, then copy the generated webhook URL. Save this URL — you'll need it later.
 
 ### Deploy Versus Incident with MS Teams Enabled
 
-Next, configure Versus Incident to forward alerts to MS Teams using the webhook URL you created.
-
-Create a directory for your configuration files:
+Next, configure Versus Incident to forward alerts to MS Teams. Create a directory for your configuration files:
 
 ```
 mkdir -p ./config
 ```
 
-Create `config/config.yaml` with the following content:
+Create `config/config.yaml` with the following content for Power Automate (recommended):
 
 ```yaml
 name: versus
@@ -34,10 +56,12 @@ host: 0.0.0.0
 port: 3000
 
 alert:
+  debug_body: true
+
   msteams:
-    enable: true
-    webhook_url: ${MSTEAMS_WEBHOOK_URL}
-    template_path: "/app/config/msteams_message.tmpl"
+    enable: false # Default value, will be overridden by MSTEAMS_ENABLE env var
+    power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL} # Power Automate HTTP trigger URL
+    template_path: "config/msteams_message.tmpl"
 ```
 
 Create a custom MS Teams template in `config/msteams_message.tmpl`, for example, the JSON Format for Sentry Webhooks Integration:
@@ -79,9 +103,9 @@ Create a custom MS Teams template in `config/msteams_message.tmpl`, for example,
 }
 ```
 
-`config/msteams_message.tmpl:`
+Now, create a rich MS Teams template in `config/msteams_message.tmpl`:
 
-```
+```markdown
 **🚨 Sentry Alert: {{.data.issue.title}}**
 
 **Project**: {{.data.issue.project.name}}
@@ -93,19 +117,21 @@ Please investigate this issue immediately.
 
 This template uses Markdown to format the alert in MS Teams. It pulls data from the Sentry webhook payload (e.g., `{{.data.issue.title}}`).
 
-Run Versus Incident using Docker, mounting your configuration files and setting the MS Teams webhook URL as an environment variable:
+**Note about MS Teams notifications (April 2025)**: The system will automatically extract "Sentry Alert: {{.data.issue.title}}" as the summary for Microsoft Teams notifications, and generate a plain text version as a fallback. You don't need to add these fields manually - Versus Incident handles this to ensure proper display in Microsoft Teams.
+
+Run Versus Incident using Docker, mounting your configuration files and setting the MS Teams Power Automate URL as an environment variable:
 
 ```bash
 docker run -d \
   -p 3000:3000 \
   -v $(pwd)/config:/app/config \
   -e MSTEAMS_ENABLE=true \
-  -e MSTEAMS_WEBHOOK_URL="your_teams_webhook_url" \
+  -e MSTEAMS_POWER_AUTOMATE_URL="your_power_automate_url" \
   --name versus \
   ghcr.io/versuscontrol/versus-incident
 ```
 
-Replace `your_teams_webhook_url` with the webhook URL. The Versus Incident API endpoint for receiving alerts is now available at:
+Replace `your_power_automate_url` with the URL you copied from Power Automate. The Versus Incident API endpoint for receiving alerts is now available at:
 
 ```
 http://localhost:3000/api/incidents

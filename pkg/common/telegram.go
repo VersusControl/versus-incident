@@ -11,6 +11,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	m "github.com/VersusControl/versus-incident/pkg/models"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
 type TelegramProvider struct {
@@ -34,7 +35,7 @@ func NewTelegramProvider(cfg config.TelegramConfig) *TelegramProvider {
 }
 
 func (t *TelegramProvider) SendAlert(i *m.Incident) error {
-	funcMaps := GetTemplateFuncMaps()
+	funcMaps := utils.GetTemplateFuncMaps()
 
 	tmpl, err := template.New(filepath.Base(t.templatePath)).Funcs(funcMaps).ParseFiles(t.templatePath)
 	if err != nil {

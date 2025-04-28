@@ -19,3 +19,6 @@
 - [Introduction](./on-call-introduction.md)
 - [AWS Incident Manager](./aws-incident-manager.md)
 - [How to Integration](./how-to-integration-aws-icm.md)
+
+# Migration Guides
+- [Migrating to v1.2.0](./migration-v1.2.0.md)

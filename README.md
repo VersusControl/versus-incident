@@ -22,6 +22,8 @@ An incident management tool that supports alerting across multiple channels with
 - [Advanced API Usage](#advanced-api-usage)
 - [Template Syntax](https://versuscontrol.github.io/versus-incident/template_syntax.html)
 - [Template Example](https://versuscontrol.github.io/versus-incident/slack-template-aws-sns.html)
+- [Migration Guides](#migration-guides)
+  - [Migrating to v1.2.0](#migrating-to-v120)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
@@ -197,17 +199,35 @@ This template supports both plain text and HTML formatting for email notificatio
 
 **Microsoft Teams Template**
 
-Create your Teams message template, for example `config/msteams_message.tmpl`:
+Create your Teams message template, for example `config/msteams_message.tmpl`. The Microsoft Teams integration now supports rich Markdown formatting that gets converted to Adaptive Cards:
 
-```
-**Critical Error in {{.ServiceName}}**
+```markdown
+# Critical Error in {{.ServiceName}}
  
-**Error Details:**
+### Error Details:
 
 ```{{.Logs}}```
 
-Please investigate immediately
+## Additional Information
+
+- Source: {{.Source}}
+- Severity: {{.Severity}}
+- Incident ID: {{.IncidentID}}
+
+Please [investigate immediately](https://your-dashboard-url.com/incidents/{{.IncidentID}})
+
+*Alert sent by Versus Incident Management*
 ```
+
+This template uses Markdown features that will be rendered as an Adaptive Card in Microsoft Teams:
+- Headings with different levels (`#`, `##`, `###`)
+- Code blocks with triple backticks
+- Unordered lists with `-` or `*`
+- Ordered lists with `1.`, `2.`, etc.
+- Links with `[text](url)` syntax
+- Bold text with `**double asterisks**`
+
+**Important Note (April 2025)**: Versus Incident now automatically extracts a summary from your template's first heading (or first line if no heading exists) to ensure proper display in Microsoft Teams notifications. It also creates a plain text fallback version for clients that don't support Adaptive Cards.
 
 ### Kubernetes
 
@@ -422,14 +442,18 @@ alert:
     smtp_port: ${SMTP_PORT} # From environment
     username: ${SMTP_USERNAME} # From environment
     password: ${SMTP_PASSWORD} # From environment
-    to: ${EMAIL_TO} # From environment
+    to: ${EMAIL_TO} # From environment, can contain multiple comma-separated email addresses
     subject: ${EMAIL_SUBJECT} # From environment
     template_path: "config/email_message.tmpl"
 
   msteams:
     enable: false # Default value, will be overridden by MSTEAMS_ENABLE env var
-    webhook_url: ${MSTEAMS_WEBHOOK_URL}
+    power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL} # Automatically works with both Power Automate workflow URLs and legacy Office 365 webhooks
     template_path: "config/msteams_message.tmpl"
+    other_power_url: # Optional: Define additional Power Automate URLs for multiple MS Teams channels
+      qc: ${MSTEAMS_OTHER_POWER_URL_QC} # Power Automate URL for QC team
+      ops: ${MSTEAMS_OTHER_POWER_URL_OPS} # Power Automate URL for Ops team
+      dev: ${MSTEAMS_OTHER_POWER_URL_DEV} # Power Automate URL for Dev team
 
 queue:
   enable: true
@@ -492,14 +516,17 @@ The application relies on several environment variables to configure alerting se
 | `SMTP_PORT`      | The SMTP server port (e.g., 587 for TLS). |
 | `SMTP_USERNAME`  | The username/email for SMTP authentication. |
 | `SMTP_PASSWORD`  | The password or app-specific password for SMTP authentication. |
-| `EMAIL_TO`       | The recipient email address for incident notifications. |
+| `EMAIL_TO`       | The recipient email address(es) for incident notifications. Can be multiple addresses separated by commas. |
 | `EMAIL_SUBJECT`  | The subject line for email notifications. |
 
 ### Microsoft Teams Configuration
 | Variable          | Description |
 |------------------|-------------|
 | `MSTEAMS_ENABLE`   | Set to `true` to enable Microsoft Teams notifications. |
-| `MSTEAMS_WEBHOOK_URL` | The incoming webhook URL for your Teams channel. |
+| `MSTEAMS_POWER_AUTOMATE_URL` | Automatically works with both Power Automate workflow URLs and legacy Office 365 webhooks. |
+| `MSTEAMS_OTHER_POWER_URL_QC`  | (Optional) Power Automate URL for the QC team channel. |
+| `MSTEAMS_OTHER_POWER_URL_OPS` | (Optional) Power Automate URL for the Ops team channel. |
+| `MSTEAMS_OTHER_POWER_URL_DEV` | (Optional) Power Automate URL for the Dev team channel. |
 
 ### AWS SNS Configuration
 | Variable                     | Description |
@@ -531,12 +558,12 @@ We provide a way to overwrite configuration values using query parameters, allow
 | `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_vaule>`. |
 | `email_to`   | Overrides the default recipient email address for email notifications. Use: `/api/incidents?email_to=<recipient_email>`. |
 | `email_subject`   | Overrides the default subject line for email notifications. Use: `/api/incidents?email_subject=<custom_subject>`. |
-| `msteams_other_webhook_url`   | (Optional) Overrides the default Microsoft Teams channel by specifying an alternative webhook key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_webhook_url=qc`. |
+| `msteams_other_power_url`   | (Optional) Overrides the default Microsoft Teams Power Automate flow by specifying an alternative key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_power_url=qc`. |
 | `oncall_enable`          | Set to `true` or `false` to enable or disable on-call for a specific alert. Use: `/api/incidents?oncall_enable=false`. |
 | `oncall_wait_minutes`    | Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately. Use: `/api/incidents?oncall_wait_minutes=0`. |
 | `awsim_response_plan_arn`    | Overrides the default AWS Incident Manager response plan ARN for a specific alert. Use: `/api/incidents?awsim_response_plan_arn=arn:aws:ssm-incidents::111122223333:response-plan/example-response-plan`. |
 
-**Optional: Define additional webhook URLs for multiple MS Teams channels**
+**Optional: Define additional Power Automate URLs for multiple MS Teams channels**
 
 ```yaml
 name: versus
@@ -551,31 +578,31 @@ alert:
 
   msteams:
     enable: false # Default value, will be overridden by MSTEAMS_ENABLE env var
-    webhook_url: ${MSTEAMS_WEBHOOK_URL} # Default webhook URL for MS Teams
+    power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL} # Automatically works with both Power Automate workflow URLs and legacy Office 365 webhooks
     template_path: "config/msteams_message.tmpl"
-    other_webhook_url: # Optional: Define additional webhook URLs for multiple MS Teams channels
-      qc: ${MSTEAMS_OTHER_WEBHOOK_URL_QC} # Webhook for QC team
-      ops: ${MSTEAMS_OTHER_WEBHOOK_URL_OPS} # Webhook for Ops team
-      dev: ${MSTEAMS_OTHER_WEBHOOK_URL_DEV} # Webhook for Dev team
+    other_power_url: # Optional: Define additional Power Automate URLs for multiple MS Teams channels
+      qc: ${MSTEAMS_OTHER_POWER_URL_QC} # Power Automate URL for QC team
+      ops: ${MSTEAMS_OTHER_POWER_URL_OPS} # Power Automate URL for Ops team
+      dev: ${MSTEAMS_OTHER_POWER_URL_DEV} # Power Automate URL for Dev team
 ```
 
 **Microsoft Teams Configuration**
 
 | Variable          | Description |
 |------------------|-------------|
-| `MSTEAMS_WEBHOOK_URL` | The incoming webhook URL for your Teams channel. |
-| `MSTEAMS_OTHER_WEBHOOK_URL_QC`  | (Optional) Webhook URL for the QC team channel. |
-| `MSTEAMS_OTHER_WEBHOOK_URL_OPS` | (Optional) Webhook URL for the Ops team channel. |
-| `MSTEAMS_OTHER_WEBHOOK_URL_DEV` | (Optional) Webhook URL for the Dev team channel. |
+| `MSTEAMS_POWER_AUTOMATE_URL` | Automatically works with both Power Automate workflow URLs and legacy Office 365 webhooks. |
+| `MSTEAMS_OTHER_POWER_URL_QC`  | (Optional) Power Automate URL for the QC team channel. |
+| `MSTEAMS_OTHER_POWER_URL_OPS` | (Optional) Power Automate URL for the Ops team channel. |
+| `MSTEAMS_OTHER_POWER_URL_DEV` | (Optional) Power Automate URL for the Dev team channel. |
 
-*Notes: The `MSTEAMS_WEBHOOK_URL` is the primary webhook URL, while the `MSTEAMS_OTHER_WEBHOOK_URL_*` variables are optional and allow routing alerts to specific Teams channels based on the msteams_other_webhook_url query parameter.*
+*Notes: The `MSTEAMS_POWER_AUTOMATE_URL` is the primary Power Automate URL, while the `MSTEAMS_OTHER_POWER_URL_*` variables are optional and allow routing alerts to specific Teams channels based on the msteams_other_power_url query parameter.*
 
 **Example MS Teams:**
 
-To send an alert to the QC team’s Microsoft Teams channel:
+To send an alert to the QC team's Microsoft Teams channel:
 
 ```bash
-curl -X POST http://localhost:3000/api/incidents?msteams_other_webhook_url=qc \
+curl -X POST http://localhost:3000/api/incidents?msteams_other_power_url=qc \
   -H "Content-Type: application/json" \
   -d '{
     "Logs": "[ERROR] Quality check failed.",
@@ -635,6 +662,14 @@ curl -X POST "http://localhost:3000/api/incidents?awsim_response_plan_arn=arn:aw
     "UserID": "U12345"
   }'
 ```
+
+## Migration Guides
+
+### Migrating to v1.2.0
+
+Version 1.2.0 introduces enhanced Microsoft Teams integration using Power Automate.
+
+For complete migration instructions, please see our [detailed migration guide](https://versuscontrol.github.io/versus-incident/migration-v1.2.0.html).
 
 ## Roadmap
 

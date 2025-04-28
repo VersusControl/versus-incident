@@ -29,11 +29,11 @@ alert:
     template_path: "config/email_message.tmpl"
 
   msteams:
-    enable: false
-    webhook_url: ${MSTEAMS_WEBHOOK_URL}
+    enable: false # Default value, will be overridden by MSTEAMS_ENABLE env var
+    power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL} # Power Automate HTTP trigger URL (required)
     template_path: "config/msteams_message.tmpl"
-    other_webhook_url: # Optional: Enable overriding the default Microsoft Teams channel using query parameters, eg /api/incidents?msteams_other_webhook_url=qc
-      qc: ${MSTEAMS_OTHER_WEBHOOK_URL_QC}
+    other_power_url: # Optional: Enable overriding the default Power Automate flow using query parameters, eg /api/incidents?msteams_other_power_url=qc
+      qc: ${MSTEAMS_OTHER_POWER_URL_QC}
 
 queue:
   enable: true

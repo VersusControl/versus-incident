@@ -57,10 +57,11 @@ type EmailConfig struct {
 }
 
 type MSTeamsConfig struct {
-	Enable          bool
-	WebhookURL      string            `mapstructure:"webhook_url"`
-	TemplatePath    string            `mapstructure:"template_path"`
-	OtherWebhookURL map[string]string `mapstructure:"other_webhook_url"`
+	Enable        bool
+	TemplatePath  string            `mapstructure:"template_path"`
+	OtherPowerURL map[string]string `mapstructure:"other_power_url"` // Optional alternative Power Automate URLs
+	// Power Automate Workflow URL for Teams integration
+	PowerAutomateURL string `mapstructure:"power_automate_url"`
 }
 
 type QueueConfig struct {
@@ -191,12 +192,12 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 		clonedCfg.Alert.Email.Subject = v
 	}
 
-	if v := (*paramsOverwrite)["msteams_other_webhook_url"]; v != "" {
-		if clonedCfg.Alert.MSTeams.OtherWebhookURL != nil {
-			webhook := clonedCfg.Alert.MSTeams.OtherWebhookURL[v]
+	if v := (*paramsOverwrite)["msteams_other_power_url"]; v != "" {
+		if clonedCfg.Alert.MSTeams.OtherPowerURL != nil {
+			powerUrl := clonedCfg.Alert.MSTeams.OtherPowerURL[v]
 
-			if webhook != "" {
-				clonedCfg.Alert.MSTeams.WebhookURL = webhook
+			if powerUrl != "" {
+				clonedCfg.Alert.MSTeams.PowerAutomateURL = powerUrl
 			}
 		}
 	}
