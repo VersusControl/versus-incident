@@ -66,11 +66,20 @@ func cloneEmailConfig(src EmailConfig) EmailConfig {
 
 // Helper function to deep clone the MSTeamsConfig struct
 func cloneMSTeamsConfig(src MSTeamsConfig) MSTeamsConfig {
+	// Create a copy of OtherPowerURL map if it exists
+	var otherPowerURLCopy map[string]string
+	if src.OtherPowerURL != nil {
+		otherPowerURLCopy = make(map[string]string)
+		for k, v := range src.OtherPowerURL {
+			otherPowerURLCopy[k] = v
+		}
+	}
+
 	return MSTeamsConfig{
-		Enable:          src.Enable,
-		WebhookURL:      src.WebhookURL,
-		TemplatePath:    src.TemplatePath,
-		OtherWebhookURL: src.OtherWebhookURL,
+		Enable:           src.Enable,
+		TemplatePath:     src.TemplatePath,
+		PowerAutomateURL: src.PowerAutomateURL,
+		OtherPowerURL:    otherPowerURLCopy,
 	}
 }
 

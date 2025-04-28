@@ -22,6 +22,8 @@ An incident management tool that supports alerting across multiple channels with
 - [Advanced API Usage](#advanced-api-usage)
 - [Template Syntax](https://versuscontrol.github.io/versus-incident/template_syntax.html)
 - [Template Example](https://versuscontrol.github.io/versus-incident/slack-template-aws-sns.html)
+- [Migration Guides](#migration-guides)
+  - [Migrating to v1.2.0](#migrating-to-v120)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
@@ -660,6 +662,14 @@ curl -X POST "http://localhost:3000/api/incidents?awsim_response_plan_arn=arn:aw
     "UserID": "U12345"
   }'
 ```
+
+## Migration Guides
+
+### Migrating to v1.2.0
+
+Version 1.2.0 introduces enhanced Microsoft Teams integration using Power Automate.
+
+For complete migration instructions, please see our [detailed migration guide](https://versuscontrol.github.io/versus-incident/migration-v1.2.0.html).
 
 ## Roadmap
 

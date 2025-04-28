@@ -8,6 +8,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	m "github.com/VersusControl/versus-incident/pkg/models"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 
 	"github.com/slack-go/slack"
 )
@@ -27,7 +28,7 @@ func NewSlackProvider(cfg config.SlackConfig) *SlackProvider {
 }
 
 func (s *SlackProvider) SendAlert(i *m.Incident) error {
-	funcMaps := GetTemplateFuncMaps()
+	funcMaps := utils.GetTemplateFuncMaps()
 
 	tmpl, err := template.New(filepath.Base(s.templatePath)).Funcs(funcMaps).ParseFiles(s.templatePath)
 	if err != nil {

@@ -10,7 +10,7 @@ This document explains the template syntax (Go template syntax) used for create 
 - [Control Structures](#control-structures)
   - [Conditionals (if/else)](#conditionals)
   - [Loops (range)](#loops)
-
+- [Microsoft Teams Templates](#microsoft-teams-templates)
 
 ## Basic Syntax
 
@@ -242,3 +242,50 @@ Iterate over slices/arrays with range:
 - {{ . }}
 {{ end }}
 ```
+
+## Microsoft Teams Templates
+
+Microsoft Teams templates support Markdown syntax, which is automatically converted to Adaptive Cards when sent to Teams. As of April 2025 (with the retirement of Office 365 Connectors), all Microsoft Teams integrations use Power Automate Workflows.
+
+### Supported Markdown Features
+
+Your template can include:
+
+- **Headings**: Use `#`, `##`, or `###` for different heading levels
+- **Bold Text**: Wrap text with double asterisks (`**bold**`)
+- **Code Blocks**: Use triple backticks to create code blocks
+- **Lists**: Create unordered lists with `-` or `*`, and ordered lists with numbers
+- **Links**: Use `[text](url)` to create clickable links
+
+### Automatic Summary and Text Fields
+
+Versus Incident now automatically handles two important fields for Microsoft Teams notifications:
+
+1. **Summary**: The system extracts a summary from your template's first heading (or first line if no heading exists) which appears in Teams notifications.
+2. **Text**: A plain text version of your message is automatically generated as a fallback for clients that don't support Adaptive Cards.
+
+You don't need to add these fields manually - the system handles this for you to ensure proper display in Microsoft Teams.
+
+### Example Template
+
+Here's a complete example for Microsoft Teams:
+
+```markdown
+# Incident Alert: {{.ServiceName}}
+
+### Error Information
+**Time**: {{.Timestamp}}
+**Severity**: {{.Severity}}
+
+## Error Details
+```{{.Logs}}```
+
+## Action Required
+1. Check system status
+2. Review logs in monitoring dashboard
+3. Escalate to on-call if needed
+
+[View Details](https://your-dashboard/incidents/{{.IncidentID}})
+```
+
+This will be converted to an Adaptive Card with proper formatting in Microsoft Teams, with headings, code blocks, formatted lists, and clickable links.

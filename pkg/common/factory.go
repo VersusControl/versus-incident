@@ -99,13 +99,14 @@ func (f *ProviderFactory) createEmailProvider() (core.AlertProvider, error) {
 
 func (f *ProviderFactory) createMSTeamsProvider() (core.AlertProvider, error) {
 	msc := f.cfg.Alert.MSTeams
-	if msc.WebhookURL == "" || msc.TemplatePath == "" {
-		return nil, fmt.Errorf("missing required MS Teams configuration")
+	// Check that Power Automate URL and template path are provided
+	if msc.PowerAutomateURL == "" || msc.TemplatePath == "" {
+		return nil, fmt.Errorf("missing required MS Teams configuration: need power_automate_url and template_path")
 	}
 
 	return NewMSTeamsProvider(config.MSTeamsConfig{
-		WebhookURL:   msc.WebhookURL,
-		TemplatePath: msc.TemplatePath,
+		PowerAutomateURL: msc.PowerAutomateURL,
+		TemplatePath:     msc.TemplatePath,
 	}), nil
 }
 
