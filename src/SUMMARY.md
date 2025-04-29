@@ -18,7 +18,9 @@
 # On Call
 - [Introduction](./on-call-introduction.md)
 - [AWS Incident Manager](./aws-incident-manager.md)
-- [How to Integration](./how-to-integration-aws-icm.md)
+- [How to Integration Incident Manager](./how-to-integration-aws-icm.md)
+- [PagerDuty](./pagerduty.md)
+- [How to Integration PagerDuty](./how-to-integration-pagerduty.md)
 
 # Migration Guides
 - [Migrating to v1.2.0](./migration-v1.2.0.md)
