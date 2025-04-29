@@ -66,12 +66,12 @@ func cloneEmailConfig(src EmailConfig) EmailConfig {
 
 // Helper function to deep clone the MSTeamsConfig struct
 func cloneMSTeamsConfig(src MSTeamsConfig) MSTeamsConfig {
-	// Create a copy of OtherPowerURL map if it exists
-	var otherPowerURLCopy map[string]string
-	if src.OtherPowerURL != nil {
-		otherPowerURLCopy = make(map[string]string)
-		for k, v := range src.OtherPowerURL {
-			otherPowerURLCopy[k] = v
+	// Create a copy of OtherPowerURLs map if it exists
+	var otherPowerURLsCopy map[string]string
+	if src.OtherPowerURLs != nil {
+		otherPowerURLsCopy = make(map[string]string)
+		for k, v := range src.OtherPowerURLs {
+			otherPowerURLsCopy[k] = v
 		}
 	}
 
@@ -79,7 +79,7 @@ func cloneMSTeamsConfig(src MSTeamsConfig) MSTeamsConfig {
 		Enable:           src.Enable,
 		TemplatePath:     src.TemplatePath,
 		PowerAutomateURL: src.PowerAutomateURL,
-		OtherPowerURL:    otherPowerURLCopy,
+		OtherPowerURLs:   otherPowerURLsCopy,
 	}
 }
 
@@ -128,13 +128,42 @@ func cloneOnCallConfig(src OnCallConfig) OnCallConfig {
 	return OnCallConfig{
 		Enable:             src.Enable,
 		WaitMinutes:        src.WaitMinutes,
+		Provider:           src.Provider,
 		AwsIncidentManager: cloneAwsIncidentManagerConfig(src.AwsIncidentManager),
+		PagerDuty:          clonePagerDutyConfig(src.PagerDuty),
 	}
 }
 
 // Helper function to deep clone the AwsIncidentManagerConfig struct
 func cloneAwsIncidentManagerConfig(src AwsIncidentManagerConfig) AwsIncidentManagerConfig {
+	// Create a copy of OtherResponsePlanArns map if it exists
+	var otherResponsePlanArnsCopy map[string]string
+	if src.OtherResponsePlanArns != nil {
+		otherResponsePlanArnsCopy = make(map[string]string)
+		for k, v := range src.OtherResponsePlanArns {
+			otherResponsePlanArnsCopy[k] = v
+		}
+	}
+
 	return AwsIncidentManagerConfig{
-		ResponsePlanArn: src.ResponsePlanArn,
+		ResponsePlanArn:       src.ResponsePlanArn,
+		OtherResponsePlanArns: otherResponsePlanArnsCopy,
+	}
+}
+
+// Helper function to deep clone the PagerDutyConfig struct
+func clonePagerDutyConfig(src PagerDutyConfig) PagerDutyConfig {
+	// Create a copy of OtherRoutingKeys map if it exists
+	var otherRoutingKeysCopy map[string]string
+	if src.OtherRoutingKeys != nil {
+		otherRoutingKeysCopy = make(map[string]string)
+		for k, v := range src.OtherRoutingKeys {
+			otherRoutingKeysCopy[k] = v
+		}
+	}
+
+	return PagerDutyConfig{
+		RoutingKey:       src.RoutingKey,
+		OtherRoutingKeys: otherRoutingKeysCopy,
 	}
 }

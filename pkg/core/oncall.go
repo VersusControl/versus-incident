@@ -8,78 +8,102 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ssmincidents"
 	"github.com/go-redis/redis/v8"
 )
 
-type OnCallWorkflow struct {
-	client      *ssmincidents.Client // AWS Incident Manager client
-	redisClient *redis.Client        // Redis client
+// OnCallProvider defines the interface for on-call notification providers
+type OnCallProvider interface {
+	TriggerOnCall(ctx context.Context, incidentID string) error
 }
 
+// Function that will be implemented in the common package to avoid circular imports
+var CreateOnCallProvider func(cfg *config.Config, awsClient *ssmincidents.Client) (OnCallProvider, error)
+
+// OnCallWorkflow coordinates on-call escalation with a single provider
+type OnCallWorkflow struct {
+	provider    OnCallProvider
+	redisClient *redis.Client
+}
+
+// Global instance for singleton access
 var (
-	workflow *OnCallWorkflow
-	once     sync.Once
+	onCallWorkflow *OnCallWorkflow
+	once           sync.Once
 )
 
-func InitOnCallWorkflow(
-	awsClient *ssmincidents.Client,
-	redisClient *redis.Client,
-) {
+// NewOnCallWorkflow creates a new on-call workflow with the given provider
+func NewOnCallWorkflow(redisClient *redis.Client, provider OnCallProvider) *OnCallWorkflow {
+	return &OnCallWorkflow{
+		provider:    provider,
+		redisClient: redisClient,
+	}
+}
+
+// InitOnCallWorkflow initializes the global singleton instance
+// This is called once from main.go with the Redis client and AWS client
+func InitOnCallWorkflow(awsClient *ssmincidents.Client, redisClient *redis.Client) {
 	once.Do(func() {
-		workflow = &OnCallWorkflow{
-			client:      awsClient,
-			redisClient: redisClient,
+		cfg := config.GetConfig()
+
+		provider, err := CreateOnCallProvider(cfg, awsClient)
+		if err != nil {
+			log.Printf("Warning: Failed to create on-call provider: %v", err)
+			provider = nil // No provider
 		}
+
+		onCallWorkflow = NewOnCallWorkflow(redisClient, provider)
+		log.Println("On-call workflow initialized")
 	})
 }
 
+// GetOnCallWorkflow returns the global singleton instance
+// This maintains compatibility with existing code
 func GetOnCallWorkflow() *OnCallWorkflow {
-	return workflow
+	if onCallWorkflow == nil {
+		panic("on-call workflow not initialized - call InitOnCallWorkflow first")
+	}
+	return onCallWorkflow
 }
 
+// triggerProvider triggers the on-call provider
+func (w *OnCallWorkflow) triggerProvider(ctx context.Context, incidentID string) error {
+	if err := w.provider.TriggerOnCall(ctx, incidentID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Start initiates the on-call workflow for an incident
 func (w *OnCallWorkflow) Start(incidentID string, oc config.OnCallConfig) error {
-	if oc.AwsIncidentManager.ResponsePlanArn == "" {
-		return fmt.Errorf("missing Response Plan ARN configuration")
+	if w == nil || w.redisClient == nil {
+		return fmt.Errorf("the on-call workflow hasn't been properly initialized")
 	}
 
-	if w == nil || w.redisClient == nil {
-		return fmt.Errorf("the on-call workflow hasn't been initiated yet")
+	if w.provider == nil {
+		return fmt.Errorf("no on-call provider available")
 	}
 
 	ctx := context.Background()
 
-	// To do, move this code into the factory or function
-	// If WaitMinutes is 0, it means there’s no need to check for an acknowledgment, and the on-call will trigger immediately
+	// If WaitMinutes is 0, trigger immediately
 	if oc.WaitMinutes == 0 {
-		title := "Incident id " + incidentID
-		input := &ssmincidents.StartIncidentInput{
-			ResponsePlanArn: aws.String(oc.AwsIncidentManager.ResponsePlanArn),
-			Title:           aws.String(title),
-		}
-
-		if _, err := w.client.StartIncident(ctx, input); err != nil {
-			return fmt.Errorf("failed to start AWS incident: %v", err)
-		}
-
-		log.Printf("Incident escalated: %s", title)
-		return nil
+		return w.triggerProvider(ctx, incidentID)
 	}
 
-	// If WaitMinutes isn't 0, store incident in Redis with expiration (wait time + buffer)
+	// Store incident in Redis with expiration time
 	expiration := time.Duration(oc.WaitMinutes)*time.Minute + 1*time.Minute
 	if err := w.redisClient.Set(ctx, incidentID, "pending", expiration).Err(); err != nil {
 		return fmt.Errorf("failed to store incident %s in Redis: %v", incidentID, err)
 	}
 
-	log.Printf("Incident On Call Workflow: %s", incidentID)
+	log.Printf("Incident %s queued with %d minute wait period", incidentID, oc.WaitMinutes)
 
 	// Start timer to check for acknowledgment
 	go func() {
 		<-time.After(time.Duration(oc.WaitMinutes) * time.Minute)
 
-		// Check if the incident is still pending
+		// Check if incident is still pending
 		exists, err := w.redisClient.Exists(ctx, incidentID).Result()
 		if err != nil {
 			log.Printf("Failed to check incident %s in Redis: %v", incidentID, err)
@@ -87,22 +111,14 @@ func (w *OnCallWorkflow) Start(incidentID string, oc config.OnCallConfig) error 
 		}
 
 		if exists == 1 {
-			// Trigger AWS Incident Manager
-			title := "Incident id " + incidentID
-			input := &ssmincidents.StartIncidentInput{
-				ResponsePlanArn: aws.String(oc.AwsIncidentManager.ResponsePlanArn),
-				Title:           aws.String(title),
+			// If still pending, trigger on-call
+			if err := w.triggerProvider(ctx, incidentID); err != nil {
+				log.Printf("Failed to trigger provider: %v", err)
 			}
 
-			if _, err := w.client.StartIncident(ctx, input); err != nil {
-				log.Printf("Failed to start AWS incident: %v", err)
-			} else {
-				log.Printf("Incident escalated: %s", title)
-			}
-
-			// Cleanup
+			// Remove from Redis
 			if err := w.redisClient.Del(ctx, incidentID).Err(); err != nil {
-				log.Printf("Failed to delete incident %s: %v", incidentID, err)
+				log.Printf("Failed to delete incident %s from Redis: %v", incidentID, err)
 			}
 		}
 	}()
@@ -110,24 +126,22 @@ func (w *OnCallWorkflow) Start(incidentID string, oc config.OnCallConfig) error 
 	return nil
 }
 
+// Ack acknowledges an incident to prevent escalation
 func (w *OnCallWorkflow) Ack(incidentID string) error {
 	if w == nil || w.redisClient == nil {
-		return fmt.Errorf("the on-call workflow hasn't been initiated yet")
+		return fmt.Errorf("the on-call workflow hasn't been properly initialized")
 	}
 
-	// Delete incident from Redis on acknowledgment
+	// Delete incident from Redis to prevent escalation
 	ctx := context.Background()
-
-	// Check if the key exists
 	exists, _ := w.redisClient.Exists(ctx, incidentID).Result()
 
 	if exists == 1 {
 		if err := w.redisClient.Del(ctx, incidentID).Err(); err != nil {
 			return fmt.Errorf("failed to acknowledge incident %s: %v", incidentID, err)
 		}
-
 		return nil
 	}
 
-	return fmt.Errorf("incident does not exist or acknowledged")
+	return fmt.Errorf("incident does not exist or was already acknowledged")
 }

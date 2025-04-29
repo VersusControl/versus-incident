@@ -5,7 +5,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/yourusername/versus)](https://goreportcard.com/report/github.com/yourusername/versus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-An incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Compatible with any tool supporting webhook alerts, it’s designed for modern DevOps teams to quickly respond to production incidents.
+An incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Compatible with any tool supporting webhook alerts, it's designed for modern DevOps teams to quickly respond to production incidents.
 
 🚀 Boost Your SRE Skills with the Book: [On-Call in Action](https://a.co/d/4A8zrWR).
 
@@ -20,10 +20,11 @@ An incident management tool that supports alerting across multiple channels with
 - [Configuration](#complete-configuration)
 - [Environment Variables](#environment-variables)
 - [Advanced API Usage](#advanced-api-usage)
-- [Template Syntax](https://versuscontrol.github.io/versus-incident/template_syntax.html)
+- [Template Syntax](https://versuscontrol.github.io/versus-incident/template-syntax.html)
 - [Template Example](https://versuscontrol.github.io/versus-incident/slack-template-aws-sns.html)
 - [Migration Guides](#migration-guides)
   - [Migrating to v1.2.0](#migrating-to-v120)
+  - [Migrating to v1.3.0](#migrating-to-v130)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
@@ -34,7 +35,7 @@ An incident management tool that supports alerting across multiple channels with
 - 📝 **Custom Templates**: Define your own alert messages using Go templates
 - 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
 - 📡 **REST API**: Simple HTTP interface to receive alerts
-- 📡 **On-call**: On-call integrations with AWS Incident Manager
+- 📡 **On-call**: On-call integrations with AWS Incident Manager and PagerDuty
 
 ![Versus](src/docs/images/versus-architecture.svg)
 
@@ -372,7 +373,7 @@ aws sns publish \
 
 ## On-call
 
-Currently, Versus support On-call integrations with AWS Incident Manager. Updated configuration example with on-call features:
+Versus supports On-call integrations with AWS Incident Manager and PagerDuty. Updated configuration example with on-call features:
 
 ```yaml
 name: versus
@@ -387,10 +388,22 @@ oncall:
   # /api/incidents?oncall_enable=false => Set to `true` or `false` to enable or disable on-call for a specific alert
   # /api/incidents?oncall_wait_minutes=0 => Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately
   enable: false
-  wait_minutes: 3 # If you set it to 0, it means there’s no need to check for an acknowledgment, and the on-call will trigger immediately
+  wait_minutes: 3 # If you set it to 0, it means there's no need to check for an acknowledgment, and the on-call will trigger immediately
+  provider: aws_incident_manager # Valid values: "aws_incident_manager" or "pagerduty"
 
-  aws_incident_manager: # Overrides the default AWS Incident Manager response plan ARN for a specific alert /api/incidents?awsim_response_plan_arn=arn:aws:ssm-incidents::111122223333:response-plan/example-response-plan
+  aws_incident_manager: # Used when provider is "aws_incident_manager"
     response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
+    other_response_plan_arns: # Optional: Enable overriding the default response plan ARN using query parameters, eg /api/incidents?awsim_other_response_plan=prod
+      prod: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_PROD}
+      dev: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_DEV}
+      staging: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_STAGING}
+
+  pagerduty: # Used when provider is "pagerduty"
+    routing_key: ${PAGERDUTY_ROUTING_KEY} # Integration/Routing key for Events API v2 (REQUIRED)
+    other_routing_keys: # Optional: Enable overriding the default routing key using query parameters, eg /api/incidents?pagerduty_other_routing_key=infra
+      infra: ${PAGERDUTY_OTHER_ROUTING_KEY_INFRA}
+      app: ${PAGERDUTY_OTHER_ROUTING_KEY_APP}
+      db: ${PAGERDUTY_OTHER_ROUTING_KEY_DB}
 
 redis: # Required for on-call functionality
   insecure_skip_verify: true # dev only
@@ -405,7 +418,9 @@ redis: # Required for on-call functionality
 The `oncall` section includes:
 1. `enable`: A boolean to toggle on-call functionality (default: `false`).
 2. `wait_minutes`: Time in minutes to wait for an acknowledgment before escalating (default: `3`). Setting it to `0` triggers the on-call immediately.
-3. `aws_incident_manager`: Contains the `response_plan_arn`, which links to an AWS Incident Manager response plan via an environment variable.
+3. `provider`: Specifies which on-call provider to use ("aws_incident_manager" or "pagerduty").
+4. `aws_incident_manager`: Configuration for AWS Incident Manager when it's the selected provider, including `response_plan_arn` and `other_response_plan_arns`.
+5. `pagerduty`: Configuration for PagerDuty when it's the selected provider, including routing keys.
 
 The `redis` section is required when `oncall.enable` is `true`. It configures the Redis instance used for state management or queuing, with settings like `host`, `port`, `password`, and `db`.
 
@@ -450,7 +465,7 @@ alert:
     enable: false # Default value, will be overridden by MSTEAMS_ENABLE env var
     power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL} # Automatically works with both Power Automate workflow URLs and legacy Office 365 webhooks
     template_path: "config/msteams_message.tmpl"
-    other_power_url: # Optional: Define additional Power Automate URLs for multiple MS Teams channels
+    other_power_urls: # Optional: Define additional Power Automate URLs for multiple MS Teams channels
       qc: ${MSTEAMS_OTHER_POWER_URL_QC} # Power Automate URL for QC team
       ops: ${MSTEAMS_OTHER_POWER_URL_OPS} # Power Automate URL for Ops team
       dev: ${MSTEAMS_OTHER_POWER_URL_DEV} # Power Automate URL for Dev team
@@ -466,16 +481,41 @@ queue:
     # Options If you want to automatically create an sns subscription
     https_endpoint_subscription: ${SNS_HTTPS_ENDPOINT_SUBSCRIPTION} # If the user configures an HTTPS endpoint, then an SNS subscription will be automatically created, e.g. https://your-domain.com
     topic_arn: ${SNS_TOPIC_ARN}
+    
+  # AWS SQS
+  sqs:
+    enable: false
+    queue_url: ${SQS_QUEUE_URL}
+    
+  # GCP Pub Sub
+  pubsub:
+    enable: false
+    
+  # Azure Event Bus
+  azbus:
+    enable: false
 
 oncall:
   ### Enable overriding using query parameters
   # /api/incidents?oncall_enable=false => Set to `true` or `false` to enable or disable on-call for a specific alert
   # /api/incidents?oncall_wait_minutes=0 => Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately
   enable: false
-  wait_minutes: 3 # If you set it to 0, it means there’s no need to check for an acknowledgment, and the on-call will trigger immediately
+  wait_minutes: 3 # If you set it to 0, it means there's no need to check for an acknowledgment, and the on-call will trigger immediately
+  provider: aws_incident_manager # Valid values: "aws_incident_manager" or "pagerduty"
 
-  aws_incident_manager: # Overrides the default AWS Incident Manager response plan ARN for a specific alert /api/incidents?awsim_response_plan_arn=arn:aws:ssm-incidents::111122223333:response-plan/example-response-plan
+  aws_incident_manager: # Used when provider is "aws_incident_manager"
     response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
+    other_response_plan_arns: # Optional: Enable overriding the default response plan ARN using query parameters, eg /api/incidents?awsim_other_response_plan=prod
+      prod: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_PROD}
+      dev: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_DEV}
+      staging: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_STAGING}
+
+  pagerduty: # Used when provider is "pagerduty"
+    routing_key: ${PAGERDUTY_ROUTING_KEY} # Integration/Routing key for Events API v2 (REQUIRED)
+    other_routing_keys: # Optional: Enable overriding the default routing key using query parameters, eg /api/incidents?pagerduty_other_routing_key=infra
+      infra: ${PAGERDUTY_OTHER_ROUTING_KEY_INFRA}
+      app: ${PAGERDUTY_OTHER_ROUTING_KEY_APP}
+      db: ${PAGERDUTY_OTHER_ROUTING_KEY_DB}
 
 redis: # Required for on-call functionality
   insecure_skip_verify: true # dev only
@@ -528,18 +568,28 @@ The application relies on several environment variables to configure alerting se
 | `MSTEAMS_OTHER_POWER_URL_OPS` | (Optional) Power Automate URL for the Ops team channel. |
 | `MSTEAMS_OTHER_POWER_URL_DEV` | (Optional) Power Automate URL for the Dev team channel. |
 
-### AWS SNS Configuration
+### Queue Services Configuration
 | Variable                     | Description |
 |-----------------------------|-------------|
 | `SNS_ENABLE`             | Set to `true` to enable receive Alert Messages from SNS. |
 | `SNS_HTTPS_ENDPOINT_SUBSCRIPTION`             | This specifies the HTTPS endpoint to which SNS sends messages. When an HTTPS endpoint is configured, an SNS subscription is automatically created. If no endpoint is configured, you must create the SNS subscription manually using the CLI or AWS Console. E.g. `https://your-domain.com`. |
 | `SNS_TOPIC_ARN`             | AWS ARN of the SNS topic to subscribe to. |
+| `SQS_ENABLE`             | Set to `true` to enable receive Alert Messages from AWS SQS. |
+| `SQS_QUEUE_URL`             | URL of the AWS SQS queue to receive messages from. |
 
 ### On-Call Configuration
 | Variable                          | Description |
 |----------------------------------|-------------|
 | `ONCALL_ENABLE`             | Set to `true` to enable on-call functionality. |
-| `AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN` | The ARN of the AWS Incident Manager response plan to use for on-call escalations. Required if on-call is enabled. |
+| `ONCALL_PROVIDER`           | Specify the on-call provider to use ("aws_incident_manager" or "pagerduty"). |
+| `AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN` | The ARN of the AWS Incident Manager response plan to use for on-call escalations. Required if on-call provider is "aws_incident_manager". |
+| `AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_PROD` | (Optional) AWS Incident Manager response plan ARN for production environment. |
+| `AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_DEV` | (Optional) AWS Incident Manager response plan ARN for development environment. |
+| `AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_STAGING` | (Optional) AWS Incident Manager response plan ARN for staging environment. |
+| `PAGERDUTY_ROUTING_KEY`     | Integration/Routing key for PagerDuty Events API v2. Required if on-call provider is "pagerduty". |
+| `PAGERDUTY_OTHER_ROUTING_KEY_INFRA` | (Optional) PagerDuty routing key for infrastructure team. |
+| `PAGERDUTY_OTHER_ROUTING_KEY_APP`   | (Optional) PagerDuty routing key for application team. |
+| `PAGERDUTY_OTHER_ROUTING_KEY_DB`    | (Optional) PagerDuty routing key for database team. |
 
 ### Redis Configuration
 | Variable          | Description |
@@ -561,7 +611,8 @@ We provide a way to overwrite configuration values using query parameters, allow
 | `msteams_other_power_url`   | (Optional) Overrides the default Microsoft Teams Power Automate flow by specifying an alternative key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_power_url=qc`. |
 | `oncall_enable`          | Set to `true` or `false` to enable or disable on-call for a specific alert. Use: `/api/incidents?oncall_enable=false`. |
 | `oncall_wait_minutes`    | Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately. Use: `/api/incidents?oncall_wait_minutes=0`. |
-| `awsim_response_plan_arn`    | Overrides the default AWS Incident Manager response plan ARN for a specific alert. Use: `/api/incidents?awsim_response_plan_arn=arn:aws:ssm-incidents::111122223333:response-plan/example-response-plan`. |
+| `awsim_other_response_plan` | Overrides the default AWS Incident Manager response plan by specifying an alternative key (e.g., prod, dev, staging). Use: `/api/incidents?awsim_other_response_plan=prod`. |
+| `pagerduty_other_routing_key` | Overrides the default PagerDuty routing key by specifying an alternative key (e.g., infra, app, db). Use: `/api/incidents?pagerduty_other_routing_key=infra`. |
 
 **Optional: Define additional Power Automate URLs for multiple MS Teams channels**
 
@@ -580,7 +631,7 @@ alert:
     enable: false # Default value, will be overridden by MSTEAMS_ENABLE env var
     power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL} # Automatically works with both Power Automate workflow URLs and legacy Office 365 webhooks
     template_path: "config/msteams_message.tmpl"
-    other_power_url: # Optional: Define additional Power Automate URLs for multiple MS Teams channels
+    other_power_urls: # Optional: Define additional Power Automate URLs for multiple MS Teams channels
       qc: ${MSTEAMS_OTHER_POWER_URL_QC} # Power Automate URL for QC team
       ops: ${MSTEAMS_OTHER_POWER_URL_OPS} # Power Automate URL for Ops team
       dev: ${MSTEAMS_OTHER_POWER_URL_DEV} # Power Automate URL for Dev team
@@ -651,14 +702,26 @@ curl -X POST http://localhost:3000/api/incidents?oncall_wait_minutes=0 \
   }'
 ```
 
-To use a specific AWS Incident Manager response plan for an alert:
+To use a specific AWS Incident Manager response plan for the production environment:
 
 ```bash
-curl -X POST "http://localhost:3000/api/incidents?awsim_response_plan_arn=arn:aws:ssm-incidents::111122223333:response-plan/example-response-plan" \
+curl -X POST "http://localhost:3000/api/incidents?awsim_other_response_plan=prod" \
   -H "Content-Type: application/json" \
   -d '{
-    "Logs": "[ERROR] Critical system failure.",
-    "ServiceName": "core-service",
+    "Logs": "[ERROR] Production issue detected.",
+    "ServiceName": "prod-service",
+    "UserID": "U12345"
+  }'
+```
+
+To use a specific PagerDuty routing key for the infrastructure team:
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?pagerduty_other_routing_key=infra" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Server load balancer failure.",
+    "ServiceName": "lb-service",
     "UserID": "U12345"
   }'
 ```
@@ -671,6 +734,12 @@ Version 1.2.0 introduces enhanced Microsoft Teams integration using Power Automa
 
 For complete migration instructions, please see our [detailed migration guide](https://versuscontrol.github.io/versus-incident/migration-v1.2.0.html).
 
+### Migrating to v1.3.0
+
+Version 1.3.0 introduces a new integration with PagerDuty.
+
+For complete migration instructions, please see our [detailed migration guide](https://versuscontrol.github.io/versus-incident/migration-v1.3.0.html).
+
 ## Roadmap
 
 - [x] Add Telegram support
@@ -679,11 +748,11 @@ For complete migration instructions, please see our [detailed migration guide](h
 - [x] Add MS Team support
 - [ ] Add Viber support
 - [ ] Add Lark support
-- [ ] Add support error logs for listeners from the queue (AWS SQS, GCP Cloud Pub/Sub, Azure Service Bus)
+- [x] Add support for queue listeners (AWS SQS, GCP Cloud Pub/Sub, Azure Service Bus)
 - [x] Support multiple templates
 - [ ] API Server for Incident Management
 - [ ] Web UI
-- [x] On-call integrations (AWS Incident Manager)
+- [x] On-call integrations (AWS Incident Manager, PagerDuty)
 - [ ] Prometheus metrics
 
 Complete Project Diagram

@@ -22,3 +22,4 @@
 
 # Migration Guides
 - [Migrating to v1.2.0](./migration-v1.2.0.md)
+- [Migrating to v1.3.0](./migration-v1.3.0.md)
