@@ -32,7 +32,7 @@ alert:
     enable: false # Default value, will be overridden by MSTEAMS_ENABLE env var
     power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL} # Power Automate HTTP trigger URL (required)
     template_path: "config/msteams_message.tmpl"
-    other_power_url: # Optional: Enable overriding the default Power Automate flow using query parameters, eg /api/incidents?msteams_other_power_url=qc
+    other_power_urls: # Optional: Enable overriding the default Power Automate flow using query parameters, eg /api/incidents?msteams_other_power_url=qc
       qc: ${MSTEAMS_OTHER_POWER_URL_QC}
 
 queue:
@@ -63,10 +63,22 @@ oncall:
   # /api/incidents?oncall_enable=false => Set to `true` or `false` to enable or disable on-call for a specific alert
   # /api/incidents?oncall_wait_minutes=0 => Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately
   enable: false
-  wait_minutes: 3 # If you set it to 0, it means there’s no need to check for an acknowledgment, and the on-call will trigger immediately
+  wait_minutes: 3 # If you set it to 0, it means there's no need to check for an acknowledgment, and the on-call will trigger immediately
+  provider: aws_incident_manager # Valid values: "aws_incident_manager" or "pagerduty"
 
-  aws_incident_manager: # Overrides the default AWS Incident Manager response plan ARN for a specific alert /api/incidents?awsim_response_plan_arn=arn:aws:ssm-incidents::111122223333:response-plan/example-response-plan
+  aws_incident_manager: # Used when provider is "aws_incident_manager"
     response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
+    other_response_plan_arns: # Optional: Enable overriding the default response plan ARN using query parameters, eg /api/incidents?awsim_other_response_plan_arn=infra
+      infra: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_INFRA}
+      app: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_APP}
+      db: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_DB}
+
+  pagerduty: # Used when provider is "pagerduty"
+    routing_key: ${PAGERDUTY_ROUTING_KEY} # Integration/Routing key for Events API v2 (REQUIRED)
+    other_routing_keys: # Optional: Enable overriding the default routing key using query parameters, eg /api/incidents?pagerduty_other_routing_key=infra
+      infra: ${PAGERDUTY_OTHER_ROUTING_KEY_INFRA}
+      app: ${PAGERDUTY_OTHER_ROUTING_KEY_APP}
+      db: ${PAGERDUTY_OTHER_ROUTING_KEY_DB}
 
 redis: # Required for on-call functionality
   insecure_skip_verify: true # dev only

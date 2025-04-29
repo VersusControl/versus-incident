@@ -21,7 +21,7 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	}
 
 	// Initialization of providers and alert
-	factory := common.NewProviderFactory(cfg)
+	factory := common.NewAlertProviderFactory(cfg)
 	providers, err := factory.CreateProviders()
 	if err != nil {
 		return fmt.Errorf("failed to create providers: %v", err)

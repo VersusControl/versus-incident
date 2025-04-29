@@ -57,9 +57,9 @@ type EmailConfig struct {
 }
 
 type MSTeamsConfig struct {
-	Enable        bool
-	TemplatePath  string            `mapstructure:"template_path"`
-	OtherPowerURL map[string]string `mapstructure:"other_power_url"` // Optional alternative Power Automate URLs
+	Enable         bool
+	TemplatePath   string            `mapstructure:"template_path"`
+	OtherPowerURLs map[string]string `mapstructure:"other_power_urls"` // Optional alternative Power Automate URLs
 	// Power Automate Workflow URL for Teams integration
 	PowerAutomateURL string `mapstructure:"power_automate_url"`
 }
@@ -96,11 +96,19 @@ type AzBusConfig struct {
 type OnCallConfig struct {
 	Enable             bool
 	WaitMinutes        int                      `mapstructure:"wait_minutes"`
+	Provider           string                   `mapstructure:"provider"` // "aws_incident_manager" or "pagerduty"
 	AwsIncidentManager AwsIncidentManagerConfig `mapstructure:"aws_incident_manager"`
+	PagerDuty          PagerDutyConfig          `mapstructure:"pagerduty"`
 }
 
 type AwsIncidentManagerConfig struct {
-	ResponsePlanArn string `mapstructure:"response_plan_arn"`
+	ResponsePlanArn       string            `mapstructure:"response_plan_arn"`
+	OtherResponsePlanArns map[string]string `mapstructure:"other_response_plan_arns"`
+}
+
+type PagerDutyConfig struct {
+	RoutingKey       string            `mapstructure:"routing_key"`
+	OtherRoutingKeys map[string]string `mapstructure:"other_routing_keys"`
 }
 
 type RedisConfig struct {
@@ -164,6 +172,11 @@ func LoadConfig(path string) error {
 		setEnableFromEnv("SNS_ENABLE", &cfg.Queue.SNS.Enable)
 
 		setEnableFromEnv("ONCALL_ENABLE", &cfg.OnCall.Enable)
+
+		// Set provider from environment variable if provided
+		if provider := os.Getenv("ONCALL_PROVIDER"); provider != "" {
+			cfg.OnCall.Provider = provider
+		}
 	})
 
 	return err
@@ -193,8 +206,8 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 	}
 
 	if v := (*paramsOverwrite)["msteams_other_power_url"]; v != "" {
-		if clonedCfg.Alert.MSTeams.OtherPowerURL != nil {
-			powerUrl := clonedCfg.Alert.MSTeams.OtherPowerURL[v]
+		if clonedCfg.Alert.MSTeams.OtherPowerURLs != nil {
+			powerUrl := clonedCfg.Alert.MSTeams.OtherPowerURLs[v]
 
 			if powerUrl != "" {
 				clonedCfg.Alert.MSTeams.PowerAutomateURL = powerUrl
@@ -214,8 +227,24 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 		}
 	}
 
-	if v := (*paramsOverwrite)["awsim_response_plan_arn"]; v != "" {
-		clonedCfg.OnCall.AwsIncidentManager.ResponsePlanArn = v
+	if v := (*paramsOverwrite)["awsim_other_response_plan"]; v != "" {
+		if clonedCfg.OnCall.AwsIncidentManager.OtherResponsePlanArns != nil {
+			responsePlanArn := clonedCfg.OnCall.AwsIncidentManager.OtherResponsePlanArns[v]
+
+			if responsePlanArn != "" {
+				clonedCfg.OnCall.AwsIncidentManager.ResponsePlanArn = responsePlanArn
+			}
+		}
+	}
+
+	if v := (*paramsOverwrite)["pagerduty_other_routing_key"]; v != "" {
+		if clonedCfg.OnCall.PagerDuty.OtherRoutingKeys != nil {
+			routingKey := clonedCfg.OnCall.PagerDuty.OtherRoutingKeys[v]
+
+			if routingKey != "" {
+				clonedCfg.OnCall.PagerDuty.RoutingKey = routingKey
+			}
+		}
 	}
 
 	return clonedCfg

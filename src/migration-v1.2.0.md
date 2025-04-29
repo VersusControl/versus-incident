@@ -14,7 +14,7 @@ The main change in v1.2.0 is the Microsoft Teams integration architecture:
 
 * **Configuration property names updated**: 
   - `webhook_url` → `power_automate_url`
-  - `other_webhook_url` → `other_power_url`
+  - `other_webhook_url` → `other_power_urls`
 
 * **Environment variable names updated**:
   - `MSTEAMS_WEBHOOK_URL` → `MSTEAMS_POWER_AUTOMATE_URL`
@@ -53,7 +53,7 @@ alert:
     enable: false # Default value, will be overridden by MSTEAMS_ENABLE env var
     power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL} # Power Automate HTTP trigger URL
     template_path: "config/msteams_message.tmpl"
-    other_power_url: # Optional: Enable overriding the default Power Automate flow
+    other_power_urls: # Optional: Enable overriding the default Power Automate flow
       qc: ${MSTEAMS_OTHER_POWER_URL_QC}
       ops: ${MSTEAMS_OTHER_POWER_URL_OPS}
       dev: ${MSTEAMS_OTHER_POWER_URL_DEV}
@@ -70,7 +70,7 @@ msteams:
   enable: false # Set to true to enable, or use MSTEAMS_ENABLE env var
   power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL} # Power Automate HTTP trigger URL
   template_path: "config/msteams_message.tmpl"
-  other_power_url: # Optional: Enable overriding the default Power Automate flow
+  other_power_urls: # Optional: Enable overriding the default Power Automate flow
     qc: ${MSTEAMS_OTHER_POWER_URL_QC}
     ops: ${MSTEAMS_OTHER_POWER_URL_OPS}
     dev: ${MSTEAMS_OTHER_POWER_URL_DEV}
@@ -169,4 +169,4 @@ curl -X POST http://your-versus-incident-server:3000/api/incidents \
 
 - The older Microsoft Teams integration using webhook URLs still work after upgrading to v1.2.0, just update properties `webhook_url` → `power_automate_url`
 - If you experience any issues with message delivery to Microsoft Teams, check your Power Automate flow run history to debug potential issues
-- For organizations with multiple teams or departments, consider setting up separate Power Automate flows for each team and configuring them with the `other_power_url` property
+- For organizations with multiple teams or departments, consider setting up separate Power Automate flows for each team and configuring them with the `other_power_urls` property
