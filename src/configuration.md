@@ -111,14 +111,14 @@ The application relies on several environment variables to configure alerting se
 |------------------|-------------|
 | `SLACK_ENABLE`   | Set to `true` to enable Slack notifications. |
 | `SLACK_TOKEN`    | The authentication token for your Slack bot. |
-| `SLACK_CHANNEL_ID` | The ID of the Slack channel where alerts will be sent. |
+| `SLACK_CHANNEL_ID` | The ID of the Slack channel where alerts will be sent. **Can be overridden per request using the `slack_channel_id` query parameter.** |
 
 ### Telegram Configuration
 | Variable              | Description |
 |----------------------|-------------|
 | `TELEGRAM_ENABLE`    | Set to `true` to enable Telegram notifications. |
 | `TELEGRAM_BOT_TOKEN` | The authentication token for your Telegram bot. |
-| `TELEGRAM_CHAT_ID`   | The chat ID where alerts will be sent. |
+| `TELEGRAM_CHAT_ID`   | The chat ID where alerts will be sent. **Can be overridden per request using the `telegram_chat_id` query parameter.** |
 
 ### Email Configuration
 | Variable          | Description |
@@ -128,8 +128,8 @@ The application relies on several environment variables to configure alerting se
 | `SMTP_PORT`      | The SMTP server port (e.g., 587 for TLS). |
 | `SMTP_USERNAME`  | The username/email for SMTP authentication. |
 | `SMTP_PASSWORD`  | The password or app-specific password for SMTP authentication. |
-| `EMAIL_TO`       | The recipient email address(es) for incident notifications. Can be multiple addresses separated by commas. |
-| `EMAIL_SUBJECT`  | The subject line for email notifications. |
+| `EMAIL_TO`       | The recipient email address(es) for incident notifications. Can be multiple addresses separated by commas. **Can be overridden per request using the `email_to` query parameter.** |
+| `EMAIL_SUBJECT`  | The subject line for email notifications. **Can be overridden per request using the `email_subject` query parameter.** |
 
 ### Microsoft Teams Configuration
 
@@ -153,7 +153,107 @@ As of the April 2025 update, Versus Incident automatically detects the type of U
 
 This automatic detection provides backward compatibility while supporting newer features, eliminating the need for separate configuration options.
 
-#### Multiple Teams Channels
+| Variable          | Description |
+|------------------|-------------|
+| `MSTEAMS_ENABLE`   | Set to `true` to enable Microsoft Teams notifications. |
+| `MSTEAMS_POWER_AUTOMATE_URL` | The Power Automate HTTP trigger URL for your Teams channel. Automatically works with both Power Automate workflow URLs and legacy Office 365 webhooks. |
+| `MSTEAMS_OTHER_POWER_URL_QC`  | (Optional) Power Automate URL for the QC team channel. **Can be selected per request using the `msteams_other_power_url=qc` query parameter.** |
+| `MSTEAMS_OTHER_POWER_URL_OPS` | (Optional) Power Automate URL for the Ops team channel. **Can be selected per request using the `msteams_other_power_url=ops` query parameter.** |
+| `MSTEAMS_OTHER_POWER_URL_DEV` | (Optional) Power Automate URL for the Dev team channel. **Can be selected per request using the `msteams_other_power_url=dev` query parameter.** |
+
+### Queue Services Configuration
+| Variable                     | Description |
+|-----------------------------|-------------|
+| `SNS_ENABLE`             | Set to `true` to enable receive Alert Messages from SNS. |
+| `SNS_HTTPS_ENDPOINT_SUBSCRIPTION`             | This specifies the HTTPS endpoint to which SNS sends messages. When an HTTPS endpoint is configured, an SNS subscription is automatically created. If no endpoint is configured, you must create the SNS subscription manually using the CLI or AWS Console. E.g. `https://your-domain.com`. |
+| `SNS_TOPIC_ARN`             | AWS ARN of the SNS topic to subscribe to. |
+| `SQS_ENABLE`             | Set to `true` to enable receive Alert Messages from AWS SQS. |
+| `SQS_QUEUE_URL`             | URL of the AWS SQS queue to receive messages from. |
+
+### On-Call Configuration
+| Variable                          | Description |
+|----------------------------------|-------------|
+| `ONCALL_ENABLE`             | Set to `true` to enable on-call functionality. **Can be overridden per request using the `oncall_enable` query parameter.** |
+| `ONCALL_WAIT_MINUTES`       | Time in minutes to wait for acknowledgment before escalating (default: 3). **Can be overridden per request using the `oncall_wait_minutes` query parameter.** |
+| `ONCALL_PROVIDER`           | Specify the on-call provider to use ("aws_incident_manager" or "pagerduty"). |
+| `AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN` | The ARN of the AWS Incident Manager response plan to use for on-call escalations. Required if on-call provider is "aws_incident_manager". |
+| `AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_PROD` | (Optional) AWS Incident Manager response plan ARN for production environment. **Can be selected per request using the `awsim_other_response_plan=prod` query parameter.** |
+| `AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_DEV` | (Optional) AWS Incident Manager response plan ARN for development environment. **Can be selected per request using the `awsim_other_response_plan=dev` query parameter.** |
+| `AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_STAGING` | (Optional) AWS Incident Manager response plan ARN for staging environment. **Can be selected per request using the `awsim_other_response_plan=staging` query parameter.** |
+| `PAGERDUTY_ROUTING_KEY`     | Integration/Routing key for PagerDuty Events API v2. Required if on-call provider is "pagerduty". |
+| `PAGERDUTY_OTHER_ROUTING_KEY_INFRA` | (Optional) PagerDuty routing key for infrastructure team. **Can be selected per request using the `pagerduty_other_routing_key=infra` query parameter.** |
+| `PAGERDUTY_OTHER_ROUTING_KEY_APP`   | (Optional) PagerDuty routing key for application team. **Can be selected per request using the `pagerduty_other_routing_key=app` query parameter.** |
+| `PAGERDUTY_OTHER_ROUTING_KEY_DB`    | (Optional) PagerDuty routing key for database team. **Can be selected per request using the `pagerduty_other_routing_key=db` query parameter.** |
+
+### Redis Configuration
+| Variable          | Description |
+|------------------|-------------|
+| `REDIS_HOST`     | The hostname or IP address of the Redis server. Required if on-call is enabled. |
+| `REDIS_PORT`     | The port number of the Redis server. Required if on-call is enabled. |
+| `REDIS_PASSWORD` | The password for authenticating with the Redis server. Required if on-call is enabled and Redis requires authentication. |
+
+Ensure these environment variables are properly set before running the application.
+
+## Dynamic Configuration with Query Parameters
+We provide a way to overwrite configuration values using query parameters, allowing you to send alerts to different channels and customize notification behavior on a per-request basis.
+
+| Query Parameter          | Description |
+|------------------|-------------|
+| `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_value>`. |
+| `telegram_chat_id`   | The chat ID where Telegram alerts will be sent. Use: `/api/incidents?telegram_chat_id=<your_chat_id>`. |
+| `email_to`   | Overrides the default recipient email address for email notifications. Use: `/api/incidents?email_to=<recipient_email>`. |
+| `email_subject`   | Overrides the default subject line for email notifications. Use: `/api/incidents?email_subject=<custom_subject>`. |
+| `msteams_other_power_url`   | Overrides the default Microsoft Teams Power Automate flow by specifying an alternative key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_power_url=qc`. |
+| `oncall_enable`          | Set to `true` or `false` to enable or disable on-call for a specific alert. Use: `/api/incidents?oncall_enable=false`. |
+| `oncall_wait_minutes`    | Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately. Use: `/api/incidents?oncall_wait_minutes=0`. |
+| `awsim_other_response_plan` | Overrides the default AWS Incident Manager response plan ARN by specifying an alternative key (e.g., prod, dev, staging). Use: `/api/incidents?awsim_other_response_plan=prod`. |
+| `pagerduty_other_routing_key` | Overrides the default PagerDuty routing key by specifying an alternative key (e.g., infra, app, db). Use: `/api/incidents?pagerduty_other_routing_key=infra`. |
+
+### Examples for Each Query Parameter
+
+#### Slack Channel Override
+
+To send an alert to a specific Slack channel (e.g., a dedicated channel for database issues):
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?slack_channel_id=C01DB2ISSUES" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Database connection pool exhausted.",
+    "ServiceName": "database-service",
+    "UserID": "U12345"
+  }'
+```
+
+#### Telegram Chat Override
+
+To send an alert to a different Telegram chat (e.g., for network monitoring):
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?telegram_chat_id=-1001234567890" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Network latency exceeding thresholds.",
+    "ServiceName": "network-monitor",
+    "UserID": "U12345"
+  }'
+```
+
+#### Email Recipient Override
+
+To send an email alert to a specific recipient with a custom subject:
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?email_to=network-team@yourdomain.com&email_subject=Urgent%20Network%20Issue" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Load balancer failing health checks.",
+    "ServiceName": "load-balancer",
+    "UserID": "U12345"
+  }'
+```
+
+#### Microsoft Teams Channel Override
 
 You can configure multiple Microsoft Teams channels using the `other_power_urls` setting:
 
@@ -169,131 +269,120 @@ alert:
       dev: ${MSTEAMS_OTHER_POWER_URL_DEV}
 ```
 
-To send alerts to specific channels, use the `msteams_other_power_url` query parameter:
+Then, to send an alert to the QC team's Microsoft Teams channel:
 
 ```bash
 curl -X POST "http://localhost:3000/api/incidents?msteams_other_power_url=qc" \
   -H "Content-Type: application/json" \
   -d '{
-    "Logs": "[ERROR] Quality check failed.",
-    "ServiceName": "qa-service"
-  }'
-```
-
-| Variable          | Description |
-|------------------|-------------|
-| `MSTEAMS_ENABLE`   | Set to `true` to enable Microsoft Teams notifications. |
-| `MSTEAMS_POWER_AUTOMATE_URL` | The Power Automate HTTP trigger URL for your Teams channel. |
-| `MSTEAMS_OTHER_POWER_URL_QC`  | (Optional) Power Automate URL for the QC team channel. |
-| `MSTEAMS_OTHER_POWER_URL_OPS` | (Optional) Power Automate URL for the Ops team channel. |
-| `MSTEAMS_OTHER_POWER_URL_DEV` | (Optional) Power Automate URL for the Dev team channel. |
-
-### Queue Services Configuration
-| Variable                     | Description |
-|-----------------------------|-------------|
-| `SNS_ENABLE`             | Set to `true` to enable receive Alert Messages from SNS. |
-| `SNS_HTTPS_ENDPOINT_SUBSCRIPTION`             | This specifies the HTTPS endpoint to which SNS sends messages. When an HTTPS endpoint is configured, an SNS subscription is automatically created. If no endpoint is configured, you must create the SNS subscription manually using the CLI or AWS Console. E.g. `https://your-domain.com`. |
-| `SNS_TOPIC_ARN`             | AWS ARN of the SNS topic to subscribe to. |
-| `SQS_ENABLE`             | Set to `true` to enable receive Alert Messages from AWS SQS. |
-| `SQS_QUEUE_URL`             | URL of the AWS SQS queue to receive messages from. |
-
-### On-Call Configuration
-| Variable                          | Description |
-|----------------------------------|-------------|
-| `ONCALL_ENABLE`             | Set to `true` to enable on-call functionality. |
-| `ONCALL_PROVIDER`           | Specify the on-call provider to use ("aws_incident_manager" or "pagerduty"). |
-| `AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN` | The ARN of the AWS Incident Manager response plan to use for on-call escalations. Required if on-call provider is "aws_incident_manager". |
-| `AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_PROD` | (Optional) AWS Incident Manager response plan ARN for production environment. |
-| `AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_DEV` | (Optional) AWS Incident Manager response plan ARN for development environment. |
-| `AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_STAGING` | (Optional) AWS Incident Manager response plan ARN for staging environment. |
-| `PAGERDUTY_ROUTING_KEY`     | Integration/Routing key for PagerDuty Events API v2. Required if on-call provider is "pagerduty". |
-| `PAGERDUTY_OTHER_ROUTING_KEY_INFRA` | (Optional) PagerDuty routing key for infrastructure team. |
-| `PAGERDUTY_OTHER_ROUTING_KEY_APP`   | (Optional) PagerDuty routing key for application team. |
-| `PAGERDUTY_OTHER_ROUTING_KEY_DB`    | (Optional) PagerDuty routing key for database team. |
-
-### Redis Configuration
-| Variable          | Description |
-|------------------|-------------|
-| `REDIS_HOST`     | The hostname or IP address of the Redis server. Required if on-call is enabled. |
-| `REDIS_PORT`     | The port number of the Redis server. Required if on-call is enabled. |
-| `REDIS_PASSWORD` | The password for authenticating with the Redis server. Required if on-call is enabled and Redis requires authentication. |
-
-Ensure these environment variables are properly set before running the application.
-
-## Advanced API Usage
-We provide a way to overwrite configuration values using query parameters, allowing you to send alerts to different channel IDs based on the service.
-
-| Query          | Description |
-|------------------|-------------|
-| `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_vaule>`. |
-| `email_to`   | Overrides the default recipient email address for email notifications. Use: `/api/incidents?email_to=<recipient_email>`. |
-| `email_subject`   | Overrides the default subject line for email notifications. Use: `/api/incidents?email_subject=<custom_subject>`. |
-| `msteams_other_power_url`   | (Optional) Overrides the default Microsoft Teams Power Automate flow by specifying an alternative key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_power_url=qc`. |
-| `oncall_enable`          | Set to `true` or `false` to enable or disable on-call for a specific alert. Use: `/api/incidents?oncall_enable=false`. |
-| `oncall_wait_minutes`    | Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately. Use: `/api/incidents?oncall_wait_minutes=0`. |
-| `awsim_other_response_plan` | Overrides the default AWS Incident Manager response plan ARN by specifying an alternative key (e.g., prod, dev, staging). Use: `/api/incidents?awsim_other_response_plan=prod`. |
-| `pagerduty_other_routing_key` | Overrides the default PagerDuty routing key by specifying an alternative key (e.g., infra, app, db). Use: `/api/incidents?pagerduty_other_routing_key=infra`. |
-
-**Example Email:**
-
-To send an email alert to a specific recipient with a custom subject:
-
-```bash
-curl -X POST "http://localhost:3000/api/incidents?email_to=alerts@yourdomain.com&email_subject=Urgent%20Incident%20Notification" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "Logs": "[ERROR] Critical system failure.",
-    "ServiceName": "core-service",
+    "Logs": "[ERROR] Quality check failed for latest deployment.",
+    "ServiceName": "quality-service",
     "UserID": "U12345"
   }'
 ```
 
-**Example On-call:**
+#### On-Call Controls
 
-To disable on-call for a specific alert:
+To disable on-call escalation for a non-critical alert:
 
 ```bash
-curl -X POST http://localhost:3000/api/incidents?oncall_enable=false \
+curl -X POST "http://localhost:3000/api/incidents?oncall_enable=false" \
   -H "Content-Type: application/json" \
   -d '{
-    "Logs": "[ERROR] This is a test error.",
-    "ServiceName": "test-service",
+    "Logs": "[WARNING] This is a minor issue that doesn't require on-call response.",
+    "ServiceName": "monitoring-service",
     "UserID": "U12345"
   }'
 ```
 
-To trigger on-call immediately without waiting:
+To trigger on-call immediately without the normal wait period for a critical issue:
 
 ```bash
-curl -X POST http://localhost:3000/api/incidents?oncall_wait_minutes=0 \
+curl -X POST "http://localhost:3000/api/incidents?oncall_wait_minutes=0" \
   -H "Content-Type: application/json" \
   -d '{
-    "Logs": "[ERROR] Urgent issue detected.",
-    "ServiceName": "urgent-service",
+    "Logs": "[CRITICAL] Payment processing system down.",
+    "ServiceName": "payment-service",
     "UserID": "U12345"
   }'
 ```
 
-To use a specific AWS Incident Manager response plan for the production environment:
+#### AWS Incident Manager Response Plan Override
+
+You can configure multiple AWS Incident Manager response plans using the `other_response_plan_arns` setting:
+
+```yaml
+oncall:
+  enable: true
+  wait_minutes: 3
+  provider: aws_incident_manager
+  
+  aws_incident_manager:
+    response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}  # Default response plan
+    other_response_plan_arns:
+      prod: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_PROD}  # Production environment
+      dev: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_DEV}    # Development environment
+      staging: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_STAGING}  # Staging environment
+```
+
+Then, to use a specific AWS Incident Manager response plan for a production environment issue:
 
 ```bash
 curl -X POST "http://localhost:3000/api/incidents?awsim_other_response_plan=prod" \
   -H "Content-Type: application/json" \
   -d '{
-    "Logs": "[ERROR] Production system failure.",
-    "ServiceName": "prod-service",
+    "Logs": "[CRITICAL] Production database cluster failure.",
+    "ServiceName": "prod-database",
     "UserID": "U12345"
   }'
 ```
 
-To use a specific PagerDuty routing key for the infrastructure team:
+#### PagerDuty Routing Key Override
+
+You can configure multiple PagerDuty routing keys using the `other_routing_keys` setting:
+
+```yaml
+oncall:
+  enable: true
+  wait_minutes: 3
+  provider: pagerduty
+  
+  pagerduty:
+    routing_key: ${PAGERDUTY_ROUTING_KEY}  # Default routing key
+    other_routing_keys:
+      infra: ${PAGERDUTY_OTHER_ROUTING_KEY_INFRA}  # Infrastructure team
+      app: ${PAGERDUTY_OTHER_ROUTING_KEY_APP}      # Application team
+      db: ${PAGERDUTY_OTHER_ROUTING_KEY_DB}        # Database team
+```
+
+Then, to use a specific PagerDuty routing key for the infrastructure team:
 
 ```bash
 curl -X POST "http://localhost:3000/api/incidents?pagerduty_other_routing_key=infra" \
   -H "Content-Type: application/json" \
   -d '{
-    "Logs": "[ERROR] Server load balancer failure.",
-    "ServiceName": "lb-service",
+    "Logs": "[ERROR] Server load balancer failure in us-west-2.",
+    "ServiceName": "infrastructure",
     "UserID": "U12345"
   }'
 ```
+
+### Combining Multiple Parameters
+
+You can combine multiple query parameters to customize exactly how an incident is handled:
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?slack_channel_id=C01PROD&telegram_chat_id=-987654321&oncall_enable=true&oncall_wait_minutes=1" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[CRITICAL] Multiple service failures detected in production environment.",
+    "ServiceName": "core-infrastructure",
+    "UserID": "U12345",
+    "Severity": "CRITICAL"
+  }'
+```
+
+This will:
+1. Send the alert to a specific Slack channel (`C01PROD`)
+2. Send the alert to a specific Telegram chat (`-987654321`)
+3. Enable on-call escalation with a shortened 1-minute wait time

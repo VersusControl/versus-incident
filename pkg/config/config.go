@@ -197,6 +197,10 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 		clonedCfg.Alert.Slack.ChannelID = v
 	}
 
+	if v := (*paramsOverwrite)["telegram_chat_id"]; v != "" {
+		clonedCfg.Alert.Telegram.ChatID = v
+	}
+
 	if v := (*paramsOverwrite)["email_to"]; v != "" {
 		clonedCfg.Alert.Email.To = v
 	}
