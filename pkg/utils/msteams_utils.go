@@ -98,6 +98,8 @@ func ConvertMarkdownToAdaptiveCard(markdown string) AdaptiveCard {
 	var firstLine string
 
 	linkRegex := regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	// Pre-compile the ordered list regex pattern for better performance
+	orderedListRegex := regexp.MustCompile(`^\d+\.\s`)
 
 	for lineNum, line := range lines {
 		line = strings.TrimSpace(line)
@@ -179,7 +181,7 @@ func ConvertMarkdownToAdaptiveCard(markdown string) AdaptiveCard {
 			continue
 		}
 
-		orderedListMatch, _ := regexp.MatchString(`^\d+\.\s`, line)
+		orderedListMatch := orderedListRegex.MatchString(line)
 		if orderedListMatch {
 			if !inList || !isOrderedList {
 				// Start a new ordered list

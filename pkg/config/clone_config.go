@@ -27,6 +27,7 @@ func cloneAlertConfig(src AlertConfig) AlertConfig {
 		Telegram:  cloneTelegramConfig(src.Telegram),
 		Email:     cloneEmailConfig(src.Email),
 		MSTeams:   cloneMSTeamsConfig(src.MSTeams),
+		Lark:      cloneLarkConfig(src.Lark),
 	}
 }
 
@@ -80,6 +81,25 @@ func cloneMSTeamsConfig(src MSTeamsConfig) MSTeamsConfig {
 		TemplatePath:     src.TemplatePath,
 		PowerAutomateURL: src.PowerAutomateURL,
 		OtherPowerURLs:   otherPowerURLsCopy,
+	}
+}
+
+// Helper function to deep clone the LarkConfig struct
+func cloneLarkConfig(src LarkConfig) LarkConfig {
+	// Create a copy of OtherWebhookURLs map if it exists
+	var otherWebhookURLsCopy map[string]string
+	if src.OtherWebhookURLs != nil {
+		otherWebhookURLsCopy = make(map[string]string)
+		for k, v := range src.OtherWebhookURLs {
+			otherWebhookURLsCopy[k] = v
+		}
+	}
+
+	return LarkConfig{
+		Enable:           src.Enable,
+		WebhookURL:       src.WebhookURL,
+		TemplatePath:     src.TemplatePath,
+		OtherWebhookURLs: otherWebhookURLsCopy,
 	}
 }
 

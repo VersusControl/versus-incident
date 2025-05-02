@@ -51,6 +51,14 @@ func (f *AlertProviderFactory) CreateProviders() ([]core.AlertProvider, error) {
 		providers = append(providers, msteamsProvider)
 	}
 
+	if f.cfg.Alert.Lark.Enable {
+		larkProvider, err := f.createLarkProvider()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Lark provider: %w", err)
+		}
+		providers = append(providers, larkProvider)
+	}
+
 	return providers, nil
 }
 
@@ -107,5 +115,18 @@ func (f *AlertProviderFactory) createMSTeamsProvider() (core.AlertProvider, erro
 	return NewMSTeamsProvider(config.MSTeamsConfig{
 		PowerAutomateURL: msc.PowerAutomateURL,
 		TemplatePath:     msc.TemplatePath,
+	}), nil
+}
+
+func (f *AlertProviderFactory) createLarkProvider() (core.AlertProvider, error) {
+	lc := f.cfg.Alert.Lark
+	// Check that webhook URL and template path are provided
+	if lc.WebhookURL == "" || lc.TemplatePath == "" {
+		return nil, fmt.Errorf("missing required Lark configuration: need webhook_url and template_path")
+	}
+
+	return NewLarkProvider(config.LarkConfig{
+		WebhookURL:   lc.WebhookURL,
+		TemplatePath: lc.TemplatePath,
 	}), nil
 }

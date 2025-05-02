@@ -34,6 +34,14 @@ alert:
     template_path: "config/msteams_message.tmpl"
     other_power_urls: # Optional: Enable overriding the default Power Automate flow using query parameters, eg /api/incidents?msteams_other_power_url=qc
       qc: ${MSTEAMS_OTHER_POWER_URL_QC}
+      
+  lark:
+    enable: false # Default value, will be overridden by LARK_ENABLE env var
+    webhook_url: ${LARK_WEBHOOK_URL} # Lark webhook URL (required)
+    template_path: "config/lark_message.tmpl"
+    other_webhook_urls: # Optional: Enable overriding the default webhook URL using query parameters, eg /api/incidents?lark_other_webhook_url=dev
+      dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
+      prod: ${LARK_OTHER_WEBHOOK_URL_PROD}
 
 queue:
   enable: true
