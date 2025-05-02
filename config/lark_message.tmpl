@@ -1,0 +1,12 @@
+Critical Error in {{.ServiceName}}
+
+**Error Details:**
+
+```
+{{.Logs}}
+```
+
+{{ if .AckURL }}
+
+[Click here to acknowledge]({{.AckURL}})
+{{ end }}

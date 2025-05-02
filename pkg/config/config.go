@@ -29,6 +29,7 @@ type AlertConfig struct {
 	Telegram  TelegramConfig
 	Email     EmailConfig
 	MSTeams   MSTeamsConfig
+	Lark      LarkConfig
 }
 
 type SlackConfig struct {
@@ -62,6 +63,13 @@ type MSTeamsConfig struct {
 	OtherPowerURLs map[string]string `mapstructure:"other_power_urls"` // Optional alternative Power Automate URLs
 	// Power Automate Workflow URL for Teams integration
 	PowerAutomateURL string `mapstructure:"power_automate_url"`
+}
+
+type LarkConfig struct {
+	Enable           bool
+	WebhookURL       string            `mapstructure:"webhook_url"`
+	TemplatePath     string            `mapstructure:"template_path"`
+	OtherWebhookURLs map[string]string `mapstructure:"other_webhook_urls"`
 }
 
 type QueueConfig struct {
@@ -169,6 +177,7 @@ func LoadConfig(path string) error {
 		setEnableFromEnv("TELEGRAM_ENABLE", &cfg.Alert.Telegram.Enable)
 		setEnableFromEnv("EMAIL_ENABLE", &cfg.Alert.Email.Enable)
 		setEnableFromEnv("MSTEAMS_ENABLE", &cfg.Alert.MSTeams.Enable)
+		setEnableFromEnv("LARK_ENABLE", &cfg.Alert.Lark.Enable)
 		setEnableFromEnv("SNS_ENABLE", &cfg.Queue.SNS.Enable)
 
 		setEnableFromEnv("ONCALL_ENABLE", &cfg.OnCall.Enable)
@@ -215,6 +224,16 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 
 			if powerUrl != "" {
 				clonedCfg.Alert.MSTeams.PowerAutomateURL = powerUrl
+			}
+		}
+	}
+
+	if v := (*paramsOverwrite)["lark_other_webhook_url"]; v != "" {
+		if clonedCfg.Alert.Lark.OtherWebhookURLs != nil {
+			webhookURL := clonedCfg.Alert.Lark.OtherWebhookURLs[v]
+
+			if webhookURL != "" {
+				clonedCfg.Alert.Lark.WebhookURL = webhookURL
 			}
 		}
 	}
