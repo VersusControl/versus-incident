@@ -41,6 +41,14 @@ alert:
       qc: ${MSTEAMS_OTHER_POWER_URL_QC} # Power Automate URL for QC team
       ops: ${MSTEAMS_OTHER_POWER_URL_OPS} # Power Automate URL for Ops team
       dev: ${MSTEAMS_OTHER_POWER_URL_DEV} # Power Automate URL for Dev team
+      
+  lark:
+    enable: false # Default value, will be overridden by LARK_ENABLE env var
+    webhook_url: ${LARK_WEBHOOK_URL} # Lark webhook URL (required)
+    template_path: "config/lark_message.tmpl"
+    other_webhook_urls: # Optional: Enable overriding the default webhook URL using query parameters, eg /api/incidents?lark_other_webhook_url=dev
+      dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
+      prod: ${LARK_OTHER_WEBHOOK_URL_PROD}
 
 queue:
   enable: true
@@ -161,6 +169,14 @@ This automatic detection provides backward compatibility while supporting newer 
 | `MSTEAMS_OTHER_POWER_URL_OPS` | (Optional) Power Automate URL for the Ops team channel. **Can be selected per request using the `msteams_other_power_url=ops` query parameter.** |
 | `MSTEAMS_OTHER_POWER_URL_DEV` | (Optional) Power Automate URL for the Dev team channel. **Can be selected per request using the `msteams_other_power_url=dev` query parameter.** |
 
+### Lark Configuration
+| Variable                     | Description |
+|-----------------------------|-------------|
+| `LARK_ENABLE`             | Set to `true` to enable Lark notifications. |
+| `LARK_WEBHOOK_URL`        | The webhook URL for your Lark channel. |
+| `LARK_OTHER_WEBHOOK_URL_DEV` | (Optional) Webhook URL for the development team. **Can be selected per request using the `lark_other_webhook_url=dev` query parameter.** |
+| `LARK_OTHER_WEBHOOK_URL_PROD` | (Optional) Webhook URL for the production team. **Can be selected per request using the `lark_other_webhook_url=prod` query parameter.** |
+
 ### Queue Services Configuration
 | Variable                     | Description |
 |-----------------------------|-------------|
@@ -204,6 +220,7 @@ We provide a way to overwrite configuration values using query parameters, allow
 | `email_to`   | Overrides the default recipient email address for email notifications. Use: `/api/incidents?email_to=<recipient_email>`. |
 | `email_subject`   | Overrides the default subject line for email notifications. Use: `/api/incidents?email_subject=<custom_subject>`. |
 | `msteams_other_power_url`   | Overrides the default Microsoft Teams Power Automate flow by specifying an alternative key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_power_url=qc`. |
+| `lark_other_webhook_url`   | Overrides the default Lark webhook URL by specifying an alternative key (e.g., dev, prod). Use: `/api/incidents?lark_other_webhook_url=dev`. |
 | `oncall_enable`          | Set to `true` or `false` to enable or disable on-call for a specific alert. Use: `/api/incidents?oncall_enable=false`. |
 | `oncall_wait_minutes`    | Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately. Use: `/api/incidents?oncall_wait_minutes=0`. |
 | `awsim_other_response_plan` | Overrides the default AWS Incident Manager response plan ARN by specifying an alternative key (e.g., prod, dev, staging). Use: `/api/incidents?awsim_other_response_plan=prod`. |
@@ -277,6 +294,33 @@ curl -X POST "http://localhost:3000/api/incidents?msteams_other_power_url=qc" \
   -d '{
     "Logs": "[ERROR] Quality check failed for latest deployment.",
     "ServiceName": "quality-service",
+    "UserID": "U12345"
+  }'
+```
+
+#### Lark Webhook Override
+
+You can configure multiple Lark webhook URLs using the `other_webhook_urls` setting:
+
+```yaml
+alert:
+  lark:
+    enable: true
+    webhook_url: ${LARK_WEBHOOK_URL}
+    template_path: "config/lark_message.tmpl"
+    other_webhook_urls:
+      dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
+      prod: ${LARK_OTHER_WEBHOOK_URL_PROD}
+```
+
+Then, to send an alert to the development team's Lark channel:
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?lark_other_webhook_url=dev" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Development server crash detected.",
+    "ServiceName": "dev-server",
     "UserID": "U12345"
   }'
 ```

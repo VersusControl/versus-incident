@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"path/filepath"
 	"text/template"
@@ -39,18 +40,15 @@ func (l *LarkProvider) SendAlert(i *m.Incident) error {
 		return fmt.Errorf("failed to execute template: %w", err)
 	}
 
-	// Create Lark message format using utility function
-	larkMsg := utils.LarkMessage{
-		MsgType: "post",
-		Content: utils.LarkMsgContent{
-			Post: utils.ConvertToLarkMarkdown(message.String(), i.Resolved),
-		},
-	}
+	// Create interactive card message
+	larkMsg := utils.CreateLarkMessage(message.String(), i.Resolved)
 
 	jsonData, err := json.Marshal(larkMsg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
+
+	log.Println(bytes.NewBuffer(jsonData))
 
 	resp, err := http.Post(l.webhookURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -61,7 +59,7 @@ func (l *LarkProvider) SendAlert(i *m.Incident) error {
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("Lark API returned non-200 status code: %d, body: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("lark API returned non-200 status code: %d, body: %s", resp.StatusCode, string(body))
 	}
 
 	return nil
