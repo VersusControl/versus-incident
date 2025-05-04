@@ -1,5 +1,10 @@
 ## Advanced Template Tips
 
+## Table of Contents
+- [Multi-Service Template](#multi-service-template)
+- [Conditional Formatting](#conditional-formatting)
+- [Best Practices for Custom Templates](#best-practices-for-custom-templates)
+
 ### Multi-Service Template
 
 Handle multiple alerts in one template:

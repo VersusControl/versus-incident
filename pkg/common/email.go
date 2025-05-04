@@ -11,6 +11,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	m "github.com/VersusControl/versus-incident/pkg/models"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
 type EmailProvider struct {
@@ -74,7 +75,7 @@ func (e *EmailProvider) getAuth() smtp.Auth {
 }
 
 func (e *EmailProvider) SendAlert(i *m.Incident) error {
-	funcMaps := GetTemplateFuncMaps()
+	funcMaps := utils.GetTemplateFuncMaps()
 
 	// Parse template
 	tmpl, err := template.New(filepath.Base(e.templatePath)).Funcs(funcMaps).ParseFiles(e.templatePath)

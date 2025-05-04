@@ -1,6 +1,14 @@
 ## Configuring CloudWatch to send Alert to Versus Incident
 
-![Diagram](docs/images/diagram.png)
+## Table of Contents
+- [Create an SNS Topic](#create-an-sns-topic)
+- [Create a CloudWatch Alarm for RDS CPU](#create-a-cloudwatch-alarm-for-rds-cpu)
+- [Versus Incident](#versus-incident)
+- [Subscribe Versus to the SNS Topic](#subscribe-versus-to-the-sns-topic)
+- [Test the Integration](#test-the-integration)
+- [Conclusion](#conclusion)
+
+![Diagram](/docs/images/diagram.png)
 
 In this guide, you’ll learn how to set up a CloudWatch alarm to trigger when RDS CPU usage exceeds 80% and send an alert to Slack and Telegram.
 

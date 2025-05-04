@@ -1,12 +1,19 @@
 ## Understanding AWS Incident Manager On-Call
 
+## Table of Contents
+- [Key Components of AWS Incident Manager On-Call](#key-components-of-aws-incident-manager-on-call)
+  - [1. Contacts](#1-contacts)
+  - [2. Escalation Plans](#2-escalation-plans)
+  - [3. Runbooks (Options)](#3-runbooks-options)
+  - [4. Response Plans](#4-response-plans)
+
 AWS On-Call is a service that helps organizations manage and respond to incidents quickly and effectively. It’s part of AWS Systems Manager. This document explains the key parts of AWS Incident Manager On-Call—contacts, escalation plans, runbooks, and response plans—in a simple and clear way.
 
 ### Key Components of AWS Incident Manager On-Call
 
 AWS Incident Manager On-Call relies on four main pieces: contacts, escalation plans, runbooks, and response plans. Let’s break them down one by one.
 
-![Versus](docs/images/aws-icm.png)
+![Versus](/docs/images/aws-icm.png)
 
 ### 1. Contacts
 

@@ -1,8 +1,19 @@
 ## Getting Started
 
+## Table of Contents
+- [Prerequisites](#prerequisites)
+- [Easy Installation with Docker](#easy-installation-with-docker)
+- [Universal Alert Template Support](#universal-alert-template-support)
+  - [Example: Send an Alertmanager alert](#example-send-an-alertmanager-alert)
+  - [Example: Send a Sentry alert](#example-send-a-sentry-alert)
+- [Development Custom Templates](#development-custom-templates)
+  - [Docker](#docker)
+  - [Kubernetes](#kubernetes)
+- [SNS Usage](#sns-usage)
+- [On-call](#on-call)
+
 ### Prerequisites
 
-- Go 1.20+
 - Docker 20.10+ (optional)
 - Slack workspace (for Slack notifications)
 
@@ -16,29 +27,104 @@ docker run -p 3000:3000 \
   ghcr.io/versuscontrol/versus-incident
 ```
 
-### Or Build from source
+Versus listens on port 3000 by default and exposes the `/api/incidents` endpoint, which you can configure as a webhook URL in your monitoring tools. This endpoint accepts JSON payloads from various monitoring systems and forwards the alerts to your configured notification channels.
+
+### Universal Alert Template Support
+
+Our default template automatically handles alerts from multiple sources, including:
+- Alertmanager (Prometheus)
+- Grafana Alerts
+- Sentry
+- CloudWatch SNS
+- FluentBit
+
+#### Example: Send an Alertmanager alert
 
 ```bash
-# Clone the repository
-git clone https://github.com/VersusControl/versus-incident.git
-cd versus-incident
-
-# Build with Go
-go build -o versus-incident ./cmd/main.go
-chmod +x versus-incident
+curl -X POST "http://localhost:3000/api/incidents" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "receiver": "webhook-incident",
+    "status": "firing",
+    "alerts": [ 
+      {                
+        "status": "firing",                         
+        "labels": {                                   
+          "alertname": "PostgresqlDown",
+          "instance": "postgresql-prod-01",
+          "severity": "critical"
+        },                        
+        "annotations": {                                                
+          "summary": "Postgresql down (instance postgresql-prod-01)",
+          "description": "Postgresql instance is down."
+        },                                     
+        "startsAt": "2023-10-01T12:34:56.789Z",                         
+        "endsAt": "2023-10-01T12:44:56.789Z",                
+        "generatorURL": ""
+      }                                  
+    ],                                 
+    "groupLabels": {                                                                  
+      "alertname": "PostgresqlDown"     
+    },                                                                    
+    "commonLabels": {                                                           
+      "alertname": "PostgresqlDown",                                                       
+      "severity": "critical",
+      "instance": "postgresql-prod-01"
+    },  
+    "commonAnnotations": {                                                                                  
+      "summary": "Postgresql down (instance postgresql-prod-01)",
+      "description": "Postgresql instance is down."
+    },            
+    "externalURL": ""            
+  }'
 ```
 
-Create `run.sh`:
+#### Example: Send a Sentry alert
+
 ```bash
-#!/bin/bash
-export SLACK_ENABLE=true
-export SLACK_TOKEN=your_token
-export SLACK_CHANNEL_ID=your_channel
-
-./versus-incident
+curl -X POST "http://localhost:3000/api/incidents" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "created",
+    "data": {
+      "issue": {
+        "id": "123456",
+        "title": "Example Issue",
+        "culprit": "example_function in example_module",
+        "shortId": "PROJECT-1",
+        "project": {
+          "id": "1",
+          "name": "Example Project",
+          "slug": "example-project"
+        },
+        "metadata": {
+          "type": "ExampleError",
+          "value": "This is an example error"
+        },
+        "status": "unresolved",
+        "level": "error",
+        "firstSeen": "2023-10-01T12:00:00Z",
+        "lastSeen": "2023-10-01T12:05:00Z",
+        "count": 5,
+        "userCount": 3
+      }
+    },
+    "installation": {
+      "uuid": "installation-uuid"
+    },
+    "actor": {
+      "type": "user",
+      "id": "789",
+      "name": "John Doe"
+    }
+  }'
 ```
 
-## Development
+**Result:**
+
+![Versus Result](/docs/images/versus-result-01.png)
+
+## Development Custom Templates
 
 ### Docker
 
@@ -125,7 +211,7 @@ Response:
 
 **Result:**
 
-![Slack Alert](docs/images/versus-result.png)
+![Versus Result](/docs/images/versus-result-02.png)
 
 #### Other Templates
 

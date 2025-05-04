@@ -1,6 +1,18 @@
 ## Configuring Fluent Bit to Send Error Logs to Versus Incident
 
-![Diagram](docs/images/diagram.png)
+## Table of Contents
+- [Understand the Log Format](#understand-the-log-format)
+- [Configure Fluent Bit Filters](#configure-fluent-bit-filters)
+  - [Filter Configuration](#filter-configuration)
+  - [Explanation](#explanation)
+- [Configure Fluent Bit Output](#configure-fluent-bit-output)
+  - [Output Configuration](#output-configuration)
+  - [Explanation](#explanation-1)
+- [Full Fluent Bit Configuration Example](#full-fluent-bit-configuration-example)
+- [Test the Configuration](#test-the-configuration)
+- [Conclusion](#conclusion)
+
+![Diagram](/docs/images/diagram.png)
 
 Fluent Bit is a lightweight log processor and forwarder that can filter, modify, and forward logs to various destinations. In this tutorial, we will configure Fluent Bit to filter logs containing [ERROR] and send them to the Versus Incident Management System using its REST API.
 

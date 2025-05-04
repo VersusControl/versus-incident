@@ -1,5 +1,14 @@
 ## Migration Guide to v1.3.0
 
+## Table of Contents
+- [Key Changes in v1.3.0](#key-changes-in-v130)
+  - [1. New Provider Configuration (Major Change from v1.2.0)](#1-new-provider-configuration-major-change-from-v120)
+  - [2. PagerDuty Integration (New in v1.3.0)](#2-pagerduty-integration-new-in-v130)
+  - [3. AWS Incident Manager Environment-Specific Response Plans (New in v1.3.0)](#3-aws-incident-manager-environment-specific-response-plans-new-in-v130)
+- [How to Migrate from v1.2.0](#how-to-migrate-from-v120)
+- [Complete Configuration Example](#complete-configuration-example)
+- [Upgrading from v1.2.0](#upgrading-from-v120)
+
 This guide explains the changes introduced in Versus Incident v1.3.0 and how to update your configuration to take advantage of the new features.
 
 ### Key Changes in v1.3.0

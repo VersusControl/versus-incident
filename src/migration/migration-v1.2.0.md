@@ -1,5 +1,20 @@
 # Migrating to v1.2.0
 
+## Table of Contents
+- [What's New in v1.2.0](#whats-new-in-v120)
+- [Key Changes](#key-changes)
+- [Configuration Changes](#configuration-changes)
+  - [v1.1.5 (Before)](#v115-before)
+  - [v1.2.0 (After)](#v120-after)
+- [Migration Steps](#migration-steps)
+  - [1. Update Your Configuration File](#1-update-your-configuration-file)
+  - [2. Update Your Environment Variables](#2-update-your-environment-variables)
+  - [3. Setting up Power Automate for Microsoft Teams](#3-setting-up-power-automate-for-microsoft-teams)
+  - [4. Update Your API Calls](#4-update-your-api-calls)
+  - [5. Update Your Microsoft Teams Templates (Optional)](#5-update-your-microsoft-teams-templates-optional)
+- [Testing the Migration](#testing-the-migration)
+- [Additional Notes](#additional-notes)
+
 This guide provides instructions for migrating from v1.1.5 to v1.2.0.
 
 ## What's New in v1.2.0

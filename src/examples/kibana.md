@@ -1,5 +1,17 @@
 ## Configure Kibana to Send Alerts to Slack and Telegram
 
+## Table of Contents
+- [Prerequisites](#prerequisites)
+- [Step 1: Set Up Slack and Telegram Bots](#step-1-set-up-slack-and-telegram-bots)
+  - [Slack Bot](#slack-bot)
+  - [Telegram Bot](#telegram-bot)
+- [Step 2: Deploy Versus Incident with Slack and Telegram Enabled](#step-2-deploy-versus-incident-with-slack-and-telegram-enabled)
+  - [Create Configuration Files](#create-configuration-files)
+  - [Run Versus Incident with Docker](#run-versus-incident-with-docker)
+- [Step 3: Configure Kibana Alerts with a Webhook](#step-3-configure-kibana-alerts-with-a-webhook)
+- [Step 4: Test the Integration](#step-4-test-the-integration)
+- [Conclusion](#conclusion)
+
 Kibana, part of the Elastic Stack, provides powerful monitoring and alerting capabilities for your applications and infrastructure. However, its native notification options are limited.
 
 In this guide, we’ll walk through setting up Kibana to send alerts to Versus Incident, which will then forward them to Slack and Telegram using custom templates.
