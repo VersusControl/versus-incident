@@ -1,5 +1,21 @@
 ## How to Integrate with PagerDuty
 
+## Table of Contents
+- [Prerequisites](#prerequisites)
+- [Setting Up PagerDuty for On-Call](#setting-up-pagerduty-for-on-call)
+  - [1. Create Users in PagerDuty](#1-create-users-in-pagerduty)
+  - [2. Create On-Call Schedules](#2-create-on-call-schedules)
+  - [3. Create Escalation Policies](#3-create-escalation-policies)
+  - [4. Create a PagerDuty Service](#4-create-a-pagerduty-service)
+  - [5. Get the Integration Key](#5-get-the-integration-key)
+- [Deploy Versus Incident](#deploy-versus-incident)
+  - [Docker Deployment](#docker-deployment)
+- [Alert Manager Routing Configuration](#alert-manager-routing-configuration)
+- [Override the PagerDuty Routing Key per Alert](#override-the-pagerduty-routing-key-per-alert)
+- [Testing the Integration](#testing-the-integration)
+- [How It Works Under the Hood](#how-it-works-under-the-hood)
+- [Conclusion](#conclusion)
+
 This document provides a step-by-step guide to integrate Versus Incident with PagerDuty for on-call management. The integration enables automated escalation of alerts to on-call teams when incidents are not acknowledged within a specified time.
 
 We'll cover setting up PagerDuty, configuring the integration with Versus, deploying Versus, and testing the integration with practical examples.

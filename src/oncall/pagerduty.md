@@ -1,5 +1,14 @@
 ## Understanding PagerDuty On-Call
 
+## Table of Contents
+- [Key Components of PagerDuty On-Call](#key-components-of-pagerduty-on-call)
+- [1. Services](#1-services)
+- [2. Escalation Policies](#2-escalation-policies)
+- [3. Schedules](#3-schedules)
+- [4. Integrations](#4-integrations)
+- [The PagerDuty Incident Lifecycle](#the-pagerduty-incident-lifecycle)
+- [Key Benefits of PagerDuty for On-Call Management](#key-benefits-of-pagerduty-for-on-call-management)
+
 PagerDuty is a popular incident management platform that provides robust on-call scheduling, alerting, and escalation capabilities. This document explains the key components of PagerDuty's on-call system—services, escalation policies, schedules, and integrations—in a simple and clear way.
 
 ### Key Components of PagerDuty On-Call

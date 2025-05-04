@@ -1,6 +1,13 @@
 ## How to Customize Alert Messages from Alertmanager to Slack and Telegram
 
-![Diagram](docs/images/alertmanager.png)
+## Table of Contents
+- [Configure Alertmanager Webhook](#configure-alertmanager-webhook)
+- [Launch Versus with Slack/Telegram](#launch-versus-with-slacktelegram)
+- [Test](#test)
+- [Advanced: Dynamic Channel Routing](#advanced-dynamic-channel-routing)
+- [Troubleshooting Tips](#troubleshooting-tips)
+
+![Diagram](/docs/images/alertmanager.png)
 
 In this guide, you'll learn how to route Prometheus Alertmanager alerts to Slack and Telegram using the Versus Incident, while fully customizing alert messages.
 
@@ -59,7 +66,7 @@ Alertmanager sends alerts to the webhook in JSON format. Here’s an example of 
         "description": "Postgresql instance is down."
       },
       "startsAt": "2023-10-01T12:34:56.789Z",
-      "endsAt": "0001-01-01T00:00:00Z",
+      "endsAt": "2023-10-01T12:44:56.789Z",
       "generatorURL": ""
     }
   ],
@@ -173,7 +180,7 @@ curl -X POST http://localhost:3000/api/incidents \
           "description": "Postgresql instance is down."
         },
         "startsAt": "2023-10-01T12:34:56.789Z",
-        "endsAt": "0001-01-01T00:00:00Z",
+        "endsAt": "2023-10-01T12:44:56.789Z",
         "generatorURL": ""
       }
     ],
@@ -195,7 +202,7 @@ curl -X POST http://localhost:3000/api/incidents \
 
 Final Result:
 
-![Slack Alert](docs/images/versus-result.png)
+![Slack Alert](/docs/images/versus-result-02.png)
 
 ### Advanced: Dynamic Channel Routing
 Override Slack channels per alert using query parameters:

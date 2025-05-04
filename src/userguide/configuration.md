@@ -1,5 +1,21 @@
 ## Configuration
 
+## Table of Contents
+- [Sample Configuration File](#sample-configuration-file)
+- [Environment Variables](#environment-variables)
+  - [Common](#common)
+  - [Slack Configuration](#slack-configuration)
+  - [Telegram Configuration](#telegram-configuration)
+  - [Email Configuration](#email-configuration)
+  - [Microsoft Teams Configuration](#microsoft-teams-configuration)
+  - [Lark Configuration](#lark-configuration)
+  - [Queue Services Configuration](#queue-services-configuration)
+  - [On-Call Configuration](#on-call-configuration)
+  - [Redis Configuration](#redis-configuration)
+- [Dynamic Configuration with Query Parameters](#dynamic-configuration-with-query-parameters)
+  - [Examples for Each Query Parameter](#examples-for-each-query-parameter)
+  - [Combining Multiple Parameters](#combining-multiple-parameters)
+
 A sample configuration file is located at `config/config.yaml`:
 
 ```yaml

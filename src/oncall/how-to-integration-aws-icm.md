@@ -1,5 +1,15 @@
 ## How to Integration
 
+## Table of Contents
+- [Prerequisites](#prerequisites)
+- [Setting Up AWS Incident Manager for On-Call](#setting-up-aws-incident-manager-for-on-call)
+- [Define IAM Role for Versus](#define-iam-role-for-versus)
+- [Deploy Versus Incident](#deploy-versus-incident)
+- [Alert Rules](#alert-rules)
+- [Alert Manager Routing Configuration](#alert-manager-routing-configuration)
+- [Testing the Integration](#testing-the-integration)
+- [Conclusion](#conclusion)
+
 This document provides a step-by-step guide to integrate Versus Incident with AWS Incident Manager make an On Call. The integration enables automated escalation of alerts to on-call teams when incidents are not acknowledged within a specified time.
 
 We'll cover configuring Prometheus Alert Manager to send alerts to Versus, setting up AWS Incident Manager, deploying Versus, and testing the integration with a practical example.
@@ -301,7 +311,7 @@ This triggers the response plan immediately without waiting.
 
 Result
 
-![Versus On-Call Result](docs/images/on-call-result.png)
+![Versus On-Call Result](/docs/images/on-call-result.png)
 
 ### Conclusion
 
