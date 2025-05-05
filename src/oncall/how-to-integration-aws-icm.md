@@ -110,6 +110,10 @@ alert:
     token: ${SLACK_TOKEN}
     channel_id: ${SLACK_CHANNEL_ID}
     template_path: "config/slack_message.tmpl"
+    message_properties:
+      button_text: "Acknowledge Alert" # Custom text for the acknowledgment button
+      button_style: "primary" # Button style: "primary" (blue), "danger" (red), or empty for default gray
+      disable_button: false # Set to true to disable the button if you want to handle acknowledgment differently
 
 oncall:
   enable: true
@@ -131,6 +135,33 @@ Create Slack templates `config/slack_message.tmpl`:
 ```
 🔥 *{{ .commonLabels.severity | upper }} Alert: {{ .commonLabels.alertname }}*
 
+🌐 *Instance*: `{{ .commonLabels.instance }}`
+🚨 *Status*: `{{ .status }}`
+
+{{ range .alerts }}
+📝 {{ .annotations.description }}  
+{{ end }}
+```
+
+**Slack Acknowledgment Button (Default)**
+
+By default, Versus automatically adds an interactive acknowledgment button to Slack notifications when on-call is enabled. This allows users to acknowledge alerts. You can customize the button appearance in your `config.yaml`, for example:
+
+![Versus On-Call Slack](/docs/images/on-call-slack.png)
+
+**ACK URL Generation**
+
++ When an incident is created (e.g., via a POST to `/api/incidents`), Versus generates an acknowledgment URL if on-call is enabled.
++ The URL is constructed using the `public_host` value, typically in the format: `https://your-host.example/api/incidents/ack/<incident-id>`.
++ This URL is injected into the button.
+
+**Manual Acknowledgment Handling**
+
+If you prefer to handle acknowledgments manually or want to disable the default button (by setting `disable_button: true`), you can add the acknowledgment URL directly in your template. Here's an example of including a clickable link in your Slack template:
+
+```
+🔥 *{{ .commonLabels.severity | upper }} Alert: {{ .commonLabels.alertname }}*
+
 🌐 *Instance*: `{{ .commonLabels.instance }}`  
 🚨 *Status*: `{{ .status }}`
 
@@ -143,11 +174,7 @@ Create Slack templates `config/slack_message.tmpl`:
 {{ end }}
 ```
 
-**ACK URL Generation**
-
-+ When an incident is created (e.g., via a POST to `/api/incidents`), Versus generates an acknowledgment URL if on-call is enabled.
-+ The URL is constructed using the `public_host` value, typically in the format: `https://your-host.example/api/incidents/ack/<incident-id>`.
-+ This URL is injected into the alert data as a field (e.g., `.AckURL`) and becomes available for use in templates.
+The conditional `{{ if .AckURL }}` ensures the link only appears if the acknowledgment URL is available (i.e., when on-call is enabled).
 
 Create the `docker-compose.yml` file:
 

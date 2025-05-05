@@ -32,6 +32,10 @@ alert:
     token: ${SLACK_TOKEN}            # From environment
     channel_id: ${SLACK_CHANNEL_ID}  # From environment
     template_path: "config/slack_message.tmpl"
+    message_properties:
+      button_text: "Acknowledge Alert" # Custom text for the acknowledgment button
+      button_style: "primary" # Button style: "primary" (default blue), "danger" (red), or empty for default gray
+      disable_button: false # Set to true to disable the button, if you want to handle acknowledgment differently
 
   telegram:
     enable: false  # Default value, will be overridden by TELEGRAM_ENABLE env var
@@ -136,6 +140,23 @@ The application relies on several environment variables to configure alerting se
 | `SLACK_ENABLE`   | Set to `true` to enable Slack notifications. |
 | `SLACK_TOKEN`    | The authentication token for your Slack bot. |
 | `SLACK_CHANNEL_ID` | The ID of the Slack channel where alerts will be sent. **Can be overridden per request using the `slack_channel_id` query parameter.** |
+
+Slack also supports interactive acknowledgment buttons that can be configured using the following properties in the `config.yaml` file:
+
+```yaml
+alert:
+  slack:
+    # ...other slack configuration...
+    message_properties:
+      button_text: "Acknowledge Alert" # Custom text for the acknowledgment button
+      button_style: "primary" # Button style: "primary" (default blue), "danger" (red), or empty for default gray
+      disable_button: false # Set to true to disable the button, if you want to handle acknowledgment differently
+```
+
+These properties allow you to:
+- Customize the text of the acknowledgment button (`button_text`)
+- Change the style of the button (`button_style`) - options are "primary" (blue), "danger" (red), or leave empty for default gray
+- Disable the interactive button entirely (`disable_button`) if you want to handle acknowledgment through other means
 
 ### Telegram Configuration
 | Variable              | Description |

@@ -41,9 +41,9 @@ type SlackConfig struct {
 }
 
 type SlackMessageProperties struct {
-	UseButtonAck bool   `mapstructure:"use_button_ack"`
-	ButtonText   string `mapstructure:"button_text"`
-	ButtonStyle  string `mapstructure:"button_style"`
+	DisableButton bool   `mapstructure:"disable_button"`
+	ButtonText    string `mapstructure:"button_text"`
+	ButtonStyle   string `mapstructure:"button_style"`
 }
 
 type TelegramConfig struct {
