@@ -68,7 +68,7 @@ func (s *SlackProvider) sendUnresolvedAlert(i *m.Incident) error {
 	color := "#C70039"
 
 	// Determine whether to use button or standard message format
-	if s.msgProps.UseButtonAck && ackURL != "" {
+	if !s.msgProps.DisableButton && ackURL != "" {
 		// Send message with interactive button
 		return s.sendMessageWithButton(messageText, color, ackURL, i.ID)
 	} else {
@@ -86,8 +86,8 @@ func (s *SlackProvider) processAckURL(i *m.Incident) (map[string]interface{}, st
 		return nil, ""
 	}
 
-	// If button ACK is enabled, extract and remove AckURL from content
-	if s.msgProps.UseButtonAck {
+	// Extract and remove AckURL from content
+	if !s.msgProps.DisableButton {
 		// Create a clone of the content to avoid modifying the original
 		contentClone := make(map[string]interface{})
 		for k, v := range *i.Content {
@@ -106,7 +106,7 @@ func (s *SlackProvider) processAckURL(i *m.Incident) (map[string]interface{}, st
 		return contentClone, ackURL
 	}
 
-	// If button ACK is not enabled, just return the original content and extract AckURL
+	// If button is disabled, just return the original content and extract AckURL
 	if urlVal, ok := (*i.Content)["AckURL"]; ok {
 		if urlStr, ok := urlVal.(string); ok {
 			ackURL = urlStr

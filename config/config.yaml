@@ -12,9 +12,9 @@ alert:
     channel_id: ${SLACK_CHANNEL_ID}
     template_path: "config/slack_message.tmpl"
     message_properties:
-      use_button_ack: true # Enable interactive button for acknowledging alerts
       button_text: "Acknowledge Alert" # Custom text for the acknowledgment button
       button_style: "primary" # Button style: "primary" (default blue), "danger" (red), or empty for default gray
+      disable_button: false # Set to true to disable the button, if you want to handle the alert acknowledgment in your own way
   
   telegram:
     enable: false
