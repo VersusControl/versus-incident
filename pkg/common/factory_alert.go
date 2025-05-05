@@ -69,9 +69,10 @@ func (f *AlertProviderFactory) createSlackProvider() (core.AlertProvider, error)
 	}
 
 	return NewSlackProvider(config.SlackConfig{
-		Token:        sc.Token,
-		ChannelID:    sc.ChannelID,
-		TemplatePath: sc.TemplatePath,
+		Token:             sc.Token,
+		ChannelID:         sc.ChannelID,
+		TemplatePath:      sc.TemplatePath,
+		MessageProperties: sc.MessageProperties,
 	}), nil
 }
 

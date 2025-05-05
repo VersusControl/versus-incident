@@ -4,13 +4,17 @@ port: 3000
 public_host: https://your-host.example
 
 alert:
-  debug_body: true
+  debug_body: false
 
   slack:
     enable: false
     token: ${SLACK_TOKEN}
     channel_id: ${SLACK_CHANNEL_ID}
     template_path: "config/slack_message.tmpl"
+    message_properties:
+      use_button_ack: true # Enable interactive button for acknowledging alerts
+      button_text: "Acknowledge Alert" # Custom text for the acknowledgment button
+      button_style: "primary" # Button style: "primary" (default blue), "danger" (red), or empty for default gray
   
   telegram:
     enable: false
