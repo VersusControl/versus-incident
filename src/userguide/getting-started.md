@@ -8,6 +8,7 @@
   - [Example: Send a Sentry alert](#example-send-a-sentry-alert)
 - [Development Custom Templates](#development-custom-templates)
   - [Docker](#docker)
+  - [Understanding Custom Templates](#understanding-custom-templates-with-monitoring-webhooks)
   - [Kubernetes](#kubernetes)
 - [SNS Usage](#sns-usage)
 - [On-call](#on-call)
@@ -212,6 +213,84 @@ Response:
 **Result:**
 
 ![Versus Result](/docs/images/versus-result-02.png)
+
+### Understanding Custom Templates with Monitoring Webhooks
+
+When integrating Versus with any monitoring tool that supports webhooks, you need to understand the JSON payload structure that the tool sends to create an effective template. Here's a step-by-step guide:
+
+1. **Enable Debug Mode**: First, enable debug_body in your config to see the exact payload structure:
+
+```yaml
+alert:
+  debug_body: true  # This will print the incoming payload to the console
+```
+
+2. **Capture Sample Payload**: Send a test alert to Versus, then review the JSON structure within the logs of your Versus instance.
+
+3. **Create Custom Template**: Use the JSON structure to build a template that extracts the relevant information.
+
+#### FluentBit Integration Example
+
+Here's a sample FluentBit configuration to send logs to Versus:
+
+```ini
+[OUTPUT]
+    Name            http
+    Match           kube.production.user-service.*
+    Host            versus-host
+    Port            3000
+    URI             /api/incidents
+    Format          json
+    Header          Content-Type application/json
+    Retry_Limit     3
+```
+
+**Sample FluentBit JSON Payload:**
+
+```json
+{
+  "date": 1746354647.987654321,
+  "log": "ERROR: Exception occurred while handling request ID: req-55ef8801\nTraceback (most recent call last):\n  File \"/app/server.py\", line 215, in handle_request\n    user_id = session['user_id']\nKeyError: 'user_id'\n",
+  "stream": "stderr",
+  "time": "2025-05-04T17:30:47.987654321Z",
+  "kubernetes": {
+    "pod_name": "user-service-6cc8d5f7b5-wxyz9",
+    "namespace_name": "production",
+    "pod_id": "f0e9d8c7-b6a5-f4e3-d2c1-b0a9f8e7d6c5",
+    "labels": {
+      "app": "user-service",
+      "tier": "backend",
+      "environment": "production"
+    },
+    "annotations": {
+      "kubernetes.io/psp": "eks.restricted",
+      "monitoring.alpha.example.com/scrape": "true"
+    },
+    "host": "ip-10-1-2-4.ap-southeast-1.compute.internal",
+    "container_name": "auth-logic-container",
+    "docker_id": "f5e4d3c2b1a0f5e4d3c2b1a0f5e4d3c2b1a0f5e4d3c2b1a0f5e4d3c2b1a0f5e4",
+    "container_hash": "my-docker-hub/user-service@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+    "container_image": "my-docker-hub/user-service:v2.1.0"
+  }
+}
+```
+
+**FluentBit Slack Template (`config/slack_message.tmpl`):**
+
+```
+🚨 *Error in {{.kubernetes.labels.app}}* 🚨
+*Environment:* {{.kubernetes.labels.environment}}
+*Pod:* {{.kubernetes.pod_name}}
+*Container:* {{.kubernetes.container_name}}
+
+*Error Details:*
+```{{.log}}```
+
+*Time:* {{.time}}
+*Host:* {{.kubernetes.host}}
+
+<@SLACK_ONCALL_USER_ID> Please investigate!
+```
 
 #### Other Templates
 

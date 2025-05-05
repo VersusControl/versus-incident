@@ -4,7 +4,7 @@ port: 3000
 public_host: https://your-host.example
 
 alert:
-  debug_body: false
+  debug_body: true
 
   slack:
     enable: false
