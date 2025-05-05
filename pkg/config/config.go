@@ -33,10 +33,17 @@ type AlertConfig struct {
 }
 
 type SlackConfig struct {
-	Enable       bool
-	Token        string
-	ChannelID    string `mapstructure:"channel_id"`
-	TemplatePath string `mapstructure:"template_path"`
+	Enable            bool
+	Token             string
+	ChannelID         string                 `mapstructure:"channel_id"`
+	TemplatePath      string                 `mapstructure:"template_path"`
+	MessageProperties SlackMessageProperties `mapstructure:"message_properties"`
+}
+
+type SlackMessageProperties struct {
+	UseButtonAck bool   `mapstructure:"use_button_ack"`
+	ButtonText   string `mapstructure:"button_text"`
+	ButtonStyle  string `mapstructure:"button_style"`
 }
 
 type TelegramConfig struct {

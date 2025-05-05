@@ -38,6 +38,11 @@ func cloneSlackConfig(src SlackConfig) SlackConfig {
 		Token:        src.Token,
 		ChannelID:    src.ChannelID,
 		TemplatePath: src.TemplatePath,
+		MessageProperties: SlackMessageProperties{
+			UseButtonAck: src.MessageProperties.UseButtonAck,
+			ButtonText:   src.MessageProperties.ButtonText,
+			ButtonStyle:  src.MessageProperties.ButtonStyle,
+		},
 	}
 }
 
