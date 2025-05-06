@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"path/filepath"
 	"text/template"
@@ -47,8 +46,6 @@ func (l *LarkProvider) SendAlert(i *m.Incident) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
-
-	log.Println(bytes.NewBuffer(jsonData))
 
 	resp, err := http.Post(l.webhookURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {

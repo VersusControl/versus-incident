@@ -36,33 +36,17 @@ type LarkCardElement struct {
 // CreateLarkMessage creates a Lark message with interactive card format
 // This format uses "msg_type": "interactive" with a card structure
 func CreateLarkMessage(content string, isResolved bool) *LarkMessage {
-	// Extract first line for title and remove it from content
-	title := "Incident Alert"
-	remainingContent := content
-
-	if len(content) > 0 {
-		lines := strings.SplitN(content, "\n", 2)
-		if len(lines) > 0 && len(lines[0]) > 0 {
-			// Use first line as title
-			title = strings.ReplaceAll(lines[0], "**", "")
-			title = strings.TrimSpace(title)
-
-			// Remove the first line from content
-			if len(lines) > 1 {
-				remainingContent = strings.TrimSpace(lines[1])
-			} else {
-				// If there was only one line, it's now in the title
-				remainingContent = ""
-			}
-		}
-	}
+	title := "Alert"
 
 	// Add status indicator to title
 	if isResolved {
-		title = "🟢 " + title
+		title = "🟢 Resolved " + title
 	} else {
-		title = "🔴 " + title
+		title = "🔴 Firing " + title
 	}
+
+	// Trim whitespace (including newlines) from the beginning and end of content
+	content = strings.TrimSpace(content)
 
 	// Create the interactive card message
 	return &LarkMessage{
@@ -77,7 +61,7 @@ func CreateLarkMessage(content string, isResolved bool) *LarkMessage {
 			Elements: []LarkCardElement{
 				{
 					Tag:     "markdown",
-					Content: remainingContent,
+					Content: content,
 				},
 			},
 		},
