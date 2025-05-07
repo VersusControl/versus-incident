@@ -506,7 +506,7 @@ metadata:
   name: versus-service
 spec:
   selector:
-    app: versus
+    app: versus-incident
   ports:
     - protocol: TCP
       port: 3000

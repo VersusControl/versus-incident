@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -14,7 +15,7 @@ import (
 
 // OnCallProvider defines the interface for on-call notification providers
 type OnCallProvider interface {
-	TriggerOnCall(ctx context.Context, incidentID string) error
+	TriggerOnCall(ctx context.Context, incidentID string, cfg *config.OnCallConfig) error
 }
 
 // Function that will be implemented in the common package to avoid circular imports
@@ -67,8 +68,8 @@ func GetOnCallWorkflow() *OnCallWorkflow {
 }
 
 // triggerProvider triggers the on-call provider
-func (w *OnCallWorkflow) triggerProvider(ctx context.Context, incidentID string) error {
-	if err := w.provider.TriggerOnCall(ctx, incidentID); err != nil {
+func (w *OnCallWorkflow) triggerProvider(ctx context.Context, incidentID string, cfg *config.OnCallConfig) error {
+	if err := w.provider.TriggerOnCall(ctx, incidentID, cfg); err != nil {
 		return err
 	}
 	return nil
@@ -88,12 +89,19 @@ func (w *OnCallWorkflow) Start(incidentID string, oc config.OnCallConfig) error 
 
 	// If WaitMinutes is 0, trigger immediately
 	if oc.WaitMinutes == 0 {
-		return w.triggerProvider(ctx, incidentID)
+		return w.triggerProvider(ctx, incidentID, &oc)
 	}
 
 	// Store incident in Redis with expiration time
 	expiration := time.Duration(oc.WaitMinutes)*time.Minute + 1*time.Minute
-	if err := w.redisClient.Set(ctx, incidentID, "pending", expiration).Err(); err != nil {
+
+	// We need to store the full OnCallConfig to use it when triggering
+	ocBytes, err := json.Marshal(oc)
+	if err != nil {
+		return fmt.Errorf("failed to serialize on-call config: %v", err)
+	}
+
+	if err := w.redisClient.Set(ctx, incidentID, string(ocBytes), expiration).Err(); err != nil {
 		return fmt.Errorf("failed to store incident %s in Redis: %v", incidentID, err)
 	}
 
@@ -104,22 +112,32 @@ func (w *OnCallWorkflow) Start(incidentID string, oc config.OnCallConfig) error 
 		<-time.After(time.Duration(oc.WaitMinutes) * time.Minute)
 
 		// Check if incident is still pending
-		exists, err := w.redisClient.Exists(ctx, incidentID).Result()
+		value, err := w.redisClient.Get(ctx, incidentID).Result()
 		if err != nil {
-			log.Printf("Failed to check incident %s in Redis: %v", incidentID, err)
+			if err != redis.Nil {
+				log.Printf("Failed to check incident %s in Redis: %v", incidentID, err)
+			}
 			return
 		}
 
-		if exists == 1 {
-			// If still pending, trigger on-call
-			if err := w.triggerProvider(ctx, incidentID); err != nil {
+		// If still exists, trigger on-call with stored config
+		var storedConfig config.OnCallConfig
+		if err := json.Unmarshal([]byte(value), &storedConfig); err != nil {
+			log.Printf("Failed to deserialize on-call config: %v", err)
+			// Fall back to default config
+			if err := w.triggerProvider(ctx, incidentID, nil); err != nil {
 				log.Printf("Failed to trigger provider: %v", err)
 			}
-
-			// Remove from Redis
-			if err := w.redisClient.Del(ctx, incidentID).Err(); err != nil {
-				log.Printf("Failed to delete incident %s from Redis: %v", incidentID, err)
+		} else {
+			// Use stored config
+			if err := w.triggerProvider(ctx, incidentID, &storedConfig); err != nil {
+				log.Printf("Failed to trigger provider: %v", err)
 			}
+		}
+
+		// Remove from Redis
+		if err := w.redisClient.Del(ctx, incidentID).Err(); err != nil {
+			log.Printf("Failed to delete incident %s from Redis: %v", incidentID, err)
 		}
 	}()
 
