@@ -560,8 +560,8 @@ oncall:
   ### Enable overriding using query parameters
   # /api/incidents?oncall_enable=false => Set to `true` or `false` to enable or disable on-call for a specific alert
   # /api/incidents?oncall_wait_minutes=0 => Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately
-  enable: false
-  initialized_only: true  # Initialize on-call infrastructure but don't enable by default; use query param oncall_enable=true to enable for specific requests
+  initialized_only: true  # Initialize on-call feature but don't enable by default; use query param oncall_enable=true to enable for specific requests
+  enable: false # Use this to enable or disable on-call for all alerts
   wait_minutes: 3 # If you set it to 0, it means there's no need to check for an acknowledgment, and the on-call will trigger immediately
   provider: aws_incident_manager # Valid values: "aws_incident_manager" or "pagerduty"
 
@@ -591,7 +591,7 @@ redis: # Required for on-call functionality
 
 The `oncall` section includes:
 1. `enable`: A boolean to toggle on-call functionality for all incidents (default: `false`).
-2. `initialized_only`: Initialize on-call infrastructure but keep it disabled by default. When set to `true`, on-call is triggered only for requests that explicitly include `?oncall_enable=true` in the URL. This is useful for having on-call ready but not enabled for all alerts.
+2. `initialized_only`: Initialize on-call feature but keep it disabled by default. When set to `true`, on-call is triggered only for requests that explicitly include `?oncall_enable=true` in the URL. This is useful for having on-call ready but not enabled for all alerts.
 3. `wait_minutes`: Time in minutes to wait for an acknowledgment before escalating (default: `3`). Setting it to `0` triggers the on-call immediately.
 4. `provider`: Specifies which on-call provider to use ("aws_incident_manager" or "pagerduty").
 5. `aws_incident_manager`: Configuration for AWS Incident Manager when it's the selected provider, including `response_plan_arn` and `other_response_plan_arns`.
