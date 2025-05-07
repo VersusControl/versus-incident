@@ -560,7 +560,8 @@ oncall:
   ### Enable overriding using query parameters
   # /api/incidents?oncall_enable=false => Set to `true` or `false` to enable or disable on-call for a specific alert
   # /api/incidents?oncall_wait_minutes=0 => Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately
-  enable: false
+  initialized_only: true  # Initialize on-call feature but don't enable by default; use query param oncall_enable=true to enable for specific requests
+  enable: false # Use this to enable or disable on-call for all alerts
   wait_minutes: 3 # If you set it to 0, it means there's no need to check for an acknowledgment, and the on-call will trigger immediately
   provider: aws_incident_manager # Valid values: "aws_incident_manager" or "pagerduty"
 
@@ -589,15 +590,12 @@ redis: # Required for on-call functionality
 **Explanation:**
 
 The `oncall` section includes:
-1. `enable`: A boolean to toggle on-call functionality (default: `false`).
-2. `wait_minutes`: Time in minutes to wait for an acknowledgment before escalating (default: `3`). Setting it to `0` triggers the on-call immediately.
-3. `provider`: Specifies which on-call provider to use ("aws_incident_manager" or "pagerduty").
-4. `aws_incident_manager`: Configuration for AWS Incident Manager when it's the selected provider, including `response_plan_arn` and `other_response_plan_arns`.
-5. `pagerduty`: Configuration for PagerDuty when it's the selected provider, including routing keys.
-
-The `redis` section is required when `oncall.enable` is `true`. It configures the Redis instance used for state management or queuing, with settings like `host`, `port`, `password`, and `db`.
-
-For detailed information on integration, please refer to the document here: [On-call setup with Versus](https://versuscontrol.github.io/versus-incident/on-call-introduction.html).
+1. `enable`: A boolean to toggle on-call functionality for all incidents (default: `false`).
+2. `initialized_only`: Initialize on-call feature but keep it disabled by default. When set to `true`, on-call is triggered only for requests that explicitly include `?oncall_enable=true` in the URL. This is useful for having on-call ready but not enabled for all alerts.
+3. `wait_minutes`: Time in minutes to wait for an acknowledgment before escalating (default: `3`). Setting it to `0` triggers the on-call immediately.
+4. `provider`: Specifies which on-call provider to use ("aws_incident_manager" or "pagerduty").
+5. `aws_incident_manager`: Configuration for AWS Incident Manager when it's the selected provider, including `response_plan_arn` and `other_response_plan_arns`.
+6. `pagerduty`: Configuration for PagerDuty when it's the selected provider, including routing keys.
 
 ## Complete Configuration
 
@@ -684,7 +682,8 @@ oncall:
   ### Enable overriding using query parameters
   # /api/incidents?oncall_enable=false => Set to `true` or `false` to enable or disable on-call for a specific alert
   # /api/incidents?oncall_wait_minutes=0 => Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately
-  enable: false
+  initialized_only: false  # Initialize on-call feature but don't enable by default; use query param oncall_enable=true to enable for specific requests
+  enable: false # Use this to enable or disable on-call for all alerts
   wait_minutes: 3 # If you set it to 0, it means there's no need to check for an acknowledgment, and the on-call will trigger immediately
   provider: aws_incident_manager # Valid values: "aws_incident_manager" or "pagerduty"
 
@@ -791,6 +790,7 @@ These properties allow you to:
 | Variable                          | Description |
 |----------------------------------|-------------|
 | `ONCALL_ENABLE`             | Set to `true` to enable on-call functionality. **Can be overridden per request using the `oncall_enable` query parameter.** |
+| `ONCALL_INITIALIZED_ONLY`   | Set to `true` to initialize on-call feature but keep it disabled by default. When enabled, on-call is triggered only for requests that explicitly include `?oncall_enable=true` in the URL. |
 | `ONCALL_WAIT_MINUTES`       | Time in minutes to wait for acknowledgment before escalating (default: 3). **Can be overridden per request using the `oncall_wait_minutes` query parameter.** |
 | `ONCALL_PROVIDER`           | Specify the on-call provider to use ("aws_incident_manager" or "pagerduty"). |
 | `AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN` | The ARN of the AWS Incident Manager response plan to use for on-call escalations. Required if on-call provider is "aws_incident_manager". |

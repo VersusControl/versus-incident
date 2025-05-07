@@ -110,6 +110,7 @@ type AzBusConfig struct {
 
 type OnCallConfig struct {
 	Enable             bool
+	InitializedOnly    bool                     `mapstructure:"initialized_only"` // Initialize infrastructure but don't enable by default
 	WaitMinutes        int                      `mapstructure:"wait_minutes"`
 	Provider           string                   `mapstructure:"provider"` // "aws_incident_manager" or "pagerduty"
 	AwsIncidentManager AwsIncidentManagerConfig `mapstructure:"aws_incident_manager"`
