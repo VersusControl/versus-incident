@@ -14,7 +14,7 @@ import (
 
 // OnCallProvider defines the interface for on-call notification providers
 type OnCallProvider interface {
-	TriggerOnCall(ctx context.Context, incidentID string) error
+	TriggerOnCall(ctx context.Context, incidentID string, cfg *config.OnCallConfig) error
 }
 
 // Function that will be implemented in the common package to avoid circular imports
@@ -67,8 +67,8 @@ func GetOnCallWorkflow() *OnCallWorkflow {
 }
 
 // triggerProvider triggers the on-call provider
-func (w *OnCallWorkflow) triggerProvider(ctx context.Context, incidentID string) error {
-	if err := w.provider.TriggerOnCall(ctx, incidentID); err != nil {
+func (w *OnCallWorkflow) triggerProvider(ctx context.Context, incidentID string, cfg *config.OnCallConfig) error {
+	if err := w.provider.TriggerOnCall(ctx, incidentID, cfg); err != nil {
 		return err
 	}
 	return nil
@@ -88,11 +88,12 @@ func (w *OnCallWorkflow) Start(incidentID string, oc config.OnCallConfig) error 
 
 	// If WaitMinutes is 0, trigger immediately
 	if oc.WaitMinutes == 0 {
-		return w.triggerProvider(ctx, incidentID)
+		return w.triggerProvider(ctx, incidentID, &oc)
 	}
 
 	// Store incident in Redis with expiration time
 	expiration := time.Duration(oc.WaitMinutes)*time.Minute + 1*time.Minute
+
 	if err := w.redisClient.Set(ctx, incidentID, "pending", expiration).Err(); err != nil {
 		return fmt.Errorf("failed to store incident %s in Redis: %v", incidentID, err)
 	}
@@ -112,7 +113,7 @@ func (w *OnCallWorkflow) Start(incidentID string, oc config.OnCallConfig) error 
 
 		if exists == 1 {
 			// If still pending, trigger on-call
-			if err := w.triggerProvider(ctx, incidentID); err != nil {
+			if err := w.triggerProvider(ctx, incidentID, &oc); err != nil {
 				log.Printf("Failed to trigger provider: %v", err)
 			}
 

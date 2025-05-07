@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/VersusControl/versus-incident/pkg/config"
 )
 
 // PagerDuty API v2 payload structures
@@ -39,9 +41,15 @@ func NewPagerDutyProvider(routingKey string) *PagerDutyProvider {
 }
 
 // TriggerOnCall creates an incident in PagerDuty using Events API v2
-func (p *PagerDutyProvider) TriggerOnCall(ctx context.Context, incidentID string) error {
+func (p *PagerDutyProvider) TriggerOnCall(ctx context.Context, incidentID string, cfg *config.OnCallConfig) error {
+	// Use the override config if provided, otherwise use the default
+	routingKey := p.routingKey
+	if cfg != nil && cfg.PagerDuty.RoutingKey != "" {
+		routingKey = cfg.PagerDuty.RoutingKey
+	}
+
 	event := PagerDutyEvent{
-		RoutingKey:  p.routingKey,
+		RoutingKey:  routingKey,
 		EventAction: "trigger",
 		Payload: PagerDutyEventPayload{
 			Summary:  "Incident " + incidentID,

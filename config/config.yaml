@@ -80,7 +80,7 @@ oncall:
 
   aws_incident_manager: # Used when provider is "aws_incident_manager"
     response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
-    other_response_plan_arns: # Optional: Enable overriding the default response plan ARN using query parameters, eg /api/incidents?awsim_other_response_plan_arn=infra
+    other_response_plan_arns: # Optional: Enable overriding the default response plan ARN using query parameters, eg /api/incidents?awsim_other_response_plan=infra
       infra: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_INFRA}
       app: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_APP}
       db: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_DB}

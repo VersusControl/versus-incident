@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ssmincidents"
 )
@@ -24,10 +25,16 @@ func NewAwsIncidentManagerProvider(client *ssmincidents.Client, responsePlanArn 
 }
 
 // TriggerOnCall creates an incident in AWS Incident Manager
-func (p *AwsIncidentManagerProvider) TriggerOnCall(ctx context.Context, incidentID string) error {
+func (p *AwsIncidentManagerProvider) TriggerOnCall(ctx context.Context, incidentID string, cfg *config.OnCallConfig) error {
+	// Use the override config if provided, otherwise use the default
+	responsePlanArn := p.responsePlanArn
+	if cfg != nil && cfg.AwsIncidentManager.ResponsePlanArn != "" {
+		responsePlanArn = cfg.AwsIncidentManager.ResponsePlanArn
+	}
+
 	title := "Incident id " + incidentID
 	input := &ssmincidents.StartIncidentInput{
-		ResponsePlanArn: aws.String(p.responsePlanArn),
+		ResponsePlanArn: aws.String(responsePlanArn),
 		Title:           aws.String(title),
 	}
 
