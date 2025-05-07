@@ -99,7 +99,8 @@ oncall:
   ### Enable overriding using query parameters
   # /api/incidents?oncall_enable=false => Set to `true` or `false` to enable or disable on-call for a specific alert
   # /api/incidents?oncall_wait_minutes=0 => Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately
-  enable: false
+  initialized_only: true  # Initialize on-call feature but don't enable by default; use query param oncall_enable=true to enable for specific requests
+  enable: false # Use this to enable or disable on-call for all alerts
   wait_minutes: 3 # If you set it to 0, it means there's no need to check for an acknowledgment, and the on-call will trigger immediately
   provider: aws_incident_manager # Valid values: "aws_incident_manager" or "pagerduty"
 
@@ -226,7 +227,8 @@ This automatic detection provides backward compatibility while supporting newer 
 ### On-Call Configuration
 | Variable                          | Description |
 |----------------------------------|-------------|
-| `ONCALL_ENABLE`             | Set to `true` to enable on-call functionality. **Can be overridden per request using the `oncall_enable` query parameter.** |
+| `ONCALL_ENABLE`             | Set to `true` to enable on-call functionality for all incidents by default. **Can be overridden per request using the `oncall_enable` query parameter.** |
+| `ONCALL_INITIALIZED_ONLY`   | Set to `true` to initialize on-call feature but keep it disabled by default. When set to `true`, on-call is triggered only for requests that explicitly include `?oncall_enable=true` in the URL. |
 | `ONCALL_WAIT_MINUTES`       | Time in minutes to wait for acknowledgment before escalating (default: 3). **Can be overridden per request using the `oncall_wait_minutes` query parameter.** |
 | `ONCALL_PROVIDER`           | Specify the on-call provider to use ("aws_incident_manager" or "pagerduty"). |
 | `AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN` | The ARN of the AWS Incident Manager response plan to use for on-call escalations. Required if on-call provider is "aws_incident_manager". |
@@ -237,6 +239,55 @@ This automatic detection provides backward compatibility while supporting newer 
 | `PAGERDUTY_OTHER_ROUTING_KEY_INFRA` | (Optional) PagerDuty routing key for infrastructure team. **Can be selected per request using the `pagerduty_other_routing_key=infra` query parameter.** |
 | `PAGERDUTY_OTHER_ROUTING_KEY_APP`   | (Optional) PagerDuty routing key for application team. **Can be selected per request using the `pagerduty_other_routing_key=app` query parameter.** |
 | `PAGERDUTY_OTHER_ROUTING_KEY_DB`    | (Optional) PagerDuty routing key for database team. **Can be selected per request using the `pagerduty_other_routing_key=db` query parameter.** |
+
+#### Enabling On-Call for Specific Incidents with initialized_only
+
+When you have `initialized_only: true` in your configuration (rather than `enable: true`), on-call is only triggered for incidents that explicitly request it. This is useful when:
+
+1. You want the on-call infrastructure ready but not active for all alerts
+2. You need to selectively enable on-call only for high-priority services or incidents
+3. You want to let your monitoring system decide which alerts should trigger on-call
+
+Example configuration:
+
+```yaml
+oncall:
+  enable: false
+  initialized_only: true  # Infrastructure ready but not active by default
+  wait_minutes: 3
+  provider: aws_incident_manager
+  # ... provider configuration ...
+```
+
+With this configuration, on-call is only triggered when requested via query parameter:
+
+```bash
+# This alert will send notifications but NOT trigger on-call escalation
+curl -X POST "http://localhost:3000/api/incidents" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[WARNING] Non-critical database latency increase.",
+    "ServiceName": "database-monitoring",
+    "UserID": "U12345"
+  }'
+
+# This alert WILL trigger on-call escalation because of the query parameter
+curl -X POST "http://localhost:3000/api/incidents?oncall_enable=true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[CRITICAL] Production database is down.",
+    "ServiceName": "core-database",
+    "UserID": "U12345"
+  }'
+```
+
+**Understanding On-Call Modes:**
+
+| Mode | Configuration | Behavior |
+|------|--------------|----------|
+| Disabled | `enable: false`<br>`initialized_only: false` | On-call infrastructure is not initialized. No on-call functionality is available. |
+| Always Enabled | `enable: true` | On-call is active for all incidents by default. Can be disabled per request with `?oncall_enable=false`. |
+| Opt-In Only | `enable: false`<br>`initialized_only: true` | On-call infrastructure is initialized but inactive by default. Must be explicitly enabled per request with `?oncall_enable=true`. |
 
 ### Redis Configuration
 | Variable          | Description |

@@ -60,7 +60,7 @@ func main() {
 		}
 	}
 
-	if cfg.OnCall.Enable {
+	if cfg.OnCall.Enable || cfg.OnCall.InitializedOnly {
 		redisOptions := handlerRedisOptions(cfg.Redis)
 
 		// Initialize Redis client

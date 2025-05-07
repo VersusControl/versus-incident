@@ -152,6 +152,7 @@ func cloneAzBusConfig(src AzBusConfig) AzBusConfig {
 func cloneOnCallConfig(src OnCallConfig) OnCallConfig {
 	return OnCallConfig{
 		Enable:             src.Enable,
+		InitializedOnly:    src.InitializedOnly,
 		WaitMinutes:        src.WaitMinutes,
 		Provider:           src.Provider,
 		AwsIncidentManager: cloneAwsIncidentManagerConfig(src.AwsIncidentManager),
