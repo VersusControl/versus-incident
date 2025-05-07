@@ -236,7 +236,7 @@ This automatic detection provides backward compatibility while supporting newer 
 | `AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_DEV` | (Optional) AWS Incident Manager response plan ARN for development environment. **Can be selected per request using the `awsim_other_response_plan=dev` query parameter.** |
 | `AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_STAGING` | (Optional) AWS Incident Manager response plan ARN for staging environment. **Can be selected per request using the `awsim_other_response_plan=staging` query parameter.** |
 | `PAGERDUTY_ROUTING_KEY`     | Integration/Routing key for PagerDuty Events API v2. Required if on-call provider is "pagerduty". |
-| `PAGERDUTY_OTHER_ROUTING_KEY_INFRA` | (Optional) PagerDuty routing key for infrastructure team. **Can be selected per request using the `pagerduty_other_routing_key=infra` query parameter.** |
+| `PAGERDUTY_OTHER_ROUTING_KEY_INFRA` | (Optional) PagerDuty routing key for feature team. **Can be selected per request using the `pagerduty_other_routing_key=infra` query parameter.** |
 | `PAGERDUTY_OTHER_ROUTING_KEY_APP`   | (Optional) PagerDuty routing key for application team. **Can be selected per request using the `pagerduty_other_routing_key=app` query parameter.** |
 | `PAGERDUTY_OTHER_ROUTING_KEY_DB`    | (Optional) PagerDuty routing key for database team. **Can be selected per request using the `pagerduty_other_routing_key=db` query parameter.** |
 
@@ -244,7 +244,7 @@ This automatic detection provides backward compatibility while supporting newer 
 
 When you have `initialized_only: true` in your configuration (rather than `enable: true`), on-call is only triggered for incidents that explicitly request it. This is useful when:
 
-1. You want the on-call infrastructure ready but not active for all alerts
+1. You want the on-call feature ready but not active for all alerts
 2. You need to selectively enable on-call only for high-priority services or incidents
 3. You want to let your monitoring system decide which alerts should trigger on-call
 
@@ -253,7 +253,7 @@ Example configuration:
 ```yaml
 oncall:
   enable: false
-  initialized_only: true  # Infrastructure ready but not active by default
+  initialized_only: true  # feature ready but not active by default
   wait_minutes: 3
   provider: aws_incident_manager
   # ... provider configuration ...
@@ -285,9 +285,9 @@ curl -X POST "http://localhost:3000/api/incidents?oncall_enable=true" \
 
 | Mode | Configuration | Behavior |
 |------|--------------|----------|
-| Disabled | `enable: false`<br>`initialized_only: false` | On-call infrastructure is not initialized. No on-call functionality is available. |
+| Disabled | `enable: false`<br>`initialized_only: false` | On-call feature is not initialized. No on-call functionality is available. |
 | Always Enabled | `enable: true` | On-call is active for all incidents by default. Can be disabled per request with `?oncall_enable=false`. |
-| Opt-In Only | `enable: false`<br>`initialized_only: true` | On-call infrastructure is initialized but inactive by default. Must be explicitly enabled per request with `?oncall_enable=true`. |
+| Opt-In Only | `enable: false`<br>`initialized_only: true` | On-call feature is initialized but inactive by default. Must be explicitly enabled per request with `?oncall_enable=true`. |
 
 ### Redis Configuration
 | Variable          | Description |

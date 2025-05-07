@@ -21,8 +21,7 @@ An incident management tool that supports alerting across multiple channels with
 - [Configuration](#complete-configuration)
 - [Environment Variables](#environment-variables)
 - [Dynamic Configuration with Query Parameters](#dynamic-configuration-with-query-parameters)
-- [Template Syntax](https://versuscontrol.github.io/versus-incident/template-syntax.html)
-- [Template Example](https://versuscontrol.github.io/versus-incident/slack-template-aws-sns.html)
+- [Template Syntax](https://versuscontrol.github.io/versus-incident/userguide/template-syntax.html)
 - [Migration Guides](#migration-guides)
   - [Migrating to v1.2.0](#migrating-to-v120)
   - [Migrating to v1.3.0](#migrating-to-v130)
@@ -597,6 +596,10 @@ The `oncall` section includes:
 5. `aws_incident_manager`: Configuration for AWS Incident Manager when it's the selected provider, including `response_plan_arn` and `other_response_plan_arns`.
 6. `pagerduty`: Configuration for PagerDuty when it's the selected provider, including routing keys.
 
+The redis section is required when `oncall.enable` or `oncall.initialized_only` is true. It configures the Redis instance used for state management or queuing, with settings like host, port, password, and db.
+
+For detailed information on integration, please refer to the document here: [On-call setup with Versus](https://versuscontrol.github.io/versus-incident/oncall/on-call-introduction.html).
+
 ## Complete Configuration
 
 A sample configuration file is located at `config/config.yaml`:
@@ -801,6 +804,12 @@ These properties allow you to:
 | `PAGERDUTY_OTHER_ROUTING_KEY_INFRA` | (Optional) PagerDuty routing key for infrastructure team. **Can be selected per request using the `pagerduty_other_routing_key=infra` query parameter.** |
 | `PAGERDUTY_OTHER_ROUTING_KEY_APP`   | (Optional) PagerDuty routing key for application team. **Can be selected per request using the `pagerduty_other_routing_key=app` query parameter.** |
 | `PAGERDUTY_OTHER_ROUTING_KEY_DB`    | (Optional) PagerDuty routing key for database team. **Can be selected per request using the `pagerduty_other_routing_key=db` query parameter.** |
+
+When you have `initialized_only: true` in your configuration (rather than `enable: true`), on-call is only triggered for incidents that explicitly request it. This is useful when:
+
+1. You want the on-call feature ready but not active for all alerts
+2. You need to selectively enable on-call only for high-priority services or incidents
+3. You want to let your monitoring system decide which alerts should trigger on-call
 
 ### Redis Configuration
 | Variable          | Description |
@@ -1038,13 +1047,13 @@ This will:
 
 Version 1.2.0 introduces enhanced Microsoft Teams integration using Power Automate.
 
-For complete migration instructions, please see our [detailed migration guide](https://versuscontrol.github.io/versus-incident/migration-v1.2.0.html).
+For complete migration instructions, please see our [detailed migration guide](https://versuscontrol.github.io/versus-incident/migration/migration-v1.2.0.html).
 
 ### Migrating to v1.3.0
 
 Version 1.3.0 introduces a new integration with PagerDuty.
 
-For complete migration instructions, please see our [detailed migration guide](https://versuscontrol.github.io/versus-incident/migration-v1.3.0.html).
+For complete migration instructions, please see our [detailed migration guide](https://versuscontrol.github.io/versus-incident/migration/migration-v1.3.0.html).
 
 ## Roadmap
 
