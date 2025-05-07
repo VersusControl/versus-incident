@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -95,13 +94,7 @@ func (w *OnCallWorkflow) Start(incidentID string, oc config.OnCallConfig) error 
 	// Store incident in Redis with expiration time
 	expiration := time.Duration(oc.WaitMinutes)*time.Minute + 1*time.Minute
 
-	// We need to store the full OnCallConfig to use it when triggering
-	ocBytes, err := json.Marshal(oc)
-	if err != nil {
-		return fmt.Errorf("failed to serialize on-call config: %v", err)
-	}
-
-	if err := w.redisClient.Set(ctx, incidentID, string(ocBytes), expiration).Err(); err != nil {
+	if err := w.redisClient.Set(ctx, incidentID, "pending", expiration).Err(); err != nil {
 		return fmt.Errorf("failed to store incident %s in Redis: %v", incidentID, err)
 	}
 
@@ -112,32 +105,22 @@ func (w *OnCallWorkflow) Start(incidentID string, oc config.OnCallConfig) error 
 		<-time.After(time.Duration(oc.WaitMinutes) * time.Minute)
 
 		// Check if incident is still pending
-		value, err := w.redisClient.Get(ctx, incidentID).Result()
+		exists, err := w.redisClient.Exists(ctx, incidentID).Result()
 		if err != nil {
-			if err != redis.Nil {
-				log.Printf("Failed to check incident %s in Redis: %v", incidentID, err)
-			}
+			log.Printf("Failed to check incident %s in Redis: %v", incidentID, err)
 			return
 		}
 
-		// If still exists, trigger on-call with stored config
-		var storedConfig config.OnCallConfig
-		if err := json.Unmarshal([]byte(value), &storedConfig); err != nil {
-			log.Printf("Failed to deserialize on-call config: %v", err)
-			// Fall back to default config
-			if err := w.triggerProvider(ctx, incidentID, nil); err != nil {
+		if exists == 1 {
+			// If still pending, trigger on-call
+			if err := w.triggerProvider(ctx, incidentID, &oc); err != nil {
 				log.Printf("Failed to trigger provider: %v", err)
 			}
-		} else {
-			// Use stored config
-			if err := w.triggerProvider(ctx, incidentID, &storedConfig); err != nil {
-				log.Printf("Failed to trigger provider: %v", err)
-			}
-		}
 
-		// Remove from Redis
-		if err := w.redisClient.Del(ctx, incidentID).Err(); err != nil {
-			log.Printf("Failed to delete incident %s from Redis: %v", incidentID, err)
+			// Remove from Redis
+			if err := w.redisClient.Del(ctx, incidentID).Err(); err != nil {
+				log.Printf("Failed to delete incident %s from Redis: %v", incidentID, err)
+			}
 		}
 	}()
 
