@@ -1,162 +1,42 @@
-name: Publish Helm Chart
+name: Release Helm Chart
 
 on:
   push:
     branches:
-      - "main"
+      - main
     paths:
-      - 'helm/**'
+      - 'helm/versus-incident/**'
       - '.github/workflows/helm-publish.yml'
-    tags:
-      - 'v*'
-  workflow_dispatch:
 
 jobs:
-  publish-helm-chart:
+  release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write  # Updated to 'write' to allow creating/updating gh-pages branch
-      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      - name: Set up Helm
-        uses: azure/setup-helm@v3
-        with:
-          version: 'latest'
-
       - name: Configure Git
         run: |
           git config user.name "$GITHUB_ACTOR"
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
 
-      # Set up chart-releaser
-      - name: Set up chart-releaser
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: v3.12.0
+
+      - name: Add Helm Dependencies
+        run: |
+          cd helm/versus-incident
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm dependency update
+
+      - name: Run chart-releaser
         uses: helm/chart-releaser-action@v1.5.0
         with:
-          install_only: true
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v2
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup version
-        id: setup-version
-        run: |
-          if [[ $GITHUB_REF == refs/tags/v* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/v}
-            echo "Using tag version: $VERSION"
-          else
-            # Read version from VERSION file instead of Chart.yaml
-            VERSION=$(cat helm/versus-incident/VERSION)
-            echo "Using version from VERSION file: $VERSION"
-          fi
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          
-          # Extract and set chart path for reusability
-          CHART_PATH="helm/versus-incident"
-          echo "CHART_PATH=$CHART_PATH" >> $GITHUB_ENV
-
-      - name: Update Chart Version
-        if: github.ref_type == 'tag'
-        run: |
-          VERSION=${{ steps.setup-version.outputs.version }}
-          # Update chart version to match the tag version
-          sed -i "s/version: .*/version: ${VERSION}/" $CHART_PATH/Chart.yaml
-          # Update appVersion to match the tag version
-          sed -i "s/appVersion: .*/appVersion: \"${VERSION}\"/" $CHART_PATH/Chart.yaml
-          cat $CHART_PATH/Chart.yaml
-
-      - name: Package Helm Chart
-        run: |
-          mkdir -p .cr-release-packages
-          helm dependency update $CHART_PATH
-          helm package $CHART_PATH --destination .cr-release-packages
-
-      # Check if gh-pages branch exists, create if it doesn't
-      - name: Initialize gh-pages branch if needed
-        run: |
-          if ! git ls-remote --heads origin gh-pages | grep gh-pages > /dev/null; then
-            echo "Creating gh-pages branch"
-            git checkout --orphan gh-pages
-            git rm -rf .
-            echo "# Helm Charts Repository" > README.md
-            git add README.md
-            git commit -m "Initial gh-pages commit"
-            git push origin gh-pages
-            git checkout -
-          fi
-
-      - name: Upload Chart to GitHub Releases
-        if: github.ref_type == 'tag'
-        run: |
-          cr upload \
-            --owner ${{ github.repository_owner }} \
-            --git-repo ${{ github.event.repository.name }} \
-            --token ${{ secrets.GITHUB_TOKEN }} \
-            --package-path .cr-release-packages
-
-      # Create or update the Helm repository index and push to gh-pages
-      - name: Update and push Helm repository index
-        run: |
-          # Create temporary directory for gh-pages branch
-          mkdir -p tmp-helm-repo
-          
-          # Checkout gh-pages branch to temporary directory
-          git clone --single-branch --branch gh-pages https://${GITHUB_ACTOR}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git tmp-helm-repo
-          
-          # Update or create index.yaml
-          if [ -f "tmp-helm-repo/index.yaml" ]; then
-            cp tmp-helm-repo/index.yaml .
-            cr index \
-              --owner ${{ github.repository_owner }} \
-              --git-repo ${{ github.event.repository.name }} \
-              --index-path index.yaml \
-              --token ${{ secrets.GITHUB_TOKEN }} \
-              --package-path .cr-release-packages \
-              --merge
-          else
-            cr index \
-              --owner ${{ github.repository_owner }} \
-              --git-repo ${{ github.event.repository.name }} \
-              --index-path index.yaml \
-              --token ${{ secrets.GITHUB_TOKEN }} \
-              --package-path .cr-release-packages
-          fi
-          
-          # Copy the updated index and chart packages to gh-pages directory
-          cp index.yaml tmp-helm-repo/
-          mkdir -p tmp-helm-repo/charts
-          cp .cr-release-packages/*.tgz tmp-helm-repo/charts/
-          
-          # Commit and push changes to gh-pages branch
-          cd tmp-helm-repo
-          git add .
-          git commit -m "Update Helm repository" || echo "No changes to commit"
-          git push
-
-      - name: Push Helm Chart to GHCR
+          charts_dir: helm
+          config: .github/cr-config.yaml
         env:
-          OWNER: ${{ github.repository_owner }}
-          CHART_NAME: versus-incident
-          VERSION: ${{ steps.setup-version.outputs.version }}
-        run: |
-          echo "Pushing Helm chart to GHCR..."
-          # OCI registry format for GHCR
-          HELM_EXPERIMENTAL_OCI=1 helm push .cr-release-packages/${CHART_NAME}-*.tgz oci://ghcr.io/${OWNER}/charts/${CHART_NAME}
-          
-      - name: Summary
-        run: |
-          echo "## Helm Chart Publishing Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- Chart Name: versus-incident" >> $GITHUB_STEP_SUMMARY
-          echo "- Version: ${{ env.VERSION }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Published to GitHub Packages: ghcr.io/${{ github.repository_owner }}/charts/versus-incident:${{ env.VERSION }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Published to GitHub Pages Helm Repository: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- To add this repo: helm repo add versus-incident https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}" >> $GITHUB_STEP_SUMMARY
+          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
