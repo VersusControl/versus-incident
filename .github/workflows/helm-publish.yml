@@ -1,4 +1,4 @@
-name: Release Helm Chart
+name: Release Helm Chart as OCI
 
 on:
   push:
@@ -7,13 +7,11 @@ on:
     paths:
       - 'helm/versus-incident/**'
       - '.github/workflows/helm-publish.yml'
-      - '.github/cr-config.yaml'
 
 # Add explicit permissions for the workflow
 permissions:
-  contents: write    # Needed for creating releases
-  pages: write       # Needed for gh-pages
-  id-token: write    # Needed for GitHub Pages deployment
+  contents: read
+  packages: write    # Needed for publishing to GHCR
 
 jobs:
   release:
@@ -21,18 +19,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Configure Git
-        run: |
-          git config user.name "$GITHUB_ACTOR"
-          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
 
       - name: Install Helm
         uses: azure/setup-helm@v3
         with:
           version: v3.12.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Add Helm Dependencies
         run: |
@@ -40,10 +38,19 @@ jobs:
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm dependency update
 
-      - name: Run chart-releaser
-        uses: helm/chart-releaser-action@v1.5.0
-        with:
-          charts_dir: helm
-          config: .github/cr-config.yaml
-        env:
-          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: Set version variable
+        id: version
+        run: |
+          VERSION=$(cat helm/versus-incident/VERSION)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          
+      - name: Package and Push Chart to OCI Registry
+        run: |
+          cd helm/versus-incident
+          helm package .
+          helm push versus-incident-${{ env.VERSION }}.tgz oci://ghcr.io/${{ github.repository }}/charts
+          
+      - name: Display installation instructions
+        run: |
+          echo "Chart published successfully to OCI registry."
+          echo "Users can install with: helm install versus-incident oci://ghcr.io/${{ github.repository }}/charts/versus-incident --version ${{ env.VERSION }}
