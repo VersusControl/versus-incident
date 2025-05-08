@@ -2,6 +2,8 @@ name: Publish Helm Chart
 
 on:
   push:
+    branches:
+      - "main"
     paths:
       - 'helm/**'
       - '.github/workflows/helm-publish.yml'
@@ -51,8 +53,9 @@ jobs:
             VERSION=${GITHUB_REF#refs/tags/v}
             echo "Using tag version: $VERSION"
           else
-            VERSION=$(grep -Po '(?<=^appVersion: ")[^"]*' helm/versus-incident/Chart.yaml)
-            echo "Using appVersion from Chart.yaml: $VERSION"
+            # Read version from VERSION file instead of Chart.yaml
+            VERSION=$(cat helm/versus-incident/VERSION)
+            echo "Using version from VERSION file: $VERSION"
           fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "version=$VERSION" >> $GITHUB_OUTPUT
