@@ -49,9 +49,18 @@ jobs:
         run: |
           cd helm/versus-incident
           helm package .
-          helm push versus-incident-${{ env.VERSION }}.tgz oci://ghcr.io/${{ github.repository }}/charts
+          # Try to push the chart, and create the repository if it doesn't exist
+          if ! helm push versus-incident-${{ env.VERSION }}.tgz oci://ghcr.io/versuscontrol/versus-incident/charts; then
+            echo "Initial push failed. The repository might not exist yet. Creating it now..."
+            # Create parent directories if needed
+            helm registry login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+            # Try pushing again
+            helm push versus-incident-${{ env.VERSION }}.tgz oci://ghcr.io/versuscontrol/versus-incident/charts
+          fi
+          # Verify the push was successful
+          echo "Verifying chart was pushed successfully..."
+          helm show chart oci://ghcr.io/versuscontrol/versus-incident/charts/versus-incident --version ${{ env.VERSION }}
           
       - name: Display installation instructions
         run: |
           echo "Chart published successfully to OCI registry."
-          echo "Users can install with: helm install versus-incident oci://ghcr.io/${{ github.repository }}/charts/versus-incident --version ${{ env.VERSION }}
