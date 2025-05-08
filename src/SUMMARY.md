@@ -5,6 +5,7 @@
 - [Getting Started](./userguide/getting-started.md)
 - [Template Syntax](./userguide/template-syntax.md)
 - [Configuration](./userguide/configuration.md)
+- [Helm Chart](./userguide/helm.md)
 - [Advanced Template Tips](./userguide/advanced-template-tips.md)
 
 # How to Send Alert to Versus Incident
