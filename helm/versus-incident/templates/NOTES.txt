@@ -16,7 +16,11 @@
 {{- end }}
 
 2. Versus Incident has been deployed! You can send incidents to:
+{{- if .Values.config.publicHost }}
+   {{ .Values.config.publicHost }}/api/incidents
+{{- else }}
    http://<service-address>:{{ .Values.service.port }}/api/incidents
+{{- end }}
 
 {{- if .Values.alert.slack.enable }}
 3. Slack notifications are enabled.
