@@ -5,6 +5,6 @@ owner: versuscontrol
 git-repo: versus-incident
 package-path: .cr-release-packages
 index-path: .cr-index
-pages-branch: main
+pages-branch: index
 charts-repo: https://versuscontrol.github.io/versus-incident
 skip-existing: true

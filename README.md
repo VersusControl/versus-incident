@@ -16,6 +16,7 @@ An incident management tool that supports alerting across multiple channels with
   - [Docker](#docker)
   - [Understanding Custom Templates](#understanding-custom-templates-with-monitoring-webhooks)
   - [Kubernetes](#kubernetes)
+  - [Helm Chart](#helm-chart)
 - [SNS Usage](#sns-usage)
 - [On-call](#on-call)
 - [Configuration](#complete-configuration)
