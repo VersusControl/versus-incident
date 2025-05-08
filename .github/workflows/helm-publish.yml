@@ -7,6 +7,7 @@ on:
     paths:
       - 'helm/versus-incident/**'
       - '.github/workflows/helm-publish.yml'
+      - '.github/cr-config.yaml'
 
 # Add explicit permissions for the workflow
 permissions:
