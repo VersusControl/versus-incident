@@ -100,14 +100,14 @@ jobs:
         run: |
           echo "Pushing Helm chart to GHCR..."
           # OCI registry format for GHCR
-          HELM_EXPERIMENTAL_OCI=1 helm push .cr-release-packages/${CHART_NAME}-*.tgz oci://ghcr.io/${OWNER}/helm
+          HELM_EXPERIMENTAL_OCI=1 helm push .cr-release-packages/${CHART_NAME}-*.tgz oci://ghcr.io/${OWNER}/charts/${CHART_NAME}
           
       - name: Summary
         run: |
           echo "## Helm Chart Publishing Summary" >> $GITHUB_STEP_SUMMARY
           echo "- Chart Name: versus-incident" >> $GITHUB_STEP_SUMMARY
           echo "- Version: ${{ env.VERSION }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Published to GitHub Packages: ghcr.io/${{ github.repository_owner }}/helm/versus-incident:${{ env.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Published to GitHub Packages: ghcr.io/${{ github.repository_owner }}/charts/versus-incident:${{ env.VERSION }}" >> $GITHUB_STEP_SUMMARY
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             echo "- Published to GitHub Pages Helm Repository" >> $GITHUB_STEP_SUMMARY
           fi
