@@ -10,34 +10,27 @@ This guide explains how to deploy Versus Incident using Helm, a package manager 
 
 ## Installing the Chart
 
-You can install the Versus Incident Helm chart using the GitHub repository:
+You can install the Versus Incident Helm chart using OCI registry:
 
 ```bash
-# Add the Versus Incident Helm repository
-helm repo add versus-incident https://versuscontrol.github.io/versus-incident
-
-# Update Helm repositories
-helm repo update
-
-# Install the chart with the release name 'versus-incident'
-helm install versus-incident versus-incident/versus-incident
+helm install versus-incident oci://ghcr.io/versuscontrol/versus-incident/charts/versus-incident
 ```
 
 ### Install with Custom Values
 
 ```bash
 # Install with custom configuration from a values file
-helm install versus-incident versus-incident/versus-incident -f values.yaml
+helm install versus-incident oci://ghcr.io/versuscontrol/versus-incident/charts/versus-incident -f values.yaml
 ```
 
 ### Upgrading an Existing Installation
 
 ```bash
 # Upgrade an existing installation with the latest version
-helm upgrade versus-incident versus-incident/versus-incident
+helm upgrade versus-incident oci://ghcr.io/versuscontrol/versus-incident/charts/versus-incident
 
 # Upgrade with custom values
-helm upgrade versus-incident versus-incident/versus-incident -f values.yaml
+helm upgrade versus-incident oci://ghcr.io/versuscontrol/versus-incident/charts/versus-incident -f values.yaml
 ```
 
 ## Configuration
