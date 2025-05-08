@@ -1,0 +1,10 @@
+# Chart releaser configuration
+# See: https://github.com/helm/chart-releaser
+
+owner: versuscontrol
+git-repo: versus-incident
+package-path: .cr-release-packages
+index-path: .cr-index
+pages-branch: main
+charts-repo: https://versuscontrol.github.io/versus-incident
+skip-existing: true
