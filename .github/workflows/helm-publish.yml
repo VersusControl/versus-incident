@@ -8,6 +8,12 @@ on:
       - 'helm/versus-incident/**'
       - '.github/workflows/helm-publish.yml'
 
+# Add explicit permissions for the workflow
+permissions:
+  contents: write    # Needed for creating releases
+  pages: write       # Needed for gh-pages
+  id-token: write    # Needed for GitHub Pages deployment
+
 jobs:
   release:
     runs-on: ubuntu-latest
