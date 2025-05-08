@@ -15,7 +15,7 @@ jobs:
   publish-helm-chart:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write  # Updated to 'write' to allow creating/updating gh-pages branch
       packages: write
     steps:
       - name: Checkout
@@ -28,6 +28,12 @@ jobs:
         with:
           version: 'latest'
 
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      # Set up chart-releaser
       - name: Set up chart-releaser
         uses: helm/chart-releaser-action@v1.5.0
         with:
@@ -73,6 +79,20 @@ jobs:
           helm dependency update $CHART_PATH
           helm package $CHART_PATH --destination .cr-release-packages
 
+      # Check if gh-pages branch exists, create if it doesn't
+      - name: Initialize gh-pages branch if needed
+        run: |
+          if ! git ls-remote --heads origin gh-pages | grep gh-pages > /dev/null; then
+            echo "Creating gh-pages branch"
+            git checkout --orphan gh-pages
+            git rm -rf .
+            echo "# Helm Charts Repository" > README.md
+            git add README.md
+            git commit -m "Initial gh-pages commit"
+            git push origin gh-pages
+            git checkout -
+          fi
+
       - name: Upload Chart to GitHub Releases
         if: github.ref_type == 'tag'
         run: |
@@ -82,15 +102,44 @@ jobs:
             --token ${{ secrets.GITHUB_TOKEN }} \
             --package-path .cr-release-packages
 
-      - name: Push chart to GitHub Pages
-        if: github.ref_type == 'tag'
+      # Create or update the Helm repository index and push to gh-pages
+      - name: Update and push Helm repository index
         run: |
-          cr index \
-            --owner ${{ github.repository_owner }} \
-            --git-repo ${{ github.event.repository.name }} \
-            --index-path index.yaml \
-            --token ${{ secrets.GITHUB_TOKEN }} \
-            --package-path .cr-release-packages
+          # Create temporary directory for gh-pages branch
+          mkdir -p tmp-helm-repo
+          
+          # Checkout gh-pages branch to temporary directory
+          git clone --single-branch --branch gh-pages https://${GITHUB_ACTOR}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git tmp-helm-repo
+          
+          # Update or create index.yaml
+          if [ -f "tmp-helm-repo/index.yaml" ]; then
+            cp tmp-helm-repo/index.yaml .
+            cr index \
+              --owner ${{ github.repository_owner }} \
+              --git-repo ${{ github.event.repository.name }} \
+              --index-path index.yaml \
+              --token ${{ secrets.GITHUB_TOKEN }} \
+              --package-path .cr-release-packages \
+              --merge
+          else
+            cr index \
+              --owner ${{ github.repository_owner }} \
+              --git-repo ${{ github.event.repository.name }} \
+              --index-path index.yaml \
+              --token ${{ secrets.GITHUB_TOKEN }} \
+              --package-path .cr-release-packages
+          fi
+          
+          # Copy the updated index and chart packages to gh-pages directory
+          cp index.yaml tmp-helm-repo/
+          mkdir -p tmp-helm-repo/charts
+          cp .cr-release-packages/*.tgz tmp-helm-repo/charts/
+          
+          # Commit and push changes to gh-pages branch
+          cd tmp-helm-repo
+          git add .
+          git commit -m "Update Helm repository" || echo "No changes to commit"
+          git push
 
       - name: Push Helm Chart to GHCR
         env:
@@ -108,6 +157,5 @@ jobs:
           echo "- Chart Name: versus-incident" >> $GITHUB_STEP_SUMMARY
           echo "- Version: ${{ env.VERSION }}" >> $GITHUB_STEP_SUMMARY
           echo "- Published to GitHub Packages: ghcr.io/${{ github.repository_owner }}/charts/versus-incident:${{ env.VERSION }}" >> $GITHUB_STEP_SUMMARY
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            echo "- Published to GitHub Pages Helm Repository" >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "- Published to GitHub Pages Helm Repository: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- To add this repo: helm repo add versus-incident https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}" >> $GITHUB_STEP_SUMMARY
