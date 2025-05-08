@@ -1,0 +1,195 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "versus-incident.fullname" . }}-config
+  labels:
+    {{- include "versus-incident.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    name: {{ .Values.config.name }}
+    host: {{ .Values.config.host }}
+    port: {{ .Values.config.port }}
+    {{- if .Values.config.publicHost }}
+    public_host: {{ .Values.config.publicHost }}
+    {{- end }}
+
+    alert:
+      debug_body: {{ .Values.alert.debugBody }}
+
+      slack:
+        enable: {{ .Values.alert.slack.enable }}
+        token: ${SLACK_TOKEN}
+        channel_id: ${SLACK_CHANNEL_ID}
+        template_path: "/app/config/slack_message.tmpl"
+        {{- if .Values.alert.slack.messageProperties }}
+        message_properties:
+          {{- if .Values.alert.slack.messageProperties.buttonText }}
+          button_text: "{{ .Values.alert.slack.messageProperties.buttonText }}"
+          {{- end }}
+          {{- if .Values.alert.slack.messageProperties.buttonStyle }}
+          button_style: "{{ .Values.alert.slack.messageProperties.buttonStyle }}"
+          {{- end }}
+          {{- if .Values.alert.slack.messageProperties.disableButton }}
+          disable_button: {{ .Values.alert.slack.messageProperties.disableButton }}
+          {{- end }}
+        {{- end }}
+
+      telegram:
+        enable: {{ .Values.alert.telegram.enable }}
+        bot_token: ${TELEGRAM_BOT_TOKEN}
+        chat_id: ${TELEGRAM_CHAT_ID}
+        template_path: "/app/config/telegram_message.tmpl"
+
+      email:
+        enable: {{ .Values.alert.email.enable }}
+        smtp_host: ${SMTP_HOST}
+        smtp_port: ${SMTP_PORT}
+        username: ${SMTP_USERNAME}
+        password: ${SMTP_PASSWORD}
+        to: ${EMAIL_TO}
+        subject: ${EMAIL_SUBJECT}
+        template_path: "/app/config/email_message.tmpl"
+
+      msteams:
+        enable: {{ .Values.alert.msteams.enable }}
+        power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL}
+        template_path: "/app/config/msteams_message.tmpl"
+        {{- if .Values.alert.msteams.otherPowerUrls }}
+        other_power_urls:
+          {{- range $key, $val := .Values.alert.msteams.otherPowerUrls }}
+          {{ $key }}: ${MSTEAMS_OTHER_POWER_URL_{{ $key | upper }}}
+          {{- end }}
+        {{- end }}
+
+      lark:
+        enable: {{ .Values.alert.lark.enable }}
+        webhook_url: ${LARK_WEBHOOK_URL}
+        template_path: "/app/config/lark_message.tmpl"
+        {{- if .Values.alert.lark.otherWebhookUrls }}
+        other_webhook_urls:
+          {{- range $key, $val := .Values.alert.lark.otherWebhookUrls }}
+          {{ $key }}: ${LARK_OTHER_WEBHOOK_URL_{{ $key | upper }}}
+          {{- end }}
+        {{- end }}
+
+      sns:
+        enable: {{ .Values.alert.sns.enable }}
+        {{- if .Values.alert.sns.httpsEndpointSubscriptionPath }}
+        https_endpoint_subscription_path: {{ .Values.alert.sns.httpsEndpointSubscriptionPath }}
+        {{- end }}
+        {{- if .Values.alert.sns.httpsEndpointSubscription }}
+        https_endpoint_subscription: ${SNS_HTTPS_ENDPOINT_SUBSCRIPTION}
+        {{- end }}
+        {{- if .Values.alert.sns.topicArn }}
+        topic_arn: ${SNS_TOPIC_ARN}
+        {{- end }}
+
+      sqs:
+        enable: {{ .Values.alert.sqs.enable }}
+        {{- if .Values.alert.sqs.queueUrl }}
+        queue_url: ${SQS_QUEUE_URL}
+        {{- end }}
+
+    {{- if or .Values.oncall.enable .Values.oncall.initializedOnly }}
+    oncall:
+      initialized_only: {{ .Values.oncall.initializedOnly }}
+      enable: {{ .Values.oncall.enable }}
+      wait_minutes: {{ .Values.oncall.waitMinutes }}
+      provider: {{ .Values.oncall.provider }}
+      
+      {{- if eq .Values.oncall.provider "aws_incident_manager" }}
+      aws_incident_manager:
+        response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
+        {{- if .Values.oncall.awsIncidentManager.otherResponsePlanArns }}
+        other_response_plan_arns:
+          {{- range $key, $val := .Values.oncall.awsIncidentManager.otherResponsePlanArns }}
+          {{ $key }}: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_{{ $key | upper }}}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      
+      {{- if eq .Values.oncall.provider "pagerduty" }}
+      pagerduty:
+        routing_key: ${PAGERDUTY_ROUTING_KEY}
+        {{- if .Values.oncall.pagerduty.otherRoutingKeys }}
+        other_routing_keys:
+          {{- range $key, $val := .Values.oncall.pagerduty.otherRoutingKeys }}
+          {{ $key }}: ${PAGERDUTY_OTHER_ROUTING_KEY_{{ $key | upper }}}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+
+    # Redis Configuration Section - required for on-call functionality
+    redis:
+      {{- if .Values.redis.enabled }}
+      # Configuration for built-in Redis
+      insecure_skip_verify: false
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT}
+      password: ${REDIS_PASSWORD}
+      db: 0
+      {{- else }}
+      # Configuration for external Redis
+      insecure_skip_verify: {{ .Values.externalRedis.insecureSkipVerify }}
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT}
+      password: ${REDIS_PASSWORD}
+      db: {{ .Values.externalRedis.db }}
+      {{- if .Values.externalRedis.connectionTimeout }}
+      connection_timeout: {{ .Values.externalRedis.connectionTimeout }}
+      {{- end }}
+      {{- if .Values.externalRedis.readTimeout }}
+      read_timeout: {{ .Values.externalRedis.readTimeout }}
+      {{- end }}
+      {{- if .Values.externalRedis.writeTimeout }}
+      write_timeout: {{ .Values.externalRedis.writeTimeout }}
+      {{- end }}
+      {{- if .Values.externalRedis.maxRetries }}
+      max_retries: {{ .Values.externalRedis.maxRetries }}
+      {{- end }}
+      {{- if .Values.externalRedis.minRetryBackoff }}
+      min_retry_backoff: {{ .Values.externalRedis.minRetryBackoff }}
+      {{- end }}
+      {{- if .Values.externalRedis.maxRetryBackoff }}
+      max_retry_backoff: {{ .Values.externalRedis.maxRetryBackoff }}
+      {{- end }}
+      {{- if .Values.externalRedis.tls.enabled }}
+      tls:
+        enabled: {{ .Values.externalRedis.tls.enabled }}
+        {{- if .Values.externalRedis.tls.caFile }}
+        ca_file: ${REDIS_TLS_CA_FILE}
+        {{- end }}
+        {{- if .Values.externalRedis.tls.certFile }}
+        cert_file: ${REDIS_TLS_CERT_FILE}
+        {{- end }}
+        {{- if .Values.externalRedis.tls.keyFile }}
+        key_file: ${REDIS_TLS_KEY_FILE}
+        {{- end }}
+      {{- end }}
+      {{- end }}
+
+  {{- if .Values.templates.slack }}
+  slack_message.tmpl: |
+{{ .Values.templates.slack | indent 4 }}
+  {{- end }}
+
+  {{- if .Values.templates.telegram }}
+  telegram_message.tmpl: |
+{{ .Values.templates.telegram | indent 4 }}
+  {{- end }}
+
+  {{- if .Values.templates.msteams }}
+  msteams_message.tmpl: |
+{{ .Values.templates.msteams | indent 4 }}
+  {{- end }}
+
+  {{- if .Values.templates.email }}
+  email_message.tmpl: |
+{{ .Values.templates.email | indent 4 }}
+  {{- end }}
+
+  {{- if .Values.templates.lark }}
+  lark_message.tmpl: |
+{{ .Values.templates.lark | indent 4 }}
+  {{- end }}

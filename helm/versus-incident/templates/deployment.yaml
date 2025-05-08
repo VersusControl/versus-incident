@@ -1,0 +1,331 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "versus-incident.fullname" . }}
+  labels:
+    {{- include "versus-incident.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "versus-incident.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "versus-incident.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "versus-incident.serviceAccountName" . }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.config.port }}
+              protocol: TCP
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          env:
+            {{- if .Values.alert.slack.enable }}
+            - name: SLACK_ENABLE
+              value: "true"
+            - name: SLACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: slack_token
+            - name: SLACK_CHANNEL_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: slack_channel_id
+            {{- end }}
+            
+            {{- if .Values.alert.telegram.enable }}
+            - name: TELEGRAM_ENABLE
+              value: "true"
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: telegram_bot_token
+            - name: TELEGRAM_CHAT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: telegram_chat_id
+            {{- end }}
+            
+            {{- if .Values.alert.email.enable }}
+            - name: EMAIL_ENABLE
+              value: "true"
+            - name: SMTP_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: smtp_host
+            - name: SMTP_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: smtp_port
+            - name: SMTP_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: smtp_username
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: smtp_password
+            - name: EMAIL_TO
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: email_to
+            - name: EMAIL_SUBJECT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: email_subject
+            {{- end }}
+            
+            {{- if .Values.alert.msteams.enable }}
+            - name: MSTEAMS_ENABLE
+              value: "true"
+            - name: MSTEAMS_POWER_AUTOMATE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: msteams_power_automate_url
+            {{- range $key, $val := .Values.alert.msteams.otherPowerUrls }}
+            - name: MSTEAMS_OTHER_POWER_URL_{{ $key | upper }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: msteams_other_power_url_{{ $key }}
+            {{- end }}
+            {{- end }}
+            
+            {{- if .Values.alert.lark.enable }}
+            - name: LARK_ENABLE
+              value: "true"
+            - name: LARK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: lark_webhook_url
+            {{- range $key, $val := .Values.alert.lark.otherWebhookUrls }}
+            - name: LARK_OTHER_WEBHOOK_URL_{{ $key | upper }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: lark_other_webhook_url_{{ $key }}
+            {{- end }}
+            {{- end }}
+            
+            {{- if .Values.alert.sns.enable }}
+            - name: SNS_ENABLE
+              value: "true"
+            {{- if .Values.alert.sns.topicArn }}
+            - name: SNS_TOPIC_ARN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: sns_topic_arn
+            {{- end }}
+            {{- if .Values.alert.sns.httpsEndpointSubscription }}
+            - name: SNS_HTTPS_ENDPOINT_SUBSCRIPTION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: sns_https_endpoint_subscription
+            {{- end }}
+            {{- end }}
+            
+            {{- if .Values.alert.sqs.enable }}
+            - name: SQS_ENABLE
+              value: "true"
+            - name: SQS_QUEUE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: sqs_queue_url
+            {{- end }}
+            
+            {{- if or .Values.oncall.enable .Values.oncall.initializedOnly }}
+            - name: ONCALL_ENABLE
+              value: "{{ .Values.oncall.enable }}"
+            - name: ONCALL_INITIALIZED_ONLY
+              value: "{{ .Values.oncall.initializedOnly }}"
+            - name: ONCALL_WAIT_MINUTES
+              value: "{{ .Values.oncall.waitMinutes }}"
+            - name: ONCALL_PROVIDER
+              value: "{{ .Values.oncall.provider }}"
+            
+            {{- if eq .Values.oncall.provider "aws_incident_manager" }}
+            - name: AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: aws_incident_manager_response_plan_arn
+            {{- range $key, $val := .Values.oncall.awsIncidentManager.otherResponsePlanArns }}
+            - name: AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_{{ $key | upper }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: aws_incident_manager_other_response_plan_arn_{{ $key }}
+            {{- end }}
+            {{- end }}
+            
+            {{- if eq .Values.oncall.provider "pagerduty" }}
+            - name: PAGERDUTY_ROUTING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: pagerduty_routing_key
+            {{- range $key, $val := .Values.oncall.pagerduty.otherRoutingKeys }}
+            - name: PAGERDUTY_OTHER_ROUTING_KEY_{{ $key | upper }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: pagerduty_other_routing_key_{{ $key }}
+            {{- end }}
+            {{- end }}
+            
+            {{- /* Redis configuration - used for on-call functionality */ -}}
+            - name: REDIS_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: redis_host
+            - name: REDIS_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: redis_port
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: redis_password
+            {{- if not .Values.redis.enabled }}
+            - name: REDIS_INSECURE_SKIP_VERIFY
+              value: "{{ .Values.externalRedis.insecureSkipVerify }}"
+            - name: REDIS_DB
+              value: "{{ .Values.externalRedis.db }}"
+            {{- if .Values.externalRedis.connectionTimeout }}
+            - name: REDIS_CONNECTION_TIMEOUT
+              value: "{{ .Values.externalRedis.connectionTimeout }}"
+            {{- end }}
+            {{- if .Values.externalRedis.readTimeout }}
+            - name: REDIS_READ_TIMEOUT
+              value: "{{ .Values.externalRedis.readTimeout }}"
+            {{- end }}
+            {{- if .Values.externalRedis.writeTimeout }}
+            - name: REDIS_WRITE_TIMEOUT
+              value: "{{ .Values.externalRedis.writeTimeout }}"
+            {{- end }}
+            {{- if .Values.externalRedis.maxRetries }}
+            - name: REDIS_MAX_RETRIES
+              value: "{{ .Values.externalRedis.maxRetries }}"
+            {{- end }}
+            {{- if .Values.externalRedis.minRetryBackoff }}
+            - name: REDIS_MIN_RETRY_BACKOFF
+              value: "{{ .Values.externalRedis.minRetryBackoff }}"
+            {{- end }}
+            {{- if .Values.externalRedis.maxRetryBackoff }}
+            - name: REDIS_MAX_RETRY_BACKOFF
+              value: "{{ .Values.externalRedis.maxRetryBackoff }}"
+            {{- end }}
+            {{- if .Values.externalRedis.tls.enabled }}
+            - name: REDIS_TLS_ENABLED
+              value: "{{ .Values.externalRedis.tls.enabled }}"
+            {{- if .Values.externalRedis.tls.caFile }}
+            - name: REDIS_TLS_CA_FILE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: redis_tls_ca_file
+            {{- end }}
+            {{- if .Values.externalRedis.tls.certFile }}
+            - name: REDIS_TLS_CERT_FILE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: redis_tls_cert_file
+            {{- end }}
+            {{- if .Values.externalRedis.tls.keyFile }}
+            - name: REDIS_TLS_KEY_FILE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: redis_tls_key_file
+            {{- end }}
+            {{- end }}
+            {{- else }}
+            - name: REDIS_INSECURE_SKIP_VERIFY
+              value: "false"
+            - name: REDIS_DB
+              value: "0"
+            {{- end }}
+            {{- end }}
+            
+            {{- if or .Values.alert.sns.enable .Values.alert.sqs.enable }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: aws_access_key_id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: aws_secret_access_key
+            {{- if .Values.aws.region }}
+            - name: AWS_REGION
+              value: "{{ .Values.aws.region }}"
+            {{- end }}
+            {{- end }}
+            
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/config/config.yaml
+              subPath: config.yaml
+            {{- if .Values.templates.slack }}
+            - name: config-volume
+              mountPath: /app/config/slack_message.tmpl
+              subPath: slack_message.tmpl
+            {{- end }}
+            {{- if .Values.templates.telegram }}
+            - name: config-volume
+              mountPath: /app/config/telegram_message.tmpl
+              subPath: telegram_message.tmpl
+            {{- end }}
+            {{- if .Values.templates.email }}
+            - name: config-volume
+              mountPath: /app/config/email_message.tmpl
+              subPath: email_message.tmpl
+            {{- end }}
+            {{- if .Values.templates.msteams }}
+            - name: config-volume
+              mountPath: /app/config/msteams_message.tmpl
+              subPath: msteams_message.tmpl
+            {{- end }}
+            {{- if .Values.templates.lark }}
+            - name: config-volume
+              mountPath: /app/config/lark_message.tmpl
+              subPath: lark_message.tmpl
+            {{- end }}
+      volumes:
+        - name: config-volume
+          configMap:
+            name: {{ include "versus-incident.fullname" . }}-config
