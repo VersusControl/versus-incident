@@ -41,8 +41,9 @@ jobs:
       - name: Set version variable
         id: version
         run: |
-          VERSION=$(grep 'version:' helm/versus-incident/Chart.yaml | awk '{print $2}')
+          VERSION=$(grep '^version:' helm/versus-incident/Chart.yaml | awk '{print $2}')
           echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Chart version: $VERSION"
           
       - name: Package and Push Chart to OCI Registry
         run: |
@@ -53,4 +54,4 @@ jobs:
       - name: Display installation instructions
         run: |
           echo "Chart published successfully to OCI registry."
-          echo "Users can install with: helm install versus-incident oci://ghcr.io/${{ github.repository }}/charts/versus-incident --version ${{ env.VERSION }}"
+          echo "Users can install with: helm install versus-incident oci://ghcr.io/${{ github.repository }}/charts/versus-incident --version ${{ env.VERSION }}
