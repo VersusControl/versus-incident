@@ -1,0 +1,227 @@
+# Default values for Versus Incident Helm chart
+replicaCount: 2
+
+image:
+  repository: ghcr.io/versuscontrol/versus-incident
+  pullPolicy: IfNotPresent
+  tag: ""  # Defaults to .Chart.AppVersion if not set
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 3000
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 3000
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 5
+
+config:
+  name: versus-incident
+  host: 0.0.0.0
+  port: 3000
+  publicHost: ""  # Set to your public host for acknowledgement URLs
+
+alert:
+  debugBody: true
+  
+  slack:
+    enable: false
+    token: ""
+    channelId: ""
+    templatePath: "/app/config/slack_message.tmpl"
+    messageProperties:
+      buttonText: "Acknowledge Alert"
+      buttonStyle: "primary"
+      disableButton: false
+  
+  telegram:
+    enable: false
+    botToken: ""
+    chatId: ""
+    templatePath: "/app/config/telegram_message.tmpl"
+  
+  email:
+    enable: false
+    smtpHost: ""
+    smtpPort: 587
+    username: ""
+    password: ""
+    to: ""
+    subject: "Incident Alert"
+    templatePath: "/app/config/email_message.tmpl"
+  
+  msteams:
+    enable: false
+    powerAutomateUrl: ""
+    templatePath: "/app/config/msteams_message.tmpl"
+    otherPowerUrls: {}
+  
+  lark:
+    enable: false
+    webhookUrl: ""
+    templatePath: "/app/config/lark_message.tmpl"
+    otherWebhookUrls: {}
+
+  sns:
+    enable: false
+    httpsEndpointSubscriptionPath: "/sns"
+    httpsEndpointSubscription: ""
+    topicArn: ""
+  
+  sqs:
+    enable: false
+    queueUrl: ""
+
+oncall:
+  initializedOnly: false
+  enable: false
+  waitMinutes: 3
+  provider: "aws_incident_manager"
+  
+  awsIncidentManager:
+    responsePlanArn: ""
+    otherResponsePlanArns: {}
+  
+  pagerduty:
+    routingKey: ""
+    otherRoutingKeys: {}
+
+# Redis configuration
+redis:
+  # Enable the bundled Redis if you want to use the Redis dependency
+  enabled: false
+  
+  # Authentication parameters for the built-in Redis
+  auth:
+    enabled: true
+    password: ""
+    
+  # Redis architecture choice
+  architecture: standalone
+  
+  # Redis master configuration
+  master:
+    persistence:
+      enabled: true
+      size: 8Gi
+  
+# External Redis configuration (used only when redis.enabled=false)
+externalRedis:
+  # Redis server hostname or IP address
+  host: ""
+  # Redis server port
+  port: 6379
+  # Redis authentication password
+  password: ""
+  # Skip TLS certificate verification (not recommended for production)
+  insecureSkipVerify: false
+  # Redis database number
+  db: 0
+  # Redis connection parameters
+  connectionTimeout: 5 # connection timeout in seconds
+  readTimeout: 3       # read timeout in seconds
+  writeTimeout: 3      # write timeout in seconds
+  maxRetries: 3        # maximum number of retries
+  minRetryBackoff: 8   # minimum backoff in milliseconds
+  maxRetryBackoff: 512 # maximum backoff in milliseconds
+  # TLS/SSL configuration
+  tls:
+    enabled: false
+    # Path to the CA certificate file when using custom CA
+    caFile: ""
+    # Path to the client certificate file
+    certFile: ""
+    # Path to the client certificate key file
+    keyFile: ""
+
+# Templates configuration
+# If not provided, the default templates included in the container will be used
+# To use a custom template, uncomment the relevant template section and modify it
+templates: {}
+  # Custom Slack template (optional - if not defined, the default from the container will be used)
+  # slack: |
+  #   *Critical Error in {{.ServiceName}}*
+  #   ----------
+  #   Error Details:
+  #   ```
+  #   {{.Logs}}
+  #   ```
+  #   ----------
+  #   Owner <@{{.UserID}}> please investigate
+  
+  # Custom Telegram template (optional - if not defined, the default from the container will be used)
+  # telegram: |
+  #   🚨 <b>Critical Error Detected!</b> 🚨
+  #   📌 <b>Service:</b> {{.ServiceName}}
+  #   ⚠️ <b>Error Details:</b>
+  #   {{.Logs}}
+  
+  # Custom Microsoft Teams template (optional - if not defined, the default from the container will be used)
+  # msteams: |
+  #   # Critical Error in {{.ServiceName}}
+  #    
+  #   ### Error Details:
+  #   
+  #   ```{{.Logs}}```
+  #   
+  #   ## Additional Information
+  #   
+  #   - Source: {{.Source}}
+  #   - Severity: {{.Severity}}
+  #   - Incident ID: {{.IncidentID}}
+  #   
+  #   Please [investigate immediately](https://your-dashboard-url.com/incidents/{{.IncidentID}})
+  #   
+  #   *Alert sent by Versus Incident Management*
+  
+  # Custom Email template (optional - if not defined, the default from the container will be used)
+  # email: |
+  #   Subject: Critical Error Alert - {{.ServiceName}}
+  #   
+  #   Critical Error Detected in {{.ServiceName}}
+  #   ----------------------------------------
+  #   
+  #   Error Details:
+  #   {{.Logs}}
+  #   
+  #   Please investigate this issue immediately.
+  #   
+  #   Best regards,
+  #   Versus Incident Management System
+  
+  # Custom Lark template (optional - if not defined, the default from the container will be used)
+  # lark: |
+  #   Critical Error in {{.ServiceName}}
+  #   
+  #   **Error Details:**
+  #   
+  #   ```{{.Logs}}```
+  #   
+  #   {{ if .AckURL }}
+  #   
+  #   [Click here to acknowledge]({{.AckURL}})
+  #   {{ end }}

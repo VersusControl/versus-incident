@@ -1,0 +1,113 @@
+name: Publish Helm Chart
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'helm/**'
+      - '.github/workflows/helm-publish.yml'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  publish-helm-chart:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'latest'
+
+      - name: Set up chart-releaser
+        uses: helm/chart-releaser-action@v1.5.0
+        with:
+          install_only: true
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup version
+        id: setup-version
+        run: |
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+            echo "Using tag version: $VERSION"
+          else
+            VERSION=$(grep -Po '(?<=^appVersion: ")[^"]*' helm/versus-incident/Chart.yaml)
+            echo "Using appVersion from Chart.yaml: $VERSION"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+          # Extract and set chart path for reusability
+          CHART_PATH="helm/versus-incident"
+          echo "CHART_PATH=$CHART_PATH" >> $GITHUB_ENV
+
+      - name: Update Chart Version
+        if: github.ref_type == 'tag'
+        run: |
+          VERSION=${{ steps.setup-version.outputs.version }}
+          # Update chart version to match the tag version
+          sed -i "s/version: .*/version: ${VERSION}/" $CHART_PATH/Chart.yaml
+          # Update appVersion to match the tag version
+          sed -i "s/appVersion: .*/appVersion: \"${VERSION}\"/" $CHART_PATH/Chart.yaml
+          cat $CHART_PATH/Chart.yaml
+
+      - name: Package Helm Chart
+        run: |
+          mkdir -p .cr-release-packages
+          helm dependency update $CHART_PATH
+          helm package $CHART_PATH --destination .cr-release-packages
+
+      - name: Upload Chart to GitHub Releases
+        if: github.ref_type == 'tag'
+        run: |
+          cr upload \
+            --owner ${{ github.repository_owner }} \
+            --git-repo ${{ github.event.repository.name }} \
+            --token ${{ secrets.GITHUB_TOKEN }} \
+            --package-path .cr-release-packages
+
+      - name: Push chart to GitHub Pages
+        if: github.ref_type == 'tag'
+        run: |
+          cr index \
+            --owner ${{ github.repository_owner }} \
+            --git-repo ${{ github.event.repository.name }} \
+            --index-path index.yaml \
+            --token ${{ secrets.GITHUB_TOKEN }} \
+            --package-path .cr-release-packages
+
+      - name: Push Helm Chart to GHCR
+        env:
+          OWNER: ${{ github.repository_owner }}
+          CHART_NAME: versus-incident
+          VERSION: ${{ steps.setup-version.outputs.version }}
+        run: |
+          echo "Pushing Helm chart to GHCR..."
+          # OCI registry format for GHCR
+          HELM_EXPERIMENTAL_OCI=1 helm push .cr-release-packages/${CHART_NAME}-*.tgz oci://ghcr.io/${OWNER}/helm
+          
+      - name: Summary
+        run: |
+          echo "## Helm Chart Publishing Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Chart Name: versus-incident" >> $GITHUB_STEP_SUMMARY
+          echo "- Version: ${{ env.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Published to GitHub Packages: ghcr.io/${{ github.repository_owner }}/helm/versus-incident:${{ env.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "- Published to GitHub Pages Helm Repository" >> $GITHUB_STEP_SUMMARY
+          fi

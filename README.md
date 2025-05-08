@@ -517,6 +517,30 @@ spec:
 kubectl apply -f versus-deployment.yaml
 ```
 
+### Helm Chart
+
+You can install the Versus Incident Helm chart using either the GitHub repository or OCI registry:
+
+```bash
+# Add the Versus Incident Helm repository
+helm repo add versus-incident https://versuscontrol.github.io/versus-incident
+
+# Update Helm repositories
+helm repo update
+
+# Install the chart with the release name 'versus-incident'
+helm install versus-incident versus-incident/versus-incident
+```
+
+Install with custom values:
+
+```bash
+# Install with custom configuration from a values file
+helm install versus-incident versus-incident/versus-incident -f values.yaml
+```
+
+For detailed information, please refer to the document [here](https://github.com/VersusControl/versus-incident/blob/main/helm/versus-incident).
+
 ## SNS Usage
 ```bash
 docker run -d \
