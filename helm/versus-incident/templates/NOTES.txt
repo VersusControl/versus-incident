@@ -1,21 +1,5 @@
-1. Get the application URL by running these commands:
-{{- if contains "NodePort" .Values.service.type }}
-  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "versus-incident.fullname" . }})
-  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
-  echo http://$NODE_IP:$NODE_PORT
-{{- else if contains "LoadBalancer" .Values.service.type }}
-     NOTE: It may take a few minutes for the LoadBalancer IP to be available.
-           You can watch the status of by running 'kubectl get --namespace {{ .Release.Namespace }} svc -w {{ include "versus-incident.fullname" . }}'
-  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "versus-incident.fullname" . }} --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
-  echo http://$SERVICE_IP:{{ .Values.service.port }}
-{{- else if contains "ClusterIP" .Values.service.type }}
-  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "versus-incident.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
-  export CONTAINER_PORT=$(kubectl get pod --namespace {{ .Release.Namespace }} $POD_NAME -o jsonpath="{.spec.containers[0].ports[0].containerPort}")
-  echo "Visit http://127.0.0.1:{{ .Values.service.port }} to use your application"
-  kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME {{ .Values.service.port }}:$CONTAINER_PORT
-{{- end }}
 
-2. Versus Incident has been deployed! You can send incidents to:
+1. Versus Incident has been deployed! You can send incidents to:
 {{- if .Values.config.publicHost }}
    {{ .Values.config.publicHost }}/api/incidents
 {{- else }}
@@ -23,32 +7,32 @@
 {{- end }}
 
 {{- if .Values.alert.slack.enable }}
-3. Slack notifications are enabled.
+2. Slack notifications are enabled.
 {{- end }}
 
 {{- if .Values.alert.telegram.enable }}
-4. Telegram notifications are enabled.
+3. Telegram notifications are enabled.
 {{- end }}
 
 {{- if .Values.alert.email.enable }}
-5. Email notifications are enabled.
+4. Email notifications are enabled.
 {{- end }}
 
 {{- if .Values.alert.msteams.enable }}
-6. Microsoft Teams notifications are enabled.
+5. Microsoft Teams notifications are enabled.
 {{- end }}
 
 {{- if .Values.alert.lark.enable }}
-7. Lark notifications are enabled.
+6. Lark notifications are enabled.
 {{- end }}
 
 {{- if or .Values.oncall.enable .Values.oncall.initializedOnly }}
-8. On-call integration is {{- if .Values.oncall.enable }} enabled{{- else }} initialized but disabled by default{{- end }}.
+7. On-call integration is {{- if .Values.oncall.enable }} enabled{{- else }} initialized but disabled by default{{- end }}.
    Provider: {{ .Values.oncall.provider }}
 {{- end }}
 
 {{- if .Values.redis.enabled }}
-9. Redis configuration:
+8. Redis configuration:
    - Using bundled Redis deployment
    - Host: {{ .Release.Name }}-redis-master
    - Port: 6379
@@ -56,7 +40,7 @@
    - Authentication is enabled
    {{- end }}
 {{- else if and (not .Values.redis.enabled) (or .Values.oncall.enable .Values.oncall.initializedOnly) }}
-9. Redis configuration:
+8. Redis configuration:
    - Using external Redis instance
    - Host: {{ .Values.externalRedis.host }}
    - Port: {{ .Values.externalRedis.port }}
