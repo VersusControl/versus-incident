@@ -12,7 +12,7 @@
   - [Kubernetes](#kubernetes)
   - [Helm Chart](#helm-chart)
 - [SNS Usage](#sns-usage)
-- [On-call](#on-call)
+- [On-Call](#on-call)
 
 ### Prerequisites
 
@@ -516,9 +516,9 @@ aws sns publish \
 
 **A key real-world application of Amazon SNS** involves integrating it with CloudWatch Alarms. This allows CloudWatch to publish messages to an SNS topic when an alarm state changes (e.g., from OK to ALARM), which can then trigger notifications to Slack, Telegram, or Email via Versus Incident with a custom template.
 
-### On-call
+### On-Call
 
-Currently, Versus support On-call integrations with AWS Incident Manager. Updated configuration example with on-call features:
+Currently, Versus support On-Call integrations with AWS Incident Manager. Updated configuration example with on-call features:
 
 ```yaml
 name: versus
@@ -549,10 +549,13 @@ redis: # Required for on-call functionality
 **Explanation:**
 
 The `oncall` section includes:
-1. `enable`: A boolean to toggle on-call functionality (default: `false`).
-2. `wait_minutes`: Time in minutes to wait for an acknowledgment before escalating (default: `3`). Setting it to `0` triggers the on-call immediately.
-3. `aws_incident_manager`: Contains the `response_plan_arn`, which links to an AWS Incident Manager response plan via an environment variable.
+1. `enable`: A boolean to toggle on-call functionality for all incidents (default: `false`).
+2. `initialized_only`: Initialize on-call feature but keep it disabled by default. When set to `true`, on-call is triggered only for requests that explicitly include `?oncall_enable=true` in the URL. This is useful for having on-call ready but not enabled for all alerts.
+3. `wait_minutes`: Time in minutes to wait for an acknowledgment before escalating (default: `3`). Setting it to `0` triggers the on-call immediately.
+4. `provider`: Specifies which on-call provider to use ("aws_incident_manager" or "pagerduty").
+5. `aws_incident_manager`: Configuration for AWS Incident Manager when it's the selected provider, including `response_plan_arn` and `other_response_plan_arns`.
+6. `pagerduty`: Configuration for PagerDuty when it's the selected provider, including routing keys.
 
-The `redis` section is required when `oncall.enable` is `true`. It configures the Redis instance used for state management or queuing, with settings like `host`, `port`, `password`, and `db`.
+The redis section is required when `oncall.enable` or `oncall.initialized_only` is true. It configures the Redis instance used for state management or queuing, with settings like host, port, password, and db.
 
-For detailed information on integration, please refer to the document here: [On-call setup with Versus](https://versuscontrol.github.io/versus-incident/on-call-introduction.html).
+For detailed information on integration, please refer to the document here: [On-Call setup with Versus](https://versuscontrol.github.io/versus-incident/on-call-introduction.html).

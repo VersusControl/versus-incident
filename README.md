@@ -18,7 +18,7 @@ An incident management tool that supports alerting across multiple channels with
   - [Kubernetes](#kubernetes)
   - [Helm Chart](#helm-chart)
 - [SNS Usage](#sns-usage)
-- [On-call](#on-call)
+- [On-Call](#on-call)
 - [Configuration](#complete-configuration)
 - [Environment Variables](#environment-variables)
 - [Dynamic Configuration with Query Parameters](#dynamic-configuration-with-query-parameters)
@@ -36,7 +36,7 @@ An incident management tool that supports alerting across multiple channels with
 - 📝 **Custom Templates**: Define your own alert messages using Go templates
 - 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
 - 📡 **REST API**: Simple HTTP interface to receive alerts
-- 📡 **On-call**: On-call integrations with AWS Incident Manager and PagerDuty
+- 📡 **On-Call**: On-Call integrations with AWS Incident Manager and PagerDuty
 
 ![Versus](src/docs/images/versus-architecture.svg)
 
@@ -579,9 +579,9 @@ aws sns publish \
 
 **A key real-world application of Amazon SNS** involves integrating it with CloudWatch Alarms. This allows CloudWatch to publish messages to an SNS topic when an alarm state changes (e.g., from OK to ALARM), which can then trigger notifications to Slack, Telegram, or Email via Versus Incident with a custom template.
 
-## On-call
+## On-Call
 
-Versus supports On-call integrations with AWS Incident Manager and PagerDuty. Updated configuration example with on-call features:
+Versus supports On-Call integrations with AWS Incident Manager and PagerDuty. Updated configuration example with on-call features:
 
 ```yaml
 name: versus
@@ -634,7 +634,7 @@ The `oncall` section includes:
 
 The redis section is required when `oncall.enable` or `oncall.initialized_only` is true. It configures the Redis instance used for state management or queuing, with settings like host, port, password, and db.
 
-For detailed information on integration, please refer to the document here: [On-call setup with Versus](https://versuscontrol.github.io/versus-incident/oncall/on-call-introduction.html).
+For detailed information on integration, please refer to the document here: [On-Call setup with Versus](https://versuscontrol.github.io/versus-incident/oncall/on-call-introduction.html).
 
 ## Complete Configuration
 
