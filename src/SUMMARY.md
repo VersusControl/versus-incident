@@ -19,6 +19,7 @@
 - [Introduction](./oncall/on-call-introduction.md)
 - [AWS Incident Manager](./oncall/aws-incident-manager.md)
 - [How to Integration Incident Manager](./oncall/how-to-integration-aws-icm.md)
+- [How to Integration Incident Manager (Advanced)](./oncall/how-to-integration-aws-icm-adv.md)
 - [PagerDuty](./oncall/pagerduty.md)
 - [How to Integration PagerDuty](./oncall/how-to-integration-pagerduty.md)
 
