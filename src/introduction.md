@@ -7,7 +7,7 @@
 
 An incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Compatible with any tool supporting webhook alerts, it’s designed for modern DevOps teams to quickly respond to production incidents.
 
-🚀 Boost Your SRE Skills with the Book: [On-Call in Action](https://a.co/d/4A8zrWR).
+🚀 Mastering your Site Reliability Engineering Skills: [On-Call in Action](https://www.amazon.com/dp/B0F8Q9WY15).
 
 ### Features
 
