@@ -261,6 +261,79 @@ alert:
     httpsEndpointSubscriptionPath: "/sns"
 ```
 
+## Ingress Configuration
+
+The Helm chart supports configuring an Ingress resource for external access:
+
+```yaml
+ingress:
+  enabled: true
+  className: "nginx"  # Specify your ingress controller class
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    kubernetes.io/tls-acme: "true"
+    # Add any other annotations needed
+  hosts:
+    - host: versus-incident.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: versus-incident-tls
+      hosts:
+        - versus-incident.example.com
+```
+
+When enabling Ingress, make sure to also set the `config.publicHost` value to match your host for proper acknowledgement URL creation:
+
+```yaml
+config:
+  publicHost: "https://versus-incident.example.com"
+```
+
+## Horizontal Pod Autoscaler Configuration
+
+The Helm chart supports configuring a Horizontal Pod Autoscaler (HPA) to automatically scale the number of pods based on CPU and memory utilization:
+
+```yaml
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+```
+
+For more advanced scaling behavior, you can use the `behavior` configuration:
+
+```yaml
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+      - type: Pods
+        value: 4
+        periodSeconds: 15
+      selectPolicy: Max
+```
+
+Note: When enabling autoscaling, the `replicaCount` value in your values.yaml is only used for the initial deployment before the HPA takes over scaling control.
+
 ## Uninstalling the Chart
 
 To uninstall/delete the `versus-incident` deployment:
