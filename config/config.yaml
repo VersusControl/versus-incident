@@ -64,6 +64,13 @@ alert:
       dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
       prod: ${LARK_OTHER_WEBHOOK_URL_PROD}
 
+  googlechat:
+    enable: false # Default value, will be overridden by GOOGLECHAT_ENABLE env var
+    webhook_url: ${GOOGLECHAT_WEBHOOK_URL} # Google Chat webhook URL (required)
+    template_path: "config/googlechat_message.tmpl"
+    message_properties:
+      button_text: "Acknowledge Alert" # Custom text for the acknowledgment button
+
 queue:
   enable: true
   debug_body: true

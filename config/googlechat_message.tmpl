@@ -1,0 +1,323 @@
+{{- /*
+Google Chat Card V2 Message Template
+Generates a JSON payload for Google Chat.
+Inputs:
+- .IncidentData: map[string]interface{} (alert details)
+- .AckURL: string (acknowledgment URL)
+- .ButtonText: string (text for the ack button)
+- .IsResolved: bool (true if the alert is resolved)
+*/}}
+{{- $data := .IncidentData }}
+{{- $ackURL := .AckURL }}
+{{- $buttonText := .ButtonText }}
+{{- $isResolved := .IsResolved }}
+
+{{- /* Initialize standardized fields */}}
+{{- $sourceSystem := "Unknown" }}
+{{- $title := "Incident Alert" }}
+{{- $description := "No description provided." }}
+{{- $severity := "INFO" }} {{/* Default severity */}}
+{{- $status := "UNKNOWN" }}
+{{- $resource := "" }}
+{{- $timestamp := "" }}
+{{- $links := "" }}
+{{- $labels := "" }}
+{{- $annotations := "" }}
+{{- $runbookURL := "" }}
+{{- $dashboardURL := "" }}
+{{- $logsURL := "" }}
+
+{{- /* Severity Icons */}}
+{{- $severityIcons := dict
+  "CRITICAL" "🔴"
+  "HIGH" "🟠"
+  "WARNING" "🟡"
+  "INFO" "🔵"
+  "UNKNOWN" "⚪️"
+}}
+
+{{- /* Status Icons */}}
+{{- $statusIcons := dict
+  "FIRING" "🔥"
+  "PROBLEM" "🔥"
+  "RESOLVED" "✅"
+  "RECOVERED" "✅"
+  "ACTIVE" "🔔"
+  "PENDING" "⏳"
+  "ACKNOWLEDGED" "👍"
+  "DOWN" "🔻"
+  "UP" "🟢"
+  "UNKNOWN" "❓"
+}}
+
+{{- /* --- Data Extraction Logic (adapted from slack_message.tmpl) --- */}}
+
+{{- /* General "common" or "generic" source detection */}}
+{{- if $data.commonLabels }}
+  {{- $sourceSystem = "Prometheus (Generic)" }}
+  {{- $title = $data.commonAnnotations.summary | default ($data.commonAnnotations.description | default "Prometheus Alert") }}
+  {{- $description = $data.commonAnnotations.description | default ($data.commonAnnotations.message | default "N/A") }}
+  {{- $severity = $data.commonLabels.severity | upper | default "UNKNOWN" }}
+  {{- $status = $data.status | upper | default "UNKNOWN" }}
+  {{- if $data.commonLabels.instance }}
+    {{- $resource = printf "%s (%s)" ($data.commonLabels.instance) ($data.commonLabels.job | default "N/A") }}
+  {{- else if $data.commonLabels.pod }}
+     {{- $resource = printf "Pod: %s, Namespace: %s" ($data.commonLabels.pod) ($data.commonLabels.namespace | default "N/A") }}
+  {{- else if $data.commonLabels.job }}
+     {{- $resource = printf "Job: %s" ($data.commonLabels.job) }}
+  {{- end }}
+  {{- $timestamp = $data.startsAt | default ($data.endsAt | default (now | date "2006-01-02T15:04:05Z")) }}
+  {{- $runbookURL = $data.commonAnnotations.runbook_url | default ($data.commonLabels.runbook_url | default (env "DEFAULT_RUNBOOK_URL")) }}
+  {{- $dashboardURL = $data.commonAnnotations.dashboard_url | default $data.dashboardURL }}
+  {{- $logsURL = $data.commonAnnotations.logs_url | default $data.logsURL }}
+
+  {{- $labelBuilder := newStringBuilder }}
+  {{- range $key, $value := $data.commonLabels }}
+    {{- if and (ne $key "severity") (ne $key "alertname") (ne $key "job") (ne $key "instance") (ne $key "namespace") (ne $key "pod") (ne $key "runbook_url") }}
+      {{- $labelBuilder.WriteString (printf "<b>%s:</b> %s\\n" $key $value) }}
+    {{- end }}
+  {{- end }}
+  {{- $labels = $labelBuilder.String }}
+
+  {{- $annotationBuilder := newStringBuilder }}
+  {{- range $key, $value := $data.commonAnnotations }}
+    {{- if and (ne $key "summary") (ne $key "description") (ne $key "message") (ne $key "runbook_url") (ne $key "dashboard_url") (ne $key "logs_url") }}
+      {{- $annotationBuilder.WriteString (printf "<b>%s:</b> %s\\n" $key $value) }}
+    {{- end }}
+  {{- end }}
+  {{- $annotations = $annotationBuilder.String }}
+
+{{- /* Grafana */}}
+{{- else if $data.ruleName }}
+  {{- $sourceSystem = "Grafana" }}
+  {{- $title = $data.ruleName }}
+  {{- $description = $data.message | default "N/A" }}
+  {{- $severity = $data.evalMatches.0.metric | default ($data.severity | upper | default "UNKNOWN") }} {{/* Try to get severity from metric name if common */}}
+  {{- $status = $data.state | upper | default "UNKNOWN" }}
+  {{- $resource = $data.ruleUrl | default "N/A" }}
+  {{- $timestamp = $data.time | default (now | date "2006-01-02T15:04:05Z") }}
+  {{- $runbookURL = $data.runbook_url | default (env "DEFAULT_RUNBOOK_URL") }}
+  {{- $dashboardURL = $data.dashboardUrl | default $data.ruleUrl }}
+  {{- $logsURL = $data.logsUrl }}
+  {{- if $data.tags }}
+    {{- $labelBuilder := newStringBuilder }}
+    {{- range $key, $value := $data.tags }}
+      {{- $labelBuilder.WriteString (printf "<b>%s:</b> %s\\n" $key $value) }}
+    {{- end }}
+    {{- $labels = $labelBuilder.String }}
+  {{- end }}
+
+{{- /* CloudWatch */}}
+{{- else if and $data.AlarmName $data.AWSAccountId }}
+  {{- $sourceSystem = "AWS CloudWatch" }}
+  {{- $title = $data.AlarmName }}
+  {{- $description = $data.AlarmDescription | default ($data.NewStateReason | default "N/A") }}
+  {{- if contains "critical" ($data.AlarmName | lower) }}{{ $severity = "CRITICAL" }}
+  {{- else if contains "high" ($data.AlarmName | lower) }}{{ $severity = "HIGH" }}
+  {{- else if contains "warning" ($data.AlarmName | lower) }}{{ $severity = "WARNING" }}
+  {{- else }}{{ $severity = "INFO" }}{{ end }}
+  {{- $status = $data.NewStateValue | upper | default "UNKNOWN" }}
+  {{- $resource = printf "AWS Account: %s, Region: %s" $data.AWSAccountId $data.Region }}
+  {{- $timestamp = $data.StateChangeTime | default (now | date "2006-01-02T15:04:05Z") }}
+  {{- $runbookURL = $data.runbook_url | default (env "DEFAULT_RUNBOOK_URL") }}
+
+{{- /* Sentry */}}
+{{- else if $data.event }}
+  {{- $sourceSystem = "Sentry" }}
+  {{- $title = $data.event.title | default "Sentry Issue" }}
+  {{- $description = $data.message | default ($data.event.metadata.value | default "N/A") }}
+  {{- $severity = $data.level | upper | default "UNKNOWN" }}
+  {{- $status = "FIRING" }} {{/* Sentry alerts are usually new issues */}}
+  {{- $resource = $data.project_name | default ($data.event.project | default "N/A") }}
+  {{- $timestamp = $data.event.timestamp | default (now | date "2006-01-02T15:04:05Z") | formatAsTime }}
+  {{- $links = printf "<a href='%s'>View in Sentry</a>" $data.url }}
+  {{- if $data.event.culprit }}
+    {{- $annotations = printf "<b>Culprit:</b> %s\\n" $data.event.culprit }}
+  {{- end }}
+  {{- if $data.event.tags }}
+    {{- $labelBuilder := newStringBuilder }}
+    {{- range $key, $value := $data.event.tags }}
+      {{- $labelBuilder.WriteString (printf "<b>%s:</b> %s\\n" $key $value) }}
+    {{- end }}
+    {{- $labels = $labelBuilder.String }}
+  {{- end }}
+
+{{- /* Fluent Bit */}}
+{{- else if $data.source_system (eq $data.source_system "fluent-bit") }}
+    {{- $sourceSystem = "Fluent Bit" }}
+    {{- $title = $data.title | default "Fluent Bit Log Alert" }}
+    {{- $description = $data.message | default "Log pattern matched." }}
+    {{- $severity = $data.severity | upper | default "WARNING" }}
+    {{- $status = "FIRING" }}
+    {{- $resource = printf "Host: %s, File: %s" ($data.host | default "N/A") ($data.file | default "N/A") }}
+    {{- $timestamp = $data.timestamp | default (now | date "2006-01-02T15:04:05Z") }}
+    {{- if $data.record }}
+        {{- $annotationBuilder := newStringBuilder }}
+        {{- range $key, $value := $data.record }}
+            {{- $annotationBuilder.WriteString (printf "<b>%s:</b> %s\\n" $key $value) }}
+        {{- end }}
+        {{- $annotations = $annotationBuilder.String }}
+    {{- end }}
+
+{{- /* Default/Catch-all for other JSON inputs */}}
+{{- else if $data.title }}
+  {{- $sourceSystem = $data.source_system | default "Custom JSON" }}
+  {{- $title = $data.title }}
+  {{- $description = $data.description | default ($data.message | default "N/A") }}
+  {{- $severity = $data.severity | upper | default "UNKNOWN" }}
+  {{- $status = $data.status | upper | default "UNKNOWN" }}
+  {{- $resource = $data.resource | default "N/A" }}
+  {{- $timestamp = $data.timestamp | default (now | date "2006-01-02T15:04:05Z") }}
+  {{- $runbookURL = $data.runbook_url | default (env "DEFAULT_RUNBOOK_URL") }}
+  {{- $dashboardURL = $data.dashboard_url }}
+  {{- $logsURL = $data.logs_url }}
+  {{- if $data.labels }}
+    {{- $labelBuilder := newStringBuilder }}
+    {{- range $key, $value := $data.labels }}
+      {{- $labelBuilder.WriteString (printf "<b>%s:</b> %s\\n" $key $value) }}
+    {{- end }}
+    {{- $labels = $labelBuilder.String }}
+  {{- end }}
+  {{- if $data.annotations }}
+    {{- $annotationBuilder := newStringBuilder }}
+    {{- range $key, $value := $data.annotations }}
+      {{- $annotationBuilder.WriteString (printf "<b>%s:</b> %s\\n" $key $value) }}
+    {{- end }}
+    {{- $annotations = $annotationBuilder.String }}
+  {{- end }}
+
+{{- /* If data is totally unknown structure */}}
+{{- else }}
+  {{- $sourceSystem = "Unknown Input" }}
+  {{- $title = "Generic Alert" }}
+  {{- $description = "The alert data structure is not recognized." }}
+  {{- $severity = "UNKNOWN" }}
+  {{- $status = "UNKNOWN" }}
+  {{- $timestamp = (now | date "2006-01-02T15:04:05Z") }}
+  {{- $jsonPreview := toJson $data | truncate 200 }}
+  {{- $annotations = printf "<b>Raw Data Preview:</b>\\n%s" $jsonPreview }}
+{{- end }}
+
+{{- /* --- Normalize Status and Severity for Icons --- */}}
+{{- $finalStatus := $status | upper }}
+{{- $finalSeverity := $severity | upper }}
+{{- $statusIcon := index $statusIcons $finalStatus | default (index $statusIcons "UNKNOWN") }}
+{{- $severityIcon := index $severityIcons $finalSeverity | default (index $severityIcons "UNKNOWN") }}
+
+{{- /* --- Build Card Title --- */}}
+{{- $cardTitle := printf "%s %s: %s" $statusIcon $finalStatus $title }}
+{{- if $isResolved }}
+  {{- $cardTitle = printf "%s RESOLVED: %s" (index $statusIcons "RESOLVED") $title }}
+{{- end }}
+
+{
+  "cardsV2": [{
+    "cardId": "alertCard-{{ now.UnixNano }}",
+    "card": {
+      "header": {
+        "title": "{{ $cardTitle | escapeJsonString }}",
+        "subtitle": "{{ $sourceSystem | escapeJsonString }}",
+        "imageUrl": "", {{/* Placeholder for a potential icon URL, e.g., based on source system */}}
+        "imageType": "CIRCLE"
+      },
+      "sections": [
+        {
+          "widgets": [
+            {
+              "textParagraph": {
+                "text": "<b>Severity:</b> {{ $severityIcon }} {{ $finalSeverity | escapeJsonString }}"
+              }
+            },
+            {
+              "textParagraph": {
+                "text": "<b>Status:</b> {{ $statusIcon }} {{ $finalStatus | escapeJsonString }}"
+              }
+            }
+            {{- if $description }}
+            ,{
+              "textParagraph": {
+                "text": "<b>Description:</b>\\n{{ $description | escapeJsonString | replace "\n" "\\n" }}"
+              }
+            }
+            {{- end }}
+            {{- if $resource }}
+            ,{
+              "textParagraph": {
+                "text": "<b>Resource:</b> {{ $resource | escapeJsonString }}"
+              }
+            }
+            {{- end }}
+            {{- if $timestamp }}
+            ,{
+              "textParagraph": {
+                "text": "<b>Timestamp:</b> {{ $timestamp | formatAsTime | escapeJsonString }}"
+              }
+            }
+            {{- end }}
+          ]
+        }
+        {{- if or $labels $annotations }}
+        ,{
+          "header": "Details",
+          "collapsible": true,
+          "uncollapsibleWidgetsCount": 0,
+          "widgets": [
+            {{- $detailWidgets := newWidgetList }}
+            {{- if $labels }}
+              {{- $detailWidgets.Add (printf `{ "textParagraph": { "text": "<b>Labels:</b>\\n%s" }}` ($labels | escapeJsonString) ) }}
+            {{- end }}
+            {{- if $annotations }}
+              {{- $detailWidgets.Add (printf `{ "textParagraph": { "text": "<b>Annotations:</b>\\n%s" }}` ($annotations | escapeJsonString) ) }}
+            {{- end }}
+            {{- $detailWidgets.Join "," | trimSuffix "," }}
+          ]
+        }
+        {{- end }}
+        {{- if or $runbookURL $dashboardURL $logsURL $links }}
+        ,{
+          "header": "Links",
+          "collapsible": true,
+          "uncollapsibleWidgetsCount": 0,
+          "widgets": [
+            {{- $linkWidgets := newWidgetList }}
+            {{- if $runbookURL }}
+              {{- $linkWidgets.Add (printf `{ "textParagraph": { "text": "<a href='%s'>Runbook</a>" }}` ($runbookURL | escapeJsonString) ) }}
+            {{- end }}
+            {{- if $dashboardURL }}
+              {{- $linkWidgets.Add (printf `{ "textParagraph": { "text": "<a href='%s'>Dashboard</a>" }}` ($dashboardURL | escapeJsonString) ) }}
+            {{- end }}
+            {{- if $logsURL }}
+              {{- $linkWidgets.Add (printf `{ "textParagraph": { "text": "<a href='%s'>Logs</a>" }}` ($logsURL | escapeJsonString) ) }}
+            {{- end }}
+            {{- if $links }} {{/* For Sentry or other specific links */}}
+              {{- $linkWidgets.Add (printf `{ "textParagraph": { "text": "%s" }}` ($links | escapeJsonString) ) }}
+            {{- end }}
+            {{- $linkWidgets.Join "," | trimSuffix "," }}
+          ]
+        }
+        {{- end }}
+        {{- if and $ackURL (not $isResolved) }}
+        ,{
+          "widgets": [
+            {
+              "buttonList": {
+                "buttons": [
+                  {
+                    "text": "{{ $buttonText | escapeJsonString }}",
+                    "onClick": {
+                      "openLink": {
+                        "url": "{{ $ackURL | escapeJsonString }}"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+        {{- end }}
+      ]
+    }
+  }]
+}
+{{- /* vim: set ft=gohtmltmpl: */ -}}

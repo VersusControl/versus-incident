@@ -67,6 +67,14 @@ func (f *AlertProviderFactory) CreateProviders() ([]core.AlertProvider, error) {
 		providers = append(providers, larkProvider)
 	}
 
+	if f.cfg.Alert.GoogleChat.Enable {
+		googleChatProvider, err := f.createGoogleChatProvider()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create GoogleChat provider: %w", err)
+		}
+		providers = append(providers, googleChatProvider)
+	}
+
 	return providers, nil
 }
 
@@ -96,6 +104,25 @@ func (f *AlertProviderFactory) createTelegramProvider() (core.AlertProvider, err
 		TemplatePath: tc.TemplatePath,
 		UseProxy:     tc.UseProxy,
 	}, f.cfg.Proxy), nil
+}
+
+func (f *AlertProviderFactory) createGoogleChatProvider() (core.AlertProvider, error) {
+	gc := f.cfg.Alert.GoogleChat // Assuming GoogleChat is added to f.cfg.Alert in a later step
+	if gc.WebhookURL == "" || gc.TemplatePath == "" {
+		return nil, fmt.Errorf("missing required GoogleChat configuration: WebhookURL and TemplatePath are required")
+	}
+
+	// Construct the GoogleChatConfig for NewGoogleChatProvider
+	// This assumes config.GoogleChatConfig and config.GoogleChatMessageProperties structs exist
+	// and that gc (f.cfg.Alert.GoogleChat) has matching fields.
+	googleChatCfg := config.GoogleChatConfig{
+		WebhookURL:   gc.WebhookURL,
+		TemplatePath: gc.TemplatePath,
+		MessageProperties: config.GoogleChatMessageProperties{
+			ButtonText: gc.MessageProperties.ButtonText,
+		},
+	}
+	return NewGoogleChatProvider(googleChatCfg), nil
 }
 
 func (f *AlertProviderFactory) createViberProvider() (core.AlertProvider, error) {

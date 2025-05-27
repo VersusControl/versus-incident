@@ -32,7 +32,7 @@ An incident management tool that supports alerting across multiple channels with
 
 ## Features
 
-- 🚨 **Multi-channel Alerts**: Send incident notifications to Slack, Microsoft Teams, Telegram, Viber, Email, and Lark (more channels coming!)
+- 🚨 **Multi-channel Alerts**: Send incident notifications to Slack, Microsoft Teams, Telegram, Viber, Email, Lark, and Google Chat (more channels coming!)
 - 📝 **Custom Templates**: Define your own alert messages using Go templates
 - 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
 - 📡 **REST API**: Simple HTTP interface to receive alerts
@@ -712,6 +712,13 @@ alert:
       dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
       prod: ${LARK_OTHER_WEBHOOK_URL_PROD}
 
+  googlechat:
+    enable: false # Default value, will be overridden by GOOGLECHAT_ENABLE env var
+    webhook_url: ${GOOGLECHAT_WEBHOOK_URL} # Google Chat Webhook URL
+    template_path: "config/googlechat_message.tmpl"
+    message_properties:
+      button_text: "Acknowledge Alert" # Custom text for the acknowledgment button
+
   queue:
   enable: true
   debug_body: true
@@ -875,6 +882,14 @@ Viber supports two types of API integrations:
 | `LARK_USE_PROXY` | Set to `true` to use the global proxy configuration for Lark API calls. Useful when Lark is blocked. |
 | `LARK_OTHER_WEBHOOK_URL_DEV` | (Optional) Webhook URL for the development environment. **Can be selected per request using the `lark_other_webhook_url=dev` query parameter.** |
 | `LARK_OTHER_WEBHOOK_URL_PROD` | (Optional) Webhook URL for the production environment. **Can be selected per request using the `lark_other_webhook_url=prod` query parameter.** |
+
+### Google Chat Configuration
+| Variable                   | Description |
+|---------------------------|-------------|
+| `GOOGLECHAT_ENABLE`        | Set to `true` to enable Google Chat notifications. |
+| `GOOGLECHAT_WEBHOOK_URL`   | The incoming webhook URL obtained from your Google Chat space. |
+
+For Google Chat, you also need to configure `message_properties` in `config.yaml` for the acknowledgment button text, as shown in the 'Complete Configuration' section.
 
 ### Queue Services Configuration
 | Variable                     | Description |
