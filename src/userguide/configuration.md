@@ -43,6 +43,16 @@ alert:
     chat_id: ${TELEGRAM_CHAT_ID} # From environment
     template_path: "config/telegram_message.tmpl"
 
+  viber:
+    enable: false  # Default value, will be overridden by VIBER_ENABLE env var
+    api_type: ${VIBER_API_TYPE} # From environment - "channel" (default) or "bot"
+    bot_token: ${VIBER_BOT_TOKEN} # From environment (token for bot or channel)
+    # Channel API (recommended for incident management)
+    channel_id: ${VIBER_CHANNEL_ID} # From environment (required for channel API)
+    # Bot API (for individual user notifications)
+    user_id: ${VIBER_USER_ID} # From environment (required for bot API)
+    template_path: "config/viber_message.tmpl"
+
   email:
     enable: false # Default value, will be overridden by EMAIL_ENABLE env var
     smtp_host: ${SMTP_HOST} # From environment
@@ -165,6 +175,34 @@ These properties allow you to:
 | `TELEGRAM_ENABLE`    | Set to `true` to enable Telegram notifications. |
 | `TELEGRAM_BOT_TOKEN` | The authentication token for your Telegram bot. |
 | `TELEGRAM_CHAT_ID`   | The chat ID where alerts will be sent. **Can be overridden per request using the `telegram_chat_id` query parameter.** |
+
+### Viber Configuration
+
+Viber supports two types of API integrations:
+- **Channel API** (default): Send messages to Viber channels for team notifications
+- **Bot API**: Send messages to individual users for personal notifications
+
+**When to use Channel API:**
+- ✅ Broadcasting to team channels
+- ✅ Public incident notifications
+- ✅ Automated system alerts
+- ✅ Better for most incident management scenarios
+- ✅ No individual user setup required
+
+**When to use Bot API:**
+- ✅ Personal notifications to specific users
+- ✅ Direct messaging for individual alerts
+- ⚠️ Limited to individual users only
+- ⚠️ Requires users to interact with bot first
+- ⚠️ User IDs can be hard to obtain
+
+| Variable            | Description |
+|--------------------|-------------|
+| `VIBER_ENABLE`     | Set to `true` to enable Viber notifications. |
+| `VIBER_BOT_TOKEN`  | The authentication token for your Viber bot or channel. |
+| `VIBER_API_TYPE`   | API type: `"channel"` (default) for team notifications or `"bot"` for individual messaging. |
+| `VIBER_CHANNEL_ID` | The channel ID where alerts will be posted (required for channel API). **Can be overridden per request using the `viber_channel_id` query parameter.** |
+| `VIBER_USER_ID`    | The user ID where alerts will be sent (required for bot API). **Can be overridden per request using the `viber_user_id` query parameter.** |
 
 ### Email Configuration
 | Variable          | Description |
@@ -305,6 +343,8 @@ We provide a way to overwrite configuration values using query parameters, allow
 |------------------|-------------|
 | `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_value>`. |
 | `telegram_chat_id`   | The chat ID where Telegram alerts will be sent. Use: `/api/incidents?telegram_chat_id=<your_chat_id>`. |
+| `viber_channel_id`   | The channel ID where Viber alerts will be posted (for Channel API). Use: `/api/incidents?viber_channel_id=<your_channel_id>`. |
+| `viber_user_id`      | The user ID where Viber alerts will be sent (for Bot API). Use: `/api/incidents?viber_user_id=<your_user_id>`. |
 | `email_to`   | Overrides the default recipient email address for email notifications. Use: `/api/incidents?email_to=<recipient_email>`. |
 | `email_subject`   | Overrides the default subject line for email notifications. Use: `/api/incidents?email_subject=<custom_subject>`. |
 | `msteams_other_power_url`   | Overrides the default Microsoft Teams Power Automate flow by specifying an alternative key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_power_url=qc`. |
@@ -340,6 +380,34 @@ curl -X POST "http://localhost:3000/api/incidents?telegram_chat_id=-100123456789
   -d '{
     "Logs": "[ERROR] Network latency exceeding thresholds.",
     "ServiceName": "network-monitor",
+    "UserID": "U12345"
+  }'
+```
+
+#### Viber Channel Override
+
+To send an alert to a specific Viber channel (recommended for team notifications):
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?viber_channel_id=01234567890A=" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Mobile service experiencing high error rates.",
+    "ServiceName": "mobile-api",
+    "UserID": "U12345"
+  }'
+```
+
+#### Viber User Override
+
+To send an alert to a specific Viber user (for individual notifications):
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?viber_user_id=01234567890A=" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Personal alert for mobile service issue.",
+    "ServiceName": "mobile-api",
     "UserID": "U12345"
   }'
 ```

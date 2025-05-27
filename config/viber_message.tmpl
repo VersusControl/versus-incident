@@ -1,0 +1,302 @@
+{{/* 
+  Universal Viber Alert Template
+  Supports: Alertmanager, Grafana, Sentry, Fluent Bit, CloudWatch
+*/}}
+
+{{/* Helper Variables */}}
+{{- $defaultRunbook := or (env "DEFAULT_RUNBOOK_URL") "" -}}
+{{- $severityIcons := dict "CRITICAL" "🔴" "ERROR" "🟠" "WARNING" "🟡" "INFO" "ℹ️" "RESOLVED" "✅" -}}
+{{- $statusIcons := dict "FIRING" "🔥" "RESOLVED" "✅" "UNKNOWN" "ℹ️" -}}
+
+{{/* Detect Source System */}}
+{{- $source := "Unknown" -}}
+{{- if and .receiver -}}
+  {{- if or .commonAnnotations.dashboardURL (and .alerts (index .alerts 0).dashboardURL) -}}
+    {{- $source = "Grafana" -}}
+  {{- else -}}
+    {{- $source = "Prometheus" -}}
+  {{- end -}}
+{{- else if .AlarmName -}}
+  {{- $source = "CloudWatch" -}}
+{{- else if or .log .kubernetes.pod_name -}}
+  {{- $source = "Fluent Bit" -}}
+{{- else if or .event.event_id .data.issue.id -}}
+  {{- $source = "Sentry" -}}
+{{- end -}}
+
+{{/* Process Alerts */}}
+{{- $alerts := list -}}
+{{- if or (eq $source "Prometheus") (eq $source "Grafana") -}}
+  {{- $alerts = .alerts -}}
+{{- else -}}
+  {{- $alerts = list . -}} {{/* Treat single payload as one alert */}}
+{{- end -}}
+
+{{- range $index, $alert := $alerts -}}
+  {{/* Initialize unified alert data structure */}}
+  {{- $unified := dict 
+    "SourceSystem" $source 
+    "Severity" "INFO" 
+    "Status" "UNKNOWN" 
+    "Title" "Unknown Alert" 
+    "Resource" "N/A" 
+    "Description" "No description." 
+    "Timestamp" (now | format "2006-01-02 15:04:05")
+    "DiagnosticLink" ""
+    "RunbookLink" $defaultRunbook
+  -}}
+
+  {{/* Map severity based on alert type */}}
+  {{- $rawSeverity := "" -}}
+  {{- if eq $source "Prometheus" -}}
+    {{- $rawSeverity = or $alert.labels.severity "info" -}}
+  {{- else if eq $source "Grafana" -}}
+    {{- $rawSeverity = or $alert.labels.severity "info" -}}
+  {{- else if eq $source "CloudWatch" -}}
+    {{- $rawSeverity = or $alert.NewStateValue "info" -}}
+  {{- else if eq $source "Fluent Bit" -}}
+    {{- $rawSeverity = or $alert.level "info" -}}
+  {{- else if eq $source "Sentry" -}}
+    {{- $rawSeverity = or $alert.data.issue.level $alert.event.level "info" -}}
+  {{- end -}}
+
+  {{/* Convert severity to standard format */}}
+  {{- $severity := lower $rawSeverity -}}
+  {{- $mappedSeverity := "INFO" -}}
+  {{- if or (eq $severity "critical") (eq $severity "fatal") (eq $severity "alarm") (eq $severity "p1") (eq $severity "1") -}}
+    {{- $mappedSeverity = "CRITICAL" -}}
+  {{- else if or (eq $severity "error") (eq $severity "high") (eq $severity "p2") (eq $severity "2") -}}
+    {{- $mappedSeverity = "ERROR" -}}
+  {{- else if or (eq $severity "warning") (eq $severity "warn") (eq $severity "p3") (eq $severity "3") -}}
+    {{- $mappedSeverity = "WARNING" -}}
+  {{- else if or (eq $severity "info") (eq $severity "information") (eq $severity "low") (eq $severity "p4") (eq $severity "4") -}}
+    {{- $mappedSeverity = "INFO" -}}
+  {{- else if or (eq $severity "ok") (eq $severity "resolved") -}}
+    {{- $mappedSeverity = "RESOLVED" -}}
+  {{- end -}}
+
+  {{/* Map status based on alert type */}}
+  {{- $rawStatus := "" -}}
+  {{- if eq $source "Prometheus" -}}
+    {{- $rawStatus = or $alert.status "unknown" -}}
+  {{- else if eq $source "Grafana" -}}
+    {{- $rawStatus = or $alert.status "unknown" -}}
+  {{- else if eq $source "CloudWatch" -}}
+    {{- $rawStatus = or $alert.NewStateValue "unknown" -}}
+  {{- else if eq $source "Fluent Bit" -}}
+    {{- $rawStatus = or $alert.level "unknown" -}}
+  {{- else if eq $source "Sentry" -}}
+    {{- $rawStatus = or $alert.action "unknown" -}}
+  {{- end -}}
+
+  {{/* Convert status to standard format */}}
+  {{- $status := lower $rawStatus -}}
+  {{- $mappedStatus := "UNKNOWN" -}}
+  {{- if or (eq $status "firing") (eq $status "alarm") (eq $status "active") (eq $status "unresolved") (eq $status "created") (eq $status "triggered") -}}
+    {{- $mappedStatus = "FIRING" -}}
+  {{- else if or (eq $status "resolved") (eq $status "ok") (eq $status "completed") -}}
+    {{- $mappedStatus = "RESOLVED" -}}
+  {{- end -}}
+
+  {{/* Source-Specific Data Extraction */}}
+  {{- if eq $source "Prometheus" -}}
+    {{/* Extract Prometheus specific fields */}}
+    {{- $unified = dict 
+      "SourceSystem" $source
+      "Severity" $mappedSeverity
+      "Status" $mappedStatus
+      "Title" (or $alert.labels.alertname "Prometheus Alert") 
+      "Resource" (or $alert.labels.instance $alert.labels.job "N/A") 
+      "Description" (or $alert.annotations.description $alert.annotations.summary "No description.") 
+      "Timestamp" (or $alert.startsAt (now | format "2006-01-02 15:04:05")) 
+      "DiagnosticLink" (or $alert.generatorURL "") 
+      "RunbookLink" (or $alert.annotations.runbook_url $defaultRunbook)
+    -}}
+
+  {{- else if eq $source "Grafana" -}}
+    {{/* Extract Grafana specific fields */}}
+    {{- $unified = dict 
+      "SourceSystem" $source
+      "Severity" $mappedSeverity
+      "Status" $mappedStatus
+      "Title" (or $alert.labels.alertname "Grafana Alert") 
+      "Resource" (or $alert.labels.instance $alert.labels.job "N/A") 
+      "Description" (or $alert.annotations.description $alert.annotations.summary "No description.") 
+      "Timestamp" (or $alert.startsAt (now | format "2006-01-02 15:04:05")) 
+      "DiagnosticLink" (or $alert.dashboardURL $alert.panelURL $alert.silenceURL "") 
+      "RunbookLink" (or $alert.annotations.runbook_url $defaultRunbook)
+    -}}
+
+  {{- else if eq $source "CloudWatch" -}}
+    {{/* Extract CloudWatch specific fields */}}
+    {{- $regionCode := "us-east-1" -}}
+    {{- if contains "us-east-1" $alert.AlarmArn -}}
+      {{- $regionCode = "us-east-1" -}}
+    {{- else if contains "us-east-2" $alert.AlarmArn -}}
+      {{- $regionCode = "us-east-2" -}}
+    {{- else if contains "us-west-1" $alert.AlarmArn -}}
+      {{- $regionCode = "us-west-1" -}}
+    {{- else if contains "us-west-2" $alert.AlarmArn -}}
+      {{- $regionCode = "us-west-2" -}}
+    {{- else if contains "eu-central-1" $alert.AlarmArn -}}
+      {{- $regionCode = "eu-central-1" -}}
+    {{- else if contains "eu-west-1" $alert.AlarmArn -}}
+      {{- $regionCode = "eu-west-1" -}}
+    {{- else if contains "ap-northeast-1" $alert.AlarmArn -}}
+      {{- $regionCode = "ap-northeast-1" -}}
+    {{- end -}}
+
+    {{/* Extract account ID from ARN */}}
+    {{- $accountId := "unknown" -}}
+    {{- if $alert.AlarmArn -}}
+      {{- $arnParts := split ":" $alert.AlarmArn -}}
+      {{- if gt (len $arnParts) 4 -}}
+        {{- $accountId = index $arnParts 4 -}}
+      {{- end -}}
+    {{- end -}}
+
+    {{- $unified = dict 
+      "SourceSystem" $source
+      "Severity" $mappedSeverity
+      "Status" $mappedStatus
+      "Title" (or $alert.AlarmName "CloudWatch Alarm") 
+      "Resource" (or $alert.AlarmName "N/A") 
+      "Description" (or $alert.AlarmDescription $alert.NewStateReason "No description.") 
+      "Timestamp" (or $alert.StateChangeTime (now | format "2006-01-02 15:04:05")) 
+      "DiagnosticLink" ""
+      "RunbookLink" $defaultRunbook
+      "AWSAccount" $accountId
+      "AWSRegion" $regionCode
+    -}}
+
+  {{- else if eq $source "Fluent Bit" -}}
+    {{/* Extract Fluent Bit specific fields */}}
+    {{- $detectedSeverity := "ERROR" -}}
+    {{- if or (contains "CRITICAL" (upper $alert.log)) (contains "FATAL" (upper $alert.log)) -}}
+      {{- $detectedSeverity = "CRITICAL" -}}
+    {{- else if or (contains "ERROR" (upper $alert.log)) -}}
+      {{- $detectedSeverity = "ERROR" -}}
+    {{- else if or (contains "WARNING" (upper $alert.log)) (contains "WARN" (upper $alert.log)) -}}
+      {{- $detectedSeverity = "WARNING" -}}
+    {{- else -}}
+      {{- $detectedSeverity = "INFO" -}}
+    {{- end -}}
+
+    {{/* Get pod resource string */}}
+    {{- $podResource := "unknown" -}}
+    {{- if $alert.kubernetes.pod_name -}}
+      {{- $podResource = printf "%s/%s" (or $alert.kubernetes.namespace_name "default") $alert.kubernetes.pod_name -}}
+    {{- end -}}
+
+    {{/* Format timestamp if available */}}
+    {{- $timestamp := "" -}}
+    {{- if $alert.date -}}
+      {{/* Convert Unix timestamp to formatted time if needed */}}
+      {{- $timestamp = $alert.date | toString -}}
+    {{- else -}}
+      {{- $timestamp = now | format "2006-01-02 15:04:05" -}}
+    {{- end -}}
+    
+    {{/* Extract application from labels if available */}}
+    {{- $appName := "unknown" -}}
+    {{- if and $alert.kubernetes $alert.kubernetes.labels $alert.kubernetes.labels.app -}}
+      {{- $appName = $alert.kubernetes.labels.app -}}
+    {{- end -}}
+    
+    {{/* Extract error details */}}
+    {{- $errorMessage := $alert.log -}}
+    {{- $shortError := $alert.log -}}
+    {{- if contains "\n" $shortError -}}
+      {{- $lines := split "\n" $shortError -}}
+      {{- $shortError = index $lines 0 -}}
+    {{- end -}}
+    
+    {{- $unified = dict 
+      "SourceSystem" $source
+      "Severity" $detectedSeverity
+      "Status" "FIRING"
+      "Title" (printf "Error in %s" $appName)
+      "Resource" $podResource
+      "Description" $errorMessage
+      "Timestamp" $timestamp
+      "DiagnosticLink" ""
+      "RunbookLink" $defaultRunbook
+      "K8s" (dict
+        "Namespace" (or $alert.kubernetes.namespace_name "")
+        "PodName" (or $alert.kubernetes.pod_name "")
+        "ContainerName" (or $alert.kubernetes.container_name "")
+        "Node" (or $alert.kubernetes.host "")
+        "Labels" (or $alert.kubernetes.labels dict)
+      )
+    -}}
+
+  {{- else if eq $source "Sentry" -}}
+    {{/* Extract Sentry specific fields */}}
+    {{- $unified = dict 
+      "SourceSystem" $source
+      "Severity" $mappedSeverity
+      "Status" $mappedStatus
+      "Title" (or $alert.data.issue.title $alert.message $alert.event.title "Sentry Alert") 
+      "Resource" (printf "%s/%s" (or $alert.project_slug "unknown") (or $alert.data.issue.culprit $alert.culprit "N/A")) 
+      "Description" (or $alert.data.issue.metadata.value $alert.event.logentry.formatted "No description.") 
+      "Timestamp" (or $alert.data.issue.firstSeen $alert.event.timestamp (now | format "2006-01-02 15:04:05")) 
+      "DiagnosticLink" (or $alert.data.issue.web_url $alert.url "") 
+      "RunbookLink" $defaultRunbook
+    -}}
+  {{- end -}}
+
+  {{/* Output Generation (Plain text for Viber) */}}
+  {{- $severityIcon := or (index $severityIcons $unified.Severity) "ℹ️" -}}
+  {{- $statusIcon := or (index $statusIcons $unified.Status) "ℹ️" -}}
+
+  {{- /* Start of message output */ -}}
+  {{ $statusIcon }} {{ $unified.Status }}: {{ $unified.Title }} ({{ $unified.SourceSystem }})
+  
+  {{ $severityIcon }} Severity: {{ $unified.Severity }}
+  Resource: {{ $unified.Resource }}
+  Description: {{ $unified.Description }}
+  Time: {{ $unified.Timestamp }}
+  
+  {{- if $unified.AWSAccount }}
+  AWS Account: {{ $unified.AWSAccount }}
+  {{- end }}
+  {{- if $unified.AWSRegion }}
+  AWS Region: {{ $unified.AWSRegion }}
+  {{- end }}
+  
+  {{- if and (eq $unified.SourceSystem "Fluent Bit") $unified.K8s }}
+  Kubernetes Metadata:
+  {{- if $unified.K8s.Namespace }}
+  • Namespace: {{ $unified.K8s.Namespace }}
+  {{- end }}
+  {{- if $unified.K8s.PodName }}
+  • Pod: {{ $unified.K8s.PodName }}
+  {{- end }}
+  {{- if $unified.K8s.ContainerName }}
+  • Container: {{ $unified.K8s.ContainerName }}
+  {{- end }}
+  {{- if $unified.K8s.Node }}
+  • Node: {{ $unified.K8s.Node }}
+  {{- end }}
+  {{- if $unified.K8s.Labels }}
+  • Labels:
+  {{- range $key, $value := $unified.K8s.Labels }}
+    - {{ $key }}: {{ $value }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  
+  {{- if $unified.RunbookLink }}
+  Runbook: {{ $unified.RunbookLink }}
+  {{- end }}
+  {{- if $unified.DiagnosticLink }}
+  Diagnostics: {{ $unified.DiagnosticLink }}
+  {{- end }}
+  {{- if $alert.AckURL }}
+  -------------------
+  Click here to acknowledge: {{ $alert.AckURL }}
+  {{- end }}
+  {{- if ne (add $index 1) (len $alerts) }}
+  ---
+  {{- end }}
+{{- end -}}

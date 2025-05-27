@@ -69,6 +69,13 @@ alert:
   
   lark:
     enable: false
+  
+  viber:
+    enable: false
+    # apiType: "channel"  # Default: "channel" (or "bot")
+    # botToken: "your-viber-token"
+    # channelId: "your-channel-id"  # For Channel API
+    # userId: "your-user-id"        # For Bot API
 ```
 
 ### Important Parameters
@@ -84,6 +91,8 @@ alert:
 | `alert.email.enable` | Enable email notifications | `false` |
 | `alert.msteams.enable` | Enable Microsoft Teams notifications | `false` |
 | `alert.lark.enable` | Enable Lark notifications | `false` |
+| `alert.viber.enable` | Enable Viber notifications | `false` |
+| `alert.viber.apiType` | Viber API type ("channel" or "bot") | `"channel"` |
 | `oncall.enable` | Enable on-call functionality | `false` |
 | `oncall.provider` | On-call provider ("aws_incident_manager" or "pagerduty") | `"aws_incident_manager"` |
 | `redis.enabled` | Enable bundled Redis (required for on-call) | `false` |
@@ -151,6 +160,40 @@ alert:
       dev: "dev-team-webhook-url"
       prod: "prod-team-webhook-url"
 ```
+
+### Viber
+
+Viber supports two types of API integrations:
+
+- **Channel API** (default): Send messages to Viber channels for team notifications  
+- **Bot API**: Send messages to individual users for personal notifications
+
+**Recommended Configuration (Channel API):**
+```yaml
+alert:
+  viber:
+    enable: true
+    botToken: "your-viber-channel-token"  # Token for channel or bot
+    apiType: "channel"  # Default: "channel" (or "bot" for individual messaging)
+    channelId: "your-viber-channel-id"  # Required for Channel API
+    templatePath: "/app/config/viber_message.tmpl"
+```
+
+**Alternative Configuration (Bot API):**
+```yaml
+alert:
+  viber:
+    enable: true
+    botToken: "your-viber-bot-token"
+    apiType: "bot"  # For individual user notifications
+    userId: "your-viber-user-id"  # Required for Bot API
+    templatePath: "/app/config/viber_message.tmpl"
+```
+
+**When to use each API type:**
+
+- **Channel API** ✅ Better for incident management, team notifications, easier setup
+- **Bot API** ⚠️ Limited to individual users, requires user interaction first
 
 ## On-Call Configurations
 

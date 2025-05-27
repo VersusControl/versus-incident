@@ -27,6 +27,7 @@ type AlertConfig struct {
 	DebugBody bool `mapstructure:"debug_body"`
 	Slack     SlackConfig
 	Telegram  TelegramConfig
+	Viber     ViberConfig
 	Email     EmailConfig
 	MSTeams   MSTeamsConfig
 	Lark      LarkConfig
@@ -51,6 +52,17 @@ type TelegramConfig struct {
 	BotToken     string `mapstructure:"bot_token"`
 	ChatID       string `mapstructure:"chat_id"`
 	TemplatePath string `mapstructure:"template_path"`
+}
+
+type ViberConfig struct {
+	Enable  bool
+	APIType string `mapstructure:"api_type"` // "bot" or "channel" - defaults to "channel"
+	// Bot API configuration
+	BotToken     string `mapstructure:"bot_token"`
+	UserID       string `mapstructure:"user_id"`
+	TemplatePath string `mapstructure:"template_path"`
+	// Channel configuration for Channels Post API
+	ChannelID string `mapstructure:"channel_id"`
 }
 
 type EmailConfig struct {
@@ -216,6 +228,14 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 
 	if v := (*paramsOverwrite)["telegram_chat_id"]; v != "" {
 		clonedCfg.Alert.Telegram.ChatID = v
+	}
+
+	if v := (*paramsOverwrite)["viber_user_id"]; v != "" {
+		clonedCfg.Alert.Viber.UserID = v
+	}
+
+	if v := (*paramsOverwrite)["viber_channel_id"]; v != "" {
+		clonedCfg.Alert.Viber.ChannelID = v
 	}
 
 	if v := (*paramsOverwrite)["email_to"]; v != "" {

@@ -65,6 +65,31 @@ spec:
                   key: telegram_chat_id
             {{- end }}
             
+            {{- if .Values.alert.viber.enable }}
+            - name: VIBER_ENABLE
+              value: "true"
+            - name: VIBER_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: viber_bot_token
+            - name: VIBER_USER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: viber_user_id
+            - name: VIBER_CHANNEL_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: viber_channel_id
+            - name: VIBER_API_TYPE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: viber_api_type
+            {{- end }}
+            
             {{- if .Values.alert.email.enable }}
             - name: EMAIL_ENABLE
               value: "true"

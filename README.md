@@ -32,7 +32,7 @@ An incident management tool that supports alerting across multiple channels with
 
 ## Features
 
-- 🚨 **Multi-channel Alerts**: Send incident notifications to Slack, Microsoft Teams, Telegram, Email, and Lark (more channels coming!)
+- 🚨 **Multi-channel Alerts**: Send incident notifications to Slack, Microsoft Teams, Telegram, Viber, Email, and Lark (more channels coming!)
 - 📝 **Custom Templates**: Define your own alert messages using Go templates
 - 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
 - 📡 **REST API**: Simple HTTP interface to receive alerts
@@ -665,6 +665,16 @@ alert:
     chat_id: ${TELEGRAM_CHAT_ID} # From environment
     template_path: "config/telegram_message.tmpl"
 
+  viber:
+    enable: false  # Default value, will be overridden by VIBER_ENABLE env var
+    bot_token: ${VIBER_BOT_TOKEN} # From environment (token for bot or channel)
+    api_type: ${VIBER_API_TYPE} # From environment - "channel" (default) or "bot"
+    # Channel API (recommended for incident management)
+    channel_id: ${VIBER_CHANNEL_ID} # From environment (required for channel API)
+    # Bot API (for individual user notifications)  
+    user_id: ${VIBER_USER_ID} # From environment (required for bot API)
+    template_path: "config/viber_message.tmpl"
+
   email:
     enable: false # Default value, will be overridden by EMAIL_ENABLE env var
     smtp_host: ${SMTP_HOST} # From environment
@@ -788,6 +798,34 @@ These properties allow you to:
 | `TELEGRAM_BOT_TOKEN` | The authentication token for your Telegram bot. |
 | `TELEGRAM_CHAT_ID`   | The chat ID where alerts will be sent. **Can be overridden per request using the `telegram_chat_id` query parameter.** |
 
+### Viber Configuration
+
+Viber supports two types of API integrations:
+- **Channel API** (default): Send messages to Viber channels for team notifications
+- **Bot API**: Send messages to individual users for personal notifications
+
+**When to use Channel API:**
+- ✅ Broadcasting to team channels
+- ✅ Public incident notifications
+- ✅ Automated system alerts
+- ✅ Better for most incident management scenarios
+- ✅ No individual user setup required
+
+**When to use Bot API:**
+- ✅ Personal notifications to specific users
+- ✅ Direct messaging for individual alerts
+- ⚠️ Limited to individual users only
+- ⚠️ Requires users to interact with bot first
+- ⚠️ User IDs can be hard to obtain
+
+| Variable            | Description |
+|--------------------|-------------|
+| `VIBER_ENABLE`     | Set to `true` to enable Viber notifications. |
+| `VIBER_BOT_TOKEN`  | The authentication token for your Viber bot or channel. |
+| `VIBER_API_TYPE`   | API type: `"channel"` (default) for team notifications or `"bot"` for individual messaging. |
+| `VIBER_CHANNEL_ID` | The channel ID where alerts will be posted (required for channel API). **Can be overridden per request using the `viber_channel_id` query parameter.** |
+| `VIBER_USER_ID`    | The user ID where alerts will be sent (required for bot API). **Can be overridden per request using the `viber_user_id` query parameter.** |
+
 ### Email Configuration
 | Variable          | Description |
 |------------------|-------------|
@@ -863,6 +901,8 @@ We provide a way to overwrite configuration values using query parameters, allow
 |------------------|-------------|
 | `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_value>`. |
 | `telegram_chat_id`   | The chat ID where Telegram alerts will be sent. Use: `/api/incidents?telegram_chat_id=<your_chat_id>`. |
+| `viber_user_id`   | The user ID where Viber alerts will be sent (for bot API). Use: `/api/incidents?viber_user_id=<your_user_id>`. |
+| `viber_channel_id`   | The channel ID where Viber alerts will be posted (for channel API). Use: `/api/incidents?viber_channel_id=<your_channel_id>`. |
 | `email_to`   | Overrides the default recipient email address for email notifications. Use: `/api/incidents?email_to=<recipient_email>`. |
 | `email_subject`   | Overrides the default subject line for email notifications. Use: `/api/incidents?email_subject=<custom_subject>`. |
 | `msteams_other_power_url`   | Overrides the default Microsoft Teams Power Automate flow by specifying an alternative key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_power_url=qc`. |
@@ -898,6 +938,34 @@ curl -X POST "http://localhost:3000/api/incidents?telegram_chat_id=-100123456789
   -d '{
     "Logs": "[ERROR] Network latency exceeding thresholds.",
     "ServiceName": "network-monitor",
+    "UserID": "U12345"
+  }'
+```
+
+#### Viber Channel Override (Default API)
+
+To send an alert to a different Viber channel (e.g., for team notifications):
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?viber_channel_id=your_channel_id" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Production database connection failure.",
+    "ServiceName": "database",
+    "UserID": "U12345"
+  }'
+```
+
+#### Viber User Override (Bot API)
+
+To send an alert to a different Viber user (e.g., for personal notifications):
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?viber_user_id=4UHcAFe/T6w4SJjQ3M8VKA==" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Mobile app service degradation detected.",
+    "ServiceName": "mobile-api",
     "UserID": "U12345"
   }'
 ```
@@ -1097,7 +1165,7 @@ For complete migration instructions, please see our [detailed migration guide](h
 - [x] Add Email support
 - [x] Add SNS subscription
 - [x] Add MS Team support
-- [ ] Add Viber support
+- [x] Add Viber support
 - [x] Add Lark support
 - [x] Add support for queue listeners (AWS SQS, GCP Cloud Pub/Sub, Azure Service Bus)
 - [x] Support multiple templates

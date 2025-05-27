@@ -109,6 +109,14 @@ alert:
     chatId: ""
     templatePath: "/app/config/telegram_message.tmpl"
   
+  viber:
+    enable: false
+    botToken: ""
+    userId: ""
+    channelId: ""
+    apiType: "channel" # "bot" or "channel"
+    templatePath: "/app/config/viber_message.tmpl"
+  
   email:
     enable: false
     smtpHost: ""

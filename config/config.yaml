@@ -22,6 +22,14 @@ alert:
     chat_id: ${TELEGRAM_CHAT_ID}
     template_path: "config/telegram_message.tmpl"
 
+  viber:
+    enable: false
+    api_type: ${VIBER_API_TYPE} # "bot" or "channel" - defaults to "channel"
+    bot_token: ${VIBER_BOT_TOKEN}
+    user_id: ${VIBER_USER_ID}
+    channel_id: ${VIBER_CHANNEL_ID}
+    template_path: "config/viber_message.tmpl"
+
   email:
     enable: false
     smtp_host: ${SMTP_HOST}

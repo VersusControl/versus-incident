@@ -25,6 +25,7 @@ func cloneAlertConfig(src AlertConfig) AlertConfig {
 		DebugBody: src.DebugBody,
 		Slack:     cloneSlackConfig(src.Slack),
 		Telegram:  cloneTelegramConfig(src.Telegram),
+		Viber:     cloneViberConfig(src.Viber),
 		Email:     cloneEmailConfig(src.Email),
 		MSTeams:   cloneMSTeamsConfig(src.MSTeams),
 		Lark:      cloneLarkConfig(src.Lark),
@@ -53,6 +54,18 @@ func cloneTelegramConfig(src TelegramConfig) TelegramConfig {
 		BotToken:     src.BotToken,
 		ChatID:       src.ChatID,
 		TemplatePath: src.TemplatePath,
+	}
+}
+
+// Helper function to deep clone the ViberConfig struct
+func cloneViberConfig(src ViberConfig) ViberConfig {
+	return ViberConfig{
+		Enable:       src.Enable,
+		APIType:      src.APIType,
+		BotToken:     src.BotToken,
+		UserID:       src.UserID,
+		TemplatePath: src.TemplatePath,
+		ChannelID:    src.ChannelID,
 	}
 }
 

@@ -152,6 +152,9 @@ alert:
   telegram:
     enable: false
 
+  viber:
+    enable: false
+
   msteams:
     enable: false
 ```
