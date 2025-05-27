@@ -2,7 +2,6 @@ package common
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -43,7 +42,11 @@ func NewGoogleChatProvider(cfg config.GoogleChatConfig) *GoogleChatProvider {
 
 // SendAlert sends an alert to Google Chat
 func (s *GoogleChatProvider) SendAlert(i *m.Incident) error {
-	utils.Log.Infof("GoogleChatProvider: Received alert ID %s, Status: %s", i.ID, i.ContentMap()["status"])
+	var status interface{}
+	if i.Content != nil {
+		status = (*i.Content)["status"]
+	}
+	utils.Log.Infof("GoogleChatProvider: Received alert ID %s, Status: %s", i.ID, status)
 
 	incidentData := make(map[string]interface{})
 	if i.Content != nil {
@@ -61,19 +64,15 @@ func (s *GoogleChatProvider) SendAlert(i *m.Incident) error {
 		}
 	}
 	isResolved := strings.ToLower(statusStr) == "resolved"
-
 	if !isResolved {
 		// Process AckURL, similar to SlackProvider.processAckURL
-		if ackURLVal, ok := incidentData["ackurl"]; ok {
+		if ackURLVal, ok := incidentData["AckURL"]; ok {
 			ackURL = fmt.Sprintf("%v", ackURLVal)
-			delete(incidentData, "ackurl") // Remove from incidentData as it's handled separately
-		} else if ackURLVal, ok := incidentData["ack_url"]; ok {
-			ackURL = fmt.Sprintf("%v", ackURLVal)
-			delete(incidentData, "ack_url")
+			delete(incidentData, "AckURL") // Remove from incidentData as it's handled separately
 		}
+		utils.Log.Debugf("GoogleChatProvider: AckURL for incident %s: %s", i.ID, ackURL)
 	}
-	
-	payload, err := renderCardPayload(s.templatePath, incidentData, ackURL, s.msgProps.ButtonText, isResolved)
+	payload, err := renderCardPayload(s.templatePath, incidentData)
 	if err != nil {
 		utils.Log.Errorf("GoogleChatProvider: Error rendering card payload for incident %s: %v", i.ID, err)
 		return fmt.Errorf("failed to render Google Chat card payload for incident %s: %w", i.ID, err)
@@ -111,7 +110,7 @@ func (s *GoogleChatProvider) SendAlert(i *m.Incident) error {
 }
 
 // renderCardPayload generates the JSON payload for a Google Chat Card
-func renderCardPayload(templatePath string, incidentData map[string]interface{}, ackURL string, buttonText string, isResolved bool) ([]byte, error) {
+func renderCardPayload(templatePath string, incidentData map[string]interface{}) ([]byte, error) {
 	if templatePath == "" {
 		utils.Log.Errorf("GoogleChatProvider: Template path is not configured.")
 		return nil, fmt.Errorf("google chat template path is not configured")
@@ -125,14 +124,8 @@ func renderCardPayload(templatePath string, incidentData map[string]interface{},
 	}
 
 	var buf bytes.Buffer
-	templateData := map[string]interface{}{
-		"Incident":   incidentData,
-		"AckURL":     ackURL,
-		"ButtonText": buttonText,
-		"IsResolved": isResolved,
-	}
 
-	if err := tmpl.Execute(&buf, templateData); err != nil {
+	if err := tmpl.Execute(&buf, incidentData); err != nil {
 		utils.Log.Errorf("GoogleChatProvider: Error executing template %s: %v", templatePath, err)
 		return nil, fmt.Errorf("failed to execute Google Chat template %s: %w", templatePath, err)
 	}

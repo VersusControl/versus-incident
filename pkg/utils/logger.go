@@ -7,12 +7,12 @@ import (
 
 // Logger defines a simple interface for logging.
 type Logger interface {
-	Info(args ...interface{})
-	Infof(format string, args ...interface{})
-	Error(args ...interface{})
-	Errorf(format string, args ...interface{})
-	Debug(args ...interface{})
-	Debugf(format string, args ...interface{})
+	Info(args ...any)
+	Infof(format string, args ...any)
+	Error(args ...any)
+	Errorf(format string, args ...any)
+	Debug(args ...any)
+	Debugf(format string, args ...any)
 }
 
 // simpleLogger is a basic implementation of the Logger interface.
@@ -33,29 +33,29 @@ func NewSimpleLogger() Logger {
 	}
 }
 
-func (l *simpleLogger) Info(args ...interface{}) {
+func (l *simpleLogger) Info(args ...any) {
 	l.infoLogger.Println(args...)
 }
 
-func (l *simpleLogger) Infof(format string, args ...interface{}) {
+func (l *simpleLogger) Infof(format string, args ...any) {
 	l.infoLogger.Printf(format, args...)
 }
 
-func (l *simpleLogger) Error(args ...interface{}) {
+func (l *simpleLogger) Error(args ...any) {
 	l.errorLogger.Println(args...)
 }
 
-func (l *simpleLogger) Errorf(format string, args ...interface{}) {
+func (l *simpleLogger) Errorf(format string, args ...any) {
 	l.errorLogger.Printf(format, args...)
 }
 
-func (l *simpleLogger) Debug(args ...interface{}) {
+func (l *simpleLogger) Debug(args ...any) {
 	if os.Getenv("LOG_LEVEL") == "DEBUG" {
 		l.debugLogger.Println(args...)
 	}
 }
 
-func (l *simpleLogger) Debugf(format string, args ...interface{}) {
+func (l *simpleLogger) Debugf(format string, args ...any) {
 	if os.Getenv("LOG_LEVEL") == "DEBUG" {
 		l.debugLogger.Printf(format, args...)
 	}
