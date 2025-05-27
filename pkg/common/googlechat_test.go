@@ -125,9 +125,7 @@ type GoogleChatCard struct {
 }
 
 func TestGoogleChatProvider_SendAlert_Unresolved(t *testing.T) {
-	// Ensure template functions are available (mock or real)
-	// If utils.GetTemplateFuncMaps() is not fully implemented, this test might fail at template execution.
-	utils.InitFuncMaps() // Assuming this initializes the maps needed by the template
+	// utils.GetTemplateFuncMaps() is called directly by the provider, so no separate InitFuncMaps() is needed here.
 
 	// Create a temporary valid template file for this test
 	// This ensures the test doesn't depend on the global template file's exact content,
@@ -147,11 +145,17 @@ func TestGoogleChatProvider_SendAlert_Unresolved(t *testing.T) {
 			"cardsV2": [{
 				"cardId": "alertCard-{{ now.UnixNano }}",
 				"card": {
-					"header": { "title": "{{ $data := .Incident }}{{ $statusIcon := \"🔥\"}}{{ $finalStatus := $data.status | upper }}{{ printf \"%s %s: %s\" $statusIcon $finalStatus ($data.title | default \"Incident\") }}" },
+					"header": { "title": "{{ $data := .Incident }}{{ $statusIcon := \"🔥\"}}{{ $finalStatus := $data.status | upper }}{{ printf \"%s %s: %s\" $statusIcon $finalStatus ($data.title | default \"Incident\") | escapeJsonString }}" },
 					"sections": [
-						{ "widgets": [ { "textParagraph": { "text": "Desc: {{ .Incident.description }}" } } ] }
+						{ "widgets": [ { "textParagraph": { "text": "Desc: {{ .Incident.description | escapeJsonString }}" } } ] }
+						{{ if .Incident.customDetailsArray }}
+						,{ "widgets": [ { "textParagraph": { "text": "Array: {{ buildJsonArray (.Incident.customDetailsArray.item1 | escapeJsonString) (.Incident.customDetailsArray.item2 | escapeJsonString) }} " } } ] }
+						{{ end }}
+						{{ if .Incident.customDetailsObject }}
+						,{ "widgets": [ { "textParagraph": { "text": "Object: {{ buildJsonObjectMembers (printf "\"key1\": \"%s\"" (.Incident.customDetailsObject.prop1 | escapeJsonString)) (printf "\"key2\": \"%s\"" (.Incident.customDetailsObject.prop2 | escapeJsonString)) }} " } } ] }
+						{{ end }}
 						{{ if and .AckURL (not .IsResolved) }}
-						,{ "widgets": [ { "buttonList": { "buttons": [ { "text": "{{ .ButtonText }}", "onClick": { "openLink": { "url": "{{ .AckURL }}" } } } ] } } ] }
+						,{ "widgets": [ { "buttonList": { "buttons": [ { "text": "{{ .ButtonText | escapeJsonString }}", "onClick": { "openLink": { "url": "{{ .AckURL | escapeJsonString }}" } } } ] } } ] }
 						{{ end }}
 					]
 				}
@@ -180,14 +184,22 @@ func TestGoogleChatProvider_SendAlert_Unresolved(t *testing.T) {
 	provider := setupGoogleChatProvider(t, server.URL, tempTemplatePath, mockButtonText)
 
 	incidentContent := map[string]interface{}{
-		"title":       "Test Unresolved Alert",
-		"description": "This is a test description for an unresolved alert.",
+		"title":       "Test Unresolved Alert with \"quotes\" & \\backslashes\\",
+		"description": "Description with \"quotes\", \\backslashes\\, and \nnewlines\n and \ttabs\t.",
 		"status":      "firing",
 		"severity":    "critical",
 		"ackurl":      mockAckURL, // Ensure ackurl is present
 		"commonAnnotations": map[string]string{"summary": "Test Unresolved Alert"},
 		"commonLabels": map[string]string{"severity": "critical"},
 		"startsAt": time.Now().Format(time.RFC3339),
+		"customDetailsArray": map[string]string{ // For testing buildJsonArray
+			"item1": "Array Item 1 \"with quotes\"",
+			"item2": "Array Item 2 \\with backslash\\",
+		},
+		"customDetailsObject": map[string]string{ // For testing buildJsonObjectMembers
+			"prop1": "Object Prop 1 value with \nnewline",
+			"prop2": "Object Prop 2 value with \ttab",
+		},
 	}
 	incident := &m.Incident{
 		ID:      "incident-123",
@@ -205,32 +217,48 @@ func TestGoogleChatProvider_SendAlert_Unresolved(t *testing.T) {
 
 	require.Len(t, cardPayload.CardsV2, 1, "Should have one card in cardsV2")
 	card := cardPayload.CardsV2[0].Card
-	assert.Contains(t, card.Header.Title, "FIRING: Test Unresolved Alert", "Card header title mismatch")
+	assert.Contains(t, card.Header.Title, "FIRING: Test Unresolved Alert with \\\"quotes\\\" & \\\\backslashes\\\\", "Card header title mismatch or not escaped")
 
 	// Check for description (example, depends on template structure)
 	foundDescription := false
 	foundButton := false
+	foundArray := false
+	foundObject := false
+
 	for _, section := range card.Sections {
 		for _, widget := range section.Widgets {
-			if widget.TextParagraph != nil && strings.Contains(widget.TextParagraph.Text, "This is a test description") {
-				foundDescription = true
+			if widget.TextParagraph != nil {
+				if strings.Contains(widget.TextParagraph.Text, "Desc: Description with \\\"quotes\\\", \\\\backslashes\\\\, and \\nnewlines\\n and \\ttabs\\t.") {
+					foundDescription = true
+				}
+				// Check for custom array (Note: direct string contains might be fragile if order changes or more processing is done)
+				// A more robust check would parse the JSON fragment if possible.
+				if strings.Contains(widget.TextParagraph.Text, "Array: [\\\"Array Item 1 \\\\\\\"with quotes\\\\\\\"\\\",\\\"Array Item 2 \\\\\\\\with backslash\\\\\\\\\"]") {
+					foundArray = true
+				}
+				// Check for custom object
+				if strings.Contains(widget.TextParagraph.Text, "Object: {\\\"key1\\\": \\\"Object Prop 1 value with \\\\nnewline\\\",\\\"key2\\\": \\\"Object Prop 2 value with \\\\ttab\\\"}") {
+					foundObject = true
+				}
 			}
 			if widget.ButtonList != nil {
 				require.Len(t, widget.ButtonList.Buttons, 1, "Should have one button")
 				button := widget.ButtonList.Buttons[0]
-				assert.Equal(t, mockButtonText, button.Text)
-				assert.Equal(t, mockAckURL, button.OnClick.OpenLink.URL)
+				assert.Equal(t, mockButtonText, button.Text) // Assuming ButtonText itself doesn't need escaping in this context, or is escaped by template
+				assert.Equal(t, mockAckURL, button.OnClick.OpenLink.URL) // Same for AckURL
 				foundButton = true
 			}
 		}
 	}
-	assert.True(t, foundDescription, "Description not found in card widgets")
+	assert.True(t, foundDescription, "Escaped description not found in card widgets")
+	assert.True(t, foundArray, "Custom JSON array not found or incorrect in card widgets")
+	assert.True(t, foundObject, "Custom JSON object not found or incorrect in card widgets")
 	assert.True(t, foundButton, "Acknowledge button not found or incorrect")
 }
 
 
 func TestGoogleChatProvider_SendAlert_Resolved(t *testing.T) {
-	utils.InitFuncMaps()
+	// utils.GetTemplateFuncMaps() is called directly by the provider, so no separate InitFuncMaps() is needed here.
 	tempTemplateDir := t.TempDir()
 	tempTemplatePath := filepath.Join(tempTemplateDir, googleChatTestTemplate)
 	originalTemplateFile := filepath.Join(testTemplateDir, googleChatTestTemplate)
@@ -241,8 +269,8 @@ func TestGoogleChatProvider_SendAlert_Resolved(t *testing.T) {
 			"cardsV2": [{
 				"cardId": "alertCard-{{ now.UnixNano }}",
 				"card": {
-					"header": { "title": "{{ $data := .Incident }}{{ $statusIcon := \"✅\"}}{{ $finalStatus := $data.status | upper }}{{ if .IsResolved }}RESOLVED{{ else }}{{ $finalStatus }}{{ end }}: {{ $data.title | default \"Incident\" }}" },
-					"sections": [ { "widgets": [ { "textParagraph": { "text": "Desc: {{ .Incident.description }}" } } ] } ]
+					"header": { "title": "{{ $data := .Incident }}{{ $statusIcon := \"✅\"}}{{ $finalStatus := $data.status | upper }}{{ if .IsResolved }}RESOLVED{{ else }}{{ $finalStatus }}{{ end }}: {{ $data.title | default \"Incident\" | escapeJsonString }}" },
+					"sections": [ { "widgets": [ { "textParagraph": { "text": "Desc: {{ .Incident.description | escapeJsonString }}" } } ] } ]
 				}
 			}]
 		}`
@@ -283,7 +311,7 @@ func TestGoogleChatProvider_SendAlert_Resolved(t *testing.T) {
 
 	require.Len(t, cardPayload.CardsV2, 1)
 	card := cardPayload.CardsV2[0].Card
-	assert.Contains(t, card.Header.Title, "RESOLVED: Test Resolved Alert", "Card header title mismatch for resolved alert")
+	assert.Contains(t, card.Header.Title, "RESOLVED: Test Resolved Alert", "Card header title mismatch for resolved alert or not escaped")
 
 	buttonFound := false
 	for _, section := range card.Sections {
@@ -299,14 +327,14 @@ func TestGoogleChatProvider_SendAlert_Resolved(t *testing.T) {
 }
 
 func TestGoogleChatProvider_SendAlert_HTTPError(t *testing.T) {
-	utils.InitFuncMaps()
+	// utils.GetTemplateFuncMaps() is called directly by the provider, so no separate InitFuncMaps() is needed here.
 	tempTemplateDir := t.TempDir()
 	tempTemplatePath := filepath.Join(tempTemplateDir, googleChatTestTemplate)
 	originalTemplateFile := filepath.Join(testTemplateDir, googleChatTestTemplate)
 	originalContent, err := ioutil.ReadFile(originalTemplateFile)
 	if err != nil {
 		t.Logf("Could not read original template '%s', using minimal: %v", originalTemplateFile, err)
-		minimalTemplate := `{ "cardsV2": [{ "cardId": "test", "card": { "header": { "title": "Test" } } }] }`
+		minimalTemplate := `{ "cardsV2": [{ "cardId": "test", "card": { "header": { "title": "{{ .Incident.title | escapeJsonString }}" } } }] }`
 		err = ioutil.WriteFile(tempTemplatePath, []byte(minimalTemplate), 0644)
 		require.NoError(t, err)
 	} else {
@@ -339,7 +367,7 @@ func TestGoogleChatProvider_SendAlert_TemplateError_NonExistentTemplate(t *testi
 }
 
 func TestGoogleChatProvider_SendAlert_TemplateError_BadTemplate(t *testing.T) {
-	utils.InitFuncMaps()
+	// utils.GetTemplateFuncMaps() is called directly by the provider, so no separate InitFuncMaps() is needed here.
 	// Create a temporary template file with invalid syntax
 	badTemplateContent := `{ "cardsV2": [ { "cardId": "test", "card": { "header": { "title": "{{ .Incident.title" } } } ] }` // Missing closing }}
 	tempTemplateFile := createTempTemplateFile(t, badTemplateContent)

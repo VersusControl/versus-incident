@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,8 @@ func NewGoogleChatProvider(cfg config.GoogleChatConfig) *GoogleChatProvider {
 
 // SendAlert sends an alert to Google Chat
 func (s *GoogleChatProvider) SendAlert(i *m.Incident) error {
+	utils.Log.Infof("GoogleChatProvider: Received alert ID %s, Status: %s", i.ID, i.ContentMap()["status"])
+
 	incidentData := make(map[string]interface{})
 	if i.Content != nil {
 		for k, v := range *i.Content {
@@ -50,7 +53,14 @@ func (s *GoogleChatProvider) SendAlert(i *m.Incident) error {
 	}
 
 	var ackURL string
-	isResolved := strings.ToLower(incidentData["status"].(string)) == "resolved"
+	// Determine if resolved. Safely access status.
+	var statusStr string
+	if statusVal, ok := incidentData["status"]; ok {
+		if str, ok := statusVal.(string); ok {
+			statusStr = str
+		}
+	}
+	isResolved := strings.ToLower(statusStr) == "resolved"
 
 	if !isResolved {
 		// Process AckURL, similar to SlackProvider.processAckURL
@@ -65,45 +75,53 @@ func (s *GoogleChatProvider) SendAlert(i *m.Incident) error {
 	
 	payload, err := renderCardPayload(s.templatePath, incidentData, ackURL, s.msgProps.ButtonText, isResolved)
 	if err != nil {
-		return fmt.Errorf("failed to render Google Chat card payload: %w", err)
+		utils.Log.Errorf("GoogleChatProvider: Error rendering card payload for incident %s: %v", i.ID, err)
+		return fmt.Errorf("failed to render Google Chat card payload for incident %s: %w", i.ID, err)
 	}
+	utils.Log.Debugf("GoogleChatProvider: Payload for incident %s: %s", i.ID, string(payload))
 
+	utils.Log.Infof("GoogleChatProvider: Sending alert %s to Google Chat webhook", i.ID)
 	req, err := http.NewRequest("POST", s.webhookURL, bytes.NewBuffer(payload))
 	if err != nil {
-		return fmt.Errorf("failed to create Google Chat request: %w", err)
+		utils.Log.Errorf("GoogleChatProvider: Error creating HTTP request for incident %s: %v", i.ID, err)
+		return fmt.Errorf("failed to create Google Chat request for incident %s: %w", i.ID, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send Google Chat message: %w", err)
+		utils.Log.Errorf("GoogleChatProvider: Error sending alert %s to Google Chat: %v", i.ID, err)
+		return fmt.Errorf("failed to send Google Chat message for incident %s: %w", i.ID, err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		// Attempt to read body for more details, but don't fail if it's not possible
-		var responseBody strings.Builder
-		_, err := responseBody.ReadFrom(resp.Body)
-		if err != nil {
-			utils.Logger.Errorf("Failed to read Google Chat error response body: %v", err)
-		}
-		return fmt.Errorf("failed to send Google Chat message: status code %d, response: %s", resp.StatusCode, responseBody.String())
+	responseBodyBytes, readErr := ioutil.ReadAll(resp.Body)
+	if readErr != nil {
+		utils.Log.Errorf("GoogleChatProvider: Failed to read response body for incident %s: %v", i.ID, readErr)
+		// Continue to check status code, as the request might have succeeded
 	}
 
-	utils.Logger.Infof("Google Chat alert sent successfully for incident: %s", i.ID)
+	if resp.StatusCode != http.StatusOK {
+		utils.Log.Errorf("GoogleChatProvider: Google Chat responded with status %s for incident %s. Body: %s", resp.Status, i.ID, string(responseBodyBytes))
+		return fmt.Errorf("failed to send Google Chat message for incident %s: status code %d, response: %s", i.ID, resp.StatusCode, string(responseBodyBytes))
+	}
+
+	utils.Log.Infof("GoogleChatProvider: Successfully sent alert %s to Google Chat", i.ID)
 	return nil
 }
 
 // renderCardPayload generates the JSON payload for a Google Chat Card
 func renderCardPayload(templatePath string, incidentData map[string]interface{}, ackURL string, buttonText string, isResolved bool) ([]byte, error) {
 	if templatePath == "" {
+		utils.Log.Errorf("GoogleChatProvider: Template path is not configured.")
 		return nil, fmt.Errorf("google chat template path is not configured")
 	}
 
 	tmplName := filepath.Base(templatePath)
 	tmpl, err := template.New(tmplName).Funcs(utils.GetTemplateFuncMaps()).ParseFiles(templatePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse Google Chat template: %w", err)
+		utils.Log.Errorf("GoogleChatProvider: Error parsing template %s: %v", templatePath, err)
+		return nil, fmt.Errorf("failed to parse Google Chat template %s: %w", templatePath, err)
 	}
 
 	var buf bytes.Buffer
@@ -115,7 +133,8 @@ func renderCardPayload(templatePath string, incidentData map[string]interface{},
 	}
 
 	if err := tmpl.Execute(&buf, templateData); err != nil {
-		return nil, fmt.Errorf("failed to execute Google Chat template: %w", err)
+		utils.Log.Errorf("GoogleChatProvider: Error executing template %s: %v", templatePath, err)
+		return nil, fmt.Errorf("failed to execute Google Chat template %s: %w", templatePath, err)
 	}
 
 	// The template is expected to produce a valid JSON.
