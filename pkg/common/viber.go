@@ -20,6 +20,7 @@ type ViberProvider struct {
 	channelID    string
 	templatePath string
 	apiType      string // "bot" or "channel"
+	client       *http.Client
 }
 
 // ViberBotMessage represents a message for Viber Bot API
@@ -36,11 +37,13 @@ type ViberChannelMessage struct {
 	Text string `json:"text"`
 }
 
-func NewViberProvider(cfg config.ViberConfig) *ViberProvider {
+func NewViberProvider(cfg config.ViberConfig, proxyConfig config.ProxyConfig) *ViberProvider {
 	apiType := cfg.APIType
 	if apiType == "" {
 		apiType = "bot" // Default to bot API for backward compatibility
 	}
+
+	client := utils.CreateHTTPClient(proxyConfig, cfg.UseProxy)
 
 	return &ViberProvider{
 		botToken:     cfg.BotToken,
@@ -48,6 +51,7 @@ func NewViberProvider(cfg config.ViberConfig) *ViberProvider {
 		channelID:    cfg.ChannelID,
 		templatePath: cfg.TemplatePath,
 		apiType:      apiType,
+		client:       client,
 	}
 }
 
@@ -109,7 +113,6 @@ func (v *ViberProvider) sendChannelMessage(text string) error {
 
 // makeAPIRequest makes the HTTP request to Viber API
 func (v *ViberProvider) makeAPIRequest(url string, jsonData []byte) error {
-	client := &http.Client{}
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -118,7 +121,7 @@ func (v *ViberProvider) makeAPIRequest(url string, jsonData []byte) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Viber-Auth-Token", v.botToken)
 
-	resp, err := client.Do(req)
+	resp, err := v.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}

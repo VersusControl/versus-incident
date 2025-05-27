@@ -49,6 +49,12 @@ helm upgrade \
 # values.yaml
 replicaCount: 2
 
+# Proxy configuration (for networks that block messaging services)
+proxy:
+  url: "http://proxy.example.com:8080"
+  username: "proxy-user"     # optional
+  password: "proxy-pass"     # optional
+
 alert:
   slack:
     enable: true
@@ -60,22 +66,26 @@ alert:
   
   telegram:
     enable: false
+    botToken: "your-telegram-bot-token"
+    chatId: "your-chat-id"
+    useProxy: false 
+  
+  viber:
+    enable: false
+    botToken: "your-viber-token"
+    channelId: "your-channel-id"
+    useProxy: false
+  
+  lark:
+    enable: false
+    webhookUrl: "your-lark-webhook-url"
+    useProxy: false
   
   email:
     enable: false
   
   msteams:
     enable: false
-  
-  lark:
-    enable: false
-  
-  viber:
-    enable: false
-    # apiType: "channel"  # Default: "channel" (or "bot")
-    # botToken: "your-viber-token"
-    # channelId: "your-channel-id"  # For Channel API
-    # userId: "your-user-id"        # For Bot API
 ```
 
 ### Important Parameters

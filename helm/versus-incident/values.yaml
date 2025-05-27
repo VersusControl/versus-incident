@@ -90,6 +90,16 @@ config:
   port: 3000
   publicHost: ""  # Set to your public host for acknowledgement URLs
 
+# Proxy configuration (global settings)
+# Use this when your network blocks access to messaging services like Telegram, Viber, or Lark
+proxy:
+  # HTTP/HTTPS/SOCKS5 proxy URL (e.g., http://proxy.example.com:8080)
+  url: ""
+  # Optional proxy username for authenticated proxies
+  username: ""
+  # Optional proxy password for authenticated proxies
+  password: ""
+
 alert:
   debugBody: true
   
@@ -108,6 +118,7 @@ alert:
     botToken: ""
     chatId: ""
     templatePath: "/app/config/telegram_message.tmpl"
+    useProxy: false  # Set to true to use global proxy settings for Telegram API calls
   
   viber:
     enable: false
@@ -116,6 +127,7 @@ alert:
     channelId: ""
     apiType: "channel" # "bot" or "channel"
     templatePath: "/app/config/viber_message.tmpl"
+    useProxy: false  # Set to true to use global proxy settings for Viber API calls
   
   email:
     enable: false
@@ -137,6 +149,7 @@ alert:
     enable: false
     webhookUrl: ""
     templatePath: "/app/config/lark_message.tmpl"
+    useProxy: false  # Set to true to use global proxy settings for Lark API calls
     otherWebhookUrls: {}
 
   sns:

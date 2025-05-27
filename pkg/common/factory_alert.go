@@ -94,7 +94,8 @@ func (f *AlertProviderFactory) createTelegramProvider() (core.AlertProvider, err
 		BotToken:     tc.BotToken,
 		ChatID:       tc.ChatID,
 		TemplatePath: tc.TemplatePath,
-	}), nil
+		UseProxy:     tc.UseProxy,
+	}, f.cfg.Proxy), nil
 }
 
 func (f *AlertProviderFactory) createViberProvider() (core.AlertProvider, error) {
@@ -125,7 +126,8 @@ func (f *AlertProviderFactory) createViberProvider() (core.AlertProvider, error)
 		ChannelID:    vc.ChannelID,
 		TemplatePath: vc.TemplatePath,
 		APIType:      apiType,
-	}), nil
+		UseProxy:     vc.UseProxy,
+	}, f.cfg.Proxy), nil
 }
 
 func (f *AlertProviderFactory) createEmailProvider() (core.AlertProvider, error) {
@@ -168,5 +170,6 @@ func (f *AlertProviderFactory) createLarkProvider() (core.AlertProvider, error) 
 	return NewLarkProvider(config.LarkConfig{
 		WebhookURL:   lc.WebhookURL,
 		TemplatePath: lc.TemplatePath,
-	}), nil
+		UseProxy:     lc.UseProxy,
+	}, f.cfg.Proxy), nil
 }

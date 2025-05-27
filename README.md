@@ -646,6 +646,13 @@ host: 0.0.0.0
 port: 3000
 public_host: https://your-ack-host.example # Required for on-call ack
 
+# Proxy configuration (global settings)
+# Use this when your network blocks access to messaging services like Telegram, Viber, or Lark
+proxy:
+  url: ${PROXY_URL}           # HTTP/HTTPS/SOCKS5 proxy URL (e.g., http://proxy.example.com:8080)
+  username: ${PROXY_USERNAME} # Optional proxy username for authenticated proxies
+  password: ${PROXY_PASSWORD} # Optional proxy password for authenticated proxies
+
 alert:
   debug_body: true  # Default value, will be overridden by DEBUG_BODY env var
 
@@ -664,6 +671,7 @@ alert:
     bot_token: ${TELEGRAM_BOT_TOKEN} # From environment
     chat_id: ${TELEGRAM_CHAT_ID} # From environment
     template_path: "config/telegram_message.tmpl"
+    use_proxy: false # Set to true to use global proxy settings for Telegram API calls
 
   viber:
     enable: false  # Default value, will be overridden by VIBER_ENABLE env var
@@ -674,6 +682,7 @@ alert:
     # Bot API (for individual user notifications)  
     user_id: ${VIBER_USER_ID} # From environment (required for bot API)
     template_path: "config/viber_message.tmpl"
+    use_proxy: false # Set to true to use global proxy settings for Viber API calls
 
   email:
     enable: false # Default value, will be overridden by EMAIL_ENABLE env var
@@ -698,6 +707,7 @@ alert:
     enable: false # Default value, will be overridden by LARK_ENABLE env var
     webhook_url: ${LARK_WEBHOOK_URL} # Lark webhook URL (required)
     template_path: "config/lark_message.tmpl"
+    use_proxy: false # Set to true to use global proxy settings for Lark API calls
     other_webhook_urls: # Optional: Enable overriding the default webhook URL using query parameters, eg /api/incidents?lark_other_webhook_url=dev
       dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
       prod: ${LARK_OTHER_WEBHOOK_URL_PROD}
@@ -767,6 +777,15 @@ The application relies on several environment variables to configure alerting se
 |------------------|-------------|
 | `DEBUG_BODY`   | Set to `true` to enable print body send to Versus Incident. |
 
+### Proxy Configuration
+| Variable          | Description |
+|------------------|-------------|
+| `PROXY_URL`      | HTTP/HTTPS/SOCKS5 proxy URL (e.g., `http://proxy.example.com:8080`). Used by channels that have `use_proxy: true` enabled. |
+| `PROXY_USERNAME` | Optional username for authenticated proxy servers. |
+| `PROXY_PASSWORD` | Optional password for authenticated proxy servers. |
+
+**Note**: The proxy configuration is global and can be used by any channel (Telegram, Viber, Lark) by setting their respective `use_proxy` field to `true` in the configuration.
+
 ### Slack Configuration
 | Variable          | Description |
 |------------------|-------------|
@@ -797,6 +816,7 @@ These properties allow you to:
 | `TELEGRAM_ENABLE`    | Set to `true` to enable Telegram notifications. |
 | `TELEGRAM_BOT_TOKEN` | The authentication token for your Telegram bot. |
 | `TELEGRAM_CHAT_ID`   | The chat ID where alerts will be sent. **Can be overridden per request using the `telegram_chat_id` query parameter.** |
+| `TELEGRAM_USE_PROXY` | Set to `true` to use the global proxy configuration for Telegram API calls. Useful when Telegram is blocked. |
 
 ### Viber Configuration
 
@@ -825,6 +845,7 @@ Viber supports two types of API integrations:
 | `VIBER_API_TYPE`   | API type: `"channel"` (default) for team notifications or `"bot"` for individual messaging. |
 | `VIBER_CHANNEL_ID` | The channel ID where alerts will be posted (required for channel API). **Can be overridden per request using the `viber_channel_id` query parameter.** |
 | `VIBER_USER_ID`    | The user ID where alerts will be sent (required for bot API). **Can be overridden per request using the `viber_user_id` query parameter.** |
+| `VIBER_USE_PROXY`  | Set to `true` to use the global proxy configuration for Viber API calls. Useful when Viber is blocked. |
 
 ### Email Configuration
 | Variable          | Description |
@@ -851,6 +872,7 @@ Viber supports two types of API integrations:
 |------------------|-------------|
 | `LARK_ENABLE`   | Set to `true` to enable Lark notifications. |
 | `LARK_WEBHOOK_URL` | The webhook URL for Lark notifications. |
+| `LARK_USE_PROXY` | Set to `true` to use the global proxy configuration for Lark API calls. Useful when Lark is blocked. |
 | `LARK_OTHER_WEBHOOK_URL_DEV` | (Optional) Webhook URL for the development environment. **Can be selected per request using the `lark_other_webhook_url=dev` query parameter.** |
 | `LARK_OTHER_WEBHOOK_URL_PROD` | (Optional) Webhook URL for the production environment. **Can be selected per request using the `lark_other_webhook_url=prod` query parameter.** |
 

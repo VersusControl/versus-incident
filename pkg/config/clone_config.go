@@ -14,6 +14,8 @@ func cloneConfig(src *Config) *Config {
 		Alert:      cloneAlertConfig(src.Alert),
 		Queue:      cloneQueueConfig(src.Queue),
 		OnCall:     cloneOnCallConfig(src.OnCall),
+		Proxy:      cloneProxyConfig(src.Proxy),
+		Redis:      cloneRedisConfig(src.Redis),
 	}
 
 	return cloned
@@ -54,6 +56,7 @@ func cloneTelegramConfig(src TelegramConfig) TelegramConfig {
 		BotToken:     src.BotToken,
 		ChatID:       src.ChatID,
 		TemplatePath: src.TemplatePath,
+		UseProxy:     src.UseProxy,
 	}
 }
 
@@ -66,6 +69,7 @@ func cloneViberConfig(src ViberConfig) ViberConfig {
 		UserID:       src.UserID,
 		TemplatePath: src.TemplatePath,
 		ChannelID:    src.ChannelID,
+		UseProxy:     src.UseProxy,
 	}
 }
 
@@ -118,6 +122,7 @@ func cloneLarkConfig(src LarkConfig) LarkConfig {
 		WebhookURL:       src.WebhookURL,
 		TemplatePath:     src.TemplatePath,
 		OtherWebhookURLs: otherWebhookURLsCopy,
+		UseProxy:         src.UseProxy,
 	}
 }
 
@@ -204,5 +209,25 @@ func clonePagerDutyConfig(src PagerDutyConfig) PagerDutyConfig {
 	return PagerDutyConfig{
 		RoutingKey:       src.RoutingKey,
 		OtherRoutingKeys: otherRoutingKeysCopy,
+	}
+}
+
+// Helper function to deep clone the ProxyConfig struct
+func cloneProxyConfig(src ProxyConfig) ProxyConfig {
+	return ProxyConfig{
+		URL:      src.URL,
+		Username: src.Username,
+		Password: src.Password,
+	}
+}
+
+// Helper function to deep clone the RedisConfig struct
+func cloneRedisConfig(src RedisConfig) RedisConfig {
+	return RedisConfig{
+		Host:               src.Host,
+		Port:               src.Port,
+		Password:           src.Password,
+		DB:                 src.DB,
+		InsecureSkipVerify: src.InsecureSkipVerify,
 	}
 }
