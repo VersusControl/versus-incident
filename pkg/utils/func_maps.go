@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"encoding/json"
 	"regexp"
 	"strings"
 	"sync"
@@ -383,6 +384,49 @@ func GetTemplateFuncMaps() template.FuncMap {
 		"regexMatch": func(pattern, s string) bool {
 			match, _ := regexp.MatchString(pattern, s)
 			return match
+		},
+
+		// JSON helper functions
+		"escapeJsonString": func(s string) string {
+			b, err := json.Marshal(s)
+			if err != nil {
+				// This should ideally not happen for a simple string.
+				// Log or handle more gracefully in a real scenario.
+				// For now, returning a placeholder or the original string might be options.
+				// Returning an error string is also possible if the template can handle it.
+				return "error escaping string"
+			}
+			// json.Marshal wraps the string in quotes, trim them.
+			if len(b) < 2 { // Should not happen if Marshal succeeded
+				return ""
+			}
+			return string(b[1 : len(b)-1])
+		},
+		"buildJsonArray": func(elements ...string) string {
+			var validElements []string
+			for _, el := range elements {
+				// Trim whitespace to ensure that strings with only spaces are also considered empty
+				if strings.TrimSpace(el) != "" {
+					validElements = append(validElements, el)
+				}
+			}
+			if len(validElements) == 0 {
+				return "[]"
+			}
+			return "[" + strings.Join(validElements, ",") + "]"
+		},
+		"buildJsonObjectMembers": func(members ...string) string {
+			var validMembers []string
+			for _, m := range members {
+				// Trim whitespace
+				if strings.TrimSpace(m) != "" {
+					validMembers = append(validMembers, m)
+				}
+			}
+			if len(validMembers) == 0 {
+				return "{}"
+			}
+			return "{" + strings.Join(validMembers, ",") + "}"
 		},
 	}
 

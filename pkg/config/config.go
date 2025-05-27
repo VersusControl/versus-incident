@@ -38,6 +38,7 @@ type AlertConfig struct {
 	Email     EmailConfig
 	MSTeams   MSTeamsConfig
 	Lark      LarkConfig
+	GoogleChat GoogleChatConfig `yaml:"googlechat" mapstructure:"googlechat"`
 }
 
 type SlackConfig struct {
@@ -99,6 +100,17 @@ type LarkConfig struct {
 	TemplatePath     string            `mapstructure:"template_path"`
 	OtherWebhookURLs map[string]string `mapstructure:"other_webhook_urls"`
 	UseProxy         bool              `mapstructure:"use_proxy"`
+}
+
+type GoogleChatMessageProperties struct {
+	ButtonText string `yaml:"button_text" mapstructure:"button_text"`
+}
+
+type GoogleChatConfig struct {
+	Enable            bool                        `yaml:"enable" mapstructure:"enable"`
+	WebhookURL        string                      `yaml:"webhook_url" mapstructure:"webhook_url"`
+	TemplatePath      string                      `yaml:"template_path" mapstructure:"template_path"`
+	MessageProperties GoogleChatMessageProperties `yaml:"message_properties" mapstructure:"message_properties"`
 }
 
 type QueueConfig struct {
@@ -212,6 +224,7 @@ func LoadConfig(path string) error {
 		setEnableFromEnv("MSTEAMS_ENABLE", &cfg.Alert.MSTeams.Enable)
 		setEnableFromEnv("LARK_ENABLE", &cfg.Alert.Lark.Enable)
 		setEnableFromEnv("LARK_USE_PROXY", &cfg.Alert.Lark.UseProxy)
+		setEnableFromEnv("GOOGLECHAT_ENABLE", &cfg.Alert.GoogleChat.Enable)
 		setEnableFromEnv("SNS_ENABLE", &cfg.Queue.SNS.Enable)
 
 		setEnableFromEnv("ONCALL_ENABLE", &cfg.OnCall.Enable)

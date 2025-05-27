@@ -1,0 +1,348 @@
+{{/*
+  Universal Google Chat Alert Template
+  Supports: Alertmanager, Grafana, Sentry, Fluent Bit, CloudWatch
+*/}}
+
+{{/* Helper Variables */}}
+{{- $defaultRunbook := or (env "DEFAULT_RUNBOOK_URL") "" -}}
+{{- $severityIcons := dict "CRITICAL" "🔴" "ERROR" "🟠" "WARNING" "🟡" "INFO" "ℹ️" "RESOLVED" "✅" -}}
+{{- $statusIcons := dict "FIRING" "🔥" "RESOLVED" "✅" "UNKNOWN" "ℹ️" -}}
+
+{{/* Detect Source System - Same logic as before */}}
+{{- $source := "Unknown" -}}
+{{- if and .receiver -}}
+  {{- if or .commonAnnotations.dashboardURL (and .alerts (index .alerts 0).dashboardURL) -}}
+    {{- $source = "Grafana" -}}
+  {{- else -}}
+    {{- $source = "Prometheus" -}}
+  {{- end -}}
+{{- else if .AlarmName -}}
+  {{- $source = "CloudWatch" -}}
+{{- else if or .log .kubernetes.pod_name -}}
+  {{- $source = "Fluent Bit" -}}
+{{- else if or .event.event_id .data.issue.id -}}
+  {{- $source = "Sentry" -}}
+{{- end -}}
+
+{{/* Process Alerts - Same logic as before */}}
+{{- $alerts := list -}}
+{{- if or (eq $source "Prometheus") (eq $source "Grafana") -}}
+  {{- $alerts = .alerts -}}
+{{- else -}}
+  {{- $alerts = list . -}} {{/* Treat single payload as one alert */}}
+{{- end -}}
+
+{{- /* Start of Google Chat JSON output */ -}}
+{"cardsV2": [
+{{- range $index, $alert := $alerts -}}
+  {{/* Initialize unified alert data structure */}}
+  {{- $unified := dict
+    "SourceSystem" $source
+    "Severity" "INFO"
+    "Status" "UNKNOWN"
+    "Title" "Unknown Alert"
+    "Resource" "N/A"
+    "Description" "No description."
+    "Timestamp" (now | format "2006-01-02 15:04:05")
+    "DiagnosticLink" ""
+    "RunbookLink" $defaultRunbook
+  -}}
+
+  {{/* Map severity based on alert type - Same logic as before */}}
+  {{- $rawSeverity := "" -}}
+  {{- if eq $source "Prometheus" -}}
+    {{- $rawSeverity = or $alert.labels.severity "info" -}}
+  {{- else if eq $source "Grafana" -}}
+    {{- $rawSeverity = or $alert.labels.severity "info" -}}
+  {{- else if eq $source "CloudWatch" -}}
+    {{- $rawSeverity = or $alert.NewStateValue "info" -}}
+  {{- else if eq $source "Fluent Bit" -}}
+    {{- $rawSeverity = or $alert.level "info" -}}
+  {{- else if eq $source "Sentry" -}}
+    {{- $rawSeverity = or $alert.data.issue.level $alert.event.level "info" -}}
+  {{- end -}}
+
+  {{- $severity := lower $rawSeverity -}}
+  {{- $mappedSeverity := "INFO" -}}
+  {{- if or (eq $severity "critical") (eq $severity "fatal") (eq $severity "alarm") (eq $severity "p1") (eq $severity "1") -}}
+    {{- $mappedSeverity = "CRITICAL" -}}
+  {{- else if or (eq $severity "error") (eq $severity "high") (eq $severity "p2") (eq $severity "2") -}}
+    {{- $mappedSeverity = "ERROR" -}}
+  {{- else if or (eq $severity "warning") (eq $severity "warn") (eq $severity "p3") (eq $severity "3") -}}
+    {{- $mappedSeverity = "WARNING" -}}
+  {{- else if or (eq $severity "ok") (eq $severity "resolved") -}}
+    {{- $mappedSeverity = "RESOLVED" -}}
+  {{- end -}}
+
+  {{/* Map status based on alert type - Same logic as before */}}
+  {{- $rawStatus := "" -}}
+  {{- if eq $source "Prometheus" -}}
+    {{- $rawStatus = or $alert.status "unknown" -}}
+  {{- else if eq $source "Grafana" -}}
+    {{- $rawStatus = or $alert.status "unknown" -}}
+  {{- else if eq $source "CloudWatch" -}}
+    {{- $rawStatus = or $alert.NewStateValue "unknown" -}}
+  {{- else if eq $source "Fluent Bit" -}}
+    {{- $rawStatus = or $alert.level "unknown" -}}
+  {{- else if eq $source "Sentry" -}}
+    {{- $rawStatus = or $alert.action "unknown" -}}
+  {{- end -}}
+
+  {{- $status := lower $rawStatus -}}
+  {{- $mappedStatus := "UNKNOWN" -}}
+  {{- if or (eq $status "firing") (eq $status "alarm") (eq $status "active") (eq $status "unresolved") (eq $status "created") (eq $status "triggered") -}}
+    {{- $mappedStatus = "FIRING" -}}
+  {{- else if or (eq $status "resolved") (eq $status "ok") (eq $status "completed") -}}
+    {{- $mappedStatus = "RESOLVED" -}}
+  {{- end -}}
+
+  {{/* Source-Specific Data Extraction - Same logic as before */}}
+  {{- if eq $source "Prometheus" -}}
+    {{- $unified = dict
+      "SourceSystem" $source
+      "Severity" $mappedSeverity
+      "Status" $mappedStatus
+      "Title" (or $alert.labels.alertname "Prometheus Alert")
+      "Resource" (or $alert.labels.instance $alert.labels.pod $alert.labels.job "N/A")
+      "Description" (or $alert.annotations.description $alert.annotations.message $alert.annotations.summary "No description.")
+      "Timestamp" (or $alert.startsAt (now | format "2006-01-02 15:04:05"))
+      "DiagnosticLink" (or $alert.generatorURL "")
+      "RunbookLink" (or $alert.annotations.runbook_url $defaultRunbook)
+    -}}
+  {{- else if eq $source "Grafana" -}}
+    {{- $unified = dict
+      "SourceSystem" $source
+      "Severity" $mappedSeverity
+      "Status" $mappedStatus
+      "Title" (or $alert.labels.alertname $alert.annotations.summary $alert.annotations.title "Grafana Alert")
+      "Resource" (or $alert.labels.instance $alert.labels.pod $alert.labels.job $alert.labels.host "N/A")
+      "Description" (or $alert.annotations.description $alert.annotations.message "No description.")
+      "Timestamp" (or $alert.startsAt (now | format "2006-01-02 15:04:05"))
+      "DiagnosticLink" (or $alert.panelURL $alert.dashboardURL $alert.generatorURL "")
+      "RunbookLink" (or $alert.annotations.runbook_url $defaultRunbook)
+    -}}
+  {{- else if eq $source "CloudWatch" -}}
+    {{- $formattedDimensions := "" -}}
+    {{- $metricNamespace := or $alert.Trigger.Namespace "AWS" -}}
+    {{- $metricName := or $alert.Trigger.MetricName "Unknown" -}}
+    {{- if $alert.Trigger.Dimensions -}}
+      {{- $dimensionsList := list -}}
+      {{- range $dimension := $alert.Trigger.Dimensions -}}
+        {{- if and $dimension.name $dimension.value -}}
+          {{- $dimensionsList = append $dimensionsList (printf "%s: %s" $dimension.name $dimension.value) -}}
+        {{- end -}}
+      {{- end -}}
+      {{- if $dimensionsList -}}
+        {{- $formattedDimensions = join (stringSlice $dimensionsList) ", " -}}
+      {{- end -}}
+    {{- end -}}
+    {{- $resource := "N/A" -}}
+    {{- if $formattedDimensions -}}
+      {{- $resource = printf "%s/%s (%s)" $metricNamespace $metricName $formattedDimensions -}}
+    {{- else -}}
+      {{- $resource = printf "%s/%s" $metricNamespace $metricName -}}
+    {{- end -}}
+    {{- $regionCode := "" -}}
+    {{- if contains "us-east-1" $alert.AlarmArn -}}
+      {{- $regionCode = "us-east-1" -}}
+    {{- else if contains "us-east-2" $alert.AlarmArn -}}
+      {{- $regionCode = "us-east-2" -}}
+    {{- else if contains "us-west-1" $alert.AlarmArn -}}
+      {{- $regionCode = "us-west-1" -}}
+    {{- else if contains "us-west-2" $alert.AlarmArn -}}
+      {{- $regionCode = "us-west-2" -}}
+    {{- else if contains "eu-central-1" $alert.AlarmArn -}}
+      {{- $regionCode = "eu-central-1" -}}
+    {{- else if contains "eu-west-1" $alert.AlarmArn -}}
+      {{- $regionCode = "eu-west-1" -}}
+    {{- else if contains "ap-northeast-1" $alert.AlarmArn -}}
+      {{- $regionCode = "ap-northeast-1" -}}
+    {{- else if contains "ap-southeast-1" $alert.AlarmArn -}}
+      {{- $regionCode = "ap-southeast-1" -}}
+    {{- else if contains "ap-southeast-2" $alert.AlarmArn -}}
+      {{- $regionCode = "ap-southeast-2" -}}
+    {{- else -}}
+      {{- $regionCode = "us-east-1" -}}
+    {{- end -}}
+    {{- $diagnosticLink := printf "https://%s.console.aws.amazon.com/cloudwatch/home?region=%s#alarmsV2:alarm/%s" $regionCode $regionCode $alert.AlarmName -}}
+    {{- $unified = dict
+      "SourceSystem" $source
+      "Severity" $mappedSeverity
+      "Status" $mappedStatus
+      "Title" (or $alert.AlarmName "CloudWatch Alert")
+      "Resource" $resource
+      "Description" (or $alert.NewStateReason "No description.")
+      "Timestamp" (or $alert.StateChangeTime (now | format "2006-01-02 15:04:05"))
+      "DiagnosticLink" $diagnosticLink
+      "RunbookLink" $defaultRunbook
+      "AWSAccount" (or $alert.AWSAccountId "")
+      "AWSRegion" $regionCode
+    -}}
+  {{- else if eq $source "Fluent Bit" -}}
+    {{- $detectedSeverity := "INFO" -}}
+    {{- if and $alert.log (regexMatch "(?i)ERROR" $alert.log) -}}
+      {{- $detectedSeverity = "ERROR" -}}
+    {{- else if and $alert.log (regexMatch "(?i)CRITICAL" $alert.log) -}}
+      {{- $detectedSeverity = "WARNING" -}}
+    {{- else if and $alert.log (regexMatch "(?i)WARNING" $alert.log) -}}
+      {{- $detectedSeverity = "WARNING" -}}
+    {{- end -}}
+    {{- $podResource := "unknown" -}}
+    {{- if $alert.kubernetes -}}
+      {{- $podName := or $alert.kubernetes.pod_name "unknown-pod" -}}
+      {{- $namespace := or $alert.kubernetes.namespace_name "unknown-namespace" -}}
+      {{- $containerName := or $alert.kubernetes.container_name "unknown-container" -}}
+      {{- $podResource = printf "pod/%s (container: %s) in namespace %s" $podName $containerName $namespace -}}
+  	 {{- end -}}
+  	 {{- $timestamp := "" -}}
+  	 {{- if $alert.time -}}
+  	   {{- $timestamp = $alert.time -}}
+  	 {{- else if $alert.date -}}
+  	   {{- $timestamp = $alert.date | toString -}}
+  	 {{- else -}}
+  	   {{- $timestamp = now | format "2006-01-02 15:04:05" -}}
+  	 {{- end -}}
+  	 {{- $appName := "unknown" -}}
+  	 {{- if and $alert.kubernetes $alert.kubernetes.labels $alert.kubernetes.labels.app -}}
+  	   {{- $appName = $alert.kubernetes.labels.app -}}
+  	 {{- end -}}
+  	 {{- $errorMessage := $alert.log -}}
+  	 {{- $shortError := $alert.log -}}
+  	 {{- if contains "\n" $shortError -}}
+  	   {{- $lines := split "\n" $shortError -}}
+  	   {{- $shortError = index $lines 0 -}}
+  	 {{- end -}}
+  	 {{- $unified = dict
+  	   "SourceSystem" $source
+  	   "Severity" $detectedSeverity
+  	   "Status" "FIRING"
+  	   "Title" (printf "Error in %s" $appName)
+  	   "Resource" $podResource
+  	   "Description" $errorMessage
+  	   "Timestamp" $timestamp
+  	   "DiagnosticLink" ""
+  	   "RunbookLink" $defaultRunbook
+  	   "K8s" (dict
+  	     "Namespace" (or $alert.kubernetes.namespace_name "")
+  	     "PodName" (or $alert.kubernetes.pod_name "")
+  	     "ContainerName" (or $alert.kubernetes.container_name "")
+  	     "Node" (or $alert.kubernetes.host "")
+  	     "Labels" (or $alert.kubernetes.labels dict)
+  	   )
+  	 -}}
+  {{- else if eq $source "Sentry" -}}
+    {{- $unified = dict
+      "SourceSystem" $source
+      "Severity" $mappedSeverity
+      "Status" $mappedStatus
+      "Title" (or $alert.data.issue.title $alert.message $alert.event.title "Sentry Alert")
+      "Resource" (printf "%s/%s" (or $alert.project_slug "unknown") (or $alert.data.issue.culprit $alert.culprit "N/A"))
+      "Description" (or $alert.data.issue.metadata.value $alert.event.logentry.formatted "No description.")
+      "Timestamp" (or $alert.data.issue.firstSeen $alert.event.timestamp (now | format "2006-01-02 15:04:05"))
+      "DiagnosticLink" (or $alert.data.issue.web_url $alert.url "")
+      "RunbookLink" $defaultRunbook
+    -}}
+  {{- end -}}
+
+  {{- $severityIcon := or (index $severityIcons $unified.Severity) "ℹ️" -}}
+  {{- $statusIcon := or (index $statusIcons $unified.Status) "ℹ️" -}}
+
+  {
+    "card": {
+      "header": {
+        "title": "{{ $statusIcon }} {{ $unified.Status }}: {{ $unified.Title | js }}",
+        "subtitle": "{{ $severityIcon }} Severity: {{ $unified.Severity }} ({{ $unified.SourceSystem }})"
+      },
+      "sections": [
+        {
+          "widgets": [
+            {
+              "textParagraph": {
+                "text": "<b>Resource:</b> {{ $unified.Resource | js }}"
+              }
+            },
+            {
+              "textParagraph": {
+                "text": "<b>Description:</b> {{ $unified.Description | js }}"
+              }
+            },
+            {
+              "textParagraph": {
+                "text": "<b>Time:</b> {{ $unified.Timestamp | js }}"
+              }
+            }
+            {{- if $unified.AWSAccount -}},
+            {
+              "textParagraph": {
+                "text": "<b>AWS Account:</b> {{ $unified.AWSAccount | js }}"
+              }
+            }
+            {{- end -}}
+            {{- if $unified.AWSRegion -}},
+            {
+              "textParagraph": {
+                "text": "<b>AWS Region:</b> {{ $unified.AWSRegion | js }}"
+              }
+            }
+            {{- end -}}
+            {{- if and (eq $unified.SourceSystem "Fluent Bit") $unified.K8s -}},
+            {
+              "textParagraph": {
+                "text": "<b>Kubernetes Metadata:</b>"
+              }
+            }
+            {{- if $unified.K8s.Namespace -}},
+            { "textParagraph": { "text": " • Namespace: {{ $unified.K8s.Namespace | js }}" } }
+            {{- end -}}
+            {{- if $unified.K8s.PodName -}},
+            { "textParagraph": { "text": " • Pod: {{ $unified.K8s.PodName | js }}" } }
+            {{- end -}}
+            {{- if $unified.K8s.ContainerName -}},
+            { "textParagraph": { "text": " • Container: {{ $unified.K8s.ContainerName | js }}" } }
+            {{- end -}}
+            {{- if $unified.K8s.Node -}},
+            { "textParagraph": { "text": " • Node: {{ $unified.K8s.Node | js }}" } }
+            {{- end -}}
+            {{- if $unified.K8s.Labels -}},
+            { "textParagraph": { "text": " • Labels:" } }
+            {{- range $key, $value := $unified.K8s.Labels -}}
+            ,{ "textParagraph": { "text": "   - {{ $key | js }}: {{ $value | js }}" } }
+            {{- end -}}
+            {{- end -}}
+            {{- end -}}
+            {{- $buttons := list -}}
+            {{- if $unified.RunbookLink -}}
+              {{- $buttons = append $buttons (dict "text" "Runbook" "onClick" (dict "openLink" (dict "url" $unified.RunbookLink))) -}}
+            {{- end -}}
+            {{- if $unified.DiagnosticLink -}}
+              {{- $buttons = append $buttons (dict "text" "Diagnostics" "onClick" (dict "openLink" (dict "url" $unified.DiagnosticLink))) -}}
+            {{- end -}}
+            {{- if $alert.AckURL -}}
+              {{- $buttons = append $buttons (dict "text" "Acknowledge" "onClick" (dict "openLink" (dict "url" $alert.AckURL))) -}}
+            {{- end -}}
+            {{- if $buttons -}},
+            {
+              "buttonList": {
+                "buttons": [
+                {{- range $btnIndex, $button := $buttons -}}
+                  {
+                    "text": "{{ $button.text | js }}",
+                    "onClick": {
+                      "openLink": {
+                        "url": "{{ $button.onClick.openLink.url | js }}"
+                      }
+                    }
+                  }{{- if ne (add $btnIndex 1) (len $buttons) -}},{{- end -}}
+                {{- end -}}
+                ]
+              }
+            }
+            {{- end -}}
+          ]
+        }
+      ]
+    }
+  }
+  {{- if ne (add $index 1) (len $alerts) -}},{{- end -}}
+{{- end -}}
+]}

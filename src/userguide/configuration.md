@@ -80,6 +80,13 @@ alert:
       dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
       prod: ${LARK_OTHER_WEBHOOK_URL_PROD}
 
+  googlechat:
+    enable: false # Default value, will be overridden by GOOGLECHAT_ENABLE env var
+    webhook_url: ${GOOGLECHAT_WEBHOOK_URL} # Google Chat Webhook URL
+    template_path: "config/googlechat_message.tmpl"
+    message_properties:
+      button_text: "Acknowledge Alert" # Custom text for the acknowledgment button
+
 queue:
   enable: true
   debug_body: true
@@ -252,6 +259,28 @@ This automatic detection provides backward compatibility while supporting newer 
 | `LARK_WEBHOOK_URL`        | The webhook URL for your Lark channel. |
 | `LARK_OTHER_WEBHOOK_URL_DEV` | (Optional) Webhook URL for the development team. **Can be selected per request using the `lark_other_webhook_url=dev` query parameter.** |
 | `LARK_OTHER_WEBHOOK_URL_PROD` | (Optional) Webhook URL for the production team. **Can be selected per request using the `lark_other_webhook_url=prod` query parameter.** |
+
+### Google Chat Configuration
+
+To enable Google Chat notifications, configure the following settings in your `config.yaml` and corresponding environment variables:
+
+```yaml
+alert:
+  googlechat:
+    enable: false # Set to true or use GOOGLECHAT_ENABLE=true
+    webhook_url: ${GOOGLECHAT_WEBHOOK_URL} # Google Chat Webhook URL
+    template_path: "config/googlechat_message.tmpl" # Path to the message template
+    message_properties:
+      button_text: "Acknowledge Alert" # Custom text for the acknowledgment button
+```
+
+| Variable                 | Description                                                                                                                               |
+|--------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
+| `GOOGLECHAT_ENABLE`      | Set to `true` to enable Google Chat notifications. Overrides the `enable` field in `config.yaml`.                                          |
+| `GOOGLECHAT_WEBHOOK_URL` | The incoming webhook URL for your Google Chat space. To get this URL, go to your Google Chat space, click the space name, then "Apps & integrations", then "Add webhooks". Give it a name and copy the provided URL. |
+
+**Message Properties:**
+- `button_text`: Defines the text for the acknowledgment button displayed on unresolved alerts that have an `AckURL`.
 
 ### Queue Services Configuration
 | Variable                     | Description |
