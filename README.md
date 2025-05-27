@@ -7,7 +7,7 @@
 
 An incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Compatible with any tool supporting webhook alerts, it's designed for modern DevOps teams to quickly respond to production incidents.
 
-🚀 Mastering your Site Reliability Engineering Skills: [On-Call in Action](https://www.amazon.com/dp/B0F8Q9WY15).
+🚀 Mastering your Site Reliability Engineering Skills: [On-Call in Action](https://leanpub.com/on-call-in-action).
 
 ## Table of Contents
 - [Features](#features)
