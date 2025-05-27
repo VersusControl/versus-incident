@@ -18,6 +18,7 @@ type TelegramProvider struct {
 	botToken     string
 	chatID       string
 	templatePath string
+	client       *http.Client
 }
 
 type TelegramMessage struct {
@@ -26,11 +27,14 @@ type TelegramMessage struct {
 	ParseMode string `json:"parse_mode"`
 }
 
-func NewTelegramProvider(cfg config.TelegramConfig) *TelegramProvider {
+func NewTelegramProvider(cfg config.TelegramConfig, proxyConfig config.ProxyConfig) *TelegramProvider {
+	client := utils.CreateHTTPClient(proxyConfig, cfg.UseProxy)
+
 	return &TelegramProvider{
 		botToken:     cfg.BotToken,
 		chatID:       cfg.ChatID,
 		templatePath: cfg.TemplatePath,
+		client:       client,
 	}
 }
 
@@ -59,7 +63,14 @@ func (t *TelegramProvider) SendAlert(i *m.Incident) error {
 	}
 
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.botToken)
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := t.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}

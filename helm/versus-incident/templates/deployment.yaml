@@ -50,6 +50,29 @@ spec:
                   key: slack_channel_id
             {{- end }}
             
+            {{- /* Proxy configuration */ -}}
+            {{- if .Values.proxy.url }}
+            - name: PROXY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: proxy_url
+            {{- if .Values.proxy.username }}
+            - name: PROXY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: proxy_username
+            {{- end }}
+            {{- if .Values.proxy.password }}
+            - name: PROXY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: proxy_password
+            {{- end }}
+            {{- end }}
+            
             {{- if .Values.alert.telegram.enable }}
             - name: TELEGRAM_ENABLE
               value: "true"
@@ -63,6 +86,39 @@ spec:
                 secretKeyRef:
                   name: {{ include "versus-incident.fullname" . }}-secrets
                   key: telegram_chat_id
+            {{- if .Values.alert.telegram.useProxy }}
+            - name: TELEGRAM_USE_PROXY
+              value: "true"
+            {{- end }}
+            {{- end }}
+            
+            {{- if .Values.alert.viber.enable }}
+            - name: VIBER_ENABLE
+              value: "true"
+            - name: VIBER_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: viber_bot_token
+            - name: VIBER_USER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: viber_user_id
+            - name: VIBER_CHANNEL_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: viber_channel_id
+            - name: VIBER_API_TYPE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: viber_api_type
+            {{- if .Values.alert.viber.useProxy }}
+            - name: VIBER_USE_PROXY
+              value: "true"
+            {{- end }}
             {{- end }}
             
             {{- if .Values.alert.email.enable }}
@@ -131,6 +187,10 @@ spec:
                 secretKeyRef:
                   name: {{ include "versus-incident.fullname" . }}-secrets
                   key: lark_other_webhook_url_{{ $key }}
+            {{- end }}
+            {{- if .Values.alert.lark.useProxy }}
+            - name: LARK_USE_PROXY
+              value: "true"
             {{- end }}
             {{- end }}
             

@@ -3,6 +3,12 @@ host: 0.0.0.0
 port: 3000
 public_host: https://your-host.example
 
+# Proxy configuration (global settings)
+proxy:
+  url: ${PROXY_URL}           # HTTP/HTTPS/SOCKS5 proxy URL (e.g., http://proxy.example.com:8080)
+  username: ${PROXY_USERNAME} # Optional proxy username
+  password: ${PROXY_PASSWORD} # Optional proxy password
+
 alert:
   debug_body: true
 
@@ -21,6 +27,16 @@ alert:
     bot_token: ${TELEGRAM_BOT_TOKEN}
     chat_id: ${TELEGRAM_CHAT_ID}
     template_path: "config/telegram_message.tmpl"
+    use_proxy: false # Set to true to use global proxy settings for Telegram API calls
+
+  viber:
+    enable: false
+    api_type: ${VIBER_API_TYPE} # "bot" or "channel" - defaults to "channel"
+    bot_token: ${VIBER_BOT_TOKEN}
+    user_id: ${VIBER_USER_ID}
+    channel_id: ${VIBER_CHANNEL_ID}
+    template_path: "config/viber_message.tmpl"
+    use_proxy: false # Set to true to use global proxy settings for Viber API calls
 
   email:
     enable: false
@@ -43,6 +59,7 @@ alert:
     enable: false # Default value, will be overridden by LARK_ENABLE env var
     webhook_url: ${LARK_WEBHOOK_URL} # Lark webhook URL (required)
     template_path: "config/lark_message.tmpl"
+    use_proxy: false # Set to true to use global proxy settings for Lark API calls
     other_webhook_urls: # Optional: Enable overriding the default webhook URL using query parameters, eg /api/incidents?lark_other_webhook_url=dev
       dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
       prod: ${LARK_OTHER_WEBHOOK_URL_PROD}

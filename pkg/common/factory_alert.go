@@ -35,6 +35,14 @@ func (f *AlertProviderFactory) CreateProviders() ([]core.AlertProvider, error) {
 		providers = append(providers, telegramProvider)
 	}
 
+	if f.cfg.Alert.Viber.Enable {
+		viberProvider, err := f.createViberProvider()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Viber provider: %w", err)
+		}
+		providers = append(providers, viberProvider)
+	}
+
 	if f.cfg.Alert.Email.Enable {
 		emailProvider, err := f.createEmailProvider()
 		if err != nil {
@@ -86,7 +94,40 @@ func (f *AlertProviderFactory) createTelegramProvider() (core.AlertProvider, err
 		BotToken:     tc.BotToken,
 		ChatID:       tc.ChatID,
 		TemplatePath: tc.TemplatePath,
-	}), nil
+		UseProxy:     tc.UseProxy,
+	}, f.cfg.Proxy), nil
+}
+
+func (f *AlertProviderFactory) createViberProvider() (core.AlertProvider, error) {
+	vc := f.cfg.Alert.Viber
+
+	// Default to channel API if not specified
+	apiType := vc.APIType
+	if apiType == "" {
+		apiType = "channel"
+	}
+
+	// Validate required fields based on API type
+	if vc.BotToken == "" || vc.TemplatePath == "" {
+		return nil, fmt.Errorf("missing required Viber configuration: bot_token and template_path are required")
+	}
+
+	if apiType == "bot" && vc.UserID == "" {
+		return nil, fmt.Errorf("missing required Viber Bot configuration: user_id is required for bot API")
+	}
+
+	if apiType == "channel" && vc.ChannelID == "" {
+		return nil, fmt.Errorf("missing required Viber Channel configuration: channel_id is required for channel API")
+	}
+
+	return NewViberProvider(config.ViberConfig{
+		BotToken:     vc.BotToken,
+		UserID:       vc.UserID,
+		ChannelID:    vc.ChannelID,
+		TemplatePath: vc.TemplatePath,
+		APIType:      apiType,
+		UseProxy:     vc.UseProxy,
+	}, f.cfg.Proxy), nil
 }
 
 func (f *AlertProviderFactory) createEmailProvider() (core.AlertProvider, error) {
@@ -129,5 +170,6 @@ func (f *AlertProviderFactory) createLarkProvider() (core.AlertProvider, error) 
 	return NewLarkProvider(config.LarkConfig{
 		WebhookURL:   lc.WebhookURL,
 		TemplatePath: lc.TemplatePath,
-	}), nil
+		UseProxy:     lc.UseProxy,
+	}, f.cfg.Proxy), nil
 }

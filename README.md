@@ -32,7 +32,7 @@ An incident management tool that supports alerting across multiple channels with
 
 ## Features
 
-- 🚨 **Multi-channel Alerts**: Send incident notifications to Slack, Microsoft Teams, Telegram, Email, and Lark (more channels coming!)
+- 🚨 **Multi-channel Alerts**: Send incident notifications to Slack, Microsoft Teams, Telegram, Viber, Email, and Lark (more channels coming!)
 - 📝 **Custom Templates**: Define your own alert messages using Go templates
 - 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
 - 📡 **REST API**: Simple HTTP interface to receive alerts
@@ -646,6 +646,13 @@ host: 0.0.0.0
 port: 3000
 public_host: https://your-ack-host.example # Required for on-call ack
 
+# Proxy configuration (global settings)
+# Use this when your network blocks access to messaging services like Telegram, Viber, or Lark
+proxy:
+  url: ${PROXY_URL}           # HTTP/HTTPS/SOCKS5 proxy URL (e.g., http://proxy.example.com:8080)
+  username: ${PROXY_USERNAME} # Optional proxy username for authenticated proxies
+  password: ${PROXY_PASSWORD} # Optional proxy password for authenticated proxies
+
 alert:
   debug_body: true  # Default value, will be overridden by DEBUG_BODY env var
 
@@ -664,6 +671,18 @@ alert:
     bot_token: ${TELEGRAM_BOT_TOKEN} # From environment
     chat_id: ${TELEGRAM_CHAT_ID} # From environment
     template_path: "config/telegram_message.tmpl"
+    use_proxy: false # Set to true to use global proxy settings for Telegram API calls
+
+  viber:
+    enable: false  # Default value, will be overridden by VIBER_ENABLE env var
+    bot_token: ${VIBER_BOT_TOKEN} # From environment (token for bot or channel)
+    api_type: ${VIBER_API_TYPE} # From environment - "channel" (default) or "bot"
+    # Channel API (recommended for incident management)
+    channel_id: ${VIBER_CHANNEL_ID} # From environment (required for channel API)
+    # Bot API (for individual user notifications)  
+    user_id: ${VIBER_USER_ID} # From environment (required for bot API)
+    template_path: "config/viber_message.tmpl"
+    use_proxy: false # Set to true to use global proxy settings for Viber API calls
 
   email:
     enable: false # Default value, will be overridden by EMAIL_ENABLE env var
@@ -688,6 +707,7 @@ alert:
     enable: false # Default value, will be overridden by LARK_ENABLE env var
     webhook_url: ${LARK_WEBHOOK_URL} # Lark webhook URL (required)
     template_path: "config/lark_message.tmpl"
+    use_proxy: false # Set to true to use global proxy settings for Lark API calls
     other_webhook_urls: # Optional: Enable overriding the default webhook URL using query parameters, eg /api/incidents?lark_other_webhook_url=dev
       dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
       prod: ${LARK_OTHER_WEBHOOK_URL_PROD}
@@ -757,6 +777,15 @@ The application relies on several environment variables to configure alerting se
 |------------------|-------------|
 | `DEBUG_BODY`   | Set to `true` to enable print body send to Versus Incident. |
 
+### Proxy Configuration
+| Variable          | Description |
+|------------------|-------------|
+| `PROXY_URL`      | HTTP/HTTPS/SOCKS5 proxy URL (e.g., `http://proxy.example.com:8080`). Used by channels that have `use_proxy: true` enabled. |
+| `PROXY_USERNAME` | Optional username for authenticated proxy servers. |
+| `PROXY_PASSWORD` | Optional password for authenticated proxy servers. |
+
+**Note**: The proxy configuration is global and can be used by any channel (Telegram, Viber, Lark) by setting their respective `use_proxy` field to `true` in the configuration.
+
 ### Slack Configuration
 | Variable          | Description |
 |------------------|-------------|
@@ -787,6 +816,36 @@ These properties allow you to:
 | `TELEGRAM_ENABLE`    | Set to `true` to enable Telegram notifications. |
 | `TELEGRAM_BOT_TOKEN` | The authentication token for your Telegram bot. |
 | `TELEGRAM_CHAT_ID`   | The chat ID where alerts will be sent. **Can be overridden per request using the `telegram_chat_id` query parameter.** |
+| `TELEGRAM_USE_PROXY` | Set to `true` to use the global proxy configuration for Telegram API calls. Useful when Telegram is blocked. |
+
+### Viber Configuration
+
+Viber supports two types of API integrations:
+- **Channel API** (default): Send messages to Viber channels for team notifications
+- **Bot API**: Send messages to individual users for personal notifications
+
+**When to use Channel API:**
+- ✅ Broadcasting to team channels
+- ✅ Public incident notifications
+- ✅ Automated system alerts
+- ✅ Better for most incident management scenarios
+- ✅ No individual user setup required
+
+**When to use Bot API:**
+- ✅ Personal notifications to specific users
+- ✅ Direct messaging for individual alerts
+- ⚠️ Limited to individual users only
+- ⚠️ Requires users to interact with bot first
+- ⚠️ User IDs can be hard to obtain
+
+| Variable            | Description |
+|--------------------|-------------|
+| `VIBER_ENABLE`     | Set to `true` to enable Viber notifications. |
+| `VIBER_BOT_TOKEN`  | The authentication token for your Viber bot or channel. |
+| `VIBER_API_TYPE`   | API type: `"channel"` (default) for team notifications or `"bot"` for individual messaging. |
+| `VIBER_CHANNEL_ID` | The channel ID where alerts will be posted (required for channel API). **Can be overridden per request using the `viber_channel_id` query parameter.** |
+| `VIBER_USER_ID`    | The user ID where alerts will be sent (required for bot API). **Can be overridden per request using the `viber_user_id` query parameter.** |
+| `VIBER_USE_PROXY`  | Set to `true` to use the global proxy configuration for Viber API calls. Useful when Viber is blocked. |
 
 ### Email Configuration
 | Variable          | Description |
@@ -813,6 +872,7 @@ These properties allow you to:
 |------------------|-------------|
 | `LARK_ENABLE`   | Set to `true` to enable Lark notifications. |
 | `LARK_WEBHOOK_URL` | The webhook URL for Lark notifications. |
+| `LARK_USE_PROXY` | Set to `true` to use the global proxy configuration for Lark API calls. Useful when Lark is blocked. |
 | `LARK_OTHER_WEBHOOK_URL_DEV` | (Optional) Webhook URL for the development environment. **Can be selected per request using the `lark_other_webhook_url=dev` query parameter.** |
 | `LARK_OTHER_WEBHOOK_URL_PROD` | (Optional) Webhook URL for the production environment. **Can be selected per request using the `lark_other_webhook_url=prod` query parameter.** |
 
@@ -863,6 +923,8 @@ We provide a way to overwrite configuration values using query parameters, allow
 |------------------|-------------|
 | `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_value>`. |
 | `telegram_chat_id`   | The chat ID where Telegram alerts will be sent. Use: `/api/incidents?telegram_chat_id=<your_chat_id>`. |
+| `viber_user_id`   | The user ID where Viber alerts will be sent (for bot API). Use: `/api/incidents?viber_user_id=<your_user_id>`. |
+| `viber_channel_id`   | The channel ID where Viber alerts will be posted (for channel API). Use: `/api/incidents?viber_channel_id=<your_channel_id>`. |
 | `email_to`   | Overrides the default recipient email address for email notifications. Use: `/api/incidents?email_to=<recipient_email>`. |
 | `email_subject`   | Overrides the default subject line for email notifications. Use: `/api/incidents?email_subject=<custom_subject>`. |
 | `msteams_other_power_url`   | Overrides the default Microsoft Teams Power Automate flow by specifying an alternative key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_power_url=qc`. |
@@ -898,6 +960,34 @@ curl -X POST "http://localhost:3000/api/incidents?telegram_chat_id=-100123456789
   -d '{
     "Logs": "[ERROR] Network latency exceeding thresholds.",
     "ServiceName": "network-monitor",
+    "UserID": "U12345"
+  }'
+```
+
+#### Viber Channel Override (Default API)
+
+To send an alert to a different Viber channel (e.g., for team notifications):
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?viber_channel_id=your_channel_id" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Production database connection failure.",
+    "ServiceName": "database",
+    "UserID": "U12345"
+  }'
+```
+
+#### Viber User Override (Bot API)
+
+To send an alert to a different Viber user (e.g., for personal notifications):
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?viber_user_id=4UHcAFe/T6w4SJjQ3M8VKA==" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Mobile app service degradation detected.",
+    "ServiceName": "mobile-api",
     "UserID": "U12345"
   }'
 ```
@@ -1097,7 +1187,7 @@ For complete migration instructions, please see our [detailed migration guide](h
 - [x] Add Email support
 - [x] Add SNS subscription
 - [x] Add MS Team support
-- [ ] Add Viber support
+- [x] Add Viber support
 - [x] Add Lark support
 - [x] Add support for queue listeners (AWS SQS, GCP Cloud Pub/Sub, Azure Service Bus)
 - [x] Support multiple templates

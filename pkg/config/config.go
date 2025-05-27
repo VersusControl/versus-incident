@@ -19,14 +19,22 @@ type Config struct {
 	Alert  AlertConfig
 	Queue  QueueConfig
 	OnCall OnCallConfig
+	Proxy  ProxyConfig
 
 	Redis RedisConfig `mapstructure:"redis"`
+}
+
+type ProxyConfig struct {
+	URL      string `mapstructure:"url"`      // HTTP/HTTPS/SOCKS5 proxy URL
+	Username string `mapstructure:"username"` // Optional proxy username
+	Password string `mapstructure:"password"` // Optional proxy password
 }
 
 type AlertConfig struct {
 	DebugBody bool `mapstructure:"debug_body"`
 	Slack     SlackConfig
 	Telegram  TelegramConfig
+	Viber     ViberConfig
 	Email     EmailConfig
 	MSTeams   MSTeamsConfig
 	Lark      LarkConfig
@@ -51,6 +59,19 @@ type TelegramConfig struct {
 	BotToken     string `mapstructure:"bot_token"`
 	ChatID       string `mapstructure:"chat_id"`
 	TemplatePath string `mapstructure:"template_path"`
+	UseProxy     bool   `mapstructure:"use_proxy"`
+}
+
+type ViberConfig struct {
+	Enable  bool
+	APIType string `mapstructure:"api_type"` // "bot" or "channel" - defaults to "channel"
+	// Bot API configuration
+	BotToken     string `mapstructure:"bot_token"`
+	UserID       string `mapstructure:"user_id"`
+	TemplatePath string `mapstructure:"template_path"`
+	// Channel configuration for Channels Post API
+	ChannelID string `mapstructure:"channel_id"`
+	UseProxy  bool   `mapstructure:"use_proxy"`
 }
 
 type EmailConfig struct {
@@ -77,6 +98,7 @@ type LarkConfig struct {
 	WebhookURL       string            `mapstructure:"webhook_url"`
 	TemplatePath     string            `mapstructure:"template_path"`
 	OtherWebhookURLs map[string]string `mapstructure:"other_webhook_urls"`
+	UseProxy         bool              `mapstructure:"use_proxy"`
 }
 
 type QueueConfig struct {
@@ -183,9 +205,13 @@ func LoadConfig(path string) error {
 
 		setEnableFromEnv("SLACK_ENABLE", &cfg.Alert.Slack.Enable)
 		setEnableFromEnv("TELEGRAM_ENABLE", &cfg.Alert.Telegram.Enable)
+		setEnableFromEnv("TELEGRAM_USE_PROXY", &cfg.Alert.Telegram.UseProxy)
+		setEnableFromEnv("VIBER_ENABLE", &cfg.Alert.Viber.Enable)
+		setEnableFromEnv("VIBER_USE_PROXY", &cfg.Alert.Viber.UseProxy)
 		setEnableFromEnv("EMAIL_ENABLE", &cfg.Alert.Email.Enable)
 		setEnableFromEnv("MSTEAMS_ENABLE", &cfg.Alert.MSTeams.Enable)
 		setEnableFromEnv("LARK_ENABLE", &cfg.Alert.Lark.Enable)
+		setEnableFromEnv("LARK_USE_PROXY", &cfg.Alert.Lark.UseProxy)
 		setEnableFromEnv("SNS_ENABLE", &cfg.Queue.SNS.Enable)
 
 		setEnableFromEnv("ONCALL_ENABLE", &cfg.OnCall.Enable)
@@ -216,6 +242,14 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 
 	if v := (*paramsOverwrite)["telegram_chat_id"]; v != "" {
 		clonedCfg.Alert.Telegram.ChatID = v
+	}
+
+	if v := (*paramsOverwrite)["viber_user_id"]; v != "" {
+		clonedCfg.Alert.Viber.UserID = v
+	}
+
+	if v := (*paramsOverwrite)["viber_channel_id"]; v != "" {
+		clonedCfg.Alert.Viber.ChannelID = v
 	}
 
 	if v := (*paramsOverwrite)["email_to"]; v != "" {
