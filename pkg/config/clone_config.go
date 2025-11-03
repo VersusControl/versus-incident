@@ -22,12 +22,13 @@ func cloneConfig(src *Config) *Config {
 // Helper function to deep clone the AlertConfig struct
 func cloneAlertConfig(src AlertConfig) AlertConfig {
 	return AlertConfig{
-		DebugBody: src.DebugBody,
-		Slack:     cloneSlackConfig(src.Slack),
-		Telegram:  cloneTelegramConfig(src.Telegram),
-		Email:     cloneEmailConfig(src.Email),
-		MSTeams:   cloneMSTeamsConfig(src.MSTeams),
-		Lark:      cloneLarkConfig(src.Lark),
+		DebugBody: 	src.DebugBody,
+		Slack:     	cloneSlackConfig(src.Slack),
+		Telegram:  	cloneTelegramConfig(src.Telegram),
+		Email:     	cloneEmailConfig(src.Email),
+		MSTeams:   	cloneMSTeamsConfig(src.MSTeams),
+		Lark:      	cloneLarkConfig(src.Lark),
+		GoogleChat:	cloneGoogleChatConfig(src.GoogleChat),
 	}
 }
 
@@ -105,6 +106,17 @@ func cloneLarkConfig(src LarkConfig) LarkConfig {
 		WebhookURL:       src.WebhookURL,
 		TemplatePath:     src.TemplatePath,
 		OtherWebhookURLs: otherWebhookURLsCopy,
+	}
+}
+
+// Helper function to deep clone the GoogleChatConfig struct
+func cloneGoogleChatConfig(src GoogleChatConfig) GoogleChatConfig {
+	return GoogleChatConfig{
+		Enable:       src.Enable,
+		SpaceID:      src.SpaceID,
+		SpaceKey:     src.SpaceKey,
+		SpaceToken: 	src.SpaceToken,
+		TemplatePath: src.TemplatePath,
 	}
 }
 

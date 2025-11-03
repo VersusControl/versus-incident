@@ -25,11 +25,12 @@ type Config struct {
 
 type AlertConfig struct {
 	DebugBody bool `mapstructure:"debug_body"`
-	Slack     SlackConfig
-	Telegram  TelegramConfig
-	Email     EmailConfig
-	MSTeams   MSTeamsConfig
-	Lark      LarkConfig
+	Slack     	SlackConfig
+	Telegram  	TelegramConfig
+	Email     	EmailConfig
+	MSTeams   	MSTeamsConfig
+	Lark      	LarkConfig
+	GoogleChat	GoogleChatConfig
 }
 
 type SlackConfig struct {
@@ -77,6 +78,14 @@ type LarkConfig struct {
 	WebhookURL       string            `mapstructure:"webhook_url"`
 	TemplatePath     string            `mapstructure:"template_path"`
 	OtherWebhookURLs map[string]string `mapstructure:"other_webhook_urls"`
+}
+
+type GoogleChatConfig struct {
+	Enable       bool
+	SpaceID 		 string `mapstructure:"space_id"`
+	SpaceKey 		 string `mapstructure:"space_key"`
+	SpaceToken   string `mapstructure:"space_token"`
+	TemplatePath string `mapstructure:"template_path"`
 }
 
 type QueueConfig struct {
@@ -186,6 +195,7 @@ func LoadConfig(path string) error {
 		setEnableFromEnv("EMAIL_ENABLE", &cfg.Alert.Email.Enable)
 		setEnableFromEnv("MSTEAMS_ENABLE", &cfg.Alert.MSTeams.Enable)
 		setEnableFromEnv("LARK_ENABLE", &cfg.Alert.Lark.Enable)
+		setEnableFromEnv("GOOGLE_CHAT_ENABLE", &cfg.Alert.GoogleChat.Enable)
 		setEnableFromEnv("SNS_ENABLE", &cfg.Queue.SNS.Enable)
 
 		setEnableFromEnv("ONCALL_ENABLE", &cfg.OnCall.Enable)
@@ -244,6 +254,14 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 				clonedCfg.Alert.Lark.WebhookURL = webhookURL
 			}
 		}
+	}
+
+	if v := (*paramsOverwrite)["space_id"]; v != "" {
+		clonedCfg.Alert.Email.Subject = v
+	}
+
+	if v := (*paramsOverwrite)["space_token"]; v != "" {
+		clonedCfg.Alert.Email.Subject = v
 	}
 
 	if v := (*paramsOverwrite)["oncall_enable"]; v != "" {
