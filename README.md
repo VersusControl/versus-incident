@@ -971,6 +971,37 @@ curl -X POST "http://localhost:3000/api/incidents?lark_other_webhook_url=dev" \
   }'
 ```
 
+### GoogleChat Webhook Override
+You can configure multiple Google Chat webhook URLs using the `other_webhook_urls` setting and display custom buttons through `other_buttons` and `display_buttons` parameters:
+
+```yaml
+alert:
+  googlechat:
+    enable: true
+    webhook_url: ${GOOGLECHAT_WEBHOOK_URL}
+    template_path: "config/googlechat_message.tmpl"
+    other_webhook_urls:
+      dev: ${GOOGLECHAT_OTHER_WEBHOOK_URL_DEV}
+      prod: ${GOOGLECHAT_OTHER_WEBHOOK_URL_PROD}
+    other_buttons:
+      grafana: "http://grafana.local/dashboard"
+      kibana: "http://kibana.local/discover"
+    display_buttons:
+      - grafana
+      - kibana
+```
+
+Then, to send an alert to the production environment's Google Chat webhook with display buttons for Grafana Dashboard only:
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?googlechat_other_webhook_url=prod&googlechat_display_buttons=grafana" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Service": "Lending Service",
+    "Severity": "CRITICAL",                                       
+    "IncidentURL": "http://incident-tracker.local/incidents/12345"
+  }'
+
 #### On-Call Controls
 
 To disable on-call escalation for a non-critical alert:
