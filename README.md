@@ -1001,6 +1001,7 @@ curl -X POST "http://localhost:3000/api/incidents?googlechat_other_webhook_url=p
     "Severity": "CRITICAL",                                       
     "IncidentURL": "http://incident-tracker.local/incidents/12345"
   }'
+```
 
 #### On-Call Controls
 
