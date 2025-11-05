@@ -57,7 +57,7 @@ alert:
       grafana: "https://grafana.nonprod.galaxyfinx.in/goto/cf366eazi4nwge?orgId=1"
       kibana: "https://kibana.nonprod.vikkibank.io/app/r/s/e0vP7"
       argocd: "https://argocd.nonprod.galaxyfinx.in/applications/argocd/data-gl-posting-service?view=tree&resource="
-    display_buttons: # Optional: List of buttons to display in the Google Chat message. Coukld use query parameter to override too, eg /api/incidents?googlechat_display_buttons=grafana,kibana
+    display_buttons: # Optional: List of buttons to display in the Google Chat message. Could use query parameter to override too, eg /api/incidents?googlechat_display_buttons=grafana,kibana
       - grafana
       - kibana
       - argocd

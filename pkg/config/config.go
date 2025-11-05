@@ -262,7 +262,7 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 		}
 	}
 
-	if v := (*paramsOverwrite)["google_other_webhook_url"]; v != "" {
+	if v := (*paramsOverwrite)["googlechat_other_webhook_url"]; v != "" {
 		if clonedCfg.Alert.GoogleChat.OtherWebhookURLs != nil {
 			webhookURL := clonedCfg.Alert.GoogleChat.OtherWebhookURLs[v]
 
@@ -272,7 +272,7 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 		}
 	}
 
-	if v := (*paramsOverwrite)["google_display_buttons"]; v != "" {
+	if v := (*paramsOverwrite)["googlechat_display_buttons"]; v != "" {
 		clonedCfg.Alert.GoogleChat.DisplayButtons = strings.Split(v, ",")
 	}
 
