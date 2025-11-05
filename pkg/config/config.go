@@ -201,7 +201,7 @@ func LoadConfig(path string) error {
 		setEnableFromEnv("EMAIL_ENABLE", &cfg.Alert.Email.Enable)
 		setEnableFromEnv("MSTEAMS_ENABLE", &cfg.Alert.MSTeams.Enable)
 		setEnableFromEnv("LARK_ENABLE", &cfg.Alert.Lark.Enable)
-		setEnableFromEnv("GOOGLE_CHAT_ENABLE", &cfg.Alert.GoogleChat.Enable)
+		setEnableFromEnv("GOOGLECHAT_ENABLE", &cfg.Alert.GoogleChat.Enable)
 		setEnableFromEnv("SNS_ENABLE", &cfg.Queue.SNS.Enable)
 
 		setEnableFromEnv("ONCALL_ENABLE", &cfg.OnCall.Enable)
