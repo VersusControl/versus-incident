@@ -131,6 +131,18 @@ alert:
     templatePath: "/app/config/lark_message.tmpl"
     otherWebhookUrls: {}
 
+  googlechat:
+    enable: false
+    webhook_url: ""
+    templatePath: "/app/config/googlechat_message.tmpl"
+    otherWebhookUrls: {}
+    other_buttons: {}
+    displayButtons: []
+    messageProperties:
+      buttonText: "Acknowledge Alert"
+      buttonStyle: "primary"
+      disableButton: false
+      
   sns:
     enable: false
     httpsEndpointSubscriptionPath: "/sns"
@@ -270,3 +282,10 @@ templates: {}
   #   
   #   [Click here to acknowledge]({{.AckURL}})
   #   {{ end }}
+
+  # Custom GoogleChat template (optional - if not defined, the default from the container will be used)
+  # googlechat: |
+  # <b>GoogleChat Alert!</b>
+  # <u>Service:</u> <i>{{.Service}}</i>
+  # <u>Severity:</u> <b>{{.Severity}}</b>
+  # <a href="{{.IncidentURL}}">View Incident</a>

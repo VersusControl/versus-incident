@@ -72,6 +72,37 @@ data:
           {{- end }}
         {{- end }}
 
+      googlechat:
+        enable: {{ .Values.alert.googlechat.enable }}
+        webhook_url: ${GOOGLECHAT_WEBHOOK_URL}
+        template_path: "/app/config/googlechat_message.tmpl"
+        {{- if .Values.alert.googlechat.otherWebhookUrls }}
+        other_webhook_urls:
+          {{- range $key, $val := .Values.alert.googlechat.otherWebhookUrls }}
+          {{ $key }}: ${GOOGLECHAT_OTHER_WEBHOOK_URL_{{ $key | upper }}}
+          {{- end }}
+        {{- end }}
+        other_buttons:
+          {{- range $key, $val := .Values.alert.googlechat.otherButtons }}
+          {{ $key }}: "{{ $val }}"
+          {{- end }}
+        display_buttons:
+          {{- range $val := .Values.alert.googlechat.displayButtons }}
+          - {{ $val }}
+          {{- end }}
+        {{- if .Values.alert.googlechat.messageProperties }}
+        message_properties:
+          {{- if .Values.alert.googlechat.messageProperties.buttonText }}
+          button_text: "{{ .Values.alert.googlechat.messageProperties.buttonText }}"
+          {{- end }}
+          {{- if .Values.alert.googlechat.messageProperties.buttonColor }}
+          button_color: "{{ .Values.alert.googlechat.messageProperties.buttonColor }}"
+          {{- end }}
+          {{- if .Values.alert.googlechat.messageProperties.disableButton }}
+          disable_button: {{ .Values.alert.googlechat.messageProperties.disableButton }}
+          {{- end }}
+        {{- end }}
+
       sns:
         enable: {{ .Values.alert.sns.enable }}
         {{- if .Values.alert.sns.httpsEndpointSubscriptionPath }}
@@ -192,4 +223,9 @@ data:
   {{- if .Values.templates.lark }}
   lark_message.tmpl: |
 {{ .Values.templates.lark | indent 4 }}
+  {{- end }}
+
+  {{- if .Values.templates.googlechat }}
+  googlechat_message.tmpl: |
+{{ .Values.templates.googlechat | indent 4 }}
   {{- end }}

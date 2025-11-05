@@ -3,3 +3,5 @@ tmp.txt
 *.sh
 .air.conf
 book
+.DS_Store
+.vscode

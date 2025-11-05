@@ -24,13 +24,13 @@ type Config struct {
 }
 
 type AlertConfig struct {
-	DebugBody bool `mapstructure:"debug_body"`
-	Slack     	SlackConfig
-	Telegram  	TelegramConfig
-	Email     	EmailConfig
-	MSTeams   	MSTeamsConfig
-	Lark      	LarkConfig
-	GoogleChat	GoogleChatConfig
+	DebugBody  bool `mapstructure:"debug_body"`
+	Slack      SlackConfig
+	Telegram   TelegramConfig
+	Email      EmailConfig
+	MSTeams    MSTeamsConfig
+	Lark       LarkConfig
+	GoogleChat GoogleChatConfig
 }
 
 type SlackConfig struct {
@@ -81,11 +81,18 @@ type LarkConfig struct {
 }
 
 type GoogleChatConfig struct {
-	Enable       bool
-	SpaceID 		 string `mapstructure:"space_id"`
-	SpaceKey 		 string `mapstructure:"space_key"`
-	SpaceToken   string `mapstructure:"space_token"`
-	TemplatePath string `mapstructure:"template_path"`
+	Enable            bool
+	WebhookURL        string                      `mapstructure:"webhook_url"`
+	TemplatePath      string                      `mapstructure:"template_path"`
+	OtherWebhookURLs  map[string]string           `mapstructure:"other_webhook_urls"`
+	OtherButtons      map[string]string           `mapstructure:"other_buttons"`
+	DisplayButtons    []string                    `mapstructure:"display_buttons"`
+	MessageProperties GoogleChatMessageProperties `mapstructure:"message_properties"`
+}
+type GoogleChatMessageProperties struct {
+	DisableButton bool   `mapstructure:"disable_button"`
+	ButtonText    string `mapstructure:"button_text"`
+	ButtonStyle   string `mapstructure:"button_style"`
 }
 
 type QueueConfig struct {
@@ -174,7 +181,6 @@ func LoadConfig(path string) error {
 		v.AutomaticEnv()
 		v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 		v.AllowEmptyEnv(true)
-		v.SetTypeByDefaultValue(true)
 
 		if err = v.Unmarshal(&cfg); err != nil {
 			err = fmt.Errorf("failed to unmarshal config: %w", err)
@@ -256,12 +262,18 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 		}
 	}
 
-	if v := (*paramsOverwrite)["space_id"]; v != "" {
-		clonedCfg.Alert.Email.Subject = v
+	if v := (*paramsOverwrite)["google_other_webhook_url"]; v != "" {
+		if clonedCfg.Alert.GoogleChat.OtherWebhookURLs != nil {
+			webhookURL := clonedCfg.Alert.GoogleChat.OtherWebhookURLs[v]
+
+			if webhookURL != "" {
+				clonedCfg.Alert.GoogleChat.WebhookURL = webhookURL
+			}
+		}
 	}
 
-	if v := (*paramsOverwrite)["space_token"]; v != "" {
-		clonedCfg.Alert.Email.Subject = v
+	if v := (*paramsOverwrite)["google_display_buttons"]; v != "" {
+		clonedCfg.Alert.GoogleChat.DisplayButtons = strings.Split(v, ",")
 	}
 
 	if v := (*paramsOverwrite)["oncall_enable"]; v != "" {

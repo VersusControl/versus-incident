@@ -133,7 +133,24 @@ spec:
                   key: lark_other_webhook_url_{{ $key }}
             {{- end }}
             {{- end }}
-            
+
+            {{- if .Values.alert.googlechat.enable }}
+            - name: GOOGLECHAT_ENABLE
+              value: "true"
+            - name: GOOGLECHAT_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: googlechat_webhook_url
+            {{- range $key, $val := .Values.alert.googlechat.otherWebhookUrls }}
+            - name: GOOGLECHAT_OTHER_WEBHOOK_URL_{{ $key | upper }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: googlechat_other_webhook_url_{{ $key }}
+            {{- end }}
+            {{- end }}
+
             {{- if .Values.alert.sns.enable }}
             - name: SNS_ENABLE
               value: "true"
@@ -326,6 +343,11 @@ spec:
             - name: config-volume
               mountPath: /app/config/lark_message.tmpl
               subPath: lark_message.tmpl
+            {{- end }}
+            {{- if .Values.templates.googlechat }}
+            - name: config-volume
+              mountPath: /app/config/googlechat_message.tmpl
+              subPath: googlechat_message.tmpl
             {{- end }}
       volumes:
         - name: config-volume

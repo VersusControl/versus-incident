@@ -1,19 +1,30 @@
 ## Configuration
 
 ## Table of Contents
-- [Sample Configuration File](#sample-configuration-file)
+- [Configuration](#configuration)
+- [Table of Contents](#table-of-contents)
 - [Environment Variables](#environment-variables)
   - [Common](#common)
   - [Slack Configuration](#slack-configuration)
   - [Telegram Configuration](#telegram-configuration)
   - [Email Configuration](#email-configuration)
   - [Microsoft Teams Configuration](#microsoft-teams-configuration)
+    - [Automatic URL Detection (April 2025 Update)](#automatic-url-detection-april-2025-update)
   - [Lark Configuration](#lark-configuration)
   - [Queue Services Configuration](#queue-services-configuration)
   - [On-Call Configuration](#on-call-configuration)
+    - [Enabling On-Call for Specific Incidents with initialized\_only](#enabling-on-call-for-specific-incidents-with-initialized_only)
   - [Redis Configuration](#redis-configuration)
 - [Dynamic Configuration with Query Parameters](#dynamic-configuration-with-query-parameters)
   - [Examples for Each Query Parameter](#examples-for-each-query-parameter)
+    - [Slack Channel Override](#slack-channel-override)
+    - [Telegram Chat Override](#telegram-chat-override)
+    - [Email Recipient Override](#email-recipient-override)
+    - [Microsoft Teams Channel Override](#microsoft-teams-channel-override)
+    - [Lark Webhook Override](#lark-webhook-override)
+    - [On-Call Controls](#on-call-controls)
+    - [AWS Incident Manager Response Plan Override](#aws-incident-manager-response-plan-override)
+    - [PagerDuty Routing Key Override](#pagerduty-routing-key-override)
   - [Combining Multiple Parameters](#combining-multiple-parameters)
 
 A sample configuration file is located at `config/config.yaml`:
@@ -69,6 +80,26 @@ alert:
     other_webhook_urls: # Optional: Enable overriding the default webhook URL using query parameters, eg /api/incidents?lark_other_webhook_url=dev
       dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
       prod: ${LARK_OTHER_WEBHOOK_URL_PROD}
+
+  googlechat:
+    enable: false # Default value, will be overridden by GOOGLECHAT_ENABLE env var
+    webhook_url: ${GOOGLECHAT_WEBHOOK_URL} # Google Chat webhook URL (required)
+    template_path: "config/googlechat_message_test.tmpl"
+    other_webhook_urls: # Optional: Enable overriding the default webhook URL using query parameters, eg /api/incidents?googlechat_other_webhook_url=dev
+      dev: ${GOOGLECHAT_OTHER_WEBHOOK_URL_DEV}
+      staging: ${GOOGLECHAT_OTHER_WEBHOOK_URL_STAGING}"
+    other_buttons: # Optional
+      grafana: "https://grafana.com.org/grafana/dashboards/12345"
+      kibana: "https://kibana.com.org/app/kibana#/dashboard/abcde"
+      argocd: "https://argocd.com.org/applications/versus"
+    display_buttons: # Optional: List of buttons to display in the Google Chat message. Coukld use query parameter to override too, eg /api/incidents?googlechat_display_buttons=grafana,kibana
+      - grafana
+      - kibana
+      - argocd
+    message_properties:
+      button_text: "Acknowledge Alert" # Custom text for the acknowledgment button
+      button_style: "primary" # Button style: "primary" (default blue), "danger" (red), or empty for default gray
+      disable_button: false # Set to true to disable the button, if you want to handle the alert acknowledgment in your own way
 
 queue:
   enable: true
