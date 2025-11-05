@@ -65,7 +65,7 @@ alert:
       button_text: "Acknowledge Alert" # Custom text for the acknowledgment button
       button_style: "primary" # Button style: "primary" (default blue), "danger" (red), or empty for default gray
       disable_button: false # Set to true to disable the button, if you want to handle the alert acknowledgment in your own way
-    template_path: "config/googlechat_message_test.tmpl"
+    template_path: "config/googlechat_message.tmpl"
 
 queue:
   enable: true
