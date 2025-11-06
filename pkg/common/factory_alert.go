@@ -148,6 +148,7 @@ func (f *AlertProviderFactory) createGoogleChatProvider() (core.AlertProvider, e
 
 	return NewGoogleChatProvider(config.GoogleChatConfig{
 		WebhookURL:     gc.WebhookURL,
+		Thread:         gc.Thread,
 		OtherButtons:   gc.OtherButtons,
 		DisplayButtons: gc.DisplayButtons,
 		TemplatePath:   gc.TemplatePath,

@@ -83,6 +83,7 @@ type LarkConfig struct {
 type GoogleChatConfig struct {
 	Enable           bool
 	WebhookURL       string            `mapstructure:"webhook_url"`
+	Thread           string            `mapstructure:"thread"`
 	TemplatePath     string            `mapstructure:"template_path"`
 	OtherWebhookURLs map[string]string `mapstructure:"other_webhook_urls"`
 	OtherButtons     map[string]string `mapstructure:"other_buttons"`
@@ -264,6 +265,10 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 				clonedCfg.Alert.GoogleChat.WebhookURL = webhookURL
 			}
 		}
+	}
+
+	if v := (*paramsOverwrite)["thread"]; v != "" {
+		clonedCfg.Alert.GoogleChat.Thread = v
 	}
 
 	if v := (*paramsOverwrite)["googlechat_display_buttons"]; v != "" {

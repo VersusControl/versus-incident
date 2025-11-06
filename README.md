@@ -986,15 +986,29 @@ alert:
     other_buttons:
       grafana: "http://grafana.local/dashboard"
       kibana: "http://kibana.local/discover"
+      argocd: "http://argocd.local/applications"
     display_buttons:
       - grafana
       - kibana
+      - argocd
 ```
 
 Then, to send an alert to the production environment's Google Chat webhook with display buttons for Grafana Dashboard only:
 
 ```bash
 curl -X POST "http://localhost:3000/api/incidents?googlechat_other_webhook_url=prod&googlechat_display_buttons=grafana" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Service": "Lending Service",
+    "Severity": "CRITICAL",                                       
+    "IncidentURL": "http://incident-tracker.local/incidents/12345"
+  }'
+```
+
+To send an alert to the development environment's Google Chat webhook with display buttons for Kibana and ArgoCD only, and send it in a same thread (__DAATE__ will be replaced with the current date):
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?googlechat_other_webhook_url=dev&googlechat_display_buttons=kibana,argocd&googlechat_thread_key=non-prod-workload-cluster__DATE__" \
   -H "Content-Type: application/json" \
   -d '{
     "Service": "Lending Service",

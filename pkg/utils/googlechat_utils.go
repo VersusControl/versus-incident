@@ -3,6 +3,11 @@ package utils
 // GoogleChatCardMessage represents the structure of a Google Chat card message
 type GoogleChatCardMessage struct {
 	CardsV2 []GoogleChatCard `json:"cardsV2"`
+	Thread  ThreadInfo       `json:"thread,omitempty"`
+}
+
+type ThreadInfo struct {
+	ThreadKey string `json:"threadKey"`
 }
 
 // GoogleChatCard represents a card in Google Chat
@@ -56,7 +61,7 @@ type OpenLink struct {
 	URL string `json:"url"`
 }
 
-func CreateGoogleChatMessage(content string, buttonMap map[string]string, displayButtons []string, isResolved bool) *GoogleChatCardMessage {
+func CreateGoogleChatMessage(content string, threadKey string, buttonMap map[string]string, displayButtons []string, isResolved bool) *GoogleChatCardMessage {
 	title := "Alert"
 
 	// Add status indicator to title
@@ -93,6 +98,9 @@ func CreateGoogleChatMessage(content string, buttonMap map[string]string, displa
 
 	// Create the card message
 	return &GoogleChatCardMessage{
+		Thread: ThreadInfo{
+			ThreadKey: threadKey,
+		},
 		CardsV2: []GoogleChatCard{
 			{
 				GoogleChatCardID: "alert-card",
