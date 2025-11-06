@@ -50,7 +50,7 @@ alert:
   googlechat:
     enable: false # Default value, will be overridden by GOOGLECHAT_ENABLE env var
     webhook_url: ${GOOGLECHAT_WEBHOOK_URL} # Google Chat webhook URL (required)
-    template_path: "config/googlechat_message_test.tmpl"
+    template_path: "config/googlechat_message.tmpl"
     other_webhook_urls: # Optional: Enable overriding the default webhook URL using query parameters, eg /api/incidents?googlechat_other_webhook_url=dev
       dev: ${GOOGLECHAT_OTHER_WEBHOOK_URL_DEV}
       staging: ${GOOGLECHAT_OTHER_WEBHOOK_URL_STAGING}"

@@ -71,6 +71,9 @@ alert:
   
   lark:
     enable: false
+
+  googlechat:
+    enable: false
 ```
 
 ### Important Parameters
@@ -86,7 +89,7 @@ alert:
 | `alert.email.enable` | Enable email notifications | `false` |
 | `alert.msteams.enable` | Enable Microsoft Teams notifications | `false` |
 | `alert.lark.enable` | Enable Lark notifications | `false` |
-| `alert.google.enable` | Enable Google Chat notifications | `false` |
+| `alert.googlechat.enable` | Enable Google Chat notifications | `false` |
 | `oncall.enable` | Enable on-call functionality | `false` |
 | `oncall.provider` | On-call provider ("aws_incident_manager" or "pagerduty") | `"aws_incident_manager"` |
 | `redis.enabled` | Enable bundled Redis (required for on-call) | `false` |

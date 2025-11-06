@@ -22,6 +22,7 @@
     - [Email Recipient Override](#email-recipient-override)
     - [Microsoft Teams Channel Override](#microsoft-teams-channel-override)
     - [Lark Webhook Override](#lark-webhook-override)
+    - [Google Chat Webhook Override](#google-chat-webhook-override)
     - [On-Call Controls](#on-call-controls)
     - [AWS Incident Manager Response Plan Override](#aws-incident-manager-response-plan-override)
     - [PagerDuty Routing Key Override](#pagerduty-routing-key-override)
@@ -443,6 +444,53 @@ curl -X POST "http://localhost:3000/api/incidents?lark_other_webhook_url=dev" \
     "UserID": "U12345"
   }'
 ```
+
+#### Google Chat Webhook Override
+You can configure multiple Google Chat webhook URLs using the `other_webhook_urls` setting:
+
+```yaml
+alert:
+  googlechat:
+    enable: true
+    webhook_url: ${GOOGLECHAT_WEBHOOK_URL}
+    template_path: "config/googlechat_message_test.tmpl"
+    other_webhook_urls:
+      dev: ${GOOGLECHAT_OTHER_WEBHOOK_URL_DEV}
+      staging: ${GOOGLECHAT_OTHER_WEBHOOK_URL_STAGING}
+    other_buttons:
+      grafana: "https://grafana.com.org/grafana/dashboards/12345"
+      kibana: "https://kibana.com.org/app/kibana#/dashboard/abcde"
+      argocd: "https://argocd.com.org/applications/versus"
+    buttons:
+      - grafana
+      - kibana
+      - argocd
+```
+
+Then, to send an alert to the staging environment's Google Chat channel and include custom buttons for grafana, and kibana dashboards:
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?googlechat_other_webhook_url=staging&googlechat_display_buttons=grafana,kibana" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Staging environment deployment failed.",
+    "ServiceName": "staging-deploy",
+    "UserID": "U12345"
+  }'
+```
+
+To send an alert to the development environment's Google Chat webhook with display buttons for Kibana and ArgoCD only, and send it in a same thread (__DAATE__ will be replaced with the current date):
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?googlechat_other_webhook_url=dev&googlechat_display_buttons=kibana,argocd&googlechat_thread=non-prod-workload-cluster__DATE__" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Service": "Lending Service",
+    "Severity": "CRITICAL",                                       
+    "IncidentURL": "http://incident-tracker.local/incidents/12345"
+  }'
+```
+
 
 #### On-Call Controls
 

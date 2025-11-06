@@ -267,7 +267,7 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 		}
 	}
 
-	if v := (*paramsOverwrite)["thread"]; v != "" {
+	if v := (*paramsOverwrite)["googlechat_thread"]; v != "" {
 		clonedCfg.Alert.GoogleChat.Thread = v
 	}
 

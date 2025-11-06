@@ -52,7 +52,6 @@ func (g *GoogleChatProvider) SendAlert(i *m.Incident) error {
 		return fmt.Errorf("failed to execute template: %w", err)
 	}
 
-	fmt.Println("thread", g.thread)
 	var thread = g.thread
 	if thread != "" {
 		thread = strings.ReplaceAll(g.thread, "__DATE__", time.Now().Format("20060102"))
