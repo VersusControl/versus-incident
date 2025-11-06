@@ -40,6 +40,14 @@ data:
         chat_id: ${TELEGRAM_CHAT_ID}
         template_path: "/app/config/telegram_message.tmpl"
 
+      viber:
+        enable: {{ .Values.alert.viber.enable }}
+        bot_token: ${VIBER_BOT_TOKEN}
+        user_id: ${VIBER_USER_ID}
+        channel_id: ${VIBER_CHANNEL_ID}
+        api_type: ${VIBER_API_TYPE}
+        template_path: "/app/config/viber_message.tmpl"
+
       email:
         enable: {{ .Values.alert.email.enable }}
         smtp_host: ${SMTP_HOST}

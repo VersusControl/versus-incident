@@ -17,12 +17,15 @@ import (
 type LarkProvider struct {
 	webhookURL   string
 	templatePath string
+	client       *http.Client
 }
 
-func NewLarkProvider(cfg config.LarkConfig) *LarkProvider {
+func NewLarkProvider(cfg config.LarkConfig, proxyConfig config.ProxyConfig) *LarkProvider {
+	client := utils.CreateHTTPClient(proxyConfig, cfg.UseProxy)
 	return &LarkProvider{
 		webhookURL:   cfg.WebhookURL,
 		templatePath: cfg.TemplatePath,
+		client:       client,
 	}
 }
 
@@ -47,7 +50,13 @@ func (l *LarkProvider) SendAlert(i *m.Incident) error {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
-	resp, err := http.Post(l.webhookURL, "application/json", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", l.webhookURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := l.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}
