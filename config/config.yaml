@@ -48,8 +48,9 @@ alert:
       prod: ${LARK_OTHER_WEBHOOK_URL_PROD}
 
   googlechat:
-    enable: false # Default value, will be overridden by GOOGLECHAT_ENABLE env var
+    enable: true # Default value, will be overridden by GOOGLECHAT_ENABLE env var
     webhook_url: ${GOOGLECHAT_WEBHOOK_URL} # Google Chat webhook URL (required)
+    template_path: "config/googlechat_message_test.tmpl"
     other_webhook_urls: # Optional: Enable overriding the default webhook URL using query parameters, eg /api/incidents?googlechat_other_webhook_url=dev
       dev: ${GOOGLECHAT_OTHER_WEBHOOK_URL_DEV}
       staging: ${GOOGLECHAT_OTHER_WEBHOOK_URL_STAGING}"
@@ -61,11 +62,6 @@ alert:
       - grafana
       - kibana
       - argocd
-    message_properties:
-      button_text: "Acknowledge Alert" # Custom text for the acknowledgment button
-      button_style: "primary" # Button style: "primary" (default blue), "danger" (red), or empty for default gray
-      disable_button: false # Set to true to disable the button, if you want to handle the alert acknowledgment in your own way
-    template_path: "config/googlechat_message.tmpl"
 
 queue:
   enable: true

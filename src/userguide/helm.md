@@ -173,10 +173,6 @@ alert:
       - "grafana"
       - "kibana"
       - "argocd"
-    messageProperties:
-      buttonText: "Acknowledge Alert"
-      buttonStyle: "primary" # "primary" (blue), "danger" (red), or empty (default gray)
-      disableButton: false
 ```
 
 ## On-Call Configurations

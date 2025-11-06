@@ -81,18 +81,12 @@ type LarkConfig struct {
 }
 
 type GoogleChatConfig struct {
-	Enable            bool
-	WebhookURL        string                      `mapstructure:"webhook_url"`
-	TemplatePath      string                      `mapstructure:"template_path"`
-	OtherWebhookURLs  map[string]string           `mapstructure:"other_webhook_urls"`
-	OtherButtons      map[string]string           `mapstructure:"other_buttons"`
-	DisplayButtons    []string                    `mapstructure:"display_buttons"`
-	MessageProperties GoogleChatMessageProperties `mapstructure:"message_properties"`
-}
-type GoogleChatMessageProperties struct {
-	DisableButton bool   `mapstructure:"disable_button"`
-	ButtonText    string `mapstructure:"button_text"`
-	ButtonStyle   string `mapstructure:"button_style"`
+	Enable           bool
+	WebhookURL       string            `mapstructure:"webhook_url"`
+	TemplatePath     string            `mapstructure:"template_path"`
+	OtherWebhookURLs map[string]string `mapstructure:"other_webhook_urls"`
+	OtherButtons     map[string]string `mapstructure:"other_buttons"`
+	DisplayButtons   []string          `mapstructure:"display_buttons"`
 }
 
 type QueueConfig struct {

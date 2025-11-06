@@ -118,11 +118,6 @@ func cloneGoogleChatConfig(src GoogleChatConfig) GoogleChatConfig {
 		OtherWebhookURLs: src.OtherWebhookURLs,
 		OtherButtons:     src.OtherButtons,
 		DisplayButtons:   src.DisplayButtons,
-		MessageProperties: GoogleChatMessageProperties{
-			DisableButton: src.MessageProperties.DisableButton,
-			ButtonText:    src.MessageProperties.ButtonText,
-			ButtonStyle:   src.MessageProperties.ButtonStyle,
-		},
 	}
 }
 

@@ -90,18 +90,6 @@ data:
           {{- range $val := .Values.alert.googlechat.displayButtons }}
           - {{ $val }}
           {{- end }}
-        {{- if .Values.alert.googlechat.messageProperties }}
-        message_properties:
-          {{- if .Values.alert.googlechat.messageProperties.buttonText }}
-          button_text: "{{ .Values.alert.googlechat.messageProperties.buttonText }}"
-          {{- end }}
-          {{- if .Values.alert.googlechat.messageProperties.buttonColor }}
-          button_color: "{{ .Values.alert.googlechat.messageProperties.buttonColor }}"
-          {{- end }}
-          {{- if .Values.alert.googlechat.messageProperties.disableButton }}
-          disable_button: {{ .Values.alert.googlechat.messageProperties.disableButton }}
-          {{- end }}
-        {{- end }}
 
       sns:
         enable: {{ .Values.alert.sns.enable }}

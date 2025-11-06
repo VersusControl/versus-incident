@@ -152,6 +152,26 @@ alert:
       prod: "prod-team-webhook-url"
 ```
 
+### GoogleChat
+
+```yaml
+alert:
+  googleChat:
+    enable: true
+    webhookUrl: "your-google-chat-webhook-url"
+    otherWebhookUrls:
+      dev: "dev-team-webhook-url"
+      ops: "ops-team-webhook-url"
+    otherButtons:
+      grafana: "https://grafana.example.com/d/your-dashboard"
+      kibana: "https://kibana.example.com/app/discover"
+      argocd: "https://argocd.example.com/applications"
+    displayButtons:
+      - grafana
+      - kibana
+      - argocd
+```
+
 ## On-Call Configurations
 
 ### AWS Incident Manager

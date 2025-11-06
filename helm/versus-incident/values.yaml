@@ -138,10 +138,6 @@ alert:
     otherWebhookUrls: {}
     other_buttons: {}
     displayButtons: []
-    messageProperties:
-      buttonText: "Acknowledge Alert"
-      buttonStyle: "primary"
-      disableButton: false
       
   sns:
     enable: false
