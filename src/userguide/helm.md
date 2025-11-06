@@ -71,6 +71,9 @@ alert:
   
   lark:
     enable: false
+
+  googlechat:
+    enable: false
 ```
 
 ### Important Parameters
@@ -86,6 +89,7 @@ alert:
 | `alert.email.enable` | Enable email notifications | `false` |
 | `alert.msteams.enable` | Enable Microsoft Teams notifications | `false` |
 | `alert.lark.enable` | Enable Lark notifications | `false` |
+| `alert.googlechat.enable` | Enable Google Chat notifications | `false` |
 | `oncall.enable` | Enable on-call functionality | `false` |
 | `oncall.provider` | On-call provider ("aws_incident_manager" or "pagerduty") | `"aws_incident_manager"` |
 | `redis.enabled` | Enable bundled Redis (required for on-call) | `false` |
@@ -152,6 +156,26 @@ alert:
     otherWebhookUrls:
       dev: "dev-team-webhook-url"
       prod: "prod-team-webhook-url"
+```
+
+### Google Chat
+
+```yaml
+alert:
+  googlechat:
+    enable: true
+    webhookUrl: "your-googlechat-webhook-url"
+    otherWebhookUrls:
+      dev: "dev-team-webhook-url"
+      ops: "ops-team-webhook-url"
+    otherButtons:
+      grafana: "https://grafana.example.com"
+      kibana: "https://kibana.example.com"
+      argocd: "https://argocd.example.com"
+    displayButtons:
+      - "grafana"
+      - "kibana"
+      - "argocd"
 ```
 
 ## On-Call Configurations

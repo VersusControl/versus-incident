@@ -40,6 +40,14 @@ data:
         chat_id: ${TELEGRAM_CHAT_ID}
         template_path: "/app/config/telegram_message.tmpl"
 
+      viber:
+        enable: {{ .Values.alert.viber.enable }}
+        bot_token: ${VIBER_BOT_TOKEN}
+        user_id: ${VIBER_USER_ID}
+        channel_id: ${VIBER_CHANNEL_ID}
+        api_type: ${VIBER_API_TYPE}
+        template_path: "/app/config/viber_message.tmpl"
+
       email:
         enable: {{ .Values.alert.email.enable }}
         smtp_host: ${SMTP_HOST}
@@ -71,6 +79,25 @@ data:
           {{ $key }}: ${LARK_OTHER_WEBHOOK_URL_{{ $key | upper }}}
           {{- end }}
         {{- end }}
+
+      googlechat:
+        enable: {{ .Values.alert.googlechat.enable }}
+        webhook_url: ${GOOGLECHAT_WEBHOOK_URL}
+        template_path: "/app/config/googlechat_message.tmpl"
+        {{- if .Values.alert.googlechat.otherWebhookUrls }}
+        other_webhook_urls:
+          {{- range $key, $val := .Values.alert.googlechat.otherWebhookUrls }}
+          {{ $key }}: ${GOOGLECHAT_OTHER_WEBHOOK_URL_{{ $key | upper }}}
+          {{- end }}
+        {{- end }}
+        other_buttons:
+          {{- range $key, $val := .Values.alert.googlechat.otherButtons }}
+          {{ $key }}: "{{ $val }}"
+          {{- end }}
+        display_buttons:
+          {{- range $val := .Values.alert.googlechat.displayButtons }}
+          - {{ $val }}
+          {{- end }}
 
       sns:
         enable: {{ .Values.alert.sns.enable }}
@@ -192,4 +219,9 @@ data:
   {{- if .Values.templates.lark }}
   lark_message.tmpl: |
 {{ .Values.templates.lark | indent 4 }}
+  {{- end }}
+
+  {{- if .Values.templates.googlechat }}
+  googlechat_message.tmpl: |
+{{ .Values.templates.googlechat | indent 4 }}
   {{- end }}

@@ -1,19 +1,31 @@
 ## Configuration
 
 ## Table of Contents
-- [Sample Configuration File](#sample-configuration-file)
+- [Configuration](#configuration)
+- [Table of Contents](#table-of-contents)
 - [Environment Variables](#environment-variables)
   - [Common](#common)
   - [Slack Configuration](#slack-configuration)
   - [Telegram Configuration](#telegram-configuration)
   - [Email Configuration](#email-configuration)
   - [Microsoft Teams Configuration](#microsoft-teams-configuration)
+    - [Automatic URL Detection (April 2025 Update)](#automatic-url-detection-april-2025-update)
   - [Lark Configuration](#lark-configuration)
   - [Queue Services Configuration](#queue-services-configuration)
   - [On-Call Configuration](#on-call-configuration)
+    - [Enabling On-Call for Specific Incidents with initialized\_only](#enabling-on-call-for-specific-incidents-with-initialized_only)
   - [Redis Configuration](#redis-configuration)
 - [Dynamic Configuration with Query Parameters](#dynamic-configuration-with-query-parameters)
   - [Examples for Each Query Parameter](#examples-for-each-query-parameter)
+    - [Slack Channel Override](#slack-channel-override)
+    - [Telegram Chat Override](#telegram-chat-override)
+    - [Email Recipient Override](#email-recipient-override)
+    - [Microsoft Teams Channel Override](#microsoft-teams-channel-override)
+    - [Lark Webhook Override](#lark-webhook-override)
+    - [Google Chat Webhook Override](#google-chat-webhook-override)
+    - [On-Call Controls](#on-call-controls)
+    - [AWS Incident Manager Response Plan Override](#aws-incident-manager-response-plan-override)
+    - [PagerDuty Routing Key Override](#pagerduty-routing-key-override)
   - [Combining Multiple Parameters](#combining-multiple-parameters)
 
 A sample configuration file is located at `config/config.yaml`:
@@ -43,6 +55,16 @@ alert:
     chat_id: ${TELEGRAM_CHAT_ID} # From environment
     template_path: "config/telegram_message.tmpl"
 
+  viber:
+    enable: false  # Default value, will be overridden by VIBER_ENABLE env var
+    api_type: ${VIBER_API_TYPE} # From environment - "channel" (default) or "bot"
+    bot_token: ${VIBER_BOT_TOKEN} # From environment (token for bot or channel)
+    # Channel API (recommended for incident management)
+    channel_id: ${VIBER_CHANNEL_ID} # From environment (required for channel API)
+    # Bot API (for individual user notifications)
+    user_id: ${VIBER_USER_ID} # From environment (required for bot API)
+    template_path: "config/viber_message.tmpl"
+
   email:
     enable: false # Default value, will be overridden by EMAIL_ENABLE env var
     smtp_host: ${SMTP_HOST} # From environment
@@ -69,6 +91,26 @@ alert:
     other_webhook_urls: # Optional: Enable overriding the default webhook URL using query parameters, eg /api/incidents?lark_other_webhook_url=dev
       dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
       prod: ${LARK_OTHER_WEBHOOK_URL_PROD}
+
+  googlechat:
+    enable: false # Default value, will be overridden by GOOGLECHAT_ENABLE env var
+    webhook_url: ${GOOGLECHAT_WEBHOOK_URL} # Google Chat webhook URL (required)
+    template_path: "config/googlechat_message_test.tmpl"
+    other_webhook_urls: # Optional: Enable overriding the default webhook URL using query parameters, eg /api/incidents?googlechat_other_webhook_url=dev
+      dev: ${GOOGLECHAT_OTHER_WEBHOOK_URL_DEV}
+      staging: ${GOOGLECHAT_OTHER_WEBHOOK_URL_STAGING}"
+    other_buttons: # Optional
+      grafana: "https://grafana.com.org/grafana/dashboards/12345"
+      kibana: "https://kibana.com.org/app/kibana#/dashboard/abcde"
+      argocd: "https://argocd.com.org/applications/versus"
+    display_buttons: # Optional: List of buttons to display in the Google Chat message. Coukld use query parameter to override too, eg /api/incidents?googlechat_display_buttons=grafana,kibana
+      - grafana
+      - kibana
+      - argocd
+    message_properties:
+      button_text: "Acknowledge Alert" # Custom text for the acknowledgment button
+      button_style: "primary" # Button style: "primary" (default blue), "danger" (red), or empty for default gray
+      disable_button: false # Set to true to disable the button, if you want to handle the alert acknowledgment in your own way
 
 queue:
   enable: true
@@ -165,6 +207,34 @@ These properties allow you to:
 | `TELEGRAM_ENABLE`    | Set to `true` to enable Telegram notifications. |
 | `TELEGRAM_BOT_TOKEN` | The authentication token for your Telegram bot. |
 | `TELEGRAM_CHAT_ID`   | The chat ID where alerts will be sent. **Can be overridden per request using the `telegram_chat_id` query parameter.** |
+
+### Viber Configuration
+
+Viber supports two types of API integrations:
+- **Channel API** (default): Send messages to Viber channels for team notifications
+- **Bot API**: Send messages to individual users for personal notifications
+
+**When to use Channel API:**
+- ✅ Broadcasting to team channels
+- ✅ Public incident notifications
+- ✅ Automated system alerts
+- ✅ Better for most incident management scenarios
+- ✅ No individual user setup required
+
+**When to use Bot API:**
+- ✅ Personal notifications to specific users
+- ✅ Direct messaging for individual alerts
+- ⚠️ Limited to individual users only
+- ⚠️ Requires users to interact with bot first
+- ⚠️ User IDs can be hard to obtain
+
+| Variable            | Description |
+|--------------------|-------------|
+| `VIBER_ENABLE`     | Set to `true` to enable Viber notifications. |
+| `VIBER_BOT_TOKEN`  | The authentication token for your Viber bot or channel. |
+| `VIBER_API_TYPE`   | API type: `"channel"` (default) for team notifications or `"bot"` for individual messaging. |
+| `VIBER_CHANNEL_ID` | The channel ID where alerts will be posted (required for channel API). **Can be overridden per request using the `viber_channel_id` query parameter.** |
+| `VIBER_USER_ID`    | The user ID where alerts will be sent (required for bot API). **Can be overridden per request using the `viber_user_id` query parameter.** |
 
 ### Email Configuration
 | Variable          | Description |
@@ -305,6 +375,8 @@ We provide a way to overwrite configuration values using query parameters, allow
 |------------------|-------------|
 | `slack_channel_id`   | The ID of the Slack channel where alerts will be sent. Use: `/api/incidents?slack_channel_id=<your_value>`. |
 | `telegram_chat_id`   | The chat ID where Telegram alerts will be sent. Use: `/api/incidents?telegram_chat_id=<your_chat_id>`. |
+| `viber_channel_id`   | The channel ID where Viber alerts will be posted (for Channel API). Use: `/api/incidents?viber_channel_id=<your_channel_id>`. |
+| `viber_user_id`      | The user ID where Viber alerts will be sent (for Bot API). Use: `/api/incidents?viber_user_id=<your_user_id>`. |
 | `email_to`   | Overrides the default recipient email address for email notifications. Use: `/api/incidents?email_to=<recipient_email>`. |
 | `email_subject`   | Overrides the default subject line for email notifications. Use: `/api/incidents?email_subject=<custom_subject>`. |
 | `msteams_other_power_url`   | Overrides the default Microsoft Teams Power Automate flow by specifying an alternative key (e.g., qc, ops, dev). Use: `/api/incidents?msteams_other_power_url=qc`. |
@@ -340,6 +412,34 @@ curl -X POST "http://localhost:3000/api/incidents?telegram_chat_id=-100123456789
   -d '{
     "Logs": "[ERROR] Network latency exceeding thresholds.",
     "ServiceName": "network-monitor",
+    "UserID": "U12345"
+  }'
+```
+
+#### Viber Channel Override
+
+To send an alert to a specific Viber channel (recommended for team notifications):
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?viber_channel_id=01234567890A=" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Mobile service experiencing high error rates.",
+    "ServiceName": "mobile-api",
+    "UserID": "U12345"
+  }'
+```
+
+#### Viber User Override
+
+To send an alert to a specific Viber user (for individual notifications):
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?viber_user_id=01234567890A=" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Personal alert for mobile service issue.",
+    "ServiceName": "mobile-api",
     "UserID": "U12345"
   }'
 ```
@@ -412,6 +512,53 @@ curl -X POST "http://localhost:3000/api/incidents?lark_other_webhook_url=dev" \
     "UserID": "U12345"
   }'
 ```
+
+#### Google Chat Webhook Override
+You can configure multiple Google Chat webhook URLs using the `other_webhook_urls` setting:
+
+```yaml
+alert:
+  googlechat:
+    enable: true
+    webhook_url: ${GOOGLECHAT_WEBHOOK_URL}
+    template_path: "config/googlechat_message_test.tmpl"
+    other_webhook_urls:
+      dev: ${GOOGLECHAT_OTHER_WEBHOOK_URL_DEV}
+      staging: ${GOOGLECHAT_OTHER_WEBHOOK_URL_STAGING}
+    other_buttons:
+      grafana: "https://grafana.com.org/grafana/dashboards/12345"
+      kibana: "https://kibana.com.org/app/kibana#/dashboard/abcde"
+      argocd: "https://argocd.com.org/applications/versus"
+    buttons:
+      - grafana
+      - kibana
+      - argocd
+```
+
+Then, to send an alert to the staging environment's Google Chat channel and include custom buttons for grafana, and kibana dashboards:
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?googlechat_other_webhook_url=staging&googlechat_display_buttons=grafana,kibana" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Logs": "[ERROR] Staging environment deployment failed.",
+    "ServiceName": "staging-deploy",
+    "UserID": "U12345"
+  }'
+```
+
+To send an alert to the development environment's Google Chat webhook with display buttons for Kibana and ArgoCD only, and send it in a same thread (__DAATE__ will be replaced with the current date):
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents?googlechat_other_webhook_url=dev&googlechat_display_buttons=kibana,argocd&googlechat_thread=non-prod-workload-cluster__DATE__" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Service": "Lending Service",
+    "Severity": "CRITICAL",                                       
+    "IncidentURL": "http://incident-tracker.local/incidents/12345"
+  }'
+```
+
 
 #### On-Call Controls
 
