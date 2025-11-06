@@ -156,7 +156,7 @@ alert:
 
 ```yaml
 alert:
-  googleChat:
+  googlechat:
     enable: true
     webhookUrl: "your-google-chat-webhook-url"
     otherWebhookUrls:
