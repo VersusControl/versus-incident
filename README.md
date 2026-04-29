@@ -24,9 +24,6 @@ An incident management tool that supports alerting across multiple channels with
 - [Environment Variables](#environment-variables)
 - [Dynamic Configuration with Query Parameters](#dynamic-configuration-with-query-parameters)
 - [Template Syntax](https://versuscontrol.github.io/versus-incident/userguide/template-syntax.html)
-- [Migration Guides](#migration-guides)
-  - [Migrating to v1.2.0](#migrating-to-v120)
-  - [Migrating to v1.3.0](#migrating-to-v130)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
@@ -309,6 +306,10 @@ Here's a sample FluentBit configuration to send logs to Versus:
 <@SLACK_ONCALL_USER_ID> Please investigate!
 ```
 
+**Other Templates:**
+
+Please refer to the document here: [Other Templates](https://versus-incident.devopsvn.tech/userguide/getting-started.html#other-templates).
+
 #### More examples
 
 1. [How to Customize Alert Messages from Alertmanager to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-customize-alert-messages-from-alertmanager-to-slack-and-telegram-786525713689)
@@ -319,239 +320,11 @@ Here's a sample FluentBit configuration to send logs to Versus:
 6. [How to Configure Grafana to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-configure-grafana-to-send-alerts-to-slack-and-telegram-b11a784369b8)
 7. [How to Configure OpenSearch to Send Alerts to Slack and Telegram](https://medium.com/@hmquan08011996/how-to-configure-opensearch-to-send-alerts-to-slack-and-telegram-43d177d36791)
 
-#### Other Templates
-
-**Telegram Template**
-
-For Telegram, you can use HTML formatting. Create your Telegram message template, for example `config/telegram_message.tmpl`:
-```
-🚨 <b>Critical Error Detected!</b> 🚨
-📌 <b>Service:</b> {{.ServiceName}}
-⚠️ <b>Error Details:</b>
-{{.Logs}}
-```
-
-This template will be parsed with HTML tags when sending the alert to Telegram.
-
-**Email Template**
-
-Create your email message template, for example `config/email_message.tmpl`:
-
-```
-Subject: Critical Error Alert - {{.ServiceName}}
-
-Critical Error Detected in {{.ServiceName}}
-----------------------------------------
-
-Error Details:
-{{.Logs}}
-
-Please investigate this issue immediately.
-
-Best regards,
-Versus Incident Management System
-```
-
-This template supports both plain text and HTML formatting for email notifications.
-
-**Microsoft Teams Template**
-
-Create your Teams message template, for example `config/msteams_message.tmpl`. The Microsoft Teams integration now supports rich Markdown formatting that gets converted to Adaptive Cards:
-
-```markdown
-# Critical Error in {{.ServiceName}}
- 
-### Error Details:
-
-```{{.Logs}}```
-
-## Additional Information
-
-- Source: {{.Source}}
-- Severity: {{.Severity}}
-- Incident ID: {{.IncidentID}}
-
-Please [investigate immediately](https://your-dashboard-url.com/incidents/{{.IncidentID}})
-
-*Alert sent by Versus Incident Management*
-```
-
-This template uses Markdown features that will be rendered as an Adaptive Card in Microsoft Teams:
-- Headings with different levels (`#`, `##`, `###`)
-- Code blocks with triple backticks
-- Unordered lists with `-` or `*`
-- Ordered lists with `1.`, `2.`, etc.
-- Links with `[text](url)` syntax
-- Bold text with `**double asterisks**`
-
-**Important Note (April 2025)**: Versus Incident now automatically extracts a summary from your template's first heading (or first line if no heading exists) to ensure proper display in Microsoft Teams notifications. It also creates a plain text fallback version for clients that don't support Adaptive Cards.
-
-**Lark Template**
-
-Create your Lark message template, for example `config/lark_message.tmpl`:
-
-```markdown
-Critical Error in {{.ServiceName}}
-
-**Error Details:**
-
-```{{.Logs}}```
-
-{{ if .AckURL }}
-
-[Click here to acknowledge]({{.AckURL}})
-{{ end }}
-```
-
-This template uses Markdown formatting for optimal display in Lark channels.
-
 ### Kubernetes
 
-1. Create a secret for Slack:
-```bash
-# Create secret
-kubectl create secret generic versus-secrets \
-  --from-literal=slack_token=$SLACK_TOKEN \
-  --from-literal=slack_channel_id=$SLACK_CHANNEL_ID
-```
-
-2. Create ConfigMap for config and template file, for example `versus-config.yaml`:
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: versus-config
-data:
-  config.yaml: |
-    name: versus
-    host: 0.0.0.0
-    port: 3000
-
-    alert:
-      slack:
-        enable: true
-        token: ${SLACK_TOKEN}
-        channel_id: ${SLACK_CHANNEL_ID}
-        template_path: "/app/config/slack_message.tmpl"
-
-      telegram:
-        enable: false
-
-  slack_message.tmpl: |
-    *Critical Error in {{.ServiceName}}*
-    ----------
-    Error Details:
-    ```
-    {{.Logs}}
-    ```
-    ----------
-    Owner <@{{.UserID}}> please investigate
-
-```
-
-```bash
-kubectl apply -f versus-config.yaml
-```
-
-3. Create `versus-deployment.yaml`:
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: versus-incident
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: versus-incident
-  template:
-    metadata:
-      labels:
-        app: versus-incident
-    spec:
-      containers:
-      - name: versus-incident
-        image: ghcr.io/versuscontrol/versus-incident
-        ports:
-        - containerPort: 3000
-        livenessProbe:
-          httpGet:
-            path: /healthz
-            port: 3000
-        env:
-          - name: SLACK_CHANNEL_ID
-            valueFrom:
-              secretKeyRef:
-                name: versus-secrets
-                key: slack_channel_id
-          - name: SLACK_TOKEN
-            valueFrom:
-              secretKeyRef:
-                name: versus-secrets
-                key: slack_token
-        volumeMounts:
-        - name: versus-config
-          mountPath: /app/config/config.yaml
-          subPath: config.yaml
-        - name: versus-config
-          mountPath: /app/config/slack_message.tmpl
-          subPath: slack_message.tmpl
-      volumes:
-      - name: versus-config
-        configMap:
-          name: versus-config
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: versus-service
-spec:
-  selector:
-    app: versus-incident
-  ports:
-    - protocol: TCP
-      port: 3000
-      targetPort: 3000
-```
-
-4. Apply:
-```bash
-kubectl apply -f versus-deployment.yaml
-```
+For detailed information, please refer to the document [here](https://versus-incident.devopsvn.tech/userguide/getting-started.html#kubernetes).
 
 ### Helm Chart
-
-You can install the Versus Incident Helm chart using OCI registry:
-
-```bash
-helm install versus-incident oci://ghcr.io/versuscontrol/charts/versus-incident
-```
-
-### Install with Custom Values
-
-```bash
-# Install with custom configuration from a values file
-helm install \
-  versus-incident \
-  oci://ghcr.io/versuscontrol/charts/versus-incident \
-  -f values.yaml
-```
-
-### Upgrading an Existing Installation
-
-```bash
-# Upgrade an existing installation with the latest version
-helm upgrade \
-  versus-incident \
-  oci://ghcr.io/versuscontrol/charts/versus-incident
-
-# Upgrade with custom values
-helm upgrade \
-  versus-incident \
-  oci://ghcr.io/versuscontrol/charts/versus-incident \
-  -f values.yaml
-```
 
 For detailed information, please refer to the document [here](https://github.com/VersusControl/versus-incident/blob/main/helm/versus-incident).
 
@@ -695,7 +468,7 @@ sources:
 
 The `redis` section is required when `agent.enable` is `true`. Redis is used to remember where the agent left off in each log source, so it picks up from the right place after a restart.
 
-For detailed information on integration, please refer to the document here: [AI Agent setup with Versus](https://versuscontrol.github.io/versus-incident/agent/agent-introduction.html).
+For detailed information on integration, please refer to the document here: [Enable AI Agent](https://versuscontrol.github.io/versus-incident/agent/agent-introduction.html).
 
 ## On-Call
 
@@ -884,6 +657,66 @@ redis: # Required for on-call functionality
   port: ${REDIS_PORT}
   password: ${REDIS_PASSWORD}
   db: 0
+
+# -----------------------------------------------------------------------------
+# AI agent mode (training | shadow | detect) — opt-in.
+#
+# When agent.enable=false (the default), nothing changes: no goroutines start,
+# no new dependencies are loaded, no Redis keys are created.
+#
+# Recommended rollout:
+#   1: mode=training, review the catalog via /api/agent/patterns
+#   2: mode=shadow,   review log lines `agent[shadow]: would alert ...`
+#   3: mode=detect    (AI emission ships in a follow-up milestone)
+#
+# See local/plans/ai-incident-detection/ for the full design.
+# -----------------------------------------------------------------------------
+agent:
+  enable: false                   # master switch (env: AGENT_ENABLE)
+  mode: training                  # training | shadow | detect (env: AGENT_MODE)
+  poll_interval: 30s              # how often each source is pulled
+  lookback: 5m                    # initial backfill window on startup
+  batch_max: 1000                 # safety cap per tick
+  signal_max_bytes: 8192          # cap on Signal.Raw
+  gateway_secret: ${AGENT_GATEWAY_SECRET}  # shared secret for /api/agent/* endpoints (sent in X-Gateway-Secret header)
+  data_dir: ./data
+
+  # Signal sources are kept in a separate file so users can manage them
+  # independently of the main config. Path is resolved relative to this
+  # config file. Override via env: AGENT_SOURCES_PATH.
+  sources_path: ./agent_sources.yaml
+
+  redaction:
+    enable: true
+    redact_ips: false             # IPs are usually useful context; opt-in
+    extra_patterns:
+      - "(?i)password=\\S+"
+      - "Authorization:\\s*Bearer\\s+\\S+"
+
+  catalog:
+    mode: file                    # storage backend; only "file" is supported today (planned: redis, database)
+    persist_interval: 30s
+    auto_promote_after: 100       # in detect mode, this many sightings = "known"
+
+  miner:
+    similarity_threshold: 0.4
+    tree_depth: 4
+    max_children: 100
+
+  regex:
+    # Set to ".*" to train on every line; leave empty to require
+    # an explicit named rule match.
+    default_pattern: "(?i).*error.*"
+    rules:
+      - name: oom-killer
+        pattern: "Out of memory: Killed process"
+        severity: critical
+      - name: panic
+        pattern: "(?i)panic:"
+        severity: critical
+      - name: 5xx-burst
+        pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
+        severity: high
 ```
 
 ## Environment Variables
@@ -1292,20 +1125,6 @@ This will:
 1. Send the alert to a specific Slack channel (`C01PROD`)
 2. Send the alert to a specific Telegram chat (`-987654321`)
 3. Enable on-call escalation with a shortened 1-minute wait time
-
-## Migration Guides
-
-### Migrating to v1.2.0
-
-Version 1.2.0 introduces enhanced Microsoft Teams integration using Power Automate.
-
-For complete migration instructions, please see our [detailed migration guide](https://versuscontrol.github.io/versus-incident/migration/migration-v1.2.0.html).
-
-### Migrating to v1.3.0
-
-Version 1.3.0 introduces a new integration with PagerDuty.
-
-For complete migration instructions, please see our [detailed migration guide](https://versuscontrol.github.io/versus-incident/migration/migration-v1.3.0.html).
 
 ## Roadmap
 
