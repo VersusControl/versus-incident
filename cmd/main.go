@@ -4,10 +4,15 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"strconv"
+	"syscall"
 
+	"github.com/VersusControl/versus-incident/pkg/agent"
 	c "github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/controllers"
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -60,6 +65,10 @@ func main() {
 		}
 	}
 
+	// Shared Redis client used by both on-call and the agent worker. We open
+	// it once here so both subsystems share connections.
+	var sharedRedis *redis.Client
+
 	if cfg.OnCall.Enable || cfg.OnCall.InitializedOnly {
 		redisOptions := handlerRedisOptions(cfg.Redis)
 
@@ -70,6 +79,7 @@ func main() {
 		if err := redisClient.Ping(context.Background()).Err(); err != nil {
 			log.Fatal("Redis connection failed:", err)
 		}
+		sharedRedis = redisClient
 
 		awsCfg, err := config.LoadDefaultConfig(context.Background())
 		if err != nil {
@@ -80,13 +90,140 @@ func main() {
 		core.InitOnCallWorkflow(awsClient, redisClient)
 	}
 
+	// Start the AI agent worker if enabled. Backwards compatible: when
+	// agent.enable=false (the default) nothing changes.
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+
+	if cfg.Agent.Enable {
+		// Try to attach to the existing Redis client; if on-call wasn't
+		// enabled but agent is, open one now (best effort — fall back to
+		// in-memory cursors when Redis isn't reachable).
+		rdb := sharedRedis
+		if rdb == nil && cfg.Redis.Host != "" {
+			rdb = redis.NewClient(handlerRedisOptions(cfg.Redis))
+			if err := rdb.Ping(context.Background()).Err(); err != nil {
+				log.Printf("agent: Redis unavailable (%v); cursors will be in-memory only", err)
+				rdb = nil
+			}
+		}
+
+		cat, err := startAgent(rootCtx, app, cfg.Agent, rdb)
+		if err != nil {
+			log.Fatalf("agent: failed to start: %v", err)
+		}
+		_ = cat // catalog handle held by goroutine + admin controller
+	}
+
+	// Trap SIGINT/SIGTERM so the HTTP server stops accepting connections
+	// and any background workers (currently just the agent) get a chance to
+	// flush state via rootCtx cancellation.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		log.Printf("received signal %s, shutting down…", sig)
+		rootCancel()
+		if err := app.Shutdown(); err != nil {
+			log.Printf("shutdown error: %v", err)
+		}
+	}()
+
 	addr := cfg.Host + ":" + strconv.Itoa(cfg.Port)
 
 	printCustomBanner()
 	if err := app.Listen(addr); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+
+	rootCancel()
 }
+
+// startAgent constructs the worker, starts it in a goroutine, and registers
+// admin routes on the fiber app. It returns the catalog so the caller can
+// hold a reference (and so future hot-reload code has a handle to it).
+func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, rdb *redis.Client) (*agent.Catalog, error) {
+	mode := cfg.Catalog.Mode
+	if mode == "" {
+		mode = "file"
+	}
+	if mode != "file" {
+		return nil, fmt.Errorf("agent: catalog.mode %q not supported (only %q is implemented)", mode, "file")
+	}
+	catalogPath := cfg.CatalogPath()
+
+	// Ensure the catalog directory exists so LoadCatalog / Persist don't fail
+	// on a fresh install where the user hasn't created the data dir yet.
+	if dir := filepath.Dir(catalogPath); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("agent: create catalog directory %s: %w", dir, err)
+		}
+	}
+
+	catalog, err := agent.LoadCatalog(catalogPath)
+	if err != nil {
+		log.Printf("agent: catalog load warning: %v (starting fresh)", err)
+	}
+	log.Printf("agent: catalog loaded mode=%s path=%s patterns=%d", mode, catalogPath, catalog.Len())
+
+	miner := agent.NewMiner(cfg.Miner.SimilarityThreshold, cfg.Miner.TreeDepth, cfg.Miner.MaxChildren)
+	for _, p := range catalog.All() {
+		miner.AddCluster(p.ID, p.Template, p.Count)
+	}
+
+	redactor, redactErrs := agent.NewRedactor(cfg.Redaction.Enable && cfg.Redaction.RedactIPs, cfg.Redaction.ExtraPatterns)
+	for _, e := range redactErrs {
+		log.Printf("agent: redactor warning: %v", e)
+	}
+
+	matcher, regexErrs := agent.NewRegexMatcher(cfg.Regex)
+	for _, e := range regexErrs {
+		log.Printf("agent: regex warning: %v", e)
+	}
+
+	sources, sourceErrs := agent.BuildSources(cfg)
+	for _, e := range sourceErrs {
+		log.Printf("agent: source warning: %v", e)
+	}
+	if len(sources) == 0 {
+		return nil, errNoSources
+	}
+
+	cursors := agent.NewCursorStore(rdb)
+
+	worker, err := agent.NewWorker(agent.WorkerOptions{
+		Cfg:      cfg,
+		Sources:  sources,
+		Cursors:  cursors,
+		Redactor: redactor,
+		Matcher:  matcher,
+		Miner:    miner,
+		Catalog:  catalog,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	go worker.Run(ctx)
+
+	// Admin endpoints (require AGENT_GATEWAY_SECRET).
+	if cfg.GatewaySecret == "" {
+		return nil, fmt.Errorf("agent: gateway_secret is not configured — /api/agent/* admin endpoints require a secret")
+	}
+	api := app.Group("/api")
+	controllers.NewAgentController(catalog).Register(api)
+
+	return catalog, nil
+}
+
+// errNoSources is returned by startAgent when no enabled source could be
+// constructed. We return a sentinel rather than fmt.Errorf so the caller can
+// log a clean "agent: no enabled sources, refusing to start" message.
+var errNoSources = &agentStartError{msg: "no enabled sources configured"}
+
+type agentStartError struct{ msg string }
+
+func (e *agentStartError) Error() string { return e.msg }
 
 func printCustomBanner() {
 	cfg := c.GetConfig()

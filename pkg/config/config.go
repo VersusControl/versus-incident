@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +23,8 @@ type Config struct {
 	Proxy  ProxyConfig
 
 	Redis RedisConfig `mapstructure:"redis"`
+
+	Agent AgentConfig `mapstructure:"agent"`
 }
 
 type ProxyConfig struct {
@@ -220,9 +223,62 @@ func LoadConfig(path string) error {
 		if provider := os.Getenv("ONCALL_PROVIDER"); provider != "" {
 			cfg.OnCall.Provider = provider
 		}
+
+		// Agent mode env overrides
+		setEnableFromEnv("AGENT_ENABLE", &cfg.Agent.Enable)
+		if mode := os.Getenv("AGENT_MODE"); mode != "" {
+			cfg.Agent.Mode = mode
+		}
+		if secret := os.Getenv("AGENT_GATEWAY_SECRET"); secret != "" {
+			cfg.Agent.GatewaySecret = secret
+		}
+		if sp := os.Getenv("AGENT_SOURCES_PATH"); sp != "" {
+			cfg.Agent.SourcesPath = sp
+		}
+
+		// If the user pointed agent.sources_path at an external file, load
+		// it now and use it INSTEAD of any inline sources.
+		if cfg.Agent.SourcesPath != "" {
+			sourcesPath := cfg.Agent.SourcesPath
+			if !filepath.IsAbs(sourcesPath) {
+				sourcesPath = filepath.Join(filepath.Dir(path), sourcesPath)
+			}
+			loaded, lerr := loadAgentSourcesFile(sourcesPath)
+			if lerr != nil {
+				err = fmt.Errorf("failed to load agent sources file %s: %w", sourcesPath, lerr)
+				return
+			}
+			cfg.Agent.Sources = loaded
+		}
 	})
 
 	return err
+}
+
+// loadAgentSourcesFile reads an external YAML file containing a top-level
+// `sources:` list and returns the parsed sources. ${VAR} references are
+// expanded against the process environment, mirroring the main config loader.
+func loadAgentSourcesFile(path string) ([]AgentSourceConfig, error) {
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.SetConfigType("yaml")
+
+	if err := v.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	for _, k := range v.AllKeys() {
+		if value, ok := v.Get(k).(string); ok {
+			v.Set(k, os.ExpandEnv(value))
+		}
+	}
+
+	var wrapper struct {
+		Sources []AgentSourceConfig `mapstructure:"sources"`
+	}
+	if err := v.Unmarshal(&wrapper); err != nil {
+		return nil, fmt.Errorf("unmarshal: %w", err)
+	}
+	return wrapper.Sources, nil
 }
 
 func GetConfig() *Config {

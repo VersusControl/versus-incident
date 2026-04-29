@@ -1,0 +1,72 @@
+# -----------------------------------------------------------------------------
+# Agent signal sources.
+#
+# Loaded by the main config when `agent.sources_path` points at this file.
+# Keeping sources separate makes it easy to swap fixtures (file → ES) and to
+# manage per-environment source lists without touching the rest of the config.
+#
+# Each entry must have:
+#   name:    unique identifier (used in cursor keys and admin views)
+#   type:    "file" or "elasticsearch"
+#   enable:  true | false
+# Plus one of `file:` / `elasticsearch:` blocks depending on `type`.
+# -----------------------------------------------------------------------------
+sources:
+  # File source — easiest way to test the agent end-to-end. Drop a log file
+  # in local/resource/ and point this at it. See local/resource/README.md.
+
+  - name: noisy-app
+    type: file
+    enable: false
+    file:
+      path: ./local/resource/noisy-app.log
+      format: text
+      from_beginning: true
+
+  # - name: sample-app
+  #   type: file
+  #   enable: false                # set true to enable this source
+  #   file:
+  #     path: ./local/resource/sample-app.log
+  #     format: text                # "text" or "json"
+  #     from_beginning: true        # set false in production to tail from EOF
+  #     # cursor_path: ./data/cursors/file-sample-app.cursor
+  #     max_line_bytes: 65536
+  #     timestamp_layout: "2006-01-02T15:04:05Z07:00"
+  #     JSON-mode field overrides:
+  #     message_field: message
+  #     timestamp_field: "@timestamp"
+  #     severity_field: level
+
+  - name: es-app
+    type: elasticsearch
+    enable: false
+    elasticsearch:
+      addresses:
+        - http://localhost:9200
+      index: "logstash-*"
+      time_field: "@timestamp"
+      query: '*'
+      message_field: "@message"
+      page_size: 500
+
+  # - name: es-app-with-queries
+  #   type: elasticsearch
+  #   enable: false                 # set true after configuring credentials
+  #   elasticsearch:
+  #     addresses:
+  #       - https://es.example.internal:9200
+  #     username: ${ES_USERNAME}
+  #     password: ${ES_PASSWORD}
+  #     # api_key: ${ES_API_KEY}    # alternative to user/pass
+  #     insecure_skip_verify: false
+  #     index: "logs-app-*"
+  #     time_field: "@timestamp"
+  #     query: 'log.level:(error OR warn)'
+  #     message_field: message
+  #     severity_field: log.level
+  #     extra_fields:
+  #       - service.name
+  #       - host.name
+  #       - error.stack_trace
+  #     page_size: 500

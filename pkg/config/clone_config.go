@@ -16,6 +16,7 @@ func cloneConfig(src *Config) *Config {
 		OnCall:     cloneOnCallConfig(src.OnCall),
 		Proxy:      cloneProxyConfig(src.Proxy),
 		Redis:      cloneRedisConfig(src.Redis),
+		Agent:      cloneAgentConfig(src.Agent),
 	}
 
 	return cloned
@@ -230,4 +231,84 @@ func cloneRedisConfig(src RedisConfig) RedisConfig {
 		DB:                 src.DB,
 		InsecureSkipVerify: src.InsecureSkipVerify,
 	}
+}
+
+// Helper function to deep clone the AgentConfig struct
+func cloneAgentConfig(src AgentConfig) AgentConfig {
+	cloned := AgentConfig{
+		Enable:         src.Enable,
+		Mode:           src.Mode,
+		PollInterval:   src.PollInterval,
+		Lookback:       src.Lookback,
+		BatchMax:       src.BatchMax,
+		SignalMaxBytes: src.SignalMaxBytes,
+		GatewaySecret:  src.GatewaySecret,
+		DataDir:        src.DataDir,
+		SourcesPath:    src.SourcesPath,
+		Redaction: AgentRedactionConfig{
+			Enable:    src.Redaction.Enable,
+			RedactIPs: src.Redaction.RedactIPs,
+		},
+		Catalog: AgentCatalogConfig{
+			Mode:             src.Catalog.Mode,
+			PersistInterval:  src.Catalog.PersistInterval,
+			AutoPromoteAfter: src.Catalog.AutoPromoteAfter,
+		},
+		Miner: AgentMinerConfig{
+			SimilarityThreshold: src.Miner.SimilarityThreshold,
+			TreeDepth:           src.Miner.TreeDepth,
+			MaxChildren:         src.Miner.MaxChildren,
+		},
+		Regex: AgentRegexConfig{
+			DefaultPattern: src.Regex.DefaultPattern,
+		},
+	}
+
+	if src.Redaction.ExtraPatterns != nil {
+		cloned.Redaction.ExtraPatterns = append([]string(nil), src.Redaction.ExtraPatterns...)
+	}
+	if src.Regex.Rules != nil {
+		cloned.Regex.Rules = append([]AgentRegexRule(nil), src.Regex.Rules...)
+	}
+	if src.Sources != nil {
+		cloned.Sources = make([]AgentSourceConfig, len(src.Sources))
+		for i, s := range src.Sources {
+			c := AgentSourceConfig{
+				Name:   s.Name,
+				Type:   s.Type,
+				Enable: s.Enable,
+				Elasticsearch: AgentElasticsearchSourceConfig{
+					Username:           s.Elasticsearch.Username,
+					Password:           s.Elasticsearch.Password,
+					APIKey:             s.Elasticsearch.APIKey,
+					InsecureSkipVerify: s.Elasticsearch.InsecureSkipVerify,
+					Index:              s.Elasticsearch.Index,
+					TimeField:          s.Elasticsearch.TimeField,
+					Query:              s.Elasticsearch.Query,
+					MessageField:       s.Elasticsearch.MessageField,
+					SeverityField:      s.Elasticsearch.SeverityField,
+					PageSize:           s.Elasticsearch.PageSize,
+				},
+				File: AgentFileSourceConfig{
+					Path:            s.File.Path,
+					Format:          s.File.Format,
+					CursorPath:      s.File.CursorPath,
+					FromBeginning:   s.File.FromBeginning,
+					MaxLineBytes:    s.File.MaxLineBytes,
+					TimestampLayout: s.File.TimestampLayout,
+					MessageField:    s.File.MessageField,
+					TimestampField:  s.File.TimestampField,
+					SeverityField:   s.File.SeverityField,
+				},
+			}
+			if s.Elasticsearch.Addresses != nil {
+				c.Elasticsearch.Addresses = append([]string(nil), s.Elasticsearch.Addresses...)
+			}
+			if s.Elasticsearch.ExtraFields != nil {
+				c.Elasticsearch.ExtraFields = append([]string(nil), s.Elasticsearch.ExtraFields...)
+			}
+			cloned.Sources[i] = c
+		}
+	}
+	return cloned
 }
