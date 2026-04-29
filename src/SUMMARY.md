@@ -15,6 +15,15 @@
 - [Use Sentry](./examples/sentry.md)
 - [Use Kibana](./examples/kibana.md)
 
+# AI Agent
+- [Introduction](./agent/agent-introduction.md)
+- [Getting Started](./agent/getting-started.md)
+- [Configuration](./agent/configuration.md)
+- [RedAction](./agent/redaction.md)
+- [Catalog](./agent/catalog.md)
+- [Miner](./agent/miner.md)
+- [Regex](./agent/regex.md)
+
 # On Call
 - [Introduction](./oncall/on-call-introduction.md)
 - [AWS Incident Manager](./oncall/aws-incident-manager.md)
