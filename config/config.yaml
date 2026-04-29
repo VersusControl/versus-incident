@@ -116,3 +116,63 @@ redis: # Required for on-call functionality
   port: ${REDIS_PORT}
   password: ${REDIS_PASSWORD}
   db: 0
+
+# -----------------------------------------------------------------------------
+# AI agent mode (training | shadow | detect) — opt-in.
+#
+# When agent.enable=false (the default), nothing changes: no goroutines start,
+# no new dependencies are loaded, no Redis keys are created.
+#
+# Recommended rollout:
+#   1: mode=training, review the catalog via /api/agent/patterns
+#   2: mode=shadow,   review log lines `agent[shadow]: would alert ...`
+#   3: mode=detect    (AI emission ships in a follow-up milestone)
+#
+# See local/plans/ai-incident-detection/ for the full design.
+# -----------------------------------------------------------------------------
+agent:
+  enable: false                   # master switch (env: AGENT_ENABLE)
+  mode: training                  # training | shadow | detect (env: AGENT_MODE)
+  poll_interval: 30s              # how often each source is pulled
+  lookback: 5m                    # initial backfill window on startup
+  batch_max: 1000                 # safety cap per tick
+  signal_max_bytes: 8192          # cap on Signal.Raw
+  gateway_secret: ${AGENT_GATEWAY_SECRET}  # shared secret for /api/agent/* endpoints (sent in X-Gateway-Secret header)
+  data_dir: ./data
+
+  # Signal sources are kept in a separate file so users can manage them
+  # independently of the main config. Path is resolved relative to this
+  # config file. Override via env: AGENT_SOURCES_PATH.
+  sources_path: ./agent_sources.yaml
+
+  redaction:
+    enable: true
+    redact_ips: false             # IPs are usually useful context; opt-in
+    extra_patterns:
+      - "(?i)password=\\S+"
+      - "Authorization:\\s*Bearer\\s+\\S+"
+
+  catalog:
+    mode: file                    # storage backend; only "file" is supported today (planned: redis, database)
+    persist_interval: 30s
+    auto_promote_after: 100       # in detect mode, this many sightings = "known"
+
+  miner:
+    similarity_threshold: 0.4
+    tree_depth: 4
+    max_children: 100
+
+  regex:
+    # Set to ".*" to train on every line; leave empty to require
+    # an explicit named rule match.
+    default_pattern: "(?i).*error.*"
+    rules:
+      - name: oom-killer
+        pattern: "Out of memory: Killed process"
+        severity: critical
+      - name: panic
+        pattern: "(?i)panic:"
+        severity: critical
+      - name: 5xx-burst
+        pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
+        severity: high

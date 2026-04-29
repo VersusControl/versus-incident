@@ -1,5 +1,9 @@
 tmp
 tmp.txt
 *.sh
+!scripts/*.sh
 .air.conf
 book
+local
+data
+AGENTS.md
