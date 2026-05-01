@@ -12,6 +12,7 @@
   - [Kubernetes](#kubernetes)
   - [Helm Chart](#helm-chart)
 - [SNS Usage](#sns-usage)
+- [AI Agent](#ai-agent)
 - [On-Call](#on-call)
 
 ### Prerequisites
@@ -518,6 +519,122 @@ aws sns publish \
 ```
 
 **A key real-world application of Amazon SNS** involves integrating it with CloudWatch Alarms. This allows CloudWatch to publish messages to an SNS topic when an alarm state changes (e.g., from OK to ALARM), which can then trigger notifications to Slack, Telegram, or Email via Versus Incident with a custom template.
+
+### AI Agent
+
+Versus supports an opt-in **AI SRE agent** that reads your logs, metrics and tracing, learns what normal looks like, and only alerts you when something new and unexpected appears.
+
+Configuration example with agent features:
+
+```yaml
+name: versus
+host: 0.0.0.0
+port: 3000
+
+# ... existing alert configurations ...
+
+agent:
+  enable: false # Use this to enable or disable the agent for all sources
+  mode: training # Valid values: "training", "shadow", or "detect"
+  poll_interval: 30s
+  gateway_secret: ${AGENT_GATEWAY_SECRET} # Shared secret required for /api/agent/* endpoints (sent in X-Gateway-Secret header)
+
+  # Sources are kept in a separate file so they can be managed independently
+  # (e.g. swap fixtures, per-environment lists). Path is resolved relative to
+  # this config file. Override via env: AGENT_SOURCES_PATH.
+  sources_path: ./agent_sources.yaml
+
+  catalog:
+    mode: file # Storage backend for the pattern catalog. Currently only "file" is supported (the catalog is saved as <data_dir>/patterns.json).
+    persist_interval: 30s
+    auto_promote_after: 100 # In detect mode, this many sightings = "known"
+
+  redaction:
+    enable: true
+    redact_ips: false
+    extra_patterns: # Optional: extra regex rules to scrub before clustering
+      - "(?i)password=\\S+"
+      - "Authorization:\\s*Bearer\\s+\\S+"
+
+  miner:
+    similarity_threshold: 0.4
+    tree_depth: 4
+    max_children: 100
+
+  regex:
+    # Optional: tag any signal whose message matches this pattern
+    # if none of the named rules below hit. Leave empty to disable.
+    default_pattern: "(?i)error|exception|fatal|panic"
+    # Named rules are tried first, in order. The first match wins.
+    rules:
+      - name: oom
+        severity: critical
+        pattern: "(?i)out of memory|OOMKilled|java\\.lang\\.OutOfMemoryError"
+      - name: db-timeout
+        severity: high
+        pattern: "(?i)(connection|query) timeout|deadlock detected"
+      - name: auth-failure
+        severity: medium
+        pattern: "(?i)401 unauthorized|invalid credentials|permission denied"
+
+redis: # Required for the agent to persist source cursors across restarts
+  host: ${REDIS_HOST}
+  port: ${REDIS_PORT}
+  password: ${REDIS_PASSWORD}
+  db: 0
+```
+
+**Explanation:**
+
+The `agent` section includes:
+1. `enable`: Turn the agent on or off (default: `false`). When disabled, nothing extra runs — no background processes, no extra files written.
+2. `mode`: How the agent behaves after it has learned your log patterns:
+   - `training`: observation only — the agent learns patterns and saves them, but sends no alerts.
+   - `shadow`: same as training, but also logs a note every time it would have sent an alert. Good for reviewing before going live.
+   - `detect`: the agent actively sends alerts for any pattern it has never seen before.
+3. `poll_interval`: How often the agent checks your log sources for new entries.
+4. `gateway_secret`: A shared secret that protects the `/api/agent/*` management endpoints. Set this to any value you choose; clients must send the same value in the `X-Gateway-Secret` header. When no secret is configured, the agent can't start.
+5. `catalog`: Where the agent stores the list of known patterns and how often to write updates. `mode` selects the storage backend — only `file` is supported today, which writes to `<data_dir>/patterns.json` (the filename is fixed).
+6. `redaction`: Rules for automatically removing sensitive information (passwords, tokens, emails, etc.) from logs before the agent processes them.
+7. `miner`: Controls how aggressively the agent groups similar log lines together. The defaults work well for most setups.
+8. `regex`: Acts as a **pre-filter** for the agent. Only signals whose message matches at least one rule (a named entry under `rules` or `default_pattern`) are forwarded to the pattern miner and stored in the catalog. Anything that doesn't match is dropped before clustering, so boring noise (200-OK requests, debug lines, etc.) never bloats `patterns.json`.
+
+   - Named `rules` are tried in order; the first match wins and tags the signal with that `name` and `severity`.
+   - If no named rule hits, `default_pattern` is tried. Matches there are tagged with `name=default`.
+   - **To learn from every line, set `default_pattern: ".*"`.** This is useful in early training when you don't yet know what's interesting.
+   - **To filter aggressively, set `default_pattern: ""` (empty)** and rely on your named rules — anything that doesn't match an explicit rule is dropped.
+9. `sources_path`: Path to a separate YAML file that lists the log sources the agent should read from. Keeping sources in their own file makes it easier to manage per-environment source lists or swap fixtures without touching the rest of the config. The path is resolved relative to the main config file. Override via the `AGENT_SOURCES_PATH` env var.
+
+The sources file (default `./agent_sources.yaml`) has a single top-level `sources:` list. Each entry needs `name`, `type` (`file` or `elasticsearch`), `enable`, plus a matching `file:` or `elasticsearch:` block. Example:
+
+```yaml
+sources:
+  - name: prod-app
+    type: elasticsearch
+    enable: true
+    elasticsearch:
+      addresses:
+        - https://es.example.internal:9200
+      username: ${ES_USERNAME}
+      password: ${ES_PASSWORD}
+      index: "logs-app-*"
+      time_field: "@timestamp"
+      query: 'log.level:(error OR warn)'
+      message_field: message
+      page_size: 500
+
+  - name: sample-app
+    type: file
+    enable: true
+    file:
+      path: ./local/resource/sample-app.log
+      format: text
+      from_beginning: true
+```
+
+The `redis` section is required when `agent.enable` is `true`. Redis is used to remember where the agent left off in each log source, so it picks up from the right place after a restart.
+
+For detailed information on integration, please refer to the document here: [Enable AI Agent](https://versuscontrol.github.io/versus-incident/agent/agent-introduction.html).
 
 ### On-Call
 
