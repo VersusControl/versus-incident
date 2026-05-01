@@ -5,6 +5,8 @@ small, curated catalog of recurring patterns. Once a service has been
 running long enough for the catalog to stabilize, anything that doesn't fit
 a known pattern is — by definition — something new, and worth a closer look.
 
+![AI Agent](/docs/images/ai-agent.png)
+
 It is **off by default** (`agent.enable: false`). Nothing extra runs, no
 goroutines start, and no files are created until you explicitly opt in.
 
@@ -19,18 +21,7 @@ Every time the agent checks for new logs, each line travels through a
 short assembly line. Each station does one job; if a station rejects the
 line, the rest is skipped.
 
-```mermaid
-flowchart TD
-    A[Read a log line<br/>from your app or Elasticsearch] --> B[Hide sensitive bits<br/><i>passwords, tokens, emails…</i>]
-    B --> C{Is this line<br/>worth learning from?}
-    C -- no --> X[(ignore)]
-    C -- yes --> D[Group with similar lines<br/><i>e.g. all 'connection refused' messages</i>]
-    D --> E[Remember the group<br/><i>save to the catalog</i>]
-    E --> F{What do we<br/>do with it?}
-    F -- training --> T[Just learn it]
-    F -- shadow --> S[Pretend to alert<br/><i>log only, useful to review</i>]
-    F -- detect --> R[Send a real incident<br/><i>only for unfamiliar lines</i>]
-```
+![AI Agent](/docs/images/ai-agent-pipeline.png)
 
 In plain English:
 
