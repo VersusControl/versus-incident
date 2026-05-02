@@ -166,6 +166,19 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, rdb *red
 	}
 	log.Printf("agent: catalog loaded mode=%s path=%s patterns=%d", mode, catalogPath, catalog.Len())
 
+	// Shadow log: only meaningful when running in shadow mode, but we always
+	// load it so a mode switch (e.g. operator flips agent.mode=shadow at
+	// runtime) doesn't lose history. Path lives next to the catalog under
+	// <data_dir>/shadow.json.
+	shadowPath := cfg.ShadowPath()
+	shadowLog, err := agent.LoadShadowLog(shadowPath, 0)
+	if err != nil {
+		log.Printf("agent: shadow log load warning: %v (starting fresh)", err)
+	}
+	if cfg.Mode == "shadow" {
+		log.Printf("agent: shadow log loaded path=%s events=%d", shadowPath, shadowLog.Len())
+	}
+
 	miner := agent.NewMiner(cfg.Miner.SimilarityThreshold, cfg.Miner.TreeDepth, cfg.Miner.MaxChildren)
 	for _, p := range catalog.All() {
 		miner.AddCluster(p.ID, p.Template, p.Count)
@@ -199,6 +212,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, rdb *red
 		Matcher:  matcher,
 		Miner:    miner,
 		Catalog:  catalog,
+		Shadow:   shadowLog,
 	})
 	if err != nil {
 		return nil, err
@@ -211,7 +225,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, rdb *red
 		return nil, fmt.Errorf("agent: gateway_secret is not configured — /api/agent/* admin endpoints require a secret")
 	}
 	api := app.Group("/api")
-	controllers.NewAgentController(catalog).Register(api)
+	controllers.NewAgentController(catalog, shadowLog).Register(api)
 
 	return catalog, nil
 }

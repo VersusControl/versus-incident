@@ -189,11 +189,12 @@ func (m *Miner) indexCluster(c *MinerCluster) {
 
 // Variable detectors used during tokenization. Anything matching becomes <*>.
 var (
-	reNumber = regexp.MustCompile(`^[\-+]?[0-9]+(\.[0-9]+)?$`)
-	reHex    = regexp.MustCompile(`^0x[0-9a-fA-F]+$`)
-	reUUID   = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	reIPv4   = regexp.MustCompile(`^(\d{1,3}\.){3}\d{1,3}(:\d+)?$`)
-	reLong   = regexp.MustCompile(`^[A-Fa-f0-9]{16,}$`) // long hashes / IDs
+	reNumber   = regexp.MustCompile(`^[\-+]?[0-9]+(\.[0-9]+)?$`)
+	reHex      = regexp.MustCompile(`^0x[0-9a-fA-F]+$`)
+	reUUID     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	reIPv4     = regexp.MustCompile(`^(\d{1,3}\.){3}\d{1,3}(:\d+)?$`)
+	reLong     = regexp.MustCompile(`^[A-Fa-f0-9]{16,}$`) // long hashes / IDs
+	reAlphaNum = regexp.MustCompile(`^[A-Za-z0-9_./:\-]+$`)
 	// REDACTED tokens emitted by the redactor are treated as wildcards.
 	reRedacted = regexp.MustCompile(`^<REDACTED:[^>]+>$`)
 )
@@ -232,6 +233,28 @@ func isVariable(t string) bool {
 	if reNumber.MatchString(t) || reHex.MatchString(t) || reUUID.MatchString(t) ||
 		reIPv4.MatchString(t) || reLong.MatchString(t) {
 		return true
+	}
+	if reAlphaNum.MatchString(t) && hasLetter(t) && hasDigit(t) {
+		return true
+	}
+	return false
+}
+
+func hasLetter(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDigit(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			return true
+		}
 	}
 	return false
 }

@@ -22,6 +22,7 @@ sources:
       path: ./local/resource/noisy-app.log
       format: text
       from_beginning: true
+      max_lines_per_pull: 5000
 
   # - name: sample-app
   #   type: file
@@ -32,6 +33,7 @@ sources:
   #     from_beginning: true        # set false in production to tail from EOF
   #     # cursor_path: ./data/cursors/file-sample-app.cursor
   #     max_line_bytes: 65536
+  #     max_lines_per_pull: 1000
   #     timestamp_layout: "2006-01-02T15:04:05Z07:00"
   #     JSON-mode field overrides:
   #     message_field: message

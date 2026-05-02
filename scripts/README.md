@@ -71,7 +71,7 @@ sources:
 If you want a clean run, clear the agent's stored state first:
 
 ```bash
-rm -f data/patterns.json data/patterns.json.* \
+rm -f data/patterns.json \
       local/resource/.versus-cursor-noisy-app
 ```
 

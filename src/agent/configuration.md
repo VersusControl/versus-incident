@@ -105,8 +105,7 @@ catalog:
 | `auto_promote_after` | int | `100` | A pattern seen this many times in `detect` mode is treated as known (won't alert). `0` disables the promotion. |
 
 The on-disk filename is fixed (`patterns.json`); the only configurable
-part is `data_dir`. The file is written atomically (tmp + rename) and
-five rotated backups are kept (`patterns.json.1` … `.5`).
+part is `data_dir`.
 
 ---
 
@@ -144,19 +143,16 @@ regex:
   rules:
     - name: oom-killer
       pattern: "Out of memory: Killed process"
-      severity: critical
     - name: panic
       pattern: "(?i)panic:"
-      severity: critical
     - name: 5xx-burst
       pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
-      severity: high
 ```
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `default_pattern` | regex | `""` | Catch-all tried after every named rule misses. Empty = nothing matches by default → strict mode. `".*"` = learn from every line. |
-| `rules` | list | `[]` | Named rules. First match wins. Each rule has `name`, `pattern`, `severity`. |
+| `rules` | list | `[]` | Named rules. First match wins. Each rule has `name` and `pattern`. The matched `name` is stored on the pattern as `rule_name` so you can cross-reference shadow events back to the rule that flagged them. |
 
 Common recipes:
 
@@ -223,12 +219,75 @@ file:
   from_beginning: true        # replay-like; false tails from EOF
   cursor_path: ""             # default: <data_dir>/cursors/file-<name>.cursor
   max_line_bytes: 65536
+  max_lines_per_pull: 1000    # cap signals returned per tick; the rest carries to the next Pull
   timestamp_layout: ""        # Go time layout; empty = auto
   # JSON-mode only:
   message_field: message
   timestamp_field: "@timestamp"
   severity_field: level
 ```
+
+> When you start the agent against an existing log file with
+> `from_beginning: true`, the source paginates the backlog
+> `max_lines_per_pull` lines at a time. Each tick advances the byte
+> offset only over what was actually consumed, so a multi-million-line
+> file is drained safely across many ticks.
+
+#### `max_lines_per_pull` vs `agent.batch_max`
+
+These two caps look similar but live at different layers and protect
+against different things. Both apply on every tick, in this order:
+
+1. **`max_lines_per_pull`** (per-source, file source only). The file
+   source stops reading after this many non-empty lines and persists
+   its byte offset there. Lines past the cap stay in the file and are
+   read on the next tick — nothing is lost.
+2. **`agent.batch_max`** (worker-wide, every source). After the source
+   returns, the worker truncates the slice to `batch_max` and **drops**
+   anything beyond it. The source's cursor has already advanced, so
+   dropped signals are gone. This is a backstop for runaway sources,
+   not a normal flow-control knob.
+
+The practical rule: keep `max_lines_per_pull ≤ agent.batch_max`. If you
+flip them around, the worker's hard truncation kicks in and you lose
+signals on every tick.
+
+##### Worked example
+
+Suppose you have a 50,000-line backlog, `poll_interval: 30s`,
+`max_lines_per_pull: 1000`, and `agent.batch_max: 1000`:
+
+| Tick | Lines read by file source | After `batch_max` | Cursor advances by | Remaining backlog |
+|---|---|---|---|---|
+| 1 | 1,000 | 1,000 | 1,000 | 49,000 |
+| 2 | 1,000 | 1,000 | 1,000 | 48,000 |
+| … | … | … | … | … |
+| 50 | 1,000 | 1,000 | 1,000 | 0 |
+
+Total drain time: 50 ticks × 30s ≈ **25 minutes**. Nothing is dropped.
+
+To drain faster, raise `max_lines_per_pull` *and* `agent.batch_max`
+together, e.g. both to `5000`:
+
+| Tick | Read | After `batch_max` | Cursor | Remaining |
+|---|---|---|---|---|
+| 1 | 5,000 | 5,000 | 5,000 | 45,000 |
+| … | … | … | … | … |
+| 10 | 5,000 | 5,000 | 5,000 | 0 |
+
+Drain time: 10 ticks × 30s ≈ **5 minutes**.
+
+What happens if you only raise one of them? With
+`max_lines_per_pull: 5000` but `agent.batch_max: 1000`:
+
+| Tick | Read | After `batch_max` | Cursor | Lost |
+|---|---|---|---|---|
+| 1 | 5,000 | 1,000 | **5,000** | **4,000** |
+| 2 | 5,000 | 1,000 | **5,000** | **4,000** |
+
+The cursor jumps 5,000 lines forward on every tick but only 1,000 are
+actually mined — the other 4,000 are silently discarded. Always raise
+the two caps together.
 
 ### `elasticsearch` source
 
@@ -274,7 +333,7 @@ are not registered and the agent refuses to start.
 | `GET` | `/api/agent/status` | Catalog size, dirty flag, persist-interval, mode. |
 | `GET` | `/api/agent/patterns` | All patterns, sorted by sighting count desc. |
 | `GET` | `/api/agent/patterns/:id` | One pattern. |
-| `POST` | `/api/agent/patterns/:id` | Update `severity`, `label`, and/or `tags`. |
+| `POST` | `/api/agent/patterns/:id` | Update `verdict` and/or `tags`. |
 | `DELETE` | `/api/agent/patterns/:id` | Remove a pattern from the catalog. |
 | `POST` | `/api/agent/flush` | Force-flush the in-memory catalog to disk. |
 
@@ -283,7 +342,7 @@ Example:
 ```bash
 curl -H "X-Gateway-Secret: $AGENT_GATEWAY_SECRET" \
   -H 'Content-Type: application/json' \
-  -d '{"severity":"known","label":"deploy-rollout","tags":["benign"]}' \
+  -d '{"verdict":"known","tags":["deploy-rollout","benign"]}' \
   http://localhost:3000/api/agent/patterns/p-abc123
 ```
 

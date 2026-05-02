@@ -295,6 +295,7 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 					CursorPath:      s.File.CursorPath,
 					FromBeginning:   s.File.FromBeginning,
 					MaxLineBytes:    s.File.MaxLineBytes,
+					MaxLinesPerPull: s.File.MaxLinesPerPull,
 					TimestampLayout: s.File.TimestampLayout,
 					MessageField:    s.File.MessageField,
 					TimestampField:  s.File.TimestampField,

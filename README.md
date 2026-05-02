@@ -402,13 +402,10 @@ agent:
     # Named rules are tried first, in order. The first match wins.
     rules:
       - name: oom
-        severity: critical
         pattern: "(?i)out of memory|OOMKilled|java\\.lang\\.OutOfMemoryError"
       - name: db-timeout
-        severity: high
         pattern: "(?i)(connection|query) timeout|deadlock detected"
       - name: auth-failure
-        severity: medium
         pattern: "(?i)401 unauthorized|invalid credentials|permission denied"
 
 redis: # Required for the agent to persist source cursors across restarts
@@ -433,7 +430,7 @@ The `agent` section includes:
 7. `miner`: Controls how aggressively the agent groups similar log lines together. The defaults work well for most setups.
 8. `regex`: Acts as a **pre-filter** for the agent. Only signals whose message matches at least one rule (a named entry under `rules` or `default_pattern`) are forwarded to the pattern miner and stored in the catalog. Anything that doesn't match is dropped before clustering, so boring noise (200-OK requests, debug lines, etc.) never bloats `patterns.json`.
 
-   - Named `rules` are tried in order; the first match wins and tags the signal with that `name` and `severity`.
+   - Named `rules` are tried in order; the first match wins and tags the signal with that `name` (stored as `rule_name` on the pattern).
    - If no named rule hits, `default_pattern` is tried. Matches there are tagged with `name=default`.
    - **To learn from every line, set `default_pattern: ".*"`.** This is useful in early training when you don't yet know what's interesting.
    - **To filter aggressively, set `default_pattern: ""` (empty)** and rely on your named rules — anything that doesn't match an explicit rule is dropped.
@@ -710,13 +707,10 @@ agent:
     rules:
       - name: oom-killer
         pattern: "Out of memory: Killed process"
-        severity: critical
       - name: panic
         pattern: "(?i)panic:"
-        severity: critical
       - name: 5xx-burst
         pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
-        severity: high
 ```
 
 ## Environment Variables
