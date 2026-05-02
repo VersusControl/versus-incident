@@ -3,9 +3,9 @@
 //	SignalSource → Redact → Detector pipeline (Regex → Miner → Catalog →
 //	Frequency) → (training: persist | shadow: log | detect: AI → Incident)
 //
-// Phase 1 ships training mode end-to-end and leaves shadow / detect as
-// configurable no-ops (the worker honors the mode but does not call an AI
-// analyzer or emit incidents until later milestones).
+// Training mode is end-to-end. Shadow and detect honor the same
+// classification path; the AI analyzer call in detect mode is wired up
+// separately from the worker.
 package agent
 
 import (

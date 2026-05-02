@@ -79,7 +79,7 @@ type Detector interface {
 }
 
 // AIFinding is the structured response returned by an AIAnalyzer for an
-// unknown / spiking pattern. (Phase-1 stub — only used in detect mode.)
+// unknown / spiking pattern. Used by detect mode.
 type AIFinding struct {
 	Title       string
 	Summary     string
@@ -90,8 +90,8 @@ type AIFinding struct {
 	SampleIDs   []string // signal IDs / pattern IDs for traceability
 }
 
-// AIAnalyzer turns an AgentResult into an AIFinding. Phase-1 has only the
-// interface; concrete analyzers ship in Phase 2+.
+// AIAnalyzer turns an AgentResult into an AIFinding. Concrete analyzers
+// (OpenAI-compatible chat/completions, etc.) implement this interface.
 type AIAnalyzer interface {
 	Name() string
 	Analyze(ctx context.Context, result AgentResult) (*AIFinding, error)

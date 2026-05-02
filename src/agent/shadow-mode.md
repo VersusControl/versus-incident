@@ -44,29 +44,7 @@ filter → cluster → catalog) and adds **one extra step at the end**:
 classify the result and, if the verdict isn't `known`, write a row to
 `shadow.json`. No alert is ever sent.
 
-```mermaid
-flowchart TD
-    A[New log line from source] --> B[Redact secrets]
-    B --> C{Matches regex<br/>pre-filter?}
-    C -- No --> X[Drop]
-    C -- Yes --> D[Cluster into pattern]
-    D --> E[Upsert into catalog<br/>count++, refresh template]
-    E --> F{Pattern known?<br/>verdict=known<br/>OR count ≥ auto_promote_after}
-    F -- Yes --> G[Silent: ignore]
-    F -- No --> H[Verdict = unknown]
-    H --> I[Coalesce by source + pattern_id<br/>bump count / occurrences]
-    I --> J[(shadow.json)]
-    H --> K[Stdout:<br/>agent shadow: would alert ...]
-
-    classDef drop fill:#fff3cd,stroke:#856404,color:#856404;
-    classDef silent fill:#d4edda,stroke:#155724,color:#155724;
-    classDef alert fill:#f8d7da,stroke:#721c24,color:#721c24;
-    classDef store fill:#cce5ff,stroke:#004085,color:#004085;
-    class X drop;
-    class G silent;
-    class H,K alert;
-    class J,E store;
-```
+![AI Agent](/docs/images/shadow-mode.png)
 
 Key things to take away from the diagram:
 

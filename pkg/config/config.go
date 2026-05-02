@@ -235,6 +235,29 @@ func LoadConfig(path string) error {
 		if sp := os.Getenv("AGENT_SOURCES_PATH"); sp != "" {
 			cfg.Agent.SourcesPath = sp
 		}
+		if grace := os.Getenv("AGENT_NEW_SERVICE_GRACE"); grace != "" {
+			cfg.Agent.NewServiceGrace = grace
+		}
+		if sp := os.Getenv("AGENT_SERVICE_PATTERNS"); sp != "" {
+			// comma-separated list; empty entries are ignored
+			var list []string
+			for _, p := range strings.Split(sp, ",") {
+				if s := strings.TrimSpace(p); s != "" {
+					list = append(list, s)
+				}
+			}
+			cfg.Agent.ServicePatterns = list
+		}
+		setEnableFromEnv("AGENT_AI_ENABLE", &cfg.Agent.AI.Enable)
+		if u := os.Getenv("AGENT_AI_BASE_URL"); u != "" {
+			cfg.Agent.AI.BaseURL = u
+		}
+		if k := os.Getenv("AGENT_AI_API_KEY"); k != "" {
+			cfg.Agent.AI.APIKey = k
+		}
+		if m := os.Getenv("AGENT_AI_MODEL"); m != "" {
+			cfg.Agent.AI.Model = m
+		}
 
 		// If the user pointed agent.sources_path at an external file, load
 		// it now and use it INSTEAD of any inline sources.

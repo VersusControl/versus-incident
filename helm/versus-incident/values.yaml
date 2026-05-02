@@ -177,27 +177,52 @@ oncall:
     otherRoutingKeys: {}
 
 # Redis configuration
+#
+# Redis is REQUIRED only when on-call is enabled (oncall.enable=true or
+# oncall.initializedOnly=true). When on-call is disabled, the values in this
+# section are ignored and no Redis connection is attempted.
+#
+# There are exactly TWO supported modes. Pick ONE:
+#
+#   1) Bundled Redis (recommended for getting started):
+#        redis.enabled: true
+#        redis.auth.password: "<your-password>"
+#      The chart deploys the Bitnami Redis subchart and the application
+#      automatically connects to "<release-name>-redis-master:6379".
+#      The externalRedis.* block is IGNORED in this mode.
+#
+#   2) External Redis (production / shared Redis):
+#        redis.enabled: false
+#        externalRedis.host: "redis.my-namespace.svc.cluster.local"
+#        externalRedis.password: "<your-password>"
+#      The bundled Redis is NOT deployed; the application connects to the
+#      host/port you provide.
+#
+# Common pitfall: setting externalRedis.host while leaving redis.enabled=true
+# silently ignores externalRedis.* — the app talks to the bundled Redis.
 redis:
-  # Enable the bundled Redis if you want to use the Redis dependency
+  # Enable the bundled Redis subchart. Set to false to use externalRedis.
   enabled: false
-  
-  # Authentication parameters for the built-in Redis
+
+  # Authentication parameters for the built-in Redis (used only when enabled=true)
   auth:
     enabled: true
     password: ""
-    
+
   # Redis architecture choice
   architecture: standalone
-  
+
   # Redis master configuration
   master:
     persistence:
       enabled: true
       size: 8Gi
-  
+
 # External Redis configuration (used only when redis.enabled=false)
 externalRedis:
-  # Redis server hostname or IP address
+  # Redis server hostname or IP address.
+  # Must be reachable from the versus-incident pods (resolve via DNS or IP).
+  # Example: "redis-master.redis.svc.cluster.local"
   host: ""
   # Redis server port
   port: 6379
@@ -207,13 +232,16 @@ externalRedis:
   insecureSkipVerify: false
   # Redis database number
   db: 0
-  # Redis connection parameters
-  connectionTimeout: 5 # connection timeout in seconds
-  readTimeout: 3       # read timeout in seconds
-  writeTimeout: 3      # write timeout in seconds
-  maxRetries: 3        # maximum number of retries
-  minRetryBackoff: 8   # minimum backoff in milliseconds
-  maxRetryBackoff: 512 # maximum backoff in milliseconds
+  # Redis connection parameters.
+  # Defaults are intentionally generous so transient DNS/network slowness
+  # in Kubernetes does not surface as "context deadline exceeded". Tune
+  # downward if you need faster failure detection.
+  connectionTimeout: 30 # connection timeout in seconds
+  readTimeout: 30       # read timeout in seconds
+  writeTimeout: 30      # write timeout in seconds
+  maxRetries: 3         # maximum number of retries
+  minRetryBackoff: 8    # minimum backoff in milliseconds
+  maxRetryBackoff: 512  # maximum backoff in milliseconds
   # TLS/SSL configuration
   tls:
     enabled: false

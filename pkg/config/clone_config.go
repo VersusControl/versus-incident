@@ -236,15 +236,17 @@ func cloneRedisConfig(src RedisConfig) RedisConfig {
 // Helper function to deep clone the AgentConfig struct
 func cloneAgentConfig(src AgentConfig) AgentConfig {
 	cloned := AgentConfig{
-		Enable:         src.Enable,
-		Mode:           src.Mode,
-		PollInterval:   src.PollInterval,
-		Lookback:       src.Lookback,
-		BatchMax:       src.BatchMax,
-		SignalMaxBytes: src.SignalMaxBytes,
-		GatewaySecret:  src.GatewaySecret,
-		DataDir:        src.DataDir,
-		SourcesPath:    src.SourcesPath,
+		Enable:          src.Enable,
+		Mode:            src.Mode,
+		PollInterval:    src.PollInterval,
+		Lookback:        src.Lookback,
+		BatchMax:        src.BatchMax,
+		SignalMaxBytes:  src.SignalMaxBytes,
+		GatewaySecret:   src.GatewaySecret,
+		DataDir:         src.DataDir,
+		NewServiceGrace: src.NewServiceGrace,
+		ServicePatterns: append([]string(nil), src.ServicePatterns...),
+		SourcesPath:     src.SourcesPath,
 		Redaction: AgentRedactionConfig{
 			Enable:    src.Redaction.Enable,
 			RedactIPs: src.Redaction.RedactIPs,
@@ -261,6 +263,16 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 		},
 		Regex: AgentRegexConfig{
 			DefaultPattern: src.Regex.DefaultPattern,
+		},
+		AI: AgentAIConfig{
+			Enable:          src.AI.Enable,
+			BaseURL:         src.AI.BaseURL,
+			APIKey:          src.AI.APIKey,
+			Model:           src.AI.Model,
+			Temperature:     src.AI.Temperature,
+			MaxTokens:       src.AI.MaxTokens,
+			MaxCallsPerHour: src.AI.MaxCallsPerHour,
+			CacheTTL:        src.AI.CacheTTL,
 		},
 	}
 

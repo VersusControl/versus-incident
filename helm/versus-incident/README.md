@@ -262,21 +262,69 @@ redis:
 
 ## Redis Configuration
 
-Redis is required for on-call functionality. The chart can either deploy its own Redis instance or connect to an external one.
+Redis is **only required when on-call is enabled** (`oncall.enable=true` or `oncall.initializedOnly=true`). When on-call is disabled, the Redis settings are ignored.
 
-### External Redis
+The chart supports exactly two modes — pick one:
+
+### Mode 1 — Bundled Redis (recommended for getting started)
+
+The chart deploys a Bitnami Redis subchart and the application connects to it automatically at `<release-name>-redis-master:6379`.
 
 ```yaml
+oncall:
+  enable: true
+
 redis:
-  enabled: false
+  enabled: true
+  auth:
+    enabled: true
+    password: "your-redis-password"
+  architecture: standalone
+  master:
+    persistence:
+      enabled: true
+      size: 8Gi
+
+# externalRedis.* is IGNORED in this mode — leave it untouched.
+```
+
+### Mode 2 — External Redis (production / shared Redis)
+
+Disable the bundled Redis and point the chart at an existing Redis instance.
+
+```yaml
+oncall:
+  enable: true
+
+redis:
+  enabled: false              # do NOT deploy bundled Redis
 
 externalRedis:
-  host: "redis.example.com"
+  host: "redis.my-namespace.svc.cluster.local"  # required
   port: 6379
   password: "your-redis-password"
-  insecureSkipVerify: false
   db: 0
+  insecureSkipVerify: false
+  # Connection tuning. Defaults are deliberately generous so transient
+  # DNS / network slowness in Kubernetes does not surface as
+  # "context deadline exceeded". Tune downward if you want faster failure.
+  connectionTimeout: 30
+  readTimeout: 30
+  writeTimeout: 30
+  maxRetries: 3
+  minRetryBackoff: 8
+  maxRetryBackoff: 512
 ```
+
+### Common pitfall — "Redis connection failed: context deadline exceeded"
+
+Setting `externalRedis.host` while leaving `redis.enabled: true` (the default in some older examples) causes the application to talk to the bundled Redis and silently ignore your `externalRedis.*` values. Since chart `1.3.8` the chart fails fast with a clear error if both are set at the same time. If you hit this on an older chart version:
+
+1. Decide which mode you want.
+2. For Mode 2: set `redis.enabled: false` AND set `externalRedis.host`.
+3. Verify connectivity from the pod: `kubectl exec -it <pod> -- nc -vz <externalRedis.host> 6379`.
+4. If you see timeouts, raise `externalRedis.connectionTimeout` / `readTimeout` / `writeTimeout` (now defaulted to 30s).
+
 
 ## Custom Alert Templates
 

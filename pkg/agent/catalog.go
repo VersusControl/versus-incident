@@ -34,8 +34,21 @@ type Pattern struct {
 	RuleName string `json:"rule_name"`
 	// Source is the SignalSource name where the pattern was first observed.
 	Source string `json:"source"`
+	// Service is the service name extracted from the pattern's first
+	// matching log message (via the agent.service_pattern regex). Empty
+	// when service detection is disabled or the regex did not match. The
+	// agent uses this to gate detect-mode AI analysis behind the
+	// new-service grace window.
+	Service string `json:"service,omitempty"`
 	// Tags are arbitrary operator-supplied markers.
 	Tags []string `json:"tags,omitempty"`
+}
+
+// ServiceInfo tracks when a service was first seen by the agent. Stored in
+// the same patterns.json file alongside patterns — one data store, no Redis
+// dependency for this feature.
+type ServiceInfo struct {
+	FirstSeen time.Time `json:"first_seen"`
 }
 
 // Catalog is the in-memory + on-disk pattern store.
@@ -47,15 +60,17 @@ type Catalog struct {
 	mu       sync.RWMutex
 	path     string
 	patterns map[string]*Pattern
+	services map[string]*ServiceInfo
 	dirty    bool
 }
 
 // catalogFile is the on-disk schema. Versioned so we can evolve the
 // in-memory struct without breaking existing files.
 type catalogFile struct {
-	Version   int                 `json:"version"`
-	UpdatedAt time.Time           `json:"updated_at"`
-	Patterns  map[string]*Pattern `json:"patterns"`
+	Version   int                     `json:"version"`
+	UpdatedAt time.Time               `json:"updated_at"`
+	Patterns  map[string]*Pattern     `json:"patterns"`
+	Services  map[string]*ServiceInfo `json:"services,omitempty"`
 }
 
 const catalogFileVersion = 1
@@ -66,6 +81,7 @@ func LoadCatalog(path string) (*Catalog, error) {
 	c := &Catalog{
 		path:     path,
 		patterns: make(map[string]*Pattern),
+		services: make(map[string]*ServiceInfo),
 	}
 	if path == "" {
 		return c, nil
@@ -84,6 +100,9 @@ func LoadCatalog(path string) (*Catalog, error) {
 	}
 	if f.Patterns != nil {
 		c.patterns = f.Patterns
+	}
+	if f.Services != nil {
+		c.services = f.Services
 	}
 	return c, nil
 }
@@ -141,11 +160,17 @@ func (c *Catalog) Len() int {
 // is updated. tickCount is the number of matches observed in the current
 // worker tick — used to update the EWMA baseline.
 //
+// service is the service name extracted from the log via
+// agent.service_patterns. It is stamped on the pattern only on first sighting
+// (subsequent observations preserve the original attribution to keep the
+// catalog stable). Pass "" when service detection is disabled or the
+// pattern's regexes did not match.
+//
 // ruleName comes from the regex pre-filter and is applied:
 //   - on first-seen: always
 //   - subsequently: only when a non-default named rule supersedes a previous
 //     default tag, or when the previous tag was empty
-func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alpha float64, ruleName string) *Pattern {
+func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alpha float64, ruleName, service string) *Pattern {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now().UTC()
@@ -159,6 +184,7 @@ func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alph
 			Count:     0,
 			Source:    source,
 			RuleName:  ruleName,
+			Service:   service,
 		}
 		c.patterns[patternID] = p
 	} else {
@@ -242,6 +268,7 @@ func (c *Catalog) Persist() error {
 		Version:   catalogFileVersion,
 		UpdatedAt: time.Now().UTC(),
 		Patterns:  c.patterns,
+		Services:  c.services,
 	}
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
@@ -258,4 +285,82 @@ func (c *Catalog) Persist() error {
 	}
 	c.dirty = false
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Service tracking — detect-mode new-service grace period
+// ---------------------------------------------------------------------------
+
+// RegisterService records a service name the first time it is seen. Returns
+// true when the service was newly registered (first sighting), false when it
+// was already known. The caller uses this to decide whether to log a
+// "new service discovered" message.
+func (c *Catalog) RegisterService(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.services[name]; ok {
+		return false
+	}
+	c.services[name] = &ServiceInfo{FirstSeen: time.Now().UTC()}
+	c.dirty = true
+	return true
+}
+
+// IsServiceInGrace reports whether the named service is still inside its
+// new-service grace window. A zero graceDuration means grace is disabled
+// (always returns false). An unknown service is registered on the spot and
+// enters grace.
+func (c *Catalog) IsServiceInGrace(name string, graceDuration time.Duration) bool {
+	if graceDuration <= 0 {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	svc, ok := c.services[name]
+	if !ok {
+		svc = &ServiceInfo{FirstSeen: time.Now().UTC()}
+		c.services[name] = svc
+		c.dirty = true
+	}
+	return time.Now().UTC().Before(svc.FirstSeen.Add(graceDuration))
+}
+
+// AllServices returns a snapshot of every tracked service, sorted by
+// FirstSeen ascending.
+func (c *Catalog) AllServices() map[string]ServiceInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make(map[string]ServiceInfo, len(c.services))
+	for k, v := range c.services {
+		out[k] = *v
+	}
+	return out
+}
+
+// EndServiceGrace forces a service out of its grace period by setting
+// FirstSeen to the zero time. Returns false when the service doesn't exist.
+func (c *Catalog) EndServiceGrace(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	svc, ok := c.services[name]
+	if !ok {
+		return false
+	}
+	svc.FirstSeen = time.Time{} // epoch → always past grace
+	c.dirty = true
+	return true
+}
+
+// RestartServiceGrace resets a service's FirstSeen to now, restarting the
+// grace window. Returns false when the service doesn't exist.
+func (c *Catalog) RestartServiceGrace(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	svc, ok := c.services[name]
+	if !ok {
+		return false
+	}
+	svc.FirstSeen = time.Now().UTC()
+	c.dirty = true
+	return true
 }

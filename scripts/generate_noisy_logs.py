@@ -348,6 +348,401 @@ def t_unexpected_shutdown() -> tuple[str, str]:
     )
 
 
+# -----------------------------------------------------------------------------
+# Multi-format / multi-language / multi-infrastructure templates
+#
+# Real production deployments emit logs in many shapes. The agent's
+# `service_patterns` regexes are designed to extract a service name from any
+# of them, so we mirror a representative sample here. Each function returns
+# (level, message); the message body is **already a complete log line** in
+# the target format. The driver function still prefixes a timestamp so files
+# remain time-ordered.
+# -----------------------------------------------------------------------------
+
+# --- Node.js ----------------------------------------------------------------
+def t_node_pino_info() -> tuple[str, str]:
+    # Pino default JSON line.
+    user = random.choice(USERS)
+    return "INFO ", (
+        f'{{"level":30,"time":{int(random.random()*1e13)},"pid":{random.randint(100,9999)},'
+        f'"hostname":"{random.choice(HOSTS)}","service":"checkout-api","msg":"order placed",'
+        f'"user":"{user}","duration_ms":{random.randint(20,300)}}}'
+    )
+
+
+def t_node_pino_error() -> tuple[str, str]:
+    return "ERROR", (
+        f'{{"level":50,"time":{int(random.random()*1e13)},"pid":{random.randint(100,9999)},'
+        f'"hostname":"{random.choice(HOSTS)}","service":"checkout-api","msg":"stripe charge failed",'
+        f'"err":{{"type":"StripeCardError","code":"card_declined","statusCode":402}}}}'
+    )
+
+
+def t_node_winston() -> tuple[str, str]:
+    # Winston JSON.
+    return "WARN ", (
+        f'{{"level":"warn","timestamp":"2026-05-02T12:34:56.789Z","service":"recommendations",'
+        f'"message":"feature flag fallback","flag":"new-ranker","reason":"timeout"}}'
+    )
+
+
+def t_node_express_morgan() -> tuple[str, str]:
+    # Combined-log-format from morgan + express, with leading bracketed app name.
+    code = random.choice([200, 201, 304, 404, 500])
+    return "INFO ", (
+        f'[checkout-api] {random_ip()} - - "GET /api/cart HTTP/1.1" {code} '
+        f'{random.randint(80, 9000)} "-" "Mozilla/5.0"'
+    )
+
+
+# --- Python -----------------------------------------------------------------
+def t_python_json_logger() -> tuple[str, str]:
+    # python-json-logger / AWS Lambda Powertools.
+    return "ERROR", (
+        f'{{"asctime":"2026-05-02 12:34:56,789","name":"orders.api","levelname":"ERROR",'
+        f'"service":"orders-worker","message":"sqlalchemy IntegrityError on orders.idx_user_id",'
+        f'"trace_id":"{random_trace_id()}"}}'
+    )
+
+
+def t_python_structlog() -> tuple[str, str]:
+    # structlog logfmt renderer.
+    return "INFO ", (
+        f'event="charge captured" service=billing svc=billing-svc '
+        f'amount_usd={random.randint(1, 9999)}.{random.randint(0,99):02d} '
+        f'gateway=stripe trace_id={random_trace_id()}'
+    )
+
+
+def t_python_loguru() -> tuple[str, str]:
+    return "WARN ", (
+        f'2026-05-02 12:34:56.789 | WARNING  | orders.tasks:run:42 - '
+        f'service=orders-worker celery task retry attempt={random.randint(1,5)} '
+        f'task=orders.tasks.send_receipt'
+    )
+
+
+def t_python_django_500() -> tuple[str, str]:
+    # Django built-in logger with bracketed app name.
+    return "ERROR", (
+        f'[django.request] [orders] Internal Server Error: /checkout/  '
+        f'Traceback (most recent call last): File "views.py", line 88, '
+        f'in checkout — django.db.utils.OperationalError: server closed the connection'
+    )
+
+
+# --- Java / JVM -------------------------------------------------------------
+def t_java_logback() -> tuple[str, str]:
+    # Spring Boot default pattern: bracketed thread + bracketed logger.
+    return "ERROR", (
+        f'2026-05-02 12:34:56.789  ERROR 1 --- [http-nio-8080-exec-3] '
+        f'[payments-service] c.e.p.PaymentController : '
+        f'org.springframework.web.client.HttpServerErrorException$ServiceUnavailable: 503 from upstream'
+    )
+
+
+def t_java_log4j_json() -> tuple[str, str]:
+    return "INFO ", (
+        f'{{"timestamp":"2026-05-02T12:34:56.789Z","level":"INFO","thread":"kafka-consumer-1",'
+        f'"loggerName":"com.example.OrdersConsumer","service":"orders-consumer",'
+        f'"message":"committed offset","topic":"orders.created","partition":3,"offset":{random.randint(1_000_000, 9_000_000)}}}'
+    )
+
+
+def t_java_logback_json() -> tuple[str, str]:
+    # logstash-logback-encoder / Quarkus structured.
+    return "WARN ", (
+        f'{{"@timestamp":"2026-05-02T12:34:56.789Z","level":"WARN","thread_name":"vert.x-eventloop-thread-2",'
+        f'"logger_name":"io.vertx.core.http","app":"vertx-gateway","message":"connection reset by peer",'
+        f'"trace.id":"{random_trace_id()}"}}'
+    )
+
+
+def t_kotlin_micronaut() -> tuple[str, str]:
+    return "INFO ", (
+        f'2026-05-02 12:34:56.789 [default-nioEventLoopGroup-1-3] INFO  i.m.h.s.netty.NettyHttpServer - '
+        f'service=micronaut-edge endpoint=/health status=UP'
+    )
+
+
+# --- Go ---------------------------------------------------------------------
+def t_go_zap_json() -> tuple[str, str]:
+    return "ERROR", (
+        f'{{"level":"error","ts":"2026-05-02T12:34:56.789Z","caller":"server/handler.go:142",'
+        f'"msg":"failed to enqueue job","service":"jobrunner","queue":"emails","err":"redis: nil"}}'
+    )
+
+
+def t_go_zerolog() -> tuple[str, str]:
+    # zerolog default JSON.
+    return "INFO ", (
+        f'{{"level":"info","time":"2026-05-02T12:34:56Z","service":"feature-flags",'
+        f'"flag":"new-checkout","user":"{random.choice(USERS)}","enabled":true,"message":"flag evaluated"}}'
+    )
+
+
+def t_go_logrus_text() -> tuple[str, str]:
+    return "WARN ", (
+        f'time="2026-05-02T12:34:56Z" level=warning msg="kafka producer slow" '
+        f'service=event-bus svc=event-bus topic=billing.events latency_ms={random.randint(500, 5000)}'
+    )
+
+
+def t_go_slog() -> tuple[str, str]:
+    # Go 1.21+ slog default text handler is logfmt-ish.
+    return "INFO ", (
+        f'time=2026-05-02T12:34:56.789Z level=INFO msg="cache miss" '
+        f'service=catalog svc=catalog key=product:{random.randint(1000,9999)}'
+    )
+
+
+# --- Rust -------------------------------------------------------------------
+def t_rust_tracing() -> tuple[str, str]:
+    return "ERROR", (
+        f'2026-05-02T12:34:56.789Z ERROR billing::reconciler: service=billing-reconciler '
+        f'mismatch detected account_id={random.randint(100_000_000, 900_000_000)} delta_cents={random.randint(-9999, 9999)}'
+    )
+
+
+# --- .NET / Serilog ---------------------------------------------------------
+def t_dotnet_serilog_compact() -> tuple[str, str]:
+    return "INFO ", (
+        f'{{"@t":"2026-05-02T12:34:56.789Z","@l":"Information","@m":"Order {random.randint(1,9999)} shipped",'
+        f'"Service":"orders-shipping","app":"orders-shipping","Carrier":"UPS"}}'
+    )
+
+
+def t_dotnet_serilog_text() -> tuple[str, str]:
+    return "WARN ", (
+        f'2026-05-02 12:34:56.789 +00:00 [WRN] [billing-api] HTTP retry attempt {random.randint(1,4)} '
+        f'for POST /v1/charges (HttpRequestException)'
+    )
+
+
+# --- Ruby -------------------------------------------------------------------
+def t_ruby_rails() -> tuple[str, str]:
+    method = random.choice(["GET", "POST"])
+    return "INFO ", (
+        f'I, [2026-05-02T12:34:56.789 #{random.randint(100,9999)}]  INFO -- : '
+        f'service=storefront-rails [Rack] {method} /products status=200 '
+        f'duration={random.uniform(5, 800):.2f}ms'
+    )
+
+
+def t_ruby_semantic_logger() -> tuple[str, str]:
+    return "ERROR", (
+        f'2026-05-02 12:34:56.789 E [{random.randint(100,9999)}:worker-3] '
+        f'service=storefront-jobs Sidekiq -- Job failed: ChargeJob '
+        f'error="ActiveRecord::RecordNotFound: Couldn\'t find Order"'
+    )
+
+
+# --- PHP --------------------------------------------------------------------
+def t_php_monolog_json() -> tuple[str, str]:
+    return "WARN ", (
+        f'{{"message":"deprecated function called","context":{{"fn":"each"}},'
+        f'"level":300,"level_name":"WARNING","channel":"app","datetime":"2026-05-02T12:34:56+00:00",'
+        f'"extra":{{"service":"legacy-shop"}}}}'
+    )
+
+
+# --- nginx / HAProxy / Envoy ------------------------------------------------
+def t_nginx_access_json() -> tuple[str, str]:
+    return "INFO ", (
+        f'{{"time":"2026-05-02T12:34:56+00:00","remote_addr":"{random_ip()}","service":"nginx-edge",'
+        f'"request":"GET /api/health HTTP/1.1","status":{random.choice([200, 200, 200, 404, 502])},'
+        f'"body_bytes_sent":{random.randint(20, 4000)},"upstream":"checkout-api:8080"}}'
+    )
+
+
+def t_nginx_error_log() -> tuple[str, str]:
+    return "ERROR", (
+        f'2026/05/02 12:34:56 [error] {random.randint(1000,9999)}#0: '
+        f'*{random.randint(1, 99999)} upstream timed out (110: Connection timed out) '
+        f'while reading response header from upstream, client: {random_ip()}, '
+        f'server: api.example.com, upstream: "http://10.0.{random.randint(0,255)}.{random.randint(0,255)}:8080/"'
+    )
+
+
+def t_haproxy() -> tuple[str, str]:
+    return "INFO ", (
+        f'haproxy[{random.randint(100,9999)}]: {random_ip()}:{random.randint(30000,60000)} '
+        f'[02/May/2026:12:34:56.789] frontend_https~ backend_checkout/checkout-api-{random.randint(1,5)} '
+        f'0/0/0/{random.randint(5, 250)}/{random.randint(5, 250)} '
+        f'{random.choice([200, 200, 503])} {random.randint(100, 8000)} - - ---- 1/1/0/0/0 0/0 "GET /api/cart HTTP/1.1"'
+    )
+
+
+def t_envoy_access() -> tuple[str, str]:
+    return "INFO ", (
+        f'[2026-05-02T12:34:56.789Z] "POST /service/v1/orders HTTP/2" {random.choice([200, 200, 503])} '
+        f'- via_upstream - "-" {random.randint(100, 4000)} {random.randint(50, 1500)} '
+        f'{random.randint(5, 250)} - "{random_ip()}" "envoy/1.30.0" '
+        f'"{random_trace_id()}" "checkout-api.svc.cluster.local" "10.0.0.{random.randint(1,254)}:8080"'
+    )
+
+
+# --- Databases (native log formats) -----------------------------------------
+def t_postgres_log() -> tuple[str, str]:
+    return "ERROR", (
+        f'2026-05-02 12:34:56.789 UTC [{random.randint(100,9999)}] postgres@orders ERROR: '
+        f'duplicate key value violates unique constraint "orders_pkey"'
+    )
+
+
+def t_mysql_log() -> tuple[str, str]:
+    return "WARN ", (
+        f'2026-05-02T12:34:56.789Z {random.randint(1,99)} [Warning] [MY-010055] [Server] '
+        f'IP address \'{random_ip()}\' could not be resolved: Name or service not known'
+    )
+
+
+def t_redis_log() -> tuple[str, str]:
+    return "WARN ", (
+        f'{random.randint(100,9999)}:M 02 May 2026 12:34:56.789 # Background AOF rewrite '
+        f'terminated by signal 9'
+    )
+
+
+def t_kafka_broker() -> tuple[str, str]:
+    return "ERROR", (
+        f'[2026-05-02 12:34:56,789] ERROR [ReplicaManager broker={random.randint(0,4)}] '
+        f'Error processing fetch with max size 1048576 from consumer on partition orders-{random.randint(0,11)} '
+        f'(kafka.server.ReplicaManager)'
+    )
+
+
+def t_mongodb() -> tuple[str, str]:
+    return "WARN ", (
+        f'{{"t":{{"$date":"2026-05-02T12:34:56.789Z"}},"s":"W","c":"NETWORK","id":22943,'
+        f'"ctx":"conn{random.randint(1,9999)}","msg":"Connection refused","attr":{{"service":"mongo-shard-1"}}}}'
+    )
+
+
+# --- syslog / journald / Docker ---------------------------------------------
+def t_syslog_sshd() -> tuple[str, str]:
+    return "WARN ", (
+        f'sshd[{random.randint(1000,9999)}]: Failed password for root from {random_ip()} '
+        f'port {random.randint(30000,60000)} ssh2'
+    )
+
+
+def t_syslog_postfix() -> tuple[str, str]:
+    return "INFO ", (
+        f'postfix/smtpd[{random.randint(1000,9999)}]: connect from unknown[{random_ip()}]'
+    )
+
+
+def t_syslog_cron() -> tuple[str, str]:
+    return "INFO ", (
+        f'cron[{random.randint(1000,9999)}]: (root) CMD (/usr/local/bin/backup.sh)'
+    )
+
+
+def t_journald_systemd() -> tuple[str, str]:
+    return "INFO ", (
+        f'systemd[1]: Started {random.choice(["docker.service", "containerd.service", "kubelet.service"])}.'
+    )
+
+
+def t_docker_json() -> tuple[str, str]:
+    # Docker JSON-file driver wraps app stdout — operators usually configure
+    # a tag so the line begins with a service-prefix-like header.
+    return "INFO ", (
+        f'docker[{random.randint(100,9999)}]: container=feature-flags-7b8c9 '
+        f'message="evaluated 142 flags" duration_ms={random.randint(5, 200)}'
+    )
+
+
+# --- Kubernetes events ------------------------------------------------------
+def t_k8s_kubelet() -> tuple[str, str]:
+    return "WARN ", (
+        f'kubelet[{random.randint(1000,9999)}]: Failed to pull image "registry.example.com/checkout:v1.2.3": '
+        f'rpc error: code = NotFound desc = manifest not known'
+    )
+
+
+def t_k8s_event_json() -> tuple[str, str]:
+    return "WARN ", (
+        f'{{"kind":"Event","apiVersion":"v1","involvedObject":{{"kind":"Pod","name":"checkout-api-abc",'
+        f'"namespace":"prod"}},"reason":"BackOff","message":"Back-off restarting failed container",'
+        f'"service.name":"checkout-api","type":"Warning"}}'
+    )
+
+
+# --- Cloud (AWS / GCP / Azure) ---------------------------------------------
+def t_aws_lambda() -> tuple[str, str]:
+    return "ERROR", (
+        f'{{"timestamp":"2026-05-02T12:34:56.789Z","level":"ERROR","service":"order-processor",'
+        f'"message":"DynamoDB ProvisionedThroughputExceededException","aws_request_id":"{random_trace_id()}",'
+        f'"function_name":"order-processor-prod","function_version":"$LATEST"}}'
+    )
+
+
+def t_aws_cloudwatch_alarm() -> tuple[str, str]:
+    return "ERROR", (
+        f'{{"AlarmName":"orders-api-5xx","NewStateValue":"ALARM","Region":"{random.choice(REGIONS)}",'
+        f'"service":"orders-api","Threshold":5.0,"StateReason":"Threshold crossed: 1 datapoint above 5.0"}}'
+    )
+
+
+def t_aws_alb_access() -> tuple[str, str]:
+    return "INFO ", (
+        f'http 2026-05-02T12:34:56.789Z app/checkout-alb/abc123 {random_ip()}:{random.randint(30000,60000)} '
+        f'10.0.1.{random.randint(1,254)}:8080 0.001 0.045 0.000 '
+        f'{random.choice([200, 502, 504])} {random.choice([200, 502, 504])} '
+        f'{random.randint(100, 9000)} {random.randint(100, 9000)} '
+        f'"GET https://api.example.com:443/api/cart HTTP/2.0" "Mozilla/5.0" '
+        f'TLS_AES_128_GCM_SHA256 TLSv1.3 arn:aws:elasticloadbalancing:us-east-1:111122223333:targetgroup/checkout-tg/abc'
+    )
+
+
+def t_aws_eks_cni() -> tuple[str, str]:
+    return "WARN ", (
+        f'aws-node[{random.randint(100,9999)}]: service=aws-vpc-cni W0502 12:34:56.789 '
+        f'IP pool exhausted on node ip-10-0-{random.randint(0,255)}-{random.randint(0,255)}.ec2.internal'
+    )
+
+
+def t_gcp_log_entry() -> tuple[str, str]:
+    return "ERROR", (
+        f'{{"timestamp":"2026-05-02T12:34:56.789Z","severity":"ERROR","resource":{{"type":"cloud_run_revision",'
+        f'"labels":{{"service_name":"orders-api"}}}},"jsonPayload":{{"service.name":"orders-api",'
+        f'"message":"context deadline exceeded"}}}}'
+    )
+
+
+def t_gcp_gke() -> tuple[str, str]:
+    return "WARN ", (
+        f'{{"timestamp":"2026-05-02T12:34:56.789Z","severity":"WARNING","logName":"projects/prod/logs/gke-cluster",'
+        f'"jsonPayload":{{"app":"feature-flags","message":"liveness probe failed: HTTP 503"}}}}'
+    )
+
+
+def t_azure_appinsights() -> tuple[str, str]:
+    return "ERROR", (
+        f'{{"timestamp":"2026-05-02T12:34:56.789Z","level":"Error","cloud_RoleName":"orders-api",'
+        f'"service":"orders-api","operation_Id":"{random_trace_id()}","message":"SqlException: Timeout expired"}}'
+    )
+
+
+# --- OpenTelemetry / ECS strict --------------------------------------------
+def t_otel_json() -> tuple[str, str]:
+    return "ERROR", (
+        f'{{"@timestamp":"2026-05-02T12:34:56.789Z","log.level":"error",'
+        f'"service.name":"recommendations","service.version":"3.4.1","trace.id":"{random_trace_id()}",'
+        f'"span.id":"{uuid.uuid4().hex[:16]}","message":"vector store query failed: OOM on shard 4"}}'
+    )
+
+
+def t_ecs_filebeat() -> tuple[str, str]:
+    return "INFO ", (
+        f'{{"@timestamp":"2026-05-02T12:34:56.789Z","ecs.version":"8.0.0",'
+        f'"service.name":"search-indexer","host.name":"{random.choice(HOSTS)}",'
+        f'"event.dataset":"app","message":"reindex completed","docs":{random.randint(1000, 99999)}}}'
+    )
+
+
 # (template_fn, weight)
 TEMPLATES: list[tuple[callable, int]] = [
     # Very common (the noisy baseline the agent should cluster as "boring")
@@ -396,6 +791,80 @@ TEMPLATES: list[tuple[callable, int]] = [
     (t_replication_lag, 1),
     (t_kernel_taint, 1),
     (t_unexpected_shutdown, 1),
+
+    # ----- Multi-format / multi-language / multi-infra ----------------------
+    # Most of these are "noisy info/warn" so the catalog grows a healthy mix
+    # of services. A few errors stay rare so detect/shadow has something to
+    # surface across many runtimes.
+
+    # Node.js
+    (t_node_pino_info, 8),
+    (t_node_pino_error, 1),
+    (t_node_winston, 4),
+    (t_node_express_morgan, 6),
+
+    # Python
+    (t_python_json_logger, 1),
+    (t_python_structlog, 6),
+    (t_python_loguru, 3),
+    (t_python_django_500, 1),
+
+    # Java / Kotlin / JVM
+    (t_java_logback, 1),
+    (t_java_log4j_json, 6),
+    (t_java_logback_json, 4),
+    (t_kotlin_micronaut, 4),
+
+    # Go
+    (t_go_zap_json, 2),
+    (t_go_zerolog, 6),
+    (t_go_logrus_text, 4),
+    (t_go_slog, 6),
+
+    # Rust / .NET / Ruby / PHP
+    (t_rust_tracing, 1),
+    (t_dotnet_serilog_compact, 4),
+    (t_dotnet_serilog_text, 3),
+    (t_ruby_rails, 5),
+    (t_ruby_semantic_logger, 1),
+    (t_php_monolog_json, 3),
+
+    # Web / proxy / mesh
+    (t_nginx_access_json, 8),
+    (t_nginx_error_log, 2),
+    (t_haproxy, 5),
+    (t_envoy_access, 6),
+
+    # Databases / message brokers (native log formats)
+    (t_postgres_log, 1),
+    (t_mysql_log, 2),
+    (t_redis_log, 2),
+    (t_kafka_broker, 1),
+    (t_mongodb, 2),
+
+    # syslog / journald / Docker
+    (t_syslog_sshd, 2),
+    (t_syslog_postfix, 4),
+    (t_syslog_cron, 4),
+    (t_journald_systemd, 3),
+    (t_docker_json, 4),
+
+    # Kubernetes
+    (t_k8s_kubelet, 2),
+    (t_k8s_event_json, 1),
+
+    # Cloud
+    (t_aws_lambda, 1),
+    (t_aws_cloudwatch_alarm, 1),
+    (t_aws_alb_access, 5),
+    (t_aws_eks_cni, 2),
+    (t_gcp_log_entry, 1),
+    (t_gcp_gke, 3),
+    (t_azure_appinsights, 1),
+
+    # OpenTelemetry / ECS
+    (t_otel_json, 1),
+    (t_ecs_filebeat, 4),
 ]
 
 

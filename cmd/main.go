@@ -194,6 +194,11 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, rdb *red
 		log.Printf("agent: regex warning: %v", e)
 	}
 
+	services, svcErrs := agent.NewServiceMatcher(cfg.ServicePatterns)
+	for _, e := range svcErrs {
+		log.Printf("agent: service_patterns warning: %v", e)
+	}
+
 	sources, sourceErrs := agent.BuildSources(cfg)
 	for _, e := range sourceErrs {
 		log.Printf("agent: source warning: %v", e)
@@ -213,6 +218,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, rdb *red
 		Miner:    miner,
 		Catalog:  catalog,
 		Shadow:   shadowLog,
+		Services: services,
 	})
 	if err != nil {
 		return nil, err

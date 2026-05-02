@@ -263,7 +263,7 @@ spec:
             {{- end }}
             {{- end }}
             
-            {{- /* Redis configuration - used for on-call functionality */ -}}
+            {{- /* Redis configuration - used for on-call functionality */}}
             - name: REDIS_HOST
               valueFrom:
                 secretKeyRef:
