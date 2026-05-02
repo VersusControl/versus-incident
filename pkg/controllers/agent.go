@@ -38,6 +38,8 @@ func NewAgentController(cat *agent.Catalog, sl *agent.ShadowLog) *AgentControlle
 //	GET    /shadow/stats     aggregate counts for the shadow log
 //	DELETE /shadow           clear the shadow log
 //	POST   /shadow/flush     force-flush the shadow log to disk
+//	GET    /services         list known services with grace status
+//	POST   /services/:name/grace  control grace period (end / restart)
 func (a *AgentController) Register(router fiber.Router) {
 	g := router.Group("/agent", a.authMiddleware)
 	g.Get("/status", a.getStatus)
@@ -50,6 +52,8 @@ func (a *AgentController) Register(router fiber.Router) {
 	g.Get("/shadow/stats", a.shadowStats)
 	g.Delete("/shadow", a.clearShadow)
 	g.Post("/shadow/flush", a.flushShadow)
+	g.Get("/services", a.listServices)
+	g.Post("/services/:name/grace", a.controlServiceGrace)
 }
 
 // authMiddleware enforces a shared gateway secret. Clients send the
@@ -161,4 +165,35 @@ func (a *AgentController) flushShadow(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"ok": true, "events": a.shadow.Len()})
+}
+
+// listServices returns every known service with its first-seen timestamp.
+func (a *AgentController) listServices(c *fiber.Ctx) error {
+	return c.JSON(fiber.Map{"services": a.catalog.AllServices()})
+}
+
+type serviceGraceRequest struct {
+	Action string `json:"action"` // "end" | "restart"
+}
+
+// controlServiceGrace lets an operator end or restart a service's grace period.
+func (a *AgentController) controlServiceGrace(c *fiber.Ctx) error {
+	name := c.Params("name")
+	var req serviceGraceRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid body"})
+	}
+	switch req.Action {
+	case "end":
+		if !a.catalog.EndServiceGrace(name) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "service not found"})
+		}
+	case "restart":
+		if !a.catalog.RestartServiceGrace(name) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "service not found"})
+		}
+	default:
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "action must be \"end\" or \"restart\""})
+	}
+	return c.JSON(fiber.Map{"ok": true})
 }

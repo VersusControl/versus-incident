@@ -174,3 +174,52 @@ agent:
         pattern: "(?i)panic:"
       - name: 5xx-burst
         pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
+
+  # AI analyzer — used in detect mode to assess unknown/spiking patterns.
+  # For now it the placeholder only.
+  ai:
+    enable: false                   # master switch (env: AGENT_AI_ENABLE)
+    base_url: ${AGENT_AI_BASE_URL}  # OpenAI-compatible chat/completions endpoint
+    api_key: ${AGENT_AI_API_KEY}
+    model: "gpt-4o-mini"
+    temperature: 0.2
+    max_tokens: 512
+    max_calls_per_hour: 60          # 0 = unlimited
+    cache_ttl: "1h"
+
+  # New-service grace: when a previously unseen service starts emitting logs
+  # in detect mode, it enters an implicit training window so the catalog can
+  # build up before AI analysis kicks in. Set to "0" to disable.
+  new_service_grace: 0            # duration (env: AGENT_NEW_SERVICE_GRACE), ex 10m, 2h, etc.
+  # Service detection — regexes applied to each log message to extract the
+  # service name.
+  service_patterns:
+    # ECS / OpenTelemetry: "service.name":"foo", service.name=foo, service_name=foo
+    # Used by: OpenTelemetry SDKs (all langs), Elastic Common Schema, Datadog APM
+    - '(?i)\bservice[._-]?name["\s:=]+"?([A-Za-z0-9._-]+)'
+    # logfmt key=value: service=foo, svc=foo, app=foo, component=foo
+    # Used by: Go (zap, zerolog, logrus, slog), Kubernetes klog, Python structlog,
+    #          Ruby semantic_logger, Rust tracing, .NET Serilog (compact format)
+    - '(?i)\b(?:service|svc|app|component)\s*=\s*"?([A-Za-z0-9._-]+)'
+    # JSON access logs: "service":"foo", "svc":"foo", "app":"foo", "component":"foo"
+    # Used by: Node.js (Bunyan, Pino, Winston), .NET Serilog (JSON), Java logback-json,
+    #          Python python-json-logger, AWS Lambda Powertools, nginx JSON access logs
+    - '(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"'
+    # Two bracketed tokens at line start: [logger] [service] ...
+    # Used by: Python Django (`[django.request] [orders] ...`),
+    #          some logback layouts that put logger first then MDC service.
+    # The second bracket is the service; matched before the single-bracket rule
+    # so this wins for two-bracket lines.
+    - '^\[[^\]]+\]\s+\[([A-Za-z0-9._-]+)\]'
+    # Bracketed prefix at line start: [foo]
+    # Used by: Apache log4j (default), many CLIs, Erlang/Elixir Logger,
+    #          Docker compose default formatter
+    - '^\[([A-Za-z0-9._-]+)\]'
+    # Spring Boot / Java logback default pattern:
+    #   2026-05-02 12:34:56.789 ERROR 1 --- [thread-name] [service-name] com.foo.Bar : ...
+    # The service is the SECOND bracketed token after the "---" separator.
+    - '---\s+\[[^\]]*\]\s+\[([A-Za-z0-9._-]+)\]'
+    # syslog/journald/Docker: foo[123]: at line start
+    # Used by: Linux syslog (rsyslog/syslog-ng), systemd-journald, Docker JSON-file
+    #          driver with tag, Postfix, sshd, cron, kernel
+    - '^([A-Za-z0-9._-]+)\[\d+\]:'

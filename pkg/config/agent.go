@@ -16,10 +16,21 @@ type AgentConfig struct {
 	GatewaySecret  string `mapstructure:"gateway_secret"`
 	DataDir        string `mapstructure:"data_dir"`
 
+	// NewServiceGrace is the duration a newly discovered service stays in
+	// implicit training mode before detect-mode AI analysis begins. Signals
+	// from a service still in its grace period flow through the full pipeline
+	// (redact → regex → miner → catalog) but are not forwarded to the AI
+	// analyzer. Set to "0" to disable (all services analysed immediately).
+	NewServiceGrace string `mapstructure:"new_service_grace"` // e.g. "30m"
+	// ServicePatterns is an ordered list of regexes applied to each
+	// (post-redaction) log message to discover the service name.
+	ServicePatterns []string `mapstructure:"service_patterns"`
+
 	Redaction AgentRedactionConfig `mapstructure:"redaction"`
 	Catalog   AgentCatalogConfig   `mapstructure:"catalog"`
 	Miner     AgentMinerConfig     `mapstructure:"miner"`
 	Regex     AgentRegexConfig     `mapstructure:"regex"`
+	AI        AgentAIConfig        `mapstructure:"ai"`
 
 	// SourcesPath optionally points to an external YAML file containing the
 	// `sources:` list. When set, sources defined inline in the main config
@@ -156,4 +167,31 @@ type AgentElasticsearchSourceConfig struct {
 	SeverityField      string   `mapstructure:"severity_field"`
 	ExtraFields        []string `mapstructure:"extra_fields"`
 	PageSize           int      `mapstructure:"page_size"`
+}
+
+// AgentAIConfig holds configuration for the AI analyzer used in detect mode.
+// The struct and env overrides are wired today; the concrete HTTP client
+// and prompt builder land alongside detect-mode emission.
+type AgentAIConfig struct {
+	// Enable gates whether the AI analyzer is called at all. When false
+	// (the default) detect mode still classifies patterns but never calls
+	// the LLM — it only logs what it would have sent. This allows operators
+	// to run detect mode in a "dry-run" fashion without an API key.
+	Enable bool `mapstructure:"enable"`
+	// BaseURL is the OpenAI-compatible chat/completions endpoint, e.g.
+	// "https://api.openai.com/v1" or a local vLLM / LM Studio URL.
+	BaseURL string `mapstructure:"base_url"`
+	// APIKey is the bearer token sent in the Authorization header.
+	APIKey string `mapstructure:"api_key"`
+	// Model is the model identifier, e.g. "gpt-4o-mini".
+	Model string `mapstructure:"model"`
+	// Temperature controls randomness (0.0–2.0). Default 0.2.
+	Temperature float64 `mapstructure:"temperature"`
+	// MaxTokens caps the response length. Default 512.
+	MaxTokens int `mapstructure:"max_tokens"`
+	// MaxCallsPerHour is a sliding-window rate limit. 0 = unlimited.
+	MaxCallsPerHour int `mapstructure:"max_calls_per_hour"`
+	// CacheTTL is how long an AI result for a pattern_id is cached to
+	// avoid re-asking about the same pattern. Default "1h".
+	CacheTTL string `mapstructure:"cache_ttl"`
 }

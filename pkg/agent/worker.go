@@ -39,9 +39,10 @@ func init() {
 //
 //	Pull (per source) → Redact → Cluster → Catalog upsert → (mode-specific tail)
 //
-// Phase-1 ships training mode end-to-end. Shadow and detect modes are wired
-// up but only log the verdict — they do not call an AI analyzer or emit
-// incidents until later milestones.
+// Training mode is fully end-to-end. Shadow and detect modes share the same
+// classification path; shadow records would-have-alerted events to the
+// shadow log, while detect logs the verdict (AI emission is wired up
+// separately).
 type Worker struct {
 	cfg      config.AgentConfig
 	sources  []core.SignalSource
@@ -52,10 +53,12 @@ type Worker struct {
 	catalog  *Catalog
 	shadow   *ShadowLog // nil when shadow log is disabled
 
-	pollInterval time.Duration
-	persistEvery time.Duration
-	lookback     time.Duration
-	ewmaAlpha    float64
+	pollInterval    time.Duration
+	persistEvery    time.Duration
+	lookback        time.Duration
+	ewmaAlpha       float64
+	services        *ServiceMatcher // regex-based service-name extractor
+	newServiceGrace time.Duration   // 0 = disabled
 }
 
 // WorkerOptions bundles the dependencies a Worker needs. Construction does
@@ -68,7 +71,8 @@ type WorkerOptions struct {
 	Matcher  *RegexMatcher
 	Miner    *Miner
 	Catalog  *Catalog
-	Shadow   *ShadowLog // optional; pass nil to disable shadow recording
+	Shadow   *ShadowLog      // optional; pass nil to disable shadow recording
+	Services *ServiceMatcher // optional; pass nil to disable service detection
 }
 
 // NewWorker validates options and applies defaults.
@@ -82,6 +86,7 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 		miner:    opt.Miner,
 		catalog:  opt.Catalog,
 		shadow:   opt.Shadow,
+		services: opt.Services,
 	}
 
 	if len(w.sources) == 0 {
@@ -97,7 +102,8 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 	w.pollInterval = parseDurationOr(opt.Cfg.PollInterval, 30*time.Second)
 	w.persistEvery = parseDurationOr(opt.Cfg.Catalog.PersistInterval, 30*time.Second)
 	w.lookback = parseDurationOr(opt.Cfg.Lookback, 5*time.Minute)
-	w.ewmaAlpha = 0.2 // hard-coded for phase 1; configurable in spike-detection milestone
+	w.ewmaAlpha = 0.2 // configurable once spike detection lands
+	w.newServiceGrace = parseDurationOr(opt.Cfg.NewServiceGrace, 0)
 
 	return w, nil
 }
@@ -204,10 +210,11 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 	// Group by pattern within this tick so we can update the EWMA with
 	// per-pattern frequency, not per-signal.
 	type bucket struct {
-		template string
-		signals  []core.Signal
-		isNew    bool
-		tag      MatchResult
+		template    string
+		signals     []core.Signal
+		isNew       bool
+		tag         MatchResult
+		serviceName string // extracted from first signal's Fields
 	}
 	buckets := make(map[string]*bucket)
 
@@ -234,7 +241,11 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		}
 		b := buckets[id]
 		if b == nil {
-			b = &bucket{template: template, isNew: isNew, tag: tag}
+			svc := w.services.Extract(sig.Message)
+			if svc == "" {
+				svc = "_unknown"
+			}
+			b = &bucket{template: template, isNew: isNew, tag: tag, serviceName: svc}
 			buckets[id] = b
 		}
 		b.signals = append(b.signals, sig)
@@ -243,7 +254,14 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 	// Update catalog and produce verdicts.
 	verdicts := make(map[string]int) // verdict-name → count, for stats
 	for id, b := range buckets {
-		w.catalog.Upsert(id, b.template, src.Name(), len(b.signals), w.ewmaAlpha, b.tag.RuleName)
+		w.catalog.Upsert(id, b.template, src.Name(), len(b.signals), w.ewmaAlpha, b.tag.RuleName, b.serviceName)
+
+		// Track the service so the grace window starts even in training mode.
+		if b.serviceName != "_unknown" {
+			if w.catalog.RegisterService(b.serviceName) {
+				log.Printf("agent: new service discovered: %s", b.serviceName)
+			}
+		}
 
 		tag := b.tag
 
@@ -255,10 +273,32 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 				log.Printf("%sagent: new pattern %s (source=%s tag=%s) → %s%s",
 					colorGreen, id, src.Name(), tag.RuleName, truncateString(b.template, 120), colorReset)
 			}
-		case "shadow":
+
+		case "shadow", "detect":
+			// New-service grace is shared by shadow and detect: shadow is
+			// meant to be a faithful preview of detect, so whatever detect
+			// filters out, shadow filters too. During grace the signal is
+			// learned (catalog already upserted above) but not surfaced as
+			// a "would alert" / AI candidate.
+			if b.serviceName != "_unknown" && w.newServiceGrace > 0 &&
+				w.catalog.IsServiceInGrace(b.serviceName, w.newServiceGrace) {
+				verdicts["grace"]++
+				if b.isNew {
+					log.Printf("%sagent[%s]: new pattern %s (service=%s in grace, learning only) → %s%s",
+						colorGreen, mode, id, b.serviceName, truncateString(b.template, 120), colorReset)
+				}
+				continue
+			}
+
 			v := w.classify(id, len(b.signals))
 			verdicts[v.String()]++
-			if v != core.VerdictKnownPattern {
+			if v == core.VerdictKnownPattern {
+				continue
+			}
+
+			// Mode-specific sink: shadow records to NDJSON; detect will
+			// call the AI analyzer and emit an incident.
+			if mode == "shadow" {
 				sample := ""
 				if len(b.signals) > 0 {
 					sample = b.signals[0].Message
@@ -267,18 +307,13 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 					w.shadow.Record(src.Name(), id, b.template, sample,
 						b.tag.RuleName, v.String(), len(b.signals))
 				}
-				log.Printf("%sagent[shadow]: would alert pattern=%s tag=%s verdict=%s freq=%d%s",
-					colorGreen, id, tag.RuleName, v, len(b.signals), colorReset)
+				log.Printf("%sagent[shadow]: would alert pattern=%s service=%s tag=%s verdict=%s freq=%d%s",
+					colorGreen, id, b.serviceName, tag.RuleName, v, len(b.signals), colorReset)
+			} else {
+				log.Printf("%sagent[detect]: pattern=%s service=%s tag=%s verdict=%s freq=%d (AI emission not yet wired)%s",
+					colorGreen, id, b.serviceName, tag.RuleName, v, len(b.signals), colorReset)
 			}
-		case "detect":
-			// Phase-1 stub: classify but do not call AI / emit incidents.
-			// Wire-up happens in a follow-up milestone.
-			v := w.classify(id, len(b.signals))
-			verdicts[v.String()]++
-			if v != core.VerdictKnownPattern {
-				log.Printf("%sagent[detect]: pattern=%s tag=%s verdict=%s freq=%d (AI emission not yet wired)%s",
-					colorGreen, id, tag.RuleName, v, len(b.signals), colorReset)
-			}
+
 		default:
 			log.Printf("agent: unknown mode=%q, treating as training", mode)
 			verdicts["learned"]++
@@ -291,10 +326,10 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		src.Name(), len(signals), len(signals)-skippedNoMatch, len(buckets), skippedNoMatch, verdicts, newCursor.Format(time.RFC3339))
 }
 
-// classify is the (currently minimal) verdict logic for shadow/detect modes.
-// Phase-1: no spike thresholding yet — anything new is unknown, anything we
-// already had is known. Frequency-based spike detection ships in a follow-up.
-// tickFrequency will be used for EWMA spike detection in a future milestone.
+// Classify is the (currently minimal) verdict logic for shadow/detect modes.
+// No spike thresholding yet — anything new is unknown, anything we already
+// had is known. Frequency-based spike detection ships in a follow-up.
+// tickFrequency will be used for EWMA spike detection later.
 func (w *Worker) classify(patternID string, _ int) core.AgentVerdict {
 	p := w.catalog.Get(patternID)
 	if p == nil {
