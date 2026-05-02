@@ -249,18 +249,75 @@ Once you trust the catalog, replace the test file with the real one:
 2. Edit `config/agent_sources.yaml` so `file.path` points at your
    application's log file (mount it read-only into `/app/logs`).
 3. (Optional) Drop the old test catalog so the agent starts fresh:
-   `rm -f data/patterns.json data/patterns.json.*`.
+   `rm -f data/patterns.json`.
 4. Start the agent again.
 
 After a few days of training mode, when the new-pattern rate flattens
-out, switch `AGENT_MODE` to `shadow` and watch the
-`agent[shadow]: would alert ...` lines for a release cycle before
-promoting to `detect`.
+out, switch `AGENT_MODE` to `shadow` and watch the would-have-alerted
+events accumulate at `GET /api/agent/shadow` for a release cycle before
+promoting to `detect`. See [Shadow Mode](./shadow-mode.md) for the full
+review workflow.
+
+---
+
+## Common questions
+
+**Q: How long should I leave the agent in training mode?**
+Until the rate of new patterns flattens out. For a small service this is
+usually a few days; for a large estate it can be a week or two. Watch
+the `agent: new pattern …` lines in stdout — when they slow to a
+trickle over a full release cycle, you're ready for shadow mode.
+
+**Q: Does training mode send any alerts?**
+No. Training is observation-only. The agent learns templates and writes
+them to `patterns.json`, nothing else. No Slack, no email, no on-call.
+
+**Q: Where does `patterns.json` live and what's in it?**
+At `<data_dir>/patterns.json` (default `data/patterns.json`). Each entry
+is one pattern: ID, mined template, first/last seen timestamps, total
+sighting count, EWMA frequency baseline, the regex `rule_name` that
+flagged it, and any operator-assigned `verdict` / `tags`.
+
+**Q: What if my log file rotates?**
+The file source detects rotation by comparing the file's current size
+to the saved cursor offset. When the file shrinks (a fresh log after
+rotation), it restarts from offset 0. No special configuration needed.
+
+**Q: Do I need Redis?**
+Yes, when the agent is enabled. Redis stores per-source cursors so the
+agent picks up exactly where it left off across restarts. Without
+Redis, every restart would either replay your `lookback` window or
+miss entries written while the agent was down. For local testing the
+file source also writes a sidecar cursor file as a fallback, but
+Elasticsearch and other backends rely on Redis.
+
+**Q: My catalog is full of patterns I don't care about — how do I clean
+up?**
+Three options, in order of effort:
+
+1. Tighten `agent.regex.default_pattern` (or set it to empty and rely on
+   named rules) so noisy lines never reach the miner.
+2. Delete bad patterns one by one:
+   `DELETE /api/agent/patterns/<id>`.
+3. Wipe and start over: stop the agent, delete `data/patterns.json*`,
+   start it again. You'll lose your training history.
+
+**Q: Can I run multiple agents against the same Redis?**
+Yes, as long as their source `name`s are distinct (cursor keys are
+namespaced by source name). Each agent should have its own
+`data_dir` so they don't fight over `patterns.json`.
+
+**Q: What's the smallest config I can run with?**
+Effectively: `agent.enable=true`, `agent.gateway_secret=…`,
+`agent.sources_path=…`, plus a `redis` block. Everything else has
+sensible defaults.
 
 ---
 
 ## What's next
 
+- [Shadow Mode](./shadow-mode.md) — the next step after training: review
+  what the agent _would_ have alerted on without sending anything.
 - [Configuration](./configuration.md) — every knob, env override, and
   per-request parameter.
 - [Redaction](./redaction.md), [Regex](./regex.md), [Miner](./miner.md),

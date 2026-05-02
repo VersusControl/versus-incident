@@ -125,7 +125,8 @@ redis: # Required for on-call functionality
 #
 # Recommended rollout:
 #   1: mode=training, review the catalog via /api/agent/patterns
-#   2: mode=shadow,   review log lines `agent[shadow]: would alert ...`
+#   2: mode=shadow,   review the would-have-alerted log via /api/agent/shadow
+#                     (also visible in stdout as `agent[shadow]: would alert ...`)
 #   3: mode=detect    (AI emission ships in a follow-up milestone)
 #
 # See local/plans/ai-incident-detection/ for the full design.
@@ -135,8 +136,8 @@ agent:
   mode: training                  # training | shadow | detect (env: AGENT_MODE)
   poll_interval: 30s              # how often each source is pulled
   lookback: 5m                    # initial backfill window on startup
-  batch_max: 1000                 # safety cap per tick
-  signal_max_bytes: 8192          # cap on Signal.Raw
+  batch_max: 5000                 # safety cap per tick
+  signal_max_bytes: 65536         # cap on Signal.Raw
   gateway_secret: ${AGENT_GATEWAY_SECRET}  # shared secret for /api/agent/* endpoints (sent in X-Gateway-Secret header)
   data_dir: ./data
 
@@ -155,7 +156,7 @@ agent:
   catalog:
     mode: file                    # storage backend; only "file" is supported today (planned: redis, database)
     persist_interval: 30s
-    auto_promote_after: 100       # in detect mode, this many sightings = "known"
+    auto_promote_after: 50       # in detect mode, this many sightings = "known"
 
   miner:
     similarity_threshold: 0.4
@@ -169,10 +170,7 @@ agent:
     rules:
       - name: oom-killer
         pattern: "Out of memory: Killed process"
-        severity: critical
       - name: panic
         pattern: "(?i)panic:"
-        severity: critical
       - name: 5xx-burst
         pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
-        severity: high

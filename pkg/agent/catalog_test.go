@@ -17,9 +17,9 @@ func TestCatalog_RoundTrip(t *testing.T) {
 		t.Fatalf("expected empty catalog, got %d", cat.Len())
 	}
 
-	cat.Upsert("p-aaa", "user <*> failed login", "src1", 5, 0.2, "", "")
-	cat.Upsert("p-bbb", "connection refused <*>", "src1", 12, 0.2, "", "")
-	cat.Upsert("p-aaa", "user <*> failed login", "src1", 3, 0.2, "", "")
+	cat.Upsert("p-aaa", "user <*> failed login", "src1", 5, 0.2, "")
+	cat.Upsert("p-bbb", "connection refused <*>", "src1", 12, 0.2, "")
+	cat.Upsert("p-aaa", "user <*> failed login", "src1", 3, 0.2, "")
 
 	if cat.Len() != 2 {
 		t.Errorf("expected 2 patterns, got %d", cat.Len())
@@ -54,16 +54,16 @@ func TestCatalog_RoundTrip(t *testing.T) {
 func TestCatalog_LabelAndDelete(t *testing.T) {
 	dir := t.TempDir()
 	cat, _ := LoadCatalog(filepath.Join(dir, "patterns.json"))
-	cat.Upsert("p-x", "hello <*>", "src", 1, 0.2, "", "")
+	cat.Upsert("p-x", "hello <*>", "src", 1, 0.2, "")
 
-	if !cat.Label("p-x", "high", "auth-failure", []string{"auth", "noisy"}) {
+	if !cat.Label("p-x", "known", []string{"auth", "noisy"}) {
 		t.Fatalf("Label should return true for existing pattern")
 	}
-	if cat.Label("missing", "high", "x", nil) {
+	if cat.Label("missing", "known", nil) {
 		t.Fatalf("Label should return false for missing pattern")
 	}
 	got := cat.Get("p-x")
-	if got.Severity != "high" || got.Label != "auth-failure" || len(got.Tags) != 2 {
+	if got.Verdict != "known" || len(got.Tags) != 2 {
 		t.Errorf("label not applied: %+v", got)
 	}
 
@@ -82,28 +82,27 @@ func TestCatalog_UpsertAppliesRegexTag(t *testing.T) {
 	dir := t.TempDir()
 	cat, _ := LoadCatalog(filepath.Join(dir, "patterns.json"))
 
-	// First-seen with named rule -> label + severity stored.
-	cat.Upsert("p-1", "Out of memory <*>", "src", 1, 0.2, "oom-killer", "critical")
-	got := cat.Get("p-1")
-	if got.Severity != "critical" || got.Label != "oom-killer" {
-		t.Errorf("expected critical/oom-killer, got %+v", got)
+	// First-seen with named rule -> RuleName stored.
+	cat.Upsert("p-1", "Out of memory <*>", "src", 1, 0.2, "oom-killer")
+	if got := cat.Get("p-1"); got.RuleName != "oom-killer" {
+		t.Errorf("expected oom-killer, got %+v", got)
 	}
 
-	// First-seen with default rule -> severity stored.
-	cat.Upsert("p-2", "something <*>", "src", 1, 0.2, "default", "low")
-	if got := cat.Get("p-2"); got.Severity != "low" || got.Label != "default" {
-		t.Errorf("expected low/default, got %+v", got)
+	// First-seen with default rule -> RuleName=default.
+	cat.Upsert("p-2", "something <*>", "src", 1, 0.2, "default")
+	if got := cat.Get("p-2"); got.RuleName != "default" {
+		t.Errorf("expected default, got %+v", got)
 	}
 
 	// Default rule first, then named rule -> promote.
-	cat.Upsert("p-2", "something <*>", "src", 1, 0.2, "panic", "critical")
-	if got := cat.Get("p-2"); got.Severity != "critical" || got.Label != "panic" {
-		t.Errorf("expected promotion to critical/panic, got %+v", got)
+	cat.Upsert("p-2", "something <*>", "src", 1, 0.2, "panic")
+	if got := cat.Get("p-2"); got.RuleName != "panic" {
+		t.Errorf("expected promotion to panic, got %+v", got)
 	}
 
 	// Named rule first, then default -> stay with the named one.
-	cat.Upsert("p-1", "Out of memory <*>", "src", 1, 0.2, "default", "low")
-	if got := cat.Get("p-1"); got.Severity != "critical" || got.Label != "oom-killer" {
+	cat.Upsert("p-1", "Out of memory <*>", "src", 1, 0.2, "default")
+	if got := cat.Get("p-1"); got.RuleName != "oom-killer" {
 		t.Errorf("named tag should not be downgraded, got %+v", got)
 	}
 }

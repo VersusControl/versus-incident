@@ -24,11 +24,14 @@ type Pattern struct {
 	// BaselineFrequency is the EWMA of per-tick counts. Computed during
 	// training; consumed by the spike detector in detect mode.
 	BaselineFrequency float64 `json:"baseline_frequency"`
-	// Severity is operator-assigned ("known", "info", "warning", ...).
-	// Empty means "not yet labeled".
-	Severity string `json:"severity"`
-	// Label is a short operator-assigned name (e.g. "db-retry-expected").
-	Label string `json:"label"`
+	// Verdict is the agent's classification of this pattern: "known" once
+	// it is part of baseline (auto-promoted by count or set explicitly via
+	// the admin API), otherwise empty. Operators flip a pattern to
+	// "known" by POSTing {"verdict":"known"} to /api/agent/patterns/:id.
+	Verdict string `json:"verdict"`
+	// RuleName is the regex tag attached on first sighting ("default" when
+	// only the default pattern matched, or the named rule otherwise).
+	RuleName string `json:"rule_name"`
 	// Source is the SignalSource name where the pattern was first observed.
 	Source string `json:"source"`
 	// Tags are arbitrary operator-supplied markers.
@@ -58,7 +61,7 @@ type catalogFile struct {
 const catalogFileVersion = 1
 
 // LoadCatalog opens an existing patterns file or returns an empty catalog if
-// none exists. Backups (`.1`..`.5`) are tried in order on parse failure.
+// none exists.
 func LoadCatalog(path string) (*Catalog, error) {
 	c := &Catalog{
 		path:     path,
@@ -68,37 +71,21 @@ func LoadCatalog(path string) (*Catalog, error) {
 		return c, nil
 	}
 
-	candidates := []string{path}
-	for i := 1; i <= 5; i++ {
-		candidates = append(candidates, fmt.Sprintf("%s.%d", path, i))
-	}
-
-	var lastErr error
-	for _, p := range candidates {
-		data, err := os.ReadFile(p)
-		if os.IsNotExist(err) {
-			lastErr = err
-			continue
-		}
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		var f catalogFile
-		if err := json.Unmarshal(data, &f); err != nil {
-			lastErr = fmt.Errorf("parse %s: %w", p, err)
-			continue
-		}
-		if f.Patterns != nil {
-			c.patterns = f.Patterns
-		}
-		return c, nil
-	}
-
-	if lastErr != nil && os.IsNotExist(lastErr) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
 		return c, nil // fresh start
 	}
-	return c, lastErr
+	if err != nil {
+		return c, err
+	}
+	var f catalogFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return c, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if f.Patterns != nil {
+		c.patterns = f.Patterns
+	}
+	return c, nil
 }
 
 // Get returns a pattern by ID (nil when not found).
@@ -106,6 +93,22 @@ func (c *Catalog) Get(id string) *Pattern {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.patterns[id]
+}
+
+// MarkKnown stamps a pattern as auto-promoted ("known") in the catalog.
+func (c *Catalog) MarkKnown(patternID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p, ok := c.patterns[patternID]
+	if !ok {
+		return false
+	}
+	if p.Verdict == "known" {
+		return false
+	}
+	p.Verdict = "known"
+	c.dirty = true
+	return true
 }
 
 // All returns a stable, sorted snapshot of every pattern (sorted by Count
@@ -138,11 +141,11 @@ func (c *Catalog) Len() int {
 // is updated. tickCount is the number of matches observed in the current
 // worker tick — used to update the EWMA baseline.
 //
-// ruleName / severity come from the regex pre-filter and are applied:
+// ruleName comes from the regex pre-filter and is applied:
 //   - on first-seen: always
-//   - subsequently: only if currently empty, OR if a non-default named rule
-//     supersedes a previous default tag
-func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alpha float64, ruleName, severity string) *Pattern {
+//   - subsequently: only when a non-default named rule supersedes a previous
+//     default tag, or when the previous tag was empty
+func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alpha float64, ruleName string) *Pattern {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now().UTC()
@@ -155,21 +158,16 @@ func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alph
 			LastSeen:  now,
 			Count:     0,
 			Source:    source,
-			Severity:  severity,
-			Label:     ruleName,
+			RuleName:  ruleName,
 		}
 		c.patterns[patternID] = p
 	} else {
 		// Promote tag if we now have a more specific (non-default) hit, or
 		// fill in if it was previously empty.
-		if ruleName != "" && ruleName != "default" && p.Label != ruleName {
-			p.Label = ruleName
-			p.Severity = severity
-		} else if p.Severity == "" && severity != "" {
-			p.Severity = severity
-			if p.Label == "" {
-				p.Label = ruleName
-			}
+		if ruleName != "" && ruleName != "default" && p.RuleName != ruleName {
+			p.RuleName = ruleName
+		} else if p.RuleName == "" && ruleName != "" {
+			p.RuleName = ruleName
 		}
 	}
 	p.Template = template // keep template fresh as miner refines it
@@ -187,20 +185,17 @@ func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alph
 	return p
 }
 
-// Label updates operator-curated metadata for a pattern.
-// Returns false when the pattern doesn't exist.
-func (c *Catalog) Label(patternID, severity, label string, tags []string) bool {
+// Label updates operator-curated metadata for a pattern. Empty fields are
+// left unchanged. Returns false when the pattern doesn't exist.
+func (c *Catalog) Label(patternID, verdict string, tags []string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, ok := c.patterns[patternID]
 	if !ok {
 		return false
 	}
-	if severity != "" {
-		p.Severity = severity
-	}
-	if label != "" {
-		p.Label = label
+	if verdict != "" {
+		p.Verdict = verdict
 	}
 	if tags != nil {
 		p.Tags = append([]string(nil), tags...)
@@ -228,8 +223,8 @@ func (c *Catalog) Dirty() bool {
 	return c.dirty
 }
 
-// Persist flushes the in-memory catalog to disk atomically and rotates
-// up to 5 backups. Safe to call concurrently with Upsert/Label/Delete.
+// Persist flushes the in-memory catalog to disk atomically. Safe to call
+// concurrently with Upsert/Label/Delete.
 func (c *Catalog) Persist() error {
 	if c.path == "" {
 		return nil
@@ -251,16 +246,6 @@ func (c *Catalog) Persist() error {
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal catalog: %w", err)
-	}
-
-	// rotate backups: .4 → .5, .3 → .4, ..., current → .1
-	for i := 4; i >= 1; i-- {
-		oldP := fmt.Sprintf("%s.%d", c.path, i)
-		newP := fmt.Sprintf("%s.%d", c.path, i+1)
-		_ = os.Rename(oldP, newP) // ignore: file may not exist yet
-	}
-	if _, err := os.Stat(c.path); err == nil {
-		_ = os.Rename(c.path, c.path+".1")
 	}
 
 	// atomic write: temp + rename

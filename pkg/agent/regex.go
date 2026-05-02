@@ -7,11 +7,10 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 )
 
-// RegexRule is a compiled user-defined rule plus its severity tag.
+// RegexRule is a compiled user-defined rule.
 type RegexRule struct {
-	Name     string
-	Severity string
-	Pattern  *regexp.Regexp
+	Name    string
+	Pattern *regexp.Regexp
 }
 
 // RegexMatcher is a small helper around a list of RegexRule plus an optional
@@ -36,7 +35,7 @@ func NewRegexMatcher(cfg config.AgentRegexConfig) (*RegexMatcher, []error) {
 		if err != nil {
 			errs = append(errs, fmt.Errorf("regex.default_pattern %q: %w", cfg.DefaultPattern, err))
 		} else {
-			m.defaultRule = &RegexRule{Name: "default", Severity: "low", Pattern: re}
+			m.defaultRule = &RegexRule{Name: "default", Pattern: re}
 		}
 	}
 
@@ -50,7 +49,7 @@ func NewRegexMatcher(cfg config.AgentRegexConfig) (*RegexMatcher, []error) {
 			errs = append(errs, fmt.Errorf("regex rule %q: %w", r.Name, err))
 			continue
 		}
-		m.rules = append(m.rules, RegexRule{Name: r.Name, Severity: r.Severity, Pattern: re})
+		m.rules = append(m.rules, RegexRule{Name: r.Name, Pattern: re})
 	}
 	return m, errs
 }
@@ -58,8 +57,7 @@ func NewRegexMatcher(cfg config.AgentRegexConfig) (*RegexMatcher, []error) {
 // MatchResult is the (possibly empty) tag returned by Match.
 type MatchResult struct {
 	RuleName string // empty when no rule matched
-	Severity string
-	Default  bool // true when only the default pattern matched
+	Default  bool   // true when only the default pattern matched
 }
 
 // Matched reports whether at least one rule (named or default) hit. The
@@ -77,11 +75,11 @@ func (m *RegexMatcher) Match(message string) MatchResult {
 	}
 	for _, r := range m.rules {
 		if r.Pattern.MatchString(message) {
-			return MatchResult{RuleName: r.Name, Severity: r.Severity}
+			return MatchResult{RuleName: r.Name}
 		}
 	}
 	if m.defaultRule != nil && m.defaultRule.Pattern.MatchString(message) {
-		return MatchResult{RuleName: m.defaultRule.Name, Severity: m.defaultRule.Severity, Default: true}
+		return MatchResult{RuleName: m.defaultRule.Name, Default: true}
 	}
 	return MatchResult{}
 }

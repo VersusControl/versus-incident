@@ -50,6 +50,7 @@ type Worker struct {
 	matcher  *RegexMatcher
 	miner    *Miner
 	catalog  *Catalog
+	shadow   *ShadowLog // nil when shadow log is disabled
 
 	pollInterval time.Duration
 	persistEvery time.Duration
@@ -67,6 +68,7 @@ type WorkerOptions struct {
 	Matcher  *RegexMatcher
 	Miner    *Miner
 	Catalog  *Catalog
+	Shadow   *ShadowLog // optional; pass nil to disable shadow recording
 }
 
 // NewWorker validates options and applies defaults.
@@ -79,6 +81,7 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 		matcher:  opt.Matcher,
 		miner:    opt.Miner,
 		catalog:  opt.Catalog,
+		shadow:   opt.Shadow,
 	}
 
 	if len(w.sources) == 0 {
@@ -128,6 +131,11 @@ func (w *Worker) Run(ctx context.Context) {
 			if err := w.catalog.Persist(); err != nil {
 				log.Printf("agent: final catalog flush failed: %v", err)
 			}
+			if w.shadow != nil {
+				if err := w.shadow.Persist(); err != nil {
+					log.Printf("agent: final shadow flush failed: %v", err)
+				}
+			}
 			return
 		case <-tick.C:
 			w.tick(ctx, mode)
@@ -137,6 +145,13 @@ func (w *Worker) Run(ctx context.Context) {
 					log.Printf("agent: catalog flush failed: %v", err)
 				} else {
 					log.Printf("agent: catalog flushed (%d patterns)", w.catalog.Len())
+				}
+			}
+			if w.shadow != nil && w.shadow.Dirty() {
+				if err := w.shadow.Persist(); err != nil {
+					log.Printf("agent: shadow flush failed: %v", err)
+				} else {
+					log.Printf("agent: shadow log flushed (%d events)", w.shadow.Len())
 				}
 			}
 		}
@@ -228,7 +243,7 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 	// Update catalog and produce verdicts.
 	verdicts := make(map[string]int) // verdict-name → count, for stats
 	for id, b := range buckets {
-		w.catalog.Upsert(id, b.template, src.Name(), len(b.signals), w.ewmaAlpha, b.tag.RuleName, b.tag.Severity)
+		w.catalog.Upsert(id, b.template, src.Name(), len(b.signals), w.ewmaAlpha, b.tag.RuleName)
 
 		tag := b.tag
 
@@ -244,6 +259,14 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 			v := w.classify(id, len(b.signals))
 			verdicts[v.String()]++
 			if v != core.VerdictKnownPattern {
+				sample := ""
+				if len(b.signals) > 0 {
+					sample = b.signals[0].Message
+				}
+				if w.shadow != nil {
+					w.shadow.Record(src.Name(), id, b.template, sample,
+						b.tag.RuleName, v.String(), len(b.signals))
+				}
 				log.Printf("%sagent[shadow]: would alert pattern=%s tag=%s verdict=%s freq=%d%s",
 					colorGreen, id, tag.RuleName, v, len(b.signals), colorReset)
 			}
@@ -284,7 +307,10 @@ func (w *Worker) classify(patternID string, _ int) core.AgentVerdict {
 	if threshold <= 0 {
 		threshold = 100
 	}
-	if p.Severity == "known" || p.Count >= threshold {
+	if p.Verdict == "known" || p.Count >= threshold {
+		if p.Verdict != "known" {
+			w.catalog.MarkKnown(patternID)
+		}
 		return core.VerdictKnownPattern
 	}
 	return core.VerdictUnknown

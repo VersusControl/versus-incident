@@ -45,11 +45,12 @@ type FileSource struct {
 
 // Defaults applied when the corresponding option is empty / zero.
 const (
-	defaultFileFormat         = "text"
-	defaultFileMaxLineBytes   = 64 * 1024
-	defaultJSONMessageField   = "message"
-	defaultJSONTimestampField = "@timestamp"
-	defaultJSONSeverityField  = "level"
+	defaultFileFormat          = "text"
+	defaultFileMaxLineBytes    = 64 * 1024
+	defaultFileMaxLinesPerPull = 1000
+	defaultJSONMessageField    = "message"
+	defaultJSONTimestampField  = "@timestamp"
+	defaultJSONSeverityField   = "level"
 )
 
 // defaultTextTimestampLayouts are tried in order when TimestampLayout is empty.
@@ -148,8 +149,12 @@ func (s *FileSource) Pull(_ context.Context, _ time.Time) ([]core.Signal, time.T
 	if maxLine <= 0 {
 		maxLine = defaultFileMaxLineBytes
 	}
+	maxLines := s.cfg.MaxLinesPerPull
+	if maxLines <= 0 {
+		maxLines = defaultFileMaxLinesPerPull
+	}
 
-	signals, bytesRead, err := s.readSignals(f, maxLine)
+	signals, bytesRead, err := s.readSignals(f, maxLine, maxLines)
 	// Advance offset by what we successfully consumed even if we hit a
 	// read error mid-stream — so we don't infinitely re-read a bad line.
 	s.offset += bytesRead
@@ -165,8 +170,11 @@ func (s *FileSource) Pull(_ context.Context, _ time.Time) ([]core.Signal, time.T
 
 // readSignals reads complete lines from r and converts them to signals.
 // It returns the number of bytes consumed (so the caller can advance the
-// persistent offset by exactly that much) plus any non-EOF error.
-func (s *FileSource) readSignals(r io.Reader, maxLine int) ([]core.Signal, int64, error) {
+// persistent offset by exactly that much) plus any non-EOF error. When
+// maxLines > 0 the loop stops after that many lines have been emitted as
+// signals, leaving the rest for the next Pull (the byte offset only
+// advances over the lines this call actually consumed).
+func (s *FileSource) readSignals(r io.Reader, maxLine, maxLines int) ([]core.Signal, int64, error) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	var signals []core.Signal
 	var consumed int64
@@ -191,6 +199,9 @@ func (s *FileSource) readSignals(r io.Reader, maxLine int) ([]core.Signal, int64
 				return signals, consumed, nil
 			}
 			return signals, consumed, err
+		}
+		if maxLines > 0 && len(signals) >= maxLines {
+			return signals, consumed, nil
 		}
 	}
 }

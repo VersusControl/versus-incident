@@ -257,6 +257,97 @@ def t_metrics_export() -> tuple[str, str]:
     return "INFO ", f'service=metrics message="exported metrics batch" count={random.randint(50, 500)} region={random.choice(REGIONS)}'
 
 
+# -----------------------------------------------------------------------------
+# Production-style anomaly templates
+#
+# Lines that look like things you might genuinely see (and want to be paged
+# about) on a real production cluster: kernel OOM, segfaults, data corruption,
+# expired TLS certs, NTP skew, replication lag, lost quorum, unexpected
+# shutdowns. They get LOW weights so they remain rare — exactly the kind of
+# signal the agent is supposed to surface in shadow / detect mode.
+# -----------------------------------------------------------------------------
+def t_kernel_oom_distinct() -> tuple[str, str]:
+    pid = random.randint(1000, 30000)
+    container = random.choice(["versus-worker", "versus-agent", "versus-api"])
+    return "ERROR", (
+        f'kernel: Out of memory: Killed process {pid} ({container}) '
+        f'score 999 anon-rss:2097152kB total-vm:8388608kB'
+    )
+
+
+def t_segfault() -> tuple[str, str]:
+    pid = random.randint(1000, 30000)
+    return "ERROR", (
+        f'kernel: worker[{pid}]: segfault at 7f3c8b21d000 ip 00007f3c8b21d042 '
+        f'sp 00007ffc12345678 error 4 in libc.so.6'
+    )
+
+
+def t_data_corruption() -> tuple[str, str]:
+    incident = uuid.uuid4()
+    return "ERROR", (
+        f'service=storage message="checksum mismatch detected: data corruption '
+        f'on disk" incident_id={incident} expected=sha256:a1b2c3 got=sha256:deadbeef'
+    )
+
+
+def t_security_breach() -> tuple[str, str]:
+    return "ERROR", (
+        f'service=auth message="security alert: privilege escalation attempt detected" '
+        f'user=root source_ip={random_ip()} target_role=admin action=BLOCKED'
+    )
+
+
+def t_quorum_lost() -> tuple[str, str]:
+    cluster = random.choice(["raft-incidents", "raft-oncall", "etcd-main"])
+    return "ERROR", (
+        f'service=cluster message="quorum lost" cluster={cluster} '
+        f'healthy_nodes=1 required=2 leader=unknown'
+    )
+
+
+def t_clock_skew() -> tuple[str, str]:
+    host = random.choice(HOSTS)
+    skew = random.randint(60, 600)
+    return "ERROR", (
+        f'service=monitor host={host} message="NTP clock skew exceeds threshold" '
+        f'offset_seconds={skew} action=service_paused'
+    )
+
+
+def t_certificate_expired() -> tuple[str, str]:
+    host = random.choice(TLS_HOSTS)
+    return "ERROR", (
+        f'service=notifier message="x509 certificate expired" host={host} '
+        f'expired_at=2026-04-29T00:00:00Z chain_position=leaf'
+    )
+
+
+def t_replication_lag() -> tuple[str, str]:
+    host = random.choice(DB_HOSTS)
+    lag = random.randint(300, 1800)
+    return "ERROR", (
+        f'service=db-replica replica={host} message="replication lag exceeds RPO" '
+        f'lag_seconds={lag} primary=db-primary'
+    )
+
+
+def t_kernel_taint() -> tuple[str, str]:
+    host = random.choice(HOSTS)
+    return "ERROR", (
+        f'kernel: {host} tainted: G W loaded module=nvidia_uvm '
+        f'reason="unsigned module loaded into kernel"'
+    )
+
+
+def t_unexpected_shutdown() -> tuple[str, str]:
+    pod = random.choice(PODS)
+    return "ERROR", (
+        f'service=k8s message="unexpected SIGTERM received before grace period" '
+        f'pod={pod} signal=15 grace_seconds_remaining=27'
+    )
+
+
 # (template_fn, weight)
 TEMPLATES: list[tuple[callable, int]] = [
     # Very common (the noisy baseline the agent should cluster as "boring")
@@ -295,6 +386,16 @@ TEMPLATES: list[tuple[callable, int]] = [
     (t_cron_fail, 1),
     (t_oom_killer, 1),
     (t_panic, 1),
+    (t_kernel_oom_distinct, 1),
+    (t_segfault, 1),
+    (t_data_corruption, 1),
+    (t_security_breach, 1),
+    (t_quorum_lost, 1),
+    (t_clock_skew, 1),
+    (t_certificate_expired, 1),
+    (t_replication_lag, 1),
+    (t_kernel_taint, 1),
+    (t_unexpected_shutdown, 1),
 ]
 
 

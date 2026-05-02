@@ -50,6 +50,10 @@ type AgentCatalogConfig struct {
 // Not user-configurable.
 const CatalogFileName = "patterns.json"
 
+// ShadowFileName is the fixed filename for the shadow-mode would-have-alerted
+// log. Lives alongside the catalog under `<data_dir>`.
+const ShadowFileName = "shadow.json"
+
 // ResolvedDataDir returns the configured data dir or the default ("data").
 func (a *AgentConfig) ResolvedDataDir() string {
 	if a.DataDir == "" {
@@ -64,6 +68,12 @@ func (a *AgentConfig) CatalogPath() string {
 	return filepath.Join(a.ResolvedDataDir(), CatalogFileName)
 }
 
+// ShadowPath returns the on-disk path used by the shadow log:
+// `<data_dir>/shadow.json`. The filename is fixed.
+func (a *AgentConfig) ShadowPath() string {
+	return filepath.Join(a.ResolvedDataDir(), ShadowFileName)
+}
+
 type AgentMinerConfig struct {
 	SimilarityThreshold float64 `mapstructure:"similarity_threshold"`
 	TreeDepth           int     `mapstructure:"tree_depth"`
@@ -71,9 +81,8 @@ type AgentMinerConfig struct {
 }
 
 type AgentRegexRule struct {
-	Name     string `mapstructure:"name"`
-	Pattern  string `mapstructure:"pattern"`
-	Severity string `mapstructure:"severity"`
+	Name    string `mapstructure:"name"`
+	Pattern string `mapstructure:"pattern"`
 }
 
 type AgentRegexConfig struct {
@@ -110,6 +119,14 @@ type AgentFileSourceConfig struct {
 	// MaxLineBytes caps a single line's length to protect memory; longer
 	// lines are truncated. Default 64 KiB.
 	MaxLineBytes int `mapstructure:"max_line_bytes"`
+	// MaxLinesPerPull caps the number of lines returned by a single Pull.
+	// When the file has a large backlog (e.g. from_beginning=true on a 100k-
+	// line file), this paginates the backfill across ticks so the worker's
+	// batch_max truncation never silently drops unread tail content. The
+	// byte offset only advances over what was actually consumed in this
+	// Pull, so the next tick resumes exactly where this one stopped.
+	// Default 1000.
+	MaxLinesPerPull int `mapstructure:"max_lines_per_pull"`
 
 	// Text-mode options ------------------------------------------------------
 

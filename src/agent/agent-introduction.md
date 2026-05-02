@@ -67,8 +67,9 @@ IDs, IPs, etc.). Configurable similarity threshold and tree depth.
 
 ### 5. [Catalog](./catalog.md)
 Long-term memory. Every template the miner produces is stored with a
-first-seen timestamp, sighting count, EWMA frequency, and operator-
-assignable label/severity/tags. Persisted as `data/patterns.json` (atomic
+first-seen timestamp, sighting count, EWMA frequency, the regex
+`rule_name` that flagged it, and an operator-curated verdict / tags.
+Persisted as `data/patterns.json` (atomic
 writes, rotated backups).
 
 ### 6. Worker & modes
