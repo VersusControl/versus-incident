@@ -1,109 +1,130 @@
 # AI Agent — Introduction
 
-The AI Agent is an opt-in subsystem that turns raw application logs into a
-small, curated catalog of recurring patterns. Once a service has been
-running long enough for the catalog to stabilize, anything that doesn't fit
-a known pattern is — by definition — something new, and worth a closer look.
+The AI Agent is an SRE agent that watches your systems and points
+out anything that looks new or unusual. The plan is to cover the
+three signals an SRE cares about — **logs, metrics, and traces** —
+and over time take on more of the routine work an on-call engineer
+does.
+
+**Logs are the first thing it understands.** It reads your
+application logs, learns what your "normal" log lines look like, and
+flags lines it has never seen before. The idea is simple: most log
+lines repeat themselves. If a brand-new line shows up, it usually
+means something new is happening, and you probably want to know.
+Metrics and traces will follow in later releases.
 
 ![AI Agent](/docs/images/ai-agent.png)
 
-It is **off by default** (`agent.enable: false`). Nothing extra runs, no
-goroutines start, and no files are created until you explicitly opt in.
+The agent is **off by default** (`agent.enable: false`). It will not
+read anything, save any files, or start any background work until
+you turn it on.
 
-## Why pattern learning?
+## Why this is useful
 
-Most production logs are repetitive: a few hundred templates account for
-99% of the volume. The agent solves the problem by building its own picture of "normal" from your traffic, then flagging departures from that baseline.
+Most logs in production are boring and repeat over and over. A handful
+of message shapes (templates) usually account for almost all of the
+volume. The agent learns those shapes from your real traffic and then
+points out anything that doesn't fit. You don't have to write rules
+upfront — you just let it watch for a while.
 
-## The pipeline
+## How a log line is processed
 
-Every time the agent checks for new logs, each line travels through a
-short assembly line. Each station does one job; if a station rejects the
-line, the rest is skipped.
+Each time the agent checks for new logs, every line goes through a
+short series of steps. If a step throws the line out, the next steps
+are skipped.
 
 ![AI Agent](/docs/images/ai-agent-pipeline.png)
 
-In plain English:
+In plain words:
 
-1. **Read** a fresh log line from one of your sources.
-2. **Hide** sensitive parts so secrets never leave your machine.
-3. **Decide** if the line is interesting. Boring lines (200 OK, health
-   checks, debug noise) are dropped here so they don't clutter the
-   catalog.
-4. **Group** the line with others that look the same. The agent doesn't
-   store every line it has ever seen — it stores one entry per "shape"
-   of message.
-5. **Remember** that group, including how often it shows up.
-6. **React** based on the agent's mode: just learn (training), pretend
-   to alert (shadow), or send a real incident if the line is something
-   the agent has never seen before (detect).
+1. **Read** a new log line from one of your sources (a file, an
+   Elasticsearch index, etc.).
+2. **Hide secrets.** Tokens, API keys, passwords, and similar things
+   are replaced before anything else looks at the line.
+3. **Filter.** Boring lines (`200 OK`, health checks, debug noise) are
+   dropped so they don't fill up the catalog.
+4. **Group.** Lines that look the same are grouped together. The
+   agent doesn't keep every line — only one entry per "shape" of
+   message.
+5. **Save.** That group is saved, along with how many times it has
+   been seen.
+6. **Decide what to do** based on the agent's mode: just learn
+   (training), pretend to alert (shadow), or actually send an
+   incident when the line is brand new (detect).
 
-## Components
+## Parts of the agent
 
-Each component has its own page with the full configuration reference,
-trade-offs, and examples.
+Each part has its own page with the full settings and examples.
 
-### 1. [Data Sources](./configuration.md#data-sources)
-What the agent reads from. Two source types ship today: a file tailer for
-local logs and an Elasticsearch reader for production clusters. Sources
-are cursor-aware, so the agent always picks up where it left off after a
-restart.
+### 1. [Log sources](./configuration.md#signal-sources)
+Where the agent reads logs from. Two kinds are supported today: a
+local file reader (for testing or simple setups) and an
+Elasticsearch reader (for production clusters). Both remember where
+they left off, so a restart never replays old lines or skips new
+ones.
 
-### 2. [Redaction](./redaction.md)
-Pattern-based scrubbing of secrets and PII (JWTs, AWS keys, bearer tokens,
-emails, UUIDs, user agents, …). Runs first so no other component — and no
-external AI model — ever sees the raw values.
+### 2. [Hiding secrets](./redaction.md)
+Before anything else, the agent replaces sensitive values (JWTs,
+AWS keys, bearer tokens, emails, UUIDs, user agents, etc.) with a
+placeholder. This runs first so secrets never reach the rest of
+the agent or any external AI model.
 
-### 3. [Regex pre-filter](./regex.md)
-A small set of named rules plus an optional `default_pattern` that decide
-which signals are worth learning from. Lines that match nothing are
-dropped before the miner sees them, keeping the catalog focused. Set
-`default_pattern: ".*"` to learn from every line.
+### 3. [Filter rules](./regex.md)
+A short list of named rules plus an optional catch-all
+(`default_pattern`) decide which lines are worth learning from. Any
+line that doesn't match anything is thrown away before grouping. Use
+`default_pattern: ".*"` if you want the agent to learn from every
+line.
 
-### 4. [Miner](./miner.md)
-A Drain-style log clusterer that turns a stream of similar lines into a
-single template with `<*>` placeholders for variable parts (timestamps,
-IDs, IPs, etc.). Configurable similarity threshold and tree depth.
+### 4. [Grouping (the miner)](./miner.md)
+The grouper looks at the words in each line and puts similar lines
+together. The result is a template like
+`GET /api/users/<*> 200`, where `<*>` stands for the parts that
+change (IDs, timestamps, IPs, etc.). You can tune how strict the
+grouping is.
 
 ### 5. [Catalog](./catalog.md)
-Long-term memory. Every template the miner produces is stored with a
-first-seen timestamp, sighting count, EWMA frequency, the regex
-`rule_name` that flagged it, and an operator-curated verdict / tags.
-Persisted as `data/patterns.json` (atomic
-writes, rotated backups).
+The agent's long-term memory. Every template it learns is saved
+with: when it was first seen, when it was last seen, how many times
+it has appeared, an average rate, the filter rule that matched it,
+and any labels you add. The catalog is saved to
+`data/patterns.json`.
 
-### 6. Worker & modes
-The worker glues the components together and runs them on a polling
-ticker. Three modes:
+### 6. The worker and modes
+The worker is the loop that runs everything on a timer. There are
+three modes:
 
-- **`training`** — observe only. Learn templates and persist them. No
-  alerts of any kind.
-- **`shadow`** — same as training, but log a verdict every time a signal
-  *would* have alerted in detect mode. Useful for reviewing the agent's
-  judgement before going live.
-- **`detect`** — emit incidents for genuinely novel patterns. (AI
-  summarization is a follow-up milestone; today this mode logs the
-  verdict only.)
+- **`training`** — just watch and learn. No alerts.
+- **`shadow`** — watch and learn, plus write a "would have alerted"
+  log entry every time a line would have triggered an alert. Still
+  no real alerts. Good for checking the agent's judgement before
+  going live.
+- **`detect`** — actually create incidents for lines the agent has
+  never seen before. (AI-written summaries for those incidents are
+  coming in a later release; today this mode only logs the
+  decision.)
 
 ### 7. [Admin endpoints](./configuration.md#admin-endpoints)
-A small REST surface (`/api/agent/*`, gated by `X-Gateway-Secret`) for
-inspecting the catalog, labeling patterns, and flushing state during
-training reviews.
+A small set of HTTP endpoints under `/api/agent/*` that let you
+look at the catalog, label patterns as known, and flush state
+during reviews. Every endpoint requires the `X-Gateway-Secret`
+header.
 
-## Recommended rollout
+## Suggested rollout
 
-1. Start in **training** mode for a few days. Confirm the catalog
-   stabilizes and the templates make sense.
-2. Switch to **shadow** mode. Watch the `agent[shadow]: would alert ...`
-   log lines for a release cycle.
-3. Promote to **detect**. Triage incidents the agent emits and keep
-   curating the catalog through the admin endpoints.
+1. Run in **training** for a few days. Check that the catalog
+   stops growing quickly and the templates make sense.
+2. Switch to **shadow**. Watch the `agent[shadow]: would alert ...`
+   log lines for one release cycle.
+3. Switch to **detect**. Triage what the agent reports and keep
+   labeling patterns through the admin endpoints.
 
 ## Where to next
 
-- [Getting Started](./getting-started.md) — a five-minute walkthrough
-  using the included file source and sample data.
-- [Configuration](./configuration.md) — every config knob, every env
-  override, every per-request query parameter.
-- Component deep-dives: [Redaction](./redaction.md) ·
-  [Regex](./regex.md) · [Miner](./miner.md) · [Catalog](./catalog.md).
+- [Getting Started](./getting-started.md) — a short walkthrough
+  using the file reader and sample logs.
+- [Configuration](./configuration.md) — every setting, every
+  environment variable.
+- Deep dives: [Hiding secrets](./redaction.md) ·
+  [Filter rules](./regex.md) · [Grouping](./miner.md) ·
+  [Catalog](./catalog.md).
