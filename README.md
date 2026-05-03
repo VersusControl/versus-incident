@@ -1129,8 +1129,6 @@ See [ROADMAP.md](ROADMAP.md) for the full list of shipped features, work
 in progress, and planned phases (more log sources, metrics, traces,
 cross-signal correlation).
 
-![Versus Control](src/docs/images/road-map.svg)
-
 ## Support The Project
 
 [GitHub Sponsors](https://github.com/sponsors/versuscontrol) · see [SPONSORS.md](SPONSORS.md)
