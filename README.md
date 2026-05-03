@@ -1,13 +1,15 @@
 <h1 align="center" style="border-bottom: none">
   <img alt="Versus" src="src/docs/images/versus.svg">
 </h1>
+<p align="center">
+  <a href="https://goreportcard.com/report/github.com/VersusControl/versus-incident"><img src="https://goreportcard.com/badge/github.com/VersusControl/versus-incident" alt="Go Report Card"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://github.com/sponsors/versuscontrol"><img src="https://img.shields.io/badge/sponsor-%E2%9D%A4-ff69b4" alt="Sponsor"></a>
+</p>
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/yourusername/versus)](https://goreportcard.com/report/github.com/yourusername/versus)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+An incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Compatible with any tool supporting webhook alerts, it's designed for modern DevOps teams to quickly respond to production incidents.
 
-An incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Compatible with any tool supporting webhook alerts, it's designed for modern DevOps teams to quickly respond to production incidents. With the built-in **AI SRE Agent**, Versus goes further — continuously observing your logs, metrics, and traces, learning what normal looks like, and alerting you only when something new and unexpected appears.
-
-🚀 Mastering your Site Reliability Engineering Skills: [On-Call in Action](https://leanpub.com/on-call-in-action).
+With the built-in **AI SRE Agent**, Versus goes further — continuously observing your logs, metrics, and traces, learning what normal looks like, and alerting you only when something new and unexpected appears.
 
 ## Table of Contents
 - [Features](#features)
@@ -1138,6 +1140,10 @@ This will:
 Complete Project Diagram
 
 ![Versus Control](src/docs/images/road-map.svg)
+
+## Support The Project
+
+[GitHub Sponsors](https://github.com/sponsors/versuscontrol) · [Open Collective](https://opencollective.com/versus-incident) · see [SPONSORS.md](SPONSORS.md)
 
 ## Contributing
 

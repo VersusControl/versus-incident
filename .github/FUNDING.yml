@@ -1,0 +1,7 @@
+# TODO: replace placeholders with real handles before committing.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+
+github: [versuscontrol]                       # GitHub Sponsors org/user
+# open_collective: versus-incident
+custom:
+  - https://versuscontrol.github.io/versus-incident/#sponsors
