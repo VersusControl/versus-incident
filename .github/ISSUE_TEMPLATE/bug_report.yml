@@ -1,0 +1,85 @@
+name: Bug report
+description: Report a problem with Versus Incident
+title: "[Bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! Please fill out the
+        sections below so we can reproduce and fix the issue quickly.
+
+        For security vulnerabilities, **do not file a public issue** — see
+        [SECURITY.md](https://github.com/VersusControl/versus-incident/blob/main/SECURITY.md).
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `docker run ghcr.io/versuscontrol/versus-incident --version`, the Helm chart version, or the git commit you built from.
+      placeholder: "v1.3.8"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment mode
+      options:
+        - Docker
+        - Helm / Kubernetes
+        - Source build (`go run`)
+        - Other (please specify in description)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including the alert channel / on-call provider / agent mode involved.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal config and the request/payload you sent. Redact secrets.
+      placeholder: |
+        1. Configure ...
+        2. Send `curl -X POST ...`
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste the output from Versus Incident with `DEBUG_BODY=true` if applicable. Redact tokens/webhook URLs.
+      render: shell
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Sanitized config
+      description: Paste the relevant section(s) of `config.yaml`. Replace any secrets with `${ENV_VAR}` or `[redacted]`.
+      render: yaml
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I removed all secrets, tokens, and webhook URLs from the report.
+          required: true

@@ -1,6 +1,7 @@
 <h1 align="center" style="border-bottom: none">
   <img alt="Versus" src="src/docs/images/versus.svg">
 </h1>
+
 <p align="center">
   <a href="https://goreportcard.com/report/github.com/VersusControl/versus-incident"><img src="https://goreportcard.com/badge/github.com/VersusControl/versus-incident" alt="Go Report Card"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
@@ -39,7 +40,7 @@ With the built-in **AI SRE Agent**, Versus goes further — continuously observi
 - 📡 **On-Call**: On-Call integrations with AWS Incident Manager and PagerDuty
 - 🤖 **AI Agent** *(Beta)*: An AI SRE agent that reads your logs, metrics and tracing, learns what normal looks like, and only alerts you when something new and unexpected appears.
 
-![Versus](src/docs/images/versus-architecture.svg)
+![Versus](src/docs/images/versus-architecture.png)
 
 ## Get Started in 60 Seconds
 
@@ -1124,36 +1125,24 @@ This will:
 
 ## Roadmap
 
-- [x] Add Telegram support
-- [x] Add Email support
-- [x] Add SNS subscription
-- [x] Add MS Team support
-- [x] Add Viber support
-- [x] Add Lark support
-- [x] Add support for queue listeners (AWS SQS, GCP Cloud Pub/Sub, Azure Service Bus)
-- [x] Support multiple templates
-- [ ] API Server for Incident Management
-- [ ] Web UI
-- [x] On-call integrations (AWS Incident Manager, PagerDuty)
-- [ ] Prometheus metrics
-
-Complete Project Diagram
+See [ROADMAP.md](ROADMAP.md) for the full list of shipped features, work
+in progress, and planned phases (more log sources, metrics, traces,
+cross-signal correlation).
 
 ![Versus Control](src/docs/images/road-map.svg)
 
 ## Support The Project
 
-[GitHub Sponsors](https://github.com/sponsors/versuscontrol) · [Open Collective](https://opencollective.com/versus-incident) · see [SPONSORS.md](SPONSORS.md)
+[GitHub Sponsors](https://github.com/sponsors/versuscontrol) · see [SPONSORS.md](SPONSORS.md)
 
 ## Contributing
 
-We welcome contributions! Please follow these steps:
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md)
+for development setup, coding standards, and the PR process, and review
+the [Code of Conduct](CODE_OF_CONDUCT.md) and [security policy](SECURITY.md)
+before reporting vulnerabilities.
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+Project governance is documented in [GOVERNANCE.md](GOVERNANCE.md).
 
 ## License
 
