@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question / Help
+    url: https://github.com/VersusControl/versus-incident/discussions
+    about: For general questions and "how do I" support, please open a Discussion.
+  - name: Security vulnerability
+    url: https://github.com/VersusControl/versus-incident/security/advisories/new
+    about: Please report security issues privately. Do not open a public issue.

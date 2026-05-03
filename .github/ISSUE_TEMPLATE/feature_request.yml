@@ -1,0 +1,55 @@
+name: Feature request
+description: Suggest an improvement or new feature
+title: "[Feature] "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For significant changes, consider opening a
+        [discussion](https://github.com/VersusControl/versus-incident/discussions)
+        first so we can align on the design before you (or anyone else)
+        starts coding.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the use case, not the solution. "I'm trying to … but Versus does …".
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Optional. What would the ideal API / config / UX look like?
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds, other tools, why they don't fit.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Alert channel (Slack, Telegram, Teams, Viber, Email, Lark)
+        - Queue listener (SNS, SQS, Pub/Sub, Service Bus)
+        - On-call (AWS Incident Manager, PagerDuty)
+        - AI agent (sources, redaction, miner, catalog, shadow, detect)
+        - Templates
+        - Helm chart
+        - Documentation
+        - Other
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
