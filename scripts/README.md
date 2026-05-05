@@ -35,6 +35,71 @@ python3 scripts/generate_noisy_logs.py -o /tmp/test.log -n 500
 Useful flags: `--lines/-n`, `--output/-o`, `--start-time` (`now` or RFC3339),
 `--interval-min/--interval-max`, `--append/-a`, `--seed`.
 
+### Spike mode
+
+Emit a tight burst of one specific error template so the agent's spike
+detector fires. Use this after training to verify the spike settings work.
+
+**Typical workflow:**
+
+```bash
+# 1. Train — build a baseline (2000 mixed lines)
+python3 scripts/generate_noisy_logs.py --lines 2000
+
+# 2. Switch the agent to shadow mode (AGENT_MODE=shadow) and restart
+
+# 3. Inject a spike — 80 db-conn-refused errors packed into ~16 seconds
+python3 scripts/generate_noisy_logs.py --append --start-time now \
+  --spike db-conn-refused --spike-burst 80
+
+# 4. Check the shadow log for spike verdicts
+curl -H "X-Gateway-Secret: $AGENT_GATEWAY_SECRET" \
+  http://localhost:3000/api/agent/shadow | jq '.[] | select(.verdict=="spike")'
+```
+
+When `--spike` is set, `--lines` is ignored. The script emits exactly
+`--spike-burst` lines of the chosen template with tight spacing (default
+0.0–0.2 s between lines) so they all land in one or two poll ticks.
+
+> **Why your spike might not fire.** A spike compares the current tick
+> to a *prior* baseline, so the pattern must already exist in
+> `data/patterns.json` with enough history. Specifically:
+>
+> - The pattern's `count` must be `≥ spike_min_baseline_count`
+>   (default `20`).
+> - The pattern's service must NOT be inside its `new_service_grace`
+>   window (env `AGENT_NEW_SERVICE_GRACE`).
+>
+> If you delete `data/patterns.json` and immediately inject a burst,
+> you'll see `verdicts=map[grace:1]` or `map[unknown:1]` and no
+> `SPIKE` log line. Either run the training step first and wait out
+> the grace period, or end grace early with
+> `POST /api/agent/services/<name>/grace` with body `{"action":"end"}`.
+
+**Spike flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--spike NAME` | — | Template to burst. Use `auto` for a random pick. |
+| `--spike-burst N` | `50` | Number of lines in the burst. |
+| `--spike-interval-min S` | `0.0` | Min seconds between burst lines. |
+| `--spike-interval-max S` | `0.2` | Max seconds between burst lines. |
+| `--spike-context N` | `0` | Regular noisy lines to emit before the burst. |
+| `--list-templates` | — | Print all template names and exit. |
+
+```bash
+# see all available template names
+python3 scripts/generate_noisy_logs.py --list-templates
+
+# random template, 60 lines
+python3 scripts/generate_noisy_logs.py --append --start-time now \
+  --spike auto --spike-burst 60
+
+# add 20 normal lines before the burst for context
+python3 scripts/generate_noisy_logs.py --append --start-time now \
+  --spike panic --spike-burst 40 --spike-context 20
+```
+
 ### Live tail (interval mode)
 
 Append fresh batches forever so the agent (running in another terminal via
@@ -52,6 +117,33 @@ INTERVAL=2 BATCH=50 ./scripts/run_noisy_logs.sh
 ```
 
 Stop with Ctrl+C. The script prints a summary count on exit.
+
+### One-shot spike via `run_noisy_logs.sh`
+
+The wrapper also has a spike shortcut. When `--spike` (or `SPIKE=`) is set
+the live-tail loop is skipped — the script does one burst and exits, so the
+lines all land in a single poll tick.
+
+```bash
+# 80 db-conn-refused lines into the default output path
+./scripts/run_noisy_logs.sh --spike db-conn-refused
+
+# environment-variable form, larger burst, 20 normal lines first
+SPIKE=panic SPIKE_BURST=120 SPIKE_CONTEXT=20 ./scripts/run_noisy_logs.sh
+
+# discover available template names
+./scripts/run_noisy_logs.sh --list-templates
+```
+
+| Flag | Env | Default | Description |
+|---|---|---|---|
+| `--spike NAME` | `SPIKE` | — | Template to burst (use `auto` for random). |
+| `--spike-burst N` | `SPIKE_BURST` | `80` | Number of lines in the burst. |
+| `--spike-context N` | `SPIKE_CONTEXT` | `0` | Regular lines emitted before the burst. |
+| `--list-templates` | — | — | Print all template names and exit. |
+
+The same baseline + grace prerequisites apply — see the warning in the
+spike-mode section above.
 
 ### Make sure the agent is reading from this file
 

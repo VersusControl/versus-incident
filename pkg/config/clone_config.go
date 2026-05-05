@@ -252,9 +252,12 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 			RedactIPs: src.Redaction.RedactIPs,
 		},
 		Catalog: AgentCatalogConfig{
-			Mode:             src.Catalog.Mode,
-			PersistInterval:  src.Catalog.PersistInterval,
-			AutoPromoteAfter: src.Catalog.AutoPromoteAfter,
+			Mode:                  src.Catalog.Mode,
+			PersistInterval:       src.Catalog.PersistInterval,
+			AutoPromoteAfter:      src.Catalog.AutoPromoteAfter,
+			SpikeMultiplier:       src.Catalog.SpikeMultiplier,
+			SpikeMinFrequency:     src.Catalog.SpikeMinFrequency,
+			SpikeMinBaselineCount: src.Catalog.SpikeMinBaselineCount,
 		},
 		Miner: AgentMinerConfig{
 			SimilarityThreshold: src.Miner.SimilarityThreshold,

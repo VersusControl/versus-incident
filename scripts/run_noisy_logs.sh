@@ -1,17 +1,28 @@
 #!/usr/bin/env bash
 # Continuously append fresh noisy log lines on a fixed interval so the agent
-# (running in tail mode) has live traffic to chew on.
+# (running in tail mode) has live traffic to chew on. Optionally inject a
+# one-shot spike burst to test the spike detector.
 #
 # Usage:
-#   local/scripts/run_noisy_logs.sh                     # defaults
-#   INTERVAL=10 BATCH=50 ./local/scripts/run_noisy_logs.sh
-#   ./local/scripts/run_noisy_logs.sh --output local/resource/noisy-app.log
+#   ./scripts/run_noisy_logs.sh                                # live tail
+#   INTERVAL=10 BATCH=50 ./scripts/run_noisy_logs.sh
+#   ./scripts/run_noisy_logs.sh --output local/resource/noisy-app.log
 #
-# Env vars / flags:
-#   INTERVAL  seconds between batches              (default 5)
-#   BATCH     lines per batch                      (default 20)
-#   OUTPUT    log file to append to                (default local/resource/noisy-app.log)
-#   ITER      max iterations, 0 = infinite         (default 0)
+#   # inject a single spike burst, then exit:
+#   ./scripts/run_noisy_logs.sh --spike db-conn-refused
+#   SPIKE=panic SPIKE_BURST=120 ./scripts/run_noisy_logs.sh
+#
+# Env vars / flags (live tail):
+#   INTERVAL       seconds between batches             (default 5)
+#   BATCH          lines per batch                     (default 20)
+#   OUTPUT         log file to append to               (default local/resource/noisy-app.log)
+#   ITER           max iterations, 0 = infinite        (default 0)
+#
+# Env vars / flags (spike mode — disables live tail when set):
+#   SPIKE          template name to burst              (e.g. db-conn-refused)
+#   SPIKE_BURST    number of lines in the burst        (default 80)
+#   SPIKE_CONTEXT  regular noisy lines before burst    (default 0)
+#   --list-templates   print available template names and exit
 #
 # Stops cleanly on Ctrl+C.
 
@@ -21,6 +32,10 @@ INTERVAL="${INTERVAL:-5}"
 BATCH="${BATCH:-20}"
 OUTPUT="${OUTPUT:-local/resource/noisy-app.log}"
 ITER="${ITER:-0}"
+SPIKE="${SPIKE:-}"
+SPIKE_BURST="${SPIKE_BURST:-80}"
+SPIKE_CONTEXT="${SPIKE_CONTEXT:-0}"
+LIST_TEMPLATES=0
 
 # Allow flag overrides too
 while [[ $# -gt 0 ]]; do
@@ -29,8 +44,12 @@ while [[ $# -gt 0 ]]; do
     --batch)    BATCH="$2";    shift 2 ;;
     --output|-o) OUTPUT="$2";  shift 2 ;;
     --iter)     ITER="$2";     shift 2 ;;
+    --spike)         SPIKE="$2";         shift 2 ;;
+    --spike-burst)   SPIKE_BURST="$2";   shift 2 ;;
+    --spike-context) SPIKE_CONTEXT="$2"; shift 2 ;;
+    --list-templates) LIST_TEMPLATES=1;  shift ;;
     -h|--help)
-      sed -n '2,18p' "$0"; exit 0 ;;
+      sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -43,7 +62,26 @@ if [[ ! -f "$GEN" ]]; then
   exit 1
 fi
 
+if [[ "$LIST_TEMPLATES" -eq 1 ]]; then
+  exec python3 "$GEN" --list-templates
+fi
+
 mkdir -p "$(dirname "$OUTPUT")"
+
+# Spike mode: emit one tight burst of the chosen template, then exit.
+# Live-tail loop is skipped entirely so the burst lands in a single tick.
+if [[ -n "$SPIKE" ]]; then
+  echo "spike mode: injecting $SPIKE_BURST x '$SPIKE' lines into $OUTPUT (context=$SPIKE_CONTEXT)"
+  python3 "$GEN" \
+    --append \
+    --output "$OUTPUT" \
+    --start-time now \
+    --spike "$SPIKE" \
+    --spike-burst "$SPIKE_BURST" \
+    --spike-context "$SPIKE_CONTEXT"
+  echo "done. Watch the agent log for a 'SPIKE pattern=...' line on the next tick."
+  exit 0
+fi
 
 trap 'echo; echo "stopped after $count batch(es)"; exit 0' INT TERM
 

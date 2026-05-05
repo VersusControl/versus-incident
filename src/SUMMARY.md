@@ -19,6 +19,7 @@
 - [Introduction](./agent/agent-introduction.md)
 - [Getting Started](./agent/getting-started.md)
 - [Shadow Mode](./agent/shadow-mode.md)
+- [Spike Detection](./agent/spike.md)
 - [Configuration](./agent/configuration.md)
 - [RedAction](./agent/redaction.md)
 - [Catalog](./agent/catalog.md)

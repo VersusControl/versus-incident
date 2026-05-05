@@ -157,6 +157,18 @@ agent:
     mode: file                    # storage backend; only "file" is supported today (planned: redis, database)
     persist_interval: 30s
     auto_promote_after: 50       # in detect mode, this many sightings = "known"
+    # Spike detection: a known pattern is re-flagged when its tick-level
+    # frequency suddenly exceeds the EWMA (Exponentially Weighted Moving Average) baseline by `spike_multiplier`.
+    # Two safety floors keep noise out:
+    #   - spike_min_frequency: tick must have at least this many matches
+    #     (avoids triggering on tiny absolute counts).
+    #   - spike_min_baseline_count: pattern must have been seen this many
+    #     times overall (avoids treating a barely-seen pattern's first big
+    #     tick as a spike).
+    # Set spike_multiplier: 0 to disable spike detection entirely.
+    spike_multiplier: 5.0
+    spike_min_frequency: 5
+    spike_min_baseline_count: 20
 
   miner:
     similarity_threshold: 0.4
@@ -190,7 +202,7 @@ agent:
   # New-service grace: when a previously unseen service starts emitting logs
   # in detect mode, it enters an implicit training window so the catalog can
   # build up before AI analysis kicks in. Set to "0" to disable.
-  new_service_grace: 0            # duration (env: AGENT_NEW_SERVICE_GRACE), ex 10m, 2h, etc.
+  new_service_grace: 30m            # duration (env: AGENT_NEW_SERVICE_GRACE), ex 10m, 2h, etc.
   # Service detection — regexes applied to each log message to extract the
   # service name.
   service_patterns:
@@ -205,21 +217,27 @@ agent:
     # Used by: Node.js (Bunyan, Pino, Winston), .NET Serilog (JSON), Java logback-json,
     #          Python python-json-logger, AWS Lambda Powertools, nginx JSON access logs
     - '(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"'
-    # Two bracketed tokens at line start: [logger] [service] ...
+    # Two bracketed tokens: [logger] [service] ...
     # Used by: Python Django (`[django.request] [orders] ...`),
     #          some logback layouts that put logger first then MDC service.
     # The second bracket is the service; matched before the single-bracket rule
     # so this wins for two-bracket lines.
-    - '^\[[^\]]+\]\s+\[([A-Za-z0-9._-]+)\]'
-    # Bracketed prefix at line start: [foo]
-    # Used by: Apache log4j (default), many CLIs, Erlang/Elixir Logger,
-    #          Docker compose default formatter
-    - '^\[([A-Za-z0-9._-]+)\]'
+    # NOTE: no ^ anchor — sig.Message starts with the level (e.g. "ERROR [...]").
+    - '\[[^\]]+\]\s+\[([A-Za-z0-9._-]+)\]'
     # Spring Boot / Java logback default pattern:
     #   2026-05-02 12:34:56.789 ERROR 1 --- [thread-name] [service-name] com.foo.Bar : ...
     # The service is the SECOND bracketed token after the "---" separator.
     - '---\s+\[[^\]]*\]\s+\[([A-Za-z0-9._-]+)\]'
-    # syslog/journald/Docker: foo[123]: at line start
+    # syslog/journald/Docker: foo[123]:
     # Used by: Linux syslog (rsyslog/syslog-ng), systemd-journald, Docker JSON-file
     #          driver with tag, Postfix, sshd, cron, kernel
-    - '^([A-Za-z0-9._-]+)\[\d+\]:'
+    # NOTE: no ^ anchor — level prefix precedes the token in sig.Message.
+    # MUST come before the generic single-bracket rule so `nginx[1234]:` matches
+    # this (→ "nginx") rather than [1234] (→ "1234").
+    - '([A-Za-z0-9._-]+)\[\d+\]:'
+    # Bracketed prefix: [foo]
+    # Used by: Apache log4j (default), many CLIs, Erlang/Elixir Logger,
+    #          Docker compose default formatter
+    # NOTE: no ^ anchor — level prefix precedes the bracket in sig.Message.
+    # This is the most generic bracket rule — keep it LAST among bracket patterns.
+    - '\[([A-Za-z0-9._-]+)\]'

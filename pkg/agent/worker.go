@@ -254,6 +254,16 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 	// Update catalog and produce verdicts.
 	verdicts := make(map[string]int) // verdict-name → count, for stats
 	for id, b := range buckets {
+		// Snapshot pattern state BEFORE upsert so spike detection can
+		// compare this tick against the prior baseline rather than the
+		// freshly-smoothed value.
+		var prevBaseline float64
+		var prevCount int
+		if prev := w.catalog.Get(id); prev != nil {
+			prevBaseline = prev.BaselineFrequency
+			prevCount = prev.Count
+		}
+
 		w.catalog.Upsert(id, b.template, src.Name(), len(b.signals), w.ewmaAlpha, b.tag.RuleName, b.serviceName)
 
 		// Track the service so the grace window starts even in training mode.
@@ -280,7 +290,8 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 			// filters out, shadow filters too. During grace the signal is
 			// learned (catalog already upserted above) but not surfaced as
 			// a "would alert" / AI candidate.
-			if b.serviceName != "_unknown" && w.newServiceGrace > 0 &&
+			// Remove b.serviceName != "_unknown"
+			if w.newServiceGrace > 0 &&
 				w.catalog.IsServiceInGrace(b.serviceName, w.newServiceGrace) {
 				verdicts["grace"]++
 				if b.isNew {
@@ -290,7 +301,7 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 				continue
 			}
 
-			v := w.classify(id, len(b.signals))
+			v := w.classify(id, len(b.signals), prevBaseline, prevCount)
 			verdicts[v.String()]++
 			if v == core.VerdictKnownPattern {
 				continue
@@ -326,11 +337,13 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		src.Name(), len(signals), len(signals)-skippedNoMatch, len(buckets), skippedNoMatch, verdicts, newCursor.Format(time.RFC3339))
 }
 
-// Classify is the (currently minimal) verdict logic for shadow/detect modes.
-// No spike thresholding yet — anything new is unknown, anything we already
-// had is known. Frequency-based spike detection ships in a follow-up.
-// tickFrequency will be used for EWMA spike detection later.
-func (w *Worker) classify(patternID string, _ int) core.AgentVerdict {
+// classify decides the verdict for a pattern given the current tick's
+// frequency and the pattern's pre-upsert state. The catalog has already
+// been upserted by the caller, so prevBaseline/prevCount reflect what the
+// pattern looked like BEFORE this tick — which is what we need for
+// spike detection (otherwise a 5× spike would smear into the EWMA before
+// we ever see it).
+func (w *Worker) classify(patternID string, tickFreq int, prevBaseline float64, prevCount int) core.AgentVerdict {
 	p := w.catalog.Get(patternID)
 	if p == nil {
 		return core.VerdictUnknown
@@ -342,13 +355,56 @@ func (w *Worker) classify(patternID string, _ int) core.AgentVerdict {
 	if threshold <= 0 {
 		threshold = 100
 	}
-	if p.Verdict == "known" || p.Count >= threshold {
+	isKnown := p.Verdict == "known" || p.Count >= threshold
+	if isKnown {
 		if p.Verdict != "known" {
 			w.catalog.MarkKnown(patternID)
+		}
+		// A known pattern can still spike: a steady drip suddenly
+		// jumping to a flood is exactly the case AI analysis should
+		// see. Spike supersedes "known" only when configured.
+		if isSpike(prevBaseline, prevCount, tickFreq,
+			w.cfg.Catalog.SpikeMultiplier,
+			w.cfg.Catalog.SpikeMinFrequency,
+			w.cfg.Catalog.SpikeMinBaselineCount) {
+			return core.VerdictSpike
 		}
 		return core.VerdictKnownPattern
 	}
 	return core.VerdictUnknown
+}
+
+// isSpike returns true when the current tick frequency exceeds the
+// pattern's prior EWMA baseline by `multiplier`, subject to two safety
+// floors:
+//
+//   - tickFreq must be at least minFreq (don't trigger on absolute counts
+//     so small the ratio is meaningless).
+//   - prevCount must be at least minBaselineCount (don't treat a
+//     barely-seen pattern's first big tick as a spike; let it accumulate
+//     a real baseline first).
+//
+// multiplier <= 0 disables spike detection entirely.
+func isSpike(prevBaseline float64, prevCount, tickFreq int, multiplier float64, minFreq, minBaselineCount int) bool {
+	if multiplier <= 0 {
+		return false
+	}
+	if minFreq <= 0 {
+		minFreq = 5
+	}
+	if minBaselineCount <= 0 {
+		minBaselineCount = 20
+	}
+	if tickFreq < minFreq {
+		return false
+	}
+	if prevCount < minBaselineCount {
+		return false
+	}
+	if prevBaseline <= 0 {
+		return false
+	}
+	return float64(tickFreq) > multiplier*prevBaseline
 }
 
 // -----------------------------------------------------------------------------
