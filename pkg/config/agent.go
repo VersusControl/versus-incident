@@ -55,6 +55,18 @@ type AgentCatalogConfig struct {
 	Mode             string `mapstructure:"mode"`
 	PersistInterval  string `mapstructure:"persist_interval"`   // e.g. "30s"
 	AutoPromoteAfter int    `mapstructure:"auto_promote_after"` // 0 = never
+	// SpikeMultiplier flags a tick as a frequency spike when the tick
+	// count exceeds the pattern's prior EWMA baseline by this factor.
+	// 0 disables spike detection. Default 5.0.
+	SpikeMultiplier float64 `mapstructure:"spike_multiplier"`
+	// SpikeMinFrequency is the minimum tick count required before a spike
+	// can fire. Avoids triggering on tiny absolute counts (e.g. baseline
+	// 0.5 → tickFreq 3 is technically 6× but not interesting). Default 5.
+	SpikeMinFrequency int `mapstructure:"spike_min_frequency"`
+	// SpikeMinBaselineCount is the minimum total observations required on
+	// a pattern before spike detection considers it. Avoids treating a
+	// barely-seen pattern's first big tick as a spike. Default 20.
+	SpikeMinBaselineCount int `mapstructure:"spike_min_baseline_count"`
 }
 
 // CatalogFileName is the fixed filename used by the "file" catalog backend.

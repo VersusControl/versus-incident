@@ -182,12 +182,17 @@ func TestCatalog_ServiceTracking(t *testing.T) {
 func TestServiceMatcher_CommonFormats(t *testing.T) {
 	// Exercise the same regexes shipped in config/config.yaml against
 	// representative log lines from the languages/libraries documented there.
+	// NOTE: no ^ anchors on bracket/syslog patterns because sig.Message
+	// starts with the level prefix (e.g. "ERROR [django.request] [orders]").
+	// Order matters: syslog before single-bracket so nginx[1234]: → "nginx".
 	patterns := []string{
 		`(?i)\bservice[._-]?name["\s:=]+"?([A-Za-z0-9._-]+)`,
 		`(?i)\b(?:service|svc|app|component)\s*=\s*"?([A-Za-z0-9._-]+)`,
 		`(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"`,
-		`^\[([A-Za-z0-9._-]+)\]`,
-		`^([A-Za-z0-9._-]+)\[\d+\]:`,
+		`\[[^\]]+\]\s+\[([A-Za-z0-9._-]+)\]`,
+		`---\s+\[[^\]]*\]\s+\[([A-Za-z0-9._-]+)\]`,
+		`([A-Za-z0-9._-]+)\[\d+\]:`,
+		`\[([A-Za-z0-9._-]+)\]`,
 	}
 	m, errs := NewServiceMatcher(patterns)
 	if len(errs) != 0 {
@@ -206,7 +211,11 @@ func TestServiceMatcher_CommonFormats(t *testing.T) {
 		{"ECS service.name json", `{"service.name":"foo-svc","level":"error"}`, "foo-svc"},
 		{"ECS service.name logfmt", `service.name=foo-svc level=error`, "foo-svc"},
 		{"bracket prefix", `[scheduler] cron job failed`, "scheduler"},
+		{"bracket with level prefix", `ERROR [scheduler] cron job failed`, "scheduler"},
+		{"django two-bracket", `ERROR [django.request] [orders] Internal Server Error`, "orders"},
+		{"spring boot", `ERROR 1 --- [main] [payments-service] c.e.p.PaymentCtrl : upstream error`, "payments-service"},
 		{"syslog prefix", `nginx[1234]: GET /healthz 200`, "nginx"},
+		{"syslog with level", `ERROR nginx[1234]: GET /healthz 500`, "nginx"},
 		{"no match", `random unstructured line`, ""},
 	}
 	for _, tc := range cases {

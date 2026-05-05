@@ -72,9 +72,12 @@ the earlier steps falls into one of three buckets:
 2. **Unknown** — write a row to the shadow log. This happens for a
    brand-new template, or for a rare template that hasn't been
    seen `auto_promote_after` times yet.
-3. **Spike** — reserved for a future release. The label exists in
-   the file format today but nothing produces it; you'll see
-   `verdict_spike: 0` in the stats.
+3. **Spike** — a known pattern that is suddenly firing way more
+   often than usual. The agent keeps an average rate (an EWMA) for
+   every pattern; when one tick blows past that average by a
+   configurable factor, the row is written to the shadow log with
+   `verdict: spike`. Useful for spotting sudden surges that the
+   "known" check would otherwise hide.
 
 A pattern is "known" when **either** of these is true:
 
@@ -85,6 +88,36 @@ A pattern is "known" when **either** of these is true:
   times (default `100`). The agent saves this auto-promotion to
   `patterns.json` so you can check which patterns it considers
   baseline.
+
+### When a known pattern can still fire (spike)
+
+"Known" usually means "ignore". But there's one case where you
+probably still want to know: a pattern that has been quiet
+suddenly going loud. The agent keeps an average rate (an EWMA) of
+how often each pattern fires per tick, and compares the current
+tick to that average. If the current tick is way above the
+average, the row is written to the shadow log with
+`verdict: spike` instead of being silenced.
+
+Three settings control this:
+
+- **`agent.catalog.spike_multiplier`** (default `5.0`) — how many
+  times above the baseline a tick must be. Set to `0` to disable
+  spike detection.
+- **`agent.catalog.spike_min_frequency`** (default `5`) — the
+  current tick must have at least this many matches. Stops the
+  agent from screaming when the baseline is `0.5` and one tick has
+  3 matches (technically 6× but not interesting).
+- **`agent.catalog.spike_min_baseline_count`** (default `20`) —
+  the pattern must have been seen this many times overall before
+  it's eligible for a spike. Stops a barely-seen pattern's first
+  big tick from looking like a spike before any real baseline has
+  been built.
+
+In practice: with the defaults, a pattern that normally fires once
+or twice per tick suddenly producing 10+ matches in a single tick
+will land in the shadow log as a spike, even if you previously
+labeled it `known`.
 
 ### One row per pattern, not per line
 
@@ -112,7 +145,7 @@ rows — you get **one** row with `count: 200, occurrences: 4`.
 | `template` | Latest template. `<*>` marks the parts that change. | `kernel: Out of memory: Killed process <*> (<*>) score 999 …` |
 | `source` | The source name from `agent_sources.yaml`. Lets you tell prod from staging at a glance. | `my-app` |
 | `rule_name` | Filter rule that matched. `default` means the catch-all matched but no named rule did. Empty when filtering is off. | `oom-killer` / `default` |
-| `verdict` | `unknown` today; `spike` reserved for a future release. | `unknown` |
+| `verdict` | `unknown` for first sightings, `spike` for known patterns whose tick frequency exceeds the EWMA baseline by `spike_multiplier`. | `unknown` / `spike` |
 | `sample_message` | One example line, **with secrets already hidden**, cut off at 512 bytes. | `kernel: Out of memory: Killed process 1842 (versus-worker) score 999 …` |
 | `count` | Total raw lines across every tick this row covers. | `17` |
 | `occurrences` | How many distinct ticks fired. Always `≤ count`. | `3` |
@@ -315,8 +348,9 @@ What each number means:
 - **`total_occurrences`** — sum of `occurrences`. Roughly: "how
   many ticks would have paged me?".
 - **`verdict_unknown`** / **`verdict_spike`** — breakdown by
-  label. Spike is reserved for a future release; today it's
-  always 0.
+  label. Spike rows are known patterns whose tick frequency
+  exceeded the configured threshold; unknown rows are first
+  sightings.
 
 A healthy review cycle drives `events` and `total_occurrences`
 down over time, even as `total_signals` stays flat (because

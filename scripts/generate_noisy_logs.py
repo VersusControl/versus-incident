@@ -13,6 +13,21 @@ Usage:
 Append mode (useful for live-tail testing while the agent is running):
     python3 local/scripts/generate_noisy_logs.py --append --lines 200 \
         --start-time now
+
+Spike mode — emit a tight burst of one specific template so the agent's
+spike detector fires. Typical workflow:
+
+    # 1. Train baseline so the chosen pattern becomes "known".
+    python3 scripts/generate_noisy_logs.py --lines 2000
+
+    # 2. Switch the agent to shadow or detect mode and let it catch up.
+
+    # 3. Inject a spike (50 db-conn-refused lines packed into ~10s).
+    python3 scripts/generate_noisy_logs.py --append --start-time now \
+        --spike db-conn-refused --spike-burst 80
+
+Use --list-templates to see every template name accepted by --spike, or
+pass --spike auto to pick one at random.
 """
 
 from __future__ import annotations
@@ -873,6 +888,37 @@ def weighted_choice(templates):
     return random.choices(fns, weights=weights, k=1)[0]
 
 
+# Map every template function in TEMPLATES to a short, hyphenated name so it
+# can be referenced from the CLI (e.g. --spike db-conn-refused). Built once
+# at import time from the function's __name__ minus the leading "t_".
+NAMED_TEMPLATES = {fn.__name__.removeprefix("t_").replace("_", "-"): fn
+                   for fn, _ in TEMPLATES}
+
+
+def list_templates() -> None:
+    """Print every named template, sorted, for use with --spike."""
+    for name in sorted(NAMED_TEMPLATES):
+        print(name)
+
+
+def pick_spike_template(name: str):
+    """Resolve a --spike argument to a template function.
+
+    "auto" picks a random template that produces a recognizable, repeatable
+    line (i.e. anything in TEMPLATES). An exact name lookup is tried first;
+    otherwise the script aborts with a hint.
+    """
+    if name == "auto":
+        return random.choice(list(NAMED_TEMPLATES.values()))
+    fn = NAMED_TEMPLATES.get(name)
+    if fn is None:
+        raise SystemExit(
+            f"unknown --spike template: {name!r}. "
+            f"Run with --list-templates to see all options."
+        )
+    return fn
+
+
 def parse_start_time(raw: str) -> datetime:
     if raw == "now":
         return datetime.now(timezone.utc)
@@ -897,12 +943,37 @@ def main() -> int:
                     help="append to output instead of overwriting")
     ap.add_argument("--seed", type=int, default=None,
                     help="random seed for reproducible output")
+    # Spike-mode flags. Use --spike to emit a tight burst of one specific
+    # template so the agent's spike detector fires. Typical workflow:
+    #   1. Train baseline:   --lines 2000
+    #   2. Switch agent to shadow/detect mode
+    #   3. Inject spike:     --append --spike db-conn-refused --spike-burst 80
+    ap.add_argument("--spike", default=None, metavar="NAME",
+                    help='emit a burst of one template (use "auto" to pick at random; '
+                         '--list-templates to see all names). When set, --lines is ignored.')
+    ap.add_argument("--spike-burst", type=int, default=50,
+                    help="number of lines in the spike burst (default: 50)")
+    ap.add_argument("--spike-interval-min", type=float, default=0.0,
+                    help="minimum seconds between spike lines (default: 0.0)")
+    ap.add_argument("--spike-interval-max", type=float, default=0.2,
+                    help="maximum seconds between spike lines (default: 0.2)")
+    ap.add_argument("--spike-context", type=int, default=0,
+                    help="number of regular noisy lines to emit BEFORE the spike (default: 0)")
+    ap.add_argument("--list-templates", action="store_true",
+                    help="print every template name usable with --spike, then exit")
     args = ap.parse_args()
+
+    if args.list_templates:
+        list_templates()
+        return 0
 
     if args.seed is not None:
         random.seed(args.seed)
     if args.interval_max < args.interval_min:
         print("interval-max must be >= interval-min", file=sys.stderr)
+        return 2
+    if args.spike and args.spike_interval_max < args.spike_interval_min:
+        print("spike-interval-max must be >= spike-interval-min", file=sys.stderr)
         return 2
 
     out = Path(args.output)
@@ -912,12 +983,35 @@ def main() -> int:
     ts = parse_start_time(args.start_time)
     written = 0
     with out.open(mode, encoding="utf-8") as f:
-        for _ in range(args.lines):
-            level, msg = weighted_choice(TEMPLATES)()
-            stamp = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-            f.write(f"{stamp} {level} {msg}\n")
-            written += 1
-            ts += timedelta(seconds=random.uniform(args.interval_min, args.interval_max))
+        if args.spike:
+            spike_fn = pick_spike_template(args.spike)
+            spike_label = spike_fn.__name__.removeprefix("t_").replace("_", "-")
+
+            # Optional warm-up so the spike doesn't land in a vacuum.
+            for _ in range(args.spike_context):
+                level, msg = weighted_choice(TEMPLATES)()
+                stamp = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+                f.write(f"{stamp} {level} {msg}\n")
+                written += 1
+                ts += timedelta(seconds=random.uniform(args.interval_min, args.interval_max))
+
+            # The burst itself: same template repeated, tight spacing.
+            for _ in range(args.spike_burst):
+                level, msg = spike_fn()
+                stamp = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+                f.write(f"{stamp} {level} {msg}\n")
+                written += 1
+                ts += timedelta(seconds=random.uniform(args.spike_interval_min, args.spike_interval_max))
+
+            print(f"spike: {spike_label} × {args.spike_burst} "
+                  f"(context={args.spike_context} lines)")
+        else:
+            for _ in range(args.lines):
+                level, msg = weighted_choice(TEMPLATES)()
+                stamp = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+                f.write(f"{stamp} {level} {msg}\n")
+                written += 1
+                ts += timedelta(seconds=random.uniform(args.interval_min, args.interval_max))
 
     action = "appended to" if args.append else "wrote"
     print(f"{action} {out} ({written} lines, end time {ts.strftime('%Y-%m-%dT%H:%M:%SZ')})")
