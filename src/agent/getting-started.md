@@ -79,21 +79,27 @@ redis:
   password: ${REDIS_PASSWORD}
   db: 0
 
+# Shared secret for ALL admin endpoints (`/api/admin/*` and `/api/agent/*`).
+gateway_secret: ${GATEWAY_SECRET}      # any string you choose
+
+# Storage backend for the agent catalog, shadow log, and incident history.
+storage:
+  type: file
+  file:
+    data_dir: /app/data                # patterns.json + shadow.json + incidents.json live here
+    max_incidents: 1000
+
 agent:
   enable: true                # turn the agent on
   mode: training              # just watch and learn — no alerts
   poll_interval: 10s
   lookback: 5m
-  data_dir: /app/data         # patterns.json lives here
-
-  gateway_secret: ${AGENT_GATEWAY_SECRET}  # any string you choose
 
   redaction:
     enable: true
     redact_ips: false
 
   catalog:
-    mode: file
     persist_interval: 30s
     auto_promote_after: 100   # after this many sightings, treat as known
 
@@ -148,7 +154,7 @@ docker run -d \
   -v "$PWD/logs:/app/logs:ro" \
   -e AGENT_ENABLE=true \
   -e AGENT_MODE=training \
-  -e AGENT_GATEWAY_SECRET=change-me \
+  -e GATEWAY_SECRET=change-me \
   -e REDIS_HOST=host.docker.internal \
   -e REDIS_PORT=6379 \
   -e REDIS_PASSWORD= \
@@ -224,7 +230,7 @@ in the repo.
 ## 6. Look at what the agent learned
 
 The admin endpoints need the `X-Gateway-Secret` header you set in
-step 4 (`AGENT_GATEWAY_SECRET`).
+step 4 (`GATEWAY_SECRET`).
 
 ```bash
 # Catalog summary
@@ -280,7 +286,7 @@ No. Training only watches. The agent learns templates and saves
 them to `patterns.json`. No Slack, no email, no on-call.
 
 **Q: Where does `patterns.json` live and what's in it?**
-At `<data_dir>/patterns.json` (default `data/patterns.json`). Each
+At `<storage.file.data_dir>/patterns.json` (default `data/patterns.json`). Each
 entry is one pattern: ID, the template the agent learned, when it
 was first and last seen, how many times it has been seen, an
 average rate, the filter rule that matched it, and any labels you
@@ -315,10 +321,10 @@ Three ways, easiest first:
 **Q: Can I run multiple agents against the same Redis?**
 Yes, as long as the source `name`s are different (bookmark keys
 include the source name). Each agent should have its own
-`data_dir` so they don't fight over `patterns.json`.
+`storage.file.data_dir` so they don't fight over `patterns.json`.
 
 **Q: What's the smallest config I can run with?**
-Roughly: `agent.enable=true`, `agent.gateway_secret=…`,
+Roughly: root-level `gateway_secret=…`, `agent.enable=true`,
 `agent.sources_path=…`, plus a `redis` block. Everything else has
 sensible defaults.
 

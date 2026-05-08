@@ -115,8 +115,8 @@ func (w *Worker) Run(ctx context.Context) {
 	if mode == "" {
 		mode = "training"
 	}
-	log.Printf("agent: starting worker mode=%s sources=%d poll=%s catalog=%s",
-		mode, len(w.sources), w.pollInterval, w.cfg.CatalogPath())
+	log.Printf("agent: starting worker mode=%s sources=%d poll=%s",
+		mode, len(w.sources), w.pollInterval)
 
 	// Stagger initial pull so multiple sources don't hammer their backends
 	// at the same instant on startup.

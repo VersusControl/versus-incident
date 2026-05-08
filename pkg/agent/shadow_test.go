@@ -2,15 +2,15 @@ package agent
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 func TestShadowLog_RecordCoalescesByPattern(t *testing.T) {
-	s, err := LoadShadowLog("", 0)
+	s, err := LoadShadowLog(nil, 0)
 	if err != nil {
 		t.Fatalf("LoadShadowLog: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestShadowLog_RecordCoalescesByPattern(t *testing.T) {
 }
 
 func TestShadowLog_RecordEmptyPatternIgnored(t *testing.T) {
-	s, _ := LoadShadowLog("", 0)
+	s, _ := LoadShadowLog(nil, 0)
 	s.Record("src", "", "tmpl", "msg", "", "unknown", 1)
 	if s.Len() != 0 {
 		t.Fatalf("expected empty, got %d", s.Len())
@@ -57,7 +57,7 @@ func TestShadowLog_RecordEmptyPatternIgnored(t *testing.T) {
 }
 
 func TestShadowLog_EvictsOldestWhenFull(t *testing.T) {
-	s, _ := LoadShadowLog("", 3)
+	s, _ := LoadShadowLog(nil, 3)
 	// Insert with monotonically advancing LastSeen so eviction is deterministic.
 	for i := 0; i < 5; i++ {
 		s.Record("src", "p"+string(rune('a'+i)), "tmpl", "msg", "", "unknown", 1)
@@ -78,7 +78,7 @@ func TestShadowLog_EvictsOldestWhenFull(t *testing.T) {
 }
 
 func TestShadowLog_SampleMessageTruncated(t *testing.T) {
-	s, _ := LoadShadowLog("", 0)
+	s, _ := LoadShadowLog(nil, 0)
 	huge := strings.Repeat("x", shadowSampleMaxBytes+200)
 	s.Record("src", "p1", "tmpl", huge, "", "unknown", 1)
 	got := s.All()[0].SampleMessage
@@ -91,10 +91,9 @@ func TestShadowLog_SampleMessageTruncated(t *testing.T) {
 }
 
 func TestShadowLog_PersistAndReload(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "shadow.json")
+	store := newTestStore(t)
 
-	s, err := LoadShadowLog(path, 0)
+	s, err := LoadShadowLog(store, 0)
 	if err != nil {
 		t.Fatalf("LoadShadowLog: %v", err)
 	}
@@ -110,8 +109,8 @@ func TestShadowLog_PersistAndReload(t *testing.T) {
 		t.Error("expected clean after Persist")
 	}
 
-	// Reload from disk.
-	s2, err := LoadShadowLog(path, 0)
+	// Reload from the same store.
+	s2, err := LoadShadowLog(store, 0)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -128,9 +127,8 @@ func TestShadowLog_PersistAndReload(t *testing.T) {
 }
 
 func TestShadowLog_ClearPersists(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "shadow.json")
-	s, _ := LoadShadowLog(path, 0)
+	store := newTestStore(t)
+	s, _ := LoadShadowLog(store, 0)
 	s.Record("src", "p1", "t", "m", "", "unknown", 1)
 	if err := s.Persist(); err != nil {
 		t.Fatalf("Persist: %v", err)
@@ -145,8 +143,8 @@ func TestShadowLog_ClearPersists(t *testing.T) {
 		t.Fatalf("Persist after clear: %v", err)
 	}
 
-	// File should now contain zero events.
-	data, err := os.ReadFile(path)
+	// The shadow blob should now contain zero events.
+	data, err := store.ReadBlob("shadow")
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -160,12 +158,11 @@ func TestShadowLog_ClearPersists(t *testing.T) {
 }
 
 func TestShadowLog_CorruptFileStartsFresh(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "shadow.json")
-	if err := os.WriteFile(path, []byte("not json"), 0o644); err != nil {
+	store := storage.NewMemory()
+	if err := store.WriteBlob("shadow", []byte("not json")); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	s, err := LoadShadowLog(path, 0)
+	s, err := LoadShadowLog(store, 0)
 	if err == nil {
 		t.Log("LoadShadowLog returned nil err (acceptable: warning-only path)")
 	}

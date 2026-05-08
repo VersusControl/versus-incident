@@ -16,6 +16,14 @@ for the rest of its features. Everything lives under the top-level
 ## Top-level keys
 
 ```yaml
+# Root-level (NOT under agent:)
+gateway_secret: ${GATEWAY_SECRET}     # shared secret for ALL admin endpoints
+storage:
+  type: file                          # file | redis | database
+  file:
+    data_dir: ./data                  # patterns.json + shadow.json + incidents.json live here
+    max_incidents: 1000
+
 agent:
   enable: false
   mode: training
@@ -23,14 +31,19 @@ agent:
   lookback: 5m
   batch_max: 1000
   signal_max_bytes: 8192
-  gateway_secret: ${AGENT_GATEWAY_SECRET}
-  data_dir: ./data
   sources_path: ./agent_sources.yaml
   redaction:   { … }
   catalog:     { … }
   miner:       { … }
   regex:       { … }
 ```
+
+> **Important.** As of the current release, **`gateway_secret` and the
+> storage backend live at the root of the config**, not under `agent:`.
+> One secret protects every admin endpoint (`/api/admin/*` and
+> `/api/agent/*`); one storage block is shared by the agent's catalog,
+> the shadow log, and the incident history shown in the UI. The agent's
+> previous `data_dir` field has been removed.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -40,8 +53,6 @@ agent:
 | `lookback` | duration | `5m` | Initial backfill window on first start (when there's no cursor yet). |
 | `batch_max` | int | `1000` | Safety cap on signals processed per tick per source. |
 | `signal_max_bytes` | int | `8192` | Truncates a single signal's `Raw` payload above this size. |
-| `gateway_secret` | string | (empty) | Shared secret required on `X-Gateway-Secret` header for `/api/agent/*`. **Empty disables the admin endpoints entirely**, which means the agent cannot start. Env: `AGENT_GATEWAY_SECRET`. |
-| `data_dir` | path | `./data` | Where the agent persists its catalog and source cursors. |
 | `sources_path` | path | (empty) | External YAML file containing the `sources:` list. Resolved relative to the main config. Env: `AGENT_SOURCES_PATH`. |
 
 ### Modes
@@ -56,9 +67,11 @@ agent:
 
 | Env var | Maps to |
 |---|---|
+| `GATEWAY_SECRET` | `gateway_secret` (root) |
+| `STORAGE_TYPE` | `storage.type` |
+| `STORAGE_FILE_DATA_DIR` | `storage.file.data_dir` |
 | `AGENT_ENABLE` | `agent.enable` |
 | `AGENT_MODE` | `agent.mode` |
-| `AGENT_GATEWAY_SECRET` | `agent.gateway_secret` |
 | `AGENT_SOURCES_PATH` | `agent.sources_path` |
 
 ---
@@ -93,19 +106,19 @@ the schema and admin workflows.
 
 ```yaml
 catalog:
-  mode: file
   persist_interval: 30s
   auto_promote_after: 100
 ```
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `mode` | string | `file` | Storage backend. Only `file` is supported today (planned: `redis`, `database`). |
-| `persist_interval` | duration | `30s` | How often the in-memory catalog is flushed to `data_dir/patterns.json`. |
+| `persist_interval` | duration | `30s` | How often the in-memory catalog is flushed to `<storage.file.data_dir>/patterns.json`. |
 | `auto_promote_after` | int | `100` | A pattern seen this many times in `detect` mode is treated as known (won't alert). `0` disables the promotion. |
 
-The on-disk filename is fixed (`patterns.json`); the only configurable
-part is `data_dir`.
+The storage backend itself is selected at the **root** of `config.yaml`
+(`storage.type`), not here. The on-disk filename is fixed
+(`patterns.json`); the only configurable part is the storage `data_dir`
+(root-level `storage.file.data_dir`).
 
 ---
 
@@ -217,7 +230,7 @@ file:
   path: /app/logs/my-app.log
   format: text                # "text" or "json"
   from_beginning: true        # replay-like; false tails from EOF
-  cursor_path: ""             # default: <data_dir>/cursors/file-<name>.cursor
+  cursor_path: ""             # default: <storage.file.data_dir>/cursors/file-<name>.cursor
   max_line_bytes: 65536
   max_lines_per_pull: 1000    # cap signals returned per tick; the rest carries to the next Pull
   timestamp_layout: ""        # Go time layout; empty = auto
@@ -325,7 +338,7 @@ elasticsearch:
 ## Admin endpoints
 
 All `/api/agent/*` endpoints require the `X-Gateway-Secret` header to
-match `agent.gateway_secret`. With no secret configured the endpoints
+match the root-level `gateway_secret`. With no secret configured the endpoints
 are not registered and the agent refuses to start.
 
 | Method | Path | Description |
@@ -340,7 +353,7 @@ are not registered and the agent refuses to start.
 Example:
 
 ```bash
-curl -H "X-Gateway-Secret: $AGENT_GATEWAY_SECRET" \
+curl -H "X-Gateway-Secret: $GATEWAY_SECRET" \
   -H 'Content-Type: application/json' \
   -d '{"verdict":"known","tags":["deploy-rollout","benign"]}' \
   http://localhost:3000/api/agent/patterns/p-abc123

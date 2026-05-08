@@ -41,6 +41,20 @@ see [GitHub Project](https://github.com/orgs/VersusControl/projects/2).
 - [x] Helm chart published to OCI registry
 - [x] `/healthz` endpoint
 - [x] Resolved-alert short-circuit (skip on-call when `status=resolved`)
+- [x] **Pluggable storage backend** (`storage.Provider`) shared by the agent
+  catalog, shadow log, and incident history; root-level `storage:` block
+  with `file` backend (production) and `redis` / `database` config stubs
+- [x] **Root-level `gateway_secret`** protecting all admin endpoints
+  (`/api/admin/*` and `/api/agent/*`) via the `X-Gateway-Secret` header
+
+### Incident management UI
+- [x] React + Vite + Tailwind SPA shipped under `ui/`
+- [x] Persistent incident history (`POST /api/incidents` writes a record;
+  `GET /api/ack/:id` stamps `acked_at`)
+- [x] **Admin endpoints** `GET /api/admin/incidents` (list) and
+  `GET /api/admin/incidents/:id` (full detail), gated by `X-Gateway-Secret`
+- [x] **Incidents page** (search + Open/Acked/Resolved filter) and detail
+  page (payload, channels notified, on-call status, timeline)
 
 ### AI SRE Agent — foundations
 - [x] Agent enable/disable master switch (`agent.enable`)
@@ -94,9 +108,9 @@ isn't wired.
 
 ## Planned (v1.4.0 release scope)
 
-- [ ] **Agent web dashboard** — lightweight SPA at `/ui/agent/`
-  (status, sortable catalog, shadow viewer, service grace control).
-  Same `X-Gateway-Secret` auth.
+- [ ] **Agent web dashboard** — extend the existing SPA at `ui/` with
+  agent surfaces (status, sortable catalog, shadow viewer, service grace
+  control). Same `X-Gateway-Secret` auth as the incident pages.
 - [ ] **Reliability & load testing** — graceful degradation on log-source
   outages, AI timeouts, and high log volume.
 - [ ] **Security review** — verify no sensitive data leaks into logs or AI
@@ -117,7 +131,6 @@ isn't wired.
 | 6 | Multiple AI providers (Anthropic, Bedrock, Ollama) + cost optimization | Model choice + spend control |
 | — | Prometheus metrics endpoint for Versus itself | Operate the operator |
 | — | Multiple template sets per channel | Different templates for different incident classes |
-| — | Web UI for incident management (beyond agent dashboard) | Inbox/triage view |
 | — | GCP Pub/Sub + Azure Service Bus listeners | Parity with AWS SNS/SQS |
 
 ---

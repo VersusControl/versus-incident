@@ -17,4 +17,8 @@ func SetupRoutes(app *fiber.App) {
 	incidents.Post("/", controllers.CreateIncident)
 
 	api.Get("/ack/:incidentID", controllers.HandleAck)
+
+	// Admin read endpoints (gated by X-Gateway-Secret). Mounted here so
+	// the controller can attach its own middleware via the group.
+	controllers.NewIncidentAdminController().Register(api)
 }

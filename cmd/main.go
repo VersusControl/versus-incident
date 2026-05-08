@@ -8,7 +8,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -19,6 +18,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/routes"
 	"github.com/VersusControl/versus-incident/pkg/services"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssmincidents"
 	"github.com/go-redis/redis/v8"
@@ -35,6 +35,40 @@ func main() {
 	}
 
 	cfg := c.GetConfig()
+
+	// Construct the durable storage provider once and inject everywhere
+	// that needs to persist (agent catalog/shadow, incident history). Today
+	// only the file backend is implemented; redis/database return
+	// storage.ErrUnsupported.
+	store, err := storage.New(storage.Config{
+		Type: cfg.Storage.Type,
+		File: storage.FileOptions{
+			DataDir:      cfg.Storage.File.DataDir,
+			MaxIncidents: cfg.Storage.File.MaxIncidents,
+		},
+		Redis: storage.RedisOptions{
+			Host:               cfg.Storage.Redis.Host,
+			Port:               cfg.Storage.Redis.Port,
+			Password:           cfg.Storage.Redis.Password,
+			DB:                 cfg.Storage.Redis.DB,
+			InsecureSkipVerify: cfg.Storage.Redis.InsecureSkipVerify,
+			KeyPrefix:          cfg.Storage.Redis.KeyPrefix,
+			MaxIncidents:       cfg.Storage.Redis.MaxIncidents,
+		},
+		Database: storage.DatabaseOptions{
+			Driver:       cfg.Storage.Database.Driver,
+			DSN:          cfg.Storage.Database.DSN,
+			MaxIncidents: cfg.Storage.Database.MaxIncidents,
+		},
+	})
+	if err != nil {
+		log.Fatalf("Failed to initialize storage: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	// Make storage available to the incident service (used to persist every
+	// alert + record acks).
+	services.SetStorage(store)
 
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true, // Disable the default Fiber banner
@@ -108,12 +142,17 @@ func main() {
 			}
 		}
 
-		cat, err := startAgent(rootCtx, app, cfg.Agent, rdb)
+		cat, err := startAgent(rootCtx, app, cfg.Agent, cfg.GatewaySecret, store, rdb)
 		if err != nil {
 			log.Fatalf("agent: failed to start: %v", err)
 		}
 		_ = cat // catalog handle held by goroutine + admin controller
 	}
+
+	// Mount the embedded UI LAST so it sits behind every API route. The
+	// SPA fallback inside MountStaticUI defers /api/* and /healthz back
+	// to the API handlers (which have already matched).
+	controllers.MountStaticUI(app)
 
 	// Trap SIGINT/SIGTERM so the HTTP server stops accepting connections
 	// and any background workers (currently just the agent) get a chance to
@@ -142,41 +181,22 @@ func main() {
 // startAgent constructs the worker, starts it in a goroutine, and registers
 // admin routes on the fiber app. It returns the catalog so the caller can
 // hold a reference (and so future hot-reload code has a handle to it).
-func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, rdb *redis.Client) (*agent.Catalog, error) {
-	mode := cfg.Catalog.Mode
-	if mode == "" {
-		mode = "file"
-	}
-	if mode != "file" {
-		return nil, fmt.Errorf("agent: catalog.mode %q not supported (only %q is implemented)", mode, "file")
-	}
-	catalogPath := cfg.CatalogPath()
-
-	// Ensure the catalog directory exists so LoadCatalog / Persist don't fail
-	// on a fresh install where the user hasn't created the data dir yet.
-	if dir := filepath.Dir(catalogPath); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("agent: create catalog directory %s: %w", dir, err)
-		}
-	}
-
-	catalog, err := agent.LoadCatalog(catalogPath)
+func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewaySecret string, store storage.Provider, rdb *redis.Client) (*agent.Catalog, error) {
+	catalog, err := agent.LoadCatalog(store)
 	if err != nil {
 		log.Printf("agent: catalog load warning: %v (starting fresh)", err)
 	}
-	log.Printf("agent: catalog loaded mode=%s path=%s patterns=%d", mode, catalogPath, catalog.Len())
+	log.Printf("agent: catalog loaded patterns=%d", catalog.Len())
 
 	// Shadow log: only meaningful when running in shadow mode, but we always
 	// load it so a mode switch (e.g. operator flips agent.mode=shadow at
-	// runtime) doesn't lose history. Path lives next to the catalog under
-	// <data_dir>/shadow.json.
-	shadowPath := cfg.ShadowPath()
-	shadowLog, err := agent.LoadShadowLog(shadowPath, 0)
+	// runtime) doesn't lose history.
+	shadowLog, err := agent.LoadShadowLog(store, 0)
 	if err != nil {
 		log.Printf("agent: shadow log load warning: %v (starting fresh)", err)
 	}
 	if cfg.Mode == "shadow" {
-		log.Printf("agent: shadow log loaded path=%s events=%d", shadowPath, shadowLog.Len())
+		log.Printf("agent: shadow log loaded events=%d", shadowLog.Len())
 	}
 
 	miner := agent.NewMiner(cfg.Miner.SimilarityThreshold, cfg.Miner.TreeDepth, cfg.Miner.MaxChildren)
@@ -226,8 +246,8 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, rdb *red
 
 	go worker.Run(ctx)
 
-	// Admin endpoints (require AGENT_GATEWAY_SECRET).
-	if cfg.GatewaySecret == "" {
+	// Admin endpoints (require GATEWAY_SECRET).
+	if gatewaySecret == "" {
 		return nil, fmt.Errorf("agent: gateway_secret is not configured — /api/agent/* admin endpoints require a secret")
 	}
 	api := app.Group("/api")
@@ -261,10 +281,19 @@ V       V   EEEEE   RRRRR   SSSSS   U       U   SSSSS
 │       (bound on host %s and port %d)       │
 └───────────────────────────────────────────────────┘
 
-/api/incidents -> receive incident data
-/api%s       -> receive alerts from AWS SNS
-/api/ack       -> acknowledge on-call alerts
-`, cfg.Host, cfg.Port, cfg.Queue.SNS.EndpointPath)
+Dashboard UI   -> http://%s:%d/
+Health check   -> http://%s:%d/healthz
+Create alert   -> POST http://%s:%d/api/incidents
+Acknowledge    -> GET  http://%s:%d/api/ack/:id
+Admin incidents-> GET  http://%s:%d/api/admin/incidents
+Agent status   -> GET  http://%s:%d/api/agent/status
+`, cfg.Host, cfg.Port,
+		cfg.Host, cfg.Port,
+		cfg.Host, cfg.Port,
+		cfg.Host, cfg.Port,
+		cfg.Host, cfg.Port,
+		cfg.Host, cfg.Port,
+		cfg.Host, cfg.Port)
 }
 
 func handleQueueMessage(content *map[string]interface{}) error {
