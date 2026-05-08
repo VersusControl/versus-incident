@@ -17,6 +17,12 @@ type Config struct {
 	Port       int
 	PublicHost string `mapstructure:"public_host"`
 
+	// GatewaySecret is the shared secret required by every admin endpoint
+	// (`/api/admin/*` and `/api/agent/*`). Clients send the same value in
+	// the `X-Gateway-Secret` header. When empty, admin endpoints are NOT
+	// registered and the agent refuses to start.
+	GatewaySecret string `mapstructure:"gateway_secret"`
+
 	Alert  AlertConfig
 	Queue  QueueConfig
 	OnCall OnCallConfig
@@ -24,7 +30,45 @@ type Config struct {
 
 	Redis RedisConfig `mapstructure:"redis"`
 
+	Storage StorageConfig `mapstructure:"storage"`
+
 	Agent AgentConfig `mapstructure:"agent"`
+}
+
+// StorageConfig is the durable-storage block. It is the single source of
+// truth for where the agent persists its catalog/shadow log AND where
+// the incident service writes incident history. Type-specific sub-blocks
+// are only consulted when `type` matches.
+type StorageConfig struct {
+	Type     string                `mapstructure:"type"` // file | redis | database (default: file)
+	File     StorageFileConfig     `mapstructure:"file"`
+	Redis    StorageRedisConfig    `mapstructure:"redis"`
+	Database StorageDatabaseConfig `mapstructure:"database"`
+}
+
+// StorageFileConfig is the file backend's options. Only consulted when
+// storage.type == "file".
+type StorageFileConfig struct {
+	DataDir      string `mapstructure:"data_dir"`
+	MaxIncidents int    `mapstructure:"max_incidents"` // rolling cap; default 1000
+}
+
+// StorageRedisConfig is the redis backend's options. Stub today.
+type StorageRedisConfig struct {
+	Host               string `mapstructure:"host"`
+	Port               int    `mapstructure:"port"`
+	Password           string `mapstructure:"password"`
+	DB                 int    `mapstructure:"db"`
+	InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"`
+	KeyPrefix          string `mapstructure:"key_prefix"`
+	MaxIncidents       int    `mapstructure:"max_incidents"`
+}
+
+// StorageDatabaseConfig is the database backend's options. Stub today.
+type StorageDatabaseConfig struct {
+	Driver       string `mapstructure:"driver"` // postgres | mysql | sqlite
+	DSN          string `mapstructure:"dsn"`
+	MaxIncidents int    `mapstructure:"max_incidents"`
 }
 
 type ProxyConfig struct {
@@ -224,13 +268,21 @@ func LoadConfig(path string) error {
 			cfg.OnCall.Provider = provider
 		}
 
+		// Storage env overrides
+		if t := os.Getenv("STORAGE_TYPE"); t != "" {
+			cfg.Storage.Type = t
+		}
+		if d := os.Getenv("STORAGE_FILE_DATA_DIR"); d != "" {
+			cfg.Storage.File.DataDir = d
+		}
+
 		// Agent mode env overrides
 		setEnableFromEnv("AGENT_ENABLE", &cfg.Agent.Enable)
 		if mode := os.Getenv("AGENT_MODE"); mode != "" {
 			cfg.Agent.Mode = mode
 		}
-		if secret := os.Getenv("AGENT_GATEWAY_SECRET"); secret != "" {
-			cfg.Agent.GatewaySecret = secret
+		if secret := os.Getenv("GATEWAY_SECRET"); secret != "" {
+			cfg.GatewaySecret = secret
 		}
 		if sp := os.Getenv("AGENT_SOURCES_PATH"); sp != "" {
 			cfg.Agent.SourcesPath = sp

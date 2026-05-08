@@ -1,0 +1,9 @@
+node_modules
+dist/*
+!dist/.gitkeep
+dist-ssr
+*.local
+.vite
+.DS_Store
+.env
+.env.*.local

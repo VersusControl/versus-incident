@@ -1,0 +1,130 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------- Datadog-ish base resets ---------- */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family: theme("fontFamily.sans");
+  font-size: 13px;
+  font-feature-settings: "cv11", "ss01";
+}
+
+::selection {
+  background: theme("colors.accent.subtle");
+  color: theme("colors.ink.50");
+}
+
+/* Custom scrollbar — slim, dark-friendly */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: theme("colors.ink.300");
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: theme("colors.ink.400");
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+
+/* Apply dark scrollbar inside the sidebar */
+.dark-scroll::-webkit-scrollbar-thumb {
+  background: theme("colors.ink.700");
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+
+@layer components {
+  /* Card surface used across the admin pages */
+  .card {
+    @apply rounded-md border border-ink-100 bg-white shadow-sm;
+  }
+  .card-header {
+    @apply flex items-center justify-between border-b border-ink-100 px-4 py-3;
+  }
+  .card-title {
+    @apply text-sm font-semibold text-ink-900;
+  }
+  .card-body {
+    @apply p-4;
+  }
+
+  /* Pill / tag */
+  .pill {
+    @apply inline-flex items-center gap-1 rounded-full border border-ink-100
+           bg-ink-50 px-2 py-0.5 text-2xs font-medium text-ink-700;
+  }
+  .pill-good   { @apply border-good/30   bg-good/10   text-good; }
+  .pill-warn   { @apply border-warn/30   bg-warn/10   text-warn; }
+  .pill-bad    { @apply border-bad/30    bg-bad/10    text-bad; }
+  .pill-accent { @apply border-accent/30 bg-accent/10 text-accent; }
+
+  /* Buttons */
+  .btn {
+    @apply inline-flex items-center gap-1.5 rounded-md border border-ink-200
+           bg-white px-3 py-1.5 text-xs font-medium text-ink-800
+           transition-colors hover:bg-ink-50 disabled:cursor-not-allowed
+           disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply border-accent bg-accent text-white hover:bg-accent-hover;
+  }
+  .btn-danger {
+    @apply border-bad/40 bg-white text-bad hover:bg-bad/10;
+  }
+
+  /* Stat card (used on the status dashboard) */
+  .stat-card {
+    @apply card flex flex-col gap-1 p-4;
+  }
+  .stat-label {
+    @apply text-2xs uppercase tracking-wider text-ink-400;
+  }
+  .stat-value {
+    @apply text-2xl font-semibold text-ink-900;
+  }
+  .stat-foot {
+    @apply text-2xs text-ink-400;
+  }
+
+  /* Dense Datadog-style table */
+  .ddt {
+    @apply w-full text-left text-xs;
+  }
+  .ddt thead {
+    @apply sticky top-0 z-10 bg-ink-50 text-2xs uppercase tracking-wider
+           text-ink-400;
+  }
+  .ddt th {
+    @apply border-b border-ink-100 px-3 py-2 font-medium;
+  }
+  .ddt td {
+    @apply border-b border-ink-100 px-3 py-2 text-ink-800;
+  }
+  .ddt tr:hover td {
+    @apply bg-ink-50/70;
+  }
+
+  /* Inline form controls */
+  .input {
+    @apply h-8 w-full rounded-md border border-ink-200 bg-white px-2 text-xs
+           text-ink-900 placeholder:text-ink-300 focus:border-accent
+           focus:outline-none focus:ring-2 focus:ring-accent/20;
+  }
+  textarea.input {
+    @apply h-auto py-2;
+  }
+}

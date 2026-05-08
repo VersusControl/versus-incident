@@ -1,7 +1,5 @@
 package config
 
-import "path/filepath"
-
 // -----------------------------------------------------------------------------
 // Agent mode (AI incident detection) — see local/plans/ai-incident-detection
 // -----------------------------------------------------------------------------
@@ -13,8 +11,6 @@ type AgentConfig struct {
 	Lookback       string `mapstructure:"lookback"`      // e.g. "5m"
 	BatchMax       int    `mapstructure:"batch_max"`
 	SignalMaxBytes int    `mapstructure:"signal_max_bytes"`
-	GatewaySecret  string `mapstructure:"gateway_secret"`
-	DataDir        string `mapstructure:"data_dir"`
 
 	// NewServiceGrace is the duration a newly discovered service stays in
 	// implicit training mode before detect-mode AI analysis begins. Signals
@@ -48,11 +44,6 @@ type AgentRedactionConfig struct {
 }
 
 type AgentCatalogConfig struct {
-	// Mode selects the catalog storage backend. Currently only "file" is
-	// supported — the catalog is persisted as `<agent.data_dir>/patterns.json`.
-	// Reserved for future backends: "redis", "database", etc. The catalog
-	// filename is fixed and not user-configurable.
-	Mode             string `mapstructure:"mode"`
 	PersistInterval  string `mapstructure:"persist_interval"`   // e.g. "30s"
 	AutoPromoteAfter int    `mapstructure:"auto_promote_after"` // 0 = never
 	// SpikeMultiplier flags a tick as a frequency spike when the tick
@@ -69,33 +60,12 @@ type AgentCatalogConfig struct {
 	SpikeMinBaselineCount int `mapstructure:"spike_min_baseline_count"`
 }
 
-// CatalogFileName is the fixed filename used by the "file" catalog backend.
-// Not user-configurable.
-const CatalogFileName = "patterns.json"
+// CatalogBlobName is the storage blob key used by the agent catalog.
+// Backends translate this into a path / redis key / row.
+const CatalogBlobName = "patterns"
 
-// ShadowFileName is the fixed filename for the shadow-mode would-have-alerted
-// log. Lives alongside the catalog under `<data_dir>`.
-const ShadowFileName = "shadow.json"
-
-// ResolvedDataDir returns the configured data dir or the default ("data").
-func (a *AgentConfig) ResolvedDataDir() string {
-	if a.DataDir == "" {
-		return "data"
-	}
-	return a.DataDir
-}
-
-// CatalogPath returns the on-disk path used by the "file" catalog backend:
-// `<data_dir>/patterns.json`. The filename is fixed.
-func (a *AgentConfig) CatalogPath() string {
-	return filepath.Join(a.ResolvedDataDir(), CatalogFileName)
-}
-
-// ShadowPath returns the on-disk path used by the shadow log:
-// `<data_dir>/shadow.json`. The filename is fixed.
-func (a *AgentConfig) ShadowPath() string {
-	return filepath.Join(a.ResolvedDataDir(), ShadowFileName)
-}
+// ShadowBlobName is the storage blob key used by the shadow log.
+const ShadowBlobName = "shadow"
 
 type AgentMinerConfig struct {
 	SimilarityThreshold float64 `mapstructure:"similarity_threshold"`

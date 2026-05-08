@@ -3,11 +3,11 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 // ShadowEvent is one "we would have alerted on this" record produced by the
@@ -34,11 +34,12 @@ type ShadowEvent struct {
 // debounced — Record sets a dirty flag that the worker flushes at most once
 // per `persist_interval`.
 type ShadowLog struct {
-	mu     sync.RWMutex
-	path   string
-	events map[string]*ShadowEvent // key = source + "\x00" + pattern_id
-	max    int
-	dirty  bool
+	mu       sync.RWMutex
+	store    storage.Provider
+	blobName string
+	events   map[string]*ShadowEvent // key = source + "\x00" + pattern_id
+	max      int
+	dirty    bool
 }
 
 // shadowFile is the on-disk schema. Versioned for future evolution.
@@ -60,33 +61,34 @@ const (
 	shadowSampleMaxBytes = 512
 )
 
-// LoadShadowLog opens an existing shadow log at `path` or returns an empty
-// one when no file is present. `max` caps distinct events; pass 0 for the
-// default. An empty path disables persistence (in-memory only).
-func LoadShadowLog(path string, max int) (*ShadowLog, error) {
+// LoadShadowLog opens an existing shadow log from the storage provider or
+// returns an empty one when no blob is present. `max` caps distinct events;
+// pass 0 for the default. A nil store disables persistence (in-memory only).
+func LoadShadowLog(store storage.Provider, max int) (*ShadowLog, error) {
 	if max <= 0 {
 		max = shadowDefaultMax
 	}
 	s := &ShadowLog{
-		path:   path,
-		events: make(map[string]*ShadowEvent),
-		max:    max,
+		store:    store,
+		blobName: "shadow",
+		events:   make(map[string]*ShadowEvent),
+		max:      max,
 	}
-	if path == "" {
+	if store == nil {
 		return s, nil
 	}
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return s, nil
-	}
+	data, err := store.ReadBlob(s.blobName)
 	if err != nil {
 		return s, fmt.Errorf("read shadow log: %w", err)
+	}
+	if len(data) == 0 {
+		return s, nil
 	}
 	var f shadowFile
 	if err := json.Unmarshal(data, &f); err != nil {
 		// Don't hard-fail on a corrupt shadow log: it's a debug artifact, not
 		// the source of truth. Start fresh and let the worker rebuild it.
-		return s, fmt.Errorf("parse shadow log %s: %w (starting fresh)", path, err)
+		return s, fmt.Errorf("parse shadow log: %w (starting fresh)", err)
 	}
 	for _, e := range f.Events {
 		if e == nil || e.PatternID == "" {
@@ -240,19 +242,16 @@ func (s *ShadowLog) Dirty() bool {
 	return s.dirty
 }
 
-// Persist atomically writes the shadow log to disk. Safe to call concurrently
-// with Record / Clear. No-op when path is empty (in-memory mode).
+// Persist atomically writes the shadow log via the storage backend. Safe to
+// call concurrently with Record / Clear. No-op when store is nil.
 func (s *ShadowLog) Persist() error {
-	if s.path == "" {
+	if s.store == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.dirty {
 		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return fmt.Errorf("mkdir shadow log: %w", err)
 	}
 
 	// Materialize a stable, sorted slice (most-recent first) so the file
@@ -272,12 +271,8 @@ func (s *ShadowLog) Persist() error {
 	if err != nil {
 		return fmt.Errorf("marshal shadow log: %w", err)
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("write tmp shadow log: %w", err)
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		return fmt.Errorf("rename tmp shadow log: %w", err)
+	if err := s.store.WriteBlob(s.blobName, data); err != nil {
+		return err
 	}
 	s.dirty = false
 	return nil

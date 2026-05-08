@@ -1,16 +1,27 @@
 package agent
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
-func TestCatalog_RoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "patterns.json")
+// newTestStore returns a file-backed storage provider rooted in t.TempDir.
+// Used by tests that need to persist and reload across catalog instances.
+func newTestStore(t *testing.T) storage.Provider {
+	t.Helper()
+	s, err := storage.NewFile(storage.FileOptions{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewFile: %v", err)
+	}
+	return s
+}
 
-	cat, err := LoadCatalog(path)
+func TestCatalog_RoundTrip(t *testing.T) {
+	store := newTestStore(t)
+
+	cat, err := LoadCatalog(store)
 	if err != nil {
 		t.Fatalf("initial load (no file) should succeed: %v", err)
 	}
@@ -39,8 +50,8 @@ func TestCatalog_RoundTrip(t *testing.T) {
 		t.Errorf("catalog should not be dirty immediately after persist")
 	}
 
-	// Reload from disk.
-	cat2, err := LoadCatalog(path)
+	// Reload from the same store.
+	cat2, err := LoadCatalog(store)
 	if err != nil {
 		t.Fatalf("reload failed: %v", err)
 	}
@@ -53,8 +64,7 @@ func TestCatalog_RoundTrip(t *testing.T) {
 }
 
 func TestCatalog_LabelAndDelete(t *testing.T) {
-	dir := t.TempDir()
-	cat, _ := LoadCatalog(filepath.Join(dir, "patterns.json"))
+	cat, _ := LoadCatalog(storage.NewMemory())
 	cat.Upsert("p-x", "hello <*>", "src", 1, 0.2, "", "")
 
 	if !cat.Label("p-x", "known", []string{"auth", "noisy"}) {
@@ -80,8 +90,7 @@ func TestCatalog_LabelAndDelete(t *testing.T) {
 }
 
 func TestCatalog_UpsertAppliesRegexTag(t *testing.T) {
-	dir := t.TempDir()
-	cat, _ := LoadCatalog(filepath.Join(dir, "patterns.json"))
+	cat, _ := LoadCatalog(storage.NewMemory())
 
 	// First-seen with named rule -> RuleName stored.
 	cat.Upsert("p-1", "Out of memory <*>", "src", 1, 0.2, "oom-killer", "")
@@ -109,9 +118,8 @@ func TestCatalog_UpsertAppliesRegexTag(t *testing.T) {
 }
 
 func TestCatalog_ServiceTracking(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "patterns.json")
-	cat, _ := LoadCatalog(path)
+	store := newTestStore(t)
+	cat, _ := LoadCatalog(store)
 
 	// First registration returns true.
 	if !cat.RegisterService("checkout-v2") {
@@ -166,7 +174,7 @@ func TestCatalog_ServiceTracking(t *testing.T) {
 	if err := cat.Persist(); err != nil {
 		t.Fatalf("persist failed: %v", err)
 	}
-	cat2, err := LoadCatalog(path)
+	cat2, err := LoadCatalog(store)
 	if err != nil {
 		t.Fatalf("reload failed: %v", err)
 	}

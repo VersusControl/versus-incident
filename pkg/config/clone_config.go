@@ -7,19 +7,46 @@ func cloneConfig(src *Config) *Config {
 
 	// Create a new Config and copy all fields
 	cloned := &Config{
-		Name:       src.Name,
-		Host:       src.Host,
-		Port:       src.Port,
-		PublicHost: src.PublicHost,
-		Alert:      cloneAlertConfig(src.Alert),
-		Queue:      cloneQueueConfig(src.Queue),
-		OnCall:     cloneOnCallConfig(src.OnCall),
-		Proxy:      cloneProxyConfig(src.Proxy),
-		Redis:      cloneRedisConfig(src.Redis),
-		Agent:      cloneAgentConfig(src.Agent),
+		Name:          src.Name,
+		Host:          src.Host,
+		Port:          src.Port,
+		PublicHost:    src.PublicHost,
+		GatewaySecret: src.GatewaySecret,
+		Alert:         cloneAlertConfig(src.Alert),
+		Queue:         cloneQueueConfig(src.Queue),
+		OnCall:        cloneOnCallConfig(src.OnCall),
+		Proxy:         cloneProxyConfig(src.Proxy),
+		Redis:         cloneRedisConfig(src.Redis),
+		Storage:       cloneStorageConfig(src.Storage),
+		Agent:         cloneAgentConfig(src.Agent),
 	}
 
 	return cloned
+}
+
+// Helper function to deep clone the StorageConfig struct
+func cloneStorageConfig(src StorageConfig) StorageConfig {
+	return StorageConfig{
+		Type: src.Type,
+		File: StorageFileConfig{
+			DataDir:      src.File.DataDir,
+			MaxIncidents: src.File.MaxIncidents,
+		},
+		Redis: StorageRedisConfig{
+			Host:               src.Redis.Host,
+			Port:               src.Redis.Port,
+			Password:           src.Redis.Password,
+			DB:                 src.Redis.DB,
+			InsecureSkipVerify: src.Redis.InsecureSkipVerify,
+			KeyPrefix:          src.Redis.KeyPrefix,
+			MaxIncidents:       src.Redis.MaxIncidents,
+		},
+		Database: StorageDatabaseConfig{
+			Driver:       src.Database.Driver,
+			DSN:          src.Database.DSN,
+			MaxIncidents: src.Database.MaxIncidents,
+		},
+	}
 }
 
 // Helper function to deep clone the AlertConfig struct
@@ -242,8 +269,6 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 		Lookback:        src.Lookback,
 		BatchMax:        src.BatchMax,
 		SignalMaxBytes:  src.SignalMaxBytes,
-		GatewaySecret:   src.GatewaySecret,
-		DataDir:         src.DataDir,
 		NewServiceGrace: src.NewServiceGrace,
 		ServicePatterns: append([]string(nil), src.ServicePatterns...),
 		SourcesPath:     src.SourcesPath,
@@ -252,7 +277,6 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 			RedactIPs: src.Redaction.RedactIPs,
 		},
 		Catalog: AgentCatalogConfig{
-			Mode:                  src.Catalog.Mode,
 			PersistInterval:       src.Catalog.PersistInterval,
 			AutoPromoteAfter:      src.Catalog.AutoPromoteAfter,
 			SpikeMultiplier:       src.Catalog.SpikeMultiplier,

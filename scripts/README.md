@@ -53,7 +53,7 @@ python3 scripts/generate_noisy_logs.py --append --start-time now \
   --spike db-conn-refused --spike-burst 80
 
 # 4. Check the shadow log for spike verdicts
-curl -H "X-Gateway-Secret: $AGENT_GATEWAY_SECRET" \
+curl -H "X-Gateway-Secret: $GATEWAY_SECRET" \
   http://localhost:3000/api/agent/shadow | jq '.[] | select(.verdict=="spike")'
 ```
 
@@ -279,11 +279,11 @@ sources:
 ./scripts/run_makelogs.sh           # elasticsearch source
 
 # terminal 3 — peek at what the agent learned
-curl -H "X-Gateway-Secret: $AGENT_GATEWAY_SECRET" \
+curl -H "X-Gateway-Secret: $GATEWAY_SECRET" \
      http://localhost:3000/api/agent/patterns | jq
 
 # bonus: source / cursor status
-curl -H "X-Gateway-Secret: $AGENT_GATEWAY_SECRET" \
+curl -H "X-Gateway-Secret: $GATEWAY_SECRET" \
      http://localhost:3000/api/agent/status | jq
 ```
 

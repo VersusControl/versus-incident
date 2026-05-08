@@ -3,6 +3,12 @@ host: 0.0.0.0
 port: 3000
 public_host: https://your-host.example
 
+# Shared secret required by all admin endpoints (`/api/admin/*` and
+# `/api/agent/*`). Clients send the same value in the `X-Gateway-Secret`
+# header. When empty, admin endpoints reject every request and the agent
+# refuses to start.
+gateway_secret: ${GATEWAY_SECRET}
+
 # Proxy configuration (global settings)
 proxy:
   url: ${PROXY_URL}           # HTTP/HTTPS/SOCKS5 proxy URL (e.g., http://proxy.example.com:8080)
@@ -118,6 +124,32 @@ redis: # Required for on-call functionality
   db: 0
 
 # -----------------------------------------------------------------------------
+# Storage backend used by BOTH the agent (catalog, shadow log, services) and
+# the incident service (history shown in the UI).
+#
+# Pick a `type` and fill in the matching sub-block. Today only `file` is
+# implemented end-to-end; `redis` and `database` are config stubs that error
+# at startup if selected.
+# -----------------------------------------------------------------------------
+storage:
+  type: file                     # file | redis | database (env: STORAGE_TYPE)
+  file:
+    data_dir: ./data             # absolute or relative to the working dir
+    max_incidents: 1000          # rolling cap; older records dropped on save
+  # redis:                       # not yet implemented
+  #   host: ${REDIS_HOST}
+  #   port: 6379
+  #   password: ${REDIS_PASSWORD}
+  #   db: 1
+  #   insecure_skip_verify: true
+  #   key_prefix: "versus:storage:"
+  #   max_incidents: 1000
+  # database:                    # not yet implemented
+  #   driver: postgres           # postgres | mysql | sqlite
+  #   dsn: ${DATABASE_DSN}
+  #   max_incidents: 5000
+
+# -----------------------------------------------------------------------------
 # AI agent mode (training | shadow | detect) — opt-in.
 #
 # When agent.enable=false (the default), nothing changes: no goroutines start,
@@ -138,8 +170,6 @@ agent:
   lookback: 5m                    # initial backfill window on startup
   batch_max: 5000                 # safety cap per tick
   signal_max_bytes: 65536         # cap on Signal.Raw
-  gateway_secret: ${AGENT_GATEWAY_SECRET}  # shared secret for /api/agent/* endpoints (sent in X-Gateway-Secret header)
-  data_dir: ./data
 
   # Signal sources are kept in a separate file so users can manage them
   # independently of the main config. Path is resolved relative to this
@@ -154,7 +184,6 @@ agent:
       - "Authorization:\\s*Bearer\\s+\\S+"
 
   catalog:
-    mode: file                    # storage backend; only "file" is supported today (planned: redis, database)
     persist_interval: 30s
     auto_promote_after: 50       # in detect mode, this many sightings = "known"
     # Spike detection: a known pattern is re-flagged when its tick-level

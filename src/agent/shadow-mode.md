@@ -27,8 +27,8 @@ docker run -d \
 
 Or change `agent.mode` in `config.yaml` and restart.
 
-The catalog and the shadow log live next to each other under
-`data_dir`:
+The catalog and the shadow log live next to each other under the
+storage backend's `data_dir` (root-level `storage.file.data_dir`):
 
 ```
 data/
@@ -258,11 +258,11 @@ to triage them.
 
 The `/api/agent/shadow*` endpoints are how you actually use the
 log. They're admin-only — every request needs the
-`X-Gateway-Secret` header (set with `AGENT_GATEWAY_SECRET`). The
+`X-Gateway-Secret` header (set with `GATEWAY_SECRET`). The
 examples below assume you saved that value into a shell variable:
 
 ```bash
-export SECRET=change-me   # whatever you set as AGENT_GATEWAY_SECRET
+export SECRET=change-me   # whatever you set as GATEWAY_SECRET
 ```
 
 All responses are JSON; piping to `jq` (or `python -m json.tool`)

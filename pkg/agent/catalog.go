@@ -3,11 +3,11 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 // Pattern is one entry in the on-disk catalog (`patterns.json`).
@@ -58,7 +58,8 @@ type ServiceInfo struct {
 // at most once per `persist_interval`.
 type Catalog struct {
 	mu       sync.RWMutex
-	path     string
+	store    storage.Provider
+	blobName string
 	patterns map[string]*Pattern
 	services map[string]*ServiceInfo
 	dirty    bool
@@ -75,28 +76,30 @@ type catalogFile struct {
 
 const catalogFileVersion = 1
 
-// LoadCatalog opens an existing patterns file or returns an empty catalog if
-// none exists.
-func LoadCatalog(path string) (*Catalog, error) {
+// LoadCatalog opens an existing patterns blob from the storage provider
+// or returns an empty catalog if none exists. The blob name is
+// config.CatalogBlobName ("patterns").
+func LoadCatalog(store storage.Provider) (*Catalog, error) {
 	c := &Catalog{
-		path:     path,
+		store:    store,
+		blobName: "patterns",
 		patterns: make(map[string]*Pattern),
 		services: make(map[string]*ServiceInfo),
 	}
-	if path == "" {
+	if store == nil {
 		return c, nil
 	}
 
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return c, nil // fresh start
-	}
+	data, err := store.ReadBlob(c.blobName)
 	if err != nil {
 		return c, err
 	}
+	if len(data) == 0 {
+		return c, nil // fresh start
+	}
 	var f catalogFile
 	if err := json.Unmarshal(data, &f); err != nil {
-		return c, fmt.Errorf("parse %s: %w", path, err)
+		return c, fmt.Errorf("parse catalog: %w", err)
 	}
 	if f.Patterns != nil {
 		c.patterns = f.Patterns
@@ -249,19 +252,16 @@ func (c *Catalog) Dirty() bool {
 	return c.dirty
 }
 
-// Persist flushes the in-memory catalog to disk atomically. Safe to call
-// concurrently with Upsert/Label/Delete.
+// Persist flushes the in-memory catalog to the storage backend. Safe to
+// call concurrently with Upsert/Label/Delete.
 func (c *Catalog) Persist() error {
-	if c.path == "" {
+	if c.store == nil {
 		return nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.dirty {
 		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
-		return fmt.Errorf("mkdir catalog: %w", err)
 	}
 
 	f := catalogFile{
@@ -274,14 +274,8 @@ func (c *Catalog) Persist() error {
 	if err != nil {
 		return fmt.Errorf("marshal catalog: %w", err)
 	}
-
-	// atomic write: temp + rename
-	tmp := c.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("write tmp catalog: %w", err)
-	}
-	if err := os.Rename(tmp, c.path); err != nil {
-		return fmt.Errorf("rename tmp catalog: %w", err)
+	if err := c.store.WriteBlob(c.blobName, data); err != nil {
+		return err
 	}
 	c.dirty = false
 	return nil

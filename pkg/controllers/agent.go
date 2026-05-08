@@ -61,7 +61,7 @@ func (a *AgentController) Register(router fiber.Router) {
 // Bearer prefix or other framing.
 func (a *AgentController) authMiddleware(c *fiber.Ctx) error {
 	cfg := config.GetConfig()
-	expected := cfg.Agent.GatewaySecret
+	expected := cfg.GatewaySecret
 	got := c.Get("X-Gateway-Secret")
 	if got == "" || got != expected {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})

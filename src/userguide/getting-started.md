@@ -533,11 +533,23 @@ port: 3000
 
 # ... existing alert configurations ...
 
+# Shared secret required for ALL admin endpoints (`/api/admin/*` and
+# `/api/agent/*`). Sent by clients in the `X-Gateway-Secret` header.
+gateway_secret: ${GATEWAY_SECRET}
+
+# Storage backend for the pattern catalog, shadow log, and incident
+# history. Only `file` is implemented today; `redis` and `database`
+# are config stubs.
+storage:
+  type: file              # file | redis | database (env: STORAGE_TYPE)
+  file:
+    data_dir: ./data
+    max_incidents: 1000   # rolling cap on persisted incidents
+
 agent:
   enable: false # Use this to enable or disable the agent for all sources
   mode: training # Valid values: "training", "shadow", or "detect"
   poll_interval: 30s
-  gateway_secret: ${AGENT_GATEWAY_SECRET} # Shared secret required for /api/agent/* endpoints (sent in X-Gateway-Secret header)
 
   # Sources are kept in a separate file so they can be managed independently
   # (e.g. swap fixtures, per-environment lists). Path is resolved relative to
@@ -545,7 +557,6 @@ agent:
   sources_path: ./agent_sources.yaml
 
   catalog:
-    mode: file # Storage backend for the pattern catalog. Currently only "file" is supported (the catalog is saved as <data_dir>/patterns.json).
     persist_interval: 30s
     auto_promote_after: 100 # In detect mode, this many sightings = "known"
 
@@ -590,17 +601,28 @@ The `agent` section includes:
    - `shadow`: same as training, but also logs a note every time it would have sent an alert. Good for reviewing before going live.
    - `detect`: the agent actively sends alerts for any pattern it has never seen before.
 3. `poll_interval`: How often the agent checks your log sources for new entries.
-4. `gateway_secret`: A shared secret that protects the `/api/agent/*` management endpoints. Set this to any value you choose; clients must send the same value in the `X-Gateway-Secret` header. When no secret is configured, the agent can't start.
-5. `catalog`: Where the agent stores the list of known patterns and how often to write updates. `mode` selects the storage backend — only `file` is supported today, which writes to `<data_dir>/patterns.json` (the filename is fixed).
-6. `redaction`: Rules for automatically removing sensitive information (passwords, tokens, emails, etc.) from logs before the agent processes them.
-7. `miner`: Controls how aggressively the agent groups similar log lines together. The defaults work well for most setups.
-8. `regex`: Acts as a **pre-filter** for the agent. Only signals whose message matches at least one rule (a named entry under `rules` or `default_pattern`) are forwarded to the pattern miner and stored in the catalog. Anything that doesn't match is dropped before clustering, so boring noise (200-OK requests, debug lines, etc.) never bloats `patterns.json`.
+4. `catalog`: Where the agent stores the list of known patterns and how often to write updates. `mode` selects the storage backend — only `file` is supported today, which writes to `<storage.file.data_dir>/patterns.json` (the filename is fixed).
+
+> **Admin secret.** All admin endpoints (`/api/admin/*` and
+> `/api/agent/*`) are protected by the **root-level** `gateway_secret`
+> (env `GATEWAY_SECRET`). Set it to any value you choose; clients send
+> the same value in the `X-Gateway-Secret` header. When no secret is
+> configured the admin endpoints are not registered and the agent
+> refuses to start.
+
+> **Storage.** The agent's catalog and the incident history shown in the
+> UI are persisted via the **root-level** `storage:` block (default:
+> `type: file`, `data_dir: ./data`). The agent's `data_dir` field has
+> been removed.
+5. `redaction`: Rules for automatically removing sensitive information (passwords, tokens, emails, etc.) from logs before the agent processes them.
+6. `miner`: Controls how aggressively the agent groups similar log lines together. The defaults work well for most setups.
+7. `regex`: Acts as a **pre-filter** for the agent. Only signals whose message matches at least one rule (a named entry under `rules` or `default_pattern`) are forwarded to the pattern miner and stored in the catalog. Anything that doesn't match is dropped before clustering, so boring noise (200-OK requests, debug lines, etc.) never bloats `patterns.json`.
 
    - Named `rules` are tried in order; the first match wins and tags the signal with that `name` (stored as `rule_name` on the pattern).
    - If no named rule hits, `default_pattern` is tried. Matches there are tagged with `name=default`.
    - **To learn from every line, set `default_pattern: ".*"`.** This is useful in early training when you don't yet know what's interesting.
    - **To filter aggressively, set `default_pattern: ""` (empty)** and rely on your named rules — anything that doesn't match an explicit rule is dropped.
-9. `sources_path`: Path to a separate YAML file that lists the log sources the agent should read from. Keeping sources in their own file makes it easier to manage per-environment source lists or swap fixtures without touching the rest of the config. The path is resolved relative to the main config file. Override via the `AGENT_SOURCES_PATH` env var.
+8. `sources_path`: Path to a separate YAML file that lists the log sources the agent should read from. Keeping sources in their own file makes it easier to manage per-environment source lists or swap fixtures without touching the rest of the config. The path is resolved relative to the main config file. Override via the `AGENT_SOURCES_PATH` env var.
 
 The sources file (default `./agent_sources.yaml`) has a single top-level `sources:` list. Each entry needs `name`, `type` (`file` or `elasticsearch`), `enable`, plus a matching `file:` or `elasticsearch:` block. Example:
 
