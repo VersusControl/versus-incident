@@ -1,12 +1,12 @@
 module github.com/VersusControl/versus-incident
 
-go 1.24
+go 1.25
 
 require (
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/gofiber/fiber/v2 v2.52.13
 	github.com/google/uuid v1.6.0
-	github.com/slack-go/slack v0.15.0
+	github.com/slack-go/slack v0.23.0
 	github.com/spf13/viper v1.21.0
 )
 
@@ -36,7 +36,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sns v1.39.17
 	github.com/aws/aws-sdk-go-v2/service/ssmincidents v1.39.22
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
-	github.com/go-test/deep v1.0.8 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
