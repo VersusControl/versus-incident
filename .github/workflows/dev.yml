@@ -95,7 +95,7 @@ jobs:
             org.opencontainers.image.licenses=MIT
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
