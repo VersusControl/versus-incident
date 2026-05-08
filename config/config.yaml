@@ -1,7 +1,7 @@
 name: versus
 host: 0.0.0.0
 port: 3000
-public_host: https://your-host.example
+public_host: ''
 
 # Shared secret required by all admin endpoints (`/api/admin/*` and
 # `/api/agent/*`). Clients send the same value in the `X-Gateway-Secret`

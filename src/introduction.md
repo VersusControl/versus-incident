@@ -12,6 +12,8 @@ An incident management tool that supports alerting across multiple channels with
 
 With the built-in **AI SRE Agent**, Versus goes further — continuously observing your logs, metrics, and traces, learning what normal looks like, and alerting you only when something new and unexpected appears.
 
+![Versus](docs/images/versus-dashboard.png)
+
 ### Features
 
 - 🚨 **Multi-channel Alerts**: Send incident notifications to Slack, Microsoft Teams, Telegram, and Email (more channels coming!)
@@ -21,7 +23,7 @@ With the built-in **AI SRE Agent**, Versus goes further — continuously observi
 - 📡 **On-call**: On-call integrations with AWS Incident Manager
 - 🤖 **AI Agent** *(Beta)*: An AI SRE agent that reads your logs, metrics and tracing, learns what normal looks like, and only alerts you when something new and unexpected appears.
 
-![versus](docs/images/versus-architecture.svg)
+![versus](docs/images/versus-architecture.png)
 
 ## Roadmap
 

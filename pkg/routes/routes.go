@@ -21,4 +21,5 @@ func SetupRoutes(app *fiber.App) {
 	// Admin read endpoints (gated by X-Gateway-Secret). Mounted here so
 	// the controller can attach its own middleware via the group.
 	controllers.NewIncidentAdminController().Register(api)
+	controllers.NewConfigAdminController().Register(api)
 }

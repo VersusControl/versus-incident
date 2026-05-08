@@ -4,6 +4,8 @@
 - [Sample Configuration File](#sample-configuration-file)
 - [Environment Variables](#environment-variables)
   - [Common](#common)
+  - [Admin & Gateway](#admin--gateway)
+  - [Storage](#storage)
   - [Slack Configuration](#slack-configuration)
   - [Telegram Configuration](#telegram-configuration)
   - [Email Configuration](#email-configuration)
@@ -12,9 +14,13 @@
   - [Queue Services Configuration](#queue-services-configuration)
   - [On-Call Configuration](#on-call-configuration)
   - [Redis Configuration](#redis-configuration)
+  - [AI Agent Configuration](#ai-agent-configuration)
 - [Dynamic Configuration with Query Parameters](#dynamic-configuration-with-query-parameters)
   - [Examples for Each Query Parameter](#examples-for-each-query-parameter)
   - [Combining Multiple Parameters](#combining-multiple-parameters)
+- [SNS Listener](#sns-listener)
+- [AI Agent](#ai-agent)
+- [On-Call](#on-call)
 
 A sample configuration file is located at `config/config.yaml`:
 
@@ -22,7 +28,29 @@ A sample configuration file is located at `config/config.yaml`:
 name: versus
 host: 0.0.0.0
 port: 3000
-public_host: https://your-ack-host.example # Required for on-call ack
+public_host: https://your-ack-host.example # Required for on-call ack & dashboard links
+
+# Shared secret required for ALL admin endpoints (`/api/admin/*` and
+# `/api/agent/*`) and the embedded admin dashboard. Sent by clients
+# (and the dashboard) in the `X-Gateway-Secret` header. When empty,
+# admin endpoints are not registered and the agent refuses to start.
+gateway_secret: ${GATEWAY_SECRET}
+
+# Storage backend used by BOTH the agent (catalog, shadow log, services)
+# and the incident service (history shown in the UI). Only `file` is
+# implemented today; `redis` and `database` are config stubs.
+storage:
+  type: file              # file | redis | database (env: STORAGE_TYPE)
+  file:
+    data_dir: ./data
+    max_incidents: 1000   # rolling cap on persisted incidents
+
+# Optional global proxy applied per-channel via `use_proxy: true` below
+# (Telegram, Viber, Lark). Unset to disable.
+proxy:
+  url: ${PROXY_URL}           # HTTP/HTTPS/SOCKS5, e.g. http://proxy.example.com:8080
+  username: ${PROXY_USERNAME}
+  password: ${PROXY_PASSWORD}
 
 alert:
   debug_body: true  # Default value, will be overridden by DEBUG_BODY env var
@@ -42,6 +70,7 @@ alert:
     bot_token: ${TELEGRAM_BOT_TOKEN} # From environment
     chat_id: ${TELEGRAM_CHAT_ID} # From environment
     template_path: "config/telegram_message.tmpl"
+    use_proxy: false # Set to true to use the global proxy block above
 
   viber:
     enable: false  # Default value, will be overridden by VIBER_ENABLE env var
@@ -52,6 +81,7 @@ alert:
     # Bot API (for individual user notifications)
     user_id: ${VIBER_USER_ID} # From environment (required for bot API)
     template_path: "config/viber_message.tmpl"
+    use_proxy: false
 
   email:
     enable: false # Default value, will be overridden by EMAIL_ENABLE env var
@@ -71,11 +101,12 @@ alert:
       qc: ${MSTEAMS_OTHER_POWER_URL_QC} # Power Automate URL for QC team
       ops: ${MSTEAMS_OTHER_POWER_URL_OPS} # Power Automate URL for Ops team
       dev: ${MSTEAMS_OTHER_POWER_URL_DEV} # Power Automate URL for Dev team
-      
+
   lark:
     enable: false # Default value, will be overridden by LARK_ENABLE env var
     webhook_url: ${LARK_WEBHOOK_URL} # Lark webhook URL (required)
     template_path: "config/lark_message.tmpl"
+    use_proxy: false
     other_webhook_urls: # Optional: Enable overriding the default webhook URL using query parameters, eg /api/incidents?lark_other_webhook_url=dev
       dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
       prod: ${LARK_OTHER_WEBHOOK_URL_PROD}
@@ -91,17 +122,17 @@ queue:
     # Options If you want to automatically create an sns subscription
     https_endpoint_subscription: ${SNS_HTTPS_ENDPOINT_SUBSCRIPTION} # If the user configures an HTTPS endpoint, then an SNS subscription will be automatically created, e.g. https://your-domain.com
     topic_arn: ${SNS_TOPIC_ARN}
-    
+
   # AWS SQS
   sqs:
     enable: false
     queue_url: ${SQS_QUEUE_URL}
-    
-  # GCP Pub Sub
+
+  # GCP Pub Sub (config stub — not yet implemented)
   pubsub:
     enable: false
-    
-  # Azure Event Bus
+
+  # Azure Service Bus (config stub — not yet implemented)
   azbus:
     enable: false
 
@@ -128,12 +159,117 @@ oncall:
       app: ${PAGERDUTY_OTHER_ROUTING_KEY_APP}
       db: ${PAGERDUTY_OTHER_ROUTING_KEY_DB}
 
-redis: # Required for on-call functionality
+redis: # Required for on-call functionality and the AI agent
   insecure_skip_verify: true # dev only
   host: ${REDIS_HOST}
   port: ${REDIS_PORT}
   password: ${REDIS_PASSWORD}
   db: 0
+
+# -----------------------------------------------------------------------------
+# AI agent (training | shadow | detect) — opt-in.
+# When agent.enable=false (the default) nothing extra runs.
+# Source list lives in a separate file (sources_path).
+# -----------------------------------------------------------------------------
+agent:
+  enable: false              # master switch (env: AGENT_ENABLE)
+  mode: training             # training | shadow | detect (env: AGENT_MODE)
+  poll_interval: 30s         # how often each source is pulled
+  lookback: 5m               # initial backfill window on startup
+  batch_max: 5000            # safety cap per tick
+  signal_max_bytes: 65536    # cap on Signal.Raw
+
+  # Path to the YAML file listing log sources (resolved relative to this
+  # config file). Override via env: AGENT_SOURCES_PATH.
+  sources_path: ./agent_sources.yaml
+
+  # Grace period for newly discovered services in shadow/detect mode.
+  # During grace, signals are observed and clustered but never surfaced
+  # as would-have-alerted (shadow) or sent to the AI analyzer (detect).
+  # Set to "0" to disable.
+  new_service_grace: 30m
+
+  # Regexes used to extract a service name from each log message. The
+  # first capture group of the first matching pattern wins. Empty list
+  # disables service detection (everything attributed to "_unknown").
+  service_patterns:
+    - '(?i)\bservice[._-]?name["\s:=]+"?([A-Za-z0-9._-]+)'
+    - '(?i)\b(?:service|svc|app|component)\s*=\s*"?([A-Za-z0-9._-]+)'
+    - '(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"'
+    - '\[([A-Za-z0-9._-]+)\]'
+
+  redaction:
+    enable: true
+    redact_ips: false        # IPs are usually useful context; opt-in
+    extra_patterns:
+      - "(?i)password=\\S+"
+      - "Authorization:\\s*Bearer\\s+\\S+"
+
+  catalog:
+    persist_interval: 30s
+    auto_promote_after: 50    # in detect mode, this many sightings = "known"
+    # Spike detection: a known pattern is re-flagged when its tick-level
+    # frequency exceeds the EWMA baseline by `spike_multiplier`.
+    spike_multiplier: 5.0
+    spike_min_frequency: 5
+    spike_min_baseline_count: 20
+
+  miner:
+    similarity_threshold: 0.4
+    tree_depth: 4
+    max_children: 100
+
+  regex:
+    # Pre-filter: only signals matching at least one rule (named or
+    # default) are forwarded to the miner. Set to ".*" to train on
+    # every line, or leave empty to require an explicit named match.
+    default_pattern: "(?i).*error.*"
+    rules:
+      - name: oom-killer
+        pattern: "Out of memory: Killed process"
+      - name: panic
+        pattern: "(?i)panic:"
+      - name: 5xx-burst
+        pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
+
+  # AI analyzer — used in detect mode to assess unknown/spiking patterns.
+  ai:
+    enable: false                     # master switch (env: AGENT_AI_ENABLE)
+    base_url: ${AGENT_AI_BASE_URL}    # OpenAI-compatible chat/completions endpoint
+    api_key: ${AGENT_AI_API_KEY}
+    model: "gpt-4o-mini"
+    temperature: 0.2
+    max_tokens: 512
+    max_calls_per_hour: 60            # 0 = unlimited
+    cache_ttl: "1h"
+```
+
+The runtime list of agent sources lives in the file referenced by
+`agent.sources_path` (default `./agent_sources.yaml`):
+
+```yaml
+sources:
+  - name: prod-app
+    type: elasticsearch
+    enable: true
+    elasticsearch:
+      addresses:
+        - https://es.example.internal:9200
+      username: ${ES_USERNAME}
+      password: ${ES_PASSWORD}
+      index: "logs-app-*"
+      time_field: "@timestamp"
+      query: 'log.level:(error OR warn)'
+      message_field: message
+      page_size: 500
+
+  - name: sample-app
+    type: file
+    enable: true
+    file:
+      path: ./local/resource/sample-app.log
+      format: text
+      from_beginning: true
 ```
 
 ## Environment Variables
@@ -144,6 +280,17 @@ The application relies on several environment variables to configure alerting se
 | Variable          | Description |
 |------------------|-------------|
 | `DEBUG_BODY`   | Set to `true` to enable print body send to Versus Incident. |
+
+### Admin & Gateway
+| Variable          | Description |
+|------------------|-------------|
+| `GATEWAY_SECRET` | Shared secret required to access the admin dashboard and every `/api/admin/*` and `/api/agent/*` endpoint. Sent by clients in the `X-Gateway-Secret` header. **When unset the admin endpoints are not registered at all.** |
+
+### Storage
+| Variable                 | Description |
+|--------------------------|-------------|
+| `STORAGE_TYPE`           | Storage backend for incidents and agent state. One of `file` (default and the only implemented backend today), `redis`, `database`. |
+| `STORAGE_FILE_DATA_DIR`  | Directory for the `file` backend. Default `./data`. Files written: `incidents.json`, `patterns.json`, `shadow.json`. |
 
 ### Slack Configuration
 | Variable          | Description |
@@ -333,6 +480,24 @@ curl -X POST "http://localhost:3000/api/incidents?oncall_enable=true" \
 | `REDIS_HOST`     | The hostname or IP address of the Redis server. Required if on-call is enabled. |
 | `REDIS_PORT`     | The port number of the Redis server. Required if on-call is enabled. |
 | `REDIS_PASSWORD` | The password for authenticating with the Redis server. Required if on-call is enabled and Redis requires authentication. |
+
+### AI Agent Configuration
+| Variable                  | Description |
+|---------------------------|-------------|
+| `AGENT_ENABLE`            | Set to `true` to start the AI agent worker. When `false` (default) no agent goroutines, files, or Redis keys are created. |
+| `AGENT_MODE`              | Worker mode: `training` (observe and learn only), `shadow` (classify and log "would-have-alerted" events), or `detect` (classify + emit). |
+| `AGENT_SOURCES_PATH`      | Path to the YAML file listing the agent's log sources. Resolved relative to the main config file. Default `./agent_sources.yaml`. |
+| `AGENT_NEW_SERVICE_GRACE` | Duration a newly discovered service stays in implicit training before detect-mode AI analysis begins (e.g. `30m`). `0` disables the grace window. |
+| `AGENT_SERVICE_PATTERNS`  | Comma-separated list of regexes used to extract the service name from each log line. Each pattern must contain at least one capture group. Overrides the YAML list when set. |
+| `AGENT_AI_ENABLE`         | Set to `true` to call the configured LLM in detect mode. When `false`, detect mode classifies but never calls the model (dry-run). |
+| `AGENT_AI_BASE_URL`       | OpenAI-compatible chat/completions endpoint, e.g. `https://api.openai.com/v1`. |
+| `AGENT_AI_API_KEY`        | Bearer token sent in the `Authorization` header when calling the LLM. |
+| `AGENT_AI_MODEL`          | Model identifier, e.g. `gpt-4o-mini`. |
+
+> The agent also requires the **root-level** `GATEWAY_SECRET` (see
+> [Admin & Gateway](#admin--gateway)) and the **root-level** `redis`
+> block — Redis is used to remember per-source cursors so the agent
+> resumes from where it left off after a restart.
 
 Ensure these environment variables are properly set before running the application.
 
@@ -586,3 +751,215 @@ This will:
 1. Send the alert to a specific Slack channel (`C01PROD`)
 2. Send the alert to a specific Telegram chat (`-987654321`)
 3. Enable on-call escalation with a shortened 1-minute wait time
+
+## SNS Listener
+
+Versus can subscribe to an SNS topic and treat each message as an incoming
+incident. This is useful for CloudWatch Alarms which can publish to SNS on
+state changes.
+
+```bash
+docker run -d \
+  -p 3000:3000 \
+  -e SLACK_ENABLE=true \
+  -e SLACK_TOKEN=your_slack_token \
+  -e SLACK_CHANNEL_ID=your_channel_id \
+  -e SNS_ENABLE=true \
+  -e SNS_TOPIC_ARN=$SNS_TOPIC_ARN \
+  -e SNS_HTTPS_ENDPOINT_SUBSCRIPTION=https://your-domain.com \
+  -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY \
+  -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_KEY \
+  --name versus \
+  ghcr.io/versuscontrol/versus-incident
+```
+
+Test with the AWS CLI:
+
+```bash
+aws sns publish \
+  --topic-arn $SNS_TOPIC_ARN \
+  --message '{"ServiceName":"test-service","Logs":"[ERROR] Test error","UserID":"U12345"}' \
+  --region $AWS_REGION
+```
+
+A common real-world setup: CloudWatch Alarms → SNS topic → Versus →
+Slack/Telegram/Email with a custom CloudWatch-aware template.
+
+## AI Agent
+
+Versus supports an opt-in **AI SRE agent** that reads your logs, metrics,
+and traces, learns what normal looks like, and only alerts you when
+something new and unexpected appears.
+
+Configuration example with agent features:
+
+```yaml
+name: versus
+host: 0.0.0.0
+port: 3000
+
+# ... existing alert configurations ...
+
+# Shared secret required for ALL admin endpoints (`/api/admin/*` and
+# `/api/agent/*`). Sent by clients in the `X-Gateway-Secret` header.
+gateway_secret: ${GATEWAY_SECRET}
+
+# Storage backend for the pattern catalog, shadow log, and incident
+# history. Only `file` is implemented today; `redis` and `database`
+# are config stubs.
+storage:
+  type: file              # file | redis | database (env: STORAGE_TYPE)
+  file:
+    data_dir: ./data
+    max_incidents: 1000   # rolling cap on persisted incidents
+
+agent:
+  enable: false # Use this to enable or disable the agent for all sources
+  mode: training # Valid values: "training", "shadow", or "detect"
+  poll_interval: 30s
+
+  # Sources are kept in a separate file so they can be managed independently
+  # (e.g. swap fixtures, per-environment lists). Path is resolved relative to
+  # this config file. Override via env: AGENT_SOURCES_PATH.
+  sources_path: ./agent_sources.yaml
+
+  catalog:
+    persist_interval: 30s
+    auto_promote_after: 100 # In detect mode, this many sightings = "known"
+
+  redaction:
+    enable: true
+    redact_ips: false
+    extra_patterns: # Optional: extra regex rules to scrub before clustering
+      - "(?i)password=\\S+"
+      - "Authorization:\\s*Bearer\\s+\\S+"
+
+  miner:
+    similarity_threshold: 0.4
+    tree_depth: 4
+    max_children: 100
+
+  regex:
+    # Optional: tag any signal whose message matches this pattern
+    # if none of the named rules below hit. Leave empty to disable.
+    default_pattern: "(?i)error|exception|fatal|panic"
+    # Named rules are tried first, in order. The first match wins.
+    rules:
+      - name: oom
+        pattern: "(?i)out of memory|OOMKilled|java\\.lang\\.OutOfMemoryError"
+      - name: db-timeout
+        pattern: "(?i)(connection|query) timeout|deadlock detected"
+      - name: auth-failure
+        pattern: "(?i)401 unauthorized|invalid credentials|permission denied"
+
+redis: # Required for the agent to persist source cursors across restarts
+  host: ${REDIS_HOST}
+  port: ${REDIS_PORT}
+  password: ${REDIS_PASSWORD}
+  db: 0
+```
+
+**Explanation:**
+
+The `agent` section includes:
+
+1. `enable`: Turn the agent on or off (default: `false`). When disabled, nothing extra runs.
+2. `mode`: How the agent behaves after it has learned your log patterns:
+   - `training`: observation only — the agent learns patterns and saves them, but sends no alerts.
+   - `shadow`: same as training, but also logs a note every time it would have sent an alert. Good for reviewing before going live.
+   - `detect`: the agent actively sends alerts for any pattern it has never seen before.
+3. `poll_interval`: How often the agent checks your log sources for new entries.
+4. `catalog`: Where the agent stores the list of known patterns and how often to write updates. Storage is selected by the root `storage:` block.
+
+> **Admin secret.** All admin endpoints (`/api/admin/*` and
+> `/api/agent/*`) are protected by the **root-level** `gateway_secret`
+> (env `GATEWAY_SECRET`). Set it to any value you choose; clients send
+> the same value in the `X-Gateway-Secret` header. When no secret is
+> configured the admin endpoints are not registered and the agent
+> refuses to start.
+
+5. `redaction`: Rules for automatically removing sensitive information (passwords, tokens, emails, etc.) from logs before the agent processes them.
+6. `miner`: Controls how aggressively the agent groups similar log lines together. The defaults work well for most setups.
+7. `regex`: Acts as a **pre-filter** for the agent. Only signals whose message matches at least one rule (a named entry under `rules` or `default_pattern`) are forwarded to the pattern miner and stored in the catalog.
+
+   - Named `rules` are tried in order; the first match wins and tags the signal with that `name` (stored as `rule_name` on the pattern).
+   - If no named rule hits, `default_pattern` is tried. Matches there are tagged with `name=default`.
+   - **To learn from every line, set `default_pattern: ".*"`.**
+   - **To filter aggressively, set `default_pattern: ""` (empty)** and rely on your named rules.
+
+8. `sources_path`: Path to a separate YAML file that lists the log sources the agent should read from. Resolved relative to the main config file. Override via `AGENT_SOURCES_PATH`.
+
+The sources file (default `./agent_sources.yaml`) has a single top-level `sources:` list. Each entry needs `name`, `type` (`file` or `elasticsearch`), `enable`, plus a matching `file:` or `elasticsearch:` block:
+
+```yaml
+sources:
+  - name: prod-app
+    type: elasticsearch
+    enable: true
+    elasticsearch:
+      addresses:
+        - https://es.example.internal:9200
+      username: ${ES_USERNAME}
+      password: ${ES_PASSWORD}
+      index: "logs-app-*"
+      time_field: "@timestamp"
+      query: 'log.level:(error OR warn)'
+      message_field: message
+      page_size: 500
+
+  - name: sample-app
+    type: file
+    enable: true
+    file:
+      path: ./local/resource/sample-app.log
+      format: text
+      from_beginning: true
+```
+
+The `redis` section is required when `agent.enable` is `true`. Redis stores the per-source cursor so the agent picks up where it left off after a restart.
+
+For full integration walkthroughs see [Enable AI Agent](https://versuscontrol.github.io/versus-incident/agent/agent-introduction.html).
+
+## On-Call
+
+Versus supports On-Call integrations with **AWS Incident Manager** and
+**PagerDuty**. Configuration example with on-call features:
+
+```yaml
+name: versus
+host: 0.0.0.0
+port: 3000
+public_host: https://your-ack-host.example # Required for on-call ack
+
+# ... existing alert configurations ...
+
+oncall:
+  ### Enable overriding using query parameters
+  # /api/incidents?oncall_enable=false => Set to `true` or `false` to enable or disable on-call for a specific alert
+  # /api/incidents?oncall_wait_minutes=0 => Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately
+  enable: false
+  wait_minutes: 3 # If you set it to 0, on-call triggers immediately without checking for an acknowledgment
+
+  aws_incident_manager:
+    response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
+
+redis: # Required for on-call functionality
+  insecure_skip_verify: true # dev only
+  host: ${REDIS_HOST}
+  port: ${REDIS_PORT}
+  password: ${REDIS_PASSWORD}
+  db: 0
+```
+
+The `oncall` section includes:
+
+1. `enable`: A boolean to toggle on-call functionality for all incidents (default: `false`).
+2. `initialized_only`: Initialize the on-call subsystem but keep it disabled by default. With `true`, on-call is triggered only for requests that explicitly include `?oncall_enable=true`.
+3. `wait_minutes`: Time in minutes to wait for an acknowledgment before escalating (default: `3`). Set to `0` to trigger immediately.
+4. `provider`: Which on-call provider to use (`"aws_incident_manager"` or `"pagerduty"`).
+5. `aws_incident_manager`: Configuration for AWS Incident Manager when selected, including `response_plan_arn` and `other_response_plan_arns`.
+6. `pagerduty`: Configuration for PagerDuty when selected, including `routing_key` and `other_routing_keys`.
+
+The `redis` section is required when `oncall.enable` or `oncall.initialized_only` is `true`. It stores the open-incident state needed for ack-or-escalate.
+
+For provider-specific walkthroughs see [On-Call setup with Versus](https://versuscontrol.github.io/versus-incident/oncall/on-call-introduction.html).

@@ -271,6 +271,28 @@ To uninstall/delete the `versus-incident` deployment:
 helm uninstall versus-incident
 ```
 
+## Admin Dashboard & Storage on Kubernetes
+
+The embedded admin dashboard (see [Admin Dashboard](./admin-ui.md)) and
+the persistent incident store both rely on two config keys that the
+**current chart version does not template yet**:
+
+- `GATEWAY_SECRET` — required for the dashboard and every `/api/admin/*`
+  / `/api/agent/*` endpoint.
+- `storage.file.data_dir` — directory used by the default `file`
+  storage backend (`./data` by default, inside the container).
+
+Until the chart adds first-class support, you can:
+
+1. Patch the deployment to inject `GATEWAY_SECRET` from a secret.
+2. Mount a `PersistentVolumeClaim` at `/app/data` so `incidents.json`,
+   `patterns.json`, and `shadow.json` survive pod restarts.
+
+For the manual / non-Helm path with these wired up end-to-end, see
+[Deploy on Kubernetes](./kubernetes.md). If your deployment doesn't
+need the dashboard or persistent agent state, the chart works as-is —
+alerts are still delivered to every configured channel.
+
 ## Additional Resources
 
 - [Template Syntax Guide](../userguide/template-syntax.html)

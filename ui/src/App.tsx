@@ -10,6 +10,8 @@ import { ShadowDetailPage } from "./pages/ShadowDetailPage";
 import { ServicesPage } from "./pages/ServicesPage";
 import { IncidentsPage } from "./pages/IncidentsPage";
 import { IncidentDetailPage } from "./pages/IncidentDetailPage";
+import { IncidentsConfigPage } from "./pages/IncidentsConfigPage";
+import { AgentConfigPage } from "./pages/AgentConfigPage";
 
 export default function App() {
   return (
@@ -26,6 +28,8 @@ export default function App() {
           <Route path="/shadow" element={<ShadowPage />} />
           <Route path="/shadow/:patternId" element={<ShadowDetailPage />} />
           <Route path="/services" element={<ServicesPage />} />
+          <Route path="/config/incidents" element={<IncidentsConfigPage />} />
+          <Route path="/config/agent" element={<AgentConfigPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Route>
       </Routes>
