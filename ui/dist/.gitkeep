@@ -1,2 +1,0 @@
-# Placeholder so `go:embed all:dist` succeeds before the first `npm run build`.
-# The real UI assets are written here by `scripts/build_ui.sh`.

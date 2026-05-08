@@ -12,14 +12,17 @@ An incident management tool that supports alerting across multiple channels with
 
 With the built-in **AI SRE Agent**, Versus goes further — continuously observing your logs, metrics, and traces, learning what normal looks like, and alerting you only when something new and unexpected appears.
 
+![Versus](src/docs/images/versus-dashboard.png)
+
 ## Table of Contents
 - [Features](#features)
 - [Getting Started](#get-started-in-60-seconds)
+- [Admin Dashboard](https://versuscontrol.github.io/versus-incident/userguide/admin-ui.html)
 - [Development Custom Templates](#development-custom-templates)
   - [Docker](#docker)
   - [Understanding Custom Templates](#understanding-custom-templates-with-monitoring-webhooks)
-  - [Kubernetes](#kubernetes)
-  - [Helm Chart](#helm-chart)
+  - [Deploy on Kubernetes](https://versuscontrol.github.io/versus-incident/userguide/kubernetes.html)
+  - [Helm Chart](https://versuscontrol.github.io/versus-incident/userguide/helm.html)
 - [SNS Usage](#sns-usage)
 - [AI Agent](#ai-agent)
 - [On-Call](#on-call)
@@ -48,13 +51,17 @@ With the built-in **AI SRE Agent**, Versus goes further — continuously observi
 
 ```bash
 docker run -p 3000:3000 \
+  -e GATEWAY_SECRET=change-me \
   -e SLACK_ENABLE=true \
   -e SLACK_TOKEN=your_token \
   -e SLACK_CHANNEL_ID=your_channel \
   ghcr.io/versuscontrol/versus-incident
 ```
 
-Versus listens on port 3000 by default and exposes the `/api/incidents` endpoint, which you can configure as a webhook URL in your monitoring tools. This endpoint accepts JSON payloads from various monitoring systems and forwards the alerts to your configured notification channels.
+Versus listens on port 3000 by default and exposes:
+
+- `POST /api/incidents` — webhook endpoint for monitoring tools.
+- `GET  /` — the embedded **admin dashboard**, open <http://localhost:3000/> in your browser. For the full UI walkthrough and the build/watch scripts, see [Admin Dashboard](./admin-ui.md).
 
 ### Universal Alert Template Support
 
@@ -325,37 +332,14 @@ Please refer to the document here: [Other Templates](https://versus-incident.dev
 
 ### Kubernetes
 
-For detailed information, please refer to the document [here](https://versus-incident.devopsvn.tech/userguide/getting-started.html#kubernetes).
+For a complete `Deployment` + `Service` + `PersistentVolumeClaim`
+manifest (with the persistent data volume the admin dashboard needs),
+see [Deploy on Kubernetes](https://versuscontrol.github.io/versus-incident/userguide/kubernetes.html).
 
 ### Helm Chart
 
-For detailed information, please refer to the document [here](https://github.com/VersusControl/versus-incident/blob/main/helm/versus-incident).
-
-## SNS Usage
-```bash
-docker run -d \
-  -p 3000:3000 \
-  -e SLACK_ENABLE=true \
-  -e SLACK_TOKEN=your_slack_token \
-  -e SLACK_CHANNEL_ID=your_channel_id \
-  -e SNS_ENABLE=true \
-  -e SNS_TOPIC_ARN=$SNS_TOPIC_ARN \
-  -e SNS_HTTPS_ENDPOINT_SUBSCRIPTION=https://your-domain.com \
-  -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY \
-  -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_KEY \
-  --name versus \
-  ghcr.io/versuscontrol/versus-incident
-```
-
-Send test message using AWS CLI:
-```
-aws sns publish \
-  --topic-arn $SNS_TOPIC_ARN \
-  --message '{"ServiceName":"test-service","Logs":"[ERROR] Test error","UserID":"U12345"}' \
-  --region $AWS_REGION
-```
-
-**A key real-world application of Amazon SNS** involves integrating it with CloudWatch Alarms. This allows CloudWatch to publish messages to an SNS topic when an alarm state changes (e.g., from OK to ALARM), which can then trigger notifications to Slack, Telegram, or Email via Versus Incident with a custom template.
+For the packaged install, see [Helm Chart](https://versuscontrol.github.io/versus-incident/userguide/helm.html)
+or the chart source under [helm/versus-incident](https://github.com/VersusControl/versus-incident/blob/main/helm/versus-incident).
 
 ## AI Agent
 

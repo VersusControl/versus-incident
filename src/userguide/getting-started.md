@@ -3,6 +3,8 @@
 ## Table of Contents
 - [Prerequisites](#prerequisites)
 - [Easy Installation with Docker](#easy-installation-with-docker)
+- [Admin Dashboard](#admin-dashboard)
+- [Storage Backend](#storage-backend)
 - [Universal Alert Template Support](#universal-alert-template-support)
   - [Example: Send an Alertmanager alert](#example-send-an-alertmanager-alert)
   - [Example: Send a Sentry alert](#example-send-a-sentry-alert)
@@ -19,18 +21,24 @@
 
 - Docker 20.10+ (optional)
 - Slack workspace (for Slack notifications)
+- A `GATEWAY_SECRET` value of your choosing (required if you want to
+  use the admin dashboard)
 
 ### Easy Installation with Docker
 
 ```bash
 docker run -p 3000:3000 \
+  -e GATEWAY_SECRET=change-me \
   -e SLACK_ENABLE=true \
   -e SLACK_TOKEN=your_token \
   -e SLACK_CHANNEL_ID=your_channel \
   ghcr.io/versuscontrol/versus-incident
 ```
 
-Versus listens on port 3000 by default and exposes the `/api/incidents` endpoint, which you can configure as a webhook URL in your monitoring tools. This endpoint accepts JSON payloads from various monitoring systems and forwards the alerts to your configured notification channels.
+Versus listens on port 3000 by default and exposes:
+
+- `POST /api/incidents` — webhook endpoint for monitoring tools.
+- `GET  /` — the embedded **admin dashboard**, open <http://localhost:3000/> in your browser. For the full UI walkthrough and the build/watch scripts, see [Admin Dashboard](./admin-ui.md).
 
 ### Universal Alert Template Support
 
@@ -346,154 +354,6 @@ Create your Teams message template, for example `config/msteams_message.tmpl`:
 Please investigate immediately
 ```
 
-### Kubernetes
-
-1. Create a secret for Slack:
-```bash
-# Create secret
-kubectl create secret generic versus-secrets \
-  --from-literal=slack_token=$SLACK_TOKEN \
-  --from-literal=slack_channel_id=$SLACK_CHANNEL_ID
-```
-
-2. Create ConfigMap for config and template file, for example `versus-config.yaml`:
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: versus-config
-data:
-  config.yaml: |
-    name: versus
-    host: 0.0.0.0
-    port: 3000
-
-    alert:
-      slack:
-        enable: true
-        token: ${SLACK_TOKEN}
-        channel_id: ${SLACK_CHANNEL_ID}
-        template_path: "/app/config/slack_message.tmpl"
-
-      telegram:
-        enable: false
-
-  slack_message.tmpl: |
-    *Critical Error in {{.ServiceName}}*
-    ----------
-    Error Details:
-    ```
-    {{.Logs}}
-    ```
-    ----------
-    Owner <@{{.UserID}}> please investigate
-
-```
-
-```bash
-kubectl apply -f versus-config.yaml
-```
-
-3. Create `versus-deployment.yaml`:
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: versus-incident
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: versus-incident
-  template:
-    metadata:
-      labels:
-        app: versus-incident
-    spec:
-      containers:
-      - name: versus-incident
-        image: ghcr.io/versuscontrol/versus-incident
-        ports:
-        - containerPort: 3000
-        livenessProbe:
-          httpGet:
-            path: /healthz
-            port: 3000
-        env:
-          - name: SLACK_CHANNEL_ID
-            valueFrom:
-              secretKeyRef:
-                name: versus-secrets
-                key: slack_channel_id
-          - name: SLACK_TOKEN
-            valueFrom:
-              secretKeyRef:
-                name: versus-secrets
-                key: slack_token
-        volumeMounts:
-        - name: versus-config
-          mountPath: /app/config/config.yaml
-          subPath: config.yaml
-        - name: versus-config
-          mountPath: /app/config/slack_message.tmpl
-          subPath: slack_message.tmpl
-      volumes:
-      - name: versus-config
-        configMap:
-          name: versus-config
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: versus-service
-spec:
-  selector:
-    app: versus-incident
-  ports:
-    - protocol: TCP
-      port: 3000
-      targetPort: 3000
-```
-
-4. Apply:
-```bash
-kubectl apply -f versus-deployment.yaml
-```
-
-### Helm Chart
-
-You can install the Versus Incident Helm chart using OCI registry:
-
-```bash
-helm install versus-incident oci://ghcr.io/versuscontrol/charts/versus-incident
-```
-
-### Install with Custom Values
-
-```bash
-# Install with custom configuration from a values file
-helm install \
-  versus-incident \
-  oci://ghcr.io/versuscontrol/charts/versus-incident \
-  -f values.yaml
-```
-
-### Upgrading an Existing Installation
-
-```bash
-# Upgrade an existing installation with the latest version
-helm upgrade \
-  versus-incident \
-  oci://ghcr.io/versuscontrol/charts/versus-incident
-
-# Upgrade with custom values
-helm upgrade \
-  versus-incident \
-  oci://ghcr.io/versuscontrol/charts/versus-incident \
-  -f values.yaml
-```
-
 ## SNS Usage
 ```bash
 docker run -d \
@@ -520,181 +380,11 @@ aws sns publish \
 
 **A key real-world application of Amazon SNS** involves integrating it with CloudWatch Alarms. This allows CloudWatch to publish messages to an SNS topic when an alarm state changes (e.g., from OK to ALARM), which can then trigger notifications to Slack, Telegram, or Email via Versus Incident with a custom template.
 
-### AI Agent
+## Next steps
 
-Versus supports an opt-in **AI SRE agent** that reads your logs, metrics and tracing, learns what normal looks like, and only alerts you when something new and unexpected appears.
+- [Admin Dashboard](./admin-ui.md) — what the UI surfaces and how to
+  rebuild the bundled assets.
+- [Configuration](./configuration.md) — every config key, env var, and
+  per-request query parameter.
+- [Advanced Template Tips](./advanced-template-tips.md) - learn how to write template
 
-Configuration example with agent features:
-
-```yaml
-name: versus
-host: 0.0.0.0
-port: 3000
-
-# ... existing alert configurations ...
-
-# Shared secret required for ALL admin endpoints (`/api/admin/*` and
-# `/api/agent/*`). Sent by clients in the `X-Gateway-Secret` header.
-gateway_secret: ${GATEWAY_SECRET}
-
-# Storage backend for the pattern catalog, shadow log, and incident
-# history. Only `file` is implemented today; `redis` and `database`
-# are config stubs.
-storage:
-  type: file              # file | redis | database (env: STORAGE_TYPE)
-  file:
-    data_dir: ./data
-    max_incidents: 1000   # rolling cap on persisted incidents
-
-agent:
-  enable: false # Use this to enable or disable the agent for all sources
-  mode: training # Valid values: "training", "shadow", or "detect"
-  poll_interval: 30s
-
-  # Sources are kept in a separate file so they can be managed independently
-  # (e.g. swap fixtures, per-environment lists). Path is resolved relative to
-  # this config file. Override via env: AGENT_SOURCES_PATH.
-  sources_path: ./agent_sources.yaml
-
-  catalog:
-    persist_interval: 30s
-    auto_promote_after: 100 # In detect mode, this many sightings = "known"
-
-  redaction:
-    enable: true
-    redact_ips: false
-    extra_patterns: # Optional: extra regex rules to scrub before clustering
-      - "(?i)password=\\S+"
-      - "Authorization:\\s*Bearer\\s+\\S+"
-
-  miner:
-    similarity_threshold: 0.4
-    tree_depth: 4
-    max_children: 100
-
-  regex:
-    # Optional: tag any signal whose message matches this pattern
-    # if none of the named rules below hit. Leave empty to disable.
-    default_pattern: "(?i)error|exception|fatal|panic"
-    # Named rules are tried first, in order. The first match wins.
-    rules:
-      - name: oom
-        pattern: "(?i)out of memory|OOMKilled|java\\.lang\\.OutOfMemoryError"
-      - name: db-timeout
-        pattern: "(?i)(connection|query) timeout|deadlock detected"
-      - name: auth-failure
-        pattern: "(?i)401 unauthorized|invalid credentials|permission denied"
-
-redis: # Required for the agent to persist source cursors across restarts
-  host: ${REDIS_HOST}
-  port: ${REDIS_PORT}
-  password: ${REDIS_PASSWORD}
-  db: 0
-```
-
-**Explanation:**
-
-The `agent` section includes:
-1. `enable`: Turn the agent on or off (default: `false`). When disabled, nothing extra runs — no background processes, no extra files written.
-2. `mode`: How the agent behaves after it has learned your log patterns:
-   - `training`: observation only — the agent learns patterns and saves them, but sends no alerts.
-   - `shadow`: same as training, but also logs a note every time it would have sent an alert. Good for reviewing before going live.
-   - `detect`: the agent actively sends alerts for any pattern it has never seen before.
-3. `poll_interval`: How often the agent checks your log sources for new entries.
-4. `catalog`: Where the agent stores the list of known patterns and how often to write updates. `mode` selects the storage backend — only `file` is supported today, which writes to `<storage.file.data_dir>/patterns.json` (the filename is fixed).
-
-> **Admin secret.** All admin endpoints (`/api/admin/*` and
-> `/api/agent/*`) are protected by the **root-level** `gateway_secret`
-> (env `GATEWAY_SECRET`). Set it to any value you choose; clients send
-> the same value in the `X-Gateway-Secret` header. When no secret is
-> configured the admin endpoints are not registered and the agent
-> refuses to start.
-
-> **Storage.** The agent's catalog and the incident history shown in the
-> UI are persisted via the **root-level** `storage:` block (default:
-> `type: file`, `data_dir: ./data`). The agent's `data_dir` field has
-> been removed.
-5. `redaction`: Rules for automatically removing sensitive information (passwords, tokens, emails, etc.) from logs before the agent processes them.
-6. `miner`: Controls how aggressively the agent groups similar log lines together. The defaults work well for most setups.
-7. `regex`: Acts as a **pre-filter** for the agent. Only signals whose message matches at least one rule (a named entry under `rules` or `default_pattern`) are forwarded to the pattern miner and stored in the catalog. Anything that doesn't match is dropped before clustering, so boring noise (200-OK requests, debug lines, etc.) never bloats `patterns.json`.
-
-   - Named `rules` are tried in order; the first match wins and tags the signal with that `name` (stored as `rule_name` on the pattern).
-   - If no named rule hits, `default_pattern` is tried. Matches there are tagged with `name=default`.
-   - **To learn from every line, set `default_pattern: ".*"`.** This is useful in early training when you don't yet know what's interesting.
-   - **To filter aggressively, set `default_pattern: ""` (empty)** and rely on your named rules — anything that doesn't match an explicit rule is dropped.
-8. `sources_path`: Path to a separate YAML file that lists the log sources the agent should read from. Keeping sources in their own file makes it easier to manage per-environment source lists or swap fixtures without touching the rest of the config. The path is resolved relative to the main config file. Override via the `AGENT_SOURCES_PATH` env var.
-
-The sources file (default `./agent_sources.yaml`) has a single top-level `sources:` list. Each entry needs `name`, `type` (`file` or `elasticsearch`), `enable`, plus a matching `file:` or `elasticsearch:` block. Example:
-
-```yaml
-sources:
-  - name: prod-app
-    type: elasticsearch
-    enable: true
-    elasticsearch:
-      addresses:
-        - https://es.example.internal:9200
-      username: ${ES_USERNAME}
-      password: ${ES_PASSWORD}
-      index: "logs-app-*"
-      time_field: "@timestamp"
-      query: 'log.level:(error OR warn)'
-      message_field: message
-      page_size: 500
-
-  - name: sample-app
-    type: file
-    enable: true
-    file:
-      path: ./local/resource/sample-app.log
-      format: text
-      from_beginning: true
-```
-
-The `redis` section is required when `agent.enable` is `true`. Redis is used to remember where the agent left off in each log source, so it picks up from the right place after a restart.
-
-For detailed information on integration, please refer to the document here: [Enable AI Agent](https://versuscontrol.github.io/versus-incident/agent/agent-introduction.html).
-
-### On-Call
-
-Currently, Versus support On-Call integrations with AWS Incident Manager. Updated configuration example with on-call features:
-
-```yaml
-name: versus
-host: 0.0.0.0
-port: 3000
-public_host: https://your-ack-host.example # Required for on-call ack
-
-# ... existing alert configurations ...
-
-oncall:
-  ### Enable overriding using query parameters
-  # /api/incidents?oncall_enable=false => Set to `true` or `false` to enable or disable on-call for a specific alert
-  # /api/incidents?oncall_wait_minutes=0 => Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately
-  enable: false
-  wait_minutes: 3 # If you set it to 0, it means there’s no need to check for an acknowledgment, and the on-call will trigger immediately
-
-  aws_incident_manager:
-    response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
-
-redis: # Required for on-call functionality
-  insecure_skip_verify: true # dev only
-  host: ${REDIS_HOST}
-  port: ${REDIS_PORT}
-  password: ${REDIS_PASSWORD}
-  db: 0
-```
-
-**Explanation:**
-
-The `oncall` section includes:
-1. `enable`: A boolean to toggle on-call functionality for all incidents (default: `false`).
-2. `initialized_only`: Initialize on-call feature but keep it disabled by default. When set to `true`, on-call is triggered only for requests that explicitly include `?oncall_enable=true` in the URL. This is useful for having on-call ready but not enabled for all alerts.
-3. `wait_minutes`: Time in minutes to wait for an acknowledgment before escalating (default: `3`). Setting it to `0` triggers the on-call immediately.
-4. `provider`: Specifies which on-call provider to use ("aws_incident_manager" or "pagerduty").
-5. `aws_incident_manager`: Configuration for AWS Incident Manager when it's the selected provider, including `response_plan_arn` and `other_response_plan_arns`.
-6. `pagerduty`: Configuration for PagerDuty when it's the selected provider, including routing keys.
-
-The redis section is required when `oncall.enable` or `oncall.initialized_only` is true. It configures the Redis instance used for state management or queuing, with settings like host, port, password, and db.
-
-For detailed information on integration, please refer to the document here: [On-Call setup with Versus](https://versuscontrol.github.io/versus-incident/on-call-introduction.html).

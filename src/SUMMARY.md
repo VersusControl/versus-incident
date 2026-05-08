@@ -3,8 +3,10 @@
 
 # User Guide
 - [Getting Started](./userguide/getting-started.md)
+- [Admin Dashboard](./userguide/admin-ui.md)
 - [Template Syntax](./userguide/template-syntax.md)
 - [Configuration](./userguide/configuration.md)
+- [Deploy on Kubernetes](./userguide/kubernetes.md)
 - [Helm Chart](./userguide/helm.md)
 - [Advanced Template Tips](./userguide/advanced-template-tips.md)
 

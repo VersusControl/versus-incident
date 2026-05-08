@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/VersusControl/versus-incident/pkg/agent"
@@ -268,6 +269,13 @@ func (e *agentStartError) Error() string { return e.msg }
 func printCustomBanner() {
 	cfg := c.GetConfig()
 
+	// Prefer the operator-supplied public_host (e.g. https://versus.example.com)
+	// for the URLs we surface. Fall back to host:port for plain local dev.
+	base := strings.TrimRight(cfg.PublicHost, "/")
+	if base == "" {
+		base = fmt.Sprintf("http://%s:%d", cfg.Host, cfg.Port)
+	}
+
 	log.Printf(`
 
 V       V   EEEEE   RRRRR   SSSSS   U       U   SSSSS
@@ -281,19 +289,14 @@ V       V   EEEEE   RRRRR   SSSSS   U       U   SSSSS
 │       (bound on host %s and port %d)       │
 └───────────────────────────────────────────────────┘
 
-Dashboard UI   -> http://%s:%d/
-Health check   -> http://%s:%d/healthz
-Create alert   -> POST http://%s:%d/api/incidents
-Acknowledge    -> GET  http://%s:%d/api/ack/:id
-Admin incidents-> GET  http://%s:%d/api/admin/incidents
-Agent status   -> GET  http://%s:%d/api/agent/status
+Dashboard UI   -> %s/
+Health check   -> %s/healthz
+Create alert   -> POST %s/api/incidents
+Acknowledge    -> GET  %s/api/ack/:id
+Admin incidents-> GET  %s/api/admin/incidents
+Agent status   -> GET  %s/api/agent/status
 `, cfg.Host, cfg.Port,
-		cfg.Host, cfg.Port,
-		cfg.Host, cfg.Port,
-		cfg.Host, cfg.Port,
-		cfg.Host, cfg.Port,
-		cfg.Host, cfg.Port,
-		cfg.Host, cfg.Port)
+		base, base, base, base, base, base)
 }
 
 func handleQueueMessage(content *map[string]interface{}) error {

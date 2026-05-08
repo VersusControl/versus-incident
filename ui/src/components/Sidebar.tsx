@@ -7,6 +7,8 @@ import {
   Layers,
   LogOut,
   Server,
+  Settings,
+  Sliders,
   Triangle,
   type LucideIcon,
 } from "lucide-react";
@@ -26,6 +28,11 @@ const agentItems = [
   { to: "/patterns", label: "Patterns", icon: Layers },
   { to: "/shadow",   label: "Shadow",   icon: EyeOff },
   { to: "/services", label: "Services", icon: Server },
+];
+
+const configItems = [
+  { to: "/config/incidents", label: "Incidents Config", icon: Sliders },
+  { to: "/config/agent",     label: "Agent Config",     icon: Settings },
 ];
 
 // Datadog-style left rail: dark navy, slim, icon + label, accent stripe on
@@ -65,6 +72,12 @@ export function Sidebar() {
           AI Agent
         </div>
         {agentItems.map(({ to, label, icon: Icon }) => (
+          <SideLink key={to} to={to} label={label} Icon={Icon} />
+        ))}
+        <div className="mt-2 px-2 py-2 text-2xs uppercase tracking-wider text-ink-500">
+          Configuration
+        </div>
+        {configItems.map(({ to, label, icon: Icon }) => (
           <SideLink key={to} to={to} label={label} Icon={Icon} />
         ))}
       </nav>

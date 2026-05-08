@@ -181,4 +181,110 @@ export const api = {
   },
   getIncident: (id: string) =>
     request<IncidentDetail>(`/api/admin/incidents/${id}`),
+
+  getIncidentsConfig: () =>
+    request<IncidentsConfig>("/api/admin/config/incidents"),
+  getAgentConfig: () => request<AgentConfigView>("/api/admin/config/agent"),
 };
+
+// ---------- Config view types (read-only, secret-redacted) ----------
+
+export interface ConfigField {
+  label: string;
+  value: unknown;
+  secret?: boolean;
+}
+
+export interface ChannelConfig {
+  id: string;
+  name: string;
+  enable: boolean;
+  fields: ConfigField[];
+}
+
+export interface QueueProviderConfig {
+  id: string;
+  name: string;
+  enable: boolean;
+  fields: ConfigField[];
+}
+
+export interface IncidentsConfig {
+  name: string;
+  host: string;
+  port: number;
+  public_host: string;
+  alert: { debug_body: boolean; channels: ChannelConfig[] };
+  queue: {
+    enable: boolean;
+    debug_body: boolean;
+    providers: QueueProviderConfig[];
+  };
+  oncall: {
+    enable: boolean;
+    initialized_only: boolean;
+    wait_minutes: number;
+    provider: string;
+    aws_incident_manager: {
+      response_plan_arn: string;
+      other_response_plan_keys: string[];
+    };
+    pagerduty: {
+      routing_key: string;
+      other_routing_keys: string[];
+    };
+  };
+  storage: {
+    type: string;
+    file: { data_dir: string; max_incidents: number };
+  };
+}
+
+export interface AgentConfigView {
+  enable: boolean;
+  mode: string;
+  poll_interval: string;
+  lookback: string;
+  batch_max: number;
+  signal_max_bytes: number;
+  new_service_grace: string;
+  service_patterns: string[];
+  sources_path: string;
+  sources: Array<{
+    name: string;
+    type: string;
+    enable: boolean;
+    details?: Record<string, unknown>;
+  }>;
+  redaction: {
+    enable: boolean;
+    redact_ips: boolean;
+    extra_pattern_count: number;
+  };
+  catalog: {
+    persist_interval: string;
+    auto_promote_after: number;
+    spike_multiplier: number;
+    spike_min_frequency: number;
+    spike_min_baseline_count: number;
+  };
+  miner: {
+    similarity_threshold: number;
+    tree_depth: number;
+    max_children: number;
+  };
+  regex: {
+    default_pattern: string;
+    rules: Array<{ name: string; pattern: string }>;
+  };
+  ai: {
+    enable: boolean;
+    base_url: string;
+    model: string;
+    temperature: number;
+    max_tokens: number;
+    max_calls_per_hour: number;
+    cache_ttl: string;
+    api_key: string;
+  };
+}
