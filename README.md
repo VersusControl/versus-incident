@@ -675,7 +675,6 @@ redis: # Required for on-call functionality
 #   2: mode=shadow,   review log lines `agent[shadow]: would alert ...`
 #   3: mode=detect    (AI emission ships in a follow-up milestone)
 #
-# See local/plans/ai-incident-detection/ for the full design.
 # -----------------------------------------------------------------------------
 agent:
   enable: false                   # master switch (env: AGENT_ENABLE)

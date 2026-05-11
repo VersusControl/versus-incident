@@ -97,7 +97,6 @@ export function AgentConfigPage() {
               </div>
               <div className="card-body">
                 <Grid>
-                  <KV k="Base URL" v={cfg.data.ai.base_url || "—"} />
                   <KV k="Model" v={cfg.data.ai.model || "—"} />
                   <SecretField
                     k="API key"

@@ -19,7 +19,7 @@ kubectl create secret generic versus-secrets \
   --from-literal=slack_channel_id=$SLACK_CHANNEL_ID
 ```
 
-### 2. ConfigMap with config + templates
+### 2. ConfigMap with config
 
 ```yaml
 # versus-config.yaml
@@ -47,17 +47,87 @@ data:
         enable: true
         token: ${SLACK_TOKEN}
         channel_id: ${SLACK_CHANNEL_ID}
-        template_path: /app/config/slack_message.tmpl
-
-  slack_message.tmpl: |
-    *Critical Error in {{.ServiceName}}*
-    ----------
-    ```{{.Logs}}```
-    Owner <@{{.UserID}}> please investigate
 ```
 
 ```bash
 kubectl apply -f versus-config.yaml
+```
+
+### Using custom templates
+
+If the default formatting doesn't suit your needs you can override any
+template by mounting your own file. Create a ConfigMap with your custom
+template(s) and mount them into the container:
+
+```yaml
+# versus-custom-templates.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: versus-custom-templates
+data:
+  slack_message.tmpl: |
+    *🚨 Incident in {{.ServiceName}}*
+    ----------
+    *Severity:* {{.Severity}}
+    *Environment:* {{.Environment}}
+    ```{{.Logs}}```
+    Owner <@{{.UserID}}> please investigate
+
+  telegram_message.tmpl: |
+    🚨 <b>Incident in {{.ServiceName}}</b>
+
+    <b>Severity:</b> {{.Severity}}
+    <b>Environment:</b> {{.Environment}}
+    <pre>{{.Logs}}</pre>
+    Owner please investigate
+```
+
+```bash
+kubectl apply -f versus-custom-templates.yaml
+```
+
+Then update the Deployment to mount the custom templates and point the
+config at them:
+
+```yaml
+# In the container spec:
+          volumeMounts:
+            - name: versus-config
+              mountPath: /app/config/config.yaml
+              subPath: config.yaml
+            - name: custom-templates
+              mountPath: /app/custom/slack_message.tmpl
+              subPath: slack_message.tmpl
+            - name: custom-templates
+              mountPath: /app/custom/telegram_message.tmpl
+              subPath: telegram_message.tmpl
+            - name: versus-data
+              mountPath: /app/data
+
+# In the volumes section:
+      volumes:
+        - name: versus-config
+          configMap:
+            name: versus-config
+        - name: custom-templates
+          configMap:
+            name: versus-custom-templates
+        - name: versus-data
+          persistentVolumeClaim:
+            claimName: versus-data
+```
+
+And reference the mounted paths in `config.yaml`:
+
+```yaml
+alert:
+  slack:
+    enable: true
+    template_path: "/app/custom/slack_message.tmpl"
+  telegram:
+    enable: true
+    template_path: "/app/custom/telegram_message.tmpl"
 ```
 
 ## Persistent data store
@@ -155,9 +225,6 @@ spec:
             - name: versus-config
               mountPath: /app/config/config.yaml
               subPath: config.yaml
-            - name: versus-config
-              mountPath: /app/config/slack_message.tmpl
-              subPath: slack_message.tmpl
             - name: versus-data
               mountPath: /app/data
       volumes:

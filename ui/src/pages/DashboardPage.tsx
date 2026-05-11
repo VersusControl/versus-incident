@@ -5,7 +5,7 @@ import {
   AlertTriangle,
   EyeOff,
   Layers,
-  Server,
+  Sparkles,
   type LucideIcon,
 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -40,9 +40,9 @@ export function DashboardPage() {
     queryFn: api.listShadow,
     retry: 0,
   });
-  const services = useQuery({
-    queryKey: ["services"],
-    queryFn: api.listServices,
+  const detectStats = useQuery({
+    queryKey: ["detect-stats"],
+    queryFn: api.detectStats,
     retry: 0,
   });
   const patterns = useQuery({
@@ -141,13 +141,13 @@ export function DashboardPage() {
                 Icon={EyeOff}
               />
               <Tile
-                label="Services"
+                label="AI Detect"
                 value={
-                  services.data ? Object.keys(services.data).length : undefined
+                  status.data?.detect_events ?? detectStats.data?.events ?? 0
                 }
-                loading={services.isLoading}
-                to="/services"
-                Icon={Server}
+                loading={status.isLoading && detectStats.isLoading}
+                to="/detect"
+                Icon={Sparkles}
               />
             </div>
           </div>
@@ -240,10 +240,10 @@ export function DashboardPage() {
                     0
                   }
                   totalSignals={shadowStats.data?.total_signals}
-                  servicesCount={
-                    services.data
-                      ? Object.keys(services.data).length
-                      : undefined
+                  detectEvents={
+                    status.data?.detect_events ??
+                    detectStats.data?.events ??
+                    0
                   }
                   verdicts={shadowStats.data?.verdicts}
                   loading={status.isLoading && shadowStats.isLoading}
@@ -411,14 +411,14 @@ function AgentChart({
   patterns,
   shadowEvents,
   totalSignals,
-  servicesCount,
+  detectEvents,
   verdicts,
   loading,
 }: {
   patterns?: number;
   shadowEvents?: number;
   totalSignals?: number;
-  servicesCount?: number;
+  detectEvents?: number;
   verdicts?: Record<string, number>;
   loading?: boolean;
 }) {
@@ -428,7 +428,7 @@ function AgentChart({
     { label: "Patterns", value: patterns ?? 0, color: BAR_COLORS[0] },
     { label: "Shadow", value: shadowEvents ?? 0, color: BAR_COLORS[1] },
     { label: "Signals", value: totalSignals ?? 0, color: BAR_COLORS[2] },
-    { label: "Services", value: servicesCount ?? 0, color: BAR_COLORS[3] },
+    { label: "AI Detect", value: detectEvents ?? 0, color: BAR_COLORS[3] },
   ];
 
   const verdictEntries = Object.entries(verdicts ?? {}).sort(

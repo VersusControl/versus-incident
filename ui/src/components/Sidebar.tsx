@@ -9,6 +9,7 @@ import {
   Server,
   Settings,
   Sliders,
+  Sparkles,
   Triangle,
   type LucideIcon,
 } from "lucide-react";
@@ -27,6 +28,7 @@ const agentItems = [
   { to: "/status",   label: "Status",   icon: Activity },
   { to: "/patterns", label: "Patterns", icon: Layers },
   { to: "/shadow",   label: "Shadow",   icon: EyeOff },
+  { to: "/detect",   label: "Detect",   icon: Sparkles },
   { to: "/services", label: "Services", icon: Server },
 ];
 

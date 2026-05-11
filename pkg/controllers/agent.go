@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"github.com/VersusControl/versus-incident/pkg/agent"
+	"github.com/VersusControl/versus-incident/pkg/agent/ai"
 	"github.com/VersusControl/versus-incident/pkg/config"
 
 	"github.com/gofiber/fiber/v2"
@@ -15,13 +16,15 @@ import (
 type AgentController struct {
 	catalog *agent.Catalog
 	shadow  *agent.ShadowLog
+	detect  *agent.DetectLog
 }
 
-// NewAgentController wires the catalog and shadow log into a controller.
-// Pass `cat=nil` if the agent is disabled — in that case every endpoint will
-// return 503. `sl` may be nil to disable the shadow endpoints.
-func NewAgentController(cat *agent.Catalog, sl *agent.ShadowLog) *AgentController {
-	return &AgentController{catalog: cat, shadow: sl}
+// NewAgentController wires the catalog, shadow log, and detect log into a
+// controller. Pass `cat=nil` if the agent is disabled — in that case every
+// endpoint will return 503. `sl` may be nil to disable the shadow endpoints,
+// and `dl` may be nil to disable the detect-log endpoints.
+func NewAgentController(cat *agent.Catalog, sl *agent.ShadowLog, dl *agent.DetectLog) *AgentController {
+	return &AgentController{catalog: cat, shadow: sl, detect: dl}
 }
 
 // Register attaches the agent admin endpoints to the given fiber group.
@@ -40,6 +43,12 @@ func NewAgentController(cat *agent.Catalog, sl *agent.ShadowLog) *AgentControlle
 //	POST   /shadow/flush     force-flush the shadow log to disk
 //	GET    /services         list known services with grace status
 //	POST   /services/:name/grace  control grace period (end / restart)
+//	GET    /detect           list detect-mode AI calls (newest first)
+//	GET    /detect/stats     aggregate counts for the detect log
+//	GET    /detect/:id       get one detect-mode AI call (full prompt + response)
+//	DELETE /detect           clear the detect log
+//	POST   /detect/flush     force-flush the detect log to disk
+//	GET    /ai/system-prompt the assembled system prompt sent on every AI call
 func (a *AgentController) Register(router fiber.Router) {
 	g := router.Group("/agent", a.authMiddleware)
 	g.Get("/status", a.getStatus)
@@ -54,6 +63,12 @@ func (a *AgentController) Register(router fiber.Router) {
 	g.Post("/shadow/flush", a.flushShadow)
 	g.Get("/services", a.listServices)
 	g.Post("/services/:name/grace", a.controlServiceGrace)
+	g.Get("/detect", a.listDetect)
+	g.Get("/detect/stats", a.detectStats)
+	g.Get("/detect/:id", a.getDetect)
+	g.Delete("/detect", a.clearDetect)
+	g.Post("/detect/flush", a.flushDetect)
+	g.Get("/ai/system-prompt", a.getSystemPrompt)
 }
 
 // authMiddleware enforces a shared gateway secret. Clients send the
@@ -78,6 +93,10 @@ func (a *AgentController) getStatus(c *fiber.Ctx) error {
 	if a.shadow != nil {
 		status["shadow_events"] = a.shadow.Len()
 		status["shadow_dirty"] = a.shadow.Dirty()
+	}
+	if a.detect != nil {
+		status["detect_events"] = a.detect.Len()
+		status["detect_dirty"] = a.detect.Dirty()
 	}
 	return c.JSON(status)
 }
@@ -196,4 +215,65 @@ func (a *AgentController) controlServiceGrace(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "action must be \"end\" or \"restart\""})
 	}
 	return c.JSON(fiber.Map{"ok": true})
+}
+
+// listDetect returns every detect-mode AI call (newest first). Each
+// entry includes the user prompt sent, the raw model response, and the
+// parsed finding so the UI can render an audit trail.
+func (a *AgentController) listDetect(c *fiber.Ctx) error {
+	if a.detect == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "detect log not enabled"})
+	}
+	return c.JSON(fiber.Map{"events": a.detect.All()})
+}
+
+// detectStats returns aggregate counts for the detect log (per
+// outcome, per verdict, per severity).
+func (a *AgentController) detectStats(c *fiber.Ctx) error {
+	if a.detect == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "detect log not enabled"})
+	}
+	return c.JSON(a.detect.Stats())
+}
+
+// getDetect returns one detect event by ID.
+func (a *AgentController) getDetect(c *fiber.Ctx) error {
+	if a.detect == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "detect log not enabled"})
+	}
+	e := a.detect.Get(c.Params("id"))
+	if e == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
+	}
+	return c.JSON(e)
+}
+
+// clearDetect drops every event and persists the empty log.
+func (a *AgentController) clearDetect(c *fiber.Ctx) error {
+	if a.detect == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "detect log not enabled"})
+	}
+	n := a.detect.Clear()
+	if err := a.detect.Persist(); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"ok": true, "cleared": n})
+}
+
+// flushDetect force-writes the detect log to disk.
+func (a *AgentController) flushDetect(c *fiber.Ctx) error {
+	if a.detect == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "detect log not enabled"})
+	}
+	if err := a.detect.Persist(); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"ok": true, "events": a.detect.Len()})
+}
+
+// getSystemPrompt returns the assembled system prompt sent to the model
+// on every AI call. Detect events store only the user prompt to keep
+// the on-disk log small; this endpoint provides the constant half.
+func (a *AgentController) getSystemPrompt(c *fiber.Ctx) error {
+	return c.JSON(fiber.Map{"system_prompt": ai.SystemPrompt()})
 }

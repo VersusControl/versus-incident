@@ -78,7 +78,7 @@ type Detector interface {
 	Process(ctx context.Context, batch []Signal) ([]AgentResult, error)
 }
 
-// AIFinding is the structured response returned by an AIAnalyzer for an
+// AIFinding is the structured response returned by an AISRE for an
 // unknown / spiking pattern. Used by detect mode.
 type AIFinding struct {
 	Title       string
@@ -90,9 +90,26 @@ type AIFinding struct {
 	SampleIDs   []string // signal IDs / pattern IDs for traceability
 }
 
-// AIAnalyzer turns an AgentResult into an AIFinding. Concrete analyzers
-// (OpenAI-compatible chat/completions, etc.) implement this interface.
-type AIAnalyzer interface {
+// AICallResult bundles the parsed finding with the inputs and outputs
+// of the underlying model call. The trace fields (UserPrompt,
+// RawResponse, DurationMs, Model) are persisted into the detect log so
+// operators can audit what was sent to the model and what came back.
+//
+// SystemPrompt is intentionally omitted — it is a constant per build
+// and would bloat every record. Operators can fetch the current
+// assembled system prompt via the agent admin API.
+type AICallResult struct {
+	Finding     *AIFinding
+	UserPrompt  string
+	RawResponse string
+	DurationMs  int64
+	Model       string
+}
+
+// AISRE turns an AgentResult into an AICallResult. Concrete
+// implementations (OpenAI-compatible chat/completions, etc.) live
+// under pkg/agent/ai.
+type AISRE interface {
 	Name() string
-	Analyze(ctx context.Context, result AgentResult) (*AIFinding, error)
+	Analyze(ctx context.Context, result AgentResult) (*AICallResult, error)
 }
