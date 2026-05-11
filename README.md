@@ -23,7 +23,6 @@ With the built-in **AI SRE Agent**, Versus goes further — continuously observi
   - [Understanding Custom Templates](#understanding-custom-templates-with-monitoring-webhooks)
   - [Deploy on Kubernetes](https://versuscontrol.github.io/versus-incident/userguide/kubernetes.html)
   - [Helm Chart](https://versuscontrol.github.io/versus-incident/userguide/helm.html)
-- [SNS Usage](#sns-usage)
 - [AI Agent](#ai-agent)
 - [On-Call](#on-call)
 - [Configuration](#complete-configuration)
