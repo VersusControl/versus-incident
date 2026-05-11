@@ -161,7 +161,6 @@ storage:
 #                     (also visible in stdout as `agent[shadow]: would alert ...`)
 #   3: mode=detect    (AI emission ships in a follow-up milestone)
 #
-# See local/plans/ai-incident-detection/ for the full design.
 # -----------------------------------------------------------------------------
 agent:
   enable: false                   # master switch (env: AGENT_ENABLE)
@@ -220,7 +219,6 @@ agent:
   # For now it the placeholder only.
   ai:
     enable: false                   # master switch (env: AGENT_AI_ENABLE)
-    base_url: ${AGENT_AI_BASE_URL}  # OpenAI-compatible chat/completions endpoint
     api_key: ${AGENT_AI_API_KEY}
     model: "gpt-4o-mini"
     temperature: 0.2

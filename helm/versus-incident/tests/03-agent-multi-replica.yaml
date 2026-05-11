@@ -1,0 +1,9 @@
+# Failure scenario: agent + RWO PVC + 2 replicas.
+# Expected: helm template exits non-zero with the validateAgent message.
+replicaCount: 2
+agent:
+  enable: true
+  mode: shadow
+storage:
+  persistence:
+    enabled: true

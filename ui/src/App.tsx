@@ -7,6 +7,9 @@ import { PatternsPage } from "./pages/PatternsPage";
 import { PatternDetailPage } from "./pages/PatternDetailPage";
 import { ShadowPage } from "./pages/ShadowPage";
 import { ShadowDetailPage } from "./pages/ShadowDetailPage";
+import { DetectPage } from "./pages/DetectPage";
+import { DetectDetailPage } from "./pages/DetectDetailPage";
+import { SystemPromptPage } from "./pages/SystemPromptPage";
 import { ServicesPage } from "./pages/ServicesPage";
 import { IncidentsPage } from "./pages/IncidentsPage";
 import { IncidentDetailPage } from "./pages/IncidentDetailPage";
@@ -27,6 +30,9 @@ export default function App() {
           <Route path="/patterns/:id" element={<PatternDetailPage />} />
           <Route path="/shadow" element={<ShadowPage />} />
           <Route path="/shadow/:patternId" element={<ShadowDetailPage />} />
+          <Route path="/detect" element={<DetectPage />} />
+          <Route path="/detect/system-prompt" element={<SystemPromptPage />} />
+          <Route path="/detect/:id" element={<DetectDetailPage />} />
           <Route path="/services" element={<ServicesPage />} />
           <Route path="/config/incidents" element={<IncidentsConfigPage />} />
           <Route path="/config/agent" element={<AgentConfigPage />} />

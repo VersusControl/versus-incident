@@ -1,0 +1,54 @@
+name: Dev - Helm Chart CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'helm/versus-incident/**'
+      - '.github/workflows/helm-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'helm/versus-incident/**'
+      - '.github/workflows/helm-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helm-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  helm:
+    name: Lint & template
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.14.0
+
+      - name: Add chart dependencies
+        run: |
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm dependency build helm/versus-incident
+
+      - name: helm lint
+        run: |
+          helm lint helm/versus-incident
+          for f in helm/versus-incident/tests/*.yaml; do
+            echo "==> helm lint with $(basename "$f")"
+            # Skip EXPECT_FAIL scenarios (lint will fail on validateAgent / validateStorage).
+            if grep -q "^# EXPECT_FAIL" "${f%.yaml}.assert" 2>/dev/null; then
+              echo "    skipped (EXPECT_FAIL scenario)"
+              continue
+            fi
+            helm lint helm/versus-incident -f "$f"
+          done
+
+      - name: helm template smoke tests
+        run: ./helm/versus-incident/tests/run.sh

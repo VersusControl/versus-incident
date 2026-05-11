@@ -1,0 +1,3 @@
+# EXPECT_FAIL — both validators may fire (agent multi-replica OR RWO multi-replica).
+# Either one being present in stderr is sufficient.
+with 2 replicas

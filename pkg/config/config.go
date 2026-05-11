@@ -301,9 +301,6 @@ func LoadConfig(path string) error {
 			cfg.Agent.ServicePatterns = list
 		}
 		setEnableFromEnv("AGENT_AI_ENABLE", &cfg.Agent.AI.Enable)
-		if u := os.Getenv("AGENT_AI_BASE_URL"); u != "" {
-			cfg.Agent.AI.BaseURL = u
-		}
 		if k := os.Getenv("AGENT_AI_API_KEY"); k != "" {
 			cfg.Agent.AI.APIKey = k
 		}

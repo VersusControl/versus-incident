@@ -21,6 +21,7 @@
 - [Introduction](./agent/agent-introduction.md)
 - [Getting Started](./agent/getting-started.md)
 - [Shadow Mode](./agent/shadow-mode.md)
+- [AI Detect Mode](./agent/ai-detect-mode.md)
 - [Spike Detection](./agent/spike.md)
 - [Configuration](./agent/configuration.md)
 - [RedAction](./agent/redaction.md)
@@ -39,3 +40,4 @@
 # Migration Guides
 - [Migrating to v1.2.0](./migration/migration-v1.2.0.md)
 - [Migrating to v1.3.0](./migration/migration-v1.3.0.md)
+- [Migrating to v1.4.0](./migration/migration-v1.4.0.md)

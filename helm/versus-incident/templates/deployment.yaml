@@ -35,6 +35,46 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           env:
+            {{- /* Gateway secret — always wired. Empty value leaves admin endpoints unregistered. */}}
+            - name: GATEWAY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: gateway_secret
+
+            {{- /* Storage backend (file backend honored by the binary today). */}}
+            {{- if .Values.storage.type }}
+            - name: STORAGE_TYPE
+              value: {{ .Values.storage.type | quote }}
+            {{- end }}
+            {{- if eq (.Values.storage.type | default "file") "file" }}
+            - name: STORAGE_FILE_DATA_DIR
+              value: {{ .Values.storage.file.dataDir | default "/app/data" | quote }}
+            {{- end }}
+
+            {{- /* Agent (opt-in). Detect mode requires agent.ai.apiKey. */}}
+            {{- if .Values.agent.enable }}
+            - name: AGENT_ENABLE
+              value: "true"
+            - name: AGENT_MODE
+              value: {{ .Values.agent.mode | default "training" | quote }}
+            {{- if .Values.agent.newServiceGrace }}
+            - name: AGENT_NEW_SERVICE_GRACE
+              value: {{ .Values.agent.newServiceGrace | quote }}
+            {{- end }}
+            {{- if .Values.agent.ai.enable }}
+            - name: AGENT_AI_ENABLE
+              value: "true"
+            - name: AGENT_AI_MODEL
+              value: {{ .Values.agent.ai.model | default "gpt-4o-mini" | quote }}
+            - name: AGENT_AI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: agent_ai_api_key
+            {{- end }}
+            {{- end }}
+
             {{- if .Values.alert.slack.enable }}
             - name: SLACK_ENABLE
               value: "true"
@@ -362,6 +402,15 @@ spec:
             - name: config-volume
               mountPath: /app/config/config.yaml
               subPath: config.yaml
+            {{- if .Values.agent.enable }}
+            - name: config-volume
+              mountPath: /app/config/agent_sources.yaml
+              subPath: agent_sources.yaml
+            {{- end }}
+            {{- if eq (.Values.storage.type | default "file") "file" }}
+            - name: data-volume
+              mountPath: {{ .Values.storage.file.dataDir | default "/app/data" }}
+            {{- end }}
             {{- if .Values.templates.slack }}
             - name: config-volume
               mountPath: /app/config/slack_message.tmpl
@@ -391,3 +440,12 @@ spec:
         - name: config-volume
           configMap:
             name: {{ include "versus-incident.fullname" . }}-config
+        {{- if eq (.Values.storage.type | default "file") "file" }}
+        - name: data-volume
+          {{- if .Values.storage.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.storage.persistence.existingClaim | default (printf "%s-data" (include "versus-incident.fullname" .)) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}

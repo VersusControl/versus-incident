@@ -901,6 +901,66 @@ def list_templates() -> None:
         print(name)
 
 
+# Curated incident "scenarios" — each one is a correlated burst of several
+# templates from the same problem domain, so the AI SRE in detect mode has
+# enough context to write a useful summary. Used by --scenario.
+#
+# Each scenario lists (template_fn, weight) pairs; the burst draws from this
+# weighted pool, so the dominant template still spikes hardest while
+# supporting templates appear as "smoke" around it.
+SCENARIOS: dict[str, list[tuple[callable, int]]] = {
+    "db-outage": [
+        (t_db_conn_refused, 6),
+        (t_db_query_slow, 3),
+        (t_db_deadlock, 2),
+        (t_replication_lag, 1),
+        (t_circuit_open, 2),
+        (t_5xx, 2),
+    ],
+    "cache-meltdown": [
+        (t_redis_timeout, 6),
+        (t_circuit_open, 2),
+        (t_5xx, 2),
+        (t_worker_lag, 1),
+    ],
+    "disk-full": [
+        (t_disk_full, 5),
+        (t_s3_upload_fail, 2),
+        (t_cron_fail, 1),
+        (t_panic, 1),
+    ],
+    "tls-expired": [
+        (t_certificate_expired, 5),
+        (t_tls_handshake_fail, 3),
+        (t_oncall_fail, 1),
+    ],
+    "oom-cascade": [
+        (t_kernel_oom_distinct, 4),
+        (t_oom_killer, 3),
+        (t_pod_restart, 3),
+        (t_unexpected_shutdown, 1),
+    ],
+    "auth-attack": [
+        (t_auth_login_fail, 6),
+        (t_syslog_sshd, 3),
+        (t_security_breach, 1),
+    ],
+    "k8s-imagepull": [
+        (t_k8s_kubelet, 5),
+        (t_pod_restart, 2),
+        (t_k8s_event_json, 2),
+    ],
+}
+
+
+def list_scenarios() -> None:
+    """Print every scenario name (for use with --scenario)."""
+    for name in sorted(SCENARIOS):
+        members = ", ".join(fn.__name__.removeprefix("t_").replace("_", "-")
+                            for fn, _ in SCENARIOS[name])
+        print(f"{name:<18} {members}")
+
+
 def pick_spike_template(name: str):
     """Resolve a --spike argument to a template function.
 
@@ -959,6 +1019,17 @@ def main() -> int:
                     help="maximum seconds between spike lines (default: 0.2)")
     ap.add_argument("--spike-context", type=int, default=0,
                     help="number of regular noisy lines to emit BEFORE the spike (default: 0)")
+    # Scenario mode — emit a curated cluster of correlated failures (e.g.
+    # db-outage = several db_* templates in a tight window). Built for the
+    # detect-mode demo: the AI SRE gets enough context to summarize a
+    # mini-incident, not just one repeated line.
+    ap.add_argument("--scenario", default=None, metavar="NAME",
+                    help="emit a curated cluster of correlated failures "
+                         "(use --list-scenarios to see all). Mutually exclusive with --spike.")
+    ap.add_argument("--scenario-burst", type=int, default=60,
+                    help="number of lines in the scenario burst (default: 60)")
+    ap.add_argument("--list-scenarios", action="store_true",
+                    help="print every --scenario name and the templates it draws from, then exit")
     ap.add_argument("--list-templates", action="store_true",
                     help="print every template name usable with --spike, then exit")
     args = ap.parse_args()
@@ -966,6 +1037,17 @@ def main() -> int:
     if args.list_templates:
         list_templates()
         return 0
+    if args.list_scenarios:
+        list_scenarios()
+        return 0
+
+    if args.spike and args.scenario:
+        print("--spike and --scenario are mutually exclusive", file=sys.stderr)
+        return 2
+    if args.scenario and args.scenario not in SCENARIOS:
+        print(f"unknown --scenario: {args.scenario!r}. "
+              f"Run with --list-scenarios to see all options.", file=sys.stderr)
+        return 2
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -983,7 +1065,16 @@ def main() -> int:
     ts = parse_start_time(args.start_time)
     written = 0
     with out.open(mode, encoding="utf-8") as f:
-        if args.spike:
+        if args.scenario:
+            pool = SCENARIOS[args.scenario]
+            for _ in range(args.scenario_burst):
+                level, msg = weighted_choice(pool)()
+                stamp = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+                f.write(f"{stamp} {level} {msg}\n")
+                written += 1
+                ts += timedelta(seconds=random.uniform(args.spike_interval_min, args.spike_interval_max))
+            print(f"scenario: {args.scenario} × {args.scenario_burst} lines")
+        elif args.spike:
             spike_fn = pick_spike_template(args.spike)
             spike_label = spike_fn.__name__.removeprefix("t_").replace("_", "-")
 

@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: PROD - Build and Push Docker Image
 
 on:
   push:

@@ -80,6 +80,8 @@ export interface Status {
   dirty: boolean;
   shadow_events?: number;
   shadow_dirty?: boolean;
+  detect_events?: number;
+  detect_dirty?: boolean;
 }
 
 export interface ShadowEvent {
@@ -105,6 +107,43 @@ export interface ShadowStats {
 export interface ServiceInfo {
   first_seen: string;
 }
+
+// AIFinding is the structured response parsed out of the model's JSON.
+export interface AIFinding {
+  Title?: string;
+  Summary?: string;
+  Severity?: string; // critical | high | medium | low
+  Category?: string;
+  Confidence?: number; // 0..1
+  Suggestions?: string[];
+  SampleIDs?: string[];
+}
+
+// DetectEvent mirrors pkg/agent.DetectEvent — the audit record for one
+// detect-mode handling of a pattern.
+export interface DetectEvent {
+  id: string;
+  timestamp: string;
+  source: string;
+  pattern_id: string;
+  template: string;
+  service?: string;
+  verdict: string; // unknown | spike | known
+  frequency: number;
+  baseline: number;
+  samples?: string[];
+  model?: string;
+  user_prompt?: string;
+  raw_response?: string;
+  duration_ms?: number;
+  finding?: AIFinding | null;
+  outcome: string; // emitted | cached | dry | quota | ai_error | send_error
+  error?: string;
+}
+
+// DetectStats is a flat map: keys include `events`, `outcome_<name>`,
+// `verdict_<name>`, `severity_<name>`.
+export type DetectStats = Record<string, number>;
 
 // Incident shapes — list responses are summaries (no Content blob); the
 // detail endpoint returns the full payload.
@@ -171,6 +210,26 @@ export const api = {
     request<{ ok: boolean }>(
       `/api/agent/services/${encodeURIComponent(name)}/grace`,
       { method: "POST", body: JSON.stringify({ action }) },
+    ),
+
+  listDetect: () =>
+    request<{ events: DetectEvent[] }>("/api/agent/detect").then(
+      (r) => r.events ?? [],
+    ),
+  detectStats: () => request<DetectStats>("/api/agent/detect/stats"),
+  getDetect: (id: string) =>
+    request<DetectEvent>(`/api/agent/detect/${encodeURIComponent(id)}`),
+  clearDetect: () =>
+    request<{ ok: boolean; cleared: number }>("/api/agent/detect", {
+      method: "DELETE",
+    }),
+  flushDetect: () =>
+    request<{ ok: boolean; events: number }>("/api/agent/detect/flush", {
+      method: "POST",
+    }),
+  getSystemPrompt: () =>
+    request<{ system_prompt: string }>("/api/agent/ai/system-prompt").then(
+      (r) => r.system_prompt,
     ),
 
   listIncidents: (limit?: number) => {
@@ -279,7 +338,6 @@ export interface AgentConfigView {
   };
   ai: {
     enable: boolean;
-    base_url: string;
     model: string;
     temperature: number;
     max_tokens: number;

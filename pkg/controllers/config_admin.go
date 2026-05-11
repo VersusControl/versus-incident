@@ -296,7 +296,6 @@ func (c *ConfigAdminController) agent(ctx *fiber.Ctx) error {
 		},
 		"ai": fiber.Map{
 			"enable":             a.AI.Enable,
-			"base_url":           a.AI.BaseURL,
 			"model":              a.AI.Model,
 			"temperature":        a.AI.Temperature,
 			"max_tokens":         a.AI.MaxTokens,

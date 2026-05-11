@@ -1,0 +1,28 @@
+# Agent in detect mode with AI enabled, persistent storage, single replica.
+replicaCount: 1
+gatewaySecret: "test-secret-do-not-use-in-prod"
+
+storage:
+  type: file
+  file:
+    dataDir: /app/data
+    maxIncidents: 1000
+  persistence:
+    enabled: true
+    size: 2Gi
+    accessMode: ReadWriteOnce
+
+agent:
+  enable: true
+  mode: detect
+  ai:
+    enable: true
+    apiKey: "sk-test-key"
+    model: "gpt-4o-mini"
+  sources:
+    - name: app-logs
+      type: file
+      enable: true
+      file:
+        path: /var/log/app.log
+        from_beginning: false

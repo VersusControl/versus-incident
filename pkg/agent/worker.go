@@ -41,8 +41,8 @@ func init() {
 //
 // Training mode is fully end-to-end. Shadow and detect modes share the same
 // classification path; shadow records would-have-alerted events to the
-// shadow log, while detect logs the verdict (AI emission is wired up
-// separately).
+// shadow log, while detect calls the AI SRE and emits an incident through
+// the existing services.CreateIncident pipeline.
 type Worker struct {
 	cfg      config.AgentConfig
 	sources  []core.SignalSource
@@ -52,6 +52,12 @@ type Worker struct {
 	miner    *Miner
 	catalog  *Catalog
 	shadow   *ShadowLog // nil when shadow log is disabled
+	detect   *DetectLog // nil when detect log is disabled
+
+	// Detect-mode dependencies. All three are nil-safe: when ai.SRE is
+	// nil the worker logs a "dry detect" line and skips emission.
+	ai      AIBundle
+	emitter Emitter
 
 	pollInterval    time.Duration
 	persistEvery    time.Duration
@@ -60,6 +66,12 @@ type Worker struct {
 	services        *ServiceMatcher // regex-based service-name extractor
 	newServiceGrace time.Duration   // 0 = disabled
 }
+
+// Emitter delivers an AI finding to the rest of the system. In production
+// this is services.CreateIncidentFromFinding; tests inject a capturing
+// stub. A nil Emitter disables emission (worker logs the would-be call
+// and moves on).
+type Emitter func(f *core.AIFinding, r core.AgentResult, source, service string) error
 
 // WorkerOptions bundles the dependencies a Worker needs. Construction does
 // not connect to anything; the worker dials lazily inside Run.
@@ -72,7 +84,16 @@ type WorkerOptions struct {
 	Miner    *Miner
 	Catalog  *Catalog
 	Shadow   *ShadowLog      // optional; pass nil to disable shadow recording
+	Detect   *DetectLog      // optional; pass nil to disable detect-call audit log
 	Services *ServiceMatcher // optional; pass nil to disable service detection
+
+	// AI is the detect-mode bundle (analyzer + cache + rate limiter).
+	// Pass a zero-value AIBundle to disable AI emission.
+	AI AIBundle
+	// Emitter is invoked for each finding in detect mode. nil disables
+	// emission (worker still calls AI and caches the result, but the
+	// finding does not flow through to channels).
+	Emitter Emitter
 }
 
 // NewWorker validates options and applies defaults.
@@ -86,7 +107,10 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 		miner:    opt.Miner,
 		catalog:  opt.Catalog,
 		shadow:   opt.Shadow,
+		detect:   opt.Detect,
 		services: opt.Services,
+		ai:       opt.AI,
+		emitter:  opt.Emitter,
 	}
 
 	if len(w.sources) == 0 {
@@ -142,6 +166,11 @@ func (w *Worker) Run(ctx context.Context) {
 					log.Printf("agent: final shadow flush failed: %v", err)
 				}
 			}
+			if w.detect != nil {
+				if err := w.detect.Persist(); err != nil {
+					log.Printf("agent: final detect flush failed: %v", err)
+				}
+			}
 			return
 		case <-tick.C:
 			w.tick(ctx, mode)
@@ -158,6 +187,13 @@ func (w *Worker) Run(ctx context.Context) {
 					log.Printf("agent: shadow flush failed: %v", err)
 				} else {
 					log.Printf("agent: shadow log flushed (%d events)", w.shadow.Len())
+				}
+			}
+			if w.detect != nil && w.detect.Dirty() {
+				if err := w.detect.Persist(); err != nil {
+					log.Printf("agent: detect flush failed: %v", err)
+				} else {
+					log.Printf("agent: detect log flushed (%d events)", w.detect.Len())
 				}
 			}
 		}
@@ -307,8 +343,8 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 				continue
 			}
 
-			// Mode-specific sink: shadow records to NDJSON; detect will
-			// call the AI analyzer and emit an incident.
+			// Mode-specific sink: shadow records to NDJSON; detect calls
+			// the AI SRE and emits an incident.
 			if mode == "shadow" {
 				sample := ""
 				if len(b.signals) > 0 {
@@ -321,8 +357,8 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 				log.Printf("%sagent[shadow]: would alert pattern=%s service=%s tag=%s verdict=%s freq=%d%s",
 					colorGreen, id, b.serviceName, tag.RuleName, v, len(b.signals), colorReset)
 			} else {
-				log.Printf("%sagent[detect]: pattern=%s service=%s tag=%s verdict=%s freq=%d (AI emission not yet wired)%s",
-					colorGreen, id, b.serviceName, tag.RuleName, v, len(b.signals), colorReset)
+				outcome := w.emitDetect(ctx, src.Name(), id, b.template, b.serviceName, b.signals, v, prevBaseline)
+				verdicts["emit_"+outcome]++
 			}
 
 		default:
@@ -335,6 +371,122 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 
 	log.Printf("agent: tick %s signals=%d matched=%d patterns=%d skipped_no_match=%d verdicts=%v cursor=%s",
 		src.Name(), len(signals), len(signals)-skippedNoMatch, len(buckets), skippedNoMatch, verdicts, newCursor.Format(time.RFC3339))
+}
+
+// emitDetect handles one Unknown / Spike pattern in detect mode. Returns
+// a short outcome label ("emitted" | "cached" | "dry" | "quota" |
+// "ai_error" | "send_error") used as a stat suffix in the tick log.
+//
+// The function is nil-safe through and through:
+//   - w.ai.SRE == nil          → "dry detect": classify, log, do not emit.
+//   - w.ai.Cache hit           → reuse the prior finding without re-calling AI.
+//   - w.ai.Rate.Allow == false → skip this call (would-be cost shed).
+//   - w.emitter == nil         → AI was called and cached, but no incident is sent
+//     (shadow-of-detect: useful for validating AI output without alerting).
+func (w *Worker) emitDetect(
+	ctx context.Context,
+	source, patternID, template, service string,
+	signals []core.Signal,
+	verdict core.AgentVerdict,
+	prevBaseline float64,
+) string {
+	result := core.AgentResult{
+		Verdict:       verdict,
+		PatternID:     patternID,
+		Template:      template,
+		SampleSignals: signals,
+		Frequency:     len(signals),
+		Baseline:      prevBaseline,
+	}
+
+	// Build a partial DetectEvent up front so every outcome path can
+	// stamp itself into the audit log.
+	evt := &DetectEvent{
+		Source:    source,
+		PatternID: patternID,
+		Template:  template,
+		Service:   service,
+		Verdict:   verdict.String(),
+		Frequency: len(signals),
+		Baseline:  prevBaseline,
+		Samples:   sampleMessages(signals, 3),
+	}
+
+	// 1. Dry detect — analyzer not configured.
+	if w.ai.SRE == nil {
+		log.Printf("%sagent[detect:dry]: pattern=%s service=%s verdict=%s freq=%d (ai.enable=false)%s",
+			colorGreen, patternID, service, verdict, len(signals), colorReset)
+		evt.Outcome = "dry"
+		w.detect.Record(evt)
+		return "dry"
+	}
+
+	// 2. Cache hit — reuse the prior finding.
+	if cached, ok := w.ai.Cache.Get(patternID); ok {
+		log.Printf("%sagent[detect]: cache hit pattern=%s verdict=%s freq=%d%s",
+			colorGreen, patternID, verdict, len(signals), colorReset)
+		evt.Finding = cached
+		outcome := w.send(cached, result, source, service, "cached")
+		evt.Outcome = outcome
+		if outcome == "send_error" {
+			evt.Error = "emitter returned error (see logs)"
+		}
+		w.detect.Record(evt)
+		return outcome
+	}
+
+	// 3. Rate limit guard.
+	if !w.ai.Rate.Allow() {
+		log.Printf("agent[detect]: AI quota exceeded; skipping pattern=%s freq=%d", patternID, len(signals))
+		evt.Outcome = "quota"
+		w.detect.Record(evt)
+		return "quota"
+	}
+
+	// 4. Real AI call.
+	call, err := w.ai.SRE.Analyze(ctx, result)
+	if err != nil {
+		log.Printf("agent[detect]: AI analyze failed pattern=%s: %v", patternID, err)
+		evt.Outcome = "ai_error"
+		evt.Error = err.Error()
+		w.detect.Record(evt)
+		return "ai_error"
+	}
+	finding := call.Finding
+	w.ai.Cache.Put(patternID, finding)
+
+	evt.Finding = finding
+	evt.Model = call.Model
+	evt.UserPrompt = call.UserPrompt
+	evt.RawResponse = call.RawResponse
+	evt.DurationMs = call.DurationMs
+
+	outcome := w.send(finding, result, source, service, "emitted")
+	evt.Outcome = outcome
+	if outcome == "send_error" {
+		evt.Error = "emitter returned error (see logs)"
+	}
+	w.detect.Record(evt)
+	return outcome
+}
+
+// send delegates to the configured emitter and translates errors into
+// the worker's outcome vocabulary.
+func (w *Worker) send(finding *core.AIFinding, result core.AgentResult, source, service, okLabel string) string {
+	if w.emitter == nil {
+		log.Printf("%sagent[detect]: pattern=%s service=%s severity=%s confidence=%.2f title=%q (no emitter wired)%s",
+			colorGreen, result.PatternID, service, finding.Severity, finding.Confidence,
+			truncateString(finding.Title, 80), colorReset)
+		return okLabel
+	}
+	if err := w.emitter(finding, result, source, service); err != nil {
+		log.Printf("agent[detect]: emit failed pattern=%s: %v", result.PatternID, err)
+		return "send_error"
+	}
+	log.Printf("%sagent[detect]: emitted pattern=%s service=%s severity=%s confidence=%.2f title=%q%s",
+		colorGreen, result.PatternID, service, finding.Severity, finding.Confidence,
+		truncateString(finding.Title, 80), colorReset)
+	return okLabel
 }
 
 // classify decides the verdict for a pattern given the current tick's
@@ -449,4 +601,24 @@ func truncateString(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// sampleMessages returns up to `max` non-empty Message fields from
+// signals — used to attach a few representative log lines to the
+// detect audit log.
+func sampleMessages(signals []core.Signal, max int) []string {
+	if max <= 0 {
+		return nil
+	}
+	out := make([]string, 0, max)
+	for _, s := range signals {
+		if s.Message == "" {
+			continue
+		}
+		out = append(out, s.Message)
+		if len(out) == max {
+			break
+		}
+	}
+	return out
 }

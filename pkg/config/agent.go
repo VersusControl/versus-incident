@@ -1,7 +1,7 @@
 package config
 
 // -----------------------------------------------------------------------------
-// Agent mode (AI incident detection) — see local/plans/ai-incident-detection
+// Agent mode (AI incident detection)
 // -----------------------------------------------------------------------------
 
 type AgentConfig struct {
@@ -66,6 +66,10 @@ const CatalogBlobName = "patterns"
 
 // ShadowBlobName is the storage blob key used by the shadow log.
 const ShadowBlobName = "shadow"
+
+// AICacheBlobName is the storage blob key used by the AI SRE result
+// cache (per-pattern findings, ttl-bounded).
+const AICacheBlobName = "ai_cache"
 
 type AgentMinerConfig struct {
 	SimilarityThreshold float64 `mapstructure:"similarity_threshold"`
@@ -151,18 +155,15 @@ type AgentElasticsearchSourceConfig struct {
 	PageSize           int      `mapstructure:"page_size"`
 }
 
-// AgentAIConfig holds configuration for the AI analyzer used in detect mode.
+// AgentAIConfig holds configuration for the AI SRE used in detect mode.
 // The struct and env overrides are wired today; the concrete HTTP client
 // and prompt builder land alongside detect-mode emission.
 type AgentAIConfig struct {
-	// Enable gates whether the AI analyzer is called at all. When false
+	// Enable gates whether the AI SRE is called at all. When false
 	// (the default) detect mode still classifies patterns but never calls
 	// the LLM — it only logs what it would have sent. This allows operators
 	// to run detect mode in a "dry-run" fashion without an API key.
 	Enable bool `mapstructure:"enable"`
-	// BaseURL is the OpenAI-compatible chat/completions endpoint, e.g.
-	// "https://api.openai.com/v1" or a local vLLM / LM Studio URL.
-	BaseURL string `mapstructure:"base_url"`
 	// APIKey is the bearer token sent in the Authorization header.
 	APIKey string `mapstructure:"api_key"`
 	// Model is the model identifier, e.g. "gpt-4o-mini".

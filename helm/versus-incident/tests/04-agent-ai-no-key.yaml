@@ -1,0 +1,8 @@
+# Failure scenario: agent.ai.enable=true with empty apiKey.
+replicaCount: 1
+agent:
+  enable: true
+  mode: detect
+  ai:
+    enable: true
+    apiKey: ""

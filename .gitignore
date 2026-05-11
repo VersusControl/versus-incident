@@ -2,6 +2,7 @@ tmp
 tmp.txt
 *.sh
 !scripts/*.sh
+!helm/**/*.sh
 .air.conf
 book
 local

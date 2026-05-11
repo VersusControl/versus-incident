@@ -200,6 +200,16 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		log.Printf("agent: shadow log loaded events=%d", shadowLog.Len())
 	}
 
+	// Detect log: per-call audit trail (pattern + prompt + raw response
+	// + finding) for the UI. Always loaded so a mode switch keeps history.
+	detectLog, err := agent.LoadDetectLog(store, 0)
+	if err != nil {
+		log.Printf("agent: detect log load warning: %v (starting fresh)", err)
+	}
+	if cfg.Mode == "detect" {
+		log.Printf("agent: detect log loaded events=%d", detectLog.Len())
+	}
+
 	miner := agent.NewMiner(cfg.Miner.SimilarityThreshold, cfg.Miner.TreeDepth, cfg.Miner.MaxChildren)
 	for _, p := range catalog.All() {
 		miner.AddCluster(p.ID, p.Template, p.Count)
@@ -215,7 +225,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		log.Printf("agent: regex warning: %v", e)
 	}
 
-	services, svcErrs := agent.NewServiceMatcher(cfg.ServicePatterns)
+	serviceMatcher, svcErrs := agent.NewServiceMatcher(cfg.ServicePatterns)
 	for _, e := range svcErrs {
 		log.Printf("agent: service_patterns warning: %v", e)
 	}
@@ -230,6 +240,12 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 
 	cursors := agent.NewCursorStore(rdb)
 
+	aiBundle := agent.BuildAI(cfg, store, nil)
+	if aiBundle.SRE != nil {
+		log.Printf("agent: AI SRE enabled provider=%s model=%s rate_limit=%d/hr",
+			aiBundle.SRE.Name(), cfg.AI.Model, cfg.AI.MaxCallsPerHour)
+	}
+
 	worker, err := agent.NewWorker(agent.WorkerOptions{
 		Cfg:      cfg,
 		Sources:  sources,
@@ -239,7 +255,10 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		Miner:    miner,
 		Catalog:  catalog,
 		Shadow:   shadowLog,
-		Services: services,
+		Detect:   detectLog,
+		Services: serviceMatcher,
+		AI:       aiBundle,
+		Emitter:  services.CreateIncidentFromFinding,
 	})
 	if err != nil {
 		return nil, err
@@ -252,7 +271,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		return nil, fmt.Errorf("agent: gateway_secret is not configured — /api/agent/* admin endpoints require a secret")
 	}
 	api := app.Group("/api")
-	controllers.NewAgentController(catalog, shadowLog).Register(api)
+	controllers.NewAgentController(catalog, shadowLog, detectLog).Register(api)
 
 	return catalog, nil
 }

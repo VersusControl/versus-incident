@@ -24,6 +24,11 @@
 #   SPIKE_CONTEXT  regular noisy lines before burst    (default 0)
 #   --list-templates   print available template names and exit
 #
+# Env vars / flags (scenario mode — curated incident clusters for detect demos):
+#   SCENARIO         scenario name (e.g. db-outage, disk-full, tls-expired)
+#   SCENARIO_BURST   total lines in the cluster        (default 60)
+#   --list-scenarios print available scenarios and exit
+#
 # Stops cleanly on Ctrl+C.
 
 set -euo pipefail
@@ -35,7 +40,10 @@ ITER="${ITER:-0}"
 SPIKE="${SPIKE:-}"
 SPIKE_BURST="${SPIKE_BURST:-80}"
 SPIKE_CONTEXT="${SPIKE_CONTEXT:-0}"
+SCENARIO="${SCENARIO:-}"
+SCENARIO_BURST="${SCENARIO_BURST:-60}"
 LIST_TEMPLATES=0
+LIST_SCENARIOS=0
 
 # Allow flag overrides too
 while [[ $# -gt 0 ]]; do
@@ -47,9 +55,12 @@ while [[ $# -gt 0 ]]; do
     --spike)         SPIKE="$2";         shift 2 ;;
     --spike-burst)   SPIKE_BURST="$2";   shift 2 ;;
     --spike-context) SPIKE_CONTEXT="$2"; shift 2 ;;
+    --scenario)       SCENARIO="$2";       shift 2 ;;
+    --scenario-burst) SCENARIO_BURST="$2"; shift 2 ;;
     --list-templates) LIST_TEMPLATES=1;  shift ;;
+    --list-scenarios) LIST_SCENARIOS=1;  shift ;;
     -h|--help)
-      sed -n '2,28p' "$0"; exit 0 ;;
+      sed -n '2,32p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -65,8 +76,25 @@ fi
 if [[ "$LIST_TEMPLATES" -eq 1 ]]; then
   exec python3 "$GEN" --list-templates
 fi
+if [[ "$LIST_SCENARIOS" -eq 1 ]]; then
+  exec python3 "$GEN" --list-scenarios
+fi
 
 mkdir -p "$(dirname "$OUTPUT")"
+
+# Scenario mode: emit a curated cluster of correlated failures so the
+# detect-mode AI SRE has rich context for one mini-incident, then exit.
+if [[ -n "$SCENARIO" ]]; then
+  echo "scenario mode: injecting '$SCENARIO' cluster ($SCENARIO_BURST lines) into $OUTPUT"
+  python3 "$GEN" \
+    --append \
+    --output "$OUTPUT" \
+    --start-time now \
+    --scenario "$SCENARIO" \
+    --scenario-burst "$SCENARIO_BURST"
+  echo "done. Watch the agent log for an 'emit_emitted' verdict on the next tick."
+  exit 0
+fi
 
 # Spike mode: emit one tight burst of the chosen template, then exit.
 # Live-tail loop is skipped entirely so the burst lands in a single tick.

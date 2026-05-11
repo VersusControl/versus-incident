@@ -77,8 +77,16 @@ alert:
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `replicaCount` | Number of replicas for the deployment | `2` |
+| `replicaCount` | Number of replicas for the deployment (set to `1` when `agent.enable=true` or persistence is enabled) | `2` |
 | `config.publicHost` | Public URL for acknowledgment links | `""` |
+| `gatewaySecret` | Shared secret for `/api/admin/*` and `/api/agent/*`. Empty value leaves admin routes unregistered. | `""` |
+| `storage.type` | Storage backend (only `file` is implemented today) | `"file"` |
+| `storage.file.dataDir` | Directory for incidents, pattern catalog, detect log | `"/app/data"` |
+| `storage.persistence.enabled` | Mount a PVC at `storage.file.dataDir` | `false` |
+| `agent.enable` | Enable the AI SRE Agent | `false` |
+| `agent.mode` | `training`, `shadow`, or `detect` | `"training"` |
+| `agent.ai.enable` | Forward unknown / spike patterns to the LLM | `false` |
+| `agent.ai.apiKey` | OpenAI API key (stored in the chart Secret) | `""` |
 | `alert.slack.enable` | Enable Slack notifications | `false` |
 | `alert.slack.token` | Slack bot token | `""` |
 | `alert.slack.channelId` | Slack channel ID | `""` |
@@ -271,27 +279,173 @@ To uninstall/delete the `versus-incident` deployment:
 helm uninstall versus-incident
 ```
 
-## Admin Dashboard & Storage on Kubernetes
+## Admin Dashboard & Storage
 
 The embedded admin dashboard (see [Admin Dashboard](./admin-ui.md)) and
-the persistent incident store both rely on two config keys that the
-**current chart version does not template yet**:
+the persistent incident store are first-class chart values from
+v1.4.0+.
 
-- `GATEWAY_SECRET` — required for the dashboard and every `/api/admin/*`
-  / `/api/agent/*` endpoint.
-- `storage.file.data_dir` — directory used by the default `file`
-  storage backend (`./data` by default, inside the container).
+```yaml
+# Required for the dashboard and every /api/admin/* and /api/agent/*
+# endpoint. When empty the admin routes are not registered at all
+# (no silent open surface). Generate with `openssl rand -hex 32`.
+gatewaySecret: "my-strong-secret"
 
-Until the chart adds first-class support, you can:
+storage:
+  type: file                  # only `file` is implemented today
+  file:
+    dataDir: /app/data        # holds incidents.json, patterns.json, etc.
+    maxIncidents: 1000        # rolling cap
 
-1. Patch the deployment to inject `GATEWAY_SECRET` from a secret.
-2. Mount a `PersistentVolumeClaim` at `/app/data` so `incidents.json`,
-   `patterns.json`, and `shadow.json` survive pod restarts.
+  # Persist the data dir so incident history and the agent catalog
+  # survive pod restarts. When disabled an emptyDir is used.
+  persistence:
+    enabled: true
+    size: 2Gi
+    accessMode: ReadWriteOnce
+    storageClassName: ""      # "" → cluster default
+    # existingClaim: my-pvc   # bind to an existing PVC instead
+```
 
-For the manual / non-Helm path with these wired up end-to-end, see
-[Deploy on Kubernetes](./kubernetes.md). If your deployment doesn't
-need the dashboard or persistent agent state, the chart works as-is —
-alerts are still delivered to every configured channel.
+> ⚠️ **Single-writer.** The file storage backend writes JSON files
+> directly to disk, and the AI agent worker is single-writer to the
+> pattern catalog and detect log. When you enable persistence or the
+> agent, set `replicaCount: 1` and `autoscaling.enabled: false`. The
+> chart's pre-flight validation will refuse to render if you violate
+> this.
+
+## AI SRE Agent
+
+The chart can deploy the agent introduced in
+[AI Detect Mode](../agent/ai-detect-mode.md). It is fully opt-in:
+when `agent.enable: false` (the default) no extra resources are
+created and no AI calls are made.
+
+### Minimum config — training mode
+
+Run the agent in observe-only mode against a log file mounted into
+the pod:
+
+```yaml
+replicaCount: 1                     # required while agent.enable=true
+gatewaySecret: "my-strong-secret"
+
+storage:
+  type: file
+  file:
+    dataDir: /app/data
+  persistence:
+    enabled: true
+    size: 2Gi
+
+agent:
+  enable: true
+  mode: training                    # observe + build catalog only
+  pollInterval: 30s
+  newServiceGrace: 30m
+  sources:
+    - name: app-logs
+      type: file
+      enable: true
+      file:
+        path: /var/log/app.log
+        from_beginning: false
+```
+
+Inspect the catalog after a few minutes:
+
+```bash
+kubectl exec -it deploy/versus-incident -- \
+  curl -H "X-Gateway-Secret: my-strong-secret" \
+       http://localhost:3000/api/agent/patterns
+```
+
+### Detect mode (forward unknowns to the LLM)
+
+Switch `mode: detect` and enable the AI analyzer. The API key is
+written to the chart Secret and exposed as `AGENT_AI_API_KEY`:
+
+```yaml
+agent:
+  enable: true
+  mode: detect
+  ai:
+    enable: true
+    apiKey: "${OPENAI_API_KEY}"     # use --set or external secret in prod
+    model: "gpt-4o-mini"
+    temperature: 0.2
+    maxTokens: 512
+    maxCallsPerHour: 30             # 0 = unlimited
+    cacheTtl: "1h"
+```
+
+Install with the secret on the command line so it never lands in a
+checked-in `values.yaml`:
+
+```bash
+helm upgrade --install versus-incident \
+  oci://ghcr.io/versuscontrol/charts/versus-incident \
+  --version 1.4.1 \
+  -f values.yaml \
+  --set gatewaySecret="$(openssl rand -hex 32)" \
+  --set agent.ai.apiKey="$OPENAI_API_KEY"
+```
+
+Every AI call is recorded in the detect log
+(`/app/data/detect.json`, capped at 500 events) and viewable via
+the API or the UI:
+
+```bash
+curl -H "X-Gateway-Secret: $SECRET" \
+     http://versus-incident.local/api/agent/detect/stats
+```
+
+### Mounting log files into the pod
+
+The file source needs the log file accessible inside the container.
+Common patterns:
+
+| Source | How to mount |
+|--------|--------------|
+| App in the same pod | sidecar emits to a shared `emptyDir`, agent reads it |
+| Node logs (e.g. journald) | `hostPath` volume + `securityContext.fsGroup` |
+| Cloud log service | use the `elasticsearch` source instead of `file` |
+
+For Elasticsearch, replace the source block:
+
+```yaml
+agent:
+  sources:
+    - name: prod-logs
+      type: elasticsearch
+      enable: true
+      elasticsearch:
+        addresses: ["https://es.internal:9200"]
+        api_key: "${ES_API_KEY}"
+        index: "logs-prod-*"
+        time_field: "@timestamp"
+        message_field: "message"
+        page_size: 500
+```
+
+Always pass `apiKey` / credentials via `--set` or an external Secret;
+inline secrets in `values.yaml` end up in `helm get values` output.
+
+### Important agent parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `agent.enable` | Master switch (requires `replicaCount: 1`) | `false` |
+| `agent.mode` | `training`, `shadow`, or `detect` | `"training"` |
+| `agent.pollInterval` | How often each source is pulled | `"30s"` |
+| `agent.lookback` | Initial backfill window on startup | `"5m"` |
+| `agent.newServiceGrace` | Implicit training window per new service | `"30m"` |
+| `agent.ai.enable` | Call the LLM (detect mode dry-runs without this) | `false` |
+| `agent.ai.apiKey` | OpenAI API key | `""` |
+| `agent.ai.model` | Model identifier | `"gpt-4o-mini"` |
+| `agent.ai.maxCallsPerHour` | Per-hour rate limit (`0` = unlimited) | `60` |
+| `agent.ai.cacheTtl` | TTL for the per-pattern AI result cache | `"1h"` |
+| `agent.sources` | Inline list of signal sources | `[]` |
 
 ## Additional Resources
 
