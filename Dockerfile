@@ -1,4 +1,4 @@
-FROM node:20-alpine AS ui-build
+FROM node:26-alpine AS ui-build
 WORKDIR /ui
 COPY ui/package.json ui/package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
