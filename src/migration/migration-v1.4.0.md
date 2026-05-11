@@ -137,20 +137,20 @@ If you fork the channel templates, see §4.
 
 ```bash
 # Docker
-docker pull ghcr.io/versuscontrol/versus-incident:1.4.0
+docker pull ghcr.io/versuscontrol/versus-incident:v1.4.0-beta
 
 # Helm
 helm repo update
 helm upgrade versus-incident oci://ghcr.io/versuscontrol/charts/versus-incident \
-  --version 1.4.1
+  --version 1.4.0
 ```
 
 Restart the service to apply the changes. Existing pattern catalogs
 and shadow logs are forward-compatible (no schema migration).
 
-### Helm chart changes (1.3.x → 1.4.1)
+### Helm chart changes (1.3.x → 1.4.0)
 
-Chart `1.4.1` adds first-class support for everything that v1.4.0
+Chart `1.4.0` adds first-class support for everything that v1.4.0
 ships in the binary. Key additions to `values.yaml`:
 
 ```yaml
@@ -212,7 +212,7 @@ endpoints are not registered. Generate a strong value at install:
 ```bash
 helm upgrade --install versus-incident \
   oci://ghcr.io/versuscontrol/charts/versus-incident \
-  --version 1.4.1 \
+  --version 1.4.0 \
   -f values.yaml \
   --set gatewaySecret="$(openssl rand -hex 32)" \
   --set agent.ai.apiKey="$OPENAI_API_KEY"
