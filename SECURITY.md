@@ -64,8 +64,10 @@ anonymous.
 - Run Versus Incident behind an authenticated reverse proxy. The
   `/api/incidents` endpoint is intentionally unauthenticated so monitoring
   tools can post directly; restrict it at the network layer.
-- Set a strong `agent.gateway_secret` if the AI agent admin endpoints
-  (`/api/agent/*`) are exposed.
+- Set a strong root-level `gateway_secret` if any admin endpoints
+  (`/api/admin/*` or `/api/agent/*`) are exposed. Empty `gateway_secret`
+  means the admin routes are not registered at all — never set it to an
+  empty string and assume the endpoints are protected by something else.
 - Use TLS to Redis in production. Do **not** set
   `redis.insecure_skip_verify: true` outside development.
 - Provide all tokens, webhook URLs, and routing keys via environment

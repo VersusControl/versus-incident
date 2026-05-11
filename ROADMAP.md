@@ -78,60 +78,126 @@ see [GitHub Project](https://github.com/orgs/VersusControl/projects/2).
 - [x] **Pattern management API** — `/api/agent/{status, patterns,
   patterns/:id, flush, shadow, shadow/stats, services,
   services/:name/grace}`, gated by `X-Gateway-Secret`
-- [x] **AI analyzer config struct** (OpenAI-compatible: `base_url`,
-  `api_key`, `model`, rate limits, cache TTL)
+- [x] **AI analyzer config struct** (OpenAI: `api_key`, `model`, rate
+  limits, cache TTL)
 - [x] **User documentation** (`src/agent/*` mdBook pages: introduction,
-  configuration, redaction, regex, miner, catalog, shadow-mode)
+  configuration, redaction, regex, miner, catalog, shadow-mode,
+  ai-detect-mode)
 - [x] **Helm chart support** for agent mode
 
----
-
-## In progress
-
-These are partially landed; the surfaces exist but the end-to-end behavior
-isn't wired.
-
-- [ ] **Unknown error detection (detect mode)** — classifier and shadow
-  recording are done; forwarding unknowns to the AI analyzer is the
-  remaining piece.
-- [ ] **AI error analysis HTTP client** — config struct is in;
-  prompt builder + OpenAI-compatible HTTP client land alongside detect-mode
-  emission.
-- [ ] **AI cost & privacy controls** — redaction is done; per-hour call
-  limit and cache TTL enforcement land with the HTTP client.
-- [ ] **Incidents from detected issues** — emit AI verdicts through the
-  existing alert + on-call pipeline so no extra channel config is needed.
-- [ ] **Frequency spike detection** — flag previously-known patterns whose
-  rate exceeds historical EWMA baseline.
+### AI SRE Agent — detect mode
+- [x] **Detect-mode AI pipeline** — unknown / spike patterns forwarded to
+  the AI SRE; findings emitted as incidents through the standard
+  `services.CreateIncident` pipeline (all channels + on-call)
+- [x] **OpenAI HTTP client** (`pkg/agent/ai/openai.go`) — plain `net/http`
+  against `/v1/chat/completions`; structured JSON response format;
+  no SDK dependency
+- [x] **Multi-file system prompt** (`pkg/agent/ai/prompts/`) — SOUL,
+  INPUTS, OUTPUT, RULES Markdown files embedded via `go:embed` and
+  concatenated at build time; operator-tunable without Go changes
+- [x] **AI cost & privacy controls** — per-hour rate limiter
+  (`pkg/agent/ai/rate.go`), result cache with TTL eviction
+  (`pkg/agent/ai/cache.go`), redaction pipeline runs before any AI call
+- [x] **Detect-mode audit log** — bounded ring buffer (`DetectLog`, cap
+  500) persisted as `detect` storage blob; captures every AI call with
+  prompt, raw response, finding, outcome, latency, model
+- [x] **Detect admin endpoints** — `GET /api/agent/detect` (list),
+  `/detect/stats`, `/detect/:id`, `DELETE /detect`, `POST /detect/flush`,
+  `GET /api/agent/ai/system-prompt`
+- [x] **Agent web dashboard** — Detect page (table + outcome filters),
+  detail page (prompt + raw response + finding), system-prompt page,
+  Dashboard AI Detect tile + chart bar
+- [x] **Notification templates for agent incidents** — all 5 channel
+  templates (Slack, Telegram, MS Teams, Lark, Viber) detect `Versus Agent`
+  source and render verdict, category, frequency, confidence, suggestions,
+  sample log in channel-native formatting
+- [x] **Frequency spike detection** — flag previously-known patterns whose
+  rate exceeds historical EWMA baseline; spikes routed to AI SRE alongside
+  unknowns
+- [x] **Test scenario scripts** — `--scenario` flag for
+  `generate_noisy_logs.py` / `run_noisy_logs.sh` with 7 curated incident
+  scenarios (db-outage, cache-meltdown, disk-full, tls-expired,
+  oom-cascade, auth-attack, k8s-imagepull)
 
 ---
 
 ## Planned (v1.4.0 release scope)
 
-- [ ] **Agent web dashboard** — extend the existing SPA at `ui/` with
-  agent surfaces (status, sortable catalog, shadow viewer, service grace
-  control). Same `X-Gateway-Secret` auth as the incident pages.
+- [x] **Security review** — verified no sensitive data leaks into logs or
+  AI prompts; admin-endpoint authn/authz audited. Redaction runs before
+  every AI call and before persisting to the detect log; all
+  `/api/admin/*` and `/api/agent/*` endpoints gated by
+  `X-Gateway-Secret`; empty `gateway_secret` leaves admin routes
+  unregistered (no silent open surface); Redis enforces TLS 1.2 minimum
+  unless `insecure_skip_verify` is explicitly enabled.
+- [x] **Release v1.4.0** — Docker image + Helm chart bumped to 1.4.0 +
+  [CHANGELOG.md](CHANGELOG.md) + migration notes
+  ([`src/migration/migration-v1.4.0.md`](src/migration/migration-v1.4.0.md)).
+
+## Planned (v1.4.1 release scope)
 - [ ] **Reliability & load testing** — graceful degradation on log-source
   outages, AI timeouts, and high log volume.
-- [ ] **Security review** — verify no sensitive data leaks into logs or AI
-  prompts; admin-endpoint authn/authz audit.
-- [ ] **Release v1.4.0** — Docker image + Helm chart + changelog +
-  migration notes for existing users.
 
 ---
 
 ## Future phases (not scheduled)
 
-| Phase | Theme | Why |
-|---|---|---|
-| 2 | More log sources (Loki, CloudWatch Logs, OpenSearch) | Reach teams not on Elasticsearch |
-| 3 | Metrics analysis (Prometheus) | Detect anomalies in numeric time-series |
-| 4 | Tracing analysis (Jaeger, Tempo) | Latency outliers and error-rate spikes |
-| 5 | Cross-signal correlation | Combine logs + metrics + traces into one root-cause incident |
-| 6 | Multiple AI providers (Anthropic, Bedrock, Ollama) + cost optimization | Model choice + spend control |
-| — | Prometheus metrics endpoint for Versus itself | Operate the operator |
-| — | Multiple template sets per channel | Different templates for different incident classes |
-| — | GCP Pub/Sub + Azure Service Bus listeners | Parity with AWS SNS/SQS |
+Phases land when the prior phase's success criteria hold up under real
+soak. See `local/plans/ai-incident-detection/sre-agent-roadmap.md` for
+full descriptions and ADR references.
+
+### AI SRE Agent — Phase 2: Triage with read-only tools
+- [ ] **Eino agent framework** — replace plain HTTP analyzer with
+  `ChatModelAgent` (Eino); current `openai.go` becomes the `openai-direct`
+  opt-out path
+- [ ] **`get_related_logs` tool** — query the same SignalSource backwards
+  from the alert time for surrounding context
+- [ ] **`get_recent_incidents` tool** — read from local `storage.Provider`
+  incident history
+- [ ] **`get_pattern_history` tool** — return EWMA / count trend for the
+  pattern
+- [ ] **`describe_service` tool** — operator-curated YAML from
+  `config/services.yaml` (owner, runbook URL, tier)
+- [ ] **Evidence list in findings** — `AIFinding.Evidence []EvidenceItem`
+  surfaced in the incident message ("I looked at X and saw Y")
+
+### AI SRE Agent — Phase 3: Metrics & traces sources
+- [ ] **Prometheus signal source** — pull rule-based queries, normalize
+  into `Signal`
+- [ ] **OTLP / Tempo / Jaeger signal source** — error spans + latency
+  outliers
+- [ ] **Additional log sources** — Loki, CloudWatch Logs, OpenSearch
+
+### AI SRE Agent — Phase 4: Cross-signal correlation
+- [ ] **`VerdictCorrelated`** — log + metric + trace anomalies for the
+  same service within a sliding window collapse into a single incident
+- [ ] **Windowed dedup** — Redis-backed `service.name + 5m bucket`
+  evaluated before AI emission
+
+### AI SRE Agent — Phase 5: Runbook RAG
+- [ ] **Local runbook indexing** — Markdown runbooks in `config/runbooks/`,
+  embedded with a local model (default `bge-small-en-v1.5` via Ollama)
+- [ ] **`find_runbook` tool** — semantic search over runbooks; high-confidence
+  match appears directly in the incident
+
+### AI SRE Agent — Phase 6: Suggested remediation
+- [ ] **Text-only suggested actions** — for known-good categories (restart,
+  scale up), AI suggests the exact command gated by an operator allow-list
+- [ ] **No auto-execution** — suggestions are text only; human approval
+  required
+
+### AI SRE Agent — Phase 7: Multi-LLM + cost optimization
+- [ ] **Model router** — cheaper model for verdict refinement, stronger
+  model for final summary
+- [ ] **Per-team / per-source budgets**
+- [ ] **Self-hosted-only enforcement** (`ai.disallow_external: true`)
+
+### Platform
+| Item | Why |
+|---|---|
+| Prometheus metrics endpoint for Versus itself | Operate the operator |
+| Multiple template sets per channel | Different templates for different incident classes |
+| GCP Pub/Sub + Azure Service Bus listeners | Parity with AWS SNS/SQS |
 
 ---
 
