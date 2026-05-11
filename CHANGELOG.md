@@ -78,3 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `gateway_secret` continues to gate every `/api/agent/*` endpoint;
   empty secret means the admin endpoints are not registered at all
   (no silent open admin surface).
+
+---
+
+## [1.4.x]
+
+See git history and previous Helm chart releases. Migration notes:
+[`src/migration/migration-v1.4.0.md`](src/migration/migration-v1.4.0.md).
