@@ -39,10 +39,10 @@ type DetectEvent struct {
 	// AI call (empty when outcome != "emitted" — cached/dry/quota/etc.
 	// did not invoke the model; ai_error fills RawResponse only when
 	// available).
-	Model        string `json:"model,omitempty"`
-	UserPrompt   string `json:"user_prompt,omitempty"`
-	RawResponse  string `json:"raw_response,omitempty"`
-	DurationMs   int64  `json:"duration_ms,omitempty"`
+	Model       string `json:"model,omitempty"`
+	UserPrompt  string `json:"user_prompt,omitempty"`
+	RawResponse string `json:"raw_response,omitempty"`
+	DurationMs  int64  `json:"duration_ms,omitempty"`
 
 	// Final structured finding (nil when no finding was produced).
 	Finding *core.AIFinding `json:"finding,omitempty"`
