@@ -1,4 +1,6 @@
 {{- include "versus-incident.validateRedis" . -}}
+{{- include "versus-incident.validateStorage" . -}}
+{{- include "versus-incident.validateAgent" . -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -13,6 +15,20 @@ data:
     {{- if .Values.config.publicHost }}
     public_host: {{ .Values.config.publicHost }}
     {{- end }}
+
+    # Shared secret gating /api/admin/* and /api/agent/*. Empty value
+    # leaves admin routes unregistered (no silent open surface).
+    gateway_secret: ${GATEWAY_SECRET}
+
+    # Pluggable storage backend (file | redis | database). Today only
+    # `file` is implemented end-to-end.
+    storage:
+      type: {{ .Values.storage.type | default "file" }}
+      {{- if eq (.Values.storage.type | default "file") "file" }}
+      file:
+        data_dir: {{ .Values.storage.file.dataDir | default "/app/data" }}
+        max_incidents: {{ .Values.storage.file.maxIncidents | default 1000 }}
+      {{- end }}
 
     alert:
       debug_body: {{ .Values.alert.debugBody }}
@@ -177,6 +193,35 @@ data:
         {{- end }}
       {{- end }}
       {{- end }}
+
+    {{- if .Values.agent.enable }}
+    # AI SRE Agent — opt-in. See src/agent/ai-detect-mode.md
+    agent:
+      enable: true
+      mode: {{ .Values.agent.mode | default "training" }}
+      poll_interval: {{ .Values.agent.pollInterval | default "30s" }}
+      lookback: {{ .Values.agent.lookback | default "5m" }}
+      new_service_grace: {{ .Values.agent.newServiceGrace | default "30m" }}
+      sources_path: /app/config/agent_sources.yaml
+      ai:
+        enable: {{ .Values.agent.ai.enable }}
+        api_key: ${AGENT_AI_API_KEY}
+        model: {{ .Values.agent.ai.model | default "gpt-4o-mini" | quote }}
+        temperature: {{ .Values.agent.ai.temperature | default 0.2 }}
+        max_tokens: {{ .Values.agent.ai.maxTokens | default 512 }}
+        max_calls_per_hour: {{ .Values.agent.ai.maxCallsPerHour | default 60 }}
+        cache_ttl: {{ .Values.agent.ai.cacheTtl | default "1h" | quote }}
+    {{- end }}
+
+  {{- if .Values.agent.enable }}
+  agent_sources.yaml: |
+    sources:
+      {{- if .Values.agent.sources }}
+{{ toYaml .Values.agent.sources | indent 6 }}
+      {{- else }}
+      []
+      {{- end }}
+  {{- end }}
 
   {{- if .Values.templates.slack }}
   slack_message.tmpl: |

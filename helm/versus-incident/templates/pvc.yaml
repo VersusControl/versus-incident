@@ -1,0 +1,17 @@
+{{- if and (eq (.Values.storage.type | default "file") "file") .Values.storage.persistence.enabled (not .Values.storage.persistence.existingClaim) -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "versus-incident.fullname" . }}-data
+  labels:
+    {{- include "versus-incident.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.storage.persistence.accessMode | default "ReadWriteOnce" }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.persistence.size | default "1Gi" }}
+  {{- with .Values.storage.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

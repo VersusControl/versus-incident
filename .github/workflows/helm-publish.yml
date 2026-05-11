@@ -1,4 +1,4 @@
-name: Release Helm Chart as OCI
+name: PROD - Release Helm Chart as OCI
 
 on:
   push:

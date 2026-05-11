@@ -142,11 +142,84 @@ docker pull ghcr.io/versuscontrol/versus-incident:1.4.0
 # Helm
 helm repo update
 helm upgrade versus-incident oci://ghcr.io/versuscontrol/charts/versus-incident \
-  --version 1.4.0
+  --version 1.4.1
 ```
 
 Restart the service to apply the changes. Existing pattern catalogs
 and shadow logs are forward-compatible (no schema migration).
+
+### Helm chart changes (1.3.x → 1.4.1)
+
+Chart `1.4.1` adds first-class support for everything that v1.4.0
+ships in the binary. Key additions to `values.yaml`:
+
+```yaml
+# NEW — required for the dashboard and every /api/admin/* and
+# /api/agent/* endpoint. Empty value leaves admin routes unregistered.
+gatewaySecret: ""
+
+# NEW — pluggable storage backend (only `file` is implemented today).
+# Persist the data dir so incident history and the agent catalog
+# survive pod restarts.
+storage:
+  type: file
+  file:
+    dataDir: /app/data
+    maxIncidents: 1000
+  persistence:
+    enabled: false
+    size: 1Gi
+    accessMode: ReadWriteOnce
+    # existingClaim: my-pvc
+
+# NEW — opt-in AI SRE Agent (training | shadow | detect).
+agent:
+  enable: false
+  mode: training
+  pollInterval: 30s
+  newServiceGrace: 30m
+  ai:
+    enable: false
+    apiKey: ""              # stored in the chart Secret
+    model: "gpt-4o-mini"
+    maxCallsPerHour: 60
+    cacheTtl: "1h"
+  sources: []               # see helm.md for examples
+```
+
+The chart also adds pre-flight validation that **fails the render**
+in three previously-silent misconfigurations:
+
+- Unknown `storage.type`.
+- `storage.persistence.enabled=true` with `accessMode: ReadWriteOnce`
+  and `replicaCount > 1` (the PVC cannot be mounted on multiple pods).
+- `agent.enable=true` with `replicaCount > 1` (the agent worker is
+  single-writer to the catalog and detect log).
+
+If you previously ran multiple replicas with the agent or persistence
+hand-rolled, drop replicas to `1` and disable autoscaling before
+upgrading:
+
+```yaml
+replicaCount: 1
+autoscaling:
+  enabled: false
+```
+
+If you set `gatewaySecret` to an empty value, the dashboard and admin
+endpoints are not registered. Generate a strong value at install:
+
+```bash
+helm upgrade --install versus-incident \
+  oci://ghcr.io/versuscontrol/charts/versus-incident \
+  --version 1.4.1 \
+  -f values.yaml \
+  --set gatewaySecret="$(openssl rand -hex 32)" \
+  --set agent.ai.apiKey="$OPENAI_API_KEY"
+```
+
+For the full chart guide including agent setup, see
+[`src/userguide/helm.md`](../userguide/helm.md).
 
 For any issues with the migration, please
 [open an issue](https://github.com/VersusControl/versus-incident/issues).

@@ -94,6 +94,18 @@ alert:
 |-----------|-------------|---------|
 | `replicaCount` | Number of replicas for the deployment | `2` |
 | `config.publicHost` | Public URL for acknowledgment links | `""` |
+| `gatewaySecret` | Shared secret for `/api/admin/*` and `/api/agent/*`. Empty value leaves admin routes unregistered. | `""` |
+| `storage.type` | Storage backend (`file`, `redis`, `database`). Only `file` is implemented today. | `"file"` |
+| `storage.file.dataDir` | Directory for pattern catalog, detect log, AI cache, incident history | `"/app/data"` |
+| `storage.persistence.enabled` | Mount a PVC at `storage.file.dataDir` so agent state survives restarts | `false` |
+| `storage.persistence.size` | PVC request size | `"1Gi"` |
+| `agent.enable` | Enable the AI SRE Agent (must run with `replicaCount: 1`) | `false` |
+| `agent.mode` | `training`, `shadow`, or `detect` | `"training"` |
+| `agent.ai.enable` | Enable LLM analysis in detect mode | `false` |
+| `agent.ai.apiKey` | OpenAI API key (stored in chart Secret) | `""` |
+| `agent.ai.model` | Model identifier | `"gpt-4o-mini"` |
+| `agent.ai.maxCallsPerHour` | Per-hour AI call rate limit (`0` = unlimited) | `60` |
+| `agent.sources` | Inline list of signal sources (snake_case keys) | `[]` |
 | `alert.slack.enable` | Enable Slack notifications | `false` |
 | `alert.slack.token` | Slack bot token | `""` |
 | `alert.slack.channelId` | Slack channel ID | `""` |

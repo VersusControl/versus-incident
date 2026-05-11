@@ -49,3 +49,28 @@
 
 For more information on using Versus Incident, refer to the documentation at:
 https://github.com/versuscontrol/versus-incident
+
+{{- if not .Values.gatewaySecret }}
+
+WARNING: gatewaySecret is empty. The admin endpoints (/api/admin/*,
+/api/agent/*) and the management UI are NOT registered. Set a strong
+value (e.g. `--set gatewaySecret=$(openssl rand -hex 32)`) before
+exposing the UI.
+{{- end }}
+
+{{- if .Values.agent.enable }}
+
+9. AI SRE Agent is enabled (mode: {{ .Values.agent.mode }}).
+   {{- if eq .Values.agent.mode "detect" }}
+   {{- if .Values.agent.ai.enable }}
+   AI analyzer: {{ .Values.agent.ai.model }} (max {{ .Values.agent.ai.maxCallsPerHour }} calls/hr).
+   {{- else }}
+   AI analyzer is DISABLED — detect mode runs as a dry-run (no LLM calls).
+   Set agent.ai.enable=true and agent.ai.apiKey to forward unknowns to the model.
+   {{- end }}
+   {{- end }}
+   Detect log + pattern catalog persist to: {{ .Values.storage.file.dataDir }}
+   {{- if not .Values.storage.persistence.enabled }}
+   WARNING: storage.persistence.enabled=false — agent state is lost on pod restart.
+   {{- end }}
+{{- end }}

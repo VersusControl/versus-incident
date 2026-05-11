@@ -2,7 +2,7 @@ apiVersion: v2
 name: versus-incident
 description: A Helm chart for Versus Incident Management System
 type: application
-version: 1.4.0
+version: 1.4.1
 appVersion: "1.4.0"
 
 # Dependencies

@@ -90,6 +90,82 @@ config:
   port: 3000
   publicHost: ""  # Set to your public host for acknowledgement URLs
 
+# Shared secret required by all admin endpoints (`/api/admin/*` and
+# `/api/agent/*`). Clients send the same value in the `X-Gateway-Secret`
+# header.
+#
+# When `gatewaySecret` is empty the admin routes are NOT registered at
+# all — the agent UI, detect log endpoints, and incident admin endpoints
+# return 404. This is the safest default; set a strong value (32+ random
+# bytes) before exposing the UI or admin endpoints.
+gatewaySecret: ""
+
+# Storage backend used by BOTH the agent (catalog, shadow log, detect log,
+# services, AI cache) and the incident service (history shown in the UI).
+#
+# Today only `file` is implemented end-to-end; `redis` and `database` are
+# config stubs that error at startup if selected.
+storage:
+  type: file        # file | redis | database
+  file:
+    dataDir: /app/data
+    maxIncidents: 1000
+  # Persistence for the file backend. Required when storage.type=file and
+  # you want detect-log / pattern-catalog / incident-history to survive
+  # pod restarts. When disabled, an emptyDir is used instead (data is
+  # lost on rescheduling).
+  persistence:
+    enabled: false
+    size: 1Gi
+    storageClassName: ""   # "" → cluster default
+    accessMode: ReadWriteOnce
+    # Bind to an existing PVC instead of creating a new one.
+    existingClaim: ""
+
+# AI SRE Agent (opt-in). When agent.enable=false (default) nothing
+# changes: no goroutines start, no AI calls are made, no extra config
+# blocks are rendered. See docs: src/agent/ai-detect-mode.md
+agent:
+  enable: false
+  # training | shadow | detect
+  #   training : observe + build catalog only
+  #   shadow   : would-have-alerted log, no notifications sent
+  #   detect   : forward unknown / spike patterns to the AI SRE and emit
+  #              incidents through the standard alert pipeline
+  mode: training
+  pollInterval: 30s
+  lookback: 5m
+  newServiceGrace: 30m
+
+  ai:
+    # AI analyzer toggle. Required for detect mode to actually call an LLM.
+    # When false, detect mode classifies patterns but never calls the model
+    # (dry-run; no API key needed).
+    enable: false
+    # OpenAI API key. Stored in the chart Secret and exposed as
+    # AGENT_AI_API_KEY env var.
+    apiKey: ""
+    model: "gpt-4o-mini"
+    temperature: 0.2
+    maxTokens: 512
+    maxCallsPerHour: 60
+    cacheTtl: "1h"
+
+  # Inline signal sources. Each entry is rendered verbatim (via toYaml)
+  # into agent_sources.yaml — use snake_case keys matching the Go config
+  # (`from_beginning`, `message_field`, etc.). Leave empty to disable
+  # the agent loop.
+  # Example:
+  #   sources:
+  #     - name: app-logs
+  #       type: file
+  #       enable: true
+  #       file:
+  #         path: /var/log/app.log
+  #         from_beginning: false
+  sources: []
+
+
 # Proxy configuration (global settings)
 # Use this when your network blocks access to messaging services like Telegram, Viber, or Lark
 proxy:

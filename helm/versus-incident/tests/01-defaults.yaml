@@ -1,0 +1,2 @@
+# Default values — agent + admin disabled, no PVC, no Slack/etc.
+# Asserts that nothing surprising lands in the rendered output.

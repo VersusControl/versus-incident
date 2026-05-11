@@ -1,0 +1,17 @@
+- name: AGENT_ENABLE
+- name: AGENT_MODE
+- name: AGENT_AI_ENABLE
+- name: AGENT_AI_MODEL
+- name: AGENT_AI_API_KEY
+agent_ai_api_key:
+agent_sources.yaml: \|
+sources_path: /app/config/agent_sources.yaml
+mode: detect
+name: app-logs
+type: file
+path: /var/log/app.log
+kind: PersistentVolumeClaim
+storage: 2Gi
+persistentVolumeClaim:
+gateway_secret:
+!emptyDir
