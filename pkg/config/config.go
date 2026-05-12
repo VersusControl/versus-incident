@@ -167,6 +167,20 @@ type SNSConfig struct {
 type SQSConfig struct {
 	Enable   bool   `mapstructure:"enable"`
 	QueueURL string `mapstructure:"queue_url"`
+	// Region overrides the AWS region resolved by the default chain
+	// (AWS_REGION env / shared config). Optional — usually leave empty
+	// and rely on standard AWS env / IAM.
+	Region string `mapstructure:"region"`
+	// MaxNumberOfMessages caps how many messages a single ReceiveMessage
+	// pull returns. AWS hard limit is 10. Default 10.
+	MaxNumberOfMessages int `mapstructure:"max_number_of_messages"`
+	// WaitTimeSeconds enables long-polling. 0 = short poll (immediate
+	// return; wasteful). AWS max is 20. Default 20.
+	WaitTimeSeconds int `mapstructure:"wait_time_seconds"`
+	// VisibilityTimeoutSeconds is how long a received message is hidden
+	// from other consumers while the handler runs. Must exceed handler
+	// max latency. Default 30.
+	VisibilityTimeoutSeconds int `mapstructure:"visibility_timeout_seconds"`
 }
 
 type PubSubConfig struct {

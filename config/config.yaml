@@ -82,10 +82,18 @@ queue:
     https_endpoint_subscription: ${SNS_HTTPS_ENDPOINT_SUBSCRIPTION} # If the user configures an HTTPS endpoint, then an SNS subscription will be automatically created, e.g. https://your-domain.com
     topic_arn: ${SNS_TOPIC_ARN}
 
-  # AWS SQS
+  # AWS SQS — long-polls a queue and dispatches each message body to
+  # the same handler used by the HTTP /api/incidents endpoint. Auth is
+  # the standard AWS SDK chain (env, shared credentials, IAM role).
+  # Handler errors leave the message visible again after
+  # visibility_timeout_seconds → SQS-native redrive / DLQ retries.
   sqs:
     enable: false
-    queue_url: your_sqs_queue_url
+    queue_url: ${SQS_QUEUE_URL}
+    # region: ${AWS_REGION}             # optional; defaults to standard chain
+    # max_number_of_messages: 10        # 1–10, default 10
+    # wait_time_seconds: 20             # long-polling, max 20
+    # visibility_timeout_seconds: 30    # how long a received message is hidden
   # GCP Pub Sub
   pubsub:
     enable: false

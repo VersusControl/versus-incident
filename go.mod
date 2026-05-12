@@ -4,6 +4,7 @@ go 1.24
 
 require (
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.73.0
+	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.27
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/gofiber/fiber/v2 v2.52.13
 	github.com/google/uuid v1.6.0

@@ -74,7 +74,11 @@ func (f *ListenerFactory) createSQSListener() (core.QueueListener, error) {
 	}
 
 	return NewSQSListener(config.SQSConfig{
-		Enable:   sc.Enable,
-		QueueURL: sc.QueueURL,
-	}), nil
+		Enable:                   sc.Enable,
+		QueueURL:                 sc.QueueURL,
+		Region:                   sc.Region,
+		MaxNumberOfMessages:      sc.MaxNumberOfMessages,
+		WaitTimeSeconds:          sc.WaitTimeSeconds,
+		VisibilityTimeoutSeconds: sc.VisibilityTimeoutSeconds,
+	})
 }
