@@ -34,11 +34,13 @@ func (i *IncidentAdminController) Register(router fiber.Router) {
 
 // authMiddleware reuses the agent gateway secret. Keeping the same
 // header name (X-Gateway-Secret) means the UI only manages one secret.
+// Comparison is constant-time (see secureEqual in agent.go) to avoid
+// header-length / prefix-match timing oracles.
 func (i *IncidentAdminController) authMiddleware(c *fiber.Ctx) error {
 	cfg := config.GetConfig()
 	expected := cfg.GatewaySecret
 	got := c.Get("X-Gateway-Secret")
-	if expected == "" || got == "" || got != expected {
+	if expected == "" || !secureEqual(got, expected) {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
 	}
 	return c.Next()
