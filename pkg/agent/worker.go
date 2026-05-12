@@ -62,9 +62,15 @@ type Worker struct {
 	pollInterval    time.Duration
 	persistEvery    time.Duration
 	lookback        time.Duration
+	pullTimeout     time.Duration // 0 = no per-pull deadline beyond ctx
 	ewmaAlpha       float64
 	services        *ServiceMatcher // regex-based service-name extractor
 	newServiceGrace time.Duration   // 0 = disabled
+
+	// Health is the per-source failure / cooldown tracker. Nil-safe:
+	// when nil the worker skips health bookkeeping (used by older tests
+	// that construct a Worker by hand).
+	Health *HealthTracker
 }
 
 // Emitter delivers an AI finding to the rest of the system. In production
@@ -126,8 +132,19 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 	w.pollInterval = parseDurationOr(opt.Cfg.PollInterval, 30*time.Second)
 	w.persistEvery = parseDurationOr(opt.Cfg.Catalog.PersistInterval, 30*time.Second)
 	w.lookback = parseDurationOr(opt.Cfg.Lookback, 5*time.Minute)
+	w.pullTimeout = parseDurationOr(opt.Cfg.Reliability.PullTimeout, 20*time.Second)
 	w.ewmaAlpha = 0.2 // configurable once spike detection lands
 	w.newServiceGrace = parseDurationOr(opt.Cfg.NewServiceGrace, 0)
+
+	// Build the source-health tracker. Pre-register every configured
+	// source so the admin status endpoint surfaces them before their
+	// first tick lands.
+	initialBackoff := parseDurationOr(opt.Cfg.Reliability.SourceBackoffInitial, 30*time.Second)
+	maxBackoff := parseDurationOr(opt.Cfg.Reliability.SourceBackoffMax, 10*time.Minute)
+	w.Health = NewHealthTracker(initialBackoff, maxBackoff, 2)
+	for _, s := range w.sources {
+		w.Health.Register(s.Name())
+	}
 
 	return w, nil
 }
@@ -215,22 +232,63 @@ func (w *Worker) tick(ctx context.Context, mode string) {
 }
 
 func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode string) {
+	// Honor any active cooldown set by prior consecutive failures.
+	if w.Health != nil {
+		if skip, until := w.Health.ShouldSkip(src.Name()); skip {
+			log.Printf("agent: %s in cooldown until %s, skipping pull",
+				src.Name(), until.Format(time.RFC3339))
+			return
+		}
+	}
+
 	since := w.loadCursor(ctx, src.Name())
 
-	signals, newCursor, err := src.Pull(ctx, since)
+	// Apply a per-pull deadline so a hung backend cannot stall the
+	// whole worker. The deadline is derived from configured
+	// pull_timeout; ctx cancellation still wins (e.g. shutdown).
+	pullCtx := ctx
+	if w.pullTimeout > 0 {
+		var cancel context.CancelFunc
+		pullCtx, cancel = context.WithTimeout(ctx, w.pullTimeout)
+		defer cancel()
+	}
+
+	start := time.Now()
+	signals, newCursor, err := src.Pull(pullCtx, since)
+	dur := time.Since(start)
 	if err != nil {
-		log.Printf("agent: pull from %s failed: %v", src.Name(), err)
+		if w.Health != nil {
+			until := w.Health.RecordFailure(src.Name(), err, dur)
+			if !until.IsZero() {
+				log.Printf("agent: pull from %s failed: %v (cooldown until %s)",
+					src.Name(), err, until.Format(time.RFC3339))
+			} else {
+				log.Printf("agent: pull from %s failed: %v", src.Name(), err)
+			}
+		} else {
+			log.Printf("agent: pull from %s failed: %v", src.Name(), err)
+		}
 		return
 	}
 	if len(signals) == 0 {
+		if w.Health != nil {
+			w.Health.RecordSuccess(src.Name(), 0, 0, dur)
+		}
 		return
 	}
 
-	// Cap batch size as a safety net.
+	// Cap batch size as a safety net. Drops are tracked so the admin
+	// status endpoint can surface persistent truncation (a signal that
+	// either batch_max is too low or the source is over budget).
+	dropped := 0
 	if w.cfg.BatchMax > 0 && len(signals) > w.cfg.BatchMax {
-		log.Printf("agent: %s returned %d signals, truncating to batch_max=%d",
-			src.Name(), len(signals), w.cfg.BatchMax)
+		dropped = len(signals) - w.cfg.BatchMax
+		log.Printf("agent: %s returned %d signals, truncating to batch_max=%d (dropped=%d)",
+			src.Name(), len(signals), w.cfg.BatchMax, dropped)
 		signals = signals[:w.cfg.BatchMax]
+	}
+	if w.Health != nil {
+		w.Health.RecordSuccess(src.Name(), len(signals), dropped, dur)
 	}
 
 	// Redact every payload before doing anything else with it.
@@ -443,14 +501,29 @@ func (w *Worker) emitDetect(
 		return "quota"
 	}
 
+	// 3b. Circuit breaker — short-circuit when AI provider is having
+	// a bad day. No upstream cost is incurred while open.
+	if w.ai.Breaker != nil && !w.ai.Breaker.Allow() {
+		log.Printf("agent[detect]: AI breaker open; skipping pattern=%s freq=%d", patternID, len(signals))
+		evt.Outcome = "breaker_open"
+		w.detect.Record(evt)
+		return "breaker_open"
+	}
+
 	// 4. Real AI call.
 	call, err := w.ai.SRE.Analyze(ctx, result)
 	if err != nil {
+		if w.ai.Breaker != nil {
+			w.ai.Breaker.RecordFailure(err)
+		}
 		log.Printf("agent[detect]: AI analyze failed pattern=%s: %v", patternID, err)
 		evt.Outcome = "ai_error"
 		evt.Error = err.Error()
 		w.detect.Record(evt)
 		return "ai_error"
+	}
+	if w.ai.Breaker != nil {
+		w.ai.Breaker.RecordSuccess(time.Duration(call.DurationMs) * time.Millisecond)
 	}
 	finding := call.Finding
 	w.ai.Cache.Put(patternID, finding)

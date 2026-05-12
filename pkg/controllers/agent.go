@@ -1,6 +1,9 @@
 package controllers
 
 import (
+	"sort"
+	"time"
+
 	"github.com/VersusControl/versus-incident/pkg/agent"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai"
 	"github.com/VersusControl/versus-incident/pkg/config"
@@ -17,14 +20,17 @@ type AgentController struct {
 	catalog *agent.Catalog
 	shadow  *agent.ShadowLog
 	detect  *agent.DetectLog
+	health  *agent.HealthTracker
+	breaker *ai.Breaker
 }
 
 // NewAgentController wires the catalog, shadow log, and detect log into a
 // controller. Pass `cat=nil` if the agent is disabled — in that case every
 // endpoint will return 503. `sl` may be nil to disable the shadow endpoints,
-// and `dl` may be nil to disable the detect-log endpoints.
-func NewAgentController(cat *agent.Catalog, sl *agent.ShadowLog, dl *agent.DetectLog) *AgentController {
-	return &AgentController{catalog: cat, shadow: sl, detect: dl}
+// and `dl` may be nil to disable the detect-log endpoints. `health` and
+// `breaker` may be nil — `getStatus` omits the corresponding section.
+func NewAgentController(cat *agent.Catalog, sl *agent.ShadowLog, dl *agent.DetectLog, health *agent.HealthTracker, breaker *ai.Breaker) *AgentController {
+	return &AgentController{catalog: cat, shadow: sl, detect: dl, health: health, breaker: breaker}
 }
 
 // Register attaches the agent admin endpoints to the given fiber group.
@@ -98,7 +104,64 @@ func (a *AgentController) getStatus(c *fiber.Ctx) error {
 		status["detect_events"] = a.detect.Len()
 		status["detect_dirty"] = a.detect.Dirty()
 	}
+	if a.health != nil {
+		status["sources"] = sourcesPayload(a.health)
+	}
+	if a.breaker != nil {
+		status["ai"] = a.breaker.Stats()
+	}
 	return c.JSON(status)
+}
+
+// sourcePayload is the JSON view of one SourceHealth row surfaced
+// under /api/agent/status. It mirrors the struct but uses RFC3339
+// timestamps and snake_case keys (consistent with the rest of the
+// admin API).
+type sourcePayload struct {
+	Name                string `json:"name"`
+	OK                  bool   `json:"ok"`
+	ConsecutiveFailures int    `json:"consecutive_failures"`
+	LastError           string `json:"last_error,omitempty"`
+	LastErrorAt         string `json:"last_error_at,omitempty"`
+	LastSuccessAt       string `json:"last_success_at,omitempty"`
+	InCooldownUntil     string `json:"in_cooldown_until,omitempty"`
+	TotalPullsOK        int64  `json:"total_pulls_ok"`
+	TotalPullsFailed    int64  `json:"total_pulls_failed"`
+	TotalSignalsPulled  int64  `json:"total_signals_pulled"`
+	TotalSignalsDropped int64  `json:"total_signals_dropped"`
+	LastPullDurationMs  int64  `json:"last_pull_duration_ms"`
+	LastSignalsPulled   int    `json:"last_signals_pulled"`
+}
+
+func sourcesPayload(h *agent.HealthTracker) []sourcePayload {
+	snap := h.Snapshot()
+	out := make([]sourcePayload, 0, len(snap))
+	for _, s := range snap {
+		row := sourcePayload{
+			Name:                s.Name,
+			OK:                  s.ConsecutiveFailures == 0,
+			ConsecutiveFailures: s.ConsecutiveFailures,
+			LastError:           s.LastError,
+			TotalPullsOK:        s.TotalPullsOK,
+			TotalPullsFailed:    s.TotalPullsFailed,
+			TotalSignalsPulled:  s.TotalSignalsPulled,
+			TotalSignalsDropped: s.TotalSignalsDropped,
+			LastPullDurationMs:  s.LastPullDurationMs,
+			LastSignalsPulled:   s.LastSignalsPulled,
+		}
+		if !s.LastErrorAt.IsZero() {
+			row.LastErrorAt = s.LastErrorAt.Format(time.RFC3339)
+		}
+		if !s.LastSuccessAt.IsZero() {
+			row.LastSuccessAt = s.LastSuccessAt.Format(time.RFC3339)
+		}
+		if !s.InCooldownUntil.IsZero() {
+			row.InCooldownUntil = s.InCooldownUntil.Format(time.RFC3339)
+		}
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 func (a *AgentController) listPatterns(c *fiber.Ctx) error {

@@ -271,7 +271,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		return nil, fmt.Errorf("agent: gateway_secret is not configured — /api/agent/* admin endpoints require a secret")
 	}
 	api := app.Group("/api")
-	controllers.NewAgentController(catalog, shadowLog, detectLog).Register(api)
+	controllers.NewAgentController(catalog, shadowLog, detectLog, worker.Health, aiBundle.Breaker).Register(api)
 
 	return catalog, nil
 }

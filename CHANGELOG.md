@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.1] — Unreleased
+
+### Added
+
+#### Reliability & graceful degradation
+- **Per-source health tracker** (`pkg/agent/health.go`): consecutive
+  failures, last error, last success, cooldown end, lifetime pull /
+  signal / drop counters, last pull duration. Exposed under
+  `GET /api/agent/status` as `sources: [...]`.
+- **Exponential backoff cooldown** for failing sources. After the first
+  consecutive failure the source enters a `source_backoff_initial`
+  cooldown that doubles each subsequent failure up to
+  `source_backoff_max`. Pulls during cooldown are skipped (logged) so a
+  flapping backend cannot stall the worker.
+- **Per-pull context deadline** (`reliability.pull_timeout`, default
+  20s) so a hung backend can't run past the tick budget.
+- **Silent-truncation counter**: when `batch_max` truncates a tick,
+  the dropped count is recorded and surfaced under
+  `total_signals_dropped`. Previously the truncation only logged.
+- **OpenAI retry with jitter** (`pkg/agent/ai/openai.go`): HTTP 429 and
+  5xx now retry up to `ai_retry.max_attempts` (default 3) with
+  exponential backoff. 4xx other than 429 surface immediately.
+- **Circuit breaker for AI calls** (`pkg/agent/ai/breaker.go`):
+  consecutive failures above `ai_breaker.failure_threshold` (default 5)
+  flip the breaker open; calls short-circuit for `ai_breaker.cooldown`
+  (default 2m), then one probe is allowed; success closes, failure
+  re-opens with a fresh cooldown. Surfaced in the detect audit log as
+  outcome `breaker_open`.
+- **AI health under `/api/agent/status`** as `ai: {state,
+  consecutive_failures, total_success, total_failure, total_opens,
+  total_probes, last_error, last_error_at, last_success_at, opened_at,
+  latency_p50_ms, latency_p95_ms}`. Latencies are computed over a
+  rolling window of the last 100 successful calls.
+
+### Configuration
+- New `agent.reliability` block (see `config/config.yaml`).
+  All fields have sensible defaults; the block is optional.
+
+---
+
 ## [1.4.0] — 2026-05
 
 ### Added

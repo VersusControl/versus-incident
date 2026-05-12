@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"strings"
 	"time"
@@ -30,18 +31,49 @@ type OpenAI struct {
 	// the worker can swap in a redaction-aware extractor without the
 	// AI package depending on pkg/agent.
 	SampleFn func(core.AgentResult) []string
+
+	// Retry parameters. Zero values mean "no retry beyond the first
+	// attempt" — set by NewOpenAIWithRetry.
+	maxAttempts    int
+	initialBackoff time.Duration
+	maxBackoff     time.Duration
+
+	// sleep is the function used to wait between retries. Exposed for
+	// tests so they don't have to wait real wall-clock time.
+	sleep func(time.Duration)
+	// rng generates jitter; injectable so tests can pin it.
+	rng *rand.Rand
 }
 
 // NewOpenAI constructs the analyzer. httpClient may be nil — a sane
-// default (30s timeout, no proxy) is used.
+// default (30s timeout, no proxy) is used. No retry — backwards
+// compatible.
 func NewOpenAI(cfg config.AgentAIConfig, client *http.Client) *OpenAI {
+	return NewOpenAIWithRetry(cfg, client, 1, 0, 0)
+}
+
+// NewOpenAIWithRetry constructs the analyzer with explicit retry
+// parameters. maxAttempts <= 1 disables retry. Each retry sleeps
+// `min(maxBackoff, initialBackoff * 2^(attempt-1))` plus up to 25%
+// jitter. Retries fire on HTTP 429, any 5xx, or any network/transport
+// error. 4xx other than 429 surface immediately (the request is
+// fundamentally broken — retrying won't help).
+func NewOpenAIWithRetry(cfg config.AgentAIConfig, client *http.Client, maxAttempts int, initialBackoff, maxBackoff time.Duration) *OpenAI {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
 	return &OpenAI{
-		cfg:        cfg,
-		httpClient: client,
-		SampleFn:   defaultSampleFn,
+		cfg:            cfg,
+		httpClient:     client,
+		SampleFn:       defaultSampleFn,
+		maxAttempts:    maxAttempts,
+		initialBackoff: initialBackoff,
+		maxBackoff:     maxBackoff,
+		sleep:          time.Sleep,
+		rng:            rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -126,9 +158,59 @@ func (o *OpenAI) do(ctx context.Context, body chatRequest) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ai: marshal request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openAIChatURL, bytes.NewReader(buf))
+
+	attempts := o.maxAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		// Ctx already cancelled — give up immediately so callers see
+		// the underlying error, not a "retry exhausted" wrapper.
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("ai: http: %w", err)
+		}
+
+		data, status, err := o.doOnce(ctx, buf)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+
+		// Don't retry on non-retryable HTTP statuses (4xx other than
+		// 429). The first attempt either succeeds or we surface the
+		// error so the operator can fix config (bad API key, bad
+		// model name, etc.).
+		if !isRetryable(status, err) || attempt == attempts {
+			return nil, lastErr
+		}
+		// Compute exponential backoff with jitter.
+		backoff := o.initialBackoff
+		for i := 1; i < attempt; i++ {
+			backoff *= 2
+			if o.maxBackoff > 0 && backoff > o.maxBackoff {
+				backoff = o.maxBackoff
+				break
+			}
+		}
+		if o.rng != nil && backoff > 0 {
+			jitter := time.Duration(o.rng.Int63n(int64(backoff / 4)))
+			backoff += jitter
+		}
+		o.sleep(backoff)
+	}
+	return nil, lastErr
+}
+
+// doOnce performs a single HTTP attempt. Returns the response body
+// (nil on error), the HTTP status code (0 when no response was
+// received), and any error. The status code lets the caller tell
+// retryable failures (429, 5xx) from non-retryable (4xx other).
+func (o *OpenAI) doOnce(ctx context.Context, payload []byte) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openAIChatURL, bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("ai: build request: %w", err)
+		return nil, 0, fmt.Errorf("ai: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if o.cfg.APIKey != "" {
@@ -137,18 +219,36 @@ func (o *OpenAI) do(ctx context.Context, body chatRequest) ([]byte, error) {
 
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("ai: http: %w", err)
+		return nil, 0, fmt.Errorf("ai: http: %w", err)
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("ai: read body: %w", err)
+		return nil, resp.StatusCode, fmt.Errorf("ai: read body: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("ai: http %d: %s", resp.StatusCode, truncate(string(data), 300))
+		return nil, resp.StatusCode, fmt.Errorf("ai: http %d: %s", resp.StatusCode, truncate(string(data), 300))
 	}
-	return data, nil
+	return data, resp.StatusCode, nil
+}
+
+// isRetryable reports whether a failed attempt is worth retrying.
+// status==0 means the request never got a response (network/transport
+// failure) — usually transient. status==429 (rate limit) and 5xx
+// (server-side) are also transient. Anything else (400, 401, 403, 404,
+// 422…) is a client error that won't fix itself.
+func isRetryable(status int, err error) bool {
+	if status == 0 {
+		return err != nil
+	}
+	if status == http.StatusTooManyRequests {
+		return true
+	}
+	if status >= 500 && status < 600 {
+		return true
+	}
+	return false
 }
 
 // -----------------------------------------------------------------------------

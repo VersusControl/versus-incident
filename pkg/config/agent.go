@@ -22,11 +22,12 @@ type AgentConfig struct {
 	// (post-redaction) log message to discover the service name.
 	ServicePatterns []string `mapstructure:"service_patterns"`
 
-	Redaction AgentRedactionConfig `mapstructure:"redaction"`
-	Catalog   AgentCatalogConfig   `mapstructure:"catalog"`
-	Miner     AgentMinerConfig     `mapstructure:"miner"`
-	Regex     AgentRegexConfig     `mapstructure:"regex"`
-	AI        AgentAIConfig        `mapstructure:"ai"`
+	Redaction   AgentRedactionConfig   `mapstructure:"redaction"`
+	Catalog     AgentCatalogConfig     `mapstructure:"catalog"`
+	Miner       AgentMinerConfig       `mapstructure:"miner"`
+	Regex       AgentRegexConfig       `mapstructure:"regex"`
+	AI          AgentAIConfig          `mapstructure:"ai"`
+	Reliability AgentReliabilityConfig `mapstructure:"reliability"`
 
 	// Sources is the list of enabled signal sources. Versus loads it from
 	// the file `agent_sources.yaml` sitting next to the main config file
@@ -207,6 +208,60 @@ type AgentCloudWatchLogsSourceConfig struct {
 	FilterPattern string `mapstructure:"filter_pattern"`
 	// PageSize is the per-call limit (max 10000). Default 500.
 	PageSize int `mapstructure:"page_size"`
+}
+
+// AgentReliabilityConfig bundles the knobs that govern graceful
+// degradation when log sources or the AI provider misbehave. Every
+// field has a sensible default; the block exists so operators can
+// tighten or relax behavior without recompiling.
+type AgentReliabilityConfig struct {
+	// PullTimeout caps a single source Pull. When the source's HTTP
+	// client already has a longer timeout this lowers the effective
+	// budget; when shorter, the source's own timeout wins. Default
+	// "20s" (slightly under the 30s the built-in HTTP clients use, so
+	// pull_timeout is the active gate by default).
+	PullTimeout string `mapstructure:"pull_timeout"`
+
+	// SourceBackoffInitial is the cooldown applied after the FIRST
+	// consecutive failure. Each subsequent consecutive failure doubles
+	// the cooldown up to SourceBackoffMax. A successful pull resets the
+	// counter and clears the cooldown.
+	SourceBackoffInitial string `mapstructure:"source_backoff_initial"` // default 30s
+	SourceBackoffMax     string `mapstructure:"source_backoff_max"`     // default 10m
+
+	// AIRetry controls retry behavior of the OpenAI HTTP client.
+	AIRetry AgentAIRetryConfig `mapstructure:"ai_retry"`
+
+	// AIBreaker controls the circuit breaker wrapping AI calls.
+	AIBreaker AgentAIBreakerConfig `mapstructure:"ai_breaker"`
+}
+
+// AgentAIRetryConfig governs retry of OpenAI HTTP calls. Retries fire
+// only on transient failures (HTTP 429, 5xx, or network errors). 4xx
+// responses other than 429 are surfaced immediately.
+type AgentAIRetryConfig struct {
+	// MaxAttempts is the total number of attempts (initial + retries).
+	// 1 disables retry. Default 3.
+	MaxAttempts int `mapstructure:"max_attempts"`
+	// InitialBackoff is the first sleep after attempt 1. Each subsequent
+	// retry doubles up to MaxBackoff. Jitter is added on top. Default 500ms.
+	InitialBackoff string `mapstructure:"initial_backoff"`
+	// MaxBackoff caps any individual sleep. Default 5s.
+	MaxBackoff string `mapstructure:"max_backoff"`
+}
+
+// AgentAIBreakerConfig governs the circuit breaker wrapping AI calls.
+// When the breaker is open, AI calls are short-circuited and recorded
+// as "breaker_open" in the detect audit log — no upstream cost is
+// incurred. After Cooldown elapses the breaker enters half-open and
+// allows a single probe; success closes it, failure re-opens.
+type AgentAIBreakerConfig struct {
+	// FailureThreshold is the number of consecutive failures that flips
+	// the breaker open. 0 disables the breaker. Default 5.
+	FailureThreshold int `mapstructure:"failure_threshold"`
+	// Cooldown is how long the breaker stays open before allowing one
+	// probe. Default 2m.
+	Cooldown string `mapstructure:"cooldown"`
 }
 
 // AgentAIConfig holds configuration for the AI SRE used in detect mode.

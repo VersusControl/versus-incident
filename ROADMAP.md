@@ -135,8 +135,12 @@ see [GitHub Project](https://github.com/orgs/VersusControl/projects/2).
   ([`src/migration/migration-v1.4.0.md`](src/migration/migration-v1.4.0.md)).
 
 ## Planned (v1.4.1 release scope)
-- [ ] **Reliability & load testing** — graceful degradation on log-source
-  outages, AI timeouts, and high log volume.
+- [x] **Reliability & load testing** — graceful degradation on log-source
+  outages, AI timeouts, and high log volume. Per-source health tracker
+  with exponential backoff cooldown, per-tick context deadline,
+  silent-truncation counter, OpenAI retry on 429/5xx with jitter,
+  circuit breaker for AI calls, health surfaced under
+  `/api/agent/status`.
 
 ---
 

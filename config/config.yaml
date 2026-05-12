@@ -222,6 +222,21 @@ agent:
     max_calls_per_hour: 60          # 0 = unlimited
     cache_ttl: "1h"
 
+  # Reliability knobs — graceful degradation when sources hang or the AI
+  # provider misbehaves. Every field is optional; the defaults shown
+  # below are what BuildAI / NewWorker apply when the block is omitted.
+  reliability:
+    pull_timeout: 20s               # per-source Pull deadline; 0 disables
+    source_backoff_initial: 30s     # cooldown after the first consecutive failure
+    source_backoff_max: 10m         # cap; doubles each failure up to this
+    ai_retry:
+      max_attempts: 3               # total attempts (1 disables retry)
+      initial_backoff: 500ms        # first sleep; doubles each retry
+      max_backoff: 5s
+    ai_breaker:
+      failure_threshold: 5          # consecutive failures to flip open; 0 disables
+      cooldown: 2m                  # open duration before a probe is allowed
+
   # New-service grace: when a previously unseen service starts emitting logs
   # in detect mode, it enters an implicit training window so the catalog can
   # build up before AI analysis kicks in. Set to "0" to disable.
