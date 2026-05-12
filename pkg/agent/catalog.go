@@ -57,12 +57,27 @@ type ServiceInfo struct {
 // debounced — calls to MarkDirty() set a flag that the agent worker flushes
 // at most once per `persist_interval`.
 type Catalog struct {
-	mu       sync.RWMutex
-	store    storage.Provider
-	blobName string
-	patterns map[string]*Pattern
-	services map[string]*ServiceInfo
-	dirty    bool
+	mu          sync.RWMutex
+	store       storage.Provider
+	blobName    string
+	patterns    map[string]*Pattern
+	services    map[string]*ServiceInfo
+	dirty       bool
+	maxPatterns int // 0 = unlimited
+}
+
+// SetMaxPatterns configures an upper bound on the number of patterns
+// kept in the catalog. When the limit is reached and Upsert needs to
+// add a new pattern, the least-frequent pattern that is NOT marked
+// "known" is evicted. "Known" patterns are operator-curated baseline
+// and stay even if rarely seen.
+func (c *Catalog) SetMaxPatterns(n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if n < 0 {
+		n = 0
+	}
+	c.maxPatterns = n
 }
 
 // catalogFile is the on-disk schema. Versioned so we can evolve the
@@ -110,11 +125,22 @@ func LoadCatalog(store storage.Provider) (*Catalog, error) {
 	return c, nil
 }
 
-// Get returns a pattern by ID (nil when not found).
+// Get returns a deep copy of the pattern keyed by id, or nil when not
+// found. Returning a copy (rather than the live pointer) prevents
+// callers from observing torn reads while a concurrent Upsert mutates
+// the same struct.
 func (c *Catalog) Get(id string) *Pattern {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.patterns[id]
+	p, ok := c.patterns[id]
+	if !ok {
+		return nil
+	}
+	cp := *p
+	if p.Tags != nil {
+		cp.Tags = append([]string(nil), p.Tags...)
+	}
+	return &cp
 }
 
 // MarkKnown stamps a pattern as auto-promoted ("known") in the catalog.
@@ -179,6 +205,12 @@ func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alph
 	now := time.Now().UTC()
 	p, ok := c.patterns[patternID]
 	if !ok {
+		// Honor the configured cap before inserting. Eviction targets
+		// the least-frequent non-"known" pattern; this preserves
+		// operator-curated baseline regardless of how rarely it fires.
+		if c.maxPatterns > 0 && len(c.patterns) >= c.maxPatterns {
+			c.evictLeastFrequentLocked()
+		}
 		p = &Pattern{
 			ID:        patternID,
 			Template:  template,
@@ -212,6 +244,27 @@ func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alph
 	}
 	c.dirty = true
 	return p
+}
+
+// evictLeastFrequentLocked drops the least-frequent non-known pattern.
+// Caller must hold c.mu. When every remaining pattern is "known" the
+// cap is exceeded silently — operators chose to mark them so, and we
+// will not auto-evict curated baseline.
+func (c *Catalog) evictLeastFrequentLocked() {
+	var victim *Pattern
+	for _, p := range c.patterns {
+		if p.Verdict == "known" {
+			continue
+		}
+		if victim == nil || p.Count < victim.Count ||
+			(p.Count == victim.Count && p.LastSeen.Before(victim.LastSeen)) {
+			victim = p
+		}
+	}
+	if victim != nil {
+		delete(c.patterns, victim.ID)
+		c.dirty = true
+	}
 }
 
 // Label updates operator-curated metadata for a pattern. Empty fields are

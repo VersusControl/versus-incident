@@ -1,11 +1,147 @@
 package agent
 
 import (
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
+
+// TestCatalog_ConcurrentGetUpsertNoRace catches the data race where
+// Catalog.Get returned a live *Pattern that callers could read while
+// a concurrent Upsert was writing to the same struct. Run with -race
+// to verify; without -race the test will pass even on the buggy code.
+// TestCatalog_MaxPatternsEvictsLeastFrequent verifies M2: the catalog
+// bounds its size and evicts the least-frequent NON-"known" pattern
+// when adding a new one would exceed the cap. Known patterns are
+// operator-curated baseline and must survive eviction.
+func TestCatalog_MaxPatternsEvictsLeastFrequent(t *testing.T) {
+	store := newTestStore(t)
+	cat, err := LoadCatalog(store)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	cat.SetMaxPatterns(3)
+
+	// Seed 3 patterns with different counts; #1 has the lowest count.
+	cat.Upsert("p1", "tpl1", "src", 1, 0.2, "rule", "svc")
+	cat.Upsert("p2", "tpl2", "src", 10, 0.2, "rule", "svc")
+	cat.Upsert("p3", "tpl3", "src", 5, 0.2, "rule", "svc")
+	if got := cat.Len(); got != 3 {
+		t.Fatalf("seed: len=%d want 3", got)
+	}
+
+	// Adding a 4th pattern must evict p1 (lowest Count).
+	cat.Upsert("p4", "tpl4", "src", 100, 0.2, "rule", "svc")
+	if got := cat.Len(); got != 3 {
+		t.Fatalf("after insert: len=%d want 3 (eviction)", got)
+	}
+	if cat.Get("p1") != nil {
+		t.Fatal("p1 should have been evicted (least-frequent)")
+	}
+	if cat.Get("p4") == nil {
+		t.Fatal("p4 should be present after eviction")
+	}
+}
+
+func TestCatalog_MaxPatternsPreservesKnown(t *testing.T) {
+	store := newTestStore(t)
+	cat, _ := LoadCatalog(store)
+	cat.SetMaxPatterns(2)
+
+	// pLow is the lowest-count pattern but operator-curated as "known".
+	cat.Upsert("pLow", "tpl-low", "src", 1, 0.2, "rule", "svc")
+	cat.MarkKnown("pLow")
+	cat.Upsert("pHigh", "tpl-high", "src", 100, 0.2, "rule", "svc")
+
+	// Adding a 3rd pattern must NOT evict pLow even though it's lowest
+	// count — known patterns survive eviction. pHigh (the only non-
+	// known pattern) is the victim.
+	cat.Upsert("pNew", "tpl-new", "src", 50, 0.2, "rule", "svc")
+
+	if cat.Get("pLow") == nil {
+		t.Fatal("known pattern pLow must NOT be evicted")
+	}
+	if cat.Get("pHigh") != nil {
+		t.Fatal("non-known pHigh should have been evicted")
+	}
+}
+
+func TestCatalog_MaxPatternsZeroDisabled(t *testing.T) {
+	store := newTestStore(t)
+	cat, _ := LoadCatalog(store)
+	// Default: maxPatterns=0 → unbounded.
+	for i := 0; i < 20; i++ {
+		cat.Upsert("p"+itoa(i), "tpl", "src", 1, 0.2, "rule", "svc")
+	}
+	if got := cat.Len(); got != 20 {
+		t.Fatalf("unbounded catalog: len=%d want 20", got)
+	}
+}
+
+func itoa(i int) string {
+	// Tiny helper to avoid pulling strconv in the test file purely for
+	// formatting an integer into a key suffix.
+	if i == 0 {
+		return "0"
+	}
+	digits := ""
+	for i > 0 {
+		digits = string(rune('0'+i%10)) + digits
+		i /= 10
+	}
+	return digits
+}
+
+func TestCatalog_ConcurrentGetUpsertNoRace(t *testing.T) {
+	store := newTestStore(t)
+	cat, err := LoadCatalog(store)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	// Seed one pattern that both goroutines hammer.
+	cat.Upsert("p1", "tpl", "src", 1, 0.2, "rule", "svc")
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				cat.Upsert("p1", "tpl", "src", 2, 0.2, "rule", "svc")
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if p := cat.Get("p1"); p != nil {
+					// Touch a few fields; under the buggy code these reads
+					// race with the writer's Upsert.
+					_ = p.Count
+					_ = p.BaselineFrequency
+					_ = p.Template
+				}
+			}
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
 
 // newTestStore returns a file-backed storage provider rooted in t.TempDir.
 // Used by tests that need to persist and reload across catalog instances.

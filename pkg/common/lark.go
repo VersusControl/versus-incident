@@ -29,6 +29,9 @@ func NewLarkProvider(cfg config.LarkConfig, proxyConfig config.ProxyConfig) *Lar
 	}
 }
 
+// Name implements core.AlertProvider.
+func (l *LarkProvider) Name() string { return "lark" }
+
 func (l *LarkProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 

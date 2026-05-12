@@ -38,6 +38,9 @@ func NewTelegramProvider(cfg config.TelegramConfig, proxyConfig config.ProxyConf
 	}
 }
 
+// Name implements core.AlertProvider.
+func (t *TelegramProvider) Name() string { return "telegram" }
+
 func (t *TelegramProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 

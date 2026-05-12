@@ -55,6 +55,9 @@ func NewViberProvider(cfg config.ViberConfig, proxyConfig config.ProxyConfig) *V
 	}
 }
 
+// Name implements core.AlertProvider.
+func (v *ViberProvider) Name() string { return "viber" }
+
 func (v *ViberProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 
