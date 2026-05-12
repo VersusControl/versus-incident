@@ -271,7 +271,6 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 		SignalMaxBytes:  src.SignalMaxBytes,
 		NewServiceGrace: src.NewServiceGrace,
 		ServicePatterns: append([]string(nil), src.ServicePatterns...),
-		SourcesPath:     src.SourcesPath,
 		Redaction: AgentRedactionConfig{
 			Enable:    src.Redaction.Enable,
 			RedactIPs: src.Redaction.RedactIPs,
@@ -339,12 +338,33 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 					TimestampField:  s.File.TimestampField,
 					SeverityField:   s.File.SeverityField,
 				},
+				Loki: AgentLokiSourceConfig{
+					Address:            s.Loki.Address,
+					TenantID:           s.Loki.TenantID,
+					Username:           s.Loki.Username,
+					Password:           s.Loki.Password,
+					BearerToken:        s.Loki.BearerToken,
+					InsecureSkipVerify: s.Loki.InsecureSkipVerify,
+					Query:              s.Loki.Query,
+					SeverityField:      s.Loki.SeverityField,
+					PageSize:           s.Loki.PageSize,
+				},
+				CloudWatchLogs: AgentCloudWatchLogsSourceConfig{
+					Region:          s.CloudWatchLogs.Region,
+					LogGroupName:    s.CloudWatchLogs.LogGroupName,
+					LogStreamPrefix: s.CloudWatchLogs.LogStreamPrefix,
+					FilterPattern:   s.CloudWatchLogs.FilterPattern,
+					PageSize:        s.CloudWatchLogs.PageSize,
+				},
 			}
 			if s.Elasticsearch.Addresses != nil {
 				c.Elasticsearch.Addresses = append([]string(nil), s.Elasticsearch.Addresses...)
 			}
 			if s.Elasticsearch.ExtraFields != nil {
 				c.Elasticsearch.ExtraFields = append([]string(nil), s.Elasticsearch.ExtraFields...)
+			}
+			if s.Loki.ExtraLabels != nil {
+				c.Loki.ExtraLabels = append([]string(nil), s.Loki.ExtraLabels...)
 			}
 			cloned.Sources[i] = c
 		}

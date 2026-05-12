@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+{{/*
+  Versus Agent — Email template (HTML)
+*/}}
+{{- $sevColors := dict "critical" "#C70039" "high" "#E67E22" "medium" "#F1C40F" "low" "#27AE60" "info" "#3498DB" -}}
+{{- $sev := lower (or .Severity "info") -}}
+{{- $sevColor := or (index $sevColors $sev) "#3498DB" -}}
+<html>
+<head><meta charset="UTF-8"><title>Versus Agent — {{ or .AlertName "AI-detected incident" }}</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; color:#222; max-width: 720px; margin: 0 auto; padding: 16px;">
+  <h2 style="margin:0 0 8px 0;">🤖 Versus Agent — {{ or .AlertName "AI-detected incident" }}</h2>
+  <p style="margin:0 0 16px 0;">
+    <span style="display:inline-block; padding:2px 8px; border-radius:4px; background:{{ $sevColor }}; color:#fff; font-weight:600;">
+      {{ upper (or .Severity "INFO") }}
+    </span>
+  </p>
+
+  <table style="border-collapse:collapse; width:100%;" cellpadding="6">
+    <tr><td style="background:#f5f5f5; width:160px;"><b>Service</b></td><td>{{ or .ServiceName "_unknown" }}</td></tr>
+    {{- if .Source }}
+    <tr><td style="background:#f5f5f5;"><b>Source</b></td><td>{{ .Source }}</td></tr>
+    {{- end }}
+    {{- if .Category }}
+    <tr><td style="background:#f5f5f5;"><b>Category</b></td><td>{{ .Category }}</td></tr>
+    {{- end }}
+    {{- if .Verdict }}
+    <tr><td style="background:#f5f5f5;"><b>Verdict</b></td><td>{{ .Verdict }}</td></tr>
+    {{- end }}
+    {{- if .Confidence }}
+    <tr><td style="background:#f5f5f5;"><b>Confidence</b></td><td>{{ printf "%.2f" .Confidence }}</td></tr>
+    {{- end }}
+    {{- if .Frequency }}
+    <tr><td style="background:#f5f5f5;"><b>Frequency</b></td><td>{{ .Frequency }} (baseline {{ printf "%.2f" .Baseline }})</td></tr>
+    {{- end }}
+    {{- if .PatternID }}
+    <tr><td style="background:#f5f5f5;"><b>Pattern</b></td><td><code>{{ .PatternID }}</code></td></tr>
+    {{- end }}
+    {{- if .PatternTemplate }}
+    <tr><td style="background:#f5f5f5;"><b>Template</b></td><td><code>{{ .PatternTemplate }}</code></td></tr>
+    {{- end }}
+  </table>
+
+  <h3 style="margin-top:20px;">Summary</h3>
+  <p>{{ or .Summary "(no summary)" }}</p>
+
+  {{- if .Suggestions }}
+  <h3>Suggestions</h3>
+  <ul>
+    {{- range $i, $s := .Suggestions }}
+    <li>{{ $s }}</li>
+    {{- end }}
+  </ul>
+  {{- end }}
+
+  {{- if .Logs }}
+  <h3>Sample log</h3>
+  <pre style="background:#f5f5f5; padding:12px; border-radius:4px; overflow:auto;">{{ .Logs }}</pre>
+  {{- end }}
+
+  {{- if .AckURL }}
+  <p style="margin-top:24px;">
+    <a href="{{ .AckURL }}" style="display:inline-block; padding:10px 18px; background:#3498DB; color:#fff; text-decoration:none; border-radius:4px;">Acknowledge alert</a>
+  </p>
+  {{- end }}
+</body>
+</html>

@@ -41,7 +41,12 @@ func NewTelegramProvider(cfg config.TelegramConfig, proxyConfig config.ProxyConf
 func (t *TelegramProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 
-	tmpl, err := template.New(filepath.Base(t.templatePath)).Funcs(funcMaps).ParseFiles(t.templatePath)
+	tplPath := t.templatePath
+	if i.Content != nil && utils.IsAgentIncident(*i.Content) {
+		tplPath = utils.AgentTelegramTemplatePath
+	}
+
+	tmpl, err := template.New(filepath.Base(tplPath)).Funcs(funcMaps).ParseFiles(tplPath)
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}

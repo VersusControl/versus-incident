@@ -1,0 +1,10 @@
+# Sample log lines for the file-source example.
+
+2026-05-12T09:00:01Z INFO  [api] service=checkout request_id=abc started GET /cart
+2026-05-12T09:00:02Z INFO  [api] service=checkout request_id=abc completed 200 in 12ms
+2026-05-12T09:01:14Z ERROR [api] service=payments connection refused dial tcp 10.0.0.4:5432
+2026-05-12T09:01:15Z ERROR [api] service=payments connection refused dial tcp 10.0.0.4:5432
+2026-05-12T09:01:16Z ERROR [api] service=payments connection refused dial tcp 10.0.0.4:5432
+2026-05-12T09:02:30Z WARN  [worker] service=mailer queue depth high count=2342
+2026-05-12T09:03:45Z ERROR [worker] service=mailer panic: runtime error: invalid memory address
+2026-05-12T09:04:00Z INFO  [api] service=checkout request_id=def started GET /cart

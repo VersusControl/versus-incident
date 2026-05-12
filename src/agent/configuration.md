@@ -5,8 +5,8 @@ This page is the reference for every knob the agent exposes. Pair it with
 
 The agent reads its configuration from the same `config.yaml` Versus uses
 for the rest of its features. Everything lives under the top-level
-`agent:` key. The list of log sources lives in a separate file (default
-`agent_sources.yaml`) so it can be managed independently.
+`agent:` key. The list of log sources lives in a sibling file
+`agent_sources.yaml` so it can be managed independently per environment.
 
 > **Reminder.** The agent is **off by default** (`agent.enable: false`).
 > Nothing about the agent runs until that flag flips.
@@ -31,7 +31,6 @@ agent:
   lookback: 5m
   batch_max: 1000
   signal_max_bytes: 8192
-  sources_path: ./agent_sources.yaml
   redaction:   { … }
   catalog:     { … }
   miner:       { … }
@@ -53,7 +52,6 @@ agent:
 | `lookback` | duration | `5m` | Initial backfill window on first start (when there's no cursor yet). |
 | `batch_max` | int | `1000` | Safety cap on signals processed per tick per source. |
 | `signal_max_bytes` | int | `8192` | Truncates a single signal's `Raw` payload above this size. |
-| `sources_path` | path | (empty) | External YAML file containing the `sources:` list. Resolved relative to the main config. Env: `AGENT_SOURCES_PATH`. |
 
 ### Modes
 
@@ -61,7 +59,7 @@ agent:
 |---|---|---|
 | `training` | Observes only. New patterns are added to the catalog; nothing else. | First few days. Until the catalog stabilizes. |
 | `shadow` | Same as training, but logs `agent[shadow]: would alert …` for any signal it would have alerted on. | A release cycle of review before going live. |
-| `detect` | Treats unknown signals as anomalies. AI summarization + incident emission ships in a follow-up milestone — today this mode logs the verdict only. | Production, after you trust the catalog. |
+| `detect` | Treats unknown / spiking patterns as anomalies, asks the AI SRE to triage them, and emits a real incident through every configured channel. | Production, after you trust the catalog. |
 
 ### Environment overrides
 
@@ -72,7 +70,11 @@ agent:
 | `STORAGE_FILE_DATA_DIR` | `storage.file.data_dir` |
 | `AGENT_ENABLE` | `agent.enable` |
 | `AGENT_MODE` | `agent.mode` |
-| `AGENT_SOURCES_PATH` | `agent.sources_path` |
+| `AGENT_NEW_SERVICE_GRACE` | `agent.new_service_grace` |
+| `AGENT_SERVICE_PATTERNS` | `agent.service_patterns` (comma-separated) |
+| `AGENT_AI_ENABLE` | `agent.ai.enable` |
+| `AGENT_AI_API_KEY` | `agent.ai.api_key` |
+| `AGENT_AI_MODEL` | `agent.ai.model` |
 
 ---
 
@@ -179,11 +181,11 @@ Common recipes:
 
 ## Signal sources
 
-The list of log sources lives in a separate file referenced by
-`agent.sources_path`. Versus reads it at startup, expands `${ENV_VAR}`
-references inside it, and replaces `agent.sources` in memory. Keeping
-sources separate makes it easy to swap fixtures (local file ↔ ES) and
-manage per-environment lists without touching the rest of the config.
+The list of log sources lives in a sibling file `agent_sources.yaml`
+sitting next to your main `config.yaml`. The file is optional and,
+when present, REPLACES any inline `agent.sources` from the main
+config. Versus expands `${ENV_VAR}` references inside the file at
+load time.
 
 ```yaml
 # config/agent_sources.yaml
@@ -195,20 +197,6 @@ sources:
       path: /var/log/my-app/app.log
       format: text
       from_beginning: false   # tail-like behavior
-
-  - name: prod-app
-    type: elasticsearch
-    enable: false
-    elasticsearch:
-      addresses:
-        - https://es.prod.example:9200
-      username: ${ES_USERNAME}
-      password: ${ES_PASSWORD}
-      index: "logs-app-*"
-      time_field: "@timestamp"
-      query: 'log.level:(error OR warn)'
-      message_field: message
-      page_size: 500
 ```
 
 Common keys for every source:
@@ -216,37 +204,18 @@ Common keys for every source:
 | Key | Type | Description |
 |---|---|---|
 | `name` | string | Unique identifier. Used in cursor keys and admin views. |
-| `type` | string | `file` or `elasticsearch`. |
+| `type` | string | `file`, `elasticsearch`, `loki`, or `cloudwatchlogs`. |
 | `enable` | bool | Per-source switch. |
 
-### `file` source
+For per-source field reference and troubleshooting, see the
+dedicated [Data Sources](./data-sources.md) guide:
 
-Cheapest way to test the agent end-to-end. One source = one file (no
-globs). Tracks position via a sidecar cursor file, so it survives
-restarts and handles log rotation (a shrinking file resets to offset 0).
+- [File](./data-sources/file.md)
+- [Elasticsearch](./data-sources/elasticsearch.md)
+- [Loki](./data-sources/loki.md)
+- [CloudWatch Logs](./data-sources/cloudwatch-logs.md)
 
-```yaml
-file:
-  path: /app/logs/my-app.log
-  format: text                # "text" or "json"
-  from_beginning: true        # replay-like; false tails from EOF
-  cursor_path: ""             # default: <storage.file.data_dir>/cursors/file-<name>.cursor
-  max_line_bytes: 65536
-  max_lines_per_pull: 1000    # cap signals returned per tick; the rest carries to the next Pull
-  timestamp_layout: ""        # Go time layout; empty = auto
-  # JSON-mode only:
-  message_field: message
-  timestamp_field: "@timestamp"
-  severity_field: level
-```
-
-> When you start the agent against an existing log file with
-> `from_beginning: true`, the source paginates the backlog
-> `max_lines_per_pull` lines at a time. Each tick advances the byte
-> offset only over what was actually consumed, so a multi-million-line
-> file is drained safely across many ticks.
-
-#### `max_lines_per_pull` vs `agent.batch_max`
+### `max_lines_per_pull` vs `agent.batch_max`
 
 These two caps look similar but live at different layers and protect
 against different things. Both apply on every tick, in this order:
@@ -301,37 +270,6 @@ What happens if you only raise one of them? With
 The cursor jumps 5,000 lines forward on every tick but only 1,000 are
 actually mined — the other 4,000 are silently discarded. Always raise
 the two caps together.
-
-### `elasticsearch` source
-
-Reads through the `_search` API with a `range` filter on `time_field`.
-Uses `sort` + `search_after` for stable pagination. Authenticates with
-HTTP basic auth or an API key.
-
-```yaml
-elasticsearch:
-  addresses:                  # any number; first that responds wins
-    - https://es.prod.example:9200
-  username: ${ES_USERNAME}
-  password: ${ES_PASSWORD}
-  api_key: ""                 # alternative to user/pass
-  insecure_skip_verify: false
-  index: "logs-app-*"         # supports wildcards
-  time_field: "@timestamp"
-  query: 'log.level:(error OR warn)'   # Lucene-style query string; "*" = match all
-  message_field: message
-  severity_field: log.level
-  extra_fields:
-    - service.name
-    - host.name
-    - error.stack_trace
-  page_size: 500
-```
-
-> **Tip on `lookback`.** The agent's first poll uses
-> `since = now - lookback`. ES queries with very large historical
-> windows may hit a lot of data on the first tick — start with the
-> default `5m` and only increase if you need to backfill.
 
 ---
 

@@ -77,8 +77,13 @@ func (e *EmailProvider) getAuth() smtp.Auth {
 func (e *EmailProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 
+	tplPath := e.templatePath
+	if i.Content != nil && utils.IsAgentIncident(*i.Content) {
+		tplPath = utils.AgentEmailTemplatePath
+	}
+
 	// Parse template
-	tmpl, err := template.New(filepath.Base(e.templatePath)).Funcs(funcMaps).ParseFiles(e.templatePath)
+	tmpl, err := template.New(filepath.Base(tplPath)).Funcs(funcMaps).ParseFiles(tplPath)
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}

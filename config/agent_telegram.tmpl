@@ -1,0 +1,49 @@
+{{/*
+  Versus Agent — Telegram template (HTML parse_mode)
+*/}}
+{{- $sevIcons := dict "critical" "🔴" "high" "🟠" "medium" "🟡" "low" "🟢" "info" "ℹ️" -}}
+{{- $sev := lower (or .Severity "info") -}}
+{{- $sevIcon := or (index $sevIcons $sev) "ℹ️" -}}
+<b>🤖 Versus Agent — {{ or .AlertName "AI-detected incident" }}</b>
+
+<b>{{ $sevIcon }} Severity:</b> {{ upper (or .Severity "INFO") }}
+<b>Service:</b> {{ or .ServiceName "_unknown" }}
+{{- if .Source }}
+<b>Source:</b> {{ .Source }}
+{{- end }}
+{{- if .Category }}
+<b>Category:</b> {{ .Category }}
+{{- end }}
+{{- if .Verdict }}
+<b>Verdict:</b> {{ .Verdict }}
+{{- end }}
+{{- if .Confidence }}
+<b>Confidence:</b> {{ printf "%.2f" .Confidence }}
+{{- end }}
+
+<b>Summary:</b>
+{{ or .Summary "(no summary)" }}
+
+{{- if .Frequency }}
+<b>Frequency:</b> {{ .Frequency }} (baseline {{ printf "%.2f" .Baseline }})
+{{- end }}
+{{- if .PatternID }}
+<b>Pattern:</b> <code>{{ .PatternID }}</code>
+{{- end }}
+{{- if .PatternTemplate }}
+<b>Template:</b> <code>{{ .PatternTemplate }}</code>
+{{- end }}
+
+{{- if .Suggestions }}
+
+<b>Suggestions:</b>
+{{- range $i, $s := .Suggestions }}
+• {{ $s }}
+{{- end }}
+{{- end }}
+
+{{- if .Logs }}
+
+<b>Sample log:</b>
+<pre>{{ .Logs }}</pre>
+{{- end }}

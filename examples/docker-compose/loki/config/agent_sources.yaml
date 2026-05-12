@@ -1,0 +1,11 @@
+sources:
+  - name: demo-loki
+    type: loki
+    enable: true
+    loki:
+      address: http://loki:3100
+      query: '{app=~".+"}'
+      severity_field: level
+      extra_labels:
+        - app
+      page_size: 500

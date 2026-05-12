@@ -116,11 +116,18 @@ func (s *SlackProvider) processAckURL(i *m.Incident) (map[string]interface{}, st
 	return *i.Content, ackURL
 }
 
-// renderTemplateWithContent renders the template with the given content map
+// renderTemplateWithContent renders the template with the given content map.
+// Agent-emitted incidents (detect mode) are rendered through the shared
+// agent template instead of the per-channel one.
 func (s *SlackProvider) renderTemplateWithContent(content map[string]interface{}) (string, error) {
 	funcMaps := utils.GetTemplateFuncMaps()
 
-	tmpl, err := template.New(filepath.Base(s.templatePath)).Funcs(funcMaps).ParseFiles(s.templatePath)
+	tplPath := s.templatePath
+	if utils.IsAgentIncident(content) {
+		tplPath = utils.AgentSlackTemplatePath
+	}
+
+	tmpl, err := template.New(filepath.Base(tplPath)).Funcs(funcMaps).ParseFiles(tplPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse template: %w", err)
 	}

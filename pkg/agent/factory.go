@@ -33,6 +33,20 @@ func BuildSources(cfg config.AgentConfig) ([]core.SignalSource, []error) {
 				continue
 			}
 			sources = append(sources, fs)
+		case "loki":
+			lk, err := signalsources.NewLokiSource(s.Name, s.Loki)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("source %s: %w", s.Name, err))
+				continue
+			}
+			sources = append(sources, lk)
+		case "cloudwatchlogs":
+			cw, err := signalsources.NewCloudWatchLogsSource(s.Name, s.CloudWatchLogs)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("source %s: %w", s.Name, err))
+				continue
+			}
+			sources = append(sources, cw)
 		default:
 			errs = append(errs, fmt.Errorf("source %s: unknown type %q", s.Name, s.Type))
 		}

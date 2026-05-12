@@ -284,9 +284,6 @@ func LoadConfig(path string) error {
 		if secret := os.Getenv("GATEWAY_SECRET"); secret != "" {
 			cfg.GatewaySecret = secret
 		}
-		if sp := os.Getenv("AGENT_SOURCES_PATH"); sp != "" {
-			cfg.Agent.SourcesPath = sp
-		}
 		if grace := os.Getenv("AGENT_NEW_SERVICE_GRACE"); grace != "" {
 			cfg.Agent.NewServiceGrace = grace
 		}
@@ -308,13 +305,12 @@ func LoadConfig(path string) error {
 			cfg.Agent.AI.Model = m
 		}
 
-		// If the user pointed agent.sources_path at an external file, load
-		// it now and use it INSTEAD of any inline sources.
-		if cfg.Agent.SourcesPath != "" {
-			sourcesPath := cfg.Agent.SourcesPath
-			if !filepath.IsAbs(sourcesPath) {
-				sourcesPath = filepath.Join(filepath.Dir(path), sourcesPath)
-			}
+		// Always load the sibling `agent_sources.yaml` file (same directory
+		// as the main config). The file is optional — a missing file means
+		// the agent simply has no sources. When present it REPLACES any
+		// inline `agent.sources` from the main config.
+		sourcesPath := filepath.Join(filepath.Dir(path), "agent_sources.yaml")
+		if _, statErr := os.Stat(sourcesPath); statErr == nil {
 			loaded, lerr := loadAgentSourcesFile(sourcesPath)
 			if lerr != nil {
 				err = fmt.Errorf("failed to load agent sources file %s: %w", sourcesPath, lerr)

@@ -18,8 +18,6 @@
   {{- end -}}
 {{- else if .AlarmName -}}
   {{- $source = "CloudWatch" -}}
-{{- else if .PatternID -}}
-  {{- $source = "Versus Agent" -}}
 {{- else if or .log .kubernetes.pod_name -}}
   {{- $source = "Fluent Bit" -}}
 {{- else if or .event.event_id .data.issue.id -}}
@@ -60,8 +58,6 @@
     {{- $rawSeverity = or $alert.level "info" -}}
   {{- else if eq $source "Sentry" -}}
     {{- $rawSeverity = or $alert.data.issue.level $alert.event.level "info" -}}
-  {{- else if eq $source "Versus Agent" -}}
-    {{- $rawSeverity = or $alert.Severity "info" -}}
   {{- end -}}
 
   {{/* Convert severity to standard format */}}
@@ -89,8 +85,6 @@
     {{- $rawStatus = or $alert.level "unknown" -}}
   {{- else if eq $source "Sentry" -}}
     {{- $rawStatus = or $alert.action "unknown" -}}
-  {{- else if eq $source "Versus Agent" -}}
-    {{- $rawStatus = or $alert.Status "firing" -}}
   {{- end -}}
 
   {{/* Convert status to standard format */}}
@@ -284,35 +278,6 @@
       "DiagnosticLink" (or $alert.data.issue.web_url $alert.url "") 
       "RunbookLink" $defaultRunbook
     -}}
-  {{- else if eq $source "Versus Agent" -}}
-    {{/* Extract Versus AI agent specific fields */}}
-    {{- $title := or $alert.AlertName "AI-detected incident" -}}
-    {{- $resource := or $alert.ServiceName $alert.Service "unknown" -}}
-    {{- if $alert.Source -}}
-      {{- $resource = printf "%s (via %s)" $resource $alert.Source -}}
-    {{- end -}}
-    {{- $description := or $alert.Summary $alert.description $alert.Logs "No description." -}}
-    {{- $unified = dict
-      "SourceSystem" $source
-      "Severity" $mappedSeverity
-      "Status" $mappedStatus
-      "Title" $title
-      "Resource" $resource
-      "Description" $description
-      "Timestamp" (now | format "2006-01-02 15:04:05")
-      "DiagnosticLink" ""
-      "RunbookLink" $defaultRunbook
-      "Agent" (dict
-        "Verdict"      (or $alert.Verdict "")
-        "Category"     (or $alert.Category "")
-        "Confidence"   $alert.Confidence
-        "Frequency"    $alert.Frequency
-        "Baseline"     $alert.Baseline
-        "PatternID"    (or $alert.PatternID "")
-        "Suggestions"  $alert.Suggestions
-        "Logs"         (or $alert.Logs "")
-      )
-    -}}
   {{- end -}}
 
   {{/* Output Generation (Markdown) */}}
@@ -355,27 +320,6 @@
   {{- end -}}
   {{- end -}}
   
-  {{- if and (eq $unified.SourceSystem "Versus Agent") $unified.Agent -}}
-  *Verdict:* {{ $unified.Agent.Verdict }}{{- if $unified.Agent.Category }} · {{ $unified.Agent.Category }}{{- end -}}{{- "\n" -}}
-  *Frequency:* {{ $unified.Agent.Frequency }} (baseline {{ printf "%.2f" $unified.Agent.Baseline }}){{- "\n" -}}
-  {{- if $unified.Agent.Confidence -}}
-  *Confidence:* {{ printf "%.2f" $unified.Agent.Confidence }}{{- "\n" -}}
-  {{- end -}}
-  {{- if $unified.Agent.PatternID -}}
-  *Pattern:* `{{ $unified.Agent.PatternID }}`{{- "\n" -}}
-  {{- end -}}
-  {{- if $unified.Agent.Suggestions -}}
-  *Suggestions:*{{- "\n" -}}
-  {{- range $i, $s := $unified.Agent.Suggestions }}
-  • {{ $s }}{{- "\n" -}}
-  {{- end -}}
-  {{- end -}}
-  {{- if $unified.Agent.Logs -}}
-  *Sample log:*{{- "\n" -}}
-  ```{{ $unified.Agent.Logs }}```{{- "\n" -}}
-  {{- end -}}
-  {{- end -}}
-
   {{- if $unified.RunbookLink -}}
   *Runbook:* <{{ $unified.RunbookLink }}|Link>{{- "\n" -}}
   {{- end -}}

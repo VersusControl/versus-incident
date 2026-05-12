@@ -58,7 +58,12 @@ func NewViberProvider(cfg config.ViberConfig, proxyConfig config.ProxyConfig) *V
 func (v *ViberProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 
-	tmpl, err := template.New(filepath.Base(v.templatePath)).Funcs(funcMaps).ParseFiles(v.templatePath)
+	tplPath := v.templatePath
+	if i.Content != nil && utils.IsAgentIncident(*i.Content) {
+		tplPath = utils.AgentViberTemplatePath
+	}
+
+	tmpl, err := template.New(filepath.Base(tplPath)).Funcs(funcMaps).ParseFiles(tplPath)
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}

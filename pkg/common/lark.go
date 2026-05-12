@@ -32,7 +32,12 @@ func NewLarkProvider(cfg config.LarkConfig, proxyConfig config.ProxyConfig) *Lar
 func (l *LarkProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 
-	tmpl, err := template.New(filepath.Base(l.templatePath)).Funcs(funcMaps).ParseFiles(l.templatePath)
+	tplPath := l.templatePath
+	if i.Content != nil && utils.IsAgentIncident(*i.Content) {
+		tplPath = utils.AgentLarkTemplatePath
+	}
+
+	tmpl, err := template.New(filepath.Base(tplPath)).Funcs(funcMaps).ParseFiles(tplPath)
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}

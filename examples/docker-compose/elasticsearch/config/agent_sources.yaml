@@ -1,0 +1,15 @@
+sources:
+  - name: demo-es
+    type: elasticsearch
+    enable: true
+    elasticsearch:
+      addresses:
+        - http://elasticsearch:9200
+      index: "logs-*"
+      time_field: "@timestamp"
+      query: '*'
+      message_field: message
+      severity_field: level
+      extra_fields:
+        - service
+      page_size: 500
