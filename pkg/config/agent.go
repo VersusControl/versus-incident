@@ -46,6 +46,11 @@ type AgentRedactionConfig struct {
 type AgentCatalogConfig struct {
 	PersistInterval  string `mapstructure:"persist_interval"`   // e.g. "30s"
 	AutoPromoteAfter int    `mapstructure:"auto_promote_after"` // 0 = never
+	// MaxPatterns caps the catalog size. When a new pattern is upserted
+	// and the catalog is at the cap, the least-frequent non-"known"
+	// pattern is evicted to make room. 0 disables the cap (legacy
+	// behaviour — patterns.json grows without bound).
+	MaxPatterns int `mapstructure:"max_patterns"`
 	// SpikeMultiplier flags a tick as a frequency spike when the tick
 	// count exceeds the pattern's prior EWMA baseline by this factor.
 	// 0 disables spike detection. Default 5.0.
@@ -273,6 +278,13 @@ type AgentAIConfig struct {
 	// the LLM — it only logs what it would have sent. This allows operators
 	// to run detect mode in a "dry-run" fashion without an API key.
 	Enable bool `mapstructure:"enable"`
+	// BaseURL is the full chat/completions endpoint to POST to. Default
+	// is OpenAI's URL. Set this to use an OpenAI-compatible endpoint
+	// from a different provider (e.g. Google's Gemini, Anthropic via a
+	// gateway, LiteLLM / OpenRouter proxies). The wire format must
+	// match OpenAI chat/completions: `messages: [{role, content}]`
+	// request body, `choices[0].message.content` response.
+	BaseURL string `mapstructure:"base_url"`
 	// APIKey is the bearer token sent in the Authorization header.
 	APIKey string `mapstructure:"api_key"`
 	// Model is the model identifier, e.g. "gpt-4o-mini".
