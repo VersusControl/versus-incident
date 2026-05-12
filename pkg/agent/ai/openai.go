@@ -15,16 +15,21 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
 
-// openAIChatURL is the standard OpenAI chat/completions endpoint.
-// Hard-coded so detect mode just works once the operator sets an API
-// key — no extra base_url plumbing.
-const openAIChatURL = "https://api.openai.com/v1/chat/completions"
+// defaultOpenAIChatURL is the OpenAI chat/completions endpoint. Used
+// as the fallback when AgentAIConfig.BaseURL is empty. Operators set
+// BaseURL to point at any OpenAI-compatible provider — e.g. Google's
+// `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`
+// for Gemini, or a local LiteLLM/OpenRouter proxy.
+const defaultOpenAIChatURL = "https://api.openai.com/v1/chat/completions"
 
-// OpenAI is an AISRE backed by OpenAI's /chat/completions endpoint.
-// One call per AgentResult; no streaming, no tool use.
+// OpenAI is an AISRE backed by an OpenAI-compatible /chat/completions
+// endpoint (OpenAI itself, Gemini's OpenAI-compatible layer, LiteLLM
+// proxy, OpenRouter, ...). One call per AgentResult; no streaming, no
+// tool use.
 type OpenAI struct {
 	cfg        config.AgentAIConfig
 	httpClient *http.Client
+	chatURL    string // resolved at construction; cfg.BaseURL or default
 
 	// SampleFn extracts the sample lines passed to the model from an
 	// AgentResult. Defaults to "first up to 3 messages". Exposed so
@@ -37,12 +42,6 @@ type OpenAI struct {
 	maxAttempts    int
 	initialBackoff time.Duration
 	maxBackoff     time.Duration
-
-	// sleep is the function used to wait between retries. Exposed for
-	// tests so they don't have to wait real wall-clock time.
-	sleep func(time.Duration)
-	// rng generates jitter; injectable so tests can pin it.
-	rng *rand.Rand
 }
 
 // NewOpenAI constructs the analyzer. httpClient may be nil — a sane
@@ -65,15 +64,18 @@ func NewOpenAIWithRetry(cfg config.AgentAIConfig, client *http.Client, maxAttemp
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
+	chatURL := cfg.BaseURL
+	if chatURL == "" {
+		chatURL = defaultOpenAIChatURL
+	}
 	return &OpenAI{
 		cfg:            cfg,
 		httpClient:     client,
+		chatURL:        chatURL,
 		SampleFn:       defaultSampleFn,
 		maxAttempts:    maxAttempts,
 		initialBackoff: initialBackoff,
 		maxBackoff:     maxBackoff,
-		sleep:          time.Sleep,
-		rng:            rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -118,28 +120,50 @@ func (o *OpenAI) Analyze(ctx context.Context, r core.AgentResult) (*core.AICallR
 		ResponseFormat: &responseFormat{Type: "json_object"},
 	}
 
-	start := time.Now()
-	raw, err := o.do(ctx, body)
-	durationMs := time.Since(start).Milliseconds()
+	content, finishReason, durationMs, err := o.callOnce(ctx, body)
 	if err != nil {
 		return nil, err
 	}
 
-	var resp chatResponse
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, fmt.Errorf("ai: decode response: %w", err)
+	// Auto-retry once when the response is truncated by max_tokens.
+	// More verbose models (Gemini-2.5-flash is a notable offender)
+	// often blow past a 512-token budget mid-JSON, leaving an
+	// unbalanced object that ParseFinding cannot recover. Doubling
+	// once usually clears it; capped at truncationRetryMaxTokens to
+	// bound cost on pathological prompts.
+	if finishReason == finishLength && body.MaxTokens < truncationRetryMaxTokens {
+		body.MaxTokens *= 2
+		if body.MaxTokens > truncationRetryMaxTokens {
+			body.MaxTokens = truncationRetryMaxTokens
+		}
+		retryContent, retryFinish, retryDur, retryErr := o.callOnce(ctx, body)
+		if retryErr != nil {
+			// Surface the retry error but keep going — the first
+			// (truncated) content may still parse into something
+			// usable, and the operator should see both signals.
+			return nil, fmt.Errorf("ai: truncated then retry failed: %w", retryErr)
+		}
+		content, finishReason = retryContent, retryFinish
+		durationMs += retryDur
 	}
-	if len(resp.Choices) == 0 {
-		return nil, fmt.Errorf("ai: response had no choices")
-	}
-	content := strings.TrimSpace(resp.Choices[0].Message.Content)
-	if content == "" {
-		return nil, fmt.Errorf("ai: empty content from model")
+
+	if finishReason == finishContentFilter {
+		return nil, fmt.Errorf("ai: response blocked by safety filter (finish_reason=content_filter)")
 	}
 
 	finding, err := ParseFinding(content)
 	if err != nil {
-		return nil, err
+		// Surface the first chunk of what the model actually returned
+		// so the detect audit log shows operators why parsing failed —
+		// otherwise they only see "no JSON object found" with no clue
+		// what the model said. Annotate the truncation case explicitly
+		// since it has a different fix (raise max_tokens) than other
+		// parse failures.
+		if finishReason == finishLength {
+			return nil, fmt.Errorf("ai: response truncated at max_tokens=%d, raise it (raw: %s)",
+				body.MaxTokens, truncate(content, 300))
+		}
+		return nil, fmt.Errorf("%w (raw: %s)", err, truncate(content, 300))
 	}
 	if finding.SampleIDs == nil && r.PatternID != "" {
 		finding.SampleIDs = []string{r.PatternID}
@@ -151,6 +175,35 @@ func (o *OpenAI) Analyze(ctx context.Context, r core.AgentResult) (*core.AICallR
 		DurationMs:  durationMs,
 		Model:       o.cfg.Model,
 	}, nil
+}
+
+// callOnce sends one chat request, parses the response envelope, and
+// returns the content + finish_reason + total wall-clock duration. It
+// is a thin wrapper over do() that decodes the OpenAI-shaped response
+// envelope; Analyze uses it twice when a truncation auto-retry is
+// needed.
+func (o *OpenAI) callOnce(ctx context.Context, body chatRequest) (content string, finishReason string, durationMs int64, err error) {
+	start := time.Now()
+	raw, doErr := o.do(ctx, body)
+	durationMs = time.Since(start).Milliseconds()
+	if doErr != nil {
+		return "", "", durationMs, doErr
+	}
+	var resp chatResponse
+	if jerr := json.Unmarshal(raw, &resp); jerr != nil {
+		return "", "", durationMs, fmt.Errorf("ai: decode response: %w", jerr)
+	}
+	if len(resp.Choices) == 0 {
+		return "", "", durationMs, fmt.Errorf("ai: response had no choices")
+	}
+	content = strings.TrimSpace(resp.Choices[0].Message.Content)
+	finishReason = resp.Choices[0].FinishReason
+	if content == "" && finishReason != finishContentFilter {
+		// Empty content with a stop/length finish_reason is anomalous;
+		// content_filter explains itself.
+		return "", finishReason, durationMs, fmt.Errorf("ai: empty content from model")
+	}
+	return content, finishReason, durationMs, nil
 }
 
 func (o *OpenAI) do(ctx context.Context, body chatRequest) ([]byte, error) {
@@ -166,9 +219,13 @@ func (o *OpenAI) do(ctx context.Context, body chatRequest) ([]byte, error) {
 
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
-		// Ctx already cancelled — give up immediately so callers see
-		// the underlying error, not a "retry exhausted" wrapper.
+		// Ctx already cancelled — give up immediately. Surface
+		// lastErr when we have one (it carries useful HTTP detail like
+		// "ai: http 502: ...") and the bare ctx error otherwise.
 		if err := ctx.Err(); err != nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
 			return nil, fmt.Errorf("ai: http: %w", err)
 		}
 
@@ -185,7 +242,7 @@ func (o *OpenAI) do(ctx context.Context, body chatRequest) ([]byte, error) {
 		if !isRetryable(status, err) || attempt == attempts {
 			return nil, lastErr
 		}
-		// Compute exponential backoff with jitter.
+		// Compute exponential backoff with jitter (up to 25%).
 		backoff := o.initialBackoff
 		for i := 1; i < attempt; i++ {
 			backoff *= 2
@@ -194,11 +251,23 @@ func (o *OpenAI) do(ctx context.Context, body chatRequest) ([]byte, error) {
 				break
 			}
 		}
-		if o.rng != nil && backoff > 0 {
-			jitter := time.Duration(o.rng.Int63n(int64(backoff / 4)))
-			backoff += jitter
+		// rand.Int63n requires a positive argument; guard against
+		// extremely small backoffs that would round to zero.
+		if quarter := int64(backoff / 4); quarter > 0 {
+			backoff += time.Duration(rand.Int63n(quarter))
 		}
-		o.sleep(backoff)
+
+		// Honor ctx cancellation during the retry sleep so SIGTERM
+		// is not blocked by an in-flight backoff (worst case 15s
+		// across 3 attempts at default settings before this fix).
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, fmt.Errorf("ai: http: %w", ctx.Err())
+		case <-time.After(backoff):
+		}
 	}
 	return nil, lastErr
 }
@@ -208,7 +277,7 @@ func (o *OpenAI) do(ctx context.Context, body chatRequest) ([]byte, error) {
 // received), and any error. The status code lets the caller tell
 // retryable failures (429, 5xx) from non-retryable (4xx other).
 func (o *OpenAI) doOnce(ctx context.Context, payload []byte) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openAIChatURL, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.chatURL, bytes.NewReader(payload))
 	if err != nil {
 		return nil, 0, fmt.Errorf("ai: build request: %w", err)
 	}
@@ -274,9 +343,29 @@ type responseFormat struct {
 
 type chatResponse struct {
 	Choices []struct {
-		Message chatMessage `json:"message"`
+		Message      chatMessage `json:"message"`
+		FinishReason string      `json:"finish_reason,omitempty"`
 	} `json:"choices"`
 }
+
+// Sentinel finish_reason values surfaced by both OpenAI and Gemini's
+// OpenAI-compatible shim. Other providers (Claude via LiteLLM, etc.)
+// usually map to these via their adapters.
+const (
+	// finishLength means the model hit max_tokens before completing.
+	// For our JSON-output prompt this means the JSON object is
+	// truncated → ParseFinding will fail with "no JSON object found".
+	// We auto-retry once with doubled max_tokens to recover.
+	finishLength = "length"
+	// finishContentFilter means the provider's safety filter blocked
+	// the response. Retrying with more tokens will not help — surface
+	// a clear error so the operator can adjust the prompt or model.
+	finishContentFilter = "content_filter"
+	// truncationRetryMaxTokens caps how large the auto-retry will
+	// allow max_tokens to grow. Beyond this we give up rather than
+	// rack up costs.
+	truncationRetryMaxTokens = 4096
+)
 
 // -----------------------------------------------------------------------------
 // helpers

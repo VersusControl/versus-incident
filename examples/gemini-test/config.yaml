@@ -1,0 +1,70 @@
+name: versus
+host: 0.0.0.0
+port: 3000
+public_host: 'http://localhost:3000'
+gateway_secret: ${GATEWAY_SECRET}
+
+alert:
+  debug_body: true
+  slack:    { enable: false }
+  telegram: { enable: false }
+  msteams:  { enable: false }
+  lark:     { enable: false }
+  viber:    { enable: false }
+  email:    { enable: false }
+
+queue:  { enable: false }
+oncall: { enable: false, initialized_only: false }
+
+storage:
+  type: file
+  file:
+    data_dir: ./data
+    max_incidents: 1000
+
+agent:
+  enable: true
+  mode: detect
+  poll_interval: 5s
+  lookback: 1m
+  batch_max: 100
+  signal_max_bytes: 65536
+  sources_path: ./agent_sources.yaml
+
+  redaction: { enable: true, redact_ips: false }
+
+  catalog:
+    persist_interval: 10s
+    auto_promote_after: 1000       # cao để mọi pattern đầu tiên là "unknown" → trigger AI
+    max_patterns: 1000
+
+  miner: { similarity_threshold: 0.4, tree_depth: 4, max_children: 100 }
+
+  regex:
+    # Chỉ học từ error/panic để giảm noise và tiết kiệm Gemini calls
+    default_pattern: "(?i)error|panic|fatal|oom|exception"
+
+  # Gemini qua OpenAI-compatible endpoint
+  ai:
+    enable: true
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    api_key: ${GEMINI_API_KEY}
+    model: "gemini-2.5-flash"      # nhanh + cheap. Đổi sang gemini-2.5-pro nếu cần chất lượng cao hơn
+    temperature: 0.2
+    max_tokens: 512               # với truncation auto-retry, 512 cũng OK; agent doubles → 1024 on retry
+    max_calls_per_hour: 30         # cap để bảo vệ quota Gemini free tier
+    cache_ttl: "10m"
+
+  new_service_grace: 0             # tắt grace để AI gọi luôn (cho test)
+
+  reliability:
+    pull_timeout: 20s
+    source_backoff_initial: 30s
+    source_backoff_max: 10m
+    ai_retry:
+      max_attempts: 3
+      initial_backoff: 500ms
+      max_backoff: 5s
+    ai_breaker:
+      failure_threshold: 5
+      cooldown: 2m

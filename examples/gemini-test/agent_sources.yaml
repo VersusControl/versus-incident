@@ -1,0 +1,9 @@
+sources:
+  - name: app
+    type: file
+    enable: true
+    file:
+      path: ./local/resource/app.log
+      format: text
+      from_beginning: true
+      max_lines_per_pull: 200

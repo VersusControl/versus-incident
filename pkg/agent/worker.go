@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -146,6 +147,13 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 		w.Health.Register(s.Name())
 	}
 
+	// Wire the catalog cap. A zero/negative configured value disables
+	// the cap; tests construct workers without setting it and the
+	// catalog stays unbounded.
+	if opt.Cfg.Catalog.MaxPatterns > 0 {
+		w.catalog.SetMaxPatterns(opt.Cfg.Catalog.MaxPatterns)
+	}
+
 	return w, nil
 }
 
@@ -218,13 +226,24 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 // tick runs one poll across every source. Errors from one source never
-// affect the others — the worker keeps moving.
+// affect the others — the worker keeps moving. A panic inside one
+// source is contained: logged, recorded as a failure on the health
+// tracker, and the next tick still runs (so a single bad input
+// cannot silently kill the agent).
 func (w *Worker) tick(ctx context.Context, mode string) {
 	var wg sync.WaitGroup
 	for _, src := range w.sources {
 		wg.Add(1)
 		go func(s core.SignalSource) {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("agent: PANIC in tickSource %s: %v\n%s", s.Name(), r, debug.Stack())
+					if w.Health != nil {
+						w.Health.RecordFailure(s.Name(), fmt.Errorf("panic: %v", r), 0)
+					}
+				}
+			}()
 			w.tickSource(ctx, s, mode)
 		}(src)
 	}
@@ -493,21 +512,23 @@ func (w *Worker) emitDetect(
 		return outcome
 	}
 
-	// 3. Rate limit guard.
-	if !w.ai.Rate.Allow() {
-		log.Printf("agent[detect]: AI quota exceeded; skipping pattern=%s freq=%d", patternID, len(signals))
-		evt.Outcome = "quota"
-		w.detect.Record(evt)
-		return "quota"
-	}
-
-	// 3b. Circuit breaker — short-circuit when AI provider is having
-	// a bad day. No upstream cost is incurred while open.
+	// 3. Circuit breaker FIRST — when AI provider is having a bad day
+	// we short-circuit without consuming a rate-limit slot. Otherwise
+	// an outage would silently drain the per-hour quota for calls
+	// that never reach the upstream.
 	if w.ai.Breaker != nil && !w.ai.Breaker.Allow() {
 		log.Printf("agent[detect]: AI breaker open; skipping pattern=%s freq=%d", patternID, len(signals))
 		evt.Outcome = "breaker_open"
 		w.detect.Record(evt)
 		return "breaker_open"
+	}
+
+	// 4. Rate limit guard.
+	if !w.ai.Rate.Allow() {
+		log.Printf("agent[detect]: AI quota exceeded; skipping pattern=%s freq=%d", patternID, len(signals))
+		evt.Outcome = "quota"
+		w.detect.Record(evt)
+		return "quota"
 	}
 
 	// 4. Real AI call.

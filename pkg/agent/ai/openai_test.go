@@ -13,62 +13,20 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
 
-func newClientHittingServer(t *testing.T, srv *httptest.Server) *http.Client {
-	t.Helper()
-	return srv.Client()
-}
-
-func newOpenAIForTest(t *testing.T, srv *httptest.Server, attempts int) *OpenAI {
-	t.Helper()
-	o := NewOpenAIWithRetry(
-		config.AgentAIConfig{Model: "test-model", APIKey: "k"},
-		newClientHittingServer(t, srv),
-		attempts,
-		1*time.Millisecond, // initial backoff
-		2*time.Millisecond, // max backoff
-	)
-	// Make sleep & jitter deterministic + cheap.
-	o.sleep = func(time.Duration) {}
-	o.rng = nil
-	return o
-}
-
-// rewrite the request URL so the analyzer hits our httptest server
-// instead of api.openai.com. We do this by overriding the transport.
-type rewritingTransport struct {
-	dst http.RoundTripper
-	url string
-}
-
-func (r *rewritingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Replace scheme+host with the test server's.
-	new, err := http.NewRequestWithContext(req.Context(), req.Method, r.url, req.Body)
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range req.Header {
-		new.Header[k] = v
-	}
-	return r.dst.RoundTrip(new)
-}
-
 func withHandler(t *testing.T, handler http.HandlerFunc) (*OpenAI, *httptest.Server) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
+	// Use BaseURL to point straight at the test server — no transport
+	// rewriting needed. This also exercises the BaseURL config path.
 	o := NewOpenAIWithRetry(
-		config.AgentAIConfig{Model: "test-model", APIKey: "k"},
-		&http.Client{
-			Transport: &rewritingTransport{dst: http.DefaultTransport, url: srv.URL},
-			Timeout:   2 * time.Second,
-		},
+		config.AgentAIConfig{Model: "test-model", APIKey: "k", BaseURL: srv.URL},
+		&http.Client{Timeout: 2 * time.Second},
 		3,
 		1*time.Millisecond,
 		2*time.Millisecond,
 	)
-	o.sleep = func(time.Duration) {}
-	o.rng = nil
 	return o, srv
 }
 
@@ -77,6 +35,22 @@ func goodResponse() string {
 	// well-formed (the body is a JSON object containing the fields
 	// ParseFinding looks for).
 	return `{"choices":[{"message":{"content":"{\"verdict\":\"unknown\",\"title\":\"t\",\"severity\":\"warn\",\"category\":\"infra\",\"confidence\":0.5,\"summary\":\"s\",\"suggested_actions\":[]}"}}]}`
+}
+
+// truncatedResponse returns a chat envelope whose content is a JSON
+// object missing its closing brace — simulating Gemini-style
+// truncation when the model hits max_tokens mid-output. The envelope
+// itself is valid; ParseFinding will fail on the content.
+func truncatedResponse() string {
+	return `{"choices":[{"finish_reason":"length","message":{"content":"{\"title\":\"truncated mid output, no closing brace\",\"summary\":\"this response was cut o"}}]}`
+}
+
+func goodResponseWithFinishStop() string {
+	return `{"choices":[{"finish_reason":"stop","message":{"content":"{\"verdict\":\"unknown\",\"title\":\"t\",\"severity\":\"warn\",\"category\":\"infra\",\"confidence\":0.5,\"summary\":\"s\",\"suggested_actions\":[]}"}}]}`
+}
+
+func contentFilterResponse() string {
+	return `{"choices":[{"finish_reason":"content_filter","message":{"content":""}}]}`
 }
 
 func sampleResult() core.AgentResult {
@@ -88,6 +62,99 @@ func sampleResult() core.AgentResult {
 			{Message: "boom"},
 		},
 		Frequency: 1,
+	}
+}
+
+// TestOpenAI_TruncationAutoRetry verifies that a finish_reason="length"
+// triggers exactly one auto-retry with doubled max_tokens. The first
+// call returns a truncated JSON object; the retry returns the full
+// object. Analyze should succeed using the retry's content.
+func TestOpenAI_TruncationAutoRetry(t *testing.T) {
+	var calls int32
+	o, _ := withHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			// First call: model says it ran out of tokens.
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(truncatedResponse()))
+			return
+		}
+		// Retry: full response.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(goodResponseWithFinishStop()))
+	})
+
+	res, err := o.Analyze(context.Background(), sampleResult())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil || res.Finding == nil {
+		t.Fatal("nil result/finding after auto-retry")
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 calls (1 truncated + 1 retry), got %d", got)
+	}
+}
+
+// TestOpenAI_TruncationRetryFailsWithClearError covers the case where
+// the retry STILL returns truncated content. The error should
+// explicitly mention max_tokens so operators know the fix.
+func TestOpenAI_TruncationRetryFailsWithClearError(t *testing.T) {
+	o, _ := withHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(truncatedResponse()))
+	})
+
+	_, err := o.Analyze(context.Background(), sampleResult())
+	if err == nil {
+		t.Fatal("expected error when both attempts truncate")
+	}
+	if !strings.Contains(err.Error(), "truncated") || !strings.Contains(err.Error(), "max_tokens") {
+		t.Fatalf("error should mention truncation+max_tokens; got: %v", err)
+	}
+}
+
+// TestOpenAI_ContentFilterErrorIsClear verifies that finish_reason=
+// content_filter does NOT retry (more tokens won't unblock a safety
+// filter) and surfaces a recognizable error.
+func TestOpenAI_ContentFilterErrorIsClear(t *testing.T) {
+	var calls int32
+	o, _ := withHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(contentFilterResponse()))
+	})
+
+	_, err := o.Analyze(context.Background(), sampleResult())
+	if err == nil {
+		t.Fatal("expected error on content_filter")
+	}
+	if !strings.Contains(err.Error(), "safety filter") {
+		t.Fatalf("error should mention safety filter; got: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("content_filter must not auto-retry; calls=%d want 1", got)
+	}
+}
+
+// TestOpenAI_BaseURLDefault verifies that omitting BaseURL falls back
+// to the OpenAI endpoint. We don't actually call OpenAI; we just
+// check the resolved URL on the struct.
+func TestOpenAI_BaseURLDefault(t *testing.T) {
+	o := NewOpenAI(config.AgentAIConfig{Model: "m", APIKey: "k"}, nil)
+	if o.chatURL != defaultOpenAIChatURL {
+		t.Fatalf("default base url not honored: got %q want %q", o.chatURL, defaultOpenAIChatURL)
+	}
+}
+
+// TestOpenAI_BaseURLConfigured verifies that an explicit BaseURL is
+// preserved end-to-end. This is the path operators use to swap in
+// Gemini's OpenAI-compatible endpoint or a LiteLLM proxy.
+func TestOpenAI_BaseURLConfigured(t *testing.T) {
+	custom := "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+	o := NewOpenAI(config.AgentAIConfig{Model: "gemini-2.0-flash", APIKey: "k", BaseURL: custom}, nil)
+	if o.chatURL != custom {
+		t.Fatalf("configured base url not honored: got %q want %q", o.chatURL, custom)
 	}
 }
 
@@ -179,11 +246,8 @@ func TestOpenAI_NoRetryWhenAttemptsIs1(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	o := NewOpenAIWithRetry(
-		config.AgentAIConfig{Model: "test-model", APIKey: "k"},
-		&http.Client{
-			Transport: &rewritingTransport{dst: http.DefaultTransport, url: srv.URL},
-			Timeout:   2 * time.Second,
-		},
+		config.AgentAIConfig{Model: "test-model", APIKey: "k", BaseURL: srv.URL},
+		&http.Client{Timeout: 2 * time.Second},
 		1, 0, 0,
 	)
 
@@ -192,6 +256,43 @@ func TestOpenAI_NoRetryWhenAttemptsIs1(t *testing.T) {
 	}
 	if atomic.LoadInt32(&calls) != 1 {
 		t.Fatalf("calls=%d want 1", calls)
+	}
+}
+
+// TestOpenAI_CancelDuringSleepReturnsFast verifies the ctx-aware
+// retry sleep added in v1.4.1 hardening. Before this fix, an
+// in-flight backoff blocked SIGTERM for up to MaxBackoff seconds.
+// We use a server that always returns 503 and an unusually large
+// backoff so the test would obviously hang without the ctx-aware
+// sleep.
+func TestOpenAI_CancelDuringSleepReturnsFast(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	o := NewOpenAIWithRetry(
+		config.AgentAIConfig{Model: "test-model", APIKey: "k", BaseURL: srv.URL},
+		&http.Client{Timeout: 2 * time.Second},
+		3,
+		2*time.Second, // initial backoff — long enough that a non-ctx-aware sleep would hang
+		5*time.Second,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel ~50ms in, during the first retry sleep.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := o.Analyze(ctx, sampleResult())
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error after cancel")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("Analyze took %s — the retry sleep ignored ctx cancel", elapsed)
 	}
 }
 
