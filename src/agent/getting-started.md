@@ -114,17 +114,15 @@ agent:
     # Leave the rules empty for now; you can add them later.
     default_pattern: ".*"
     rules: []
-
-  sources_path: /app/config/agent_sources.yaml
 ```
 
 ---
 
 ## 3. Write `agent_sources.yaml`
 
-The list of log sources is in a separate file so you can swap it
-between environments without touching the main settings. For
-training, point it at a single local log file.
+The list of log sources lives in a sibling file `agent_sources.yaml`
+next to your main `config.yaml`. The file is optional. For training,
+point it at a single local log file.
 
 ```yaml
 sources:
@@ -324,9 +322,9 @@ include the source name). Each agent should have its own
 `storage.file.data_dir` so they don't fight over `patterns.json`.
 
 **Q: What's the smallest config I can run with?**
-Roughly: root-level `gateway_secret=…`, `agent.enable=true`,
-`agent.sources_path=…`, plus a `redis` block. Everything else has
-sensible defaults.
+Roughly: root-level `gateway_secret=…`, `agent.enable=true`, plus
+a `redis` block and a sibling `agent_sources.yaml` listing at least
+one source. Everything else has sensible defaults.
 
 ---
 

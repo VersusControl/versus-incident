@@ -1,0 +1,93 @@
+# Minimal Versus Incident config used by the docker-compose examples.
+
+name: versus
+host: 0.0.0.0
+port: 3000
+
+gateway_secret: ${GATEWAY_SECRET}
+
+alert:
+  debug_body: true
+
+  slack:
+    enable: ${SLACK_ENABLE}
+    token: ${SLACK_TOKEN}
+    channel_id: ${SLACK_CHANNEL_ID}
+    template_path: "config/slack_message.tmpl"
+
+  telegram:
+    enable: ${TELEGRAM_ENABLE}
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+    template_path: "config/telegram_message.tmpl"
+
+queue:
+  enable: false
+
+oncall:
+  enable: false
+  initialized_only: true
+  wait_minutes: 0
+  provider: aws_incident_manager
+
+redis:
+  insecure_skip_verify: true
+  host: ${REDIS_HOST}
+  port: ${REDIS_PORT}
+  password: ${REDIS_PASSWORD}
+  db: 0
+
+storage:
+  type: file
+  file:
+    data_dir: /app/data
+    max_incidents: 1000
+
+agent:
+  enable: ${AGENT_ENABLE}
+  mode: ${AGENT_MODE}
+  poll_interval: 15s
+  lookback: 5m
+  batch_max: 1000
+
+  redaction:
+    enable: true
+    redact_ips: false
+
+  catalog:
+    persist_interval: 30s
+    auto_promote_after: 50
+    spike_multiplier: 5.0
+    spike_min_frequency: 5
+    spike_min_baseline_count: 20
+
+  miner:
+    similarity_threshold: 0.4
+    tree_depth: 4
+    max_children: 100
+
+  regex:
+    default_pattern: "(?i).*error.*"
+    rules:
+      - name: panic
+        pattern: "(?i)panic:"
+      - name: oom
+        pattern: "Out of memory"
+
+  ai:
+    enable: ${AGENT_AI_ENABLE}
+    api_key: ${AGENT_AI_API_KEY}
+    model: ${AGENT_AI_MODEL}
+    temperature: 0.2
+    max_tokens: 512
+    max_calls_per_hour: 60
+    cache_ttl: "1h"
+
+  new_service_grace: 10m
+
+  service_patterns:
+    - '(?i)\bservice[._-]?name["\s:=]+"?([A-Za-z0-9._-]+)'
+    - '(?i)\b(?:service|svc|app|component)\s*=\s*"?([A-Za-z0-9._-]+)'
+    - '(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"'
+    - '([A-Za-z0-9._-]+)\[\d+\]:'
+    - '\[([A-Za-z0-9._-]+)\]'

@@ -1,0 +1,9 @@
+sources:
+  - name: sample-app
+    type: file
+    enable: true
+    file:
+      path: /var/log/sample/app.log
+      format: text
+      from_beginning: true
+      max_lines_per_pull: 1000

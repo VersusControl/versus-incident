@@ -28,7 +28,12 @@ func NewMSTeamsProvider(cfg config.MSTeamsConfig) *MSTeamsProvider {
 func (m *MSTeamsProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 
-	tmpl, err := template.New(filepath.Base(m.templatePath)).Funcs(funcMaps).ParseFiles(m.templatePath)
+	tplPath := m.templatePath
+	if i.Content != nil && utils.IsAgentIncident(*i.Content) {
+		tplPath = utils.AgentMSTeamsTemplatePath
+	}
+
+	tmpl, err := template.New(filepath.Base(tplPath)).Funcs(funcMaps).ParseFiles(tplPath)
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}

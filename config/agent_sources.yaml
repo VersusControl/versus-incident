@@ -1,15 +1,16 @@
 # -----------------------------------------------------------------------------
 # Agent signal sources.
 #
-# Loaded by the main config when `agent.sources_path` points at this file.
-# Keeping sources separate makes it easy to swap fixtures (file → ES) and to
-# manage per-environment source lists without touching the rest of the config.
+# Loaded automatically by Versus when this file sits next to the main
+# config file (path is hardcoded — no `sources_path` setting). Drop the
+# file or rename it to disable all sources without editing config.yaml.
 #
 # Each entry must have:
 #   name:    unique identifier (used in cursor keys and admin views)
-#   type:    "file" or "elasticsearch"
+#   type:    "file" | "elasticsearch" | "loki" | "cloudwatchlogs"
 #   enable:  true | false
-# Plus one of `file:` / `elasticsearch:` blocks depending on `type`.
+# Plus the matching block (`file:` / `elasticsearch:` / `loki:` /
+# `cloudwatchlogs:`) for the chosen type.
 # -----------------------------------------------------------------------------
 sources:
   # File source — easiest way to test the agent end-to-end. Drop a log file
@@ -72,3 +73,36 @@ sources:
   #       - host.name
   #       - error.stack_trace
   #     page_size: 500
+
+  # Grafana Loki source.
+  # - name: loki-prod
+  #   type: loki
+  #   enable: false
+  #   loki:
+  #     address: http://loki:3100        # or https://logs-prod-...grafana.net for Grafana Cloud
+  #     # tenant_id: ${LOKI_TENANT_ID}    # multi-tenant Loki / Grafana Cloud
+  #     # username: ${LOKI_USERNAME}      # Grafana Cloud: instance ID
+  #     # password: ${LOKI_PASSWORD}      # Grafana Cloud: API token
+  #     # bearer_token: ${LOKI_TOKEN}     # alternative to user/pass
+  #     # insecure_skip_verify: false
+  #     query: '{app="api",env="prod"} |= "error"'
+  #     severity_field: level             # read from stream labels
+  #     extra_labels:
+  #       - app
+  #       - namespace
+  #     page_size: 500
+
+  # AWS CloudWatch Logs source.
+  # Auth uses the standard AWS SDK chain (env vars, ~/.aws/credentials,
+  # IAM instance/task role). Required IAM:
+  #   logs:FilterLogEvents on the target log group.
+  # - name: cwlogs-lambda
+  #   type: cloudwatchlogs
+  #   enable: false
+  #   cloudwatchlogs:
+  #     region: us-east-1
+  #     log_group_name: /aws/lambda/my-function
+  #     # log_stream_prefix: 2026/05/12     # narrow to recent streams (cheaper)
+  #     # filter_pattern: '?ERROR ?Exception'  # CloudWatch filter syntax (NOT regex)
+  #     page_size: 500
+

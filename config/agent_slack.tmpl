@@ -1,0 +1,54 @@
+{{/*
+  Versus Agent — Slack template (mrkdwn)
+  Used when the incident originates from the AI SRE Agent (detect mode).
+  Available fields: .AlertName .Summary .Severity .Category .Confidence
+  .Suggestions .ServiceName .Source .PatternID .PatternTemplate
+  .Frequency .Baseline .Verdict .Logs .Status .AckURL
+*/}}
+{{- $sevIcons := dict "critical" "🔴" "high" "🟠" "medium" "🟡" "low" "🟢" "info" "ℹ️" -}}
+{{- $sev := lower (or .Severity "info") -}}
+{{- $sevIcon := or (index $sevIcons $sev) "ℹ️" -}}
+*🤖 Versus Agent — {{ or .AlertName "AI-detected incident" }}*
+*{{ $sevIcon }} Severity:* {{ upper (or .Severity "INFO") }}
+*Service:* {{ or .ServiceName "_unknown" }}
+{{- if .Source }}
+*Source:* {{ .Source }}
+{{- end }}
+{{- if .Category }}
+*Category:* {{ .Category }}
+{{- end }}
+{{- if .Verdict }}
+*Verdict:* {{ .Verdict }}
+{{- end }}
+{{- if .Confidence }}
+*Confidence:* {{ printf "%.2f" .Confidence }}
+{{- end }}
+
+*Summary:*
+{{ or .Summary "(no summary)" }}
+
+{{- if .Frequency }}
+*Frequency:* {{ .Frequency }} (baseline {{ printf "%.2f" .Baseline }})
+{{- end }}
+{{- if .PatternID }}
+*Pattern:* `{{ .PatternID }}`
+{{- end }}
+{{- if .PatternTemplate }}
+*Template:* `{{ .PatternTemplate }}`
+{{- end }}
+
+{{- if .Suggestions }}
+
+*Suggestions:*
+{{- range $i, $s := .Suggestions }}
+• {{ $s }}
+{{- end }}
+{{- end }}
+
+{{- if .Logs }}
+
+*Sample log:*
+```
+{{ .Logs }}
+```
+{{- end }}

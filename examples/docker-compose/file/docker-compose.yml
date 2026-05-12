@@ -1,0 +1,52 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: versus-file-redis
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-versus}"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-versus}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  versus:
+    image: ghcr.io/versuscontrol/versus-incident:latest
+    container_name: versus-file
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      GATEWAY_SECRET: ${GATEWAY_SECRET:-change-me}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-versus}
+      SLACK_ENABLE: ${SLACK_ENABLE:-false}
+      SLACK_TOKEN: ${SLACK_TOKEN:-}
+      SLACK_CHANNEL_ID: ${SLACK_CHANNEL_ID:-}
+      TELEGRAM_ENABLE: ${TELEGRAM_ENABLE:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      AGENT_ENABLE: ${AGENT_ENABLE:-true}
+      AGENT_MODE: ${AGENT_MODE:-training}
+      AGENT_AI_ENABLE: ${AGENT_AI_ENABLE:-false}
+      AGENT_AI_API_KEY: ${AGENT_AI_API_KEY:-}
+      AGENT_AI_MODEL: ${AGENT_AI_MODEL:-gpt-4o-mini}
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/var/log/sample
+      - versus-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
+  versus-data:

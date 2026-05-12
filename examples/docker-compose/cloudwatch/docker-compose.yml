@@ -1,0 +1,64 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: versus-cw-redis
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-versus}"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-versus}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  versus:
+    image: ghcr.io/versuscontrol/versus-incident:latest
+    container_name: versus-cw
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      GATEWAY_SECRET: ${GATEWAY_SECRET:-change-me}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-versus}
+      SLACK_ENABLE: ${SLACK_ENABLE:-false}
+      SLACK_TOKEN: ${SLACK_TOKEN:-}
+      SLACK_CHANNEL_ID: ${SLACK_CHANNEL_ID:-}
+      TELEGRAM_ENABLE: ${TELEGRAM_ENABLE:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      AGENT_ENABLE: ${AGENT_ENABLE:-true}
+      AGENT_MODE: ${AGENT_MODE:-training}
+      AGENT_AI_ENABLE: ${AGENT_AI_ENABLE:-false}
+      AGENT_AI_API_KEY: ${AGENT_AI_API_KEY:-}
+      AGENT_AI_MODEL: ${AGENT_AI_MODEL:-gpt-4o-mini}
+      # AWS credentials for the CloudWatch Logs source.
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      # Substituted into agent_sources.yaml.
+      CW_REGION: ${CW_REGION:-us-east-1}
+      CW_LOG_GROUP_NAME: ${CW_LOG_GROUP_NAME}
+      CW_LOG_STREAM_PREFIX: ${CW_LOG_STREAM_PREFIX:-}
+      CW_FILTER_PATTERN: ${CW_FILTER_PATTERN:-}
+    volumes:
+      - ./config:/app/config:ro
+      - versus-data:/app/data
+      # Optional: mount your local AWS profile as a fallback when env
+      # vars are not set. Uncomment if you use ~/.aws/credentials.
+      # - ${HOME}/.aws:/home/nonroot/.aws:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
+  versus-data:

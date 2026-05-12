@@ -170,10 +170,6 @@ agent:
   batch_max: 5000                 # safety cap per tick
   signal_max_bytes: 65536         # cap on Signal.Raw
 
-  # Signal sources are kept in a separate file so users can manage them
-  # independently of the main config. Path is resolved relative to this
-  # config file. Override via env: AGENT_SOURCES_PATH.
-  sources_path: ./agent_sources.yaml
 
   redaction:
     enable: true

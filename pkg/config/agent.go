@@ -28,13 +28,12 @@ type AgentConfig struct {
 	Regex     AgentRegexConfig     `mapstructure:"regex"`
 	AI        AgentAIConfig        `mapstructure:"ai"`
 
-	// SourcesPath optionally points to an external YAML file containing the
-	// `sources:` list. When set, sources defined inline in the main config
-	// are ignored and replaced with the file's contents at load time. The
-	// external file's top-level key is `sources`. Relative paths are
-	// resolved against the main config file's directory.
-	SourcesPath string              `mapstructure:"sources_path"`
-	Sources     []AgentSourceConfig `mapstructure:"sources"`
+	// Sources is the list of enabled signal sources. Versus loads it from
+	// the file `agent_sources.yaml` sitting next to the main config file
+	// (path is hardcoded; missing file is OK — the agent simply has no
+	// sources). The file's top-level key is `sources`. ${VAR} references
+	// in the file are expanded against the process environment.
+	Sources []AgentSourceConfig `mapstructure:"sources"`
 }
 
 type AgentRedactionConfig struct {
@@ -88,11 +87,13 @@ type AgentRegexConfig struct {
 }
 
 type AgentSourceConfig struct {
-	Name          string                         `mapstructure:"name"`
-	Type          string                         `mapstructure:"type"` // "elasticsearch" | "file"
-	Enable        bool                           `mapstructure:"enable"`
-	Elasticsearch AgentElasticsearchSourceConfig `mapstructure:"elasticsearch"`
-	File          AgentFileSourceConfig          `mapstructure:"file"`
+	Name           string                          `mapstructure:"name"`
+	Type           string                          `mapstructure:"type"` // "elasticsearch" | "file" | "loki" | "cloudwatchlogs"
+	Enable         bool                            `mapstructure:"enable"`
+	Elasticsearch  AgentElasticsearchSourceConfig  `mapstructure:"elasticsearch"`
+	File           AgentFileSourceConfig           `mapstructure:"file"`
+	Loki           AgentLokiSourceConfig           `mapstructure:"loki"`
+	CloudWatchLogs AgentCloudWatchLogsSourceConfig `mapstructure:"cloudwatchlogs"`
 }
 
 // AgentFileSourceConfig drives the file-tailing SignalSource.
@@ -153,6 +154,59 @@ type AgentElasticsearchSourceConfig struct {
 	SeverityField      string   `mapstructure:"severity_field"`
 	ExtraFields        []string `mapstructure:"extra_fields"`
 	PageSize           int      `mapstructure:"page_size"`
+}
+
+// AgentLokiSourceConfig drives the Grafana Loki SignalSource.
+//
+// The source uses Loki's HTTP `query_range` endpoint with `direction=forward`
+// so the stream is read oldest-first and pagination is cursor-friendly. The
+// cursor is the maximum log timestamp seen on the previous tick.
+type AgentLokiSourceConfig struct {
+	// Address is the Loki base URL, e.g. "http://loki:3100".
+	Address string `mapstructure:"address"`
+	// TenantID, when set, is sent as the `X-Scope-OrgID` header (multi-tenant
+	// Loki / Grafana Cloud).
+	TenantID string `mapstructure:"tenant_id"`
+	// Username/Password enable HTTP Basic auth (Grafana Cloud uses
+	// instance ID / API token).
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
+	// BearerToken is sent as `Authorization: Bearer <token>` when set.
+	// Mutually exclusive with Username/Password (Bearer wins).
+	BearerToken        string `mapstructure:"bearer_token"`
+	InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"`
+	// Query is a LogQL selector, e.g. `{app="api",env="prod"} |= "error"`.
+	// Required.
+	Query string `mapstructure:"query"`
+	// SeverityField, when set, is read from each entry's stream labels
+	// (e.g. "level") to populate Signal.Severity.
+	SeverityField string `mapstructure:"severity_field"`
+	// ExtraLabels are additional stream labels copied into Signal.Fields.
+	ExtraLabels []string `mapstructure:"extra_labels"`
+	// PageSize is the per-query limit (Loki caps this around 5000 by
+	// default). Default 500.
+	PageSize int `mapstructure:"page_size"`
+}
+
+// AgentCloudWatchLogsSourceConfig drives the AWS CloudWatch Logs SignalSource.
+//
+// The source uses the `FilterLogEvents` API (cheap, real-time, no async
+// query lifecycle). Authentication is the standard AWS SDK chain
+// (env vars, shared credentials file, IAM role).
+type AgentCloudWatchLogsSourceConfig struct {
+	// Region, e.g. "us-east-1". Required.
+	Region string `mapstructure:"region"`
+	// LogGroupName is the CloudWatch log group, e.g. "/aws/lambda/my-fn".
+	// Required.
+	LogGroupName string `mapstructure:"log_group_name"`
+	// LogStreamPrefix optionally restricts events to streams whose name
+	// starts with this prefix (cheaper than scanning the whole group).
+	LogStreamPrefix string `mapstructure:"log_stream_prefix"`
+	// FilterPattern is a CloudWatch Logs filter pattern (NOT a regex).
+	// See AWS docs. Empty matches every event.
+	FilterPattern string `mapstructure:"filter_pattern"`
+	// PageSize is the per-call limit (max 10000). Default 500.
+	PageSize int `mapstructure:"page_size"`
 }
 
 // AgentAIConfig holds configuration for the AI SRE used in detect mode.

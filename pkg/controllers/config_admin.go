@@ -271,7 +271,6 @@ func (c *ConfigAdminController) agent(ctx *fiber.Ctx) error {
 		"signal_max_bytes":  a.SignalMaxBytes,
 		"new_service_grace": a.NewServiceGrace,
 		"service_patterns":  a.ServicePatterns,
-		"sources_path":      a.SourcesPath,
 		"sources":           sources,
 		"redaction": fiber.Map{
 			"enable":              a.Redaction.Enable,
