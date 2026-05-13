@@ -29,7 +29,6 @@ agent:
   lookback: 1m
   batch_max: 100
   signal_max_bytes: 65536
-  sources_path: ./agent_sources.yaml
 
   redaction: { enable: true, redact_ips: false }
 
@@ -47,11 +46,11 @@ agent:
   # Gemini qua OpenAI-compatible endpoint
   ai:
     enable: true
-    base_url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    provider: gemini               # URL + auth header resolved from this; no base_url needed
     api_key: ${GEMINI_API_KEY}
     model: "gemini-2.5-flash"      # nhanh + cheap. Đổi sang gemini-2.5-pro nếu cần chất lượng cao hơn
     temperature: 0.2
-    max_tokens: 512               # với truncation auto-retry, 512 cũng OK; agent doubles → 1024 on retry
+    max_tokens: 512                # với truncation auto-retry, 512 cũng OK; agent doubles → 1024 on retry
     max_calls_per_hour: 30         # cap để bảo vệ quota Gemini free tier
     cache_ttl: "10m"
 

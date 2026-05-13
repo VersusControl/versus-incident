@@ -18,15 +18,21 @@ func withHandler(t *testing.T, handler http.HandlerFunc) (*OpenAI, *httptest.Ser
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
-	// Use BaseURL to point straight at the test server — no transport
-	// rewriting needed. This also exercises the BaseURL config path.
-	o := NewOpenAIWithRetry(
-		config.AgentAIConfig{Model: "test-model", APIKey: "k", BaseURL: srv.URL},
+	// Construct with provider=openai (the default URL), then override
+	// chatURL to the httptest server. We can reach the unexported
+	// field because the test lives in the same package; this avoids
+	// adding a public seam just for tests.
+	o, err := NewOpenAIWithRetry(
+		config.AgentAIConfig{Model: "test-model", APIKey: "k", Provider: "openai"},
 		&http.Client{Timeout: 2 * time.Second},
 		3,
 		1*time.Millisecond,
 		2*time.Millisecond,
 	)
+	if err != nil {
+		t.Fatalf("construct: %v", err)
+	}
+	o.chatURL = srv.URL
 	return o, srv
 }
 
@@ -137,24 +143,70 @@ func TestOpenAI_ContentFilterErrorIsClear(t *testing.T) {
 	}
 }
 
-// TestOpenAI_BaseURLDefault verifies that omitting BaseURL falls back
-// to the OpenAI endpoint. We don't actually call OpenAI; we just
-// check the resolved URL on the struct.
-func TestOpenAI_BaseURLDefault(t *testing.T) {
-	o := NewOpenAI(config.AgentAIConfig{Model: "m", APIKey: "k"}, nil)
-	if o.chatURL != defaultOpenAIChatURL {
-		t.Fatalf("default base url not honored: got %q want %q", o.chatURL, defaultOpenAIChatURL)
+// TestProviderURL covers the supported provider names + the empty
+// default + an unknown value. The endpoints are operator-visible
+// (any change is a behavior break) so we lock them down with an
+// exact-match assertion.
+func TestProviderURL(t *testing.T) {
+	cases := []struct {
+		provider string
+		wantURL  string
+		wantErr  bool
+	}{
+		{"", "https://api.openai.com/v1/chat/completions", false}, // default
+		{"openai", "https://api.openai.com/v1/chat/completions", false},
+		{"OpenAI", "https://api.openai.com/v1/chat/completions", false}, // case-insensitive
+		{"gemini", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", false},
+		{"  gemini  ", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", false}, // whitespace-tolerant
+		{"claude", "https://api.anthropic.com/v1/chat/completions", false},
+		{"anthropic", "", true}, // common typo; explicit reject
+		{"bedrock", "", true},
+		{"openrouter", "", true},
+	}
+	for _, tc := range cases {
+		got, err := ProviderURL(tc.provider)
+		switch {
+		case tc.wantErr && err == nil:
+			t.Errorf("ProviderURL(%q): expected error, got url=%q", tc.provider, got)
+		case !tc.wantErr && err != nil:
+			t.Errorf("ProviderURL(%q): unexpected error: %v", tc.provider, err)
+		case !tc.wantErr && got != tc.wantURL:
+			t.Errorf("ProviderURL(%q): got %q, want %q", tc.provider, got, tc.wantURL)
+		}
 	}
 }
 
-// TestOpenAI_BaseURLConfigured verifies that an explicit BaseURL is
-// preserved end-to-end. This is the path operators use to swap in
-// Gemini's OpenAI-compatible endpoint or a LiteLLM proxy.
-func TestOpenAI_BaseURLConfigured(t *testing.T) {
-	custom := "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-	o := NewOpenAI(config.AgentAIConfig{Model: "gemini-2.0-flash", APIKey: "k", BaseURL: custom}, nil)
-	if o.chatURL != custom {
-		t.Fatalf("configured base url not honored: got %q want %q", o.chatURL, custom)
+// TestNewOpenAI_PropagatesProviderError ensures construction fails
+// fast when the operator misconfigures the provider — otherwise the
+// analyzer would 404 on every call instead of telling the operator
+// at startup.
+func TestNewOpenAI_PropagatesProviderError(t *testing.T) {
+	if _, err := NewOpenAI(config.AgentAIConfig{Model: "m", APIKey: "k", Provider: "bogus"}, nil); err == nil {
+		t.Fatal("expected error from NewOpenAI with unknown provider")
+	}
+}
+
+// TestOpenAI_NameReflectsProvider verifies Name() returns the
+// canonical lowercase provider name so the audit log and startup
+// banner show what the analyzer is actually talking to.
+func TestOpenAI_NameReflectsProvider(t *testing.T) {
+	for _, in := range []string{"", "openai", "OpenAI"} {
+		o, err := NewOpenAI(config.AgentAIConfig{Model: "m", APIKey: "k", Provider: in}, nil)
+		if err != nil {
+			t.Fatalf("construct(%q): %v", in, err)
+		}
+		if got := o.Name(); got != "openai" {
+			t.Errorf("Name() for provider=%q: got %q, want openai", in, got)
+		}
+	}
+	for _, p := range []string{"gemini", "claude"} {
+		o, err := NewOpenAI(config.AgentAIConfig{Model: "m", APIKey: "k", Provider: p}, nil)
+		if err != nil {
+			t.Fatalf("construct(%q): %v", p, err)
+		}
+		if got := o.Name(); got != p {
+			t.Errorf("Name() for provider=%q: got %q, want %q", p, got, p)
+		}
 	}
 }
 
@@ -245,11 +297,15 @@ func TestOpenAI_NoRetryWhenAttemptsIs1(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	o := NewOpenAIWithRetry(
-		config.AgentAIConfig{Model: "test-model", APIKey: "k", BaseURL: srv.URL},
+	o, err := NewOpenAIWithRetry(
+		config.AgentAIConfig{Model: "test-model", APIKey: "k", Provider: "openai"},
 		&http.Client{Timeout: 2 * time.Second},
 		1, 0, 0,
 	)
+	if err != nil {
+		t.Fatalf("construct: %v", err)
+	}
+	o.chatURL = srv.URL
 
 	if _, err := o.Analyze(context.Background(), sampleResult()); err == nil {
 		t.Fatal("expected error")
@@ -271,13 +327,17 @@ func TestOpenAI_CancelDuringSleepReturnsFast(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	o := NewOpenAIWithRetry(
-		config.AgentAIConfig{Model: "test-model", APIKey: "k", BaseURL: srv.URL},
+	o, err := NewOpenAIWithRetry(
+		config.AgentAIConfig{Model: "test-model", APIKey: "k", Provider: "openai"},
 		&http.Client{Timeout: 2 * time.Second},
 		3,
 		2*time.Second, // initial backoff — long enough that a non-ctx-aware sleep would hang
 		5*time.Second,
 	)
+	if err != nil {
+		t.Fatalf("construct: %v", err)
+	}
+	o.chatURL = srv.URL
 	ctx, cancel := context.WithCancel(context.Background())
 	// Cancel ~50ms in, during the first retry sleep.
 	go func() {
@@ -286,9 +346,9 @@ func TestOpenAI_CancelDuringSleepReturnsFast(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, err := o.Analyze(ctx, sampleResult())
+	_, analyzeErr := o.Analyze(ctx, sampleResult())
 	elapsed := time.Since(start)
-	if err == nil {
+	if analyzeErr == nil {
 		t.Fatal("expected error after cancel")
 	}
 	if elapsed > 500*time.Millisecond {

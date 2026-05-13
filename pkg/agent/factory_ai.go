@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"log"
 	"net/http"
 	"time"
 
@@ -42,7 +43,15 @@ func BuildAI(cfg config.AgentConfig, store storage.Provider, httpClient *http.Cl
 	}
 	initialBackoff := parseDurationOr(retry.InitialBackoff, 500*time.Millisecond)
 	maxBackoff := parseDurationOr(retry.MaxBackoff, 5*time.Second)
-	sre := ai.NewOpenAIWithRetry(cfg.AI, httpClient, maxAttempts, initialBackoff, maxBackoff)
+	sre, err := ai.NewOpenAIWithRetry(cfg.AI, httpClient, maxAttempts, initialBackoff, maxBackoff)
+	if err != nil {
+		// Misconfigured provider — return empty bundle so detect mode
+		// degrades to "dry detect" (classify but do not emit) instead
+		// of starting up with a dangling reference to a backend that
+		// will 404 on every call.
+		log.Printf("agent: AI disabled (%v); detect mode will run dry", err)
+		return AIBundle{}
+	}
 
 	ttl := parseDurationOr(cfg.AI.CacheTTL, time.Hour)
 	cache := ai.NewResultCache(ttl, store)

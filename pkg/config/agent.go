@@ -278,13 +278,17 @@ type AgentAIConfig struct {
 	// the LLM — it only logs what it would have sent. This allows operators
 	// to run detect mode in a "dry-run" fashion without an API key.
 	Enable bool `mapstructure:"enable"`
-	// BaseURL is the full chat/completions endpoint to POST to. Default
-	// is OpenAI's URL. Set this to use an OpenAI-compatible endpoint
-	// from a different provider (e.g. Google's Gemini, Anthropic via a
-	// gateway, LiteLLM / OpenRouter proxies). The wire format must
-	// match OpenAI chat/completions: `messages: [{role, content}]`
-	// request body, `choices[0].message.content` response.
-	BaseURL string `mapstructure:"base_url"`
+	// Provider selects the AI backend. The chat/completions endpoint
+	// and a couple of provider-specific quirks are resolved from this
+	// value at startup; operators do not specify a URL. Supported:
+	//
+	//   - "openai" (default) — https://api.openai.com
+	//   - "gemini"           — Google AI Studio OpenAI-compatible shim
+	//   - "claude"           — Anthropic OpenAI-compatible endpoint
+	//
+	// All three speak the OpenAI chat/completions wire format. Empty
+	// is treated as "openai" for backwards compatibility.
+	Provider string `mapstructure:"provider"`
 	// APIKey is the bearer token sent in the Authorization header.
 	APIKey string `mapstructure:"api_key"`
 	// Model is the model identifier, e.g. "gpt-4o-mini".

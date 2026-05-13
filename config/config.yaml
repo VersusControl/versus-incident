@@ -213,15 +213,13 @@ agent:
         pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
 
   # AI analyzer — used in detect mode to assess unknown/spiking patterns.
-  # Any OpenAI-compatible chat/completions endpoint works (OpenAI itself,
-  # Google's Gemini OpenAI-compatible endpoint, LiteLLM / OpenRouter
-  # proxies, ...). Wire format must be OpenAI chat/completions.
+  # `provider` picks the backend; all three speak the OpenAI chat/completions
+  # wire format. Operators do not configure URLs.
   ai:
     enable: false                   # master switch (env: AGENT_AI_ENABLE)
-    # base_url: ""                  # default: https://api.openai.com/v1/chat/completions
-                                    # Gemini: https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+    provider: openai                # openai | gemini | claude (default: openai)
     api_key: ${AGENT_AI_API_KEY}
-    model: "gpt-4o-mini"            # OpenAI: gpt-4o-mini, gpt-4o; Gemini: gemini-2.0-flash, gemini-1.5-flash, gemini-1.5-pro
+    model: "gpt-4o-mini"            # openai: gpt-4o-mini, gpt-4o · gemini: gemini-2.5-flash · claude: claude-sonnet-4-5
     temperature: 0.2
     max_tokens: 512
     max_calls_per_hour: 60          # 0 = unlimited

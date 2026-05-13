@@ -71,11 +71,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 #### Multi-provider AI support
-- **`agent.ai.base_url` config field** (`pkg/agent/ai/openai.go`): override
-  the OpenAI chat/completions endpoint to point at any OpenAI-compatible
-  provider — e.g. Google Gemini's `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`,
-  LiteLLM proxies, OpenRouter. Wire format remains OpenAI chat/completions.
-  Default unchanged (OpenAI), so existing deployments keep working.
+- **`agent.ai.provider` config field** (`pkg/agent/ai/openai.go`,
+  `pkg/config/agent.go`): selects the AI backend by name —
+  `openai` (default), `gemini`, or `claude`. The chat/completions
+  endpoint is resolved from this value at startup; operators do not
+  configure URLs. All three providers speak the OpenAI
+  chat/completions wire format (Gemini and Claude via their respective
+  OpenAI compatibility shims). Unknown values fail fast at startup
+  with a clear error.
 - **`finish_reason` handling + truncation auto-retry**
   (`pkg/agent/ai/openai.go`): the analyzer now reads each choice's
   `finish_reason`. On `length` (model hit max_tokens mid-JSON) it

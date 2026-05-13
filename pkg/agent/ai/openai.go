@@ -15,21 +15,49 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
 
-// defaultOpenAIChatURL is the OpenAI chat/completions endpoint. Used
-// as the fallback when AgentAIConfig.BaseURL is empty. Operators set
-// BaseURL to point at any OpenAI-compatible provider — e.g. Google's
-// `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`
-// for Gemini, or a local LiteLLM/OpenRouter proxy.
-const defaultOpenAIChatURL = "https://api.openai.com/v1/chat/completions"
+// ProviderURL resolves the chat/completions endpoint for the named
+// AI provider. All three supported providers speak the OpenAI
+// chat/completions wire format; only the host changes (Gemini and
+// Claude both ship an OpenAI compatibility shim). Returns an error
+// for unknown values so a misconfigured deploy fails at startup with
+// a clear message rather than silently 404'ing on every call.
+//
+// Empty input is treated as "openai" for backwards compatibility with
+// configs written before the field existed.
+func ProviderURL(provider string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "", "openai":
+		return "https://api.openai.com/v1/chat/completions", nil
+	case "gemini":
+		return "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", nil
+	case "claude":
+		return "https://api.anthropic.com/v1/chat/completions", nil
+	default:
+		return "", fmt.Errorf("ai: unknown provider %q (want openai | gemini | claude)", provider)
+	}
+}
+
+// normalizeProvider returns the canonical lowercase provider name,
+// using "openai" for the empty default. Exposed so the audit log and
+// startup banner show what the analyzer is actually talking to.
+func normalizeProvider(provider string) string {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	if p == "" {
+		return "openai"
+	}
+	return p
+}
 
 // OpenAI is an AISRE backed by an OpenAI-compatible /chat/completions
-// endpoint (OpenAI itself, Gemini's OpenAI-compatible layer, LiteLLM
-// proxy, OpenRouter, ...). One call per AgentResult; no streaming, no
-// tool use.
+// endpoint. The same client code drives OpenAI itself, Gemini's
+// OpenAI compatibility shim, and Anthropic's OpenAI compatibility
+// endpoint — the URL is the only thing that changes. Selected via
+// AgentAIConfig.Provider; see ProviderURL.
 type OpenAI struct {
 	cfg        config.AgentAIConfig
 	httpClient *http.Client
-	chatURL    string // resolved at construction; cfg.BaseURL or default
+	chatURL    string // resolved from cfg.Provider at construction
+	name       string // canonical provider name surfaced via Name()
 
 	// SampleFn extracts the sample lines passed to the model from an
 	// AgentResult. Defaults to "first up to 3 messages". Exposed so
@@ -46,8 +74,8 @@ type OpenAI struct {
 
 // NewOpenAI constructs the analyzer. httpClient may be nil — a sane
 // default (30s timeout, no proxy) is used. No retry — backwards
-// compatible.
-func NewOpenAI(cfg config.AgentAIConfig, client *http.Client) *OpenAI {
+// compatible. Returns an error for an unknown provider.
+func NewOpenAI(cfg config.AgentAIConfig, client *http.Client) (*OpenAI, error) {
 	return NewOpenAIWithRetry(cfg, client, 1, 0, 0)
 }
 
@@ -56,31 +84,35 @@ func NewOpenAI(cfg config.AgentAIConfig, client *http.Client) *OpenAI {
 // `min(maxBackoff, initialBackoff * 2^(attempt-1))` plus up to 25%
 // jitter. Retries fire on HTTP 429, any 5xx, or any network/transport
 // error. 4xx other than 429 surface immediately (the request is
-// fundamentally broken — retrying won't help).
-func NewOpenAIWithRetry(cfg config.AgentAIConfig, client *http.Client, maxAttempts int, initialBackoff, maxBackoff time.Duration) *OpenAI {
+// fundamentally broken — retrying won't help). Returns an error if
+// cfg.Provider is not one of the supported values.
+func NewOpenAIWithRetry(cfg config.AgentAIConfig, client *http.Client, maxAttempts int, initialBackoff, maxBackoff time.Duration) (*OpenAI, error) {
+	chatURL, err := ProviderURL(cfg.Provider)
+	if err != nil {
+		return nil, err
+	}
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
-	chatURL := cfg.BaseURL
-	if chatURL == "" {
-		chatURL = defaultOpenAIChatURL
-	}
 	return &OpenAI{
 		cfg:            cfg,
 		httpClient:     client,
 		chatURL:        chatURL,
+		name:           normalizeProvider(cfg.Provider),
 		SampleFn:       defaultSampleFn,
 		maxAttempts:    maxAttempts,
 		initialBackoff: initialBackoff,
 		maxBackoff:     maxBackoff,
-	}
+	}, nil
 }
 
-// Name implements core.AISRE.
-func (o *OpenAI) Name() string { return "openai" }
+// Name implements core.AISRE. Returns the canonical provider name
+// ("openai" / "gemini" / "claude") so the audit log identifies the
+// backend each call actually hit.
+func (o *OpenAI) Name() string { return o.name }
 
 // Analyze sends the result to the configured chat endpoint and parses
 // the structured AIFinding from the response. The returned
