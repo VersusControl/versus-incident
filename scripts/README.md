@@ -2,14 +2,27 @@
 
 Helper scripts for generating test traffic against the Versus AI agent.
 
-There are two flavours:
+The main generator is
+[`generate_noisy_logs.py`](generate_noisy_logs.py), wrapped by
+[`run_noisy_logs.sh`](run_noisy_logs.sh) for live-tail and one-shot
+spike / scenario modes. It can write to a **local file** or push the
+same generated lines directly into **Loki**, **Elasticsearch**, or
+**CloudWatch Logs** — selected via `--target` (or `TARGET=`).
 
-| Goal                                         | Script                                                  |
-|----------------------------------------------|---------------------------------------------------------|
-| Generate a local log **file** the agent tails | [`generate_noisy_logs.py`](generate_noisy_logs.py) + [`run_noisy_logs.sh`](run_noisy_logs.sh) |
-| Push synthetic events into **Elasticsearch** | [`ensure_elasticsearch.sh`](ensure_elasticsearch.sh) + [`run_makelogs.sh`](run_makelogs.sh)   |
+| Target | Flag / env | Default endpoint |
+|---|---|---|
+| `file` (default) | `-o PATH` / `OUTPUT=` | `local/resource/noisy-app.log` |
+| `loki` | `--loki-url` / `LOKI_URL=` | `http://localhost:3100` |
+| `elasticsearch` | `--es-url` / `ES_URL=` (+ `--es-index` / `ES_INDEX=`) | `http://localhost:9200`, index `logs-noisy` |
+| `cloudwatch` | `--cw-log-group` / `CW_LOG_GROUP_NAME=` (+ `--cw-region`) | — (requires `boto3` + AWS creds) |
 
-Pick whichever matches the source you've enabled in `config/agent_sources.yaml`.
+The `elasticsearch`-via-`makelogs` flavour is also kept around (see
+[§2](#2-elasticsearch-source--makelogs)) — useful when you want
+Elastic's own canned HTTP-traffic fixtures rather than the Versus
+templates.
+
+Pick whichever matches the source you've enabled in
+`config/agent_sources.yaml`.
 
 ---
 
@@ -30,10 +43,17 @@ python3 scripts/generate_noisy_logs.py --lines 5000 --seed 42
 
 # write somewhere else
 python3 scripts/generate_noisy_logs.py -o /tmp/test.log -n 500
+
+# push the same content into other backends (see "Targets" above):
+python3 scripts/generate_noisy_logs.py --target loki --lines 500
+python3 scripts/generate_noisy_logs.py --target elasticsearch --lines 500
+python3 scripts/generate_noisy_logs.py --target cloudwatch \
+  --cw-log-group /aws/lambda/my-fn --cw-region us-east-1 --lines 500
 ```
 
 Useful flags: `--lines/-n`, `--output/-o`, `--start-time` (`now` or RFC3339),
-`--interval-min/--interval-max`, `--append/-a`, `--seed`.
+`--interval-min/--interval-max`, `--append/-a`, `--seed`, `--target`,
+`--batch-size`.
 
 ### Spike mode
 
@@ -114,6 +134,11 @@ INTERVAL=2 BATCH=50 ./scripts/run_noisy_logs.sh
 
 # stop after 30 batches
 ./scripts/run_noisy_logs.sh --interval 1 --batch 10 --iter 30
+
+# push to a different backend instead of a file:
+./scripts/run_noisy_logs.sh --target loki
+./scripts/run_noisy_logs.sh --target elasticsearch
+TARGET=cloudwatch CW_LOG_GROUP_NAME=/aws/lambda/foo ./scripts/run_noisy_logs.sh
 ```
 
 Stop with Ctrl+C. The script prints a summary count on exit.

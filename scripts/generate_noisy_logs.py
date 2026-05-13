@@ -33,9 +33,14 @@ pass --spike auto to pick one at random.
 from __future__ import annotations
 
 import argparse
+import base64
+import json
 import os
 import random
+import re
 import sys
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -987,6 +992,319 @@ def parse_start_time(raw: str) -> datetime:
     return datetime.fromisoformat(raw)
 
 
+# -----------------------------------------------------------------------------
+# Sinks — where the generated lines go.
+#
+# Every sink takes `(ts, level, msg)` tuples and persists them. Adding a new
+# sink means subclassing `Sink`, wiring it into `make_sink`, and adding the
+# matching flags in `main`. The producers in `produce_records` are sink-
+# agnostic so the same training / spike / scenario flags work everywhere.
+# -----------------------------------------------------------------------------
+
+
+class Sink:
+    """Base sink interface. Subclasses must implement `write` and may
+    implement `flush`/`close`."""
+
+    name = "base"
+
+    def write(self, ts: datetime, level: str, msg: str) -> None:
+        raise NotImplementedError
+
+    def flush(self) -> None:  # noqa: D401 — empty default
+        pass
+
+    def close(self) -> None:
+        self.flush()
+
+    def summary(self) -> str:
+        return self.name
+
+
+class FileSink(Sink):
+    """Append/overwrite a local log file.
+
+    Format matches what the file agent source expects (`format: text`):
+        2026-04-20T12:00:00Z LEVEL message...
+    """
+
+    name = "file"
+
+    def __init__(self, path: Path, append: bool):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._path = path
+        self._fp = path.open("a" if append else "w", encoding="utf-8")
+
+    def write(self, ts, level, msg):
+        stamp = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._fp.write(f"{stamp} {level} {msg}\n")
+
+    def flush(self):
+        self._fp.flush()
+
+    def close(self):
+        self._fp.close()
+
+    def summary(self):
+        return f"file:{self._path}"
+
+
+class LokiSink(Sink):
+    """Push lines into Grafana Loki via `/loki/api/v1/push`.
+
+    Lines are buffered locally and flushed in batches (`batch_size`,
+    default 500) to avoid one HTTP call per line. The `app` and `level`
+    fields become stream labels so the agent's `severity_field: level`
+    plus `extra_labels: [app]` configuration works as-is.
+    """
+
+    name = "loki"
+
+    def __init__(self, base_url: str, app_label: str = "noisy",
+                 tenant: str | None = None, batch_size: int = 500):
+        self._url = base_url.rstrip("/") + "/loki/api/v1/push"
+        self._app = app_label
+        self._tenant = tenant
+        self._batch_size = batch_size
+        self._buf: dict[str, list[tuple[str, str]]] = {}
+        self._count = 0
+
+    def write(self, ts, level, msg):
+        # Loki expects nanosecond unix timestamps as strings.
+        ns = str(int(ts.timestamp() * 1_000_000_000))
+        key = level.strip().lower()
+        self._buf.setdefault(key, []).append((ns, msg))
+        self._count += 1
+        if self._count >= self._batch_size:
+            self.flush()
+
+    def flush(self):
+        if not self._buf:
+            return
+        streams = []
+        for level, values in self._buf.items():
+            streams.append({
+                "stream": {"app": self._app, "level": level},
+                "values": values,
+            })
+        body = json.dumps({"streams": streams}).encode("utf-8")
+        req = urllib.request.Request(
+            self._url, data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        if self._tenant:
+            req.add_header("X-Scope-OrgID", self._tenant)
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status >= 300:
+                    raise RuntimeError(f"loki push returned {resp.status}")
+        except urllib.error.HTTPError as e:  # pragma: no cover
+            raise RuntimeError(
+                f"loki push failed: {e.code} {e.reason}: "
+                f"{e.read().decode('utf-8', 'replace')[:300]}"
+            ) from e
+        self._buf.clear()
+
+    def summary(self):
+        return f"loki:{self._url}"
+
+
+class ElasticsearchSink(Sink):
+    """Bulk-index documents into Elasticsearch.
+
+    Uses the `_bulk` endpoint, batched to `batch_size` (default 500) docs
+    per request. Documents match the agent's default expectations:
+    `@timestamp`, `message`, `level`, `service` (when extractable).
+    """
+
+    name = "elasticsearch"
+    _SERVICE_RE = re.compile(
+        r'(?i)(?:\bservice|\bsvc|\bapp|\bcomponent)\s*[:=]\s*"?([A-Za-z0-9._-]+)'
+    )
+
+    def __init__(self, base_url: str, index: str = "logs-noisy",
+                 username: str | None = None, password: str | None = None,
+                 batch_size: int = 500):
+        self._url = base_url.rstrip("/") + "/_bulk"
+        self._index = index
+        self._auth = None
+        if username:
+            token = base64.b64encode(f"{username}:{password or ''}".encode()).decode()
+            self._auth = f"Basic {token}"
+        self._batch_size = batch_size
+        self._buf: list[str] = []
+        self._pending = 0
+
+    def write(self, ts, level, msg):
+        doc = {
+            "@timestamp": ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "message": msg,
+            "level": level.strip(),
+        }
+        m = self._SERVICE_RE.search(msg)
+        if m:
+            doc["service"] = m.group(1)
+        self._buf.append(json.dumps({"index": {"_index": self._index}}))
+        self._buf.append(json.dumps(doc))
+        self._pending += 1
+        if self._pending >= self._batch_size:
+            self.flush()
+
+    def flush(self):
+        if not self._buf:
+            return
+        body = ("\n".join(self._buf) + "\n").encode("utf-8")
+        req = urllib.request.Request(
+            self._url, data=body, method="POST",
+            headers={"Content-Type": "application/x-ndjson"},
+        )
+        if self._auth:
+            req.add_header("Authorization", self._auth)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if resp.status >= 300:
+                    raise RuntimeError(f"_bulk returned {resp.status}")
+                # ES returns 200 even when individual items fail; surface it.
+                payload = json.loads(resp.read().decode("utf-8"))
+                if payload.get("errors"):
+                    bad = next((it for it in payload.get("items", [])
+                                if next(iter(it.values())).get("error")), None)
+                    if bad is not None:
+                        raise RuntimeError(f"_bulk had item errors: {bad}")
+        except urllib.error.HTTPError as e:  # pragma: no cover
+            raise RuntimeError(
+                f"_bulk failed: {e.code} {e.reason}: "
+                f"{e.read().decode('utf-8', 'replace')[:300]}"
+            ) from e
+        self._buf.clear()
+        self._pending = 0
+
+    def summary(self):
+        return f"elasticsearch:{self._url} index={self._index}"
+
+
+class CloudWatchSink(Sink):
+    """Send lines to a CloudWatch Logs log stream via `PutLogEvents`.
+
+    Requires the `boto3` package (imported lazily). The log group must
+    already exist; the log stream is auto-created if missing.
+    """
+
+    name = "cloudwatch"
+
+    def __init__(self, log_group: str, log_stream: str,
+                 region: str | None = None, batch_size: int = 500):
+        try:
+            import boto3  # type: ignore
+        except ImportError as e:  # pragma: no cover
+            raise SystemExit(
+                "boto3 is required for --target cloudwatch. "
+                "Install with: pip install boto3"
+            ) from e
+        self._client = boto3.client("logs", region_name=region) \
+            if region else boto3.client("logs")
+        self._group = log_group
+        self._stream = log_stream
+        self._batch_size = batch_size
+        self._buf: list[dict] = []
+        # Ensure stream exists. CreateLogStream is idempotent enough for tests.
+        try:
+            self._client.create_log_stream(
+                logGroupName=log_group, logStreamName=log_stream)
+        except self._client.exceptions.ResourceAlreadyExistsException:
+            pass
+
+    def write(self, ts, level, msg):
+        # CloudWatch wants ms-since-epoch. Add the level to the message so
+        # the agent's regex rules ("(?i).*error.*") still see it.
+        self._buf.append({
+            "timestamp": int(ts.timestamp() * 1000),
+            "message": f"{level.strip()} {msg}",
+        })
+        if len(self._buf) >= self._batch_size:
+            self.flush()
+
+    def flush(self):
+        if not self._buf:
+            return
+        # PutLogEvents requires strict timestamp ordering per call.
+        self._buf.sort(key=lambda e: e["timestamp"])
+        self._client.put_log_events(
+            logGroupName=self._group,
+            logStreamName=self._stream,
+            logEvents=self._buf,
+        )
+        self._buf.clear()
+
+    def summary(self):
+        return f"cloudwatch:{self._group}/{self._stream}"
+
+
+def make_sink(args) -> Sink:
+    target = args.target
+    if target == "file":
+        return FileSink(Path(args.output), args.append)
+    if target == "loki":
+        return LokiSink(
+            base_url=args.loki_url,
+            app_label=args.loki_app,
+            tenant=args.loki_tenant,
+            batch_size=args.batch_size,
+        )
+    if target == "elasticsearch":
+        return ElasticsearchSink(
+            base_url=args.es_url,
+            index=args.es_index,
+            username=args.es_user,
+            password=args.es_pass,
+            batch_size=args.batch_size,
+        )
+    if target == "cloudwatch":
+        if not args.cw_log_group:
+            raise SystemExit("--cw-log-group is required for --target cloudwatch")
+        return CloudWatchSink(
+            log_group=args.cw_log_group,
+            log_stream=args.cw_log_stream,
+            region=args.cw_region,
+            batch_size=args.batch_size,
+        )
+    raise SystemExit(f"unknown --target: {target!r}")
+
+
+def produce_records(args, ts: datetime):
+    """Yield `(ts, level, msg)` tuples in the same order as the legacy
+    file-mode writer. Sink-agnostic so every sink behaves identically."""
+
+    if args.scenario:
+        pool = SCENARIOS[args.scenario]
+        for _ in range(args.scenario_burst):
+            level, msg = weighted_choice(pool)()
+            yield ts, level, msg
+            ts += timedelta(seconds=random.uniform(
+                args.spike_interval_min, args.spike_interval_max))
+        return
+
+    if args.spike:
+        spike_fn = pick_spike_template(args.spike)
+        for _ in range(args.spike_context):
+            level, msg = weighted_choice(TEMPLATES)()
+            yield ts, level, msg
+            ts += timedelta(seconds=random.uniform(
+                args.interval_min, args.interval_max))
+        for _ in range(args.spike_burst):
+            level, msg = spike_fn()
+            yield ts, level, msg
+            ts += timedelta(seconds=random.uniform(
+                args.spike_interval_min, args.spike_interval_max))
+        return
+
+    for _ in range(args.lines):
+        level, msg = weighted_choice(TEMPLATES)()
+        yield ts, level, msg
+        ts += timedelta(seconds=random.uniform(
+            args.interval_min, args.interval_max))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--output", "-o", default="local/resource/noisy-app.log",
@@ -1032,6 +1350,43 @@ def main() -> int:
                     help="print every --scenario name and the templates it draws from, then exit")
     ap.add_argument("--list-templates", action="store_true",
                     help="print every template name usable with --spike, then exit")
+
+    # --- Sinks ---------------------------------------------------------
+    # The default `file` target preserves the original behavior (write to
+    # the local log file the file-source agent tails). The other targets
+    # push the same generated lines into the matching backend so the
+    # loki / elasticsearch / cloudwatch docker-compose examples can be
+    # exercised with identical training / spike / scenario flags.
+    ap.add_argument("--target", default=os.getenv("TARGET", "file"),
+                    choices=["file", "loki", "elasticsearch", "cloudwatch"],
+                    help="where to send generated logs (default: file; "
+                         "env: TARGET)")
+    ap.add_argument("--batch-size", type=int, default=500,
+                    help="lines per network batch for non-file targets (default: 500)")
+    # Loki
+    ap.add_argument("--loki-url", default=os.getenv("LOKI_URL", "http://localhost:3100"),
+                    help="Loki base URL (default: http://localhost:3100; env: LOKI_URL)")
+    ap.add_argument("--loki-app", default=os.getenv("LOKI_APP", "noisy"),
+                    help='value for the "app" stream label (default: noisy; env: LOKI_APP)')
+    ap.add_argument("--loki-tenant", default=os.getenv("LOKI_TENANT"),
+                    help="optional X-Scope-OrgID for multi-tenant Loki (env: LOKI_TENANT)")
+    # Elasticsearch
+    ap.add_argument("--es-url", default=os.getenv("ES_URL", "http://localhost:9200"),
+                    help="Elasticsearch base URL (default: http://localhost:9200; env: ES_URL)")
+    ap.add_argument("--es-index", default=os.getenv("ES_INDEX", "logs-noisy"),
+                    help='Elasticsearch index name (default: logs-noisy; env: ES_INDEX)')
+    ap.add_argument("--es-user", default=os.getenv("ES_USER"),
+                    help="optional basic-auth username (env: ES_USER)")
+    ap.add_argument("--es-pass", default=os.getenv("ES_PASS"),
+                    help="optional basic-auth password (env: ES_PASS)")
+    # CloudWatch
+    ap.add_argument("--cw-log-group", default=os.getenv("CW_LOG_GROUP_NAME"),
+                    help="CloudWatch log group name (env: CW_LOG_GROUP_NAME)")
+    ap.add_argument("--cw-log-stream", default=os.getenv("CW_LOG_STREAM", "noisy-app"),
+                    help='CloudWatch log stream name (default: noisy-app; env: CW_LOG_STREAM)')
+    ap.add_argument("--cw-region", default=os.getenv("CW_REGION") or os.getenv("AWS_REGION"),
+                    help="AWS region (env: CW_REGION or AWS_REGION)")
+
     args = ap.parse_args()
 
     if args.list_templates:
@@ -1058,54 +1413,32 @@ def main() -> int:
         print("spike-interval-max must be >= spike-interval-min", file=sys.stderr)
         return 2
 
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    mode = "a" if args.append else "w"
+    ts_start = parse_start_time(args.start_time)
+    sink = make_sink(args)
 
-    ts = parse_start_time(args.start_time)
     written = 0
-    with out.open(mode, encoding="utf-8") as f:
-        if args.scenario:
-            pool = SCENARIOS[args.scenario]
-            for _ in range(args.scenario_burst):
-                level, msg = weighted_choice(pool)()
-                stamp = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-                f.write(f"{stamp} {level} {msg}\n")
-                written += 1
-                ts += timedelta(seconds=random.uniform(args.spike_interval_min, args.spike_interval_max))
-            print(f"scenario: {args.scenario} × {args.scenario_burst} lines")
-        elif args.spike:
-            spike_fn = pick_spike_template(args.spike)
-            spike_label = spike_fn.__name__.removeprefix("t_").replace("_", "-")
+    last_ts = ts_start
+    try:
+        for ts, level, msg in produce_records(args, ts_start):
+            sink.write(ts, level, msg)
+            written += 1
+            last_ts = ts
+    finally:
+        sink.close()
 
-            # Optional warm-up so the spike doesn't land in a vacuum.
-            for _ in range(args.spike_context):
-                level, msg = weighted_choice(TEMPLATES)()
-                stamp = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-                f.write(f"{stamp} {level} {msg}\n")
-                written += 1
-                ts += timedelta(seconds=random.uniform(args.interval_min, args.interval_max))
+    if args.scenario:
+        kind = f"scenario:{args.scenario} × {args.scenario_burst} lines"
+    elif args.spike:
+        spike_label = pick_spike_template(args.spike).__name__\
+            .removeprefix("t_").replace("_", "-")
+        kind = (f"spike:{spike_label} × {args.spike_burst} "
+                f"(context={args.spike_context})")
+    else:
+        kind = f"noisy × {args.lines} lines"
 
-            # The burst itself: same template repeated, tight spacing.
-            for _ in range(args.spike_burst):
-                level, msg = spike_fn()
-                stamp = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-                f.write(f"{stamp} {level} {msg}\n")
-                written += 1
-                ts += timedelta(seconds=random.uniform(args.spike_interval_min, args.spike_interval_max))
-
-            print(f"spike: {spike_label} × {args.spike_burst} "
-                  f"(context={args.spike_context} lines)")
-        else:
-            for _ in range(args.lines):
-                level, msg = weighted_choice(TEMPLATES)()
-                stamp = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-                f.write(f"{stamp} {level} {msg}\n")
-                written += 1
-                ts += timedelta(seconds=random.uniform(args.interval_min, args.interval_max))
-
-    action = "appended to" if args.append else "wrote"
-    print(f"{action} {out} ({written} lines, end time {ts.strftime('%Y-%m-%dT%H:%M:%SZ')})")
+    action = "appended to" if args.append and args.target == "file" else "sent to"
+    print(f"{action} {sink.summary()} — {kind} "
+          f"(end time {last_ts.strftime('%Y-%m-%dT%H:%M:%SZ')})")
     return 0
 
 

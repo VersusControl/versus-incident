@@ -7,34 +7,61 @@ append to it.
 ## Run
 
 ```bash
-cp .env.example .env
-# edit .env if you want to enable Slack/Telegram or change the secret
 docker compose up -d
 ```
+
+Everything defaults to safe local values. To override (e.g. real
+`GATEWAY_SECRET`, enable Slack/Telegram), export the variables in
+your shell before running `docker compose up` — see
+[../README.md](../README.md).
 
 ## Verify
 
 ```bash
 curl http://localhost:3000/healthz                                 # ok
-SECRET=$(grep GATEWAY_SECRET .env | cut -d= -f2)
+SECRET=${GATEWAY_SECRET:-change-me}
 curl -H "X-Gateway-Secret: $SECRET" http://localhost:3000/api/agent/patterns | jq
 ```
 
-## Test
+## Generate test traffic
 
-Append a line — the agent picks it up within `poll_interval` (15s):
+Either append a single line manually:
 
 ```bash
 echo "$(date -u +%FT%TZ) ERROR [api] service=payments db connection refused" \
   >> logs/app.log
 ```
 
+…or use the bundled generator to produce realistic noisy traffic
+that the agent can cluster (run from the repo root):
+
+```bash
+# 500 mixed lines (INFO/WARN/ERROR) appended once:
+python3 scripts/generate_noisy_logs.py --append \
+  --output examples/docker-compose/file/logs/app.log --lines 500
+
+# Continuous live tail — 20 lines every 5s, Ctrl+C to stop:
+OUTPUT=examples/docker-compose/file/logs/app.log \
+  scripts/run_noisy_logs.sh
+
+# Inject a spike burst (test the spike detector):
+OUTPUT=examples/docker-compose/file/logs/app.log \
+  scripts/run_noisy_logs.sh --spike db-conn-refused --spike-burst 80
+
+# Inject a curated incident cluster (test detect mode):
+OUTPUT=examples/docker-compose/file/logs/app.log \
+  scripts/run_noisy_logs.sh --scenario db-outage
+```
+
+The agent picks up appended lines within `poll_interval` (15s). See
+[scripts/README.md](../../../scripts/README.md) for the full flag
+list including `--list-templates` and `--list-scenarios`.
+
 ## Layout
 
 ```
 file/
 ├── docker-compose.yml
-├── .env.example
 ├── config/
 │   ├── config.yaml
 │   └── agent_sources.yaml
