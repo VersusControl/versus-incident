@@ -1,13 +1,66 @@
 services:
+  # One-shot: generate a self-signed cert for Redis TLS into a shared volume.
+  # Runs once per `docker compose up` and exits 0. Other services wait on
+  # `condition: service_completed_successfully`.
+  redis-tls-init:
+    image: alpine:3.20
+    container_name: versus-loki-redis-tls-init
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        cd /tls
+        if [ -f server.crt ] && [ -f server.key ] && [ -f ca.crt ]; then
+          echo "TLS material already present; skipping."
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+          -keyout server.key -out server.crt \
+          -subj "/CN=redis" \
+          -addext "subjectAltName=DNS:redis,DNS:localhost,IP:127.0.0.1"
+        cp server.crt ca.crt
+        chmod 0644 server.crt server.key ca.crt
+        echo "Generated self-signed cert for redis."
+    volumes:
+      - redis-tls:/tls
+
   redis:
     image: redis:7-alpine
     container_name: versus-loki-redis
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-versus}"]
+    depends_on:
+      redis-tls-init:
+        condition: service_completed_successfully
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:-versus}
+      - --port
+      - "0"
+      - --tls-port
+      - "6379"
+      - --tls-cert-file
+      - /tls/server.crt
+      - --tls-key-file
+      - /tls/server.key
+      - --tls-ca-cert-file
+      - /tls/ca.crt
+      - --tls-auth-clients
+      - "no"
     volumes:
       - redis-data:/data
+      - redis-tls:/tls:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-versus}", "ping"]
+      test:
+        - CMD
+        - redis-cli
+        - --tls
+        - --insecure
+        - -a
+        - ${REDIS_PASSWORD:-versus}
+        - ping
       interval: 5s
       timeout: 3s
       retries: 5
@@ -45,7 +98,7 @@ services:
     restart: unless-stopped
 
   versus:
-    image: ghcr.io/versuscontrol/versus-incident:latest
+    image: ghcr.io/versuscontrol/versus-incident:dev-5324869
     container_name: versus-loki-app
     depends_on:
       redis:
@@ -82,6 +135,7 @@ services:
 
 volumes:
   redis-data:
+  redis-tls:
   versus-data:
   loki-data:
   grafana-data:

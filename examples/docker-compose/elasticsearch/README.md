@@ -19,7 +19,6 @@ so you can browse the same indices.
 ## Run
 
 ```bash
-cp .env.example .env
 docker compose up -d
 ```
 
@@ -29,9 +28,33 @@ Wait ~30s for Elasticsearch to become healthy, then verify:
 curl http://localhost:9200/_cluster/health
 ```
 
-## Test
+All settings have safe defaults; export the variables in your
+shell to override — see [../README.md](../README.md).
 
-Index a doc:
+## Generate test traffic
+
+Push synthetic logs into the local Elasticsearch using the bundled
+generator (run from the repo root):
+
+```bash
+# 500 mixed lines once into the logs-noisy index:
+python3 scripts/generate_noisy_logs.py --target elasticsearch --lines 500
+
+# Continuous — 20 lines every 5s, Ctrl+C to stop:
+scripts/run_noisy_logs.sh --target elasticsearch
+
+# Spike (test the spike detector):
+scripts/run_noisy_logs.sh --target elasticsearch --spike db-conn-refused --spike-burst 80
+
+# Curated incident cluster (test detect mode):
+scripts/run_noisy_logs.sh --target elasticsearch --scenario db-outage
+```
+
+The index `logs-noisy` matches the default `logs-*` pattern in
+[config/agent_sources.yaml](config/agent_sources.yaml). Change with
+`--es-index NAME` (or `ES_INDEX=NAME`) if you customize the source.
+
+Or index a single doc by hand:
 
 ```bash
 curl -X POST http://localhost:9200/logs-demo/_doc \
@@ -44,10 +67,10 @@ curl -X POST http://localhost:9200/logs-demo/_doc \
   }'
 ```
 
-Then check the agent picked it up:
+## Verify
 
 ```bash
-SECRET=$(grep GATEWAY_SECRET .env | cut -d= -f2)
+SECRET=${GATEWAY_SECRET:-change-me}
 curl -H "X-Gateway-Secret: $SECRET" http://localhost:3000/api/agent/patterns | jq
 ```
 
@@ -59,7 +82,6 @@ at <http://localhost:5601>.
 ```
 elasticsearch/
 ├── docker-compose.yml
-├── .env.example
 └── config/
     ├── config.yaml
     └── agent_sources.yaml

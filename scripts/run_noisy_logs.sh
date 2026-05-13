@@ -4,27 +4,48 @@
 # one-shot spike burst to test the spike detector.
 #
 # Usage:
-#   ./scripts/run_noisy_logs.sh                                # live tail
+#   ./scripts/run_noisy_logs.sh                                # live tail to file
 #   INTERVAL=10 BATCH=50 ./scripts/run_noisy_logs.sh
 #   ./scripts/run_noisy_logs.sh --output local/resource/noisy-app.log
 #
+#   # target a Loki / Elasticsearch / CloudWatch backend instead of a file:
+#   ./scripts/run_noisy_logs.sh --target loki
+#   ./scripts/run_noisy_logs.sh --target elasticsearch
+#   TARGET=cloudwatch CW_LOG_GROUP_NAME=/aws/lambda/foo ./scripts/run_noisy_logs.sh
+#
 #   # inject a single spike burst, then exit:
 #   ./scripts/run_noisy_logs.sh --spike db-conn-refused
-#   SPIKE=panic SPIKE_BURST=120 ./scripts/run_noisy_logs.sh
+#   SPIKE=panic SPIKE_BURST=120 ./scripts/run_noisy_logs.sh --target loki
 #
 # Env vars / flags (live tail):
 #   INTERVAL       seconds between batches             (default 5)
 #   BATCH          lines per batch                     (default 20)
-#   OUTPUT         log file to append to               (default local/resource/noisy-app.log)
+#   TARGET         file|loki|elasticsearch|cloudwatch  (default file)
+#   OUTPUT         log file (file target only)         (default local/resource/noisy-app.log)
 #   ITER           max iterations, 0 = infinite        (default 0)
 #
-# Env vars / flags (spike mode — disables live tail when set):
+# Loki target:
+#   LOKI_URL       (default http://localhost:3100)
+#   LOKI_APP       (default noisy)            ## "app" stream label
+#   LOKI_TENANT    (optional)                 ## X-Scope-OrgID
+#
+# Elasticsearch target:
+#   ES_URL         (default http://localhost:9200)
+#   ES_INDEX       (default logs-noisy)
+#   ES_USER / ES_PASS (optional basic auth)
+#
+# CloudWatch target:
+#   CW_LOG_GROUP_NAME   (required)
+#   CW_LOG_STREAM       (default noisy-app)
+#   CW_REGION / AWS_REGION
+#
+# Spike-mode (disables live tail when set):
 #   SPIKE          template name to burst              (e.g. db-conn-refused)
 #   SPIKE_BURST    number of lines in the burst        (default 80)
 #   SPIKE_CONTEXT  regular noisy lines before burst    (default 0)
 #   --list-templates   print available template names and exit
 #
-# Env vars / flags (scenario mode — curated incident clusters for detect demos):
+# Scenario-mode (curated incident clusters for detect demos):
 #   SCENARIO         scenario name (e.g. db-outage, disk-full, tls-expired)
 #   SCENARIO_BURST   total lines in the cluster        (default 60)
 #   --list-scenarios print available scenarios and exit
@@ -35,6 +56,7 @@ set -euo pipefail
 
 INTERVAL="${INTERVAL:-5}"
 BATCH="${BATCH:-20}"
+TARGET="${TARGET:-file}"
 OUTPUT="${OUTPUT:-local/resource/noisy-app.log}"
 ITER="${ITER:-0}"
 SPIKE="${SPIKE:-}"
@@ -50,6 +72,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --interval) INTERVAL="$2"; shift 2 ;;
     --batch)    BATCH="$2";    shift 2 ;;
+    --target)   TARGET="$2";   shift 2 ;;
     --output|-o) OUTPUT="$2";  shift 2 ;;
     --iter)     ITER="$2";     shift 2 ;;
     --spike)         SPIKE="$2";         shift 2 ;;
@@ -60,7 +83,7 @@ while [[ $# -gt 0 ]]; do
     --list-templates) LIST_TEMPLATES=1;  shift ;;
     --list-scenarios) LIST_SCENARIOS=1;  shift ;;
     -h|--help)
-      sed -n '2,32p' "$0"; exit 0 ;;
+      sed -n '2,55p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -80,18 +103,55 @@ if [[ "$LIST_SCENARIOS" -eq 1 ]]; then
   exec python3 "$GEN" --list-scenarios
 fi
 
-mkdir -p "$(dirname "$OUTPUT")"
+# Translate the shell-level TARGET / endpoint env vars into CLI flags for the
+# Python generator. The generator also reads the same env vars directly, but
+# being explicit avoids surprises (e.g. ES_INDEX silently inheriting from a
+# parent shell).
+target_args=( --target "$TARGET" )
+case "$TARGET" in
+  file)
+    mkdir -p "$(dirname "$OUTPUT")"
+    target_args+=( --output "$OUTPUT" )
+    summary_target="file:$OUTPUT"
+    ;;
+  loki)
+    target_args+=( --loki-url "${LOKI_URL:-http://localhost:3100}" \
+                   --loki-app "${LOKI_APP:-noisy}" )
+    [[ -n "${LOKI_TENANT:-}" ]] && target_args+=( --loki-tenant "$LOKI_TENANT" )
+    summary_target="loki:${LOKI_URL:-http://localhost:3100}"
+    ;;
+  elasticsearch)
+    target_args+=( --es-url "${ES_URL:-http://localhost:9200}" \
+                   --es-index "${ES_INDEX:-logs-noisy}" )
+    [[ -n "${ES_USER:-}" ]] && target_args+=( --es-user "$ES_USER" )
+    [[ -n "${ES_PASS:-}" ]] && target_args+=( --es-pass "$ES_PASS" )
+    summary_target="elasticsearch:${ES_URL:-http://localhost:9200}/${ES_INDEX:-logs-noisy}"
+    ;;
+  cloudwatch)
+    if [[ -z "${CW_LOG_GROUP_NAME:-}" ]]; then
+      echo "TARGET=cloudwatch requires CW_LOG_GROUP_NAME" >&2
+      exit 2
+    fi
+    target_args+=( --cw-log-group "$CW_LOG_GROUP_NAME" \
+                   --cw-log-stream "${CW_LOG_STREAM:-noisy-app}" )
+    [[ -n "${CW_REGION:-${AWS_REGION:-}}" ]] && \
+      target_args+=( --cw-region "${CW_REGION:-${AWS_REGION}}" )
+    summary_target="cloudwatch:${CW_LOG_GROUP_NAME}/${CW_LOG_STREAM:-noisy-app}"
+    ;;
+  *)
+    echo "unknown TARGET: $TARGET" >&2; exit 2 ;;
+esac
 
 # Scenario mode: emit a curated cluster of correlated failures so the
 # detect-mode AI SRE has rich context for one mini-incident, then exit.
 if [[ -n "$SCENARIO" ]]; then
-  echo "scenario mode: injecting '$SCENARIO' cluster ($SCENARIO_BURST lines) into $OUTPUT"
+  echo "scenario mode: injecting '$SCENARIO' cluster ($SCENARIO_BURST lines) -> $summary_target"
   python3 "$GEN" \
     --append \
-    --output "$OUTPUT" \
     --start-time now \
     --scenario "$SCENARIO" \
-    --scenario-burst "$SCENARIO_BURST"
+    --scenario-burst "$SCENARIO_BURST" \
+    "${target_args[@]}"
   echo "done. Watch the agent log for an 'emit_emitted' verdict on the next tick."
   exit 0
 fi
@@ -99,33 +159,33 @@ fi
 # Spike mode: emit one tight burst of the chosen template, then exit.
 # Live-tail loop is skipped entirely so the burst lands in a single tick.
 if [[ -n "$SPIKE" ]]; then
-  echo "spike mode: injecting $SPIKE_BURST x '$SPIKE' lines into $OUTPUT (context=$SPIKE_CONTEXT)"
+  echo "spike mode: injecting $SPIKE_BURST x '$SPIKE' lines (context=$SPIKE_CONTEXT) -> $summary_target"
   python3 "$GEN" \
     --append \
-    --output "$OUTPUT" \
     --start-time now \
     --spike "$SPIKE" \
     --spike-burst "$SPIKE_BURST" \
-    --spike-context "$SPIKE_CONTEXT"
+    --spike-context "$SPIKE_CONTEXT" \
+    "${target_args[@]}"
   echo "done. Watch the agent log for a 'SPIKE pattern=...' line on the next tick."
   exit 0
 fi
 
 trap 'echo; echo "stopped after $count batch(es)"; exit 0' INT TERM
 
-echo "appending $BATCH line(s) every ${INTERVAL}s to $OUTPUT (Ctrl+C to stop)"
+echo "appending $BATCH line(s) every ${INTERVAL}s -> $summary_target (Ctrl+C to stop)"
 count=0
 while :; do
   python3 "$GEN" \
     --append \
-    --output "$OUTPUT" \
     --lines "$BATCH" \
     --start-time now \
     --interval-min 0.1 \
     --interval-max 1.0 \
+    "${target_args[@]}" \
     >/dev/null
   count=$((count + 1))
-  printf '[%s] batch %d (%d lines) -> %s\n' "$(date -u +%H:%M:%SZ)" "$count" "$BATCH" "$OUTPUT"
+  printf '[%s] batch %d (%d lines) -> %s\n' "$(date -u +%H:%M:%SZ)" "$count" "$BATCH" "$summary_target"
 
   if [[ "$ITER" -gt 0 && "$count" -ge "$ITER" ]]; then
     echo "reached --iter=$ITER, exiting"

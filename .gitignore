@@ -10,3 +10,4 @@ data
 AGENTS.md
 reactflow
 charts
+__pycache__
