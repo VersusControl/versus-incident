@@ -74,6 +74,9 @@ func (e *EmailProvider) getAuth() smtp.Auth {
 	return smtp.PlainAuth("", e.username, e.password, e.smtpHost)
 }
 
+// Name implements core.AlertProvider.
+func (e *EmailProvider) Name() string { return "email" }
+
 func (e *EmailProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 

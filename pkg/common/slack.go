@@ -29,6 +29,9 @@ func NewSlackProvider(cfg config.SlackConfig) *SlackProvider {
 	}
 }
 
+// Name implements core.AlertProvider.
+func (s *SlackProvider) Name() string { return "slack" }
+
 // SendAlert determines whether to process a resolved or unresolved incident
 func (s *SlackProvider) SendAlert(i *m.Incident) error {
 	if i.Resolved {

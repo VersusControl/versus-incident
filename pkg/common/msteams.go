@@ -25,6 +25,9 @@ func NewMSTeamsProvider(cfg config.MSTeamsConfig) *MSTeamsProvider {
 	}
 }
 
+// Name implements core.AlertProvider.
+func (m *MSTeamsProvider) Name() string { return "msteams" }
+
 func (m *MSTeamsProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 

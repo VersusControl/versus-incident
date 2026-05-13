@@ -1,11 +1,65 @@
 package agent
 
 import (
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
+
+// TestCatalog_ConcurrentGetUpsertNoRace catches the data race where
+// Catalog.Get returned a live *Pattern that callers could read while
+// a concurrent Upsert was writing to the same struct. Run with -race
+// to verify; without -race the test will pass even on the buggy code.
+func TestCatalog_ConcurrentGetUpsertNoRace(t *testing.T) {
+	store := newTestStore(t)
+	cat, err := LoadCatalog(store)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	// Seed one pattern that both goroutines hammer.
+	cat.Upsert("p1", "tpl", "src", 1, 0.2, "rule", "svc")
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				cat.Upsert("p1", "tpl", "src", 2, 0.2, "rule", "svc")
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if p := cat.Get("p1"); p != nil {
+					// Touch a few fields; under the buggy code these reads
+					// race with the writer's Upsert.
+					_ = p.Count
+					_ = p.BaselineFrequency
+					_ = p.Template
+				}
+			}
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
 
 // newTestStore returns a file-backed storage provider rooted in t.TempDir.
 // Used by tests that need to persist and reload across catalog instances.
