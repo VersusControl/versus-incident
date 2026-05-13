@@ -12,7 +12,7 @@ An incident management tool that supports alerting across multiple channels with
 
 With the built-in **AI SRE Agent**, Versus goes further — continuously observing your logs, metrics, and traces, learning what normal looks like, and alerting you only when something new and unexpected appears.
 
-![Versus](src/docs/images/versus-dashboard.png)
+![Versus](src/docs/images/versus-dashboard-01.png)
 
 ## Table of Contents
 - [Features](#features)
@@ -60,7 +60,7 @@ docker run -p 3000:3000 \
 Versus listens on port 3000 by default and exposes:
 
 - `POST /api/incidents` — webhook endpoint for monitoring tools.
-- `GET  /` — the embedded **admin dashboard**, open <http://localhost:3000/> in your browser. For the full UI walkthrough and the build/watch scripts, see [Admin Dashboard](./admin-ui.md).
+- `GET  /` — the embedded **admin dashboard**, open <http://localhost:3000/> in your browser. For the full UI walkthrough and the build/watch scripts, see [Admin Dashboard](https://versuscontrol.github.io/versus-incident/userguide/admin-ui.html).
 
 ### Universal Alert Template Support
 

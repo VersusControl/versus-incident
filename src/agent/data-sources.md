@@ -52,10 +52,3 @@ The runnable [docker-compose example](https://github.com/VersusControl/versus-in
 ships with **Versus + Redis + Loki + Elasticsearch + Grafana + Kibana**
 so you can experiment with all source types in a single
 `docker compose up`.
-
-## Adding a new source type
-
-The codebase is designed so a new backend takes ~150 lines of Go. See
-the **Adding a new SignalSource** section in
-[AGENTS.md](https://github.com/VersusControl/versus-incident/blob/main/AGENTS.md)
-and the existing implementations under `pkg/signalsources/`.
