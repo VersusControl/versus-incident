@@ -5,6 +5,8 @@ React app embedded directly into the Go binary. There is no separate UI
 process to run; once the server is up, the dashboard is available at the
 root path.
 
+![Versus](docs/images/versus-dashboard-02.png)
+
 ## Quick start
 
 ```bash

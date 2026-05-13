@@ -12,7 +12,7 @@ An incident management tool that supports alerting across multiple channels with
 
 With the built-in **AI SRE Agent**, Versus goes further — continuously observing your logs, metrics, and traces, learning what normal looks like, and alerting you only when something new and unexpected appears.
 
-![Versus](docs/images/versus-dashboard.png)
+![Versus](docs/images/versus-dashboard-01.png)
 
 ### Features
 
