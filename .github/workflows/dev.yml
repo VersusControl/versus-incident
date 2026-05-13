@@ -41,6 +41,15 @@ jobs:
             exit 1
           fi
 
+      # ui/embed.go uses `go:embed all:dist`, which fails to compile if
+      # ui/dist/ is empty. The repo ships a committed ui/dist/.gitkeep
+      # so this should always exist, but re-create it in CI as a guard
+      # in case it ever gets deleted.
+      - name: Ensure ui/dist placeholder exists
+        run: |
+          mkdir -p ui/dist
+          touch ui/dist/.gitkeep
+
       - name: go vet
         run: go vet ./...
 
