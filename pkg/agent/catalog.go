@@ -110,11 +110,22 @@ func LoadCatalog(store storage.Provider) (*Catalog, error) {
 	return c, nil
 }
 
-// Get returns a pattern by ID (nil when not found).
+// Get returns a deep copy of the pattern keyed by id, or nil when not
+// found. Returning a copy (rather than the live pointer) prevents
+// callers from observing torn reads while a concurrent Upsert mutates
+// the same struct.
 func (c *Catalog) Get(id string) *Pattern {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.patterns[id]
+	p, ok := c.patterns[id]
+	if !ok {
+		return nil
+	}
+	cp := *p
+	if p.Tags != nil {
+		cp.Tags = append([]string(nil), p.Tags...)
+	}
+	return &cp
 }
 
 // MarkKnown stamps a pattern as auto-promoted ("known") in the catalog.

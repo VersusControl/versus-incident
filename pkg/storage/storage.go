@@ -68,18 +68,26 @@ type Provider interface {
 // runtime models.Incident plus the audit fields the UI needs (when it
 // happened, who got notified, was it acked, raw payload for debugging).
 type IncidentRecord struct {
-	ID               string   `json:"id"`
-	TeamID           string   `json:"team_id,omitempty"`
-	Title            string   `json:"title,omitempty"`
-	Source           string   `json:"source,omitempty"`  // "http" | "sns" | "sqs" | ...
-	Service          string   `json:"service,omitempty"` // best-effort from payload
-	Resolved         bool     `json:"resolved"`
+	ID       string `json:"id"`
+	TeamID   string `json:"team_id,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Source   string `json:"source,omitempty"`  // "http" | "sns" | "sqs" | ...
+	Service  string `json:"service,omitempty"` // best-effort from payload
+	Resolved bool   `json:"resolved"`
+	// ChannelsEnabled is the snapshot of channels that were configured
+	// when the alert fired. ChannelsNotified is the subset that
+	// actually succeeded. The two diverge whenever a channel fails:
+	// keep both so the UI can show "Slack failed" without losing the
+	// fact that Slack was supposed to be tried.
+	ChannelsEnabled  []string `json:"channels_enabled,omitempty"`
 	ChannelsNotified []string `json:"channels_notified,omitempty"`
 	OnCallTriggered  bool     `json:"oncall_triggered,omitempty"`
+	OnCallError      string   `json:"oncall_error,omitempty"`
 	// NotifyStatus reflects the outcome of the alert fan-out:
 	// "pending" — record persisted, fan-out not yet attempted
 	// "sent"    — every enabled channel returned success
-	// "failed"  — at least one channel returned an error (see NotifyError)
+	// "partial" — at least one channel succeeded, at least one failed
+	// "failed"  — no channel succeeded
 	NotifyStatus string                 `json:"notify_status,omitempty"`
 	NotifyError  string                 `json:"notify_error,omitempty"`
 	CreatedAt    time.Time              `json:"created_at"`

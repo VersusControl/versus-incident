@@ -30,7 +30,7 @@ func (c *ConfigAdminController) authMiddleware(ctx *fiber.Ctx) error {
 	cfg := config.GetConfig()
 	expected := cfg.GatewaySecret
 	got := ctx.Get("X-Gateway-Secret")
-	if expected == "" || got == "" || got != expected {
+	if expected == "" || !secureEqual(got, expected) {
 		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
 	}
 	return ctx.Next()

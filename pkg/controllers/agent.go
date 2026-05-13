@@ -73,12 +73,13 @@ func (a *AgentController) Register(router fiber.Router) {
 
 // authMiddleware enforces a shared gateway secret. Clients send the
 // configured value verbatim in the `X-Gateway-Secret` header — there is no
-// Bearer prefix or other framing.
+// Bearer prefix or other framing. Comparison is constant-time to deny
+// header-length / prefix-match timing oracles.
 func (a *AgentController) authMiddleware(c *fiber.Ctx) error {
 	cfg := config.GetConfig()
 	expected := cfg.GatewaySecret
 	got := c.Get("X-Gateway-Secret")
-	if got == "" || got != expected {
+	if expected == "" || !secureEqual(got, expected) {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
 	}
 

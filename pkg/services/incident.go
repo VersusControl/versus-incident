@@ -61,53 +61,87 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 		}
 	}
 
-	sendErr := alert.SendAlert(incident)
+	// Fan out to every enabled channel. SendAllAlerts (unlike the
+	// legacy SendAlert) does NOT short-circuit on the first failure —
+	// a broken Slack must not silently mute Telegram or Email.
+	fanOut := alert.SendAllAlerts(incident)
+	sendErr := fanOut.Err
 
 	// Stamp the final fan-out outcome so the UI can show whether the
-	// alert actually reached its channels.
+	// alert actually reached its channels. ChannelsNotified is now
+	// the list of providers that SUCCEEDED, not the list of providers
+	// that were enabled in config.
 	if store != nil && rec != nil {
-		if sendErr != nil {
-			rec.NotifyStatus = "failed"
-			rec.NotifyError = sendErr.Error()
-		} else {
+		rec.ChannelsNotified = fanOut.Succeeded
+		switch {
+		case sendErr == nil:
 			rec.NotifyStatus = "sent"
 			rec.NotifyError = ""
+		case len(fanOut.Succeeded) == 0:
+			rec.NotifyStatus = "failed"
+			rec.NotifyError = sendErr.Error()
+		default:
+			rec.NotifyStatus = "partial"
+			rec.NotifyError = sendErr.Error()
 		}
 		if err := store.SaveIncident(rec); err != nil {
 			log.Printf("incident: persist status warning: %v", err)
 		}
 	}
 
-	if sendErr != nil {
-		return sendErr
-	}
-
+	// On-call escalation. We still kick this off even when *some*
+	// channels failed — partial delivery is exactly the case where an
+	// escalation matters most. Only skip when no channel succeeded
+	// AND there are no channels configured at all (nothing to escalate
+	// off of).
+	var oncallErr error
 	if !resolved && cfg.OnCall.Enable {
 		workflow := core.GetOnCallWorkflow()
 		if err := workflow.Start(incident.ID, cfg.OnCall); err != nil {
-			return err
+			oncallErr = err
+			// Walk back the optimistic OnCallTriggered flag set at
+			// build time so the UI does not lie. Best-effort
+			// persistence; the alert outcome above is the source of
+			// truth.
+			if store != nil && rec != nil {
+				rec.OnCallTriggered = false
+				rec.OnCallError = err.Error()
+				if err := store.SaveIncident(rec); err != nil {
+					log.Printf("incident: persist oncall status warning: %v", err)
+				}
+			}
 		}
 	}
 
+	switch {
+	case sendErr != nil && oncallErr != nil:
+		return fmt.Errorf("send: %w; oncall: %v", sendErr, oncallErr)
+	case sendErr != nil:
+		return sendErr
+	case oncallErr != nil:
+		return oncallErr
+	}
 	return nil
 }
 
 // buildIncidentRecord copies the alert into a durable IncidentRecord.
-// It snapshots which channels were enabled at the time the alert fired
-// and a best-effort title/service derived from common payload keys.
+// ChannelsEnabled snapshots the channels configured at fire time;
+// ChannelsNotified stays empty here and is filled in after the
+// fan-out so it reflects channels that ACTUALLY succeeded.
+// OnCallTriggered likewise starts at the optimistic value and is
+// flipped back to false if workflow.Start fails.
 func buildIncidentRecord(incident *m.Incident, cfg *config.Config, content map[string]interface{}, resolved bool) *storage.IncidentRecord {
-	channels := enabledChannels(cfg)
 	rec := &storage.IncidentRecord{
-		ID:               incident.ID,
-		TeamID:           incident.TeamID,
-		Title:            firstString(content, "title", "alertname", "summary", "subject", "name"),
-		Service:          firstString(content, "service", "service_name", "app", "component"),
-		Source:           "http",
-		Resolved:         resolved,
-		ChannelsNotified: channels,
-		OnCallTriggered:  !resolved && cfg.OnCall.Enable,
-		CreatedAt:        time.Now().UTC(),
-		Content:          content,
+		ID:              incident.ID,
+		TeamID:          incident.TeamID,
+		Title:           firstString(content, "title", "alertname", "summary", "subject", "name"),
+		Service:         firstString(content, "service", "service_name", "app", "component"),
+		Source:          "http",
+		Resolved:        resolved,
+		ChannelsEnabled: enabledChannels(cfg),
+		OnCallTriggered: !resolved && cfg.OnCall.Enable,
+		CreatedAt:       time.Now().UTC(),
+		Content:         content,
 	}
 	return rec
 }

@@ -78,12 +78,44 @@ func (p *fileProvider) WriteBlob(name string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("storage: mkdir blob dir: %w", err)
 	}
-	tmp := target + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := writeFileAtomicSync(target, data, 0o644); err != nil {
 		return fmt.Errorf("storage: write blob %s: %w", name, err)
 	}
+	return nil
+}
+
+// writeFileAtomicSync writes data to a sibling tmp file, fsyncs it,
+// then renames over the target. The fsync between write and rename is
+// the load-bearing line: without it, a power loss between rename and
+// fs commit can replace a previous good file with a zero-length one.
+// (The rename itself is journaled by ext4/xfs; the tmp file's *data*
+// isn't unless we sync.)
+func writeFileAtomicSync(target string, data []byte, mode os.FileMode) error {
+	tmp := target + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	// Cleanup the tmp file on any error path before rename.
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}
+	if _, err := f.Write(data); err != nil {
+		cleanup()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
 	if err := os.Rename(tmp, target); err != nil {
-		return fmt.Errorf("storage: rename blob %s: %w", name, err)
+		_ = os.Remove(tmp)
+		return err
 	}
 	return nil
 }
@@ -141,12 +173,8 @@ func (p *fileProvider) persistIncidentsLocked() error {
 		return fmt.Errorf("storage: marshal incidents: %w", err)
 	}
 	target := filepath.Join(p.dir, incidentsFile)
-	tmp := target + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := writeFileAtomicSync(target, data, 0o644); err != nil {
 		return fmt.Errorf("storage: write incidents: %w", err)
-	}
-	if err := os.Rename(tmp, target); err != nil {
-		return fmt.Errorf("storage: rename incidents: %w", err)
 	}
 	return nil
 }
