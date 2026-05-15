@@ -2,11 +2,12 @@ package routes
 
 import (
 	"github.com/VersusControl/versus-incident/pkg/controllers"
+	"github.com/VersusControl/versus-incident/pkg/teams"
 
 	"github.com/gofiber/fiber/v2"
 )
 
-func SetupRoutes(app *fiber.App) {
+func SetupRoutes(app *fiber.App, teamsStore *teams.Store) {
 	// Health check endpoint
 	app.Get("/healthz", controllers.HealthCheck)
 
@@ -22,4 +23,5 @@ func SetupRoutes(app *fiber.App) {
 	// the controller can attach its own middleware via the group.
 	controllers.NewIncidentAdminController().Register(api)
 	controllers.NewConfigAdminController().Register(api)
+	controllers.NewTeamsAdminController(teamsStore).Register(api)
 }

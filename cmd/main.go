@@ -20,6 +20,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/routes"
 	"github.com/VersusControl/versus-incident/pkg/services"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/teams"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssmincidents"
 	"github.com/go-redis/redis/v8"
@@ -71,13 +72,22 @@ func main() {
 	// alert + record acks).
 	services.SetStorage(store)
 
+	// Initialize the operator-defined teams / members registry on the
+	// same storage backend. Nil-tolerant: the controller responds with
+	// 503 if construction failed, but a healthy boot wires it in.
+	teamsStore, err := teams.NewStore(store)
+	if err != nil {
+		log.Printf("warn: teams store unavailable: %v", err)
+		teamsStore = nil
+	}
+
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true, // Disable the default Fiber banner
 	})
 
 	app.Use(middleware.Logger())
 
-	routes.SetupRoutes(app)
+	routes.SetupRoutes(app, teamsStore)
 
 	// Start queue listeners
 	if cfg.Queue.Enable {

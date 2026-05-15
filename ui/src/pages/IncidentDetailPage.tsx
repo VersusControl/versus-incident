@@ -1,11 +1,13 @@
 import { Link, useParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Brain, FileText, Sparkles } from "lucide-react";
+import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, Brain, CheckCircle2, FileText, Sparkles, UserPlus } from "lucide-react";
 import { api } from "@/lib/api";
 import { fmtAbs, fmtRel } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
 import { ErrorBox, Spinner } from "@/components/feedback";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 // Stable keys written into Incident.content by the backend. Agent-emitted
 // incidents (services.CreateIncidentFromFinding) set most of these; manual
@@ -312,9 +314,16 @@ export function IncidentDetailPage() {
                 </div>
               </div>
 
+              <AssignmentCard
+                incidentID={data.id}
+                teamID={data.assigned_team_id}
+                memberIDs={data.assigned_member_ids}
+              />
+
               <div className="card">
                 <div className="card-header">
                   <span className="card-title">Status</span>
+                  {!data.resolved && <ResolveButton incidentID={data.id} />}
                 </div>
                 <div className="card-body text-xs">
                   {data.resolved && (
@@ -440,6 +449,235 @@ function AiActionCard({
           <p className="text-2xs leading-relaxed text-ink-600">
             {description}
           </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ResolveButton posts to /api/admin/incidents/:id/resolve and refreshes
+// both the detail view and the incidents list. Uses ConfirmDialog (not
+// window.confirm) so the prompt matches the rest of the admin UI.
+function ResolveButton({ incidentID }: { incidentID: string }) {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const m = useMutation({
+    mutationFn: () => api.resolveIncident(incidentID),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["incident", incidentID] });
+      qc.invalidateQueries({ queryKey: ["incidents"] });
+      setOpen(false);
+    },
+  });
+  return (
+    <>
+      <button
+        className="btn"
+        aria-label="Mark incident resolved"
+        title="Mark this incident as resolved"
+        disabled={m.isPending}
+        onClick={() => setOpen(true)}
+      >
+        <CheckCircle2 size={11} />
+        {m.isPending ? "Resolving…" : "Resolve"}
+      </button>
+      {open && (
+        <ConfirmDialog
+          title="Resolve incident"
+          message={
+            <>
+              Mark this incident as resolved? This stamps a resolved-at
+              timestamp and cannot be undone from the UI today.
+            </>
+          }
+          confirmLabel="Resolve"
+          busy={m.isPending}
+          error={m.isError ? m.error : undefined}
+          onConfirm={() => m.mutate()}
+          onClose={() => {
+            if (!m.isPending) setOpen(false);
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+
+// AssignmentCard renders the team + members currently assigned to the
+// incident and a small inline editor that posts to
+// /api/admin/incidents/:id/assign. Team and member references that no
+// longer exist in the roster fall back to their raw id so we don't lie
+// to the operator about who is on the hook.
+function AssignmentCard({
+  incidentID,
+  teamID,
+  memberIDs,
+}: {
+  incidentID: string;
+  teamID?: string;
+  memberIDs?: string[];
+}) {
+  const qc = useQueryClient();
+  const teamsQ = useQuery({ queryKey: ["teams"], queryFn: api.listTeams });
+  const membersQ = useQuery({
+    queryKey: ["members"],
+    queryFn: api.listMembers,
+  });
+
+  const [editing, setEditing] = useState(false);
+  const [draftTeam, setDraftTeam] = useState(teamID ?? "");
+  const [draftMembers, setDraftMembers] = useState<string[]>(memberIDs ?? []);
+
+  const memberById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const x of membersQ.data ?? []) m.set(x.id, x.name);
+    return m;
+  }, [membersQ.data]);
+
+  const teamById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const x of teamsQ.data ?? []) m.set(x.id, x.name);
+    return m;
+  }, [teamsQ.data]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.assignIncident(incidentID, {
+        team_id: draftTeam || null,
+        member_ids: draftMembers,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["incident", incidentID] });
+      setEditing(false);
+    },
+  });
+
+  const toggleMember = (id: string) => {
+    setDraftMembers((cur) =>
+      cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
+    );
+  };
+
+  if (!editing) {
+    return (
+      <div className="card">
+        <div className="card-header">
+          <span className="card-title">Assigned</span>
+          <button
+            className="btn"
+            onClick={() => {
+              setDraftTeam(teamID ?? "");
+              setDraftMembers(memberIDs ?? []);
+              setEditing(true);
+            }}
+          >
+            <UserPlus size={11} />
+            {teamID || (memberIDs && memberIDs.length > 0)
+              ? "Change"
+              : "Assign"}
+          </button>
+        </div>
+        <div className="card-body space-y-2 text-xs">
+          <div>
+            <div className="text-2xs uppercase tracking-wider text-ink-400">
+              Team
+            </div>
+            <div className="mt-1">
+              {teamID ? (
+                <Pill tone="accent">{teamById.get(teamID) ?? teamID}</Pill>
+              ) : (
+                <span className="text-ink-300">—</span>
+              )}
+            </div>
+          </div>
+          <div>
+            <div className="text-2xs uppercase tracking-wider text-ink-400">
+              Members
+            </div>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {(memberIDs ?? []).length === 0 && (
+                <span className="text-ink-300">—</span>
+              )}
+              {(memberIDs ?? []).map((id) => (
+                <Pill key={id}>{memberById.get(id) ?? id.slice(0, 8)}</Pill>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        <span className="card-title">Assign</span>
+      </div>
+      <div className="card-body space-y-3 text-xs">
+        <div>
+          <label className="field-label">Team</label>
+          <select
+            className="input"
+            value={draftTeam}
+            onChange={(e) => setDraftTeam(e.target.value)}
+          >
+            <option value="">— None —</option>
+            {(teamsQ.data ?? []).map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <div className="mb-1 flex items-center justify-between">
+            <label className="field-label mb-0">Members</label>
+            <span className="text-2xs text-ink-400">
+              {draftMembers.length} selected
+            </span>
+          </div>
+          {(membersQ.data ?? []).length === 0 ? (
+            <p className="text-2xs text-ink-400">
+              No members yet — add some from the Members page.
+            </p>
+          ) : (
+            <div className="max-h-48 space-y-1 overflow-auto rounded-md border border-ink-100 bg-ink-50/40 p-2">
+              {(membersQ.data ?? []).map((m) => (
+                <label
+                  key={m.id}
+                  className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 hover:bg-white"
+                >
+                  <input
+                    type="checkbox"
+                    checked={draftMembers.includes(m.id)}
+                    onChange={() => toggleMember(m.id)}
+                  />
+                  <span className="flex-1 text-xs text-ink-800">{m.name}</span>
+                  <span className="font-mono text-2xs text-ink-400">
+                    {m.alias}
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+        {save.isError && <ErrorBox error={save.error} />}
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            className="btn"
+            onClick={() => setEditing(false)}
+            disabled={save.isPending}
+          >
+            Cancel
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={() => save.mutate()}
+            disabled={save.isPending}
+          >
+            {save.isPending ? "Saving…" : "Save"}
+          </button>
         </div>
       </div>
     </div>

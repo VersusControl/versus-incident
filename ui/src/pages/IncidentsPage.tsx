@@ -1,12 +1,14 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { Search } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CheckCircle2, Search, UserPlus } from "lucide-react";
 import { api, type IncidentSummary } from "@/lib/api";
 import { fmtAbs, fmtRel, truncate } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
 import { EmptyState, ErrorBox, Spinner } from "@/components/feedback";
+import { AssignDialog } from "@/components/AssignDialog";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 type StatusFilter = "all" | "open" | "acked" | "resolved";
 
@@ -90,26 +92,28 @@ export function IncidentsPage() {
             <table className="ddt">
               <thead>
                 <tr>
-                  <th className="w-44">When</th>
+                  <th className="w-32">When</th>
                   <th className="w-28">Service</th>
                   <th>Title</th>
                   <th className="w-32">Channels</th>
+                  <th className="w-32">Assigned</th>
                   <th className="w-24">Notify</th>
                   <th className="w-24">Status</th>
                   <th className="w-32">ID</th>
+                  <th className="w-28" />
                 </tr>
               </thead>
               <tbody>
                 {isLoading && (
                   <tr>
-                    <td colSpan={7} className="py-8 text-center">
+                    <td colSpan={9} className="py-8 text-center">
                       <Spinner />
                     </td>
                   </tr>
                 )}
                 {!isLoading && filtered.length === 0 && (
                   <tr>
-                    <td colSpan={7}>
+                    <td colSpan={9}>
                       <EmptyState
                         title="No incidents"
                         hint={
@@ -134,11 +138,37 @@ export function IncidentsPage() {
 }
 
 function IncidentRow({ i }: { i: IncidentSummary }) {
+  const qc = useQueryClient();
+  const [assigning, setAssigning] = useState(false);
+  const [resolving, setResolving] = useState(false);
   const status = i.resolved
     ? { label: "resolved", tone: "good" as const }
     : i.acked_at
       ? { label: "acked", tone: "accent" as const }
       : { label: "open", tone: "bad" as const };
+  const teamsQ = useQuery({ queryKey: ["teams"], queryFn: api.listTeams });
+  const membersQ = useQuery({
+    queryKey: ["members"],
+    queryFn: api.listMembers,
+  });
+  const teamName =
+    i.assigned_team_id &&
+    (teamsQ.data ?? []).find((t) => t.id === i.assigned_team_id)?.name;
+  const memberNames = (i.assigned_member_ids ?? []).map((id) => {
+    return (
+      (membersQ.data ?? []).find((m) => m.id === id)?.name ?? id.slice(0, 8)
+    );
+  });
+  const hasAssignment =
+    !!i.assigned_team_id || (i.assigned_member_ids ?? []).length > 0;
+  const resolve = useMutation({
+    mutationFn: () => api.resolveIncident(i.id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["incidents"] });
+      qc.invalidateQueries({ queryKey: ["incident", i.id] });
+      setResolving(false);
+    },
+  });
   return (
     <tr>
       <td title={fmtAbs(i.created_at)}>{fmtRel(i.created_at)}</td>
@@ -162,12 +192,79 @@ function IncidentRow({ i }: { i: IncidentSummary }) {
         </div>
       </td>
       <td>
+        {hasAssignment ? (
+          <div className="flex flex-wrap gap-1">
+            {teamName && <Pill tone="accent">{teamName}</Pill>}
+            {memberNames.map((n, idx) => (
+              <Pill key={idx}>{n}</Pill>
+            ))}
+          </div>
+        ) : (
+          <span className="text-ink-300">—</span>
+        )}
+      </td>
+      <td>
         <NotifyPill status={i.notify_status} error={i.notify_error} />
       </td>
       <td>
         <Pill tone={status.tone}>{status.label}</Pill>
       </td>
       <td className="font-mono text-2xs text-ink-400">{i.id.slice(0, 8)}</td>
+      <td>
+        <div className="flex justify-end gap-1">
+          <button
+            className="btn"
+            aria-label="Assign team or member"
+            title={hasAssignment ? "Change assignment" : "Assign team or member"}
+            onClick={() => setAssigning(true)}
+          >
+            <UserPlus size={11} />
+          </button>
+          <button
+            className="btn"
+            aria-label="Mark incident resolved"
+            title={
+              i.resolved
+                ? "Already resolved"
+                : "Mark this incident as resolved"
+            }
+            disabled={i.resolved || resolve.isPending}
+            onClick={() => setResolving(true)}
+          >
+            <CheckCircle2 size={11} />
+          </button>
+        </div>
+        {assigning && (
+          <AssignDialog
+            incidentID={i.id}
+            initialTeamID={i.assigned_team_id}
+            initialMemberIDs={i.assigned_member_ids}
+            onClose={() => setAssigning(false)}
+          />
+        )}
+        {resolving && (
+          <ConfirmDialog
+            title="Resolve incident"
+            message={
+              <>
+                Mark{" "}
+                <span className="font-medium text-ink-900">
+                  {i.title || i.id.slice(0, 8)}
+                </span>{" "}
+                as resolved? This stamps a resolved-at timestamp and cannot be
+                undone from the UI today.
+              </>
+            }
+            confirmLabel="Resolve"
+            busy={resolve.isPending}
+            error={resolve.isError ? resolve.error : undefined}
+            onConfirm={() => resolve.mutate()}
+            onClose={() => {
+              if (!resolve.isPending) setResolving(false);
+            }}
+          />
+        )}
+      </td>
     </tr>
   );
 }

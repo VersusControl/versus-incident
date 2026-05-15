@@ -92,5 +92,13 @@ type IncidentRecord struct {
 	NotifyError  string                 `json:"notify_error,omitempty"`
 	CreatedAt    time.Time              `json:"created_at"`
 	AckedAt      *time.Time             `json:"acked_at,omitempty"`
+	ResolvedAt   *time.Time             `json:"resolved_at,omitempty"`
 	Content      map[string]interface{} `json:"content,omitempty"`
+
+	// AssignedTeamID and AssignedMemberIDs record an operator's
+	// assignment for this incident. Routing logic (Phase 2) will read
+	// these to pick channels per assignee; the storage layer only
+	// holds the references. Empty means unassigned.
+	AssignedTeamID    string   `json:"assigned_team_id,omitempty"`
+	AssignedMemberIDs []string `json:"assigned_member_ids,omitempty"`
 }

@@ -135,6 +135,16 @@ see [GitHub Project](https://github.com/orgs/VersusControl/projects/2).
   ([`src/migration/migration-v1.4.0.md`](src/migration/migration-v1.4.0.md)).
 
 ## Planned (v1.4.1 release scope)
+- [ ] **Team & member management** — define teams and members through a
+  new admin UI + REST API (gated by `X-Gateway-Secret`) and assign them
+  to incidents. Members have a name, an editable alias (auto-derived
+  from the name in the UI), and a meta block of per-channel identifiers
+  (Slack ID, Telegram ID, email, Viber ID, MS Teams UPN, PagerDuty user
+  ID, …). Teams have a name, an alias, an optional description, and an
+  ordered member list. Persisted via the existing `storage.Provider`
+  (new `teams` + `members` blobs). Incident records gain optional
+  `assigned_team_id` and `assigned_member_ids` fields. No automatic
+  routing yet — that lands in a later phase.
 - [ ] **Reliability & load testing** — graceful degradation on log-source
   outages, AI timeouts, and high log volume.
 
