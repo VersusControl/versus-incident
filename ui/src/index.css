@@ -41,8 +41,16 @@ body {
 }
 
 /* Apply dark scrollbar inside the sidebar */
+.dark-scroll::-webkit-scrollbar-track {
+  background: theme("colors.ink.900");
+}
 .dark-scroll::-webkit-scrollbar-thumb {
-  background: theme("colors.ink.700");
+  background: theme("colors.ink.500");
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+.dark-scroll::-webkit-scrollbar-thumb:hover {
+  background: theme("colors.ink.400");
   background-clip: content-box;
   border: 2px solid transparent;
 }
@@ -126,5 +134,8 @@ body {
   }
   textarea.input {
     @apply h-auto py-2;
+  }
+  .field-label {
+    @apply mb-1 block text-2xs uppercase tracking-wider text-ink-500;
   }
 }

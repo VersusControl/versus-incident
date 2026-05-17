@@ -160,10 +160,62 @@ export interface IncidentSummary {
   notify_error?: string;
   created_at: string;
   acked_at?: string | null;
+  resolved_at?: string | null;
+  assigned_team_id?: string;
+  assigned_member_ids?: string[];
 }
 
 export interface IncidentDetail extends IncidentSummary {
   content?: Record<string, unknown>;
+}
+
+// ---------- Team / member management ----------
+
+// MemberMeta mirrors pkg/teams.MemberMeta — typed per-channel ids.
+export interface MemberMeta {
+  email?: string;
+  slack_id?: string;
+  telegram_id?: string;
+  msteams_upn?: string;
+  viber_id?: string;
+  lark_id?: string;
+  pagerduty_user_id?: string;
+  awsim_contact_arn?: string;
+  phone?: string;
+}
+
+export interface Member {
+  id: string;
+  name: string;
+  alias: string;
+  meta: MemberMeta;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Team {
+  id: string;
+  name: string;
+  alias: string;
+  description?: string;
+  member_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+// MemberInput / TeamInput are the bodies sent on create/update.
+// `meta`/`member_ids` use `null` to mean "field omitted" (leave alone).
+export interface MemberInput {
+  name?: string;
+  alias?: string;
+  meta?: MemberMeta | null;
+}
+
+export interface TeamInput {
+  name?: string;
+  alias?: string;
+  description?: string;
+  member_ids?: string[] | null;
 }
 
 // ---------- Endpoints ----------
@@ -244,6 +296,58 @@ export const api = {
   getIncidentsConfig: () =>
     request<IncidentsConfig>("/api/admin/config/incidents"),
   getAgentConfig: () => request<AgentConfigView>("/api/admin/config/agent"),
+
+  listMembers: () =>
+    request<{ members: Member[] }>("/api/admin/members").then(
+      (r) => r.members ?? [],
+    ),
+  createMember: (body: MemberInput) =>
+    request<Member>("/api/admin/members", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateMember: (id: string, body: MemberInput) =>
+    request<Member>(`/api/admin/members/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteMember: (id: string) =>
+    request<void>(`/api/admin/members/${id}`, { method: "DELETE" }),
+
+  listTeams: () =>
+    request<{ teams: Team[] }>("/api/admin/teams").then((r) => r.teams ?? []),
+  createTeam: (body: TeamInput) =>
+    request<Team>("/api/admin/teams", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateTeam: (id: string, body: TeamInput) =>
+    request<Team>(`/api/admin/teams/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteTeam: (id: string) =>
+    request<void>(`/api/admin/teams/${id}`, { method: "DELETE" }),
+
+  assignIncident: (
+    id: string,
+    body: { team_id?: string | null; member_ids?: string[] | null },
+  ) =>
+    request<{
+      id: string;
+      assigned_team_id?: string;
+      assigned_member_ids?: string[];
+      updated_at: string;
+    }>(`/api/admin/incidents/${id}/assign`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  resolveIncident: (id: string) =>
+    request<{ id: string; resolved: boolean; resolved_at?: string | null }>(
+      `/api/admin/incidents/${id}/resolve`,
+      { method: "POST" },
+    ),
 };
 
 // ---------- Config view types (read-only, secret-redacted) ----------

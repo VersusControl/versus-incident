@@ -15,6 +15,8 @@ import { IncidentsPage } from "./pages/IncidentsPage";
 import { IncidentDetailPage } from "./pages/IncidentDetailPage";
 import { IncidentsConfigPage } from "./pages/IncidentsConfigPage";
 import { AgentConfigPage } from "./pages/AgentConfigPage";
+import { MembersPage } from "./pages/MembersPage";
+import { TeamsPage } from "./pages/TeamsPage";
 
 export default function App() {
   return (
@@ -34,6 +36,8 @@ export default function App() {
           <Route path="/detect/system-prompt" element={<SystemPromptPage />} />
           <Route path="/detect/:id" element={<DetectDetailPage />} />
           <Route path="/services" element={<ServicesPage />} />
+          <Route path="/members" element={<MembersPage />} />
+          <Route path="/teams" element={<TeamsPage />} />
           <Route path="/config/incidents" element={<IncidentsConfigPage />} />
           <Route path="/config/agent" element={<AgentConfigPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
