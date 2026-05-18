@@ -63,5 +63,17 @@ func CreateIncidentFromFinding(f *core.AIFinding, r core.AgentResult, source, se
 		"Status": "firing",
 	}
 
-	return CreateIncident("", &content)
+	// Escalate to on-call for high/critical severity findings when
+	// on-call is configured. Lower severities skip on-call even if it
+	// is globally enabled — agent medium/low findings are informational
+	// and should not page operators.
+	params := map[string]string{}
+	switch f.Severity {
+	case "critical", "high":
+		params["oncall_enable"] = "true"
+	default:
+		params["oncall_enable"] = "false"
+	}
+
+	return CreateIncident("", &content, &params)
 }
