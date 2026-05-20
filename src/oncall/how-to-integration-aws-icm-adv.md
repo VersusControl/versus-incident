@@ -1,23 +1,8 @@
-## How to Integration AWS Incident Manager On-Call (Advanced)
-
-## Table of Contents
-- [Prerequisites](#prerequisites)
-- [Advanced On-Call Management with AWS Incident Manager](#advanced-on-call-management-with-aws-incident-manager)
-- [Creating On-Call Schedules](#creating-on-call-schedules)
-- [Understanding AWS Incident Manager Rotations](#understanding-aws-incident-manager-rotations)
-- [Multi-Level Escalation Workflows](#multi-level-escalation-workflows)
-- [Advanced Versus Incident Configuration](#advanced-versus-incident-configuration)
-- [AWS IAM Role Configuration for Critical-Only Approach](#aws-iam-role-configuration-for-critical-only-approach)
-- [Advanced Incident Routing Rules](#advanced-incident-routing-rules)
-- [Dynamic Configuration with Query Parameters](#dynamic-configuration-with-query-parameters)
-- [Monitoring and Analytics](#monitoring-and-analytics)
-- [Testing and Validation](#testing-and-validation)
-- [Testing the Critical-Only Approach](#testing-the-critical-only-approach)
-- [Conclusion](#conclusion)
+# AWS Incident Manager — advanced integration
 
 This document provides an advanced guide to integrating Versus Incident with AWS Incident Manager for advanced on-call management. While the basic integration guide covers essential setup, this advanced guide focuses on implementing complex on-call rotations, schedules, and workflows.
 
-### Prerequisites
+## Prerequisites
 
 Before proceeding with this advanced guide, ensure you have:
 + Completed the basic [AWS Incident Manager integration](/src/oncall/how-to-integration-aws-icm.md)
@@ -26,7 +11,7 @@ Before proceeding with this advanced guide, ensure you have:
 + Prometheus Alert Manager configured and sending alerts to Versus
 + Multiple teams requiring on-call management with different rotation patterns
 
-### Advanced On-Call Management with AWS Incident Manager
+## Advanced On-Call Management with AWS Incident Manager
 
 AWS Incident Manager offers advanced capabilities for managing on-call schedules, beyond the basic escalation plans covered in the introductory guide. These include:
 
@@ -37,7 +22,7 @@ AWS Incident Manager offers advanced capabilities for managing on-call schedules
 
 Let's configure an advanced on-call system with two teams (Platform and Application) that have different rotation schedules and escalation workflows.
 
-### Creating On-Call Schedules
+## Creating On-Call Schedules
 
 AWS Incident Manager allows you to create on-call schedules that automatically rotate responsibilities among team members. Here's how to set up comprehensive schedules:
 
@@ -74,7 +59,7 @@ AWS Incident Manager allows you to create on-call schedules that automatically r
 
 You now have two separate rotation schedules that will automatically change the primary on-call contact based on the defined patterns.
 
-#### Understanding AWS Incident Manager Rotations
+### Understanding AWS Incident Manager Rotations
 
 AWS Incident Manager rotations provide a powerful way to manage on-call responsibilities. Here's a deeper explanation of how they work:
 
@@ -114,7 +99,7 @@ AWS Incident Manager rotations provide a powerful way to manage on-call responsi
    - This helps teams plan their schedules and understand upcoming on-call responsibilities
    - The calendar view accounts for overrides and exceptions
 
-### Multi-Level Escalation Workflows
+## Multi-Level Escalation Workflows
 
 Build advanced escalation workflows that incorporate your on-call schedules:
 
@@ -144,7 +129,7 @@ Build advanced escalation workflows that incorporate your on-call schedules:
 
 These advanced escalation workflows ensure that the right people are engaged at the right time, without unnecessary escalation for routine issues.
 
-### Advanced Versus Incident Configuration
+## Advanced Versus Incident Configuration
 
 Configure Versus Incident for advanced integration with AWS Incident Manager:
 
@@ -234,7 +219,7 @@ Create an enhanced Slack template (`config/slack_message.tmpl`) that provides mo
 
 This template provides additional context and clear timing expectations for responders.
 
-### AWS IAM Role Configuration for Critical-Only Approach
+## AWS IAM Role Configuration for Critical-Only Approach
 
 For the critical-only on-call approach, you need to configure appropriate IAM permissions. This role allows Versus Incident to interact with AWS Incident Manager but only for critical incidents:
 
@@ -285,7 +270,7 @@ This policy:
 
 This IAM configuration ensures that even if a non-critical incident tries to invoke the response plan, it will fail due to IAM permissions, providing an additional layer of enforcement for your critical-only on-call policy.
 
-### Advanced Incident Routing Rules
+## Advanced Incident Routing Rules
 
 Configure Alert Manager with advanced routing based on services, teams, and severity to work with the `initialized_only` setting:
 
@@ -354,7 +339,7 @@ This configuration ensures that:
 - You have granular control over which alerts and severity levels can page your team
 - You can easily test alert routing without risk of accidental paging
 
-### Dynamic Configuration with Query Parameters
+## Dynamic Configuration with Query Parameters
 
 Versus Incident supports dynamic configuration through query parameters, which is especially powerful for managing on-call behavior when using `initialized_only: true`. These parameters can be added to your Alert Manager webhook URLs to override default settings on a per-alert basis:
 
@@ -382,7 +367,7 @@ Versus Incident supports dynamic configuration through query parameters, which i
 
 This flexibility allows you to fine-tune your incident response workflow based on the specific needs of different services and alert types while maintaining the critical-only approach to on-call escalation.
 
-### Monitoring and Analytics
+## Monitoring and Analytics
 
 Implement metrics and reporting for your incident response process:
 
@@ -409,7 +394,7 @@ Implement metrics and reporting for your incident response process:
 
 These analytics help identify patterns, reduce false positives, and enable teams to address systemic issues.
 
-### Testing and Validation
+## Testing and Validation
 
 Thoroughly test your advanced on-call workflows:
 
@@ -430,7 +415,7 @@ Thoroughly test your advanced on-call workflows:
    - Rotate scenarios to test different aspects of the system
    - Include post-drill reviews and improvement plans
 
-### Testing the Critical-Only Approach
+## Testing the Critical-Only Approach
 
 You need to verify both that on-call is triggered with the right parameters and that it doesn't trigger by default:
 
@@ -504,7 +489,7 @@ You need to verify both that on-call is triggered with the right parameters and 
    - The correct response plan is used (check in AWS Incident Manager)
    - The appropriate platform team is engaged
 
-### Conclusion
+## Conclusion
 
 By implementing this advanced on-call management system with AWS Incident Manager and Versus Incident, you've created a advanced incident response workflow that:
 

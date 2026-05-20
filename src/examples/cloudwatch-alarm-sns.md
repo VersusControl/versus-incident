@@ -1,12 +1,7 @@
-## Configuring CloudWatch to send Alert to Versus Incident
+# CloudWatch Alarm → SNS → Versus
 
-## Table of Contents
-- [Create an SNS Topic](#create-an-sns-topic)
-- [Create a CloudWatch Alarm for RDS CPU](#create-a-cloudwatch-alarm-for-rds-cpu)
-- [Versus Incident](#versus-incident)
-- [Subscribe Versus to the SNS Topic](#subscribe-versus-to-the-sns-topic)
-- [Test the Integration](#test-the-integration)
-- [Conclusion](#conclusion)
+Trigger a CloudWatch alarm when RDS CPU exceeds a threshold and fan it out to Slack and Telegram via Versus Incident.
+
 
 ![Diagram](/docs/images/diagram.png)
 
@@ -28,7 +23,7 @@ Slack and Telegram API Token.
 
 4. Subscribe Versus to the SNS Topic.
 
-### Create an SNS Topic
+## Create an SNS Topic
 
 Create an SNS topic to route CloudWatch Alarms to Versus:
 
@@ -36,7 +31,7 @@ Create an SNS topic to route CloudWatch Alarms to Versus:
 aws sns create-topic --name RDS-CPU-Alarm-Topic
 ```
 
-### Create a CloudWatch Alarm for RDS CPU
+## Create a CloudWatch Alarm for RDS CPU
 
 Set up an alarm to trigger when RDS CPU exceeds 80% for 5 minutes.
 
@@ -62,7 +57,7 @@ Explanation:
 + `--dimensions`: Identifies your RDS instance.
 + `--alarm-actions`: The SNS topic ARN where alerts are sent.
 
-### Versus Incident
+## Versus Incident
 
 Next, we will deploy Versus Incident and configure it with a custom template to send alerts to both Slack and Telegram. Enable SNS support in `config/config.yaml`:
 
@@ -177,7 +172,7 @@ ngrok http 3000 --url your-versus-https-url.ngrok-free.app
 
 This URL is available to anyone on the internet.
 
-### Subscribe Versus to the SNS Topic
+## Subscribe Versus to the SNS Topic
 
 Subscribe Versus’s /sns endpoint to the topic. Replace versus-host with your deployment URL:
 
@@ -188,7 +183,7 @@ aws sns subscribe \
   --notification-endpoint https://your-versus-https-url.ngrok-free.app/sns
 ```
 
-### Test the Integration
+## Test the Integration
 
 1. Simulate high CPU load on your RDS instance (e.g., run intensive queries).
 2. Check the CloudWatch console to confirm the alarm triggers.

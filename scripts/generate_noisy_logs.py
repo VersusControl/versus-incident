@@ -1240,6 +1240,146 @@ class CloudWatchSink(Sink):
         return f"cloudwatch:{self._group}/{self._stream}"
 
 
+_GELF_LEVELS = {
+    "fatal": 2, "panic": 2,
+    "error": 3, "err": 3,
+    "warn":  4, "warning": 4,
+    "info":  6,
+    "debug": 7,
+}
+
+
+class GraylogSink(Sink):
+    """Send lines to Graylog over GELF UDP.
+
+    GELF is Graylog's native JSON-over-UDP format. The default port is
+    12201; the GELF UDP input must already exist in Graylog (System →
+    Inputs → Launch new input → GELF UDP). One UDP packet per line —
+    no batching, no compression (kept simple; messages under ~8 KiB
+    fit in a single packet so chunking is not needed for synthetic
+    log lines).
+    """
+
+    name = "graylog"
+    _SERVICE_RE = re.compile(
+        r'(?i)(?:\bservice|\bsvc|\bapp|\bcomponent)\s*[:=]\s*"?([A-Za-z0-9._-]+)'
+    )
+
+    def __init__(self, host: str = "localhost", port: int = 12201,
+                 source: str = "noisy"):
+        import socket
+        self._addr = (host, port)
+        self._source = source
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def write(self, ts, level, msg):
+        gelf = {
+            "version": "1.1",
+            "host": self._source,
+            "short_message": msg,
+            "timestamp": ts.timestamp(),
+            "level": _GELF_LEVELS.get(level.strip().lower(), 6),
+            "_level_name": level.strip(),
+        }
+        m = self._SERVICE_RE.search(msg)
+        if m:
+            # Custom fields in GELF must be prefixed with an underscore.
+            gelf["_service"] = m.group(1)
+        try:
+            self._sock.sendto(json.dumps(gelf).encode("utf-8"), self._addr)
+        except OSError as e:  # pragma: no cover
+            raise RuntimeError(f"graylog GELF send failed: {e}") from e
+
+    def flush(self):
+        # UDP is fire-and-forget; nothing to drain.
+        pass
+
+    def close(self):
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+    def summary(self):
+        return f"graylog:gelf://{self._addr[0]}:{self._addr[1]}"
+
+
+class SplunkSink(Sink):
+    """Send lines to Splunk via the HTTP Event Collector (HEC).
+
+    HEC is the standard ingest path for synthetic / programmatic data.
+    Requires a HEC token (configurable per index) — see the
+    `examples/docker-compose/splunk/` README for how the example
+    bootstraps one. Events are POSTed to
+    `<host>/services/collector/event` as newline-delimited JSON (the
+    HEC batched format).
+    """
+
+    name = "splunk"
+    _SERVICE_RE = re.compile(
+        r'(?i)(?:\bservice|\bsvc|\bapp|\bcomponent)\s*[:=]\s*"?([A-Za-z0-9._-]+)'
+    )
+
+    def __init__(self, base_url: str, token: str, index: str = "main",
+                 sourcetype: str = "_json", insecure: bool = True,
+                 batch_size: int = 500):
+        self._url = base_url.rstrip("/") + "/services/collector/event"
+        self._token = token
+        self._index = index
+        self._sourcetype = sourcetype
+        self._batch_size = batch_size
+        self._buf: list[str] = []
+        # HEC ships with a self-signed cert by default; the splunk example
+        # exposes splunkd at https://localhost:8088 with that cert.
+        self._ctx = None
+        if insecure and base_url.lower().startswith("https"):
+            import ssl
+            self._ctx = ssl._create_unverified_context()  # noqa: SLF001
+
+    def write(self, ts, level, msg):
+        fields = {"level": level.strip()}
+        m = self._SERVICE_RE.search(msg)
+        if m:
+            fields["service"] = m.group(1)
+        event = {
+            "time": ts.timestamp(),
+            "host": "noisy",
+            "source": "generate_noisy_logs.py",
+            "sourcetype": self._sourcetype,
+            "index": self._index,
+            "event": msg,
+            "fields": fields,
+        }
+        self._buf.append(json.dumps(event))
+        if len(self._buf) >= self._batch_size:
+            self.flush()
+
+    def flush(self):
+        if not self._buf:
+            return
+        body = ("\n".join(self._buf)).encode("utf-8")
+        req = urllib.request.Request(
+            self._url, data=body, method="POST",
+            headers={
+                "Authorization": f"Splunk {self._token}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30, context=self._ctx) as resp:
+                if resp.status >= 300:
+                    raise RuntimeError(f"splunk HEC returned {resp.status}")
+        except urllib.error.HTTPError as e:  # pragma: no cover
+            raise RuntimeError(
+                f"splunk HEC failed: {e.code} {e.reason}: "
+                f"{e.read().decode('utf-8', 'replace')[:300]}"
+            ) from e
+        self._buf.clear()
+
+    def summary(self):
+        return f"splunk:{self._url} index={self._index}"
+
+
 def make_sink(args) -> Sink:
     target = args.target
     if target == "file":
@@ -1266,6 +1406,23 @@ def make_sink(args) -> Sink:
             log_group=args.cw_log_group,
             log_stream=args.cw_log_stream,
             region=args.cw_region,
+            batch_size=args.batch_size,
+        )
+    if target == "graylog":
+        return GraylogSink(
+            host=args.graylog_host,
+            port=args.graylog_port,
+            source=args.graylog_source,
+        )
+    if target == "splunk":
+        if not args.splunk_token:
+            raise SystemExit("--splunk-token is required for --target splunk")
+        return SplunkSink(
+            base_url=args.splunk_url,
+            token=args.splunk_token,
+            index=args.splunk_index,
+            sourcetype=args.splunk_sourcetype,
+            insecure=not args.splunk_verify,
             batch_size=args.batch_size,
         )
     raise SystemExit(f"unknown --target: {target!r}")
@@ -1358,7 +1515,7 @@ def main() -> int:
     # loki / elasticsearch / cloudwatch docker-compose examples can be
     # exercised with identical training / spike / scenario flags.
     ap.add_argument("--target", default=os.getenv("TARGET", "file"),
-                    choices=["file", "loki", "elasticsearch", "cloudwatch"],
+                    choices=["file", "loki", "elasticsearch", "cloudwatch", "graylog", "splunk"],
                     help="where to send generated logs (default: file; "
                          "env: TARGET)")
     ap.add_argument("--batch-size", type=int, default=500,
@@ -1386,6 +1543,30 @@ def main() -> int:
                     help='CloudWatch log stream name (default: noisy-app; env: CW_LOG_STREAM)')
     ap.add_argument("--cw-region", default=os.getenv("CW_REGION") or os.getenv("AWS_REGION"),
                     help="AWS region (env: CW_REGION or AWS_REGION)")
+    # Graylog (GELF UDP)
+    ap.add_argument("--graylog-host", default=os.getenv("GRAYLOG_HOST", "localhost"),
+                    help="Graylog GELF UDP host (default: localhost; env: GRAYLOG_HOST)")
+    ap.add_argument("--graylog-port", type=int,
+                    default=int(os.getenv("GRAYLOG_PORT", "12201")),
+                    help="Graylog GELF UDP port (default: 12201; env: GRAYLOG_PORT)")
+    ap.add_argument("--graylog-source", default=os.getenv("GRAYLOG_SOURCE", "noisy"),
+                    help='GELF "host" field on every message (default: noisy; '
+                         "env: GRAYLOG_SOURCE)")
+    # Splunk (HEC)
+    ap.add_argument("--splunk-url", default=os.getenv("SPLUNK_URL", "https://localhost:8088"),
+                    help="Splunk HEC base URL (default: https://localhost:8088; "
+                         "env: SPLUNK_URL)")
+    ap.add_argument("--splunk-token", default=os.getenv("SPLUNK_HEC_TOKEN"),
+                    help="Splunk HEC token (required for --target splunk; "
+                         "env: SPLUNK_HEC_TOKEN)")
+    ap.add_argument("--splunk-index", default=os.getenv("SPLUNK_INDEX", "main"),
+                    help="target Splunk index (default: main; env: SPLUNK_INDEX)")
+    ap.add_argument("--splunk-sourcetype",
+                    default=os.getenv("SPLUNK_SOURCETYPE", "_json"),
+                    help="HEC sourcetype (default: _json; env: SPLUNK_SOURCETYPE)")
+    ap.add_argument("--splunk-verify", action="store_true",
+                    help="verify the Splunk TLS cert (off by default — the "
+                         "example ships a self-signed cert)")
 
     args = ap.parse_args()
 

@@ -6,8 +6,9 @@ The main generator is
 [`generate_noisy_logs.py`](generate_noisy_logs.py), wrapped by
 [`run_noisy_logs.sh`](run_noisy_logs.sh) for live-tail and one-shot
 spike / scenario modes. It can write to a **local file** or push the
-same generated lines directly into **Loki**, **Elasticsearch**, or
-**CloudWatch Logs** — selected via `--target` (or `TARGET=`).
+same generated lines directly into **Loki**, **Elasticsearch**,
+**CloudWatch Logs**, **Graylog** (GELF UDP), or **Splunk** (HEC) —
+selected via `--target` (or `TARGET=`).
 
 | Target | Flag / env | Default endpoint |
 |---|---|---|
@@ -15,6 +16,8 @@ same generated lines directly into **Loki**, **Elasticsearch**, or
 | `loki` | `--loki-url` / `LOKI_URL=` | `http://localhost:3100` |
 | `elasticsearch` | `--es-url` / `ES_URL=` (+ `--es-index` / `ES_INDEX=`) | `http://localhost:9200`, index `logs-noisy` |
 | `cloudwatch` | `--cw-log-group` / `CW_LOG_GROUP_NAME=` (+ `--cw-region`) | — (requires `boto3` + AWS creds) |
+| `graylog` | `--graylog-host` / `GRAYLOG_HOST=` (+ `--graylog-port`) | `localhost:12201` (GELF UDP) |
+| `splunk` | `--splunk-token` / `SPLUNK_HEC_TOKEN=` (+ `--splunk-url`) | `https://localhost:8088` (HEC) |
 
 The `elasticsearch`-via-`makelogs` flavour is also kept around (see
 [§2](#2-elasticsearch-source--makelogs)) — useful when you want
@@ -49,6 +52,9 @@ python3 scripts/generate_noisy_logs.py --target loki --lines 500
 python3 scripts/generate_noisy_logs.py --target elasticsearch --lines 500
 python3 scripts/generate_noisy_logs.py --target cloudwatch \
   --cw-log-group /aws/lambda/my-fn --cw-region us-east-1 --lines 500
+python3 scripts/generate_noisy_logs.py --target graylog --lines 500
+python3 scripts/generate_noisy_logs.py --target splunk \
+  --splunk-token "$SPLUNK_HEC_TOKEN" --lines 500
 ```
 
 Useful flags: `--lines/-n`, `--output/-o`, `--start-time` (`now` or RFC3339),
@@ -139,6 +145,8 @@ INTERVAL=2 BATCH=50 ./scripts/run_noisy_logs.sh
 ./scripts/run_noisy_logs.sh --target loki
 ./scripts/run_noisy_logs.sh --target elasticsearch
 TARGET=cloudwatch CW_LOG_GROUP_NAME=/aws/lambda/foo ./scripts/run_noisy_logs.sh
+./scripts/run_noisy_logs.sh --target graylog
+SPLUNK_HEC_TOKEN=... ./scripts/run_noisy_logs.sh --target splunk
 ```
 
 Stop with Ctrl+C. The script prints a summary count on exit.

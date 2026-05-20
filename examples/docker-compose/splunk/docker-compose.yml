@@ -1,0 +1,135 @@
+services:
+  # One-shot: generate a self-signed cert for Redis TLS.
+  redis-tls-init:
+    image: alpine:3.20
+    container_name: versus-splunk-redis-tls-init
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        cd /tls
+        if [ -f server.crt ] && [ -f server.key ] && [ -f ca.crt ]; then
+          echo "TLS material already present; skipping."
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+          -keyout server.key -out server.crt \
+          -subj "/CN=redis" \
+          -addext "subjectAltName=DNS:redis,DNS:localhost,IP:127.0.0.1"
+        cp server.crt ca.crt
+        chmod 0644 server.crt server.key ca.crt
+        echo "Generated self-signed cert for redis."
+    volumes:
+      - redis-tls:/tls
+
+  redis:
+    image: redis:7-alpine
+    container_name: versus-splunk-redis
+    depends_on:
+      redis-tls-init:
+        condition: service_completed_successfully
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:-versus}
+      - --port
+      - "0"
+      - --tls-port
+      - "6379"
+      - --tls-cert-file
+      - /tls/server.crt
+      - --tls-key-file
+      - /tls/server.key
+      - --tls-ca-cert-file
+      - /tls/ca.crt
+      - --tls-auth-clients
+      - "no"
+    volumes:
+      - redis-data:/data
+      - redis-tls:/tls:ro
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - --tls
+        - --insecure
+        - -a
+        - ${REDIS_PASSWORD:-versus}
+        - ping
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Splunk Free / Enterprise single-instance.
+  # SPLUNK_PASSWORD must satisfy Splunk's default complexity rules
+  # (>= 8 chars, mix of letter/digit/symbol). Default below works.
+  splunk:
+    image: splunk/splunk:latest
+    container_name: versus-splunk
+    environment:
+      SPLUNK_START_ARGS: "--accept-license"
+      SPLUNK_PASSWORD: ${SPLUNK_PASSWORD:-Changeme1!}
+      # Enable HEC for log ingest (token below; index "main").
+      SPLUNK_HEC_TOKEN: ${SPLUNK_HEC_TOKEN:-00000000-0000-0000-0000-000000000000}
+    ports:
+      - "8000:8000"   # Splunk Web UI
+      - "8088:8088"   # HTTP Event Collector (HEC)
+      - "8089:8089"   # splunkd REST (what the Versus source talks to)
+    volumes:
+      - splunk-etc:/opt/splunk/etc
+      - splunk-var:/opt/splunk/var
+    restart: unless-stopped
+    healthcheck:
+      # `splunkd` answers /services/server/info once it's fully up.
+      test: ["CMD-SHELL", "curl -fsSk -u admin:${SPLUNK_PASSWORD:-Changeme1!} https://localhost:8089/services/server/info?output_mode=json || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+
+  versus:
+    image: ghcr.io/versuscontrol/versus-incident:latest
+    container_name: versus-splunk-app
+    depends_on:
+      redis:
+        condition: service_healthy
+      splunk:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      GATEWAY_SECRET: ${GATEWAY_SECRET:-change-me}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-versus}
+      SPLUNK_PASSWORD: ${SPLUNK_PASSWORD:-Changeme1!}
+      SLACK_ENABLE: ${SLACK_ENABLE:-false}
+      SLACK_TOKEN: ${SLACK_TOKEN:-}
+      SLACK_CHANNEL_ID: ${SLACK_CHANNEL_ID:-}
+      TELEGRAM_ENABLE: ${TELEGRAM_ENABLE:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      AGENT_ENABLE: ${AGENT_ENABLE:-true}
+      AGENT_MODE: ${AGENT_MODE:-training}
+      AGENT_AI_ENABLE: ${AGENT_AI_ENABLE:-false}
+      AGENT_AI_API_KEY: ${AGENT_AI_API_KEY:-}
+      AGENT_AI_MODEL: ${AGENT_AI_MODEL:-gpt-4o-mini}
+    volumes:
+      - ./config:/app/config:ro
+      - versus-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
+  redis-tls:
+  versus-data:
+  splunk-etc:
+  splunk-var:

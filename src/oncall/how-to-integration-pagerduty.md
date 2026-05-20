@@ -1,37 +1,21 @@
-## How to Integrate with PagerDuty
-
-## Table of Contents
-- [Prerequisites](#prerequisites)
-- [Setting Up PagerDuty for On-Call](#setting-up-pagerduty-for-on-call)
-  - [1. Create Users in PagerDuty](#1-create-users-in-pagerduty)
-  - [2. Create On-Call Schedules](#2-create-on-call-schedules)
-  - [3. Create Escalation Policies](#3-create-escalation-policies)
-  - [4. Create a PagerDuty Service](#4-create-a-pagerduty-service)
-  - [5. Get the Integration Key](#5-get-the-integration-key)
-- [Deploy Versus Incident](#deploy-versus-incident)
-  - [Docker Deployment](#docker-deployment)
-- [Alert Manager Routing Configuration](#alert-manager-routing-configuration)
-- [Override the PagerDuty Routing Key per Alert](#override-the-pagerduty-routing-key-per-alert)
-- [Testing the Integration](#testing-the-integration)
-- [How It Works Under the Hood](#how-it-works-under-the-hood)
-- [Conclusion](#conclusion)
+# Integrate with PagerDuty
 
 This document provides a step-by-step guide to integrate Versus Incident with PagerDuty for on-call management. The integration enables automated escalation of alerts to on-call teams when incidents are not acknowledged within a specified time.
 
 We'll cover setting up PagerDuty, configuring the integration with Versus, deploying Versus, and testing the integration with practical examples.
 
-### Prerequisites
+## Prerequisites
 
 Before you begin, ensure you have:
 + A PagerDuty account (you can start with a free trial if needed)
 + Versus Incident deployed (instructions provided later)
 + Prometheus Alert Manager set up to monitor your systems
 
-### Setting Up PagerDuty for On-Call
+## Setting Up PagerDuty for On-Call
 
 Let's configure a practical example in PagerDuty with services, schedules, and escalation policies.
 
-#### 1. Create Users in PagerDuty
+### 1. Create Users in PagerDuty
 
 First, we need to set up the users who will be part of the on-call rotation:
 
@@ -50,7 +34,7 @@ First, we need to set up the users who will be part of the on-call rotation:
 
 Repeat to create multiple users (e.g., Natsu, Zeref, Igneel, Gray, Gajeel, Laxus).
 
-#### 2. Create On-Call Schedules
+### 2. Create On-Call Schedules
 
 Now, let's create schedules for who is on-call and when:
 
@@ -64,7 +48,7 @@ Now, let's create schedules for who is on-call and when:
 4. Save the schedule
 5. Create a second schedule (e.g., "Team B Secondary") for other team members
 
-#### 3. Create Escalation Policies
+### 3. Create Escalation Policies
 
 An escalation policy defines who gets notified when an incident occurs:
 
@@ -76,7 +60,7 @@ An escalation policy defines who gets notified when an incident occurs:
    + Optionally, add a Level 3 to notify a manager
 4. Save the policy
 
-#### 4. Create a PagerDuty Service
+### 4. Create a PagerDuty Service
 
 A service is what receives incidents from monitoring systems:
 
@@ -87,7 +71,7 @@ A service is what receives incidents from monitoring systems:
 5. Configure incident settings (Auto-resolve, urgency, etc.)
 6. Save the service
 
-#### 5. Get the Integration Key
+### 5. Get the Integration Key
 
 After creating the service, you'll need the integration key (also called routing key):
 
@@ -98,11 +82,11 @@ After creating the service, you'll need the integration key (also called routing
 5. Copy the **Integration Key** (it looks something like: `12345678abcdef0123456789abcdef0`)
 6. Keep this key secure - you'll need it for Versus configuration
 
-### Deploy Versus Incident
+## Deploy Versus Incident
 
 Now let's deploy Versus with PagerDuty integration. You can use Docker or Kubernetes.
 
-#### Docker Deployment
+### Docker Deployment
 
 Create a directory for your configuration files:
 
@@ -231,11 +215,11 @@ Run Docker Compose:
 docker-compose up -d
 ```
 
-### Alert Manager Routing Configuration
+## Alert Manager Routing Configuration
 
 Now, let's configure Alert Manager to route alerts to Versus with different behaviors:
 
-#### Send Alert Only (No On-Call)
+### Send Alert Only (No On-Call)
 
 ```yaml
 receivers:
@@ -253,7 +237,7 @@ route:
     receiver: 'versus-no-oncall'
 ```
 
-#### Send Alert with Acknowledgment Wait
+### Send Alert with Acknowledgment Wait
 
 ```yaml
 receivers:
@@ -271,7 +255,7 @@ route:
 
 This configuration waits 5 minutes for acknowledgment before triggering PagerDuty if the user doesn't click the ACK link in Slack.
 
-#### Send Alert with Immediate On-Call Trigger
+### Send Alert with Immediate On-Call Trigger
 
 ```yaml
 receivers:
@@ -289,7 +273,7 @@ route:
 
 This will trigger PagerDuty immediately without waiting.
 
-### Override the PagerDuty Routing Key per Alert
+## Override the PagerDuty Routing Key per Alert
 
 You can configure Alert Manager to use different PagerDuty services for specific alerts by using named routing keys instead of exposing sensitive routing keys directly in URLs:
 
@@ -322,7 +306,7 @@ oncall:
 
 This approach keeps your sensitive PagerDuty integration keys secure by never exposing them in URLs or logs.
 
-### Testing the Integration
+## Testing the Integration
 
 Let's test the complete workflow:
 
@@ -342,7 +326,7 @@ Let's test the complete workflow:
 4. **Immediate Trigger Test**:
    - Send an urgent alert and confirm that PagerDuty is triggered instantly.
 
-### How It Works Under the Hood
+## How It Works Under the Hood
 
 When Versus integrates with PagerDuty, the following occurs:
 
@@ -354,7 +338,7 @@ When Versus integrates with PagerDuty, the following occurs:
 
 The PagerDuty service processes this event according to your escalation policy, notifying the appropriate on-call personnel.
 
-### Conclusion
+## Conclusion
 
 You've now integrated Versus Incident with PagerDuty for on-call management! Alerts from Prometheus Alert Manager can trigger notifications via Versus, with escalations handled by PagerDuty based on your escalation policy.
 

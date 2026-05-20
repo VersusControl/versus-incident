@@ -1,0 +1,823 @@
+/* =============================================================
+ * Versus Incident — Docs theme
+ * GitBook-inspired three-column layout on top of src/style.md
+ * tokens. Loaded via [output.html] additional-css in book.toml.
+ * ============================================================= */
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap");
+
+/* ──────────────────────────────────────────────────────────────
+ *  Design tokens (src/style.md)
+ * ────────────────────────────────────────────────────────────── */
+:root {
+    --color-canvas: #ffffff;
+    --color-ink: #1c1917;
+    --color-ash: #57534d;
+    --color-stone: #79716b;
+    --color-parchment: #fafaf9;
+    --color-whisper-gray: #efeeed;
+    --color-outline-gray: #e5e5e5;
+    --color-obsidian: #000000;
+    --color-sunset-orange: #fe551b;
+
+    --font-display: "Inter", ui-sans-serif, system-ui, -apple-system,
+        BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-body: "Inter", ui-sans-serif, system-ui, -apple-system,
+        BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco,
+        Consolas, "Liberation Mono", monospace;
+
+    --radius-tags: 4px;
+    --radius-default: 8px;
+    --radius-cards: 12px;
+    --radius-pill: 9999px;
+
+    --sidebar-width: 280px;
+    --toc-width: 224px;
+    --content-max: 860px;
+    --topbar-height: 56px;
+    --page-max: 1280px;
+
+    --shadow-subtle: rgba(0, 0, 0, 0.05) 0 1px 3px 0,
+        rgba(0, 0, 0, 0.05) 0 1px 2px -1px;
+    --shadow-card: rgba(0, 0, 0, 0.06) 0 1px 2px 0,
+        rgba(0, 0, 0, 0.04) 0 4px 12px 0;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  mdBook built-in vars — light theme
+ * ────────────────────────────────────────────────────────────── */
+.light,
+html:not(.no-js) {
+    --bg: var(--color-canvas);
+    --fg: var(--color-ash);
+
+    --sidebar-bg: var(--color-canvas);
+    --sidebar-fg: var(--color-ash);
+    --sidebar-non-existant: var(--color-stone);
+    --sidebar-active: var(--color-ink);
+    --sidebar-spacer: var(--color-outline-gray);
+
+    --scrollbar: var(--color-whisper-gray);
+
+    --icons: var(--color-stone);
+    --icons-hover: var(--color-ink);
+
+    --links: var(--color-ink);
+
+    --inline-code-color: var(--color-ink);
+
+    --theme-popup-bg: var(--color-canvas);
+    --theme-popup-border: var(--color-outline-gray);
+    --theme-hover: var(--color-whisper-gray);
+
+    --quote-bg: var(--color-parchment);
+    --quote-border: var(--color-outline-gray);
+
+    --warning-border: var(--color-sunset-orange);
+
+    --table-border-color: var(--color-outline-gray);
+    --table-header-bg: var(--color-whisper-gray);
+    --table-alternate-bg: var(--color-parchment);
+
+    --searchbar-border-color: var(--color-outline-gray);
+    --searchbar-bg: var(--color-canvas);
+    --searchbar-fg: var(--color-ink);
+    --searchbar-shadow-color: rgba(0, 0, 0, 0.08);
+    --searchresults-header-fg: var(--color-stone);
+    --searchresults-border-color: var(--color-outline-gray);
+    --searchresults-li-bg: var(--color-parchment);
+    --search-mark-bg: rgba(254, 85, 27, 0.18);
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Base
+ * ────────────────────────────────────────────────────────────── */
+html {
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+    background: var(--color-canvas);
+    color: var(--color-ash);
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Top bar
+ * ────────────────────────────────────────────────────────────── */
+#menu-bar,
+#menu-bar.sticky {
+    height: var(--topbar-height);
+    background: rgba(255, 255, 255, 0.85);
+    backdrop-filter: saturate(180%) blur(14px);
+    -webkit-backdrop-filter: saturate(180%) blur(14px);
+    border-bottom: 1px solid var(--color-outline-gray);
+    box-shadow: none;
+    max-width: var(--page-max);
+    margin-left: auto;
+    margin-right: auto;
+    /* padding-left: 24px;
+    padding-right: 24px; */
+    box-sizing: border-box;
+}
+
+#menu-bar .menu-title {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    margin: 0;
+    flex: 1 1 auto;
+    order: 1;
+}
+
+/* Group the left + right button clusters together on the right side. */
+#menu-bar .left-buttons {
+    order: 2;
+    margin-left: 0;
+    margin-right: 0;
+}
+
+#menu-bar .right-buttons {
+    order: 3;
+}
+
+/* Brand logo rendered inside .menu-title. */
+#menu-bar .brand-logo {
+    display: inline-flex;
+    align-items: center;
+    height: 100%;
+}
+
+#menu-bar .brand-logo-img {
+    height: 48px;
+    width: auto;
+    display: block;
+}
+
+#menu-bar .icon-button {
+    color: var(--color-stone);
+    transition: color 0.15s ease;
+}
+
+#menu-bar .icon-button:hover {
+    color: var(--color-ink);
+}
+
+/* Hide the sidebar toggle button — sidebar is always visible. */
+#menu-bar #sidebar-toggle,
+#menu-bar .left-buttons #sidebar-toggle,
+.left-buttons #sidebar-toggle {
+    display: none !important;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Sidebar (left column)
+ * ────────────────────────────────────────────────────────────── */
+.sidebar {
+    width: var(--sidebar-width);
+    background: var(--color-canvas);
+    border-right: 1px solid var(--color-outline-gray);
+    font-family: var(--font-body);
+    font-size: 14px;
+    padding-top: var(--topbar-height);
+}
+
+.sidebar .sidebar-scrollbox {
+    padding: 28px 18px 60px;
+}
+
+.sidebar::-webkit-scrollbar {
+    width: 6px;
+}
+.sidebar::-webkit-scrollbar-thumb {
+    background: var(--color-outline-gray);
+    border-radius: var(--radius-pill);
+}
+
+.chapter {
+    margin: 0;
+}
+
+.chapter li.chapter-item {
+    line-height: 1.45;
+    margin: 1px 0;
+}
+
+.chapter li > a,
+.chapter li > div {
+    color: var(--color-ash);
+    text-decoration: none;
+    padding: 6px 12px;
+    border-radius: var(--radius-default);
+    transition: background 0.12s ease, color 0.12s ease;
+    display: block;
+}
+
+.chapter li > a:hover {
+    background: var(--color-whisper-gray);
+    color: var(--color-ink);
+}
+
+.chapter li > a.active {
+    background: rgba(254, 85, 27, 0.08);
+    color: var(--color-sunset-orange);
+    font-weight: 600;
+    position: relative;
+}
+
+.chapter li > a.active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 6px;
+    bottom: 6px;
+    width: 3px;
+    border-radius: var(--radius-pill);
+    background: var(--color-sunset-orange);
+}
+
+.chapter li.part-title {
+    color: var(--color-stone);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin: 28px 0 6px;
+    padding: 0 12px;
+}
+
+.spacer {
+    background: var(--color-outline-gray);
+    margin: 14px 16px;
+    height: 1px;
+}
+
+.sidebar-resize-handle {
+    display: none;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Page wrapper
+ * ────────────────────────────────────────────────────────────── */
+.page-wrapper {
+    margin-left: var(--sidebar-width);
+    overflow: visible;
+}
+
+html:not(.sidebar-visible) .page-wrapper,
+.no-js .page-wrapper {
+    margin-left: 0;
+}
+
+.page {
+    background: var(--color-canvas);
+    min-height: 100vh;
+    /* Sticky #page-toc needs no scrolling/overflow on its ancestors,
+       otherwise it sticks inside the wrapper instead of the viewport. */
+    overflow: visible;
+}
+
+#content {
+    padding: 0;
+    overflow: visible;
+}
+
+/* Three-column flex: <main> grows, #page-toc is a sticky aside. */
+@media (min-width: 1080px) {
+    #content {
+        display: flex;
+        flex-direction: row;
+        align-items: flex-start;
+        gap: 42px;
+        max-width: var(--page-max);
+        margin: 0 auto;
+        padding: 0 24px;
+        box-sizing: border-box;
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Main content column
+ * ────────────────────────────────────────────────────────────── */
+.content {
+    font-family: var(--font-body);
+    color: var(--color-ash);
+    font-size: 16px;
+    line-height: 1.65;
+    letter-spacing: -0.005em;
+}
+
+.content main {
+    max-width: var(--content-max);
+    width: 100%;
+    margin: 0 auto;
+    padding: 56px 24px 96px;
+    box-sizing: border-box;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+@media (min-width: 1080px) {
+    .content main {
+        margin: 0;
+        padding: 56px 0 96px;
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Typography
+ * ────────────────────────────────────────────────────────────── */
+.content h1,
+.content h2,
+.content h3,
+.content h4,
+.content h5,
+.content h6 {
+    font-family: var(--font-display);
+    color: var(--color-ink);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.25;
+    margin-top: 2em;
+    margin-bottom: 0.5em;
+}
+
+.content h1 {
+    font-size: 40px;
+    font-weight: 800;
+    letter-spacing: -0.035em;
+    line-height: 1.15;
+    margin-top: 0;
+    margin-bottom: 0.5em;
+    padding-bottom: 0;
+    border-bottom: 0;
+}
+
+/* GitBook-style subtitle: first paragraph immediately following H1. */
+.content h1 + p {
+    font-size: 18px;
+    line-height: 1.55;
+    color: var(--color-stone);
+    font-weight: 400;
+    margin-top: -0.2em;
+    margin-bottom: 2em;
+    letter-spacing: -0.01em;
+}
+
+.content h2 {
+    font-size: 22px;
+    margin-top: 2.4em;
+    padding-top: 0.6em;
+    border-top: 1px solid var(--color-outline-gray);
+}
+
+.content h2:first-of-type {
+    border-top: 0;
+    padding-top: 0;
+}
+
+.content h3 {
+    font-size: 19px;
+}
+
+.content h4 {
+    font-size: 16px;
+    color: var(--color-ink);
+}
+
+.content h5,
+.content h6 {
+    font-size: 13px;
+    color: var(--color-stone);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.content p {
+    margin: 0 0 1.1em;
+}
+
+.content strong {
+    color: var(--color-ink);
+    font-weight: 600;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Links
+ * ────────────────────────────────────────────────────────────── */
+.content a,
+.content a:visited {
+    /* color: var(--color-sunset-orange); */
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.content a:hover {
+    color: var(--color-sunset-orange);
+    border-bottom-color: var(--color-sunset-orange);
+    text-decoration: none;
+}
+
+.content a.header {
+    color: inherit !important;
+    border: 0 !important;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Lists
+ * ────────────────────────────────────────────────────────────── */
+.content ul,
+.content ol {
+    padding-left: 1.4em;
+    margin: 0 0 1.1em;
+}
+
+.content li {
+    margin: 0.3em 0;
+}
+
+.content li::marker {
+    color: var(--color-stone);
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Code
+ * ────────────────────────────────────────────────────────────── */
+code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    letter-spacing: -0.01em;
+}
+
+.content :not(pre) > code {
+    background: var(--color-whisper-gray);
+    color: var(--color-ink);
+    border: 1px solid var(--color-outline-gray);
+    border-radius: var(--radius-tags);
+    padding: 1px 6px;
+}
+
+pre {
+    background: var(--color-ink) !important;
+    color: #f5f5f4 !important;
+    border-radius: var(--radius-cards);
+    padding: 18px 22px !important;
+    box-shadow: none;
+    overflow-x: auto;
+    font-size: 14px;
+    line-height: 1.6;
+    margin: 1.4em 0;
+}
+
+pre > code,
+pre code.hljs {
+    background: transparent !important;
+    color: inherit !important;
+    padding: 0 !important;
+    border: 0 !important;
+    font-size: inherit;
+}
+
+pre code.hljs .hljs-comment,
+pre code.hljs .hljs-quote {
+    color: #a8a29e;
+    font-style: italic;
+}
+pre code.hljs .hljs-keyword,
+pre code.hljs .hljs-attribute,
+pre code.hljs .hljs-selector-tag,
+pre code.hljs .hljs-meta-keyword,
+pre code.hljs .hljs-doctag,
+pre code.hljs .hljs-name {
+    color: #fe551b;
+}
+pre code.hljs .hljs-string,
+pre code.hljs .hljs-meta-string,
+pre code.hljs .hljs-symbol,
+pre code.hljs .hljs-bullet {
+    color: #fbbf24;
+}
+pre code.hljs .hljs-number,
+pre code.hljs .hljs-literal {
+    color: #fde68a;
+}
+pre code.hljs .hljs-type,
+pre code.hljs .hljs-class .hljs-title,
+pre code.hljs .hljs-title {
+    color: #93c5fd;
+}
+pre code.hljs .hljs-built_in,
+pre code.hljs .hljs-builtin-name {
+    color: #c4b5fd;
+}
+
+.buttons {
+    color: rgba(255, 255, 255, 0.5) !important;
+}
+.buttons .fa-copy {
+    color: rgba(255, 255, 255, 0.55) !important;
+}
+.buttons .fa-copy:hover {
+    color: #ffffff !important;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Blockquote / callouts
+ * ────────────────────────────────────────────────────────────── */
+.content blockquote {
+    background: var(--color-parchment);
+    border: 1px solid var(--color-outline-gray);
+    border-left: 3px solid var(--color-sunset-orange);
+    border-radius: var(--radius-default);
+    padding: 14px 18px;
+    margin: 1.4em 0;
+    color: var(--color-ink);
+}
+
+.content blockquote p:last-child {
+    margin-bottom: 0;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Tables
+ * ────────────────────────────────────────────────────────────── */
+.content table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    border: 1px solid var(--color-outline-gray);
+    border-radius: var(--radius-default);
+    overflow: hidden;
+    margin: 1.4em 0;
+    font-size: 14px;
+}
+
+.content table th,
+.content table td {
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--color-outline-gray);
+}
+
+.content table tbody tr:last-child th,
+.content table tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+.content table th {
+    background: var(--color-whisper-gray);
+    color: var(--color-ink);
+    font-weight: 600;
+    font-size: 13px;
+}
+
+.content table tbody tr:nth-child(2n) {
+    background: var(--color-parchment);
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Horizontal rule
+ * ────────────────────────────────────────────────────────────── */
+.content hr {
+    border: 0;
+    border-top: 1px solid var(--color-outline-gray);
+    margin: 2.5em 0;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Search
+ * ────────────────────────────────────────────────────────────── */
+#searchbar {
+    background: var(--color-parchment);
+    border: 1px solid var(--color-outline-gray);
+    border-radius: var(--radius-default);
+    box-shadow: none;
+    padding: 10px 14px;
+    color: var(--color-ink);
+}
+
+#searchbar:focus {
+    border-color: var(--color-ink);
+    outline: none;
+}
+
+#searchresults-outer {
+    border-top: 1px solid var(--color-outline-gray);
+}
+
+.searchresults-header {
+    color: var(--color-stone);
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+mark {
+    background: rgba(254, 85, 27, 0.18);
+    color: var(--color-ink);
+    border-radius: 2px;
+    padding: 0 2px;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Prev / next — hidden (using right-side page TOC instead)
+ * ────────────────────────────────────────────────────────────── */
+.nav-chapters,
+.mobile-nav-chapters,
+.nav-wrapper,
+.nav-wide-wrapper,
+.previous,
+.next {
+    display: none !important;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Images
+ * ────────────────────────────────────────────────────────────── */
+.content img {
+    max-width: 100%;
+    height: auto;
+    border-radius: var(--radius-default);
+    box-shadow: var(--shadow-card);
+    background: var(--color-canvas);
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Right-side page TOC (injected by src/theme/page-toc.js as a
+ *  sibling of <main> inside #content; sticky inside the flex row).
+ * ────────────────────────────────────────────────────────────── */
+#page-toc {
+    display: none;
+}
+
+@media (min-width: 1080px) {
+    #page-toc {
+        display: block;
+        position: sticky;
+        top: calc(var(--topbar-height) + 32px);
+        flex: 0 0 var(--toc-width);
+        width: var(--toc-width);
+        max-height: calc(100vh - var(--topbar-height) - 64px);
+        overflow-y: auto;
+        padding: 24px 0 24px 20px;
+        margin: 0;
+        border-left: 1px solid var(--color-outline-gray);
+        font-family: var(--font-body);
+        font-size: 13px;
+        line-height: 1.5;
+        align-self: stretch;
+    }
+
+    .page-toc-title {
+        color: var(--color-stone);
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        margin-bottom: 12px;
+    }
+
+    .page-toc-list {
+        padding-left: 0 !important;
+    }
+
+    .page-toc-list,
+    .page-toc-sublist {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+    }
+
+    /* Indent each nesting level — real <ul> nesting drives the hierarchy. */
+    .page-toc-sublist {
+        padding-left: 14px;
+        margin-top: 2px;
+        border-left: 1px solid var(--color-outline-gray);
+    }
+
+    .page-toc-item {
+        margin: 0;
+    }
+
+    .page-toc-item a,
+    .page-toc-item a:link,
+    .page-toc-item a:visited,
+    .page-toc-item a:focus,
+    .page-toc-item a:active {
+        display: block;
+        padding: 5px 0 5px 12px;
+        color: var(--color-stone);
+        text-decoration: none;
+        border-left: 2px solid transparent;
+        margin-left: -2px;
+        transition: color 0.15s ease, border-color 0.15s ease;
+        outline: none;
+        font-size: 13px;
+    }
+
+    /* Slightly smaller text as we go deeper. */
+    .page-toc-h3 > a {
+        font-size: 12.5px;
+    }
+    .page-toc-h4 > a {
+        font-size: 12px;
+        color: var(--color-stone);
+    }
+
+    .page-toc-item a:hover {
+        color: var(--color-ink);
+        text-decoration: none;
+    }
+
+    /* Active item: the section the reader is currently scrolled into.
+       Set by IntersectionObserver in src/theme/page-toc.js. Ink text +
+       ink left bar — clearly highlighted but not loud (no orange). */
+    .page-toc-item a.active,
+    .page-toc-item a.active:link,
+    .page-toc-item a.active:visited,
+    .page-toc-item a.active:hover,
+    .page-toc-item a.active:focus {
+        color: var(--color-ink);
+        border-left-color: var(--color-ink);
+        font-weight: 600;
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Override mdBook's built-in `:target::before { content: "»" }`
+ *  rule from book/css/general.css. The file is served without an
+ *  explicit charset, so the UTF-8 bytes for » (0xC2 0xBB) render
+ *  as "Â»". Re-declare with a Unicode escape — encoding-proof.
+ * ────────────────────────────────────────────────────────────── */
+.content h1:target::before,
+.content h2:target::before,
+.content h3:target::before,
+.content h4:target::before,
+.content h5:target::before,
+.content h6:target::before {
+    content: "";
+    display: none;
+    margin: 0;
+    width: 0;
+}
+
+/* Below 1080px the TOC hides; main content gets normal padding. */
+@media (max-width: 1079px) {
+    #page-toc {
+        display: none !important;
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Responsive
+ * ────────────────────────────────────────────────────────────── */
+@media (max-width: 1080px) {
+    .content main {
+        padding: 40px 24px 64px;
+    }
+}
+
+@media (max-width: 768px) {
+    .content main {
+        padding: 32px 16px 56px;
+    }
+
+    .content h1 {
+        font-size: 28px;
+    }
+
+    .content h2 {
+        font-size: 22px;
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────
+ *  Print
+ * ────────────────────────────────────────────────────────────── */
+@media print {
+    .sidebar,
+    #menu-bar,
+    #page-toc {
+        display: none !important;
+    }
+
+    .page-wrapper {
+        margin-left: 0;
+    }
+
+    pre {
+        background: var(--color-parchment) !important;
+        color: var(--color-ink) !important;
+        border: 1px solid var(--color-outline-gray);
+        box-shadow: none;
+    }
+
+    .content a {
+        text-decoration: none;
+        color: var(--color-ink);
+    }
+}

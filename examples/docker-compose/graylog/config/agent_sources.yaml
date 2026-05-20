@@ -1,0 +1,16 @@
+sources:
+  - name: demo-graylog
+    type: graylog
+    enable: true
+    graylog:
+      address: http://graylog:9000
+      # Default admin credentials configured below in docker-compose.yml.
+      username: admin
+      password: ${GRAYLOG_PASSWORD:-admin}
+      query: "*"
+      message_field: message
+      severity_field: level
+      extra_fields:
+        - source
+        - service
+      page_size: 500

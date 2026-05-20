@@ -147,8 +147,25 @@ see [GitHub Project](https://github.com/orgs/VersusControl/projects/2).
   routing yet — that lands in a later phase.
 
 ## Planned (v1.4.2 release scope)
-- [ ] **Reliability & load testing** — graceful degradation on log-source
-  outages, AI timeouts, and high log volume.
+- [x] **Graylog signal source** (`pkg/signalsources/graylog.go`) — polls
+  `/api/search/universal/absolute` (synchronous, sorted ascending) with
+  optional `stream_id`, configurable `query`, `message_field`, and extra
+  fields. Auth supports HTTP Basic and the Graylog API-token convention
+  (`<token>:token`). Cursor advances on the max message timestamp seen;
+  inclusive-`from` duplicates filtered client-side.
+- [x] **Splunk signal source** (`pkg/signalsources/splunk.go`) — streams
+  results from `/services/search/v2/jobs/export` (NDJSON). Auth via
+  bearer token (preferred) or HTTP Basic. Sub-second epoch
+  `earliest_time` / `latest_time`; cursor is the max `_time` seen;
+  search auto-prefixed with `search` when missing.
+- [x] **Docker-compose examples** — fully wired stacks under
+  `examples/docker-compose/{graylog,splunk}/` (Graylog + MongoDB +
+  OpenSearch; Splunk Enterprise with HEC) plus ready-to-use
+  `agent_sources.yaml`.
+- [x] **Noisy-log generator extensions** — `scripts/generate_noisy_logs.py`
+  gains `GraylogSink` (GELF UDP) and `SplunkSink` (HEC) with
+  `--graylog-*` / `--splunk-*` flags; `scripts/run_noisy_logs.sh` adds
+  `graylog` and `splunk` targets.
 
 ---
 
@@ -157,6 +174,10 @@ see [GitHub Project](https://github.com/orgs/VersusControl/projects/2).
 Phases land when the prior phase's success criteria hold up under real
 soak. See `local/plans/ai-incident-detection/sre-agent-roadmap.md` for
 full descriptions and ADR references.
+
+### Reliability
+- [ ] **Reliability & load testing** — graceful degradation on log-source
+  outages, AI timeouts, and high log volume.
 
 ### AI SRE Agent — Phase 2: Triage with read-only tools
 - [ ] **Eino agent framework** — replace plain HTTP analyzer with

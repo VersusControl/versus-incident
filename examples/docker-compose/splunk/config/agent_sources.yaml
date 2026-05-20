@@ -1,0 +1,20 @@
+sources:
+  - name: demo-splunk
+    type: splunk
+    enable: true
+    splunk:
+      # Splunk REST API runs on 8089; the web UI is on 8000.
+      address: https://splunk:8089
+      # The example uses HTTP Basic with the default `admin` user.
+      # In production, prefer a Splunk auth token (`token:` field).
+      username: admin
+      password: ${SPLUNK_PASSWORD:-Changeme1!}
+      insecure_skip_verify: true   # self-signed splunkd cert
+      search: 'search index=main'
+      time_field: _time
+      message_field: _raw
+      extra_fields:
+        - host
+        - source
+        - sourcetype
+      page_size: 500

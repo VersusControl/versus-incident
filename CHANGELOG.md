@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.2] — 2026-05
+
+### Added
+
+#### Data sources (AI agent)
+- **Graylog** signal source (`pkg/signalsources/graylog.go`) — polls
+  `/api/search/universal/absolute` (synchronous, sorted ascending) with
+  optional `stream_id`, configurable `query`, `message_field`, and
+  extra fields. Auth supports HTTP Basic and the Graylog API-token
+  convention (`<token>:token`). Cursor advances on the max message
+  timestamp seen; inclusive-`from` duplicates are filtered client-side.
+- **Splunk** signal source (`pkg/signalsources/splunk.go`) — streams
+  results from `/services/search/v2/jobs/export` (NDJSON). Auth via
+  bearer token (preferred) or HTTP Basic. Sub-second epoch
+  `earliest_time` / `latest_time`; cursor is the max `_time` seen.
+  Search string is auto-prefixed with `search` when missing.
+- Agent supports `type: graylog` and `type: splunk` in
+  `agent_sources.yaml` alongside the existing sources.
+
+#### Examples & tooling
+- New docker-compose examples under
+  `examples/docker-compose/{graylog,splunk}/` — fully wired stacks
+  (Graylog + MongoDB + OpenSearch; Splunk Enterprise with HEC) plus
+  ready-to-use `agent_sources.yaml`.
+- `scripts/generate_noisy_logs.py` gains `GraylogSink` (GELF UDP) and
+  `SplunkSink` (HEC) plus `--graylog-*` / `--splunk-*` CLI flags
+  (env-var aware: `GRAYLOG_HOST`, `SPLUNK_HEC_TOKEN`, …).
+- `scripts/run_noisy_logs.sh` adds `graylog` and `splunk` targets.
+
+## [1.4.1] — 2026-05
+
+### Added
+
+#### Team & member management
+- Define teams and members through a
+  new admin UI + REST API (gated by `X-Gateway-Secret`) and assign them
+  to incidents. Members have a name, an editable alias (auto-derived
+  from the name in the UI), and a meta block of per-channel identifiers
+  (Slack ID, Telegram ID, email, Viber ID, MS Teams UPN, PagerDuty user
+  ID, …). Teams have a name, an alias, an optional description, and an
+  ordered member list. Persisted via the existing `storage.Provider`
+  (new `teams` + `members` blobs). Incident records gain optional
+  `assigned_team_id` and `assigned_member_ids` fields. No automatic
+  routing yet — that lands in a later phase.
+- Enable AI SRE detect make on-call
+
 ## [1.4.0] — 2026-05
 
 ### Added

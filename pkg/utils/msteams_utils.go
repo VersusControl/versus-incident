@@ -157,7 +157,8 @@ func ConvertMarkdownToAdaptiveCard(markdown string) AdaptiveCard {
 
 		if codeBlock {
 			// Inside code block, collect text
-			codeBlockText.WriteString(line + "\n")
+			codeBlockText.WriteString(line)
+			codeBlockText.WriteByte('\n')
 			continue
 		}
 
@@ -387,7 +388,8 @@ func ConvertMarkdownToPlainText(markdown string) string {
 			}
 		}
 
-		result.WriteString(line + "\n")
+		result.WriteString(line)
+		result.WriteByte('\n')
 	}
 
 	return result.String()

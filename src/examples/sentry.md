@@ -1,14 +1,7 @@
-## How to Configure Sentry to Send Alerts to MS Teams
+# Sentry alerts to Microsoft Teams
 
-## Table of Contents
-- [Set Up Microsoft Teams Integration (2025 Update)](#set-up-microsoft-teams-integration-2025-update)
-  - [Option 1: Set Up a Power Automate Workflow (Recommended)](#option-1-set-up-a-power-automate-workflow-recommended)
-  - [Option 2: Set Up an MS Teams Webhook (Legacy Method)](#option-2-set-up-an-ms-teams-webhook-legacy-method)
-- [Deploy Versus Incident with MS Teams Enabled](#deploy-versus-incident-with-ms-teams-enabled)
-- [Configure Sentry with Integration Webhooks](#configure-sentry-with-integration-webhooks)
-  - [Create Alert Rules with the Webhook Integration](#create-alert-rules-with-the-webhook-integration)
-- [Test the Integration](#test-the-integration)
-- [Conclusion](#conclusion)
+Route Sentry application alerts through Versus Incident to a Microsoft Teams channel.
+
 
 This guide will show you how to route Sentry alerts through Versus Incident to Microsoft Teams, enabling your team to respond to application issues quickly and efficiently.
 
@@ -16,11 +9,11 @@ This guide will show you how to route Sentry alerts through Versus Incident to M
 1. Microsoft Teams channel with Power Automate or webhook permissions
 2. Sentry account with project owner permissions
 
-### Set Up Microsoft Teams Integration (2025 Update)
+## Set Up Microsoft Teams Integration (2025 Update)
 
 Microsoft has announced the retirement of Office 365 Connectors (including Incoming Webhooks) by the end of 2025. Versus Incident supports both the legacy webhook method and the new Power Automate Workflows method. We recommend using Power Automate Workflows for all new deployments.
 
-#### Option 1: Set Up a Power Automate Workflow (Recommended)
+### Option 1: Set Up a Power Automate Workflow (Recommended)
 
 Follow these steps to create a Power Automate workflow to receive alerts in Microsoft Teams:
 
@@ -40,7 +33,7 @@ Follow these steps to create a Power Automate workflow to receive alerts in Micr
    ```
 9. Click **Save** to save your flow
 
-#### Option 2: Set Up an MS Teams Webhook (Legacy Method)
+### Option 2: Set Up an MS Teams Webhook (Legacy Method)
 
 For backward compatibility, Versus still supports the traditional webhook method (being retired by end of 2025):
 
@@ -50,7 +43,7 @@ For backward compatibility, Versus still supports the traditional webhook method
 4. Name your webhook (e.g., Sentry Alerts) and optionally upload an image.
 5. Click Create, then copy the generated webhook URL. Save this URL — you'll need it later.
 
-### Deploy Versus Incident with MS Teams Enabled
+## Deploy Versus Incident with MS Teams Enabled
 
 Next, configure Versus Incident to forward alerts to MS Teams. Create a directory for your configuration files:
 
@@ -147,7 +140,7 @@ Replace `your_power_automate_url` with the URL you copied from Power Automate. T
 http://localhost:3000/api/incidents
 ```
 
-### Configure Sentry with Integration Webhooks
+## Configure Sentry with Integration Webhooks
 
 Versus Incident is specifically designed to work with **Sentry Integration Webhooks** - a feature that allows Sentry to send detailed issue data to external services when specific events occur. Here's how to set it up:
 
@@ -162,7 +155,7 @@ Versus Incident is specifically designed to work with **Sentry Integration Webho
 7. Under **Services**, check **Issue** to receive issue-related events.
 8. Click **Save Changes**.
 
-#### Create Alert Rules with the Webhook Integration
+### Create Alert Rules with the Webhook Integration
 
 Next, create alert rules that will use this webhook:
 
@@ -176,7 +169,7 @@ Next, create alert rules that will use this webhook:
 
 Sentry will now send standardized Integration webhook payloads to Versus Incident whenever the alert conditions are met. These payloads contain comprehensive issue details including stack traces, error information, and project metadata that Versus Incident can parse and format for MS Teams.
 
-### Test the Integration
+## Test the Integration
 
 To confirm everything works, simulate a Sentry alert using curl:
 
@@ -221,6 +214,6 @@ curl -X POST http://localhost:3000/api/incidents \
 
 Alternatively, trigger a real error in your Sentry-monitored application and verify the alert appears in MS Teams.
 
-### Conclusion
+## Conclusion
 
 By connecting Sentry to MS Teams via Versus Incident, you've created a streamlined alerting system that keeps your team informed of critical issues in real-time. The Sentry Integration Webhook provides rich, detailed information about each issue, and Versus Incident's flexible templating system allows you to present this information in a clear, actionable format for your team.

@@ -1,21 +1,12 @@
-## Understanding PagerDuty On-Call
-
-## Table of Contents
-- [Key Components of PagerDuty On-Call](#key-components-of-pagerduty-on-call)
-- [1. Services](#1-services)
-- [2. Escalation Policies](#2-escalation-policies)
-- [3. Schedules](#3-schedules)
-- [4. Integrations](#4-integrations)
-- [The PagerDuty Incident Lifecycle](#the-pagerduty-incident-lifecycle)
-- [Key Benefits of PagerDuty for On-Call Management](#key-benefits-of-pagerduty-for-on-call-management)
+# PagerDuty: concepts
 
 PagerDuty is a popular incident management platform that provides robust on-call scheduling, alerting, and escalation capabilities. This document explains the key components of PagerDuty's on-call system—services, escalation policies, schedules, and integrations—in a simple and clear way.
 
-### Key Components of PagerDuty On-Call
+## Key Components of PagerDuty On-Call
 
 PagerDuty's on-call system relies on four main components: services, escalation policies, schedules, and integrations. Let's explore each one in detail.
 
-### 1. Services
+## 1. Services
 
 Services in PagerDuty represent the applications, components, or systems that you monitor. Each service:
 
@@ -31,7 +22,7 @@ When an incident is triggered, it's associated with a specific service, which de
 + Have high urgency for all incidents
 + Auto-resolve incidents after 24 hours if fixed
 
-### 2. Escalation Policies
+## 2. Escalation Policies
 
 Escalation policies define who gets notified about an incident and in what order. They ensure that incidents are addressed even if the first responder isn't available.
 
@@ -45,7 +36,7 @@ An escalation policy typically includes:
 + Level 2: If no response in 15 minutes, notify the secondary on-call engineer
 + Level 3: If still no response in 10 minutes, notify the engineering manager
 
-### 3. Schedules
+## 3. Schedules
 
 Schedules determine who is on-call at any given time. They allow teams to:
 + Define rotation patterns (daily, weekly, custom)
@@ -57,7 +48,7 @@ PagerDuty's schedules are highly flexible and can accommodate complex team struc
 
 **Example:** A "Backend Team Primary" schedule might rotate three engineers weekly, with handoffs occurring every Monday at 9 AM local time. A separate "Backend Team Secondary" schedule might rotate a different group of engineers as backup.
 
-### 4. Integrations
+## 4. Integrations
 
 Integrations connect PagerDuty to your monitoring tools, allowing alerts to be automatically converted into PagerDuty incidents. PagerDuty offers hundreds of integrations with popular monitoring systems.
 
@@ -70,7 +61,7 @@ For custom systems or tools without direct integrations, PagerDuty provides:
 + Application error tracking with their "Application Errors" service
 + Custom business logic monitors with their "Business Metrics" service
 
-### The PagerDuty Incident Lifecycle
+## The PagerDuty Incident Lifecycle
 
 When an incident is created in PagerDuty:
 
@@ -82,7 +73,7 @@ When an incident is created in PagerDuty:
 
 This structured approach ensures that incidents are handled efficiently and consistently.
 
-### Key Benefits of PagerDuty for On-Call Management
+## Key Benefits of PagerDuty for On-Call Management
 
 + **Reliability**: Ensures critical alerts never go unnoticed with multiple notification methods and escalation paths
 + **Flexibility**: Supports complex team structures and rotation patterns

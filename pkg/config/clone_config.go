@@ -356,6 +356,30 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 					FilterPattern:   s.CloudWatchLogs.FilterPattern,
 					PageSize:        s.CloudWatchLogs.PageSize,
 				},
+				Graylog: AgentGraylogSourceConfig{
+					Address:            s.Graylog.Address,
+					Username:           s.Graylog.Username,
+					Password:           s.Graylog.Password,
+					APIToken:           s.Graylog.APIToken,
+					InsecureSkipVerify: s.Graylog.InsecureSkipVerify,
+					Query:              s.Graylog.Query,
+					StreamID:           s.Graylog.StreamID,
+					MessageField:       s.Graylog.MessageField,
+					SeverityField:      s.Graylog.SeverityField,
+					PageSize:           s.Graylog.PageSize,
+				},
+				Splunk: AgentSplunkSourceConfig{
+					Address:            s.Splunk.Address,
+					Token:              s.Splunk.Token,
+					Username:           s.Splunk.Username,
+					Password:           s.Splunk.Password,
+					InsecureSkipVerify: s.Splunk.InsecureSkipVerify,
+					Search:             s.Splunk.Search,
+					TimeField:          s.Splunk.TimeField,
+					MessageField:       s.Splunk.MessageField,
+					SeverityField:      s.Splunk.SeverityField,
+					PageSize:           s.Splunk.PageSize,
+				},
 			}
 			if s.Elasticsearch.Addresses != nil {
 				c.Elasticsearch.Addresses = append([]string(nil), s.Elasticsearch.Addresses...)
@@ -365,6 +389,15 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 			}
 			if s.Loki.ExtraLabels != nil {
 				c.Loki.ExtraLabels = append([]string(nil), s.Loki.ExtraLabels...)
+			}
+			if s.Graylog.Fields != nil {
+				c.Graylog.Fields = append([]string(nil), s.Graylog.Fields...)
+			}
+			if s.Graylog.ExtraFields != nil {
+				c.Graylog.ExtraFields = append([]string(nil), s.Graylog.ExtraFields...)
+			}
+			if s.Splunk.ExtraFields != nil {
+				c.Splunk.ExtraFields = append([]string(nil), s.Splunk.ExtraFields...)
 			}
 			cloned.Sources[i] = c
 		}

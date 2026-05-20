@@ -1,22 +1,13 @@
-## Configuring Fluent Bit to Send Error Logs to Versus Incident
+# Forward Fluent Bit error logs
 
-## Table of Contents
-- [Understand the Log Format](#understand-the-log-format)
-- [Configure Fluent Bit Filters](#configure-fluent-bit-filters)
-  - [Filter Configuration](#filter-configuration)
-  - [Explanation](#explanation)
-- [Configure Fluent Bit Output](#configure-fluent-bit-output)
-  - [Output Configuration](#output-configuration)
-  - [Explanation](#explanation-1)
-- [Full Fluent Bit Configuration Example](#full-fluent-bit-configuration-example)
-- [Test the Configuration](#test-the-configuration)
-- [Conclusion](#conclusion)
+Filter `[ERROR]` lines with Fluent Bit and ship them straight to the Versus Incident REST API.
+
 
 ![Diagram](/docs/images/diagram.png)
 
 Fluent Bit is a lightweight log processor and forwarder that can filter, modify, and forward logs to various destinations. In this tutorial, we will configure Fluent Bit to filter logs containing [ERROR] and send them to the Versus Incident Management System using its REST API.
 
-### Understand the Log Format
+## Understand the Log Format
 
 The log format provided is as follows, you can create a `sample.log` file:
 
@@ -29,11 +20,11 @@ The log format provided is as follows, you can create a `sample.log` file:
 
 We are interested in filtering logs that contain `[ ERROR ]`.
 
-### Configure Fluent Bit Filters
+## Configure Fluent Bit Filters
 
 To filter and process logs, we use the `grep` and `modify` filters in Fluent Bit.
 
-#### Filter Configuration
+### Filter Configuration
 
 Add the following configuration to your Fluent Bit configuration file:
 
@@ -52,7 +43,7 @@ Add the following configuration to your Fluent Bit configuration file:
     Set     ServiceName order-service
 ```
 
-#### Explanation
+### Explanation
 
 1. **Grep Filter**:
 
@@ -73,11 +64,11 @@ Default Telegram Template
 {{.Logs}}
 ```
 
-### Configure Fluent Bit Output
+## Configure Fluent Bit Output
 
 To send filtered logs to the Versus Incident Management System, we use the `http` output plugin.
 
-#### Output Configuration
+### Output Configuration
 
 Add the following configuration to your Fluent Bit configuration file:
 
@@ -93,7 +84,7 @@ Add the following configuration to your Fluent Bit configuration file:
     Format  json_stream
 ```
 
-#### Explanation
+### Explanation
 
 1. **Name**: Specifies the output plugin (`http` in this case).
 2. **Match**: Matches all logs processed by the previous filters.
@@ -101,7 +92,7 @@ Add the following configuration to your Fluent Bit configuration file:
 4. **URI**: Specifies the endpoint for creating incidents (`/api/incidents`).
 5. **Format**: Ensures the payload is sent in **JSON Stream** format.
 
-### Full Fluent Bit Configuration Example
+## Full Fluent Bit Configuration Example
 
 Here is the complete Fluent Bit configuration file:
 
@@ -137,7 +128,7 @@ Here is the complete Fluent Bit configuration file:
     Format  json_stream
 ```
 
-### Test the Configuration
+## Test the Configuration
 
 Run Versus Incident:
 

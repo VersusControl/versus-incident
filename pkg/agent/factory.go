@@ -47,6 +47,20 @@ func BuildSources(cfg config.AgentConfig) ([]core.SignalSource, []error) {
 				continue
 			}
 			sources = append(sources, cw)
+		case "graylog":
+			gl, err := signalsources.NewGraylogSource(s.Name, s.Graylog)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("source %s: %w", s.Name, err))
+				continue
+			}
+			sources = append(sources, gl)
+		case "splunk":
+			sp, err := signalsources.NewSplunkSource(s.Name, s.Splunk)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("source %s: %w", s.Name, err))
+				continue
+			}
+			sources = append(sources, sp)
 		default:
 			errs = append(errs, fmt.Errorf("source %s: unknown type %q", s.Name, s.Type))
 		}

@@ -8,10 +8,12 @@
 #   INTERVAL=10 BATCH=50 ./scripts/run_noisy_logs.sh
 #   ./scripts/run_noisy_logs.sh --output local/resource/noisy-app.log
 #
-#   # target a Loki / Elasticsearch / CloudWatch backend instead of a file:
+#   # target a Loki / Elasticsearch / CloudWatch / Graylog / Splunk backend:
 #   ./scripts/run_noisy_logs.sh --target loki
 #   ./scripts/run_noisy_logs.sh --target elasticsearch
 #   TARGET=cloudwatch CW_LOG_GROUP_NAME=/aws/lambda/foo ./scripts/run_noisy_logs.sh
+#   ./scripts/run_noisy_logs.sh --target graylog
+#   SPLUNK_HEC_TOKEN=... ./scripts/run_noisy_logs.sh --target splunk
 #
 #   # inject a single spike burst, then exit:
 #   ./scripts/run_noisy_logs.sh --spike db-conn-refused
@@ -20,7 +22,7 @@
 # Env vars / flags (live tail):
 #   INTERVAL       seconds between batches             (default 5)
 #   BATCH          lines per batch                     (default 20)
-#   TARGET         file|loki|elasticsearch|cloudwatch  (default file)
+#   TARGET         file|loki|elasticsearch|cloudwatch|graylog|splunk  (default file)
 #   OUTPUT         log file (file target only)         (default local/resource/noisy-app.log)
 #   ITER           max iterations, 0 = infinite        (default 0)
 #
@@ -38,6 +40,17 @@
 #   CW_LOG_GROUP_NAME   (required)
 #   CW_LOG_STREAM       (default noisy-app)
 #   CW_REGION / AWS_REGION
+#
+# Graylog target (GELF UDP — input must already be configured in Graylog):
+#   GRAYLOG_HOST     (default localhost)
+#   GRAYLOG_PORT     (default 12201)
+#   GRAYLOG_SOURCE   (default noisy)         ## GELF `host` field
+#
+# Splunk target (HTTP Event Collector):
+#   SPLUNK_URL          (default https://localhost:8088)
+#   SPLUNK_HEC_TOKEN    (required)
+#   SPLUNK_INDEX        (default main)
+#   SPLUNK_SOURCETYPE   (default _json)
 #
 # Spike-mode (disables live tail when set):
 #   SPIKE          template name to burst              (e.g. db-conn-refused)
@@ -83,7 +96,7 @@ while [[ $# -gt 0 ]]; do
     --list-templates) LIST_TEMPLATES=1;  shift ;;
     --list-scenarios) LIST_SCENARIOS=1;  shift ;;
     -h|--help)
-      sed -n '2,55p' "$0"; exit 0 ;;
+      sed -n '2,67p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -137,6 +150,23 @@ case "$TARGET" in
     [[ -n "${CW_REGION:-${AWS_REGION:-}}" ]] && \
       target_args+=( --cw-region "${CW_REGION:-${AWS_REGION}}" )
     summary_target="cloudwatch:${CW_LOG_GROUP_NAME}/${CW_LOG_STREAM:-noisy-app}"
+    ;;
+  graylog)
+    target_args+=( --graylog-host "${GRAYLOG_HOST:-localhost}" \
+                   --graylog-port "${GRAYLOG_PORT:-12201}" \
+                   --graylog-source "${GRAYLOG_SOURCE:-noisy}" )
+    summary_target="graylog:gelf://${GRAYLOG_HOST:-localhost}:${GRAYLOG_PORT:-12201}"
+    ;;
+  splunk)
+    if [[ -z "${SPLUNK_HEC_TOKEN:-}" ]]; then
+      echo "TARGET=splunk requires SPLUNK_HEC_TOKEN" >&2
+      exit 2
+    fi
+    target_args+=( --splunk-url "${SPLUNK_URL:-https://localhost:8088}" \
+                   --splunk-token "$SPLUNK_HEC_TOKEN" \
+                   --splunk-index "${SPLUNK_INDEX:-main}" \
+                   --splunk-sourcetype "${SPLUNK_SOURCETYPE:-_json}" )
+    summary_target="splunk:${SPLUNK_URL:-https://localhost:8088} index=${SPLUNK_INDEX:-main}"
     ;;
   *)
     echo "unknown TARGET: $TARGET" >&2; exit 2 ;;

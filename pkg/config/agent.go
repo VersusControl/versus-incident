@@ -88,12 +88,14 @@ type AgentRegexConfig struct {
 
 type AgentSourceConfig struct {
 	Name           string                          `mapstructure:"name"`
-	Type           string                          `mapstructure:"type"` // "elasticsearch" | "file" | "loki" | "cloudwatchlogs"
+	Type           string                          `mapstructure:"type"` // "elasticsearch" | "file" | "loki" | "cloudwatchlogs" | "graylog" | "splunk"
 	Enable         bool                            `mapstructure:"enable"`
 	Elasticsearch  AgentElasticsearchSourceConfig  `mapstructure:"elasticsearch"`
 	File           AgentFileSourceConfig           `mapstructure:"file"`
 	Loki           AgentLokiSourceConfig           `mapstructure:"loki"`
 	CloudWatchLogs AgentCloudWatchLogsSourceConfig `mapstructure:"cloudwatchlogs"`
+	Graylog        AgentGraylogSourceConfig        `mapstructure:"graylog"`
+	Splunk         AgentSplunkSourceConfig         `mapstructure:"splunk"`
 }
 
 // AgentFileSourceConfig drives the file-tailing SignalSource.
@@ -206,6 +208,78 @@ type AgentCloudWatchLogsSourceConfig struct {
 	// See AWS docs. Empty matches every event.
 	FilterPattern string `mapstructure:"filter_pattern"`
 	// PageSize is the per-call limit (max 10000). Default 500.
+	PageSize int `mapstructure:"page_size"`
+}
+
+// AgentGraylogSourceConfig drives the Graylog SignalSource.
+//
+// The source uses Graylog's `search/universal/absolute` REST endpoint —
+// synchronous, sorted by timestamp ascending, and cursor-friendly.
+type AgentGraylogSourceConfig struct {
+	// Address is the Graylog base URL, e.g. "https://graylog:9000".
+	Address string `mapstructure:"address"`
+	// Username + Password for HTTP Basic auth. Standard Graylog login.
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
+	// APIToken is an alternative to Username/Password. When set the
+	// source sends Basic auth with the token as the username and the
+	// literal string "token" as the password (Graylog convention).
+	APIToken           string `mapstructure:"api_token"`
+	InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"`
+	// Query is a Graylog search string, e.g. `level:ERROR AND service:api`.
+	// Defaults to "*" (match all) when empty.
+	Query string `mapstructure:"query"`
+	// StreamID optionally restricts the search to a single stream
+	// (Graylog stream ids look like "000000000000000000000001").
+	StreamID string `mapstructure:"stream_id"`
+	// MessageField is the field copied into Signal.Message.
+	// Default "message".
+	MessageField string `mapstructure:"message_field"`
+	// SeverityField is the field copied into Signal.Severity.
+	// Default "level".
+	SeverityField string `mapstructure:"severity_field"`
+	// Fields, when non-empty, restricts the server-side projection to
+	// these fields (faster + smaller responses).
+	Fields []string `mapstructure:"fields"`
+	// ExtraFields are additional fields copied into Signal.Fields. They
+	// must also appear in Fields (or Fields must be empty so the server
+	// returns the whole document).
+	ExtraFields []string `mapstructure:"extra_fields"`
+	// PageSize caps results per tick (Graylog default cap is 150).
+	// Default 500.
+	PageSize int `mapstructure:"page_size"`
+}
+
+// AgentSplunkSourceConfig drives the Splunk SignalSource.
+//
+// The source uses Splunk's `search/v2/jobs/export` REST endpoint for
+// streaming JSON results. Auth uses a bearer token by default (HEC /
+// auth tokens); HTTP Basic is the fallback for username/password setups.
+type AgentSplunkSourceConfig struct {
+	// Address is the Splunk REST base URL, e.g. "https://splunk:8089".
+	Address string `mapstructure:"address"`
+	// Token is sent as `Authorization: Bearer <token>` and takes
+	// priority over Username/Password when set.
+	Token string `mapstructure:"token"`
+	// Username + Password fall back to HTTP Basic auth.
+	Username           string `mapstructure:"username"`
+	Password           string `mapstructure:"password"`
+	InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"`
+	// Search is the SPL query. May start with the `search` command
+	// (added automatically when missing). Example:
+	// `index=main sourcetype=api level=error`.
+	Search string `mapstructure:"search"`
+	// TimeField is the timestamp field on each result. Default "_time".
+	TimeField string `mapstructure:"time_field"`
+	// MessageField is the field copied into Signal.Message.
+	// Default "_raw".
+	MessageField string `mapstructure:"message_field"`
+	// SeverityField is the field copied into Signal.Severity. Empty by
+	// default — Splunk events do not have a canonical severity field.
+	SeverityField string `mapstructure:"severity_field"`
+	// ExtraFields are copied into Signal.Fields.
+	ExtraFields []string `mapstructure:"extra_fields"`
+	// PageSize caps results per tick. Default 500.
 	PageSize int `mapstructure:"page_size"`
 }
 
