@@ -1,21 +1,14 @@
-## Understanding AWS Incident Manager On-Call
-
-## Table of Contents
-- [Key Components of AWS Incident Manager On-Call](#key-components-of-aws-incident-manager-on-call)
-  - [1. Contacts](#1-contacts)
-  - [2. Escalation Plans](#2-escalation-plans)
-  - [3. Runbooks (Options)](#3-runbooks-options)
-  - [4. Response Plans](#4-response-plans)
+# AWS Incident Manager: concepts
 
 AWS On-Call is a service that helps organizations manage and respond to incidents quickly and effectively. It’s part of AWS Systems Manager. This document explains the key parts of AWS Incident Manager On-Call—contacts, escalation plans, runbooks, and response plans—in a simple and clear way.
 
-### Key Components of AWS Incident Manager On-Call
+## Key Components of AWS Incident Manager On-Call
 
 AWS Incident Manager On-Call relies on four main pieces: contacts, escalation plans, runbooks, and response plans. Let’s break them down one by one.
 
 ![Versus](/docs/images/aws-icm.png)
 
-### 1. Contacts
+## 1. Contacts
 
 Contacts are the people who get notified when an incident happens. These could be:
 + On-call engineers (the ones on duty to fix things).
@@ -33,7 +26,7 @@ Each contact has contact methods—ways to reach them, like:
 
 If an incident occurs, AWS Incident Manager can send him a text and an email to let him know she’s needed.
 
-### 2. Escalation Plans
+## 2. Escalation Plans
 
 An escalation plan is a set of rules that decides who gets notified—and in what order—if an incident isn’t handled quickly. It’s like a backup plan to make sure someone responds, even if the first person is unavailable.
 
@@ -48,7 +41,7 @@ You can set it up to:
 
 This way, the incident doesn’t get stuck waiting for one person—it keeps moving until someone takes action.
 
-### 3. Runbooks (Options)
+## 3. Runbooks (Options)
 
 Runbooks are like instruction manuals that AWS can follow automatically to fix an incident. They’re built in AWS Systems Manager Automation and contain steps to solve common problems without needing a human to step in.
 
@@ -63,7 +56,7 @@ Runbooks can:
 
 This saves time by fixing the problem before an engineer even picks up their phone.
 
-### 4. Response Plans
+## 4. Response Plans
 
 A response plan is the master plan that pulls everything together. It tells AWS Incident Manager:
 + Which contacts to notify.

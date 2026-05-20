@@ -1,21 +1,15 @@
-## Migration Guide to v1.3.0
+# Migrating to v1.3.0
 
-## Table of Contents
-- [Key Changes in v1.3.0](#key-changes-in-v130)
-  - [1. New Provider Configuration (Major Change from v1.2.0)](#1-new-provider-configuration-major-change-from-v120)
-  - [2. PagerDuty Integration (New in v1.3.0)](#2-pagerduty-integration-new-in-v130)
-  - [3. AWS Incident Manager Environment-Specific Response Plans (New in v1.3.0)](#3-aws-incident-manager-environment-specific-response-plans-new-in-v130)
-- [How to Migrate from v1.2.0](#how-to-migrate-from-v120)
-- [Complete Configuration Example](#complete-configuration-example)
-- [Upgrading from v1.2.0](#upgrading-from-v120)
+Configuration and behaviour changes between v1.2 and v1.3, plus how to upgrade safely.
+
 
 This guide explains the changes introduced in Versus Incident v1.3.0 and how to update your configuration to take advantage of the new features.
 
-### Key Changes in v1.3.0
+## Key Changes in v1.3.0
 
 Version 1.3.0 introduces enhanced on-call management capabilities and configuration options, with a focus on flexibility and team-specific routing.
 
-#### 1. New Provider Configuration (Major Change from v1.2.0)
+### 1. New Provider Configuration (Major Change from v1.2.0)
 
 A significant change in v1.3.0 is the introduction of the `provider` property in the on-call configuration, which allows you to explicitly specify which on-call service to use:
 
@@ -28,7 +22,7 @@ oncall:
 
 This change enables Versus Incident to support multiple on-call providers simultaneously. In v1.2.0, there was no provider selection mechanism, as AWS Incident Manager was the only supported provider.
 
-#### 2. PagerDuty Integration (New in v1.3.0)
+### 2. PagerDuty Integration (New in v1.3.0)
 
 Version 1.3.0 introduces PagerDuty as a new on-call provider with comprehensive configuration options:
 
@@ -60,7 +54,7 @@ curl -X POST "http://your-versus-host:3000/api/incidents?pagerduty_other_routing
   }'
 ```
 
-#### 3. AWS Incident Manager Environment-Specific Response Plans (New in v1.3.0)
+### 3. AWS Incident Manager Environment-Specific Response Plans (New in v1.3.0)
 
 Version 1.3.0 enhances AWS Incident Manager integration with support for environment-specific response plans:
 
@@ -92,11 +86,11 @@ curl -X POST "http://your-versus-host:3000/api/incidents?awsim_other_response_pl
   }'
 ```
 
-### How to Migrate from v1.2.0
+## How to Migrate from v1.2.0
 
 If you're upgrading from v1.2.0, update your on-call configuration to include the `provider` property.
 
-### Complete Configuration Example
+## Complete Configuration Example
 
 Replace your existing on-call configuration with the new structure:
 
@@ -127,7 +121,7 @@ redis:  # Required for on-call functionality
   db: 0
 ```
 
-### Upgrading from v1.2.0
+## Upgrading from v1.2.0
 
 1. Update your Versus Incident deployment to v1.3.0:
    ```bash

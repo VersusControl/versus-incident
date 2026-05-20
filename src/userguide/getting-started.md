@@ -1,30 +1,15 @@
-## Getting Started
+# Getting Started
 
-## Table of Contents
-- [Prerequisites](#prerequisites)
-- [Easy Installation with Docker](#easy-installation-with-docker)
-- [Admin Dashboard](#admin-dashboard)
-- [Storage Backend](#storage-backend)
-- [Universal Alert Template Support](#universal-alert-template-support)
-  - [Example: Send an Alertmanager alert](#example-send-an-alertmanager-alert)
-  - [Example: Send a Sentry alert](#example-send-a-sentry-alert)
-- [Development Custom Templates](#development-custom-templates)
-  - [Docker](#docker)
-  - [Understanding Custom Templates](#understanding-custom-templates-with-monitoring-webhooks)
-  - [Kubernetes](#kubernetes)
-  - [Helm Chart](#helm-chart)
-- [SNS Usage](#sns-usage)
-- [AI Agent](#ai-agent)
-- [On-Call](#on-call)
+Get Versus Incident running locally with Docker and send your first alert in under five minutes.
 
-### Prerequisites
+## Prerequisites
 
 - Docker 20.10+ (optional)
 - Slack workspace (for Slack notifications)
 - A `GATEWAY_SECRET` value of your choosing (required if you want to
   use the admin dashboard)
 
-### Easy Installation with Docker
+## Easy Installation with Docker
 
 ```bash
 docker run -p 3000:3000 \
@@ -40,7 +25,7 @@ Versus listens on port 3000 by default and exposes:
 - `POST /api/incidents` — webhook endpoint for monitoring tools.
 - `GET  /` — the embedded **admin dashboard**, open <http://localhost:3000/> in your browser. For the full UI walkthrough and the build/watch scripts, see [Admin Dashboard](./admin-ui.md).
 
-### Universal Alert Template Support
+## Universal Alert Template Support
 
 Our default template automatically handles alerts from multiple sources, including:
 - Alertmanager (Prometheus)
@@ -49,7 +34,7 @@ Our default template automatically handles alerts from multiple sources, includi
 - CloudWatch SNS
 - FluentBit
 
-#### Example: Send an Alertmanager alert
+### Example: Send an Alertmanager alert
 
 ```bash
 curl -X POST "http://localhost:3000/api/incidents" \
@@ -90,7 +75,7 @@ curl -X POST "http://localhost:3000/api/incidents" \
   }'
 ```
 
-#### Example: Send a Sentry alert
+### Example: Send a Sentry alert
 
 ```bash
 curl -X POST "http://localhost:3000/api/incidents" \
@@ -136,8 +121,6 @@ curl -X POST "http://localhost:3000/api/incidents" \
 ![Versus Result](/docs/images/versus-result-01.png)
 
 ## Development Custom Templates
-
-### Docker
 
 Create a configuration file:
 
@@ -305,7 +288,7 @@ Here's a sample FluentBit configuration to send logs to Versus:
 <@SLACK_ONCALL_USER_ID> Please investigate!
 ```
 
-#### Other Templates
+### Other Templates
 
 **Telegram Template**
 
@@ -387,4 +370,3 @@ aws sns publish \
 - [Configuration](./configuration.md) — every config key, env var, and
   per-request query parameter.
 - [Advanced Template Tips](./advanced-template-tips.md) - learn how to write template
-

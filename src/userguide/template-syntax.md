@@ -2,16 +2,6 @@
 
 This document explains the template syntax (Go template syntax) used for create a custom alert template in Versus Incident.
 
-## Table of Contents
-- [Basic Syntax](#basic-syntax)
-  - [Access Data](#access-data)
-  - [Variables](#variables)
-  - [Pipelines](#pipelines)
-- [Control Structures](#control-structures)
-  - [Conditionals (if/else)](#conditionals)
-  - [Loops (range)](#loops)
-- [Microsoft Teams Templates](#microsoft-teams-templates)
-
 ## Basic Syntax
 
 ### Access Data

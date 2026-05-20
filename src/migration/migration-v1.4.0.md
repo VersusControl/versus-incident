@@ -1,23 +1,13 @@
-## Migration Guide to v1.4.0
-
-## Table of Contents
-- [Key Changes in v1.4.0](#key-changes-in-v140)
-  - [1. AI Detect Mode is now end-to-end](#1-ai-detect-mode-is-now-end-to-end)
-  - [2. Removed: `agent.ai.base_url`](#2-removed-agentaibase_url)
-  - [3. New admin endpoints (gated by `gateway_secret`)](#3-new-admin-endpoints-gated-by-gateway_secret)
-  - [4. Notification templates updated](#4-notification-templates-updated)
-  - [5. `core.AISRE.Analyze` signature change (Go integrators only)](#5-coreaisreanalyze-signature-change-go-integrators-only)
-- [How to Migrate from v1.3.x](#how-to-migrate-from-v13x)
-- [Upgrading](#upgrading)
+# Migrating to v1.4.0
 
 This guide explains the changes introduced in Versus Incident v1.4.0
 and how to update your configuration. Most existing deployments need
 **no config changes** — the AI agent stays opt-in and defaults to
 `agent.enable: false`.
 
-### Key Changes in v1.4.0
+## Key Changes in v1.4.0
 
-#### 1. AI Detect Mode is now end-to-end
+### 1. AI Detect Mode is now end-to-end
 
 In v1.3.x, the agent could observe and shadow-log unknown patterns but
 could not emit incidents from AI verdicts. In v1.4.0, switching
@@ -37,7 +27,7 @@ in the UI under **Agent → Detect**.
 
 See the new guide: [AI Detect Mode](../agent/ai-detect-mode.md).
 
-#### 2. Removed: `agent.ai.base_url`
+### 2. Removed: `agent.ai.base_url`
 
 The OpenAI endpoint is now hardcoded to
 `https://api.openai.com/v1/chat/completions`. The `base_url` field and
@@ -59,7 +49,7 @@ fail. A future minor release may treat unknown keys as fatal.
 Multi-LLM support (Anthropic, Bedrock, Ollama, OpenAI-compatible
 gateways) is on the [roadmap](../../ROADMAP.md) under Phase 7.
 
-#### 3. New admin endpoints (gated by `gateway_secret`)
+### 3. New admin endpoints (gated by `gateway_secret`)
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -74,7 +64,7 @@ All require the `X-Gateway-Secret` header to match the root-level
 `gateway_secret`. **An empty secret means the admin endpoints are not
 registered at all** — no silent open admin surface.
 
-#### 4. Notification templates updated
+### 4. Notification templates updated
 
 If you use the **shipped** templates (`config/{slack,telegram,msteams,
 lark,viber}_message.tmpl`), no action is required — they now correctly
@@ -85,7 +75,7 @@ If you have **forked** any of these templates, port the new
 `Versus Agent` source detection block. Look for the `if eq .Source
 "Versus Agent"` branch in the upstream files.
 
-#### 5. `core.AISRE.Analyze` signature change (Go integrators only)
+### 5. `core.AISRE.Analyze` signature change (Go integrators only)
 
 This only matters if you have a custom implementation of the
 `core.AISRE` interface in your fork.
@@ -102,7 +92,7 @@ received, the model name, and the call duration. The detect-mode audit
 log uses these fields. Update your implementation to populate them
 (empty strings are tolerated for non-OpenAI backends).
 
-### How to Migrate from v1.3.x
+## How to Migrate from v1.3.x
 
 Most users do not need to change anything. The agent is opt-in and
 disabled by default.
@@ -133,7 +123,7 @@ If you were already running the agent in `training` or `shadow` mode:
 
 If you fork the channel templates, see §4.
 
-### Upgrading
+## Upgrading
 
 ```bash
 # Docker
@@ -148,7 +138,7 @@ helm upgrade versus-incident oci://ghcr.io/versuscontrol/charts/versus-incident 
 Restart the service to apply the changes. Existing pattern catalogs
 and shadow logs are forward-compatible (no schema migration).
 
-### Helm chart changes (1.3.x → 1.4.0)
+## Helm chart changes (1.3.x → 1.4.0)
 
 Chart `1.4.0` adds first-class support for everything that v1.4.0
 ships in the binary. Key additions to `values.yaml`:

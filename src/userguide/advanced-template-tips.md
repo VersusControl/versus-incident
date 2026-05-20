@@ -1,11 +1,8 @@
-## Advanced Template Tips
+# Advanced Template Tips
 
-## Table of Contents
-- [Multi-Service Template](#multi-service-template)
-- [Conditional Formatting](#conditional-formatting)
-- [Best Practices for Custom Templates](#best-practices-for-custom-templates)
+Patterns and snippets for writing richer alert templates — multi-service rendering, custom helpers, and channel-specific formatting.
 
-### Multi-Service Template
+## Multi-Service Template
 
 Handle multiple alerts in one template:
 
@@ -40,7 +37,7 @@ Owner <@{{.UserID}}> please investigate
 {{ end }}
 ```
 
-### Conditional Formatting
+## Conditional Formatting
 
 Highlight critical issues:
 
@@ -52,7 +49,7 @@ Highlight critical issues:
 {{ end }}
 ```
 
-### Best Practices for Custom Templates
+## Best Practices for Custom Templates
 
 1. Keep It Simple: Focus on the most critical details for each alert.
 2. Use Conditional Logic: Tailor messages based on event severity or type.

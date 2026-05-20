@@ -14,7 +14,7 @@ With the built-in **AI SRE Agent**, Versus goes further — continuously observi
 
 ![Versus](docs/images/versus-dashboard-01.png)
 
-### Features
+## Features
 
 - 🚨 **Multi-channel Alerts**: Send incident notifications to Slack, Microsoft Teams, Telegram, and Email (more channels coming!)
 - 📝 **Custom Templates**: Define your own alert messages using Go templates
@@ -33,16 +33,16 @@ cross-signal correlation).
 
 ## Support The Project
 
-[GitHub Sponsors](https://github.com/sponsors/versuscontrol) · see [https://github.com/VersusControl/versus-incident/blob/main/SPONSORS.md](SPONSORS.md)
+[GitHub Sponsors](https://github.com/sponsors/versuscontrol) · see [SPONSORS.md](https://github.com/VersusControl/versus-incident/blob/main/SPONSORS.md)
 
 ## Contributing
 
-Contributions are welcome. Please read [https://github.com/VersusControl/versus-incident/blob/main/CONTRIBUTING.md](CONTRIBUTING.md)
+Contributions are welcome. Please read [CONTRIBUTING.md](https://github.com/VersusControl/versus-incident/blob/main/CONTRIBUTING.md)
 for development setup, coding standards, and the PR process, and review
-the [https://github.com/VersusControl/versus-incident/blob/main/CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) and [https://github.com/VersusControl/versus-incident/blob/main/SECURITY.md](SECURITY.md)
+the [CODE_OF_CONDUCT.md](https://github.com/VersusControl/versus-incident/blob/main/CODE_OF_CONDUCT.md) and [SECURITY.md](https://github.com/VersusControl/versus-incident/blob/main/SECURITY.md)
 before reporting vulnerabilities.
 
-Project governance is documented in [https://github.com/VersusControl/versus-incident/blob/main/GOVERNANCE.md](GOVERNANCE.md).
+Project governance is documented in [GOVERNANCE.md](https://github.com/VersusControl/versus-incident/blob/main/GOVERNANCE.md).
 
 ## License
 

@@ -1,26 +1,6 @@
-## Configuration
+# Configuration
 
-## Table of Contents
-- [Sample Configuration File](#sample-configuration-file)
-- [Environment Variables](#environment-variables)
-  - [Common](#common)
-  - [Admin & Gateway](#admin--gateway)
-  - [Storage](#storage)
-  - [Slack Configuration](#slack-configuration)
-  - [Telegram Configuration](#telegram-configuration)
-  - [Email Configuration](#email-configuration)
-  - [Microsoft Teams Configuration](#microsoft-teams-configuration)
-  - [Lark Configuration](#lark-configuration)
-  - [Queue Services Configuration](#queue-services-configuration)
-  - [On-Call Configuration](#on-call-configuration)
-  - [Redis Configuration](#redis-configuration)
-  - [AI Agent Configuration](#ai-agent-configuration)
-- [Dynamic Configuration with Query Parameters](#dynamic-configuration-with-query-parameters)
-  - [Examples for Each Query Parameter](#examples-for-each-query-parameter)
-  - [Combining Multiple Parameters](#combining-multiple-parameters)
-- [SNS Listener](#sns-listener)
-- [AI Agent](#ai-agent)
-- [On-Call](#on-call)
+Centralised reference for `config/config.yaml`, environment variables, and per-request overrides used by Versus Incident.
 
 A sample configuration file is located at `config/config.yaml`:
 

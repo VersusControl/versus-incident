@@ -234,7 +234,7 @@ The practical rule: keep `max_lines_per_pull ≤ agent.batch_max`. If you
 flip them around, the worker's hard truncation kicks in and you lose
 signals on every tick.
 
-##### Worked example
+#### Worked example
 
 Suppose you have a 50,000-line backlog, `poll_interval: 30s`,
 `max_lines_per_pull: 1000`, and `agent.batch_max: 1000`:

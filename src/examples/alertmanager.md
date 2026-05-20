@@ -1,17 +1,13 @@
-## How to Customize Alert Messages from Alertmanager to Slack and Telegram
+# Customize Alertmanager messages for Slack & Telegram
 
-## Table of Contents
-- [Configure Alertmanager Webhook](#configure-alertmanager-webhook)
-- [Launch Versus with Slack/Telegram](#launch-versus-with-slacktelegram)
-- [Test](#test)
-- [Advanced: Dynamic Channel Routing](#advanced-dynamic-channel-routing)
-- [Troubleshooting Tips](#troubleshooting-tips)
+Route Prometheus Alertmanager alerts through Versus Incident to Slack and Telegram with fully customised templates.
+
 
 ![Diagram](/docs/images/alertmanager.png)
 
 In this guide, you'll learn how to route Prometheus Alertmanager alerts to Slack and Telegram using the Versus Incident, while fully customizing alert messages.
 
-### Configure Alertmanager Webhook
+## Configure Alertmanager Webhook
 
 Update your `alertmanager.yml` to forward alerts to Versus:
 
@@ -88,7 +84,7 @@ Alertmanager sends alerts to the webhook in JSON format. Here’s an example of 
 
 Next, we will deploy Versus Incident and configure it with a custom template to send alerts to both Slack and Telegram for this payload.
 
-### Launch Versus with Slack/Telegram
+## Launch Versus with Slack/Telegram
 
 Create a configuration file `config/config.yaml`:
 
@@ -157,7 +153,7 @@ docker run -d -p 3000:3000 \
   ghcr.io/versuscontrol/versus-incident
 ```
 
-### Test
+## Test
 
 Trigger a test alert using `curl`:
 
@@ -204,14 +200,14 @@ Final Result:
 
 ![Slack Alert](/docs/images/versus-result-02.png)
 
-### Advanced: Dynamic Channel Routing
+## Advanced: Dynamic Channel Routing
 Override Slack channels per alert using query parameters:
 
 ```bash
 POST http://versus-host:3000/api/incidents?slack_channel_id=EMERGENCY-CHANNEL
 ```
 
-### Troubleshooting Tips
+## Troubleshooting Tips
 1. Enable debug mode: `DEBUG_BODY=true`
 2. Check Versus logs: `docker logs versus`
 

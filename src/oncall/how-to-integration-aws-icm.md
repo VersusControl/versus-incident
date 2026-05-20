@@ -1,27 +1,17 @@
-## How to Integration AWS Incident Manager On-Call
-
-## Table of Contents
-- [Prerequisites](#prerequisites)
-- [Setting Up AWS Incident Manager for On-Call](#setting-up-aws-incident-manager-for-on-call)
-- [Define IAM Role for Versus](#define-iam-role-for-versus)
-- [Deploy Versus Incident](#deploy-versus-incident)
-- [Alert Rules](#alert-rules)
-- [Alert Manager Routing Configuration](#alert-manager-routing-configuration)
-- [Testing the Integration](#testing-the-integration)
-- [Conclusion](#conclusion)
+# Integrate with AWS Incident Manager
 
 This document provides a step-by-step guide to integrate Versus Incident with AWS Incident Manager make an On Call. The integration enables automated escalation of alerts to on-call teams when incidents are not acknowledged within a specified time.
 
 We'll cover configuring Prometheus Alert Manager to send alerts to Versus, setting up AWS Incident Manager, deploying Versus, and testing the integration with a practical example.
 
-### Prerequisites
+## Prerequisites
 
 Before you begin, ensure you have:
 + An AWS account with access to AWS Incident Manager.
 + Versus Incident deployed (instructions provided later).
 + Prometheus Alert Manager set up to monitor your systems.
 
-### Setting Up AWS Incident Manager for On-Call
+## Setting Up AWS Incident Manager for On-Call
 
 AWS Incident Manager requires configuring several components to manage on-call workflows. Let’s configure a practical example using 6 contacts, two teams, and a two-stage response plan. Use the AWS Console to set these up. 
 
@@ -61,7 +51,7 @@ A response plan ties contacts and escalation plans into a structured response.
 + Stage 2: If unacknowledged, engage "TeamB_Escalation" (Gray, Gajeel, and Laxus).
 4. Save the plan and note its ARN (e.g., `arn:aws:ssm-incidents::111122223333:response-plan/CriticalIncidentResponse`).
 
-### Define IAM Role for Versus
+## Define IAM Role for Versus
 
 Versus needs permissions to interact with AWS Incident Manager.
 
@@ -86,7 +76,7 @@ Versus needs permissions to interact with AWS Incident Manager.
 4. Name the role (e.g., "VersusIncidentRole") and create it.
 5. Note the Role ARN (e.g., `arn:aws:iam::111122223333:role/VersusIncidentRole`).
 
-### Deploy Versus Incident
+## Deploy Versus Incident
 
 Deploy Versus using Docker or Kubernetes. Docker Deployment. Create a directory for your configuration files:
 
@@ -216,7 +206,7 @@ Run Docker Compose:
 docker-compose up -d
 ```
 
-### Alert Rules
+## Alert Rules
 
 Create a `prometheus.yml` file to define a metric and alerting rule:
 
@@ -268,7 +258,7 @@ groups:
       description: "{{ $labels.service }} has an error rate above 0.8 for 1 minute."
 ```
 
-### Alert Manager Routing Configuration
+## Alert Manager Routing Configuration
 
 Configure Alert Manager to route alerts to Versus with different behaviors.
 
@@ -326,7 +316,7 @@ route:
 
 This triggers the response plan immediately without waiting.
 
-### Testing the Integration
+## Testing the Integration
 
 1. Trigger an Alert: Simulate a critical alert in Prometheus to match the Alert Manager rule.
 2. Verify Versus: Check that Versus receives the alert and sends it to configured channels (e.g., Slack).
@@ -340,7 +330,7 @@ Result
 
 ![Versus On-Call Result](/docs/images/on-call-result.png)
 
-### Conclusion
+## Conclusion
 
 You’ve now integrated Versus Incident with AWS Incident Manager for on-call management! Alerts from Prometheus Alert Manager can trigger notifications via Versus, with escalations handled by AWS Incident Manager based on your response plan. Adjust configurations as needed for your environment.
 
