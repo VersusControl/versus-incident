@@ -7,10 +7,10 @@
 #
 # Each entry must have:
 #   name:    unique identifier (used in cursor keys and admin views)
-#   type:    "file" | "elasticsearch" | "loki" | "cloudwatchlogs"
+#   type:    "file" | "elasticsearch" | "loki" | "cloudwatchlogs" | "graylog" | "splunk"
 #   enable:  true | false
 # Plus the matching block (`file:` / `elasticsearch:` / `loki:` /
-# `cloudwatchlogs:`) for the chosen type.
+# `cloudwatchlogs:` / `graylog:` / `splunk:`) for the chosen type.
 # -----------------------------------------------------------------------------
 sources:
   # File source — easiest way to test the agent end-to-end. Drop a log file
@@ -104,5 +104,56 @@ sources:
   #     log_group_name: /aws/lambda/my-function
   #     # log_stream_prefix: 2026/05/12     # narrow to recent streams (cheaper)
   #     # filter_pattern: '?ERROR ?Exception'  # CloudWatch filter syntax (NOT regex)
+  #     page_size: 500
+
+  # Graylog source.
+  # Uses the legacy `search/universal/absolute` REST endpoint —
+  # synchronous, sorted ascending, cursor-friendly. Pick ONE auth mode:
+  # API token (Graylog convention: token-as-username + literal "token"
+  # password), or plain HTTP Basic.
+  # - name: graylog-prod
+  #   type: graylog
+  #   enable: false
+  #   graylog:
+  #     address: https://graylog.example.internal:9000
+  #     # api_token: ${GRAYLOG_API_TOKEN}   # preferred; sent as Basic <token>:token
+  #     # username: ${GRAYLOG_USERNAME}     # fallback HTTP Basic
+  #     # password: ${GRAYLOG_PASSWORD}
+  #     # insecure_skip_verify: false
+  #     query: 'level:(3 OR 4) AND service:api'
+  #     # stream_id: 000000000000000000000001   # restrict to a single stream
+  #     message_field: message
+  #     severity_field: level
+  #     # fields:                  # server-side projection (faster / smaller)
+  #     #   - message
+  #     #   - timestamp
+  #     #   - source
+  #     #   - level
+  #     extra_fields:              # copied into Signal.Fields
+  #       - source
+  #       - service
+  #     page_size: 500
+
+  # Splunk source.
+  # Uses the streaming `search/v2/jobs/export` REST endpoint. Auth is
+  # bearer token (HEC / auth token) when set; HTTP Basic otherwise.
+  # `search` is auto-prefixed with the `search` operator when missing.
+  # - name: splunk-prod
+  #   type: splunk
+  #   enable: false
+  #   splunk:
+  #     address: https://splunk.example.internal:8089
+  #     token: ${SPLUNK_TOKEN}             # preferred; Authorization: Bearer <token>
+  #     # username: ${SPLUNK_USERNAME}      # fallback HTTP Basic
+  #     # password: ${SPLUNK_PASSWORD}
+  #     # insecure_skip_verify: false
+  #     search: 'index=main sourcetype=api level=error'
+  #     time_field: _time
+  #     message_field: _raw
+  #     severity_field: level
+  #     extra_fields:
+  #       - host
+  #       - source
+  #       - sourcetype
   #     page_size: 500
 

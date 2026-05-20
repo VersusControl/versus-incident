@@ -1,0 +1,175 @@
+services:
+  # One-shot: generate a self-signed cert for Redis TLS into a shared volume.
+  # Identical to the loki/elasticsearch examples; see those READMEs for
+  # the rationale behind running Redis over TLS in dev.
+  redis-tls-init:
+    image: alpine:3.20
+    container_name: versus-graylog-redis-tls-init
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        cd /tls
+        if [ -f server.crt ] && [ -f server.key ] && [ -f ca.crt ]; then
+          echo "TLS material already present; skipping."
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+          -keyout server.key -out server.crt \
+          -subj "/CN=redis" \
+          -addext "subjectAltName=DNS:redis,DNS:localhost,IP:127.0.0.1"
+        cp server.crt ca.crt
+        chmod 0644 server.crt server.key ca.crt
+        echo "Generated self-signed cert for redis."
+    volumes:
+      - redis-tls:/tls
+
+  redis:
+    image: redis:7-alpine
+    container_name: versus-graylog-redis
+    depends_on:
+      redis-tls-init:
+        condition: service_completed_successfully
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:-versus}
+      - --port
+      - "0"
+      - --tls-port
+      - "6379"
+      - --tls-cert-file
+      - /tls/server.crt
+      - --tls-key-file
+      - /tls/server.key
+      - --tls-ca-cert-file
+      - /tls/ca.crt
+      - --tls-auth-clients
+      - "no"
+    volumes:
+      - redis-data:/data
+      - redis-tls:/tls:ro
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - --tls
+        - --insecure
+        - -a
+        - ${REDIS_PASSWORD:-versus}
+        - ping
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Graylog needs two backing stores: MongoDB for configuration / users /
+  # streams, and OpenSearch (or Elasticsearch) for the actual log index.
+  mongodb:
+    image: mongo:6
+    container_name: versus-graylog-mongo
+    volumes:
+      - mongo-data:/data/db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: versus-graylog-opensearch
+    environment:
+      discovery.type: single-node
+      bootstrap.memory_lock: "true"
+      plugins.security.disabled: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  graylog:
+    # 5.x is the last branch with `search/universal/absolute` enabled
+    # by default; that's the endpoint the Versus source calls.
+    image: graylog/graylog:5.2
+    container_name: versus-graylog
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    environment:
+      # `admin` / ${GRAYLOG_PASSWORD:-admin} login. The password_secret
+      # value below is for dev only — rotate before any production use.
+      GRAYLOG_PASSWORD_SECRET: somepasswordpepper
+      # Default sha256("admin"); change to taste.
+      GRAYLOG_ROOT_PASSWORD_SHA2: 8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918
+      GRAYLOG_HTTP_EXTERNAL_URI: http://localhost:9000/
+      GRAYLOG_ELASTICSEARCH_HOSTS: http://opensearch:9200
+      GRAYLOG_MONGODB_URI: mongodb://mongodb:27017/graylog
+    ports:
+      - "9000:9000"   # web UI + REST API
+      - "12201:12201/udp"  # GELF UDP — send test logs here
+      - "5140:5140/udp"    # Syslog UDP (optional input)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -u admin:${GRAYLOG_PASSWORD:-admin} http://localhost:9000/api/system/lbstatus || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+
+  versus:
+    image: ghcr.io/versuscontrol/versus-incident:latest
+    container_name: versus-graylog-app
+    depends_on:
+      redis:
+        condition: service_healthy
+      graylog:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      GATEWAY_SECRET: ${GATEWAY_SECRET:-change-me}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-versus}
+      GRAYLOG_PASSWORD: ${GRAYLOG_PASSWORD:-admin}
+      SLACK_ENABLE: ${SLACK_ENABLE:-false}
+      SLACK_TOKEN: ${SLACK_TOKEN:-}
+      SLACK_CHANNEL_ID: ${SLACK_CHANNEL_ID:-}
+      TELEGRAM_ENABLE: ${TELEGRAM_ENABLE:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      AGENT_ENABLE: ${AGENT_ENABLE:-true}
+      AGENT_MODE: ${AGENT_MODE:-training}
+      AGENT_AI_ENABLE: ${AGENT_AI_ENABLE:-false}
+      AGENT_AI_API_KEY: ${AGENT_AI_API_KEY:-}
+      AGENT_AI_MODEL: ${AGENT_AI_MODEL:-gpt-4o-mini}
+    volumes:
+      - ./config:/app/config:ro
+      - versus-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
+  redis-tls:
+  versus-data:
+  mongo-data:
+  opensearch-data:

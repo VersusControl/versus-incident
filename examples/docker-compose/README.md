@@ -11,6 +11,8 @@ spun up alongside Versus + Redis.
 | [loki/](./loki/) | versus + redis + **loki** + **grafana** | Test the `loki` source against a real Loki |
 | [elasticsearch/](./elasticsearch/) | versus + redis + **elasticsearch** + **kibana** | Test the `elasticsearch` source against a real ES |
 | [cloudwatch/](./cloudwatch/) | versus + redis | Test the `cloudwatchlogs` source against your AWS account |
+| [graylog/](./graylog/) | versus + redis + **graylog** + mongodb + opensearch | Test the `graylog` source against a real Graylog |
+| [splunk/](./splunk/) | versus + redis + **splunk** | Test the `splunk` source against a real Splunk Enterprise |
 
 ## Workflow per example
 
@@ -42,7 +44,8 @@ list.
 
 All examples expose Versus on `http://localhost:3000`. The Loki and
 Elasticsearch examples additionally expose their respective UIs
-(Grafana on `:3001`, Kibana on `:5601`).
+(Grafana on `:3001`, Kibana on `:5601`). Graylog exposes its web UI
+on `:9000`; Splunk on `:8000`.
 
 ## Generate test traffic
 
@@ -60,6 +63,9 @@ scripts/run_noisy_logs.sh --target loki                  # push to local Loki
 scripts/run_noisy_logs.sh --target elasticsearch         # push to local ES
 TARGET=cloudwatch CW_LOG_GROUP_NAME=/aws/lambda/foo \
   scripts/run_noisy_logs.sh                              # push to AWS
+scripts/run_noisy_logs.sh --target graylog               # push GELF UDP to local Graylog
+SPLUNK_HEC_TOKEN=... \
+  scripts/run_noisy_logs.sh --target splunk              # push HEC to local Splunk
 ```
 
 See [scripts/README.md](../../scripts/README.md) for the full

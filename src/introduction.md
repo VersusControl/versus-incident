@@ -33,16 +33,16 @@ cross-signal correlation).
 
 ## Support The Project
 
-[GitHub Sponsors](https://github.com/sponsors/versuscontrol) · see [SPONSORS.md](SPONSORS.md)
+[GitHub Sponsors](https://github.com/sponsors/versuscontrol) · see [https://github.com/VersusControl/versus-incident/blob/main/SPONSORS.md](SPONSORS.md)
 
 ## Contributing
 
-Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md)
+Contributions are welcome. Please read [https://github.com/VersusControl/versus-incident/blob/main/CONTRIBUTING.md](CONTRIBUTING.md)
 for development setup, coding standards, and the PR process, and review
-the [Code of Conduct](CODE_OF_CONDUCT.md) and [security policy](SECURITY.md)
+the [https://github.com/VersusControl/versus-incident/blob/main/CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) and [https://github.com/VersusControl/versus-incident/blob/main/SECURITY.md](SECURITY.md)
 before reporting vulnerabilities.
 
-Project governance is documented in [GOVERNANCE.md](GOVERNANCE.md).
+Project governance is documented in [https://github.com/VersusControl/versus-incident/blob/main/GOVERNANCE.md](GOVERNANCE.md).
 
 ## License
 
