@@ -155,42 +155,20 @@ than 20 times (`spike_min_baseline_count`) overall (so the agent trusts its aver
 
 ## What the shadow log shows
 
-A spike entry in `shadow.json` looks like this:
+A spike entry appears on the **Shadow** page (or, in detect mode,
+is forwarded to the AI analyzer and shows up on the **Detect**
+page and as an incident) with:
 
-```json
-{
-  "source": "app-logs",
-  "pattern_id": "a3f1c2...",
-  "template": "service=db-pool message=\"connection refused to database server <*> port <*>\"",
-  "sample": "service=db-pool message=\"connection refused to database server db-07 port 5432\"",
-  "rule": "db-errors",
-  "verdict": "spike",
-  "frequency": 12,
-  "timestamp": "2026-05-04T14:23:01Z"
-}
-```
-
-Key fields:
-
-- `verdict: "spike"` — tells you this is a volume event, not a new
+- **verdict: spike** — tells you this is a volume event, not a new
   unknown pattern.
-- `frequency` — how many times the pattern fired in that one tick.
-- `template` — the learned template for the pattern (with variable
-  parts replaced by `<*>`).
+- **frequency** — how many times the pattern fired in that one
+  tick.
+- **template** — the learned template for the pattern (with
+  variable parts replaced by `<*>`).
 
-Read them with:
-
-```bash
-curl -H "X-Gateway-Secret: $SECRET" \
-  http://localhost:3000/api/agent/shadow | jq '.[] | select(.verdict=="spike")'
-```
-
-Or check the aggregate counts:
-
-```bash
-curl -H "X-Gateway-Secret: $SECRET" \
-  http://localhost:3000/api/agent/shadow/stats
-```
+Filter the Shadow page by the `spike` verdict to see only volume
+events, and watch the summary counts at the top to track how often
+they fire.
 
 ---
 
@@ -212,8 +190,8 @@ python3 scripts/generate_noisy_logs.py \
 ```
 
 Point the file source at `data/logs/app.log` and let the agent run in
-`training` mode until the source is fully consumed. Check
-`GET /api/agent/status` to confirm the catalog is growing.
+`training` mode until the source is fully consumed. Check the
+**Status** page to confirm the catalog is growing.
 
 ### Step 2 — Switch to shadow mode
 
@@ -226,8 +204,7 @@ docker run -d \
   ghcr.io/versuscontrol/versus-incident:latest
 ```
 
-Wait for the agent to catch up. The status endpoint will show
-`cursor` moving forward.
+Wait for the agent to catch up.
 
 ### Step 3 — Inject a spike
 
@@ -255,14 +232,9 @@ What `--spike` does differently from a normal run:
 
 ### Step 4 — Check the shadow log
 
-```bash
-curl -H "X-Gateway-Secret: $SECRET" \
-  http://localhost:3000/api/agent/shadow \
-  | jq '.[] | select(.verdict=="spike")'
-```
-
-You should see one or more entries with `"verdict": "spike"` and a
-`frequency` equal to (or close to) your `--spike-burst` value.
+Open the **Shadow** page and filter by the `spike` verdict. You
+should see one or more entries with a frequency equal to (or close
+to) your `--spike-burst` value.
 
 ### Useful flags
 

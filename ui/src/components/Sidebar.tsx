@@ -2,6 +2,7 @@ import { NavLink } from "react-router-dom";
 import {
   Activity,
   AlertTriangle,
+  Brain,
   EyeOff,
   FileText,
   LayoutDashboard,
@@ -32,6 +33,7 @@ const overviewItems = [
 
 const incidentItems: SideItem[] = [
   { to: "/incidents", label: "Incidents", icon: AlertTriangle },
+  { to: "/analyses", label: "Analyses", icon: Brain },
   { to: "/postmortems", label: "Post Mortem", icon: FileText, disabled: true },
 ];
 

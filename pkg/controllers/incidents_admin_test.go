@@ -23,6 +23,11 @@ func TestResolveRouteRegistered(t *testing.T) {
 		{"GET", "/api/admin/incidents/"},
 		{"GET", "/api/admin/incidents/:id"},
 		{"POST", "/api/admin/incidents/:id/resolve"},
+		{"POST", "/api/admin/incidents/:id/analyze"},
+		{"GET", "/api/admin/incidents/:id/analyses"},
+		{"GET", "/api/admin/analyses/"},
+		{"GET", "/api/admin/analyses/:analysis_id"},
+		{"DELETE", "/api/admin/analyses/:analysis_id"},
 	}
 
 	have := map[string]bool{}

@@ -1,34 +1,21 @@
 # AI Agent — Detect Mode
 
-Detect mode is the **go-live** step. The agent classifies log
-patterns the same way it does in [shadow](./shadow-mode.md), and
-when something genuinely new or anomalous shows up it asks an
-**AI SRE** to triage it and emits a real incident through the
-normal pipeline — so every channel you
-have configured (Slack, Telegram, Teams, Lark, Viber, Email, …)
-fires, and on-call escalation kicks in if enabled.
+Detect mode leverages AI to identify and alert on new or unusual patterns in real-time. It is designed for production environments where timely detection of anomalies is critical. Before enabling detect mode, ensure that your pattern catalog is well-curated and that shadow mode has been used to validate the system's behavior.
 
-Think of it as: "shadow mode, but with a hand on the alert
-button — and the AI writes the page."
+Detect mode is the **go-live** step. The agent classifies log patterns the same way it does in [shadow](./shadow-mode.md), and when something genuinely new or anomalous shows up it asks an **AI SRE** to triage it and emits a real incident. Think of it as: "shadow mode, but with a hand on the alert button — and the AI writes the page."
 
 ---
 
-## When to switch to detect
+## When to Switch to Detect Mode
 
-You're ready when **all** of these are true:
+Switch to detect mode when:
 
-- The catalog has stopped growing fast (new patterns are rare).
-- You've spent at least one release cycle in shadow and reviewed
-  the entries at `GET /api/agent/shadow`.
-- You've labelled the obvious noisy patterns as `known` so they
-  don't wake you up: `POST /api/agent/patterns/<id>` with
-  `{"verdict":"known"}`.
-- You have an OpenAI-compatible API key.
+- The catalog of patterns has stabilized, and new patterns are rare.
+- You have spent at least one release cycle in shadow mode and reviewed the results.
+- Noisy patterns have been labeled as `known` to prevent unnecessary alerts.
+- An OpenAI-compatible API key is configured.
 
-> Detect mode is **opt-in twice**: `agent.enable: true` AND
-> `agent.mode: detect` AND `agent.ai.enable: true`. With the AI
-> disabled, the worker still classifies signals but never calls a
-> model — every detect outcome is recorded as `dry`.
+Detect mode is ideal for production environments where real-time alerts for new or unusual patterns are critical.
 
 ---
 
@@ -38,30 +25,28 @@ The pipeline is the same as shadow mode for the first few steps:
 
 ![AI Agent](/docs/images/detect-mode.png)
 
-The detect tail does five things in order, all visible in the
-per-tick log under the `verdicts` map:
+When a new or anomalous pattern reaches the detect step, the
+agent does five things in order:
 
-1. **Dry guard** — if the AI is not configured, log `emit_dry`
-   and stop. The worker still updated the catalog.
-2. **Cache lookup** — keyed by `pattern_id`. A hit reuses the
-   previous AI finding without paying for another call. Counted
-   as `emit_cached`.
-3. **Rate guard** — `agent.ai.max_calls_per_hour`. Stops a noisy
-   day from running up an OpenAI bill. Counted as `emit_quota`.
-4. **Analyze** — one `chat/completions` call against the model in
-   `agent.ai.model`. The system prompt is assembled from
-   `pkg/agent/ai/prompts/*.md` (`SOUL`, `INPUTS`, `OUTPUT`,
-   `RULES`); the user prompt carries the redacted sample,
-   template, frequency, baseline, and verdict.
-5. **Emit** — the AI's `AIFinding` (severity, summary, category,
-   confidence, suggestions) is mapped into the standard incident
-   content map and pushed. All
+1. **Dry guard** — if the AI is not configured, it stops here.
+   The pattern is still recorded in the catalog.
+2. **Cache lookup** — if the same pattern was analyzed recently,
+   the previous finding is reused instead of calling the model
+   again (saves time and cost).
+3. **Rate guard** — `agent.ai.max_calls_per_hour` caps how many
+   times the model can be called, so a noisy day doesn't run up
+   your bill.
+4. **Analyze** — the AI SRE reviews the redacted sample,
+   template, frequency, and baseline, then writes a triage
+   verdict.
+5. **Emit** — the AI's finding (severity, summary, category,
+   confidence, suggestions) becomes a real incident. All
    per-channel templates and the on-call workflow trigger
-   unchanged. Counted as `emit_emitted`.
+   unchanged.
 
-Failures at step 4 or 5 land as `emit_ai_error` or
-`emit_send_error` so you can spot misconfigured keys / channels
-without grepping stack traces.
+Each outcome — including skips and failures — is recorded so you
+can spot misconfigured keys or channels at a glance on the
+**Detect** page.
 
 ---
 
@@ -121,23 +106,20 @@ nginx, and friends.
 
 ## What gets recorded
 
-Every AI call (and every cache / dry / quota outcome) is
-appended to `<storage.file.data_dir>/detect.json`. The file is a
-bounded ring of the **most recent 500 events** (FIFO); old
-entries are evicted automatically.
+Every AI call (and every cache / dry / quota outcome) is kept as
+a rolling history of the **most recent 500 events**; older
+entries are dropped automatically.
 
 Each event captures:
 
-- **Pattern context** — source, `pattern_id`, template, service,
-  verdict, frequency, baseline, sample log line.
-- **AI call** — model, full user prompt, raw response,
-  duration. The system prompt is **not** stored per event — it's
-  constant per build; fetch it once via
-  `GET /api/agent/ai/system-prompt`.
+- **Pattern context** — source, template, service, verdict,
+  frequency, baseline, sample log line.
+- **AI call** — model, the prompt sent, the raw response, and how
+  long it took.
 - **Parsed finding** — severity, summary, category, confidence,
   suggestions.
-- **Outcome** — one of `emitted`, `cached`, `dry`, `quota`,
-  `ai_error`, `send_error`.
+- **Outcome** — whether the incident was emitted, served from
+  cache, skipped (dry / quota), or errored.
 
 Look at it through the admin UI (the **Detect** page in the
 sidebar):
@@ -248,14 +230,7 @@ Click into one to see:
 - The parsed **Finding** (severity, summary, category,
   confidence, suggestions).
 
-Or fetch it with curl:
-
-```bash
-curl -s -H "X-Gateway-Secret: $GATEWAY_SECRET" \
-  http://localhost:3000/api/agent/detect | jq '.events[0]'
-```
-
-And the resulting incident lands in the **Incidents** page (and
+And the resulting incident lands on the **Incidents** page (and
 in Slack / Telegram / wherever you have channels enabled), with
 the AI's summary, severity, and suggested next steps rendered by
 each channel's template.
@@ -298,22 +273,14 @@ move accordingly.
 ## Common questions
 
 **Q: Can I disable the AI but keep detect mode?**
-Yes. Set `agent.ai.enable: false`. The worker classifies
-patterns and writes `emit_dry` outcomes to `detect.json` so you
-can see what *would* have been analyzed, with no API spend.
+Yes. Set `agent.ai.enable: false`. The worker still classifies
+patterns and records what *would* have been analyzed on the
+**Detect** page, with no API spend.
 
 **Q: How do I stop a noisy pattern from being analyzed?**
-Mark it as `known` once and the worker drops it before reaching
-the AI step:
-
-```bash
-curl -X POST -H "X-Gateway-Secret: $GATEWAY_SECRET" \
-  -H "Content-Type: application/json" \
-  -d '{"verdict":"known"}' \
-  http://localhost:3000/api/agent/patterns/<pattern_id>
-```
-
-A spike on a `known` pattern still triggers (that's the whole
+Open the pattern on the **Patterns** page and set its verdict to
+**known**. The worker then drops it before reaching the AI step.
+A spike on a known pattern still triggers (that's the whole
 point of spike detection); use `cache_ttl` to throttle repeats.
 
 **Q: My channel template renders `Unknown Alert (Unknown)` for

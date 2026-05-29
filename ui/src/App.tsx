@@ -13,6 +13,9 @@ import { SystemPromptPage } from "./pages/SystemPromptPage";
 import { ServicesPage } from "./pages/ServicesPage";
 import { IncidentsPage } from "./pages/IncidentsPage";
 import { IncidentDetailPage } from "./pages/IncidentDetailPage";
+import { AnalysesPage } from "./pages/AnalysesPage";
+import { AnalysesListPage } from "./pages/AnalysesListPage";
+import { AnalysisDetailPage } from "./pages/AnalysisDetailPage";
 import { IncidentsConfigPage } from "./pages/IncidentsConfigPage";
 import { AgentConfigPage } from "./pages/AgentConfigPage";
 import { MembersPage } from "./pages/MembersPage";
@@ -26,7 +29,13 @@ export default function App() {
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/incidents" element={<IncidentsPage />} />
+          <Route path="/analyses" element={<AnalysesListPage />} />
           <Route path="/incidents/:id" element={<IncidentDetailPage />} />
+          <Route path="/incidents/:id/analyses" element={<AnalysesPage />} />
+          <Route
+            path="/incidents/:id/analyses/:analysisId"
+            element={<AnalysisDetailPage />}
+          />
           <Route path="/status" element={<StatusPage />} />
           <Route path="/patterns" element={<PatternsPage />} />
           <Route path="/patterns/:id" element={<PatternDetailPage />} />

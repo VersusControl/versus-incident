@@ -94,7 +94,7 @@ curl -X POST http://localhost:9200/logs-demo/_doc \
 ```
 
 Then enable the sample ES source in `agent_sources.yaml` and watch
-the catalog pick it up at <http://localhost:3000/api/agent/patterns>.
+the catalog pick it up on the **Patterns** page in the admin UI.
 
 ## Troubleshooting
 

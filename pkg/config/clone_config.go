@@ -298,6 +298,8 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 			MaxTokens:       src.AI.MaxTokens,
 			MaxCallsPerHour: src.AI.MaxCallsPerHour,
 			CacheTTL:        src.AI.CacheTTL,
+			Detect:          cloneAgentAITaskConfig(src.AI.Detect),
+			Analyze:         cloneAgentAIAnalyzeConfig(src.AI.Analyze),
 		},
 	}
 
@@ -403,4 +405,23 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 		}
 	}
 	return cloned
+}
+
+// cloneAgentAITaskConfig is a value-copy helper (all fields are
+// primitives) kept as a named function for symmetry with the other
+// clone helpers and so future map/slice fields have an obvious home.
+func cloneAgentAITaskConfig(src AgentAITaskConfig) AgentAITaskConfig {
+	return AgentAITaskConfig{
+		Model:           src.Model,
+		Temperature:     src.Temperature,
+		MaxTokens:       src.MaxTokens,
+		MaxCallsPerHour: src.MaxCallsPerHour,
+		CacheTTL:        src.CacheTTL,
+	}
+}
+
+// cloneAgentAIAnalyzeConfig copies the analyze override block (model
+// override only).
+func cloneAgentAIAnalyzeConfig(src AgentAIAnalyzeConfig) AgentAIAnalyzeConfig {
+	return AgentAIAnalyzeConfig{Model: src.Model}
 }

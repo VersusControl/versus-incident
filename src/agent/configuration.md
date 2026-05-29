@@ -273,29 +273,21 @@ the two caps together.
 
 ---
 
-## Admin endpoints
+## Admin UI
 
-All `/api/agent/*` endpoints require the `X-Gateway-Secret` header to
-match the root-level `gateway_secret`. With no secret configured the endpoints
-are not registered and the agent refuses to start.
+Everything the agent records is reviewed through the admin UI,
+served at the agent's address (e.g. `http://localhost:3000`). Sign
+in with the gateway secret (`gateway_secret` / `GATEWAY_SECRET`).
+With no secret configured the agent refuses to start.
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/agent/status` | Catalog size, dirty flag, persist-interval, mode. |
-| `GET` | `/api/agent/patterns` | All patterns, sorted by sighting count desc. |
-| `GET` | `/api/agent/patterns/:id` | One pattern. |
-| `POST` | `/api/agent/patterns/:id` | Update `verdict` and/or `tags`. |
-| `DELETE` | `/api/agent/patterns/:id` | Remove a pattern from the catalog. |
-| `POST` | `/api/agent/flush` | Force-flush the in-memory catalog to disk. |
-
-Example:
-
-```bash
-curl -H "X-Gateway-Secret: $GATEWAY_SECRET" \
-  -H 'Content-Type: application/json' \
-  -d '{"verdict":"known","tags":["deploy-rollout","benign"]}' \
-  http://localhost:3000/api/agent/patterns/p-abc123
-```
+| Page | What it shows |
+|---|---|
+| **Status** | Catalog size, current mode, and source health at a glance. |
+| **Patterns** | Every learned pattern, sorted by sighting count. Open a pattern to set its verdict (`known`) and tags, or remove it. |
+| **Shadow** | Would-have-alerted entries to review in shadow mode. |
+| **Detect** | The AI's triage calls and outcomes in detect mode. |
+| **Services** | Discovered services and their grace state. |
+| **Incidents** | Incidents emitted by the agent, with the on-demand analyze action. |
 
 ---
 

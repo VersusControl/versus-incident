@@ -7,9 +7,7 @@ mode**, reading from a local file and saving what it learns to disk.
 
 By the end you'll have:
 
-- The agent running in Docker on port `3000`.
-- A `data/patterns.json` file that grows as the agent learns.
-- A way to look at what it learned through the admin endpoints.
+- A way to look at what it learned through the admin UI.
 - (Optional) A script that writes realistic test logs so you can
   play with it before pointing the agent at real data.
 
@@ -227,26 +225,15 @@ in the repo.
 
 ## 6. Look at what the agent learned
 
-The admin endpoints need the `X-Gateway-Secret` header you set in
-step 4 (`GATEWAY_SECRET`).
+Open the admin UI at `http://localhost:3000` and sign in with the
+gateway secret you set in step 4 (`GATEWAY_SECRET`). From the
+sidebar:
 
-```bash
-# Catalog summary
-curl -H "X-Gateway-Secret: change-me" \
-  http://localhost:3000/api/agent/status | jq
-
-# Every learned pattern, sorted by how often it has been seen
-curl -H "X-Gateway-Secret: change-me" \
-  http://localhost:3000/api/agent/patterns | jq
-
-# Look at one pattern in detail
-curl -H "X-Gateway-Secret: change-me" \
-  http://localhost:3000/api/agent/patterns/p-abc123 | jq
-```
-
-The `patterns.json` file in `./data/` is updated every
-`catalog.persist_interval` (default 30s). It survives restarts and
-can be copied between environments.
+- **Status** — a summary of the catalog: how many patterns the
+  agent has learned and whether it's still growing.
+- **Patterns** — every learned pattern, sorted by how often it has
+  been seen. Click any row to open its detail view (template,
+  first/last seen, sighting count, and the labels you add).
 
 ---
 
@@ -263,9 +250,9 @@ one:
 4. Start the agent again.
 
 After a few days in training, when the new-pattern rate has
-flattened, switch `AGENT_MODE` to `shadow` and watch the
-"would-have-alerted" entries collect at `GET /api/agent/shadow`
-for one release cycle before going to `detect`. See
+flattened, switch `AGENT_MODE` to `shadow` and review the
+"would-have-alerted" entries on the **Shadow** page for one release
+cycle before going to `detect`. See
 [Shadow Mode](./shadow-mode.md) for the review steps.
 
 ---
@@ -311,8 +298,7 @@ Three ways, easiest first:
 1. Make `agent.regex.default_pattern` stricter (or set it to empty
    and only use named rules) so noisy lines never reach the
    grouper.
-2. Delete bad patterns one by one:
-   `DELETE /api/agent/patterns/<id>`.
+2. Delete bad patterns one by one from the **Patterns** page.
 3. Wipe and start over: stop the agent, delete `data/patterns.json*`,
    start it again. You'll lose your training history.
 
