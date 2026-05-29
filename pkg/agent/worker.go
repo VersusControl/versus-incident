@@ -113,9 +113,6 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 		emitter:  opt.Emitter,
 	}
 
-	if len(w.sources) == 0 {
-		return nil, fmt.Errorf("agent: no enabled sources")
-	}
 	if w.miner == nil {
 		return nil, fmt.Errorf("agent: miner is required")
 	}

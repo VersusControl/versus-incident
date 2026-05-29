@@ -245,7 +245,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		log.Printf("agent: source warning: %v", e)
 	}
 	if len(sources) == 0 {
-		return nil, errNoSources
+		log.Printf("agent: no enabled sources configured; starting idle (admin endpoints active, no log polling)")
 	}
 
 	cursors := agent.NewCursorStore(rdb)
@@ -288,15 +288,6 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 
 	return catalog, nil
 }
-
-// errNoSources is returned by startAgent when no enabled source could be
-// constructed. We return a sentinel rather than fmt.Errorf so the caller can
-// log a clean "agent: no enabled sources, refusing to start" message.
-var errNoSources = &agentStartError{msg: "no enabled sources configured"}
-
-type agentStartError struct{ msg string }
-
-func (e *agentStartError) Error() string { return e.msg }
 
 func printCustomBanner() {
 	cfg := c.GetConfig()
