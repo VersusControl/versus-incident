@@ -1,13 +1,22 @@
 import { Link, useParams } from "react-router-dom";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Brain, CheckCircle2, FileText, Sparkles, UserPlus } from "lucide-react";
+import {
+  ArrowLeft,
+  Brain,
+  CheckCircle2,
+  ChevronRight,
+  FileText,
+  Sparkles,
+  UserPlus,
+} from "lucide-react";
 import { api } from "@/lib/api";
 import { fmtAbs, fmtRel } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
 import { ErrorBox, Spinner } from "@/components/feedback";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { AnalysisCard } from "@/components/AnalysisCard";
 
 // Stable keys written into Incident.content by the backend. Agent-emitted
 // incidents (services.CreateIncidentFromFinding) set most of these; manual
@@ -62,6 +71,11 @@ function severityTone(sev: string): "good" | "warn" | "bad" | "accent" {
 // present, sample logs, and the raw payload).
 export function IncidentDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
+  // justRan flips true only after the operator runs a fresh analysis in
+  // this page session. It is intentionally NOT persisted: on reload we
+  // fall back to a link to the dedicated analysis page instead of
+  // re-rendering the full result inline.
+  const [justRan, setJustRan] = useState(false);
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["incident", id],
     queryFn: () => api.getIncident(id),
@@ -108,21 +122,20 @@ export function IncidentDetailPage() {
 
         {data && (
           <>
-            {/* AI action panel — reserved for upcoming features. Each
-                action explains what it will do once shipped. Sits above
-                the two-column grid so it spans the full width. */}
+            {/* AI action panel — sits above the two-column grid so it
+                spans the full width. Analysis is wired to the analyze
+                agent (see AnalysisPanel); Auto Post Mortem is still a
+                placeholder. */}
             <div className="mb-4 grid gap-3 sm:grid-cols-2">
-              <AiActionCard
-                icon={<Brain size={14} />}
-                label="Analysis"
-                description="Run a deep AI investigation on this incident: correlate logs, recent deploys, and similar past patterns to surface a likely root cause."
-              />
+              <AnalysisActionCard incidentID={id} onRan={() => setJustRan(true)} />
               <AiActionCard
                 icon={<FileText size={14} />}
                 label="Auto Post Mortem"
                 description="Generate a draft post-mortem document (timeline, impact, root cause, action items) you can edit and share with the team."
               />
             </div>
+
+            <AnalysisPanel incidentID={id} justRan={justRan} />
 
             <div className="grid items-start gap-4 lg:grid-cols-[2fr,1fr]">
               <div className="min-w-0 space-y-4">
@@ -414,6 +427,156 @@ function Fact({ k, v }: { k: string; v: React.ReactNode }) {
     <div>
       <div className="text-2xs uppercase tracking-wider text-ink-400">{k}</div>
       <div className="text-ink-800">{v}</div>
+    </div>
+  );
+}
+
+// AnalysisActionCard owns the "Analysis" tile in the AI action panel.
+// When AI is off (agent.ai.enable false) it falls back to the original
+// disabled "coming soon" pill. When AI is enabled it renders a real
+// button that fires the analyze mutation; the result is rendered below
+// the two-column grid by AnalysisPanel.
+function AnalysisActionCard({
+  incidentID,
+  onRan,
+}: {
+  incidentID: string;
+  onRan: () => void;
+}) {
+  const cfg = useQuery({
+    queryKey: ["agent-config"],
+    queryFn: () => api.getAgentConfig(),
+    staleTime: 60_000,
+  });
+  const qc = useQueryClient();
+  const m = useMutation({
+    mutationFn: () => api.runAnalysis(incidentID),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["analyses", incidentID] });
+      onRan();
+    },
+  });
+
+  const enabled = !!cfg.data?.ai?.enable;
+  if (!enabled) {
+    return (
+      <AiActionCard
+        icon={<Brain size={14} />}
+        label="Analysis"
+        description="Run a deep AI investigation on this incident: correlate logs, recent deploys, and similar past patterns to surface a likely root cause."
+      />
+    );
+  }
+
+  return (
+    <div className="card">
+      <div className="card-body flex items-start gap-3">
+        <span className="mt-0.5 inline-flex h-7 w-7 flex-none items-center justify-center rounded-md bg-accent/10 text-accent">
+          <Brain size={14} />
+        </span>
+        <div className="min-w-0 flex-1 space-y-2">
+          <div className="flex items-center gap-1.5">
+            <span className="text-sm font-semibold text-ink-900">Analysis</span>
+            {m.isPending && <Pill tone="accent">running…</Pill>}
+            {m.isError && <Pill tone="bad">failed</Pill>}
+            {m.isSuccess && !m.isPending && <Pill tone="good">done</Pill>}
+          </div>
+          <p className="text-2xs leading-relaxed text-ink-600">
+            Run a deep AI investigation on this incident: correlate logs,
+            recent deploys, and similar past patterns to surface a likely
+            root cause.
+          </p>
+          <button
+            className="btn"
+            disabled={m.isPending}
+            onClick={() => m.mutate()}
+            aria-label="Run AI analysis"
+            title="Run a fresh analysis. Past analyses remain available below."
+          >
+            {m.isPending ? (
+              <>
+                <Spinner /> Analysing…
+              </>
+            ) : (
+              <>
+                <Sparkles size={11} /> Run analysis
+              </>
+            )}
+          </button>
+          {m.isError && <ErrorBox error={m.error} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// AnalysisPanel decides what to show below the AI action row:
+//   - just after a run in this session (justRan): the newest analysis
+//     rendered in full, one time, plus a link to the analyses page.
+//   - on a fresh load when prior analyses exist: only a link to the
+//     dedicated analyses page (the full result is NOT re-rendered).
+//   - nothing at all when no analysis has ever been run.
+function AnalysisPanel({
+  incidentID,
+  justRan,
+}: {
+  incidentID: string;
+  justRan: boolean;
+}) {
+  const { data: analyses, isLoading } = useQuery({
+    queryKey: ["analyses", incidentID],
+    queryFn: () => api.listAnalyses(incidentID),
+    enabled: !!incidentID,
+  });
+
+  if (isLoading) return null;
+  const list = analyses ?? [];
+  if (list.length === 0) return null;
+
+  // Backend returns newest first.
+  const latest = list[0];
+
+  if (!justRan) {
+    // Reload / first visit: surface a link to the analyses page instead
+    // of the full inline result.
+    return (
+      <div className="mt-4">
+        <Link
+          to={`/incidents/${incidentID}/analyses`}
+          className="card flex items-center justify-between gap-3 p-3 text-xs hover:border-accent/40"
+        >
+          <span className="flex items-center gap-2">
+            <Brain size={14} className="text-accent" />
+            <span className="text-ink-800">
+              {list.length === 1
+                ? "1 analysis available"
+                : `${list.length} analyses available`}
+            </span>
+            <span className="text-2xs text-ink-500">
+              latest {fmtRel(latest.requested_at)}
+            </span>
+          </span>
+          <span className="flex items-center gap-1.5 text-accent">
+            View analysis
+            <ChevronRight size={13} />
+          </span>
+        </Link>
+      </div>
+    );
+  }
+
+  // Immediately after a fresh run: show the result once, plus a link to
+  // the full history.
+  return (
+    <div className="mt-4 space-y-3">
+      <AnalysisCard rec={latest} title="Latest analysis" />
+      <Link
+        to={`/incidents/${incidentID}/analyses`}
+        className="inline-flex items-center gap-1.5 text-xs text-accent hover:underline"
+      >
+        View all analyses ({list.length})
+        <ChevronRight size={12} />
+      </Link>
     </div>
   );
 }

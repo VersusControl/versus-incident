@@ -100,15 +100,9 @@ three modes:
   no real alerts. Good for checking the agent's judgement before
   going live.
 - **`detect`** — actually create incidents for lines the agent has
-  never seen before. (AI-written summaries for those incidents are
-  coming in a later release; today this mode only logs the
-  decision.)
-
-### 7. [Admin endpoints](./configuration.md#admin-endpoints)
-A small set of HTTP endpoints under `/api/agent/*` that let you
-look at the catalog, label patterns as known, and flush state
-during reviews. Every endpoint requires the `X-Gateway-Secret`
-header.
+  never seen before. An AI SRE triages each one and writes the
+  summary, severity, and suggested next steps before the incident
+  is sent through every configured channel.
 
 ## Suggested rollout
 
@@ -117,7 +111,7 @@ header.
 2. Switch to **shadow**. Watch the `agent[shadow]: would alert ...`
    log lines for one release cycle.
 3. Switch to **detect**. Triage what the agent reports and keep
-   labeling patterns through the admin endpoints.
+   labeling patterns on the **Patterns** page in the admin UI.
 
 ## Where to next
 

@@ -85,7 +85,7 @@ see [GitHub Project](https://github.com/orgs/VersusControl/projects/2).
   ai-detect-mode)
 - [x] **Helm chart support** for agent mode
 
-### AI SRE Agent — detect mode
+### AI SRE Agent — Phase 1: Detector
 - [x] **Detect-mode AI pipeline** — unknown / spike patterns forwarded to
   the AI SRE; findings emitted as incidents through the standard
   `services.CreateIncident` pipeline (all channels + on-call)
@@ -118,6 +118,33 @@ see [GitHub Project](https://github.com/orgs/VersusControl/projects/2).
   `generate_noisy_logs.py` / `run_noisy_logs.sh` with 7 curated incident
   scenarios (db-outage, cache-meltdown, disk-full, tls-expired,
   oom-cascade, auth-attack, k8s-imagepull)
+
+### AI SRE Agent — Phase 2: Multi-agent split (Detector + Analyzer)
+- [x] **E1 — Typed task dispatcher** (`core.AIAgent`): replace the
+  one-method `core.AISRE` with a task-kind dispatcher (`detect` /
+  `analyze`), per-kind cache + rate limiter via a new `Router`
+- [x] **E2 — Eino framework adoption**: add Eino chat-model layer behind
+  `core.AIAgent` as the sole LLM path (no `framework` knob — Eino is the
+  implementation); per-task sub-configs `agent.ai.detect.*` and
+  `agent.ai.analyze.*`
+- [x] **E3 — DetectAgent relocation**: move detect logic into
+  `pkg/agent/ai/detect/`; compile-time tool-free guard; delete legacy
+  `pkg/agent/ai/openai.go`
+- [x] **E4 — AnalyzeAgent (backend)**: new on-demand agent + read-only
+  Eino tools (`recent_incidents`, `pattern_history`,
+  `describe_service`); compile-time
+  Emitter-free guard; new `analyses` storage blob; admin endpoints
+  `POST /api/admin/incidents/:id/analyze`,
+  `GET /api/admin/incidents/:id/analyses`,
+  `GET /api/admin/analyses/:id`, `DELETE /api/admin/analyses/:id`
+- [x] **E5 — AnalyzeAgent UI wiring**: wire the `Analysis` `AiActionCard`
+  on the incident detail page to the new endpoint; render root-cause
+  hypotheses, evidence list, next steps; collapsible past-analyses
+  history
+- [x] **E6 — Docs & ADRs**: ADR 0009 (multi-agent split);
+  `architecture.md` AI-subsystem diagram update;
+  `config-schema.md` for the new per-task keys; user-guide page for
+  on-demand analysis
 
 ---
 
@@ -167,32 +194,63 @@ see [GitHub Project](https://github.com/orgs/VersusControl/projects/2).
   `--graylog-*` / `--splunk-*` flags; `scripts/run_noisy_logs.sh` adds
   `graylog` and `splunk` targets.
 
+## Planned (v1.4.3 release scope)
+- [x] **Multi-agent split (Phase 2)** — restructured the AI subsystem
+  from one tool-using analyzer into two specialised agents coordinated
+  by a typed task dispatcher:
+  - **Typed task dispatcher** — `core.AIAgent` interface + `Router`
+    with per-task cache and rate limiter
+  - **Eino framework** — sole LLM path via `eino-ext/openai`; per-task
+    sub-configs `agent.ai.detect.*` / `agent.ai.analyze.*`
+  - **DetectAgent** relocated to `pkg/agent/ai/detect/` with own prompt
+    fragments; compile-time tool-free guard
+  - **AnalyzeAgent** (`pkg/agent/ai/analyze/`) — on-demand triage with
+    read-only tools (`recent_incidents`, `pattern_history`,
+    `describe_service`); own prompt fragments; Emitter-free guard
+  - **Analyses storage** — CRUD via `storage.Provider` (file + memory)
+  - **Admin endpoints** — `POST /analyze`, `GET /analyses`,
+    `GET /analyses/:id`, `DELETE /analyses/:id`
+  - **Per-agent system-prompt endpoint** — `?kind=detect|analyze`
+  - **Shared prompt loader** — `pkg/agent/ai/prompt/loader.go`
+  - **UI** — Run Analysis button, AnalysisCard, past analyses list
+  - Legacy `pkg/agent/ai/openai.go` deleted
+
 ---
 
-## Future phases (not scheduled)
+## Future phases
 
 Phases land when the prior phase's success criteria hold up under real
-soak. See `local/plans/ai-incident-detection/sre-agent-roadmap.md` for
-full descriptions and ADR references.
+soak. Track Phase 2 work on the
+[GitHub Project](https://github.com/orgs/VersusControl/projects/2).
 
-### Reliability
-- [ ] **Reliability & load testing** — graceful degradation on log-source
-  outages, AI timeouts, and high log volume.
+> The `Auto Post Mortem` UI card stays a `coming soon` stub until
+> Phase 3 lands.
 
-### AI SRE Agent — Phase 2: Triage with read-only tools
-- [ ] **Eino agent framework** — replace plain HTTP analyzer with
-  `ChatModelAgent` (Eino); current `openai.go` becomes the `openai-direct`
-  opt-out path
-- [ ] **`get_related_logs` tool** — query the same SignalSource backwards
-  from the alert time for surrounding context
-- [ ] **`get_recent_incidents` tool** — read from local `storage.Provider`
-  incident history
-- [ ] **`get_pattern_history` tool** — return EWMA / count trend for the
-  pattern
-- [ ] **`describe_service` tool** — operator-curated YAML from
-  `config/services.yaml` (owner, runbook URL, tier)
-- [ ] **Evidence list in findings** — `AIFinding.Evidence []EvidenceItem`
-  surfaced in the incident message ("I looked at X and saw Y")
+### AI SRE Agent — Phase 2.5: Analyze toolset expansion
+Grows the on-demand AnalyzeAgent from the three foundational read-only
+tools shipped in Phase 2 (`recent_incidents`, `pattern_history`,
+`describe_service`) into a deeper investigation set. Every tool stays
+read-only (import-graph guard), returns the `core.ToolResult` envelope,
+is allow-list filterable, and is recorded in the tool-call audit trail.
+Detailed plan + task board:
+[local plan](https://github.com/orgs/VersusControl/projects/2).
+- [ ] **E7 — Cross-source log retrieval** (`get_related_logs`) — pull a
+  redacted raw-log slice from the originating `SignalSource` around the
+  incident window (reuses `core.SignalSource`; no new config surface)
+- [ ] **E8 — Change / deploy correlation** (`recent_changes`) — line an
+  incident up against recent deploys/config changes from an optional
+  local NDJSON change feed (`agent.ai.analyze.changes_source`)
+- [ ] **E9 — Dependency awareness** (`describe_dependencies`) — surface
+  upstream/downstream neighbours from an optional `services.yaml`
+  dependency graph, flagging which neighbours are also firing
+- [ ] **E10 — Tool-runtime hardening & docs** — per-tool timeout
+  (`agent.ai.analyze.tool_timeout`), optional parallel tool dispatch
+  (`agent.ai.analyze.parallel_tools`), and doc updates to
+  `src/agent/ai-analyze-mode.md` + the agent config reference
+
+> Metrics & traces are **out of scope** for Phase 2.5 — Versus has no
+> metric ingestion path today. A metric-lookup analyze tool waits on
+> Phase 3 (metrics/traces sources).
 
 ### AI SRE Agent — Phase 3: Metrics & traces sources
 - [ ] **Prometheus signal source** — pull rule-based queries, normalize

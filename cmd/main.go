@@ -250,10 +250,13 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 
 	cursors := agent.NewCursorStore(rdb)
 
-	aiBundle := agent.BuildAI(cfg, store, nil)
-	if aiBundle.SRE != nil {
+	aiBundle := agent.BuildAIs(cfg, catalog, store, nil)
+	if aiBundle.Detect != nil {
 		log.Printf("agent: AI SRE enabled provider=%s model=%s rate_limit=%d/hr",
-			aiBundle.SRE.Name(), cfg.AI.Model, cfg.AI.MaxCallsPerHour)
+			aiBundle.Detect.Name(), cfg.AI.Model, cfg.AI.MaxCallsPerHour)
+	}
+	if aiBundle.Analyze != nil {
+		services.SetAnalyzeAgent(aiBundle.Analyze)
 	}
 
 	worker, err := agent.NewWorker(agent.WorkerOptions{

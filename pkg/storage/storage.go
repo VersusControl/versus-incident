@@ -21,8 +21,11 @@
 package storage
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/VersusControl/versus-incident/pkg/core"
 )
 
 // ErrNotFound is returned by Get* methods when the key/id is missing.
@@ -57,6 +60,20 @@ type Provider interface {
 	// ListIncidents returns the most recent incidents, newest first.
 	// limit <= 0 returns the full window.
 	ListIncidents(limit int) ([]*IncidentRecord, error)
+
+	// SaveAnalysis stores (or replaces by ID) one analyze-mode run.
+	SaveAnalysis(rec *AnalysisRecord) error
+	// GetAnalysis returns one analysis or ErrNotFound.
+	GetAnalysis(id string) (*AnalysisRecord, error)
+	// ListAnalysesByIncident returns all analyses for one incident,
+	// newest first. limit <= 0 returns the full window.
+	ListAnalysesByIncident(incidentID string, limit int) ([]*AnalysisRecord, error)
+	// ListAnalyses returns analyses across all incidents, newest first.
+	// limit <= 0 returns the full window.
+	ListAnalyses(limit int) ([]*AnalysisRecord, error)
+	// DeleteAnalysis removes one analysis. Returns ErrNotFound when the
+	// id is unknown.
+	DeleteAnalysis(id string) error
 
 	// Close releases any underlying resources (file handles, redis
 	// connections, db pools). Calling Close on a closed provider is a
@@ -101,4 +118,41 @@ type IncidentRecord struct {
 	// holds the references. Empty means unassigned.
 	AssignedTeamID    string   `json:"assigned_team_id,omitempty"`
 	AssignedMemberIDs []string `json:"assigned_member_ids,omitempty"`
+}
+
+// AnalysisRecord is the durable shape of one analyze-mode run. The
+// admin /analyze endpoint creates one per request; the UI lists them
+// per incident.
+type AnalysisRecord struct {
+	ID          string    `json:"id"`
+	IncidentID  string    `json:"incident_id"`
+	RequestedAt time.Time `json:"requested_at"`
+	RequestedBy string    `json:"requested_by,omitempty"`
+	DurationMs  int64     `json:"duration_ms,omitempty"`
+	Model       string    `json:"model,omitempty"`
+
+	// ToolCalls is the full audit trail of read-only tool invocations
+	// the agent issued during the run, in execution order.
+	ToolCalls []AnalysisToolCall `json:"tool_calls,omitempty"`
+
+	// Finding is the parsed structured output from the model. Nil when
+	// the run failed before the model produced JSON.
+	Finding *core.AIFinding `json:"finding,omitempty"`
+
+	// RawResponse is the model's final assistant message. Kept for
+	// audit / debugging when ParseFinding fails.
+	RawResponse string `json:"raw_response,omitempty"`
+
+	// Status is one of: "ok", "error", "rate_limited".
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+// AnalysisToolCall captures one tool round-trip for the audit log.
+type AnalysisToolCall struct {
+	Name       string          `json:"name"`
+	Args       json.RawMessage `json:"args,omitempty"`
+	Output     json.RawMessage `json:"output,omitempty"`
+	DurationMs int64           `json:"duration_ms,omitempty"`
+	Error      string          `json:"error,omitempty"`
 }

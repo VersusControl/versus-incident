@@ -169,6 +169,58 @@ export interface IncidentDetail extends IncidentSummary {
   content?: Record<string, unknown>;
 }
 
+// AnalysisRecord mirrors pkg/storage.AnalysisRecord. The analyze
+// agent's upper-block fields (Title/Summary/Severity/...) ship
+// PascalCase because pkg/core.AIFinding declares them without json
+// tags; analyze-only fields use snake_case via explicit tags.
+export interface RootCauseHypothesis {
+  hypothesis: string;
+  confidence: number;
+  rationale?: string;
+}
+
+export interface EvidenceItem {
+  source: string;
+  summary: string;
+  detail?: string;
+}
+
+export interface AIFinding {
+  Title?: string;
+  Summary?: string;
+  Severity?: string;
+  Category?: string;
+  Confidence?: number;
+  Suggestions?: string[];
+  SampleIDs?: string[];
+  root_cause_hypotheses?: RootCauseHypothesis[];
+  evidence?: EvidenceItem[];
+  related_pattern_ids?: string[];
+  next_steps?: string[];
+}
+
+export interface AnalysisToolCall {
+  name: string;
+  args?: unknown;
+  output?: unknown;
+  duration_ms?: number;
+  error?: string;
+}
+
+export interface AnalysisRecord {
+  id: string;
+  incident_id: string;
+  requested_at: string;
+  requested_by?: string;
+  duration_ms?: number;
+  model?: string;
+  tool_calls?: AnalysisToolCall[];
+  finding?: AIFinding;
+  raw_response?: string;
+  status: "ok" | "error" | "rate_limited" | string;
+  error?: string;
+}
+
 // ---------- Team / member management ----------
 
 // MemberMeta mirrors pkg/teams.MemberMeta — typed per-channel ids.
@@ -292,6 +344,28 @@ export const api = {
   },
   getIncident: (id: string) =>
     request<IncidentDetail>(`/api/admin/incidents/${id}`),
+
+  runAnalysis: (incidentID: string, requestedBy?: string) =>
+    request<AnalysisRecord>(`/api/admin/incidents/${incidentID}/analyze`, {
+      method: "POST",
+      body: JSON.stringify({ requested_by: requestedBy ?? "" }),
+    }),
+  listAnalyses: (incidentID: string, limit?: number) => {
+    const qs = limit ? `?limit=${limit}` : "";
+    return request<{ analyses: AnalysisRecord[] }>(
+      `/api/admin/incidents/${incidentID}/analyses${qs}`,
+    ).then((r) => r.analyses ?? []);
+  },
+  listAllAnalyses: (limit?: number) => {
+    const qs = limit ? `?limit=${limit}` : "";
+    return request<{ analyses: AnalysisRecord[] }>(
+      `/api/admin/analyses${qs}`,
+    ).then((r) => r.analyses ?? []);
+  },
+  getAnalysis: (analysisID: string) =>
+    request<AnalysisRecord>(`/api/admin/analyses/${analysisID}`),
+  deleteAnalysis: (analysisID: string) =>
+    request<void>(`/api/admin/analyses/${analysisID}`, { method: "DELETE" }),
 
   getIncidentsConfig: () =>
     request<IncidentsConfig>("/api/admin/config/incidents"),
@@ -448,5 +522,9 @@ export interface AgentConfigView {
     max_calls_per_hour: number;
     cache_ttl: string;
     api_key: string;
+    analyze?: {
+      tools?: string[];
+      max_tool_iterations?: number;
+    };
   };
 }

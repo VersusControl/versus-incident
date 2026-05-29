@@ -305,4 +305,66 @@ type AgentAIConfig struct {
 	// CacheTTL is how long an AI result for a pattern_id is cached to
 	// avoid re-asking about the same pattern. Default "1h".
 	CacheTTL string `mapstructure:"cache_ttl"`
+
+	// Detect and Analyze are per-task overrides. Empty fields fall back
+	// to the top-level defaults above, so a single shared block keeps
+	// working unchanged. Detect is used by the worker for unknown /
+	// spiking pattern classification; Analyze is used by the on-demand
+	// analyzer (E4).
+	//
+	// There is no `framework` knob: Eino is the only LLM path.
+	Detect  AgentAITaskConfig    `mapstructure:"detect"`
+	Analyze AgentAIAnalyzeConfig `mapstructure:"analyze"`
+}
+
+// AgentAIAnalyzeConfig is the analyze-agent override block. The only
+// operator-tunable knob is the model: analyze deep dives can point at a
+// stronger model than the shared ai.model. All other LLM settings
+// (temperature, max_tokens, rate limit, cache) are inherited from the
+// top-level ai block. The analyze agent is constructed whenever
+// AI.Enable is true — there is no separate opt-in gate.
+type AgentAIAnalyzeConfig struct {
+	// Model overrides the shared ai.model for analyze deep dives.
+	// Empty inherits ai.model.
+	Model string `mapstructure:"model"`
+}
+
+// AgentAITaskConfig is the per-task override block. Zero values mean
+// "inherit the top-level AgentAIConfig field".
+type AgentAITaskConfig struct {
+	Model           string  `mapstructure:"model"`
+	Temperature     float64 `mapstructure:"temperature"`
+	MaxTokens       int     `mapstructure:"max_tokens"`
+	MaxCallsPerHour int     `mapstructure:"max_calls_per_hour"`
+	CacheTTL        string  `mapstructure:"cache_ttl"`
+}
+
+// Resolve returns a fully-defaulted AgentAIConfig for the given task by
+// overlaying the task's sub-config onto the top-level defaults. Empty
+// sub-config fields preserve the top-level value (and Temperature == 0
+// is treated as "inherit" — operators wanting deterministic detect
+// must set it on the top-level block).
+func (c AgentAIConfig) Resolve(task AgentAITaskConfig) AgentAIConfig {
+	out := c
+	// Per-task block must NOT leak into Resolve's output — callers
+	// receive a flat AgentAIConfig.
+	out.Detect = AgentAITaskConfig{}
+	out.Analyze = AgentAIAnalyzeConfig{}
+
+	if task.Model != "" {
+		out.Model = task.Model
+	}
+	if task.Temperature != 0 {
+		out.Temperature = task.Temperature
+	}
+	if task.MaxTokens != 0 {
+		out.MaxTokens = task.MaxTokens
+	}
+	if task.MaxCallsPerHour != 0 {
+		out.MaxCallsPerHour = task.MaxCallsPerHour
+	}
+	if task.CacheTTL != "" {
+		out.CacheTTL = task.CacheTTL
+	}
+	return out
 }

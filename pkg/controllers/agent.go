@@ -2,7 +2,8 @@ package controllers
 
 import (
 	"github.com/VersusControl/versus-incident/pkg/agent"
-	"github.com/VersusControl/versus-incident/pkg/agent/ai"
+	"github.com/VersusControl/versus-incident/pkg/agent/ai/analyze"
+	"github.com/VersusControl/versus-incident/pkg/agent/ai/detect"
 	"github.com/VersusControl/versus-incident/pkg/config"
 
 	"github.com/gofiber/fiber/v2"
@@ -272,9 +273,29 @@ func (a *AgentController) flushDetect(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"ok": true, "events": a.detect.Len()})
 }
 
-// getSystemPrompt returns the assembled system prompt sent to the model
-// on every AI call. Detect events store only the user prompt to keep
-// the on-disk log small; this endpoint provides the constant half.
+// getSystemPrompt returns the assembled system prompt sent to the
+// model. Defaults to the detect prompt; pass ?kind=analyze for the
+// analyze agent's prompt. Detect/analyze log events store only the
+// user prompt to keep the on-disk log small; this endpoint provides
+// the constant half.
 func (a *AgentController) getSystemPrompt(c *fiber.Ctx) error {
-	return c.JSON(fiber.Map{"system_prompt": ai.SystemPrompt()})
+	kind := c.Query("kind", "detect")
+	switch kind {
+	case "detect":
+		return c.JSON(fiber.Map{
+			"kind":          "detect",
+			"system_prompt": detect.SystemPrompt(),
+			"sources":       detect.PromptOrder(),
+		})
+	case "analyze":
+		return c.JSON(fiber.Map{
+			"kind":          "analyze",
+			"system_prompt": analyze.SystemPrompt(),
+			"sources":       analyze.PromptOrder(),
+		})
+	default:
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "unknown kind; expected 'detect' or 'analyze'",
+		})
+	}
 }

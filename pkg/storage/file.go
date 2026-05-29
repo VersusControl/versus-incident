@@ -32,6 +32,10 @@ type fileProvider struct {
 	mu        sync.RWMutex
 	incidents []*IncidentRecord // newest last; persisted as is
 	loaded    bool
+
+	analysesMu     sync.RWMutex
+	analyses       []*AnalysisRecord // newest last
+	analysesLoaded bool
 }
 
 // NewFile returns a Provider backed by the local filesystem.
@@ -49,6 +53,9 @@ func NewFile(opts FileOptions) (Provider, error) {
 	}
 	p := &fileProvider{dir: dir, maxIncidents: max}
 	if err := p.loadIncidents(); err != nil {
+		return nil, err
+	}
+	if err := p.loadAnalyses(); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -247,3 +254,145 @@ func (p *fileProvider) ListIncidents(limit int) ([]*IncidentRecord, error) {
 }
 
 func (p *fileProvider) Close() error { return nil }
+
+// ---------------------------------------------------------------------------
+// Analyses
+// ---------------------------------------------------------------------------
+
+const (
+	analysesFile        = "analyses.json"
+	analysesFileVersion = 1
+	maxAnalysesDefault  = 500
+)
+
+type analysesFileSchema struct {
+	Version   int               `json:"version"`
+	UpdatedAt time.Time         `json:"updated_at"`
+	Analyses  []*AnalysisRecord `json:"analyses"`
+}
+
+func (p *fileProvider) loadAnalyses() error {
+	p.analysesMu.Lock()
+	defer p.analysesMu.Unlock()
+	if p.analysesLoaded {
+		return nil
+	}
+	p.analysesLoaded = true
+
+	path := filepath.Join(p.dir, analysesFile)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("storage: read analyses: %w", err)
+	}
+	var f analysesFileSchema
+	if err := json.Unmarshal(data, &f); err != nil {
+		return fmt.Errorf("storage: parse analyses: %w", err)
+	}
+	p.analyses = f.Analyses
+	sort.SliceStable(p.analyses, func(i, j int) bool {
+		return p.analyses[i].RequestedAt.Before(p.analyses[j].RequestedAt)
+	})
+	return nil
+}
+
+func (p *fileProvider) persistAnalysesLocked() error {
+	f := analysesFileSchema{
+		Version:   analysesFileVersion,
+		UpdatedAt: time.Now().UTC(),
+		Analyses:  p.analyses,
+	}
+	data, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return fmt.Errorf("storage: marshal analyses: %w", err)
+	}
+	target := filepath.Join(p.dir, analysesFile)
+	if err := writeFileAtomicSync(target, data, 0o644); err != nil {
+		return fmt.Errorf("storage: write analyses: %w", err)
+	}
+	return nil
+}
+
+func (p *fileProvider) SaveAnalysis(rec *AnalysisRecord) error {
+	if rec == nil || rec.ID == "" {
+		return fmt.Errorf("storage: SaveAnalysis: missing id")
+	}
+	p.analysesMu.Lock()
+	defer p.analysesMu.Unlock()
+	for i, existing := range p.analyses {
+		if existing.ID == rec.ID {
+			p.analyses[i] = rec
+			return p.persistAnalysesLocked()
+		}
+	}
+	p.analyses = append(p.analyses, rec)
+	if over := len(p.analyses) - maxAnalysesDefault; over > 0 {
+		p.analyses = append([]*AnalysisRecord(nil), p.analyses[over:]...)
+	}
+	return p.persistAnalysesLocked()
+}
+
+func (p *fileProvider) GetAnalysis(id string) (*AnalysisRecord, error) {
+	p.analysesMu.RLock()
+	defer p.analysesMu.RUnlock()
+	for _, rec := range p.analyses {
+		if rec.ID == id {
+			cp := *rec
+			return &cp, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (p *fileProvider) ListAnalysesByIncident(incidentID string, limit int) ([]*AnalysisRecord, error) {
+	p.analysesMu.RLock()
+	defer p.analysesMu.RUnlock()
+	n := len(p.analyses)
+	if n == 0 {
+		return nil, nil
+	}
+	out := make([]*AnalysisRecord, 0)
+	for i := n - 1; i >= 0; i-- {
+		if p.analyses[i].IncidentID != incidentID {
+			continue
+		}
+		cp := *p.analyses[i]
+		out = append(out, &cp)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (p *fileProvider) ListAnalyses(limit int) ([]*AnalysisRecord, error) {
+	p.analysesMu.RLock()
+	defer p.analysesMu.RUnlock()
+	n := len(p.analyses)
+	if n == 0 {
+		return nil, nil
+	}
+	out := make([]*AnalysisRecord, 0, n)
+	for i := n - 1; i >= 0; i-- {
+		cp := *p.analyses[i]
+		out = append(out, &cp)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (p *fileProvider) DeleteAnalysis(id string) error {
+	p.analysesMu.Lock()
+	defer p.analysesMu.Unlock()
+	for i, rec := range p.analyses {
+		if rec.ID == id {
+			p.analyses = append(p.analyses[:i], p.analyses[i+1:]...)
+			return p.persistAnalysesLocked()
+		}
+	}
+	return ErrNotFound
+}

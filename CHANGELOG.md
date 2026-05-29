@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.3] — 2026-05
+
+### Added
+
+#### AI SRE Agent — multi-agent split (Phase 2)
+- **Typed task dispatcher** (`pkg/core/ai_task.go`) — new `AIAgent`
+  interface with `Name()`, `Kind()`, `Run(ctx, AITask)` and task kinds
+  `detect` / `analyze`. Per-kind cache + rate limiter via
+  `pkg/agent/ai/router/router.go`.
+- **Eino framework adoption** — `pkg/agent/ai/eino/chatmodel.go` wraps
+  the `eino-ext/openai` client as the sole LLM path. Two constructors:
+  `NewChatModel` (JSON-mode, detect) and `NewToolCallingChatModel`
+  (tool-calling, analyze).
+- **DetectAgent relocation** — detect logic moved to
+  `pkg/agent/ai/detect/` with its own embedded
+  `prompts/{SOUL,INPUTS,OUTPUT,RULES}.md`. Compile-time tool-free guard
+  enforces no tools are registered.
+- **Shared prompt loader** (`pkg/agent/ai/prompt/loader.go`) —
+  content-free `Assemble` / `MustAssemble` used by both agents so
+  prompt assembly stays uniform.
+- **AnalyzeAgent** (`pkg/agent/ai/analyze/`) — on-demand triage agent
+  triggered via `POST /api/admin/incidents/:id/analyze`. Tool-calling
+  with read-only tools: `recent_incidents`, `pattern_history`,
+  `describe_service`. Own `prompts/` set (triage analyst identity,
+  never re-notifies). Max 3 tool iterations (configurable via
+  `agent.ai.analyze.max_tool_iterations`). Compile-time Emitter-free
+  guard.
+- **Analyses storage** — `storage.Provider` extended with
+  `SaveAnalysis`, `GetAnalysis`, `ListAnalyses`, `DeleteAnalysis`
+  (file + memory backends). Capped at 500 entries (FIFO eviction).
+- **Admin endpoints** (gated by `X-Gateway-Secret`):
+  - `POST /api/admin/incidents/:id/analyze`
+  - `GET /api/admin/incidents/:id/analyses`
+  - `GET /api/admin/analyses/:analysis_id`
+  - `DELETE /api/admin/analyses/:analysis_id`
+- **Per-agent system-prompt endpoint** — `GET /api/agent/ai/system-prompt`
+  now accepts `?kind=detect|analyze` (defaults to `detect`). Response
+  includes source file list and assembly order.
+- **Per-task AI config** — `agent.ai.detect.*` and `agent.ai.analyze.*`
+  sub-blocks for model, temperature, max_tokens, max_calls_per_hour,
+  cache_ttl overrides.
+
+#### UI
+- **Run Analysis** button on the incident detail page (replaces the
+  `coming soon` pill on the Analysis card when `ai.enable` is true).
+- **AnalysisCard** rendering root-cause hypotheses, evidence list
+  (collapsible, source-tagged), next steps, related pattern links,
+  and tool-call audit trail.
+- **Past analyses** collapsible section listing prior runs (newest
+  first) with timestamp, model, and duration; click to expand.
+
+#### Documentation
+- New `src/agent/ai-analyze-mode.md` covering on-demand analysis
+  configuration, pipeline, admin endpoints, and worked example.
+- New data-source pages: `src/agent/data-sources/graylog.md`,
+  `src/agent/data-sources/splunk.md`.
+
+### Changed
+- **Legacy `pkg/agent/ai/openai.go` deleted** — Eino is the only LLM
+  path going forward. The `core.AISRE` adapter is removed; all callers
+  use `core.AIAgent` via the router.
+- **Prompt fragments relocated** — moved from `pkg/agent/ai/prompts/`
+  to `pkg/agent/ai/detect/prompts/`. Each agent owns its own fragments.
+- `BuildAI` → `BuildAIs` in `pkg/agent/factory_ai.go` — returns
+  `AIBundle{Router, Detect, Analyze, Cache, Rate, AnalyzeRate}`.
+- `agent.ai.analyze` config block added; `analyze.enable` defaults to
+  `true` when `ai.enable` is true (no separate opt-in flag).
+
+### Fixed
+- Incident detail page no longer shows stale analysis status after
+  triggering a new run.
+
+---
+
 ## [1.4.2] — 2026-05
 
 ### Added

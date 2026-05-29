@@ -10,6 +10,8 @@ the next cursor — so they can be mixed freely in one deployment.
 | [Elasticsearch](./data-sources/elasticsearch.md) | `elasticsearch` | ELK, Elastic Cloud, OpenSearch |
 | [Loki](./data-sources/loki.md) | `loki` | Grafana Loki self-hosted, Grafana Cloud Logs |
 | [CloudWatch Logs](./data-sources/cloudwatch-logs.md) | `cloudwatchlogs` | AWS Lambda, ECS, EKS, EC2 |
+| [Graylog](./data-sources/graylog.md) | `graylog` | Graylog server, GELF-centralized logs |
+| [Splunk](./data-sources/splunk.md) | `splunk` | Splunk Enterprise, Splunk Cloud |
 
 ## How sources are configured
 
@@ -21,7 +23,7 @@ REPLACES any inline `agent.sources` from the main config.
 # agent_sources.yaml
 sources:
   - name: my-source        # unique, used in cursor keys & admin views
-    type: file             # one of: file | elasticsearch | loki | cloudwatchlogs
+    type: file             # one of: file | elasticsearch | loki | cloudwatchlogs | graylog | splunk
     enable: true
     file:                  # block name MUST match `type`
       path: /var/log/app.log

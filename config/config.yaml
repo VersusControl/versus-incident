@@ -212,7 +212,8 @@ agent:
         pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
 
   # AI analyzer — used in detect mode to assess unknown/spiking patterns.
-  # For now it the placeholder only.
+  # Operator-triggered deep dives use the same `ai.*` defaults plus the
+  # `ai.analyze.*` overrides below.
   ai:
     enable: false                   # master switch (env: AGENT_AI_ENABLE)
     api_key: ${AGENT_AI_API_KEY}
@@ -221,6 +222,16 @@ agent:
     max_tokens: 512
     max_calls_per_hour: 60          # 0 = unlimited
     cache_ttl: "1h"
+
+    # AnalyzeAgent — powers `POST /api/admin/incidents/:id/analyze`
+    # and the "Run analysis" button on the incident detail page.
+    # Tool-calling: the model may invoke read-only tools (incident
+    # lookup, pattern history, service summary) to gather context.
+    # AnalyzeAgent NEVER emits a notification — runs are persisted
+    # as analysis records only. It is active whenever `ai.enable` is
+    # true; the block below only tunes it.
+    analyze:
+      # model: "gpt-4o"             # override the shared `ai.model` for analyze deep dives
 
   # New-service grace: when a previously unseen service starts emitting logs
   # in detect mode, it enters an implicit training window so the catalog can

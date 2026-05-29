@@ -301,6 +301,9 @@ func (c *ConfigAdminController) agent(ctx *fiber.Ctx) error {
 			"max_calls_per_hour": a.AI.MaxCallsPerHour,
 			"cache_ttl":          a.AI.CacheTTL,
 			"api_key":            secretSet(a.AI.APIKey),
+			"analyze": fiber.Map{
+				"model": a.AI.Analyze.Model,
+			},
 		},
 	})
 }

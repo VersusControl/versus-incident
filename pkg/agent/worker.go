@@ -54,8 +54,8 @@ type Worker struct {
 	shadow   *ShadowLog // nil when shadow log is disabled
 	detect   *DetectLog // nil when detect log is disabled
 
-	// Detect-mode dependencies. All three are nil-safe: when ai.SRE is
-	// nil the worker logs a "dry detect" line and skips emission.
+	// Detect-mode dependencies. All three are nil-safe: when ai.Detect
+	// is nil the worker logs a "dry detect" line and skips emission.
 	ai      AIBundle
 	emitter Emitter
 
@@ -378,7 +378,7 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 // "ai_error" | "send_error") used as a stat suffix in the tick log.
 //
 // The function is nil-safe through and through:
-//   - w.ai.SRE == nil          → "dry detect": classify, log, do not emit.
+//   - w.ai.Detect == nil       → "dry detect": classify, log, do not emit.
 //   - w.ai.Cache hit           → reuse the prior finding without re-calling AI.
 //   - w.ai.Rate.Allow == false → skip this call (would-be cost shed).
 //   - w.emitter == nil         → AI was called and cached, but no incident is sent
@@ -413,7 +413,7 @@ func (w *Worker) emitDetect(
 	}
 
 	// 1. Dry detect — analyzer not configured.
-	if w.ai.SRE == nil {
+	if w.ai.Detect == nil {
 		log.Printf("%sagent[detect:dry]: pattern=%s service=%s verdict=%s freq=%d (ai.enable=false)%s",
 			colorGreen, patternID, service, verdict, len(signals), colorReset)
 		evt.Outcome = "dry"
@@ -444,7 +444,7 @@ func (w *Worker) emitDetect(
 	}
 
 	// 4. Real AI call.
-	call, err := w.ai.SRE.Analyze(ctx, result)
+	call, err := w.ai.Detect.Run(ctx, core.DetectTask{Result: result})
 	if err != nil {
 		log.Printf("agent[detect]: AI analyze failed pattern=%s: %v", patternID, err)
 		evt.Outcome = "ai_error"

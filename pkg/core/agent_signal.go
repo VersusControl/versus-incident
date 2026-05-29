@@ -80,6 +80,11 @@ type Detector interface {
 
 // AIFinding is the structured response returned by an AISRE for an
 // unknown / spiking pattern. Used by detect mode.
+//
+// Detect mode populates Title, Summary, Severity, Category,
+// Confidence, Suggestions, SampleIDs. The lower block (RootCauseHypotheses,
+// Evidence, RelatedPatternIDs, NextSteps) is populated by analyze mode
+// only; detect leaves them empty and they marshal as omitempty.
 type AIFinding struct {
 	Title       string
 	Summary     string
@@ -88,6 +93,32 @@ type AIFinding struct {
 	Confidence  float64 // 0..1
 	Suggestions []string
 	SampleIDs   []string // signal IDs / pattern IDs for traceability
+
+	// Analyze-mode fields. All optional; omitempty so detect-mode
+	// payloads stay byte-compatible with the pre-E1 shape.
+	RootCauseHypotheses []RootCauseHypothesis `json:"root_cause_hypotheses,omitempty"`
+	Evidence            []EvidenceItem        `json:"evidence,omitempty"`
+	RelatedPatternIDs   []string              `json:"related_pattern_ids,omitempty"`
+	NextSteps           []string              `json:"next_steps,omitempty"`
+}
+
+// RootCauseHypothesis is one candidate explanation produced by an
+// analyze-mode agent. Confidence is in [0, 1]; Rationale is a short
+// human-readable justification.
+type RootCauseHypothesis struct {
+	Hypothesis string  `json:"hypothesis"`
+	Confidence float64 `json:"confidence"`
+	Rationale  string  `json:"rationale,omitempty"`
+}
+
+// EvidenceItem records one piece of supporting evidence the analyze
+// agent gathered (typically from a tool call). Source identifies where
+// it came from (e.g. "tool:get_related_logs"); Summary is a one-liner
+// shown in the UI; Detail is the long form (capped on persist).
+type EvidenceItem struct {
+	Source  string `json:"source"`
+	Summary string `json:"summary"`
+	Detail  string `json:"detail,omitempty"`
 }
 
 // AICallResult bundles the parsed finding with the inputs and outputs
@@ -104,12 +135,17 @@ type AICallResult struct {
 	RawResponse string
 	DurationMs  int64
 	Model       string
+
+	// ToolCalls is populated by tool-using agents (analyze). It is
+	// nil for tool-free agents (detect).
+	ToolCalls []ToolCallTrace
 }
 
-// AISRE turns an AgentResult into an AICallResult. Concrete
-// implementations (OpenAI-compatible chat/completions, etc.) live
-// under pkg/agent/ai.
-type AISRE interface {
-	Name() string
-	Analyze(ctx context.Context, result AgentResult) (*AICallResult, error)
+// ToolCallTrace is one model-issued tool round-trip captured for audit.
+type ToolCallTrace struct {
+	Name       string
+	Args       string
+	Output     string
+	DurationMs int64
+	Error      string
 }

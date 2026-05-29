@@ -123,60 +123,40 @@ labeled it `known`.
 
 If the agent wrote one row for every flagged line, a busy cluster
 would drown the shadow log. Instead, the log keeps **one row per
-`(source, pattern_id)` pair**. When the same pattern is hit again,
-that row is updated:
-
-- `count` += new lines seen this tick (the raw count).
-- `occurrences` += 1 (one tick = one occurrence, no matter how
-  many lines fired).
-- `template` is refreshed if the grouper improved it.
-- `last_seen` is set to now (UTC).
-- `rule_name` is upgraded if a more specific filter rule now
-  matches.
+pattern**. When the same pattern is hit again, its row is updated:
+the count grows, the occurrence counter ticks up, and the
+last-seen time is refreshed.
 
 So if 200 NTP-skew lines arrive across 4 ticks, you don't get 200
-rows — you get **one** row with `count: 200, occurrences: 4`.
+rows — you get **one** row with a count of 200 across 4
+occurrences.
 
-### Every recorded field
+### What each row shows
 
-| Field | Meaning | Example |
-|---|---|---|
-| `pattern_id` | Stable ID. Same as in the catalog, so you can look it up there. | `p-9c2f01` |
-| `template` | Latest template. `<*>` marks the parts that change. | `kernel: Out of memory: Killed process <*> (<*>) score 999 …` |
-| `source` | The source name from `agent_sources.yaml`. Lets you tell prod from staging at a glance. | `my-app` |
-| `rule_name` | Filter rule that matched. `default` means the catch-all matched but no named rule did. Empty when filtering is off. | `oom-killer` / `default` |
-| `verdict` | `unknown` for first sightings, `spike` for known patterns whose tick frequency exceeds the EWMA baseline by `spike_multiplier`. | `unknown` / `spike` |
-| `sample_message` | One example line, **with secrets already hidden**, cut off at 512 bytes. | `kernel: Out of memory: Killed process 1842 (versus-worker) score 999 …` |
-| `count` | Total raw lines across every tick this row covers. | `17` |
-| `occurrences` | How many distinct ticks fired. Always `≤ count`. | `3` |
-| `first_seen` | UTC time the row was first added. | `2026-04-30T18:21:04Z` |
-| `last_seen` | UTC time of the most recent hit. Used for sorting and for cleanup. | `2026-04-30T18:31:42Z` |
+Every row on the **Shadow** page carries:
+
+- **template** — the learned shape, `<*>` marks the parts that
+  change.
+- **source** — which log source it came from, so you can tell prod
+  from staging at a glance.
+- **rule** — the filter rule that matched (`default` means the
+  catch-all matched but no named rule did).
+- **verdict** — `unknown` for first sightings, `spike` for a known
+  pattern firing far more than usual.
+- **sample message** — one example line, with secrets already
+  hidden.
+- **count** / **occurrences** — raw lines matched, and how many
+  distinct ticks they arrived in.
+- **first seen** / **last seen** — when the pattern first and most
+  recently appeared.
 
 ### Size limit and cleanup
 
-The shadow log holds at most **1000 different `(source, pattern_id)`
-pairs** (currently fixed). When it's full, the row with the oldest
-`last_seen` is dropped to make room. You shouldn't hit this on a
-normal-sized service: 1000 different anomalies in a single review
-window means something is *very* wrong (or the filter rules are
-too loose — see [Filter rules](./regex.md)).
-
-`shadow.json` is written safely (write to a temp file, then rename),
-so you can `cat` it from disk while the agent is running without
-risking a half-written read.
-
-### Stdout mirror
-
-You'll also see a green line in the agent's logs every time a row
-is recorded:
-
-```
-agent[shadow]: would alert pattern=p-abc123 tag=default verdict=unknown freq=4
-```
-
-`freq` is the **per-tick** count — the same number that gets added
-to `count` in the JSON. Use stdout for live debugging while you're
-tuning filter rules; use the API for review.
+The shadow log holds at most **1000 different patterns**. When it's
+full, the oldest entry is dropped to make room. You shouldn't hit
+this on a normal-sized service: 1000 different anomalies in a single
+review window means something is *very* wrong (or the filter rules
+are too loose — see [Filter rules](./regex.md)).
 
 ---
 
@@ -221,19 +201,10 @@ agent[shadow]: would alert pattern=p-9c2f01 tag=default verdict=unknown freq=1
 agent[shadow]: would alert pattern=p-7e1a44 tag=default verdict=unknown freq=2
 ```
 
-**Step 4 — review.** After a minute or two, hit the admin
-endpoint:
-
-```bash
-curl -H "X-Gateway-Secret: $SECRET" \
-  http://localhost:3000/api/agent/shadow | jq '.events[] | {template, count, occurrences}'
-```
-
-You'll see entries like:
-
-```json
-{ "template": "service=notifier message=\"x509 certificate expired\" host=<*> expired_at=<*> chain_position=<*>",  "count": 1, "occurrences": 1 }
-```
+**Step 4 — review.** After a minute or two, open the admin UI and
+click **Shadow** in the sidebar. Each row is a pattern the agent
+*would* have alerted on, with its template, sample line, counts,
+and verdict. Click a row to see the full detail.
 
 This is the "what you would have been alerted about" version. Use
 the loop in [A typical review loop](#a-typical-review-loop) below
@@ -256,164 +227,77 @@ to triage them.
 
 ## Reading the shadow log
 
-The `/api/agent/shadow*` endpoints are how you actually use the
-log. They're admin-only — every request needs the
-`X-Gateway-Secret` header (set with `GATEWAY_SECRET`). The
-examples below assume you saved that value into a shell variable:
-
-```bash
-export SECRET=change-me   # whatever you set as GATEWAY_SECRET
-```
-
-All responses are JSON; piping to `jq` (or `python -m json.tool`)
-makes them easier to read.
+The **Shadow** page in the admin UI is where you review what the
+agent would have alerted on. Everything below is available there —
+no command line needed.
 
 ### List every entry (most recent first)
 
-Start here. The endpoint returns every distinct `(source,
-pattern_id)` the agent flagged in the current window, sorted by
-`last_seen` so the freshest noise is on top:
+The Shadow page lists every distinct pattern the agent flagged in
+the current window, sorted so the freshest noise is on top. Each
+row shows:
 
-```bash
-curl -H "X-Gateway-Secret: $SECRET" \
-  http://localhost:3000/api/agent/shadow | jq
-```
-
-Sample output:
-
-```json
-{
-  "events": [
-    {
-      "pattern_id": "p-abc123",
-      "template": "GET /api/users/<*> 500",
-      "source": "my-app",
-      "rule_name": "default",
-      "verdict": "unknown",
-      "sample_message": "GET /api/users/42 500",
-      "count": 17,
-      "occurrences": 3,
-      "first_seen": "2026-04-30T18:21:04Z",
-      "last_seen": "2026-04-30T18:31:42Z"
-    }
-  ]
-}
-```
+- **template** — the learned shape, with `<*>` marking the parts
+  that change.
+- **sample message** — one example line, with secrets already
+  hidden.
+- **source** and **rule** — where the line came from and which
+  filter rule matched.
+- **verdict** — `unknown` for first sightings, `spike` for a known
+  pattern firing far more than usual.
+- **count** / **occurrences** — how many raw lines matched, and how
+  many distinct ticks they arrived in.
 
 The two numbers to watch:
 
-- **`count`** — how many raw lines matched. High `count` + low
-  `occurrences` means a brief flurry; high in both means a steady
-  drip you should look at.
-- **`occurrences`** — how many distinct ticks the pattern fired
-  in. Each tick is one polling cycle (`agent.poll_interval`).
+- **count** — high count with low occurrences means a brief flurry;
+  high in both means a steady drip you should look at.
+- **occurrences** — how many distinct polling cycles the pattern
+  fired in.
 
-If you only want to see something specific, pipe through `jq`:
-
-```bash
-# templates and counts only
-curl -s -H "X-Gateway-Secret: $SECRET" http://localhost:3000/api/agent/shadow \
-  | jq '.events[] | {template, count, rule_name}'
-
-# everything tagged "oom"
-curl -s -H "X-Gateway-Secret: $SECRET" http://localhost:3000/api/agent/shadow \
-  | jq '.events[] | select(.rule_name == "oom")'
-```
+Click any row to open its detail view with the full sample and
+timestamps.
 
 ### Summary stats
 
-Useful for dashboards or a quick "is this getting better?" check
-between review rounds:
+The top of the Shadow page shows aggregate counts for a quick "is
+this getting better?" check between review rounds:
 
-```bash
-curl -H "X-Gateway-Secret: $SECRET" \
-  http://localhost:3000/api/agent/shadow/stats | jq
-```
+- **events** — distinct patterns in the log.
+- **total signals** — raw volume across every entry.
+- **total occurrences** — roughly "how many ticks would have paged
+  me?".
+- **unknown** / **spike** — breakdown by verdict.
 
-```json
-{
-  "events": 12,
-  "total_signals": 248,
-  "total_occurrences": 41,
-  "verdict_unknown": 12,
-  "verdict_spike": 0
-}
-```
-
-What each number means:
-
-- **`events`** — distinct `(source, pattern_id)` pairs in the log.
-- **`total_signals`** — sum of `count` across every entry. The raw
-  volume.
-- **`total_occurrences`** — sum of `occurrences`. Roughly: "how
-  many ticks would have paged me?".
-- **`verdict_unknown`** / **`verdict_spike`** — breakdown by
-  label. Spike rows are known patterns whose tick frequency
-  exceeded the configured threshold; unknown rows are first
-  sightings.
-
-A healthy review cycle drives `events` and `total_occurrences`
-down over time, even as `total_signals` stays flat (because
-you're labeling the boring patterns as known).
+A healthy review cycle drives events and total occurrences down
+over time, even as total signals stays flat (because you're
+labeling the boring patterns as known).
 
 ### Force-save to disk
 
-The worker only writes `shadow.json` every
-`catalog.persist_interval` (default 30s) so it doesn't hammer the
-disk. If you need a snapshot **right now** — to copy the file out
-of a container, attach to a bug report, or just check what would
-land on disk — ask the agent to save:
-
-```bash
-curl -X POST -H "X-Gateway-Secret: $SECRET" \
-  http://localhost:3000/api/agent/shadow/flush
-```
-
-Does nothing if the log is already saved (`shadow_dirty: false`).
+The agent only saves the shadow log to disk periodically so it
+doesn't hammer the disk. If you need a snapshot **right now**, use
+the **Flush** action on the Shadow page to save immediately.
 
 ### Clear the log
 
 Once you've reviewed a batch and either labeled the patterns as
-known or fixed the underlying bug, drop the log so the next round
-starts from zero:
+known or fixed the underlying bug, use the **Clear** action on the
+Shadow page so the next round starts from zero. This also empties
+the saved file so a restart doesn't bring the old entries back.
+**The catalog is left alone** — every learned pattern stays exactly
+where it was. You're only emptying the "would have alerted" inbox.
 
-```bash
-curl -X DELETE -H "X-Gateway-Secret: $SECRET" \
-  http://localhost:3000/api/agent/shadow
-```
+### Status at a glance
 
-This also saves the empty file so a restart doesn't bring the old
-entries back. **The catalog is left alone** — every learned
-pattern stays exactly where it was. You're only emptying the
-"would have alerted" inbox.
+The **Status** page in the sidebar shows both stores at once:
 
-### Status endpoint
+- **patterns** — number of entries in the catalog.
+- **shadow events** — distinct entries in the shadow log right now.
 
-A cheap health check that tells you both stores at a glance:
-
-```bash
-curl -H "X-Gateway-Secret: $SECRET" \
-  http://localhost:3000/api/agent/status | jq
-```
-
-```json
-{
-  "patterns": 87,
-  "dirty": false,
-  "shadow_events": 12,
-  "shadow_dirty": true
-}
-```
-
-- **`patterns`** — number of entries in the catalog.
-- **`dirty`** — catalog has changes that haven't been saved yet.
-- **`shadow_events`** — distinct entries in the shadow log right
-  now.
-- **`shadow_dirty`** — same idea for the shadow log.
-
-If `shadow_events` stops growing and `shadow_dirty` stays `false`
-for many ticks, the agent has nothing new to flag — a good sign
-you're getting close to ready for `detect` mode.
+If the shadow event count stops growing for many ticks, the agent
+has nothing new to flag — a good sign you're getting close to ready
+for `detect` mode.
 
 ---
 
@@ -425,16 +309,15 @@ shadow mode. Each pass should make the next one quieter.
 1. **Run shadow mode for about 24 hours.** Long enough to cover at
    least one full traffic cycle (peak hours, off-peak, any nightly
    cron jobs).
-2. **Pull the entries.** `GET /api/agent/shadow` and skim them.
-   Sort them in your head into three groups: real anomalies you'd
-   want to be paged about, noise that should have been silenced,
-   and "new but legitimate" patterns (fresh deploys, new
-   endpoints, etc.).
+2. **Review the entries** on the **Shadow** page. Sort them in your
+   head into three groups: real anomalies you'd want to be paged
+   about, noise that should have been silenced, and "new but
+   legitimate" patterns (fresh deploys, new endpoints, etc.).
 3. **For things you _would_ want to be paged about:**
    - Add or improve a rule under `agent.regex.rules` in
      `config.yaml` so the pattern gets the right `name` next time.
-   - Example: a `quorum lost` line that landed with
-     `rule_name: default` deserves its own rule:
+   - Example: a `quorum lost` line that landed with rule `default`
+     deserves its own rule:
 
      ```yaml
      agent:
@@ -445,20 +328,13 @@ shadow mode. Each pass should make the next one quieter.
      ```
 4. **For things that are just noise:**
    - Either raise `agent.catalog.auto_promote_after` (default 100)
-     so the pattern becomes "known" sooner, **or** label it as
-     known by hand:
+     so the pattern becomes "known" sooner, **or** open the pattern
+     on the **Patterns** page and set its verdict to **known**.
 
-     ```bash
-     curl -X POST -H "X-Gateway-Secret: $SECRET" \
-       -H "Content-Type: application/json" \
-       -d '{"verdict":"known","tags":["benign-validation-error"]}' \
-       http://localhost:3000/api/agent/patterns/p-abc123
-     ```
-
-     Once `verdict == "known"`, that pattern will never appear in
-     the shadow log again, no matter how often it shows up.
-5. **Clear the log:** `DELETE /api/agent/shadow`. The next round
-   starts clean.
+     Once a pattern is marked known, it will never appear in the
+     shadow log again, no matter how often it shows up.
+5. **Clear the log** with the **Clear** action on the Shadow page.
+   The next round starts clean.
 6. **Repeat** until the shadow log is mostly empty over a full
    release cycle (one or two weeks).
 7. **Switch to detect.** Set `AGENT_MODE=detect` and you're live.
@@ -468,8 +344,8 @@ shadow mode. Each pass should make the next one quieter.
 ## Common questions
 
 **Q: Will shadow mode send any alerts?**
-No. Not Slack, Telegram, email, on-call — nothing. It only writes
-to `shadow.json` and stdout.
+No. Not Slack, Telegram, email, on-call — nothing. It only records
+would-have-alerted entries you review on the Shadow page.
 
 **Q: Does shadow mode keep adding patterns to the catalog?**
 Yes. Every line that passes the secret hider and filter rules is
@@ -478,18 +354,12 @@ shadow is "training plus a check" so you don't lose ground while
 reviewing.
 
 **Q: What happens if I switch back to training?**
-The shadow log is kept on disk and in memory; the worker just
-stops adding to it. Switch back to `shadow` later and it picks up
-where it left off.
+The shadow log is kept; the worker just stops adding to it. Switch
+back to `shadow` later and it picks up where it left off.
 
 **Q: Can the shadow log fill up forever?**
-No. It holds at most 1000 distinct `(source, pattern_id)` pairs.
-When full, the oldest-by-`last_seen` is dropped to make room. The
-limit is currently fixed.
-
-**Q: Is `shadow.json` safe to delete by hand?**
-Yes — but only while the agent is stopped, and it'll come back on
-the next tick anyway.
+No. It holds at most 1000 distinct patterns. When full, the oldest
+entry is dropped to make room.
 
 ---
 
