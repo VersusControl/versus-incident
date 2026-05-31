@@ -273,6 +273,167 @@ the two caps together.
 
 ---
 
+## `ai`
+
+The `agent.ai` block powers both the **detect** triage call and the
+on-demand **analyze** investigation. Shared keys apply to both; the
+`detect:` and `analyze:` overlays tune each task independently.
+
+```yaml
+agent:
+  ai:
+    enable: true
+    api_key: ${AGENT_AI_API_KEY}
+    model: gpt-4o-mini          # shared default for detect + analyze
+    temperature: 0.2
+    max_tokens: 1024
+    base_url: ""                # optional OpenAI-compatible endpoint
+
+    analyze:
+      model: gpt-4o             # stronger model for deep dives
+```
+
+> The tool-loop knobs `tool_timeout` and `parallel_tools` are **not** set
+> here — they live at the root of `tools.yaml` (see *Per-tool config*
+> below) because they apply to every analyze tool dispatch.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enable` | bool | `false` | Turns on the AI SRE (detect triage + analyze). Env: `AGENT_AI_ENABLE`. |
+| `api_key` | string | — | API key for the model provider. Env: `AGENT_AI_API_KEY`. |
+| `model` | string | — | Shared default model for both tasks. Env: `AGENT_AI_MODEL`. |
+| `analyze.model` | string | inherits `model` | Optional stronger model just for analyze. |
+
+> The tool-loop knobs `tool_timeout` and `parallel_tools` moved to the
+> root of `tools.yaml` (see below) — they apply to every analyze tool
+> dispatch, not just one task.
+
+> **No tool allow-list.** There is no `analyze.tools` key. Every tool
+> wired in `analyzetools.Default(...)` is available to the analyze
+> agent. Two tools are conditionally registered: `describe_dependencies`
+> only when a service-dependency graph is configured in `tools.yaml`
+> (`tools.describe_dependencies.services`), and `recent_changes` only
+> when at least one git repository is configured in `tools.yaml`
+> (`tools.recent_changes.git.repos`).
+
+### Per-tool config (`tools.yaml`)
+
+Some analyze tools read external data. That **data** configuration lives
+in an optional `tools.yaml` file sitting next to your main config — it is
+loaded automatically when present and supports `${VAR}` expansion.
+`tools.yaml` is per-tool *data* config, **not** a registration allow-list
+(tools are still wired in code via `analyzetools.Default`). The root of
+`tools.yaml` also carries the shared tool-loop knobs.
+
+```yaml
+tools:
+  tool_timeout: 20s         # per-tool dispatch cap (applies to every tool)
+  parallel_tools: false     # run tool calls in one model turn concurrently
+
+  recent_changes:
+    git:
+      auth:                 # global default auth; per-repo auth overrides it
+        token: ${GIT_TOKEN}   # HTTPS PAT (empty = ambient credentials)
+        ssh_key_path: ""      # SSH key path for ssh/scp-like remotes
+      repos:                # one or more remote git repositories
+        - url: https://github.com/acme/api.git   # remote clone URL (required)
+          branch: main                           # optional; empty = default HEAD
+          service: api                           # optional; empty = derived from URL
+        - url: git@github.com:acme/web.git        # service auto-detected as "web"
+          auth:                                  # optional; overrides git.auth
+            ssh_key_path: /home/versus/.ssh/web_deploy
+  describe_dependencies:
+    services:               # optional service-dependency graph
+      - name: web
+        depends_on:
+          - api
+      - name: api
+        depends_on:
+          - database
+          - cache
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `tool_timeout` | duration | `20s` | Per-tool dispatch cap. Empty, `0`, or an unparseable value inherits the `20s` default. A timeout surfaces as a tool error in the analysis trail, never a hard failure. |
+| `parallel_tools` | bool | `false` | When the model emits several tool calls in one turn, run them concurrently instead of sequentially. The audit trail stays deterministically ordered either way. |
+
+### Service-dependency graph (`describe_dependencies`)
+
+The `describe_dependencies` tool returns, for a given service, its
+upstream and downstream neighbours, each flagged with whether that
+neighbour also has a recent incident — helping the model reason about
+cascading failures. Author the graph under
+`tools.describe_dependencies.services` in `tools.yaml`: each entry has a
+`name` and a `depends_on` list of upstream services. Only `depends_on`
+(upstream edges) is authored by hand; the reverse edges
+(`depended_on_by`, downstream consumers) are derived automatically. An
+empty `services` list leaves the tool unregistered.
+
+### Change feed source (`recent_changes`)
+
+The `recent_changes` tool reads one or more **remote git repositories'
+commit histories** — the deploy/change record most teams already keep —
+to line an incident up against recent deploys and config changes. It
+shells out to the `git` binary (which must be on `PATH`), so no Go git
+dependency is added and no separate change pipeline is needed. Each
+configured repository is mirror-cloned into a local cache on first use and
+fetched on subsequent lookups, so the feed stays fresh on its own.
+
+Configure the repositories via `tools.yaml`
+(`tools.recent_changes.git.repos`). Each entry has a remote `url` (https
+or scp-like `git@host:org/repo`), an optional `branch`, and an optional
+`service`. When `service` is omitted it is auto-detected from the
+repository name in the URL (e.g. `git@github.com:acme/web.git` → `web`).
+With an empty `repos` list the tool is simply not registered.
+
+**Authentication.** Private remotes authenticate via an optional `auth`
+block. A global default under `tools.recent_changes.git.auth` applies to
+every repo, and any repo may override it field-by-field with its own
+`auth` (empty per-repo fields fall back to the global default; both empty
+= ambient git credentials / SSH agent). For HTTPS remotes set
+`auth.token` (a personal access token) — it is sent as an `Authorization`
+header and never written to the local clone. For SSH remotes set
+`auth.ssh_key_path` (passed through `GIT_SSH_COMMAND`). Each commit in the
+query window maps to a change record:
+
+| Field | Source |
+|---|---|
+| `timestamp` | Committer date (RFC3339). |
+| `service` | The repository's configured `service`, or the name auto-detected from its URL. Used by the optional service filter. |
+| `kind` | Always `commit`. |
+| `summary` | Commit subject line. |
+| `ref` | Short (7-char) commit SHA. |
+
+A missing window or no commits is a clean "nothing found", so the analysis
+proceeds without it.
+
+#### Worked example
+
+A production setup using a cheap model for high-volume detect triage and
+a stronger model with bounded, concurrent tool calls for deep dives:
+
+```yaml
+agent:
+  enable: true
+  mode: detect
+  ai:
+    enable: true
+    api_key: ${AGENT_AI_API_KEY}
+    model: gpt-4o-mini          # cheap, fast — used for every detect call
+    analyze:
+      model: gpt-4o             # reserved for the on-demand analyze action
+      tool_timeout: 10s         # no single lookup may stall the 2-min budget
+      parallel_tools: true      # fan out multi-tool turns for faster analyses
+```
+
+With `parallel_tools: true`, an analyze turn that calls
+`recent_incidents`, `describe_service`, and `describe_dependencies`
+together runs all three at once; each is still individually capped at
+`10s` by `tool_timeout`.
+
+---
+
 ## Admin UI
 
 Everything the agent records is reviewed through the admin UI,

@@ -1,0 +1,81 @@
+# tools.yaml — per-tool configuration for the AI SRE Agent's analyze tools.
+#
+# This file is loaded automatically when it sits next to the main config
+# file (config.yaml). It is OPTIONAL: with no file (or an empty section) a
+# tool that needs external data simply degrades to a clean "nothing found"
+# and the analysis proceeds without it.
+#
+# This file holds per-tool DATA configuration only. It is NOT a tool
+# allow-list: tools are registered in code (analyzetools.Default), and a
+# missing config block just means the tool has no data to read.
+
+
+tools:
+  # Shared tool-loop knobs (apply to every analyze tool dispatch).
+  tool_timeout: 20s     # cap per tool dispatch; empty/"0"/invalid = 20s default
+  parallel_tools: false # run tool calls in one model turn concurrently (off = sequential)
+
+  # ---------------------------------------------------------------------------
+  # recent_changes — correlate an incident with recent deploys / config changes
+  # ---------------------------------------------------------------------------
+  # The recent_changes tool reads one or more REMOTE git repositories' commit
+  # histories (the deploy/change record most teams already keep). Each repo is
+  # mirror-cloned into a local cache on first use and fetched on later lookups.
+  # It shells out to the `git` binary, which MUST be available on PATH. Private
+  # remotes authenticate via the optional `auth` block: a global default under
+  # `git.auth` applies to every repo, and each repo may override it with its own
+  # `auth`. With an empty `repos` list the tool is not registered.
+  #
+  # recent_changes:
+  #   git:
+  #     auth:                       # global default auth (optional)
+  #       token: ${GIT_TOKEN}       # HTTPS access token / PAT
+  #       ssh_key_path: ""          # path to a private SSH key
+  #     repos:
+  #       - url: https://github.com/acme/api.git  # remote clone URL (required)
+  #         branch: main                          # optional; empty = default HEAD
+  #         service: api                          # optional; empty = derived from URL
+  #         auth:                                 # optional; overrides git.auth
+  #           token: ${ACME_API_TOKEN}
+  recent_changes:
+    git:
+      auth:             # global default auth; empty = ambient git credentials
+        token: ""         # HTTPS access token / PAT (e.g. ${GIT_TOKEN})
+        ssh_key_path: ""  # path to a private SSH key for ssh/scp-like remotes
+      repos: []   # empty leaves recent_changes unregistered
+        # - url: https://github.com/acme/api.git
+        #   branch: main          # optional; empty = default HEAD
+        #   service: api          # optional; empty = auto-detected from repo name
+        # - url: git@github.com:acme/web.git   # service auto-detected as "web"
+        #   auth:                 # optional; per-repo override of git.auth
+        #     ssh_key_path: /home/versus/.ssh/web_deploy
+
+  # -------------------------------------------------------------------------
+  # describe_dependencies — surface a service's upstream/downstream neighbours
+  # -------------------------------------------------------------------------
+  # An optional service-dependency graph. With an empty `services` list the
+  # describe_dependencies tool is simply not registered and analyses proceed
+  # without dependency awareness.
+  #
+  # Schema (minimal):
+  #   services:
+  #     - name: <service-name>        # the service node
+  #       depends_on:                 # upstream services this one relies on
+  #         - <other-service-name>
+  #
+  # Only `depends_on` (upstream edges) is authored by hand. The reverse edges
+  # (`depended_on_by`, i.e. downstream consumers) are derived automatically.
+  describe_dependencies:
+    services: []
+    #  - name: web
+    #    depends_on:
+    #      - api
+    #  - name: api
+    #    depends_on:
+    #      - database
+    #      - cache
+    #  - name: worker
+    #    depends_on:
+    #      - database
+    #      - queue
+

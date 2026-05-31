@@ -69,9 +69,44 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	var analyzeRate *ai.RateLimiter
 	{
 		analyzeBaseCfg := cfg.AI.Resolve(config.AgentAITaskConfig{Model: cfg.AI.Analyze.Model})
-		tools := analyzetools.Default(store, newCatalogAdapter(catalog))
+
+		// Independent source set + redactor for the read-only
+		// get_related_logs tool. Built separately from the worker's
+		// sources so pulling logs during an analysis never advances the
+		// worker's polling cursors. A nil reader simply omits the tool.
+		readerSources, srcErrs := BuildSources(cfg)
+		for _, e := range srcErrs {
+			log.Printf("agent: analyze reader source warning: %v", e)
+		}
+		reader := newSignalReaderAdapter(readerSources)
+		redactor, redactErrs := NewRedactor(cfg.Redaction.Enable && cfg.Redaction.RedactIPs, cfg.Redaction.ExtraPatterns)
+		for _, e := range redactErrs {
+			log.Printf("agent: analyze reader redactor warning: %v", e)
+		}
+		serviceMatcher, svcErrs := NewServiceMatcher(cfg.ServicePatterns)
+		for _, e := range svcErrs {
+			log.Printf("agent: analyze reader service_patterns warning: %v", e)
+		}
+
+		// Optional service-dependency graph for the describe_dependencies
+		// tool. Built from the operator-authored upstream edges in
+		// tools.yaml (tools.describe_dependencies.services); a nil/empty
+		// graph omits the tool.
+		graph := buildDependencyGraph(cfg.Tools.DescribeDependencies.Services)
+
+		// Optional git-backed change feed for the recent_changes tool. It
+		// mirror-clones each configured remote git repository into a local
+		// cache and reads its commit history, configured via tools.yaml
+		// (tools.recent_changes.git.repos). An empty repos list leaves the
+		// feed nil so the tool is omitted; the `git` binary must be on PATH
+		// when configured.
+		changes := analyzetools.NewGitChangeFeed(buildGitRepos(cfg.Tools.RecentChanges.Git))
+
+		tools := analyzetools.Default(store, newCatalogAdapter(catalog), reader, redactor, serviceMatcher, graph, changes)
 		a, aErr := analyze.New(context.Background(), analyzeBaseCfg, tools, analyze.Options{
-			HTTPClient: httpClient,
+			HTTPClient:    httpClient,
+			ToolTimeout:   parseDurationOr(cfg.Tools.ToolTimeout, 20*time.Second),
+			ParallelTools: cfg.Tools.ParallelTools,
 		})
 		if aErr != nil {
 			log.Printf("agent: analyze agent disabled: %v", aErr)

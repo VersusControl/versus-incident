@@ -318,6 +318,22 @@ func LoadConfig(path string) error {
 			}
 			cfg.Agent.Sources = loaded
 		}
+
+		// Always load the sibling `tools.yaml` file (same directory as the
+		// main config). The file is optional — a missing file means tools
+		// needing external data config (e.g. `recent_changes`,
+		// `describe_dependencies`) degrade to a clean "nothing found".
+		// When present it REPLACES any inline `agent.tools`. The file's
+		// top-level key is `tools`.
+		toolsPath := filepath.Join(filepath.Dir(path), "tools.yaml")
+		if _, statErr := os.Stat(toolsPath); statErr == nil {
+			loaded, lerr := loadToolsFile(toolsPath)
+			if lerr != nil {
+				err = fmt.Errorf("failed to load tools file %s: %w", toolsPath, lerr)
+				return
+			}
+			cfg.Agent.Tools = loaded
+		}
 	})
 
 	return err
@@ -347,6 +363,35 @@ func loadAgentSourcesFile(path string) ([]AgentSourceConfig, error) {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
 	return wrapper.Sources, nil
+}
+
+// loadToolsFile reads an external YAML file containing a top-level
+// `tools:` map of per-tool configuration and returns the parsed config.
+// ${VAR} references are expanded against the process environment,
+// mirroring the main config loader.
+func loadToolsFile(path string) (ToolsConfig, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ToolsConfig{}, fmt.Errorf("read: %w", err)
+	}
+	// Expand ${VAR} references across the whole document so values inside
+	// list items (e.g. recent_changes.git.repos[].url) are expanded too,
+	// not just top-level scalars.
+	expanded := os.ExpandEnv(string(raw))
+
+	v := viper.New()
+	v.SetConfigType("yaml")
+	if err := v.ReadConfig(strings.NewReader(expanded)); err != nil {
+		return ToolsConfig{}, fmt.Errorf("read: %w", err)
+	}
+
+	var wrapper struct {
+		Tools ToolsConfig `mapstructure:"tools"`
+	}
+	if err := v.Unmarshal(&wrapper); err != nil {
+		return ToolsConfig{}, fmt.Errorf("unmarshal: %w", err)
+	}
+	return wrapper.Tools, nil
 }
 
 func GetConfig() *Config {

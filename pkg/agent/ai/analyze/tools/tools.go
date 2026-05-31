@@ -8,10 +8,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -51,301 +47,72 @@ type ServiceInfo struct {
 	FirstSeen time.Time
 }
 
-// RecentIncidents lists incidents from storage within a time window,
-// optionally filtered by service. The agent uses it to spot bursts /
-// recurring incidents on the same service.
-type RecentIncidents struct {
-	Store storage.Provider
+// SignalReader is the read-only slice of the configured signal sources
+// the analyze tools depend on. Declaring it as a local interface (not
+// importing pkg/agent or pkg/signalsources) keeps the import graph
+// one-directional. The bridge in pkg/agent/analyze_adapter.go wraps an
+// independent source set so pulling logs during an analysis never
+// advances the worker's polling cursors.
+type SignalReader interface {
+	// Sources returns the names of every configured source.
+	Sources() []string
+	// Pull returns signals from the named source at or after `since`.
+	// The reader does no windowing or capping; callers filter and cap
+	// client-side. An unknown source name yields an error.
+	Pull(ctx context.Context, source string, since time.Time) ([]core.Signal, error)
 }
 
-// Name implements core.AnalyzeTool.
-func (RecentIncidents) Name() string { return "recent_incidents" }
-
-// Description implements core.AnalyzeTool.
-func (RecentIncidents) Description() string {
-	return "List incidents from the local store within the last N minutes, optionally filtered by service. Returns id, title, service, severity, resolved, created_at."
+// LineRedactor scrubs sensitive substrings from a single log line
+// before it is handed to the model. *agent.Redactor satisfies this
+// interface directly via its Scrub method.
+type LineRedactor interface {
+	Scrub(s string) string
 }
 
-// ArgsSchema implements core.AnalyzeTool.
-func (RecentIncidents) ArgsSchema() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"window_minutes": map[string]any{
-				"type":        "integer",
-				"description": "Look back this many minutes from now. Default 60, max 1440.",
-			},
-			"service": map[string]any{
-				"type":        "string",
-				"description": "Optional service name to filter by (exact match).",
-			},
-			"limit": map[string]any{
-				"type":        "integer",
-				"description": "Cap the number of incidents returned. Default 20, max 100.",
-			},
-		},
-	}
-}
-
-type recentIncidentsArgs struct {
-	WindowMinutes int    `json:"window_minutes"`
-	Service       string `json:"service"`
-	Limit         int    `json:"limit"`
-}
-
-type recentIncidentItem struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title,omitempty"`
-	Service   string    `json:"service,omitempty"`
-	Severity  string    `json:"severity,omitempty"`
-	Resolved  bool      `json:"resolved"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// Invoke implements core.AnalyzeTool.
-func (r RecentIncidents) Invoke(_ context.Context, args json.RawMessage) (*core.ToolResult, error) {
-	if r.Store == nil {
-		return nil, fmt.Errorf("recent_incidents: storage not configured")
-	}
-	var a recentIncidentsArgs
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &a); err != nil {
-			return nil, fmt.Errorf("recent_incidents: parse args: %w", err)
-		}
-	}
-	if a.WindowMinutes <= 0 {
-		a.WindowMinutes = 60
-	}
-	if a.WindowMinutes > 1440 {
-		a.WindowMinutes = 1440
-	}
-	if a.Limit <= 0 {
-		a.Limit = 20
-	}
-	if a.Limit > 100 {
-		a.Limit = 100
-	}
-
-	all, err := r.Store.ListIncidents(0)
-	if err != nil {
-		return nil, fmt.Errorf("recent_incidents: list: %w", err)
-	}
-	cutoff := time.Now().UTC().Add(-time.Duration(a.WindowMinutes) * time.Minute)
-	out := make([]recentIncidentItem, 0)
-	for _, rec := range all {
-		if rec.CreatedAt.Before(cutoff) {
-			continue
-		}
-		if a.Service != "" && !strings.EqualFold(rec.Service, a.Service) {
-			continue
-		}
-		out = append(out, recentIncidentItem{
-			ID:        rec.ID,
-			Title:     rec.Title,
-			Service:   rec.Service,
-			Resolved:  rec.Resolved,
-			CreatedAt: rec.CreatedAt,
-		})
-		if len(out) >= a.Limit {
-			break
-		}
-	}
-	return &core.ToolResult{
-		Tool:  RecentIncidents{}.Name(),
-		Found: true,
-		Data: map[string]any{
-			"count":          len(out),
-			"window_minutes": a.WindowMinutes,
-			"service":        a.Service,
-			"incidents":      out,
-		},
-	}, nil
-}
-
-// PatternHistory looks up the agent catalog by pattern id and returns
-// the curated metadata (template, counts, baseline, verdict, tags).
-type PatternHistory struct {
-	Catalog PatternCatalog
-}
-
-// Name implements core.AnalyzeTool.
-func (PatternHistory) Name() string { return "pattern_history" }
-
-// Description implements core.AnalyzeTool.
-func (PatternHistory) Description() string {
-	return "Look up a learned log-pattern by id and return its template, observed counts, EWMA baseline, service, verdict, and operator tags."
-}
-
-// ArgsSchema implements core.AnalyzeTool.
-func (PatternHistory) ArgsSchema() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"pattern_id": map[string]any{
-				"type":        "string",
-				"description": "Required. The pattern id from a prior incident or finding.",
-			},
-		},
-		"required": []string{"pattern_id"},
-	}
-}
-
-type patternHistoryArgs struct {
-	PatternID string `json:"pattern_id"`
-}
-
-// Invoke implements core.AnalyzeTool.
-func (p PatternHistory) Invoke(_ context.Context, args json.RawMessage) (*core.ToolResult, error) {
-	if p.Catalog == nil {
-		return nil, fmt.Errorf("pattern_history: catalog not configured")
-	}
-	var a patternHistoryArgs
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &a); err != nil {
-			return nil, fmt.Errorf("pattern_history: parse args: %w", err)
-		}
-	}
-	if a.PatternID == "" {
-		return nil, fmt.Errorf("pattern_history: pattern_id is required")
-	}
-	pat := p.Catalog.Get(a.PatternID)
-	if pat == nil {
-		return &core.ToolResult{
-			Tool:  PatternHistory{}.Name(),
-			Found: false,
-			Data:  map[string]any{"pattern_id": a.PatternID},
-		}, nil
-	}
-	return &core.ToolResult{
-		Tool:  PatternHistory{}.Name(),
-		Found: true,
-		Data: map[string]any{
-			"pattern_id": pat.ID,
-			"template":   pat.Template,
-			"source":     pat.Source,
-			"service":    pat.Service,
-			"rule_name":  pat.RuleName,
-			"verdict":    pat.Verdict,
-			"tags":       pat.Tags,
-			"count":      pat.Count,
-			"baseline":   pat.Baseline,
-			"first_seen": pat.FirstSeen,
-			"last_seen":  pat.LastSeen,
-		},
-	}, nil
-}
-
-// DescribeService returns the catalog-known summary for a service: how
-// long it has been observed and how many patterns are attributed to it.
-type DescribeService struct {
-	Catalog PatternCatalog
-}
-
-// Name implements core.AnalyzeTool.
-func (DescribeService) Name() string { return "describe_service" }
-
-// Description implements core.AnalyzeTool.
-func (DescribeService) Description() string {
-	return "Summarize what the agent knows about a service: first-seen timestamp and the top learned patterns attributed to it."
-}
-
-// ArgsSchema implements core.AnalyzeTool.
-func (DescribeService) ArgsSchema() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"service": map[string]any{
-				"type":        "string",
-				"description": "Required. The service name to look up.",
-			},
-			"top_patterns": map[string]any{
-				"type":        "integer",
-				"description": "How many top patterns to include. Default 5, max 20.",
-			},
-		},
-		"required": []string{"service"},
-	}
-}
-
-type describeServiceArgs struct {
-	Service     string `json:"service"`
-	TopPatterns int    `json:"top_patterns"`
-}
-
-type describePatternEntry struct {
-	ID       string  `json:"id"`
-	Template string  `json:"template"`
-	Count    int     `json:"count"`
-	Baseline float64 `json:"baseline"`
-	Verdict  string  `json:"verdict,omitempty"`
-}
-
-// Invoke implements core.AnalyzeTool.
-func (d DescribeService) Invoke(_ context.Context, args json.RawMessage) (*core.ToolResult, error) {
-	if d.Catalog == nil {
-		return nil, fmt.Errorf("describe_service: catalog not configured")
-	}
-	var a describeServiceArgs
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &a); err != nil {
-			return nil, fmt.Errorf("describe_service: parse args: %w", err)
-		}
-	}
-	if a.Service == "" {
-		return nil, fmt.Errorf("describe_service: service is required")
-	}
-	if a.TopPatterns <= 0 {
-		a.TopPatterns = 5
-	}
-	if a.TopPatterns > 20 {
-		a.TopPatterns = 20
-	}
-
-	res := &core.ToolResult{
-		Tool: DescribeService{}.Name(),
-		Data: map[string]any{"service": a.Service},
-	}
-	services := d.Catalog.AllServices()
-	if info, ok := services[a.Service]; ok {
-		res.Found = true
-		res.Data["first_seen"] = info.FirstSeen
-	}
-
-	matches := make([]describePatternEntry, 0)
-	for _, p := range d.Catalog.All() {
-		if !strings.EqualFold(p.Service, a.Service) {
-			continue
-		}
-		matches = append(matches, describePatternEntry{
-			ID:       p.ID,
-			Template: p.Template,
-			Count:    p.Count,
-			Baseline: p.Baseline,
-			Verdict:  p.Verdict,
-		})
-	}
-	sort.SliceStable(matches, func(i, j int) bool {
-		return matches[i].Count > matches[j].Count
-	})
-	if len(matches) > a.TopPatterns {
-		matches = matches[:a.TopPatterns]
-	}
-	res.Data["pattern_count"] = len(matches)
-	res.Data["top_patterns"] = matches
-	return res, nil
+// ServiceExtractor pulls a service name out of a raw log message using
+// the operator-configured `agent.service_patterns`. *agent.ServiceMatcher
+// satisfies this interface directly via its Extract method, so the
+// get_related_logs service filter matches lines the exact same way the
+// worker attributes signals to services. A nil extractor (or an empty
+// result) makes the tool fall back to structured fields / source name.
+type ServiceExtractor interface {
+	Extract(message string) string
 }
 
 // Default returns the production tool set wired to the given storage
 // and catalog. Callers can also assemble a custom set by constructing
 // the individual tool structs.
-func Default(store storage.Provider, cat PatternCatalog) []core.AnalyzeTool {
-	out := make([]core.AnalyzeTool, 0, 3)
+//
+// reader/redactor power the get_related_logs tool. When reader is nil
+// (no sources configured) that tool is omitted; when redactor is nil
+// log lines are returned unscrubbed (callers should always pass a
+// redactor in production). services is the same ServiceMatcher the
+// worker uses so the get_related_logs service filter matches lines
+// consistently; it may be nil (the filter then falls back to fields).
+//
+// graph powers the describe_dependencies tool. When nil or empty (no
+// service-dependency graph configured) that tool is omitted.
+//
+// changes powers the recent_changes tool. When nil (no change feed
+// configured) that tool is omitted; the tool itself still treats a
+// missing or empty feed as a clean Found=false rather than an error.
+func Default(store storage.Provider, cat PatternCatalog, reader SignalReader, redactor LineRedactor, services ServiceExtractor, graph *DependencyGraph, changes ChangeFeed) []core.AnalyzeTool {
+	out := make([]core.AnalyzeTool, 0, 6)
 	if store != nil {
 		out = append(out, RecentIncidents{Store: store})
 	}
 	if cat != nil {
 		out = append(out, PatternHistory{Catalog: cat})
 		out = append(out, DescribeService{Catalog: cat})
+	}
+	if reader != nil {
+		out = append(out, RelatedLogs{Reader: reader, Redactor: redactor, Services: services})
+	}
+	if graph != nil && graph.Len() > 0 {
+		out = append(out, DescribeDependencies{Graph: graph, Store: store})
+	}
+	if changes != nil {
+		out = append(out, RecentChanges{Feed: changes})
 	}
 	return out
 }

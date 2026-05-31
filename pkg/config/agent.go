@@ -34,6 +34,17 @@ type AgentConfig struct {
 	// sources). The file's top-level key is `sources`. ${VAR} references
 	// in the file are expanded against the process environment.
 	Sources []AgentSourceConfig `mapstructure:"sources"`
+
+	// Tools holds per-tool configuration for analyze-mode tools that need
+	// external data (e.g. the `recent_changes` tool's git repository and
+	// the `describe_dependencies` tool's service-dependency graph).
+	// Versus loads it from the file `tools.yaml` sitting next to the main
+	// config file (path is hardcoded; missing file is OK — tools needing
+	// config then simply degrade to a clean "nothing found"). The file's
+	// top-level key is `tools`. This is per-tool DATA config, not a
+	// registration allow-list: tools are still registered in code via
+	// `analyzetools.Default`.
+	Tools ToolsConfig `mapstructure:"tools"`
 }
 
 type AgentRedactionConfig struct {
@@ -317,12 +328,17 @@ type AgentAIConfig struct {
 	Analyze AgentAIAnalyzeConfig `mapstructure:"analyze"`
 }
 
-// AgentAIAnalyzeConfig is the analyze-agent override block. The only
-// operator-tunable knob is the model: analyze deep dives can point at a
-// stronger model than the shared ai.model. All other LLM settings
-// (temperature, max_tokens, rate limit, cache) are inherited from the
-// top-level ai block. The analyze agent is constructed whenever
+// AgentAIAnalyzeConfig is the analyze-agent override block. The model
+// knob lets analyze deep dives point at a stronger model than the
+// shared ai.model. All other LLM settings (temperature, max_tokens,
+// rate limit, cache) are inherited from the top-level ai block, and the
+// tool-loop knobs (tool_timeout, parallel_tools) live on the shared
+// tools block (tools.yaml). The analyze agent is constructed whenever
 // AI.Enable is true — there is no separate opt-in gate.
+//
+// The Model knob is read directly from cfg.AI.Analyze (NOT via Resolve,
+// which zeroes the Analyze overlay), so it must be deep-cloned in
+// clone_config.go.
 type AgentAIAnalyzeConfig struct {
 	// Model overrides the shared ai.model for analyze deep dives.
 	// Empty inherits ai.model.
