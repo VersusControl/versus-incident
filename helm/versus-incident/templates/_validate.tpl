@@ -47,13 +47,10 @@ Caught here:
 {{- end -}}
 {{- if eq $type "file" -}}
   {{- $replicas := int (default 1 .Values.replicaCount) -}}
-  {{- if .Values.autoscaling.enabled -}}
-    {{- $replicas = int (default 1 .Values.autoscaling.minReplicas) -}}
-  {{- end -}}
   {{- if and .Values.storage.persistence.enabled (gt $replicas 1) -}}
     {{- $access := .Values.storage.persistence.accessMode | default "ReadWriteOnce" -}}
     {{- if eq $access "ReadWriteOnce" -}}
-      {{- fail (printf "versus-incident: storage.persistence.enabled=true with %d replicas and accessMode=ReadWriteOnce. The PVC cannot be mounted on more than one pod. Set replicaCount=1 (and autoscaling.enabled=false), use accessMode=ReadWriteMany, or switch to a non-file storage backend." $replicas) -}}
+      {{- fail (printf "versus-incident: storage.persistence.enabled=true with %d replicas and accessMode=ReadWriteOnce. The PVC cannot be mounted on more than one pod. Set replicaCount=1, use accessMode=ReadWriteMany, or switch to a non-file storage backend." $replicas) -}}
     {{- end -}}
   {{- end -}}
   {{- if and .Values.storage.persistence.existingClaim (not .Values.storage.persistence.enabled) -}}
@@ -79,11 +76,8 @@ Caught here:
     {{- fail (printf "versus-incident: agent.mode=%q is not recognised. Valid values: training, shadow, detect." $mode) -}}
   {{- end -}}
   {{- $replicas := int (default 1 .Values.replicaCount) -}}
-  {{- if .Values.autoscaling.enabled -}}
-    {{- $replicas = int (default 1 .Values.autoscaling.minReplicas) -}}
-  {{- end -}}
   {{- if gt $replicas 1 -}}
-    {{- fail (printf "versus-incident: agent.enable=true with %d replicas. The agent worker is single-writer to the pattern catalog and detect log; running multiple replicas will produce racing writes. Set replicaCount=1 and autoscaling.enabled=false when running the agent." $replicas) -}}
+    {{- fail (printf "versus-incident: agent.enable=true with %d replicas. The agent worker is single-writer to the pattern catalog and detect log; running multiple replicas will produce racing writes. Set replicaCount=1 when running the agent." $replicas) -}}
   {{- end -}}
   {{- if .Values.agent.ai.enable -}}
     {{- if not .Values.agent.ai.apiKey -}}

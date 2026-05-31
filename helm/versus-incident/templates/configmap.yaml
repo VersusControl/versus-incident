@@ -211,6 +211,10 @@ data:
         max_tokens: {{ .Values.agent.ai.maxTokens | default 512 }}
         max_calls_per_hour: {{ .Values.agent.ai.maxCallsPerHour | default 60 }}
         cache_ttl: {{ .Values.agent.ai.cacheTtl | default "1h" | quote }}
+        {{- if .Values.agent.ai.analyze.model }}
+        analyze:
+          model: {{ .Values.agent.ai.analyze.model | quote }}
+        {{- end }}
     {{- end }}
 
   {{- if .Values.agent.enable }}
@@ -221,6 +225,55 @@ data:
       {{- else }}
       []
       {{- end }}
+  {{- end }}
+
+  {{- if .Values.agent.enable }}
+  tools.yaml: |
+    # Per-tool DATA config for the analyze tools (rendered by Helm).
+    tools:
+      tool_timeout: {{ .Values.agent.tools.toolTimeout | default "20s" | quote }}
+      parallel_tools: {{ .Values.agent.tools.parallelTools | default false }}
+      recent_changes:
+        git:
+          auth:
+            token: {{ .Values.agent.tools.recentChanges.git.auth.token | default "" | quote }}
+            ssh_key_path: {{ .Values.agent.tools.recentChanges.git.auth.sshKeyPath | default "" | quote }}
+          repos:
+          {{- if .Values.agent.tools.recentChanges.git.repos }}
+          {{- range .Values.agent.tools.recentChanges.git.repos }}
+            - url: {{ .url | quote }}
+              {{- if .branch }}
+              branch: {{ .branch | quote }}
+              {{- end }}
+              {{- if .service }}
+              service: {{ .service | quote }}
+              {{- end }}
+              {{- if .auth }}
+              auth:
+                token: {{ .auth.token | default "" | quote }}
+                ssh_key_path: {{ .auth.sshKeyPath | default "" | quote }}
+              {{- end }}
+          {{- end }}
+          {{- else }}
+            []
+          {{- end }}
+      describe_dependencies:
+        services:
+        {{- if .Values.agent.tools.describeDependencies.services }}
+        {{- range .Values.agent.tools.describeDependencies.services }}
+          - name: {{ .name | quote }}
+            depends_on:
+            {{- if .dependsOn }}
+            {{- range .dependsOn }}
+              - {{ . | quote }}
+            {{- end }}
+            {{- else }}
+              []
+            {{- end }}
+        {{- end }}
+        {{- else }}
+          []
+        {{- end }}
   {{- end }}
 
   {{- if .Values.templates.slack }}
