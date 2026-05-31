@@ -4,8 +4,6 @@ Detect mode leverages AI to identify and alert on new or unusual patterns in rea
 
 Detect mode is the **go-live** step. The agent classifies log patterns the same way it does in [shadow](./shadow-mode.md), and when something genuinely new or anomalous shows up it asks an **AI SRE** to triage it and emits a real incident. Think of it as: "shadow mode, but with a hand on the alert button — and the AI writes the page."
 
----
-
 ## When to Switch to Detect Mode
 
 Switch to detect mode when:
@@ -16,8 +14,6 @@ Switch to detect mode when:
 - An OpenAI-compatible API key is configured.
 
 Detect mode is ideal for production environments where real-time alerts for new or unusual patterns are critical.
-
----
 
 ## How detect mode works
 
@@ -47,8 +43,6 @@ agent does five things in order:
 Each outcome — including skips and failures — is recorded so you
 can spot misconfigured keys or channels at a glance on the
 **Detect** page.
-
----
 
 ## Configuration
 
@@ -102,8 +96,6 @@ for the full set of starter patterns covering Pino, Winston,
 Logback, Serilog, zap, slog, syslog, journald, Docker, Envoy,
 nginx, and friends.
 
----
-
 ## What gets recorded
 
 Every AI call (and every cache / dry / quota outcome) is kept as
@@ -125,8 +117,6 @@ Look at it through the admin UI (the **Detect** page in the
 sidebar):
 
 ![AI Agent](/docs/images/ai-detect-page.png)
-
----
 
 ## Worked example: end-to-end test
 
@@ -248,8 +238,6 @@ Each scenario stresses a different part of the AI's reasoning:
 Watch the `category` and `severity` fields in the parsed finding
 move accordingly.
 
----
-
 ## Cost & safety knobs
 
 - **`max_calls_per_hour`** — hard cap. With the cache TTL set to
@@ -267,8 +255,6 @@ move accordingly.
   agent — the redactor scrubs common secret shapes
   (`sk-…`, `xoxb-…`, AWS keys, JWTs, basic-auth URLs) but treat
   it as defense-in-depth, not a guarantee.
-
----
 
 ## Common questions
 

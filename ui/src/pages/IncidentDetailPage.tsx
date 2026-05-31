@@ -13,7 +13,7 @@ import {
 import { api } from "@/lib/api";
 import { fmtAbs, fmtRel } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
-import { Pill } from "@/components/Pill";
+import { Pill, SourceBadge } from "@/components/Pill";
 import { ErrorBox, Spinner } from "@/components/feedback";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { AnalysisCard } from "@/components/AnalysisCard";
@@ -250,7 +250,12 @@ export function IncidentDetailPage() {
                 <div className="card-body grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
                   <Fact k="ID" v={<span className="font-mono">{data.id}</span>} />
                   <Fact k="Service" v={data.service || "—"} />
-                  <Fact k="Source" v={data.source || "—"} />
+                  <Fact
+                    k="Source"
+                    v={
+                      data.source ? <SourceBadge source={data.source} /> : "—"
+                    }
+                  />
                   <Fact k="Team" v={data.team_id || "—"} />
                   <Fact
                     k="Created"

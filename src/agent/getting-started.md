@@ -14,8 +14,6 @@ By the end you'll have:
 > **Reminder.** The agent is **off by default**. Nothing in this
 > guide happens until you set `AGENT_ENABLE=true`.
 
----
-
 ## Before you start
 
 - Docker (or Podman) on your machine.
@@ -24,8 +22,6 @@ By the end you'll have:
   For a quick local test:
   `docker run -d --name versus-redis -p 6379:6379 redis:7`.
 - About 5 minutes.
-
----
 
 ## 1. Make a working folder
 
@@ -48,8 +44,6 @@ versus-agent/
 ├── data/                    # patterns.json is saved here
 └── logs/                    # the file the agent will read
 ```
-
----
 
 ## 2. Write a small `config.yaml`
 
@@ -114,8 +108,6 @@ agent:
     rules: []
 ```
 
----
-
 ## 3. Write `agent_sources.yaml`
 
 The list of log sources lives in a sibling file `agent_sources.yaml`
@@ -132,8 +124,6 @@ sources:
       format: text             # "text" or "json"
       from_beginning: true     # read the whole file on first start
 ```
-
----
 
 ## 4. Run with Docker
 
@@ -175,8 +165,6 @@ agent: starting worker mode=training sources=1 poll=10s catalog=/app/data/patter
 If there are no log lines yet, the agent just waits and checks
 again every `poll_interval`. To give it something to read, jump to
 the next section.
-
----
 
 ## 5. (Optional) Generate fake logs to test
 
@@ -221,8 +209,6 @@ in the repo.
 
 [scripts]: https://github.com/VersusControl/versus-incident/tree/main/scripts
 
----
-
 ## 6. Look at what the agent learned
 
 Open the admin UI at `http://localhost:3000` and sign in with the
@@ -234,8 +220,6 @@ sidebar:
 - **Patterns** — every learned pattern, sorted by how often it has
   been seen. Click any row to open its detail view (template,
   first/last seen, sighting count, and the labels you add).
-
----
 
 ## 7. Switch to your real log file
 
@@ -254,8 +238,6 @@ flattened, switch `AGENT_MODE` to `shadow` and review the
 "would-have-alerted" entries on the **Shadow** page for one release
 cycle before going to `detect`. See
 [Shadow Mode](./shadow-mode.md) for the review steps.
-
----
 
 ## Common questions
 
@@ -311,8 +293,6 @@ include the source name). Each agent should have its own
 Roughly: root-level `gateway_secret=…`, `agent.enable=true`, plus
 a `redis` block and a sibling `agent_sources.yaml` listing at least
 one source. Everything else has sensible defaults.
-
----
 
 ## What's next
 

@@ -10,6 +10,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 
 	m "github.com/VersusControl/versus-incident/pkg/models"
 )
@@ -54,7 +55,7 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	// downstream channel later fails. Failures here are non-fatal.
 	var rec *storage.IncidentRecord
 	if store != nil {
-		rec = buildIncidentRecord(incident, cfg, contentClone, resolved)
+		rec = buildIncidentRecord(incident, cfg, contentClone, resolved, sourceHint(params...))
 		rec.NotifyStatus = "pending"
 		if err := store.SaveIncident(rec); err != nil {
 			log.Printf("incident: persist warning: %v", err)
@@ -129,14 +130,16 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 // ChannelsNotified stays empty here and is filled in after the
 // fan-out so it reflects channels that ACTUALLY succeeded.
 // OnCallTriggered likewise starts at the optimistic value and is
-// flipped back to false if workflow.Start fails.
-func buildIncidentRecord(incident *m.Incident, cfg *config.Config, content map[string]interface{}, resolved bool) *storage.IncidentRecord {
+// flipped back to false if workflow.Start fails. hint is the ingress
+// source hint ("sns"/"sqs"/...) supplied by the calling adapter; it is
+// ignored for agent-originated incidents, which carry their own Source.
+func buildIncidentRecord(incident *m.Incident, cfg *config.Config, content map[string]interface{}, resolved bool, hint string) *storage.IncidentRecord {
 	rec := &storage.IncidentRecord{
 		ID:              incident.ID,
 		TeamID:          incident.TeamID,
 		Title:           firstString(content, "title", "alertname", "summary", "subject", "name"),
 		Service:         firstString(content, "service", "service_name", "app", "component"),
-		Source:          "http",
+		Source:          resolveSource(content, hint),
 		Resolved:        resolved,
 		ChannelsEnabled: enabledChannels(cfg),
 		OnCallTriggered: !resolved && cfg.OnCall.Enable,
@@ -144,6 +147,40 @@ func buildIncidentRecord(incident *m.Incident, cfg *config.Config, content map[s
 		Content:         content,
 	}
 	return rec
+}
+
+// sourceHintKey is the reserved params key used by ingress adapters
+// (SNS, SQS) to tell buildIncidentRecord which transport delivered the
+// alert. It is NOT a config-overwrite key: GetConfigWitParamsOverwrite
+// ignores it. The public HTTP webhook strips any caller-supplied value
+// so it cannot be spoofed via query string.
+const sourceHintKey = "incident_source"
+
+// sourceHint extracts the ingress source hint from the optional params
+// overwrite map. Empty when no hint was supplied.
+func sourceHint(params ...*map[string]string) string {
+	if len(params) == 0 || params[0] == nil {
+		return ""
+	}
+	return strings.TrimSpace((*params[0])[sourceHintKey])
+}
+
+// resolveSource decides the durable Source label for an incident.
+// Agent-originated incidents are self-describing: they carry a Source
+// like "agent:elasticsearch:prod-app" in their content, so that value
+// wins. Otherwise the ingress hint ("sns"/"sqs") is used, falling back
+// to "webhook" for the standard webhook path.
+func resolveSource(content map[string]interface{}, hint string) string {
+	if utils.IsAgentIncident(content) {
+		if s, ok := content["Source"].(string); ok && strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+		return "agent"
+	}
+	if hint != "" {
+		return hint
+	}
+	return "webhook"
 }
 
 // enabledChannels returns the names of every alert channel currently

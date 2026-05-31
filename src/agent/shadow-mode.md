@@ -8,8 +8,6 @@ can read later. **It does not send any alerts.**
 Think of it as: "show me what you would have woken me up for, so I
 can decide if I trust you."
 
----
-
 ## When to switch to shadow
 
 Stay in `training` until new patterns stop showing up often —
@@ -36,8 +34,6 @@ data/
 └── shadow.json       # would-have-alerted entries (only written in shadow)
 ```
 
----
-
 ## How shadow mode works
 
 Shadow mode runs the same steps as training (read → hide secrets →
@@ -59,8 +55,6 @@ Three things to remember:
 - **No real alerts.** Would-have-alerted entries land in
   `shadow.json` (saved on disk, read through the API) and also
   print a green line in stdout.
-
----
 
 ## What gets recorded
 
@@ -158,8 +152,6 @@ this on a normal-sized service: 1000 different anomalies in a single
 review window means something is *very* wrong (or the filter rules
 are too loose — see [Filter rules](./regex.md)).
 
----
-
 ## Try it locally with the noisy-logs script
 
 If you went through [Getting Started](./getting-started.md), you
@@ -222,8 +214,6 @@ to triage them.
 >
 > 500 lines at default weights gives about 25 anomaly lines across
 > ~10 different templates — a tidy worked example.
-
----
 
 ## Reading the shadow log
 
@@ -299,8 +289,6 @@ If the shadow event count stops growing for many ticks, the agent
 has nothing new to flag — a good sign you're getting close to ready
 for `detect` mode.
 
----
-
 ## A typical review loop
 
 This is the pattern you'll repeat for as long as the agent is in
@@ -339,8 +327,6 @@ shadow mode. Each pass should make the next one quieter.
    release cycle (one or two weeks).
 7. **Switch to detect.** Set `AGENT_MODE=detect` and you're live.
 
----
-
 ## Common questions
 
 **Q: Will shadow mode send any alerts?**
@@ -360,8 +346,6 @@ back to `shadow` later and it picks up where it left off.
 **Q: Can the shadow log fill up forever?**
 No. It holds at most 1000 distinct patterns. When full, the oldest
 entry is dropped to make room.
-
----
 
 ## What's next
 
