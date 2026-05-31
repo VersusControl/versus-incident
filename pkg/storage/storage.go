@@ -88,7 +88,7 @@ type IncidentRecord struct {
 	ID       string `json:"id"`
 	TeamID   string `json:"team_id,omitempty"`
 	Title    string `json:"title,omitempty"`
-	Source   string `json:"source,omitempty"`  // "http" | "sns" | "sqs" | ...
+	Source   string `json:"source,omitempty"`  // "webhook" | "sns" | "sqs" | ...
 	Service  string `json:"service,omitempty"` // best-effort from payload
 	Resolved bool   `json:"resolved"`
 	// ChannelsEnabled is the snapshot of channels that were configured

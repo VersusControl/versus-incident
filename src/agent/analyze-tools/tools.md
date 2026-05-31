@@ -74,8 +74,6 @@ apply to **every** tool dispatch:
 | `tool_timeout` | `20s` | Caps a single tool dispatch so one slow lookup can't consume the 2-minute analysis budget. A timeout surfaces as a tool error, never a hard failure. |
 | `parallel_tools` | `false` | When the model emits several tool calls in one turn, run them concurrently instead of sequentially. The audit trail stays deterministically ordered either way. |
 
----
-
 ### `describe_dependencies`
 
 This tool maps service relationships (upstream /
@@ -106,8 +104,6 @@ tools:
           - database
           - queue
 ```
-
----
 
 ### `recent_changes`
 
@@ -149,8 +145,6 @@ tools:
             ssh_key_path: /keys/web_deploy
 ```
 
----
-
 ## Complete `tools.yaml` example
 
 A production-ready `tools.yaml` combining both external tools and the
@@ -185,8 +179,6 @@ tools:
       - name: worker
         depends_on: [database, queue]
 ```
-
----
 
 ## Running with Docker
 
@@ -238,8 +230,6 @@ services:
       - ./data:/app/data
       - ./keys/web_deploy:/keys/web_deploy:ro
 ```
-
----
 
 ## More tools
 

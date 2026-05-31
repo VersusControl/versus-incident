@@ -39,6 +39,7 @@ func CreateIncident(c *fiber.Ctx) error {
 		var err error
 		if len(c.Queries()) > 0 {
 			overwriteVaule := c.Queries()
+			delete(overwriteVaule, "incident_source") // reserved: ingress-only, not client-settable
 			for _, record := range records {
 				// capture pointer per iteration
 				rec := record
@@ -73,6 +74,7 @@ func CreateIncident(c *fiber.Ctx) error {
 	var err error
 	if len(c.Queries()) > 0 {
 		overwriteVaule := c.Queries()
+		delete(overwriteVaule, "incident_source") // reserved: ingress-only, not client-settable
 		err = services.CreateIncident("", body, &overwriteVaule)
 	} else {
 		err = services.CreateIncident("", body)

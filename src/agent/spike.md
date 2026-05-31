@@ -11,8 +11,6 @@ suddenly jumps well above the pattern's normal rate.
 
 ![AI Agent](/docs/images/spike-detection.png)
 
----
-
 ## How it works
 
 The agent keeps a running average for each pattern — specifically an
@@ -37,8 +35,6 @@ The comparison has three guards:
    whole feature off.
 
 All three must be true at the same time for a spike to be recorded.
-
----
 
 ## Configuration
 
@@ -138,8 +134,6 @@ actually wrong". This setting is that learning period.
 | 4 | `5` | 30 | No | Seen 4 times — almost ready but not yet |
 | 100 | `20` | 30 | Yes | Well past the learning period |
 
----
-
 ## Example
 
 Say the error `db-conn-refused` normally shows up about 1–2 times
@@ -150,8 +144,6 @@ With the default settings, a spike fires when the agent sees
 **8 or more** of them in one check — because `8 > 5.0 (spike_multiplier) × 1.5 (baseline) = 7.5`
 and `8 ≥ 5` (`spike_min_frequency`: the minimum count) and the pattern has been seen more
 than 20 times (`spike_min_baseline_count`) overall (so the agent trusts its average).
-
----
 
 ## What the shadow log shows
 
@@ -169,8 +161,6 @@ page and as an incident) with:
 Filter the Shadow page by the `spike` verdict to see only volume
 events, and watch the summary counts at the top to track how often
 they fire.
-
----
 
 ## Testing spike detection with the log generator
 
@@ -259,8 +249,6 @@ python3 scripts/generate_noisy_logs.py --append --start-time now \
 python3 scripts/generate_noisy_logs.py --append --start-time now \
   --spike panic --spike-burst 40 --spike-context 20
 ```
-
----
 
 ## Tuning tips
 

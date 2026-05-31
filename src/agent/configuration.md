@@ -11,8 +11,6 @@ for the rest of its features. Everything lives under the top-level
 > **Reminder.** The agent is **off by default** (`agent.enable: false`).
 > Nothing about the agent runs until that flag flips.
 
----
-
 ## Top-level keys
 
 ```yaml
@@ -76,8 +74,6 @@ agent:
 | `AGENT_AI_API_KEY` | `agent.ai.api_key` |
 | `AGENT_AI_MODEL` | `agent.ai.model` |
 
----
-
 ## `redaction`
 
 Pattern-based scrubbing of secrets and PII before any other component
@@ -98,8 +94,6 @@ redaction:
 | `enable` | bool | `true` (when `agent.enable: true`) | Master switch for redaction. |
 | `redact_ips` | bool | `false` | Opt-in IPv4/IPv6 redaction. Off by default because IPs are usually useful context. |
 | `extra_patterns` | string list | `[]` | Additional Go regexes. Invalid patterns are skipped (logged at startup), so one typo can't disable redaction. |
-
----
 
 ## `catalog`
 
@@ -122,8 +116,6 @@ The storage backend itself is selected at the **root** of `config.yaml`
 (`patterns.json`); the only configurable part is the storage `data_dir`
 (root-level `storage.file.data_dir`).
 
----
-
 ## `miner`
 
 Drain-style log clusterer. The defaults work for most setups; tune only
@@ -143,8 +135,6 @@ miner:
 | `similarity_threshold` | float (0–1) | `0.4` | Token-overlap ratio required to consider two messages part of the same template. |
 | `tree_depth` | int | `4` | Depth of the prefix tree used to bucket templates by length and leading tokens. |
 | `max_children` | int | `100` | Per-node fan-out cap to keep the tree bounded. |
-
----
 
 ## `regex`
 
@@ -176,8 +166,6 @@ Common recipes:
 | Learn everything (training, broad scope) | `default_pattern: ".*"` |
 | Only learn explicit rule matches (strict) | `default_pattern: ""` plus full `rules:` list |
 | Learn only error-ish lines (default) | `default_pattern: "(?i).*error.*"` |
-
----
 
 ## Signal sources
 
@@ -270,8 +258,6 @@ What happens if you only raise one of them? With
 The cursor jumps 5,000 lines forward on every tick but only 1,000 are
 actually mined — the other 4,000 are silently discarded. Always raise
 the two caps together.
-
----
 
 ## `ai`
 
@@ -431,8 +417,6 @@ With `parallel_tools: true`, an analyze turn that calls
 together runs all three at once; each is still individually capped at
 `10s` by `tool_timeout`.
 
----
-
 ## Admin UI
 
 Everything the agent records is reviewed through the admin UI,
@@ -448,8 +432,6 @@ With no secret configured the agent refuses to start.
 | **Detect** | The AI's triage calls and outcomes in detect mode. |
 | **Services** | Discovered services and their grace state. |
 | **Incidents** | Incidents emitted by the agent, with the on-demand analyze action. |
-
----
 
 ## Where to next
 

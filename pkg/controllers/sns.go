@@ -68,9 +68,11 @@ func SNS(c *fiber.Ctx) error {
 
 			if len(c.Queries()) > 0 {
 				overwriteVaule := c.Queries()
+				overwriteVaule["incident_source"] = "sns"
 				err = services.CreateIncident("", content, &overwriteVaule)
 			} else {
-				err = services.CreateIncident("", content)
+				overwriteVaule := map[string]string{"incident_source": "sns"}
+				err = services.CreateIncident("", content, &overwriteVaule)
 			}
 
 			if err != nil {

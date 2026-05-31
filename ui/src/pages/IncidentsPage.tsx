@@ -5,7 +5,7 @@ import { CheckCircle2, Search, UserPlus } from "lucide-react";
 import { api, type IncidentSummary } from "@/lib/api";
 import { fmtAbs, fmtRel, truncate } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
-import { Pill } from "@/components/Pill";
+import { Pill, SourceBadge } from "@/components/Pill";
 import { EmptyState, ErrorBox, Spinner } from "@/components/feedback";
 import { AssignDialog } from "@/components/AssignDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -180,6 +180,9 @@ function IncidentRow({ i }: { i: IncidentSummary }) {
         >
           {truncate(i.title || "(untitled)", 80)}
         </Link>
+        <span className="ml-2 align-middle">
+          <SourceBadge source={i.source} />
+        </span>
       </td>
       <td>
         <div className="flex flex-wrap gap-1">
