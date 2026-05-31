@@ -17,7 +17,7 @@
 - [Spike Detection](./agent/spike.md)
 - [AI Detect Mode](./agent/ai-detect-mode.md)
 - [AI Analyze Mode](./agent/ai-analyze-mode.md)
-- [AI Analyze Tools](./agent/ai-analyze-tools.md)
+  - [Analyze Tools](./agent/analyze-tools/tools.md)
 - [Configuration](./agent/configuration.md)
 - [Data Sources](./agent/data-sources.md)
   - [File](./agent/data-sources/file.md)

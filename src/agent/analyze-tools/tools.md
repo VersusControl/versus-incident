@@ -3,8 +3,6 @@
 This page covers the **configuration** required by analyze tools that
 read external data, plus a worked Docker example.
 
----
-
 Most analyze tools need no configuration — they read state the agent
 already keeps (incidents, learned patterns, redacted logs) and work out
 of the box.
@@ -68,11 +66,7 @@ Two tools read **external** data and require a config block:
 | `recent_changes` | `tools.recent_changes.git` | Remote git commit history feed |
 
 That configuration lives in an optional **`tools.yaml`** file placed next
-to your main `config.yaml`. It is loaded automatically when present and
-supports `${VAR}` environment expansion. `tools.yaml` is per-tool *data*
-config — **not** a tool allow-list (tools are registered in code).
-
-The root of `tools.yaml` also carries two shared tool-loop knobs that
+to your main `config.yaml`. The root of `tools.yaml` also carries two shared tool-loop knobs that
 apply to **every** tool dispatch:
 
 | Knob | Default | Description |
