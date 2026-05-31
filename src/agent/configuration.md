@@ -374,10 +374,9 @@ empty `services` list leaves the tool unregistered.
 
 The `recent_changes` tool reads one or more **remote git repositories'
 commit histories** — the deploy/change record most teams already keep —
-to line an incident up against recent deploys and config changes. It
-shells out to the `git` binary (which must be on `PATH`), so no Go git
-dependency is added and no separate change pipeline is needed. Each
-configured repository is mirror-cloned into a local cache on first use and
+to line an incident up against recent deploys and config changes. It uses
+**go-git** (pure Go) — no external `git` binary is required. Each
+configured repository is bare-cloned into a local cache on first use and
 fetched on subsequent lookups, so the feed stays fresh on its own.
 
 Configure the repositories via `tools.yaml`
