@@ -5,9 +5,7 @@ metadata:
   labels:
     {{- include "versus-incident.labels" . | nindent 4 }}
 spec:
-  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
-  {{- end }}
   selector:
     matchLabels:
       {{- include "versus-incident.selectorLabels" . | nindent 6 }}
@@ -406,6 +404,9 @@ spec:
             - name: config-volume
               mountPath: /app/config/agent_sources.yaml
               subPath: agent_sources.yaml
+            - name: config-volume
+              mountPath: /app/config/tools.yaml
+              subPath: tools.yaml
             {{- end }}
             {{- if eq (.Values.storage.type | default "file") "file" }}
             - name: data-volume

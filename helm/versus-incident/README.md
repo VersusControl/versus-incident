@@ -105,6 +105,11 @@ alert:
 | `agent.ai.apiKey` | OpenAI API key (stored in chart Secret) | `""` |
 | `agent.ai.model` | Model identifier | `"gpt-4o-mini"` |
 | `agent.ai.maxCallsPerHour` | Per-hour AI call rate limit (`0` = unlimited) | `60` |
+| `agent.ai.analyze.model` | Override model for the on-demand analyze agent (empty inherits `agent.ai.model`) | `""` |
+| `agent.tools.toolTimeout` | Per-tool dispatch timeout for analyze tools | `"20s"` |
+| `agent.tools.parallelTools` | Run multiple tool calls in one model turn concurrently | `false` |
+| `agent.tools.recentChanges.git.repos` | Remote git repos read by the `recent_changes` tool (empty = unregistered) | `[]` |
+| `agent.tools.describeDependencies.services` | Service-dependency graph for the `describe_dependencies` tool (empty = unregistered) | `[]` |
 | `agent.sources` | Inline list of signal sources (snake_case keys) | `[]` |
 | `alert.slack.enable` | Enable Slack notifications | `false` |
 | `alert.slack.token` | Slack bot token | `""` |
@@ -404,48 +409,18 @@ config:
   publicHost: "https://versus-incident.example.com"
 ```
 
-## Horizontal Pod Autoscaler Configuration
+## Scaling and Replicas
 
-The Helm chart supports configuring a Horizontal Pod Autoscaler (HPA) to automatically scale the number of pods based on CPU and memory utilization:
-
-```yaml
-autoscaling:
-  enabled: true
-  minReplicas: 2
-  maxReplicas: 10
-  targetCPUUtilizationPercentage: 80
-  targetMemoryUtilizationPercentage: 80
-```
-
-For more advanced scaling behavior, you can use the `behavior` configuration:
+This chart does NOT ship a HorizontalPodAutoscaler. The AI SRE Agent worker is
+a single writer to the pattern catalog and detect log, so the agent must run
+with `replicaCount: 1` — horizontal scaling would produce racing writes (the
+chart fails fast if `agent.enable=true` with more than one replica). For
+deployments that do not enable the agent you may raise `replicaCount`, but the
+number of pods is fixed by that value and is not autoscaled.
 
 ```yaml
-autoscaling:
-  enabled: true
-  minReplicas: 2
-  maxReplicas: 10
-  targetCPUUtilizationPercentage: 80
-  targetMemoryUtilizationPercentage: 80
-  behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 300
-      policies:
-      - type: Percent
-        value: 100
-        periodSeconds: 15
-    scaleUp:
-      stabilizationWindowSeconds: 0
-      policies:
-      - type: Percent
-        value: 100
-        periodSeconds: 15
-      - type: Pods
-        value: 4
-        periodSeconds: 15
-      selectPolicy: Max
+replicaCount: 1   # required when agent.enable=true
 ```
-
-Note: When enabling autoscaling, the `replicaCount` value in your values.yaml is only used for the initial deployment before the HPA takes over scaling control.
 
 ## Uninstalling the Chart
 

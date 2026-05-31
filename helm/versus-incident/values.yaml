@@ -44,32 +44,6 @@ resources:
     cpu: 200m
     memory: 256Mi
 
-# Autoscaling configuration
-autoscaling:
-  enabled: false
-  minReplicas: 2
-  maxReplicas: 10
-  targetCPUUtilizationPercentage: 80
-  targetMemoryUtilizationPercentage: 80
-  # Optional: configure scaling behavior
-  # behavior:
-  #   scaleDown:
-  #     stabilizationWindowSeconds: 300
-  #     policies:
-  #     - type: Percent
-  #       value: 100
-  #       periodSeconds: 15
-  #   scaleUp:
-  #     stabilizationWindowSeconds: 0
-  #     policies:
-  #     - type: Percent
-  #       value: 100
-  #       periodSeconds: 15
-  #     - type: Pods
-  #       value: 4
-  #       periodSeconds: 15
-  #     selectPolicy: Max
-
 livenessProbe:
   httpGet:
     path: /healthz
@@ -150,6 +124,55 @@ agent:
     maxTokens: 512
     maxCallsPerHour: 60
     cacheTtl: "1h"
+    # AnalyzeAgent — powers POST /api/admin/incidents/:id/analyze and the
+    # "Run analysis" button in the UI. Tool-calling (ReAct), read-only, never
+    # emits a notification. Active whenever ai.enable=true; this block only
+    # tunes it.
+    analyze:
+      # Override the shared ai.model for analyze deep dives. Empty inherits
+      # the top-level model above.
+      model: ""
+
+  # Per-tool configuration for the analyze tools (rendered into tools.yaml).
+  # This is DATA config only, never a registration allow-list — tools are
+  # wired in code. A missing/empty block degrades the affected tool to a
+  # clean "nothing found" rather than an error.
+  tools:
+    # Shared tool-loop knobs applied to every analyze tool dispatch.
+    toolTimeout: "20s"   # cap per tool dispatch; empty/"0"/invalid = 20s default
+    parallelTools: false # run tool calls in one model turn concurrently
+    # recent_changes — correlate an incident with recent deploys / config
+    # changes pulled from one or more REMOTE git repositories' commit
+    # histories (pure-Go go-git; no git binary required). An empty repos
+    # list leaves the tool unregistered.
+    recentChanges:
+      git:
+        # Global default auth applied to every repo without its own block.
+        # Empty relies on ambient credentials.
+        auth:
+          token: ""        # HTTPS access token / PAT (e.g. ${GIT_TOKEN})
+          sshKeyPath: ""   # path to a private SSH key for ssh/scp-like remotes
+        # Each entry: { url, branch?, service?, auth? }. url is required.
+        repos: []
+        #  - url: https://github.com/acme/api.git
+        #    branch: main          # optional; empty = default HEAD
+        #    service: api          # optional; empty = auto-detected from repo name
+        #  - url: git@github.com:acme/web.git   # service auto-detected as "web"
+        #    auth:                 # optional; per-repo override of git.auth
+        #      sshKeyPath: /home/versus/.ssh/web_deploy
+    # describe_dependencies — surface a service's upstream/downstream
+    # neighbours. Only depends_on (upstream) is authored; downstream edges
+    # are derived automatically. An empty services list leaves the tool
+    # unregistered.
+    describeDependencies:
+      services: []
+      #  - name: web
+      #    dependsOn:
+      #      - api
+      #  - name: api
+      #    dependsOn:
+      #      - database
+      #      - cache
 
   # Inline signal sources. Each entry is rendered verbatim (via toYaml)
   # into agent_sources.yaml — use snake_case keys matching the Go config
