@@ -214,6 +214,18 @@ see [GitHub Project](https://github.com/orgs/VersusControl/projects/2).
   - **Shared prompt loader** — `pkg/agent/ai/prompt/loader.go`
   - **UI** — Run Analysis button, AnalysisCard, past analyses list
   - Legacy `pkg/agent/ai/openai.go` deleted
+- [x] **Analyze toolset expansion (Phase 2.5)** — grew the AnalyzeAgent
+  from 3 foundational tools to 6, plus tool-loop infrastructure:
+  - `get_related_logs` — redacted raw-log slice via `SignalReader` bridge
+  - `recent_changes` — remote git commit history feed with per-repo +
+    global auth (HTTPS token / SSH key); configured in `tools.yaml`
+  - `describe_dependencies` — upstream/downstream service graph from
+    `tools.yaml` with `has_recent_incident` flag
+  - `tools.yaml` sibling config file (per-tool DATA, not allow-list)
+  - `tool_timeout` (default 20s) + `parallel_tools` knobs at
+    `tools.yaml` root
+  - Docs: `ai-analyze-mode.md` per-tool YAML, `configuration.md`
+    worked examples
 
 ---
 
@@ -225,28 +237,6 @@ soak. Track Phase 2 work on the
 
 > The `Auto Post Mortem` UI card stays a `coming soon` stub until
 > Phase 3 lands.
-
-### AI SRE Agent — Phase 2.5: Analyze toolset expansion
-Grows the on-demand AnalyzeAgent from the three foundational read-only
-tools shipped in Phase 2 (`recent_incidents`, `pattern_history`,
-`describe_service`) into a deeper investigation set. Every tool stays
-read-only (import-graph guard), returns the `core.ToolResult` envelope,
-is allow-list filterable, and is recorded in the tool-call audit trail.
-Detailed plan + task board:
-[local plan](https://github.com/orgs/VersusControl/projects/2).
-- [ ] **E7 — Cross-source log retrieval** (`get_related_logs`) — pull a
-  redacted raw-log slice from the originating `SignalSource` around the
-  incident window (reuses `core.SignalSource`; no new config surface)
-- [ ] **E8 — Change / deploy correlation** (`recent_changes`) — line an
-  incident up against recent deploys/config changes from an optional
-  local NDJSON change feed (`agent.ai.analyze.changes_source`)
-- [ ] **E9 — Dependency awareness** (`describe_dependencies`) — surface
-  upstream/downstream neighbours from an optional `services.yaml`
-  dependency graph, flagging which neighbours are also firing
-- [ ] **E10 — Tool-runtime hardening & docs** — per-tool timeout
-  (`agent.ai.analyze.tool_timeout`), optional parallel tool dispatch
-  (`agent.ai.analyze.parallel_tools`), and doc updates to
-  `src/agent/ai-analyze-mode.md` + the agent config reference
 
 > Metrics & traces are **out of scope** for Phase 2.5 — Versus has no
 > metric ingestion path today. A metric-lookup analyze tool waits on

@@ -13,3 +13,6 @@ charts
 __pycache__
 coverage.out
 plans
+.github/copilot-instructions.md
+PROJECT_STRUCTURE.md
+EINO_PATTERNS.md

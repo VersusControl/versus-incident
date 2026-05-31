@@ -404,7 +404,32 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 			cloned.Sources[i] = c
 		}
 	}
+	cloned.Tools = cloneToolsConfig(src.Tools)
 	return cloned
+}
+
+// cloneToolsConfig deep-copies the per-tool config block (tools.yaml),
+// including the slice/string fields each tool owns.
+func cloneToolsConfig(src ToolsConfig) ToolsConfig {
+	out := ToolsConfig{
+		ToolTimeout:   src.ToolTimeout,
+		ParallelTools: src.ParallelTools,
+	}
+	out.RecentChanges.Git.Auth = src.RecentChanges.Git.Auth
+	if src.RecentChanges.Git.Repos != nil {
+		out.RecentChanges.Git.Repos = make([]RecentChangesGitRepo, len(src.RecentChanges.Git.Repos))
+		copy(out.RecentChanges.Git.Repos, src.RecentChanges.Git.Repos)
+	}
+	if src.DescribeDependencies.Services != nil {
+		out.DescribeDependencies.Services = make([]ServiceDependency, len(src.DescribeDependencies.Services))
+		for i, s := range src.DescribeDependencies.Services {
+			out.DescribeDependencies.Services[i] = ServiceDependency{
+				Name:      s.Name,
+				DependsOn: append([]string(nil), s.DependsOn...),
+			}
+		}
+	}
+	return out
 }
 
 // cloneAgentAITaskConfig is a value-copy helper (all fields are
@@ -421,7 +446,9 @@ func cloneAgentAITaskConfig(src AgentAITaskConfig) AgentAITaskConfig {
 }
 
 // cloneAgentAIAnalyzeConfig copies the analyze override block (model
-// override only).
+// override only; the tool-loop knobs live on the shared tools block).
 func cloneAgentAIAnalyzeConfig(src AgentAIAnalyzeConfig) AgentAIAnalyzeConfig {
-	return AgentAIAnalyzeConfig{Model: src.Model}
+	return AgentAIAnalyzeConfig{
+		Model: src.Model,
+	}
 }

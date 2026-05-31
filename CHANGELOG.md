@@ -64,6 +64,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - New data-source pages: `src/agent/data-sources/graylog.md`,
   `src/agent/data-sources/splunk.md`.
 
+#### AI SRE Agent — analyze tools expansion (Phase 2.5)
+- **`get_related_logs` tool** — pulls a redacted raw-log slice from
+  configured signal sources around the incident window. Bridge via
+  `SignalReader` in `pkg/agent/analyze_adapter.go` (no import cycle).
+  Window default 15m (cap 1440m), limit default 50 (cap 200).
+- **`recent_changes` tool** — reads one or more remote git repositories'
+  commit histories to correlate incidents with recent deploys. Repos
+  configured in `tools.yaml` (`tools.recent_changes.git.repos[]`). Each
+  remote is mirror-cloned into a local cache on first use and fetched on
+  later lookups. Global + per-repo auth: HTTPS token via
+  `http.extraHeader` (never persisted to the mirror), SSH key via
+  `GIT_SSH_COMMAND`. Window default 120m (cap 1440m), newest first.
+- **`describe_dependencies` tool** — surfaces upstream/downstream
+  service neighbours from the service-dependency graph in `tools.yaml`
+  (`tools.describe_dependencies.services`), with a
+  `has_recent_incident` flag per neighbour. Reverse edges derived
+  automatically from `depends_on`.
+- **`tools.yaml` sibling config** — new optional per-tool DATA
+  configuration file (same directory as `config.yaml`). Supports
+  `${VAR}` expansion. Not a tool allow-list — tools are wired in code.
+- **`tool_timeout`** knob (root of `tools.yaml`, default `20s`) — caps
+  each tool dispatch; a timeout surfaces as a tool error, never a hard
+  failure.
+- **`parallel_tools`** knob (root of `tools.yaml`, default `false`) —
+  run multiple tool calls in one model turn concurrently while
+  preserving deterministic trace ordering.
+
 ### Changed
 - **Legacy `pkg/agent/ai/openai.go` deleted** — Eino is the only LLM
   path going forward. The `core.AISRE` adapter is removed; all callers
@@ -74,6 +101,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `AIBundle{Router, Detect, Analyze, Cache, Rate, AnalyzeRate}`.
 - `agent.ai.analyze` config block added; `analyze.enable` defaults to
   `true` when `ai.enable` is true (no separate opt-in flag).
+- `tool_timeout` and `parallel_tools` moved from `agent.ai.analyze`
+  to the root of `tools.yaml` — they apply to every tool dispatch.
+- `analyzetools.Default` signature extended to accept `SignalReader`,
+  `DependencyGraph`, and `ChangeFeed` dependencies.
 
 ### Fixed
 - Incident detail page no longer shows stale analysis status after
