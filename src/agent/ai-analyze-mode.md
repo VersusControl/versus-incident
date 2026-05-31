@@ -62,7 +62,7 @@ they returned) is recorded with every analysis and shown in the
 **Tool calls** section of the analysis result, so you can audit exactly
 what the AI looked at.
 
-See **[Analyze Tools](./ai-analyze-tools.md)** for the full YAML reference,
+See **[Analyze Tools](./analyze-tools/tools.md)** for the full YAML reference,
 authentication options, and Docker examples.
 
 ## Key Features
