@@ -78,6 +78,12 @@ apply to **every** tool dispatch:
 
 ### `describe_dependencies`
 
+This tool maps service relationships (upstream /
+downstream) so the AI can reason about blast radius and root cause
+propagation. Example: if `api` depends on `database` and the database is
+failing, the AI can infer that API errors are likely downstream
+consequences rather than a separate incident.
+
 Author the service-dependency graph under
 `tools.describe_dependencies.services`. Each entry has a `name` and a
 `depends_on` list of upstream services. Reverse (downstream) edges are
@@ -104,6 +110,12 @@ tools:
 ---
 
 ### `recent_changes`
+
+This tool reads commit histories from your deploy
+repositories so the AI can correlate an incident with a recent deploy or
+config change. Example: a spike in errors appeared 5 minutes after a
+commit "migrate users table" landed in the `api` repo — the AI can flag
+that deploy as the probable trigger.
 
 List the repositories under `tools.recent_changes.git.repos`. Each entry
 has a remote `url` (https or scp-like `git@host:org/repo`), an optional
