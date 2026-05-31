@@ -9,9 +9,9 @@ Most analyze tools need no configuration — they read state the agent
 already keeps (incidents, learned patterns, redacted logs) and work out
 of the box.
 
-### Available tools
+## Available tools
 
-#### `recent_incidents`
+### `recent_incidents`
 
 Lists incidents recorded in a recent time window so the AI can spot
 correlated failures, repeat offenders, or a broader outage in progress.
@@ -24,7 +24,7 @@ correlated failures, repeat offenders, or a broader outage in progress.
 Use case: *"Are other services failing at the same time, or is this
 incident isolated?"*
 
-#### `pattern_history`
+### `pattern_history`
 
 Looks up a learned pattern by its id and returns everything the agent
 knows about it: the log template, the EWMA frequency baseline, the
@@ -34,7 +34,7 @@ service.
 Use case: *"Is this a brand-new pattern, or a known issue that has
 spiked above its normal baseline?"*
 
-#### `describe_service`
+### `describe_service`
 
 Summarises a single service: when it was first seen by the agent and
 its top learned patterns ranked by frequency.
@@ -42,7 +42,7 @@ its top learned patterns ranked by frequency.
 Use case: *"What does normal look like for this service, and which
 patterns dominate its logs?"*
 
-#### `get_related_logs`
+### `get_related_logs`
 
 Fetches a redacted slice of recent raw log lines so the AI can read the
 actual signals around an incident instead of reasoning from summaries
@@ -58,7 +58,7 @@ secrets and PII never reach the model.
 Use case: *"What were the surrounding log lines saying right before this
 incident fired?"*
 
-### Configuration tools
+## Configuration tools
 
 Two tools read **external** data and require a config block:
 
@@ -82,7 +82,7 @@ apply to **every** tool dispatch:
 
 ---
 
-## `describe_dependencies`
+### `describe_dependencies`
 
 Author the service-dependency graph under
 `tools.describe_dependencies.services`. Each entry has a `name` and a
@@ -109,7 +109,7 @@ tools:
 
 ---
 
-## `recent_changes`
+### `recent_changes`
 
 List the repositories under `tools.recent_changes.git.repos`. Each entry
 has a remote `url` (https or scp-like `git@host:org/repo`), an optional
