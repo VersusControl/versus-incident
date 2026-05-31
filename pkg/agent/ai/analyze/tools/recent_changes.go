@@ -1,19 +1,23 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
@@ -159,20 +163,12 @@ func (RecentChanges) miss(a recentChangesArgs) *core.ToolResult {
 // changesGitKind labels every record sourced from a git commit.
 const changesGitKind = "commit"
 
-// Git output field/record separators. ASCII unit/record separators are
-// used because they never appear in commit subjects or file paths, so
-// parsing stays robust without escaping.
-const (
-	gitFieldSep  = "\x1f"
-	gitRecordSep = "\x1e"
-)
-
 // gitChangeFeed reads change records from one or more remote git
-// repositories' commit histories on every call. It shells out to the
-// `git` binary (which must be on PATH) so no Go git dependency is pulled
-// in. Each repository is mirror-cloned into a local cache directory on
-// first use and fetched on subsequent lookups; reading per-call keeps the
-// feed fresh and the tool stateless.
+// repositories' commit histories on every call. It uses the go-git
+// library (pure Go) so no external `git` binary is required. Each
+// repository is mirror-cloned into a local cache directory on first use
+// and fetched on subsequent lookups; reading per-call keeps the feed
+// fresh and the tool stateless.
 type gitChangeFeed struct {
 	repos    []GitRepo
 	cacheDir string
@@ -188,7 +184,7 @@ type GitRepo struct {
 	// Empty derives the service from the repository name in the URL.
 	Service string
 	// Token is an HTTPS access token / PAT used to authenticate to the
-	// remote. Empty relies on the ambient git credentials.
+	// remote. Empty relies on ambient credentials.
 	Token string
 	// SSHKeyPath is the path to a private SSH key used for ssh / scp-like
 	// remotes. Empty relies on the ambient SSH configuration.
@@ -202,7 +198,7 @@ const gitCacheDirName = "versus-incident-git-cache"
 // NewGitChangeFeed returns a ChangeFeed backed by the given remote git
 // repositories. Repos with an empty URL are ignored; an empty (or
 // all-empty) list yields nil so analyzetools.Default omits the
-// recent_changes tool. The `git` binary must be available on PATH.
+// recent_changes tool. No external git binary is required.
 func NewGitChangeFeed(repos []GitRepo) ChangeFeed {
 	return newGitChangeFeed(repos, filepath.Join(os.TempDir(), gitCacheDirName))
 }
@@ -257,12 +253,10 @@ func (f *gitChangeFeed) Changes(ctx context.Context, since time.Time) ([]ChangeR
 	return all, nil
 }
 
-// changesForRepo mirrors the remote into the local cache (cloning on
-// first use, fetching afterwards) and runs `git log` over the configured
-// branch since the given time. Every record is stamped with the
-// repository's service (explicit config or derived from the URL).
-func (f *gitChangeFeed) changesForRepo(ctx context.Context, repo GitRepo, since time.Time) ([]ChangeRecord, error) {
-	cachePath, err := f.ensureMirror(ctx, repo)
+// changesForRepo ensures the mirror exists, fetches the latest, and
+// walks the commit log from the configured branch since the given time.
+func (f *gitChangeFeed) changesForRepo(_ context.Context, repo GitRepo, since time.Time) ([]ChangeRecord, error) {
+	r, err := f.ensureMirror(repo)
 	if err != nil {
 		return nil, err
 	}
@@ -272,84 +266,123 @@ func (f *gitChangeFeed) changesForRepo(ctx context.Context, repo GitRepo, since 
 		service = serviceFromURL(repo.URL)
 	}
 
-	authArgs, authEnv := gitAuthArgs(repo)
-	args := append([]string{}, authArgs...)
-	args = append(args, "-C", cachePath, "log")
+	// Resolve branch reference.
+	var ref *plumbing.Reference
 	if repo.Branch != "" {
-		args = append(args, repo.Branch)
+		ref, err = r.Reference(plumbing.NewBranchReferenceName(repo.Branch), true)
+		if err != nil {
+			// Try remote ref naming (mirrors store refs/heads/*)
+			ref, err = r.Reference(plumbing.ReferenceName("refs/heads/"+repo.Branch), true)
+			if err != nil {
+				return nil, fmt.Errorf("resolve branch %q in %q: %w", repo.Branch, repo.URL, err)
+			}
+		}
+	} else {
+		head, herr := r.Head()
+		if herr != nil {
+			// Bare/mirror repos may not have HEAD; try "main" then "master".
+			for _, fallback := range []string{"refs/heads/main", "refs/heads/master"} {
+				ref, err = r.Reference(plumbing.ReferenceName(fallback), true)
+				if err == nil {
+					break
+				}
+			}
+			if ref == nil {
+				return nil, fmt.Errorf("resolve HEAD in %q: %w", repo.URL, herr)
+			}
+		} else {
+			ref = head
+		}
 	}
-	args = append(args,
-		"--no-color",
-		"--since="+since.UTC().Format(time.RFC3339),
-		// <RS>%H<US>%cI<US>%s — one line per commit.
-		"--pretty=format:"+gitRecordSep+"%H"+gitFieldSep+"%cI"+gitFieldSep+"%s",
-	)
 
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if len(authEnv) > 0 {
-		cmd.Env = append(os.Environ(), authEnv...)
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("git log %q: %w: %s", repo.URL, err, strings.TrimSpace(stderr.String()))
+	commitIter, err := r.Log(&git.LogOptions{
+		From:  ref.Hash(),
+		Order: git.LogOrderCommitterTime,
+		Since: &since,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("log %q: %w", repo.URL, err)
 	}
 
-	return parseGitLog(stdout.String(), service), nil
+	var records []ChangeRecord
+	err = commitIter.ForEach(func(c *object.Commit) error {
+		records = append(records, ChangeRecord{
+			Timestamp: c.Committer.When.UTC(),
+			Service:   service,
+			Kind:      changesGitKind,
+			Summary:   firstLine(c.Message),
+			Ref:       shortSHA(c.Hash.String()),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("iterate commits %q: %w", repo.URL, err)
+	}
+
+	return records, nil
 }
 
-// ensureMirror makes sure a local mirror of the remote exists under the
-// cache directory and is up to date: it mirror-clones on first use and
-// fetches on subsequent calls. Repo auth (HTTPS token / SSH key) is wired
-// through for both operations. It returns the local mirror path.
-func (f *gitChangeFeed) ensureMirror(ctx context.Context, repo GitRepo) (string, error) {
+// ensureMirror makes sure a local bare clone of the remote exists under
+// the cache directory and is up to date: it clones on first use and
+// fetches on subsequent calls. Returns the opened *git.Repository.
+func (f *gitChangeFeed) ensureMirror(repo GitRepo) (*git.Repository, error) {
 	path := f.cachePathFor(repo.URL)
-	authArgs, authEnv := gitAuthArgs(repo)
+	auth := gitAuth(repo)
+
 	if _, err := os.Stat(path); err == nil {
-		args := append([]string{}, authArgs...)
-		args = append(args, "-C", path, "fetch", "--prune", "--quiet")
-		cmd := exec.CommandContext(ctx, "git", args...)
-		if len(authEnv) > 0 {
-			cmd.Env = append(os.Environ(), authEnv...)
+		// Already cloned — open and fetch.
+		r, oerr := git.PlainOpen(path)
+		if oerr != nil {
+			return nil, fmt.Errorf("open mirror %q: %w", repo.URL, oerr)
 		}
-		if out, ferr := cmd.CombinedOutput(); ferr != nil {
-			return "", fmt.Errorf("git fetch %q: %w: %s", repo.URL, ferr, strings.TrimSpace(string(out)))
+		remote, rerr := r.Remote("origin")
+		if rerr != nil {
+			return nil, fmt.Errorf("remote origin %q: %w", repo.URL, rerr)
 		}
-		return path, nil
+		ferr := remote.Fetch(&git.FetchOptions{
+			Auth:  auth,
+			Force: true,
+			Tags:  git.NoTags,
+		})
+		if ferr != nil && ferr != git.NoErrAlreadyUpToDate {
+			return nil, fmt.Errorf("fetch %q: %w", repo.URL, ferr)
+		}
+		return r, nil
 	}
+
+	// First use — bare clone.
 	if err := os.MkdirAll(f.cacheDir, 0o700); err != nil {
-		return "", fmt.Errorf("git cache dir %q: %w", f.cacheDir, err)
+		return nil, fmt.Errorf("git cache dir %q: %w", f.cacheDir, err)
 	}
-	args := append([]string{}, authArgs...)
-	args = append(args, "clone", "--mirror", "--quiet", repo.URL, path)
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if len(authEnv) > 0 {
-		cmd.Env = append(os.Environ(), authEnv...)
+	r, err := git.PlainClone(path, true, &git.CloneOptions{
+		URL:  repo.URL,
+		Auth: auth,
+		Tags: git.NoTags,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("clone %q: %w", repo.URL, err)
 	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("git clone %q: %w: %s", repo.URL, err, strings.TrimSpace(string(out)))
-	}
-	return path, nil
+	return r, nil
 }
 
-// gitAuthArgs returns the extra `git -c` arguments and environment
-// additions needed to authenticate to repo's remote. An HTTPS token is
-// injected via an http.extraHeader Authorization header (never persisted
-// to the local mirror's config); an SSH key path is wired through
-// GIT_SSH_COMMAND. An empty auth config returns nothing, so the ambient
-// git credentials are used.
-func gitAuthArgs(repo GitRepo) (configArgs []string, env []string) {
+// gitAuth returns the transport.AuthMethod for the given repo config.
+// Token → HTTP Basic auth. SSHKeyPath → SSH public-key auth. Both empty
+// → nil (ambient credentials).
+func gitAuth(repo GitRepo) transport.AuthMethod {
 	if token := strings.TrimSpace(repo.Token); token != "" {
-		// Basic auth with any username + token as password is accepted by
-		// GitHub, GitLab, Bitbucket and most providers for HTTPS remotes.
-		cred := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
-		configArgs = append(configArgs, "-c", "http.extraHeader=Authorization: Basic "+cred)
+		return &http.BasicAuth{
+			Username: "x-access-token",
+			Password: token,
+		}
 	}
 	if key := strings.TrimSpace(repo.SSHKeyPath); key != "" {
-		env = append(env, "GIT_SSH_COMMAND=ssh -i "+key+" -o IdentitiesOnly=yes")
+		// Read the key file; on error fall through to nil (ambient).
+		publicKeys, err := ssh.NewPublicKeysFromFile("git", key, "")
+		if err == nil {
+			return publicKeys
+		}
 	}
-	return configArgs, env
+	return nil
 }
 
 // cachePathFor maps a remote URL to a deterministic local mirror path:
@@ -377,37 +410,12 @@ func sanitizeCacheName(name string) string {
 	}, name)
 }
 
-// parseGitLog turns the record-separated `git log` output into
-// ChangeRecords, stamping each with the given service. Each record begins
-// with gitRecordSep, followed by the SHA, committer date, and subject.
-func parseGitLog(out, service string) []ChangeRecord {
-	var records []ChangeRecord
-	for _, block := range strings.Split(out, gitRecordSep) {
-		block = strings.Trim(block, "\n")
-		if block == "" {
-			continue
-		}
-		line := block
-		if i := strings.IndexByte(block, '\n'); i >= 0 {
-			line = block[:i]
-		}
-		fields := strings.Split(line, gitFieldSep)
-		if len(fields) != 3 {
-			continue
-		}
-		ts, err := time.Parse(time.RFC3339, strings.TrimSpace(fields[1]))
-		if err != nil {
-			continue
-		}
-		records = append(records, ChangeRecord{
-			Timestamp: ts.UTC(),
-			Service:   service,
-			Kind:      changesGitKind,
-			Summary:   strings.TrimSpace(fields[2]),
-			Ref:       shortSHA(fields[0]),
-		})
+// firstLine extracts the first line (commit subject) from a message.
+func firstLine(msg string) string {
+	if i := strings.IndexByte(msg, '\n'); i >= 0 {
+		return strings.TrimSpace(msg[:i])
 	}
-	return records
+	return strings.TrimSpace(msg)
 }
 
 // serviceFromURL derives a service name from a git remote URL: the last

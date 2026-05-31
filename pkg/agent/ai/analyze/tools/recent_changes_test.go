@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -200,41 +199,6 @@ func TestNewGitChangeFeed_EmptyReposNil(t *testing.T) {
 	}
 }
 
-func TestGitAuthArgs(t *testing.T) {
-	t.Run("empty auth yields nothing", func(t *testing.T) {
-		args, env := gitAuthArgs(GitRepo{URL: "https://example.com/x.git"})
-		if len(args) != 0 || len(env) != 0 {
-			t.Fatalf("empty auth should add no args/env, got args=%v env=%v", args, env)
-		}
-	})
-	t.Run("token sets http.extraHeader", func(t *testing.T) {
-		args, env := gitAuthArgs(GitRepo{Token: "secret-token"})
-		if len(env) != 0 {
-			t.Fatalf("token should not set env, got %v", env)
-		}
-		want := "http.extraHeader=Authorization: Basic " +
-			base64.StdEncoding.EncodeToString([]byte("x-access-token:secret-token"))
-		if len(args) != 2 || args[0] != "-c" || args[1] != want {
-			t.Fatalf("token args = %v, want [-c %q]", args, want)
-		}
-	})
-	t.Run("ssh key sets GIT_SSH_COMMAND", func(t *testing.T) {
-		args, env := gitAuthArgs(GitRepo{SSHKeyPath: "/home/u/.ssh/id_ed25519"})
-		if len(args) != 0 {
-			t.Fatalf("ssh key should not set config args, got %v", args)
-		}
-		if len(env) != 1 || env[0] != "GIT_SSH_COMMAND=ssh -i /home/u/.ssh/id_ed25519 -o IdentitiesOnly=yes" {
-			t.Fatalf("ssh env = %v", env)
-		}
-	})
-	t.Run("both token and ssh key", func(t *testing.T) {
-		args, env := gitAuthArgs(GitRepo{Token: "t", SSHKeyPath: "/k"})
-		if len(args) != 2 || len(env) != 1 {
-			t.Fatalf("expected both auth methods wired, got args=%v env=%v", args, env)
-		}
-	})
-}
-
 func TestServiceFromURL(t *testing.T) {
 	tests := []struct {
 		url  string
@@ -254,53 +218,32 @@ func TestServiceFromURL(t *testing.T) {
 	}
 }
 
-func TestParseGitLog(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	older := now.Add(-30 * time.Minute)
-	// Two commits, newest first, separated by the record separator. Both
-	// are stamped with the supplied service ("api").
-	out := gitRecordSep + "abcdef1234567890" + gitFieldSep + now.Format(time.RFC3339) + gitFieldSep + "deploy api" + "\n" +
-		gitRecordSep + "0123456789abcdef" + gitFieldSep + older.Format(time.RFC3339) + gitFieldSep + "docs" + "\n"
-
-	recs := parseGitLog(out, "api")
-	if len(recs) != 2 {
-		t.Fatalf("got %d records, want 2: %+v", len(recs), recs)
-	}
-	if recs[0].Summary != "deploy api" || recs[0].Service != "api" {
-		t.Fatalf("first record = %+v", recs[0])
-	}
-	if recs[0].Ref != "abcdef1" {
-		t.Fatalf("short SHA = %q, want abcdef1", recs[0].Ref)
-	}
-	if recs[0].Kind != changesGitKind {
-		t.Fatalf("kind = %q, want %q", recs[0].Kind, changesGitKind)
-	}
-	if !recs[0].Timestamp.Equal(now) {
-		t.Fatalf("timestamp = %s, want %s", recs[0].Timestamp, now)
-	}
-	if recs[1].Service != "api" {
-		t.Fatalf("second record service = %q, want api", recs[1].Service)
-	}
-}
-
-func TestParseGitLog_SkipsMalformed(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	out := gitRecordSep + "shaonly" + "\n" + // header missing date/subject fields
-		gitRecordSep + "deadbeef" + gitFieldSep + "not-a-date" + gitFieldSep + "bad ts" + "\n" +
-		gitRecordSep + "feedface1234" + gitFieldSep + now.Format(time.RFC3339) + gitFieldSep + "good" + "\n"
-	recs := parseGitLog(out, "svc")
-	if len(recs) != 1 {
-		t.Fatalf("got %d records, want 1 (only the well-formed commit): %+v", len(recs), recs)
-	}
-	if recs[0].Summary != "good" || recs[0].Service != "svc" {
-		t.Fatalf("survivor = %+v", recs[0])
-	}
-}
-
-func TestParseGitLog_Empty(t *testing.T) {
-	if recs := parseGitLog("", "svc"); len(recs) != 0 {
-		t.Fatalf("empty output should yield no records, got %d", len(recs))
-	}
+func TestGitAuth(t *testing.T) {
+	t.Run("empty auth returns nil", func(t *testing.T) {
+		auth := gitAuth(GitRepo{URL: "https://example.com/x.git"})
+		if auth != nil {
+			t.Fatalf("empty auth should return nil, got %v", auth)
+		}
+	})
+	t.Run("token returns BasicAuth", func(t *testing.T) {
+		auth := gitAuth(GitRepo{Token: "secret-token"})
+		if auth == nil {
+			t.Fatal("token should yield non-nil auth")
+		}
+		if auth.Name() != "http-basic-auth" {
+			t.Fatalf("auth.Name() = %q, want http-basic-auth", auth.Name())
+		}
+	})
+	t.Run("both token and ssh prefers token", func(t *testing.T) {
+		// Token takes precedence in the current implementation.
+		auth := gitAuth(GitRepo{Token: "t", SSHKeyPath: "/nonexistent"})
+		if auth == nil {
+			t.Fatal("expected non-nil auth")
+		}
+		if auth.Name() != "http-basic-auth" {
+			t.Fatalf("auth.Name() = %q, want http-basic-auth (token wins)", auth.Name())
+		}
+	})
 }
 
 // initGitRepo builds a throwaway git repo with the given commits (oldest
@@ -462,5 +405,52 @@ func TestGitChangeFeed_PartialFailureDegrades(t *testing.T) {
 	}
 	if len(recs) != 1 || recs[0].Service != "good" {
 		t.Fatalf("records = %+v, want one record for service good", recs)
+	}
+}
+
+// TestGitChangeFeed_RealRepo_Eino clones the real cloudwego/eino repo and
+// queries commits from the last hour. This is a network-dependent integration
+// test — it verifies the go-git clone + log path works against a real remote.
+func TestGitChangeFeed_RealRepo_Eino(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real network test in short mode")
+	}
+
+	feed := NewGitChangeFeed([]GitRepo{
+		{URL: "https://github.com/cloudwego/eino"},
+	})
+	if feed == nil {
+		t.Fatal("feed should not be nil for a valid repo URL")
+	}
+
+	since := time.Now().UTC().Add(-1 * time.Hour)
+	recs, err := feed.Changes(context.Background(), since)
+	if err != nil {
+		t.Fatalf("Changes failed: %v", err)
+	}
+
+	t.Logf("commits in last 1h: %d", len(recs))
+	for i, r := range recs {
+		if i >= 5 {
+			t.Logf("  ... and %d more", len(recs)-5)
+			break
+		}
+		t.Logf("  [%s] %s %s — %s", r.Timestamp.Format(time.RFC3339), r.Kind, r.Ref, r.Summary)
+	}
+
+	// Validate all returned records have correct metadata.
+	for _, r := range recs {
+		if r.Kind != "commit" {
+			t.Errorf("kind = %q, want commit", r.Kind)
+		}
+		if r.Service != "eino" {
+			t.Errorf("service = %q, want eino (auto-detected)", r.Service)
+		}
+		if r.Ref == "" {
+			t.Error("ref should not be empty")
+		}
+		if r.Timestamp.Before(since) {
+			t.Errorf("commit %s is before window: %s", r.Ref, r.Timestamp)
+		}
 	}
 }
