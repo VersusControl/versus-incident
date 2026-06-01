@@ -104,6 +104,7 @@ alert:
 | `agent.ai.enable` | Enable LLM analysis in detect mode | `false` |
 | `agent.ai.apiKey` | OpenAI API key (stored in chart Secret) | `""` |
 | `agent.ai.model` | Model identifier | `"gpt-4o-mini"` |
+| `agent.ai.temperature` | Randomness control. Set `-1` to omit the field for beta-limited / reasoning models that reject explicit temperature values. | `0.2` |
 | `agent.ai.maxCallsPerHour` | Per-hour AI call rate limit (`0` = unlimited) | `60` |
 | `agent.ai.analyze.model` | Override model for the on-demand analyze agent (empty inherits `agent.ai.model`) | `""` |
 | `agent.tools.toolTimeout` | Per-tool dispatch timeout for analyze tools | `"20s"` |

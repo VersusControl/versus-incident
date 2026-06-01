@@ -279,6 +279,10 @@ agent:
       model: gpt-4o             # stronger model for deep dives
 ```
 
+For beta-limited / reasoning models (`gpt-5.*`, o-series), set
+`temperature: -1` to omit the parameter entirely; those providers fix
+temperature at `1` and reject any explicit value.
+
 > The tool-loop knobs `tool_timeout` and `parallel_tools` are **not** set
 > here — they live at the root of `tools.yaml` (see *Per-tool config*
 > below) because they apply to every analyze tool dispatch.
@@ -288,6 +292,7 @@ agent:
 | `enable` | bool | `false` | Turns on the AI SRE (detect triage + analyze). Env: `AGENT_AI_ENABLE`. |
 | `api_key` | string | — | API key for the model provider. Env: `AGENT_AI_API_KEY`. |
 | `model` | string | — | Shared default model for both tasks. Env: `AGENT_AI_MODEL`. |
+| `temperature` | float | `0.2` | Randomness control. Set `-1` to omit the field for beta-limited / reasoning models that reject explicit temperature values. |
 | `analyze.model` | string | inherits `model` | Optional stronger model just for analyze. |
 
 > The tool-loop knobs `tool_timeout` and `parallel_tools` moved to the

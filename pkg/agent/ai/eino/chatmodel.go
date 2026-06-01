@@ -48,24 +48,25 @@ func NewChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (
 		timeout = 30 * time.Second
 	}
 
-	temperature := float32(cfg.Temperature)
-	if temperature == 0 {
-		temperature = 0.2
-	}
-
-	maxTokens := cfg.MaxTokens
-	if maxTokens == 0 {
-		maxTokens = 512
+	// MaxTokens maps to the provider's max_completion_tokens. The default
+	// is reasoning-safe: for gpt-5.* / o-series models the budget is shared
+	// by hidden reasoning tokens and the visible reply, so a low cap can be
+	// fully consumed by reasoning and yield empty content.
+	maxCompletionTokens := cfg.MaxTokens
+	if maxCompletionTokens == 0 {
+		maxCompletionTokens = 2048
 	}
 
 	conf := &einoopenai.ChatModelConfig{
-		APIKey:      cfg.APIKey,
-		Timeout:     timeout,
-		HTTPClient:  opts.HTTPClient,
-		BaseURL:     opts.BaseURL,
-		Model:       cfg.Model,
-		MaxTokens:   &maxTokens,
-		Temperature: &temperature,
+		APIKey:     cfg.APIKey,
+		Timeout:    timeout,
+		HTTPClient: opts.HTTPClient,
+		BaseURL:    opts.BaseURL,
+		Model:      cfg.Model,
+		// OpenAI-compatible reasoning/beta models (gpt-5.*, o-series)
+		// reject `max_tokens`; send the supported field instead.
+		MaxCompletionTokens: &maxCompletionTokens,
+		Temperature:         resolveTemperature(cfg.Temperature, 0.2),
 		// Force JSON-mode so ParseFinding can decode the reply with the
 		// same tolerance it had under the raw HTTP client.
 		ResponseFormat: &einoopenai.ChatCompletionResponseFormat{
@@ -94,25 +95,39 @@ func NewToolCallingChatModel(ctx context.Context, cfg config.AgentAIConfig, opts
 		timeout = 30 * time.Second
 	}
 
-	temperature := float32(cfg.Temperature)
-	if temperature == 0 {
-		temperature = 0.2
-	}
-
-	maxTokens := cfg.MaxTokens
-	if maxTokens == 0 {
-		maxTokens = 1024
+	// Analyze is a multi-step ReAct loop (tool calls + final answer), so it
+	// needs even more headroom than detect for reasoning models.
+	maxCompletionTokens := cfg.MaxTokens
+	if maxCompletionTokens == 0 {
+		maxCompletionTokens = 4096
 	}
 
 	conf := &einoopenai.ChatModelConfig{
-		APIKey:      cfg.APIKey,
-		Timeout:     timeout,
-		HTTPClient:  opts.HTTPClient,
-		BaseURL:     opts.BaseURL,
-		Model:       cfg.Model,
-		MaxTokens:   &maxTokens,
-		Temperature: &temperature,
+		APIKey:              cfg.APIKey,
+		Timeout:             timeout,
+		HTTPClient:          opts.HTTPClient,
+		BaseURL:             opts.BaseURL,
+		Model:               cfg.Model,
+		MaxCompletionTokens: &maxCompletionTokens,
+		Temperature:         resolveTemperature(cfg.Temperature, 0.2),
 	}
 
 	return einoopenai.NewChatModel(ctx, conf)
+}
+
+// A NEGATIVE value is the explicit "omit temperature" sentinel:
+// it returns nil so the provider applies its own default. This is
+// required for beta-limited / reasoning models (e.g. the gpt-5 family,
+// o-series) that fix temperature at 1 and reject any explicit value. A
+// zero value inherits the supplied default; any other value is sent
+// verbatim.
+func resolveTemperature(configured, def float64) *float32 {
+	if configured < 0 {
+		return nil
+	}
+	t := float32(configured)
+	if configured == 0 {
+		t = float32(def)
+	}
+	return &t
 }

@@ -120,6 +120,9 @@ agent:
     # AGENT_AI_API_KEY env var.
     apiKey: ""
     model: "gpt-4o-mini"
+    # Randomness control. Set -1 to omit temperature entirely for
+    # beta-limited / reasoning models (gpt-5.*, o-series) that fix it
+    # at 1 and reject any explicit value.
     temperature: 0.2
     maxTokens: 512
     maxCallsPerHour: 60
