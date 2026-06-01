@@ -41,7 +41,9 @@ agent:
       model: gpt-4o         # use a stronger model for deep dives
 ```
 
-The `analyze:` block only overrides the model.
+The `analyze:` block only overrides the model. For beta-limited /
+reasoning models (`gpt-5.*`, o-series), set `temperature: -1` on the
+shared `ai` block to omit the parameter entirely.
 
 ## Investigation Tools
 

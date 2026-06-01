@@ -45,8 +45,20 @@ func TestChatModel_ProducesParseableFinding(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
 			t.Errorf("missing/incorrect Authorization header: %q", got)
 		}
-		// Drain the request body so go-openai is happy.
-		_, _ = io.Copy(io.Discard, r.Body)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		var req map[string]any
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if _, ok := req["max_completion_tokens"]; !ok {
+			t.Fatalf("request missing max_completion_tokens: %s", string(body))
+		}
+		if _, ok := req["max_tokens"]; ok {
+			t.Fatalf("request must not include deprecated max_tokens: %s", string(body))
+		}
 
 		content, err := json.Marshal(expected)
 		if err != nil {

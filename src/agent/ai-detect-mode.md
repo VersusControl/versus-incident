@@ -64,6 +64,10 @@ agent:
     cache_ttl: 30m                     # reuse the same finding for this long
 ```
 
+Use `temperature: -1` with beta-limited / reasoning models such as
+`gpt-5.*` and o-series models. Those providers fix temperature at `1`
+and reject any explicit value.
+
 Every field is overridable by env var:
 
 | Env var | Maps to |
