@@ -435,4 +435,4 @@ helm uninstall versus-incident
 
 - [Versus Incident Documentation](https://github.com/versuscontrol/versus-incident)
 - [Template Syntax Guide](https://versuscontrol.github.io/versus-incident/userguide/template-syntax.html)
-- [Configuration Reference](https://versuscontrol.github.io/versus-incident/userguide/configuration.html)
+- [Configuration Reference](https://versuscontrol.github.io/versus-incident/configuration/configuration.html)
