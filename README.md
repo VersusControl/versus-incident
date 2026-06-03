@@ -8,18 +8,29 @@
   <a href="https://github.com/sponsors/versuscontrol"><img src="https://img.shields.io/badge/sponsor-%E2%9D%A4-ff69b4" alt="Sponsor"></a>
 </p>
 
-An incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations. Compatible with any tool supporting webhook alerts, it's designed for modern DevOps teams to quickly respond to production incidents.
+Versus is an open-source **incident management tool** built with an **AI SRE agent**. The agent watches your logs, learns what *normal* looks like, and automatically opens an incident the moment something new and unexpected appears — with no alert rules to write.
 
-With the built-in **AI SRE Agent**, Versus goes further — continuously observing your logs, metrics, and traces, learning what normal looks like, and alerting you only when something new and unexpected appears.
+It also accepts incidents from any webhook-capable tool (Alertmanager, Grafana, Sentry, CloudWatch, FluentBit). Versus supports **multi-channel notifications** to Slack, Microsoft Teams, Telegram, Viber, Email, and Lark with templates you fully control, plus **on-call escalation** to AWS Incident Manager or PagerDuty when an incident goes unacknowledged.
 
 ![Versus](src/docs/images/versus-dashboard-01.png)
 
+## How Versus Creates Incidents
+
+Incidents reach Versus two ways, and both are handled by the same notification, templating, and on-call logic:
+
+- **AI SRE Agent (auto-detect)** — point the agent at your logs and it learns your normal patterns, then automatically raises an incident when a brand-new error or anomaly appears. No alert rules to maintain.
+- **Webhook alerts (you define)** — any tool that can POST a webhook (Alertmanager, Grafana, Sentry, CloudWatch SNS, FluentBit, or your own scripts) sends incidents straight to Versus, formatted with your own templates.
+
+Whichever source raises it, an incident is templated, fanned out to every channel you enable, and escalated to on-call if it isn't acknowledged in time.
+
 ## Table of Contents
 - [Features](#features)
-- [Getting Started](#get-started-in-60-seconds)
-- [Admin Dashboard](https://versuscontrol.github.io/versus-incident/userguide/admin-ui.html)
-- [Development Custom Templates](#development-custom-templates)
+- [How Versus Creates Incidents](#how-versus-creates-incidents)
+- [Getting Started](#get-started)
 - [AI Agent](#ai-agent)
+- [Webhook Alerts](#webhook-alerts)
+- [Admin Dashboard](https://versuscontrol.github.io/versus-incident/configuration/admin-ui.html)
+- [Development Custom Templates](#development-custom-templates)
 - [On-Call](#on-call)
 - [Configuration](#complete-configuration)
 - [Roadmap](#roadmap)
@@ -28,18 +39,56 @@ With the built-in **AI SRE Agent**, Versus goes further — continuously observi
 
 ## Features
 
-- 🚨 **Multi-channel Alerts**: Send incident notifications to Slack, Microsoft Teams, Telegram, Viber, Email, and Lark (more channels coming!)
+- 🤖 **AI SRE Agent** *(Beta)*: An AI agent that reads your logs, learns what normal looks like, and automatically opens an incident only when something new and unexpected appears.
+- 🌐 **Webhook Alerts**: Receive incidents from any tool that can POST a webhook — Alertmanager, Grafana, Sentry, CloudWatch SNS, FluentBit, and more.
+- 🚨 **Multi-channel Notifications**: Fan out every incident to Slack, Microsoft Teams, Telegram, Viber, Email, and Lark (more channels coming!)
 - 📝 **Custom Templates**: Define your own alert messages using Go templates
 - 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
 - 📡 **REST API**: Simple HTTP interface to receive alerts
-- 📡 **On-Call**: On-Call integrations with AWS Incident Manager and PagerDuty
-- 🤖 **AI Agent** *(Beta)*: An AI SRE agent that reads your logs, metrics and tracing, learns what normal looks like, and only alerts you when something new and unexpected appears.
+- 📞 **On-Call**: On-Call integrations with AWS Incident Manager and PagerDuty
 
 ![Versus](src/docs/images/versus-architecture.png)
 
-## Get Started in 60 Seconds
+## Get Started
 
-### Easy Installation with Docker
+### Auto-detect incidents with the AI SRE Agent
+
+Let the agent learn your logs and surface what's new. The AI SRE Agent has three modes:
+
+- **`training`** — just watch and learn. No alerts.
+- **`shadow`** — watch and learn, plus write a "would have alerted"
+  log entry every time a line would have triggered an alert. Still
+  no real alerts. Good for checking the agent's judgement before
+  going live.
+- **`detect`** — actually create incidents for lines the agent has
+  never seen before. An AI SRE triages each one and writes the
+  summary, severity, and suggested next steps before the incident
+  is sent through every configured channel.
+
+Start it in **training mode** — it only watches and learns, and never sends an alert until you're ready.
+
+```bash
+# Redis is used to remember where the agent left off in each log source.
+docker run -d --name versus-redis -p 6379:6379 redis:7
+
+docker run -p 3000:3000 \
+  -e GATEWAY_SECRET=change-me \
+  -e AGENT_ENABLE=true \
+  -e AGENT_MODE=training \
+  -e REDIS_HOST=host.docker.internal \
+  -e REDIS_PORT=6379 \
+  -v $(pwd)/config:/app/config \
+  -v $(pwd)/data:/app/data \
+  ghcr.io/versuscontrol/versus-incident
+```
+
+The agent needs a `config.yaml` and an `agent_sources.yaml` that point it at your logs. Once it's running, review the patterns it learns on the **admin dashboard** at <http://localhost:3000/>, then switch `AGENT_MODE` from `training` → `shadow` → `detect` when you trust it.
+
+Full walkthrough (with ready-to-copy config and a sample log generator): [AI Agent — Getting Started](https://versuscontrol.github.io/versus-incident/agent/getting-started.html).
+
+### Forward alerts from your existing tools
+
+Already have monitoring? Run Versus and POST your alerts to its webhook endpoint.
 
 ```bash
 docker run -p 3000:3000 \
@@ -53,121 +102,11 @@ docker run -p 3000:3000 \
 Versus listens on port 3000 by default and exposes:
 
 - `POST /api/incidents` — webhook endpoint for monitoring tools.
-- `GET  /` — the embedded **admin dashboard**, open <http://localhost:3000/> in your browser. For the full UI walkthrough and the build/watch scripts, see [Admin Dashboard](https://versuscontrol.github.io/versus-incident/userguide/admin-ui.html).
-
-### Universal Alert Template Support
-
-Our default template (Slack, Telegram) automatically handles alerts from multiple sources, including:
-- Alertmanager (Prometheus)
-- Grafana Alerts
-- Sentry
-- CloudWatch SNS
-- FluentBit
-
-#### Example JSON Payload Sent by Alertmanager
-
-```bash
-curl -X POST "http://localhost:3000/api/incidents" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "receiver": "webhook-incident",
-    "status": "firing",
-    "alerts": [ 
-      {                
-        "status": "firing",                         
-        "labels": {                                   
-          "alertname": "PostgresqlDown",
-          "instance": "postgresql-prod-01",
-          "severity": "critical"
-        },                        
-        "annotations": {                                                
-          "summary": "Postgresql down (instance postgresql-prod-01)",
-          "description": "Postgresql instance is down."
-        },                                     
-        "startsAt": "2023-10-01T12:34:56.789Z",                         
-        "endsAt": "2023-10-01T12:44:56.789Z",                
-        "generatorURL": ""
-      }                                  
-    ],                                 
-    "groupLabels": {                                                                  
-      "alertname": "PostgresqlDown"     
-    },                                                                    
-    "commonLabels": {                                                           
-      "alertname": "PostgresqlDown",                                                       
-      "severity": "critical",
-      "instance": "postgresql-prod-01"
-    },  
-    "commonAnnotations": {                                                                                  
-      "summary": "Postgresql down (instance postgresql-prod-01)",
-      "description": "Postgresql instance is down."
-    },            
-    "externalURL": ""            
-  }'
-```
-
-#### Example JSON Payload Sent by Sentry
-
-```bash
-curl -X POST "http://localhost:3000/api/incidents" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "action": "created",
-    "data": {
-      "issue": {
-        "id": "123456",
-        "title": "Example Issue",
-        "culprit": "example_function in example_module",
-        "shortId": "PROJECT-1",
-        "project": {
-          "id": "1",
-          "name": "Example Project",
-          "slug": "example-project"
-        },
-        "metadata": {
-          "type": "ExampleError",
-          "value": "This is an example error"
-        },
-        "status": "unresolved",
-        "level": "error",
-        "firstSeen": "2023-10-01T12:00:00Z",
-        "lastSeen": "2023-10-01T12:05:00Z",
-        "count": 5,
-        "userCount": 3
-      }
-    },
-    "installation": {
-      "uuid": "installation-uuid"
-    },
-    "actor": {
-      "type": "user",
-      "id": "789",
-      "name": "John Doe"
-    }
-  }'
-```
-
-**Result:**
-
-![Versus Result](src/docs/images/versus-result-01.png)
-
-## Development Custom Templates
-
-For the custom templates, see [Development Custom Templates](https://versus-incident.devopsvn.tech/userguide/getting-started.html#development-custom-templates)
-
-## Kubernetes
-
-For a complete `Deployment` + `Service` + `PersistentVolumeClaim`
-manifest (with the persistent data volume the admin dashboard needs),
-see [Deploy on Kubernetes](https://versuscontrol.github.io/versus-incident/userguide/kubernetes.html).
-
-## Helm Chart
-
-For the packaged install, see [Helm Chart](https://versuscontrol.github.io/versus-incident/userguide/helm.html)
-or the chart source under [helm/versus-incident](https://github.com/VersusControl/versus-incident/blob/main/helm/versus-incident).
+- `GET  /` — the embedded **admin dashboard**, open <http://localhost:3000/> in your browser. For the full UI walkthrough and the build/watch scripts, see [Admin Dashboard](https://versuscontrol.github.io/versus-incident/configuration/admin-ui.html).
 
 ## AI Agent
 
-Versus supports an opt-in **AI SRE agent** that reads your logs, metrics and tracing, learns what normal looks like, and only alerts you when something new and unexpected appears.
+The **AI SRE agent** is what makes Versus different: point it at your logs and it learns what *normal* looks like, then automatically opens an incident the moment a brand-new error or anomaly appears — no alert rules to maintain.
 
 Configuration example with agent features:
 
@@ -299,6 +238,120 @@ sources:
 The `redis` section is required when `agent.enable` is `true`. Redis is used to remember where the agent left off in each log source, so it picks up from the right place after a restart.
 
 For detailed information on integration, please refer to the document here: [Enable AI Agent](https://versuscontrol.github.io/versus-incident/agent/agent-introduction.html).
+
+## Webhook Alerts
+
+Already using other monitoring tools? Versus also accepts incidents from anything that can POST JSON to `/api/incidents`, so you can route existing alerts through the same channels, templates, and on-call.
+
+### Universal Alert Template Support
+
+Our default template (Slack, Telegram) automatically handles alerts from multiple sources, including:
+- Alertmanager (Prometheus)
+- Grafana Alerts
+- Sentry
+- CloudWatch SNS
+- FluentBit
+
+#### Example JSON Payload Sent by Alertmanager
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "receiver": "webhook-incident",
+    "status": "firing",
+    "alerts": [ 
+      {                
+        "status": "firing",                         
+        "labels": {                                   
+          "alertname": "PostgresqlDown",
+          "instance": "postgresql-prod-01",
+          "severity": "critical"
+        },                        
+        "annotations": {                                                
+          "summary": "Postgresql down (instance postgresql-prod-01)",
+          "description": "Postgresql instance is down."
+        },                                     
+        "startsAt": "2023-10-01T12:34:56.789Z",                         
+        "endsAt": "2023-10-01T12:44:56.789Z",                
+        "generatorURL": ""
+      }                                  
+    ],                                 
+    "groupLabels": {                                                                  
+      "alertname": "PostgresqlDown"     
+    },                                                                    
+    "commonLabels": {                                                           
+      "alertname": "PostgresqlDown",                                                       
+      "severity": "critical",
+      "instance": "postgresql-prod-01"
+    },  
+    "commonAnnotations": {                                                                                  
+      "summary": "Postgresql down (instance postgresql-prod-01)",
+      "description": "Postgresql instance is down."
+    },            
+    "externalURL": ""            
+  }'
+```
+
+#### Example JSON Payload Sent by Sentry
+
+```bash
+curl -X POST "http://localhost:3000/api/incidents" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "created",
+    "data": {
+      "issue": {
+        "id": "123456",
+        "title": "Example Issue",
+        "culprit": "example_function in example_module",
+        "shortId": "PROJECT-1",
+        "project": {
+          "id": "1",
+          "name": "Example Project",
+          "slug": "example-project"
+        },
+        "metadata": {
+          "type": "ExampleError",
+          "value": "This is an example error"
+        },
+        "status": "unresolved",
+        "level": "error",
+        "firstSeen": "2023-10-01T12:00:00Z",
+        "lastSeen": "2023-10-01T12:05:00Z",
+        "count": 5,
+        "userCount": 3
+      }
+    },
+    "installation": {
+      "uuid": "installation-uuid"
+    },
+    "actor": {
+      "type": "user",
+      "id": "789",
+      "name": "John Doe"
+    }
+  }'
+```
+
+**Result:**
+
+![Versus Result](src/docs/images/versus-result-01.png)
+
+## Development Custom Templates
+
+For the custom templates, see [Development Custom Templates](https://versus-incident.devopsvn.tech/userguide/getting-started.html#development-custom-templates)
+
+## Kubernetes
+
+For a complete `Deployment` + `Service` + `PersistentVolumeClaim`
+manifest (with the persistent data volume the admin dashboard needs),
+see [Deploy on Kubernetes](https://versuscontrol.github.io/versus-incident/configuration/kubernetes.html).
+
+## Helm Chart
+
+For the packaged install, see [Helm Chart](https://versuscontrol.github.io/versus-incident/configuration/helm.html)
+or the chart source under [helm/versus-incident](https://github.com/VersusControl/versus-incident/blob/main/helm/versus-incident).
 
 ## On-Call
 
@@ -542,7 +595,7 @@ agent:
         pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
 ```
 
-**For the detail configuration, see [Detail Configuration](https://versus-incident.devopsvn.tech/userguide/configuration.html)**
+**For the detail configuration, see [Detail Configuration](https://versus-incident.devopsvn.tech/configuration/configuration.html)**
 
 ## Roadmap
 

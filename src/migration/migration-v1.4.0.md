@@ -209,7 +209,7 @@ helm upgrade --install versus-incident \
 ```
 
 For the full chart guide including agent setup, see
-[`src/userguide/helm.md`](../userguide/helm.md).
+[`src/configuration/helm.md`](../configuration/helm.md).
 
 For any issues with the migration, please
 [open an issue](https://github.com/VersusControl/versus-incident/issues).

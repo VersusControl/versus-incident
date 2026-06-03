@@ -1,5 +1,7 @@
 # Getting Started
 
+This guide covers the **webhook path**: receiving incidents from tools you already run (Alertmanager, Grafana, Sentry, CloudWatch, FluentBit) and fanning them out to your notification channels and on-call.
+
 Get Versus Incident running locally with Docker and send your first alert in under five minutes.
 
 ## Prerequisites
