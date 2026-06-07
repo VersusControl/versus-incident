@@ -203,6 +203,8 @@ func cloneOnCallConfig(src OnCallConfig) OnCallConfig {
 		Provider:           src.Provider,
 		AwsIncidentManager: cloneAwsIncidentManagerConfig(src.AwsIncidentManager),
 		PagerDuty:          clonePagerDutyConfig(src.PagerDuty),
+		ServiceNow:         cloneServiceNowConfig(src.ServiceNow),
+		Incidentio:         cloneIncidentioConfig(src.Incidentio),
 	}
 }
 
@@ -237,6 +239,44 @@ func clonePagerDutyConfig(src PagerDutyConfig) PagerDutyConfig {
 	return PagerDutyConfig{
 		RoutingKey:       src.RoutingKey,
 		OtherRoutingKeys: otherRoutingKeysCopy,
+	}
+}
+
+// Helper function to deep clone the ServiceNowConfig struct
+func cloneServiceNowConfig(src ServiceNowConfig) ServiceNowConfig {
+	// Create a copy of OtherInstanceURLs map if it exists
+	var otherInstanceURLsCopy map[string]string
+	if src.OtherInstanceURLs != nil {
+		otherInstanceURLsCopy = make(map[string]string)
+		for k, v := range src.OtherInstanceURLs {
+			otherInstanceURLsCopy[k] = v
+		}
+	}
+
+	return ServiceNowConfig{
+		InstanceURL:       src.InstanceURL,
+		Username:          src.Username,
+		Password:          src.Password,
+		Table:             src.Table,
+		OtherInstanceURLs: otherInstanceURLsCopy,
+	}
+}
+
+// Helper function to deep clone the IncidentioConfig struct
+func cloneIncidentioConfig(src IncidentioConfig) IncidentioConfig {
+	// Create a copy of OtherAlertSourceConfigIDs map if it exists
+	var otherAlertSourceConfigIDsCopy map[string]string
+	if src.OtherAlertSourceConfigIDs != nil {
+		otherAlertSourceConfigIDsCopy = make(map[string]string)
+		for k, v := range src.OtherAlertSourceConfigIDs {
+			otherAlertSourceConfigIDsCopy[k] = v
+		}
+	}
+
+	return IncidentioConfig{
+		APIKey:                    src.APIKey,
+		AlertSourceConfigID:       src.AlertSourceConfigID,
+		OtherAlertSourceConfigIDs: otherAlertSourceConfigIDsCopy,
 	}
 }
 

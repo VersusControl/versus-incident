@@ -181,9 +181,11 @@ type OnCallConfig struct {
 	Enable             bool
 	InitializedOnly    bool                     `mapstructure:"initialized_only"` // Initialize infrastructure but don't enable by default
 	WaitMinutes        int                      `mapstructure:"wait_minutes"`
-	Provider           string                   `mapstructure:"provider"` // "aws_incident_manager" or "pagerduty"
+	Provider           string                   `mapstructure:"provider"` // "aws_incident_manager", "pagerduty", "servicenow" or "incident_io"
 	AwsIncidentManager AwsIncidentManagerConfig `mapstructure:"aws_incident_manager"`
 	PagerDuty          PagerDutyConfig          `mapstructure:"pagerduty"`
+	ServiceNow         ServiceNowConfig         `mapstructure:"servicenow"`
+	Incidentio         IncidentioConfig         `mapstructure:"incident_io"`
 }
 
 type AwsIncidentManagerConfig struct {
@@ -194,6 +196,20 @@ type AwsIncidentManagerConfig struct {
 type PagerDutyConfig struct {
 	RoutingKey       string            `mapstructure:"routing_key"`
 	OtherRoutingKeys map[string]string `mapstructure:"other_routing_keys"`
+}
+
+type ServiceNowConfig struct {
+	InstanceURL       string            `mapstructure:"instance_url"`
+	Username          string            `mapstructure:"username"`
+	Password          string            `mapstructure:"password"`
+	Table             string            `mapstructure:"table"` // ServiceNow table to create records in; defaults to "incident"
+	OtherInstanceURLs map[string]string `mapstructure:"other_instance_urls"`
+}
+
+type IncidentioConfig struct {
+	APIKey                    string            `mapstructure:"api_key"`
+	AlertSourceConfigID       string            `mapstructure:"alert_source_config_id"`
+	OtherAlertSourceConfigIDs map[string]string `mapstructure:"other_alert_source_config_ids"`
 }
 
 type RedisConfig struct {
@@ -477,6 +493,26 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 
 			if routingKey != "" {
 				clonedCfg.OnCall.PagerDuty.RoutingKey = routingKey
+			}
+		}
+	}
+
+	if v := (*paramsOverwrite)["servicenow_other_instance"]; v != "" {
+		if clonedCfg.OnCall.ServiceNow.OtherInstanceURLs != nil {
+			instanceURL := clonedCfg.OnCall.ServiceNow.OtherInstanceURLs[v]
+
+			if instanceURL != "" {
+				clonedCfg.OnCall.ServiceNow.InstanceURL = instanceURL
+			}
+		}
+	}
+
+	if v := (*paramsOverwrite)["incidentio_other_alert_source"]; v != "" {
+		if clonedCfg.OnCall.Incidentio.OtherAlertSourceConfigIDs != nil {
+			alertSourceConfigID := clonedCfg.OnCall.Incidentio.OtherAlertSourceConfigIDs[v]
+
+			if alertSourceConfigID != "" {
+				clonedCfg.OnCall.Incidentio.AlertSourceConfigID = alertSourceConfigID
 			}
 		}
 	}

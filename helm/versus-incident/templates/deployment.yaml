@@ -300,6 +300,51 @@ spec:
                   key: pagerduty_other_routing_key_{{ $key }}
             {{- end }}
             {{- end }}
+
+            {{- if eq .Values.oncall.provider "servicenow" }}
+            - name: SERVICENOW_INSTANCE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: servicenow_instance_url
+            - name: SERVICENOW_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: servicenow_username
+            - name: SERVICENOW_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: servicenow_password
+            {{- range $key, $val := .Values.oncall.servicenow.otherInstanceUrls }}
+            - name: SERVICENOW_OTHER_INSTANCE_URL_{{ $key | upper }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: servicenow_other_instance_url_{{ $key }}
+            {{- end }}
+            {{- end }}
+
+            {{- if eq .Values.oncall.provider "incident_io" }}
+            - name: INCIDENTIO_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: incidentio_api_key
+            - name: INCIDENTIO_ALERT_SOURCE_CONFIG_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: incidentio_alert_source_config_id
+            {{- range $key, $val := .Values.oncall.incidentIo.otherAlertSourceConfigIds }}
+            - name: INCIDENTIO_OTHER_ALERT_SOURCE_CONFIG_ID_{{ $key | upper }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: incidentio_other_alert_source_config_id_{{ $key }}
+            {{- end }}
+            {{- end }}
             
             {{- /* Redis configuration - used for on-call functionality */}}
             - name: REDIS_HOST
