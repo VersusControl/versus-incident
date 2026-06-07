@@ -131,51 +131,7 @@ redis: # Required for on-call functionality
   db: 0
 ```
 
-Create a Slack template in `config/slack_message.tmpl`:
-
-```
-🔥 *{{ .commonLabels.severity | upper }} Alert: {{ .commonLabels.alertname }}*
-
-🌐 *Instance*: `{{ .commonLabels.instance }}`  
-🚨 *Status*: `{{ .status }}`
-
-{{ range .alerts }}
-📝 {{ .annotations.description }}  
-{{ end }}
-```
-
-**Slack Acknowledgment Button (Default)**
-
-By default, Versus automatically adds an interactive acknowledgment button to Slack notifications when on-call is enabled. This allows users to acknowledge alerts. You can customize the button appearance in your `config.yaml`, for example:
-
-![Versus On-Call Slack](/docs/images/on-call-slack.png)
-
-**ACK URL Generation**
-
-+ When an incident is created (e.g., via a POST to `/api/incidents`), Versus generates an acknowledgment URL if on-call is enabled.
-+ The URL is constructed using the `public_host` value, typically in the format: `https://your-host.example/api/incidents/ack/<incident-id>`.
-+ This URL is injected into the button.
-
-**Manual Acknowledgment Handling**
-
-If you prefer to handle acknowledgments manually or want to disable the default button (by setting `disable_button: true`), you can add the acknowledgment URL directly in your template. Here's an example of including a clickable link in your Slack template:
-
-```
-🔥 *{{ .commonLabels.severity | upper }} Alert: {{ .commonLabels.alertname }}*
-
-🌐 *Instance*: `{{ .commonLabels.instance }}`  
-🚨 *Status*: `{{ .status }}`
-
-{{ range .alerts }}
-📝 {{ .annotations.description }}  
-{{ end }}
-{{ if .AckURL }}
-----------
-<{{.AckURL}}|Click here to acknowledge>
-{{ end }}
-```
-
-The conditional `{{ if .AckURL }}` ensures the link only appears if the acknowledgment URL is available (i.e., when on-call is enabled).
+By default, Versus adds an interactive acknowledgment button to Slack notifications when on-call is enabled, using the unified template shipped in `config/slack_message.tmpl`. If the alert is acknowledged before `wait_minutes` elapses, PagerDuty is never triggered.
 
 Create the `docker-compose.yml` file:
 
@@ -194,6 +150,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=your_redis_password
+    volumes:
+      - ./config:/app/config:ro
     depends_on:
       - redis
 

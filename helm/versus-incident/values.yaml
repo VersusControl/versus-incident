@@ -278,6 +278,18 @@ oncall:
     routingKey: ""
     otherRoutingKeys: {}
 
+  servicenow:
+    instanceUrl: ""
+    username: ""
+    password: ""
+    table: "incident"
+    otherInstanceUrls: {}
+
+  incidentIo:
+    apiKey: ""
+    alertSourceConfigId: ""
+    otherAlertSourceConfigIds: {}
+
 # Redis configuration
 #
 # Redis is REQUIRED only when on-call is enabled (oncall.enable=true or

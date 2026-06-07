@@ -48,6 +48,10 @@
 - [How to Integration Incident Manager (Advanced)](./oncall/how-to-integration-aws-icm-adv.md)
 - [PagerDuty](./oncall/pagerduty.md)
 - [How to Integration PagerDuty](./oncall/how-to-integration-pagerduty.md)
+- [ServiceNow](./oncall/servicenow.md)
+- [How to Integration ServiceNow](./oncall/how-to-integration-servicenow.md)
+- [incident.io](./oncall/incident-io.md)
+- [How to Integration incident.io](./oncall/how-to-integration-incident-io.md)
 
 # Webhook Integration Examples
 - [Use Alertmanager](./examples/alertmanager.md)

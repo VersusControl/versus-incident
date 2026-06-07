@@ -23,20 +23,6 @@ Incidents reach Versus two ways, and both are handled by the same notification, 
 
 Whichever source raises it, an incident is templated, fanned out to every channel you enable, and escalated to on-call if it isn't acknowledged in time.
 
-## Table of Contents
-- [Features](#features)
-- [How Versus Creates Incidents](#how-versus-creates-incidents)
-- [Getting Started](#get-started)
-- [AI Agent](#ai-agent)
-- [Webhook Alerts](#webhook-alerts)
-- [Admin Dashboard](https://versuscontrol.github.io/versus-incident/configuration/admin-ui.html)
-- [Development Custom Templates](#development-custom-templates)
-- [On-Call](#on-call)
-- [Configuration](#complete-configuration)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [License](#license)
-
 ## Features
 
 - 🤖 **AI SRE Agent** *(Beta)*: An AI agent that reads your logs, learns what normal looks like, and automatically opens an incident only when something new and unexpected appears.
@@ -48,6 +34,18 @@ Whichever source raises it, an incident is templated, fanned out to every channe
 - 📞 **On-Call**: On-Call integrations with AWS Incident Manager and PagerDuty
 
 ![Versus](src/docs/images/versus-architecture.png)
+
+## Table of Contents
+- [Getting Started](#get-started)
+- [AI Agent](#ai-agent)
+- [Webhook Alerts](#webhook-alerts)
+- [Admin Dashboard](https://versuscontrol.github.io/versus-incident/configuration/admin-ui.html)
+- [Development Custom Templates](#development-custom-templates)
+- [On-Call](#on-call)
+- [Configuration](#complete-configuration)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Get Started
 
@@ -103,6 +101,8 @@ Versus listens on port 3000 by default and exposes:
 
 - `POST /api/incidents` — webhook endpoint for monitoring tools.
 - `GET  /` — the embedded **admin dashboard**, open <http://localhost:3000/> in your browser. For the full UI walkthrough and the build/watch scripts, see [Admin Dashboard](https://versuscontrol.github.io/versus-incident/configuration/admin-ui.html).
+
+> **You can use both.** The AI agent and webhook alerts are not mutually exclusive — run them together and every incident, whether auto-detected or forwarded from your tools, flows through the same channels, templates, and on-call logic.
 
 ## AI Agent
 

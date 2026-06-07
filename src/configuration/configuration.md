@@ -123,7 +123,7 @@ oncall:
   initialized_only: true  # Initialize on-call feature but don't enable by default; use query param oncall_enable=true to enable for specific requests
   enable: false # Use this to enable or disable on-call for all alerts
   wait_minutes: 3 # If you set it to 0, it means there's no need to check for an acknowledgment, and the on-call will trigger immediately
-  provider: aws_incident_manager # Valid values: "aws_incident_manager" or "pagerduty"
+  provider: aws_incident_manager # Valid values: "aws_incident_manager", "pagerduty", "servicenow" or "incident_io"
 
   aws_incident_manager: # Used when provider is "aws_incident_manager"
     response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
@@ -138,6 +138,24 @@ oncall:
       infra: ${PAGERDUTY_OTHER_ROUTING_KEY_INFRA}
       app: ${PAGERDUTY_OTHER_ROUTING_KEY_APP}
       db: ${PAGERDUTY_OTHER_ROUTING_KEY_DB}
+
+  servicenow: # Used when provider is "servicenow"
+    instance_url: ${SERVICENOW_INSTANCE_URL} # eg https://dev12345.service-now.com (REQUIRED)
+    username: ${SERVICENOW_USERNAME} # REQUIRED
+    password: ${SERVICENOW_PASSWORD} # REQUIRED
+    table: incident # ServiceNow table to create records in; defaults to "incident"
+    other_instance_urls: # Optional: Override the default instance using query parameters, eg /api/incidents?servicenow_other_instance=infra
+      infra: ${SERVICENOW_OTHER_INSTANCE_URL_INFRA}
+      app: ${SERVICENOW_OTHER_INSTANCE_URL_APP}
+      db: ${SERVICENOW_OTHER_INSTANCE_URL_DB}
+
+  incident_io: # Used when provider is "incident_io"
+    api_key: ${INCIDENTIO_API_KEY} # Bearer API key for the HTTP alert source (REQUIRED)
+    alert_source_config_id: ${INCIDENTIO_ALERT_SOURCE_CONFIG_ID} # HTTP alert source config ID (REQUIRED)
+    other_alert_source_config_ids: # Optional: Override the default alert source using query parameters, eg /api/incidents?incidentio_other_alert_source=infra
+      infra: ${INCIDENTIO_OTHER_ALERT_SOURCE_CONFIG_ID_INFRA}
+      app: ${INCIDENTIO_OTHER_ALERT_SOURCE_CONFIG_ID_APP}
+      db: ${INCIDENTIO_OTHER_ALERT_SOURCE_CONFIG_ID_DB}
 
 redis: # Required for on-call functionality and the AI agent
   insecure_skip_verify: true # dev only
@@ -395,7 +413,7 @@ This automatic detection provides backward compatibility while supporting newer 
 | `ONCALL_ENABLE`             | Set to `true` to enable on-call functionality for all incidents by default. **Can be overridden per request using the `oncall_enable` query parameter.** |
 | `ONCALL_INITIALIZED_ONLY`   | Set to `true` to initialize on-call feature but keep it disabled by default. When set to `true`, on-call is triggered only for requests that explicitly include `?oncall_enable=true` in the URL. |
 | `ONCALL_WAIT_MINUTES`       | Time in minutes to wait for acknowledgment before escalating (default: 3). **Can be overridden per request using the `oncall_wait_minutes` query parameter.** |
-| `ONCALL_PROVIDER`           | Specify the on-call provider to use ("aws_incident_manager" or "pagerduty"). |
+| `ONCALL_PROVIDER`           | Specify the on-call provider to use ("aws_incident_manager", "pagerduty", "servicenow" or "incident_io"). |
 | `AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN` | The ARN of the AWS Incident Manager response plan to use for on-call escalations. Required if on-call provider is "aws_incident_manager". |
 | `AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_PROD` | (Optional) AWS Incident Manager response plan ARN for production environment. **Can be selected per request using the `awsim_other_response_plan=prod` query parameter.** |
 | `AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_DEV` | (Optional) AWS Incident Manager response plan ARN for development environment. **Can be selected per request using the `awsim_other_response_plan=dev` query parameter.** |
@@ -404,6 +422,13 @@ This automatic detection provides backward compatibility while supporting newer 
 | `PAGERDUTY_OTHER_ROUTING_KEY_INFRA` | (Optional) PagerDuty routing key for feature team. **Can be selected per request using the `pagerduty_other_routing_key=infra` query parameter.** |
 | `PAGERDUTY_OTHER_ROUTING_KEY_APP`   | (Optional) PagerDuty routing key for application team. **Can be selected per request using the `pagerduty_other_routing_key=app` query parameter.** |
 | `PAGERDUTY_OTHER_ROUTING_KEY_DB`    | (Optional) PagerDuty routing key for database team. **Can be selected per request using the `pagerduty_other_routing_key=db` query parameter.** |
+| `SERVICENOW_INSTANCE_URL`   | Base URL of your ServiceNow instance (e.g. `https://dev12345.service-now.com`). Required if on-call provider is "servicenow". |
+| `SERVICENOW_USERNAME`       | ServiceNow Basic auth username. Required if on-call provider is "servicenow". |
+| `SERVICENOW_PASSWORD`       | ServiceNow Basic auth password. Required if on-call provider is "servicenow". |
+| `SERVICENOW_OTHER_INSTANCE_URL_INFRA` | (Optional) Alternate ServiceNow instance URL. **Can be selected per request using the `servicenow_other_instance=infra` query parameter.** |
+| `INCIDENTIO_API_KEY`        | Bearer API key for the incident.io HTTP alert source. Required if on-call provider is "incident_io". |
+| `INCIDENTIO_ALERT_SOURCE_CONFIG_ID` | incident.io HTTP alert source config ID. Required if on-call provider is "incident_io". |
+| `INCIDENTIO_OTHER_ALERT_SOURCE_CONFIG_ID_INFRA` | (Optional) Alternate incident.io alert source config ID. **Can be selected per request using the `incidentio_other_alert_source=infra` query parameter.** |
 
 #### Enabling On-Call for Specific Incidents with initialized_only
 

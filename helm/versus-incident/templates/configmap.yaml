@@ -143,6 +143,32 @@ data:
           {{- end }}
         {{- end }}
       {{- end }}
+
+      {{- if eq .Values.oncall.provider "servicenow" }}
+      servicenow:
+        instance_url: ${SERVICENOW_INSTANCE_URL}
+        username: ${SERVICENOW_USERNAME}
+        password: ${SERVICENOW_PASSWORD}
+        table: {{ .Values.oncall.servicenow.table | default "incident" }}
+        {{- if .Values.oncall.servicenow.otherInstanceUrls }}
+        other_instance_urls:
+          {{- range $key, $val := .Values.oncall.servicenow.otherInstanceUrls }}
+          {{ $key }}: ${SERVICENOW_OTHER_INSTANCE_URL_{{ $key | upper }}}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+
+      {{- if eq .Values.oncall.provider "incident_io" }}
+      incident_io:
+        api_key: ${INCIDENTIO_API_KEY}
+        alert_source_config_id: ${INCIDENTIO_ALERT_SOURCE_CONFIG_ID}
+        {{- if .Values.oncall.incidentIo.otherAlertSourceConfigIds }}
+        other_alert_source_config_ids:
+          {{- range $key, $val := .Values.oncall.incidentIo.otherAlertSourceConfigIds }}
+          {{ $key }}: ${INCIDENTIO_OTHER_ALERT_SOURCE_CONFIG_ID_{{ $key | upper }}}
+          {{- end }}
+        {{- end }}
+      {{- end }}
     {{- end }}
 
     # Redis Configuration Section - required for on-call functionality
