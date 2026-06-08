@@ -104,12 +104,13 @@ type ServiceExtractor interface {
 // is unchanged. An empty (but configured) corpus still registers and
 // returns Found:false rather than an error.
 func Default(store storage.Provider, cat PatternCatalog, reader SignalReader, redactor LineRedactor, services ServiceExtractor, graph *DependencyGraph, changes ChangeFeed, embedder core.Embedder, runbooks RunbookSearcher) []core.AnalyzeTool {
-	out := make([]core.AnalyzeTool, 0, 7)
+	out := make([]core.AnalyzeTool, 0, 8)
 	if store != nil {
 		out = append(out, RecentIncidents{Store: store})
 	}
 	if cat != nil {
 		out = append(out, PatternHistory{Catalog: cat})
+		out = append(out, PatternSearch{Catalog: cat})
 		out = append(out, DescribeService{Catalog: cat})
 	}
 	if reader != nil {
