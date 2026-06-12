@@ -1,18 +1,19 @@
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { fmtAbs, fmtRel } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
 import { Pill, VerdictPill } from "@/components/Pill";
-import { ErrorBox, Spinner } from "@/components/feedback";
+import { SkCard } from "@/components/Skeleton";
+import { RetryableError } from "@/components/RetryableError";
 
 // ShadowDetailPage shows a single shadow event picked out of the list
 // returned by /api/agent/shadow. The server doesn't expose a per-event
 // GET, so we filter the cached list by pattern_id (latest match wins).
 //
-// Linked from the Shadow page table and the Dashboard's recent-shadow
-// card.
+// Linked from the Decisions › Shadow tab and the agent overview's
+// recent-shadow card.
 export function ShadowDetailPage() {
   const { patternId = "" } = useParams<{ patternId: string }>();
   const id = decodeURIComponent(patternId);
@@ -30,31 +31,58 @@ export function ShadowDetailPage() {
 
   const event = (events.data ?? []).find((e) => e.pattern_id === id);
 
+  // The catalog entry is optional context — a 404 just means the pattern
+  // was pruned from the catalog, which is normal, not an error to retry.
+  const patternLoadFailed =
+    pattern.isError &&
+    !(pattern.error instanceof ApiError && pattern.error.status === 404);
+
   return (
     <>
       <TopBar
         title="Shadow event"
         subtitle={id}
         actions={
-          <Link to="/shadow" className="btn">
-            <ArrowLeft size={12} />
+          <Link to="/agent/decisions?tab=shadow" className="btn">
+            <ArrowLeft size={12} aria-hidden />
             Back
           </Link>
         }
       />
 
       <main className="flex-1 overflow-auto p-6">
-        {events.isLoading && <Spinner />}
-        {events.isError && <ErrorBox error={events.error} />}
+        {events.isLoading && (
+          <div className="grid gap-4 lg:grid-cols-[2fr,1fr]">
+            <div className="min-w-0 space-y-4">
+              <SkCard lines={3} />
+              <SkCard lines={3} />
+            </div>
+            <div className="min-w-0 space-y-4">
+              <SkCard lines={4} />
+              <SkCard lines={3} />
+            </div>
+          </div>
+        )}
+        {events.isError && (
+          <RetryableError
+            error={events.error}
+            onRetry={() => events.refetch()}
+            retrying={events.isRefetching}
+            context="Couldn't load shadow events"
+          />
+        )}
 
-        {!events.isLoading && !event && (
+        {events.isSuccess && !event && (
           <div className="card">
-            <div className="card-body py-12 text-center text-sm text-ink-500">
+            <div className="card-body py-12 text-center text-sm text-ink-300">
               No shadow event found for pattern{" "}
-              <code className="font-mono text-ink-700">{id}</code>.
+              <code className="font-mono text-ink-100">{id}</code>.
               <div className="mt-2 text-xs text-ink-400">
                 The shadow log may have been cleared. Try{" "}
-                <Link to="/shadow" className="text-accent hover:underline">
+                <Link
+                  to="/agent/decisions?tab=shadow"
+                  className="text-link hover:underline"
+                >
                   the shadow list
                 </Link>
                 .
@@ -71,7 +99,7 @@ export function ShadowDetailPage() {
                   <span className="card-title">Sample message</span>
                 </div>
                 <div className="card-body">
-                  <pre className="max-w-full overflow-auto whitespace-pre-wrap break-all rounded-md bg-ink-50 p-3 font-mono text-xs leading-snug text-ink-800">
+                  <pre className="max-w-full overflow-auto whitespace-pre-wrap break-all rounded-md border border-ink-600 bg-surface-sunken p-3 font-mono text-xs leading-snug text-ink-100">
                     {event.sample_message}
                   </pre>
                 </div>
@@ -82,24 +110,33 @@ export function ShadowDetailPage() {
                   <span className="card-title">Template</span>
                 </div>
                 <div className="card-body">
-                  <pre className="max-w-full overflow-auto whitespace-pre-wrap break-all rounded-md bg-ink-50 p-3 font-mono text-xs leading-snug text-ink-800">
+                  <pre className="max-w-full overflow-auto whitespace-pre-wrap break-all rounded-md border border-ink-600 bg-surface-sunken p-3 font-mono text-xs leading-snug text-ink-100">
                     {event.template}
                   </pre>
-                  <p className="mt-2 text-2xs text-ink-500">
+                  <p className="mt-2 text-2xs text-ink-300">
                     The clustered template the miner extracted.
                     Variable parts are replaced with{" "}
-                    <code className="rounded bg-ink-100 px-1">{"<*>"}</code>.
+                    <code className="rounded bg-ink-700 px-1">{"<*>"}</code>.
                   </p>
                 </div>
               </div>
 
+              {pattern.isLoading && <SkCard lines={4} />}
+              {patternLoadFailed && (
+                <RetryableError
+                  error={pattern.error}
+                  onRetry={() => pattern.refetch()}
+                  retrying={pattern.isRefetching}
+                  context="Couldn't load the catalog entry"
+                />
+              )}
               {pattern.data && (
                 <div className="card">
                   <div className="card-header flex items-center justify-between">
                     <span className="card-title">Catalog entry</span>
                     <Link
-                      to={`/patterns/${event.pattern_id}`}
-                      className="text-2xs text-accent"
+                      to={`/agent/patterns/${encodeURIComponent(event.pattern_id)}`}
+                      className="text-2xs text-link hover:underline"
                     >
                       Open pattern →
                     </Link>
@@ -219,12 +256,12 @@ export function ShadowDetailPage() {
                 <div className="card-header">
                   <span className="card-title">What this means</span>
                 </div>
-                <div className="card-body space-y-2 text-xs leading-relaxed text-ink-600">
+                <div className="card-body space-y-2 text-xs leading-relaxed text-ink-300">
                   {event.verdict === "spike" && (
                     <p>
                       A previously-known pattern's tick frequency
                       exceeded the EWMA baseline by{" "}
-                      <code className="rounded bg-ink-50 px-1">
+                      <code className="rounded bg-ink-700 px-1">
                         spike_multiplier
                       </code>
                       . In detect mode this would have been escalated.
@@ -257,7 +294,7 @@ function Fact({ k, v }: { k: string; v: React.ReactNode }) {
       <div className="text-2xs uppercase tracking-wider text-ink-400">
         {k}
       </div>
-      <div className="text-ink-800">{v}</div>
+      <div className="text-ink-100">{v}</div>
     </div>
   );
 }

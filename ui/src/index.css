@@ -2,25 +2,168 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ---------- Datadog-ish base resets ---------- */
+/* ---------- Theme variables ----------
+   Dark is the default (the 3am ops context); [data-theme="light"] swaps
+   the map. `.force-dark` re-pins the dark values on a subtree — the
+   sidebar/drawer stay dark in both themes (ops identity, à la Datadog).
+   Triplets are "R G B" so Tailwind alpha modifiers work. */
+:root,
+.force-dark {
+  --ink-950: 11 13 18;
+  --ink-900: 17 20 28;
+  --ink-800: 22 26 37;
+  --ink-700: 29 34 48;
+  --ink-600: 38 44 61;
+  /* 500/400 raised from 58,66,87 / 91,101,127 — measured 1.5:1 and 2.6:1
+     on --surface, below the 3:1 secondary-text floor and invisible as
+     borders. Now: 400 = 3.7:1 text, 500 = visible hairline at /50-/60. */
+  --ink-500: 76 86 110;
+  --ink-400: 115 126 153;
+  --ink-300: 133 144 168;
+  --ink-200: 181 188 202;
+  --ink-100: 221 224 232;
+  --ink-50: 244 245 248;
+
+  --surface-sunken: 13 17 24;
+  --surface: 30 38 56;
+  --surface-raised: 42 52 74;
+
+  --accent: 59 130 246;
+  --accent-hover: 96 165 250;
+  --accent-subtle: 23 37 84;
+  /* Text links need more than --accent in the dark theme: blue-500 on
+     --surface is 4.1:1, under AA for the 11-12px link sizes. blue-300
+     measures 6.9:1. Fills (buttons) keep --accent. */
+  --link: 125 178 252;
+
+  /* Card elevation: hairline + 1px top highlight — dark surfaces read as
+     "material" by catching light on the top edge, not by drop shadow. */
+  --card-shadow:
+    inset 0 1px 0 0 rgb(255 255 255 / 0.05),
+    0 1px 2px rgb(0 0 0 / 0.3);
+  /* Faint accent wash behind the page top; pure decoration, so it must
+     stay below ~6% alpha to keep every measured contrast pair intact. */
+  --page-glow: radial-gradient(
+    72rem 28rem at 50% -10rem,
+    rgb(var(--accent) / 0.06),
+    transparent 70%
+  );
+
+  --sev-critical: 248 113 113;
+  --sev-critical-solid: 220 38 38;
+  --sev-high: 251 146 60;
+  --sev-high-solid: 234 88 12;
+  --sev-warn: 251 191 36;
+  --sev-warn-solid: 217 119 6;
+  --sev-info: 96 165 250;
+  --sev-info-solid: 37 99 235;
+  --sev-ok: 74 222 128;
+  --sev-ok-solid: 22 163 74;
+
+  --sk-shimmer: 255 255 255;
+}
+
+[data-theme="light"] {
+  /* Text end of the scale: same semantics, inverted lightness. */
+  --ink-50: 11 13 18; /* headings */
+  --ink-100: 29 34 48; /* primary text */
+  --ink-200: 58 66 87;
+  --ink-300: 91 101 127; /* secondary text */
+  --ink-400: 133 144 168; /* faint text */
+  /* Fill end: light grays. */
+  --ink-500: 195 201 214; /* borders, controls */
+  --ink-600: 227 231 238; /* pills, skeletons, hover fills */
+  --ink-700: 238 241 246;
+  --ink-800: 243 245 249;
+  --ink-900: 246 248 251;
+  --ink-950: 233 236 242;
+
+  --surface-sunken: 238 241 246; /* page background */
+  --surface: 255 255 255; /* cards */
+  --surface-raised: 244 246 250; /* thead, chips, modals */
+
+  --accent: 37 99 235;
+  --accent-hover: 29 78 216;
+  --accent-subtle: 219 234 254;
+  --link: 29 78 216; /* blue-700 — 6.7:1 on white */
+
+  --card-shadow: 0 1px 2px rgb(0 0 0 / 0.08);
+  --page-glow: none;
+
+  /* Severity text needs 600-700-level tones for AA on white tints. */
+  --sev-critical: 220 38 38;
+  --sev-critical-solid: 220 38 38;
+  --sev-high: 194 65 12;
+  --sev-high-solid: 234 88 12;
+  --sev-warn: 180 83 9;
+  --sev-warn-solid: 217 119 6;
+  --sev-info: 37 99 235;
+  --sev-info-solid: 37 99 235;
+  --sev-ok: 21 128 61;
+  --sev-ok-solid: 22 163 74;
+
+  --sk-shimmer: 0 0 0;
+}
+
+/* ---------- Base ---------- */
 html,
 body,
 #root {
   height: 100%;
 }
 
+html {
+  /* Native scrollbars, form controls and UA widgets follow the theme. */
+  color-scheme: dark;
+}
+html[data-theme="light"] {
+  color-scheme: light;
+}
+
 body {
-  font-family: theme("fontFamily.sans");
-  font-size: 13px;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* 16px on mobile (readable at 3am, no iOS auto-zoom); dense 13px on desktop. */
+  font-size: 16px;
   font-feature-settings: "cv11", "ss01";
+  background-color: rgb(var(--surface-sunken));
+  background-image: var(--page-glow);
+  background-repeat: no-repeat;
+  color: rgb(var(--ink-100));
+}
+@media (min-width: 1024px) {
+  body {
+    font-size: 13px;
+  }
 }
 
 ::selection {
-  background: theme("colors.accent.subtle");
-  color: theme("colors.ink.50");
+  background: rgb(var(--accent-subtle));
+  color: rgb(var(--ink-50));
 }
 
-/* Custom scrollbar — slim, dark-friendly */
+/* Global keyboard focus visibility — one rule, whole app (audit A1). */
+*:focus-visible {
+  outline: 2px solid rgb(var(--accent));
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Respect reduced motion everywhere (skeleton shimmer goes static, all
+   transitions collapse). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important; /* `backwards` fill keeps elements at
+       the from-frame through their delay — without this, staggered rows
+       still pop in one-by-one under reduced motion. */
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Custom scrollbar — slim, dark. */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -29,113 +172,228 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: theme("colors.ink.300");
+  background: rgb(var(--ink-500));
   border-radius: 6px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: theme("colors.ink.400");
+  background: rgb(var(--ink-400));
   background-clip: content-box;
   border: 2px solid transparent;
 }
-
-/* Apply dark scrollbar inside the sidebar */
 .dark-scroll::-webkit-scrollbar-track {
-  background: theme("colors.ink.900");
+  background: rgb(var(--ink-900));
 }
 .dark-scroll::-webkit-scrollbar-thumb {
-  background: theme("colors.ink.500");
-  background-clip: content-box;
-  border: 2px solid transparent;
-}
-.dark-scroll::-webkit-scrollbar-thumb:hover {
-  background: theme("colors.ink.400");
+  background: rgb(var(--ink-500));
   background-clip: content-box;
   border: 2px solid transparent;
 }
 
 @layer components {
-  /* Card surface used across the admin pages */
+  /* Card surface — dark migration (audit: every contrast failure was
+     measured against the old bg-white cards). */
   .card {
-    @apply rounded-md border border-ink-100 bg-white shadow-sm;
+    @apply rounded-card border border-ink-500/60 bg-surface;
+    box-shadow: var(--card-shadow);
   }
   .card-header {
-    @apply flex items-center justify-between border-b border-ink-100 px-4 py-3;
+    @apply flex items-center justify-between border-b border-ink-500/40 px-4 py-3;
   }
   .card-title {
-    @apply text-sm font-semibold text-ink-900;
+    @apply text-sm font-semibold text-ink-50;
   }
   .card-body {
     @apply p-4;
   }
 
-  /* Pill / tag */
+  /* Pill / tag — dark tinted bg + 400-level text ⇒ ≥4.5:1 on surface. */
   .pill {
-    @apply inline-flex items-center gap-1 rounded-full border border-ink-100
-           bg-ink-50 px-2 py-0.5 text-2xs font-medium text-ink-700;
+    @apply inline-flex items-center gap-1 rounded-full border border-ink-500
+           bg-ink-600 px-2 py-0.5 text-2xs font-medium text-ink-100;
   }
-  .pill-good   { @apply border-good/30   bg-good/10   text-good; }
-  .pill-warn   { @apply border-warn/30   bg-warn/10   text-warn; }
-  .pill-bad    { @apply border-bad/30    bg-bad/10    text-bad; }
-  .pill-accent { @apply border-accent/30 bg-accent/10 text-accent; }
+  .pill-good   { @apply border-sev-ok/30       bg-sev-ok/15       text-sev-ok; }
+  .pill-warn   { @apply border-sev-warn/30     bg-sev-warn/15     text-sev-warn; }
+  .pill-bad    { @apply border-sev-critical/30 bg-sev-critical/15 text-sev-critical; }
+  .pill-accent { @apply border-sev-info/30     bg-sev-info/15     text-sev-info; }
+
+  /* Severity left rails for rows/cards — color + the badge text means the
+     signal is never color-only. */
+  .sev-rail-critical { @apply border-l-2 border-l-sev-critical-solid; }
+  .sev-rail-high     { @apply border-l-2 border-l-sev-high-solid; }
+  .sev-rail-warn     { @apply border-l-2 border-l-sev-warn-solid; }
+  .sev-rail-info     { @apply border-l-2 border-l-sev-info-solid; }
+  .sev-rail-ok       { @apply border-l-2 border-l-sev-ok-solid; }
 
   /* Buttons */
   .btn {
-    @apply inline-flex items-center gap-1.5 rounded-md border border-ink-200
-           bg-white px-3 py-1.5 text-xs font-medium text-ink-800
-           transition-colors hover:bg-ink-50 disabled:cursor-not-allowed
-           disabled:opacity-50;
+    @apply inline-flex cursor-pointer items-center gap-1.5 rounded-control
+           border border-ink-500 bg-surface-raised px-3 py-1.5 text-xs
+           font-medium text-ink-100 transition-colors hover:bg-ink-600
+           disabled:cursor-not-allowed disabled:opacity-50;
   }
   .btn-primary {
-    @apply border-accent bg-accent text-white hover:bg-accent-hover;
+    @apply border-accent bg-accent text-white hover:border-accent-hover hover:bg-accent-hover;
   }
   .btn-danger {
-    @apply border-bad/40 bg-white text-bad hover:bg-bad/10;
+    @apply border-sev-critical/40 bg-surface-raised text-sev-critical hover:bg-sev-critical/10;
   }
 
-  /* Stat card (used on the status dashboard) */
+  /* Stat card */
   .stat-card {
     @apply card flex flex-col gap-1 p-4;
   }
   .stat-label {
-    @apply text-2xs uppercase tracking-wider text-ink-400;
+    @apply text-2xs uppercase tracking-wider text-ink-300;
   }
   .stat-value {
-    @apply text-2xl font-semibold text-ink-900;
+    @apply text-2xl font-semibold tabular-nums text-ink-50;
   }
   .stat-foot {
-    @apply text-2xs text-ink-400;
+    @apply text-2xs text-ink-300;
   }
 
-  /* Dense Datadog-style table */
+  /* Dense table */
   .ddt {
     @apply w-full text-left text-xs;
   }
   .ddt thead {
-    @apply sticky top-0 z-10 bg-ink-50 text-2xs uppercase tracking-wider
-           text-ink-400;
+    @apply sticky top-0 z-sticky bg-surface-raised text-2xs uppercase
+           tracking-wider text-ink-300;
   }
   .ddt th {
-    @apply border-b border-ink-100 px-3 py-2 font-medium;
+    @apply border-b border-ink-500/50 px-3 py-2 font-medium;
   }
   .ddt td {
-    @apply border-b border-ink-100 px-3 py-2 text-ink-800;
+    @apply border-b border-ink-500/30 px-3 py-2 text-ink-100;
+  }
+  .ddt td {
+    transition: background-color 120ms ease-out;
   }
   .ddt tr:hover td {
-    @apply bg-ink-50/70;
+    @apply bg-ink-600/40;
+  }
+  /* Row entrance — 180ms fade/translate, staggered 25ms across the first
+     12 rows (rows beyond enter with the last wave). `backwards` keeps a
+     row invisible through its delay; reduced motion collapses duration
+     AND delay via the global rule. Skeleton rows (.sk-row) are excluded
+     so the entrance plays once on real data, not on the shimmer first. */
+  .ddt tbody tr:not(.sk-row) {
+    animation: row-in 180ms ease-out backwards;
+  }
+  .ddt tbody tr:nth-child(2)  { animation-delay: 25ms; }
+  .ddt tbody tr:nth-child(3)  { animation-delay: 50ms; }
+  .ddt tbody tr:nth-child(4)  { animation-delay: 75ms; }
+  .ddt tbody tr:nth-child(5)  { animation-delay: 100ms; }
+  .ddt tbody tr:nth-child(6)  { animation-delay: 125ms; }
+  .ddt tbody tr:nth-child(7)  { animation-delay: 150ms; }
+  .ddt tbody tr:nth-child(8)  { animation-delay: 175ms; }
+  .ddt tbody tr:nth-child(9)  { animation-delay: 200ms; }
+  .ddt tbody tr:nth-child(10) { animation-delay: 225ms; }
+  .ddt tbody tr:nth-child(11) { animation-delay: 250ms; }
+  .ddt tbody tr:nth-child(n + 12) { animation-delay: 275ms; }
+  /* Active row for keyboard navigation (j/k) — same affordance family as
+     focus-visible so keyboard position is always visible. */
+  .ddt tr[data-active="true"] td {
+    @apply bg-accent-subtle/60;
+  }
+  .ddt tr[data-active="true"] td:first-child {
+    box-shadow: inset 2px 0 0 rgb(var(--accent));
   }
 
   /* Inline form controls */
   .input {
-    @apply h-8 w-full rounded-md border border-ink-200 bg-white px-2 text-xs
-           text-ink-900 placeholder:text-ink-300 focus:border-accent
-           focus:outline-none focus:ring-2 focus:ring-accent/20;
+    /* ink-400 border: inputs have no fill contrast against the card, so
+       the border is the only boundary — ink-500 measured under the 3:1
+       non-text minimum in dark (WCAG 1.4.11). */
+    @apply h-8 w-full rounded-control border border-ink-400 bg-surface-sunken
+           px-2 text-xs text-ink-100 placeholder:text-ink-400
+           focus:border-accent focus:outline-none focus:ring-2
+           focus:ring-accent/20;
   }
   textarea.input {
     @apply h-auto py-2;
   }
   .field-label {
-    @apply mb-1 block text-2xs uppercase tracking-wider text-ink-500;
+    @apply mb-1 block text-2xs uppercase tracking-wider text-ink-300;
+  }
+
+  /* Skeletons — layout-preserving shimmer. Static under reduced-motion via
+     the global rule above. */
+  .sk {
+    @apply relative overflow-hidden rounded bg-ink-600;
+  }
+  .sk::after {
+    content: "";
+    @apply absolute inset-0;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgb(var(--sk-shimmer) / 0.06),
+      transparent
+    );
+    animation: sk-shimmer 1.4s infinite;
+  }
+  @keyframes sk-shimmer {
+    100% {
+      transform: translateX(100%);
+    }
+  }
+
+  /* Skip link — first tab stop, visible only on focus. */
+  .skip-link {
+    @apply fixed left-2 top-2 z-toast -translate-y-16 rounded-control
+           bg-accent px-3 py-2 text-xs font-medium text-white
+           transition-transform focus:translate-y-0;
+  }
+}
+
+/* Motion vocabulary — 150-250ms, transform/opacity only; all collapse to
+   ~0ms under prefers-reduced-motion via the global rule. */
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes peek-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes peek-in-left {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
   }
 }

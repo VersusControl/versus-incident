@@ -1,29 +1,36 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, Search, Trash2, X } from "lucide-react";
+import { Pencil, Plus, Search, Trash2 } from "lucide-react";
 import {
   api,
   type Member,
   type MemberInput,
   type MemberMeta,
 } from "@/lib/api";
-import { TopBar } from "@/components/TopBar";
-import { EmptyState, ErrorBox, Spinner } from "@/components/feedback";
+import { EmptyState, ErrorBox } from "@/components/feedback";
 import { Pill } from "@/components/Pill";
+import { Modal } from "@/components/Modal";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { RetryableError } from "@/components/RetryableError";
+import { SkRows } from "@/components/Skeleton";
+import { useToast } from "@/components/Toast";
 
-// MembersPage is the operator's roster of people that can be assigned
+// MembersPanel is the operator's roster of people that can be assigned
 // to incidents. Each member has a free-form name, an editable alias
 // (auto-derived from the name until the operator changes it), and a
-// typed meta block of per-channel identifiers.
-export function MembersPage() {
+// typed meta block of per-channel identifiers. Exported as a panel so
+// PeoplePage can compose it as the Members tab.
+export function MembersPanel() {
   const qc = useQueryClient();
-  const { data, isLoading, isError, error } = useQuery({
+  const toast = useToast();
+  const { data, isLoading, isError, error, refetch, isRefetching } = useQuery({
     queryKey: ["members"],
     queryFn: api.listMembers,
   });
 
   const [q, setQ] = useState("");
   const [editing, setEditing] = useState<Member | "new" | null>(null);
+  const [deleting, setDeleting] = useState<Member | null>(null);
 
   const filtered = useMemo(() => {
     if (!data) return [];
@@ -40,45 +47,60 @@ export function MembersPage() {
   }, [data, q]);
 
   const del = useMutation({
-    mutationFn: (id: string) => api.deleteMember(id),
-    onSuccess: () => {
+    mutationFn: (m: Member) => api.deleteMember(m.id),
+    onSuccess: (_res, m) => {
       qc.invalidateQueries({ queryKey: ["members"] });
       qc.invalidateQueries({ queryKey: ["teams"] });
+      setDeleting(null);
+      toast.push({ tone: "ok", title: `Deleted ${m.name}` });
+    },
+    onError: (err, m) => {
+      toast.push({
+        tone: "error",
+        title: `Couldn't delete ${m.name}`,
+        description: err.message,
+        action: { label: "Retry", onClick: () => del.mutate(m) },
+      });
     },
   });
 
   return (
     <>
-      <TopBar
-        title="Members"
-        subtitle={data ? `${data.length} configured` : undefined}
-        actions={
-          <button className="btn" onClick={() => setEditing("new")}>
-            <Plus size={12} /> Add member
-          </button>
-        }
-      />
-
-      <main className="flex-1 overflow-auto p-6">
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <div className="relative max-w-md flex-1">
-            <Search
-              size={12}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-300"
-            />
-            <input
-              className="input pl-7"
-              placeholder="Search by name, alias, or channel id…"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-            />
-          </div>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <div className="relative max-w-md flex-1">
+          <Search
+            size={12}
+            aria-hidden
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
+          />
+          <input
+            className="input pl-7"
+            data-page-search
+            aria-label="Search members"
+            placeholder="Search by name, alias, or channel id…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
         </div>
+        <button className="btn" onClick={() => setEditing("new")}>
+          <Plus size={12} /> Add member
+        </button>
+      </div>
 
-        {isError && <ErrorBox error={error} />}
+      {isError && (
+        <div className="mb-3">
+          <RetryableError
+            error={error}
+            onRetry={() => refetch()}
+            retrying={isRefetching}
+            context="Couldn't load members"
+          />
+        </div>
+      )}
 
+      {(!isError || data) && (
         <div className="card overflow-hidden">
-          <div className="max-h-[calc(100vh-220px)] overflow-auto">
+          <div className="max-h-[calc(100vh-260px)] overflow-auto">
             <table className="ddt">
               <thead>
                 <tr>
@@ -89,27 +111,36 @@ export function MembersPage() {
                 </tr>
               </thead>
               <tbody>
-                {isLoading && (
-                  <tr>
-                    <td colSpan={4} className="py-8 text-center">
-                      <Spinner />
-                    </td>
-                  </tr>
-                )}
-                {!isLoading && filtered.length === 0 && (
+                {isLoading && <SkRows rows={6} cols={4} />}
+                {!isLoading && !isError && filtered.length === 0 && (
                   <tr>
                     <td colSpan={4}>
-                      <EmptyState
-                        title="No members yet"
-                        hint="Add operators here so you can assign them to incidents."
-                      />
+                      {q.trim() ? (
+                        <EmptyState
+                          title="No members match"
+                          hint="Try a different search."
+                        />
+                      ) : (
+                        <EmptyState
+                          title="No members yet"
+                          hint="Add operators here so you can assign them to incidents."
+                          action={
+                            <button
+                              className="btn"
+                              onClick={() => setEditing("new")}
+                            >
+                              <Plus size={12} /> Add member
+                            </button>
+                          }
+                        />
+                      )}
                     </td>
                   </tr>
                 )}
                 {filtered.map((m) => (
                   <tr key={m.id}>
-                    <td className="font-medium text-ink-900">{m.name}</td>
-                    <td className="font-mono text-2xs text-ink-600">
+                    <td className="py-2.5 font-medium text-ink-50">{m.name}</td>
+                    <td className="font-mono text-2xs text-ink-300">
                       {m.alias}
                     </td>
                     <td>
@@ -119,6 +150,7 @@ export function MembersPage() {
                       <div className="flex justify-end gap-1">
                         <button
                           className="btn"
+                          aria-label={`Edit ${m.name}`}
                           title="Edit"
                           onClick={() => setEditing(m)}
                         >
@@ -126,16 +158,12 @@ export function MembersPage() {
                         </button>
                         <button
                           className="btn"
+                          aria-label={`Delete ${m.name}`}
                           title="Delete"
                           disabled={del.isPending}
                           onClick={() => {
-                            if (
-                              confirm(
-                                `Delete ${m.name}? They will be removed from every team they belong to.`,
-                              )
-                            ) {
-                              del.mutate(m.id);
-                            }
+                            del.reset();
+                            setDeleting(m);
                           }}
                         >
                           <Trash2 size={11} />
@@ -148,7 +176,7 @@ export function MembersPage() {
             </table>
           </div>
         </div>
-      </main>
+      )}
 
       {editing && (
         <MemberEditor
@@ -156,15 +184,34 @@ export function MembersPage() {
           onClose={() => setEditing(null)}
         />
       )}
+
+      {deleting && (
+        <ConfirmDialog
+          title={`Delete ${deleting.name}?`}
+          message={
+            <>
+              They will be removed from every team they belong to. This can't
+              be undone.
+            </>
+          }
+          confirmLabel="Delete"
+          tone="danger"
+          busy={del.isPending}
+          error={del.isError ? del.error : null}
+          onConfirm={() => del.mutate(deleting)}
+          onClose={() => setDeleting(null)}
+        />
+      )}
     </>
   );
 }
+
 
 // MetaPills renders only the channel ids that are set, with a hover
 // title spelling the channel out (the field name is too cryptic on
 // its own — e.g. "msteams_upn").
 function MetaPills({ meta }: { meta?: MemberMeta }) {
-  if (!meta) return <span className="text-ink-300">—</span>;
+  if (!meta) return <span className="text-ink-400">—</span>;
   const entries: { k: keyof MemberMeta; label: string }[] = [
     { k: "email", label: "email" },
     { k: "slack_id", label: "slack" },
@@ -177,7 +224,7 @@ function MetaPills({ meta }: { meta?: MemberMeta }) {
     { k: "phone", label: "phone" },
   ];
   const set = entries.filter(({ k }) => !!meta[k]);
-  if (set.length === 0) return <span className="text-ink-300">—</span>;
+  if (set.length === 0) return <span className="text-ink-400">—</span>;
   return (
     <div className="flex flex-wrap gap-1">
       {set.map(({ k, label }) => (
@@ -220,7 +267,10 @@ function MemberEditor({
   onClose: () => void;
 }) {
   const qc = useQueryClient();
+  const toast = useToast();
   const isNew = member === null;
+  const nameId = useId();
+  const aliasId = useId();
   const [name, setName] = useState(member?.name ?? "");
   // Track whether the operator has edited the alias. While untouched
   // we keep it in sync with the auto-derived form.
@@ -245,7 +295,18 @@ function MemberEditor({
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["members"] });
+      toast.push({
+        tone: "ok",
+        title: isNew ? `Created ${name.trim()}` : `Saved ${name.trim()}`,
+      });
       onClose();
+    },
+    onError: (err) => {
+      toast.push({
+        tone: "error",
+        title: isNew ? "Couldn't create member" : "Couldn't save member",
+        description: err.message,
+      });
     },
   });
 
@@ -253,11 +314,30 @@ function MemberEditor({
     <Modal
       title={isNew ? "Add member" : `Edit ${member!.name}`}
       onClose={onClose}
+      size="lg"
+      closeDisabled={save.isPending}
+      footer={
+        <>
+          <button className="btn" onClick={onClose} disabled={save.isPending}>
+            Cancel
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={() => save.mutate()}
+            disabled={save.isPending || !name.trim()}
+          >
+            {save.isPending ? "Saving…" : isNew ? "Create" : "Save"}
+          </button>
+        </>
+      }
     >
-      <div className="space-y-3">
+      <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
         <div>
-          <label className="field-label">Name</label>
+          <label className="field-label" htmlFor={nameId}>
+            Name
+          </label>
           <input
+            id={nameId}
             className="input"
             placeholder="e.g. Alice Cooper"
             value={name}
@@ -267,12 +347,15 @@ function MemberEditor({
         </div>
         <div>
           <div className="flex items-center justify-between">
-            <label className="field-label">Alias</label>
+            <label className="field-label" htmlFor={aliasId}>
+              Alias
+            </label>
             {!aliasTouched && (
               <span className="text-2xs text-ink-400">auto from name</span>
             )}
           </div>
           <input
+            id={aliasId}
             className="input font-mono"
             placeholder="alice-cooper"
             value={effectiveAlias}
@@ -283,8 +366,8 @@ function MemberEditor({
           />
         </div>
 
-        <div className="border-t border-ink-100 pt-3">
-          <div className="mb-2 text-2xs uppercase tracking-wider text-ink-500">
+        <div className="border-t border-ink-600 pt-3">
+          <div className="mb-2 text-2xs uppercase tracking-wider text-ink-300">
             Channel identifiers
           </div>
           <div className="grid grid-cols-2 gap-3">
@@ -345,19 +428,6 @@ function MemberEditor({
 
         {save.isError && <ErrorBox error={save.error} />}
       </div>
-
-      <div className="mt-4 flex justify-end gap-2">
-        <button className="btn" onClick={onClose} disabled={save.isPending}>
-          Cancel
-        </button>
-        <button
-          className="btn btn-primary"
-          onClick={() => save.mutate()}
-          disabled={save.isPending || !name.trim()}
-        >
-          {save.isPending ? "Saving…" : isNew ? "Create" : "Save"}
-        </button>
-      </div>
     </Modal>
   );
 }
@@ -373,53 +443,19 @@ function MetaField({
   value?: string;
   onChange: (v: string) => void;
 }) {
+  const id = useId();
   return (
     <div>
-      <label className="field-label">{label}</label>
+      <label className="field-label" htmlFor={id}>
+        {label}
+      </label>
       <input
+        id={id}
         className="input"
         placeholder={hint}
         value={value ?? ""}
         onChange={(e) => onChange(e.target.value)}
       />
-    </div>
-  );
-}
-
-// Modal is a minimal centered dialog used by the create/edit flows.
-// Kept local to avoid pulling in a dialog library for one screen — the
-// existing components don't ship a modal primitive.
-export function Modal({
-  title,
-  onClose,
-  children,
-}: {
-  title: string;
-  onClose: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink-900/40 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-2xl rounded-lg bg-white shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-ink-100 px-4 py-3">
-          <h2 className="text-sm font-semibold text-ink-900">{title}</h2>
-          <button
-            className="rounded p-1 text-ink-500 hover:bg-ink-50"
-            onClick={onClose}
-          >
-            <X size={14} />
-          </button>
-        </div>
-        <div className="max-h-[calc(100vh-140px)] overflow-auto p-4">
-          {children}
-        </div>
-      </div>
     </div>
   );
 }

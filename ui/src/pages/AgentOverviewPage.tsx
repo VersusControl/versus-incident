@@ -1,0 +1,918 @@
+import { useMemo } from "react";
+import { Link } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import clsx from "clsx";
+import {
+  Activity,
+  AlertTriangle,
+  CircleDot,
+  EyeOff,
+  GraduationCap,
+  Layers,
+  Lock,
+  Power,
+  PowerOff,
+  Radar,
+  Server,
+  Sparkles,
+  Zap,
+  type LucideIcon,
+} from "lucide-react";
+import { api, type AgentConfigView } from "@/lib/api";
+import { fmtAbs, fmtRel, hourlyBuckets, truncate } from "@/lib/format";
+import { useNowTick } from "@/lib/hooks";
+import { TopBar } from "@/components/TopBar";
+import { Pill, VerdictPill } from "@/components/Pill";
+import { KpiTile } from "@/components/KpiTile";
+import { SkCard, SkRows } from "@/components/Skeleton";
+import { RetryableError } from "@/components/RetryableError";
+import { EmptyState } from "@/components/feedback";
+
+// Agent Overview (/agent) — StatusPage merged with the old Dashboard's
+// agent cards. The runtime banner implements the S4 truth table:
+//   config query loading  → skeleton banner (never the disabled treatment)
+//   config query error    → RetryableError (the agent may be fine — WE
+//                           couldn't ask)
+//   success + enable:false → the one and only disabled state
+//   success + enable:true  → mode chip (icon + text, never color alone)
+//                            and "N/M enabled" sources from real data.
+export function AgentOverviewPage() {
+  const agentCfg = useQuery({
+    queryKey: ["agent-config"],
+    queryFn: api.getAgentConfig,
+    retry: 2,
+  });
+  const status = useQuery({ queryKey: ["status"], queryFn: api.status, retry: 2 });
+  const shadowStats = useQuery({
+    queryKey: ["shadow-stats"],
+    queryFn: api.shadowStats,
+    retry: 2,
+  });
+  const detectStats = useQuery({
+    queryKey: ["detect-stats"],
+    queryFn: api.detectStats,
+    retry: 2,
+  });
+  const patterns = useQuery({
+    queryKey: ["patterns"],
+    queryFn: api.listPatterns,
+    retry: 2,
+  });
+  const shadow = useQuery({ queryKey: ["shadow"], queryFn: api.listShadow, retry: 2 });
+  const services = useQuery({
+    queryKey: ["services"],
+    queryFn: api.listServices,
+    retry: 2,
+  });
+
+  // Only a SUCCESSFUL config response with enable:false means "disabled".
+  const agentDisabled = agentCfg.isSuccess && !agentCfg.data.enable;
+
+  const topPatterns = useMemo(() => {
+    const list = patterns.data ?? [];
+    return [...list].sort((a, b) => b.count - a.count).slice(0, 5);
+  }, [patterns.data]);
+
+  const recentShadow = useMemo(
+    () => (shadow.data ?? []).slice(0, 5),
+    [shadow.data],
+  );
+
+  // Shadow activity over 24h from event last_seen stamps — the only
+  // windowed series this page's queries already carry. Enhancement only:
+  // the tile's number/loading still come from status/shadowStats. nowTick
+  // keeps the window sliding while the data reference stays unchanged.
+  const nowTick = useNowTick();
+  const shadowTrend = useMemo(
+    () =>
+      shadow.data
+        ? hourlyBuckets(
+            shadow.data.map((e) => e.last_seen),
+            24,
+            nowTick,
+          )
+        : undefined,
+    [shadow.data, nowTick],
+  );
+  const shadowTrend24 = useMemo(
+    () => (shadowTrend ?? []).reduce((a, n) => a + n, 0),
+    [shadowTrend],
+  );
+
+  // Flatten DetectStats: keys like outcome_emitted, verdict_spike, severity_high.
+  const detectGroup = (prefix: string): Array<[string, number]> => {
+    if (!detectStats.data) return [];
+    return Object.entries(detectStats.data)
+      .filter(([k]) => k.startsWith(prefix))
+      .map(([k, v]) => [k.slice(prefix.length), v] as [string, number])
+      .sort((a, b) => b[1] - a[1]);
+  };
+  const outcomes = detectGroup("outcome_");
+  const detectVerdicts = detectGroup("verdict_");
+  const severities = detectGroup("severity_");
+
+  // Derived detect counters — undefined (→ "—") until the query settles;
+  // a missing key on a SETTLED response genuinely means zero.
+  const dd = detectStats.data;
+  const emitted = dd ? (dd["outcome_emitted"] ?? 0) : undefined;
+  const cached = dd ? (dd["outcome_cached"] ?? 0) : undefined;
+  const aiErrors = dd
+    ? (dd["outcome_ai_error"] ?? 0) + (dd["outcome_send_error"] ?? 0)
+    : undefined;
+
+  // One consolidated RetryableError for the stat queries (they fail
+  // together when the agent admin endpoints are down).
+  type RetryHandle = {
+    isError: boolean;
+    error: unknown;
+    isRefetching: boolean;
+    refetch: () => unknown;
+  };
+  const statSources: Array<{ q: RetryHandle; what: string }> = [
+    { q: status, what: "agent status" },
+    { q: shadowStats, what: "shadow stats" },
+    { q: detectStats, what: "detect stats" },
+    { q: services, what: "the service list" },
+  ];
+  const failedStats = statSources.filter((s) => s.q.isError);
+
+  return (
+    <>
+      <TopBar
+        title="Agent"
+        subtitle="Runtime, learning and decision activity at a glance."
+      />
+
+      <main className="flex-1 overflow-auto p-6">
+        {/* 1 — Runtime banner (S4 truth table) */}
+        {agentCfg.isPending ? (
+          <div className="card mb-4" aria-hidden>
+            <div className="card-body flex flex-wrap items-center gap-6">
+              <div className="sk h-4 w-28" />
+              <div className="sk h-4 w-20" />
+              <div className="sk h-4 w-32" />
+              <div className="sk h-4 w-24" />
+            </div>
+          </div>
+        ) : agentCfg.isError ? (
+          <div className="mb-4">
+            <RetryableError
+              error={agentCfg.error}
+              context="Couldn't read the agent config — the agent itself may be fine; we just couldn't ask."
+              onRetry={() => agentCfg.refetch()}
+              retrying={agentCfg.isRefetching}
+            />
+          </div>
+        ) : (
+          <RuntimeBanner cfg={agentCfg.data} />
+        )}
+
+        {/* 2 — Lifetime stat tiles (no 24h windowed stats yet — §3.5 ask #6) */}
+        <div className="mb-2 text-2xs font-semibold uppercase tracking-wide text-ink-400">
+          Lifetime totals
+        </div>
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <KpiTile
+            label="Patterns"
+            value={status.data?.patterns}
+            loading={status.isPending}
+            to="/agent/patterns"
+            icon={Layers}
+            foot={
+              status.data
+                ? status.data.dirty
+                  ? "Unsaved changes"
+                  : "Persisted"
+                : undefined
+            }
+          />
+          <KpiTile
+            label="Shadow events"
+            value={status.data?.shadow_events ?? shadowStats.data?.events}
+            loading={status.isPending || shadowStats.isPending}
+            to="/agent/decisions?tab=shadow"
+            icon={EyeOff}
+            spark={shadowTrend}
+            sparkLabel={`${shadowTrend24} shadow events active in the last 24 hours`}
+            foot={
+              status.data
+                ? status.data.shadow_dirty
+                  ? "Unsaved changes"
+                  : "Disk in sync"
+                : undefined
+            }
+          />
+          <KpiTile
+            label="Detect events"
+            value={status.data?.detect_events ?? dd?.["events"]}
+            loading={status.isPending || detectStats.isPending}
+            to="/agent/decisions?tab=detect"
+            icon={Sparkles}
+            foot={
+              status.data
+                ? status.data.detect_dirty
+                  ? "Unsaved changes"
+                  : "Disk in sync"
+                : undefined
+            }
+          />
+          <KpiTile
+            label="Services tracked"
+            value={
+              services.data ? Object.keys(services.data).length : undefined
+            }
+            loading={services.isPending}
+            to="/agent/services"
+            icon={Server}
+            foot="Discovered from logs"
+          />
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <KpiTile
+            label="Incidents emitted"
+            value={emitted}
+            loading={detectStats.isPending}
+            to="/agent/decisions?tab=detect"
+            icon={AlertTriangle}
+            tone={emitted != null && emitted > 0 ? "critical" : undefined}
+            foot="From detect mode"
+          />
+          <KpiTile
+            label="AI cache hits"
+            value={cached}
+            loading={detectStats.isPending}
+            to="/agent/decisions?tab=detect"
+            icon={Zap}
+            tone={cached != null && cached > 0 ? "ok" : undefined}
+            foot="No model call needed"
+          />
+          <KpiTile
+            label="AI / send errors"
+            value={aiErrors}
+            loading={detectStats.isPending}
+            to="/agent/decisions?tab=detect"
+            icon={AlertTriangle}
+            tone={aiErrors != null && aiErrors > 0 ? "warn" : undefined}
+            foot="Failed analyses + sends"
+          />
+          <KpiTile
+            label="Total signals (shadow)"
+            value={shadowStats.data?.total_signals}
+            loading={shadowStats.isPending}
+            to="/agent/decisions?tab=shadow"
+            icon={Activity}
+            foot="Across every shadow tick"
+          />
+        </div>
+
+        {failedStats.length > 0 && (
+          <div className="mt-3">
+            {agentDisabled ? (
+              <p className="text-xs text-ink-400">
+                Agent statistics are unavailable while the agent is disabled.
+              </p>
+            ) : (
+              <RetryableError
+                error={failedStats[0].q.error}
+                context={`Couldn't load ${failedStats
+                  .map((s) => s.what)
+                  .join(", ")}`}
+                onRetry={() => failedStats.forEach((s) => s.q.refetch())}
+                retrying={failedStats.some((s) => s.q.isRefetching)}
+              />
+            )}
+          </div>
+        )}
+
+        {/* 3 — The old Dashboard agent cards */}
+        <section className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <div className="card">
+            <div className="card-header">
+              <h2 className="card-title">Top patterns by sightings</h2>
+              <Link
+                to="/agent/patterns"
+                className="text-2xs text-link hover:underline"
+              >
+                View all →
+              </Link>
+            </div>
+            <div className="card-body">
+              {patterns.isPending ? (
+                <table className="ddt">
+                  <thead>
+                    <tr>
+                      <th className="w-16 text-right">Count</th>
+                      <th className="w-20 text-right">Baseline</th>
+                      <th className="w-24">Verdict</th>
+                      <th>Template</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <SkRows rows={5} cols={4} />
+                  </tbody>
+                </table>
+              ) : patterns.isError ? (
+                agentDisabled ? (
+                  <DisabledNote />
+                ) : (
+                  <RetryableError
+                    error={patterns.error}
+                    context="Couldn't load patterns"
+                    onRetry={() => patterns.refetch()}
+                    retrying={patterns.isRefetching}
+                  />
+                )
+              ) : topPatterns.length === 0 ? (
+                <EmptyState
+                  title="No patterns yet"
+                  hint="The miner learns templates as logs flow in."
+                />
+              ) : (
+                <table className="ddt">
+                  <thead>
+                    <tr>
+                      <th className="w-16 text-right">Count</th>
+                      <th className="w-20 text-right">Baseline</th>
+                      <th className="w-24">Verdict</th>
+                      <th>Template</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {topPatterns.map((p) => (
+                      <tr key={p.id}>
+                        <td className="text-right tabular-nums">
+                          {p.count.toLocaleString()}
+                        </td>
+                        <td
+                          className="text-right font-mono text-2xs text-ink-300"
+                          title="EWMA baseline frequency per tick"
+                        >
+                          {p.baseline_frequency.toFixed(1)}/t
+                        </td>
+                        <td>
+                          <VerdictPill verdict={p.verdict} />
+                        </td>
+                        <td>
+                          <Link
+                            to={`/agent/patterns/${p.id}`}
+                            title={p.template}
+                            className="font-mono text-2xs text-link hover:underline"
+                          >
+                            {truncate(p.template, 80)}
+                          </Link>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="card-header">
+              <h2 className="card-title">Recent shadow events</h2>
+              <Link
+                to="/agent/decisions?tab=shadow"
+                className="text-2xs text-link hover:underline"
+              >
+                View all →
+              </Link>
+            </div>
+            <div className="card-body">
+              {shadow.isPending ? (
+                <table className="ddt">
+                  <thead>
+                    <tr>
+                      <th className="w-24">Verdict</th>
+                      <th>Sample</th>
+                      <th className="w-28">Last seen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <SkRows rows={5} cols={3} />
+                  </tbody>
+                </table>
+              ) : shadow.isError ? (
+                agentDisabled ? (
+                  <DisabledNote />
+                ) : (
+                  <RetryableError
+                    error={shadow.error}
+                    context="Couldn't load shadow events"
+                    onRetry={() => shadow.refetch()}
+                    retrying={shadow.isRefetching}
+                  />
+                )
+              ) : recentShadow.length === 0 ? (
+                <EmptyState
+                  title="No shadow events recorded"
+                  hint="Shadow mode logs would-have-alerted decisions here."
+                />
+              ) : (
+                <table className="ddt">
+                  <thead>
+                    <tr>
+                      <th className="w-24">Verdict</th>
+                      <th>Sample</th>
+                      <th className="w-28">Last seen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recentShadow.map((e) => (
+                      <tr key={`${e.pattern_id}-${e.first_seen}`}>
+                        <td>
+                          <VerdictPill verdict={e.verdict} />
+                        </td>
+                        <td>
+                          <Link
+                            to={`/agent/decisions/shadow/${encodeURIComponent(
+                              e.pattern_id,
+                            )}`}
+                            title={e.sample_message}
+                            className="font-mono text-2xs text-ink-100 hover:text-link hover:underline"
+                          >
+                            {truncate(e.sample_message, 80)}
+                          </Link>
+                        </td>
+                        <td
+                          className="text-2xs text-ink-300"
+                          title={fmtAbs(e.last_seen)}
+                        >
+                          {fmtRel(e.last_seen)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </section>
+
+        {/* Breakdown cards (from StatusPage) */}
+        <section className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <BreakdownCard
+            title="Verdict breakdown (shadow)"
+            isPending={shadowStats.isPending}
+            isError={shadowStats.isError}
+            agentDisabled={agentDisabled}
+            rows={Object.entries(shadowStats.data?.verdicts || {}).sort(
+              (a, b) => b[1] - a[1],
+            )}
+            emptyText="No verdicts recorded yet"
+          />
+          <BreakdownCard
+            title="Detect outcomes"
+            isPending={detectStats.isPending}
+            isError={detectStats.isError}
+            agentDisabled={agentDisabled}
+            rows={outcomes}
+            emptyText="No detect-mode calls yet"
+          />
+          <BreakdownCard
+            title="Detect verdicts"
+            isPending={detectStats.isPending}
+            isError={detectStats.isError}
+            agentDisabled={agentDisabled}
+            rows={detectVerdicts}
+            emptyText="No detect-mode calls yet"
+          />
+          <BreakdownCard
+            title="AI severity"
+            isPending={detectStats.isPending}
+            isError={detectStats.isError}
+            agentDisabled={agentDisabled}
+            rows={severities}
+            emptyText="No findings parsed yet"
+          />
+        </section>
+
+        {/* 4 — Read-only config summary (sources, redaction, miner, regex, AI) */}
+        <section className="mt-6">
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="text-2xs font-semibold uppercase tracking-wide text-ink-400">
+              Configuration
+            </h2>
+            <Link
+              to="/settings?tab=agent"
+              className="text-2xs text-link hover:underline"
+            >
+              Full configuration →
+            </Link>
+          </div>
+
+          {agentCfg.isPending ? (
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+              <SkCard lines={4} />
+              <SkCard lines={4} />
+              <SkCard lines={3} />
+              <SkCard lines={3} />
+            </div>
+          ) : agentCfg.isError ? (
+            <p className="text-xs text-ink-400">
+              Configuration is unavailable — retry from the error above.
+            </p>
+          ) : (
+            <ConfigSummary cfg={agentCfg.data} />
+          )}
+        </section>
+      </main>
+    </>
+  );
+}
+
+function DisabledNote() {
+  return (
+    <p className="py-2 text-xs text-ink-400">
+      Unavailable while the agent is disabled.
+    </p>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Runtime banner — only reached with a SUCCESSFUL config response.
+// ---------------------------------------------------------------------------
+function RuntimeBanner({ cfg }: { cfg: AgentConfigView }) {
+  if (!cfg.enable) {
+    return (
+      <div className="card mb-4">
+        <div className="card-body flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+          <div className="flex items-center gap-2">
+            <PowerOff size={14} className="text-ink-400" aria-hidden />
+            <span className="font-medium text-ink-50">Agent</span>
+            <Pill>disabled</Pill>
+          </div>
+          <p className="text-ink-300">
+            The agent loop is off (<code>agent.enable: false</code>). The data
+            below reflects its last run.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const enabledSources = cfg.sources?.filter((s) => s.enable) ?? [];
+  const totalSources = cfg.sources?.length ?? 0;
+  const aiEnabled = !!cfg.ai?.enable;
+
+  return (
+    <div className="card mb-4">
+      <div className="card-body flex flex-wrap items-center gap-x-6 gap-y-3 text-xs">
+        <div className="flex items-center gap-2">
+          <Power size={14} className="text-sev-ok" aria-hidden />
+          <span className="font-medium text-ink-50">Agent</span>
+          <Pill tone="good">enabled</Pill>
+        </div>
+        {cfg.mode && (
+          <div className="flex items-center gap-2">
+            <span className="text-ink-300">Mode</span>
+            <ModeChip mode={cfg.mode} />
+          </div>
+        )}
+        <div className="flex items-center gap-2">
+          <span className="text-ink-300">Sources</span>
+          <span className="font-mono text-ink-100">
+            {enabledSources.length}/{totalSources} enabled
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-ink-300">AI SRE</span>
+          <Pill tone={aiEnabled ? "accent" : undefined}>
+            {aiEnabled ? cfg.ai.model || "on" : "off"}
+          </Pill>
+        </div>
+        {cfg.poll_interval && (
+          <div className="flex items-center gap-2 text-ink-300">
+            Poll every{" "}
+            <span className="font-mono text-ink-100">{cfg.poll_interval}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Mode chip: training=info, shadow=warn, detect=ok — icon + text, so the
+// state is never conveyed by color alone.
+const MODE_CHIP: Record<string, { cls: string; icon: LucideIcon }> = {
+  detect: { cls: "border-sev-ok/40 bg-sev-ok/15 text-sev-ok", icon: Radar },
+  shadow: { cls: "border-sev-warn/40 bg-sev-warn/15 text-sev-warn", icon: EyeOff },
+  training: {
+    cls: "border-sev-info/40 bg-sev-info/15 text-sev-info",
+    icon: GraduationCap,
+  },
+};
+
+function ModeChip({ mode }: { mode: string }) {
+  const m = MODE_CHIP[mode.toLowerCase()] ?? {
+    cls: "border-ink-500 bg-ink-700 text-ink-200",
+    icon: CircleDot,
+  };
+  const Icon = m.icon;
+  return (
+    <span
+      className={clsx(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-2xs font-medium",
+        m.cls,
+      )}
+    >
+      <Icon size={11} aria-hidden />
+      {mode}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Breakdown card — key/count table for the flat stats maps. Errors point at
+// the consolidated RetryableError above the cards (same queries) instead of
+// stacking four identical red boxes.
+// ---------------------------------------------------------------------------
+function BreakdownCard({
+  title,
+  rows,
+  isPending,
+  isError,
+  agentDisabled,
+  emptyText,
+}: {
+  title: string;
+  rows: Array<[string, number]>;
+  isPending: boolean;
+  isError: boolean;
+  agentDisabled: boolean;
+  emptyText: string;
+}) {
+  return (
+    <div className="card">
+      <div className="card-header">
+        <h2 className="card-title">{title}</h2>
+      </div>
+      <div className="card-body">
+        {isPending ? (
+          <table className="ddt">
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th className="w-24 text-right">Count</th>
+              </tr>
+            </thead>
+            <tbody>
+              <SkRows rows={4} cols={2} />
+            </tbody>
+          </table>
+        ) : isError ? (
+          agentDisabled ? (
+            <DisabledNote />
+          ) : (
+            <p className="py-2 text-xs text-ink-300">
+              Couldn't load — use Retry in the error above the cards.
+            </p>
+          )
+        ) : rows.length === 0 ? (
+          <EmptyState title={emptyText} />
+        ) : (
+          <table className="ddt">
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th className="w-24 text-right">Count</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(([k, n]) => (
+                <tr key={k}>
+                  <td className="font-mono">{k}</td>
+                  <td className="text-right tabular-nums">
+                    {n.toLocaleString()}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Config summary — the read-only sections StatusPage/AgentConfig surfaced:
+// sources, AI block, redaction, miner+catalog, regex, plus the "How to read
+// this" explainer. Secrets stay reduced to a configured/not-set pill.
+// ---------------------------------------------------------------------------
+function ConfigSummary({ cfg }: { cfg: AgentConfigView }) {
+  return (
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+      <div className="card">
+        <div className="card-header">
+          <h2 className="card-title">Signal sources</h2>
+          <span className="text-2xs text-ink-400">
+            {cfg.sources_path || "agent_sources.yaml"}
+          </span>
+        </div>
+        <div className="card-body">
+          {cfg.sources.length === 0 ? (
+            <EmptyState
+              title="No sources configured"
+              hint="Define sources via agent.sources_path (agent_sources.yaml)."
+            />
+          ) : (
+            <table className="ddt">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th className="w-20 text-right">State</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cfg.sources.map((s) => (
+                  <tr key={s.name}>
+                    <td className="font-mono">{s.name}</td>
+                    <td className="font-mono text-ink-300">{s.type}</td>
+                    <td className="text-right">
+                      {s.enable ? (
+                        <Pill tone="good">on</Pill>
+                      ) : (
+                        <Pill>off</Pill>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-header">
+          <h2 className="card-title">AI SRE</h2>
+          <Pill tone={cfg.ai.enable ? "good" : undefined}>
+            {cfg.ai.enable ? "enabled" : "disabled"}
+          </Pill>
+        </div>
+        <div className="card-body">
+          <KVGrid>
+            <KV k="Model" v={cfg.ai.model || "—"} />
+            <div>
+              <div className="text-2xs uppercase tracking-wider text-ink-400">
+                API key
+              </div>
+              <div className="mt-0.5 flex items-center gap-1.5 text-xs">
+                <Lock size={11} className="text-ink-400" aria-hidden />
+                {cfg.ai.api_key === "set" ? (
+                  <Pill tone="good">configured</Pill>
+                ) : (
+                  <Pill>not set</Pill>
+                )}
+              </div>
+            </div>
+            <KV k="Temperature" v={String(cfg.ai.temperature)} />
+            <KV k="Max tokens" v={String(cfg.ai.max_tokens)} />
+            <KV k="Max calls / hour" v={String(cfg.ai.max_calls_per_hour)} />
+            <KV k="Cache TTL" v={cfg.ai.cache_ttl || "—"} />
+          </KVGrid>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-header">
+          <h2 className="card-title">Redaction</h2>
+          <Pill tone={cfg.redaction.enable ? "good" : undefined}>
+            {cfg.redaction.enable ? "enabled" : "disabled"}
+          </Pill>
+        </div>
+        <div className="card-body">
+          <KVGrid>
+            <KV k="Redact IPs" v={String(cfg.redaction.redact_ips)} />
+            <KV
+              k="Extra patterns"
+              v={String(cfg.redaction.extra_pattern_count)}
+            />
+          </KVGrid>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-header">
+          <h2 className="card-title">Miner &amp; catalog</h2>
+        </div>
+        <div className="card-body">
+          <KVGrid>
+            <KV
+              k="Similarity threshold"
+              v={String(cfg.miner.similarity_threshold)}
+            />
+            <KV k="Tree depth" v={String(cfg.miner.tree_depth)} />
+            <KV k="Max children" v={String(cfg.miner.max_children)} />
+            <KV
+              k="Persist interval"
+              v={cfg.catalog.persist_interval || "—"}
+            />
+            <KV
+              k="Auto-promote after"
+              v={String(cfg.catalog.auto_promote_after)}
+            />
+            <KV
+              k="Spike multiplier"
+              v={String(cfg.catalog.spike_multiplier)}
+            />
+            <KV
+              k="Spike min frequency"
+              v={String(cfg.catalog.spike_min_frequency)}
+            />
+            <KV
+              k="Spike min baseline"
+              v={String(cfg.catalog.spike_min_baseline_count)}
+            />
+          </KVGrid>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-header">
+          <h2 className="card-title">Regex pre-filter</h2>
+          <span className="text-2xs text-ink-400">
+            {cfg.regex.rules.length} rule(s)
+          </span>
+        </div>
+        <div className="card-body space-y-3">
+          <KV
+            k="Default pattern"
+            v={cfg.regex.default_pattern || "(none — strict mode)"}
+          />
+          {cfg.regex.rules.length > 0 && (
+            <ul className="space-y-1">
+              {cfg.regex.rules.map((r) => (
+                <li key={r.name} className="rounded bg-ink-700 px-2 py-1">
+                  <span className="font-mono text-2xs text-ink-100">
+                    {r.name}
+                  </span>
+                  <span
+                    className="ml-2 break-all font-mono text-2xs text-ink-300"
+                    title={r.pattern}
+                  >
+                    {truncate(r.pattern, 70)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-header">
+          <h2 className="card-title">How to read this</h2>
+        </div>
+        <div className="card-body space-y-2 text-xs leading-relaxed text-ink-300">
+          <p>
+            <strong className="text-ink-100">Mode</strong> —{" "}
+            <code>training</code> observes only, <code>shadow</code> classifies
+            and logs would-have-alerted events, <code>detect</code> calls the
+            AI SRE and emits real incidents.
+          </p>
+          <p>
+            <strong className="text-ink-100">Patterns</strong> — every
+            distinct log template the Drain-style miner has clustered. Grows in
+            training, plateaus in shadow/detect.
+          </p>
+          <p>
+            <strong className="text-ink-100">Detect outcomes</strong> —{" "}
+            <code>emitted</code> sent an incident, <code>cached</code> reused a
+            prior AI finding, <code>dry</code> means no AI configured,{" "}
+            <code>quota</code> hit the hourly cap, <code>ai_error</code> /{" "}
+            <code>send_error</code> failed analyses and channel sends.
+          </p>
+          <p>
+            <strong className="text-ink-100">Verdicts</strong> —{" "}
+            <code>spike</code> means a known pattern blew past its EWMA
+            baseline; <code>unknown</code> means a pattern has not yet been
+            auto-promoted or marked known by an operator.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function KV({ k, v }: { k: string; v: string }) {
+  return (
+    <div>
+      <div className="text-2xs uppercase tracking-wider text-ink-400">{k}</div>
+      <div className="mt-0.5 break-words font-mono text-xs text-ink-100">
+        {v}
+      </div>
+    </div>
+  );
+}
+
+function KVGrid({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3">
+      {children}
+    </div>
+  );
+}
