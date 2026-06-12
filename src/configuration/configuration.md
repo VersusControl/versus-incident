@@ -17,13 +17,18 @@ public_host: https://your-ack-host.example # Required for on-call ack & dashboar
 gateway_secret: ${GATEWAY_SECRET}
 
 # Storage backend used by BOTH the agent (catalog, shadow log, services)
-# and the incident service (history shown in the UI). Only `file` is
-# implemented today; `redis` and `database` are config stubs.
+# and the incident service (history shown in the UI).
+#
+# Supported types: file (default), postgres
 storage:
-  type: file              # file | redis | database (env: STORAGE_TYPE)
+  type: file              # file | postgres  (env: STORAGE_TYPE)
   file:
-    data_dir: ./data
     max_incidents: 1000   # rolling cap on persisted incidents
+
+  # Postgres backend — activate with STORAGE_TYPE=postgres
+  # postgres:
+  #   dsn: ${POSTGRES_DSN}   # postgres://user:pass@host:5432/db?sslmode=require
+  #   max_incidents: 1000
 
 # Optional global proxy applied per-channel via `use_proxy: true` below
 # (Telegram, Viber, Lark). Unset to disable.
@@ -288,7 +293,6 @@ The application relies on several environment variables to configure alerting se
 | Variable                 | Description |
 |--------------------------|-------------|
 | `STORAGE_TYPE`           | Storage backend for incidents and agent state. One of `file` (default and the only implemented backend today), `redis`, `database`. |
-| `STORAGE_FILE_DATA_DIR`  | Directory for the `file` backend. Default `./data`. Files written: `incidents.json`, `patterns.json`, `shadow.json`. |
 
 ### Slack Configuration
 | Variable          | Description |
@@ -815,7 +819,6 @@ gateway_secret: ${GATEWAY_SECRET}
 storage:
   type: file              # file | redis | database (env: STORAGE_TYPE)
   file:
-    data_dir: ./data
     max_incidents: 1000   # rolling cap on persisted incidents
 
 agent:

@@ -20,6 +20,7 @@ import { IncidentsConfigPage } from "./pages/IncidentsConfigPage";
 import { AgentConfigPage } from "./pages/AgentConfigPage";
 import { MembersPage } from "./pages/MembersPage";
 import { TeamsPage } from "./pages/TeamsPage";
+import { RunbooksPage } from "./pages/RunbooksPage";
 
 export default function App() {
   return (
@@ -45,6 +46,7 @@ export default function App() {
           <Route path="/detect/system-prompt" element={<SystemPromptPage />} />
           <Route path="/detect/:id" element={<DetectDetailPage />} />
           <Route path="/services" element={<ServicesPage />} />
+          <Route path="/runbooks" element={<RunbooksPage />} />
           <Route path="/members" element={<MembersPage />} />
           <Route path="/teams" element={<TeamsPage />} />
           <Route path="/config/incidents" element={<IncidentsConfigPage />} />

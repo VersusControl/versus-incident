@@ -193,6 +193,17 @@ func (c *ConfigAdminController) incidents(ctx *fiber.Ctx) error {
 			"routing_key":        secretSet(oc.PagerDuty.RoutingKey),
 			"other_routing_keys": keysOf(oc.PagerDuty.OtherRoutingKeys),
 		},
+		"servicenow": fiber.Map{
+			"instance_url":        secretSet(oc.ServiceNow.InstanceURL),
+			"username":            secretSet(oc.ServiceNow.Username),
+			"table":               oc.ServiceNow.Table,
+			"other_instance_keys": keysOf(oc.ServiceNow.OtherInstanceURLs),
+		},
+		"incident_io": fiber.Map{
+			"api_key":                        secretSet(oc.Incidentio.APIKey),
+			"alert_source_config_id":         secretSet(oc.Incidentio.AlertSourceConfigID),
+			"other_alert_source_config_keys": keysOf(oc.Incidentio.OtherAlertSourceConfigIDs),
+		},
 	}
 
 	return ctx.JSON(fiber.Map{
@@ -209,7 +220,6 @@ func (c *ConfigAdminController) incidents(ctx *fiber.Ctx) error {
 		"storage": fiber.Map{
 			"type": cfg.Storage.Type,
 			"file": fiber.Map{
-				"data_dir":      cfg.Storage.File.DataDir,
 				"max_incidents": cfg.Storage.File.MaxIncidents,
 			},
 		},

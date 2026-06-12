@@ -136,6 +136,7 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 func buildIncidentRecord(incident *m.Incident, cfg *config.Config, content map[string]interface{}, resolved bool, hint string) *storage.IncidentRecord {
 	rec := &storage.IncidentRecord{
 		ID:              incident.ID,
+		OrgID:           storage.DefaultOrgID,
 		TeamID:          incident.TeamID,
 		Title:           firstString(content, "title", "alertname", "summary", "subject", "name"),
 		Service:         firstString(content, "service", "service_name", "app", "component"),

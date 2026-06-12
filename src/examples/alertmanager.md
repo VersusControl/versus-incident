@@ -3,7 +3,7 @@
 Route Prometheus Alertmanager alerts through Versus Incident to Slack and Telegram with fully customised templates.
 
 
-![Diagram](/docs/images/alertmanager.png)
+![Diagram](../docs/images/alertmanager.png)
 
 In this guide, you'll learn how to route Prometheus Alertmanager alerts to Slack and Telegram using the Versus Incident, while fully customizing alert messages.
 
@@ -198,7 +198,7 @@ curl -X POST http://localhost:3000/api/incidents \
 
 Final Result:
 
-![Slack Alert](/docs/images/versus-result-02.png)
+![Slack Alert](../docs/images/versus-result-02.png)
 
 ## Advanced: Dynamic Channel Routing
 Override Slack channels per alert using query parameters:

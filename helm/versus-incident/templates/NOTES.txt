@@ -69,7 +69,7 @@ exposing the UI.
    Set agent.ai.enable=true and agent.ai.apiKey to forward unknowns to the model.
    {{- end }}
    {{- end }}
-   Detect log + pattern catalog persist to: {{ .Values.storage.file.dataDir }}
+   Detect log + pattern catalog persist to: /app/data
    {{- if not .Values.storage.persistence.enabled }}
    WARNING: storage.persistence.enabled=false — agent state is lost on pod restart.
    {{- end }}

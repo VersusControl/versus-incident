@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Search, UserPlus } from "lucide-react";
@@ -19,20 +19,50 @@ const filters: { id: StatusFilter; label: string }[] = [
   { id: "resolved", label: "Resolved" },
 ];
 
+// useDebounced returns a value that only updates after `delay` ms of no
+// change — keeps server-side search from firing on every keystroke.
+function useDebounced<T>(value: T, delay = 300): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
+
 // IncidentsPage shows the persisted incident history pulled from the
-// storage backend. Newest first, with a free-text filter and a status
-// segmented control.
+// storage backend. Newest first, with a status segmented control and a
+// free-text search. When the backend supports server-side search
+// (Postgres), the query is run on the server; otherwise it falls back to
+// filtering the already-loaded page client-side.
 export function IncidentsPage() {
-  const { data, isLoading, isError, error } = useQuery({
-    queryKey: ["incidents"],
-    queryFn: () => api.listIncidents(),
-  });
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<StatusFilter>("all");
 
+  // Probe backend capabilities once; default to no server search until known.
+  const { data: caps } = useQuery({
+    queryKey: ["capabilities"],
+    queryFn: () => api.capabilities(),
+    staleTime: 5 * 60_000,
+  });
+  const searchSupported = caps?.search ?? false;
+
+  const debouncedQ = useDebounced(q, 300);
+  const trimmed = debouncedQ.trim();
+  const useServerSearch = searchSupported && trimmed !== "";
+
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: useServerSearch ? ["incidents", "search", trimmed] : ["incidents"],
+    queryFn: () =>
+      useServerSearch ? api.searchIncidents(trimmed) : api.listIncidents(),
+  });
+
   const filtered = useMemo(() => {
     if (!data) return [];
-    const needle = q.trim().toLowerCase();
+    // When the server already ran the text search, don't re-filter on text
+    // (it matches fields the client can't see, e.g. payload body) — only
+    // apply the status segmented control. Otherwise filter text locally.
+    const needle = useServerSearch ? "" : q.trim().toLowerCase();
     return data.filter((i) => {
       if (filter === "open" && (i.resolved || i.acked_at)) return false;
       if (filter === "acked" && !i.acked_at) return false;
@@ -44,13 +74,17 @@ export function IncidentsPage() {
         i.id.toLowerCase().includes(needle)
       );
     });
-  }, [data, q, filter]);
+  }, [data, q, filter, useServerSearch]);
 
   return (
     <>
       <TopBar
         title="Incidents"
-        subtitle={data ? `${data.length} stored` : undefined}
+        subtitle={
+          data
+            ? `${data.length} ${useServerSearch ? "found" : "stored"}`
+            : undefined
+        }
       />
 
       <main className="flex-1 overflow-auto p-6">
@@ -62,7 +96,11 @@ export function IncidentsPage() {
             />
             <input
               className="input pl-7"
-              placeholder="Search by id, title or service…"
+              placeholder={
+                searchSupported
+                  ? "Search incidents (title, service, payload)…"
+                  : "Filter loaded incidents by id, title or service…"
+              }
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />

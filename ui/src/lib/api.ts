@@ -82,6 +82,7 @@ export interface Status {
   shadow_dirty?: boolean;
   detect_events?: number;
   detect_dirty?: boolean;
+  runbooks_available?: boolean;
 }
 
 export interface ShadowEvent {
@@ -270,6 +271,64 @@ export interface TeamInput {
   member_ids?: string[] | null;
 }
 
+// Runbook is the metadata shape returned by the list endpoint (no body,
+// no embedding vector). `has_vector` is false until the runbook has been
+// embedded (requires an embedding model to be configured).
+export interface Runbook {
+  id: string;
+  title: string;
+  services?: string[];
+  tags?: string[];
+  source?: string;
+  updated_at: string;
+  has_vector: boolean;
+}
+
+// RunbookDetail adds the full markdown body for the single-runbook view.
+export interface RunbookDetail extends Runbook {
+  body: string;
+}
+
+export interface RunbookUploadResult {
+  ingested: number;
+  embeddings: boolean;
+}
+
+// uploadMultipart posts a multipart/form-data body. Unlike `request`, it
+// must NOT set a JSON Content-Type — the browser sets the multipart
+// boundary itself from the FormData.
+async function uploadMultipart<T>(path: string, form: FormData): Promise<T> {
+  const secret = getSecret() ?? "";
+  const headers = new Headers();
+  headers.set("X-Gateway-Secret", secret);
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers,
+    body: form,
+  });
+
+  if (res.status === 204) return undefined as T;
+
+  let body: unknown = null;
+  const text = await res.text();
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+  if (!res.ok) {
+    const msg =
+      (body && typeof body === "object" && "error" in body
+        ? String((body as { error: unknown }).error)
+        : null) || `HTTP ${res.status}`;
+    throw new ApiError(res.status, msg, body);
+  }
+  return body as T;
+}
+
 // ---------- Endpoints ----------
 
 export const api = {
@@ -340,6 +399,21 @@ export const api = {
     const qs = limit ? `?limit=${limit}` : "";
     return request<{ incidents: IncidentSummary[] }>(
       `/api/admin/incidents${qs}`,
+    ).then((r) => r.incidents ?? []);
+  },
+  // capabilities reports which optional storage features the running
+  // backend supports. `search` is true only when the backend implements
+  // server-side full-text search (Postgres); memory/file return false and
+  // the UI falls back to client-side filtering.
+  capabilities: () =>
+    request<{ search: boolean }>("/api/admin/capabilities"),
+  // searchIncidents runs server-side full-text search. Only call it when
+  // capabilities().search is true; otherwise the endpoint returns 501.
+  searchIncidents: (q: string, limit?: number) => {
+    const params = new URLSearchParams({ q });
+    if (limit) params.set("limit", String(limit));
+    return request<{ incidents: IncidentSummary[] }>(
+      `/api/admin/incidents/search?${params.toString()}`,
     ).then((r) => r.incidents ?? []);
   },
   getIncident: (id: string) =>
@@ -422,6 +496,20 @@ export const api = {
       `/api/admin/incidents/${id}/resolve`,
       { method: "POST" },
     ),
+
+  listRunbooks: () =>
+    request<{ runbooks: Runbook[]; embeddings: boolean }>(
+      "/api/agent/runbooks",
+    ),
+  getRunbook: (id: string) =>
+    request<RunbookDetail>(`/api/agent/runbooks/${encodeURI(id)}`),
+  deleteRunbook: (id: string) =>
+    request<void>(`/api/agent/runbooks/${encodeURI(id)}`, { method: "DELETE" }),
+  uploadRunbooks: (files: File[]) => {
+    const form = new FormData();
+    for (const f of files) form.append("files", f, f.name);
+    return uploadMultipart<RunbookUploadResult>("/api/agent/runbooks", form);
+  },
 };
 
 // ---------- Config view types (read-only, secret-redacted) ----------
@@ -470,10 +558,21 @@ export interface IncidentsConfig {
       routing_key: string;
       other_routing_keys: string[];
     };
+    servicenow: {
+      instance_url: string;
+      username: string;
+      table: string;
+      other_instance_keys: string[];
+    };
+    incident_io: {
+      api_key: string;
+      alert_source_config_id: string;
+      other_alert_source_config_keys: string[];
+    };
   };
   storage: {
     type: string;
-    file: { data_dir: string; max_incidents: number };
+    file: { max_incidents: number };
   };
 }
 

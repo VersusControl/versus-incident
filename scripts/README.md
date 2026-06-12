@@ -322,4 +322,4 @@ curl -H "X-Gateway-Secret: $GATEWAY_SECRET" \
 
 Use `AGENT_MODE=training` first to build the catalog, then switch to
 `shadow` to see which signals would have alerted, and finally `detect`
-to emit incidents for genuinely new patterns.
+to emit incidents for new or unexpected issues patterns.

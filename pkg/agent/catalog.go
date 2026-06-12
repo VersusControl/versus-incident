@@ -16,7 +16,12 @@ import (
 // patterns; during shadow / detect we look them up to decide whether a
 // signal is "known". Operators curate it via the admin REST endpoints.
 type Pattern struct {
-	ID        string    `json:"id"`
+	ID string `json:"id"`
+	// OrgID scopes the pattern to one organization. Defaults to
+	// storage.DefaultOrgID ("default") so single-tenant OSS catalogs are
+	// unaffected; enterprise multi-tenant routing reads it to isolate
+	// per-org catalogs.
+	OrgID     string    `json:"org_id,omitempty"`
 	Template  string    `json:"template"`
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
@@ -48,6 +53,9 @@ type Pattern struct {
 // the same patterns.json file alongside patterns — one data store, no Redis
 // dependency for this feature.
 type ServiceInfo struct {
+	// OrgID scopes the service entry to one organization. Defaults to
+	// storage.DefaultOrgID ("default"); see Pattern.OrgID.
+	OrgID     string    `json:"org_id,omitempty"`
 	FirstSeen time.Time `json:"first_seen"`
 }
 
@@ -192,6 +200,7 @@ func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alph
 	if !ok {
 		p = &Pattern{
 			ID:        patternID,
+			OrgID:     storage.DefaultOrgID,
 			Template:  template,
 			FirstSeen: now,
 			LastSeen:  now,
@@ -306,7 +315,7 @@ func (c *Catalog) RegisterService(name string) bool {
 	if _, ok := c.services[name]; ok {
 		return false
 	}
-	c.services[name] = &ServiceInfo{FirstSeen: time.Now().UTC()}
+	c.services[name] = &ServiceInfo{OrgID: storage.DefaultOrgID, FirstSeen: time.Now().UTC()}
 	c.dirty = true
 	return true
 }
@@ -323,7 +332,7 @@ func (c *Catalog) IsServiceInGrace(name string, graceDuration time.Duration) boo
 	defer c.mu.Unlock()
 	svc, ok := c.services[name]
 	if !ok {
-		svc = &ServiceInfo{FirstSeen: time.Now().UTC()}
+		svc = &ServiceInfo{OrgID: storage.DefaultOrgID, FirstSeen: time.Now().UTC()}
 		c.services[name] = svc
 		c.dirty = true
 	}

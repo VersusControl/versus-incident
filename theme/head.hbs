@@ -1,0 +1,52 @@
+{{!-- Versus Incident — SEO head additions (Growth Marketer, G2-T5).
+      Site-wide Open Graph / Twitter defaults plus per-page canonical URLs
+      and unique meta descriptions for the marketing & comparison pages.
+      mdBook inserts this verbatim into every page's <head>. --}}
+<meta property="og:site_name" content="Versus Incident">
+<meta property="og:type" content="website">
+<meta property="og:title" content="{{ chapter_title }}">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="{{ chapter_title }}">
+
+{{#if (eq path "pricing.md")}}
+<link rel="canonical" href="https://versuscontrol.github.io/versus-incident/pricing.html">
+<meta name="description" content="Versus Incident pricing: a free-forever MIT core plus self-hosted Versus Enterprise. Founding-Customer beta at $199/mo. Priced on monitored services, not per seat.">
+<meta property="og:url" content="https://versuscontrol.github.io/versus-incident/pricing.html">
+<meta property="og:description" content="Free-forever MIT core plus self-hosted Versus Enterprise. Founding-Customer beta at $199/mo. Priced on monitored services, not per seat.">
+<meta name="twitter:description" content="Free-forever MIT core plus self-hosted Versus Enterprise. Founding-Customer beta at $199/mo. Priced on monitored services, not per seat.">
+{{/if}}
+{{#if (eq path "customers.md")}}
+<link rel="canonical" href="https://versuscontrol.github.io/versus-incident/customers.html">
+<meta name="description" content="Organizations backing and self-hosting Versus Incident, the self-hosted AI SRE agent that cuts on-call noise without sending logs to a third party.">
+<meta property="og:url" content="https://versuscontrol.github.io/versus-incident/customers.html">
+<meta property="og:description" content="Organizations backing and self-hosting Versus Incident, the self-hosted AI SRE agent that cuts on-call noise without sending logs to a third party.">
+<meta name="twitter:description" content="Organizations backing and self-hosting Versus Incident, the self-hosted AI SRE agent that cuts on-call noise.">
+{{/if}}
+{{#if (eq path "compare/datadog-watchdog.md")}}
+<link rel="canonical" href="https://versuscontrol.github.io/versus-incident/compare/datadog-watchdog.html">
+<meta name="description" content="Versus Incident vs Datadog Watchdog: an honest comparison. Self-hosted AI anomaly detection — your data stays in your own infrastructure, priced on services not per host.">
+<meta property="og:url" content="https://versuscontrol.github.io/versus-incident/compare/datadog-watchdog.html">
+<meta property="og:description" content="Versus Incident vs Datadog Watchdog: self-hosted AI anomaly detection — your data stays in your own infrastructure, priced on services not per host.">
+<meta name="twitter:description" content="Versus Incident vs Datadog Watchdog: self-hosted AI anomaly detection — your data stays in your own infrastructure.">
+{{/if}}
+{{#if (eq path "compare/keep.md")}}
+<link rel="canonical" href="https://versuscontrol.github.io/versus-incident/compare/keep.html">
+<meta name="description" content="Versus Incident vs Keep: the AI SRE agent that detects anomalies from logs with no rules to write, versus Keep's open-source alert management. Both self-host.">
+<meta property="og:url" content="https://versuscontrol.github.io/versus-incident/compare/keep.html">
+<meta property="og:description" content="Versus Incident vs Keep: an AI SRE agent that detects anomalies from logs with no rules to write, versus Keep's open-source alert management.">
+<meta name="twitter:description" content="Versus Incident vs Keep: AI log-anomaly detection with no rules, versus open-source alert management.">
+{{/if}}
+{{#if (eq path "compare/alertmanager.md")}}
+<link rel="canonical" href="https://versuscontrol.github.io/versus-incident/compare/alertmanager.html">
+<meta name="description" content="Versus Incident vs Alertmanager: add AI log-anomaly detection to Prometheus alerting. Versus is a drop-in webhook target — keep your rules, catch the unknowns.">
+<meta property="og:url" content="https://versuscontrol.github.io/versus-incident/compare/alertmanager.html">
+<meta property="og:description" content="Versus Incident vs Alertmanager: add AI log-anomaly detection to Prometheus alerting. Drop-in webhook target — keep your rules, catch the unknowns.">
+<meta name="twitter:description" content="Versus Incident vs Alertmanager: add AI log-anomaly detection to Prometheus. Drop-in webhook target.">
+{{/if}}
+{{#if (eq path "oncall/upstream-of-on-call.md")}}
+<link rel="canonical" href="https://versuscontrol.github.io/versus-incident/oncall/upstream-of-on-call.html">
+<meta name="description" content="Versus Incident + PagerDuty: a self-hosted AI noise-reduction layer feeding PagerDuty, Opsgenie and incident.io — fewer pages, not another on-call rotation.">
+<meta property="og:url" content="https://versuscontrol.github.io/versus-incident/oncall/upstream-of-on-call.html">
+<meta property="og:description" content="Versus Incident + PagerDuty: a self-hosted AI noise-reduction layer feeding PagerDuty, Opsgenie and incident.io — fewer pages, not another on-call rotation.">
+<meta name="twitter:description" content="Versus Incident + PagerDuty: a self-hosted AI noise-reduction layer that cuts page volume, not a replacement.">
+{{/if}}

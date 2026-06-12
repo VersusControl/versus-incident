@@ -28,7 +28,7 @@ Validate storage configuration.
 
 Today only `file` is implemented end-to-end. The file backend stores
 the pattern catalog, shadow log, detect log, AI cache, and incident
-history under storage.file.dataDir.
+history under the fixed /app/data path (mount a PVC there to persist).
 
 Caught here:
   - unsupported storage.type

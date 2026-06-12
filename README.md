@@ -8,9 +8,16 @@
   <a href="https://github.com/sponsors/versuscontrol"><img src="https://img.shields.io/badge/sponsor-%E2%9D%A4-ff69b4" alt="Sponsor"></a>
 </p>
 
-Versus is an open-source **incident management tool** built with an **AI SRE agent**. The agent watches your logs, learns what *normal* looks like, and automatically opens an incident the moment something new and unexpected appears — with no alert rules to write.
+<p align="center">
+  <strong>Versus Incident is the self-hosted AI SRE agent.</strong> It learns what your logs
+  normally look like and escalates only what is new or unexpected issues — routing to your chat channels and
+  on-call platform.
+</p>
 
-It also accepts incidents from any webhook-capable tool (Alertmanager, Grafana, Sentry, CloudWatch, FluentBit). Versus supports **multi-channel notifications** to Slack, Microsoft Teams, Telegram, Viber, Email, and Lark with templates you fully control, plus **on-call escalation** to AWS Incident Manager or PagerDuty when an incident goes unacknowledged.
+<p align="center">
+  Free with MIT license · priced on monitored services, never per seat ·
+  <a href="https://versuscontrol.github.io/versus-incident/pricing.html">Pricing</a>
+</p>
 
 ![Versus](src/docs/images/versus-dashboard-01.png)
 
@@ -31,7 +38,7 @@ Whichever source raises it, an incident is templated, fanned out to every channe
 - 📝 **Custom Templates**: Define your own alert messages using Go templates
 - 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
 - 📡 **REST API**: Simple HTTP interface to receive alerts
-- 📞 **On-Call**: On-Call integrations with AWS Incident Manager and PagerDuty
+- 📞 **On-Call**: On-Call integrations (PagerDuty, Opsgenie, incident.io, ServiceNow)
 
 ![Versus](src/docs/images/versus-architecture.png)
 
@@ -127,7 +134,6 @@ gateway_secret: ${GATEWAY_SECRET}
 storage:
   type: file              # file | redis | database (env: STORAGE_TYPE)
   file:
-    data_dir: ./data
     max_incidents: 1000   # rolling cap on persisted incidents
 
 agent:
@@ -185,7 +191,7 @@ The `agent` section includes:
    - `shadow`: same as training, but also logs a note every time it would have sent an alert. Good for reviewing before going live.
    - `detect`: the agent actively sends alerts for any pattern it has never seen before.
 3. `poll_interval`: How often the agent checks your log sources for new entries.
-4. `catalog`: Where the agent stores the list of known patterns and how often to write updates. `mode` selects the storage backend — only `file` is supported today, which writes to `<storage.file.data_dir>/patterns.json` (the filename is fixed).
+4. `catalog`: Where the agent stores the list of known patterns and how often to write updates. `mode` selects the storage backend — only `file` is supported today, which writes to `data/patterns.json` (the filename and directory are fixed).
 
 > **Admin secret.** All admin endpoints (`/api/admin/*` and
 > `/api/agent/*`) are protected by the **root-level** `gateway_secret`
@@ -196,8 +202,8 @@ The `agent` section includes:
 
 > **Storage.** The agent's catalog and the incident history shown in the
 > UI are persisted via the **root-level** `storage:` block (default:
-> `type: file`, `data_dir: ./data`). The agent's `data_dir` field has
-> been removed.
+> `type: file`). The file backend writes to the fixed `./data` directory
+> (`/app/data` in the container image).
 5. `redaction`: Rules for automatically removing sensitive information (passwords, tokens, emails, etc.) from logs before the agent processes them.
 6. `miner`: Controls how aggressively the agent groups similar log lines together. The defaults work well for most setups.
 7. `regex`: Acts as a **pre-filter** for the agent. Only signals whose message matches at least one rule (a named entry under `rules` or `default_pattern`) are forwarded to the pattern miner and stored in the catalog. Anything that doesn't match is dropped before clustering, so boring noise (200-OK requests, debug lines, etc.) never bloats `patterns.json`.

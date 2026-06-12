@@ -20,7 +20,7 @@ Typical scenarios for using analyze mode:
 2. **AI Investigation**: The AI gathers context, such as recent incidents, pattern history, and service summaries.
 3. **Insights Delivered**: The results are saved and displayed in the dashboard for review.
 
-![AI Agent](/docs/images/ai-analysis.png)
+![AI Agent](../docs/images/ai-analysis.png)
 
 Analyze mode runs within a 2-minute timeout to ensure responsiveness. Results are always saved, even if the analysis encounters errors.
 

@@ -5,7 +5,7 @@ React app embedded directly into the Go binary. There is no separate UI
 process to run; once the server is up, the dashboard is available at the
 root path.
 
-![Versus](/docs/images/versus-dashboard-02.png)
+![Versus](../docs/images/versus-dashboard-02.png)
 
 ## Quick start
 
@@ -54,6 +54,7 @@ curating the agent's pattern catalog.
 | Shadow | `/shadow` | NDJSON log of "would-have-alerted" events recorded in shadow mode. |
 | Shadow detail | `/shadow/:patternId` | Drill into one shadow event with the matching catalog entry side-by-side. |
 | Services | `/services` | Every service the agent has discovered, with first-seen timestamps and grace controls. |
+| Runbooks | `/runbooks` | The runbook corpus that backs the `find_runbook` tool. Upload `.md` files, view a runbook's contents, or delete one. |
 
 ### Incident lifecycle
 
@@ -87,6 +88,13 @@ surface without you needing `curl`:
   `agent.catalog.persist_interval`).
 - See **services** the agent has discovered; end or restart a service's
   grace period without restarting the binary.
+- Manage the **runbook corpus** that powers the `find_runbook` tool:
+  upload one or more `.md` files at once, view a runbook's contents, or
+  delete it. Uploads share the same corpus as the `runbooks/` source
+  folder, and re-uploading a file with the same name replaces it. When
+  an embedding model is configured (`tools.find_runbook.embedding_model`)
+  uploads are embedded and searchable immediately; otherwise they are
+  stored but flagged as not yet searchable.
 
 ## Where the data lives
 
@@ -97,11 +105,10 @@ JSON to a directory on disk:
 storage:
   type: file              # file | redis | database (env: STORAGE_TYPE)
   file:
-    data_dir: ./data
     max_incidents: 1000   # rolling cap on persisted incidents
 ```
 
-Files inside `data_dir`:
+Files inside the `./data` directory (`/app/data` in the container image):
 
 | File | Purpose |
 |------|---------|

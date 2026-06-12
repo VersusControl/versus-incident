@@ -40,17 +40,25 @@ type Config struct {
 // the incident service writes incident history. Type-specific sub-blocks
 // are only consulted when `type` matches.
 type StorageConfig struct {
-	Type     string                `mapstructure:"type"` // file | redis | database (default: file)
+	Type     string                `mapstructure:"type"` // file | redis | database | postgres (default: file)
 	File     StorageFileConfig     `mapstructure:"file"`
 	Redis    StorageRedisConfig    `mapstructure:"redis"`
 	Database StorageDatabaseConfig `mapstructure:"database"`
+	Postgres StoragePostgresConfig `mapstructure:"postgres"`
+}
+
+// StoragePostgresConfig is the Postgres backend options.
+// Activated when storage.type == "postgres". A single Postgres backend
+// stores incidents, analyses, and blobs — no separate object store needed.
+type StoragePostgresConfig struct {
+	DSN          string `mapstructure:"dsn"`           // env: POSTGRES_DSN
+	MaxIncidents int    `mapstructure:"max_incidents"` // rolling cap; default 1000
 }
 
 // StorageFileConfig is the file backend's options. Only consulted when
 // storage.type == "file".
 type StorageFileConfig struct {
-	DataDir      string `mapstructure:"data_dir"`
-	MaxIncidents int    `mapstructure:"max_incidents"` // rolling cap; default 1000
+	MaxIncidents int `mapstructure:"max_incidents"` // rolling cap; default 1000
 }
 
 // StorageRedisConfig is the redis backend's options. Stub today.
@@ -288,8 +296,8 @@ func LoadConfig(path string) error {
 		if t := os.Getenv("STORAGE_TYPE"); t != "" {
 			cfg.Storage.Type = t
 		}
-		if d := os.Getenv("STORAGE_FILE_DATA_DIR"); d != "" {
-			cfg.Storage.File.DataDir = d
+		if v := os.Getenv("POSTGRES_DSN"); v != "" {
+			cfg.Storage.Postgres.DSN = v
 		}
 
 		// Agent mode env overrides

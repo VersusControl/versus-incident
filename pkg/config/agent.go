@@ -121,7 +121,7 @@ type AgentFileSourceConfig struct {
 	// Format: "text" (default) or "json" (one JSON object per line).
 	Format string `mapstructure:"format"`
 	// CursorPath overrides the default sidecar cursor file location
-	// (default: <agent.data_dir>/cursors/file-<source_name>.cursor).
+	// (default: a ".versus-cursor-<source_name>" file next to the watched log file).
 	CursorPath string `mapstructure:"cursor_path"`
 	// FromBeginning controls behavior when there is no cursor yet.
 	// false (default) starts at the current end of the file (tail-like).

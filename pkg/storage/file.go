@@ -18,7 +18,7 @@ const MaxIncidentsDefault = 1000
 // FileOptions configures the file backend. Empty fields fall back to
 // sensible defaults.
 type FileOptions struct {
-	DataDir      string // default "data"
+	DataDir      string // default DefaultDataDir
 	MaxIncidents int    // default MaxIncidentsDefault
 }
 
@@ -42,7 +42,7 @@ type fileProvider struct {
 func NewFile(opts FileOptions) (Provider, error) {
 	dir := opts.DataDir
 	if dir == "" {
-		dir = "data"
+		dir = DefaultDataDir
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("storage: mkdir %s: %w", dir, err)
@@ -190,6 +190,7 @@ func (p *fileProvider) SaveIncident(rec *IncidentRecord) error {
 	if rec == nil || rec.ID == "" {
 		return fmt.Errorf("storage: SaveIncident: missing id")
 	}
+	rec.OrgID = NormalizeOrgID(rec.OrgID)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -319,6 +320,7 @@ func (p *fileProvider) SaveAnalysis(rec *AnalysisRecord) error {
 	if rec == nil || rec.ID == "" {
 		return fmt.Errorf("storage: SaveAnalysis: missing id")
 	}
+	rec.OrgID = NormalizeOrgID(rec.OrgID)
 	p.analysesMu.Lock()
 	defer p.analysesMu.Unlock()
 	for i, existing := range p.analyses {

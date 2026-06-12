@@ -15,17 +15,19 @@ import (
 // `X-Gateway-Secret` header. When no secret is configured, every request is
 // rejected — this is by design: an empty secret must not silently grant access.
 type AgentController struct {
-	catalog *agent.Catalog
-	shadow  *agent.ShadowLog
-	detect  *agent.DetectLog
+	catalog         *agent.Catalog
+	shadow          *agent.ShadowLog
+	detect          *agent.DetectLog
+	runbooksEnabled bool
 }
 
 // NewAgentController wires the catalog, shadow log, and detect log into a
 // controller. Pass `cat=nil` if the agent is disabled — in that case every
 // endpoint will return 503. `sl` may be nil to disable the shadow endpoints,
-// and `dl` may be nil to disable the detect-log endpoints.
-func NewAgentController(cat *agent.Catalog, sl *agent.ShadowLog, dl *agent.DetectLog) *AgentController {
-	return &AgentController{catalog: cat, shadow: sl, detect: dl}
+// and `dl` may be nil to disable the detect-log endpoints. `runbooksEnabled`
+// tells the status endpoint whether the runbooks subsystem is available.
+func NewAgentController(cat *agent.Catalog, sl *agent.ShadowLog, dl *agent.DetectLog, runbooksEnabled bool) *AgentController {
+	return &AgentController{catalog: cat, shadow: sl, detect: dl, runbooksEnabled: runbooksEnabled}
 }
 
 // Register attaches the agent admin endpoints to the given fiber group.
@@ -89,8 +91,9 @@ func (a *AgentController) authMiddleware(c *fiber.Ctx) error {
 
 func (a *AgentController) getStatus(c *fiber.Ctx) error {
 	status := fiber.Map{
-		"patterns": a.catalog.Len(),
-		"dirty":    a.catalog.Dirty(),
+		"patterns":           a.catalog.Len(),
+		"dirty":              a.catalog.Dirty(),
+		"runbooks_available": a.runbooksEnabled,
 	}
 	if a.shadow != nil {
 		status["shadow_events"] = a.shadow.Len()

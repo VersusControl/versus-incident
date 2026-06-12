@@ -152,7 +152,6 @@ redis: # Required for on-call functionality
 storage:
   type: file                     # file | redis | database (env: STORAGE_TYPE)
   file:
-    data_dir: ./data             # absolute or relative to the working dir
     max_incidents: 1000          # rolling cap; older records dropped on save
   # redis:                       # not yet implemented
   #   host: ${REDIS_HOST}

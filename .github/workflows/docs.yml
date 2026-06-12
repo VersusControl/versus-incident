@@ -1,0 +1,64 @@
+name: Deploy docs site to Pages
+
+# Docsify documentation site — static, no build step.
+#
+# The docs are plain HTML/CSS/JS rendered at runtime by docsify (CDN). The
+# rendering shell (`src/index.html`), the navigation (`src/_sidebar.md`) and all
+# documentation prose + images live together in this public OSS repo under
+# `src/`. There is nothing to compile, so this workflow simply uploads `src/`
+# as the Pages artifact and deploys it at the site root (custom domain via the
+# committed `src/CNAME`; `src/.nojekyll` disables Jekyll processing).
+#
+# Replaces the former React + Vite docs-app pipeline: no cross-repo checkout, no
+# PLATFORM_UI_DEPLOY_KEY secret, no repository_dispatch trigger, no Node/npm
+# build. See plans/productization/global/f4-docs-migration-plan.md.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+# Allow GITHUB_TOKEN to deploy to GitHub Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment, skipping runs queued between the run
+# in-progress and latest queued. Do NOT cancel in-progress production deploys.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  # Build job — assemble the static docs directory (no compilation).
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out docs (this repo)
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # `src/` already contains the docsify index.html, _sidebar.md,
+          # markdown content, images, CNAME and .nojekyll — it IS the site.
+          path: src
+
+  # Deployment job.
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -13,7 +13,7 @@ lines repeat themselves. If a brand-new line shows up, it usually
 means something new is happening, and you probably want to know.
 Metrics and traces will follow in later releases.
 
-![AI Agent](/docs/images/ai-agent.png)
+![AI Agent](../docs/images/ai-agent.png)
 
 The agent is **off by default** (`agent.enable: false`). It will not
 read anything, save any files, or start any background work until
@@ -33,7 +33,7 @@ Each time the agent checks for new logs, every line goes through a
 short series of steps. If a step throws the line out, the next steps
 are skipped.
 
-![AI Agent](/docs/images/ai-agent-pipeline.png)
+![AI Agent](../docs/images/ai-agent-pipeline.png)
 
 In plain words:
 

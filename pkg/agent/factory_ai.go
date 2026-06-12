@@ -4,15 +4,18 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/agent/ai"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/analyze"
 	analyzetools "github.com/VersusControl/versus-incident/pkg/agent/ai/analyze/tools"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/detect"
+	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/router"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/runbook"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
@@ -31,6 +34,11 @@ type AIBundle struct {
 	Cache       *ai.ResultCache
 	Rate        *ai.RateLimiter
 	AnalyzeRate *ai.RateLimiter // separate hourly cap for analyze
+	// Runbooks is the runbook corpus manager shared by the find_runbook
+	// read path and the admin runbooks UI (upload/list/delete). Nil when
+	// storage is unavailable. Present even without embeddings so operators
+	// can manage the corpus before configuring an embedding model.
+	Runbooks *runbook.Manager
 }
 
 // BuildAIs constructs every AI dependency (router, detect agent,
@@ -67,6 +75,7 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	// but it shares the AI.Enable master switch — no separate opt-in.
 	var analyzeAgent core.AIAgent
 	var analyzeRate *ai.RateLimiter
+	var runbookMgr *runbook.Manager
 	{
 		analyzeBaseCfg := cfg.AI.Resolve(config.AgentAITaskConfig{Model: cfg.AI.Analyze.Model})
 
@@ -102,7 +111,31 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		// when configured.
 		changes := analyzetools.NewGitChangeFeed(buildGitRepos(cfg.Tools.RecentChanges.Git))
 
-		tools := analyzetools.Default(store, newCatalogAdapter(catalog), reader, redactor, serviceMatcher, graph, changes)
+		// Optional runbook-RAG seam for the find_runbook tool. When an
+		// embedding model is configured (tools.yaml
+		// tools.find_runbook.embedding_model), build the embedder, auto-
+		// ingest the runbook source dir (incremental — only new/changed
+		// runbooks are embedded), load the persisted corpus from storage,
+		// and snapshot it into an in-memory vector index. Any failure
+		// leaves embedder/searcher nil so analyzetools.Default omits the
+		// tool — community installs without embeddings are unaffected.
+		// Runbook-RAG corpus manager. Created whenever storage is available
+		// so the admin runbooks UI can upload/list/delete runbooks even
+		// before an embedding model is configured. When an embedding model
+		// IS configured (tools.yaml tools.find_runbook.embedding_model), the
+		// manager also embeds the corpus and exposes a live search index, so
+		// the find_runbook tool is wired with the manager's embedder +
+		// searcher. Uploads atomically rebuild the index, so newly uploaded
+		// runbooks are searchable without a restart.
+		runbookMgr = buildRunbookManager(cfg, store, httpClient)
+		var embedder core.Embedder
+		var runbookSearcher analyzetools.RunbookSearcher
+		if runbookMgr != nil && runbookMgr.HasEmbedder() {
+			embedder = runbookMgr.Embedder()
+			runbookSearcher = newRunbookSearcherAdapter(runbookMgr.Index())
+		}
+
+		tools := analyzetools.Default(store, newCatalogAdapter(catalog), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher)
 		a, aErr := analyze.New(context.Background(), analyzeBaseCfg, tools, analyze.Options{
 			HTTPClient:    httpClient,
 			ToolTimeout:   parseDurationOr(cfg.Tools.ToolTimeout, 20*time.Second),
@@ -138,5 +171,69 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		Cache:       detectCache,
 		Rate:        detectRate,
 		AnalyzeRate: analyzeRate,
+		Runbooks:    runbookMgr,
 	}
+}
+
+// buildRunbookManager builds the runbook corpus manager shared by the
+// find_runbook read path and the admin runbooks UI. It returns nil only
+// when storage is unavailable (an in-memory-only corpus would not
+// survive a restart, so runbook management is disabled).
+//
+// When an embedding model is configured (tools.find_runbook.embedding_
+// model) it builds the embedder and the manager auto-ingests the runbook
+// source dir (incremental — only new or edited runbooks are embedded),
+// so the find_runbook tool gets a live, searchable corpus. When no
+// embedding model is configured the manager still loads the corpus so
+// operators can upload/list/delete runbooks; those runbooks become
+// searchable once an embedding model is set and the corpus re-ingested.
+func buildRunbookManager(cfg config.AgentConfig, store storage.Provider, httpClient *http.Client) *runbook.Manager {
+	if store == nil {
+		log.Printf("agent: runbooks disabled: no storage backend for runbook corpus")
+		return nil
+	}
+
+	rbStore, err := runbook.LoadStore(store)
+	if err != nil {
+		log.Printf("agent: runbooks disabled: load runbook corpus failed: %v", err)
+		return nil
+	}
+
+	var embedder core.Embedder
+	embCfg := cfg.Tools.FindRunbook
+	if embCfg.EmbeddingModel != "" {
+		e, embErr := einowrap.NewEmbedder(context.Background(), config.AgentAIConfig{
+			Model:  embCfg.EmbeddingModel,
+			APIKey: cfg.AI.APIKey,
+		}, einowrap.Options{
+			BaseURL:    embCfg.EmbeddingBaseURL,
+			HTTPClient: httpClient,
+		})
+		if embErr != nil {
+			log.Printf("agent: find_runbook disabled: embedder init failed: %v", embErr)
+		} else {
+			embedder = e
+		}
+	}
+
+	mgr := runbook.NewManager(rbStore, embedder)
+
+	// Auto-ingest the runbook source dir so operators never run a separate
+	// CLI. Ingestion is incremental — unchanged runbooks reuse their cached
+	// vector, so a reboot with no edits makes no embedding calls. A no-op
+	// when no embedder is configured. Non-fatal: we still serve the
+	// previously-persisted corpus on failure.
+	dir := filepath.Join(storage.DefaultDataDir, runbook.SourceSubdir)
+	if n, ingErr := mgr.IngestDir(context.Background(), dir, ""); ingErr != nil {
+		log.Printf("agent: find_runbook: runbook ingest failed: %v (serving previously-persisted corpus)", ingErr)
+	} else if n > 0 {
+		log.Printf("agent: find_runbook: ingested %d runbook(s) from %s", n, dir)
+	}
+
+	if embedder != nil {
+		log.Printf("agent: find_runbook enabled model=%s runbooks=%d", embCfg.EmbeddingModel, rbStore.Len())
+	} else {
+		log.Printf("agent: runbooks UI enabled (no embedding model; uploads not searchable until configured) runbooks=%d", rbStore.Len())
+	}
+	return mgr
 }

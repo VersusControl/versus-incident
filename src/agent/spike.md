@@ -9,7 +9,7 @@ sightings, or by you through the API), the agent stops writing it to
 the shadow log. Spike detection brings it back when the volume
 suddenly jumps well above the pattern's normal rate.
 
-![AI Agent](/docs/images/spike-detection.png)
+![AI Agent](../docs/images/spike-detection.png)
 
 ## How it works
 

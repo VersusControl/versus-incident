@@ -2,6 +2,7 @@ package routes
 
 import (
 	"github.com/VersusControl/versus-incident/pkg/controllers"
+	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/teams"
 
 	"github.com/gofiber/fiber/v2"
@@ -13,6 +14,11 @@ func SetupRoutes(app *fiber.App, teamsStore *teams.Store) {
 
 	// API routes
 	api := app.Group("/api")
+
+	// Enterprise auth slot (X2-T3). No-op pass-through in community mode;
+	// an external module registers SSO/JWT enforcement via
+	// middleware.SetAuthMiddleware before the server starts.
+	api.Use(middleware.AuthMiddleware())
 
 	incidents := api.Group("/incidents")
 	incidents.Post("/", controllers.CreateIncident)

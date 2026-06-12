@@ -45,7 +45,6 @@ func main() {
 	store, err := storage.New(storage.Config{
 		Type: cfg.Storage.Type,
 		File: storage.FileOptions{
-			DataDir:      cfg.Storage.File.DataDir,
 			MaxIncidents: cfg.Storage.File.MaxIncidents,
 		},
 		Redis: storage.RedisOptions{
@@ -61,6 +60,10 @@ func main() {
 			Driver:       cfg.Storage.Database.Driver,
 			DSN:          cfg.Storage.Database.DSN,
 			MaxIncidents: cfg.Storage.Database.MaxIncidents,
+		},
+		Postgres: storage.PostgresOptions{
+			DSN:          cfg.Storage.Postgres.DSN,
+			MaxIncidents: cfg.Storage.Postgres.MaxIncidents,
 		},
 	})
 	if err != nil {
@@ -83,9 +86,20 @@ func main() {
 
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true, // Disable the default Fiber banner
+		// Golden rule #11: Fiber request strings (c.Get/Params/Query/…) are
+		// backed by a pooled, reused request buffer. Several handlers persist
+		// c.Params("id") (teams/members CRUD). Immutable copies those strings
+		// off the buffer so they can safely outlive the request.
+		Immutable: true,
 	})
 
 	app.Use(middleware.Logger())
+
+	// Org-injection seam (X2-T3): stamps every request with a resolved
+	// org id, defaulting to the single-tenant "default" org. Invisible to
+	// OSS users; an external module registers a resolver to enable
+	// multi-tenant scoping.
+	app.Use(middleware.OrgInjector())
 
 	routes.SetupRoutes(app, teamsStore)
 
@@ -284,7 +298,8 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		return nil, fmt.Errorf("agent: gateway_secret is not configured — /api/agent/* admin endpoints require a secret")
 	}
 	api := app.Group("/api")
-	controllers.NewAgentController(catalog, shadowLog, detectLog).Register(api)
+	controllers.NewAgentController(catalog, shadowLog, detectLog, aiBundle.Runbooks != nil).Register(api)
+	controllers.NewRunbookAdminController(aiBundle.Runbooks).Register(api)
 
 	return catalog, nil
 }

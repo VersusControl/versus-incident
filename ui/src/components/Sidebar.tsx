@@ -2,6 +2,7 @@ import { NavLink } from "react-router-dom";
 import {
   Activity,
   AlertTriangle,
+  Book,
   Brain,
   EyeOff,
   FileText,
@@ -18,7 +19,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import clsx from "clsx";
-import { clearSecret } from "@/lib/api";
+import { useQuery } from "@tanstack/react-query";
+import { api, clearSecret } from "@/lib/api";
 
 interface SideItem {
   to: string;
@@ -42,7 +44,7 @@ const peopleItems = [
   { to: "/teams",   label: "Teams",   icon: Users },
 ];
 
-const agentItems = [
+const agentItems: SideItem[] = [
   { to: "/status",   label: "Status",   icon: Activity },
   { to: "/patterns", label: "Patterns", icon: Layers },
   { to: "/shadow",   label: "Shadow",   icon: EyeOff },
@@ -58,6 +60,15 @@ const configItems = [
 // Datadog-style left rail: dark navy, slim, icon + label, accent stripe on
 // the active link.
 export function Sidebar() {
+  const statusQ = useQuery({
+    queryKey: ["status"],
+    queryFn: api.status,
+    staleTime: 30_000,
+    retry: false,
+  });
+
+  const runbooksAvailable = statusQ.data?.runbooks_available ?? false;
+
   return (
     <aside className="dark-scroll flex h-full w-56 shrink-0 flex-col overflow-y-auto
                       border-r border-ink-800 bg-ink-950 text-ink-100">
@@ -100,6 +111,9 @@ export function Sidebar() {
         {agentItems.map(({ to, label, icon: Icon }) => (
           <SideLink key={to} to={to} label={label} Icon={Icon} />
         ))}
+        {runbooksAvailable && (
+          <SideLink to="/runbooks" label="Runbooks" Icon={Book} />
+        )}
         <div className="mt-2 px-2 py-2 text-2xs uppercase tracking-wider text-ink-300">
           Configuration
         </div>

@@ -26,7 +26,6 @@ data:
       type: {{ .Values.storage.type | default "file" }}
       {{- if eq (.Values.storage.type | default "file") "file" }}
       file:
-        data_dir: {{ .Values.storage.file.dataDir | default "/app/data" }}
         max_incidents: {{ .Values.storage.file.maxIncidents | default 1000 }}
       {{- end }}
 
@@ -300,6 +299,9 @@ data:
         {{- else }}
           []
         {{- end }}
+      find_runbook:
+        embedding_model: {{ .Values.agent.tools.findRunbook.embeddingModel | default "" | quote }}
+        embedding_base_url: {{ .Values.agent.tools.findRunbook.embeddingBaseUrl | default "" | quote }}
   {{- end }}
 
   {{- if .Values.templates.slack }}

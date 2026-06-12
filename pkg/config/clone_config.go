@@ -29,7 +29,6 @@ func cloneStorageConfig(src StorageConfig) StorageConfig {
 	return StorageConfig{
 		Type: src.Type,
 		File: StorageFileConfig{
-			DataDir:      src.File.DataDir,
 			MaxIncidents: src.File.MaxIncidents,
 		},
 		Redis: StorageRedisConfig{
@@ -469,6 +468,7 @@ func cloneToolsConfig(src ToolsConfig) ToolsConfig {
 			}
 		}
 	}
+	out.FindRunbook = src.FindRunbook
 	return out
 }
 
