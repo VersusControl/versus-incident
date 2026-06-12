@@ -88,4 +88,4 @@ but the templates still need to be present.
 
 ## Per-source field reference
 
-[Data Sources guide](https://versuscontrol.github.io/versus-incident/agent/data-sources.html)
+[Data Sources guide](https://docs.versusincident.com/#/agent/data-sources)

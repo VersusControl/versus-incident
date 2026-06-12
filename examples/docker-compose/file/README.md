@@ -77,4 +77,4 @@ docker compose down -v
 
 ## Reference
 
-[File source docs](https://versuscontrol.github.io/versus-incident/agent/data-sources/file.html)
+[File source docs](https://docs.versusincident.com/#/agent/data-sources/file)

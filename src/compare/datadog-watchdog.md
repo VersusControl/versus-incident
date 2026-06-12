@@ -61,4 +61,4 @@ vendor for analysis.
 Run the MIT core in under 30 minutes:
 [AI Agent — Getting Started](../agent/getting-started.md). Need data-residency
 guarantees or a self-hosted enterprise quote? Email
-<a href="mailto:supports@devopsvn.tech?subject=Versus%20vs%20Datadog%20Watchdog">supports@devopsvn.tech</a>.
+<a href="mailto:admin@versusincident.com?subject=Versus%20vs%20Datadog%20Watchdog">admin@versusincident.com</a>.

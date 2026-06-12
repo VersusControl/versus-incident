@@ -78,4 +78,4 @@ breaches and *unknown* novel failures.
 Wire Versus behind Alertmanager in minutes:
 [Use Alertmanager](../examples/alertmanager.md), or start with the AI agent in
 [AI Agent — Getting Started](../agent/getting-started.md). Email
-<a href="mailto:supports@devopsvn.tech?subject=Versus%20vs%20Alertmanager">supports@devopsvn.tech</a> for enterprise pricing.
+<a href="mailto:admin@versusincident.com?subject=Versus%20vs%20Alertmanager">admin@versusincident.com</a> for enterprise pricing.

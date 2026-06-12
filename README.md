@@ -16,7 +16,7 @@
 
 <p align="center">
   Free with MIT license · priced on monitored services, never per seat ·
-  <a href="https://versuscontrol.github.io/versus-incident/pricing.html">Pricing</a>
+  <a href="https://docs.versusincident.com/#/pricing">Pricing</a>
 </p>
 
 ![Versus](src/docs/images/versus-dashboard-01.png)
@@ -46,7 +46,7 @@ Whichever source raises it, an incident is templated, fanned out to every channe
 - [Getting Started](#get-started)
 - [AI Agent](#ai-agent)
 - [Webhook Alerts](#webhook-alerts)
-- [Admin Dashboard](https://versuscontrol.github.io/versus-incident/configuration/admin-ui.html)
+- [Admin Dashboard](https://docs.versusincident.com/#/configuration/admin-ui)
 - [Development Custom Templates](#development-custom-templates)
 - [On-Call](#on-call)
 - [Configuration](#complete-configuration)
@@ -89,7 +89,7 @@ docker run -p 3000:3000 \
 
 The agent needs a `config.yaml` and an `agent_sources.yaml` that point it at your logs. Once it's running, review the patterns it learns on the **admin dashboard** at <http://localhost:3000/>, then switch `AGENT_MODE` from `training` → `shadow` → `detect` when you trust it.
 
-Full walkthrough (with ready-to-copy config and a sample log generator): [AI Agent — Getting Started](https://versuscontrol.github.io/versus-incident/agent/getting-started.html).
+Full walkthrough (with ready-to-copy config and a sample log generator): [AI Agent — Getting Started](https://docs.versusincident.com/#/agent/getting-started).
 
 ### Forward alerts from your existing tools
 
@@ -107,7 +107,7 @@ docker run -p 3000:3000 \
 Versus listens on port 3000 by default and exposes:
 
 - `POST /api/incidents` — webhook endpoint for monitoring tools.
-- `GET  /` — the embedded **admin dashboard**, open <http://localhost:3000/> in your browser. For the full UI walkthrough and the build/watch scripts, see [Admin Dashboard](https://versuscontrol.github.io/versus-incident/configuration/admin-ui.html).
+- `GET  /` — the embedded **admin dashboard**, open <http://localhost:3000/> in your browser. For the full UI walkthrough and the build/watch scripts, see [Admin Dashboard](https://docs.versusincident.com/#/configuration/admin-ui).
 
 > **You can use both.** The AI agent and webhook alerts are not mutually exclusive — run them together and every incident, whether auto-detected or forwarded from your tools, flows through the same channels, templates, and on-call logic.
 
@@ -243,7 +243,7 @@ sources:
 
 The `redis` section is required when `agent.enable` is `true`. Redis is used to remember where the agent left off in each log source, so it picks up from the right place after a restart.
 
-For detailed information on integration, please refer to the document here: [Enable AI Agent](https://versuscontrol.github.io/versus-incident/agent/agent-introduction.html).
+For detailed information on integration, please refer to the document here: [Enable AI Agent](https://docs.versusincident.com/#/agent/agent-introduction).
 
 ## Webhook Alerts
 
@@ -346,17 +346,17 @@ curl -X POST "http://localhost:3000/api/incidents" \
 
 ## Development Custom Templates
 
-For the custom templates, see [Development Custom Templates](https://versus-incident.devopsvn.tech/userguide/getting-started.html#development-custom-templates)
+For the custom templates, see [Development Custom Templates](https://docs.versusincident.com/#/webhook/getting-started?id=development-custom-templates)
 
 ## Kubernetes
 
 For a complete `Deployment` + `Service` + `PersistentVolumeClaim`
 manifest (with the persistent data volume the admin dashboard needs),
-see [Deploy on Kubernetes](https://versuscontrol.github.io/versus-incident/configuration/kubernetes.html).
+see [Deploy on Kubernetes](https://docs.versusincident.com/#/configuration/kubernetes).
 
 ## Helm Chart
 
-For the packaged install, see [Helm Chart](https://versuscontrol.github.io/versus-incident/configuration/helm.html)
+For the packaged install, see [Helm Chart](https://docs.versusincident.com/#/configuration/helm)
 or the chart source under [helm/versus-incident](https://github.com/VersusControl/versus-incident/blob/main/helm/versus-incident).
 
 ## On-Call
@@ -414,7 +414,7 @@ The `oncall` section includes:
 
 The redis section is required when `oncall.enable` or `oncall.initialized_only` is true. It configures the Redis instance used for state management or queuing, with settings like host, port, password, and db.
 
-For detailed information on integration, please refer to the document here: [On-Call setup with Versus](https://versuscontrol.github.io/versus-incident/oncall/on-call-introduction.html).
+For detailed information on integration, please refer to the document here: [On-Call setup with Versus](https://docs.versusincident.com/#/oncall/on-call-introduction).
 
 ## Complete Configuration
 
@@ -601,7 +601,7 @@ agent:
         pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
 ```
 
-**For the detail configuration, see [Detail Configuration](https://versus-incident.devopsvn.tech/configuration/configuration.html)**
+**For the detail configuration, see [Detail Configuration](https://docs.versusincident.com/#/configuration/configuration)**
 
 ## Roadmap
 

@@ -23,7 +23,7 @@ Contacts are individuals who will be notified during an incident.
 2. Click Create contact.
 3. For each contact:
 + Enter a Name (e.g., "Natsu Dragneel").
-+ Add Contact methods (e.g., SMS: +1-555-123-4567, Email: natsu@devopsvn.tech).
++ Add Contact methods (e.g., SMS: +1-555-123-4567, Email: admin@versusincident.com).
 + Save the contact.
 
 Repeat to create 6 contacts (e.g., Natsu, Zeref, Igneel, Gray, Gajeel, Laxus).

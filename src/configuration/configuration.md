@@ -926,7 +926,7 @@ sources:
 
 The `redis` section is required when `agent.enable` is `true`. Redis stores the per-source cursor so the agent picks up where it left off after a restart.
 
-For full integration walkthroughs see [Enable AI Agent](https://versuscontrol.github.io/versus-incident/agent/agent-introduction.html).
+For full integration walkthroughs see [Enable AI Agent](https://docs.versusincident.com/#/agent/agent-introduction).
 
 ## On-Call
 
@@ -970,4 +970,4 @@ The `oncall` section includes:
 
 The `redis` section is required when `oncall.enable` or `oncall.initialized_only` is `true`. It stores the open-incident state needed for ack-or-escalate.
 
-For provider-specific walkthroughs see [On-Call setup with Versus](https://versuscontrol.github.io/versus-incident/oncall/on-call-introduction.html).
+For provider-specific walkthroughs see [On-Call setup with Versus](https://docs.versusincident.com/#/oncall/on-call-introduction).

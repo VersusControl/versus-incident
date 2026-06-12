@@ -104,4 +104,4 @@ Versus never introduces its own schedules or escalation policies.
 
 Run the MIT core in under 30 minutes and route your first incident to your on-call
 platform: [AI Agent — Getting Started](../agent/getting-started.md). Email
-<a href="mailto:supports@devopsvn.tech?subject=Versus%20%2B%20on-call">supports@devopsvn.tech</a> for enterprise pricing.
+<a href="mailto:admin@versusincident.com?subject=Versus%20%2B%20on-call">admin@versusincident.com</a> for enterprise pricing.

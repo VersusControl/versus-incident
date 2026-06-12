@@ -446,5 +446,5 @@ inline secrets in `values.yaml` end up in `helm get values` output.
 
 ## Additional Resources
 
-- [Template Syntax Guide](../webhook/template-syntax.html)
-- [Configuration Reference](./configuration.html)
+- [Template Syntax Guide](../webhook/template-syntax.md)
+- [Configuration Reference](./configuration.md)

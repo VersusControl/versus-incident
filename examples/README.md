@@ -1,7 +1,7 @@
 # Examples
 
 Runnable examples for Versus Incident. For prose docs, see the
-[user guide](https://versuscontrol.github.io/versus-incident/).
+[user guide](https://docs.versusincident.com).
 
 ## docker-compose
 
@@ -21,9 +21,9 @@ shared workflow.
 ## Notification channels
 
 Channel webhook setup lives in the main docs:
-[versuscontrol.github.io/versus-incident](https://versuscontrol.github.io/versus-incident/).
+[docs.versusincident.com](https://docs.versusincident.com).
 
 ## Data source reference
 
 Per-source field reference and troubleshooting:
-[Data Sources guide](https://versuscontrol.github.io/versus-incident/agent/data-sources.html).
+[Data Sources guide](https://docs.versusincident.com/#/agent/data-sources).

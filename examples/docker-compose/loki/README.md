@@ -91,4 +91,4 @@ docker compose down -v
 
 ## Reference
 
-[Loki source docs](https://versuscontrol.github.io/versus-incident/agent/data-sources/loki.html)
+[Loki source docs](https://docs.versusincident.com/#/agent/data-sources/loki)

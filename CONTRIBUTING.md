@@ -126,4 +126,4 @@ it.
 - GitHub Discussions:
   https://github.com/VersusControl/versus-incident/discussions
 - Issues: https://github.com/VersusControl/versus-incident/issues
-- Email: `supports@devopsvn.tech`
+- Email: `admin@versusincident.com`

@@ -54,7 +54,7 @@ spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported privately to the maintainers at **supports@devopsvn.tech**. All
+reported privately to the maintainers at **admin@versusincident.com**. All
 complaints will be reviewed and investigated promptly and fairly.
 
 All maintainers are obligated to respect the privacy and security of the

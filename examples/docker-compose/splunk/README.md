@@ -117,4 +117,4 @@ docker compose down -v
 
 ## Reference
 
-[Splunk source docs](https://versuscontrol.github.io/versus-incident/agent/data-sources/splunk.html)
+[Splunk source docs](https://docs.versusincident.com/#/agent/data-sources/splunk)
