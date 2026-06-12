@@ -835,6 +835,21 @@
         function (hook) {
           var tocObs = null;
 
+          function makeChevron() {
+            var svgNs = "http://www.w3.org/2000/svg";
+            var svg = document.createElementNS(svgNs, "svg");
+            svg.setAttribute("viewBox", "0 0 16 16");
+            svg.setAttribute("fill", "none");
+            svg.setAttribute("stroke", "currentColor");
+            svg.setAttribute("stroke-width", "2");
+            svg.setAttribute("stroke-linecap", "round");
+            svg.setAttribute("stroke-linejoin", "round");
+            var path = document.createElementNS(svgNs, "path");
+            path.setAttribute("d", "M4 6l4 4 4-4");
+            svg.appendChild(path);
+            return svg;
+          }
+
           function setupSidebar() {
             // Top-level sections: default EXPANDED
             document.querySelectorAll(".sidebar-nav > ul > li").forEach(function (li) {
@@ -863,9 +878,10 @@
               btn.type = "button";
               // Top-level defaults to EXPANDED
               btn.setAttribute("aria-expanded", "true");
-              btn.innerHTML =
-                '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg>' +
-                "<span>" + titleEl.textContent + "</span>";
+              btn.appendChild(makeChevron());
+              var sectionLabel = document.createElement("span");
+              sectionLabel.textContent = titleEl.textContent;
+              btn.appendChild(sectionLabel);
               sub.classList.add("nav-section-list");
               sub.hidden = false;
               btn.addEventListener("click", function () {
@@ -891,9 +907,10 @@
               btn.type = "button";
               var hasActive = subUl.querySelector("a.active") || link.classList.contains("active");
               btn.setAttribute("aria-expanded", hasActive ? "true" : "false");
-              btn.innerHTML =
-                '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg>' +
-                "<span>" + text + "</span>";
+              btn.appendChild(makeChevron());
+              var subLabel = document.createElement("span");
+              subLabel.textContent = text;
+              btn.appendChild(subLabel);
               subUl.classList.add("nav-sub-list");
               subUl.hidden = !hasActive;
               btn.addEventListener("click", function () {
@@ -911,14 +928,21 @@
             if (!el || !list) return;
             var hh = document.querySelectorAll(".markdown-section h2, .markdown-section h3, .markdown-section h4");
             if (tocObs) tocObs.disconnect();
-            if (!hh.length) { el.classList.add("hidden"); list.innerHTML = ""; return; }
+            if (!hh.length) { el.classList.add("hidden"); list.textContent = ""; return; }
             el.classList.remove("hidden");
-            var html = "";
+            var frag = document.createDocumentFragment();
             hh.forEach(function (h) {
               if (!h.id) h.id = h.textContent.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-              html += '<li><a href="#' + h.id + '" data-level="' + h.tagName[1] + '">' + h.textContent + '</a></li>';
+              var li = document.createElement("li");
+              var a = document.createElement("a");
+              a.setAttribute("href", "#" + h.id);
+              a.setAttribute("data-level", h.tagName[1]);
+              a.textContent = h.textContent;
+              li.appendChild(a);
+              frag.appendChild(li);
             });
-            list.innerHTML = html;
+            list.textContent = "";
+            list.appendChild(frag);
             tocObs = new IntersectionObserver(function (entries) {
               entries.forEach(function (e) {
                 if (e.isIntersecting) {
