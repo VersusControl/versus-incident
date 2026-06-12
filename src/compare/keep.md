@@ -69,4 +69,4 @@ incident lifecycle.
 
 Run the MIT core in under 30 minutes:
 [AI Agent — Getting Started](../agent/getting-started.md). Email
-<a href="mailto:supports@devopsvn.tech?subject=Versus%20vs%20Keep">supports@devopsvn.tech</a> for enterprise pricing.
+<a href="mailto:admin@versusincident.com?subject=Versus%20vs%20Keep">admin@versusincident.com</a> for enterprise pricing.

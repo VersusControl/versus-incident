@@ -95,4 +95,4 @@ docker compose down -v
 
 ## Reference
 
-[Elasticsearch source docs](https://versuscontrol.github.io/versus-incident/agent/data-sources/elasticsearch.html)
+[Elasticsearch source docs](https://docs.versusincident.com/#/agent/data-sources/elasticsearch)

@@ -100,4 +100,4 @@ docker compose down -v
 
 ## Reference
 
-[Graylog source docs](https://versuscontrol.github.io/versus-incident/agent/data-sources/graylog.html)
+[Graylog source docs](https://docs.versusincident.com/#/agent/data-sources/graylog)

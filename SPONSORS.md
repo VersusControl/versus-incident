@@ -12,7 +12,7 @@ sponsoring.
 
 - **GitHub Sponsors** — https://github.com/sponsors/versuscontrol
 - **Support contracts & paid integrations** — email
-  `supports@devopsvn.tech` (SLA, private support channel, custom
+  `admin@versusincident.com` (SLA, private support channel, custom
   channels/sources, on-prem deployment help).
 
 ## Sponsorship tiers
@@ -130,7 +130,7 @@ gated behind it — and the **founding-customer discount applies only to the
 commercial Enterprise tier**; no OSS capability is paid, time-boxed, or behind
 the beta. See the open-core commitment in [GOVERNANCE.md](GOVERNANCE.md).
 
-Talk to us: `supports@devopsvn.tech`.
+Talk to us: `admin@versusincident.com`.
 
 ## For companies: paid options instead of sponsorship
 
@@ -145,4 +145,4 @@ the Enterprise tier above, these OSS-aligned options usually fit:
    security review support, signed images. Quote on request. *(For
    license-gated air-gapped Enterprise features, see Versus Enterprise above.)*
 
-Email `supports@devopsvn.tech` with your use case.
+Email `admin@versusincident.com` with your use case.

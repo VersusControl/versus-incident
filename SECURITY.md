@@ -23,7 +23,7 @@ Use one of the following private channels:
 
 1. **GitHub Security Advisory** (preferred):
    https://github.com/VersusControl/versus-incident/security/advisories/new
-2. **Email:** `supports@devopsvn.tech` with the subject line
+2. **Email:** `admin@versusincident.com` with the subject line
    `[SECURITY] versus-incident: <short summary>`.
 
 When reporting, please include:

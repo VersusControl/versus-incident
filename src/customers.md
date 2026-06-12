@@ -21,13 +21,13 @@ of Versus Enterprise, or [fund the MIT core](https://github.com/VersusControl/ve
   <div style="flex:1 1 220px;border:1px dashed #e5e5e5;border-radius:12px;padding:24px;text-align:center;color:#79716b;">
     <div style="height:48px;display:flex;align-items:center;justify-content:center;font-size:1.6em;">+</div>
     <div><strong>Your logo here</strong></div>
-    <div style="font-size:0.9em;"><a href="mailto:supports@devopsvn.tech?subject=Versus%20Enterprise%20Founding-Customer%20beta">Become a Founding Customer</a></div>
+    <div style="font-size:0.9em;"><a href="mailto:admin@versusincident.com?subject=Versus%20Enterprise%20Founding-Customer%20beta">Become a Founding Customer</a></div>
   </div>
 
   <div style="flex:1 1 220px;border:1px dashed #e5e5e5;border-radius:12px;padding:24px;text-align:center;color:#79716b;">
     <div style="height:48px;display:flex;align-items:center;justify-content:center;font-size:1.6em;">+</div>
     <div><strong>Your logo here</strong></div>
-    <div style="font-size:0.9em;"><a href="mailto:supports@devopsvn.tech?subject=Versus%20Enterprise%20Founding-Customer%20beta">Become a Founding Customer</a></div>
+    <div style="font-size:0.9em;"><a href="mailto:admin@versusincident.com?subject=Versus%20Enterprise%20Founding-Customer%20beta">Become a Founding Customer</a></div>
   </div>
 
 </div>
@@ -48,5 +48,5 @@ of Versus Enterprise, or [fund the MIT core](https://github.com/VersusControl/ve
 ## Become a reference
 
 Running Versus and happy to be named? Email
-<a href="mailto:supports@devopsvn.tech?subject=Versus%20customer%20logo">supports@devopsvn.tech</a>
+<a href="mailto:admin@versusincident.com?subject=Versus%20customer%20logo">admin@versusincident.com</a>
 with your logo and we will add you here.

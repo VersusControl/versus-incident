@@ -357,7 +357,7 @@ function SecretBanner() {
         </code>{" "}
         or the corresponding environment variable.
         <a
-          href="https://versuscontrol.github.io/versus-incident/agent/configuration.html"
+          href="https://docs.versusincident.com/#/agent/configuration"
           target="_blank"
           rel="noreferrer"
           className="ml-2 inline-flex items-center gap-1 text-accent hover:underline"

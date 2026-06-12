@@ -22,7 +22,7 @@ Each contact has contact methods—ways to reach them, like:
 
 **Example:** Imagine Natsu is an on-call engineer. His contact info might include:
 + SMS: +84 3127 12 567
-+ Email: natsu@devopsvn.tech
++ Email: admin@versusincident.com
 
 If an incident occurs, AWS Incident Manager can send him a text and an email to let him know she’s needed.
 

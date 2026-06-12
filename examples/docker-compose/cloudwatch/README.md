@@ -98,4 +98,4 @@ docker compose down -v
 
 ## Reference
 
-[CloudWatch Logs source docs](https://versuscontrol.github.io/versus-incident/agent/data-sources/cloudwatch-logs.html)
+[CloudWatch Logs source docs](https://docs.versusincident.com/#/agent/data-sources/cloudwatch-logs)
