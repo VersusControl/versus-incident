@@ -120,7 +120,7 @@ curl -X POST "http://localhost:3000/api/incidents" \
 
 **Result:**
 
-![Versus Result](/docs/images/versus-result-01.png)
+![Versus Result](../docs/images/versus-result-01.png)
 
 ## Development Custom Templates
 
@@ -210,7 +210,7 @@ Response:
 
 **Result:**
 
-![Versus Result](/docs/images/versus-result-02.png)
+![Versus Result](../docs/images/versus-result-02.png)
 
 ### Understanding Custom Templates with Monitoring Webhooks
 

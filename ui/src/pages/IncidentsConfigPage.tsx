@@ -39,7 +39,6 @@ export function IncidentsConfigPage() {
                   <KV k="Listen" v={`${cfg.data.host}:${cfg.data.port}`} />
                   <KV k="Public host" v={cfg.data.public_host || "—"} />
                   <KV k="Storage type" v={cfg.data.storage.type || "file"} />
-                  <KV k="Data dir" v={cfg.data.storage.file.data_dir || "—"} />
                   <KV
                     k="Max incidents"
                     v={String(cfg.data.storage.file.max_incidents || 0)}
@@ -133,6 +132,52 @@ export function IncidentsConfigPage() {
                           : cfg.data.oncall.pagerduty.other_routing_keys.join(
                               ", ",
                             )
+                      }
+                    />
+                  </Grid>
+                </SubCard>
+
+                <SubCard title="ServiceNow">
+                  <Grid>
+                    <SecretField
+                      k="Instance URL"
+                      configured={!!cfg.data.oncall.servicenow.instance_url}
+                    />
+                    <SecretField
+                      k="Username"
+                      configured={!!cfg.data.oncall.servicenow.username}
+                    />
+                    <KV
+                      k="Table"
+                      v={cfg.data.oncall.servicenow.table || "incident"}
+                    />
+                    <KV
+                      k="Other instance keys"
+                      v={
+                        cfg.data.oncall.servicenow.other_instance_keys.length === 0
+                          ? "—"
+                          : cfg.data.oncall.servicenow.other_instance_keys.join(", ")
+                      }
+                    />
+                  </Grid>
+                </SubCard>
+
+                <SubCard title="incident.io">
+                  <Grid>
+                    <SecretField
+                      k="API key"
+                      configured={!!cfg.data.oncall.incident_io.api_key}
+                    />
+                    <SecretField
+                      k="Alert source config ID"
+                      configured={!!cfg.data.oncall.incident_io.alert_source_config_id}
+                    />
+                    <KV
+                      k="Other alert source keys"
+                      v={
+                        cfg.data.oncall.incident_io.other_alert_source_config_keys.length === 0
+                          ? "—"
+                          : cfg.data.oncall.incident_io.other_alert_source_config_keys.join(", ")
                       }
                     />
                   </Grid>

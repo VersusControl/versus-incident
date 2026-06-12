@@ -42,6 +42,7 @@ func (m *memoryProvider) WriteBlob(name string, data []byte) error {
 }
 
 func (m *memoryProvider) SaveIncident(rec *IncidentRecord) error {
+	rec.OrgID = NormalizeOrgID(rec.OrgID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, existing := range m.incidents {
@@ -103,6 +104,7 @@ func (m *memoryProvider) SaveAnalysis(rec *AnalysisRecord) error {
 	if rec == nil || rec.ID == "" {
 		return ErrNotFound
 	}
+	rec.OrgID = NormalizeOrgID(rec.OrgID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, existing := range m.analyses {

@@ -6,7 +6,7 @@ AWS On-Call is a service that helps organizations manage and respond to incident
 
 AWS Incident Manager On-Call relies on four main pieces: contacts, escalation plans, runbooks, and response plans. Let’s break them down one by one.
 
-![Versus](/docs/images/aws-icm.png)
+![Versus](../docs/images/aws-icm.png)
 
 ## 1. Contacts
 

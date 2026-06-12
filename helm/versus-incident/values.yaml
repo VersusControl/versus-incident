@@ -77,17 +77,17 @@ gatewaySecret: ""
 # Storage backend used by BOTH the agent (catalog, shadow log, detect log,
 # services, AI cache) and the incident service (history shown in the UI).
 #
-# Today only `file` is implemented end-to-end; `redis` and `database` are
-# config stubs that error at startup if selected.
+# Supported backends: file (default), postgres
+#   file     — local filesystem; suitable for single-replica deployments.
+#   postgres — durable, multi-replica ready; requires a Postgres DSN.
 storage:
-  type: file        # file | redis | database
+  type: file        # file | postgres  (env: STORAGE_TYPE)
   file:
-    dataDir: /app/data
     maxIncidents: 1000
-  # Persistence for the file backend. Required when storage.type=file and
-  # you want detect-log / pattern-catalog / incident-history to survive
-  # pod restarts. When disabled, an emptyDir is used instead (data is
-  # lost on rescheduling).
+  # Persistence for the file backend. The data path is fixed at /app/data.
+  # Required when storage.type=file and you want detect-log / pattern-catalog
+  # / incident-history to survive pod restarts. When disabled, an emptyDir is
+  # used instead (data is lost on rescheduling).
   persistence:
     enabled: false
     size: 1Gi
@@ -95,6 +95,16 @@ storage:
     accessMode: ReadWriteOnce
     # Bind to an existing PVC instead of creating a new one.
     existingClaim: ""
+
+  # -- Postgres backend (storage.type=postgres) ---------------------------
+  # Set STORAGE_TYPE=postgres and supply a DSN to activate. A single
+  # Postgres backend stores incidents, analyses, AND blobs (agent catalog,
+  # shadow log) — no separate object store is required.
+  # Example DSN: postgres://user:pass@postgres:5432/versus?sslmode=require
+  #
+  # postgres:
+  #   dsn: ""           # env: POSTGRES_DSN (preferred over inline value)
+  #   maxIncidents: 1000
 
 # AI SRE Agent (opt-in). When agent.enable=false (default) nothing
 # changes: no goroutines start, no AI calls are made, no extra config
@@ -176,6 +186,18 @@ agent:
       #    dependsOn:
       #      - database
       #      - cache
+    # find_runbook — ground the analysis in the team's own remediation docs
+    # via a read-only vector search over a runbook corpus you ingest ahead of
+    # time (search-only; never executes remediation). The tool is registered
+    # only when embeddingModel is set AND a storage backend is available.
+    # The query is scrubbed through the redactor BEFORE it is embedded; point
+    # embeddingBaseUrl at a local OpenAI-compatible server to keep embeddings
+    # inside the cluster. Place your *.md runbooks under <data>/runbooks (mount
+    # them into the pod); the server auto-ingests them at boot.
+    #
+    findRunbook:
+      embeddingModel: ""     # e.g. "text-embedding-3-small"; empty = tool omitted
+      embeddingBaseUrl: ""   # OpenAI-compatible endpoint; empty = OpenAI default
 
   # Inline signal sources. Each entry is rendered verbatim (via toYaml)
   # into agent_sources.yaml — use snake_case keys matching the Go config

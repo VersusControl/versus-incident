@@ -39,7 +39,6 @@ data:
     storage:
       type: file
       file:
-        data_dir: /app/data         # mount a PVC here (see below)
         max_incidents: 1000
 
     alert:

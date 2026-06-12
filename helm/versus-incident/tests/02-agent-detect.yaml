@@ -5,7 +5,6 @@ gatewaySecret: "test-secret-do-not-use-in-prod"
 storage:
   type: file
   file:
-    dataDir: /app/data
     maxIncidents: 1000
   persistence:
     enabled: true

@@ -8,9 +8,15 @@
   <a href="https://github.com/sponsors/versuscontrol"><img src="https://img.shields.io/badge/sponsor-%E2%9D%A4-ff69b4" alt="Sponsor"></a>
 </p>
 
-Versus is an open-source **incident management tool** built with an **AI SRE agent**. The agent watches your logs, learns what *normal* looks like, and automatically opens an incident the moment something new and unexpected appears — with no alert rules to write.
+<p align="center">
+  <strong>Versus Incident is the self-hosted AI SRE agent.</strong> It learns what your logs
+  normally look like and escalates only what is new or unexpected issues — routing to your chat channels and
+  on-call platform.
+</p>
 
-It also accepts incidents from any webhook-capable tool (Alertmanager, Grafana, Sentry, CloudWatch, FluentBit). Versus supports **multi-channel notifications** to Slack, Microsoft Teams, Telegram, Viber, Email, and Lark with templates you fully control, plus **on-call escalation** to AWS Incident Manager or PagerDuty when an incident goes unacknowledged.
+<p align="center">
+  Free with MIT license · <a href="./compare/datadog-watchdog.md">Compare</a>
+</p>
 
 ![Versus](docs/images/versus-dashboard-01.png)
 
@@ -31,7 +37,7 @@ Whichever source raises it, an incident is templated, fanned out to every channe
 - 📝 **Custom Templates**: Define your own alert messages using Go templates
 - 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
 - 📡 **REST API**: Simple HTTP interface to receive alerts
-- 📞 **On-Call**: On-Call integrations with AWS Incident Manager and PagerDuty
+- 📞 **On-Call**: On-Call integrations (PagerDuty, Opsgenie, incident.io, ServiceNow)
 
 ![versus](docs/images/versus-architecture.png)
 

@@ -40,7 +40,6 @@ redis:
 storage:
   type: file
   file:
-    data_dir: /app/data
     max_incidents: 1000
 
 agent:

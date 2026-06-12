@@ -30,11 +30,19 @@ func NewIncidentAdminController() *IncidentAdminController {
 // Register attaches the admin endpoints under /api/admin/incidents.
 //
 //	GET  /api/admin/incidents              list (newest first; ?limit=NN)
+//	GET  /api/admin/incidents/search       full-text search (?q=&limit=NN)
 //	GET  /api/admin/incidents/:id          single record
 //	POST /api/admin/incidents/:id/resolve  mark resolved (idempotent)
 func (i *IncidentAdminController) Register(router fiber.Router) {
+	// Capabilities probe — lets the UI enable/disable search depending on
+	// whether the active storage backend implements storage.Searcher.
+	router.Group("/admin/capabilities", i.authMiddleware).Get("/", i.capabilities)
+
 	g := router.Group("/admin/incidents", i.authMiddleware)
 	g.Get("/", i.list)
+	// /search MUST be registered before /:id so the literal path is not
+	// swallowed by the :id parameter route.
+	g.Get("/search", i.search)
 	g.Get("/:id", i.get)
 	g.Post("/:id/resolve", i.resolve)
 	g.Post("/:id/analyze", i.analyze)
@@ -77,6 +85,49 @@ func (i *IncidentAdminController) list(c *fiber.Ctx) error {
 	}
 	// Strip the (potentially large) Content blob from list responses;
 	// the UI fetches the detail endpoint to see it.
+	out := make([]fiber.Map, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, summarize(r))
+	}
+	return c.JSON(fiber.Map{"incidents": out})
+}
+
+// capabilities reports which optional storage features the running
+// backend supports, so the UI can hide controls that would 501. Today the
+// only flag is full-text search (storage.Searcher), implemented by the
+// Postgres backend; memory/file backends report false.
+func (i *IncidentAdminController) capabilities(c *fiber.Ctx) error {
+	store := services.Storage()
+	_, searchable := store.(storage.Searcher)
+	return c.JSON(fiber.Map{"search": searchable})
+}
+
+// search runs server-side full-text search over stored incidents using
+// the optional storage.Searcher capability. Backends that do not
+// implement it (memory, file) return 501 so the UI can fall back to its
+// in-page client-side filter.
+func (i *IncidentAdminController) search(c *fiber.Ctx) error {
+	store := services.Storage()
+	if store == nil {
+		return c.JSON(fiber.Map{"incidents": []any{}})
+	}
+	searcher, ok := store.(storage.Searcher)
+	if !ok {
+		return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{
+			"error":  "search not supported by the configured storage backend",
+			"search": false,
+		})
+	}
+	limit := 0
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	recs, err := searcher.SearchIncidents(c.Query("q"), limit)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
 	out := make([]fiber.Map, 0, len(recs))
 	for _, r := range recs {
 		out = append(out, summarize(r))
@@ -197,6 +248,7 @@ func (i *IncidentAdminController) analyze(c *fiber.Ctx) error {
 
 	analysis := &storage.AnalysisRecord{
 		ID:          uuid.NewString(),
+		OrgID:       rec.OrgID,
 		IncidentID:  rec.ID,
 		RequestedAt: startedAt,
 		RequestedBy: body.RequestedBy,

@@ -11,7 +11,7 @@ for the rest of its features. Everything lives under the top-level
 > **Reminder.** The agent is **off by default** (`agent.enable: false`).
 > Nothing about the agent runs until that flag flips.
 
-## Top-level keys
+## Top Level
 
 ```yaml
 # Root-level (NOT under agent:)
@@ -19,7 +19,6 @@ gateway_secret: ${GATEWAY_SECRET}     # shared secret for ALL admin endpoints
 storage:
   type: file                          # file | redis | database
   file:
-    data_dir: ./data                  # patterns.json + shadow.json + incidents.json live here
     max_incidents: 1000
 
 agent:
@@ -39,8 +38,9 @@ agent:
 > storage backend live at the root of the config**, not under `agent:`.
 > One secret protects every admin endpoint (`/api/admin/*` and
 > `/api/agent/*`); one storage block is shared by the agent's catalog,
-> the shadow log, and the incident history shown in the UI. The agent's
-> previous `data_dir` field has been removed.
+> the shadow log, and the incident history shown in the UI. The file
+> backend writes to the fixed `./data` directory (`/app/data` in the
+> container image).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -51,7 +51,7 @@ agent:
 | `batch_max` | int | `1000` | Safety cap on signals processed per tick per source. |
 | `signal_max_bytes` | int | `8192` | Truncates a single signal's `Raw` payload above this size. |
 
-### Modes
+## Modes
 
 | Mode | What it does | When to use |
 |---|---|---|
@@ -59,13 +59,12 @@ agent:
 | `shadow` | Same as training, but logs `agent[shadow]: would alert …` for any signal it would have alerted on. | A release cycle of review before going live. |
 | `detect` | Treats unknown / spiking patterns as anomalies, asks the AI SRE to triage them, and emits a real incident through every configured channel. | Production, after you trust the catalog. |
 
-### Environment overrides
+## Environment overrides
 
 | Env var | Maps to |
 |---|---|
 | `GATEWAY_SECRET` | `gateway_secret` (root) |
 | `STORAGE_TYPE` | `storage.type` |
-| `STORAGE_FILE_DATA_DIR` | `storage.file.data_dir` |
 | `AGENT_ENABLE` | `agent.enable` |
 | `AGENT_MODE` | `agent.mode` |
 | `AGENT_NEW_SERVICE_GRACE` | `agent.new_service_grace` |
@@ -74,7 +73,27 @@ agent:
 | `AGENT_AI_API_KEY` | `agent.ai.api_key` |
 | `AGENT_AI_MODEL` | `agent.ai.model` |
 
-## `redaction`
+## Miner
+
+Drain-style log clusterer. The defaults work for most setups; tune only
+if you see related lines failing to merge into one template (lower
+`similarity_threshold`) or unrelated lines collapsing together (raise
+it). See [Miner](./miner.md).
+
+```yaml
+miner:
+  similarity_threshold: 0.4
+  tree_depth: 4
+  max_children: 100
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `similarity_threshold` | float (0–1) | `0.4` | Token-overlap ratio required to consider two messages part of the same template. |
+| `tree_depth` | int | `4` | Depth of the prefix tree used to bucket templates by length and leading tokens. |
+| `max_children` | int | `100` | Per-node fan-out cap to keep the tree bounded. |
+
+## Redaction
 
 Pattern-based scrubbing of secrets and PII before any other component
 sees them. Always enable this in production. See [Redaction](./redaction.md)
@@ -95,7 +114,7 @@ redaction:
 | `redact_ips` | bool | `false` | Opt-in IPv4/IPv6 redaction. Off by default because IPs are usually useful context. |
 | `extra_patterns` | string list | `[]` | Additional Go regexes. Invalid patterns are skipped (logged at startup), so one typo can't disable redaction. |
 
-## `catalog`
+## Catalog
 
 Long-term storage for learned patterns. See [Catalog](./catalog.md) for
 the schema and admin workflows.
@@ -108,35 +127,15 @@ catalog:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `persist_interval` | duration | `30s` | How often the in-memory catalog is flushed to `<storage.file.data_dir>/patterns.json`. |
+| `persist_interval` | duration | `30s` | How often the in-memory catalog is flushed to `data/patterns.json`. |
 | `auto_promote_after` | int | `100` | A pattern seen this many times in `detect` mode is treated as known (won't alert). `0` disables the promotion. |
 
 The storage backend itself is selected at the **root** of `config.yaml`
 (`storage.type`), not here. The on-disk filename is fixed
-(`patterns.json`); the only configurable part is the storage `data_dir`
-(root-level `storage.file.data_dir`).
+(`patterns.json`), written to the fixed `./data` directory
+(`/app/data` in the container image).
 
-## `miner`
-
-Drain-style log clusterer. The defaults work for most setups; tune only
-if you see related lines failing to merge into one template (lower
-`similarity_threshold`) or unrelated lines collapsing together (raise
-it). See [Miner](./miner.md).
-
-```yaml
-miner:
-  similarity_threshold: 0.4
-  tree_depth: 4
-  max_children: 100
-```
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `similarity_threshold` | float (0–1) | `0.4` | Token-overlap ratio required to consider two messages part of the same template. |
-| `tree_depth` | int | `4` | Depth of the prefix tree used to bucket templates by length and leading tokens. |
-| `max_children` | int | `100` | Per-node fan-out cap to keep the tree bounded. |
-
-## `regex`
+## Regex
 
 Pre-filter and tagger. Only signals whose message matches at least one
 rule (named or default) are forwarded to the miner — everything else is
@@ -203,7 +202,7 @@ dedicated [Data Sources](./data-sources.md) guide:
 - [Loki](./data-sources/loki.md)
 - [CloudWatch Logs](./data-sources/cloudwatch-logs.md)
 
-### `max_lines_per_pull` vs `agent.batch_max`
+**`max_lines_per_pull` vs `agent.batch_max`**
 
 These two caps look similar but live at different layers and protect
 against different things. Both apply on every tick, in this order:
@@ -222,7 +221,7 @@ The practical rule: keep `max_lines_per_pull ≤ agent.batch_max`. If you
 flip them around, the worker's hard truncation kicks in and you lose
 signals on every tick.
 
-#### Worked example
+### Worked example
 
 Suppose you have a 50,000-line backlog, `poll_interval: 30s`,
 `max_lines_per_pull: 1000`, and `agent.batch_max: 1000`:
@@ -259,7 +258,7 @@ The cursor jumps 5,000 lines forward on every tick but only 1,000 are
 actually mined — the other 4,000 are silently discarded. Always raise
 the two caps together.
 
-## `ai`
+## AI
 
 The `agent.ai` block powers both the **detect** triage call and the
 on-demand **analyze** investigation. Shared keys apply to both; the
@@ -307,7 +306,7 @@ temperature at `1` and reject any explicit value.
 > when at least one git repository is configured in `tools.yaml`
 > (`tools.recent_changes.git.repos`).
 
-### Per-tool config (`tools.yaml`)
+### Per-tool config
 
 Some analyze tools read external data. That **data** configuration lives
 in an optional `tools.yaml` file sitting next to your main config — it is
@@ -349,7 +348,7 @@ tools:
 | `tool_timeout` | duration | `20s` | Per-tool dispatch cap. Empty, `0`, or an unparseable value inherits the `20s` default. A timeout surfaces as a tool error in the analysis trail, never a hard failure. |
 | `parallel_tools` | bool | `false` | When the model emits several tool calls in one turn, run them concurrently instead of sequentially. The audit trail stays deterministically ordered either way. |
 
-### Service-dependency graph (`describe_dependencies`)
+### Service-dependency graph
 
 The `describe_dependencies` tool returns, for a given service, its
 upstream and downstream neighbours, each flagged with whether that
@@ -361,7 +360,7 @@ cascading failures. Author the graph under
 (`depended_on_by`, downstream consumers) are derived automatically. An
 empty `services` list leaves the tool unregistered.
 
-### Change feed source (`recent_changes`)
+### Change feed source
 
 The `recent_changes` tool reads one or more **remote git repositories'
 commit histories** — the deploy/change record most teams already keep —
@@ -398,7 +397,7 @@ query window maps to a change record:
 A missing window or no commits is a clean "nothing found", so the analysis
 proceeds without it.
 
-#### Worked example
+### Worked example
 
 A production setup using a cheap model for high-volume detect triage and
 a stronger model with bounded, concurrent tool calls for deep dives:

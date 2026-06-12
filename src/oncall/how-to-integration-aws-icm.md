@@ -286,7 +286,7 @@ This triggers the response plan immediately without waiting.
 
 Result
 
-![Versus On-Call Result](/docs/images/on-call-result.png)
+![Versus On-Call Result](../docs/images/on-call-result.png)
 
 ## Conclusion
 

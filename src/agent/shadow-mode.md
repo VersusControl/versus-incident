@@ -25,8 +25,8 @@ docker run -d \
 
 Or change `agent.mode` in `config.yaml` and restart.
 
-The catalog and the shadow log live next to each other under the
-storage backend's `data_dir` (root-level `storage.file.data_dir`):
+The catalog and the shadow log live next to each other in the file
+backend's fixed `./data` directory (`/app/data` in the container image):
 
 ```
 data/
@@ -41,7 +41,7 @@ filter → group → save) and adds **one extra step at the end**:
 look at the result and, if it isn't already known, write a row to
 `shadow.json`.
 
-![AI Agent](/docs/images/shadow-mode.png)
+![AI Agent](../docs/images/shadow-mode.png)
 
 Three things to remember:
 

@@ -33,6 +33,44 @@ type ToolsConfig struct {
 	RecentChanges RecentChangesToolConfig `mapstructure:"recent_changes"`
 	// DescribeDependencies configures the `describe_dependencies` tool.
 	DescribeDependencies DescribeDependenciesToolConfig `mapstructure:"describe_dependencies"`
+	// FindRunbook configures the `find_runbook` runbook-RAG tool.
+	FindRunbook FindRunbookToolConfig `mapstructure:"find_runbook"`
+}
+
+// FindRunbookToolConfig configures the read-only `find_runbook`
+// runbook-RAG tool. The tool is opt-in: it is registered only when an
+// embedding model is configured (and a runbook corpus exists). An empty
+// `EmbeddingModel` leaves the tool unregistered, so a community install
+// behaves exactly as before.
+//
+// The runbook corpus directory lives in the data folder under `runbooks/`
+// (`./data/runbooks`; `/app/data/runbooks` in the container image); place
+// your `*.md` runbooks there. The server auto-ingests them at boot
+// (incrementally — only new or edited runbooks are embedded), so no
+// separate step is needed.
+//
+// Example (tools.yaml):
+//
+//	tools:
+//	  find_runbook:
+//	    embedding_model: text-embedding-3-small
+//	    embedding_base_url: ${EMBEDDING_BASE_URL}  # empty = OpenAI default;
+//	                                               # point at Ollama/vLLM/LocalAI
+//
+// The embeddings endpoint reuses the shared AI credential (`agent.ai.api_key`):
+// there is no separate embedding key to manage. A local OpenAI-compatible
+// server that does not authenticate ignores the bearer token.
+type FindRunbookToolConfig struct {
+	// EmbeddingModel is the embedding model id, e.g.
+	// "text-embedding-3-small". Required to register the tool; empty
+	// leaves find_runbook unregistered.
+	EmbeddingModel string `mapstructure:"embedding_model"`
+	// EmbeddingBaseURL overrides the OpenAI default endpoint. Empty uses
+	// https://api.openai.com/v1; set it to a local OpenAI-compatible
+	// server (Ollama / vLLM / LocalAI) to keep embeddings inside your own
+	// network. The embeddings call authenticates with the shared AI
+	// credential (`agent.ai.api_key`) — there is no separate embedding key.
+	EmbeddingBaseURL string `mapstructure:"embedding_base_url"`
 }
 
 // DescribeDependenciesToolConfig configures the `describe_dependencies`

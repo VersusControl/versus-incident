@@ -81,8 +81,7 @@ alert:
 | `config.publicHost` | Public URL for acknowledgment links | `""` |
 | `gatewaySecret` | Shared secret for `/api/admin/*` and `/api/agent/*`. Empty value leaves admin routes unregistered. | `""` |
 | `storage.type` | Storage backend (only `file` is implemented today) | `"file"` |
-| `storage.file.dataDir` | Directory for incidents, pattern catalog, detect log | `"/app/data"` |
-| `storage.persistence.enabled` | Mount a PVC at `storage.file.dataDir` | `false` |
+| `storage.persistence.enabled` | Mount a PVC at the fixed `/app/data` path | `false` |
 | `agent.enable` | Enable the AI SRE Agent | `false` |
 | `agent.mode` | `training`, `shadow`, or `detect` | `"training"` |
 | `agent.ai.enable` | Forward unknown / spike patterns to the LLM | `false` |
@@ -294,11 +293,11 @@ gatewaySecret: "my-strong-secret"
 storage:
   type: file                  # only `file` is implemented today
   file:
-    dataDir: /app/data        # holds incidents.json, patterns.json, etc.
     maxIncidents: 1000        # rolling cap
 
   # Persist the data dir so incident history and the agent catalog
-  # survive pod restarts. When disabled an emptyDir is used.
+  # survive pod restarts. The data path is fixed at /app/data. When
+  # disabled an emptyDir is used.
   persistence:
     enabled: true
     size: 2Gi
@@ -332,8 +331,6 @@ gatewaySecret: "my-strong-secret"
 
 storage:
   type: file
-  file:
-    dataDir: /app/data
   persistence:
     enabled: true
     size: 2Gi

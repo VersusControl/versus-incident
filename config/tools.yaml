@@ -79,3 +79,32 @@ tools:
     #      - database
     #      - queue
 
+  # -------------------------------------------------------------------------
+  # find_runbook — ground the analysis in the team's own remediation docs
+  # -------------------------------------------------------------------------
+  # The find_runbook tool runs a read-only vector search over a corpus of
+  # Markdown runbooks you ingest ahead of time. During an investigation it
+  # embeds a (redacted) query, finds the most similar runbook excerpts, and
+  # returns them so the model can cite your team's real remediation steps.
+  # It is SEARCH-ONLY: it never executes any remediation.
+  #
+  # Two-step setup:
+  #   1. Configure the embedding model below.
+  #   2. Place your `*.md` runbooks in the data folder under `runbooks/`
+  #      (./data/runbooks; /app/data/runbooks in the container image).
+  #      The server auto-ingests them at boot — it scans `*.md` files,
+  #      embeds new or edited ones, and persists the vectors.
+  #
+  # The tool is registered ONLY when embedding_model is set AND a storage
+  # backend is available. With no embedding_model the tool is omitted and
+  # analyses proceed without runbook grounding (community default).
+  #
+  # SECURITY: embedding a query is an external trust boundary, identical to
+  # the chat-completion call. The query is scrubbed through the same redactor
+  # (redaction.* in config.yaml) BEFORE it is embedded. To keep embeddings
+  # fully inside your own network, point embedding_base_url at a local
+  # OpenAI-compatible server (Ollama / vLLM / LocalAI) — no code change.
+  find_runbook:
+    embedding_model: ""      # e.g. "text-embedding-3-small"; empty = tool omitted
+    embedding_base_url: ""   # OpenAI-compatible endpoint; empty = OpenAI default. Point at a local server to keep embeddings in your own network
+

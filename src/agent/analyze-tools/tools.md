@@ -60,10 +60,11 @@ incident fired?"*
 
 Two tools read **external** data and require a config block:
 
-| Tool | Config block | Purpose |
-|---|---|---|
-| `describe_dependencies` | `tools.describe_dependencies.services` | Service-dependency graph |
-| `recent_changes` | `tools.recent_changes.git` | Remote git commit history feed |
+| Tool | Config block | Purpose | Detailed guide |
+|---|---|---|---|
+| `describe_dependencies` | `tools.describe_dependencies.services` | Service-dependency graph | *(below)* |
+| `recent_changes` | `tools.recent_changes.git` | Remote git commit history feed | [recent_changes](agent/analyze-tools/recent-changes.md) |
+| `find_runbook` | `tools.find_runbook` | Runbook-RAG vector search over your remediation docs | [find_runbook](agent/analyze-tools/find-runbook.md) |
 
 That configuration lives in an optional **`tools.yaml`** file placed next
 to your main `config.yaml`. The root of `tools.yaml` also carries two shared tool-loop knobs that
@@ -107,43 +108,57 @@ tools:
 
 ### `recent_changes`
 
-This tool reads commit histories from your deploy
-repositories so the AI can correlate an incident with a recent deploy or
-config change. Example: a spike in errors appeared 5 minutes after a
-commit "migrate users table" landed in the `api` repo — the AI can flag
-that deploy as the probable trigger.
+This tool reads commit histories from your deploy repositories so the AI
+can correlate an incident with a recent deploy or config change. Example:
+a spike in errors appeared 5 minutes after a commit "migrate users table"
+landed in the `api` repo — the AI can flag that deploy as the probable
+trigger.
 
-List the repositories under `tools.recent_changes.git.repos`. Each entry
-has a remote `url` (https or scp-like `git@host:org/repo`), an optional
-`branch`, and an optional `service` (auto-detected from the repo name
-when omitted). With an empty `repos` list the tool is not registered.
-
-**Authentication** — private remotes authenticate via an optional `auth`
-block. A global `git.auth` default applies to every repo; any repo may
-override it field-by-field. Empty fields fall back to the global default;
-both empty = ambient credentials.
-
-| Auth field | Mechanism | Notes |
-|---|---|---|
-| `token` | HTTPS Basic auth (`x-access-token` + token) | Never persisted to the local mirror |
-| `ssh_key_path` | Native SSH key authentication | Must be readable by the container user |
+Configure your repositories under `tools.recent_changes.git.repos`. With
+an empty `repos` list the tool is not registered.
 
 ```yaml
 tools:
   recent_changes:
     git:
-      auth:                       # global default auth (optional)
-        token: ${GIT_TOKEN}         # HTTPS PAT
-        ssh_key_path: ""            # SSH key path
       repos:
         - url: https://github.com/acme/api.git
           branch: main
           service: api
-        - url: git@github.com:acme/web.git
-          service: web
-          auth:                   # per-repo override
-            ssh_key_path: /keys/web_deploy
 ```
+
+> **See the full guide:** [`recent_changes` Tool](agent/analyze-tools/recent-changes.md)
+> covers arguments, the change-record shape, authentication (HTTPS tokens
+> and SSH keys), failure behavior, and a Docker example.
+
+### `find_runbook`
+
+This tool grounds the analysis in **your team's own runbooks**. During an
+investigation it embeds a short query derived from the incident, runs a
+top-K similarity search over a corpus of Markdown runbooks the server
+ingests for you, and returns the best-matching excerpts so the model can
+cite real remediation steps instead of inventing them. It is
+**search-only** — it never executes any remediation, triggers on-call, or
+sends a notification.
+
+The tool registers only when an embedding model is configured **and** a
+storage backend is available, so the default community build is
+unaffected.
+
+```yaml
+tools:
+  find_runbook:
+    embedding_model: text-embedding-3-small
+    embedding_base_url: ""     # empty = OpenAI default; set a local server to keep embeddings in-network
+```
+
+Then place your `*.md` runbooks in the data folder under `runbooks/`
+(`./data/runbooks`). The server auto-ingests them at boot.
+
+> **See the full guide:** [`find_runbook` Tool](agent/analyze-tools/find-runbook.md)
+> covers arguments, runbook front-matter, the security/redaction posture,
+> pre-baking the corpus with `runbook-ingest`, and managing runbooks from
+> the admin UI.
 
 ## Complete `tools.yaml` example
 
@@ -178,6 +193,10 @@ tools:
         depends_on: [database, cache]
       - name: worker
         depends_on: [database, queue]
+
+  find_runbook:
+    embedding_model: text-embedding-3-small
+    embedding_base_url: ""
 ```
 
 ## Running with Docker

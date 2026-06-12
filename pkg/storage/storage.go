@@ -36,6 +36,32 @@ var ErrNotFound = errors.New("storage: not found")
 // ErrUnsupported is returned by the redis/database stub backends.
 var ErrUnsupported = errors.New("storage: backend not implemented")
 
+// DefaultDataDir is the application's persistent data directory. The
+// `file` storage backend persists its JSON here (incidents, pattern
+// catalog, shadow/detect logs, AI cache, runbook corpus); on-disk assets
+// that are independent of the configured storage backend also live here,
+// such as the runbook source files under runbooks/. It is relative to the
+// process working directory; in the container image (WORKDIR /app) it
+// resolves to /app/data.
+const DefaultDataDir = "data"
+
+// DefaultOrgID is the org every record carries when no explicit
+// organization is supplied. Single-tenant OSS deployments never set an
+// org, so every persisted record transparently belongs to "default" and
+// no behaviour changes. Multi-tenant scoping (enterprise) overrides this
+// per request via the org-injection seam (pkg/middleware).
+const DefaultOrgID = "default"
+
+// NormalizeOrgID returns a non-empty org id, falling back to
+// DefaultOrgID when s is blank. Backends call this on the persistence
+// path so a record is never stored with an empty OrgID.
+func NormalizeOrgID(s string) string {
+	if s == "" {
+		return DefaultOrgID
+	}
+	return s
+}
+
 // Provider is the storage interface used by the agent and incident
 // service.
 type Provider interface {
@@ -81,11 +107,33 @@ type Provider interface {
 	Close() error
 }
 
+// Searcher is an optional capability a backend may implement on top of
+// Provider. It exposes full-text-style search over incidents and
+// analyses. Backends that cannot search efficiently (memory, file) do
+// not implement it; callers type-assert and fall back to ListIncidents
+// when the assertion fails. The Postgres backend implements it.
+type Searcher interface {
+	// SearchIncidents returns incidents whose title, service, source,
+	// or JSON body match the case-insensitive query, newest first.
+	// An empty query returns the most recent incidents (same as
+	// ListIncidents). limit <= 0 returns the full window.
+	SearchIncidents(query string, limit int) ([]*IncidentRecord, error)
+	// SearchAnalyses returns analyses whose JSON body matches the
+	// case-insensitive query, newest first. limit <= 0 returns the
+	// full window.
+	SearchAnalyses(query string, limit int) ([]*AnalysisRecord, error)
+}
+
 // IncidentRecord is the durable shape of an incident. It mirrors the
 // runtime models.Incident plus the audit fields the UI needs (when it
 // happened, who got notified, was it acked, raw payload for debugging).
 type IncidentRecord struct {
-	ID       string `json:"id"`
+	ID string `json:"id"`
+	// OrgID scopes the record to one organization. Defaults to
+	// storage.DefaultOrgID ("default") so single-tenant OSS users never
+	// see or set it; enterprise multi-tenant routing reads it to isolate
+	// orgs.
+	OrgID    string `json:"org_id,omitempty"`
 	TeamID   string `json:"team_id,omitempty"`
 	Title    string `json:"title,omitempty"`
 	Source   string `json:"source,omitempty"`  // "webhook" | "sns" | "sqs" | ...
@@ -124,7 +172,10 @@ type IncidentRecord struct {
 // admin /analyze endpoint creates one per request; the UI lists them
 // per incident.
 type AnalysisRecord struct {
-	ID          string    `json:"id"`
+	ID string `json:"id"`
+	// OrgID scopes the analysis to one organization. Defaults to
+	// storage.DefaultOrgID ("default"); see IncidentRecord.OrgID.
+	OrgID       string    `json:"org_id,omitempty"`
 	IncidentID  string    `json:"incident_id"`
 	RequestedAt time.Time `json:"requested_at"`
 	RequestedBy string    `json:"requested_by,omitempty"`

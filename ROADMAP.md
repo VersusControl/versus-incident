@@ -6,6 +6,58 @@ see [GitHub Project](https://github.com/orgs/VersusControl/projects/2).
 
 ---
 
+## Public roadmap board
+
+Planning happens in the open. The canonical, interactive view of the roadmap is
+the public GitHub Project board **"Versus Incident Roadmap"**
+([github.com/orgs/VersusControl/projects/2](https://github.com/orgs/VersusControl/projects/2)).
+This file is the human-readable mirror; the board is the live tracker.
+
+### Columns
+
+The board is a single GitHub Project (board layout) with these status columns,
+mirroring the structure of this document:
+
+| Column | Meaning |
+|---|---|
+| **Backlog** | Captured ideas and community requests not yet committed to a phase. Maps to the "Future phases" items below. |
+| **Planned** | Committed to a named release scope (e.g. `v1.4.x`). Maps to the "Planned" sections. |
+| **In Progress** | Actively being built in the current release. |
+| **In Review** | PR open, under maintainer review. |
+| **Shipped** | Merged and released. Maps to the "Shipped" sections. |
+
+### What becomes a tracked issue
+
+Every **release-scope line item** in the "Planned" and "Future phases" sections
+of this document is mirrored as a GitHub issue and placed on the board:
+
+- One issue per roadmap line item (e.g. *"Prometheus signal source"*, *"Loki log
+  source"*, *"Runbook RAG: `find_runbook` tool"*).
+- Phase-level epics (Phase 3 Metrics & traces, Phase 4 Cross-signal correlation,
+  Phase 5 Runbook RAG, Phase 6 Suggested remediation, Phase 7 Multi-LLM) are
+  tracked as **milestones**; their line items are the issues filed against them.
+- Each issue carries labels for **phase** (`phase-3` … `phase-7`, `platform`),
+  **type** (`signal-source`, `channel`, `agent`, `infra`), and **size**.
+- Community-requested items enter as **Backlog** issues and only move to
+  **Planned** once a maintainer assigns them to a release scope.
+
+### Process
+
+1. A roadmap item is filed as an issue and lands in **Backlog**.
+2. When committed to a release, a maintainer assigns the milestone and moves it
+   to **Planned**.
+3. Work progresses **In Progress → In Review → Shipped** as the PR moves.
+4. When an item ships, its checkbox in this file is ticked and it moves into the
+   relevant "Shipped (v1.x)" section. This file and the board are reconciled at
+   each release cut.
+5. Anyone can influence ordering — see [How to influence the roadmap](#how-to-influence-the-roadmap).
+
+> **Open-core note:** Everything on this public board is OSS (MIT). Enterprise
+> tier capabilities are *not* tracked here and are never migrated out of this
+> board — see the open-core commitment in [GOVERNANCE.md](GOVERNANCE.md).
+
+---
+
 ## Shipped (v1.x)
 
 ### Multi-channel alerting

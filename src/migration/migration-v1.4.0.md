@@ -22,7 +22,7 @@ could not emit incidents from AI verdicts. In v1.4.0, switching
    workflow trigger unchanged**. No new fan-out logic.
 
 Every AI call is also persisted to a bounded audit log
-(`<storage.data_dir>/detect.json`, capped at 500 events) and viewable
+(`data/detect.json`, capped at 500 events) and viewable
 in the UI under **Agent → Detect**.
 
 See the new guide: [AI Detect Mode](../agent/ai-detect-mode.md).
@@ -154,7 +154,6 @@ gatewaySecret: ""
 storage:
   type: file
   file:
-    dataDir: /app/data
     maxIncidents: 1000
   persistence:
     enabled: false

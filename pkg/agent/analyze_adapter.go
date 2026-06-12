@@ -8,6 +8,7 @@ import (
 	analyzetools "github.com/VersusControl/versus-incident/pkg/agent/ai/analyze/tools"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/runbook/vectorindex"
 )
 
 // signalReaderAdapter wraps a set of core.SignalSource instances so they
@@ -148,6 +149,45 @@ func buildDependencyGraph(nodes []config.ServiceDependency) *analyzetools.Depend
 		return nil
 	}
 	return analyzetools.NewDependencyGraph(dependsOn)
+}
+
+// runbookSearcherAdapter wraps a read-only vector index
+// (vectorindex.Index) so it satisfies analyzetools.RunbookSearcher
+// without leaking pkg/runbook (the ingestion/write path) into the tools
+// package. This keeps the import graph one-way (pkg/agent -> tools) and
+// the analyze read-only guard green: the tool only ever sees a search
+// seam, never the write path. A nil index yields a nil searcher so
+// analyzetools.Default omits the find_runbook tool.
+func newRunbookSearcherAdapter(idx vectorindex.Index) analyzetools.RunbookSearcher {
+	if idx == nil {
+		return nil
+	}
+	return &runbookSearcherAdapter{idx: idx}
+}
+
+type runbookSearcherAdapter struct{ idx vectorindex.Index }
+
+// Search implements analyzetools.RunbookSearcher by delegating to the
+// vector index and converting its results into the tools-package match
+// shape. The context is accepted for interface symmetry; the in-memory
+// index does not block on it.
+func (a *runbookSearcherAdapter) Search(_ context.Context, query []float32, service string, limit int) ([]analyzetools.RunbookMatch, error) {
+	if a == nil || a.idx == nil {
+		return nil, nil
+	}
+	hits := a.idx.Search(query, service, limit)
+	out := make([]analyzetools.RunbookMatch, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, analyzetools.RunbookMatch{
+			ID:      h.ID,
+			Title:   h.Title,
+			Service: h.Service,
+			Score:   h.Score,
+			Excerpt: h.Excerpt,
+			Source:  h.Source,
+		})
+	}
+	return out, nil
 }
 
 // buildGitRepos converts the operator-authored config repo list into the

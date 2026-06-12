@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+#### AI SRE Agent — runbook RAG (`find_runbook`, Phase 3)
+- **`find_runbook` tool** (`pkg/agent/ai/analyze/tools/find_runbook.go`)
+  — read-only runbook-RAG. During an analysis it embeds a redacted query
+  and runs a top-K cosine search over the team's runbook corpus, returning
+  the best-matching excerpts so the model grounds its finding in real
+  remediation docs. Search-only: no writes, no remediation. The query is
+  scrubbed through the analyze redactor **before** the embeddings egress
+  (same trust boundary as the chat-completion call).
+- **Embedding seam** (`pkg/core.Embedder`,
+  `pkg/agent/ai/eino/embedder.go`) — `core.Embedder` leaf interface backed
+  by the same Eino/OpenAI model path as the chat model. The embeddings
+  endpoint is OpenAI-compatible, so pointing `base_url` at a local server
+  (Ollama / vLLM / LocalAI) keeps embeddings inside the operator's own
+  network with no code change.
+- **In-memory vector index** (`pkg/runbook/vectorindex`) — in-process
+  cosine top-K index (no external vector DB); `Index` interface is the seam
+  an enterprise hosted backend swaps in without forking the tool.
+- **Runbook corpus store + ingestion** (`pkg/runbook`) — blob-backed
+  corpus persisted via `storage.Provider` (every record carries an `OrgID`
+  for per-tenant scoping). The server auto-ingests the runbook source
+  directory of Markdown runbooks (optional YAML front-matter for
+  title/services/tags) at boot: it embeds new or edited runbooks and
+  persists the vectors it loads into the index. Re-ingest is incremental
+  (unchanged runbooks reuse their cached vector), so a restart with no
+  edits makes no embedding calls. The `runbook-ingest` CLI
+  (`cmd/runbook-ingest`) remains for out-of-band pre-baking (CI / image
+  builds). The corpus directory is a fixed path under the storage data
+  folder (`./data/runbooks`; `/app/data/runbooks` in the container image).
+  The write path lives outside the analyze tools package so the read-only
+  import-graph guard stays green.
+- **`tools.find_runbook` config** (`tools.yaml`) — `embedding_model` and
+  `embedding_base_url` (the embeddings call reuses the shared
+  `agent.ai.api_key`). The tool registers only when an embedding model is
+  configured **and** a storage backend is available, so the community
+  single-tenant build is unchanged by default.
+- **Helm** — `agent.tools.findRunbook.*` values + configmap wiring.
+
+---
+
 ## [1.4.3] — 2026-05
 
 ### Added

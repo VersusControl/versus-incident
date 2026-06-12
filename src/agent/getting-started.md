@@ -3,7 +3,7 @@
 This guide takes you from nothing to a running agent in **training
 mode**, reading from a local file and saving what it learns to disk.
 
-![Training Mode](/docs/images/training-mode.png)
+![Training Mode](../docs/images/training-mode.png)
 
 By the end you'll have:
 
@@ -78,7 +78,6 @@ gateway_secret: ${GATEWAY_SECRET}      # any string you choose
 storage:
   type: file
   file:
-    data_dir: /app/data                # patterns.json + shadow.json + incidents.json live here
     max_incidents: 1000
 
 agent:
@@ -253,7 +252,8 @@ No. Training only watches. The agent learns templates and saves
 them to `patterns.json`. No Slack, no email, no on-call.
 
 **Q: Where does `patterns.json` live and what's in it?**
-At `<storage.file.data_dir>/patterns.json` (default `data/patterns.json`). Each
+At `data/patterns.json` (`/app/data/patterns.json` in the container
+image). Each
 entry is one pattern: ID, the template the agent learned, when it
 was first and last seen, how many times it has been seen, an
 average rate, the filter rule that matched it, and any labels you
@@ -286,8 +286,8 @@ Three ways, easiest first:
 
 **Q: Can I run multiple agents against the same Redis?**
 Yes, as long as the source `name`s are different (bookmark keys
-include the source name). Each agent should have its own
-`storage.file.data_dir` so they don't fight over `patterns.json`.
+include the source name). Each agent should run with its own
+working directory so they don't fight over `patterns.json`.
 
 **Q: What's the smallest config I can run with?**
 Roughly: root-level `gateway_secret=…`, `agent.enable=true`, plus

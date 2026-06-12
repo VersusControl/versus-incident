@@ -3,7 +3,7 @@
 Trigger a CloudWatch alarm when RDS CPU exceeds a threshold and fan it out to Slack and Telegram via Versus Incident.
 
 
-![Diagram](/docs/images/diagram.png)
+![Diagram](../docs/images/diagram.png)
 
 In this guide, you’ll learn how to set up a CloudWatch alarm to trigger when RDS CPU usage exceeds 80% and send an alert to Slack and Telegram.
 

@@ -3,7 +3,7 @@
 Filter `[ERROR]` lines with Fluent Bit and ship them straight to the Versus Incident REST API.
 
 
-![Diagram](/docs/images/diagram.png)
+![Diagram](../docs/images/diagram.png)
 
 Fluent Bit is a lightweight log processor and forwarder that can filter, modify, and forward logs to various destinations. In this tutorial, we will configure Fluent Bit to filter logs containing [ERROR] and send them to the Versus Incident Management System using its REST API.
 

@@ -26,7 +26,7 @@ file:
   path: /var/log/my-app/app.log    # REQUIRED. Globs are NOT supported.
   format: text                     # "text" (default) or "json"
   from_beginning: false            # true = replay whole file on first start
-  cursor_path: ""                  # default: <storage.file.data_dir>/cursors/file-<name>.cursor
+  cursor_path: ""                  # default: a ".versus-cursor-<name>" file next to the watched log file
   max_line_bytes: 65536            # truncate longer lines
   max_lines_per_pull: 1000         # cap signals per tick (paginates backlog)
 

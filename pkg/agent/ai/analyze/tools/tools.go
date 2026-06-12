@@ -96,8 +96,15 @@ type ServiceExtractor interface {
 // changes powers the recent_changes tool. When nil (no change feed
 // configured) that tool is omitted; the tool itself still treats a
 // missing or empty feed as a clean Found=false rather than an error.
-func Default(store storage.Provider, cat PatternCatalog, reader SignalReader, redactor LineRedactor, services ServiceExtractor, graph *DependencyGraph, changes ChangeFeed) []core.AnalyzeTool {
-	out := make([]core.AnalyzeTool, 0, 6)
+//
+// embedder + runbooks power the find_runbook tool. The tool is opt-in:
+// it is registered ONLY when BOTH are non-nil (an embedder is
+// configured AND a runbook index is built). A community install with no
+// runbook config leaves both nil, so the tool is omitted and behaviour
+// is unchanged. An empty (but configured) corpus still registers and
+// returns Found:false rather than an error.
+func Default(store storage.Provider, cat PatternCatalog, reader SignalReader, redactor LineRedactor, services ServiceExtractor, graph *DependencyGraph, changes ChangeFeed, embedder core.Embedder, runbooks RunbookSearcher) []core.AnalyzeTool {
+	out := make([]core.AnalyzeTool, 0, 7)
 	if store != nil {
 		out = append(out, RecentIncidents{Store: store})
 	}
@@ -113,6 +120,9 @@ func Default(store storage.Provider, cat PatternCatalog, reader SignalReader, re
 	}
 	if changes != nil {
 		out = append(out, RecentChanges{Feed: changes})
+	}
+	if embedder != nil && runbooks != nil {
+		out = append(out, FindRunbook{Embedder: embedder, Index: runbooks, Redactor: redactor})
 	}
 	return out
 }

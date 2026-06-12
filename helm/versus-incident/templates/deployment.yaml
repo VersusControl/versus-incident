@@ -45,10 +45,6 @@ spec:
             - name: STORAGE_TYPE
               value: {{ .Values.storage.type | quote }}
             {{- end }}
-            {{- if eq (.Values.storage.type | default "file") "file" }}
-            - name: STORAGE_FILE_DATA_DIR
-              value: {{ .Values.storage.file.dataDir | default "/app/data" | quote }}
-            {{- end }}
 
             {{- /* Agent (opt-in). Detect mode requires agent.ai.apiKey. */}}
             {{- if .Values.agent.enable }}
@@ -455,7 +451,7 @@ spec:
             {{- end }}
             {{- if eq (.Values.storage.type | default "file") "file" }}
             - name: data-volume
-              mountPath: {{ .Values.storage.file.dataDir | default "/app/data" }}
+              mountPath: /app/data
             {{- end }}
             {{- if .Values.templates.slack }}
             - name: config-volume

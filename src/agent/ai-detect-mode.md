@@ -2,7 +2,7 @@
 
 Detect mode leverages AI to identify and alert on new or unusual patterns in real-time. It is designed for production environments where timely detection of anomalies is critical. Before enabling detect mode, ensure that your pattern catalog is well-curated and that shadow mode has been used to validate the system's behavior.
 
-Detect mode is the **go-live** step. The agent classifies log patterns the same way it does in [shadow](./shadow-mode.md), and when something genuinely new or anomalous shows up it asks an **AI SRE** to triage it and emits a real incident. Think of it as: "shadow mode, but with a hand on the alert button — and the AI writes the page."
+Detect mode is the **go-live** step. The agent classifies log patterns the same way it does in [shadow](./shadow-mode.md), and when something new or unexpected issues or anomalous shows up it asks an **AI SRE** to triage it and emits a real incident. Think of it as: "shadow mode, but with a hand on the alert button — and the AI writes the page."
 
 ## When to Switch to Detect Mode
 
@@ -19,7 +19,7 @@ Detect mode is ideal for production environments where real-time alerts for new 
 
 The pipeline is the same as shadow mode for the first few steps:
 
-![AI Agent](/docs/images/detect-mode.png)
+![AI Agent](../docs/images/detect-mode.png)
 
 When a new or anomalous pattern reaches the detect step, the
 agent does five things in order:
@@ -120,7 +120,7 @@ Each event captures:
 Look at it through the admin UI (the **Detect** page in the
 sidebar):
 
-![AI Agent](/docs/images/ai-detect-page.png)
+![AI Agent](../docs/images/ai-detect-page.png)
 
 ## Worked example: end-to-end test
 

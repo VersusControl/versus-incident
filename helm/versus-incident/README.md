@@ -96,8 +96,7 @@ alert:
 | `config.publicHost` | Public URL for acknowledgment links | `""` |
 | `gatewaySecret` | Shared secret for `/api/admin/*` and `/api/agent/*`. Empty value leaves admin routes unregistered. | `""` |
 | `storage.type` | Storage backend (`file`, `redis`, `database`). Only `file` is implemented today. | `"file"` |
-| `storage.file.dataDir` | Directory for pattern catalog, detect log, AI cache, incident history | `"/app/data"` |
-| `storage.persistence.enabled` | Mount a PVC at `storage.file.dataDir` so agent state survives restarts | `false` |
+| `storage.persistence.enabled` | Mount a PVC at the fixed `/app/data` path so agent state survives restarts | `false` |
 | `storage.persistence.size` | PVC request size | `"1Gi"` |
 | `agent.enable` | Enable the AI SRE Agent (must run with `replicaCount: 1`) | `false` |
 | `agent.mode` | `training`, `shadow`, or `detect` | `"training"` |
@@ -111,6 +110,8 @@ alert:
 | `agent.tools.parallelTools` | Run multiple tool calls in one model turn concurrently | `false` |
 | `agent.tools.recentChanges.git.repos` | Remote git repos read by the `recent_changes` tool (empty = unregistered) | `[]` |
 | `agent.tools.describeDependencies.services` | Service-dependency graph for the `describe_dependencies` tool (empty = unregistered) | `[]` |
+| `agent.tools.findRunbook.embeddingModel` | Embedding model for the `find_runbook` runbook-RAG tool (empty = unregistered) | `""` |
+| `agent.tools.findRunbook.embeddingBaseUrl` | OpenAI-compatible embeddings endpoint (empty = OpenAI default; set to a local server to keep embeddings in-cluster) | `""` |
 | `agent.sources` | Inline list of signal sources (snake_case keys) | `[]` |
 | `alert.slack.enable` | Enable Slack notifications | `false` |
 | `alert.slack.token` | Slack bot token | `""` |
