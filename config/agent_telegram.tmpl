@@ -1,49 +1,55 @@
 {{/*
   Versus Agent — Telegram template (HTML parse_mode)
+
+  parse_mode=HTML is rendered by text/template, which does NOT auto-escape.
+  Every dynamic value is therefore piped through `escapeHTML` so miner
+  placeholders (e.g. `<*>` in .PatternTemplate) and arbitrary log text
+  cannot break Telegram's HTML parser. Static <b>/<code>/<pre> tags stay
+  literal; numeric fields (printf) need no escaping.
 */}}
 {{- $sevIcons := dict "critical" "🔴" "high" "🟠" "medium" "🟡" "low" "🟢" "info" "ℹ️" -}}
 {{- $sev := lower (or .Severity "info") -}}
 {{- $sevIcon := or (index $sevIcons $sev) "ℹ️" -}}
-<b>🤖 Versus Agent — {{ or .AlertName "AI-detected incident" }}</b>
+<b>🤖 Versus Agent — {{ escapeHTML (or .AlertName "AI-detected incident") }}</b>
 
-<b>{{ $sevIcon }} Severity:</b> {{ upper (or .Severity "INFO") }}
-<b>Service:</b> {{ or .ServiceName "_unknown" }}
+<b>{{ $sevIcon }} Severity:</b> {{ escapeHTML (upper (or .Severity "INFO")) }}
+<b>Service:</b> {{ escapeHTML (or .ServiceName "_unknown") }}
 {{- if .Source }}
-<b>Source:</b> {{ .Source }}
+<b>Source:</b> {{ escapeHTML .Source }}
 {{- end }}
 {{- if .Category }}
-<b>Category:</b> {{ .Category }}
+<b>Category:</b> {{ escapeHTML .Category }}
 {{- end }}
 {{- if .Verdict }}
-<b>Verdict:</b> {{ .Verdict }}
+<b>Verdict:</b> {{ escapeHTML .Verdict }}
 {{- end }}
 {{- if .Confidence }}
 <b>Confidence:</b> {{ printf "%.2f" .Confidence }}
 {{- end }}
 
 <b>Summary:</b>
-{{ or .Summary "(no summary)" }}
+{{ escapeHTML (or .Summary "(no summary)") }}
 
 {{- if .Frequency }}
 <b>Frequency:</b> {{ .Frequency }} (baseline {{ printf "%.2f" .Baseline }})
 {{- end }}
 {{- if .PatternID }}
-<b>Pattern:</b> <code>{{ .PatternID }}</code>
+<b>Pattern:</b> <code>{{ escapeHTML .PatternID }}</code>
 {{- end }}
 {{- if .PatternTemplate }}
-<b>Template:</b> <code>{{ .PatternTemplate }}</code>
+<b>Template:</b> <code>{{ escapeHTML .PatternTemplate }}</code>
 {{- end }}
 
 {{- if .Suggestions }}
 
 <b>Suggestions:</b>
 {{- range $i, $s := .Suggestions }}
-• {{ $s }}
+• {{ escapeHTML $s }}
 {{- end }}
 {{- end }}
 
 {{- if .Logs }}
 
 <b>Sample log:</b>
-<pre>{{ .Logs }}</pre>
+<pre>{{ escapeHTML .Logs }}</pre>
 {{- end }}

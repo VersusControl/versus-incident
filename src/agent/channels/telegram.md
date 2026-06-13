@@ -69,4 +69,10 @@ Telegram supports a MarkdownV2/HTML subset — keep formatting simple. Agent
 detections use `config/agent_telegram.tmpl` when present. See
 [Template Syntax](../../webhook/template-syntax.md) for the available fields and
 functions.
+
+> **HTML parse mode:** the agent template uses `parse_mode=HTML`, which
+> `text/template` does **not** auto-escape. Pipe any dynamic value through
+> the `escapeHTML` function (e.g. `<code>{{ escapeHTML .PatternTemplate }}</code>`)
+> so log text or miner placeholders like `<*>` cannot break Telegram's HTML
+> parser. Static tags such as `<b>`/`<code>`/`<pre>` stay literal.
 </content>
