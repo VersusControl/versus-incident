@@ -57,6 +57,7 @@ agent:
   ai:
     enable: true                       # opt in to live AI calls
     api_key: ${AGENT_AI_API_KEY}       # OpenAI-compatible bearer key
+    base_url: ${AGENT_AI_BASE_URL}     # optional: any OpenAI-compatible endpoint
     model: gpt-4o-mini                 # any chat-completions model
     temperature: 0.2
     max_tokens: 800
@@ -74,13 +75,28 @@ Every field is overridable by env var:
 |---|---|
 | `AGENT_AI_ENABLE` | `agent.ai.enable` |
 | `AGENT_AI_API_KEY` | `agent.ai.api_key` |
+| `AGENT_AI_BASE_URL` | `agent.ai.base_url` |
 | `AGENT_AI_MODEL` | `agent.ai.model` |
 
-The chat endpoint is hard-coded to
-`https://api.openai.com/v1/chat/completions`. If you point
-`AGENT_AI_API_KEY` at an OpenAI-compatible provider (Azure
-OpenAI, vLLM proxy, etc.), set `model` to a name your provider
-accepts.
+### Bring your own LLM (`base_url`)
+
+`base_url` points both the detect and analyze agents at any
+OpenAI-compatible chat-completions endpoint. Leave it empty to use the
+OpenAI default (`https://api.openai.com/v1`); set it to keep inference
+inside your own network:
+
+```yaml
+agent:
+  ai:
+    base_url: "http://ollama:11434/v1"   # Ollama / vLLM / LocalAI
+    model: "llama3.1"
+```
+
+Common targets: a local **Ollama** / **vLLM** / **LocalAI** server, an
+LLM gateway in front of **AWS Bedrock**, or Gemini's OpenAI-compatible
+endpoint. Set `model` to a name your provider accepts. The analyze agent
+can override the endpoint independently via `agent.ai.analyze.base_url`
+(e.g. a stronger model behind a different gateway).
 
 You almost always want a small **new-service grace** so the agent
 doesn't page on the first signal from a freshly-deployed

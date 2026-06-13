@@ -60,6 +60,7 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	detectCfg := cfg.AI.Resolve(cfg.AI.Detect)
 	detectAgent, err := detect.New(context.Background(), detectCfg, detect.Options{
 		HTTPClient: httpClient,
+		BaseURL:    detectCfg.BaseURL,
 	})
 	if err != nil {
 		log.Printf("agent: detect agent disabled: %v", err)
@@ -77,7 +78,10 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	var analyzeRate *ai.RateLimiter
 	var runbookMgr *runbook.Manager
 	{
-		analyzeBaseCfg := cfg.AI.Resolve(config.AgentAITaskConfig{Model: cfg.AI.Analyze.Model})
+		analyzeBaseCfg := cfg.AI.Resolve(config.AgentAITaskConfig{
+			Model:   cfg.AI.Analyze.Model,
+			BaseURL: cfg.AI.Analyze.BaseURL,
+		})
 
 		// Independent source set + redactor for the read-only
 		// get_related_logs tool. Built separately from the worker's
@@ -138,6 +142,7 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		tools := analyzetools.Default(store, newCatalogAdapter(catalog), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher)
 		a, aErr := analyze.New(context.Background(), analyzeBaseCfg, tools, analyze.Options{
 			HTTPClient:    httpClient,
+			BaseURL:       analyzeBaseCfg.BaseURL,
 			ToolTimeout:   parseDurationOr(cfg.Tools.ToolTimeout, 20*time.Second),
 			ParallelTools: cfg.Tools.ParallelTools,
 		})

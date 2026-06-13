@@ -94,3 +94,40 @@ func TestCloneConfigCarriesToolsConfig(t *testing.T) {
 		t.Fatalf("tools block = %+v, want %+v", dst.Agent.Tools, src.Agent.Tools)
 	}
 }
+
+// TestResolveCarriesBaseURL asserts the shared ai.base_url flows through
+// Resolve when a task does not override it, and that a per-task base_url
+// wins when set — the contract the factory relies on to point detect and
+// analyze at an OpenAI-compatible endpoint.
+func TestResolveCarriesBaseURL(t *testing.T) {
+	base := AgentAIConfig{APIKey: "k", BaseURL: "http://shared:11434/v1", Model: "m"}
+
+	if got := base.Resolve(AgentAITaskConfig{}); got.BaseURL != "http://shared:11434/v1" {
+		t.Errorf("Resolve dropped top-level base_url: %q", got.BaseURL)
+	}
+	if got := base.Resolve(AgentAITaskConfig{BaseURL: "http://detect:8080/v1"}); got.BaseURL != "http://detect:8080/v1" {
+		t.Errorf("Resolve ignored per-task base_url: %q", got.BaseURL)
+	}
+}
+
+// TestCloneConfigCarriesBaseURL asserts base_url survives a full
+// cloneConfig round-trip at every level (shared, detect, analyze) — the
+// config triple-touch landmine that silently drops per-request overrides
+// when a new field is added to the struct but not the deep-clone.
+func TestCloneConfigCarriesBaseURL(t *testing.T) {
+	src := &Config{}
+	src.Agent.AI.BaseURL = "http://shared/v1"
+	src.Agent.AI.Detect = AgentAITaskConfig{BaseURL: "http://detect/v1"}
+	src.Agent.AI.Analyze = AgentAIAnalyzeConfig{BaseURL: "http://analyze/v1"}
+
+	dst := cloneConfig(src)
+	if dst.Agent.AI.BaseURL != "http://shared/v1" {
+		t.Errorf("shared base_url lost: %q", dst.Agent.AI.BaseURL)
+	}
+	if dst.Agent.AI.Detect.BaseURL != "http://detect/v1" {
+		t.Errorf("detect base_url lost: %q", dst.Agent.AI.Detect.BaseURL)
+	}
+	if dst.Agent.AI.Analyze.BaseURL != "http://analyze/v1" {
+		t.Errorf("analyze base_url lost: %q", dst.Agent.AI.Analyze.BaseURL)
+	}
+}

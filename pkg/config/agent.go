@@ -305,6 +305,13 @@ type AgentAIConfig struct {
 	Enable bool `mapstructure:"enable"`
 	// APIKey is the bearer token sent in the Authorization header.
 	APIKey string `mapstructure:"api_key"`
+	// BaseURL overrides the chat/completions endpoint. Empty uses the
+	// OpenAI default (api.openai.com/v1). Point it at any OpenAI-compatible
+	// server (Ollama, vLLM, LocalAI, an LLM gateway in front of Bedrock,
+	// or Gemini's OpenAI-compatible endpoint) to keep inference inside the
+	// operator's own network — a compliance requirement for self-hosted
+	// and regulated environments. Per-task overrides live on detect/analyze.
+	BaseURL string `mapstructure:"base_url"`
 	// Model is the model identifier, e.g. "gpt-4o-mini".
 	Model string `mapstructure:"model"`
 	// Temperature controls randomness (0.0–2.0). Default 0.2.
@@ -343,12 +350,17 @@ type AgentAIAnalyzeConfig struct {
 	// Model overrides the shared ai.model for analyze deep dives.
 	// Empty inherits ai.model.
 	Model string `mapstructure:"model"`
+	// BaseURL overrides the shared ai.base_url for analyze deep dives
+	// (e.g. a stronger model behind a different endpoint). Empty inherits
+	// ai.base_url.
+	BaseURL string `mapstructure:"base_url"`
 }
 
 // AgentAITaskConfig is the per-task override block. Zero values mean
 // "inherit the top-level AgentAIConfig field".
 type AgentAITaskConfig struct {
 	Model           string  `mapstructure:"model"`
+	BaseURL         string  `mapstructure:"base_url"`
 	Temperature     float64 `mapstructure:"temperature"`
 	MaxTokens       int     `mapstructure:"max_tokens"`
 	MaxCallsPerHour int     `mapstructure:"max_calls_per_hour"`
@@ -369,6 +381,9 @@ func (c AgentAIConfig) Resolve(task AgentAITaskConfig) AgentAIConfig {
 
 	if task.Model != "" {
 		out.Model = task.Model
+	}
+	if task.BaseURL != "" {
+		out.BaseURL = task.BaseURL
 	}
 	if task.Temperature != 0 {
 		out.Temperature = task.Temperature

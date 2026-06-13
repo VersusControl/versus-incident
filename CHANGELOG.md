@@ -48,6 +48,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   single-tenant build is unchanged by default.
 - **Helm** — `agent.tools.findRunbook.*` values + configmap wiring.
 
+#### AI SRE Agent — bring-your-own LLM (`agent.ai.base_url`)
+- **`base_url` for the chat agents** (`pkg/config/agent.go`,
+  `pkg/agent/factory_ai.go`) — `agent.ai.base_url` (env
+  `AGENT_AI_BASE_URL`) points both the detect and analyze agents at any
+  OpenAI-compatible endpoint (Ollama / vLLM / LocalAI, an LLM gateway in
+  front of Bedrock, or Gemini's OpenAI-compatible endpoint), so inference
+  can stay inside the operator's network — a compliance requirement for
+  self-hosted and regulated environments. `detect.Options` and
+  `analyze.Options` already accepted a `BaseURL` (test-only until now); the
+  factory simply never set it from config. Per-task overrides:
+  `agent.ai.detect.base_url` and `agent.ai.analyze.base_url`. Empty keeps
+  the OpenAI default — existing deployments are unchanged.
+- **Helm** — `agent.ai.baseUrl` + `agent.ai.analyze.baseUrl` values and
+  configmap wiring.
+
 ---
 
 ## [1.4.3] — 2026-05

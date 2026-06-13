@@ -129,6 +129,10 @@ agent:
     # OpenAI API key. Stored in the chart Secret and exposed as
     # AGENT_AI_API_KEY env var.
     apiKey: ""
+    # Override the chat endpoint to any OpenAI-compatible server (Ollama,
+    # vLLM, LocalAI, an LLM gateway, or Gemini's OpenAI endpoint). Empty
+    # uses the OpenAI default. Not a secret — rendered into the ConfigMap.
+    baseUrl: ""
     model: "gpt-4o-mini"
     # Randomness control. Set -1 to omit temperature entirely for
     # beta-limited / reasoning models (gpt-5.*, o-series) that fix it
@@ -145,6 +149,9 @@ agent:
       # Override the shared ai.model for analyze deep dives. Empty inherits
       # the top-level model above.
       model: ""
+      # Override the shared ai.baseUrl for analyze deep dives. Empty inherits
+      # the top-level base_url above.
+      baseUrl: ""
 
   # Per-tool configuration for the analyze tools (rendered into tools.yaml).
   # This is DATA config only, never a registration allow-list — tools are
