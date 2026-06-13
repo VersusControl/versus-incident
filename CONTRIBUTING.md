@@ -56,6 +56,18 @@ For Docker / Helm flows see the README.
 - **No phase references in code comments.** Roadmap phases belong in
   planning docs, not in code. Code comments describe what the code does
   today.
+- **Config fields are a triple-touch.** Adding a field to any config
+  struct in `pkg/config` means touching **three** places or it silently
+  breaks per-request query-param overrides (which run on a deep-cloned
+  config):
+  1. the struct field + `mapstructure:"snake_case"` tag in `pkg/config`,
+  2. the matching field in `cloneConfig` (and any `cloneAgent*` helper) in
+     `pkg/config/clone_config.go` — these are field-by-field copies, so an
+     omitted field is dropped from every cloned (overridden) request,
+  3. the documented default in `config/config.yaml`.
+  Add a `clone_config_test.go` assertion that the new field survives a
+  `cloneConfig` round-trip (see `TestCloneConfigCarries*`). Mirror the key
+  into the Helm chart only if its sibling block is already exposed there.
 
 For extension points (new alert channel, on-call provider, queue
 listener, signal source) follow the patterns in `pkg/common/` and

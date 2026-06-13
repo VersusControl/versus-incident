@@ -317,6 +317,7 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 		Catalog: AgentCatalogConfig{
 			PersistInterval:       src.Catalog.PersistInterval,
 			AutoPromoteAfter:      src.Catalog.AutoPromoteAfter,
+			EwmaAlpha:             src.Catalog.EwmaAlpha,
 			SpikeMultiplier:       src.Catalog.SpikeMultiplier,
 			SpikeMinFrequency:     src.Catalog.SpikeMinFrequency,
 			SpikeMinBaselineCount: src.Catalog.SpikeMinBaselineCount,

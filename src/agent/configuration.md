@@ -123,12 +123,14 @@ the schema and admin workflows.
 catalog:
   persist_interval: 30s
   auto_promote_after: 100
+  ewma_alpha: 0.2
 ```
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `persist_interval` | duration | `30s` | How often the in-memory catalog is flushed to `data/patterns.json`. |
 | `auto_promote_after` | int | `100` | A pattern seen this many times in `detect` mode is treated as known (won't alert). `0` disables the promotion. |
+| `ewma_alpha` | float | `0.2` | Smoothing factor for each pattern's EWMA baseline frequency (`baseline = ewma_alpha·tick + (1−ewma_alpha)·baseline`). Range `(0,1]`; higher reacts faster to recent ticks, lower is steadier. This baseline is what `spike_multiplier` compares against. `0` (unset) uses the default. |
 
 The storage backend itself is selected at the **root** of `config.yaml`
 (`storage.type`), not here. The on-disk filename is fixed

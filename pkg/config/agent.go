@@ -56,6 +56,13 @@ type AgentRedactionConfig struct {
 type AgentCatalogConfig struct {
 	PersistInterval  string `mapstructure:"persist_interval"`   // e.g. "30s"
 	AutoPromoteAfter int    `mapstructure:"auto_promote_after"` // 0 = never
+	// EwmaAlpha is the smoothing factor for each pattern's EWMA baseline
+	// frequency: baseline = alpha*tickCount + (1-alpha)*baseline. Higher
+	// reacts faster to recent ticks; lower is steadier. Range (0,1].
+	// 0 (unset) falls back to the 0.2 default. This baseline is what spike
+	// detection compares against (spike_multiplier), so tuning it changes
+	// spike sensitivity.
+	EwmaAlpha float64 `mapstructure:"ewma_alpha"`
 	// SpikeMultiplier flags a tick as a frequency spike when the tick
 	// count exceeds the pattern's prior EWMA baseline by this factor.
 	// 0 disables spike detection. Default 5.0.

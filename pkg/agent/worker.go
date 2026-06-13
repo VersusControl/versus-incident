@@ -123,7 +123,11 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 	w.pollInterval = parseDurationOr(opt.Cfg.PollInterval, 30*time.Second)
 	w.persistEvery = parseDurationOr(opt.Cfg.Catalog.PersistInterval, 30*time.Second)
 	w.lookback = parseDurationOr(opt.Cfg.Lookback, 5*time.Minute)
-	w.ewmaAlpha = 0.2 // configurable once spike detection lands
+	// EWMA smoothing factor for pattern baselines; 0 (unset) → 0.2 default.
+	w.ewmaAlpha = 0.2
+	if a := opt.Cfg.Catalog.EwmaAlpha; a > 0 {
+		w.ewmaAlpha = a
+	}
 	w.newServiceGrace = parseDurationOr(opt.Cfg.NewServiceGrace, 0)
 
 	return w, nil

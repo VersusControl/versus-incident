@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   single-tenant build is unchanged by default.
 - **Helm** — `agent.tools.findRunbook.*` values + configmap wiring.
 
+#### AI SRE Agent — configurable EWMA baseline (`agent.catalog.ewma_alpha`)
+- **`ewma_alpha` catalog knob** (`pkg/config/agent.go`,
+  `pkg/agent/worker.go`) — the EWMA smoothing factor for each pattern's
+  baseline frequency was hardcoded to `0.2`; it is now configurable via
+  `agent.catalog.ewma_alpha` (default `0.2`, range `(0,1]`). The baseline
+  is what spike detection compares against, so this tunes spike
+  sensitivity. Carried through the `clone_config` deep-clone (config
+  triple-touch) and covered by a round-trip test.
+- **CONTRIBUTING** — documented the config triple-touch rule (struct +
+  `clone_config` + `config.yaml`) that this change follows, so future
+  config fields don't silently drop per-request overrides.
+
 ---
 
 ## [1.4.3] — 2026-05
