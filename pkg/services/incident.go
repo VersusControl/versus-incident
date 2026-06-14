@@ -9,6 +9,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/common"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/metrics"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/utils"
 
@@ -72,18 +73,26 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	// alert actually reached its channels. ChannelsNotified is now
 	// the list of providers that SUCCEEDED, not the list of providers
 	// that were enabled in config.
+	// Notification delivery status — drives both the persisted record and
+	// the incidents_total metric (counted even when storage is disabled).
+	status := "sent"
+	switch {
+	case sendErr == nil:
+		status = "sent"
+	case len(fanOut.Succeeded) == 0:
+		status = "failed"
+	default:
+		status = "partial"
+	}
+	metrics.IncidentsTotal.WithLabelValues(status).Inc()
+
 	if store != nil && rec != nil {
 		rec.ChannelsNotified = fanOut.Succeeded
-		switch {
-		case sendErr == nil:
-			rec.NotifyStatus = "sent"
+		rec.NotifyStatus = status
+		if sendErr != nil {
+			rec.NotifyError = sendErr.Error()
+		} else {
 			rec.NotifyError = ""
-		case len(fanOut.Succeeded) == 0:
-			rec.NotifyStatus = "failed"
-			rec.NotifyError = sendErr.Error()
-		default:
-			rec.NotifyStatus = "partial"
-			rec.NotifyError = sendErr.Error()
 		}
 		if err := store.SaveIncident(rec); err != nil {
 			log.Printf("incident: persist status warning: %v", err)

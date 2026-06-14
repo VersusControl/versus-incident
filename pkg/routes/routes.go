@@ -2,15 +2,21 @@ package routes
 
 import (
 	"github.com/VersusControl/versus-incident/pkg/controllers"
+	"github.com/VersusControl/versus-incident/pkg/metrics"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/teams"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/adaptor"
 )
 
 func SetupRoutes(app *fiber.App, teamsStore *teams.Store) {
 	// Health check endpoint
 	app.Get("/healthz", controllers.HealthCheck)
+
+	// Prometheus metrics. Unauthenticated like /healthz — exposition data
+	// only, no secrets — so a cluster scraper needs no gateway secret.
+	app.Get("/metrics", adaptor.HTTPHandler(metrics.Handler()))
 
 	// API routes
 	api := app.Group("/api")

@@ -16,6 +16,7 @@ import (
 	c "github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/controllers"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/metrics"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/routes"
 	"github.com/VersusControl/versus-incident/pkg/services"
@@ -212,6 +213,9 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		log.Printf("agent: catalog load warning: %v (starting fresh)", err)
 	}
 	log.Printf("agent: catalog loaded patterns=%d", catalog.Len())
+
+	// Expose the live catalog size as a Prometheus gauge (scraped on demand).
+	metrics.RegisterAgentPatternsGauge(func() float64 { return float64(catalog.Len()) })
 
 	// Shadow log: only meaningful when running in shadow mode, but we always
 	// load it so a mode switch (e.g. operator flips agent.mode=shadow at

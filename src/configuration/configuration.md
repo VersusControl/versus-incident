@@ -275,6 +275,34 @@ sources:
       from_beginning: true
 ```
 
+## Observability
+
+Two operational endpoints are always available and require **no** gateway
+secret (they expose no incident data or secrets), so a cluster scraper can
+reach them directly:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /healthz` | Liveness/readiness probe — returns `200 OK`. |
+| `GET /metrics` | Prometheus exposition format. |
+
+`/metrics` includes Go runtime and process collectors plus versus-specific
+series:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `versus_incidents_total` | counter | `status` (`sent`/`partial`/`failed`) | Incidents created, by notification delivery outcome. |
+| `versus_agent_patterns` | gauge | — | Patterns currently in the agent catalog (present only when the agent is enabled). |
+
+Example Prometheus scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: versus-incident
+    static_configs:
+      - targets: ["versus-incident:3000"]
+```
+
 ## Environment Variables
 
 The application relies on several environment variables to configure alerting services. Below is an explanation of each variable:

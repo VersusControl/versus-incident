@@ -56,7 +56,8 @@ func MountStaticUI(app *fiber.App) {
 	app.Use(func(c *fiber.Ctx) error {
 		path := c.Path()
 		if strings.HasPrefix(path, "/api/") ||
-			strings.HasPrefix(path, "/healthz") {
+			strings.HasPrefix(path, "/healthz") ||
+			strings.HasPrefix(path, "/metrics") {
 			return fiber.ErrNotFound
 		}
 		f, err := dist.Open("index.html")
