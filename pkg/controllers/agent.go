@@ -1,6 +1,9 @@
 package controllers
 
 import (
+	"context"
+	"time"
+
 	"github.com/VersusControl/versus-incident/pkg/agent"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/analyze"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/detect"
@@ -18,16 +21,20 @@ type AgentController struct {
 	catalog         *agent.Catalog
 	shadow          *agent.ShadowLog
 	detect          *agent.DetectLog
+	health          *agent.HealthTracker
+	cursors         *agent.CursorStore
 	runbooksEnabled bool
 }
 
 // NewAgentController wires the catalog, shadow log, and detect log into a
 // controller. Pass `cat=nil` if the agent is disabled — in that case every
 // endpoint will return 503. `sl` may be nil to disable the shadow endpoints,
-// and `dl` may be nil to disable the detect-log endpoints. `runbooksEnabled`
-// tells the status endpoint whether the runbooks subsystem is available.
-func NewAgentController(cat *agent.Catalog, sl *agent.ShadowLog, dl *agent.DetectLog, runbooksEnabled bool) *AgentController {
-	return &AgentController{catalog: cat, shadow: sl, detect: dl, runbooksEnabled: runbooksEnabled}
+// and `dl` may be nil to disable the detect-log endpoints. `health` and
+// `cur` power the source-health endpoints (nil disables them).
+// `runbooksEnabled` tells the status endpoint whether the runbooks subsystem
+// is available.
+func NewAgentController(cat *agent.Catalog, sl *agent.ShadowLog, dl *agent.DetectLog, health *agent.HealthTracker, cur *agent.CursorStore, runbooksEnabled bool) *AgentController {
+	return &AgentController{catalog: cat, shadow: sl, detect: dl, health: health, cursors: cur, runbooksEnabled: runbooksEnabled}
 }
 
 // Register attaches the agent admin endpoints to the given fiber group.
@@ -46,6 +53,10 @@ func NewAgentController(cat *agent.Catalog, sl *agent.ShadowLog, dl *agent.Detec
 //	POST   /shadow/flush     force-flush the shadow log to disk
 //	GET    /services         list known services with grace status
 //	POST   /services/:name/grace  control grace period (end / restart)
+//	GET    /sources/health   per-source circuit-breaker state
+//	POST   /sources/:name/pause   hold a source open (stop pulling)
+//	POST   /sources/:name/resume  clear a pause and reset the breaker
+//	DELETE /sources/:name/cursor  drop a source's cursor (re-backfill)
 //	GET    /detect           list detect-mode AI calls (newest first)
 //	GET    /detect/stats     aggregate counts for the detect log
 //	GET    /detect/:id       get one detect-mode AI call (full prompt + response)
@@ -66,6 +77,10 @@ func (a *AgentController) Register(router fiber.Router) {
 	g.Post("/shadow/flush", a.flushShadow)
 	g.Get("/services", a.listServices)
 	g.Post("/services/:name/grace", a.controlServiceGrace)
+	g.Get("/sources/health", a.sourcesHealth)
+	g.Post("/sources/:name/pause", a.pauseSource)
+	g.Post("/sources/:name/resume", a.resumeSource)
+	g.Delete("/sources/:name/cursor", a.deleteSourceCursor)
 	g.Get("/detect", a.listDetect)
 	g.Get("/detect/stats", a.detectStats)
 	g.Get("/detect/:id", a.getDetect)
@@ -149,6 +164,52 @@ func (a *AgentController) flush(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"ok": true, "patterns": a.catalog.Len()})
+}
+
+// sourcesHealth returns the per-source circuit-breaker state.
+func (a *AgentController) sourcesHealth(c *fiber.Ctx) error {
+	if a.health == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "source health not available"})
+	}
+	return c.JSON(fiber.Map{"sources": a.health.Snapshot(time.Now())})
+}
+
+// pauseSource holds a source open — the worker stops pulling it until resume.
+func (a *AgentController) pauseSource(c *fiber.Ctx) error {
+	if a.health == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "source health not available"})
+	}
+	name := c.Params("name")
+	if !a.health.Pause(name) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "unknown source (use the name from /sources/health)"})
+	}
+	return c.JSON(fiber.Map{"ok": true, "paused": name})
+}
+
+// resumeSource clears a manual pause and resets the breaker so the next tick
+// pulls the source again.
+func (a *AgentController) resumeSource(c *fiber.Ctx) error {
+	if a.health == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "source health not available"})
+	}
+	name := c.Params("name")
+	if !a.health.Resume(name) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "unknown source (use the name from /sources/health)"})
+	}
+	return c.JSON(fiber.Map{"ok": true, "resumed": name})
+}
+
+// deleteSourceCursor drops a source's resume cursor so its next pull
+// re-backfills from the lookback window (recovers a source stuck behind a
+// cursor past the backend's log retention).
+func (a *AgentController) deleteSourceCursor(c *fiber.Ctx) error {
+	if a.cursors == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "cursor store not available"})
+	}
+	if err := a.cursors.Delete(context.Background(), c.Params("name")); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.SendStatus(fiber.StatusNoContent)
 }
 
 // listShadow returns every shadow-mode event sorted most-recent first.

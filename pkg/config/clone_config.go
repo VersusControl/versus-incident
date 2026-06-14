@@ -302,14 +302,15 @@ func cloneRedisConfig(src RedisConfig) RedisConfig {
 // Helper function to deep clone the AgentConfig struct
 func cloneAgentConfig(src AgentConfig) AgentConfig {
 	cloned := AgentConfig{
-		Enable:          src.Enable,
-		Mode:            src.Mode,
-		PollInterval:    src.PollInterval,
-		Lookback:        src.Lookback,
-		BatchMax:        src.BatchMax,
-		SignalMaxBytes:  src.SignalMaxBytes,
-		NewServiceGrace: src.NewServiceGrace,
-		ServicePatterns: append([]string(nil), src.ServicePatterns...),
+		Enable:           src.Enable,
+		Mode:             src.Mode,
+		PollInterval:     src.PollInterval,
+		Lookback:         src.Lookback,
+		BatchMax:         src.BatchMax,
+		SignalMaxBytes:   src.SignalMaxBytes,
+		NewServiceGrace:  src.NewServiceGrace,
+		SourceBackoffMax: src.SourceBackoffMax,
+		ServicePatterns:  append([]string(nil), src.ServicePatterns...),
 		Redaction: AgentRedactionConfig{
 			Enable:    src.Redaction.Enable,
 			RedactIPs: src.Redaction.RedactIPs,

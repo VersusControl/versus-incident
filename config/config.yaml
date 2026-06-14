@@ -186,6 +186,9 @@ agent:
   lookback: 5m                    # initial backfill window on startup
   batch_max: 5000                 # safety cap per tick
   signal_max_bytes: 65536         # cap on Signal.Raw
+  # A source that keeps failing is retried on an exponential backoff
+  # (starting at poll_interval) up to this ceiling, not every tick.
+  source_backoff_max: 15m
 
 
   redaction:

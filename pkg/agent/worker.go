@@ -46,7 +46,8 @@ func init() {
 type Worker struct {
 	cfg      config.AgentConfig
 	sources  []core.SignalSource
-	cursors  *CursorStore // nil → in-memory fallback
+	cursors  *CursorStore   // nil → in-memory fallback
+	health   *HealthTracker // per-source circuit breaker; never nil after NewWorker
 	redactor *Redactor
 	matcher  *RegexMatcher
 	miner    *Miner
@@ -78,7 +79,8 @@ type Emitter func(f *core.AIFinding, r core.AgentResult, source, service string)
 type WorkerOptions struct {
 	Cfg      config.AgentConfig
 	Sources  []core.SignalSource
-	Cursors  *CursorStore // optional; pass nil for in-memory cursors
+	Cursors  *CursorStore   // optional; pass nil for in-memory cursors
+	Health   *HealthTracker // optional; nil → one built from cfg (base=poll, cap=source_backoff_max)
 	Redactor *Redactor
 	Matcher  *RegexMatcher
 	Miner    *Miner
@@ -106,6 +108,7 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 		matcher:  opt.Matcher,
 		miner:    opt.Miner,
 		catalog:  opt.Catalog,
+		health:   opt.Health,
 		shadow:   opt.Shadow,
 		detect:   opt.Detect,
 		services: opt.Services,
@@ -125,9 +128,22 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 	w.lookback = parseDurationOr(opt.Cfg.Lookback, 5*time.Minute)
 	w.ewmaAlpha = 0.2 // configurable once spike detection lands
 	w.newServiceGrace = parseDurationOr(opt.Cfg.NewServiceGrace, 0)
+	// Per-source circuit breaker: backoff steps from the poll interval up to
+	// source_backoff_max (default 15m). Built here when not injected so the
+	// breaker is always active.
+	if w.health == nil {
+		w.health = NewHealthTracker(
+			w.pollInterval,
+			parseDurationOr(opt.Cfg.SourceBackoffMax, 15*time.Minute),
+		)
+	}
 
 	return w, nil
 }
+
+// Health exposes the per-source circuit breaker so the admin controller can
+// surface and control source health.
+func (w *Worker) Health() *HealthTracker { return w.health }
 
 // Run drives the worker until ctx is canceled. It is intended to be called
 // in a goroutine from cmd/main.go.
@@ -139,8 +155,15 @@ func (w *Worker) Run(ctx context.Context) {
 	log.Printf("agent: starting worker mode=%s sources=%d poll=%s",
 		mode, len(w.sources), w.pollInterval)
 
-	// Stagger initial pull so multiple sources don't hammer their backends
-	// at the same instant on startup.
+	// Seed every source into the health tracker so it shows in the health
+	// endpoint from boot and is addressable by pause/resume before its first
+	// pull. Keyed by Name() — the same key the breaker and cursor store use.
+	if w.health != nil {
+		for _, s := range w.sources {
+			w.health.Register(s.Name())
+		}
+	}
+
 	tick := time.NewTicker(w.pollInterval)
 	defer tick.Stop()
 
@@ -200,24 +223,52 @@ func (w *Worker) Run(ctx context.Context) {
 // tick runs one poll across every source. Errors from one source never
 // affect the others — the worker keeps moving.
 func (w *Worker) tick(ctx context.Context, mode string) {
+	// Stagger source pulls so N sources don't hit their backends at the same
+	// instant (the long-promised behavior that was never implemented). Spread
+	// them across up to half the poll interval; a single source starts now.
+	var step time.Duration
+	if n := len(w.sources); n > 1 {
+		step = (w.pollInterval / 2) / time.Duration(n)
+	}
+
 	var wg sync.WaitGroup
-	for _, src := range w.sources {
+	for i, src := range w.sources {
 		wg.Add(1)
-		go func(s core.SignalSource) {
+		go func(idx int, s core.SignalSource) {
 			defer wg.Done()
+			if d := time.Duration(idx) * step; d > 0 {
+				select {
+				case <-time.After(d):
+				case <-ctx.Done():
+					return
+				}
+			}
 			w.tickSource(ctx, s, mode)
-		}(src)
+		}(i, src)
 	}
 	wg.Wait()
 }
 
 func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode string) {
+	// Circuit breaker: skip a source that is paused or still backing off from
+	// repeated failures, instead of hammering a downed backend every tick.
+	if w.health != nil && !w.health.Allow(src.Name(), time.Now()) {
+		return
+	}
+
 	since := w.loadCursor(ctx, src.Name())
 
 	signals, newCursor, err := src.Pull(ctx, since)
 	if err != nil {
 		log.Printf("agent: pull from %s failed: %v", src.Name(), err)
+		if w.health != nil {
+			w.health.RecordFailure(src.Name(), time.Now(), err)
+		}
 		return
+	}
+	// A successful pull (even an empty one) closes the breaker.
+	if w.health != nil {
+		w.health.RecordSuccess(src.Name(), time.Now())
 	}
 	if len(signals) == 0 {
 		return

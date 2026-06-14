@@ -28,6 +28,7 @@ agent:
   lookback: 5m
   batch_max: 1000
   signal_max_bytes: 8192
+  source_backoff_max: 15m
   redaction:   { … }
   catalog:     { … }
   miner:       { … }
@@ -50,6 +51,22 @@ agent:
 | `lookback` | duration | `5m` | Initial backfill window on first start (when there's no cursor yet). |
 | `batch_max` | int | `1000` | Safety cap on signals processed per tick per source. |
 | `signal_max_bytes` | int | `8192` | Truncates a single signal's `Raw` payload above this size. |
+| `source_backoff_max` | duration | `15m` | Per-source circuit-breaker ceiling. A source that keeps failing is retried on an exponential backoff (starting at `poll_interval`) up to this cap, then recovers automatically once a pull succeeds — no restart. |
+
+### Source health
+
+The worker keeps a per-source circuit breaker. These admin endpoints
+(all require `X-Gateway-Secret`) expose and control it:
+
+| Method & path | Effect |
+|---|---|
+| `GET /api/agent/sources/health` | Per-source state (`ok` / `backing_off` / `paused`), consecutive failures, last error, next-eligible time. |
+| `POST /api/agent/sources/:name/pause` | Stop pulling a source (e.g. during backend maintenance). |
+| `POST /api/agent/sources/:name/resume` | Clear a pause and reset the breaker. |
+| `DELETE /api/agent/sources/:name/cursor` | Drop the source's resume cursor so its next pull re-backfills from `lookback` (recovers a cursor stuck past the backend's log retention). |
+
+Pulls are also **staggered** within a tick so multiple sources don't hit
+their backends at the same instant.
 
 ## Modes
 

@@ -120,6 +120,8 @@ agent:
   pollInterval: 30s
   lookback: 5m
   newServiceGrace: 30m
+  # Per-source circuit-breaker backoff ceiling. Empty → 15m default.
+  sourceBackoffMax: 15m
 
   ai:
     # AI analyzer toggle. Required for detect mode to actually call an LLM.

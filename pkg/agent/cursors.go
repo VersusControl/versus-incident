@@ -58,3 +58,17 @@ func (s *CursorStore) Set(ctx context.Context, source string, t time.Time) error
 	}
 	return s.rdb.Set(ctx, s.keyPrefix+source, t.UTC().Format(time.RFC3339Nano), 0).Err()
 }
+
+// Delete drops a source's cursor so the next pull re-backfills from the
+// lookback window. Admin use: recover a source stuck behind a cursor that
+// points past a log-retention boundary. Redis errors are returned; the
+// in-memory entry is always removed.
+func (s *CursorStore) Delete(ctx context.Context, source string) error {
+	s.mu.Lock()
+	delete(s.mem, source)
+	s.mu.Unlock()
+	if s.rdb == nil {
+		return nil
+	}
+	return s.rdb.Del(ctx, s.keyPrefix+source).Err()
+}
