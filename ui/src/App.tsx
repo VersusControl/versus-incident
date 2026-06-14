@@ -1,59 +1,191 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Suspense, lazy } from "react";
+import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import { AuthGate } from "./lib/auth";
 import { AppShell } from "./components/AppShell";
-import { DashboardPage } from "./pages/DashboardPage";
-import { StatusPage } from "./pages/StatusPage";
-import { PatternsPage } from "./pages/PatternsPage";
-import { PatternDetailPage } from "./pages/PatternDetailPage";
-import { ShadowPage } from "./pages/ShadowPage";
-import { ShadowDetailPage } from "./pages/ShadowDetailPage";
-import { DetectPage } from "./pages/DetectPage";
-import { DetectDetailPage } from "./pages/DetectDetailPage";
-import { SystemPromptPage } from "./pages/SystemPromptPage";
-import { ServicesPage } from "./pages/ServicesPage";
+import { SkCard } from "./components/Skeleton";
+// Hot paths (the 3am set) stay in the main chunk:
+import { NowPage } from "./pages/NowPage";
 import { IncidentsPage } from "./pages/IncidentsPage";
 import { IncidentDetailPage } from "./pages/IncidentDetailPage";
-import { AnalysesPage } from "./pages/AnalysesPage";
 import { AnalysesListPage } from "./pages/AnalysesListPage";
-import { AnalysisDetailPage } from "./pages/AnalysisDetailPage";
-import { IncidentsConfigPage } from "./pages/IncidentsConfigPage";
-import { AgentConfigPage } from "./pages/AgentConfigPage";
-import { MembersPage } from "./pages/MembersPage";
-import { TeamsPage } from "./pages/TeamsPage";
-import { RunbooksPage } from "./pages/RunbooksPage";
+import { AgentOverviewPage } from "./pages/AgentOverviewPage";
+import { PatternsPage } from "./pages/PatternsPage";
+import { DecisionsPage } from "./pages/DecisionsPage";
+import { ServicesPage } from "./pages/ServicesPage";
 
+// Cold paths load on demand (route-level splitting, no extra deps) —
+// keeps the main chunk inside the ≤120KB gzip budget.
+const AnalysisDetailPage = lazyPage(
+  () => import("./pages/AnalysisDetailPage"),
+  "AnalysisDetailPage",
+);
+const PatternDetailPage = lazyPage(
+  () => import("./pages/PatternDetailPage"),
+  "PatternDetailPage",
+);
+const DetectDetailPage = lazyPage(
+  () => import("./pages/DetectDetailPage"),
+  "DetectDetailPage",
+);
+const ShadowDetailPage = lazyPage(
+  () => import("./pages/ShadowDetailPage"),
+  "ShadowDetailPage",
+);
+const SystemPromptPage = lazyPage(
+  () => import("./pages/SystemPromptPage"),
+  "SystemPromptPage",
+);
+const RunbooksPage = lazyPage(() => import("./pages/RunbooksPage"), "RunbooksPage");
+const PeoplePage = lazyPage(() => import("./pages/PeoplePage"), "PeoplePage");
+const SettingsPage = lazyPage(() => import("./pages/SettingsPage"), "SettingsPage");
+
+// lazyPage adapts our named-export pages to React.lazy and wraps them in a
+// Suspense fallback that mirrors a loading card (no blank flash).
+function lazyPage(
+  loader: () => Promise<Record<string, unknown>>,
+  name: string,
+) {
+  const L = lazy(async () => {
+    const m = await loader();
+    return { default: m[name] as React.ComponentType };
+  });
+  return function LazyRoute() {
+    return (
+      <Suspense
+        fallback={
+          <main className="flex-1 overflow-auto p-6">
+            <SkCard lines={4} />
+          </main>
+        }
+      >
+        <L />
+      </Suspense>
+    );
+  };
+}
+
+// Route map per UX_REDESIGN §3.3. Three zones (Respond / Agent / Manage) +
+// a full set of legacy redirects so pre-redesign bookmarks and alert
+// deep-links keep working (back-stack-integrity / deep-linking rules).
 export default function App() {
   return (
     <AuthGate>
       <Routes>
         <Route element={<AppShell />}>
-          <Route index element={<Navigate to="/dashboard" replace />} />
-          <Route path="/dashboard" element={<DashboardPage />} />
+          <Route index element={<Navigate to="/now" replace />} />
+
+          {/* Respond */}
+          <Route path="/now" element={<NowPage />} />
           <Route path="/incidents" element={<IncidentsPage />} />
-          <Route path="/analyses" element={<AnalysesListPage />} />
           <Route path="/incidents/:id" element={<IncidentDetailPage />} />
-          <Route path="/incidents/:id/analyses" element={<AnalysesPage />} />
+          <Route path="/analyses" element={<AnalysesListPage />} />
           <Route
             path="/incidents/:id/analyses/:analysisId"
             element={<AnalysisDetailPage />}
           />
-          <Route path="/status" element={<StatusPage />} />
-          <Route path="/patterns" element={<PatternsPage />} />
-          <Route path="/patterns/:id" element={<PatternDetailPage />} />
-          <Route path="/shadow" element={<ShadowPage />} />
-          <Route path="/shadow/:patternId" element={<ShadowDetailPage />} />
-          <Route path="/detect" element={<DetectPage />} />
-          <Route path="/detect/system-prompt" element={<SystemPromptPage />} />
-          <Route path="/detect/:id" element={<DetectDetailPage />} />
-          <Route path="/services" element={<ServicesPage />} />
-          <Route path="/runbooks" element={<RunbooksPage />} />
-          <Route path="/members" element={<MembersPage />} />
-          <Route path="/teams" element={<TeamsPage />} />
-          <Route path="/config/incidents" element={<IncidentsConfigPage />} />
-          <Route path="/config/agent" element={<AgentConfigPage />} />
-          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+
+          {/* Agent */}
+          <Route path="/agent" element={<AgentOverviewPage />} />
+          <Route path="/agent/patterns" element={<PatternsPage />} />
+          <Route path="/agent/patterns/:id" element={<PatternDetailPage />} />
+          <Route path="/agent/decisions" element={<DecisionsPage />} />
+          <Route
+            path="/agent/decisions/system-prompt"
+            element={<SystemPromptPage />}
+          />
+          <Route
+            path="/agent/decisions/detect/:id"
+            element={<DetectDetailPage />}
+          />
+          <Route
+            path="/agent/decisions/shadow/:patternId"
+            element={<ShadowDetailPage />}
+          />
+          <Route path="/agent/services" element={<ServicesPage />} />
+          <Route path="/agent/runbooks" element={<RunbooksPage />} />
+
+          {/* Manage */}
+          <Route path="/people" element={<PeoplePage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+
+          {/* Legacy redirects (old IA → new homes) */}
+          <Route path="/dashboard" element={<Navigate to="/now" replace />} />
+          <Route path="/status" element={<Navigate to="/agent" replace />} />
+          <Route
+            path="/patterns"
+            element={<Navigate to="/agent/patterns" replace />}
+          />
+          <Route path="/patterns/:id" element={<PatternIdRedirect />} />
+          <Route
+            path="/detect"
+            element={<Navigate to="/agent/decisions?tab=detect" replace />}
+          />
+          <Route
+            path="/detect/system-prompt"
+            element={<Navigate to="/agent/decisions/system-prompt" replace />}
+          />
+          <Route path="/detect/:id" element={<DetectIdRedirect />} />
+          <Route
+            path="/shadow"
+            element={<Navigate to="/agent/decisions?tab=shadow" replace />}
+          />
+          <Route path="/shadow/:patternId" element={<ShadowIdRedirect />} />
+          <Route
+            path="/services"
+            element={<Navigate to="/agent/services" replace />}
+          />
+          <Route
+            path="/runbooks"
+            element={<Navigate to="/agent/runbooks" replace />}
+          />
+          <Route
+            path="/members"
+            element={<Navigate to="/people?tab=members" replace />}
+          />
+          <Route
+            path="/teams"
+            element={<Navigate to="/people?tab=teams" replace />}
+          />
+          <Route
+            path="/config/incidents"
+            element={<Navigate to="/settings" replace />}
+          />
+          <Route
+            path="/config/agent"
+            element={<Navigate to="/settings?tab=agent" replace />}
+          />
+          <Route
+            path="/postmortems"
+            element={<Navigate to="/analyses?tab=postmortems" replace />}
+          />
+          <Route
+            path="/incidents/:id/analyses"
+            element={<IncidentAnalysesRedirect />}
+          />
+
+          <Route path="*" element={<Navigate to="/now" replace />} />
         </Route>
       </Routes>
     </AuthGate>
   );
+}
+
+function PatternIdRedirect() {
+  const { id } = useParams();
+  return <Navigate to={`/agent/patterns/${id}`} replace />;
+}
+
+function DetectIdRedirect() {
+  const { id } = useParams();
+  return <Navigate to={`/agent/decisions/detect/${id}`} replace />;
+}
+
+function ShadowIdRedirect() {
+  const { patternId } = useParams();
+  return <Navigate to={`/agent/decisions/shadow/${patternId}`} replace />;
+}
+
+function IncidentAnalysesRedirect() {
+  const { id } = useParams();
+  return <Navigate to={`/analyses?incident=${id}`} replace />;
 }

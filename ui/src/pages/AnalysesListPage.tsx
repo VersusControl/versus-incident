@@ -1,49 +1,64 @@
-import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { useMemo } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Search } from "lucide-react";
+import { Search, X } from "lucide-react";
 import { api } from "@/lib/api";
-import { fmtAbs, fmtRel } from "@/lib/format";
+import { fmtAbs, fmtRel, incidentTitle } from "@/lib/format";
+import { useTableKeys } from "@/lib/hooks";
 import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
-import { ErrorBox, Spinner, EmptyState } from "@/components/feedback";
+import { SeverityBadge } from "@/components/SeverityBadge";
+import { SegmentedControl } from "@/components/SegmentedControl";
+import { ClickableRow } from "@/components/DataTable";
+import { SkRows } from "@/components/Skeleton";
+import { RetryableError } from "@/components/RetryableError";
+import { EmptyState } from "@/components/feedback";
 import { formatDuration } from "@/components/AnalysisCard";
 
-type StatusFilter = "all" | "ok" | "error";
-
-const filters: { id: StatusFilter; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "ok", label: "OK" },
-  { id: "error", label: "Error" },
-];
+const COLS = 7;
 
 // AnalysesListPage lists every analysis recorded across all incidents,
-// newest first, in a table. The Incident column shows the parent
-// incident title and links directly to the incident detail page.
+// newest first. Rows open the analysis DETAIL page (audit I2 — that route
+// had no inbound link); the Incident column keeps a small secondary link
+// to the parent incident. The Post-mortems tab is the explained future
+// feature that used to be a dead sidebar item (empty-nav-state rule).
 export function AnalysesListPage() {
-  const { data, isLoading, isError, error } = useQuery({
+  const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  const tab = params.get("tab") ?? "analyses";
+  const status = params.get("status") ?? "all";
+  const incidentFilter = params.get("incident");
+  const q = params.get("q") ?? "";
+
+  const analysesQ = useQuery({
     queryKey: ["analyses-all"],
     queryFn: () => api.listAllAnalyses(),
   });
+  const { data, isLoading, isError, error, refetch, isRefetching } = analysesQ;
 
-  const { data: incidents } = useQuery({
+  const incidentsQ = useQuery({
     queryKey: ["incidents"],
     queryFn: () => api.listIncidents(),
   });
 
   const titleByID = useMemo(
-    () => new Map((incidents ?? []).map((inc) => [inc.id, inc.title])),
-    [incidents],
+    () => new Map((incidentsQ.data ?? []).map((inc) => [inc.id, inc.title])),
+    [incidentsQ.data],
   );
 
-  const [q, setQ] = useState("");
-  const [filter, setFilter] = useState<StatusFilter>("all");
+  const setParam = (key: string, value: string | null) => {
+    const next = new URLSearchParams(params);
+    if (value) next.set(key, value);
+    else next.delete(key);
+    setParams(next, { replace: true });
+  };
 
   const filtered = useMemo(() => {
     if (!data) return [];
     const needle = q.trim().toLowerCase();
     return data.filter((rec) => {
-      if (filter !== "all" && rec.status !== filter) return false;
+      if (incidentFilter && rec.incident_id !== incidentFilter) return false;
+      if (status !== "all" && rec.status !== status) return false;
       if (!needle) return true;
       const title = titleByID.get(rec.incident_id) ?? "";
       return (
@@ -54,7 +69,17 @@ export function AnalysesListPage() {
         (rec.model ?? "").toLowerCase().includes(needle)
       );
     });
-  }, [data, q, filter, titleByID]);
+  }, [data, q, status, incidentFilter, titleByID]);
+
+  const keys = useTableKeys({
+    size: filtered.length,
+    onOpen: (i) => {
+      const rec = filtered[i];
+      if (rec) navigate(`/incidents/${rec.incident_id}/analyses/${rec.id}`);
+    },
+  });
+
+  const hasFilters = Boolean(q || status !== "all" || incidentFilter);
 
   return (
     <>
@@ -64,112 +89,193 @@ export function AnalysesListPage() {
       />
 
       <main className="flex-1 overflow-auto p-6">
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <div className="relative max-w-md flex-1">
-            <Search
-              size={12}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-300"
-            />
-            <input
-              className="input pl-7"
-              placeholder="Search by incident, finding or model…"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
+        <div className="mb-3">
+          <SegmentedControl
+            param="tab"
+            defaultValue="analyses"
+            aria-label="Analyses view"
+            options={[
+              { value: "analyses", label: "Analyses" },
+              { value: "postmortems", label: "Post-mortems" },
+            ]}
+          />
+        </div>
+
+        {tab === "postmortems" ? (
+          <div className="card">
+            <EmptyState
+              title="Post-mortems are coming"
+              hint="They'll be generated from an incident's analyses, evidence and timeline."
             />
           </div>
-          <div className="flex overflow-hidden rounded-md border border-ink-200 bg-white">
-            {filters.map((f) => (
-              <button
-                key={f.id}
-                className={
-                  "px-3 py-1.5 text-xs " +
-                  (filter === f.id
-                    ? "bg-accent text-white"
-                    : "text-ink-700 hover:bg-ink-50")
-                }
-                onClick={() => setFilter(f.id)}
+        ) : (
+          <>
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <div className="relative max-w-md flex-1">
+                <Search
+                  size={12}
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
+                  aria-hidden
+                />
+                <input
+                  data-page-search
+                  className="input pl-7"
+                  placeholder="Search by incident, finding or model…"
+                  aria-label="Search analyses"
+                  value={q}
+                  onChange={(e) => setParam("q", e.target.value || null)}
+                />
+              </div>
+              <SegmentedControl
+                param="status"
+                defaultValue="all"
+                aria-label="Call status filter"
+                options={[
+                  { value: "all", label: "All" },
+                  { value: "ok", label: "OK" },
+                  { value: "error", label: "Error" },
+                ]}
+              />
+              {incidentFilter && (
+                <span className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-2xs text-ink-100">
+                  <span className="text-ink-300">incident:</span>
+                  <span
+                    className="max-w-48 truncate font-medium"
+                    title={incidentFilter}
+                  >
+                    {titleByID.get(incidentFilter) ||
+                      incidentTitle({ id: incidentFilter })}
+                  </span>
+                  <button
+                    aria-label="Clear incident filter"
+                    className="rounded p-0.5 text-ink-300 hover:text-ink-50"
+                    onClick={() => setParam("incident", null)}
+                  >
+                    <X size={11} aria-hidden />
+                  </button>
+                </span>
+              )}
+            </div>
+
+            {isError && (
+              <div className="mb-3">
+                <RetryableError
+                  error={error}
+                  onRetry={() => refetch()}
+                  retrying={isRefetching}
+                  context="Couldn't load analyses"
+                />
+              </div>
+            )}
+            {incidentsQ.isError && (
+              <div className="mb-3">
+                <RetryableError
+                  error={incidentsQ.error}
+                  onRetry={() => incidentsQ.refetch()}
+                  retrying={incidentsQ.isRefetching}
+                  context="Couldn't load incident titles — rows show raw ids meanwhile"
+                />
+              </div>
+            )}
+
+            <div className="card overflow-hidden">
+              <div
+                className="max-h-[calc(100vh-220px)] overflow-auto"
+                aria-label="Analyses table — j/k to move, Enter to open"
+                {...keys.containerProps}
               >
-                {f.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {isError && <ErrorBox error={error} />}
-
-        <div className="card overflow-hidden">
-          <div className="max-h-[calc(100vh-180px)] overflow-auto">
-            <table className="ddt">
-              <thead>
-                <tr>
-                  <th className="w-32">When</th>
-                  <th>Incident</th>
-                  <th>Finding</th>
-                  <th className="w-32">Model</th>
-                  <th className="w-20">Duration</th>
-                  <th className="w-20">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {isLoading && (
-                  <tr>
-                    <td colSpan={6} className="py-8 text-center">
-                      <Spinner />
-                    </td>
-                  </tr>
-                )}
-                {!isLoading && filtered.length === 0 && (
-                  <tr>
-                    <td colSpan={6}>
-                      <EmptyState
-                        title="No analyses"
-                        hint={
-                          q || filter !== "all"
-                            ? "Try clearing filters."
-                            : "Run an analysis from an incident to see it here."
-                        }
-                      />
-                    </td>
-                  </tr>
-                )}
-                {filtered.map((rec) => (
-                  <tr key={rec.id}>
-                    <td title={fmtAbs(rec.requested_at)}>
-                      {fmtRel(rec.requested_at)}
-                    </td>
-                    <td>
-                      <Link
-                        to={`/incidents/${rec.incident_id}`}
-                        className="font-medium text-accent hover:underline"
-                        title={rec.incident_id}
+                <table className="ddt">
+                  <thead>
+                    <tr>
+                      <th className="w-32">When</th>
+                      <th>Incident</th>
+                      <th>Finding</th>
+                      <th className="w-28">Severity</th>
+                      <th className="w-32">Model</th>
+                      <th className="w-20">Duration</th>
+                      <th className="w-20">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {isLoading && <SkRows rows={6} cols={COLS} />}
+                    {!isLoading && !isError && filtered.length === 0 && (
+                      <tr>
+                        <td colSpan={COLS}>
+                          <EmptyState
+                            title="No analyses"
+                            hint={
+                              hasFilters
+                                ? "Try clearing filters."
+                                : "Run an analysis from an incident to see it here."
+                            }
+                            action={
+                              hasFilters ? undefined : (
+                                <Link to="/incidents" className="btn">
+                                  Browse incidents
+                                </Link>
+                              )
+                            }
+                          />
+                        </td>
+                      </tr>
+                    )}
+                    {filtered.map((rec, i) => (
+                      <ClickableRow
+                        key={rec.id}
+                        to={`/incidents/${rec.incident_id}/analyses/${rec.id}`}
+                        {...keys.rowProps(i)}
                       >
-                        {titleByID.get(rec.incident_id) ||
-                          `incident ${rec.incident_id.slice(0, 8)}`}
-                      </Link>
-                    </td>
-                    <td
-                      className="text-ink-700"
-                      title={rec.finding?.Title || rec.finding?.Summary}
-                    >
-                      {rec.finding?.Title || rec.finding?.Summary || "—"}
-                    </td>
-                    <td className="text-2xs text-ink-500">{rec.model || "—"}</td>
-                    <td className="text-2xs text-ink-500">
-                      {rec.duration_ms !== undefined
-                        ? formatDuration(rec.duration_ms)
-                        : "—"}
-                    </td>
-                    <td>
-                      <Pill tone={rec.status === "ok" ? "good" : "bad"}>
-                        {rec.status}
-                      </Pill>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+                        <td
+                          className="text-ink-300"
+                          title={fmtAbs(rec.requested_at)}
+                        >
+                          {fmtRel(rec.requested_at)}
+                        </td>
+                        <td>
+                          <Link
+                            to={`/incidents/${rec.incident_id}`}
+                            className="text-ink-200 hover:text-link hover:underline"
+                            title={`Open incident ${rec.incident_id}`}
+                          >
+                            {titleByID.get(rec.incident_id) ||
+                              incidentTitle({ id: rec.incident_id })}
+                          </Link>
+                        </td>
+                        <td>
+                          <div
+                            className="max-w-md truncate font-medium text-ink-100"
+                            title={rec.finding?.Title || rec.finding?.Summary}
+                          >
+                            {rec.finding?.Title || rec.finding?.Summary || "—"}
+                          </div>
+                        </td>
+                        <td>
+                          <SeverityBadge severity={rec.finding?.Severity} />
+                        </td>
+                        <td className="text-2xs text-ink-300">
+                          {rec.model || "—"}
+                        </td>
+                        <td className="text-2xs text-ink-300">
+                          {rec.duration_ms !== undefined
+                            ? formatDuration(rec.duration_ms)
+                            : "—"}
+                        </td>
+                        <td>
+                          <Pill
+                            tone={rec.status === "ok" ? "good" : "bad"}
+                            title="AI call status"
+                          >
+                            {rec.status}
+                          </Pill>
+                        </td>
+                      </ClickableRow>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        )}
       </main>
     </>
   );

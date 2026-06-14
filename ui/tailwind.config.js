@@ -1,32 +1,82 @@
 /** @type {import('tailwindcss').Config} */
+
+// Every color token resolves through a CSS variable (defined in
+// index.css) so the light/dark theme switch is a pure variable swap —
+// no per-component theme classes. Variables hold "R G B" triplets so
+// Tailwind's <alpha-value> opacity modifiers keep working.
+const v = (name) => `rgb(var(--${name}) / <alpha-value>)`;
+
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
       colors: {
-        // Datadog-ish palette: deep navy sidebar, teal accent,
-        // amber for warnings, soft red for incidents.
+        // Neutral scale. In dark: 50-400 = text (bright→faint),
+        // 500-950 = fills (controls→sidebar). The light map mirrors the
+        // same SEMANTICS (100 is always "primary text", 600 always a
+        // subtle fill) with inverted lightness.
         ink: {
-          950: "#0b0d12",
-          900: "#11141c",
-          800: "#161a25",
-          700: "#1d2230",
-          600: "#262c3d",
-          500: "#3a4257",
-          400: "#5b657f",
-          300: "#8590a8",
-          200: "#b5bcca",
-          100: "#dde0e8",
-          50: "#f4f5f8",
+          950: v("ink-950"),
+          900: v("ink-900"),
+          800: v("ink-800"),
+          700: v("ink-700"),
+          600: v("ink-600"),
+          500: v("ink-500"),
+          400: v("ink-400"),
+          300: v("ink-300"),
+          200: v("ink-200"),
+          100: v("ink-100"),
+          50: v("ink-50"),
         },
         accent: {
-          DEFAULT: "#3b82f6",
-          hover: "#60a5fa",
-          subtle: "#172554",
+          DEFAULT: v("accent"),
+          hover: v("accent-hover"),
+          subtle: v("accent-subtle"),
         },
-        good: "#3bb273",
-        warn: "#f0a500",
-        bad: "#e0533d",
+        // Text links only. Fills keep `accent`; links need a brighter blue
+        // in dark (accent on surface measures 4.1:1, link 6.9:1).
+        link: v("link"),
+
+        // Semantic surfaces — the elevation ladder. Dark: each level is
+        // perceptibly LIGHTER than the one below; light: page is gray,
+        // cards are white, raised is a soft gray.
+        surface: {
+          sunken: v("surface-sunken"),
+          DEFAULT: v("surface"),
+          raised: v("surface-raised"),
+        },
+
+        // Severity ramp. DEFAULT = text/icon tone (AA on the theme's
+        // card surface at 11px); solid = saturated fill for rails.
+        sev: {
+          critical: { DEFAULT: v("sev-critical"), solid: v("sev-critical-solid") },
+          high: { DEFAULT: v("sev-high"), solid: v("sev-high-solid") },
+          warn: { DEFAULT: v("sev-warn"), solid: v("sev-warn-solid") },
+          info: { DEFAULT: v("sev-info"), solid: v("sev-info-solid") },
+          ok: { DEFAULT: v("sev-ok"), solid: v("sev-ok-solid") },
+        },
+
+        // Legacy aliases — existing call sites keep compiling; tones
+        // resolve to the themed severity ramp.
+        good: v("sev-ok"),
+        warn: v("sev-warn"),
+        bad: v("sev-critical"),
+      },
+      zIndex: {
+        sticky: "10",
+        dropdown: "20",
+        overlay: "40",
+        modal: "50",
+        toast: "100",
+      },
+      boxShadow: {
+        card: "0 1px 2px rgb(0 0 0 / 0.25)",
+        overlay: "0 8px 24px rgb(0 0 0 / 0.35)",
+        modal: "0 16px 48px rgb(0 0 0 / 0.45)",
+      },
+      borderRadius: {
+        card: "8px",
+        control: "6px",
       },
       fontFamily: {
         sans: [
@@ -46,7 +96,7 @@ export default {
         ],
       },
       fontSize: {
-        // Datadog admin pages run dense — most text is 12-13px.
+        // Dense admin scale — most desktop text is 12-13px.
         "2xs": ["11px", "16px"],
       },
     },

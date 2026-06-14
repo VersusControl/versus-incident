@@ -5,8 +5,10 @@ import { api, type AIFinding } from "@/lib/api";
 import { fmtAbs } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
 import { Pill, VerdictPill } from "@/components/Pill";
-import { ErrorBox, Spinner } from "@/components/feedback";
-import { OutcomePill, SeverityPill } from "./DetectPage";
+import { SeverityBadge } from "@/components/SeverityBadge";
+import { SkCard } from "@/components/Skeleton";
+import { RetryableError } from "@/components/RetryableError";
+import { OutcomePill } from "./DecisionsPage";
 
 export function DetectDetailPage() {
   const { id = "" } = useParams();
@@ -22,15 +24,28 @@ export function DetectDetailPage() {
         title="Detect event"
         subtitle={id}
         actions={
-          <Link to="/detect" className="btn">
-            <ArrowLeft size={12} /> Back
+          <Link to="/agent/decisions?tab=detect" className="btn">
+            <ArrowLeft size={12} aria-hidden /> Back
           </Link>
         }
       />
 
       <main className="flex-1 overflow-auto p-6">
-        {event.isLoading && <Spinner />}
-        {event.isError && <ErrorBox error={event.error} />}
+        {event.isLoading && (
+          <div className="space-y-4">
+            <SkCard lines={4} />
+            <SkCard lines={2} />
+            <SkCard lines={6} />
+          </div>
+        )}
+        {event.isError && (
+          <RetryableError
+            error={event.error}
+            onRetry={() => event.refetch()}
+            retrying={event.isRefetching}
+            context="Couldn't load this detect event"
+          />
+        )}
         {event.data && (
           <div className="space-y-4">
             {/* Summary card */}
@@ -40,7 +55,14 @@ export function DetectDetailPage() {
               </div>
               <div className="card-body">
                 <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs md:grid-cols-4">
-                  <Field label="When" value={fmtAbs(event.data.timestamp)} />
+                  <Field
+                    label="When"
+                    valueNode={
+                      <span title={fmtAbs(event.data.timestamp)}>
+                        {fmtAbs(event.data.timestamp)}
+                      </span>
+                    }
+                  />
                   <Field
                     label="Outcome"
                     valueNode={<OutcomePill outcome={event.data.outcome} />}
@@ -52,7 +74,7 @@ export function DetectDetailPage() {
                   <Field
                     label="Severity"
                     valueNode={
-                      <SeverityPill severity={event.data.finding?.Severity} />
+                      <SeverityBadge severity={event.data.finding?.Severity} />
                     }
                   />
                   <Field label="Source" value={event.data.source} />
@@ -75,11 +97,11 @@ export function DetectDetailPage() {
                     label="Pattern"
                     valueNode={
                       <Link
-                        to={`/patterns/${encodeURIComponent(event.data.pattern_id)}`}
-                        className="font-mono text-2xs text-accent hover:underline"
+                        to={`/agent/patterns/${encodeURIComponent(event.data.pattern_id)}`}
+                        className="font-mono text-2xs text-link hover:underline"
                       >
                         {event.data.pattern_id}{" "}
-                        <ExternalLink size={10} className="inline" />
+                        <ExternalLink size={10} className="inline" aria-hidden />
                       </Link>
                     }
                   />
@@ -93,7 +115,7 @@ export function DetectDetailPage() {
                   />
                 </dl>
                 {event.data.error && (
-                  <div className="mt-3 rounded-md border border-bad/40 bg-bad/5 px-3 py-2 text-xs text-bad">
+                  <div className="mt-3 rounded-md border border-sev-critical/40 bg-sev-critical/10 px-3 py-2 text-xs text-sev-critical">
                     <span className="font-medium">Error:</span> {event.data.error}
                   </div>
                 )}
@@ -102,7 +124,7 @@ export function DetectDetailPage() {
 
             {/* Pattern template */}
             <Card title="Pattern template">
-              <pre className="whitespace-pre-wrap break-words font-mono text-2xs text-ink-700">
+              <pre className="whitespace-pre-wrap break-words font-mono text-2xs text-ink-200">
                 {event.data.template || "—"}
               </pre>
             </Card>
@@ -114,7 +136,7 @@ export function DetectDetailPage() {
                   {event.data.samples.map((s, i) => (
                     <li
                       key={i}
-                      className="rounded-md border border-ink-100 bg-ink-50/40 p-2 font-mono text-2xs text-ink-700"
+                      className="rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs text-ink-200"
                     >
                       {s}
                     </li>
@@ -148,7 +170,7 @@ export function DetectDetailPage() {
               subtitle="Verbatim model output before JSON parsing."
             >
               {event.data.raw_response ? (
-                <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-ink-900/95 p-3 font-mono text-2xs text-ink-100">
+                <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-3 font-mono text-2xs text-ink-100">
                   {event.data.raw_response}
                 </pre>
               ) : (
@@ -176,7 +198,7 @@ function Card({
       <div className="card-header">
         <div>
           <div className="card-title">{title}</div>
-          {subtitle && <div className="text-2xs text-ink-500">{subtitle}</div>}
+          {subtitle && <div className="text-2xs text-ink-300">{subtitle}</div>}
         </div>
       </div>
       <div className="card-body">{children}</div>
@@ -195,8 +217,8 @@ function Field({
 }) {
   return (
     <div>
-      <dt className="text-2xs uppercase tracking-wider text-ink-500">{label}</dt>
-      <dd className="mt-0.5 text-xs text-ink-800">{valueNode ?? value ?? "—"}</dd>
+      <dt className="text-2xs uppercase tracking-wider text-ink-300">{label}</dt>
+      <dd className="mt-0.5 text-xs text-ink-100">{valueNode ?? value ?? "—"}</dd>
     </div>
   );
 }
@@ -207,20 +229,20 @@ function FindingBlock({ f }: { f: AIFinding }) {
     <div className="space-y-3 text-xs">
       {f.Title && (
         <div>
-          <div className="text-2xs uppercase tracking-wider text-ink-500">
+          <div className="text-2xs uppercase tracking-wider text-ink-300">
             Title
           </div>
-          <div className="mt-0.5 text-sm font-medium text-ink-900">
+          <div className="mt-0.5 text-sm font-medium text-ink-50">
             {f.Title}
           </div>
         </div>
       )}
       {f.Summary && (
         <div>
-          <div className="text-2xs uppercase tracking-wider text-ink-500">
+          <div className="text-2xs uppercase tracking-wider text-ink-300">
             Summary
           </div>
-          <p className="mt-0.5 whitespace-pre-wrap text-ink-700">{f.Summary}</p>
+          <p className="mt-0.5 whitespace-pre-wrap text-ink-200">{f.Summary}</p>
         </div>
       )}
       <div className="flex flex-wrap gap-2">
@@ -231,10 +253,10 @@ function FindingBlock({ f }: { f: AIFinding }) {
       </div>
       {f.Suggestions && f.Suggestions.length > 0 && (
         <div>
-          <div className="text-2xs uppercase tracking-wider text-ink-500">
+          <div className="text-2xs uppercase tracking-wider text-ink-300">
             Suggestions
           </div>
-          <ol className="mt-1 list-decimal space-y-1 pl-5 text-ink-700">
+          <ol className="mt-1 list-decimal space-y-1 pl-5 text-ink-200">
             {f.Suggestions.map((s, i) => (
               <li key={i}>{s}</li>
             ))}
@@ -246,7 +268,7 @@ function FindingBlock({ f }: { f: AIFinding }) {
 }
 
 function EmptyHint({ text }: { text: string }) {
-  return <div className="text-2xs italic text-ink-500">{text}</div>;
+  return <div className="text-2xs italic text-ink-400">{text}</div>;
 }
 
 // FullPrompt fetches the constant system prompt once and shows it
@@ -263,22 +285,29 @@ function FullPrompt({ userPrompt }: { userPrompt: string }) {
   return (
     <div className="space-y-2">
       <div>
-        <div className="mb-1 flex items-center justify-between text-2xs uppercase tracking-wider text-ink-500">
-          <span>System</span>
-          {sys.isLoading && <span className="italic text-ink-400">loading…</span>}
-          {sys.isError && (
-            <span className="italic text-bad">failed to load system prompt</span>
-          )}
+        <div className="mb-1 text-2xs uppercase tracking-wider text-ink-300">
+          System
         </div>
-        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md bg-ink-900/95 p-3 font-mono text-2xs text-ink-100">
-          {sys.data ?? ""}
-        </pre>
+        {sys.isLoading && <div aria-hidden className="sk h-24" />}
+        {sys.isError && (
+          <RetryableError
+            error={sys.error}
+            onRetry={() => sys.refetch()}
+            retrying={sys.isRefetching}
+            context="Couldn't load the system prompt"
+          />
+        )}
+        {sys.isSuccess && (
+          <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-3 font-mono text-2xs text-ink-100">
+            {sys.data}
+          </pre>
+        )}
       </div>
       <div>
-        <div className="mb-1 text-2xs uppercase tracking-wider text-ink-500">
+        <div className="mb-1 text-2xs uppercase tracking-wider text-ink-300">
           User
         </div>
-        <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-ink-900/95 p-3 font-mono text-2xs text-ink-100">
+        <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-3 font-mono text-2xs text-ink-100">
           {userPrompt}
         </pre>
       </div>

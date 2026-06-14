@@ -1,9 +1,9 @@
-import { X } from "lucide-react";
+import { Modal } from "./Modal";
 import { ErrorBox } from "@/components/feedback";
 
-// ConfirmDialog is a small modal used for destructive / one-way
-// actions. Matches the AssignDialog chrome so the operator gets a
-// consistent confirmation experience across the app.
+// ConfirmDialog — destructive / one-way confirmations, now on the
+// accessible Modal base (role=dialog, focus trap, Escape). Behavior kept:
+// busy state disables both actions and guards close while pending.
 export function ConfirmDialog({
   title,
   message,
@@ -26,28 +26,13 @@ export function ConfirmDialog({
   onClose: () => void;
 }) {
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink-900/40 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-md rounded-lg bg-white shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-ink-100 px-4 py-3">
-          <h2 className="text-sm font-semibold text-ink-900">{title}</h2>
-          <button
-            className="rounded p-1 text-ink-500 hover:bg-ink-50"
-            onClick={onClose}
-          >
-            <X size={14} />
-          </button>
-        </div>
-        <div className="space-y-3 p-4 text-xs text-ink-700">
-          <div>{message}</div>
-          {error && <ErrorBox error={error} />}
-        </div>
-        <div className="flex justify-end gap-2 border-t border-ink-100 px-4 py-3">
+    <Modal
+      title={title}
+      onClose={onClose}
+      closeDisabled={busy}
+      size="md"
+      footer={
+        <>
           <button className="btn" onClick={onClose} disabled={busy}>
             {cancelLabel}
           </button>
@@ -58,8 +43,13 @@ export function ConfirmDialog({
           >
             {busy ? "Working…" : confirmLabel}
           </button>
-        </div>
+        </>
+      }
+    >
+      <div className="space-y-3 text-xs text-ink-200">
+        <div>{message}</div>
+        {error && <ErrorBox error={error} />}
       </div>
-    </div>
+    </Modal>
   );
 }

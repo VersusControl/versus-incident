@@ -28,6 +28,16 @@ export function clearSecret() {
   localStorage.removeItem(SECRET_KEY);
 }
 
+// AUTH_EXPIRED_EVENT fires when a request that carried a secret comes back
+// 401 — i.e. the secret was rotated server-side mid-session. AppShell's
+// ReauthModal listens and re-prompts over the current page instead of
+// letting every view collapse into bare "HTTP 401" walls (audit finding).
+export const AUTH_EXPIRED_EVENT = "versus:auth-expired";
+
+function notifyAuthExpired() {
+  window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const secret = getSecret() ?? "";
   const headers = new Headers(init.headers);
@@ -50,6 +60,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
   }
   if (!res.ok) {
+    if (res.status === 401 && secret) notifyAuthExpired();
     const msg =
       (body && typeof body === "object" && "error" in body
         ? String((body as { error: unknown }).error)
@@ -320,6 +331,7 @@ async function uploadMultipart<T>(path: string, form: FormData): Promise<T> {
     }
   }
   if (!res.ok) {
+    if (res.status === 401 && secret) notifyAuthExpired();
     const msg =
       (body && typeof body === "object" && "error" in body
         ? String((body as { error: unknown }).error)
