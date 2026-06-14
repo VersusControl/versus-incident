@@ -123,17 +123,35 @@ the schema and admin workflows.
 catalog:
   persist_interval: 30s
   auto_promote_after: 100
+  max_patterns: 5000
+  retention: 720h
 ```
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `persist_interval` | duration | `30s` | How often the in-memory catalog is flushed to `data/patterns.json`. |
 | `auto_promote_after` | int | `100` | A pattern seen this many times in `detect` mode is treated as known (won't alert). `0` disables the promotion. |
+| `max_patterns` | int | `5000` | Size cap. When exceeded, the oldest **uncurated** patterns are evicted on the persist tick. `0`/negative disables the cap. |
+| `retention` | duration | `720h` | Uncurated patterns idle longer than this are evicted on the persist tick. `"0"` disables age eviction. |
+
+Eviction only ever touches **uncurated** patterns — those with no verdict
+and no tags. A pattern you have labelled (`known` / `spike`) or tagged is
+never removed automatically; remove it explicitly via the admin API.
 
 The storage backend itself is selected at the **root** of `config.yaml`
 (`storage.type`), not here. The on-disk filename is fixed
 (`patterns.json`), written to the fixed `./data` directory
 (`/app/data` in the container image).
+
+### Purge API
+
+| Method & path | Effect |
+|---|---|
+| `DELETE /api/agent/patterns/:id` | Remove one pattern. |
+| `DELETE /api/agent/patterns?service=<name>&older_than=<dur>` | Bulk-remove patterns by service and/or idle age (both optional; neither = all). Honors the request even for curated patterns. |
+| `DELETE /api/agent/services/:name` | Remove a service's first-seen tracking entry (patterns are left intact). |
+
+All admin endpoints require the `X-Gateway-Secret` header.
 
 ## Regex
 
