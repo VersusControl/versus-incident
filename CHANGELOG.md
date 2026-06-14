@@ -48,6 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   single-tenant build is unchanged by default.
 - **Helm** — `agent.tools.findRunbook.*` values + configmap wiring.
 
+#### AI SRE Agent — baseline-delta finding strings
+- **Pre-computed spike magnitude** (`pkg/core` —
+  `AgentResult.BaselineDelta()`) — agent incidents and the detect prompt now
+  state a spike's magnitude as a ready phrase ("240 this tick vs baseline
+  6.1/tick (39× normal)") instead of leaving an operator — or the model — to
+  divide frequency by baseline. Exposed as the `BaselineDelta` template
+  field (rendered in all six default agent channel templates) and added to
+  the detect prompt as `baseline_delta`. Additive: the `Frequency` /
+  `Baseline` fields are unchanged for custom templates.
+
 ---
 
 ## [1.4.3] — 2026-05

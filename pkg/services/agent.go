@@ -47,7 +47,10 @@ func CreateIncidentFromFinding(f *core.AIFinding, r core.AgentResult, source, se
 		"PatternTemplate": r.Template,
 		"Frequency":       r.Frequency,
 		"Baseline":        r.Baseline,
-		"Verdict":         r.Verdict.String(),
+		// BaselineDelta is the pre-computed human phrase ("39× normal") so
+		// templates state the spike magnitude without doing arithmetic.
+		"BaselineDelta": r.BaselineDelta(),
+		"Verdict":       r.Verdict.String(),
 
 		// Provenance
 		"ServiceName": service,
