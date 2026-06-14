@@ -28,6 +28,7 @@ agent:
   lookback: 5m
   batch_max: 1000
   signal_max_bytes: 8192
+  emit_dedup_window: 1h
   redaction:   { … }
   catalog:     { … }
   miner:       { … }
@@ -50,6 +51,7 @@ agent:
 | `lookback` | duration | `5m` | Initial backfill window on first start (when there's no cursor yet). |
 | `batch_max` | int | `1000` | Safety cap on signals processed per tick per source. |
 | `signal_max_bytes` | int | `8192` | Truncates a single signal's `Raw` payload above this size. |
+| `emit_dedup_window` | duration | `1h` | In **detect** mode, collapses repeat emissions for the same `(service, pattern)` into one incident per window — a sustained anomaly re-clusters every tick and would otherwise re-notify on every poll. `"0"` disables. Redis-backed when available (holds across replicas/restarts), in-memory otherwise. |
 
 ## Modes
 

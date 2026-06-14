@@ -309,6 +309,7 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 		BatchMax:        src.BatchMax,
 		SignalMaxBytes:  src.SignalMaxBytes,
 		NewServiceGrace: src.NewServiceGrace,
+		EmitDedupWindow: src.EmitDedupWindow,
 		ServicePatterns: append([]string(nil), src.ServicePatterns...),
 		Redaction: AgentRedactionConfig{
 			Enable:    src.Redaction.Enable,

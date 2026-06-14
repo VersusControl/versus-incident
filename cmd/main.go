@@ -263,6 +263,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 	}
 
 	cursors := agent.NewCursorStore(rdb)
+	dedup := agent.NewDedupStore(rdb, cfg.EmitDedupWindow)
 
 	aiBundle := agent.BuildAIs(cfg, catalog, store, nil)
 	if aiBundle.Detect != nil {
@@ -277,6 +278,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		Cfg:      cfg,
 		Sources:  sources,
 		Cursors:  cursors,
+		Dedup:    dedup,
 		Redactor: redactor,
 		Matcher:  matcher,
 		Miner:    miner,

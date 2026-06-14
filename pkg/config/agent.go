@@ -22,6 +22,12 @@ type AgentConfig struct {
 	// (post-redaction) log message to discover the service name.
 	ServicePatterns []string `mapstructure:"service_patterns"`
 
+	// EmitDedupWindow collapses repeat detect-mode emissions for the same
+	// (service, pattern) into one incident per window — a sustained anomaly
+	// re-clusters every tick and would otherwise re-notify on every poll.
+	// Empty falls back to 1h; "0" disables dedup. e.g. "1h", "30m".
+	EmitDedupWindow string `mapstructure:"emit_dedup_window"`
+
 	Redaction AgentRedactionConfig `mapstructure:"redaction"`
 	Catalog   AgentCatalogConfig   `mapstructure:"catalog"`
 	Miner     AgentMinerConfig     `mapstructure:"miner"`

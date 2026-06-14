@@ -115,7 +115,8 @@ Each event captures:
 - **Parsed finding** — severity, summary, category, confidence,
   suggestions.
 - **Outcome** — whether the incident was emitted, served from
-  cache, skipped (dry / quota), or errored.
+  cache, suppressed as a duplicate (`deduped`, see `emit_dedup_window`),
+  skipped (dry / quota), or errored.
 
 Look at it through the admin UI (the **Detect** page in the
 sidebar):
@@ -251,6 +252,11 @@ move accordingly.
   reuses the prior finding for free. Bump it during incident
   storms; lower it if you want fresher analysis on long-running
   issues.
+- **`emit_dedup_window`** — `cache_ttl` saves the AI call on a
+  repeat, but the cached finding was still *re-sent* every poll;
+  this window collapses those repeats into one incident per
+  `(service, pattern)` (subsequent ticks log `deduped`). Default
+  `1h`; set `"0"` to restore one-incident-per-tick behavior.
 - **`new_service_grace`** — silences a brand-new service for the
   configured duration. The window starts the first time the
   agent sees the service, and is persisted in `patterns.json` so

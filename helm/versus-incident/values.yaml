@@ -120,6 +120,9 @@ agent:
   pollInterval: 30s
   lookback: 5m
   newServiceGrace: 30m
+  # Collapse repeat detect-mode emissions for the same (service, pattern)
+  # into one incident per window. Empty → 1h default; "0" disables.
+  emitDedupWindow: 1h
 
   ai:
     # AI analyzer toggle. Required for detect mode to actually call an LLM.
