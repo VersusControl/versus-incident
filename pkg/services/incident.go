@@ -15,7 +15,14 @@ import (
 	m "github.com/VersusControl/versus-incident/pkg/models"
 )
 
-func CreateIncident(teamID string, content *map[string]interface{}, params ...*map[string]string) error {
+// CreateIncident persists and fans out an incident, returning the created
+// incident's ID alongside any send/on-call error. The ID is returned even
+// when a downstream channel or on-call step fails, because the incident is
+// persisted first (line below) and therefore exists; callers that need to
+// act on the new incident (e.g. auto-analysis) can rely on the ID whenever
+// it is non-empty. An empty ID is returned only when no incident was
+// created (provider construction failed before persistence).
+func CreateIncident(teamID string, content *map[string]interface{}, params ...*map[string]string) (string, error) {
 	var cfg *config.Config
 
 	if len(params) > 0 {
@@ -28,7 +35,7 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	factory := common.NewAlertProviderFactory(cfg)
 	providers, err := factory.CreateProviders()
 	if err != nil {
-		return fmt.Errorf("failed to create providers: %v", err)
+		return "", fmt.Errorf("failed to create providers: %v", err)
 	}
 
 	alert := core.NewAlert(providers...)
@@ -116,13 +123,13 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 
 	switch {
 	case sendErr != nil && oncallErr != nil:
-		return fmt.Errorf("send: %w; oncall: %v", sendErr, oncallErr)
+		return incident.ID, fmt.Errorf("send: %w; oncall: %v", sendErr, oncallErr)
 	case sendErr != nil:
-		return sendErr
+		return incident.ID, sendErr
 	case oncallErr != nil:
-		return oncallErr
+		return incident.ID, oncallErr
 	}
-	return nil
+	return incident.ID, nil
 }
 
 // buildIncidentRecord copies the alert into a durable IncidentRecord.

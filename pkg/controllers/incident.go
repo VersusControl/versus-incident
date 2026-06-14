@@ -43,14 +43,14 @@ func CreateIncident(c *fiber.Ctx) error {
 			for _, record := range records {
 				// capture pointer per iteration
 				rec := record
-				if err = services.CreateIncident("", &rec, &overwriteVaule); err != nil {
+				if _, err = services.CreateIncident("", &rec, &overwriteVaule); err != nil {
 					break
 				}
 			}
 		} else {
 			for _, record := range records {
 				rec := record
-				if err = services.CreateIncident("", &rec); err != nil {
+				if _, err = services.CreateIncident("", &rec); err != nil {
 					break
 				}
 			}
@@ -75,9 +75,9 @@ func CreateIncident(c *fiber.Ctx) error {
 	if len(c.Queries()) > 0 {
 		overwriteVaule := c.Queries()
 		delete(overwriteVaule, "incident_source") // reserved: ingress-only, not client-settable
-		err = services.CreateIncident("", body, &overwriteVaule)
+		_, err = services.CreateIncident("", body, &overwriteVaule)
 	} else {
-		err = services.CreateIncident("", body)
+		_, err = services.CreateIncident("", body)
 	}
 
 	if err != nil {

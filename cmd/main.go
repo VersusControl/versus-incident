@@ -342,7 +342,8 @@ func handleQueueMessage(content *map[string]interface{}) error {
 	// instead of the default "http". Agent-originated incidents carry
 	// their own Source and ignore this hint.
 	overwrite := map[string]string{"incident_source": "sqs"}
-	return services.CreateIncident("", content, &overwrite) // teamID as empty string
+	_, err := services.CreateIncident("", content, &overwrite) // teamID as empty string
+	return err
 }
 
 func handlerRedisOptions(rc c.RedisConfig) *redis.Options {
