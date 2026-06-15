@@ -1,0 +1,101 @@
+# Versus Incident config for the `metrics` docker-compose example.
+# Mirrors the shared minimal config used by the other examples; the only
+# example-specific tweaks are noted inline (mode default + grace window).
+
+name: versus
+host: 0.0.0.0
+port: 3000
+
+gateway_secret: ${GATEWAY_SECRET}
+
+alert:
+  debug_body: true
+
+  slack:
+    enable: ${SLACK_ENABLE}
+    token: ${SLACK_TOKEN}
+    channel_id: ${SLACK_CHANNEL_ID}
+    template_path: "config/slack_message.tmpl"
+
+  telegram:
+    enable: ${TELEGRAM_ENABLE}
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+    template_path: "config/telegram_message.tmpl"
+
+queue:
+  enable: false
+
+oncall:
+  enable: false
+  initialized_only: true
+  wait_minutes: 0
+  provider: aws_incident_manager
+
+redis:
+  insecure_skip_verify: true
+  host: ${REDIS_HOST}
+  port: ${REDIS_PORT}
+  password: ${REDIS_PASSWORD}
+  db: 0
+
+storage:
+  type: file
+  file:
+    max_incidents: 1000
+
+agent:
+  enable: ${AGENT_ENABLE}
+  # Default `detect` so a triggered incident surfaces immediately. The OSS
+  # trigger here is the `file` log source (see agent_sources.yaml): a host-run
+  # `scripts/generate_noisy_logs.py --spike 5xx ...` writes `status=503` error
+  # lines that start an incident. With AI enabled, the analyze loop then pulls
+  # query_metrics/query_traces to correlate against the series pushed by
+  # `scripts/generate_fake_metrics.py`. (The standing metric/trace data source
+  # is Enterprise-only.)
+  mode: ${AGENT_MODE}
+  poll_interval: 15s
+  lookback: 5m
+  batch_max: 1000
+
+  redaction:
+    enable: true
+    redact_ips: false
+
+  catalog:
+    persist_interval: 30s
+    auto_promote_after: 50
+    spike_multiplier: 5.0
+    spike_min_frequency: 5
+    spike_min_baseline_count: 20
+
+  miner:
+    similarity_threshold: 0.4
+    tree_depth: 4
+    max_children: 100
+
+  regex:
+    default_pattern: "(?i).*"
+    rules:
+      - name: http-5xx
+        pattern: "(?i)status=5\\d\\d"
+      - name: slow-request
+        pattern: "(?i)duration_ms=[0-9]{4,}"
+
+  ai:
+    enable: ${AGENT_AI_ENABLE}
+    api_key: ${AGENT_AI_API_KEY}
+    model: ${AGENT_AI_MODEL}
+    temperature: 0.2
+    max_tokens: 512
+    max_calls_per_hour: 60
+    cache_ttl: "1h"
+
+  # 0 = no new-service grace, so the demo fires on the first spike instead
+  # of waiting out a learning window. Raise this in production.
+  new_service_grace: 0
+
+  service_patterns:
+    - '(?i)\bservice[._-]?name["\s:=]+"?([A-Za-z0-9._-]+)'
+    - '(?i)\b(?:service|svc|app|component)\s*=\s*"?([A-Za-z0-9._-]+)'
+    - '(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"'

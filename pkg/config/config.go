@@ -225,7 +225,26 @@ type RedisConfig struct {
 	Port               int    `mapstructure:"port"`
 	Password           string `mapstructure:"password"`
 	DB                 int    `mapstructure:"db"`
+	TLS                *bool  `mapstructure:"tls"`
 	InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"`
+}
+
+// TLSEnabled reports whether the Redis client should dial over TLS. TLS is
+// the default: a nil flag (key omitted from config) preserves the historical
+// always-TLS behaviour. Set redis.tls: false (or REDIS_TLS=false) to dial a
+// plaintext Redis such as a local/dev redis:7-alpine.
+func (r RedisConfig) TLSEnabled() bool {
+	return r.TLS == nil || *r.TLS
+}
+
+// redisTLSFromEnv resolves a non-empty REDIS_TLS value to a TLS flag,
+// fail-closed: only an explicit off-value (false/0/no/off, any case) disables
+// TLS; every other value (1, yes, on, a typo, ...) keeps the secure default
+// (TLS on) so an operator never silently downgrades Redis to plaintext.
+func redisTLSFromEnv(v string) *bool {
+	off := map[string]bool{"false": true, "0": true, "no": true, "off": true}
+	enabled := !off[strings.ToLower(strings.TrimSpace(v))]
+	return &enabled
 }
 
 var (
@@ -290,6 +309,15 @@ func LoadConfig(path string) error {
 		// Set provider from environment variable if provided
 		if provider := os.Getenv("ONCALL_PROVIDER"); provider != "" {
 			cfg.OnCall.Provider = provider
+		}
+
+		// Redis env override: REDIS_TLS toggles the TLS escape hatch.
+		// Fail-closed: only an explicit off-value (false/0/no/off, any case)
+		// disables TLS; unset or any other value keeps the secure default
+		// (TLS on), so a typo or an enable-intent value like "1"/"yes" never
+		// silently downgrades the connection to plaintext.
+		if v := os.Getenv("REDIS_TLS"); v != "" {
+			cfg.Redis.TLS = redisTLSFromEnv(v)
 		}
 
 		// Storage env overrides

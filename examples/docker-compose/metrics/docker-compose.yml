@@ -1,0 +1,116 @@
+services:
+  # Prometheus Pushgateway: the host-run `scripts/generate_fake_metrics.py`
+  # PUSHes synthetic series here (Prometheus scrapes it). This is the
+  # metrics analogue of the log examples' host-run generator — all fake
+  # data is produced by scripts/, not by a bespoke in-compose service.
+  pushgateway:
+    image: prom/pushgateway:v1.9.0
+    container_name: versus-metrics-pushgateway
+    ports:
+      - "9091:9091"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9091/-/healthy"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    container_name: versus-metrics-prometheus
+    depends_on:
+      pushgateway:
+        condition: service_healthy
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=1h
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: generate a self-signed cert for Redis TLS. Versus always dials
+  # Redis over TLS by default (see cmd/main.go handlerRedisOptions — TLS is on
+  # unless redis.tls=false), so the example Redis must serve TLS too.
+  # `insecure_skip_verify: true` in config/config.yaml accepts the self-signed
+  # cert. Mirrors the `file` example's Redis-TLS setup.
+  redis-tls-init:
+    image: alpine:3.20
+    container_name: versus-metrics-redis-tls-init
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        cd /tls
+        if [ -f server.crt ] && [ -f server.key ] && [ -f ca.crt ]; then
+          echo "TLS material already present; skipping."
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+          -keyout server.key -out server.crt \
+          -subj "/CN=redis" \
+          -addext "subjectAltName=DNS:redis,DNS:localhost,IP:127.0.0.1"
+        cp server.crt ca.crt
+        chmod 0644 server.crt server.key ca.crt
+        echo "Generated self-signed cert for redis."
+    volumes:
+      - redis-tls:/tls
+
+  redis:
+    image: redis:7-alpine
+    container_name: versus-metrics-redis
+    depends_on:
+      redis-tls-init:
+        condition: service_completed_successfully
+    # TLS-only (--port 0 disables the plaintext port) + password. Versus
+    # connects with TLS + REDIS_PASSWORD and insecure_skip_verify: true.
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:-versus}
+      - --port
+      - "0"
+      - --tls-port
+      - "6379"
+      - --tls-cert-file
+      - /tls/server.crt
+      - --tls-key-file
+      - /tls/server.key
+      - --tls-ca-cert-file
+      - /tls/ca.crt
+      - --tls-auth-clients
+      - "no"
+    # Published so a host-run binary (or `docker run --network host`) reaches
+    # it at localhost:6379. Bound to loopback so it is never exposed off-box.
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+      - redis-tls:/tls:ro
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - --tls
+        - --insecure
+        - -a
+        - ${REDIS_PASSWORD:-versus}
+        - ping
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  prometheus-data:
+  redis-data:
+  redis-tls:

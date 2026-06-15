@@ -388,7 +388,7 @@ spec:
               value: "{{ .Values.externalRedis.maxRetryBackoff }}"
             {{- end }}
             {{- if .Values.externalRedis.tls.enabled }}
-            - name: REDIS_TLS_ENABLED
+            - name: REDIS_TLS
               value: "{{ .Values.externalRedis.tls.enabled }}"
             {{- if .Values.externalRedis.tls.caFile }}
             - name: REDIS_TLS_CA_FILE
@@ -411,6 +411,9 @@ spec:
                   name: {{ include "versus-incident.fullname" . }}-secrets
                   key: redis_tls_key_file
             {{- end }}
+            {{- else }}
+            - name: REDIS_TLS
+              value: "false"
             {{- end }}
             {{- else }}
             - name: REDIS_INSECURE_SKIP_VERIFY

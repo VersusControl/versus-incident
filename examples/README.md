@@ -12,6 +12,7 @@ runs only the services required for that source.
 |---|---|
 | [docker-compose/file/](./docker-compose/file/) | (none — local file) |
 | [docker-compose/loki/](./docker-compose/loki/) | Loki + Grafana |
+| [docker-compose/metrics/](./docker-compose/metrics/) | Prometheus + loadgen (Tempo optional) |
 | [docker-compose/elasticsearch/](./docker-compose/elasticsearch/) | Elasticsearch + Kibana |
 | [docker-compose/cloudwatch/](./docker-compose/cloudwatch/) | (your AWS account) |
 

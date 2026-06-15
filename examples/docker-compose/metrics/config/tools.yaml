@@ -1,0 +1,11 @@
+# Analyze-path tool config for the `metrics` example.
+#
+# `query_metrics` lets the AI analyze agent run on-demand PromQL range
+# queries against Prometheus while investigating an incident — the
+# "investigation path" that complements the detect-path source above.
+# It is registered only when an address is set; with AI disabled the tool
+# is simply never called.
+tools:
+  query_metrics:
+    prometheus:
+      address: http://prometheus:9090

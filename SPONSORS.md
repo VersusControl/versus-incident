@@ -35,7 +35,7 @@ the two ladders read coherently and never compete:
 | **Backer** | $25 | Individual self-hoster | Name listed in `SPONSORS.md` |
 | **Bronze** | $100 | Small team self-hosting the core | Logo in `README.md` (small) + `SPONSORS.md` |
 | **Silver** | $500 | Mid team self-hosting the core | Logo in `README.md` (medium) + priority issue triage + private Discord channel |
-| **Gold** | $2,000 | Org running the core at scale (≈ Enterprise Starter interest) | Logo in `README.md` (large) + monthly roadmap call (1h) + priority feature review |
+| **Gold** | $2,000 | Org running the core at scale (≈ Versus Enterprise interest) | Logo in `README.md` (large) + monthly roadmap call (1h) + priority feature review |
 | **Platinum** | Custom | Strategic backer / pre-commercial enterprise | Everything above + named integration ("Datadog support sponsored by …") + co-marketing |
 
 Sponsor amounts deliberately sit **alongside, not on top of**, the commercial
@@ -88,36 +88,31 @@ core, **Versus Enterprise** is the commercial tier. It is priced on **monitored
 services, never per-seat**, and billed **monthly**:
 
 - **Versus Enterprise** — self-hosted commercial license for multi-tenant org
-  isolation, SSO/SCIM, RBAC + audit, per-org model gateway, and air-gapped
-  supply-chain packaging. **Enterprise Starter** list **$1,500/mo** →
-  Enterprise ($3,500/mo) → Plus ($7,000/mo+).
+  isolation, SSO/SCIM, RBAC + audit, per-org model gateway, the
+  standing-intelligence metric/trace data source, and air-gapped supply-chain
+  packaging. There is **one tier today — Founding, $199/mo** — the full feature
+  set on the same binary, self-hosted.
 
-### Founding-Customer Beta — Enterprise Starter at $199/mo
+### Founding — Versus Enterprise at $199/mo
 
-**Get in before we're well-known.** We're opening the **Enterprise Starter**
-tier to the **first 10 founding customers** at an introductory self-hosted beta
-price. Low-risk first price, full features, locked in — and a transparent path
-to list price later.
+**Get in before we're well-known.** Versus Enterprise has exactly **one paid
+tier** today: **Founding, $199/mo**, an introductory founding-cohort price for
+the complete self-hosted feature set.
 
-> **Enterprise Starter:** ~~$1,500/mo list~~ → **$199/mo founding-customer
-> beta** — first **10 customers only**, price **locked at $199/mo for 12
-> months**.
+> **Founding:** **$199/mo** — the full Versus Enterprise feature set, self-hosted,
+> your data never leaves your infrastructure. Nothing held back.
 
 - **Full feature set, no asterisks.** Founding customers run the **complete
-  Enterprise Starter feature set — same binary, same features**. The discount is
-  on **price, not capability**; nothing is feature-clipped to reach $199/mo.
-- **Price-locked for 12 months** from signup, then a **published, honest
-  conversion path** — no surprise re-rate:
-  - **Year 2** — $750/mo (founding-loyalty rate)
-  - **Year 3+** — $1,500/mo (Enterprise Starter list)
-  - We send a **60-day pre-renewal notice** before any step-up.
-- **Why act now.** The cohort is capped at **10 customers** and the **12-month
-  lock** is only available to founding signups. Once the 10 seats are filled,
-  Starter is list price for everyone else.
+  Enterprise feature set — same binary, same features**, including the
+  standing-intelligence metric/trace data source. The introductory price is on
+  **price, not capability**; nothing is feature-clipped to reach $199/mo.
+- **One price today.** $199/mo is the only Versus Enterprise price right now.
+  We are **not** quoting a multi-tier list ladder or a hosted Cloud plan — higher
+  self-hosted tiers and Cloud pricing are TBD and not offered yet.
 
-This is the **self-hosted Versus Enterprise beta**. It is **not** the deferred,
-managed **Versus Cloud** tier — the Cloud "Team" price point is a separate
-future offering that is not sold today.
+This is the **self-hosted Versus Enterprise** offer. It is **not** the deferred,
+managed **Versus Cloud** product — Cloud pricing is a separate future offering
+that is not sold today.
 
 > A hosted **Versus Cloud** (managed, usage-based SaaS) is a **future** offering
 > built on the same binary. It is **not sold today** — we are shipping and selling

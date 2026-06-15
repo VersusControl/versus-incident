@@ -66,6 +66,14 @@ func GetOnCallWorkflow() *OnCallWorkflow {
 	return onCallWorkflow
 }
 
+// IsOnCallWorkflowInitialized reports whether the global on-call workflow
+// singleton has been initialized via InitOnCallWorkflow. Callers should
+// check this before GetOnCallWorkflow so an uninitialized singleton is
+// skipped instead of panicking the process.
+func IsOnCallWorkflowInitialized() bool {
+	return onCallWorkflow != nil
+}
+
 // triggerProvider triggers the on-call provider
 func (w *OnCallWorkflow) triggerProvider(ctx context.Context, incidentID string, cfg *config.OnCallConfig) error {
 	if err := w.provider.TriggerOnCall(ctx, incidentID, cfg); err != nil {

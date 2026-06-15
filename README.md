@@ -15,8 +15,7 @@
 </p>
 
 <p align="center">
-  Free with MIT license · priced on monitored services, never per seat ·
-  <a href="https://docs.versusincident.com/#/pricing">Pricing</a>
+  Free with MIT license · <a href="https://docs.versusincident.com/#/pricing">Enterprise Pricing</a>
 </p>
 
 ![Versus](src/docs/images/versus-dashboard-01.png)

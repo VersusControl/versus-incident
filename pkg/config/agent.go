@@ -95,11 +95,20 @@ type AgentRegexRule struct {
 type AgentRegexConfig struct {
 	DefaultPattern string           `mapstructure:"default_pattern"`
 	Rules          []AgentRegexRule `mapstructure:"rules"`
+
+	// Metrics and Traces are OPTIONAL top-level per-KIND regex overrides,
+	// siblings of DefaultPattern (which is the logs default). They apply to
+	// every source of that kind. Both default to empty, which means "learn
+	// all" — metrics/traces are not text-filtered by default. They are not
+	// shipped in the sample config.yaml; an operator opts in only to narrow a
+	// kind. Logs are unaffected (they always use DefaultPattern + Rules).
+	Metrics string `mapstructure:"metrics"`
+	Traces  string `mapstructure:"traces"`
 }
 
 type AgentSourceConfig struct {
 	Name           string                          `mapstructure:"name"`
-	Type           string                          `mapstructure:"type"` // "elasticsearch" | "file" | "loki" | "cloudwatchlogs" | "graylog" | "splunk"
+	Type           string                          `mapstructure:"type"` // "elasticsearch" | "file" | "loki" | "cloudwatchlogs" | "graylog" | "splunk" | <registered type, e.g. "prometheus"/"traces" via Versus Enterprise>
 	Enable         bool                            `mapstructure:"enable"`
 	Elasticsearch  AgentElasticsearchSourceConfig  `mapstructure:"elasticsearch"`
 	File           AgentFileSourceConfig           `mapstructure:"file"`
@@ -107,6 +116,14 @@ type AgentSourceConfig struct {
 	CloudWatchLogs AgentCloudWatchLogsSourceConfig `mapstructure:"cloudwatchlogs"`
 	Graylog        AgentGraylogSourceConfig        `mapstructure:"graylog"`
 	Splunk         AgentSplunkSourceConfig         `mapstructure:"splunk"`
+	// Options is a generic per-source settings block consumed by source
+	// types resolved through the runtime registration hook
+	// (signalsources.Register) rather than built into OSS — e.g. the
+	// enterprise metric (`prometheus`) and trace (`traces`) data sources.
+	// Built-in OSS log sources use their dedicated typed blocks above and
+	// ignore this field. The registered Factory decodes this map into its
+	// own concrete config struct.
+	Options map[string]interface{} `mapstructure:"options"`
 }
 
 // AgentFileSourceConfig drives the file-tailing SignalSource.
@@ -294,7 +311,6 @@ type AgentSplunkSourceConfig struct {
 	PageSize int `mapstructure:"page_size"`
 }
 
-// AgentAIConfig holds configuration for the AI SRE used in detect mode.
 // The struct and env overrides are wired today; the concrete HTTP client
 // and prompt builder land alongside detect-mode emission.
 type AgentAIConfig struct {

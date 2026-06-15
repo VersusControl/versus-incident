@@ -1,0 +1,24 @@
+# Trigger source for the OSS `metrics` example.
+#
+# IMPORTANT: in the open-source build the standing metric/trace DATA SOURCE
+# (`type: prometheus` / `type: traces` — a PromQL/TraceQL rule that *starts* an
+# incident) is a Versus Enterprise feature. OSS keeps the on-demand
+# `query_metrics` / `query_traces` analyze tools (see tools.yaml), not a
+# standing detector. So this example does NOT configure a metric/trace source.
+#
+# To still demonstrate something end-to-end on OSS, we trigger incidents through
+# a plain `file` log source: the host-run `scripts/generate_noisy_logs.py`
+# appends synthetic app logs to ./logs/app.log (bind-mounted at the path below),
+# and a `--spike 5xx` burst emits `level=error ... status=503` lines. Those lines
+# start an incident; the AI-analyze loop then calls `query_metrics` /
+# `query_traces` to CORRELATE against the fake Prometheus/Tempo data that
+# `scripts/generate_fake_metrics.py` pushes.
+sources:
+  - name: demo-app-logs
+    type: file
+    enable: true
+    file:
+      path: /var/log/sample/app.log
+      format: text
+      from_beginning: true
+      max_lines_per_pull: 1000

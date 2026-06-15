@@ -460,3 +460,92 @@ func (p *postgresProvider) SearchAnalyses(query string, limit int) ([]*AnalysisR
 func (p *postgresProvider) Close() error {
 	return p.db.Close()
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle (implements the optional storage.Lifecycle capability — X1-T7)
+//
+// A mechanical delete primitive with no org/policy concept. The blob
+// domain spans every physical blob table (the fixed allowlist + vs_blobs),
+// so model-state artifacts under the models/ namespace (which fall back to
+// vs_blobs) purge here too.
+// ---------------------------------------------------------------------------
+
+// allBlobTables returns the fixed set of physical blob tables: the shared
+// vs_blobs plus every dedicated table in the blobTables allowlist. The
+// result is a constant set (never derived from caller input), so each name
+// is safe to interpolate into a query.
+func allBlobTables() []string {
+	tables := []string{"vs_blobs"}
+	seen := map[string]bool{"vs_blobs": true}
+	for _, t := range blobTables {
+		if !seen[t] {
+			tables = append(tables, t)
+			seen[t] = true
+		}
+	}
+	return tables
+}
+
+func (p *postgresProvider) PurgeOlderThan(domain string, cutoff time.Time) (int, error) {
+	cut := cutoff.UTC()
+	switch domain {
+	case DomainIncidents:
+		res, err := p.db.Exec(`DELETE FROM vs_incidents WHERE created_at < $1`, cut)
+		if err != nil {
+			return 0, fmt.Errorf("storage: purge incidents: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		return int(n), nil
+	case DomainAnalyses:
+		res, err := p.db.Exec(`DELETE FROM vs_analyses WHERE requested_at < $1`, cut)
+		if err != nil {
+			return 0, fmt.Errorf("storage: purge analyses: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		return int(n), nil
+	case DomainBlobs:
+		total := 0
+		for _, table := range allBlobTables() {
+			res, err := p.db.Exec(
+				fmt.Sprintf(`DELETE FROM %s WHERE updated_at < $1`, table), cut,
+			)
+			if err != nil {
+				return total, fmt.Errorf("storage: purge blobs %s: %w", table, err)
+			}
+			n, _ := res.RowsAffected()
+			total += int(n)
+		}
+		return total, nil
+	default:
+		return 0, ErrUnknownDomain
+	}
+}
+
+func (p *postgresProvider) DeleteByID(domain, id string) error {
+	var (
+		res sql.Result
+		err error
+	)
+	switch domain {
+	case DomainIncidents:
+		res, err = p.db.Exec(`DELETE FROM vs_incidents WHERE id = $1`, id)
+	case DomainAnalyses:
+		res, err = p.db.Exec(`DELETE FROM vs_analyses WHERE id = $1`, id)
+	case DomainBlobs:
+		// The table is chosen from the fixed allowlist by name, so it is
+		// safe to interpolate; the name itself is bound as a parameter.
+		res, err = p.db.Exec(
+			fmt.Sprintf(`DELETE FROM %s WHERE name = $1`, blobTable(id)), id,
+		)
+	default:
+		return ErrUnknownDomain
+	}
+	if err != nil {
+		return fmt.Errorf("storage: delete %s %q: %w", domain, id, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

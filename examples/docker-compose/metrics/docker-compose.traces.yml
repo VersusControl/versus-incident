@@ -1,0 +1,30 @@
+# OPTIONAL traces overlay. Run alongside the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.traces.yml up -d
+#
+# It adds Tempo with an OTLP/HTTP receiver on :4318 and API on :3200.
+# Fake trace data is produced by the same host-run generator as the metrics:
+#   python3 scripts/generate_fake_metrics.py --otlp http://localhost:4318 ...
+#
+# The standing `traces` *source* is a Versus Enterprise feature — run the
+# Enterprise image separately (see src/examples/traces.md).
+services:
+  tempo:
+    image: grafana/tempo:2.5.0
+    container_name: versus-metrics-tempo
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    ports:
+      - "3200:3200"
+      - "4318:4318"
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3200/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  tempo-data:

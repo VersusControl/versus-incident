@@ -35,6 +35,10 @@ type DetectEvent struct {
 	Frequency int      `json:"frequency"`
 	Baseline  float64  `json:"baseline"`
 	Samples   []string `json:"samples,omitempty"` // up to 3, redacted
+	// RuleSeverity is the operator-declared severity floor carried from the
+	// source signals (empty for auto-discovered signals). Persisted so the
+	// declared-severity-honoured path is auditable/testable.
+	RuleSeverity string `json:"rule_severity,omitempty"`
 
 	// AI call (empty when outcome != "emitted" — cached/dry/quota/etc.
 	// did not invoke the model; ai_error fills RawResponse only when
