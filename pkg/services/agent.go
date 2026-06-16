@@ -75,5 +75,6 @@ func CreateIncidentFromFinding(f *core.AIFinding, r core.AgentResult, source, se
 		params["oncall_enable"] = "false"
 	}
 
-	return CreateIncident("", &content, &params)
+	_, err := CreateIncident("", &content, &params)
+	return err
 }

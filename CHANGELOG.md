@@ -48,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   single-tenant build is unchanged by default.
 - **Helm** — `agent.tools.findRunbook.*` values + configmap wiring.
 
+### Changed
+
+- **`services.CreateIncident` now returns `(incidentID string, err error)`**
+  (`pkg/services/incident.go`) — the created incident's ID was discarded;
+  it is now returned so callers can act on the new incident (e.g. a future
+  auto-analysis step). The ID is returned even on a downstream send/on-call
+  error, because the incident is persisted before fan-out. All call sites
+  updated (`cmd/main.go`, `pkg/controllers/incident.go`,
+  `pkg/controllers/sns.go`, `pkg/services/agent.go`); behavior is otherwise
+  unchanged.
+
 ---
 
 ## [1.4.3] — 2026-05
