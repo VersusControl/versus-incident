@@ -94,3 +94,16 @@ func TestCloneConfigCarriesToolsConfig(t *testing.T) {
 		t.Fatalf("tools block = %+v, want %+v", dst.Agent.Tools, src.Agent.Tools)
 	}
 }
+
+// TestCloneConfigCarriesEwmaAlpha asserts the catalog ewma_alpha survives
+// a cloneConfig round-trip — without the clone_config mirror, per-request
+// overrides would silently reset the baseline smoothing factor to zero
+// (→ the 0.2 fallback), changing spike sensitivity.
+func TestCloneConfigCarriesEwmaAlpha(t *testing.T) {
+	src := &Config{}
+	src.Agent.Catalog.EwmaAlpha = 0.35
+	dst := cloneConfig(src)
+	if dst.Agent.Catalog.EwmaAlpha != 0.35 {
+		t.Fatalf("ewma_alpha = %v, want 0.35", dst.Agent.Catalog.EwmaAlpha)
+	}
+}
