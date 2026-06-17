@@ -47,6 +47,7 @@ type Worker struct {
 	cfg      config.AgentConfig
 	sources  []core.SignalSource
 	cursors  *CursorStore // nil → in-memory fallback
+	dedup    *DedupStore  // emit dedup gate; never nil after NewWorker
 	redactor *Redactor
 	matcher  *RegexMatcher
 	miner    *Miner
@@ -79,6 +80,7 @@ type WorkerOptions struct {
 	Cfg      config.AgentConfig
 	Sources  []core.SignalSource
 	Cursors  *CursorStore // optional; pass nil for in-memory cursors
+	Dedup    *DedupStore  // optional; nil → in-memory store from cfg.emit_dedup_window
 	Redactor *Redactor
 	Matcher  *RegexMatcher
 	Miner    *Miner
@@ -106,6 +108,7 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 		matcher:  opt.Matcher,
 		miner:    opt.Miner,
 		catalog:  opt.Catalog,
+		dedup:    opt.Dedup,
 		shadow:   opt.Shadow,
 		detect:   opt.Detect,
 		services: opt.Services,
@@ -118,6 +121,12 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 	}
 	if w.catalog == nil {
 		return nil, fmt.Errorf("agent: catalog is required")
+	}
+	// Emit dedup is on by default even if a caller forgets to inject one:
+	// fall back to an in-memory store sized from config. startAgent injects
+	// a Redis-backed store so the window holds across replicas/restarts.
+	if w.dedup == nil {
+		w.dedup = NewDedupStore(nil, opt.Cfg.EmitDedupWindow)
 	}
 
 	w.pollInterval = parseDurationOr(opt.Cfg.PollInterval, 30*time.Second)
@@ -423,13 +432,7 @@ func (w *Worker) emitDetect(
 		log.Printf("%sagent[detect]: cache hit pattern=%s verdict=%s freq=%d%s",
 			colorGreen, patternID, verdict, len(signals), colorReset)
 		evt.Finding = cached
-		outcome := w.send(cached, result, source, service, "cached")
-		evt.Outcome = outcome
-		if outcome == "send_error" {
-			evt.Error = "emitter returned error (see logs)"
-		}
-		w.detect.Record(evt)
-		return outcome
+		return w.emit(ctx, evt, cached, result, source, service, "cached")
 	}
 
 	// 3. Rate limit guard.
@@ -458,11 +461,38 @@ func (w *Worker) emitDetect(
 	evt.RawResponse = call.RawResponse
 	evt.DurationMs = call.DurationMs
 
-	outcome := w.send(finding, result, source, service, "emitted")
-	evt.Outcome = outcome
+	return w.emit(ctx, evt, finding, result, source, service, "emitted")
+}
+
+// emit applies the dedup gate, sends, and records the audit event. A
+// sustained anomaly re-clusters into the same (service, pattern) every
+// tick; the gate collapses that into one incident per dedup window instead
+// of one per poll. A failed send releases the gate so the next tick retries
+// rather than being suppressed for the whole window.
+func (w *Worker) emit(
+	ctx context.Context,
+	evt *DetectEvent,
+	finding *core.AIFinding,
+	result core.AgentResult,
+	source, service, okLabel string,
+) string {
+	key := service + ":" + result.PatternID
+	if w.dedup != nil && !w.dedup.Allow(ctx, key) {
+		log.Printf("%sagent[detect]: deduped pattern=%s service=%s (already emitted within window)%s",
+			colorGreen, result.PatternID, service, colorReset)
+		evt.Outcome = "deduped"
+		w.detect.Record(evt)
+		return "deduped"
+	}
+
+	outcome := w.send(finding, result, source, service, okLabel)
 	if outcome == "send_error" {
 		evt.Error = "emitter returned error (see logs)"
+		if w.dedup != nil {
+			w.dedup.Release(ctx, key) // a failed emit must not consume the window
+		}
 	}
+	evt.Outcome = outcome
 	w.detect.Record(evt)
 	return outcome
 }

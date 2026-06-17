@@ -48,6 +48,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   single-tenant build is unchanged by default.
 - **Helm** — `agent.tools.findRunbook.*` values + configmap wiring.
 
+### Fixed
+
+#### AI SRE Agent — detect-mode emit deduplication
+- **Stop re-emitting an incident every tick for a sustained anomaly**
+  (`pkg/agent/dedup.go`, `pkg/agent/worker.go`) — a long-running anomaly
+  re-clusters into the same pattern on every poll, and the worker re-sent
+  (and re-notified) on each tick — even the cached path still called
+  `send()`. A new `DedupStore` gates emission per `(service, pattern)` for
+  `agent.emit_dedup_window` (default `1h`; `"0"` disables) — Redis
+  `SETNX EX` when available (holds across replicas), with an in-memory
+  fallback like the cursor store. Suppressed emits record
+  `outcome="deduped"` in the detect log; a failed send releases the window
+  so the next tick retries. Config triple-touch + Helm
+  (`agent.emitDedupWindow`).
+
 ---
 
 ## [1.4.3] — 2026-05

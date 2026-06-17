@@ -186,6 +186,10 @@ agent:
   lookback: 5m                    # initial backfill window on startup
   batch_max: 5000                 # safety cap per tick
   signal_max_bytes: 65536         # cap on Signal.Raw
+  # Collapse repeat detect-mode emissions for the same (service, pattern)
+  # into one incident per window — a sustained anomaly re-clusters every
+  # tick and would otherwise re-notify on every poll. "0" disables.
+  emit_dedup_window: 1h
 
 
   redaction:

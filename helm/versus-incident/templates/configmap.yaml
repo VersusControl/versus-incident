@@ -227,6 +227,9 @@ data:
       poll_interval: {{ .Values.agent.pollInterval | default "30s" }}
       lookback: {{ .Values.agent.lookback | default "5m" }}
       new_service_grace: {{ .Values.agent.newServiceGrace | default "30m" }}
+      {{- if .Values.agent.emitDedupWindow }}
+      emit_dedup_window: {{ .Values.agent.emitDedupWindow | quote }}
+      {{- end }}
       sources_path: /app/config/agent_sources.yaml
       ai:
         enable: {{ .Values.agent.ai.enable }}
