@@ -48,6 +48,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   single-tenant build is unchanged by default.
 - **Helm** — `agent.tools.findRunbook.*` values + configmap wiring.
 
+#### AI SRE Agent — per-source circuit breaker + health
+- **Circuit breaker** (`pkg/agent/health.go`, `pkg/agent/worker.go`) — a
+  failing signal source was retried every tick, hammering a downed backend
+  forever. A per-source breaker now backs off exponentially (from
+  `poll_interval` up to `agent.source_backoff_max`, default `15m`) and
+  recovers on its own once a pull succeeds — no restart. Source pulls within
+  a tick are also **staggered** (the long-promised behavior that was never
+  implemented) so N sources don't hit their backends simultaneously.
+- **Source-health admin endpoints** (gated by `X-Gateway-Secret`):
+  - `GET /api/agent/sources/health` — per-source state (`ok` /
+    `backing_off` / `paused`), failures, last error, next-eligible time.
+  - `POST /api/agent/sources/:name/pause` and `/resume` — manual hold.
+  - `DELETE /api/agent/sources/:name/cursor` — drop a stuck cursor so the
+    source re-backfills from `lookback`.
+- Config triple-touch (`agent.source_backoff_max`) + Helm
+  (`agent.sourceBackoffMax`) + docs. (Sharing the breaker with the analyze
+  `get_related_logs` reader and gap-window tracking are follow-ups.)
+
 ---
 
 ## [1.4.3] — 2026-05

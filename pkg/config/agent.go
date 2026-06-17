@@ -22,6 +22,12 @@ type AgentConfig struct {
 	// (post-redaction) log message to discover the service name.
 	ServicePatterns []string `mapstructure:"service_patterns"`
 
+	// SourceBackoffMax caps the per-source circuit-breaker backoff. A source
+	// that keeps failing is retried on an exponential backoff (starting at
+	// the poll interval) up to this ceiling, instead of every tick. Empty
+	// falls back to 15m. e.g. "15m", "1h".
+	SourceBackoffMax string `mapstructure:"source_backoff_max"`
+
 	Redaction AgentRedactionConfig `mapstructure:"redaction"`
 	Catalog   AgentCatalogConfig   `mapstructure:"catalog"`
 	Miner     AgentMinerConfig     `mapstructure:"miner"`
