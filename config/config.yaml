@@ -198,6 +198,10 @@ agent:
   catalog:
     persist_interval: 30s
     auto_promote_after: 50       # in detect mode, this many sightings = "known"
+    # Catalog bounds, enforced on the persist tick. Only UNCURATED patterns
+    # (no verdict, no tags) are evicted; operator-curated patterns are kept.
+    max_patterns: 5000           # 0/negative = no cap
+    retention: 720h              # drop uncurated patterns idle longer than this; "0" disables
     # Spike detection: a known pattern is re-flagged when its tick-level
     # frequency suddenly exceeds the EWMA (Exponentially Weighted Moving Average) baseline by `spike_multiplier`.
     # Two safety floors keep noise out:

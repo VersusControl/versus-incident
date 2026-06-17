@@ -1,6 +1,8 @@
 package controllers
 
 import (
+	"time"
+
 	"github.com/VersusControl/versus-incident/pkg/agent"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/analyze"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/detect"
@@ -38,6 +40,7 @@ func NewAgentController(cat *agent.Catalog, sl *agent.ShadowLog, dl *agent.Detec
 //	GET    /patterns/:id     get one pattern
 //	POST   /patterns/:id     update verdict / tags
 //	DELETE /patterns/:id     remove a pattern
+//	DELETE /patterns         bulk purge (?service=&older_than=<dur>)
 //	POST   /flush            force-flush the catalog to disk
 //	GET    /status           lightweight status (catalog size, dirty flag)
 //	GET    /shadow           list shadow-mode "would have alerted" events
@@ -46,6 +49,7 @@ func NewAgentController(cat *agent.Catalog, sl *agent.ShadowLog, dl *agent.Detec
 //	POST   /shadow/flush     force-flush the shadow log to disk
 //	GET    /services         list known services with grace status
 //	POST   /services/:name/grace  control grace period (end / restart)
+//	DELETE /services/:name   remove a service's first-seen tracking entry
 //	GET    /detect           list detect-mode AI calls (newest first)
 //	GET    /detect/stats     aggregate counts for the detect log
 //	GET    /detect/:id       get one detect-mode AI call (full prompt + response)
@@ -56,6 +60,7 @@ func (a *AgentController) Register(router fiber.Router) {
 	g := router.Group("/agent", a.authMiddleware)
 	g.Get("/status", a.getStatus)
 	g.Get("/patterns", a.listPatterns)
+	g.Delete("/patterns", a.purgePatterns)
 	g.Get("/patterns/:id", a.getPattern)
 	g.Post("/patterns/:id", a.updatePattern)
 	g.Delete("/patterns/:id", a.deletePattern)
@@ -66,6 +71,7 @@ func (a *AgentController) Register(router fiber.Router) {
 	g.Post("/shadow/flush", a.flushShadow)
 	g.Get("/services", a.listServices)
 	g.Post("/services/:name/grace", a.controlServiceGrace)
+	g.Delete("/services/:name", a.deleteService)
 	g.Get("/detect", a.listDetect)
 	g.Get("/detect/stats", a.detectStats)
 	g.Get("/detect/:id", a.getDetect)
@@ -139,6 +145,39 @@ func (a *AgentController) updatePattern(c *fiber.Ctx) error {
 func (a *AgentController) deletePattern(c *fiber.Ctx) error {
 	id := c.Params("id")
 	if !a.catalog.Delete(id) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// purgePatterns bulk-deletes patterns by optional filters:
+//
+//	DELETE /patterns?service=<name>&older_than=<duration>
+//
+// Both filters are optional; with neither, every pattern is removed.
+// older_than is a Go duration (e.g. "720h"). This is an explicit operator
+// action — unlike the agent's automatic sweep it also removes curated
+// patterns.
+func (a *AgentController) purgePatterns(c *fiber.Ctx) error {
+	service := c.Query("service")
+	var olderThan time.Duration
+	if v := c.Query("older_than"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid older_than duration"})
+		}
+		olderThan = d
+	}
+	removed := a.catalog.PurgePatterns(service, olderThan)
+	return c.JSON(fiber.Map{"removed": removed})
+}
+
+// deleteService removes a service's first-seen tracking entry. Patterns
+// attributed to the service are left intact (purge them via DELETE
+// /patterns?service=).
+func (a *AgentController) deleteService(c *fiber.Ctx) error {
+	name := c.Params("name")
+	if !a.catalog.DeleteService(name) {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 	}
 	return c.SendStatus(fiber.StatusNoContent)

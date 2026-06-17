@@ -56,6 +56,14 @@ type AgentRedactionConfig struct {
 type AgentCatalogConfig struct {
 	PersistInterval  string `mapstructure:"persist_interval"`   // e.g. "30s"
 	AutoPromoteAfter int    `mapstructure:"auto_promote_after"` // 0 = never
+	// MaxPatterns caps the catalog size. When exceeded, the oldest
+	// uncurated patterns (no verdict, no tags) are evicted on the persist
+	// tick. 0 disables the cap. Default 5000.
+	MaxPatterns int `mapstructure:"max_patterns"`
+	// Retention drops uncurated patterns idle longer than this on the
+	// persist tick. Empty falls back to 720h (30d); "0" disables age
+	// eviction. Curated patterns (verdict or tags) are never auto-evicted.
+	Retention string `mapstructure:"retention"`
 	// SpikeMultiplier flags a tick as a frequency spike when the tick
 	// count exceeds the pattern's prior EWMA baseline by this factor.
 	// 0 disables spike detection. Default 5.0.

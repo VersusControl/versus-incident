@@ -63,6 +63,8 @@ type Worker struct {
 	persistEvery    time.Duration
 	lookback        time.Duration
 	ewmaAlpha       float64
+	maxPatterns     int             // 0 = no cap
+	retention       time.Duration   // 0 = no age eviction
 	services        *ServiceMatcher // regex-based service-name extractor
 	newServiceGrace time.Duration   // 0 = disabled
 }
@@ -125,6 +127,13 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 	w.lookback = parseDurationOr(opt.Cfg.Lookback, 5*time.Minute)
 	w.ewmaAlpha = 0.2 // configurable once spike detection lands
 	w.newServiceGrace = parseDurationOr(opt.Cfg.NewServiceGrace, 0)
+	// Catalog bounds: default 5000 patterns / 720h retention. A negative
+	// max_patterns disables the cap; "0" retention disables age eviction.
+	w.maxPatterns = 5000
+	if opt.Cfg.Catalog.MaxPatterns != 0 {
+		w.maxPatterns = opt.Cfg.Catalog.MaxPatterns
+	}
+	w.retention = parseDurationOr(opt.Cfg.Catalog.Retention, 720*time.Hour)
 
 	return w, nil
 }
@@ -172,6 +181,13 @@ func (w *Worker) Run(ctx context.Context) {
 		case <-tick.C:
 			w.tick(ctx, mode)
 		case <-persist.C:
+			// Bound the catalog before flushing: drop idle/overflow uncurated
+			// patterns so the file (and the in-memory map) can't grow without
+			// limit. Curated patterns are always kept (see Catalog.Sweep).
+			if n := w.catalog.Sweep(w.maxPatterns, w.retention); n > 0 {
+				log.Printf("agent: catalog swept %d patterns (cap=%d retention=%s)",
+					n, w.maxPatterns, w.retention)
+			}
 			if w.catalog.Dirty() {
 				if err := w.catalog.Persist(); err != nil {
 					log.Printf("agent: catalog flush failed: %v", err)

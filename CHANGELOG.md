@@ -48,6 +48,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   single-tenant build is unchanged by default.
 - **Helm** — `agent.tools.findRunbook.*` values + configmap wiring.
 
+#### AI SRE Agent — catalog bounds + purge API
+- **`max_patterns` / `retention` + sweep** (`pkg/agent/catalog.go`,
+  `pkg/agent/worker.go`) — the pattern catalog grew without limit. It is now
+  bounded on the persist tick: `agent.catalog.max_patterns` (default 5000)
+  evicts the oldest patterns over the cap, and `agent.catalog.retention`
+  (default `720h`) drops patterns idle longer than the window. Eviction only
+  ever touches **uncurated** patterns (no verdict, no tags) — operator-
+  labelled patterns are always kept. `0`/negative cap and `"0"` retention
+  disable each independently.
+- **Purge endpoints** —
+  `DELETE /api/agent/patterns?service=&older_than=` bulk-removes patterns by
+  service and/or idle age, and `DELETE /api/agent/services/:name` removes a
+  service's tracking entry (both gated by `X-Gateway-Secret`).
+- Config triple-touch (struct + clone_config + config.yaml). Not exposed in
+  the Helm chart, which surfaces no other `agent.catalog` tuning.
+
 ---
 
 ## [1.4.3] — 2026-05

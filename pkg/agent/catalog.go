@@ -265,6 +265,110 @@ func (c *Catalog) Delete(patternID string) bool {
 	return true
 }
 
+// protectedFromEviction reports whether a pattern must survive automatic
+// cap / retention sweeps. Operator-curated patterns — those with an explicit
+// verdict or any tag — are never evicted by the agent; only the operator can
+// remove them (via PurgePatterns / Delete). Caller holds the lock.
+func protectedFromEviction(p *Pattern) bool {
+	return p.Verdict != "" || len(p.Tags) > 0
+}
+
+// Sweep bounds the catalog by enforcing retention and a size cap on
+// UNPROTECTED patterns (no verdict, no tags). Patterns idle longer than
+// `retention` are dropped first; if the catalog is still above
+// `maxPatterns`, the oldest-by-LastSeen unprotected patterns are dropped
+// until it fits. Curated patterns are always kept and still count toward
+// the cap, so a fully-curated catalog is never truncated. retention<=0
+// disables age eviction; maxPatterns<=0 disables the cap. Returns the count
+// removed. Designed to be called from the persist ticker.
+func (c *Catalog) Sweep(maxPatterns int, retention time.Duration) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	removed := 0
+
+	if retention > 0 {
+		for id, p := range c.patterns {
+			if protectedFromEviction(p) {
+				continue
+			}
+			if now.Sub(p.LastSeen) > retention {
+				delete(c.patterns, id)
+				removed++
+			}
+		}
+	}
+
+	if maxPatterns > 0 && len(c.patterns) > maxPatterns {
+		type aged struct {
+			id   string
+			seen time.Time
+		}
+		evictable := make([]aged, 0, len(c.patterns))
+		for id, p := range c.patterns {
+			if protectedFromEviction(p) {
+				continue
+			}
+			evictable = append(evictable, aged{id, p.LastSeen})
+		}
+		sort.Slice(evictable, func(i, j int) bool {
+			return evictable[i].seen.Before(evictable[j].seen)
+		})
+		over := len(c.patterns) - maxPatterns
+		for i := 0; i < len(evictable) && over > 0; i++ {
+			delete(c.patterns, evictable[i].id)
+			removed++
+			over--
+		}
+	}
+
+	if removed > 0 {
+		c.dirty = true
+	}
+	return removed
+}
+
+// PurgePatterns removes patterns matching the given filters (admin API).
+// A non-empty `service` limits the purge to that service; `olderThan`>0
+// limits it to patterns idle longer than the duration. With no filters it
+// removes every pattern. Unlike Sweep this is an explicit operator action,
+// so it does NOT spare curated patterns. Returns the count removed.
+func (c *Catalog) PurgePatterns(service string, olderThan time.Duration) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	removed := 0
+	for id, p := range c.patterns {
+		if service != "" && p.Service != service {
+			continue
+		}
+		if olderThan > 0 && now.Sub(p.LastSeen) <= olderThan {
+			continue
+		}
+		delete(c.patterns, id)
+		removed++
+	}
+	if removed > 0 {
+		c.dirty = true
+	}
+	return removed
+}
+
+// DeleteService removes a service's first-seen tracking entry (admin API).
+// Patterns attributed to the service are left intact — purge them via
+// PurgePatterns if desired. Returns false when the service is unknown.
+func (c *Catalog) DeleteService(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.services[name]; !ok {
+		return false
+	}
+	delete(c.services, name)
+	c.dirty = true
+	return true
+}
+
 // Dirty reports whether there are unflushed changes.
 func (c *Catalog) Dirty() bool {
 	c.mu.RLock()
