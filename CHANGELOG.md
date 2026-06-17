@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   single-tenant build is unchanged by default.
 - **Helm** — `agent.tools.findRunbook.*` values + configmap wiring.
 
+#### Observability — Prometheus `/metrics`
+- **`GET /metrics` endpoint** (`pkg/metrics`) — Prometheus exposition with
+  Go runtime + process collectors and versus-specific series:
+  `versus_incidents_total{status}` (incidents by delivery outcome) and
+  `versus_agent_patterns` (catalog size gauge, when the agent is enabled).
+  Unauthenticated like `/healthz` — exposition data only, no secrets — so a
+  cluster scraper needs no gateway secret. `pkg/metrics` is a leaf package
+  (imports only `client_golang`) so any subsystem can record a metric
+  without an import cycle. New dependency:
+  `github.com/prometheus/client_golang` (the de-facto standard Prometheus
+  client).
+
 ---
 
 ## [1.4.3] — 2026-05
