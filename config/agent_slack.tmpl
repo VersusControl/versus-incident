@@ -3,7 +3,7 @@
   Used when the incident originates from the AI SRE Agent (detect mode).
   Available fields: .AlertName .Summary .Severity .Category .Confidence
   .Suggestions .ServiceName .Source .PatternID .PatternTemplate
-  .Frequency .Baseline .Verdict .Logs .Status .AckURL
+  .Frequency .Baseline .BaselineDelta .Verdict .Logs .Status .AckURL
 */}}
 {{- $sevIcons := dict "critical" "🔴" "high" "🟠" "medium" "🟡" "low" "🟢" "info" "ℹ️" -}}
 {{- $sev := lower (or .Severity "info") -}}
@@ -28,7 +28,7 @@
 {{ or .Summary "(no summary)" }}
 
 {{- if .Frequency }}
-*Frequency:* {{ .Frequency }} (baseline {{ printf "%.2f" .Baseline }})
+*Frequency:* {{ .BaselineDelta }}
 {{- end }}
 {{- if .PatternID }}
 *Pattern:* `{{ .PatternID }}`

@@ -109,7 +109,10 @@ entries are dropped automatically.
 Each event captures:
 
 - **Pattern context** — source, template, service, verdict,
-  frequency, baseline, sample log line.
+  frequency, baseline, sample log line. Channel templates also receive a
+  pre-computed `BaselineDelta` field (e.g. `240 this tick vs baseline
+  6.1/tick (39× normal)`) so the spike magnitude is stated without doing
+  arithmetic; the same phrase is fed to the detect prompt.
 - **AI call** — model, the prompt sent, the raw response, and how
   long it took.
 - **Parsed finding** — severity, summary, category, confidence,

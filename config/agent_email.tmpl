@@ -30,7 +30,7 @@
     <tr><td style="background:#f5f5f5;"><b>Confidence</b></td><td>{{ printf "%.2f" .Confidence }}</td></tr>
     {{- end }}
     {{- if .Frequency }}
-    <tr><td style="background:#f5f5f5;"><b>Frequency</b></td><td>{{ .Frequency }} (baseline {{ printf "%.2f" .Baseline }})</td></tr>
+    <tr><td style="background:#f5f5f5;"><b>Frequency</b></td><td>{{ .BaselineDelta }}</td></tr>
     {{- end }}
     {{- if .PatternID }}
     <tr><td style="background:#f5f5f5;"><b>Pattern</b></td><td><code>{{ .PatternID }}</code></td></tr>

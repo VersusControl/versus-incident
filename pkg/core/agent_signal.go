@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -70,6 +71,34 @@ type AgentResult struct {
 	SampleSignals []Signal // representative signals (capped, post-redaction)
 	Frequency     int      // matches in the current tick / window
 	Baseline      float64  // EWMA baseline for the pattern (0 when unknown)
+}
+
+// BaselineDelta renders a human phrase comparing this tick's frequency to
+// the pattern's EWMA baseline, e.g. "240 this tick vs baseline 6.1/tick
+// (39× normal)". Channel templates and the detect prompt use it so the
+// magnitude is stated up front instead of asking an operator — or the
+// model — to do the division (the model never does arithmetic). Returns
+// "" when there is no frequency to describe.
+func (r AgentResult) BaselineDelta() string {
+	if r.Frequency <= 0 {
+		return ""
+	}
+	if r.Baseline <= 0 {
+		// New / unknown pattern: no baseline to compare against yet.
+		return fmt.Sprintf("%d this tick (no baseline yet)", r.Frequency)
+	}
+	mult := float64(r.Frequency) / r.Baseline
+	return fmt.Sprintf("%d this tick vs baseline %.1f/tick (%s normal)",
+		r.Frequency, r.Baseline, formatMultiple(mult))
+}
+
+// formatMultiple renders a ratio as "39×" (integer at 10× and above) or
+// "1.5×" (one decimal below 10×) so large spikes stay readable.
+func formatMultiple(m float64) string {
+	if m >= 10 {
+		return fmt.Sprintf("%.0f×", m)
+	}
+	return fmt.Sprintf("%.1f×", m)
 }
 
 // Detector consumes signals and emits AgentResults.

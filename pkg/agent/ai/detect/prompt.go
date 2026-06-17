@@ -63,6 +63,11 @@ func BuildPrompt(r core.AgentResult, source, service string, samples []string) (
 	fmt.Fprintf(&b, "pattern_template: %s\n", r.Template)
 	fmt.Fprintf(&b, "tick_frequency: %d\n", r.Frequency)
 	fmt.Fprintf(&b, "ewma_baseline: %.3f\n", r.Baseline)
+	// Pre-computed magnitude so the model cites it verbatim instead of
+	// dividing frequency by baseline itself.
+	if d := r.BaselineDelta(); d != "" {
+		fmt.Fprintf(&b, "baseline_delta: %s\n", d)
+	}
 	if len(samples) > 0 {
 		b.WriteString("samples:\n")
 		for _, s := range samples {

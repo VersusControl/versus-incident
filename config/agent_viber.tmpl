@@ -25,7 +25,7 @@ Summary:
 {{ or .Summary "(no summary)" }}
 
 {{- if .Frequency }}
-Frequency: {{ .Frequency }} (baseline {{ printf "%.2f" .Baseline }})
+Frequency: {{ .BaselineDelta }}
 {{- end }}
 {{- if .PatternID }}
 Pattern: {{ .PatternID }}
