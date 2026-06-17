@@ -1,10 +1,13 @@
 package utils
 
 import (
+	"bytes"
 	"html/template"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	texttemplate "text/template"
 )
 
 func TestTemplateDict_Set(t *testing.T) {
@@ -351,5 +354,76 @@ func TestIsTrue_ViaTemplate(t *testing.T) {
 		if !not(v) {
 			t.Errorf("not(%#v) should be true", v)
 		}
+	}
+}
+
+func TestEscapeHTMLFunc(t *testing.T) {
+	esc, ok := GetTemplateFuncMaps()["escapeHTML"].(func(interface{}) string)
+	if !ok {
+		t.Fatal("escapeHTML not registered as func(interface{}) string")
+	}
+	cases := []struct {
+		name string
+		in   interface{}
+		want string
+	}{
+		{"miner placeholder", "<*>", "&lt;*&gt;"},
+		{"ampersand", "a & b", "a &amp; b"},
+		{"angle pair", "<b>x</b>", "&lt;b&gt;x&lt;/b&gt;"},
+		{"plain", "api-gateway", "api-gateway"},
+		{"empty", "", ""},
+		{"number", 42, "42"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := esc(c.in); got != c.want {
+				t.Errorf("escapeHTML(%v) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestAgentTelegramTemplateEscapesDynamicFields renders the real committed
+// agent_telegram.tmpl through text/template (the exact path the Telegram
+// provider uses) and asserts miner placeholders / arbitrary log text are
+// escaped, while static markup stays literal. Reproduces the live Telegram
+// 400 ("Unsupported start tag") class as a regression guard.
+func TestAgentTelegramTemplateEscapesDynamicFields(t *testing.T) {
+	path := filepath.Join("..", "..", AgentTelegramTemplatePath)
+	tmpl, err := texttemplate.New(filepath.Base(path)).
+		Funcs(GetTemplateFuncMaps()).
+		ParseFiles(path)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+
+	content := map[string]interface{}{
+		"AlertName":       "spike <*>",
+		"ServiceName":     "api-gateway",
+		"Summary":         "errors & timeouts <spiking>",
+		"PatternID":       "p_abc",
+		"PatternTemplate": `WARN service = api-gateway message = " rate limit exceeded for client <*> endpoint <*>`,
+		"Logs":            "2026-01-01 ERROR <*> connection refused & reset",
+		"Suggestions":     []interface{}{"check <upstream>"},
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, content); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	out := buf.String()
+
+	if strings.Contains(out, "<*>") {
+		t.Errorf("raw <*> survived in rendered telegram body:\n%s", out)
+	}
+	if !strings.Contains(out, "&lt;*&gt;") {
+		t.Errorf("expected escaped &lt;*&gt; in rendered body:\n%s", out)
+	}
+	if strings.Contains(out, "<spiking>") || !strings.Contains(out, "&lt;spiking&gt;") {
+		t.Errorf("summary angle text not escaped:\n%s", out)
+	}
+	// Static markup must remain literal (proves we escaped values, not tags).
+	if !strings.Contains(out, "<code>") || !strings.Contains(out, "<pre>") {
+		t.Errorf("static HTML tags should remain literal:\n%s", out)
 	}
 }

@@ -4,6 +4,7 @@ package utils
 import (
 	"bytes"
 	"fmt"
+	"html"
 	"html/template"
 	"net/url"
 	"os"
@@ -125,6 +126,15 @@ func GetTemplateFuncMaps() template.FuncMap {
 			return 0
 		},
 		"urlquery": url.QueryEscape,
+		// escapeHTML escapes <, >, &, and quotes so a dynamic value is safe
+		// to interpolate into an HTML parse_mode body. The agent channel
+		// templates are rendered by text/template (no auto-escaping), so a
+		// miner placeholder like `<*>` in .PatternTemplate would otherwise
+		// reach Telegram as an unsupported start tag and 400 the send.
+		// Accepts any value (templates pipe `or`-defaulted interfaces here).
+		"escapeHTML": func(v interface{}) string {
+			return html.EscapeString(fmt.Sprint(v))
+		},
 		"truncate": func(s string, n int) string {
 			if len(s) <= n {
 				return s

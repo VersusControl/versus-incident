@@ -48,6 +48,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   single-tenant build is unchanged by default.
 - **Helm** — `agent.tools.findRunbook.*` values + configmap wiring.
 
+### Fixed
+
+#### AI SRE Agent — Telegram channel
+- **HTML-escape the agent Telegram template** (`config/agent_telegram.tmpl`,
+  `pkg/utils/func_maps.go`) — the agent Telegram template is rendered by
+  `text/template` (no auto-escaping) into a `parse_mode=HTML` body, so a
+  miner placeholder like `<*>` in `.PatternTemplate` (or any `<`/`&` in a
+  log sample) reached Telegram as an unsupported start tag and failed the
+  send with **HTTP 400 on every agent emit that carried a pattern
+  template**. Added an `escapeHTML` template function and applied it to
+  every dynamic field; static markup and numeric fields are untouched.
+  Other channels are unaffected — email renders via `html/template`
+  (auto-escaped), and Slack/Lark/MS Teams place dynamic values inside
+  Markdown code spans (literal). A regression test renders the committed
+  template through `text/template` and asserts placeholders are escaped.
+
 ---
 
 ## [1.4.3] — 2026-05
