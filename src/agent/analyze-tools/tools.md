@@ -32,6 +32,28 @@ service.
 Use case: *"Is this a brand-new pattern, or a known issue that has
 spiked above its normal baseline?"*
 
+### `pattern_search`
+
+Browses the pattern catalog with filters when the AI doesn't already
+have a pattern id. Complements `pattern_history` (which is id-only)
+by letting the AI look for candidate patterns based on what they look
+like.
+
+- **`query`** — case-insensitive substring matched against the
+  template (e.g. `"connection refused"`).
+- **`service`** — exact, case-insensitive service filter.
+- **`verdict`** — `known`, `unknown`, or `spike`.
+- **`rule_name`** — exact, case-sensitive named-rule filter
+  (e.g. `oom`, `panic`, `5xx-burst`).
+- **`order_by`** — `count_desc` (default), `last_seen_desc`, or
+  `first_seen_desc`.
+- **`limit`** — default `20`, capped at `100`. The response carries
+  `total_matched` and `truncated` so the AI knows whether to narrow
+  the query.
+
+Use case: *"Are there other patterns on this service that fired
+recently?"* or *"Find every spike-verdict pattern in the last day."*
+
 ### `describe_service`
 
 Summarises a single service: when it was first seen by the agent and
