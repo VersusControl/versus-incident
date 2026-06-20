@@ -96,7 +96,16 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	// AND there are no channels configured at all (nothing to escalate
 	// off of).
 	var oncallErr error
-	if !resolved && cfg.OnCall.Enable {
+	if !resolved && cfg.OnCall.Enable && !core.IsOnCallInitialized() {
+		// On-call can be turned on per-incident via the oncall_enable query
+		// param (the AI SRE agent sets it for high/critical findings). When
+		// the workflow was never initialized at startup — oncall.enable and
+		// oncall.initialized_only both false — GetOnCallWorkflow would panic
+		// and take down the request/agent goroutine. Skip with a clear
+		// warning instead of crashing.
+		log.Printf("incident %s: on-call escalation requested but the workflow is not initialized (set oncall.enable or oncall.initialized_only at startup to use it); skipping escalation", incident.ID)
+	}
+	if !resolved && cfg.OnCall.Enable && core.IsOnCallInitialized() {
 		workflow := core.GetOnCallWorkflow()
 		if err := workflow.Start(incident.ID, cfg.OnCall); err != nil {
 			oncallErr = err
