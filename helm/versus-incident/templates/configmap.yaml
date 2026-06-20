@@ -96,6 +96,13 @@ data:
           {{- end }}
         {{- end }}
 
+    # Queue listeners (SNS / SQS). The Go config reads these from the
+    # top-level `queue:` block (cfg.Queue.*), NOT from `alert:` — main.go
+    # only starts listeners when `queue.enable` is true.
+    queue:
+      enable: {{ or .Values.alert.sns.enable .Values.alert.sqs.enable }}
+      debug_body: {{ .Values.alert.debugBody }}
+
       sns:
         enable: {{ .Values.alert.sns.enable }}
         {{- if .Values.alert.sns.httpsEndpointSubscriptionPath }}
@@ -228,6 +235,47 @@ data:
       lookback: {{ .Values.agent.lookback | default "5m" }}
       new_service_grace: {{ .Values.agent.newServiceGrace | default "30m" }}
       sources_path: /app/config/agent_sources.yaml
+      {{- if .Values.agent.batchMax }}
+      batch_max: {{ .Values.agent.batchMax }}
+      {{- end }}
+      {{- if .Values.agent.signalMaxBytes }}
+      signal_max_bytes: {{ .Values.agent.signalMaxBytes }}
+      {{- end }}
+      {{- with .Values.agent.redaction }}
+      redaction:
+        enable: {{ .enable }}
+        redact_ips: {{ .redactIps }}
+        {{- with .extraPatterns }}
+        extra_patterns:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.agent.miner }}
+      miner:
+        similarity_threshold: {{ .similarityThreshold }}
+        tree_depth: {{ .treeDepth }}
+        max_children: {{ .maxChildren }}
+      {{- end }}
+      {{- with .Values.agent.catalog }}
+      catalog:
+        persist_interval: {{ .persistInterval }}
+        auto_promote_after: {{ .autoPromoteAfter }}
+        spike_multiplier: {{ .spikeMultiplier }}
+        spike_min_frequency: {{ .spikeMinFrequency }}
+        spike_min_baseline_count: {{ .spikeMinBaselineCount }}
+      {{- end }}
+      {{- with .Values.agent.regex }}
+      regex:
+        default_pattern: {{ .defaultPattern | default "" | quote }}
+        {{- with .rules }}
+        rules:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.agent.servicePatterns }}
+      service_patterns:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       ai:
         enable: {{ .Values.agent.ai.enable }}
         api_key: ${AGENT_AI_API_KEY}

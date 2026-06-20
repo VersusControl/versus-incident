@@ -47,16 +47,57 @@ resources:
 livenessProbe:
   httpGet:
     path: /healthz
-    port: 3000
+    port: http
   initialDelaySeconds: 30
   periodSeconds: 10
 
 readinessProbe:
   httpGet:
     path: /healthz
-    port: 3000
+    port: http
   initialDelaySeconds: 5
   periodSeconds: 5
+
+# Image pull secrets for private registries.
+imagePullSecrets: []
+  # - name: my-registry-secret
+
+# Extra environment variables injected verbatim into the container.
+extraEnv: []
+  # - name: HTTP_PROXY
+  #   value: http://proxy:3128
+
+# Extra pod annotations (merged with the config/secret checksums that drive
+# rolling restarts on config change).
+podAnnotations: {}
+
+# Pod- and container-level security contexts. Defaults run the static,
+# non-root binary as uid/gid 65532 with all capabilities dropped; fsGroup
+# makes the /app/data volume writable. Set either block to {} to opt out
+# (e.g. an image that must run as root).
+podSecurityContext:
+  fsGroup: 65532
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# Scheduling controls.
+nodeSelector: {}
+affinity: {}
+tolerations: []
+
+# AWS credentials + region. Only used when alert.sns or alert.sqs is enabled
+# (rendered into the Secret and exposed as AWS_ACCESS_KEY_ID /
+# AWS_SECRET_ACCESS_KEY / AWS_REGION). Prefer IRSA / instance roles in prod.
+aws:
+  region: ""
+  accessKeyId: ""
+  secretAccessKey: ""
 
 config:
   name: versus-incident
@@ -120,6 +161,56 @@ agent:
   pollInterval: 30s
   lookback: 5m
   newServiceGrace: 30m
+
+  # --- Signal processing + detection tuning (rendered into config.yaml). ---
+  # Without at least regex.defaultPattern set, the agent matches nothing and
+  # never builds a catalog. Defaults below mirror the in-repo config.yaml.
+  batchMax: 5000
+  signalMaxBytes: 65536
+
+  # PII/secret redaction applied before clustering.
+  redaction:
+    enable: true
+    redactIps: false
+    extraPatterns:
+      - "(?i)password=\\S+"
+      - "Authorization:\\s*Bearer\\s+\\S+"
+
+  # Drain-style log miner (clustering).
+  miner:
+    similarityThreshold: 0.4
+    treeDepth: 4
+    maxChildren: 100
+
+  # Pattern catalog + spike detection.
+  catalog:
+    persistInterval: 30s
+    autoPromoteAfter: 50
+    spikeMultiplier: 5.0
+    spikeMinFrequency: 5
+    spikeMinBaselineCount: 20
+
+  # Regex pre-filter: only matching signals reach the miner.
+  # defaultPattern ".*" trains on every line; "" requires a named rule match.
+  regex:
+    defaultPattern: "(?i).*error.*"
+    rules:
+      - name: oom-killer
+        pattern: "Out of memory: Killed process"
+      - name: panic
+        pattern: "(?i)panic:"
+      - name: 5xx-burst
+        pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
+
+  # Service-name extraction regexes (first capture group = service name).
+  servicePatterns:
+    - '(?i)\bservice[._-]?name["\s:=]+"?([A-Za-z0-9._-]+)'
+    - '(?i)\b(?:service|svc|app|component)\s*=\s*"?([A-Za-z0-9._-]+)'
+    - '(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"'
+    - '\[[^\]]+\]\s+\[([A-Za-z0-9._-]+)\]'
+    - '---\s+\[[^\]]*\]\s+\[([A-Za-z0-9._-]+)\]'
+    - '([A-Za-z0-9._-]+)\[\d+\]:'
+    - '\[([A-Za-z0-9._-]+)\]'
 
   ai:
     # AI analyzer toggle. Required for detect mode to actually call an LLM.
