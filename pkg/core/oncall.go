@@ -66,6 +66,15 @@ func GetOnCallWorkflow() *OnCallWorkflow {
 	return onCallWorkflow
 }
 
+// IsOnCallInitialized reports whether InitOnCallWorkflow has already run.
+// Callers that may enable on-call dynamically (e.g. the per-incident
+// oncall_enable query-param override the AI SRE agent uses for high /
+// critical findings) check this first to avoid GetOnCallWorkflow's panic
+// when on-call was never initialized at startup.
+func IsOnCallInitialized() bool {
+	return onCallWorkflow != nil
+}
+
 // triggerProvider triggers the on-call provider
 func (w *OnCallWorkflow) triggerProvider(ctx context.Context, incidentID string, cfg *config.OnCallConfig) error {
 	if err := w.provider.TriggerOnCall(ctx, incidentID, cfg); err != nil {
