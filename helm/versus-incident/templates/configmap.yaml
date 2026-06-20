@@ -231,14 +231,22 @@ data:
       ai:
         enable: {{ .Values.agent.ai.enable }}
         api_key: ${AGENT_AI_API_KEY}
+        {{- if .Values.agent.ai.provider }}
+        provider: {{ .Values.agent.ai.provider | quote }}
+        {{- end }}
         model: {{ .Values.agent.ai.model | default "gpt-4o-mini" | quote }}
         temperature: {{ .Values.agent.ai.temperature | default 0.2 }}
         max_tokens: {{ .Values.agent.ai.maxTokens | default 512 }}
         max_calls_per_hour: {{ .Values.agent.ai.maxCallsPerHour | default 60 }}
         cache_ttl: {{ .Values.agent.ai.cacheTtl | default "1h" | quote }}
-        {{- if .Values.agent.ai.analyze.model }}
+        {{- if or .Values.agent.ai.analyze.model .Values.agent.ai.analyze.provider }}
         analyze:
+          {{- if .Values.agent.ai.analyze.model }}
           model: {{ .Values.agent.ai.analyze.model | quote }}
+          {{- end }}
+          {{- if .Values.agent.ai.analyze.provider }}
+          provider: {{ .Values.agent.ai.analyze.provider | quote }}
+          {{- end }}
         {{- end }}
     {{- end }}
 
