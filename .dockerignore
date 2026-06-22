@@ -1,4 +1,40 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Node / frontend build artifacts (ui/dist is rebuilt inside the image)
+**/node_modules
+**/dist
+**/.vite
+npm-debug.log*
+
+# Go build & test artifacts
 .air.conf
 tmp
-examples
+*.out
+coverage.out
+*.test
+bin
+
+# Rendered documentation site (mdBook output) and project docs
+book
+book.toml
 docs
+examples
+*.md
+
+# Local dev data, scratch, and secrets
+local
+data
+*.env
+.env
+.env.*
+!*.env.example
+
+# Editor / OS noise
+.vscode
+.idea
+.DS_Store
+*.swp
+Thumbs.db

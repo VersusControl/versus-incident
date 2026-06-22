@@ -36,6 +36,14 @@ const SystemPromptPage = lazyPage(
   "SystemPromptPage",
 );
 const RunbooksPage = lazyPage(() => import("./pages/RunbooksPage"), "RunbooksPage");
+const MetricsPage = lazyPage(
+  () => import("./pages/LearnedSignalsView"),
+  "MetricsPage",
+);
+const TracesPage = lazyPage(
+  () => import("./pages/LearnedSignalsView"),
+  "TracesPage",
+);
 const PeoplePage = lazyPage(() => import("./pages/PeoplePage"), "PeoplePage");
 const SettingsPage = lazyPage(() => import("./pages/SettingsPage"), "SettingsPage");
 
@@ -86,8 +94,11 @@ export default function App() {
 
           {/* Agent */}
           <Route path="/agent" element={<AgentOverviewPage />} />
-          <Route path="/agent/patterns" element={<PatternsPage />} />
+          <Route path="/agent/logs" element={<PatternsPage />} />
+          <Route path="/agent/logs/:id" element={<PatternDetailPage />} />
           <Route path="/agent/patterns/:id" element={<PatternDetailPage />} />
+          <Route path="/agent/metrics" element={<MetricsPage />} />
+          <Route path="/agent/traces" element={<TracesPage />} />
           <Route path="/agent/decisions" element={<DecisionsPage />} />
           <Route
             path="/agent/decisions/system-prompt"
@@ -112,8 +123,16 @@ export default function App() {
           <Route path="/dashboard" element={<Navigate to="/now" replace />} />
           <Route path="/status" element={<Navigate to="/agent" replace />} />
           <Route
+            path="/agent/patterns"
+            element={<Navigate to="/agent/logs" replace />}
+          />
+          <Route
+            path="/agent/baselines"
+            element={<Navigate to="/agent/metrics" replace />}
+          />
+          <Route
             path="/patterns"
-            element={<Navigate to="/agent/patterns" replace />}
+            element={<Navigate to="/agent/logs" replace />}
           />
           <Route path="/patterns/:id" element={<PatternIdRedirect />} />
           <Route
@@ -172,7 +191,7 @@ export default function App() {
 
 function PatternIdRedirect() {
   const { id } = useParams();
-  return <Navigate to={`/agent/patterns/${id}`} replace />;
+  return <Navigate to={`/agent/logs/${id}`} replace />;
 }
 
 function DetectIdRedirect() {

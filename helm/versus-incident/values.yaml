@@ -199,6 +199,29 @@ agent:
       embeddingModel: ""     # e.g. "text-embedding-3-small"; empty = tool omitted
       embeddingBaseUrl: ""   # OpenAI-compatible endpoint; empty = OpenAI default
 
+    # query_metrics — inspect a metric's recent behaviour on demand by running
+    # a PromQL range query against a Prometheus endpoint (read-only). Returns
+    # per-series summaries (last/min/max/delta). Registered only when
+    # prometheus.address is set; independent of any `prometheus` source.
+    queryMetrics:
+      prometheus:
+        address: ""              # e.g. http://prometheus:9090; empty = tool omitted
+        bearerToken: ""          # Authorization: Bearer <token>
+        username: ""             # fallback HTTP Basic
+        password: ""
+        insecureSkipVerify: false # dev only — never against prod
+    # query_traces — correlate an incident with distributed traces by searching
+    # a Tempo-compatible backend (TraceQL). Returns redacted span summaries
+    # (service, operation, duration, error). Registered only when tempo.address
+    # is set. Only the Tempo backend is implemented today.
+    queryTraces:
+      tempo:
+        address: ""              # e.g. http://tempo:3200; empty = tool omitted
+        bearerToken: ""
+        username: ""             # fallback HTTP Basic
+        password: ""
+        insecureSkipVerify: false # dev only
+
   # Inline signal sources. Each entry is rendered verbatim (via toYaml)
   # into agent_sources.yaml — use snake_case keys matching the Go config
   # (`from_beginning`, `message_field`, etc.). Leave empty to disable
@@ -378,9 +401,12 @@ externalRedis:
   maxRetries: 3         # maximum number of retries
   minRetryBackoff: 8    # minimum backoff in milliseconds
   maxRetryBackoff: 512  # maximum backoff in milliseconds
-  # TLS/SSL configuration
+  # TLS/SSL configuration. Drives the REDIS_TLS env var the binary reads.
+  # Defaults to true so external Redis connections are encrypted out of the
+  # box (the secure default); set to false only for a plaintext dev/local
+  # Redis.
   tls:
-    enabled: false
+    enabled: true
     # Path to the CA certificate file when using custom CA
     caFile: ""
     # Path to the client certificate file

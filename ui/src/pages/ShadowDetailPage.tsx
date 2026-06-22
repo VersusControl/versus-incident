@@ -135,7 +135,7 @@ export function ShadowDetailPage() {
                   <div className="card-header flex items-center justify-between">
                     <span className="card-title">Catalog entry</span>
                     <Link
-                      to={`/agent/patterns/${encodeURIComponent(event.pattern_id)}`}
+                      to={`/agent/logs/${encodeURIComponent(event.pattern_id)}`}
                       className="text-2xs text-link hover:underline"
                     >
                       Open pattern →

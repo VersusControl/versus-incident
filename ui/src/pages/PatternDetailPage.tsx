@@ -71,7 +71,7 @@ export function PatternDetailPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["patterns"] });
       toast.push({ tone: "ok", title: "Pattern deleted", description: id });
-      nav("/agent/patterns", { replace: true });
+      nav("/agent/logs", { replace: true });
     },
     onError: (err) => {
       toast.push({
@@ -85,10 +85,10 @@ export function PatternDetailPage() {
   return (
     <>
       <TopBar
-        title="Patterns"
+        title="Logs"
         subtitle={id}
         actions={
-          <Link to="/agent/patterns" className="btn">
+          <Link to="/agent/logs" className="btn">
             <ArrowLeft size={12} /> Back
           </Link>
         }
@@ -126,8 +126,8 @@ export function PatternDetailPage() {
                   <Fact label="Source" value={data.source} />
                   <Fact label="Count" value={data.count} />
                   <Fact
-                    label="Baseline (EWMA)"
-                    value={data.baseline_frequency.toFixed(3)}
+                    label="Normal"
+                    value={`≈ ${data.baseline_frequency.toFixed(1)}`}
                   />
                   <Fact
                     label="First seen"

@@ -155,3 +155,64 @@ func TestWorker_EmitDetect_DryWhenNoAgent(t *testing.T) {
 		t.Fatalf("emitter called %d times in dry mode, want 0", called)
 	}
 }
+
+// TestWorker_EmitDetect_HonorsDeclaredSeverityFloor covers QA-006: when an
+// incoming Signal carries an operator-declared Severity (e.g. an anomaly rule's
+// `severity: critical`), the emitted finding must not be demoted below it even
+// when the AI rates it lower. A signal with no declared severity defers to the
+// AI verdict.
+func TestWorker_EmitDetect_HonorsDeclaredSeverityFloor(t *testing.T) {
+	tests := []struct {
+		name           string
+		signalSeverity string
+		aiSeverity     string
+		wantSeverity   string
+	}{
+		{"declared critical floors a medium AI verdict", "critical", "medium", "critical"},
+		{"declared high floors a low AI verdict", "high", "low", "high"},
+		{"AI may escalate above the declared floor", "high", "critical", "critical"},
+		{"empty declared severity defers to AI", "", "medium", "medium"},
+		{"non-canonical declared severity is ignored (log path)", "error", "low", "low"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &fakeAgent{finding: &core.AIFinding{
+				Title:    "t",
+				Summary:  "s",
+				Severity: tc.aiSeverity,
+			}}
+
+			var got *core.AIFinding
+			emitter := func(f *core.AIFinding, _ core.AgentResult, _, _ string) error {
+				got = f
+				return nil
+			}
+
+			w := newWorkerForTest(t, AIBundle{Detect: agent}, emitter)
+
+			signals := []core.Signal{{
+				Message:  "metric svc/error_rate = 0.44",
+				Source:   "demo-prom",
+				Severity: tc.signalSeverity,
+			}}
+			outcome := w.emitDetect(
+				context.Background(),
+				"demo-prom", "pid-sev", "metric <*> = <*>",
+				"svc", signals,
+				core.VerdictSpike,
+				0,
+			)
+
+			if outcome != "emitted" {
+				t.Fatalf("outcome = %q, want emitted", outcome)
+			}
+			if got == nil {
+				t.Fatal("emitter never called")
+			}
+			if got.Severity != tc.wantSeverity {
+				t.Fatalf("emitted severity = %q, want %q", got.Severity, tc.wantSeverity)
+			}
+		})
+	}
+}

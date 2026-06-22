@@ -10,6 +10,9 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/scheduler"
+	"github.com/VersusControl/versus-incident/pkg/signalsources"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
 // ANSI color codes used to make agent detection lines stand out from
@@ -54,6 +57,22 @@ type Worker struct {
 	shadow   *ShadowLog // nil when shadow log is disabled
 	detect   *DetectLog // nil when detect log is disabled
 
+	// matchAll is the built-in "learn all" matcher ((?i).*) handed to metric
+	// and trace sources on the log-brain fallback path, so their non-"error"
+	// messages are not dropped by the log-tuned default pattern. Built once in
+	// NewWorker. matcher (above) stays the LOGS matcher and is unchanged.
+	matchAll *RegexMatcher
+	// kindByName maps an enabled source NAME to its data-source KIND
+	// (signalsources.KindOf(type)). It drives per-kind matcher selection in
+	// matcherForSource; unknown/unregistered types resolve to KindLogs.
+	kindByName map[string]signalsources.Kind
+	// metricsMatcher / tracesMatcher hold the OPTIONAL top-level per-kind regex
+	// override built from agent.regex.metrics / agent.regex.traces. nil when
+	// the operator did not set the key — matcherForSource then falls back to
+	// matchAll (learn-all) for that kind. There is no per-source override.
+	metricsMatcher *RegexMatcher
+	tracesMatcher  *RegexMatcher
+
 	// Detect-mode dependencies. All three are nil-safe: when ai.Detect
 	// is nil the worker logs a "dry detect" line and skips emission.
 	ai      AIBundle
@@ -65,6 +84,14 @@ type Worker struct {
 	ewmaAlpha       float64
 	services        *ServiceMatcher // regex-based service-name extractor
 	newServiceGrace time.Duration   // 0 = disabled
+
+	// brains maps a source NAME to its resolved per-type brain (Learner +
+	// Detector). Enterprise metric/trace brains are resolved at construction
+	// from cfg.Sources; any source without a registered brain — every source
+	// in the OSS build — gets the built-in log brain, created lazily on first
+	// tick. brainMu guards the lazy insert because ticks run concurrently.
+	brains  map[string]typedBrain
+	brainMu sync.Mutex
 }
 
 // Emitter delivers an AI finding to the rest of the system. In production
@@ -126,6 +153,33 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 	w.ewmaAlpha = 0.2 // configurable once spike detection lands
 	w.newServiceGrace = parseDurationOr(opt.Cfg.NewServiceGrace, 0)
 
+	// Per-source-KIND regex default. The logs matcher is the global default
+	// (w.matcher); metrics/traces get a build-once match-all matcher so their
+	// non-"error" messages flow with zero operator config. The OPTIONAL
+	// top-level per-kind override (agent.regex.metrics / agent.regex.traces),
+	// when set, narrows that kind for all of its sources; there is no
+	// per-source override.
+	w.matchAll, _ = NewRegexMatcher(config.AgentRegexConfig{DefaultPattern: "(?i).*"})
+	if pat := opt.Cfg.Regex.Metrics; pat != "" {
+		w.metricsMatcher, _ = NewRegexMatcher(config.AgentRegexConfig{DefaultPattern: pat})
+	}
+	if pat := opt.Cfg.Regex.Traces; pat != "" {
+		w.tracesMatcher, _ = NewRegexMatcher(config.AgentRegexConfig{DefaultPattern: pat})
+	}
+	w.kindByName = make(map[string]signalsources.Kind, len(opt.Cfg.Sources))
+	for _, s := range opt.Cfg.Sources {
+		if !s.Enable {
+			continue
+		}
+		w.kindByName[s.Name] = signalsources.KindOf(s.Type)
+	}
+
+	// Resolve per-type brains. In OSS this registers nothing (the log brain is
+	// the un-registered default); when Versus Enterprise is linked, its
+	// metric/trace brains are built here for the matching configured sources.
+	w.brains = make(map[string]typedBrain)
+	w.resolveRegisteredBrains()
+
 	return w, nil
 }
 
@@ -138,6 +192,13 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 	log.Printf("agent: starting worker mode=%s sources=%d poll=%s",
 		mode, len(w.sources), w.pollInterval)
+
+	// Start the recurring-evaluation scheduler (E13). It runs registered
+	// read-only / analyze-kind jobs on their own interval, bound to this
+	// worker's context so shutdown cancels in-flight jobs. In community
+	// mode no job is registered, so this starts nothing and OSS behaviour
+	// is byte-for-byte unchanged.
+	go scheduler.NewFromRegistry().Run(ctx)
 
 	// Stagger initial pull so multiple sources don't hammer their backends
 	// at the same instant on startup.
@@ -240,103 +301,100 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		}
 	}
 
+	// Decision 1B per-kind override (agent.regex.metrics / agent.regex.traces):
+	// when the operator set it, drop metric/trace signals whose message does NOT
+	// match BEFORE the brain sees them, so the override bites brain-agnostically
+	// — including a licensed source bound to its enterprise brain, which never
+	// builds a log brain. Logs are never pre-filtered here (the log brain owns
+	// their default_pattern + rules); an unset override ⇒ nil matcher ⇒ all
+	// signals flow (learn-all), unchanged. pulled keeps the pre-filter count so
+	// the tick's skipped_no_match still reports the dropped signals.
+	pulled := len(signals)
+	if pf := w.preBrainMatcher(src.Name()); pf != nil {
+		kept := signals[:0]
+		for _, sig := range signals {
+			if pf.Match(sig.Message).Matched() {
+				kept = append(kept, sig)
+			}
+		}
+		signals = kept
+	}
+
 	// Group by pattern within this tick so we can update the EWMA with
 	// per-pattern frequency, not per-signal.
-	type bucket struct {
-		template    string
-		signals     []core.Signal
-		isNew       bool
-		tag         MatchResult
-		serviceName string // extracted from first signal's Fields
-	}
-	buckets := make(map[string]*bucket)
+	//
+	// The keying, learning and scoring are owned by the source's per-type
+	// brain (the SignalLearner + SignalDetector). In OSS every source uses the
+	// built-in log brain (drain-miner catalog + frequency-novelty classifier);
+	// when an enterprise metric/trace brain is registered for the source's
+	// type it plugs into this exact lifecycle. The worker stays type-agnostic.
+	learner, detector := w.brainFor(src.Name())
 
-	skippedNoMatch := 0
-	for _, sig := range signals {
-		if sig.Message == "" {
-			continue
-		}
-		// Regex pre-filter: only signals matching at least one rule (named or
-		// default) are worth learning from. This keeps boring noise out of the
-		// catalog. To learn from every line, configure
-		// `regex.default_pattern: ".*"`.
-		var tag MatchResult
-		if w.matcher != nil {
-			tag = w.matcher.Match(sig.Message)
-			if !tag.Matched() {
-				skippedNoMatch++
-				continue
-			}
-		}
-		id, template, isNew := w.miner.Cluster(sig.Message)
-		if id == "" {
-			continue
-		}
-		b := buckets[id]
-		if b == nil {
-			svc := w.services.Extract(sig.Message)
-			if svc == "" {
-				svc = "_unknown"
-			}
-			b = &bucket{template: template, isNew: isNew, tag: tag, serviceName: svc}
-			buckets[id] = b
-		}
-		b.signals = append(b.signals, sig)
+	observations, err := learner.Group(ctx, signals)
+	if err != nil {
+		log.Printf("agent: grouping signals from %s failed: %v", src.Name(), err)
+		return
 	}
 
-	// Update catalog and produce verdicts.
+	// Update the model and produce verdicts, one observation at a time.
 	verdicts := make(map[string]int) // verdict-name → count, for stats
-	for id, b := range buckets {
-		// Snapshot pattern state BEFORE upsert so spike detection can
-		// compare this tick against the prior baseline rather than the
-		// freshly-smoothed value.
-		var prevBaseline float64
-		var prevCount int
-		if prev := w.catalog.Get(id); prev != nil {
-			prevBaseline = prev.BaselineFrequency
-			prevCount = prev.Count
-		}
-
-		w.catalog.Upsert(id, b.template, src.Name(), len(b.signals), w.ewmaAlpha, b.tag.RuleName, b.serviceName)
+	matched := 0                     // signals that landed in an observation
+	for _, o := range observations {
+		matched += o.Frequency
 
 		// Track the service so the grace window starts even in training mode.
-		if b.serviceName != "_unknown" {
-			if w.catalog.RegisterService(b.serviceName) {
-				log.Printf("agent: new service discovered: %s", b.serviceName)
+		if o.Service != "" && o.Service != "_unknown" {
+			if w.catalog.RegisterService(o.Service) {
+				log.Printf("agent: new service discovered: %s", o.Service)
 			}
 		}
 
-		tag := b.tag
+		// Snapshot the learned expectation BEFORE folding this tick so a
+		// deviation is judged against the prior baseline rather than the
+		// freshly-smoothed value (otherwise a spike would smear into the EWMA
+		// before we ever classify it). Then fold the tick into the model.
+		mean, std, confident := learner.Expected(ctx, o.Key, o.Timestamp)
+		if err := learner.Learn(ctx, []core.Observation{o}); err != nil {
+			log.Printf("agent: learning key=%s from %s failed: %v", o.Key, src.Name(), err)
+			continue
+		}
 
 		switch mode {
 		case "training":
 			// Pure observation. No verdict, no incident.
 			verdicts["learned"]++
-			if b.isNew {
+			if o.IsNew {
 				log.Printf("%sagent: new pattern %s (source=%s tag=%s) → %s%s",
-					colorGreen, id, src.Name(), tag.RuleName, truncateString(b.template, 120), colorReset)
+					colorGreen, o.Key, src.Name(), w.shadowTag(o), truncateString(o.Signal, 120), colorReset)
 			}
 
 		case "shadow", "detect":
-			// New-service grace is shared by shadow and detect: shadow is
-			// meant to be a faithful preview of detect, so whatever detect
-			// filters out, shadow filters too. During grace the signal is
-			// learned (catalog already upserted above) but not surfaced as
-			// a "would alert" / AI candidate.
-			// Remove b.serviceName != "_unknown"
+			// New-service grace is shared by shadow and detect: shadow is meant
+			// to be a faithful preview of detect, so whatever detect filters
+			// out, shadow filters too. During grace the signal is learned
+			// (folded above) but not surfaced as a "would alert" / AI candidate.
 			if w.newServiceGrace > 0 &&
-				w.catalog.IsServiceInGrace(b.serviceName, w.newServiceGrace) {
+				w.catalog.IsServiceInGrace(o.Service, w.newServiceGrace) {
 				verdicts["grace"]++
-				if b.isNew {
+				if o.IsNew {
 					log.Printf("%sagent[%s]: new pattern %s (service=%s in grace, learning only) → %s%s",
-						colorGreen, mode, id, b.serviceName, truncateString(b.template, 120), colorReset)
+						colorGreen, mode, o.Key, o.Service, truncateString(o.Signal, 120), colorReset)
 				}
 				continue
 			}
 
-			v := w.classify(id, len(b.signals), prevBaseline, prevCount)
-			verdicts[v.String()]++
-			if v == core.VerdictKnownPattern {
+			v := detector.Classify(o, mean, std, confident)
+			verdicts[v.Class.String()]++
+
+			// Per-key training gate: a model that is not yet confident for this
+			// key suppresses in EVERY mode. Logs are always confident, so this
+			// is a no-op for the OSS log brain; it is what lets a metric/trace
+			// brain keep learning a fresh key without firing.
+			if !v.Confident {
+				continue
+			}
+			// A known, non-spiking pattern is normal — nothing to surface.
+			if v.Class == core.VerdictKnownPattern {
 				continue
 			}
 
@@ -344,17 +402,17 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 			// the AI SRE and emits an incident.
 			if mode == "shadow" {
 				sample := ""
-				if len(b.signals) > 0 {
-					sample = b.signals[0].Message
+				if len(o.Samples) > 0 {
+					sample = o.Samples[0].Message
 				}
 				if w.shadow != nil {
-					w.shadow.Record(src.Name(), id, b.template, sample,
-						b.tag.RuleName, v.String(), len(b.signals))
+					w.shadow.Record(src.Name(), o.Key, o.Signal, sample,
+						w.shadowTag(o), v.Class.String(), o.Frequency)
 				}
 				log.Printf("%sagent[shadow]: would alert pattern=%s service=%s tag=%s verdict=%s freq=%d%s",
-					colorGreen, id, b.serviceName, tag.RuleName, v, len(b.signals), colorReset)
+					colorGreen, o.Key, o.Service, w.shadowTag(o), v.Class, o.Frequency, colorReset)
 			} else {
-				outcome := w.emitDetect(ctx, src.Name(), id, b.template, b.serviceName, b.signals, v, prevBaseline)
+				outcome := w.emitDetect(ctx, src.Name(), o.Key, o.Signal, o.Service, o.Samples, v.Class, v.Baseline)
 				verdicts["emit_"+outcome]++
 			}
 
@@ -367,7 +425,7 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 	w.saveCursor(ctx, src.Name(), newCursor)
 
 	log.Printf("agent: tick %s signals=%d matched=%d patterns=%d skipped_no_match=%d verdicts=%v cursor=%s",
-		src.Name(), len(signals), len(signals)-skippedNoMatch, len(buckets), skippedNoMatch, verdicts, newCursor.Format(time.RFC3339))
+		src.Name(), pulled, matched, len(observations), pulled-matched, verdicts, newCursor.Format(time.RFC3339))
 }
 
 // emitDetect handles one Unknown / Spike pattern in detect mode. Returns
@@ -394,19 +452,21 @@ func (w *Worker) emitDetect(
 		SampleSignals: signals,
 		Frequency:     len(signals),
 		Baseline:      prevBaseline,
+		RuleSeverity:  strongestSeverity(signals),
 	}
 
 	// Build a partial DetectEvent up front so every outcome path can
 	// stamp itself into the audit log.
 	evt := &DetectEvent{
-		Source:    source,
-		PatternID: patternID,
-		Template:  template,
-		Service:   service,
-		Verdict:   verdict.String(),
-		Frequency: len(signals),
-		Baseline:  prevBaseline,
-		Samples:   sampleMessages(signals, 3),
+		Source:       source,
+		PatternID:    patternID,
+		Template:     template,
+		Service:      service,
+		Verdict:      verdict.String(),
+		Frequency:    len(signals),
+		Baseline:     prevBaseline,
+		Samples:      sampleMessages(signals, 3),
+		RuleSeverity: result.RuleSeverity,
 	}
 
 	// 1. Dry detect — analyzer not configured.
@@ -470,6 +530,9 @@ func (w *Worker) emitDetect(
 // send delegates to the configured emitter and translates errors into
 // the worker's outcome vocabulary.
 func (w *Worker) send(finding *core.AIFinding, result core.AgentResult, source, service, okLabel string) string {
+	// Honour an operator-declared severity as a floor: the AI may escalate
+	// but must not silently demote below the rule-declared severity (QA-006).
+	clampSeverityFloor(finding, result.RuleSeverity)
 	if w.emitter == nil {
 		log.Printf("%sagent[detect]: pattern=%s service=%s severity=%s confidence=%.2f title=%q (no emitter wired)%s",
 			colorGreen, result.PatternID, service, finding.Severity, finding.Confidence,
@@ -486,41 +549,67 @@ func (w *Worker) send(finding *core.AIFinding, result core.AgentResult, source, 
 	return okLabel
 }
 
-// classify decides the verdict for a pattern given the current tick's
-// frequency and the pattern's pre-upsert state. The catalog has already
-// been upserted by the caller, so prevBaseline/prevCount reflect what the
-// pattern looked like BEFORE this tick — which is what we need for
-// spike detection (otherwise a 5× spike would smear into the EWMA before
-// we ever see it).
-func (w *Worker) classify(patternID string, tickFreq int, prevBaseline float64, prevCount int) core.AgentVerdict {
-	p := w.catalog.Get(patternID)
-	if p == nil {
-		return core.VerdictUnknown
+// shadowTag re-derives the regex rule name for an observation from its first
+// representative signal. It is used only for audit/shadow attribution and for
+// the discovery log line, mirroring the tag the pre-seam worker captured from
+// the bucket's first signal. Returns "" when no matcher is configured or the
+// observation carries no raw samples (e.g. a metric/trace observation), so the
+// field is simply omitted downstream.
+func (w *Worker) shadowTag(o core.Observation) string {
+	if w.matcher == nil || len(o.Samples) == 0 {
+		return ""
 	}
-	// A pattern is "known" once it has been observed enough times to be
-	// considered baseline. The auto_promote_after threshold doubles as the
-	// detect-mode cutoff for "we trust this is normal".
-	threshold := w.cfg.Catalog.AutoPromoteAfter
-	if threshold <= 0 {
-		threshold = 100
-	}
-	isKnown := p.Verdict == "known" || p.Count >= threshold
-	if isKnown {
-		if p.Verdict != "known" {
-			w.catalog.MarkKnown(patternID)
+	return w.matcher.Match(o.Samples[0].Message).RuleName
+}
+
+// matcherForSource resolves the regex pre-filter for a source by name,
+// applying the per-source-KIND precedence (highest → lowest):
+//
+//  1. the OPTIONAL top-level per-kind override — agent.regex.metrics /
+//     agent.regex.traces (metricsMatcher / tracesMatcher), when set;
+//  2. the per-kind built-in default — match-all for metrics/traces;
+//  3. the global logs matcher (w.matcher) for the logs kind and any
+//     unknown/unregistered type (which KindOf defaults to KindLogs).
+//
+// Only the log-brain path consults this; metric/trace sources bound to their
+// proper enterprise brain group by fields and never hit it. The Decision 1B
+// per-kind override still bites those sources via preBrainMatcher, which the
+// worker applies to the signals before any brain (enterprise or log) sees them.
+func (w *Worker) matcherForSource(name string) *RegexMatcher {
+	switch w.kindByName[name] {
+	case signalsources.KindMetrics:
+		if w.metricsMatcher != nil {
+			return w.metricsMatcher
 		}
-		// A known pattern can still spike: a steady drip suddenly
-		// jumping to a flood is exactly the case AI analysis should
-		// see. Spike supersedes "known" only when configured.
-		if isSpike(prevBaseline, prevCount, tickFreq,
-			w.cfg.Catalog.SpikeMultiplier,
-			w.cfg.Catalog.SpikeMinFrequency,
-			w.cfg.Catalog.SpikeMinBaselineCount) {
-			return core.VerdictSpike
+		return w.matchAll
+	case signalsources.KindTraces:
+		if w.tracesMatcher != nil {
+			return w.tracesMatcher
 		}
-		return core.VerdictKnownPattern
+		return w.matchAll
+	default:
+		return w.matcher
 	}
-	return core.VerdictUnknown
+}
+
+// preBrainMatcher returns the OPTIONAL per-kind text pre-filter applied to a
+// metrics/traces source's signals BEFORE they reach its brain (enterprise or
+// log). It is non-nil only when the operator set agent.regex.metrics /
+// agent.regex.traces for that kind (Decision 1B); logs and the learn-all
+// default return nil, so no pre-filter runs — logs are filtered inside the log
+// brain, and an unset override lets metrics/traces learn all. Applying the
+// override here (rather than inside a brain) makes it bite brain-agnostically,
+// which is the only way it can narrow a licensed source that binds to its
+// enterprise brain and never builds a log brain.
+func (w *Worker) preBrainMatcher(name string) *RegexMatcher {
+	switch w.kindByName[name] {
+	case signalsources.KindMetrics:
+		return w.metricsMatcher
+	case signalsources.KindTraces:
+		return w.tracesMatcher
+	default:
+		return nil
+	}
 }
 
 // isSpike returns true when the current tick frequency exceeds the
@@ -618,4 +707,33 @@ func sampleMessages(signals []core.Signal, max int) []string {
 		}
 	}
 	return out
+}
+
+// strongestSeverity returns the highest-ranked operator-declared severity
+// carried by the grouped signals (the rule's `severity`), normalized to a
+// canonical value. Returns "" when no signal carries a recognised declared
+// severity (e.g. auto-discovered metric signals or log signals), so the
+// downstream floor is simply absent and the AI decides.
+func strongestSeverity(signals []core.Signal) string {
+	best := ""
+	bestRank := 0
+	for _, s := range signals {
+		if r := utils.SeverityRank(s.Severity); r > bestRank {
+			bestRank = r
+			best = utils.NormalizeSeverity(s.Severity)
+		}
+	}
+	return best
+}
+
+// clampSeverityFloor raises finding.Severity up to floor when floor is a
+// recognised severity stronger than the AI's verdict. It never demotes — an
+// AI escalation above the floor is preserved. A no-op when floor is empty.
+func clampSeverityFloor(f *core.AIFinding, floor string) {
+	if f == nil || floor == "" {
+		return
+	}
+	if utils.SeverityRank(floor) > utils.SeverityRank(f.Severity) {
+		f.Severity = utils.NormalizeSeverity(floor)
+	}
 }

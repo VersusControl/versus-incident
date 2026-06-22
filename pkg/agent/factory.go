@@ -62,7 +62,25 @@ func BuildSources(cfg config.AgentConfig) ([]core.SignalSource, []error) {
 			}
 			sources = append(sources, sp)
 		default:
-			errs = append(errs, fmt.Errorf("source %s: unknown type %q", s.Name, s.Type))
+			// Source types not built into OSS are resolved through the
+			// registration hook (signalsources.Register). The enterprise
+			// module registers its metric/trace data sources from an init(),
+			// so they wire up here without OSS importing enterprise.
+			factory, ok := signalsources.Lookup(s.Type)
+			if !ok {
+				if signalsources.RequiresEnterprise(s.Type) {
+					errs = append(errs, fmt.Errorf("source %s: %w", s.Name, signalsources.ErrRequiresEnterprise(s.Type)))
+				} else {
+					errs = append(errs, fmt.Errorf("source %s: unknown type %q", s.Name, s.Type))
+				}
+				continue
+			}
+			src, err := factory(s.Name, s.Options)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("source %s: %w", s.Name, err))
+				continue
+			}
+			sources = append(sources, src)
 		}
 	}
 	return sources, errs

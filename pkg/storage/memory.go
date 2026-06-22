@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -10,6 +11,7 @@ import (
 type memoryProvider struct {
 	mu        sync.RWMutex
 	blobs     map[string][]byte
+	blobAt    map[string]time.Time // per-blob updated_at, for Lifecycle purge
 	incidents []*IncidentRecord
 	analyses  []*AnalysisRecord
 }
@@ -17,7 +19,10 @@ type memoryProvider struct {
 // NewMemory returns a Provider that keeps all state in memory. Intended
 // for tests; never select via the config factory.
 func NewMemory() Provider {
-	return &memoryProvider{blobs: make(map[string][]byte)}
+	return &memoryProvider{
+		blobs:  make(map[string][]byte),
+		blobAt: make(map[string]time.Time),
+	}
 }
 
 func (m *memoryProvider) ReadBlob(name string) ([]byte, error) {
@@ -38,7 +43,24 @@ func (m *memoryProvider) WriteBlob(name string, data []byte) error {
 	cp := make([]byte, len(data))
 	copy(cp, data)
 	m.blobs[name] = cp
+	m.blobAt[name] = time.Now().UTC()
 	return nil
+}
+
+func (m *memoryProvider) ListBlobs(prefix string) ([]Blob, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]Blob, 0)
+	for name, data := range m.blobs {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		// Return a copy so callers can't mutate state through the slice.
+		cp := make([]byte, len(data))
+		copy(cp, data)
+		out = append(out, Blob{Name: name, Data: cp})
+	}
+	return out, nil
 }
 
 func (m *memoryProvider) SaveIncident(rec *IncidentRecord) error {
@@ -178,4 +200,83 @@ func (m *memoryProvider) DeleteAnalysis(id string) error {
 		}
 	}
 	return ErrNotFound
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle (implements the optional storage.Lifecycle capability — X1-T7)
+// ---------------------------------------------------------------------------
+
+func (m *memoryProvider) PurgeOlderThan(domain string, cutoff time.Time) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	switch domain {
+	case DomainIncidents:
+		kept := make([]*IncidentRecord, 0, len(m.incidents))
+		n := 0
+		for _, rec := range m.incidents {
+			if rec.CreatedAt.Before(cutoff) {
+				n++
+				continue
+			}
+			kept = append(kept, rec)
+		}
+		m.incidents = kept
+		return n, nil
+	case DomainAnalyses:
+		kept := make([]*AnalysisRecord, 0, len(m.analyses))
+		n := 0
+		for _, rec := range m.analyses {
+			if rec.RequestedAt.Before(cutoff) {
+				n++
+				continue
+			}
+			kept = append(kept, rec)
+		}
+		m.analyses = kept
+		return n, nil
+	case DomainBlobs:
+		n := 0
+		for name, at := range m.blobAt {
+			if at.Before(cutoff) {
+				delete(m.blobs, name)
+				delete(m.blobAt, name)
+				n++
+			}
+		}
+		return n, nil
+	default:
+		return 0, ErrUnknownDomain
+	}
+}
+
+func (m *memoryProvider) DeleteByID(domain, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	switch domain {
+	case DomainIncidents:
+		for i, rec := range m.incidents {
+			if rec.ID == id {
+				m.incidents = append(m.incidents[:i], m.incidents[i+1:]...)
+				return nil
+			}
+		}
+		return ErrNotFound
+	case DomainAnalyses:
+		for i, rec := range m.analyses {
+			if rec.ID == id {
+				m.analyses = append(m.analyses[:i], m.analyses[i+1:]...)
+				return nil
+			}
+		}
+		return ErrNotFound
+	case DomainBlobs:
+		if _, ok := m.blobs[id]; !ok {
+			return ErrNotFound
+		}
+		delete(m.blobs, id)
+		delete(m.blobAt, id)
+		return nil
+	default:
+		return ErrUnknownDomain
+	}
 }

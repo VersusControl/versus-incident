@@ -63,6 +63,10 @@ func BuildPrompt(r core.AgentResult, source, service string, samples []string) (
 	fmt.Fprintf(&b, "pattern_template: %s\n", r.Template)
 	fmt.Fprintf(&b, "tick_frequency: %d\n", r.Frequency)
 	fmt.Fprintf(&b, "ewma_baseline: %.3f\n", r.Baseline)
+	if r.RuleSeverity != "" {
+		fmt.Fprintf(&b, "operator_declared_severity: %s\n", r.RuleSeverity)
+		fmt.Fprintf(&b, "note: the operator declared this signal as %q severity; do not rate it below that.\n", r.RuleSeverity)
+	}
 	if len(samples) > 0 {
 		b.WriteString("samples:\n")
 		for _, s := range samples {

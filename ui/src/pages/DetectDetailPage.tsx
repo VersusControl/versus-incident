@@ -97,7 +97,7 @@ export function DetectDetailPage() {
                     label="Pattern"
                     valueNode={
                       <Link
-                        to={`/agent/patterns/${encodeURIComponent(event.data.pattern_id)}`}
+                        to={`/agent/logs/${encodeURIComponent(event.data.pattern_id)}`}
                         className="font-mono text-2xs text-link hover:underline"
                       >
                         {event.data.pattern_id}{" "}

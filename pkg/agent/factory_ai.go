@@ -135,7 +135,17 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 			runbookSearcher = newRunbookSearcherAdapter(runbookMgr.Index())
 		}
 
-		tools := analyzetools.Default(store, newCatalogAdapter(catalog), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher)
+		// Optional metric/trace readers for the query_metrics / query_traces
+		// tools (X10). Each is configured independently in tools.yaml
+		// (tools.query_metrics.prometheus / tools.query_traces.tempo) so an
+		// on-demand analyze query never touches a detect-path source cursor.
+		// A blank endpoint yields a nil reader so analyzetools.Default omits
+		// the tool — community installs without a metric/trace backend are
+		// unaffected.
+		metrics := newMetricReaderAdapter(cfg.Tools.QueryMetrics.Prometheus)
+		traces := newTraceReaderAdapter(cfg.Tools.QueryTraces.Tempo)
+
+		tools := analyzetools.Default(store, newCatalogAdapter(catalog), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher, metrics, traces)
 		a, aErr := analyze.New(context.Background(), analyzeBaseCfg, tools, analyze.Options{
 			HTTPClient:    httpClient,
 			ToolTimeout:   parseDurationOr(cfg.Tools.ToolTimeout, 20*time.Second),

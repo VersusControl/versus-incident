@@ -33,8 +33,29 @@ import (
 // callers can rely on errors.Is(err, storage.ErrNotFound).
 var ErrNotFound = errors.New("storage: not found")
 
-// ErrUnsupported is returned by the redis/database stub backends.
+// ErrUnsupported is returned by the redis/database stub backends, and by
+// the model-state purge path when the configured backend does not
+// implement the optional storage.Lifecycle capability.
 var ErrUnsupported = errors.New("storage: backend not implemented")
+
+// ErrUnknownDomain is returned by Lifecycle methods when domain is not
+// one of the fixed {DomainIncidents, DomainAnalyses, DomainBlobs} set.
+var ErrUnknownDomain = errors.New("storage: unknown lifecycle domain")
+
+// Lifecycle domains. A small fixed set so a backend can map each to its
+// physical table(s) without ever trusting caller-supplied input.
+const (
+	// DomainIncidents targets incident history (IncidentRecord); age is
+	// compared against created_at.
+	DomainIncidents = "incidents"
+	// DomainAnalyses targets analyze-mode runs (AnalysisRecord); age is
+	// compared against requested_at.
+	DomainAnalyses = "analyses"
+	// DomainBlobs targets opaque blobs written via WriteBlob — including
+	// the learned model-state artifacts under the models/ namespace (E14);
+	// age is compared against the blob's updated_at.
+	DomainBlobs = "blobs"
+)
 
 // DefaultDataDir is the application's persistent data directory. The
 // `file` storage backend persists its JSON here (incidents, pattern
@@ -71,6 +92,16 @@ type Provider interface {
 	ReadBlob(name string) ([]byte, error)
 	// WriteBlob atomically replaces the blob stored under name.
 	WriteBlob(name string, data []byte) error
+	// ListBlobs returns every blob whose name begins with prefix, as
+	// (name, data) pairs in no guaranteed order. It is the enumeration
+	// primitive the model-state seam (ModelStore.List) rides to list all
+	// learned artifacts under a namespace (models/<org>/<agent>/…). A
+	// prefix that matches nothing returns an empty result, never
+	// ErrNotFound, mirroring the ReadBlob "fresh start" contract. The
+	// returned Data slices are copies the caller owns. The list is
+	// unbounded — a namespace is naturally bounded per org × agent (one
+	// artifact per learned key), so callers that need a cap apply it.
+	ListBlobs(prefix string) ([]Blob, error)
 
 	// SaveIncident appends a new incident to the store. Subsequent
 	// SaveIncident calls with the same ID overwrite the existing record
@@ -107,6 +138,14 @@ type Provider interface {
 	Close() error
 }
 
+// Blob is one entry returned by Provider.ListBlobs: a stored blob's
+// logical name (the same name passed to WriteBlob/ReadBlob) and its raw
+// bytes. Data is a copy the caller owns and may mutate freely.
+type Blob struct {
+	Name string
+	Data []byte
+}
+
 // Searcher is an optional capability a backend may implement on top of
 // Provider. It exposes full-text-style search over incidents and
 // analyses. Backends that cannot search efficiently (memory, file) do
@@ -122,6 +161,28 @@ type Searcher interface {
 	// case-insensitive query, newest first. limit <= 0 returns the
 	// full window.
 	SearchAnalyses(query string, limit int) ([]*AnalysisRecord, error)
+}
+
+// Lifecycle is an optional capability a backend may implement on top of
+// Provider (X1-T7). It is a mechanical, tier-neutral delete primitive: it
+// carries NO org or policy concept — the caller decides what to purge and
+// when. The enterprise retention policy engine consumes it; single-tenant
+// OSS may call it directly. Backends that cannot delete efficiently (file,
+// redis stub) do not implement it; callers type-assert and treat a failed
+// assertion as "purge unsupported" rather than silently succeeding. The
+// Postgres and memory backends implement it.
+type Lifecycle interface {
+	// PurgeOlderThan deletes every record in domain whose natural age
+	// column is strictly older than cutoff, returning the number deleted.
+	// The compared column is fixed per domain (see DomainIncidents /
+	// DomainAnalyses / DomainBlobs). An unknown domain returns
+	// ErrUnknownDomain and deletes nothing.
+	PurgeOlderThan(domain string, cutoff time.Time) (int, error)
+	// DeleteByID deletes one record from domain by its primary key — an
+	// incident/analysis id, or a blob name. Returns ErrNotFound when the
+	// id is unknown and ErrUnknownDomain for a domain outside the fixed
+	// set.
+	DeleteByID(domain, id string) error
 }
 
 // IncidentRecord is the durable shape of an incident. It mirrors the

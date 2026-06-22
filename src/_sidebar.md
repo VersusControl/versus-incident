@@ -11,6 +11,8 @@
     - [CloudWatch Logs](/agent/data-sources/cloudwatch-logs)
     - [Graylog](/agent/data-sources/graylog)
     - [Splunk](/agent/data-sources/splunk)
+    - [Prometheus / Metrics](/agent/data-sources/prometheus)
+    - [Traces / Tempo](/agent/data-sources/traces)
   - [Notification Channels](/agent/channels)
     - [Slack](/agent/channels/slack)
     - [Microsoft Teams](/agent/channels/msteams)
@@ -29,6 +31,10 @@
   - [Catalog](/agent/catalog)
   - [Miner](/agent/miner)
   - [Regex](/agent/regex)
+
+- Agent Demos (End-to-End)
+  - [Metrics (Prometheus)](/examples/metrics)
+  - [Traces](/examples/traces)
 
 - Configuration
   - [Overview](/configuration/admin-ui)

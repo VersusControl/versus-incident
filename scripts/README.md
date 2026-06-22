@@ -27,6 +27,11 @@ templates.
 Pick whichever matches the source you've enabled in
 `config/agent_sources.yaml`.
 
+For **metrics** (rather than logs) there is a separate generator,
+[`generate_fake_metrics.py`](generate_fake_metrics.py), which pushes
+synthetic Prometheus series to a Pushgateway — see
+[§3](#3-metrics-source--fake-prometheus-series).
+
 ---
 
 ## 1. File source — local noisy logs
@@ -298,6 +303,96 @@ sources:
 > outside that window. Either bump `agent.lookback` in
 > `config/config.yaml` (e.g. `1h` / `24h`) or use loop mode so fresh
 > events keep landing inside the window.
+
+---
+
+## 3. Metrics source — fake Prometheus series
+
+[`generate_fake_metrics.py`](generate_fake_metrics.py) is the metrics
+analogue of `generate_noisy_logs.py`. Because Prometheus *scrapes* rather
+than receiving pushes, the script pushes a realistic, increasing
+time-series to a **Prometheus Pushgateway** that Prometheus then scrapes —
+so the `query_metrics` analyze tool (and, on Enterprise, a standing
+`prometheus` source) has real series to range-query. Used by the
+[`metrics/`](../examples/docker-compose/metrics/) example.
+
+It emits exactly the metric names that example's PromQL uses:
+
+```
+demo_http_requests_total{service,code}                 (counter)
+demo_http_request_duration_seconds_bucket{service,le}  (histogram)
+```
+
+### Normal traffic
+
+```bash
+# steady, healthy traffic for 60s (~0.5% errors, low latency) to the
+# default pushgateway at http://localhost:9091
+python3 scripts/generate_fake_metrics.py
+
+# point at a different pushgateway / service (the enterprise metrics-source
+# example reuses this script with its own service name)
+python3 scripts/generate_fake_metrics.py \
+  --target http://localhost:9091 --service checkout
+
+# see the exact series/labels emitted + sample PromQL
+python3 scripts/generate_fake_metrics.py --list
+```
+
+Useful flags: `--target/-t` (env `PUSHGATEWAY_URL`), `--service/-s`,
+`--job/-j`, `--duration/-d` (0 = until Ctrl+C), `--interval/-i`, `--rate/-r`,
+`--seed`.
+
+### Spike mode
+
+Mirror the log generator's `--spike` UX — drive a 5xx + latency anomaly
+(~45% 500s, p95 > 500ms) so the PromQL anomaly rules cross their thresholds:
+
+```bash
+# 90s of anomaly
+python3 scripts/generate_fake_metrics.py --spike --duration 90
+
+# hands-off demo: spike for 60s, then auto-revert to normal for the rest of
+# the run (the analogue of /spike?seconds=60 then /calm)
+python3 scripts/generate_fake_metrics.py --spike --spike-duration 60 --duration 180
+
+# wipe the pushed series afterwards (cleanup / the analogue of /calm)
+python3 scripts/generate_fake_metrics.py --clear
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--spike` | off | Engage the 5xx + latency anomaly. |
+| `--spike-duration S` | `0` | Stay anomalous for S seconds then auto-revert (0 = whole run). |
+| `--clear` | — | DELETE the pushed group from the pushgateway and exit. |
+| `--otlp URL` | — | Also POST best-effort OTLP spans to a Tempo backend (traces overlay). |
+
+### Optional: traces (Tempo)
+
+When the `metrics/` example's traces overlay is up, point the same script at
+Tempo's OTLP/HTTP endpoint so it also emits best-effort spans (error spans
+during a `--spike`):
+
+```bash
+python3 scripts/generate_fake_metrics.py --spike \
+  --otlp http://localhost:4318 --duration 90
+```
+
+### How it fits the `metrics/` example (OSS)
+
+On the OSS image the standing metric/trace **source** is Enterprise-only, so
+the example **triggers** incidents through the `file` log source and uses
+metrics only to **correlate**. Both fake-data steps are `scripts/`-based:
+
+```bash
+# 1. trigger the incident (status=503 error log lines)
+python3 scripts/generate_noisy_logs.py --append --start-time now \
+  --spike 5xx --spike-burst 80 \
+  --output examples/docker-compose/metrics/logs/app.log
+
+# 2. push the correlating metric anomaly
+python3 scripts/generate_fake_metrics.py --spike --duration 90
+```
 
 ---
 

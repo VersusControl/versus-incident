@@ -295,6 +295,7 @@ func cloneRedisConfig(src RedisConfig) RedisConfig {
 		Port:               src.Port,
 		Password:           src.Password,
 		DB:                 src.DB,
+		TLS:                src.TLS,
 		InsecureSkipVerify: src.InsecureSkipVerify,
 	}
 }
@@ -328,6 +329,8 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 		},
 		Regex: AgentRegexConfig{
 			DefaultPattern: src.Regex.DefaultPattern,
+			Metrics:        src.Regex.Metrics,
+			Traces:         src.Regex.Traces,
 		},
 		AI: AgentAIConfig{
 			Enable:          src.AI.Enable,
@@ -440,6 +443,9 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 			if s.Splunk.ExtraFields != nil {
 				c.Splunk.ExtraFields = append([]string(nil), s.Splunk.ExtraFields...)
 			}
+			if s.Options != nil {
+				c.Options = cloneAnyMap(s.Options)
+			}
 			cloned.Sources[i] = c
 		}
 	}
@@ -469,6 +475,8 @@ func cloneToolsConfig(src ToolsConfig) ToolsConfig {
 		}
 	}
 	out.FindRunbook = src.FindRunbook
+	out.QueryMetrics = src.QueryMetrics
+	out.QueryTraces = src.QueryTraces
 	return out
 }
 
@@ -490,5 +498,37 @@ func cloneAgentAITaskConfig(src AgentAITaskConfig) AgentAITaskConfig {
 func cloneAgentAIAnalyzeConfig(src AgentAIAnalyzeConfig) AgentAIAnalyzeConfig {
 	return AgentAIAnalyzeConfig{
 		Model: src.Model,
+	}
+}
+
+// cloneAnyMap deep-copies a generic decoded-YAML map (the
+// AgentSourceConfig.Options block consumed by registered source types).
+// It recurses into nested maps and slices so a per-request cloneConfig
+// never shares mutable structure with the global config.
+func cloneAnyMap(src map[string]interface{}) map[string]interface{} {
+	if src == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		out[k] = cloneAnyValue(v)
+	}
+	return out
+}
+
+// cloneAnyValue deep-copies one decoded-YAML value (map, slice, or scalar).
+func cloneAnyValue(v interface{}) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		return cloneAnyMap(t)
+	case []interface{}:
+		out := make([]interface{}, len(t))
+		for i, e := range t {
+			out[i] = cloneAnyValue(e)
+		}
+		return out
+	default:
+		// Scalars (string/bool/int/float/nil) are value types — safe to copy.
+		return t
 	}
 }

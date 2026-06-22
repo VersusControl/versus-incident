@@ -8,11 +8,15 @@ import {
   Bot,
   Check,
   CheckCircle2,
+  LineChart,
+  Lock,
   RefreshCw,
+  Waypoints,
   X,
 } from "lucide-react";
 import {
   api,
+  ApiError,
   type AgentConfigView,
   type IncidentSummary,
   type Status,
@@ -314,14 +318,14 @@ export function NowPage() {
             icon={Bot}
             tone={agentTone}
             foot={
-              status.data ? `${status.data.patterns} patterns` : undefined
+              status.data ? `${status.data.patterns} log patterns` : undefined
             }
           />
         </div>
 
-        {/* (3) Feed + Agent Pulse; single column on mobile (feed first). */}
-        <section className="grid grid-cols-1 items-start gap-4 lg:grid-cols-3">
-          <div className="card lg:col-span-2">
+        {/* (3) Incident feed — full width */}
+        <section>
+          <div className="card">
             <div className="card-header">
               <span className="card-title">Incident feed</span>
               <Link
@@ -402,9 +406,10 @@ export function NowPage() {
               )}
             </div>
           </div>
-
-          <AgentPulse status={status} config={config} />
         </section>
+
+        {/* (4) Agent Pulse — own row below the feed */}
+        <AgentPulse status={status} config={config} />
       </main>
     </>
   );
@@ -461,9 +466,7 @@ function StatePill({ incident }: { incident: IncidentSummary }) {
   return <Pill tone="bad">open</Pill>;
 }
 
-// AgentPulse — mode + lifetime catalog/shadow/detect totals. No 24h
-// figures and no sparkline until the backend exposes windowed stats
-// (UX_REDESIGN §3.5 ask #6) — no fabricated trends.
+// AgentPulse — mode + lifetime totals + enterprise Metrics/Traces status.
 function AgentPulse({
   status,
   config,
@@ -471,6 +474,28 @@ function AgentPulse({
   status: UseQueryResult<Status>;
   config: UseQueryResult<AgentConfigView>;
 }) {
+  // Probe baselines to show Metrics/Traces learning progress (enterprise-only).
+  const baselines = useQuery({
+    queryKey: ["baselines-pulse"],
+    queryFn: async () => {
+      try {
+        return await api.listBaselines();
+      } catch (e) {
+        if (e instanceof ApiError && (e.status === 403 || e.status === 404)) {
+          return null; // locked — OSS or no intelligence license
+        }
+        throw e;
+      }
+    },
+    staleTime: 30_000,
+    retry: 1,
+  });
+  const enterpriseAvailable = baselines.data !== null && baselines.data !== undefined;
+  const metricCount = baselines.data?.baselines?.filter((b) => b.type === "metric").length ?? 0;
+  const traceCount = baselines.data?.baselines?.filter((b) => b.type === "trace").length ?? 0;
+  const metricReady = baselines.data?.baselines?.filter((b) => b.type === "metric" && b.confident).length ?? 0;
+  const traceReady = baselines.data?.baselines?.filter((b) => b.type === "trace" && b.confident).length ?? 0;
+
   return (
     <div className="card">
       <div className="card-header">
@@ -527,9 +552,44 @@ function AgentPulse({
         )}
         {status.isSuccess && (
           <div className="grid grid-cols-3 gap-2">
-            <PulseStat label="Patterns" value={status.data.patterns} />
-            <PulseStat label="Shadow" value={status.data.shadow_events ?? 0} />
-            <PulseStat label="Detect" value={status.data.detect_events ?? 0} />
+            <PulseStat label="Logs" value={status.data.patterns} to="/agent/logs" />
+            <PulseStat label="Shadow" value={status.data.shadow_events ?? 0} to="/agent/decisions?tab=shadow" />
+            <PulseStat label="Detect" value={status.data.detect_events ?? 0} to="/agent/decisions?tab=detect" />
+          </div>
+        )}
+
+        {/* Enterprise: Metrics & Traces learning status */}
+        {baselines.isPending && (
+          <div aria-hidden className="grid grid-cols-2 gap-2">
+            <div className="sk h-12" />
+            <div className="sk h-12" />
+          </div>
+        )}
+        {enterpriseAvailable && (
+          <div className="grid grid-cols-2 gap-2">
+            <PulseEnterpriseStat
+              icon={LineChart}
+              label="Metrics"
+              total={metricCount}
+              ready={metricReady}
+              to="/agent/metrics"
+            />
+            <PulseEnterpriseStat
+              icon={Waypoints}
+              label="Traces"
+              total={traceCount}
+              ready={traceReady}
+              to="/agent/traces"
+            />
+          </div>
+        )}
+        {baselines.data === null && (
+          <div className="flex items-center gap-2 rounded-control border border-ink-700 bg-surface-raised px-3 py-2 text-2xs text-ink-400">
+            <Lock size={12} className="shrink-0" />
+            <span>
+              Metrics &amp; Traces learning requires an{" "}
+              <Link to="/agent/metrics" className="text-link hover:underline">Enterprise license</Link>.
+            </span>
           </div>
         )}
 
@@ -541,10 +601,10 @@ function AgentPulse({
   );
 }
 
-function PulseStat({ label, value }: { label: string; value: number }) {
+function PulseStat({ label, value, to }: { label: string; value: number; to?: string }) {
   const counted = useCountUp(value);
-  return (
-    <div className="rounded-control border border-ink-600 bg-surface-raised px-2 py-1.5 text-center">
+  const inner = (
+    <div className="rounded-control border border-ink-600 bg-surface-raised px-2 py-1.5 text-center transition-colors hover:border-ink-500">
       <div className="text-base font-semibold tabular-nums text-ink-50">
         {counted.toLocaleString()}
       </div>
@@ -552,5 +612,42 @@ function PulseStat({ label, value }: { label: string; value: number }) {
         {label}
       </div>
     </div>
+  );
+  if (to) return <Link to={to}>{inner}</Link>;
+  return inner;
+}
+
+function PulseEnterpriseStat({
+  icon: Icon,
+  label,
+  total,
+  ready,
+  to,
+}: {
+  icon: typeof LineChart;
+  label: string;
+  total: number;
+  ready: number;
+  to: string;
+}) {
+  return (
+    <Link
+      to={to}
+      className="rounded-control border border-ink-600 bg-surface-raised px-3 py-2 transition-colors hover:border-ink-500"
+    >
+      <div className="flex items-center gap-1.5 text-2xs text-ink-300">
+        <Icon size={12} />
+        <span className="uppercase tracking-wider">{label}</span>
+      </div>
+      <div className="mt-1 text-xs text-ink-50">
+        <span className="font-semibold tabular-nums">{total}</span>
+        <span className="text-ink-300"> signals</span>
+        {total > 0 && (
+          <span className="ml-1.5 text-2xs text-ink-300">
+            ({ready} ready)
+          </span>
+        )}
+      </div>
+    </Link>
   );
 }

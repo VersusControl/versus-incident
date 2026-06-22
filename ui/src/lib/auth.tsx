@@ -212,10 +212,10 @@ function SecretForm({
         </div>
         <div className="text-center">
           <div className="text-sm font-semibold uppercase tracking-[0.18em] text-ink-50">
-            Versus · Incident
+            Versus Incident
           </div>
           <div className="mt-0.5 text-2xs text-ink-300">
-            Incident response console
+            Incident Console
           </div>
         </div>
       </div>

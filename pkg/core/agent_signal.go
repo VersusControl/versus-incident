@@ -70,6 +70,11 @@ type AgentResult struct {
 	SampleSignals []Signal // representative signals (capped, post-redaction)
 	Frequency     int      // matches in the current tick / window
 	Baseline      float64  // EWMA baseline for the pattern (0 when unknown)
+	// RuleSeverity is the strongest operator-declared severity carried by the
+	// grouped signals (e.g. an anomaly rule's `severity: critical`). Empty for
+	// auto-discovered signals with no declared severity. It acts as a floor:
+	// the AI may escalate but must not silently demote below it.
+	RuleSeverity string
 }
 
 // Detector consumes signals and emits AgentResults.

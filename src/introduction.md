@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  Free with MIT license · <a href="./compare/datadog-watchdog.md">Compare</a>
+  Free with MIT license · <a href="/#/compare/datadog-watchdog">Compare</a>
 </p>
 
 ![Versus](docs/images/versus-dashboard-01.png)
@@ -43,7 +43,7 @@ Whichever source raises it, an incident is templated, fanned out to every channe
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the full list of shipped features, work
+See [ROADMAP.md](https://github.com/VersusControl/versus-incident/blob/main/ROADMAP.md) for the full list of shipped features, work
 in progress, and planned phases (more log sources, metrics, traces,
 cross-signal correlation).
 
@@ -62,4 +62,4 @@ Project governance is documented in [GOVERNANCE.md](https://github.com/VersusCon
 
 ## License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+Distributed under the MIT License. See [LICENSE](https://github.com/VersusControl/versus-incident/blob/main/LICENSE) for more information.

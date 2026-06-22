@@ -14,6 +14,24 @@ func NormalizeSeverity(s string) string {
 	}
 }
 
+// SeverityRank maps a canonical severity to an orderable rank (critical
+// highest). Unknown / empty severities rank lowest (0) so they never act
+// as a floor over a real AI-assigned severity.
+func SeverityRank(s string) int {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "critical":
+		return 4
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
+}
+
 // ExtractJSONObject pulls the first balanced {...} block out of s.
 // Returns "" when no balanced object is present.
 //

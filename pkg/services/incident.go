@@ -97,18 +97,32 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	// off of).
 	var oncallErr error
 	if !resolved && cfg.OnCall.Enable {
-		workflow := core.GetOnCallWorkflow()
-		if err := workflow.Start(incident.ID, cfg.OnCall); err != nil {
-			oncallErr = err
-			// Walk back the optimistic OnCallTriggered flag set at
-			// build time so the UI does not lie. Best-effort
-			// persistence; the alert outcome above is the source of
-			// truth.
-			if store != nil && rec != nil {
+		if !core.IsOnCallWorkflowInitialized() {
+			// On-call was requested (globally or via a per-incident
+			// override) but the workflow singleton was never initialized
+			// at boot — escalation is simply skipped so the incident still
+			// persists and the caller keeps running instead of panicking.
+			log.Printf("incident: on-call requested for %s but workflow not initialized; skipping on-call", incident.ID)
+			if store != nil && rec != nil && rec.OnCallTriggered {
 				rec.OnCallTriggered = false
-				rec.OnCallError = err.Error()
 				if err := store.SaveIncident(rec); err != nil {
 					log.Printf("incident: persist oncall status warning: %v", err)
+				}
+			}
+		} else {
+			workflow := core.GetOnCallWorkflow()
+			if err := workflow.Start(incident.ID, cfg.OnCall); err != nil {
+				oncallErr = err
+				// Walk back the optimistic OnCallTriggered flag set at
+				// build time so the UI does not lie. Best-effort
+				// persistence; the alert outcome above is the source of
+				// truth.
+				if store != nil && rec != nil {
+					rec.OnCallTriggered = false
+					rec.OnCallError = err.Error()
+					if err := store.SaveIncident(rec); err != nil {
+						log.Printf("incident: persist oncall status warning: %v", err)
+					}
 				}
 			}
 		}

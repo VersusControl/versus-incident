@@ -103,7 +103,7 @@ export function useShortcuts({ onHelp }: { onHelp: () => void }) {
         pending.current = null;
         window.clearTimeout(timer.current);
         const dest =
-          e.key === "n" ? "/now" : e.key === "i" ? "/incidents" : e.key === "p" ? "/agent/patterns" : null;
+          e.key === "n" ? "/now" : e.key === "i" ? "/incidents" : e.key === "p" ? "/agent/logs" : null;
         if (dest) {
           e.preventDefault();
           navigate(dest);

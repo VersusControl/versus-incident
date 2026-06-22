@@ -103,8 +103,15 @@ type ServiceExtractor interface {
 // runbook config leaves both nil, so the tool is omitted and behaviour
 // is unchanged. An empty (but configured) corpus still registers and
 // returns Found:false rather than an error.
-func Default(store storage.Provider, cat PatternCatalog, reader SignalReader, redactor LineRedactor, services ServiceExtractor, graph *DependencyGraph, changes ChangeFeed, embedder core.Embedder, runbooks RunbookSearcher) []core.AnalyzeTool {
-	out := make([]core.AnalyzeTool, 0, 7)
+//
+// metrics powers the query_metrics tool; traces powers the query_traces
+// tool. Each is registered only when its reader is non-nil (a configured
+// Prometheus / Tempo endpoint). A community install with neither leaves
+// both nil so the tools are omitted and behaviour is unchanged. The
+// query_traces tool reuses the same redactor as get_related_logs to scrub
+// service/operation strings before they reach the model.
+func Default(store storage.Provider, cat PatternCatalog, reader SignalReader, redactor LineRedactor, services ServiceExtractor, graph *DependencyGraph, changes ChangeFeed, embedder core.Embedder, runbooks RunbookSearcher, metrics MetricReader, traces TraceReader) []core.AnalyzeTool {
+	out := make([]core.AnalyzeTool, 0, 9)
 	if store != nil {
 		out = append(out, RecentIncidents{Store: store})
 	}
@@ -123,6 +130,12 @@ func Default(store storage.Provider, cat PatternCatalog, reader SignalReader, re
 	}
 	if embedder != nil && runbooks != nil {
 		out = append(out, FindRunbook{Embedder: embedder, Index: runbooks, Redactor: redactor})
+	}
+	if metrics != nil {
+		out = append(out, QueryMetrics{Reader: metrics})
+	}
+	if traces != nil {
+		out = append(out, QueryTraces{Reader: traces, Redactor: redactor})
 	}
 	return out
 }

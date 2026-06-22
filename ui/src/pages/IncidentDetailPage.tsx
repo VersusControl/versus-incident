@@ -571,7 +571,7 @@ export function IncidentDetailPage() {
                       v={
                         patternID ? (
                           <Link
-                            to={`/agent/patterns/${patternID}`}
+                            to={`/agent/logs/${patternID}`}
                             className="font-mono text-link hover:underline"
                           >
                             {patternID.slice(0, 12)}

@@ -9,6 +9,7 @@ spun up alongside Versus + Redis.
 |---|---|---|
 | [file/](./file/) | versus + redis | Quickest start; tail a local log file |
 | [loki/](./loki/) | versus + redis + **loki** + **grafana** | Test the `loki` source against a real Loki |
+| [metrics/](./metrics/) | versus + redis + **prometheus** + **pushgateway** | OSS metric/trace **correlation**: `query_metrics`/`query_traces` analyze tools pull host-pushed series during an AI investigation (incident triggered via a `file` log source). All fake data comes from the `scripts/` generators. The standing `prometheus`/`traces` *source* is Enterprise. |
 | [elasticsearch/](./elasticsearch/) | versus + redis + **elasticsearch** + **kibana** | Test the `elasticsearch` source against a real ES |
 | [cloudwatch/](./cloudwatch/) | versus + redis | Test the `cloudwatchlogs` source against your AWS account |
 | [graylog/](./graylog/) | versus + redis + **graylog** + mongodb + opensearch | Test the `graylog` source against a real Graylog |

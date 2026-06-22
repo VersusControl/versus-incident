@@ -35,6 +35,10 @@ type ToolsConfig struct {
 	DescribeDependencies DescribeDependenciesToolConfig `mapstructure:"describe_dependencies"`
 	// FindRunbook configures the `find_runbook` runbook-RAG tool.
 	FindRunbook FindRunbookToolConfig `mapstructure:"find_runbook"`
+	// QueryMetrics configures the `query_metrics` tool's Prometheus reader.
+	QueryMetrics QueryMetricsToolConfig `mapstructure:"query_metrics"`
+	// QueryTraces configures the `query_traces` tool's trace-backend reader.
+	QueryTraces QueryTracesToolConfig `mapstructure:"query_traces"`
 }
 
 // FindRunbookToolConfig configures the read-only `find_runbook`
@@ -162,4 +166,54 @@ type RecentChangesGitRepo struct {
 	// Auth optionally overrides the global git auth for this repo. Empty
 	// fields fall back to the global default in RecentChangesGitConfig.
 	Auth GitAuthConfig `mapstructure:"auth"`
+}
+
+// QueryMetricsToolConfig configures the read-only `query_metrics` tool.
+// The tool runs on-demand PromQL range queries against a Prometheus
+// endpoint, independent of the detect-path prometheus SignalSource, so
+// an analysis can pull arbitrary metric series. With an empty
+// `Prometheus.Address` the tool is not registered (a community install
+// without a metric backend behaves exactly as before).
+type QueryMetricsToolConfig struct {
+	Prometheus QueryMetricsPrometheusConfig `mapstructure:"prometheus"`
+}
+
+// QueryMetricsPrometheusConfig points the `query_metrics` tool at a
+// Prometheus HTTP query endpoint. Auth mirrors the prometheus
+// SignalSource: bearer token takes priority over HTTP Basic.
+type QueryMetricsPrometheusConfig struct {
+	// Address is the Prometheus base URL, e.g. "http://prometheus:9090".
+	// Empty leaves the `query_metrics` tool unregistered.
+	Address string `mapstructure:"address"`
+	// BearerToken is sent as `Authorization: Bearer <token>` when set.
+	BearerToken string `mapstructure:"bearer_token"`
+	// Username/Password enable HTTP Basic auth (used when BearerToken is
+	// empty).
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
+	// InsecureSkipVerify disables TLS verification (dev only).
+	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"`
+}
+
+// QueryTracesToolConfig configures the read-only `query_traces` tool.
+// The tool runs on-demand trace searches against a Tempo-compatible
+// backend. With an empty `Tempo.Address` the tool is not registered.
+type QueryTracesToolConfig struct {
+	Tempo QueryTracesTempoConfig `mapstructure:"tempo"`
+}
+
+// QueryTracesTempoConfig points the `query_traces` tool at a Tempo HTTP
+// search endpoint. Auth mirrors the traces SignalSource.
+type QueryTracesTempoConfig struct {
+	// Address is the Tempo base URL, e.g. "http://tempo:3200". Empty
+	// leaves the `query_traces` tool unregistered.
+	Address string `mapstructure:"address"`
+	// BearerToken is sent as `Authorization: Bearer <token>` when set.
+	BearerToken string `mapstructure:"bearer_token"`
+	// Username/Password enable HTTP Basic auth (used when BearerToken is
+	// empty).
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
+	// InsecureSkipVerify disables TLS verification (dev only).
+	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"`
 }

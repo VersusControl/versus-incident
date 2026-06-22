@@ -352,6 +352,13 @@ func handlerRedisOptions(rc c.RedisConfig) *redis.Options {
 		DB:       rc.DB,
 	}
 
+	if !rc.TLSEnabled() {
+		// Plaintext Redis (e.g. a local/dev redis:7-alpine): dial without
+		// TLS by leaving TLSConfig nil. Make the downgrade auditable.
+		log.Println("WARNING: Redis TLS disabled (plaintext connection) — intended for dev/local only")
+		return redisOptions
+	}
+
 	if rc.InsecureSkipVerify {
 		// Configure TLS
 		redisOptions.TLSConfig = &tls.Config{

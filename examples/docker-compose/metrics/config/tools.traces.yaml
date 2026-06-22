@@ -1,0 +1,10 @@
+# Analyze-path tools for the OPTIONAL traces overlay: `query_metrics`
+# (Prometheus) PLUS `query_traces` (Tempo). Mounted over tools.yaml only
+# when you run with `-f docker-compose.traces.yml`.
+tools:
+  query_metrics:
+    prometheus:
+      address: http://prometheus:9090
+  query_traces:
+    tempo:
+      address: http://tempo:3200
