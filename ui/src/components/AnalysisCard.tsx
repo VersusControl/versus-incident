@@ -144,7 +144,7 @@ export function AnalysisCard({
               {finding.related_pattern_ids.map((pid) => (
                 <Link
                   key={pid}
-                  to={`/agent/patterns/${pid}`}
+                  to={`/agent/logs/${pid}`}
                   className="font-mono text-2xs text-link hover:underline"
                 >
                   {pid.slice(0, 12)}

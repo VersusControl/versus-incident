@@ -140,11 +140,11 @@ the clone is removed and PASS once restored.
 
 ### Environment variables
 
-X5 introduces **no new environment variables**. It reuses
-`VERSUS_ENTERPRISE_ADMIN_TOKEN` (RBAC role-assignment + audit read APIs) and
-`VERSUS_ENTERPRISE_SESSION_KEY` (the X4 session the RBAC guard resolves). Both
-remain env-sourced, never hardcoded; an unset admin token fails the admin APIs
-closed (`503`).
+X5 introduces **no new environment variables**. It reuses the auto-generated
+admin token (RBAC role-assignment + audit read APIs) and the auto-generated SSO
+session pepper (the X4 session the RBAC guard resolves). Both are generated and
+persisted on first licensed boot rather than env-configured, never hardcoded;
+an unset/disabled admin token fails the admin APIs closed (`503`).
 
 ### X5 gate evidence
 
@@ -415,8 +415,8 @@ covering `versus-enterprise/pkg/sso` (`verify.go`, `oidc.go`, `txstore.go`,
   expired are indistinguishable (no oracle). `OrgID` is stamped onto the session
   and `strings.Clone`d off the request buffer (golden rule #11). Cookie is
   `HttpOnly`, `Secure` (prod), `SameSite=Lax` (so the top-level IdP redirect
-  carries it). Absent `VERSUS_ENTERPRISE_SESSION_KEY` falls back to an ephemeral
-  random key (fail-safe, logged without the key) — never a hardcoded default.
+  carries it). The session pepper is auto-generated and persisted on first
+  licensed boot (stable across restarts) — never a hardcoded default.
 - **Per-org isolation (`config.go`):** IdP config persists through
   `tenancy.NewOrgScoped(base, org)`, namespaced per tenant so one org's IdP
   settings can never resolve for another. The callback enforces

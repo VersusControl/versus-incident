@@ -120,6 +120,37 @@ func (s *ModelStore) Get(orgID, agent, key string) (*ModelState, error) {
 	return &ms, nil
 }
 
+// List returns every model artifact persisted under (org, agent), in no
+// guaranteed order — callers sort. It returns an empty slice when none
+// exist (mirroring the Get "fresh start" contract), never ErrNotFound.
+// Each returned ModelState carries the verbatim opaque Data; the consumer
+// decodes it. The list is unbounded: a model-state namespace is naturally
+// bounded per org × agent (one artifact per learned key), so no cap is
+// imposed here — a caller that needs one applies it.
+func (s *ModelStore) List(orgID, agent string) ([]*ModelState, error) {
+	org := NormalizeOrgID(orgID)
+	for _, c := range []string{org, agent} {
+		if c == "" || strings.ContainsAny(c, "/\\") || strings.Contains(c, "..") {
+			return nil, ErrInvalidModelKey
+		}
+	}
+	prefix := ModelStateNamespace + "/" + org + "/" + agent + "/"
+	blobs, err := s.p.ListBlobs(prefix)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list model state %q: %w", prefix, err)
+	}
+	out := make([]*ModelState, 0, len(blobs))
+	for _, b := range blobs {
+		var ms ModelState
+		if err := json.Unmarshal(b.Data, &ms); err != nil {
+			return nil, fmt.Errorf("storage: unmarshal model state %q: %w", b.Name, err)
+		}
+		rec := ms
+		out = append(out, &rec)
+	}
+	return out, nil
+}
+
 // Purge removes the artifact (org, agent, key) via the X1-T7
 // storage.Lifecycle delete primitive. It returns ErrUnsupported when the
 // backend does not implement Lifecycle (file / community), so a retention

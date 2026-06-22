@@ -394,7 +394,7 @@ function DetectRow({
       <td className="text-2xs text-ink-200">{e.service || "—"}</td>
       <td className="font-mono text-2xs">
         <Link
-          to={`/agent/patterns/${encodeURIComponent(e.pattern_id)}`}
+          to={`/agent/logs/${encodeURIComponent(e.pattern_id)}`}
           className="text-link hover:underline"
           title={`Open pattern ${e.pattern_id}`}
         >
@@ -601,7 +601,7 @@ function ShadowTab() {
                     </td>
                     <td className="font-mono text-2xs">
                       <Link
-                        to={`/agent/patterns/${encodeURIComponent(e.pattern_id)}`}
+                        to={`/agent/logs/${encodeURIComponent(e.pattern_id)}`}
                         className="text-link hover:underline"
                         title={`Open pattern ${e.pattern_id}`}
                       >

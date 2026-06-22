@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -89,6 +91,42 @@ func (p *fileProvider) WriteBlob(name string, data []byte) error {
 		return fmt.Errorf("storage: write blob %s: %w", name, err)
 	}
 	return nil
+}
+
+// ListBlobs walks the data directory and returns every blob whose logical
+// name (the <DataDir>-relative path minus the ".json" suffix) begins with
+// prefix. The one-file-per-blob layout means a namespaced model-state name
+// like models/<org>/<agent>/<key> maps to a nested directory, so the walk
+// naturally enumerates a whole namespace. In-flight ".json.tmp" files from
+// an atomic write are skipped (they don't carry the ".json" suffix).
+func (p *fileProvider) ListBlobs(prefix string) ([]Blob, error) {
+	var out []Blob
+	err := filepath.WalkDir(p.dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".json") {
+			return nil
+		}
+		rel, err := filepath.Rel(p.dir, path)
+		if err != nil {
+			return err
+		}
+		name := strings.TrimSuffix(filepath.ToSlash(rel), ".json")
+		if !strings.HasPrefix(name, prefix) {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("storage: read blob %s: %w", name, err)
+		}
+		out = append(out, Blob{Name: name, Data: data})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("storage: list blobs %q: %w", prefix, err)
+	}
+	return out, nil
 }
 
 // writeFileAtomicSync writes data to a sibling tmp file, fsyncs it,

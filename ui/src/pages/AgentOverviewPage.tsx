@@ -9,16 +9,18 @@ import {
   EyeOff,
   GraduationCap,
   Layers,
+  LineChart,
   Lock,
   Power,
   PowerOff,
   Radar,
   Server,
   Sparkles,
+  Waypoints,
   Zap,
   type LucideIcon,
 } from "lucide-react";
-import { api, type AgentConfigView } from "@/lib/api";
+import { api, ApiError, type AgentConfigView, type BaselineRow } from "@/lib/api";
 import { fmtAbs, fmtRel, hourlyBuckets, truncate } from "@/lib/format";
 import { useNowTick } from "@/lib/hooks";
 import { TopBar } from "@/components/TopBar";
@@ -63,6 +65,24 @@ export function AgentOverviewPage() {
     queryKey: ["services"],
     queryFn: api.listServices,
     retry: 2,
+  });
+
+  // Enterprise baselines probe — shows Metrics/Traces learning section.
+  // Returns null when locked (403/404 = OSS or no intelligence license).
+  const baselines = useQuery({
+    queryKey: ["baselines-overview"],
+    queryFn: async () => {
+      try {
+        return await api.listBaselines();
+      } catch (e) {
+        if (e instanceof ApiError && (e.status === 403 || e.status === 404)) {
+          return null;
+        }
+        throw e;
+      }
+    },
+    staleTime: 30_000,
+    retry: 1,
   });
 
   // Only a SUCCESSFUL config response with enable:false means "disabled".
@@ -173,10 +193,10 @@ export function AgentOverviewPage() {
         </div>
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <KpiTile
-            label="Patterns"
+            label="Log patterns"
             value={status.data?.patterns}
             loading={status.isPending}
-            to="/agent/patterns"
+            to="/agent/logs"
             icon={Layers}
             foot={
               status.data
@@ -284,13 +304,16 @@ export function AgentOverviewPage() {
           </div>
         )}
 
-        {/* 3 — The old Dashboard agent cards */}
+        {/* 3 — Metrics & Traces learning (Enterprise-only) */}
+        <EnterpriseLearningSummary baselines={baselines.data} loading={baselines.isPending} locked={baselines.data === null} />
+
+        {/* 4 — The old Dashboard agent cards */}
         <section className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
           <div className="card">
             <div className="card-header">
               <h2 className="card-title">Top patterns by sightings</h2>
               <Link
-                to="/agent/patterns"
+                to="/agent/logs"
                 className="text-2xs text-link hover:underline"
               >
                 View all →
@@ -302,7 +325,7 @@ export function AgentOverviewPage() {
                   <thead>
                     <tr>
                       <th className="w-16 text-right">Count</th>
-                      <th className="w-20 text-right">Baseline</th>
+                      <th className="w-20 text-right">Normal</th>
                       <th className="w-24">Verdict</th>
                       <th>Template</th>
                     </tr>
@@ -332,7 +355,7 @@ export function AgentOverviewPage() {
                   <thead>
                     <tr>
                       <th className="w-16 text-right">Count</th>
-                      <th className="w-20 text-right">Baseline</th>
+                      <th className="w-20 text-right">Normal</th>
                       <th className="w-24">Verdict</th>
                       <th>Template</th>
                     </tr>
@@ -345,16 +368,16 @@ export function AgentOverviewPage() {
                         </td>
                         <td
                           className="text-right font-mono text-2xs text-ink-300"
-                          title="EWMA baseline frequency per tick"
+                          title="Expected frequency per tick"
                         >
-                          {p.baseline_frequency.toFixed(1)}/t
+                          ≈{p.baseline_frequency.toFixed(1)}
                         </td>
                         <td>
                           <VerdictPill verdict={p.verdict} />
                         </td>
                         <td>
                           <Link
-                            to={`/agent/patterns/${p.id}`}
+                            to={`/agent/logs/${p.id}`}
                             title={p.template}
                             className="font-mono text-2xs text-link hover:underline"
                           >
@@ -914,5 +937,163 @@ function KVGrid({ children }: { children: React.ReactNode }) {
     <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3">
       {children}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Enterprise Metrics/Traces learning summary — shows signal counts, ready-to-
+// detect progress, and links to the detail pages. When locked (OSS / no
+// intelligence license) shows a subtle locked banner. Renders nothing while
+// loading (skeleton is optional; this section is non-critical).
+// ---------------------------------------------------------------------------
+function EnterpriseLearningSummary({
+  baselines,
+  loading,
+  locked,
+}: {
+  baselines: { baselines: BaselineRow[] } | null | undefined;
+  loading: boolean;
+  locked: boolean;
+}) {
+  if (loading) {
+    return (
+      <div className="mt-6">
+        <div className="mb-2 text-2xs font-semibold uppercase tracking-wide text-ink-400">
+          Metrics &amp; Traces
+        </div>
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          <div className="sk h-24 rounded-card" />
+          <div className="sk h-24 rounded-card" />
+        </div>
+      </div>
+    );
+  }
+
+  if (locked) {
+    return (
+      <div className="mt-6">
+        <div className="mb-2 text-2xs font-semibold uppercase tracking-wide text-ink-400">
+          Metrics &amp; Traces
+        </div>
+        <div className="flex items-center gap-2 rounded-card border border-ink-700 bg-surface-raised px-4 py-3 text-xs text-ink-400">
+          <Lock size={14} className="shrink-0" />
+          <span>
+            Metrics and Traces learning is an Enterprise feature.{" "}
+            <Link to="/agent/metrics" className="text-link hover:underline">
+              Learn more →
+            </Link>
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!baselines) return null;
+
+  const rows = baselines.baselines ?? [];
+  const metrics = rows.filter((r) => r.type === "metric");
+  const traces = rows.filter((r) => r.type === "trace");
+  const metricsReady = metrics.filter((r) => r.confident).length;
+  const tracesReady = traces.filter((r) => r.confident).length;
+
+  return (
+    <div className="mt-6">
+      <div className="mb-2 text-2xs font-semibold uppercase tracking-wide text-ink-400">
+        Metrics &amp; Traces
+      </div>
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <Link
+          to="/agent/metrics"
+          className="card transition-colors hover:border-ink-500"
+        >
+          <div className="card-body flex items-center gap-4">
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent-subtle">
+              <LineChart size={18} className="text-accent" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold text-ink-50">
+                {metrics.length} metric signal{metrics.length !== 1 ? "s" : ""}
+              </div>
+              <div className="text-2xs text-ink-300">
+                {metricsReady} ready to detect
+                {metrics.length > 0 && metricsReady < metrics.length && (
+                  <> · {metrics.length - metricsReady} still learning</>
+                )}
+              </div>
+            </div>
+            {metrics.length > 0 && (
+              <ProgressRing progress={metricsReady / metrics.length} />
+            )}
+          </div>
+        </Link>
+
+        <Link
+          to="/agent/traces"
+          className="card transition-colors hover:border-ink-500"
+        >
+          <div className="card-body flex items-center gap-4">
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent-subtle">
+              <Waypoints size={18} className="text-accent" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold text-ink-50">
+                {traces.length} trace signal{traces.length !== 1 ? "s" : ""}
+              </div>
+              <div className="text-2xs text-ink-300">
+                {tracesReady} ready to detect
+                {traces.length > 0 && tracesReady < traces.length && (
+                  <> · {traces.length - tracesReady} still learning</>
+                )}
+              </div>
+            </div>
+            {traces.length > 0 && (
+              <ProgressRing progress={tracesReady / traces.length} />
+            )}
+          </div>
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+// Tiny SVG progress ring for the enterprise learning cards.
+function ProgressRing({ progress }: { progress: number }) {
+  const r = 14;
+  const c = 2 * Math.PI * r;
+  const offset = c * (1 - Math.min(1, Math.max(0, progress)));
+  return (
+    <svg width={36} height={36} className="shrink-0">
+      <circle
+        cx={18}
+        cy={18}
+        r={r}
+        fill="none"
+        stroke="currentColor"
+        className="text-ink-700"
+        strokeWidth={3}
+      />
+      <circle
+        cx={18}
+        cy={18}
+        r={r}
+        fill="none"
+        stroke="currentColor"
+        className="text-accent"
+        strokeWidth={3}
+        strokeDasharray={c}
+        strokeDashoffset={offset}
+        strokeLinecap="round"
+        transform="rotate(-90 18 18)"
+      />
+      <text
+        x={18}
+        y={18}
+        textAnchor="middle"
+        dominantBaseline="central"
+        className="fill-ink-100 text-[9px] font-semibold"
+      >
+        {Math.round(progress * 100)}%
+      </text>
+    </svg>
   );
 }

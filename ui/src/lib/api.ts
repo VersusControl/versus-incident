@@ -96,7 +96,35 @@ export interface Status {
   runbooks_available?: boolean;
 }
 
-export interface ShadowEvent {
+// BaselineRow mirrors the enterprise pkg/intel BaselineRow — one learned
+// metric or trace signal as the Metrics / Traces views render it. The endpoint
+// is Enterprise-gated (403 without an `intelligence` license; absent entirely
+// on an OSS binary) — the page renders the locked upsell state in that case.
+// The server carries the display `unit` plus already-converted `display_mean`
+// /`display_std`, so the UI formats numbers but never converts a wire unit.
+export interface BaselineRow {
+  type: "metric" | "trace";
+  source: string; // "prometheus" | "traces"
+  service: string;
+  signal: string;
+  operation?: string; // trace rows only
+  kind: string; // traffic | errors | latency | saturation | other
+  expected_mean: number; // raw learned value, in the wire unit
+  expected_std: number;
+  unit: string; // display unit: "req/s" | "ms" | "%" | "" (raw)
+  display_mean: number; // expected_mean converted into `unit`
+  display_std: number; // expected_std converted into `unit`
+  confident: boolean; // still-learning (false) vs ready-to-detect (true)
+  observations: number; // samples folded so far
+  threshold: number; // samples needed before the signal is ready
+  last_updated: string;
+}
+
+export interface BaselinesResponse {
+  org: string;
+  count: number;
+  baselines: BaselineRow[];
+}export interface ShadowEvent {
   pattern_id: string;
   template: string;
   source: string;
@@ -362,6 +390,18 @@ export const api = {
     request<{ ok: boolean; patterns: number }>("/api/agent/flush", {
       method: "POST",
     }),
+
+  // listBaselines reads the Enterprise learned metric/trace baselines. It
+  // does NOT swallow errors: an ApiError with status 403 (unlicensed) or 404
+  // (OSS binary — endpoint absent) is how the page knows to render the locked
+  // upsell state instead of a table.
+  listBaselines: (params?: { type?: "metric" | "trace"; confident?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (params?.type) qs.set("type", params.type);
+    if (params?.confident) qs.set("confident", "true");
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return request<BaselinesResponse>(`/api/agent/baselines${suffix}`);
+  },
 
   listShadow: () =>
     request<{ events: ShadowEvent[] }>("/api/agent/shadow").then(

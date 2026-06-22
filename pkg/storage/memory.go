@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -44,6 +45,22 @@ func (m *memoryProvider) WriteBlob(name string, data []byte) error {
 	m.blobs[name] = cp
 	m.blobAt[name] = time.Now().UTC()
 	return nil
+}
+
+func (m *memoryProvider) ListBlobs(prefix string) ([]Blob, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]Blob, 0)
+	for name, data := range m.blobs {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		// Return a copy so callers can't mutate state through the slice.
+		cp := make([]byte, len(data))
+		copy(cp, data)
+		out = append(out, Blob{Name: name, Data: cp})
+	}
+	return out, nil
 }
 
 func (m *memoryProvider) SaveIncident(rec *IncidentRecord) error {

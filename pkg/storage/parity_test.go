@@ -288,6 +288,121 @@ func TestPostgresBlobCRUD(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared blob-listing helper — the namespaced enumeration the model-state
+// seam (ModelStore.List) rides. Every backend must list a prefixed
+// namespace identically: a model-state name like
+// models/<org>/<agent>/<key> is one nested blob, and ListBlobs(prefix)
+// must return exactly the blobs under that prefix and nothing else.
+// ---------------------------------------------------------------------------
+
+func runBlobListing(t *testing.T, p storage.Provider) {
+	t.Helper()
+
+	// An empty store lists nothing under any prefix — not an error.
+	got, err := p.ListBlobs("models/")
+	if err != nil {
+		t.Fatalf("ListBlobs(empty store): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ListBlobs(empty store) len = %d, want 0", len(got))
+	}
+
+	// Lay down a model-state namespace (two orgs, two agents) plus an
+	// unrelated top-level blob that must never leak into a namespace list.
+	blobs := map[string][]byte{
+		"models/acme/intel-baseline/svcA~rate":   []byte(`{"k":"a1"}`),
+		"models/acme/intel-baseline/svcB~rate":   []byte(`{"k":"a2"}`),
+		"models/acme/intel-trace/svcA~op~p99":    []byte(`{"k":"t1"}`),
+		"models/globex/intel-baseline/svcA~rate": []byte(`{"k":"g1"}`),
+		"patterns":                               []byte(`{"doc":"patterns"}`),
+	}
+	for name, data := range blobs {
+		if err := p.WriteBlob(name, data); err != nil {
+			t.Fatalf("WriteBlob(%s): %v", name, err)
+		}
+	}
+
+	// List one org+agent namespace: exactly the two baseline artifacts.
+	got, err = p.ListBlobs("models/acme/intel-baseline/")
+	if err != nil {
+		t.Fatalf("ListBlobs(acme baseline): %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListBlobs(acme baseline) len = %d, want 2", len(got))
+	}
+	for _, b := range got {
+		want, ok := blobs[b.Name]
+		if !ok {
+			t.Fatalf("ListBlobs returned an unexpected name %q", b.Name)
+		}
+		if string(b.Data) != string(want) {
+			t.Fatalf("ListBlobs[%s] = %q, want %q", b.Name, b.Data, want)
+		}
+	}
+
+	// Listing the whole org spans both agents (2 baseline + 1 trace = 3).
+	got, err = p.ListBlobs("models/acme/")
+	if err != nil {
+		t.Fatalf("ListBlobs(acme): %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("ListBlobs(acme) len = %d, want 3", len(got))
+	}
+
+	// A different org's namespace is isolated.
+	got, err = p.ListBlobs("models/globex/intel-baseline/")
+	if err != nil {
+		t.Fatalf("ListBlobs(globex baseline): %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "models/globex/intel-baseline/svcA~rate" {
+		t.Fatalf("ListBlobs(globex baseline) = %v, want one globex artifact", got)
+	}
+
+	// An org that never wrote anything lists nothing.
+	got, err = p.ListBlobs("models/nobody/")
+	if err != nil {
+		t.Fatalf("ListBlobs(unknown org): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ListBlobs(unknown org) len = %d, want 0", len(got))
+	}
+
+	// Mutating a returned Data slice must not corrupt stored state.
+	got, err = p.ListBlobs("models/globex/intel-baseline/")
+	if err != nil {
+		t.Fatalf("ListBlobs(globex re-read): %v", err)
+	}
+	if len(got) == 1 {
+		got[0].Data[0] = 'X'
+	}
+	reread, err := p.ReadBlob("models/globex/intel-baseline/svcA~rate")
+	if err != nil {
+		t.Fatalf("ReadBlob after mutation: %v", err)
+	}
+	if string(reread) != `{"k":"g1"}` {
+		t.Fatalf("stored blob corrupted by caller mutation: %q", reread)
+	}
+}
+
+func TestMemoryBlobListing(t *testing.T) {
+	runBlobListing(t, storage.NewMemory())
+}
+
+func TestFileBlobListing(t *testing.T) {
+	dir := t.TempDir()
+	p, err := storage.NewFile(storage.FileOptions{DataDir: dir})
+	if err != nil {
+		t.Fatalf("NewFile: %v", err)
+	}
+	defer p.Close()
+	runBlobListing(t, p)
+}
+
+func TestPostgresBlobListing(t *testing.T) {
+	runBlobListing(t, newTestPostgres(t))
+}
+
+// ---------------------------------------------------------------------------
 // Postgres backend — analyses (mirrors TestMemoryAnalysisCRUD /
 // TestFileAnalysisCRUD from analyses_test.go)
 // ---------------------------------------------------------------------------

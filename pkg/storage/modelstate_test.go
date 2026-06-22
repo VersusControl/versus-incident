@@ -147,3 +147,74 @@ func TestModelStore_InvalidKey(t *testing.T) {
 		}
 	}
 }
+
+func TestModelStore_List(t *testing.T) {
+	ms := storage.NewModelStore(storage.NewMemory())
+
+	// Persist three artifacts under (acme, sre) and one under a different
+	// agent + a different org that must NOT show up in the (acme, sre) list.
+	if err := ms.Put("acme", "sre", "k1", 1, []byte("one")); err != nil {
+		t.Fatalf("Put k1: %v", err)
+	}
+	if err := ms.Put("acme", "sre", "k2", 2, []byte("two")); err != nil {
+		t.Fatalf("Put k2: %v", err)
+	}
+	if err := ms.Put("acme", "sre", "k3", 3, []byte("three")); err != nil {
+		t.Fatalf("Put k3: %v", err)
+	}
+	if err := ms.Put("acme", "other-agent", "k1", 9, []byte("nope")); err != nil {
+		t.Fatalf("Put other-agent: %v", err)
+	}
+	if err := ms.Put("globex", "sre", "k1", 9, []byte("nope")); err != nil {
+		t.Fatalf("Put globex: %v", err)
+	}
+
+	got, err := ms.List("acme", "sre")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("List len = %d, want 3", len(got))
+	}
+	byKey := map[string][]byte{}
+	for _, m := range got {
+		if m.OrgID != "acme" || m.Agent != "sre" {
+			t.Fatalf("List returned a foreign artifact: %+v", m)
+		}
+		byKey[m.Key] = m.Data
+	}
+	for k, want := range map[string]string{"k1": "one", "k2": "two", "k3": "three"} {
+		if string(byKey[k]) != want {
+			t.Fatalf("List[%s] = %q, want %q", k, byKey[k], want)
+		}
+	}
+}
+
+func TestModelStore_ListEmptyForUnknownOrg(t *testing.T) {
+	ms := storage.NewModelStore(storage.NewMemory())
+	if err := ms.Put("acme", "sre", "k1", 1, []byte("one")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	// An org that never wrote anything must list nothing — no leakage, no
+	// error.
+	got, err := ms.List("nobody", "sre")
+	if err != nil {
+		t.Fatalf("List(unknown org): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("List(unknown org) len = %d, want 0", len(got))
+	}
+}
+
+func TestModelStore_ListInvalidKey(t *testing.T) {
+	ms := storage.NewModelStore(storage.NewMemory())
+	for _, c := range []struct{ org, agent string }{
+		{"acme", "sre/sub"},
+		{"acme", "../escape"},
+		{"acme", ""},
+	} {
+		if _, err := ms.List(c.org, c.agent); !errors.Is(err, storage.ErrInvalidModelKey) {
+			t.Fatalf("List(%q,%q) = %v, want ErrInvalidModelKey", c.org, c.agent, err)
+		}
+	}
+}

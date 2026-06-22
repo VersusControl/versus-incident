@@ -245,8 +245,8 @@ export function PatternsPage() {
   return (
     <>
       <TopBar
-        title="Patterns"
-        subtitle={data ? `${data.length} learned` : undefined}
+        title="What the agent knows right now"
+        subtitle={data ? `${data.length} log templates learned` : "The agent learns recurring message templates from your logs so it can spot new or unusual ones."}
         actions={
           <button
             className="btn"
@@ -260,6 +260,11 @@ export function PatternsPage() {
       />
 
       <main className="flex-1 overflow-auto p-4 lg:p-6">
+        <p className="mb-3 max-w-3xl text-xs text-ink-300">
+          The recurring log messages the agent has learned for each service —
+          and how often each normally shows up — so it can spot a new or surging
+          one.
+        </p>
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <SegmentedControl
             param={VERDICT_PARAM}
@@ -321,7 +326,7 @@ export function PatternsPage() {
                       />
                     </th>
                     <th className="w-20 text-right">Count</th>
-                    <th className="w-24 text-right">Baseline</th>
+                    <th className="w-24 text-right">Normal</th>
                     <th>Template</th>
                     <th className="w-28">Service</th>
                     <th className="w-24">Verdict</th>
@@ -337,6 +342,11 @@ export function PatternsPage() {
                           <EmptyState
                             title="No patterns learned yet"
                             hint="The agent builds the catalog as logs flow in."
+                            action={
+                              <Link className="btn" to="/agent/metrics">
+                                Learning metrics or traces? See Metrics
+                              </Link>
+                            }
                           />
                         ) : verdictFilter === "uncurated" && !q.trim() ? (
                           <EmptyState title="No uncurated patterns — the catalog is fully labeled." />
@@ -368,7 +378,7 @@ export function PatternsPage() {
                         {p.count}
                       </td>
                       <td className="text-right tabular-nums text-ink-300">
-                        {p.baseline_frequency.toFixed(1)}/t
+                        ≈ {p.baseline_frequency.toFixed(1)}
                       </td>
                       <td className="max-w-0">
                         <div
@@ -467,8 +477,8 @@ export function PatternsPage() {
       )}
 
       {/* Peek panel — inspect without losing list position. No sparkline:
-          the API exposes no bucketed counts (UX_REDESIGN §3.5 ask #6), so
-          count vs baseline tells the story. */}
+          the API exposes no bucketed counts (UX_REDESIGN §3.5 ask #6), so the
+          current count vs the learned-normal count tells the story. */}
       {peek && (
         <PeekPanel
           open
@@ -476,7 +486,7 @@ export function PatternsPage() {
           title={<span className="font-mono">{peek.id}</span>}
           footer={
             <Link
-              to={`/agent/patterns/${peek.id}`}
+              to={`/agent/logs/${peek.id}`}
               className="btn"
               onClick={() => setPeekId(null)}
             >
@@ -498,9 +508,9 @@ export function PatternsPage() {
               <PeekFact label="Count">
                 <span className="tabular-nums">{peek.count}</span>
               </PeekFact>
-              <PeekFact label="Baseline (EWMA)">
+              <PeekFact label="Normal">
                 <span className="tabular-nums">
-                  {peek.baseline_frequency.toFixed(1)}/t
+                  ≈ {peek.baseline_frequency.toFixed(1)}
                 </span>
               </PeekFact>
               <PeekFact label="First seen">
@@ -570,7 +580,7 @@ export function PatternsPage() {
       {confirmFlush && (
         <ConfirmDialog
           title="Flush catalog to disk"
-          message="Write the in-memory pattern catalog to data/patterns.json now? This persists all counts and verdicts."
+          message="Write the in-memory pattern catalog to persists storage now."
           confirmLabel="Flush"
           busy={flush.isPending}
           error={flush.error}

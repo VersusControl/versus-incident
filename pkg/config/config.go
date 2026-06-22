@@ -395,17 +395,19 @@ func LoadConfig(path string) error {
 // `sources:` list and returns the parsed sources. ${VAR} references are
 // expanded against the process environment, mirroring the main config loader.
 func loadAgentSourcesFile(path string) ([]AgentSourceConfig, error) {
-	v := viper.New()
-	v.SetConfigFile(path)
-	v.SetConfigType("yaml")
-
-	if err := v.ReadInConfig(); err != nil {
+	raw, err := os.ReadFile(path)
+	if err != nil {
 		return nil, fmt.Errorf("read: %w", err)
 	}
-	for _, k := range v.AllKeys() {
-		if value, ok := v.Get(k).(string); ok {
-			v.Set(k, os.ExpandEnv(value))
-		}
+	// Expand ${VAR} references across the whole document so values inside
+	// list items (e.g. sources[].options.address) are expanded too, not
+	// just top-level scalars.
+	expanded := os.ExpandEnv(string(raw))
+
+	v := viper.New()
+	v.SetConfigType("yaml")
+	if err := v.ReadConfig(strings.NewReader(expanded)); err != nil {
+		return nil, fmt.Errorf("read: %w", err)
 	}
 
 	var wrapper struct {

@@ -178,7 +178,7 @@ func TestPrometheusQuerier_MetadataParses(t *testing.T) {
 	defer ts.Close()
 
 	q, _ := NewPrometheusQuerier(ts.URL, PrometheusAuth{}, false)
-	meta, err := q.Metadata(context.Background())
+	meta, err := q.Metadata(context.Background(), time.Time{}, time.Time{})
 	if err != nil {
 		t.Fatalf("metadata: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestPrometheusQuerier_LabelValuesParsesAndSendsMatchers(t *testing.T) {
 	defer ts.Close()
 
 	q, _ := NewPrometheusQuerier(ts.URL, PrometheusAuth{}, false)
-	vals, err := q.LabelValues(context.Background(), "service", `up{job="api"}`)
+	vals, err := q.LabelValues(context.Background(), "service", time.Time{}, time.Time{}, `up{job="api"}`)
 	if err != nil {
 		t.Fatalf("label values: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestPrometheusQuerier_LabelValuesParsesAndSendsMatchers(t *testing.T) {
 
 func TestPrometheusQuerier_LabelValuesRequiresName(t *testing.T) {
 	q, _ := NewPrometheusQuerier("http://example", PrometheusAuth{}, false)
-	if _, err := q.LabelValues(context.Background(), ""); err == nil {
+	if _, err := q.LabelValues(context.Background(), "", time.Time{}, time.Time{}); err == nil {
 		t.Error("expected error for empty label name")
 	}
 }
@@ -243,7 +243,7 @@ func TestPrometheusQuerier_SeriesParsesLabelSets(t *testing.T) {
 	defer ts.Close()
 
 	q, _ := NewPrometheusQuerier(ts.URL, PrometheusAuth{}, false)
-	series, err := q.Series(context.Background(), "up")
+	series, err := q.Series(context.Background(), time.Time{}, time.Time{}, "up")
 	if err != nil {
 		t.Fatalf("series: %v", err)
 	}
@@ -257,7 +257,65 @@ func TestPrometheusQuerier_SeriesParsesLabelSets(t *testing.T) {
 
 func TestPrometheusQuerier_SeriesRequiresSelector(t *testing.T) {
 	q, _ := NewPrometheusQuerier("http://example", PrometheusAuth{}, false)
-	if _, err := q.Series(context.Background()); err == nil {
+	if _, err := q.Series(context.Background(), time.Time{}, time.Time{}); err == nil {
 		t.Error("expected error when no selector is given")
+	}
+}
+
+// TestPrometheusQuerier_DiscoveryReadsSendTimeRange proves the discovery reads
+// thread a bounded start/end window onto the GET (the fix for Mimir/Cortex/
+// Thanos/VictoriaMetrics/Grafana Cloud, which return empty without it) and that
+// the zero time omits the param (vanilla Prometheus "all data" behavior).
+func TestPrometheusQuerier_DiscoveryReadsSendTimeRange(t *testing.T) {
+	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	end := time.Now().UTC().Truncate(time.Second)
+
+	var gotStart, gotEnd string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("discovery must be GET-only, got %s", r.Method)
+		}
+		gotStart = r.URL.Query().Get("start")
+		gotEnd = r.URL.Query().Get("end")
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/v1/label/"):
+			w.Write([]byte(`{"status":"success","data":["api"]}`))
+		case r.URL.Path == "/api/v1/series":
+			w.Write([]byte(`{"status":"success","data":[{"__name__":"up"}]}`))
+		default:
+			w.Write([]byte(`{"status":"success","data":{}}`))
+		}
+	}))
+	defer ts.Close()
+	q, _ := NewPrometheusQuerier(ts.URL, PrometheusAuth{}, false)
+
+	// Windowed reads must carry both params.
+	if _, err := q.LabelValues(context.Background(), "service", start, end); err != nil {
+		t.Fatalf("label values: %v", err)
+	}
+	if gotStart == "" || gotEnd == "" {
+		t.Errorf("LabelValues did not send start/end (start=%q end=%q)", gotStart, gotEnd)
+	}
+	if _, err := q.Series(context.Background(), start, end, "up"); err != nil {
+		t.Fatalf("series: %v", err)
+	}
+	if gotStart == "" || gotEnd == "" {
+		t.Errorf("Series did not send start/end (start=%q end=%q)", gotStart, gotEnd)
+	}
+	if _, err := q.Metadata(context.Background(), start, end); err != nil {
+		t.Fatalf("metadata: %v", err)
+	}
+	if gotStart == "" || gotEnd == "" {
+		t.Errorf("Metadata did not send start/end (start=%q end=%q)", gotStart, gotEnd)
+	}
+
+	// Zero time omits the params (backward-compatible vanilla behavior).
+	gotStart, gotEnd = "x", "x"
+	if _, err := q.LabelValues(context.Background(), "service", time.Time{}, time.Time{}); err != nil {
+		t.Fatalf("label values (zero): %v", err)
+	}
+	if gotStart != "" || gotEnd != "" {
+		t.Errorf("zero-time LabelValues sent start/end (start=%q end=%q)", gotStart, gotEnd)
 	}
 }

@@ -141,6 +141,20 @@ func formatPromTime(t time.Time) string {
 	return strconv.FormatFloat(float64(t.UTC().UnixNano())/1e9, 'f', 3, 64)
 }
 
+// setTimeRange adds start/end query params when non-zero. Discovery reads pass
+// a bounded lookback so Prometheus-compatible backends that require an explicit
+// window (Mimir, Cortex, Thanos, VictoriaMetrics, Grafana Cloud) return data
+// instead of an empty set. Both params are omitted on the zero time, preserving
+// vanilla Prometheus' "all data" behavior for callers that don't scope.
+func setTimeRange(v url.Values, start, end time.Time) {
+	if !start.IsZero() {
+		v.Set("start", formatPromTime(start))
+	}
+	if !end.IsZero() {
+		v.Set("end", formatPromTime(end))
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Discovery reads (GET-only).
 //
@@ -163,8 +177,19 @@ type MetricMeta struct {
 // Metadata returns the metric → metadata map advertised by the target
 // (GET /api/v1/metadata). A metric may carry several metadata entries; Prometheus
 // guarantees they are consistent, so we keep the first.
-func (q *PrometheusQuerier) Metadata(ctx context.Context) (map[string]MetricMeta, error) {
-	body, err := q.get(ctx, q.address+"/api/v1/metadata")
+//
+// start/end bound the read to a time window: vanilla Prometheus ignores them,
+// but Prometheus-compatible backends (Mimir, Cortex, Thanos, VictoriaMetrics,
+// Grafana Cloud) return empty for the metadata/label/series endpoints unless an
+// explicit window is supplied. Pass the zero time for either to omit it.
+func (q *PrometheusQuerier) Metadata(ctx context.Context, start, end time.Time) (map[string]MetricMeta, error) {
+	v := url.Values{}
+	setTimeRange(v, start, end)
+	u := q.address + "/api/v1/metadata"
+	if enc := v.Encode(); enc != "" {
+		u += "?" + enc
+	}
+	body, err := q.get(ctx, u)
 	if err != nil {
 		return nil, err
 	}
@@ -196,11 +221,15 @@ func (q *PrometheusQuerier) Metadata(ctx context.Context) (map[string]MetricMeta
 // LabelValues returns the observed values of a label
 // (GET /api/v1/label/<name>/values), optionally constrained by series selectors
 // (e.g. `up`, `http_requests_total{job="api"}`).
-func (q *PrometheusQuerier) LabelValues(ctx context.Context, label string, matchers ...string) ([]string, error) {
+//
+// start/end bound the read to a time window (see Metadata for why this matters
+// on Prometheus-compatible backends). Pass the zero time for either to omit it.
+func (q *PrometheusQuerier) LabelValues(ctx context.Context, label string, start, end time.Time, matchers ...string) ([]string, error) {
 	if label == "" {
 		return nil, fmt.Errorf("prometheus: label name is required")
 	}
 	v := url.Values{}
+	setTimeRange(v, start, end)
 	for _, m := range matchers {
 		if m != "" {
 			v.Add("match[]", m)
@@ -230,7 +259,10 @@ func (q *PrometheusQuerier) LabelValues(ctx context.Context, label string, match
 
 // Series returns the label sets of series matching the given selectors
 // (GET /api/v1/series). At least one selector is required by Prometheus.
-func (q *PrometheusQuerier) Series(ctx context.Context, matchers ...string) ([]map[string]string, error) {
+//
+// start/end bound the read to a time window (see Metadata for why this matters
+// on Prometheus-compatible backends). Pass the zero time for either to omit it.
+func (q *PrometheusQuerier) Series(ctx context.Context, start, end time.Time, matchers ...string) ([]map[string]string, error) {
 	sel := make([]string, 0, len(matchers))
 	for _, m := range matchers {
 		if m != "" {
@@ -241,6 +273,7 @@ func (q *PrometheusQuerier) Series(ctx context.Context, matchers ...string) ([]m
 		return nil, fmt.Errorf("prometheus: at least one series selector is required")
 	}
 	v := url.Values{}
+	setTimeRange(v, start, end)
 	for _, m := range sel {
 		v.Add("match[]", m)
 	}

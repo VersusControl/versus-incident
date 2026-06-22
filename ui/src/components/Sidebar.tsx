@@ -5,19 +5,41 @@ import {
   Book,
   Brain,
   Flame,
-  Layers,
+  LineChart,
+  Lock,
   LogOut,
+  ScrollText,
   Server,
   Settings,
   Sparkles,
-  Triangle,
   Users,
+  Waypoints,
   type LucideIcon,
 } from "lucide-react";
 import clsx from "clsx";
 import { useQuery } from "@tanstack/react-query";
-import { api, clearSecret } from "@/lib/api";
+import { api, ApiError, clearSecret } from "@/lib/api";
 import { useOpenIncidentCount } from "@/lib/hooks";
+import { useTheme } from "@/lib/theme";
+
+// Theme-aware sidebar brand — uses the same SVG logo approach as the
+// management platform TopNav Brand component.
+function SidebarBrand() {
+  const { theme } = useTheme();
+  // Sidebar is force-dark, so we always show the light (white) logo —
+  // unless the app theme is light, in which case we show the dark logo
+  // so it stays visible if the sidebar ever inherits the light surface.
+  const logoSrc = theme === "dark" ? "/versus-logo-light.svg" : "/versus-logo-light.svg";
+
+  return (
+    <div className="flex items-center gap-2 px-4 py-4">
+      <img src={logoSrc} alt="Versus" className="h-5 w-auto" />
+      <div className="text-2xs uppercase tracking-wider text-ink-200">
+        Versus Incident
+      </div>
+    </div>
+  );
+}
 
 // Three zones organized by the user's job, not the backend's modules
 // (UX_REDESIGN §2.1): RESPOND is the 3am zone and always comes first;
@@ -30,6 +52,7 @@ interface SideItem {
   badge?: number;
   dim?: boolean;
   dimTitle?: string;
+  locked?: boolean;
 }
 
 export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
@@ -41,6 +64,28 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   });
   const { open } = useOpenIncidentCount();
 
+  // Probe the enterprise baselines endpoint once to determine if Metrics/Traces
+  // are available. A 403 (no intelligence license) or 404 (OSS binary — route
+  // absent) means locked; any other error or success means available.
+  const baselinesProbe = useQuery({
+    queryKey: ["baselines-probe"],
+    queryFn: async () => {
+      try {
+        await api.listBaselines({ type: "metric" });
+        return true;
+      } catch (e) {
+        if (e instanceof ApiError && (e.status === 403 || e.status === 404)) {
+          return false;
+        }
+        // Network error / 500 — assume available (the page itself handles errors)
+        return true;
+      }
+    },
+    staleTime: 5 * 60_000, // re-probe every 5 minutes at most
+    retry: 1,
+  });
+  const enterpriseLocked = baselinesProbe.data === false;
+
   const runbooksAvailable = statusQ.data?.runbooks_available ?? false;
 
   const respond: SideItem[] = [
@@ -50,7 +95,27 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   ];
   const agent: SideItem[] = [
     { to: "/agent", label: "Overview", icon: Activity, end: true },
-    { to: "/agent/patterns", label: "Patterns", icon: Layers },
+    { to: "/agent/logs", label: "Logs", icon: ScrollText },
+    {
+      to: "/agent/metrics",
+      label: "Metrics",
+      icon: LineChart,
+      locked: enterpriseLocked,
+      dim: enterpriseLocked,
+      dimTitle: enterpriseLocked
+        ? "Enterprise feature — requires an intelligence license"
+        : undefined,
+    },
+    {
+      to: "/agent/traces",
+      label: "Traces",
+      icon: Waypoints,
+      locked: enterpriseLocked,
+      dim: enterpriseLocked,
+      dimTitle: enterpriseLocked
+        ? "Enterprise feature — requires an intelligence license"
+        : undefined,
+    },
     { to: "/agent/decisions", label: "Decisions", icon: Sparkles },
     { to: "/agent/services", label: "Services", icon: Server },
     {
@@ -74,12 +139,7 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
     // force-dark: the rail keeps its dark identity in BOTH themes — the
     // CSS variables are re-pinned on this subtree (see index.css).
     <div className="force-dark flex h-full flex-col bg-ink-950 text-ink-100">
-      <div className="flex items-center gap-2 px-4 py-4">
-        <Triangle size={18} className="rotate-180 text-link" fill="currentColor" />
-        <div className="text-2xs uppercase tracking-wider text-ink-200">
-          Versus · Incident
-        </div>
-      </div>
+      <SidebarBrand />
 
       <nav aria-label="Primary" className="dark-scroll flex-1 overflow-y-auto px-2 py-2">
         <Zone title="Respond" items={respond} onNavigate={onNavigate} />
@@ -143,6 +203,7 @@ function SideLink({
   badge,
   dim,
   dimTitle,
+  locked,
   onNavigate,
 }: SideItem & { onNavigate?: () => void }) {
   return (
@@ -172,6 +233,9 @@ function SideLink({
           />
           <Icon size={14} />
           <span className="flex-1">{label}</span>
+          {locked && (
+            <Lock size={12} className="text-ink-500" aria-label="Enterprise" />
+          )}
           {badge !== undefined && badge > 0 && (
             <span className="rounded-full bg-sev-critical/20 px-1.5 text-2xs tabular-nums text-sev-critical">
               {badge}

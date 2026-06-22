@@ -92,6 +92,16 @@ type Provider interface {
 	ReadBlob(name string) ([]byte, error)
 	// WriteBlob atomically replaces the blob stored under name.
 	WriteBlob(name string, data []byte) error
+	// ListBlobs returns every blob whose name begins with prefix, as
+	// (name, data) pairs in no guaranteed order. It is the enumeration
+	// primitive the model-state seam (ModelStore.List) rides to list all
+	// learned artifacts under a namespace (models/<org>/<agent>/…). A
+	// prefix that matches nothing returns an empty result, never
+	// ErrNotFound, mirroring the ReadBlob "fresh start" contract. The
+	// returned Data slices are copies the caller owns. The list is
+	// unbounded — a namespace is naturally bounded per org × agent (one
+	// artifact per learned key), so callers that need a cap apply it.
+	ListBlobs(prefix string) ([]Blob, error)
 
 	// SaveIncident appends a new incident to the store. Subsequent
 	// SaveIncident calls with the same ID overwrite the existing record
@@ -126,6 +136,14 @@ type Provider interface {
 	// connections, db pools). Calling Close on a closed provider is a
 	// no-op.
 	Close() error
+}
+
+// Blob is one entry returned by Provider.ListBlobs: a stored blob's
+// logical name (the same name passed to WriteBlob/ReadBlob) and its raw
+// bytes. Data is a copy the caller owns and may mutate freely.
+type Blob struct {
+	Name string
+	Data []byte
 }
 
 // Searcher is an optional capability a backend may implement on top of

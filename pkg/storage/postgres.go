@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"sort"
+	"strings"
 	"time"
 
 	// pgx stdlib driver — registers "pgx" with database/sql.
@@ -138,6 +139,44 @@ func (p *postgresProvider) WriteBlob(name string, data []byte) error {
 		return fmt.Errorf("storage: write blob %q: %w", name, err)
 	}
 	return nil
+}
+
+// ListBlobs returns every blob whose name begins with prefix. A model-state
+// namespace (models/<org>/<agent>/…) falls back to vs_blobs, but the scan
+// spans every physical blob table so the enumeration is correct for any
+// prefix. LIKE wildcards in the prefix are escaped so a literal '%' or '_'
+// in a blob name (e.g. an org id) matches literally.
+func (p *postgresProvider) ListBlobs(prefix string) ([]Blob, error) {
+	like := escapeLike(prefix) + "%"
+	var out []Blob
+	for _, table := range allBlobTables() {
+		q := fmt.Sprintf(`SELECT name, data FROM %s WHERE name LIKE $1 ESCAPE '\'`, table)
+		rows, err := p.db.Query(q, like)
+		if err != nil {
+			return nil, fmt.Errorf("storage: list blobs %s: %w", table, err)
+		}
+		for rows.Next() {
+			var name string
+			var data []byte
+			if err := rows.Scan(&name, &data); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("storage: scan blob in %s: %w", table, err)
+			}
+			out = append(out, Blob{Name: name, Data: data})
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, fmt.Errorf("storage: list blobs %s: %w", table, err)
+		}
+	}
+	return out, nil
+}
+
+// escapeLike escapes the SQL LIKE metacharacters in s so it is matched as a
+// literal prefix. Pairs with the `ESCAPE '\'` clause in ListBlobs.
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
 // ---------------------------------------------------------------------------

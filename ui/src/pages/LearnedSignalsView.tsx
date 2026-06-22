@@ -1,0 +1,388 @@
+import { useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { LineChart, Lock, Search, Waypoints, type LucideIcon } from "lucide-react";
+import { api, ApiError, type BaselineRow } from "@/lib/api";
+import {
+  displayService,
+  fmtAbs,
+  fmtRel,
+  formatNormalValue,
+  formatWiggle,
+  humanSignal,
+} from "@/lib/format";
+import { TopBar } from "@/components/TopBar";
+import { Pill } from "@/components/Pill";
+import { EmptyState } from "@/components/feedback";
+import { SegmentedControl } from "@/components/SegmentedControl";
+import { ClickableRow } from "@/components/DataTable";
+import { PeekPanel } from "@/components/PeekPanel";
+import { SkRows } from "@/components/Skeleton";
+import { RetryableError } from "@/components/RetryableError";
+
+// LearnedSignalsView — the read-only "what the agent knows right now" view for
+// ONE telemetry type (Metrics or Traces). It makes the Enterprise metric/trace
+// learners VISIBLE in plain words: per (service, signal) [+ operation for
+// traces] it shows the everyday-normal value with real units, whether the
+// agent has seen enough to start catching problems ("Ready to detect") or is
+// still gathering samples ("Still learning — N of 20"), how much evidence
+// backs it, and whether the signal is still flowing.
+//
+// Enterprise-gated: the endpoint returns 403 without an `intelligence` license
+// and is absent (404) on an OSS binary — either way the page renders the
+// locked upsell state, never real data. No enterprise dependency lives here:
+// the lock is driven purely by the HTTP status, so OSS-only builds stay green.
+// Read-only v1: no label / delete / reset — the agent learns these on its own.
+
+const PAGE_TITLE = "What the agent knows right now";
+
+// VALUE_TOOLTIP / STATUS_TOOLTIP are the §3.2 one-line glosses for the two
+// concepts that must survive in plain words.
+const VALUE_TOOLTIP =
+  "The everyday range the agent has seen for this signal. Values inside it are business-as-usual.";
+const STATUS_TOOLTIP =
+  "Still learning: the agent is gathering samples and won't flag this signal yet. Ready: it has seen enough to flag unusual behaviour.";
+
+const READONLY_NOTE =
+  "The agent learns these on its own — nothing to set up or edit here.";
+
+type Variant = {
+  kind: "metric" | "trace";
+  icon: LucideIcon;
+  subtitle: string;
+  sourceLabel: string;
+  hasOperation: boolean;
+  searchPlaceholder: string;
+  lockedTitle: string;
+  lockedBody: string;
+};
+
+const METRIC: Variant = {
+  kind: "metric",
+  icon: LineChart,
+  subtitle:
+    "The agent is learning what's normal for each service's numbers — request rate, errors, latency — so it can catch a value that suddenly looks wrong.",
+  sourceLabel: "Prometheus",
+  hasOperation: false,
+  searchPlaceholder: "Search service or signal…  ( / )",
+  lockedTitle: "Metrics learning is an Enterprise capability",
+  lockedBody:
+    "Metrics learning is an Enterprise capability — the agent learns what's normal for each service's request rate, errors and latency so it can catch problems automatically.",
+};
+
+const TRACE: Variant = {
+  kind: "trace",
+  icon: Waypoints,
+  subtitle:
+    "The agent is learning the normal speed and error rate of each service operation, so it can catch requests that suddenly get slow or start failing.",
+  sourceLabel: "Traces",
+  hasOperation: true,
+  searchPlaceholder: "Search service, operation or signal…  ( / )",
+  lockedTitle: "Traces learning is an Enterprise capability",
+  lockedBody:
+    "Traces learning is an Enterprise capability — the agent learns the normal speed and error rate of each operation so it can catch slow or failing requests automatically.",
+};
+
+const STATUS_PARAM = "status";
+
+function rowKey(r: BaselineRow): string {
+  return `${r.type}:${r.service}:${r.operation ?? ""}:${r.signal}`;
+}
+
+// StatusPill is the one thing that matters: will the agent flag a problem on
+// this signal yet? Green "Ready to detect", or amber "Still learning — N of 20".
+function StatusPill({ row, compact }: { row: BaselineRow; compact?: boolean }) {
+  if (row.confident) {
+    return (
+      <Pill tone="good" title={STATUS_TOOLTIP}>
+        Ready to detect
+      </Pill>
+    );
+  }
+  return (
+    <Pill
+      tone="warn"
+      title={`Still learning — ${row.observations} of ${row.threshold} samples. ${STATUS_TOOLTIP}`}
+    >
+      {compact
+        ? `Still learning ${row.observations}/${row.threshold}`
+        : `Still learning — ${row.observations} of ${row.threshold} samples`}
+    </Pill>
+  );
+}
+
+// NormalValue renders "what's normal right now" with units. While the signal is
+// still settling the value is shown but prefixed "So far …" so the operator
+// reads it as provisional, never authoritative.
+function NormalValue({ row, compact }: { row: BaselineRow; compact?: boolean }) {
+  const value = formatNormalValue(row.display_mean, row.unit);
+  const wiggle = formatWiggle(row.display_std, row.unit, !compact);
+  const body = compact ? `${value} ${wiggle}` : `${value}, usually ${wiggle}`;
+  if (!row.confident) {
+    return (
+      <span className="text-ink-300" title={VALUE_TOOLTIP}>
+        So far {body}
+        {!compact && <span className="text-ink-400"> (still settling)</span>}
+      </span>
+    );
+  }
+  return (
+    <span className="text-ink-100" title={VALUE_TOOLTIP}>
+      {body}
+    </span>
+  );
+}
+
+export function LearnedSignalsView({ variant }: { variant: Variant }) {
+  const { data, isLoading, isError, error, refetch, isRefetching } = useQuery({
+    queryKey: ["baselines", variant.kind],
+    queryFn: () => api.listBaselines({ type: variant.kind }),
+    retry: (count, err) => {
+      // The locked state — 403 (unlicensed) / 404 (OSS) — is terminal, not
+      // transient, so never retry it.
+      if (err instanceof ApiError && (err.status === 403 || err.status === 404))
+        return false;
+      return count < 1;
+    },
+  });
+
+  const [params] = useSearchParams();
+  const statusFilter = params.get(STATUS_PARAM) ?? "all";
+  const [q, setQ] = useState("");
+  const [peekKey, setPeekKey] = useState<string | null>(null);
+
+  const locked =
+    isError &&
+    error instanceof ApiError &&
+    (error.status === 403 || error.status === 404);
+
+  const rows = data?.baselines ?? [];
+
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return rows.filter((r) => {
+      if (statusFilter === "ready" && !r.confident) return false;
+      if (statusFilter === "learning" && r.confident) return false;
+      if (!needle) return true;
+      return (
+        r.service.toLowerCase().includes(needle) ||
+        r.signal.toLowerCase().includes(needle) ||
+        humanSignal(r.signal).toLowerCase().includes(needle) ||
+        (r.operation ?? "").toLowerCase().includes(needle)
+      );
+    });
+  }, [rows, q, statusFilter]);
+
+  const peek = peekKey ? rows.find((r) => rowKey(r) === peekKey) : undefined;
+  const cols = variant.hasOperation ? 7 : 6;
+
+  // ----- locked / upsell state (OSS or unlicensed) ------------------------
+  if (locked) {
+    return (
+      <>
+        <TopBar title={PAGE_TITLE} />
+        <main className="flex-1 overflow-auto p-4 lg:p-6">
+          <div className="card p-8">
+            <div className="mx-auto flex max-w-md flex-col items-center gap-3 text-center">
+              <div className="rounded-full bg-accent-subtle p-3 text-link">
+                <Lock size={20} />
+              </div>
+              <h2 className="text-sm font-semibold text-ink-50">
+                {variant.lockedTitle}
+              </h2>
+              <p className="text-xs text-ink-300">{variant.lockedBody}</p>
+              <a
+                className="btn btn-primary mt-1"
+                href="https://versusincident.com/enterprise"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Learn about Enterprise
+              </a>
+            </div>
+          </div>
+        </main>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <TopBar
+        title={PAGE_TITLE}
+        subtitle={data ? `${data.count} learned` : undefined}
+      />
+
+      <main className="flex-1 overflow-auto p-4 lg:p-6">
+        <p className="mb-3 max-w-3xl text-xs text-ink-300">{variant.subtitle}</p>
+
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <SegmentedControl
+            param={STATUS_PARAM}
+            defaultValue="all"
+            aria-label="Status filter"
+            options={[
+              { value: "all", label: "All" },
+              { value: "ready", label: "Ready" },
+              { value: "learning", label: "Still learning" },
+            ]}
+          />
+
+          <div className="relative w-full max-w-md sm:w-auto sm:flex-1">
+            <Search
+              size={12}
+              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
+            />
+            <input
+              data-page-search
+              className="input pl-7"
+              placeholder={variant.searchPlaceholder}
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          </div>
+        </div>
+
+        {isError && !locked ? (
+          <RetryableError
+            error={error}
+            onRetry={() => refetch()}
+            retrying={isRefetching}
+            context="Couldn't load what the agent has learned"
+          />
+        ) : (
+          <div className="card overflow-hidden">
+            <div className="max-h-[calc(100vh-260px)] overflow-auto">
+              <table className="ddt">
+                <thead>
+                  <tr>
+                    <th className="w-28">Service</th>
+                    {variant.hasOperation && <th className="w-40">Operation</th>}
+                    <th className="w-32">Signal</th>
+                    <th className="w-56">What's normal now</th>
+                    <th className="w-44">Status</th>
+                    <th className="w-20 text-right">Seen</th>
+                    <th className="w-28">Last seen</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {isLoading && <SkRows rows={8} cols={cols} />}
+                  {!isLoading && filtered.length === 0 && (
+                    <tr>
+                      <td colSpan={cols}>
+                        {rows.length === 0 ? (
+                          <EmptyState
+                            title="Nothing learned yet"
+                            hint="The agent starts learning the moment a metric or trace source runs in training mode. Give it a few minutes, then refresh."
+                          />
+                        ) : (
+                          <EmptyState
+                            title="Nothing matches your filters"
+                            hint="Try clearing the search or switching the status filter."
+                          />
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                  {filtered.map((r) => (
+                    <ClickableRow
+                      key={rowKey(r)}
+                      onOpen={() => setPeekKey(rowKey(r))}
+                    >
+                      <td className="font-medium text-ink-100">
+                        {displayService(r.service)}
+                      </td>
+                      {variant.hasOperation && (
+                        <td className="font-mono text-2xs text-ink-200">
+                          {r.operation || "—"}
+                        </td>
+                      )}
+                      <td className="text-ink-100">{humanSignal(r.signal)}</td>
+                      <td className="tabular-nums">
+                        <NormalValue row={r} compact />
+                      </td>
+                      <td>
+                        <StatusPill row={r} compact />
+                      </td>
+                      <td className="text-right tabular-nums text-ink-200">
+                        {r.observations}
+                      </td>
+                      <td className="text-ink-300" title={fmtAbs(r.last_updated)}>
+                        {fmtRel(r.last_updated)}
+                      </td>
+                    </ClickableRow>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </main>
+
+      <PeekPanel
+        open={!!peek}
+        onClose={() => setPeekKey(null)}
+        title={
+          peek
+            ? `${displayService(peek.service)} · ${humanSignal(peek.signal)}`
+            : ""
+        }
+      >
+        {peek && (
+          <dl className="space-y-3 text-xs">
+            <Field label="Status">
+              <StatusPill row={peek} />
+            </Field>
+            <Field label="What's normal right now">
+              <NormalValue row={peek} />
+              <div className="mt-0.5 text-2xs text-ink-400">
+                Changes with time of day.
+              </div>
+            </Field>
+            <Field label="Seen">{peek.observations} samples</Field>
+            <Field label="Last seen">
+              <span title={fmtAbs(peek.last_updated)}>
+                {fmtRel(peek.last_updated)}
+              </span>
+            </Field>
+            <Field label="Service">{displayService(peek.service)}</Field>
+            {variant.hasOperation && (
+              <Field label="Operation">{peek.operation || "—"}</Field>
+            )}
+            <Field label="Signal">
+              {humanSignal(peek.signal)}
+              <span className="ml-1 font-mono text-2xs text-ink-400">
+                {peek.signal}
+              </span>
+            </Field>
+            <Field label="Source">{variant.sourceLabel}</Field>
+            <p className="pt-2 text-2xs text-ink-400">{READONLY_NOTE}</p>
+          </dl>
+        )}
+      </PeekPanel>
+    </>
+  );
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <dt className="text-2xs uppercase tracking-wide text-ink-400">{label}</dt>
+      <dd className="mt-0.5 text-ink-100">{children}</dd>
+    </div>
+  );
+}
+
+export function MetricsPage() {
+  return <LearnedSignalsView variant={METRIC} />;
+}
+
+export function TracesPage() {
+  return <LearnedSignalsView variant={TRACE} />;
+}
