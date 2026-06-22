@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.74.1
-	github.com/cloudwego/eino v0.9.2
+	github.com/cloudwego/eino v0.9.9
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 	github.com/go-git/go-git/v5 v5.19.1
 	github.com/go-redis/redis/v8 v8.11.5
