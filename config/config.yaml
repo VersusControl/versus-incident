@@ -234,6 +234,10 @@ agent:
   ai:
     enable: false                   # master switch (env: AGENT_AI_ENABLE)
     api_key: ${AGENT_AI_API_KEY}
+    # provider: LLM backend for the chat agents — "openai" (default) or
+    # "gemini". Maps to the right OpenAI-compatible endpoint internally, so
+    # there's no need to specify a base URL. Empty = openai.
+    provider: ${AGENT_AI_PROVIDER}
     model: "gpt-5.4-mini"
     # temperature: 0.0–2.0 (default 0.2). Set a NEGATIVE value (e.g. -1) to
     # omit temperature so the provider uses its own default.

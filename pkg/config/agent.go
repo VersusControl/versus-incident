@@ -1,5 +1,7 @@
 package config
 
+import "strings"
+
 // -----------------------------------------------------------------------------
 // Agent mode (AI incident detection)
 // -----------------------------------------------------------------------------
@@ -321,6 +323,10 @@ type AgentAIConfig struct {
 	Enable bool `mapstructure:"enable"`
 	// APIKey is the bearer token sent in the Authorization header.
 	APIKey string `mapstructure:"api_key"`
+	// Provider selects the LLM backend: "openai" (default) or "gemini".
+	// It maps to an OpenAI-compatible endpoint internally (see
+	// ProviderBaseURL) so operators pick a short name instead of a long URL.
+	Provider string `mapstructure:"provider"`
 	// Model is the model identifier, e.g. "gpt-4o-mini".
 	Model string `mapstructure:"model"`
 	// Temperature controls randomness (0.0–2.0). Default 0.2.
@@ -359,12 +365,16 @@ type AgentAIAnalyzeConfig struct {
 	// Model overrides the shared ai.model for analyze deep dives.
 	// Empty inherits ai.model.
 	Model string `mapstructure:"model"`
+	// Provider overrides the shared ai.provider for analyze deep dives.
+	// Empty inherits ai.provider.
+	Provider string `mapstructure:"provider"`
 }
 
 // AgentAITaskConfig is the per-task override block. Zero values mean
 // "inherit the top-level AgentAIConfig field".
 type AgentAITaskConfig struct {
 	Model           string  `mapstructure:"model"`
+	Provider        string  `mapstructure:"provider"`
 	Temperature     float64 `mapstructure:"temperature"`
 	MaxTokens       int     `mapstructure:"max_tokens"`
 	MaxCallsPerHour int     `mapstructure:"max_calls_per_hour"`
@@ -386,6 +396,9 @@ func (c AgentAIConfig) Resolve(task AgentAITaskConfig) AgentAIConfig {
 	if task.Model != "" {
 		out.Model = task.Model
 	}
+	if task.Provider != "" {
+		out.Provider = task.Provider
+	}
 	if task.Temperature != 0 {
 		out.Temperature = task.Temperature
 	}
@@ -399,4 +412,17 @@ func (c AgentAIConfig) Resolve(task AgentAITaskConfig) AgentAIConfig {
 		out.CacheTTL = task.CacheTTL
 	}
 	return out
+}
+
+// ProviderBaseURL maps an LLM provider id to its OpenAI-compatible chat
+// completions base URL, consumed by the shared eino OpenAI client. Both
+// "openai" and "gemini" expose OpenAI-compatible APIs, so only the base URL
+// changes. "" / "openai" / unknown return "" — the OpenAI default endpoint.
+func ProviderBaseURL(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "gemini":
+		return "https://generativelanguage.googleapis.com/v1beta/openai"
+	default:
+		return ""
+	}
 }

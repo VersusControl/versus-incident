@@ -335,6 +335,7 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 		AI: AgentAIConfig{
 			Enable:          src.AI.Enable,
 			APIKey:          src.AI.APIKey,
+			Provider:        src.AI.Provider,
 			Model:           src.AI.Model,
 			Temperature:     src.AI.Temperature,
 			MaxTokens:       src.AI.MaxTokens,
@@ -486,6 +487,7 @@ func cloneToolsConfig(src ToolsConfig) ToolsConfig {
 func cloneAgentAITaskConfig(src AgentAITaskConfig) AgentAITaskConfig {
 	return AgentAITaskConfig{
 		Model:           src.Model,
+		Provider:        src.Provider,
 		Temperature:     src.Temperature,
 		MaxTokens:       src.MaxTokens,
 		MaxCallsPerHour: src.MaxCallsPerHour,
@@ -497,7 +499,8 @@ func cloneAgentAITaskConfig(src AgentAITaskConfig) AgentAITaskConfig {
 // override only; the tool-loop knobs live on the shared tools block).
 func cloneAgentAIAnalyzeConfig(src AgentAIAnalyzeConfig) AgentAIAnalyzeConfig {
 	return AgentAIAnalyzeConfig{
-		Model: src.Model,
+		Model:    src.Model,
+		Provider: src.Provider,
 	}
 }
 
