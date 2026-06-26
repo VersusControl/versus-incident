@@ -15,6 +15,10 @@
 //   - Auth slot — a settable middleware that runs on the API surface
 //     ahead of the OSS gateway-secret checks. OSS registers none (the
 //     slot is a pass-through); a wrapper registers SSO/JWT enforcement.
+//     A registered handler may call MarkAuthorized to tell the OSS
+//     gateway-secret guards the request is already authenticated by an
+//     alternative credential (e.g. an SSO session), so one enterprise
+//     credential can unlock both the data plane and the admin surfaces.
 //
 // Registration is process-wide and expected to happen once at boot,
 // before the server starts accepting connections.
@@ -63,6 +67,29 @@ func AuthMiddleware() fiber.Handler {
 		return v
 	}
 	return func(c *fiber.Ctx) error { return c.Next() }
+}
+
+// AuthorizedContextKey is the fiber Locals key a registered auth handler
+// (see SetAuthMiddleware) sets to mark a request as already authenticated
+// by an alternative credential — e.g. an enterprise SSO session. The OSS
+// gateway-secret guards honour this flag and skip the
+// X-Gateway-Secret check when it is set, so a single enterprise credential
+// can unlock both the data plane and the admin surfaces.
+const AuthorizedContextKey = "versus.authorized"
+
+// MarkAuthorized records that the current request was authenticated upstream
+// by a registered auth handler. Community OSS never calls this, so the
+// gateway-secret guards behave exactly as before.
+func MarkAuthorized(c *fiber.Ctx) {
+	c.Locals(AuthorizedContextKey, true)
+}
+
+// RequestAuthorized reports whether a prior auth handler marked this request
+// authorized. It defaults to false (community mode), leaving the OSS
+// gateway-secret checks unchanged.
+func RequestAuthorized(c *fiber.Ctx) bool {
+	v, _ := c.Locals(AuthorizedContextKey).(bool)
+	return v
 }
 
 // SetOrgResolver registers the function used to resolve an org id from a

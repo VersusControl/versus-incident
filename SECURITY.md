@@ -110,8 +110,8 @@ the community build; the OSS tree never imports the enterprise module.
   access.
 - **Per-org isolation.** Subject→role assignments persist through the X3
   `tenancy.NewOrgScoped` storage seam, so a role in org A can never be seen or
-  used in org B. The role-assignment API is guarded by the constant-time
-  `X-Versus-Admin-Token`.
+  used in org B. The role-assignment API is guarded by the `roles:manage`
+  permission, resolved from the caller's org-bound SSO session.
 
 ### Audit trail (`versus-enterprise/pkg/audit`)
 
@@ -123,7 +123,8 @@ the community build; the OSS tree never imports the enterprise module.
   `VerifyPersisted` detect any out-of-band edit of the stored log.
 - **No secrets in entries.** Security-relevant events are recorded by name
   (e.g. `sso.config.changed`) — never the secret value. The admin read API
-  `GET /enterprise/api/audit/{org}` uses a constant-time admin-token compare.
+  `GET /enterprise/api/audit/{org}` is gated on the `audit:view` permission
+  resolved from the caller's org-bound SSO session.
 - **Catalog:** `sso.login.success` / `sso.login.failure`,
   `sso.config.changed`, `rbac.denied`, `rbac.role.assigned` /
   `rbac.role.unassigned`, `tenant.created` / `tenant.suspended` /
@@ -140,18 +141,19 @@ the clone is removed and PASS once restored.
 
 ### Environment variables
 
-X5 introduces **no new environment variables**. It reuses the auto-generated
-admin token (RBAC role-assignment + audit read APIs) and the auto-generated SSO
-session pepper (the X4 session the RBAC guard resolves). Both are generated and
-persisted on first licensed boot rather than env-configured, never hardcoded;
-an unset/disabled admin token fails the admin APIs closed (`503`).
+X5 introduces **no new environment variables**. It reuses the auto-generated SSO
+session pepper (the X4 session the RBAC guard resolves): the role-assignment and
+audit read APIs are gated on the caller's RBAC permission carried by that
+session. The pepper is generated and persisted on first licensed boot rather
+than env-configured, never hardcoded; a request with no session fails the admin
+APIs closed (`401`), and an insufficient role is denied (`403`).
 
 ### X5 gate evidence
 
 `go build ./...`, `go vet ./...`, and `go test -race ./...` are green in
 `versus-enterprise/`. Audit immutability (no delete/update API + hash chain),
 per-org isolation (RBAC `RoleOf` and audit `Query` proven not to cross orgs),
-constant-time admin/token compares, and the buffer-aliasing guard were all
+constant-time secret compares, and the buffer-aliasing guard were all
 verified at the X5 gate.
 
 ## Supply chain and dependency provenance
@@ -212,7 +214,7 @@ Reviewed and passed at the Security release gate on 2026-06-10
   a stored org id. This is the confidentiality control behind the SOC 2
   multi-tenancy evidence (epics G7 / X7).
 - **Secret hygiene (X3, M4):** all credentials — session key, gateway secret,
-  enterprise admin token, Postgres DSN, Google OAuth client secret — are read
+  Postgres DSN, Google OAuth client secret — are read
   from environment variables only (no hardcoded literals), compared in constant
   time where applicable, and never written to logs (startup logs print
   non-secret configuration only). Session tokens are 256-bit and stored only as
@@ -427,10 +429,10 @@ covering `versus-enterprise/pkg/sso` (`verify.go`, `oidc.go`, `txstore.go`,
   at exchange time; `IdPConfig.MarshalJSON` redacts it (`***redacted***`) so it
   never leaves over the API, and the stored blob uses a separate non-redacting
   marshaller. `state`/`nonce`/`verifier`/session-handle all from `crypto/rand`;
-  admin token and org binding compared via `secureEqual` (sha256 + `subtle`). The
+  the org binding is compared via `secureEqual` (sha256 + `subtle`). The
   token-exchange error path never echoes the IdP response body.
 - **SSRF:** the OIDC `issuer` (hence discovery URL) is **config-pinned per org**
-  via the admin-token-gated `PUT /:org/config`; it is never taken from request
+  via the `sso:manage`-gated `PUT /:org/config`; it is never taken from request
   input at login/callback time. Discovery requires the document's own `issuer` to
   equal the configured issuer exactly, and `jwks_uri` is taken from that verified
   document — an attacker cannot redirect the JWKS fetch at request time.

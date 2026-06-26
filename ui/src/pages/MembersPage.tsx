@@ -1,12 +1,25 @@
 import { useId, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Plus, Search, Trash2 } from "lucide-react";
+import clsx from "clsx";
 import {
+  ApiError,
   api,
   type Member,
   type MemberInput,
   type MemberMeta,
+  type MemberRole,
+  type MembersEnvelope,
 } from "@/lib/api";
+import {
+  ASSIGNABLE_ROLES,
+  canAddMember,
+  isAdminRole,
+  memberAffordances,
+  normalizeEmail,
+  roleLabel,
+} from "@/lib/role";
+import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { EmptyState, ErrorBox } from "@/components/feedback";
 import { Pill } from "@/components/Pill";
 import { Modal } from "@/components/Modal";
@@ -14,6 +27,15 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
 import { useToast } from "@/components/Toast";
+
+// RbacBinding is what the enterprise RBAC members surface contributes to one
+// roster row: the member's effective role and the subject the role-change
+// control targets. Keyed by normalized email since the OSS roster carries an
+// email but no IdP subject.
+interface RbacBinding {
+  role?: string;
+  subject: string;
+}
 
 // MembersPanel is the operator's roster of people that can be assigned
 // to incidents. Each member has a free-form name, an editable alias
@@ -28,9 +50,46 @@ export function MembersPanel() {
     queryFn: api.listMembers,
   });
 
+  // Enterprise RBAC overlay. rbacActive is true only on a licensed binary with
+  // a live session — off it, the panel is the OSS roster exactly as today (no
+  // role column, fully editable). The self match keys on the session EMAIL vs
+  // each row's meta.email (normalized), since the OSS roster has no IdP subject.
+  const access = useEffectiveRole();
+  const rbacActive = access.enterprise && access.hasSession;
+  const isAdmin = access.isAdmin;
+  const selfEmail = normalizeEmail(access.session.data?.email);
+
+  const rbacQ = useQuery<MembersEnvelope>({
+    queryKey: ["rbac-members", access.org],
+    queryFn: () => api.listRbacMembers(access.org as string),
+    enabled: rbacActive && !!access.org,
+    retry: (count, err) => {
+      if (err instanceof ApiError && [401, 403, 404, 503].includes(err.status)) {
+        return false;
+      }
+      return count < 1;
+    },
+    staleTime: 30_000,
+  });
+
+  // Join the RBAC members (role + subject) to the OSS roster by normalized
+  // email, so each roster row can surface its role and (for an admin) a
+  // role-change control that targets the right subject.
+  const rbacByEmail = useMemo(() => {
+    const m = new Map<string, RbacBinding>();
+    for (const r of rbacQ.data?.members ?? []) {
+      const key = normalizeEmail(r.email);
+      if (key) m.set(key, { role: r.role, subject: r.subject });
+    }
+    return m;
+  }, [rbacQ.data]);
+
   const [q, setQ] = useState("");
   const [editing, setEditing] = useState<Member | "new" | null>(null);
   const [deleting, setDeleting] = useState<Member | null>(null);
+  const [pendingRoleSubject, setPendingRoleSubject] = useState<string | null>(
+    null,
+  );
 
   const filtered = useMemo(() => {
     if (!data) return [];
@@ -64,6 +123,27 @@ export function MembersPanel() {
     },
   });
 
+  const setRole = useMutation({
+    mutationFn: (vars: { subject: string; role: MemberRole }) =>
+      api.setMemberRole(access.org as string, vars.subject, vars.role),
+    onMutate: (vars) => setPendingRoleSubject(vars.subject),
+    onSuccess: (_res, vars) => {
+      qc.invalidateQueries({ queryKey: ["rbac-members", access.org] });
+      toast.push({ tone: "ok", title: `Role updated to ${roleLabel(vars.role)}` });
+    },
+    onError: (err) => {
+      toast.push({
+        tone: "error",
+        title: "Couldn't change the role",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    },
+    onSettled: () => setPendingRoleSubject(null),
+  });
+
+  const showAdd = canAddMember(rbacActive, isAdmin);
+  const colCount = rbacActive ? 5 : 4;
+
   return (
     <>
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -82,9 +162,15 @@ export function MembersPanel() {
             onChange={(e) => setQ(e.target.value)}
           />
         </div>
-        <button className="btn" onClick={() => setEditing("new")}>
-          <Plus size={12} /> Add member
-        </button>
+        {showAdd && (
+          <button
+            className="btn"
+            data-testid="members-add"
+            onClick={() => setEditing("new")}
+          >
+            <Plus size={12} /> Add member
+          </button>
+        )}
       </div>
 
       {isError && (
@@ -107,14 +193,15 @@ export function MembersPanel() {
                   <th className="w-56">Name</th>
                   <th className="w-40">Alias</th>
                   <th>Channel identifiers</th>
+                  {rbacActive && <th className="w-40">Role</th>}
                   <th className="w-24" />
                 </tr>
               </thead>
               <tbody>
-                {isLoading && <SkRows rows={6} cols={4} />}
+                {isLoading && <SkRows rows={6} cols={colCount} />}
                 {!isLoading && !isError && filtered.length === 0 && (
                   <tr>
-                    <td colSpan={4}>
+                    <td colSpan={colCount}>
                       {q.trim() ? (
                         <EmptyState
                           title="No members match"
@@ -125,53 +212,102 @@ export function MembersPanel() {
                           title="No members yet"
                           hint="Add operators here so you can assign them to incidents."
                           action={
-                            <button
-                              className="btn"
-                              onClick={() => setEditing("new")}
-                            >
-                              <Plus size={12} /> Add member
-                            </button>
+                            showAdd ? (
+                              <button
+                                className="btn"
+                                onClick={() => setEditing("new")}
+                              >
+                                <Plus size={12} /> Add member
+                              </button>
+                            ) : undefined
                           }
                         />
                       )}
                     </td>
                   </tr>
                 )}
-                {filtered.map((m) => (
-                  <tr key={m.id}>
-                    <td className="py-2.5 font-medium text-ink-50">{m.name}</td>
-                    <td className="font-mono text-2xs text-ink-300">
-                      {m.alias}
-                    </td>
-                    <td>
-                      <MetaPills meta={m.meta} />
-                    </td>
-                    <td>
-                      <div className="flex justify-end gap-1">
-                        <button
-                          className="btn"
-                          aria-label={`Edit ${m.name}`}
-                          title="Edit"
-                          onClick={() => setEditing(m)}
-                        >
-                          <Pencil size={11} />
-                        </button>
-                        <button
-                          className="btn"
-                          aria-label={`Delete ${m.name}`}
-                          title="Delete"
-                          disabled={del.isPending}
-                          onClick={() => {
-                            del.reset();
-                            setDeleting(m);
-                          }}
-                        >
-                          <Trash2 size={11} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {filtered.map((m) => {
+                  const emailKey = normalizeEmail(m.meta?.email);
+                  const binding = emailKey
+                    ? rbacByEmail.get(emailKey)
+                    : undefined;
+                  const isSelf = !!selfEmail && emailKey === selfEmail;
+                  const aff = memberAffordances({
+                    rbacActive,
+                    isAdmin,
+                    isSelf,
+                    hasSubject: !!binding?.subject,
+                  });
+                  return (
+                    <tr key={m.id} data-testid={`member-row-${m.id}`}>
+                      <td className="py-2.5 font-medium text-ink-50">
+                        <span>{m.name}</span>
+                        {rbacActive && isSelf && (
+                          <span
+                            data-testid={`member-self-${m.id}`}
+                            className="ml-2 inline-flex items-center rounded-full bg-ink-100/10 px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide text-ink-300"
+                          >
+                            You
+                          </span>
+                        )}
+                      </td>
+                      <td className="font-mono text-2xs text-ink-300">
+                        {m.alias}
+                      </td>
+                      <td>
+                        <MetaPills meta={m.meta} />
+                      </td>
+                      {rbacActive && (
+                        <td>
+                          <MemberRoleCell
+                            memberId={m.id}
+                            role={binding?.role}
+                            subject={binding?.subject}
+                            canManage={aff.canManageRole}
+                            pending={
+                              !!binding?.subject &&
+                              pendingRoleSubject === binding.subject
+                            }
+                            onChange={(role) =>
+                              binding?.subject &&
+                              setRole.mutate({ subject: binding.subject, role })
+                            }
+                          />
+                        </td>
+                      )}
+                      <td>
+                        <div className="flex justify-end gap-1">
+                          {aff.canEdit && (
+                            <button
+                              className="btn"
+                              data-testid={`member-edit-${m.id}`}
+                              aria-label={`Edit ${m.name}`}
+                              title="Edit"
+                              onClick={() => setEditing(m)}
+                            >
+                              <Pencil size={11} />
+                            </button>
+                          )}
+                          {aff.canDelete && (
+                            <button
+                              className="btn"
+                              data-testid={`member-delete-${m.id}`}
+                              aria-label={`Delete ${m.name}`}
+                              title="Delete"
+                              disabled={del.isPending}
+                              onClick={() => {
+                                del.reset();
+                                setDeleting(m);
+                              }}
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -203,6 +339,69 @@ export function MembersPanel() {
         />
       )}
     </>
+  );
+}
+
+// MemberRoleCell renders one roster row's RBAC role on the enterprise People
+// page: a read-only pill for everyone, or — for an admin/owner on a row that
+// maps to an RBAC subject — a live <select> that reassigns the role through the
+// SAME assignRole path the Admin surface uses. A row with no RBAC subject (a
+// roster member who never signed in via SSO) shows a muted "No SSO role".
+function MemberRoleCell({
+  memberId,
+  role,
+  subject,
+  canManage,
+  pending,
+  onChange,
+}: {
+  memberId: string;
+  role?: string;
+  subject?: string;
+  canManage: boolean;
+  pending: boolean;
+  onChange: (role: MemberRole) => void;
+}) {
+  if (canManage && subject) {
+    return (
+      <select
+        data-testid={`member-role-${memberId}`}
+        aria-label={`Role for ${subject}`}
+        className="input h-8 py-0 text-xs"
+        value={(role ?? "viewer").toLowerCase()}
+        disabled={pending}
+        onChange={(e) => onChange(e.target.value as MemberRole)}
+      >
+        {ASSIGNABLE_ROLES.map((r) => (
+          <option key={r} value={r}>
+            {roleLabel(r)}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  if (!subject) {
+    return (
+      <span
+        data-testid={`member-role-${memberId}`}
+        className="text-2xs text-ink-400"
+      >
+        No SSO role
+      </span>
+    );
+  }
+  return (
+    <span
+      data-testid={`member-role-${memberId}`}
+      className={clsx(
+        "inline-flex items-center rounded-full px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide",
+        isAdminRole(role)
+          ? "bg-accent-subtle text-accent"
+          : "bg-ink-100/10 text-ink-300",
+      )}
+    >
+      {roleLabel(role)}
+    </span>
   );
 }
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/runbook"
 
 	"github.com/gofiber/fiber/v2"
@@ -52,6 +53,9 @@ func (c *RunbookAdminController) Register(router fiber.Router) {
 }
 
 func (c *RunbookAdminController) authMiddleware(ctx *fiber.Ctx) error {
+	if middleware.RequestAuthorized(ctx) {
+		return ctx.Next()
+	}
 	cfg := config.GetConfig()
 	expected := cfg.GatewaySecret
 	got := ctx.Get("X-Gateway-Secret")

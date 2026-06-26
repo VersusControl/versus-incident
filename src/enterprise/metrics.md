@@ -39,9 +39,14 @@ and then goes clearly anomalous, it emits a signal.
 | Need | Why |
 |---|---|
 | **Docker** (Compose v2) | run the Prometheus stack; the standing source runs from your **Versus Enterprise distribution** (below) |
-| A **Versus Enterprise license**, supply it via the `LICENSE_KEY` environment variable | the standing `prometheus` source is gated on this feature |
+| A **Versus Enterprise license** with the **`intelligence`** entitlement, supplied via the `LICENSE_KEY` environment variable | the standing `prometheus` source is gated on this feature |
 | An **AI API key** (e.g. OpenAI) | the detect AI that triages the anomaly and writes the incident summary |
 | **Python 3** | runs `scripts/generate_fake_metrics.py` (stdlib only — no `pip install`) |
+
+> **First time running Enterprise?** Start with
+> [Getting Started — Running the Enterprise Agent](./getting-started.md). It
+> covers signing in as the default admin, turning on AI, and switching modes
+> from the UI — the controls this walkthrough uses.
 
 ## 1. Bring up the stack
 
@@ -85,10 +90,32 @@ when you start the container. The demo walks through them in order:
 | `shadow` | Scores every signal against the learned baseline. Writes **"would have alerted"** verdicts to the UI — but **pages no one**. | Validating that the learned baseline is accurate before going live. |
 | `detect` | Opens a **real incident automatically** when a signal deviates from the learned baseline. A lightweight **AI classification** writes the incident's title, severity, and summary. (The deep, tool-using **AI analysis** is a separate, on-demand step — see [step 5](#5-watch-the-results).) | Production — the payoff mode. |
 
+### In plain words
+
+Think of the agent like a new on-call engineer learning your systems:
+
+- **Training** — it just *watches*. For every service it sees, it learns the
+  normal range of each golden signal (request rate, error rate, latency) and
+  writes that down as a **baseline**. It never alerts in this mode.
+- **Shadow** — now it *scores* live traffic against what it learned and
+  notes *"I would have alerted here"* — but it stays silent and pages no one.
+  This is your dress rehearsal: you check it would have caught the right
+  things before trusting it.
+- **Detect** — it *acts*. When a signal clearly breaks from its baseline, it
+  opens a real incident and a lightweight AI classification writes the title,
+  severity, and summary.
+
+```mermaid
+flowchart LR
+  t["Training<br/>learn normal"] --> s["Shadow<br/>would-have-alerted"] --> d["Detect<br/>open real incidents"]
+```
+
 The recommended sequence for this demo:
 
 1. Start in **`training`** with healthy traffic → builds the baseline.
-2. Switch to **`detect`** and introduce the spike → fires a real incident.
+2. Switch to **`shadow`** and spike one service → it *flags* the anomaly
+   without paging.
+3. Switch to **`detect`** and spike again → it opens a real incident.
 
 ## 4. Run your Versus Enterprise
 
@@ -127,19 +154,86 @@ enterprise: agent started (mode=training, sources=1)
 `sources=1` and **no** `requires Versus Enterprise` line confirm the license unlocked the
 source.
 
-**Now generate steady, healthy traffic** so the source learns a low baseline:
+**Now generate steady, healthy traffic** so the source learns a baseline. To
+see per-service isolation, drive **three services** with different profiles —
+each on its own `--job` so discovery enumerates all three and learns a
+**separate baseline per service**:
 
 ```bash
-python3 scripts/generate_fake_metrics.py --service ec2-i-0abcd1234 --duration 600
+# from the repo root — the generator is stdlib-only; default --target is :9091
+python3 scripts/generate_fake_metrics.py \
+    --service checkout --job demo-checkout --rate 20 --duration 180 --interval 2 --seed 11 &
+python3 scripts/generate_fake_metrics.py \
+    --service payments --job demo-payments --rate 5  --duration 180 --interval 2 --seed 22 &
+python3 scripts/generate_fake_metrics.py \
+    --service search   --job demo-search   --rate 60 --duration 180 --interval 2 --seed 33 &
+wait
 ```
 
-Leave it running. The source watches the healthy metrics and builds its model of "normal"
-for each discovered signal. Nothing alerts — that's correct for training mode.
+Each flag does one thing: `--service` is the service label the agent groups
+by, `--job` keeps the three pushes from overwriting each other on the
+Pushgateway, `--rate` sets how busy the service is, and `--seed` makes the
+run reproducible. Leave them running — the `wait` blocks for the full 180s.
 
-### Step B — Detect mode (fire the incident)
+While it runs, the source watches the healthy metrics and builds a model of
+"normal" for each discovered signal. **Give it a couple of minutes**: a
+signal needs enough samples before it's confident enough to flag anything.
+Nothing alerts — that's correct for training mode.
 
-Stop the container (`Ctrl-C` or `docker stop versus-enterprise`) and restart in
-**`detect`** mode — change only `AGENT_MODE`:
+### Step B — See what it learned
+
+Open <http://localhost:3000/> and find the agent's **learned-signals** page
+(*"What the agent knows right now"*). Each `(service, signal)` shows up with a
+status pill:
+
+- **Still learning** — gathering samples; it won't flag this signal yet.
+- **Ready to detect** — it has seen enough to catch unusual behaviour.
+
+You should see `checkout`, `payments`, and `search` each with their own
+signals, and the per-service request rates clearly different (low for
+`payments`, high for `search`) — proof the agent learned each service in
+isolation rather than pooling them together.
+
+### Step C — Shadow mode (flag without paging)
+
+Now switch the agent to **`shadow`** so it scores live traffic against those
+baselines and tells you what it *would* have alerted on — without paging
+anyone.
+
+Switch the mode from the **Agent** page in the UI.
+On restart-based setups you can instead stop the container and start it again
+with `AGENT_MODE=shadow`. Either way, the baselines you just learned are
+**persisted** and reload automatically — the agent does not start over.
+
+Drive traffic again, but this time **spike only `search`** while `checkout`
+and `payments` stay healthy:
+
+```bash
+python3 scripts/generate_fake_metrics.py \
+    --service checkout --job demo-checkout --rate 20 --duration 120 --interval 2 --seed 11 &
+python3 scripts/generate_fake_metrics.py \
+    --service payments --job demo-payments --rate 5  --duration 120 --interval 2 --seed 22 &
+python3 scripts/generate_fake_metrics.py \
+    --service search   --job demo-search   --rate 60 --spike --duration 120 --interval 2 --seed 99 &
+wait
+```
+
+The `--spike` flag drives `search` to ~45% `500`s with fat-tailed latency
+(p95 > 500ms). Let it run long enough to sustain — the agent only flags after
+a few consecutive anomalous ticks, not on a single blip. On the **Shadow**
+page you'll see *would-have-alerted* events for **`search` only**; `checkout`
+and `payments` stay quiet, and **no incident is opened**. That's shadow doing
+its job: catching the right service, paging no one.
+
+### Step D — Detect mode (fire the incident)
+
+Happy with what shadow flagged? Switch the agent to **`detect`** — again from
+the **Agent** page (or restart with `AGENT_MODE=detect`). Detect **requires AI
+to be enabled**, which you set up in
+[Getting Started → activate the AI key](./getting-started.md#5-activate-the-ai-key).
+
+If you're using the restart path instead of the UI control, the full command
+is just the training one with `AGENT_MODE=detect`:
 
 ```bash
 docker run --rm --name versus-enterprise \
@@ -158,17 +252,18 @@ docker run --rm --name versus-enterprise \
   ghcr.io/versuscontrol/versus-enterprise:latest
 ```
 
-Now introduce the spike:
+Now spike again:
 
 ```bash
-python3 scripts/generate_fake_metrics.py --spike --service ec2-i-0abcd1234 --duration 180
+python3 scripts/generate_fake_metrics.py \
+    --service search --job demo-search --rate 60 --spike --duration 180 --interval 2 --seed 99
 ```
 
-This pushes `~45%` `500`s and a fat-tailed latency distribution (p95 > 500ms). The
-auto-discovered signals deviate from the baseline learned in training, and Versus
-**opens an incident automatically** — a lightweight AI classification (the detect agent)
-writes its title, severity, and summary. The deeper tool-using investigation does **not**
-run yet; it's an on-demand step you trigger from the incident itself (next).
+This time the deviation from the learned baseline makes Versus **open an
+incident automatically** — a lightweight AI classification (the detect agent)
+writes its title, severity, and summary. The deeper tool-using investigation
+does **not** run yet; it's an on-demand step you trigger from the incident
+itself (next).
 
 ## 5. Watch the results
 
@@ -227,7 +322,9 @@ sources:
 
 The metric names (`demo_http_requests_total`,
 `demo_http_request_duration_seconds_bucket`) are exactly what the generator emits, so the
-pinned signals attach to the generator's series out of the box. **A pinned signal is not
+pinned signals attach to the generator's series out of the box.
+
+**A pinned signal is not
 a threshold tripwire:** its value still flows through the same auto-learning baseline
 brain, so — like every signal — it must establish a baseline from steady traffic before a
 deviation pages. The `> 0.5` in the PromQL shapes *which* series the source tracks and the
@@ -256,6 +353,7 @@ docker compose down -v
 
 ## See also
 
+- New here? [Getting Started — Running the Enterprise Agent](./getting-started.md)
 - Reference: [Prometheus / Metrics (Enterprise)](../agent/data-sources/prometheus.md)
 - The trace twin of this demo: [Traces demo, end to end](./traces.md)
 - The logs lifecycle this mirrors: [Shadow Mode](../agent/shadow-mode.md) · [AI Detect Mode](../agent/ai-detect-mode.md) · [AI Analyze Mode](../agent/ai-analyze-mode.md)

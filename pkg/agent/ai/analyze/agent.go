@@ -61,6 +61,11 @@ type Options struct {
 	BaseURL    string
 	Timeout    time.Duration
 
+	// AuthKeyFunc is an OPTIONAL per-request Authorization override passed
+	// straight to the chat model's transport. Nil (the OSS default) leaves
+	// the YAML-keyed header untouched.
+	AuthKeyFunc func(ctx context.Context) (key string, ok bool)
+
 	// ChatModel overrides the Eino tool-calling chat model. When
 	// non-nil the agent skips dialing OpenAI; tests pass a fake. The
 	// ReAct agent binds tools onto it via WithTools.
@@ -101,9 +106,10 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.AnalyzeTool
 	chat := opts.ChatModel
 	if chat == nil {
 		base, err := einowrap.NewToolCallingChatModel(ctx, cfg, einowrap.Options{
-			HTTPClient: opts.HTTPClient,
-			BaseURL:    opts.BaseURL,
-			Timeout:    opts.Timeout,
+			HTTPClient:  opts.HTTPClient,
+			BaseURL:     opts.BaseURL,
+			Timeout:     opts.Timeout,
+			AuthKeyFunc: opts.AuthKeyFunc,
 		})
 		if err != nil {
 			return nil, err

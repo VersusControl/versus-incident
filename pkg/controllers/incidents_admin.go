@@ -9,6 +9,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/services"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 
@@ -59,6 +60,9 @@ func (i *IncidentAdminController) Register(router fiber.Router) {
 // Comparison is constant-time (see secureEqual in agent.go) to avoid
 // header-length / prefix-match timing oracles.
 func (i *IncidentAdminController) authMiddleware(c *fiber.Ctx) error {
+	if middleware.RequestAuthorized(c) {
+		return c.Next()
+	}
 	cfg := config.GetConfig()
 	expected := cfg.GatewaySecret
 	got := c.Get("X-Gateway-Secret")

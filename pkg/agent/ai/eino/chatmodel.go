@@ -29,6 +29,63 @@ type Options struct {
 	HTTPClient *http.Client
 	BaseURL    string
 	Timeout    time.Duration
+
+	// AuthKeyFunc is an OPTIONAL per-request Authorization override. When
+	// non-nil the outbound transport calls it for every request: if it
+	// returns ok the request's Authorization header is replaced with
+	// "Bearer <key>" AFTER the SDK set its YAML-keyed header (so the
+	// override wins); ok=false leaves the YAML-keyed header untouched. When
+	// nil the transport is a plain pass-through and the client is used
+	// exactly as before — this is the OSS byte-for-byte path. The package
+	// stays generic: it knows nothing about who supplies the key (the agent
+	// package injects a function backed by its runtime AISettingsResolver,
+	// which avoids an import cycle because eino never imports agent).
+	AuthKeyFunc func(ctx context.Context) (key string, ok bool)
+}
+
+// authRoundTripper injects a runtime Authorization override onto every
+// outbound request. It consults keyFn per request, so a hot-swapped key
+// takes effect without rebuilding the client. Per the http.RoundTripper
+// contract it must not mutate the input request, so it clones the request
+// (which deep-copies the header) before writing the override.
+type authRoundTripper struct {
+	base  http.RoundTripper
+	keyFn func(ctx context.Context) (key string, ok bool)
+}
+
+func (a authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := a.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if a.keyFn == nil {
+		return base.RoundTrip(req)
+	}
+	key, ok := a.keyFn(req.Context())
+	if !ok {
+		// No opinion: send the request exactly as the SDK built it.
+		return base.RoundTrip(req)
+	}
+	clone := req.Clone(req.Context())
+	clone.Header.Set("Authorization", "Bearer "+key)
+	return base.RoundTrip(clone)
+}
+
+// withAuthRoundTripper returns an *http.Client whose transport injects the
+// runtime Authorization override. When keyFn is nil the input client is
+// returned unchanged (nil included), so the no-resolver path is byte-for-
+// byte identical to the pre-seam wiring. The input client is never mutated:
+// a shallow copy is wrapped so the caller's client keeps its own transport.
+func withAuthRoundTripper(c *http.Client, timeout time.Duration, keyFn func(ctx context.Context) (key string, ok bool)) *http.Client {
+	if keyFn == nil {
+		return c
+	}
+	if c == nil {
+		c = &http.Client{Timeout: timeout}
+	}
+	wrapped := *c
+	wrapped.Transport = authRoundTripper{base: c.Transport, keyFn: keyFn}
+	return &wrapped
 }
 
 // NewChatModel builds an Eino ChatModel configured for JSON-mode
@@ -60,7 +117,7 @@ func NewChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (
 	conf := &einoopenai.ChatModelConfig{
 		APIKey:     cfg.APIKey,
 		Timeout:    timeout,
-		HTTPClient: opts.HTTPClient,
+		HTTPClient: withAuthRoundTripper(opts.HTTPClient, timeout, opts.AuthKeyFunc),
 		BaseURL:    opts.BaseURL,
 		Model:      cfg.Model,
 		// OpenAI-compatible reasoning/beta models (gpt-5.*, o-series)
@@ -105,7 +162,7 @@ func NewToolCallingChatModel(ctx context.Context, cfg config.AgentAIConfig, opts
 	conf := &einoopenai.ChatModelConfig{
 		APIKey:              cfg.APIKey,
 		Timeout:             timeout,
-		HTTPClient:          opts.HTTPClient,
+		HTTPClient:          withAuthRoundTripper(opts.HTTPClient, timeout, opts.AuthKeyFunc),
 		BaseURL:             opts.BaseURL,
 		Model:               cfg.Model,
 		MaxCompletionTokens: &maxCompletionTokens,

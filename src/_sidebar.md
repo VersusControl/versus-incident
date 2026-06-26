@@ -32,9 +32,14 @@
   - [Miner](/agent/miner)
   - [Regex](/agent/regex)
 
-- Agent Demos (End-to-End)
-  - [Metrics (Prometheus)](/examples/metrics)
-  - [Traces](/examples/traces)
+- Enterprise SRE Agent
+  - [Getting Started](/enterprise/getting-started)
+  - [Single Sign-On (SSO)](/enterprise/sso/overview)
+    - [Google Workspace](/enterprise/sso/google)
+    - [Microsoft Entra ID](/enterprise/sso/azure)
+    - [Generic OIDC](/enterprise/sso/oidc)
+  - [Metrics (Prometheus)](/enterprise/metrics)
+  - [Traces](/enterprise/traces)
 
 - Configuration
   - [Overview](/configuration/admin-ui)
@@ -71,8 +76,3 @@
   - [vs Datadog Watchdog](/compare/datadog-watchdog)
   - [vs Keep](/compare/keep)
   - [vs Alertmanager](/compare/alertmanager)
-
-- Migration Guides
-  - [Migrating to v1.2.0](/migration/migration-v1.2.0)
-  - [Migrating to v1.3.0](/migration/migration-v1.3.0)
-  - [Migrating to v1.4.0](/migration/migration-v1.4.0)

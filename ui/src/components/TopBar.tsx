@@ -6,6 +6,8 @@ import clsx from "clsx";
 import { api } from "@/lib/api";
 import { useOpenIncidentCount } from "@/lib/hooks";
 import { useTheme } from "@/lib/theme";
+import { roleLabel, isAdminRole } from "@/lib/role";
+import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { ShellContext } from "./AppShell";
 
 // TopBar truth table (audit S6 — the old bar showed a red "Agent
@@ -67,6 +69,7 @@ export function TopBar({ title, subtitle, actions }: Props) {
 
       <div className="flex shrink-0 items-center gap-3">
         {actions}
+        <TopBarIdentity />
         <button
           aria-label={
             theme === "dark" ? "Switch to light theme" : "Switch to dark theme"
@@ -182,5 +185,44 @@ function AgentChip({
       <span aria-hidden className={clsx("h-1.5 w-1.5 rounded-full", dot)} />
       {label}
     </Link>
+  );
+}
+
+// TopBarIdentity mirrors the sidebar's SignedInIdentity in the shared page
+// header: WHO the operator is signed in as and their effective RBAC role. It
+// renders ONLY when a live SSO / built-in-admin session resolves (an enterprise
+// binary, signed in). On a community/OSS binary or a gateway-secret-only
+// operator the whoami 403s, so nothing renders — no layout shift, no error. It
+// reuses the SAME data path (useEffectiveRole → getSsoSession) and role helpers
+// (roleLabel / isAdminRole) as the sidebar so the two can never disagree.
+function TopBarIdentity() {
+  const access = useEffectiveRole();
+  if (access.loading || !access.hasSession) {
+    return null;
+  }
+  const sess = access.session.data;
+  if (!sess) {
+    return null;
+  }
+  const identity = sess.email?.trim() || sess.subject?.trim() || "Signed in";
+  const admin = isAdminRole(access.role);
+  return (
+    <div className="hidden min-w-0 items-center gap-2 sm:flex" title={identity}>
+      <span
+        data-testid="topbar-identity"
+        className="max-w-[16rem] truncate text-xs text-ink-300"
+      >
+        {identity}
+      </span>
+      <span
+        data-testid="topbar-role"
+        className={clsx(
+          "inline-flex items-center rounded-full px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide",
+          admin ? "bg-accent-subtle text-accent" : "bg-ink-700 text-ink-200",
+        )}
+      >
+        {roleLabel(access.role)}
+      </span>
+    </div>
   );
 }

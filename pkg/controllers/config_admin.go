@@ -1,7 +1,9 @@
 package controllers
 
 import (
+	"github.com/VersusControl/versus-incident/pkg/agent"
 	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/middleware"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -27,6 +29,9 @@ func (c *ConfigAdminController) Register(router fiber.Router) {
 }
 
 func (c *ConfigAdminController) authMiddleware(ctx *fiber.Ctx) error {
+	if middleware.RequestAuthorized(ctx) {
+		return ctx.Next()
+	}
 	cfg := config.GetConfig()
 	expected := cfg.GatewaySecret
 	got := ctx.Get("X-Gateway-Secret")
@@ -272,9 +277,15 @@ func (c *ConfigAdminController) agent(ctx *fiber.Ctx) error {
 		})
 	}
 
+	// Report the runtime-EFFECTIVE mode (an enterprise per-org override when
+	// set, else the YAML floor) so the dashboard top bar and config views match
+	// what the worker is actually running. Community OSS has no resolver, so
+	// this is a.Mode unchanged.
+	effectiveMode := agent.EffectiveModeForOrg(middleware.OrgFromContext(ctx), a.Mode)
+
 	return ctx.JSON(fiber.Map{
 		"enable":            a.Enable,
-		"mode":              a.Mode,
+		"mode":              effectiveMode,
 		"poll_interval":     a.PollInterval,
 		"lookback":          a.Lookback,
 		"batch_max":         a.BatchMax,

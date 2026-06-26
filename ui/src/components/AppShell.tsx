@@ -50,7 +50,7 @@ export function AppShell() {
           Skip to content
         </a>
 
-        <div className="flex h-full overflow-hidden">
+        <div className="flex h-full overflow-hidden" data-testid="app-authenticated">
           <Sidebar />
           <div
             id="main"

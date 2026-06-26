@@ -117,3 +117,57 @@ func TestAuthMiddlewareRegisteredHandlerRuns(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 }
+
+func TestRequestAuthorizedDefaultsFalse(t *testing.T) {
+	app := fiber.New()
+	app.Get("/", func(c *fiber.Ctx) error {
+		if RequestAuthorized(c) {
+			return c.SendString("authorized")
+		}
+		return c.SendString("anonymous")
+	})
+	resp, _ := app.Test(httptest.NewRequest("GET", "/", nil))
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "anonymous" {
+		t.Fatalf("RequestAuthorized default = %q, want anonymous", string(body))
+	}
+}
+
+func TestMarkAuthorizedPropagatesToHandler(t *testing.T) {
+	resetSlots()
+	defer resetSlots()
+	// A registered auth handler marks requests carrying the right token as
+	// authorized; a downstream handler observes the flag and a gateway-secret
+	// guard (simulated here) would honour it.
+	SetAuthMiddleware(func(c *fiber.Ctx) error {
+		if c.Get("X-Admin") == "adm" {
+			MarkAuthorized(c)
+		}
+		return c.Next()
+	})
+
+	app := fiber.New()
+	app.Use(AuthMiddleware())
+	app.Get("/", func(c *fiber.Ctx) error {
+		if RequestAuthorized(c) {
+			return c.SendString("authorized")
+		}
+		return c.SendString("anonymous")
+	})
+
+	// No upstream credential — not marked.
+	resp, _ := app.Test(httptest.NewRequest("GET", "/", nil))
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "anonymous" {
+		t.Fatalf("without token = %q, want anonymous", string(body))
+	}
+
+	// Upstream credential present — marked authorized.
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("X-Admin", "adm")
+	resp, _ = app.Test(req)
+	body, _ = io.ReadAll(resp.Body)
+	if string(body) != "authorized" {
+		t.Fatalf("with token = %q, want authorized", string(body))
+	}
+}

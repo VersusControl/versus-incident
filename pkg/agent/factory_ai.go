@@ -52,14 +52,30 @@ type AIBundle struct {
 // model. store may be nil — caches degrade to in-memory only; the
 // analyze agent's tool registry will also be smaller.
 func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, httpClient *http.Client) AIBundle {
-	if !cfg.AI.Enable {
+	// Resolve the detect-task config up front so the construction gate can
+	// see whether a model is actually configured.
+	detectCfg := cfg.AI.Resolve(cfg.AI.Detect)
+
+	// Construct the bundle when AI is enabled at boot, OR when a runtime
+	// AISettingsResolver is registered (so an off-at-boot enterprise binary
+	// still has an idle bundle the runtime enable flag can switch on). In
+	// the resolver case a model must still be configured — otherwise we
+	// would build a nil-key client that only errors at call time. OSS
+	// registers no resolver, so this collapses to the original
+	// `!cfg.AI.Enable` gate and is byte-for-byte unchanged.
+	if !cfg.AI.Enable && (aiSettingsResolver() == nil || detectCfg.Model == "") {
 		return AIBundle{}
 	}
 
+	// Per-request Authorization override backed by the runtime resolver.
+	// Nil in OSS (no resolver) so the chat-model transport stays a plain
+	// pass-through.
+	authKeyFn := aiSettingsKeyFunc()
+
 	// Detect-task wiring -----------------------------------------------------
-	detectCfg := cfg.AI.Resolve(cfg.AI.Detect)
 	detectAgent, err := detect.New(context.Background(), detectCfg, detect.Options{
-		HTTPClient: httpClient,
+		HTTPClient:  httpClient,
+		AuthKeyFunc: authKeyFn,
 	})
 	if err != nil {
 		log.Printf("agent: detect agent disabled: %v", err)
@@ -148,6 +164,7 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		tools := analyzetools.Default(store, newCatalogAdapter(catalog), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher, metrics, traces)
 		a, aErr := analyze.New(context.Background(), analyzeBaseCfg, tools, analyze.Options{
 			HTTPClient:    httpClient,
+			AuthKeyFunc:   authKeyFn,
 			ToolTimeout:   parseDurationOr(cfg.Tools.ToolTimeout, 20*time.Second),
 			ParallelTools: cfg.Tools.ParallelTools,
 		})

@@ -40,9 +40,14 @@ signal, a lightweight AI classification labels it, and an incident lands in
 | Need | Why |
 |---|---|
 | **Docker** (Compose v2) | run the Tempo stack |
-| A **Versus Enterprise license**, supply it via the `LICENSE_KEY` environment variable | the standing `traces` source is gated on this feature |
+| A **Versus Enterprise license** with the **`intelligence`** entitlement, supplied via the `LICENSE_KEY` environment variable | the standing `traces` source is gated on this feature |
 | An **AI API key** (e.g. OpenAI) | the detect AI that triages the anomaly and writes the incident summary |
 | **Python 3** | runs `scripts/generate_fake_metrics.py` (stdlib only — no `pip install`) |
+
+> **First time running Enterprise?** Start with
+> [Getting Started — Running the Enterprise Agent](./getting-started.md). It
+> covers signing in as the default admin, turning on AI, and switching modes
+> from the UI — the controls this walkthrough uses.
 
 ## 1. Bring up the stack
 
@@ -88,10 +93,31 @@ when you start the container. The demo walks through them in order:
 | `shadow` | Scores every target against the learned baseline. Writes **"would have alerted"** verdicts to the UI — but **pages no one**. | Validating that the learned baseline is accurate before going live. |
 | `detect` | Opens a **real incident automatically** when a target deviates from the learned baseline. A lightweight **AI classification** writes the incident's title, severity, and summary. (The deep, tool-using **AI analysis** is a separate, on-demand step — see [step 5](#5-watch-the-results).) | Production — the payoff mode. |
 
+### In plain words
+
+Think of the agent like a new on-call engineer learning your systems:
+
+- **Training** — it just *watches* a healthy trace stream and learns the
+  normal speed (p99 latency) and error rate of each `(service, operation)`,
+  writing that down as a **baseline**. It never alerts in this mode.
+- **Shadow** — now it *scores* live traffic against what it learned and
+  notes *"I would have alerted here"* — but it stays silent and pages no one.
+  Your dress rehearsal before trusting it.
+- **Detect** — it *acts*. When an operation clearly breaks from its
+  baseline, it opens a real incident and a lightweight AI classification
+  writes the title, severity, and summary.
+
+```mermaid
+flowchart LR
+  t["Training<br/>learn normal"] --> s["Shadow<br/>would-have-alerted"] --> d["Detect<br/>open real incidents"]
+```
+
 The recommended sequence for this demo:
 
 1. Start in **`training`** with a healthy stream → builds the baseline.
-2. Switch to **`detect`** and introduce slow/erroring spans → fires a real incident.
+2. Switch to **`shadow`** and introduce slow/erroring spans → it *flags* the
+   anomaly without paging.
+3. Switch to **`detect`** and spike again → it opens a real incident.
 
 ## 4. Run your Versus Enterprise
 
@@ -139,12 +165,50 @@ python3 scripts/generate_fake_metrics.py --service ec2-i-0abcd1234 \
 ```
 
 Leave it running. The source watches the healthy spans and builds its model of "normal"
-for each discovered `(service, operation)`. Nothing alerts — that's correct for training.
+for each discovered `(service, operation)`. **Give it a couple of minutes** — an
+operation needs enough samples before it's confident enough to flag anything. Nothing
+alerts — that's correct for training.
 
-### Step B — Detect mode (fire the incident)
+### Step B — See what it learned
 
-Stop the container (`Ctrl-C` or `docker stop versus-enterprise`) and restart in
-**`detect`** mode — change only `AGENT_MODE`:
+Open <http://localhost:3000/> and find the agent's **learned-signals** page
+(*"What the agent knows right now"*). Each `(service, operation)` shows up with a
+status pill:
+
+- **Still learning** — gathering samples; it won't flag this operation yet.
+- **Ready to detect** — it has seen enough to catch slow or failing requests.
+
+### Step C — Shadow mode (flag without paging)
+
+Switch the agent to **`shadow`** so it scores live traffic against those baselines
+and tells you what it *would* have alerted on — without paging anyone. Switch the
+mode from the **Agent** page in the UI (see
+[Getting Started → switch the agent mode](./getting-started.md#6-use-the-key-to-run--switch-the-agent-mode)),
+or restart with `AGENT_MODE=shadow`. The baselines you just learned are **persisted**
+and reload automatically — the agent does not start over.
+
+Now introduce slow/erroring spans — about half are **error spans** with 800–3000ms
+latency:
+
+```bash
+python3 scripts/generate_fake_metrics.py --spike --service ec2-i-0abcd1234 \
+    --otlp http://localhost:4318 --duration 120
+```
+
+Let it sustain — the agent flags only after a few consecutive anomalous ticks, not a
+single blip. On the **Shadow** page you'll see *would-have-alerted* events for the
+affected operations, and **no incident is opened**. That's shadow doing its job:
+catching the anomaly, paging no one.
+
+### Step D — Detect mode (fire the incident)
+
+Happy with what shadow flagged? Switch the agent to **`detect`** — again from the
+**Agent** page (or restart with `AGENT_MODE=detect`). Detect **requires AI to be
+enabled**, which you set up in
+[Getting Started → activate the AI key](./getting-started.md#5-activate-the-ai-key).
+
+If you're using the restart path instead of the UI control, the full command is just
+the training one with `AGENT_MODE=detect`:
 
 ```bash
 docker run --rm --name versus-enterprise \
@@ -163,8 +227,7 @@ docker run --rm --name versus-enterprise \
   ghcr.io/versuscontrol/versus-enterprise:latest
 ```
 
-Now introduce slow/erroring spans — about half are **error spans** with 800–3000ms
-latency:
+Now spike again:
 
 ```bash
 python3 scripts/generate_fake_metrics.py --spike --service ec2-i-0abcd1234 \
@@ -240,6 +303,7 @@ docker compose -f docker-compose.yml -f docker-compose.traces.yml down -v
 
 ## See also
 
+- New here? [Getting Started — Running the Enterprise Agent](./getting-started.md)
 - Reference: [Traces / Tempo (Enterprise)](../agent/data-sources/traces.md)
 - The metric twin of this demo: [Metrics demo, end to end](./metrics.md)
 - The logs lifecycle this mirrors: [Shadow Mode](../agent/shadow-mode.md) · [AI Detect Mode](../agent/ai-detect-mode.md) · [AI Analyze Mode](../agent/ai-analyze-mode.md)

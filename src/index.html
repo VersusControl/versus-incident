@@ -832,6 +832,16 @@
       },
       copyCode: { buttonText: "Copy", errorText: "Error", successText: "Copied" },
       pagination: { previousText: "Previous", nextText: "Next", crossChapter: true, crossChapterText: true },
+      markdown: {
+        renderer: {
+          code: function(code, lang) {
+            if (lang === "mermaid") {
+              return '<div class="mermaid">' + code + '</div>';
+            }
+            return this.origin.code.apply(this, arguments);
+          }
+        }
+      },
       plugins: [
         function (hook) {
           var tocObs = null;
@@ -966,6 +976,9 @@
             var c = document.querySelector(".content"); if (c) c.scrollTop = 0;
             buildToc();
             setupSidebar();
+            if (typeof mermaid !== "undefined") {
+              mermaid.run({ querySelector: ".mermaid" });
+            }
             var sb = document.querySelector(".sidebar");
             var bd = document.getElementById("backdrop");
             if (sb) sb.classList.remove("open");
@@ -1024,6 +1037,8 @@
   <script src="//cdn.jsdelivr.net/npm/prismjs@1/components/prism-go.min.js"></script>
   <script src="//cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script>
   <script src="//cdn.jsdelivr.net/npm/prismjs@1/components/prism-docker.min.js"></script>
+  <script src="//cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: false, theme: "default", securityLevel: "strict" });</script>
 </body>
 
 </html>

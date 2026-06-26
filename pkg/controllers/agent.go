@@ -5,6 +5,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/analyze"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/detect"
 	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/middleware"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -79,6 +80,13 @@ func (a *AgentController) Register(router fiber.Router) {
 // Bearer prefix or other framing. Comparison is constant-time to deny
 // header-length / prefix-match timing oracles.
 func (a *AgentController) authMiddleware(c *fiber.Ctx) error {
+	// An enterprise auth handler may have already authenticated this request
+	// with an alternative credential (e.g. an SSO session); honour that so a
+	// single enterprise credential unlocks both the data plane and the admin
+	// surfaces. Community OSS never sets this, so the gateway check is unchanged.
+	if middleware.RequestAuthorized(c) {
+		return c.Next()
+	}
 	cfg := config.GetConfig()
 	expected := cfg.GatewaySecret
 	got := c.Get("X-Gateway-Secret")
