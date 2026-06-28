@@ -3,14 +3,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
 import {
   AlertCircle,
+  Cpu,
   Eye,
   EyeOff,
   KeyRound,
   Loader2,
   Sparkles,
 } from "lucide-react";
-import { ApiError, api, type AISettingsView } from "@/lib/api";
-import { keySetLabel, noEncryptionKeyMessage } from "@/lib/agentAI";
+import { ApiError, api, AI_PROVIDERS, type AISettingsView } from "@/lib/api";
+import { keySetLabel, noEncryptionKeyMessage, providerKeyNotice } from "@/lib/agentAI";
 import { AdminAccessNotice } from "@/components/AdminAccessNotice";
 import { EnterpriseLockedBody } from "@/components/EnterpriseLocked";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
@@ -160,16 +161,18 @@ function SettingsBody({
   // fresh authoritative view arrives. The key field is transient (in-memory
   // only) and never seeded from the (masked) server view.
   const [enabled, setEnabled] = useState(view.enabled);
+  const [provider, setProvider] = useState(view.provider ?? "");
   const [keyInput, setKeyInput] = useState("");
   const [showKey, setShowKey] = useState(false);
 
   useEffect(() => {
     setEnabled(view.enabled);
-  }, [view.enabled, view.source, view.key_set, view.last4]);
+    setProvider(view.provider ?? "");
+  }, [view.enabled, view.source, view.key_set, view.last4, view.provider]);
 
   const save = useMutation({
-    mutationFn: (vars: { enabled: boolean; apiKey: string }) =>
-      api.setAISettings(vars.enabled, vars.apiKey),
+    mutationFn: (vars: { enabled: boolean; provider: string; apiKey: string }) =>
+      api.setAISettings(vars.enabled, vars.provider, vars.apiKey),
     onSuccess: () => {
       toast.push({ title: "AI settings saved", tone: "ok" });
       setKeyInput(""); // drop the transient key the moment the PUT lands
@@ -214,6 +217,28 @@ function SettingsBody({
   const onOverride = view.source === "override";
   const noKeyMsg = noEncryptionKeyMessage(save.error);
 
+  // B35 (Security gate finding F2): when the operator stages a provider change
+  // without entering the matching key, warn that the previous key would be
+  // reused (Bearer providers) or fall back to the YAML key (claude/gemini
+  // header-auth). Save then asks for an explicit confirmation.
+  const providerNotice = providerKeyNotice(
+    view.provider ?? "",
+    provider,
+    keyInput.trim().length > 0,
+  );
+
+  const onSave = () => {
+    if (
+      providerNotice.requireKey &&
+      !window.confirm(
+        `${providerNotice.message}\n\nSave anyway and reuse the existing key?`,
+      )
+    ) {
+      return; // operator backed out — let them enter the matching key first
+    }
+    save.mutate({ enabled, provider, apiKey: keyInput.trim() });
+  };
+
   return (
     <div className="flex flex-col gap-4">
       {/* Effective enable + provenance */}
@@ -228,6 +253,10 @@ function SettingsBody({
           <KeyRound size={12} aria-hidden className="text-ink-400" />
           {keySetLabel(view.key_set, view.last4)}
         </span>
+        <span className="inline-flex items-center gap-1.5 text-2xs text-ink-300">
+          <Cpu size={12} aria-hidden className="text-ink-400" />
+          provider: {view.provider ? view.provider : "config default"}
+        </span>
       </div>
 
       {/* Enable toggle */}
@@ -241,6 +270,51 @@ function SettingsBody({
         />
         Enable AI for this org
       </label>
+
+      {/* Model provider — a change rebuilds the model at runtime (no restart) */}
+      <div>
+        <label className="field-label" htmlFor="ai-provider">
+          Model provider{" "}
+          <span className="font-normal text-ink-400">
+            (enter the matching key below when you switch)
+          </span>
+        </label>
+        <select
+          id="ai-provider"
+          value={provider}
+          disabled={busy}
+          onChange={(e) => setProvider(e.target.value)}
+          className="input h-9 max-w-sm text-sm"
+        >
+          <option value="">Use config default</option>
+          {AI_PROVIDERS.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
+        {providerNotice.show && (
+          <div
+            role={providerNotice.tone === "warn" ? "alert" : undefined}
+            className={clsx(
+              "mt-2 flex items-start gap-2 rounded-control border p-2.5 text-2xs",
+              providerNotice.tone === "warn"
+                ? "border-sev-warn/40 bg-sev-warn/10"
+                : "border-link/30 bg-link/10",
+            )}
+          >
+            <AlertCircle
+              size={13}
+              aria-hidden
+              className={clsx(
+                "mt-0.5 shrink-0",
+                providerNotice.tone === "warn" ? "text-sev-warn" : "text-link",
+              )}
+            />
+            <p className="text-ink-200">{providerNotice.message}</p>
+          </div>
+        )}
+      </div>
 
       {/* Masked API key (transient — never persisted to browser storage) */}
       <div>
@@ -294,9 +368,7 @@ function SettingsBody({
         <button
           type="button"
           disabled={busy}
-          onClick={() =>
-            save.mutate({ enabled, apiKey: keyInput.trim() })
-          }
+          onClick={onSave}
           className="btn btn-primary"
         >
           {save.isPending ? "Saving…" : "Save"}

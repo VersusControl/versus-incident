@@ -319,6 +319,12 @@ type AgentAIConfig struct {
 	// the LLM — it only logs what it would have sent. This allows operators
 	// to run detect mode in a "dry-run" fashion without an API key.
 	Enable bool `mapstructure:"enable"`
+	// Provider selects the model backend the eino layer constructs
+	// (e.g. "openai", "deepseek", "qwen", "ollama", "claude"). Empty
+	// defaults to "openai". The single APIKey below is the credential for
+	// the SELECTED provider — operators change the key to match when they
+	// switch provider. An unsupported value fails fast at model construction.
+	Provider string `mapstructure:"provider"`
 	// APIKey is the bearer token sent in the Authorization header.
 	APIKey string `mapstructure:"api_key"`
 	// Model is the model identifier, e.g. "gpt-4o-mini".

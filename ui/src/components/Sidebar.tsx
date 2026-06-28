@@ -12,6 +12,7 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  Target,
   Users,
   Waypoints,
   type LucideIcon,
@@ -110,6 +111,16 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       to: "/agent/traces",
       label: "Traces",
       icon: Waypoints,
+      locked: enterpriseLocked,
+      dim: enterpriseLocked,
+      dimTitle: enterpriseLocked
+        ? "Enterprise feature — requires an intelligence license"
+        : undefined,
+    },
+    {
+      to: "/agent/slo",
+      label: "SLOs",
+      icon: Target,
       locked: enterpriseLocked,
       dim: enterpriseLocked,
       dimTitle: enterpriseLocked

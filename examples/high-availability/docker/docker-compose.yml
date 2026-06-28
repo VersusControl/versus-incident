@@ -37,7 +37,7 @@ services:
 
   # --- Replica 0 -------------------------------------------------------------
   versus-0: &versus
-    image: ${VERSUS_ENTERPRISE_IMAGE:-ghcr.io/versuscontrol/versus-enterprise:dev}
+    image: ${VERSUS_ENTERPRISE_IMAGE:-ghcr.io/versuscontrol/versus-enterprise}
     container_name: versus-ha-0
     depends_on:
       postgres:

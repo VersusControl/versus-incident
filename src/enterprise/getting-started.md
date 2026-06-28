@@ -34,8 +34,7 @@ Open the platform in your browser and create an account with your **email and
 a password** (the form also asks for a workspace / organization name). If your
 platform has Google sign-in enabled, you can **Continue with Google** instead.
 
-![The management platform sign-up and log-in screen](../docs/images/enterprise/platform-login.png)
-*Screenshot placeholder — to be added.*
+![The management platform sign-up and log-in screen](../docs/images/enterprise-platform-login.png)
 
 ### 2. Subscribe to the Founding plan
 
@@ -62,8 +61,7 @@ The key is a long, signed token made of three dot-separated segments (e.g.
 next to it and confirm they list **Intelligence** — that's the entitlement the
 rest of this guide relies on.
 
-![Generating the enterprise license key on the dashboard](../docs/images/enterprise/generate-license-key.png)
-*Screenshot placeholder — to be added.*
+![Generating the enterprise license key on the dashboard](../docs/images/enterprise-generate-license-key.png)
 
 ### 4. Copy the key into the agent
 
@@ -154,7 +152,7 @@ A signed-out caller, or one whose role is read-only (`viewer`/`responder`), sees
 the **Sign in to manage** / **Requires the admin role** notice instead. Privileges
 are carried by your role, granted from the **Members** panel by an owner.
 
-### 4. Activate the AI key
+### 4. Activate the AI key (Optional)
 
 Find the **AI settings** card (titled *AI settings*, marked *Enterprise
 control*). This is where you give the agent its AI provider key and turn AI
@@ -164,8 +162,7 @@ on for your org.
 2. In the **API key** field, paste your AI provider key (e.g. `sk-…`).
 3. Click **Save**.
 
-![The AI settings card with the enable toggle, API key field, and Save button](../docs/images/enterprise/activate-ai-key.png)
-*Screenshot placeholder — to be added.*
+![The AI settings card with the enable toggle, API key field, and Save button](../docs/images/enterprise-activate-ai-key.png)
 
 What happens on save:
 
@@ -197,17 +194,13 @@ Click a mode to switch to it. The change takes effect at runtime — no
 restart needed — and overrides the YAML floor (use **Revert to YAML** to
 clear the override).
 
-![Switching the runtime mode between Training, Shadow, and Detect](../docs/images/enterprise/agent-mode-switch.png)
-*Screenshot placeholder — to be added.*
-
 **Detect is guarded.** Because detect opens real incidents, choosing it
 asks you to confirm (*"Arm detect mode?"* → **Arm detect**), and it
 **requires AI to be enabled** — which is exactly why you activated the key
 in [step 5](#5-activate-the-ai-key). If AI is still off, the control points
 you back to the AI settings card.
 
-![Confirming the switch into detect mode](../docs/images/enterprise/arm-detect.png)
-*Screenshot placeholder — to be added.*
+![Confirming the switch into detect mode](../docs/images/enterprise-arm-detect.png)
 
 The recommended path on a new deployment is to **stay in training** until
 the agent has learned a baseline, move to **shadow** to sanity-check what it

@@ -11,9 +11,11 @@ import (
 	"time"
 	"unsafe"
 
+	einoollama "github.com/cloudwego/eino-ext/components/model/ollama"
 	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
 
+	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
@@ -132,16 +134,54 @@ func TestAgent_ToolFree(t *testing.T) {
 	}
 }
 
-// TestAgent_FieldIsBaseChatModel guarantees the Agent stores a plain
-// model.BaseChatModel, not the tool-calling extension. If the field
-// is ever widened to model.ToolCallingChatModel the compile guard
-// here keeps detect honest.
+// TestAgent_RuntimeProviderOverride proves the detect agent routes model
+// construction through the runtime-provider holder seam: a runtime provider
+// override selects a different concrete backend at build time, and an unknown
+// runtime provider fails closed to the configured provider (no error, no
+// crash). Offline — construction never dials out.
+func TestAgent_RuntimeProviderOverride(t *testing.T) {
+	cfg := config.AgentAIConfig{APIKey: "k", Model: "gpt-4o-mini", MaxTokens: 64}
+
+	// Runtime override to ollama ⇒ the eagerly-built model is the ollama
+	// backend, proving detect consults the holder's runtime-provider seam.
+	a, err := New(context.Background(), cfg, Options{
+		Runtime: einowrap.RuntimeAI{
+			Provider: func(context.Context) (string, bool) { return "ollama", true },
+		},
+	})
+	if err != nil {
+		t.Fatalf("New(ollama override): %v", err)
+	}
+	if _, ok := a.ChatModel().(*einoollama.ChatModel); !ok {
+		t.Fatalf("ChatModel = %T, want *einoollama.ChatModel", a.ChatModel())
+	}
+
+	// Unknown runtime provider ⇒ fail closed to the configured provider
+	// (openai), no error.
+	b, err := New(context.Background(), cfg, Options{
+		Runtime: einowrap.RuntimeAI{
+			Provider: func(context.Context) (string, bool) { return "nope", true },
+		},
+	})
+	if err != nil {
+		t.Fatalf("New(unknown override) must fail closed, got: %v", err)
+	}
+	if _, ok := b.ChatModel().(*einoopenai.ChatModel); !ok {
+		t.Fatalf("fail-closed ChatModel = %T, want *einoopenai.ChatModel", b.ChatModel())
+	}
+}
+
+// TestAgent_FieldIsBaseChatModel guarantees the Agent's model holder is
+// parameterised on model.BaseChatModel, not the tool-calling extension. The
+// generic type parameter makes it a compile-time impossibility for the
+// detect path to ever hold (or rebuild into) a tool-calling model. If the
+// holder is ever widened to model.ToolCallingChatModel this guard fails.
 func TestAgent_FieldIsBaseChatModel(t *testing.T) {
 	chatField, ok := reflect.TypeOf(Agent{}).FieldByName("chat")
 	if !ok {
 		t.Fatalf("Agent has no chat field")
 	}
-	want := reflect.TypeOf((*model.BaseChatModel)(nil)).Elem()
+	want := reflect.TypeOf((*einowrap.Holder[model.BaseChatModel])(nil))
 	if chatField.Type != want {
 		t.Fatalf("Agent.chat type = %v, want %v", chatField.Type, want)
 	}

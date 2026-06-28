@@ -41,11 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   folder (`./data/runbooks`; `/app/data/runbooks` in the container image).
   The write path lives outside the analyze tools package so the read-only
   import-graph guard stays green.
-- **`tools.find_runbook` config** (`tools.yaml`) — `embedding_model` and
-  `embedding_base_url` (the embeddings call reuses the shared
-  `agent.ai.api_key`). The tool registers only when an embedding model is
-  configured **and** a storage backend is available, so the community
-  single-tenant build is unchanged by default.
+- **`tools.find_runbook` config** (`tools.yaml`) — `embedding_model` (the
+  embeddings call reuses the shared `agent.ai.api_key`). The tool registers
+  only when an embedding model is configured **and** a storage backend is
+  available, so the community single-tenant build is unchanged by default.
 - **Helm** — `agent.tools.findRunbook.*` values + configmap wiring.
 
 ### Fixed

@@ -307,7 +307,6 @@ data:
         {{- end }}
       find_runbook:
         embedding_model: {{ .Values.agent.tools.findRunbook.embeddingModel | default "" | quote }}
-        embedding_base_url: {{ .Values.agent.tools.findRunbook.embeddingBaseUrl | default "" | quote }}
       query_metrics:
         prometheus:
           address: {{ .Values.agent.tools.queryMetrics.prometheus.address | default "" | quote }}

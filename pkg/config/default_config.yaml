@@ -1,0 +1,212 @@
+# -----------------------------------------------------------------------------
+# DEFAULT (best-practice) configuration baseline.
+#
+# This file is embedded into the binary and loaded FIRST. The user's own
+# config file is then deep-merged ON TOP of it: any key the user sets wins,
+# and any key the user omits keeps the default value below. This means a
+# user config never silently loses a value just because a key is missing —
+# the sensible default fills the gap.
+#
+# Keep this file in sync with the documented sample at `config/config.yaml`.
+# This is ENFORCED: TestDefaultConfigMatchesSample (default_config_test.go)
+# parses both files and fails the build if their keys or values diverge, so a
+# change to one must be mirrored in the other.
+# Secret fields use ${VAR} placeholders so they resolve from the environment
+# exactly as the sample does; omit a secret here and it simply stays empty.
+# -----------------------------------------------------------------------------
+name: versus
+host: 0.0.0.0
+port: 3000
+public_host: ''
+
+gateway_secret: ${GATEWAY_SECRET}
+
+proxy:
+  url: ${PROXY_URL}
+  username: ${PROXY_USERNAME}
+  password: ${PROXY_PASSWORD}
+
+alert:
+  debug_body: true
+
+  slack:
+    enable: false
+    token: ${SLACK_TOKEN}
+    channel_id: ${SLACK_CHANNEL_ID}
+    template_path: "config/slack_message.tmpl"
+    message_properties:
+      button_text: "Acknowledge Alert"
+      button_style: "primary"
+      disable_button: false
+
+  telegram:
+    enable: false
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+    template_path: "config/telegram_message.tmpl"
+    use_proxy: false
+
+  viber:
+    enable: false
+    api_type: ${VIBER_API_TYPE}
+    bot_token: ${VIBER_BOT_TOKEN}
+    user_id: ${VIBER_USER_ID}
+    channel_id: ${VIBER_CHANNEL_ID}
+    template_path: "config/viber_message.tmpl"
+    use_proxy: false
+
+  email:
+    enable: false
+    smtp_host: ${SMTP_HOST}
+    smtp_port: ${SMTP_PORT}
+    username: ${SMTP_USERNAME}
+    password: ${SMTP_PASSWORD}
+    to: ${EMAIL_TO}
+    subject: ${EMAIL_SUBJECT}
+    template_path: "config/email_message.tmpl"
+
+  msteams:
+    enable: false
+    power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL}
+    template_path: "config/msteams_message.tmpl"
+    other_power_urls:
+      qc: ${MSTEAMS_OTHER_POWER_URL_QC}
+
+  lark:
+    enable: false
+    webhook_url: ${LARK_WEBHOOK_URL}
+    template_path: "config/lark_message.tmpl"
+    use_proxy: false
+    other_webhook_urls:
+      dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
+      prod: ${LARK_OTHER_WEBHOOK_URL_PROD}
+
+queue:
+  enable: true
+  debug_body: true
+
+  sns:
+    enable: false
+    https_endpoint_subscription_path: /sns
+    https_endpoint_subscription: ${SNS_HTTPS_ENDPOINT_SUBSCRIPTION}
+    topic_arn: ${SNS_TOPIC_ARN}
+
+  sqs:
+    enable: false
+    queue_url: your_sqs_queue_url
+
+  pubsub:
+    enable: false
+
+  azbus:
+    enable: false
+
+oncall:
+  initialized_only: false
+  enable: false
+  wait_minutes: 3
+  provider: aws_incident_manager
+
+  aws_incident_manager:
+    response_plan_arn: ${AWS_INCIDENT_MANAGER_RESPONSE_PLAN_ARN}
+    other_response_plan_arns:
+      infra: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_INFRA}
+      app: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_APP}
+      db: ${AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_DB}
+
+  pagerduty:
+    routing_key: ${PAGERDUTY_ROUTING_KEY}
+    other_routing_keys:
+      infra: ${PAGERDUTY_OTHER_ROUTING_KEY_INFRA}
+      app: ${PAGERDUTY_OTHER_ROUTING_KEY_APP}
+      db: ${PAGERDUTY_OTHER_ROUTING_KEY_DB}
+
+  servicenow:
+    instance_url: ${SERVICENOW_INSTANCE_URL}
+    username: ${SERVICENOW_USERNAME}
+    password: ${SERVICENOW_PASSWORD}
+    table: incident
+    other_instance_urls:
+      infra: ${SERVICENOW_OTHER_INSTANCE_URL_INFRA}
+      app: ${SERVICENOW_OTHER_INSTANCE_URL_APP}
+      db: ${SERVICENOW_OTHER_INSTANCE_URL_DB}
+
+  incident_io:
+    api_key: ${INCIDENTIO_API_KEY}
+    alert_source_config_id: ${INCIDENTIO_ALERT_SOURCE_CONFIG_ID}
+    other_alert_source_config_ids:
+      infra: ${INCIDENTIO_OTHER_ALERT_SOURCE_CONFIG_ID_INFRA}
+      app: ${INCIDENTIO_OTHER_ALERT_SOURCE_CONFIG_ID_APP}
+      db: ${INCIDENTIO_OTHER_ALERT_SOURCE_CONFIG_ID_DB}
+
+redis:
+  insecure_skip_verify: true
+  host: ${REDIS_HOST}
+  port: ${REDIS_PORT}
+  password: ${REDIS_PASSWORD}
+  db: 0
+
+storage:
+  type: file
+  file:
+    max_incidents: 1000
+
+agent:
+  enable: false
+  mode: training
+  poll_interval: 30s
+  lookback: 5m
+  batch_max: 5000
+  signal_max_bytes: 65536
+
+  redaction:
+    enable: true
+    redact_ips: false
+    extra_patterns:
+      - "(?i)password=\\S+"
+      - "Authorization:\\s*Bearer\\s+\\S+"
+
+  catalog:
+    persist_interval: 30s
+    auto_promote_after: 50
+    spike_multiplier: 5.0
+    spike_min_frequency: 5
+    spike_min_baseline_count: 20
+
+  miner:
+    similarity_threshold: 0.4
+    tree_depth: 4
+    max_children: 100
+
+  regex:
+    default_pattern: "(?i).*error.*"
+    rules:
+      - name: oom-killer
+        pattern: "Out of memory: Killed process"
+      - name: panic
+        pattern: "(?i)panic:"
+      - name: 5xx-burst
+        pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
+
+  ai:
+    enable: false
+    # provider selects the model backend (openai | deepseek | qwen | ollama |
+    # claude | gemini). Default openai. The api_key below must match the chosen provider.
+    provider: openai
+    api_key: ${AGENT_AI_API_KEY}
+    model: "gpt-5.4-mini"
+    temperature: 0.2
+    max_tokens: 4096
+    max_calls_per_hour: 60
+    cache_ttl: "1h"
+    analyze:
+
+  new_service_grace: 30m
+  service_patterns:
+    - '(?i)\bservice[._-]?name["\s:=]+"?([A-Za-z0-9._-]+)'
+    - '(?i)\b(?:service|svc|app|component)\s*=\s*"?([A-Za-z0-9._-]+)'
+    - '(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"'
+    - '\[[^\]]+\]\s+\[([A-Za-z0-9._-]+)\]'
+    - '---\s+\[[^\]]*\]\s+\[([A-Za-z0-9._-]+)\]'
+    - '([A-Za-z0-9._-]+)\[\d+\]:'
+    - '\[([A-Za-z0-9._-]+)\]'

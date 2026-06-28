@@ -58,8 +58,6 @@ type ToolsConfig struct {
 //	tools:
 //	  find_runbook:
 //	    embedding_model: text-embedding-3-small
-//	    embedding_base_url: ${EMBEDDING_BASE_URL}  # empty = OpenAI default;
-//	                                               # point at Ollama/vLLM/LocalAI
 //
 // The embeddings endpoint reuses the shared AI credential (`agent.ai.api_key`):
 // there is no separate embedding key to manage. A local OpenAI-compatible
@@ -69,12 +67,6 @@ type FindRunbookToolConfig struct {
 	// "text-embedding-3-small". Required to register the tool; empty
 	// leaves find_runbook unregistered.
 	EmbeddingModel string `mapstructure:"embedding_model"`
-	// EmbeddingBaseURL overrides the OpenAI default endpoint. Empty uses
-	// https://api.openai.com/v1; set it to a local OpenAI-compatible
-	// server (Ollama / vLLM / LocalAI) to keep embeddings inside your own
-	// network. The embeddings call authenticates with the shared AI
-	// credential (`agent.ai.api_key`) — there is no separate embedding key.
-	EmbeddingBaseURL string `mapstructure:"embedding_base_url"`
 }
 
 // DescribeDependenciesToolConfig configures the `describe_dependencies`

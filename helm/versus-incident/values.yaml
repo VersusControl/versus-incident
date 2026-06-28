@@ -285,14 +285,13 @@ agent:
     # via a read-only vector search over a runbook corpus you ingest ahead of
     # time (search-only; never executes remediation). The tool is registered
     # only when embeddingModel is set AND a storage backend is available.
-    # The query is scrubbed through the redactor BEFORE it is embedded; point
-    # embeddingBaseUrl at a local OpenAI-compatible server to keep embeddings
-    # inside the cluster. Place your *.md runbooks under <data>/runbooks (mount
+    # The query is scrubbed through the redactor BEFORE it is embedded; set
+    # agent.ai.provider to ollama (or gemini) to keep embeddings inside the
+    # cluster. Place your *.md runbooks under <data>/runbooks (mount
     # them into the pod); the server auto-ingests them at boot.
     #
     findRunbook:
       embeddingModel: ""     # e.g. "text-embedding-3-small"; empty = tool omitted
-      embeddingBaseUrl: ""   # OpenAI-compatible endpoint; empty = OpenAI default
 
     # query_metrics — inspect a metric's recent behaviour on demand by running
     # a PromQL range query against a Prometheus endpoint (read-only). Returns

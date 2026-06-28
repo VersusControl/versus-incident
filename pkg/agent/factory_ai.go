@@ -72,10 +72,16 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	// pass-through.
 	authKeyFn := aiSettingsKeyFunc()
 
+	// Runtime overrides (provider / enabled / key state) folded into each
+	// agent's model-holder rebuild signature. Zero value in OSS (no
+	// resolver), so the holder pins the configured provider and builds once.
+	aiRT := aiRuntime()
+
 	// Detect-task wiring -----------------------------------------------------
 	detectAgent, err := detect.New(context.Background(), detectCfg, detect.Options{
 		HTTPClient:  httpClient,
 		AuthKeyFunc: authKeyFn,
+		Runtime:     aiRT,
 	})
 	if err != nil {
 		log.Printf("agent: detect agent disabled: %v", err)
@@ -165,6 +171,7 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		a, aErr := analyze.New(context.Background(), analyzeBaseCfg, tools, analyze.Options{
 			HTTPClient:    httpClient,
 			AuthKeyFunc:   authKeyFn,
+			Runtime:       aiRT,
 			ToolTimeout:   parseDurationOr(cfg.Tools.ToolTimeout, 20*time.Second),
 			ParallelTools: cfg.Tools.ParallelTools,
 		})
@@ -230,10 +237,10 @@ func buildRunbookManager(cfg config.AgentConfig, store storage.Provider, httpCli
 	embCfg := cfg.Tools.FindRunbook
 	if embCfg.EmbeddingModel != "" {
 		e, embErr := einowrap.NewEmbedder(context.Background(), config.AgentAIConfig{
-			Model:  embCfg.EmbeddingModel,
-			APIKey: cfg.AI.APIKey,
+			Provider: cfg.AI.Provider,
+			Model:    embCfg.EmbeddingModel,
+			APIKey:   cfg.AI.APIKey,
 		}, einowrap.Options{
-			BaseURL:    embCfg.EmbeddingBaseURL,
 			HTTPClient: httpClient,
 		})
 		if embErr != nil {

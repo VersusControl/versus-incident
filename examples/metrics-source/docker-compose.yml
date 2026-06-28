@@ -59,7 +59,7 @@ services:
   # `intelligence` entitlement (see README → "License"). Without it the
   # `prometheus` source returns "requires Versus Enterprise".
   versus:
-    image: ${VERSUS_ENTERPRISE_IMAGE:-ghcr.io/versuscontrol/versus-enterprise:dev}
+    image: ${VERSUS_ENTERPRISE_IMAGE:-ghcr.io/versuscontrol/versus-enterprise}
     container_name: versus-ent-metrics-app
     depends_on:
       redis:

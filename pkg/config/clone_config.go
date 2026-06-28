@@ -334,6 +334,7 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 		},
 		AI: AgentAIConfig{
 			Enable:          src.AI.Enable,
+			Provider:        src.AI.Provider,
 			APIKey:          src.AI.APIKey,
 			Model:           src.AI.Model,
 			Temperature:     src.AI.Temperature,

@@ -1,12 +1,13 @@
 // Package eino contains the Eino-backed chat model wrapper used by all
 // AI agents in versus-incident. It is the ONLY package in the codebase
-// that imports Eino's model package — every concrete AI agent (detect,
-// analyze, ...) goes through this helper so a future framework swap
-// only touches one file.
+// that imports concrete model SDKs — every concrete AI agent (detect,
+// analyze, ...) goes through these helpers so a future framework swap
+// only touches this package.
 //
-// There is no `framework` knob in the config. Eino is the
-// implementation; if operators need a different backend they bring it
-// up here.
+// There is no `framework` knob in the config (Eino is the framework).
+// The MODEL backend, however, IS selectable: `agent.ai.provider` chooses
+// among the providers registered in provider.go (openai by default). The
+// provider registry is the single chokepoint for concrete model imports.
 package eino
 
 import (
@@ -15,7 +16,6 @@ import (
 	"net/http"
 	"time"
 
-	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
@@ -93,8 +93,11 @@ func withAuthRoundTripper(c *http.Client, timeout time.Duration, keyFn func(ctx 
 // config (see AgentAIConfig.Resolve) — this helper does not look at
 // the per-task sub-blocks.
 //
-// Model must be set; APIKey may be empty (the OpenAI ACL client errors
-// at call time, not construction time, which is fine for tests).
+// The concrete model backend is selected by cfg.Provider via the provider
+// registry (provider.go); an empty provider defaults to openai and an
+// unsupported one fails fast. Model must be set; APIKey may be empty (the
+// provider client errors at call time, not construction time, which is fine
+// for tests).
 func NewChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (model.BaseChatModel, error) {
 	if cfg.Model == "" {
 		return nil, fmt.Errorf("eino: model is empty")
@@ -114,24 +117,18 @@ func NewChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (
 		maxCompletionTokens = 2048
 	}
 
-	conf := &einoopenai.ChatModelConfig{
-		APIKey:     cfg.APIKey,
-		Timeout:    timeout,
-		HTTPClient: withAuthRoundTripper(opts.HTTPClient, timeout, opts.AuthKeyFunc),
-		BaseURL:    opts.BaseURL,
-		Model:      cfg.Model,
-		// OpenAI-compatible reasoning/beta models (gpt-5.*, o-series)
-		// reject `max_tokens`; send the supported field instead.
-		MaxCompletionTokens: &maxCompletionTokens,
-		Temperature:         resolveTemperature(cfg.Temperature, 0.2),
+	return newProviderChatModel(ctx, cfg.Provider, chatModelRequest{
+		apiKey:      cfg.APIKey,
+		model:       cfg.Model,
+		baseURL:     opts.BaseURL,
+		httpClient:  withAuthRoundTripper(opts.HTTPClient, timeout, opts.AuthKeyFunc),
+		timeout:     timeout,
+		maxTokens:   maxCompletionTokens,
+		temperature: resolveTemperature(cfg.Temperature, 0.2),
 		// Force JSON-mode so ParseFinding can decode the reply with the
 		// same tolerance it had under the raw HTTP client.
-		ResponseFormat: &einoopenai.ChatCompletionResponseFormat{
-			Type: einoopenai.ChatCompletionResponseFormatTypeJSONObject,
-		},
-	}
-
-	return einoopenai.NewChatModel(ctx, conf)
+		jsonMode: true,
+	})
 }
 
 // NewToolCallingChatModel mirrors NewChatModel but returns the
@@ -159,25 +156,26 @@ func NewToolCallingChatModel(ctx context.Context, cfg config.AgentAIConfig, opts
 		maxCompletionTokens = 4096
 	}
 
-	conf := &einoopenai.ChatModelConfig{
-		APIKey:              cfg.APIKey,
-		Timeout:             timeout,
-		HTTPClient:          withAuthRoundTripper(opts.HTTPClient, timeout, opts.AuthKeyFunc),
-		BaseURL:             opts.BaseURL,
-		Model:               cfg.Model,
-		MaxCompletionTokens: &maxCompletionTokens,
-		Temperature:         resolveTemperature(cfg.Temperature, 0.2),
-	}
-
-	return einoopenai.NewChatModel(ctx, conf)
+	return newProviderChatModel(ctx, cfg.Provider, chatModelRequest{
+		apiKey:      cfg.APIKey,
+		model:       cfg.Model,
+		baseURL:     opts.BaseURL,
+		httpClient:  withAuthRoundTripper(opts.HTTPClient, timeout, opts.AuthKeyFunc),
+		timeout:     timeout,
+		maxTokens:   maxCompletionTokens,
+		temperature: resolveTemperature(cfg.Temperature, 0.2),
+		jsonMode:    false,
+	})
 }
 
-// A NEGATIVE value is the explicit "omit temperature" sentinel:
-// it returns nil so the provider applies its own default. This is
-// required for beta-limited / reasoning models (e.g. the gpt-5 family,
-// o-series) that fix temperature at 1 and reject any explicit value. A
-// zero value inherits the supplied default; any other value is sent
-// verbatim.
+// A NEGATIVE value is the explicit "omit temperature" sentinel: it returns nil
+// so the provider applies its own default. This is an OPERATOR override that
+// works for any provider/model. For OpenAI beta-limited / reasoning models
+// (the gpt-5 family, o-series) the omission is also applied AUTOMATICALLY in
+// buildOpenAIChatModel (see isFixedSamplingModel), so operators no longer have
+// to set -1 per reasoning deployment; the sentinel remains as a manual override
+// for any model the family list does not yet cover. A zero value inherits the
+// supplied default; any other value is sent verbatim.
 func resolveTemperature(configured, def float64) *float32 {
 	if configured < 0 {
 		return nil

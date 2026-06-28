@@ -11,7 +11,7 @@ Kubernetes manifests you can read top to bottom. This is the same topology the
 | Item | Where it comes from |
 |---|---|
 | A **cluster** + `kubectl` | kind, minikube, or any cluster. Kustomize is built into `kubectl` ≥ 1.14 (`kubectl apply -k`). |
-| The **enterprise image** pullable by the cluster | `ghcr.io/versuscontrol/versus-enterprise:dev` (private — use `imagePullSecrets`, or on kind: `kind load docker-image ghcr.io/versuscontrol/versus-enterprise:dev`) |
+| The **enterprise image** pullable by the cluster | `ghcr.io/versuscontrol/versus-enterprise` (private — use `imagePullSecrets`, or on kind: `kind load docker-image ghcr.io/versuscontrol/versus-enterprise`) |
 | A **Versus Enterprise license** (`LICENSE_KEY`) | required to prove session/secret convergence; the topology boots without it |
 
 The example lives at `versus-incident/examples/high-availability/k8s/` and

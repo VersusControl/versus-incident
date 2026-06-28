@@ -121,7 +121,6 @@ In [`tools.yaml`](../../configuration/configuration.md):
 tools:
   find_runbook:
     embedding_model: text-embedding-3-small   # empty = tool omitted
-    embedding_base_url: ""   # empty = OpenAI default; set a local server to keep embeddings in-network
 ```
 
 ### 2. Add your runbooks
@@ -185,9 +184,9 @@ incident-derived text, so it is scrubbed through the same redactor
 excerpts are scrubbed on the way out too. Incident-derived text never
 egresses raw.
 
-To keep embeddings fully inside your own network, point
-`embedding_base_url` at a local OpenAI-compatible server (Ollama / vLLM /
-LocalAI). No code change is required.
+To keep embeddings fully inside your own network, set `agent.ai.provider`
+to `ollama` (or `gemini`) — the embedder selects its backend from the same
+provider as the chat path. No code change is required.
 
 ## Pre-baking the corpus (optional)
 
@@ -201,7 +200,7 @@ runbook-ingest -config config/config.yaml
 ```
 
 It reads the same `data/runbooks` directory, the same
-`tools.find_runbook.embedding_model` / `embedding_base_url`, and the same
+`tools.find_runbook.embedding_model`, and the same
 `agent.ai.api_key` the server uses.
 
 ## Managing runbooks from the admin UI

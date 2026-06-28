@@ -44,6 +44,10 @@ const TracesPage = lazyPage(
   () => import("./pages/LearnedSignalsView"),
   "TracesPage",
 );
+const SLORecommendationsPage = lazyPage(
+  () => import("./pages/SLORecommendationsPage"),
+  "SLORecommendationsPage",
+);
 const PeoplePage = lazyPage(() => import("./pages/PeoplePage"), "PeoplePage");
 const SettingsPage = lazyPage(() => import("./pages/SettingsPage"), "SettingsPage");
 const AdminPage = lazyPage(() => import("./pages/AdminPage"), "AdminPage");
@@ -100,6 +104,7 @@ export default function App() {
           <Route path="/agent/patterns/:id" element={<PatternDetailPage />} />
           <Route path="/agent/metrics" element={<MetricsPage />} />
           <Route path="/agent/traces" element={<TracesPage />} />
+          <Route path="/agent/slo" element={<SLORecommendationsPage />} />
           <Route path="/agent/decisions" element={<DecisionsPage />} />
           <Route
             path="/agent/decisions/system-prompt"

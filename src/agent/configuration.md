@@ -268,6 +268,7 @@ on-demand **analyze** investigation. Shared keys apply to both; the
 agent:
   ai:
     enable: true
+    provider: openai            # openai | deepseek | qwen | ollama | claude | gemini
     api_key: ${AGENT_AI_API_KEY}
     model: gpt-4o-mini          # shared default for detect + analyze
     temperature: 0.2
@@ -289,6 +290,7 @@ temperature at `1` and reject any explicit value.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `enable` | bool | `false` | Turns on the AI SRE (detect triage + analyze). Env: `AGENT_AI_ENABLE`. |
+| `provider` | string | `openai` | Model backend: `openai`, `deepseek`, `qwen`, `ollama`, `claude`, or `gemini`. An unknown value fails fast (no silent fallback). Env: `AGENT_AI_PROVIDER`. |
 | `api_key` | string | — | API key for the model provider. Env: `AGENT_AI_API_KEY`. |
 | `model` | string | — | Shared default model for both tasks. Env: `AGENT_AI_MODEL`. |
 | `temperature` | float | `0.2` | Randomness control. Set `-1` to omit the field for beta-limited / reasoning models that reject explicit temperature values. |

@@ -28,7 +28,7 @@ the other — because sessions and secrets converge through the shared Postgres.
 | Item | Where it comes from |
 |---|---|
 | **Docker** + Docker Compose v2 | runs Postgres, both replicas, and the load balancer |
-| The **enterprise image** | `ghcr.io/versuscontrol/versus-enterprise:dev` (private — `docker login ghcr.io` first, or set `VERSUS_ENTERPRISE_IMAGE` to a local build in `.env`) |
+| The **enterprise image** | `ghcr.io/versuscontrol/versus-enterprise` (private — `docker login ghcr.io` first, or set `VERSUS_ENTERPRISE_IMAGE` to a local build in `.env`) |
 | A **Versus Enterprise license** (`LICENSE_KEY`) | optional for the topology demo (empty boots community mode); required to prove session/secret convergence |
 
 The example lives at `versus-incident/examples/high-availability/docker/`.

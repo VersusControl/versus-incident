@@ -27,10 +27,14 @@ import (
 // config, the Eino chat model, and a sample extractor.
 type Agent struct {
 	cfg config.AgentAIConfig
-	// chat is the tool-free Eino base chat model. We deliberately type
-	// this as BaseChatModel (not ToolCallingChatModel) so the compiler
-	// rejects any future BindTools / WithTools wiring on the detect path.
-	chat model.BaseChatModel
+	// chat is the holder that lazily (re)builds the tool-free Eino base
+	// chat model. We type its artifact as BaseChatModel (not
+	// ToolCallingChatModel) so the compiler — and the structural guard in
+	// agent_test.go — rejects any future BindTools / WithTools wiring on the
+	// detect path. The holder rebuilds the model when the effective provider
+	// (or model id / runtime state) changes, so an operator's runtime
+	// provider switch is picked up on the next Run without a restart.
+	chat *einowrap.Holder[model.BaseChatModel]
 
 	// SampleFn picks the lines forwarded to the model from an
 	// AgentResult. Defaults to "first up to 3 non-empty messages".
@@ -52,23 +56,31 @@ type Options struct {
 	// straight to the chat model's transport. Nil (the OSS default) leaves
 	// the YAML-keyed header untouched.
 	AuthKeyFunc func(ctx context.Context) (key string, ok bool)
+
+	// Runtime folds optional runtime overrides (provider / enabled / key
+	// state) into the model holder's rebuild signature. The zero value (the
+	// OSS default) pins the configured provider and builds the model once.
+	Runtime einowrap.RuntimeAI
 }
 
 // New constructs a detect Agent. cfg must already be resolved for the
 // detect task (see config.AgentAIConfig.Resolve).
 func New(ctx context.Context, cfg config.AgentAIConfig, opts Options) (*Agent, error) {
-	chat, err := einowrap.NewChatModel(ctx, cfg, einowrap.Options{
+	holder := einowrap.NewChatModelHolder(cfg, einowrap.Options{
 		HTTPClient:  opts.HTTPClient,
 		BaseURL:     opts.BaseURL,
 		Timeout:     opts.Timeout,
 		AuthKeyFunc: opts.AuthKeyFunc,
-	})
-	if err != nil {
+	}, opts.Runtime)
+	// Build once up front so a bad config (empty model, explicitly-set
+	// unknown provider) still fails fast at construction, exactly as the
+	// pre-holder wiring did.
+	if _, err := holder.Get(ctx); err != nil {
 		return nil, err
 	}
 	return &Agent{
 		cfg:      cfg,
-		chat:     chat,
+		chat:     holder,
 		SampleFn: defaultSampleFn,
 	}, nil
 }
@@ -80,8 +92,9 @@ func (a *Agent) Name() string { return "detect" }
 func (a *Agent) Kind() core.AITaskKind { return core.AITaskDetect }
 
 // ChatModel exposes the underlying Eino model. Only used by the
-// tool-free guard test in agent_test.go.
-func (a *Agent) ChatModel() model.BaseChatModel { return a.chat }
+// tool-free guard test in agent_test.go. It returns the currently-built
+// model from the holder (built eagerly in New); it never triggers a rebuild.
+func (a *Agent) ChatModel() model.BaseChatModel { return a.chat.Current() }
 
 // Run implements core.AIAgent. It rejects any task that is not a
 // DetectTask; the router enforces kind routing but we double-check.
@@ -114,8 +127,16 @@ func (a *Agent) analyze(ctx context.Context, r core.AgentResult) (*core.AICallRe
 	samples := a.SampleFn(r)
 	system, user := BuildPrompt(r, source, service, samples)
 
+	// Resolve the model for the current effective signature; the holder
+	// rebuilds it only when the provider / model / runtime state changed,
+	// so a steady tick reuses the cached model at no cost.
+	chat, err := a.chat.Get(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("detect: build chat model: %w", err)
+	}
+
 	start := time.Now()
-	out, err := a.chat.Generate(ctx, []*schema.Message{
+	out, err := chat.Generate(ctx, []*schema.Message{
 		schema.SystemMessage(system),
 		schema.UserMessage(user),
 	})

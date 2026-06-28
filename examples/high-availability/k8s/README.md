@@ -21,9 +21,9 @@ YAML you can read top-to-bottom. Applied with `kubectl apply -k .` (kustomize).
 
 - A cluster (kind / minikube / any). `kubectl` + kustomize (built into
   `kubectl` ≥ 1.14, i.e. `kubectl apply -k`).
-- The enterprise image `ghcr.io/versuscontrol/versus-enterprise:dev` pullable by
+- The enterprise image `ghcr.io/versuscontrol/versus-enterprise` pullable by
   the cluster (it is private — `imagePullSecrets` or a local load may be needed;
-  on kind: `kind load docker-image ghcr.io/versuscontrol/versus-enterprise:dev`).
+  on kind: `kind load docker-image ghcr.io/versuscontrol/versus-enterprise`).
 
 ## Run it
 

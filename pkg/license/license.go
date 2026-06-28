@@ -49,7 +49,7 @@ const CacheEnvVar = "LICENSE_CACHE_PATH"
 // matching private key lives outside this repo (the license service).
 // Rotating it is a code change + redeploy, by design — the OSS tree must
 // never be able to mint a license.
-const embeddedPublicKeyB64 = "y2PLuY8KwJXkFHY/Tnz+BH1fxYktZzHsM2NevovuqPY="
+const embeddedPublicKeyB64 = "GFScSx3UMPFg9jUs6gRAs49Bf9TeE8mL6BEUUP4Gqa0="
 
 var (
 	// ErrNoLicense indicates LICENSE_KEY was absent/empty — community mode.

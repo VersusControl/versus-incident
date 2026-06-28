@@ -149,7 +149,6 @@ unaffected.
 tools:
   find_runbook:
     embedding_model: text-embedding-3-small
-    embedding_base_url: ""     # empty = OpenAI default; set a local server to keep embeddings in-network
 ```
 
 Then place your `*.md` runbooks in the data folder under `runbooks/`
@@ -196,7 +195,6 @@ tools:
 
   find_runbook:
     embedding_model: text-embedding-3-small
-    embedding_base_url: ""
 ```
 
 ## Running with Docker
