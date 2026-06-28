@@ -23,9 +23,6 @@ the other — because sessions and secrets converge through the shared Postgres.
                           └───────────┘  (secrets + sessions converge here)
 ```
 
-> New to enterprise HA? Read the [overview](./overview.md) first for the runtime
-> contract (shared Postgres, instance identity, secret convergence).
-
 ## What you'll need
 
 | Item | Where it comes from |

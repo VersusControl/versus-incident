@@ -39,13 +39,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out docs (this repo)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           # `src/` already contains the docsify index.html, _sidebar.md,
           # markdown content, images, CNAME and .nojekyll — it IS the site.
@@ -61,4 +61,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

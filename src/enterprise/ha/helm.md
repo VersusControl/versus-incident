@@ -7,9 +7,6 @@ file**. With `ha.enabled: true` the chart renders a **StatefulSet of replicas**
 sharing one Postgres; with the default (`ha.enabled: false`) it renders the
 single-instance **Deployment** unchanged — same chart, one switch.
 
-> New to enterprise HA? Read the [overview](./overview.md) first for the runtime
-> contract (shared Postgres, instance identity, secret convergence).
-
 ## What you'll need
 
 | Item | Where it comes from |

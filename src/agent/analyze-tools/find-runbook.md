@@ -32,7 +32,7 @@ corpus is re-ingested.
 
 > **Note:** `find_runbook` also requires AI to be enabled
 > (`AGENT_AI_ENABLE=true`) — it runs inside the
-> [AI Analyze mode](agent/ai-analyze-mode.md). The same
+> [AI Analyze mode](../ai-analyze-mode.md). The same
 > `agent.ai.api_key` is reused for the embeddings call.
 
 ## What the agent sees
@@ -115,7 +115,7 @@ runbooks in the corpus directory.
 
 ### 1. Configure the embedding model
 
-In [`tools.yaml`](configuration/configuration.md):
+In [`tools.yaml`](../../configuration/configuration.md):
 
 ```yaml
 tools:
@@ -207,10 +207,10 @@ It reads the same `data/runbooks` directory, the same
 ## Managing runbooks from the admin UI
 
 Beyond the corpus directory, you can upload, view, and delete runbooks
-from the **Runbooks** page in the [admin UI](configuration/admin-ui.md)
+from the **Runbooks** page in the [admin UI](../../configuration/admin-ui.md)
 (`/runbooks`). Uploads atomically rebuild the search index, so newly
 uploaded runbooks become searchable without a restart.
 
 ---
 
-Back to the [Analyze Tools overview](agent/analyze-tools/tools.md).
+Back to the [Analyze Tools overview](./tools.md).

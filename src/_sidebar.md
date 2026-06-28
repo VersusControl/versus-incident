@@ -34,11 +34,13 @@
 
 - Enterprise SRE Agent
   - [Getting Started](/enterprise/getting-started)
-  - [Single Sign-On (SSO)](/enterprise/sso/overview)
+  - [Single Sign-On (SSO)](/enterprise/sso)
+    - [Overview](/enterprise/sso/overview)
     - [Google Workspace](/enterprise/sso/google)
     - [Microsoft Entra ID](/enterprise/sso/azure)
     - [Generic OIDC](/enterprise/sso/oidc)
-  - [High Availability](/enterprise/ha/overview)
+  - [High Availability](/enterprise/ha)
+    - [Overview](/enterprise/ha/overview)
     - [Docker Compose](/enterprise/ha/docker)
     - [Kubernetes](/enterprise/ha/kubernetes)
     - [Helm](/enterprise/ha/helm)

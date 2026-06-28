@@ -63,8 +63,8 @@ Two tools read **external** data and require a config block:
 | Tool | Config block | Purpose | Detailed guide |
 |---|---|---|---|
 | `describe_dependencies` | `tools.describe_dependencies.services` | Service-dependency graph | *(below)* |
-| `recent_changes` | `tools.recent_changes.git` | Remote git commit history feed | [recent_changes](agent/analyze-tools/recent-changes.md) |
-| `find_runbook` | `tools.find_runbook` | Runbook-RAG vector search over your remediation docs | [find_runbook](agent/analyze-tools/find-runbook.md) |
+| `recent_changes` | `tools.recent_changes.git` | Remote git commit history feed | [recent_changes](./recent-changes.md) |
+| `find_runbook` | `tools.find_runbook` | Runbook-RAG vector search over your remediation docs | [find_runbook](./find-runbook.md) |
 
 That configuration lives in an optional **`tools.yaml`** file placed next
 to your main `config.yaml`. The root of `tools.yaml` also carries two shared tool-loop knobs that
@@ -127,7 +127,7 @@ tools:
           service: api
 ```
 
-> **See the full guide:** [`recent_changes` Tool](agent/analyze-tools/recent-changes.md)
+> **See the full guide:** [`recent_changes` Tool](./recent-changes.md)
 > covers arguments, the change-record shape, authentication (HTTPS tokens
 > and SSH keys), failure behavior, and a Docker example.
 
@@ -155,7 +155,7 @@ tools:
 Then place your `*.md` runbooks in the data folder under `runbooks/`
 (`./data/runbooks`). The server auto-ingests them at boot.
 
-> **See the full guide:** [`find_runbook` Tool](agent/analyze-tools/find-runbook.md)
+> **See the full guide:** [`find_runbook` Tool](./find-runbook.md)
 > covers arguments, runbook front-matter, the security/redaction posture,
 > pre-baking the corpus with `runbook-ingest`, and managing runbooks from
 > the admin UI.

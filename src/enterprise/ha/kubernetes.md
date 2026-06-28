@@ -6,9 +6,6 @@ Run the Enterprise SRE Agent as **3 replicas sharing one Postgres** with plain
 Kubernetes manifests you can read top to bottom. This is the same topology the
 [Helm chart](./helm.md) produces, applied with `kubectl apply -k .` (kustomize).
 
-> New to enterprise HA? Read the [overview](./overview.md) first for the runtime
-> contract (shared Postgres, instance identity, secret convergence).
-
 ## What you'll need
 
 | Item | Where it comes from |
