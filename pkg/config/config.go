@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +12,14 @@ import (
 
 	"github.com/spf13/viper"
 )
+
+// defaultConfigYAML is the best-practice configuration baseline embedded into
+// the binary. It is loaded first; the user's config file is then deep-merged
+// on top so any key the user omits keeps its default value instead of falling
+// back to an empty zero value.
+//
+//go:embed default_config.yaml
+var defaultConfigYAML []byte
 
 type Config struct {
 	Name       string
@@ -256,139 +266,159 @@ func LoadConfig(path string) error {
 	var err error
 
 	cfgOnce.Do(func() {
-		v := viper.New()
-		v.SetConfigFile(path)
-		v.SetConfigType("yaml")
-
-		// Replace ${VAR} with environment variables
-		v.SetTypeByDefaultValue(true)
-
-		if err = v.ReadInConfig(); err != nil {
-			err = fmt.Errorf("failed to read config: %w", err)
-			return
-		}
-
-		for _, k := range v.AllKeys() {
-			if value, ok := v.Get(k).(string); ok {
-				v.Set(k, os.ExpandEnv(value))
-			}
-		}
-
-		v.AutomaticEnv()
-		v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
-		v.AllowEmptyEnv(true)
-		v.SetTypeByDefaultValue(true)
-
-		if err = v.Unmarshal(&cfg); err != nil {
-			err = fmt.Errorf("failed to unmarshal config: %w", err)
-			return
-		}
-
-		setEnableFromEnv := func(envVar string, config *bool) {
-			if value := os.Getenv(envVar); value != "" {
-				*config = strings.ToLower(value) == "true"
-			}
-		}
-
-		setEnableFromEnv("DEBUG_BODY", &cfg.Alert.DebugBody)
-		setEnableFromEnv("DEBUG_BODY", &cfg.Queue.DebugBody)
-
-		setEnableFromEnv("SLACK_ENABLE", &cfg.Alert.Slack.Enable)
-		setEnableFromEnv("TELEGRAM_ENABLE", &cfg.Alert.Telegram.Enable)
-		setEnableFromEnv("TELEGRAM_USE_PROXY", &cfg.Alert.Telegram.UseProxy)
-		setEnableFromEnv("VIBER_ENABLE", &cfg.Alert.Viber.Enable)
-		setEnableFromEnv("VIBER_USE_PROXY", &cfg.Alert.Viber.UseProxy)
-		setEnableFromEnv("EMAIL_ENABLE", &cfg.Alert.Email.Enable)
-		setEnableFromEnv("MSTEAMS_ENABLE", &cfg.Alert.MSTeams.Enable)
-		setEnableFromEnv("LARK_ENABLE", &cfg.Alert.Lark.Enable)
-		setEnableFromEnv("LARK_USE_PROXY", &cfg.Alert.Lark.UseProxy)
-		setEnableFromEnv("SNS_ENABLE", &cfg.Queue.SNS.Enable)
-
-		setEnableFromEnv("ONCALL_ENABLE", &cfg.OnCall.Enable)
-
-		// Set provider from environment variable if provided
-		if provider := os.Getenv("ONCALL_PROVIDER"); provider != "" {
-			cfg.OnCall.Provider = provider
-		}
-
-		// Redis env override: REDIS_TLS toggles the TLS escape hatch.
-		// Fail-closed: only an explicit off-value (false/0/no/off, any case)
-		// disables TLS; unset or any other value keeps the secure default
-		// (TLS on), so a typo or an enable-intent value like "1"/"yes" never
-		// silently downgrades the connection to plaintext.
-		if v := os.Getenv("REDIS_TLS"); v != "" {
-			cfg.Redis.TLS = redisTLSFromEnv(v)
-		}
-
-		// Storage env overrides
-		if t := os.Getenv("STORAGE_TYPE"); t != "" {
-			cfg.Storage.Type = t
-		}
-		if v := os.Getenv("POSTGRES_DSN"); v != "" {
-			cfg.Storage.Postgres.DSN = v
-		}
-
-		// Agent mode env overrides
-		setEnableFromEnv("AGENT_ENABLE", &cfg.Agent.Enable)
-		if mode := os.Getenv("AGENT_MODE"); mode != "" {
-			cfg.Agent.Mode = mode
-		}
-		if secret := os.Getenv("GATEWAY_SECRET"); secret != "" {
-			cfg.GatewaySecret = secret
-		}
-		if grace := os.Getenv("AGENT_NEW_SERVICE_GRACE"); grace != "" {
-			cfg.Agent.NewServiceGrace = grace
-		}
-		if sp := os.Getenv("AGENT_SERVICE_PATTERNS"); sp != "" {
-			// comma-separated list; empty entries are ignored
-			var list []string
-			for _, p := range strings.Split(sp, ",") {
-				if s := strings.TrimSpace(p); s != "" {
-					list = append(list, s)
-				}
-			}
-			cfg.Agent.ServicePatterns = list
-		}
-		setEnableFromEnv("AGENT_AI_ENABLE", &cfg.Agent.AI.Enable)
-		if k := os.Getenv("AGENT_AI_API_KEY"); k != "" {
-			cfg.Agent.AI.APIKey = k
-		}
-		if m := os.Getenv("AGENT_AI_MODEL"); m != "" {
-			cfg.Agent.AI.Model = m
-		}
-
-		// Always load the sibling `agent_sources.yaml` file (same directory
-		// as the main config). The file is optional — a missing file means
-		// the agent simply has no sources. When present it REPLACES any
-		// inline `agent.sources` from the main config.
-		sourcesPath := filepath.Join(filepath.Dir(path), "agent_sources.yaml")
-		if _, statErr := os.Stat(sourcesPath); statErr == nil {
-			loaded, lerr := loadAgentSourcesFile(sourcesPath)
-			if lerr != nil {
-				err = fmt.Errorf("failed to load agent sources file %s: %w", sourcesPath, lerr)
-				return
-			}
-			cfg.Agent.Sources = loaded
-		}
-
-		// Always load the sibling `tools.yaml` file (same directory as the
-		// main config). The file is optional — a missing file means tools
-		// needing external data config (e.g. `recent_changes`,
-		// `describe_dependencies`) degrade to a clean "nothing found".
-		// When present it REPLACES any inline `agent.tools`. The file's
-		// top-level key is `tools`.
-		toolsPath := filepath.Join(filepath.Dir(path), "tools.yaml")
-		if _, statErr := os.Stat(toolsPath); statErr == nil {
-			loaded, lerr := loadToolsFile(toolsPath)
-			if lerr != nil {
-				err = fmt.Errorf("failed to load tools file %s: %w", toolsPath, lerr)
-				return
-			}
-			cfg.Agent.Tools = loaded
-		}
+		cfg, err = loadConfigFromPath(path)
 	})
 
 	return err
+}
+
+// loadConfigFromPath performs the full config load+merge+unmarshal pipeline for
+// a single config file and returns the resulting *Config. It is the unguarded
+// core that LoadConfig wraps in a sync.Once; factoring it out lets tests
+// exercise the exact same pipeline multiple times in-process without consuming
+// the package's one-shot global load.
+func loadConfigFromPath(path string) (*Config, error) {
+	v := viper.New()
+	v.SetConfigType("yaml")
+
+	// Replace ${VAR} with environment variables
+	v.SetTypeByDefaultValue(true)
+
+	// 1. Load the embedded best-practice defaults as the baseline.
+	if err := v.ReadConfig(bytes.NewReader(defaultConfigYAML)); err != nil {
+		return nil, fmt.Errorf("failed to read embedded default config: %w", err)
+	}
+
+	// 2. Deep-merge the user's config file on top. Keys the user sets win;
+	//    keys the user omits keep the default value from step 1. This is
+	//    what prevents a partial user config from blanking out everything
+	//    it does not explicitly mention.
+	userRaw, rerr := os.ReadFile(path)
+	if rerr != nil {
+		return nil, fmt.Errorf("failed to read config: %w", rerr)
+	}
+	if err := v.MergeConfig(bytes.NewReader(userRaw)); err != nil {
+		return nil, fmt.Errorf("failed to merge config: %w", err)
+	}
+
+	for _, k := range v.AllKeys() {
+		if value, ok := v.Get(k).(string); ok {
+			v.Set(k, os.ExpandEnv(value))
+		}
+	}
+
+	v.AutomaticEnv()
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
+	v.AllowEmptyEnv(true)
+	v.SetTypeByDefaultValue(true)
+
+	loaded := &Config{}
+	if err := v.Unmarshal(loaded); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	setEnableFromEnv := func(envVar string, config *bool) {
+		if value := os.Getenv(envVar); value != "" {
+			*config = strings.ToLower(value) == "true"
+		}
+	}
+
+	setEnableFromEnv("DEBUG_BODY", &loaded.Alert.DebugBody)
+	setEnableFromEnv("DEBUG_BODY", &loaded.Queue.DebugBody)
+
+	setEnableFromEnv("SLACK_ENABLE", &loaded.Alert.Slack.Enable)
+	setEnableFromEnv("TELEGRAM_ENABLE", &loaded.Alert.Telegram.Enable)
+	setEnableFromEnv("TELEGRAM_USE_PROXY", &loaded.Alert.Telegram.UseProxy)
+	setEnableFromEnv("VIBER_ENABLE", &loaded.Alert.Viber.Enable)
+	setEnableFromEnv("VIBER_USE_PROXY", &loaded.Alert.Viber.UseProxy)
+	setEnableFromEnv("EMAIL_ENABLE", &loaded.Alert.Email.Enable)
+	setEnableFromEnv("MSTEAMS_ENABLE", &loaded.Alert.MSTeams.Enable)
+	setEnableFromEnv("LARK_ENABLE", &loaded.Alert.Lark.Enable)
+	setEnableFromEnv("LARK_USE_PROXY", &loaded.Alert.Lark.UseProxy)
+	setEnableFromEnv("SNS_ENABLE", &loaded.Queue.SNS.Enable)
+
+	setEnableFromEnv("ONCALL_ENABLE", &loaded.OnCall.Enable)
+
+	// Set provider from environment variable if provided
+	if provider := os.Getenv("ONCALL_PROVIDER"); provider != "" {
+		loaded.OnCall.Provider = provider
+	}
+
+	// Redis env override: REDIS_TLS toggles the TLS escape hatch.
+	// Fail-closed: only an explicit off-value (false/0/no/off, any case)
+	// disables TLS; unset or any other value keeps the secure default
+	// (TLS on), so a typo or an enable-intent value like "1"/"yes" never
+	// silently downgrades the connection to plaintext.
+	if val := os.Getenv("REDIS_TLS"); val != "" {
+		loaded.Redis.TLS = redisTLSFromEnv(val)
+	}
+
+	// Storage env overrides
+	if t := os.Getenv("STORAGE_TYPE"); t != "" {
+		loaded.Storage.Type = t
+	}
+	if val := os.Getenv("POSTGRES_DSN"); val != "" {
+		loaded.Storage.Postgres.DSN = val
+	}
+
+	// Agent mode env overrides
+	setEnableFromEnv("AGENT_ENABLE", &loaded.Agent.Enable)
+	if mode := os.Getenv("AGENT_MODE"); mode != "" {
+		loaded.Agent.Mode = mode
+	}
+	if secret := os.Getenv("GATEWAY_SECRET"); secret != "" {
+		loaded.GatewaySecret = secret
+	}
+	if grace := os.Getenv("AGENT_NEW_SERVICE_GRACE"); grace != "" {
+		loaded.Agent.NewServiceGrace = grace
+	}
+	if sp := os.Getenv("AGENT_SERVICE_PATTERNS"); sp != "" {
+		// comma-separated list; empty entries are ignored
+		var list []string
+		for _, p := range strings.Split(sp, ",") {
+			if s := strings.TrimSpace(p); s != "" {
+				list = append(list, s)
+			}
+		}
+		loaded.Agent.ServicePatterns = list
+	}
+	setEnableFromEnv("AGENT_AI_ENABLE", &loaded.Agent.AI.Enable)
+	if k := os.Getenv("AGENT_AI_API_KEY"); k != "" {
+		loaded.Agent.AI.APIKey = k
+	}
+	if m := os.Getenv("AGENT_AI_MODEL"); m != "" {
+		loaded.Agent.AI.Model = m
+	}
+
+	// Always load the sibling `agent_sources.yaml` file (same directory
+	// as the main config). The file is optional — a missing file means
+	// the agent simply has no sources. When present it REPLACES any
+	// inline `agent.sources` from the main config.
+	sourcesPath := filepath.Join(filepath.Dir(path), "agent_sources.yaml")
+	if _, statErr := os.Stat(sourcesPath); statErr == nil {
+		sources, lerr := loadAgentSourcesFile(sourcesPath)
+		if lerr != nil {
+			return nil, fmt.Errorf("failed to load agent sources file %s: %w", sourcesPath, lerr)
+		}
+		loaded.Agent.Sources = sources
+	}
+
+	// Always load the sibling `tools.yaml` file (same directory as the
+	// main config). The file is optional — a missing file means tools
+	// needing external data config (e.g. `recent_changes`,
+	// `describe_dependencies`) degrade to a clean "nothing found".
+	// When present it REPLACES any inline `agent.tools`. The file's
+	// top-level key is `tools`.
+	toolsPath := filepath.Join(filepath.Dir(path), "tools.yaml")
+	if _, statErr := os.Stat(toolsPath); statErr == nil {
+		tools, lerr := loadToolsFile(toolsPath)
+		if lerr != nil {
+			return nil, fmt.Errorf("failed to load tools file %s: %w", toolsPath, lerr)
+		}
+		loaded.Agent.Tools = tools
+	}
+
+	return loaded, nil
 }
 
 // loadAgentSourcesFile reads an external YAML file containing a top-level
