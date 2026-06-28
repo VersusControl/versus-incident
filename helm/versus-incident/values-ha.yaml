@@ -1,0 +1,56 @@
+# values-ha.yaml — High-Availability / multi-instance (epic X9, ENTERPRISE).
+#
+# Renders a StatefulSet of 3 enterprise replicas behind one Service, sharing ONE
+# Postgres, partitioning signal sources + the SLO scheduler job by hash-
+# ownership, and converging managed secrets (session key, AI master key, admin-
+# token hash) across replicas via Postgres. Hardening (securityContext,
+# NetworkPolicy, PodDisruptionBudget, anti-affinity) and graceful-rollout probes
+# come from the chart defaults; this file just turns HA on and points at the
+# enterprise image + the required secrets.
+#
+# Apply:
+#   helm upgrade --install versus oci://ghcr.io/versuscontrol/charts/versus-incident \
+#     -f values-ha.yaml \
+#     --set enterprise.licenseKey="$LICENSE_KEY" \
+#     --set storage.postgres.dsn="postgres://versus:PASS@my-rds:5432/versus?sslmode=require"
+#
+# Prefer existing Secrets (GitOps / production) over inline --set:
+#   --set enterprise.existingSecret=versus-license      (key: license_key)
+#   --set storage.postgres.dsnExistingSecret=versus-pg  (key: postgres_dsn)
+
+replicaCount: 3
+
+# HA runs the ENTERPRISE image (license-gated). Tag is used verbatim.
+image:
+  repository: ghcr.io/versuscontrol/versus-enterprise
+  tag: v1.0.0
+
+# Turn on the StatefulSet HA path. storage.type is DERIVED to postgres here, but
+# we set it explicitly for clarity.
+ha:
+  enabled: true
+
+storage:
+  type: postgres
+  postgres:
+    # Provide one of these (do NOT commit a real DSN):
+    #   --set storage.postgres.dsn=...                  (inline → chart Secret)
+    #   --set storage.postgres.dsnExistingSecret=...    (your own Secret)
+    dsn: ""
+    dsnExistingSecret: ""
+    maxIncidents: 1000
+
+# Enterprise license (REQUIRED — HA is enterprise). Provide one of these:
+#   --set enterprise.licenseKey=...        (inline → chart Secret)
+#   --set enterprise.existingSecret=...    (your own Secret, key: license_key)
+enterprise:
+  licenseKey: ""
+  existingSecret: ""
+
+resources:
+  limits:
+    cpu: "1"
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi

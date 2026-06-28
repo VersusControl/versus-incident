@@ -10,7 +10,7 @@ import { ErrorBox } from "@/components/feedback";
 import { SkCard } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 
 const BUILTIN_VERDICTS = ["", "known", "spike"];
 

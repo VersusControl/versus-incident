@@ -23,7 +23,7 @@ import { AGENT_AI_SETTINGS_ANCHOR } from "@/components/AgentAISettingsControl";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { adminGateState } from "@/lib/role";
 import { detectAiDisabledRemedy } from "@/lib/agentAI";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 
 // AgentModeControl — the operator surface for the Enterprise runtime
 // mode-override (X26). It reads /enterprise/api/agent/mode on mount, shows the

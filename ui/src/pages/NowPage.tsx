@@ -8,9 +8,12 @@ import {
   Bot,
   Check,
   CheckCircle2,
+  EyeOff,
   LineChart,
   Lock,
   RefreshCw,
+  ScrollText,
+  Sparkles,
   Waypoints,
   X,
 } from "lucide-react";
@@ -33,8 +36,8 @@ import { Pill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { KpiTile } from "@/components/KpiTile";
 import { ChannelIcon } from "@/components/ChannelIcon";
-import { ClickableRow, useTableKeys } from "@/components/DataTable";
-import { useCountUp, useNowTick } from "@/lib/hooks";
+import { ClickableRow } from "@/components/DataTable";
+import { useNowTick, useTableKeys } from "@/lib/hooks";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { EmptyState } from "@/components/feedback";
@@ -550,47 +553,93 @@ function AgentPulse({
             retrying={status.isFetching}
           />
         )}
-        {status.isSuccess && (
-          <div className="grid grid-cols-3 gap-2">
-            <PulseStat label="Logs" value={status.data.patterns} to="/agent/logs" />
-            <PulseStat label="Shadow" value={status.data.shadow_events ?? 0} to="/agent/decisions?tab=shadow" />
-            <PulseStat label="Detect" value={status.data.detect_events ?? 0} to="/agent/decisions?tab=detect" />
-          </div>
-        )}
 
-        {/* Enterprise: Metrics & Traces learning status */}
-        {baselines.isPending && (
-          <div aria-hidden className="grid grid-cols-2 gap-2">
+        {/* Signal stats. Enterprise: Logs · Metrics · Traces share one row,
+            same style. OSS: Logs · Shadow · Detect. The baselines probe gates
+            which block renders (null = locked OSS / no intelligence license). */}
+        {status.isSuccess && baselines.isPending && (
+          <div aria-hidden className="grid grid-cols-3 gap-2">
+            <div className="sk h-12" />
             <div className="sk h-12" />
             <div className="sk h-12" />
           </div>
         )}
-        {enterpriseAvailable && (
-          <div className="grid grid-cols-2 gap-2">
-            <PulseEnterpriseStat
-              icon={LineChart}
-              label="Metrics"
-              total={metricCount}
-              ready={metricReady}
-              to="/agent/metrics"
-            />
-            <PulseEnterpriseStat
-              icon={Waypoints}
-              label="Traces"
-              total={traceCount}
-              ready={traceReady}
-              to="/agent/traces"
-            />
-          </div>
+        {status.isSuccess && !baselines.isPending && enterpriseAvailable && (
+          <>
+            <div className="grid grid-cols-3 gap-2">
+              <PulseSignalStat
+                icon={ScrollText}
+                label="Logs"
+                total={status.data.patterns}
+                unit="patterns"
+                to="/agent/logs"
+              />
+              <PulseSignalStat
+                icon={LineChart}
+                label="Metrics"
+                total={metricCount}
+                ready={metricReady}
+                to="/agent/metrics"
+              />
+              <PulseSignalStat
+                icon={Waypoints}
+                label="Traces"
+                total={traceCount}
+                ready={traceReady}
+                to="/agent/traces"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <PulseSignalStat
+                icon={EyeOff}
+                label="Shadow"
+                total={status.data.shadow_events ?? 0}
+                unit="events"
+                to="/agent/decisions?tab=shadow"
+              />
+              <PulseSignalStat
+                icon={Sparkles}
+                label="Detect"
+                total={status.data.detect_events ?? 0}
+                unit="events"
+                to="/agent/decisions?tab=detect"
+              />
+            </div>
+          </>
         )}
-        {baselines.data === null && (
-          <div className="flex items-center gap-2 rounded-control border border-ink-700 bg-surface-raised px-3 py-2 text-2xs text-ink-400">
-            <Lock size={12} className="shrink-0" />
-            <span>
-              Metrics &amp; Traces learning requires an{" "}
-              <Link to="/agent/metrics" className="text-link hover:underline">Enterprise license</Link>.
-            </span>
-          </div>
+        {status.isSuccess && !baselines.isPending && !enterpriseAvailable && (
+          <>
+            <div className="grid grid-cols-3 gap-2">
+              <PulseSignalStat
+                icon={ScrollText}
+                label="Logs"
+                total={status.data.patterns}
+                unit="patterns"
+                to="/agent/logs"
+              />
+              <PulseSignalStat
+                icon={EyeOff}
+                label="Shadow"
+                total={status.data.shadow_events ?? 0}
+                unit="events"
+                to="/agent/decisions?tab=shadow"
+              />
+              <PulseSignalStat
+                icon={Sparkles}
+                label="Detect"
+                total={status.data.detect_events ?? 0}
+                unit="events"
+                to="/agent/decisions?tab=detect"
+              />
+            </div>
+            <div className="flex items-center gap-2 rounded-control border border-ink-700 bg-surface-raised px-3 py-2 text-2xs text-ink-400">
+              <Lock size={12} className="shrink-0" />
+              <span>
+                Metrics &amp; Traces learning requires an{" "}
+                <Link to="/agent/metrics" className="text-link hover:underline">Enterprise license</Link>.
+              </span>
+            </div>
+          </>
         )}
 
         <p className="text-2xs text-ink-300">
@@ -601,33 +650,23 @@ function AgentPulse({
   );
 }
 
-function PulseStat({ label, value, to }: { label: string; value: number; to?: string }) {
-  const counted = useCountUp(value);
-  const inner = (
-    <div className="rounded-control border border-ink-600 bg-surface-raised px-2 py-1.5 text-center transition-colors hover:border-ink-500">
-      <div className="text-base font-semibold tabular-nums text-ink-50">
-        {counted.toLocaleString()}
-      </div>
-      <div className="text-2xs uppercase tracking-wider text-ink-300">
-        {label}
-      </div>
-    </div>
-  );
-  if (to) return <Link to={to}>{inner}</Link>;
-  return inner;
-}
-
-function PulseEnterpriseStat({
+// Unified signal stat tile for the Agent pulse — used for Logs, Metrics,
+// Traces, Shadow and Detect so every signal reads with the same style.
+// `ready` is optional (baselines have a confident/ready count; logs/events
+// don't) and only renders when the signal exposes it.
+function PulseSignalStat({
   icon: Icon,
   label,
   total,
   ready,
+  unit = "signals",
   to,
 }: {
   icon: typeof LineChart;
   label: string;
   total: number;
-  ready: number;
+  ready?: number;
+  unit?: string;
   to: string;
 }) {
   return (
@@ -641,11 +680,9 @@ function PulseEnterpriseStat({
       </div>
       <div className="mt-1 text-xs text-ink-50">
         <span className="font-semibold tabular-nums">{total}</span>
-        <span className="text-ink-300"> signals</span>
-        {total > 0 && (
-          <span className="ml-1.5 text-2xs text-ink-300">
-            ({ready} ready)
-          </span>
+        <span className="text-ink-300"> {unit}</span>
+        {ready !== undefined && total > 0 && (
+          <span className="ml-1.5 text-2xs text-ink-300">({ready} ready)</span>
         )}
       </div>
     </Link>

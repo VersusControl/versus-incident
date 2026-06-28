@@ -1,0 +1,25 @@
+# HA renders a StatefulSet (NOT a Deployment), wires POD_NAME + INSTANCE_COUNT,
+# the enterprise LICENSE_KEY, postgres storage, and the hardening/topology
+# resources. The single-instance Deployment must NOT appear.
+kind: StatefulSet
+serviceName: versus-test-versus-incident-headless
+podManagementPolicy: Parallel
+- name: POD_NAME
+fieldPath: metadata.name
+- name: INSTANCE_COUNT
+value: "3"
+- name: LICENSE_KEY
+key: license_key
+- name: STORAGE_TYPE
+value: "postgres"
+- name: POSTGRES_DSN
+key: postgres_dsn
+readOnlyRootFilesystem: true
+runAsNonRoot: true
+topologyKey: kubernetes.io/hostname
+kind: PodDisruptionBudget
+kind: NetworkPolicy
+clusterIP: None
+license_key:
+postgres_dsn:
+!kind: Deployment

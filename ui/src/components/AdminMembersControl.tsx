@@ -27,7 +27,7 @@ import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { AdminAccessNotice } from "@/components/AdminAccessNotice";
 import { EnterpriseLockedBody } from "@/components/EnterpriseLocked";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 
 // AdminMembersControl — the operator surface for Enterprise RBAC membership
 // (X5). It lists provisioned members joined with their EFFECTIVE role and lets

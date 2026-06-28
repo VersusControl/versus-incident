@@ -1,0 +1,119 @@
+services:
+  # Prometheus Pushgateway: the host-run generator
+  # (scripts/generate_fake_metrics.py) PUSHes synthetic series here, and
+  # Prometheus scrapes it. This is the SAME fake-data path the OSS metrics
+  # example uses — all fake data comes from the generator, never a bespoke
+  # in-compose loadgen + curl /spike. The UX is identical everywhere.
+  pushgateway:
+    image: prom/pushgateway:v1.9.0
+    container_name: versus-ent-metrics-pushgateway
+    ports:
+      - "9091:9091"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9091/-/healthy"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    container_name: versus-ent-metrics-prometheus
+    depends_on:
+      pushgateway:
+        condition: service_healthy
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=1h
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: versus-ent-metrics-redis
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:-versus}
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-versus}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # The ENTERPRISE binary/image. The metric/trace DATA SOURCE is an
+  # enterprise-only capability, so this example MUST run the enterprise
+  # image (not the OSS one) AND supply a LICENSE_KEY carrying the
+  # `intelligence` entitlement (see README → "License"). Without it the
+  # `prometheus` source returns "requires Versus Enterprise".
+  versus:
+    image: ${VERSUS_ENTERPRISE_IMAGE:-ghcr.io/versuscontrol/versus-enterprise:dev}
+    container_name: versus-ent-metrics-app
+    depends_on:
+      redis:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      # --- Enterprise license (REQUIRED for the data source) ---------------
+      # Offline-verified Ed25519 JWT. MUST carry the `intelligence`
+      # entitlement. Supplied from your local .env — NEVER commit a real key.
+      LICENSE_KEY: ${LICENSE_KEY:-}
+      # --- Data-plane auth: built-in default admin (session) ----------------
+      # The enterprise data plane / admin UI is authenticated by a LIVE SESSION
+      # — the built-in default admin (username `admin`; password printed ONCE in
+      # the logs on first boot) or SSO. There is NO gateway secret. The shim
+      # below drops the Secure cookie attribute so that session cookie survives
+      # plain HTTP on localhost. Dev-only — NEVER set behind TLS in production.
+      VERSUS_ENTERPRISE_COOKIE_INSECURE: "1"
+      # --- OSS / shared config ---------------------------------------------
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-versus}
+      SLACK_ENABLE: ${SLACK_ENABLE:-false}
+      SLACK_TOKEN: ${SLACK_TOKEN:-}
+      SLACK_CHANNEL_ID: ${SLACK_CHANNEL_ID:-}
+      TELEGRAM_ENABLE: ${TELEGRAM_ENABLE:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      AGENT_ENABLE: ${AGENT_ENABLE:-true}
+      AGENT_MODE: ${AGENT_MODE:-detect}
+      AGENT_AI_ENABLE: ${AGENT_AI_ENABLE:-false}
+      AGENT_AI_API_KEY: ${AGENT_AI_API_KEY:-}
+      AGENT_AI_MODEL: ${AGENT_AI_MODEL:-gpt-4o-mini}
+      # --- Standing-intelligence layer (X16 baseline / X15 auto-SLO) -------
+      # OPTIONAL. Empty by default = the wedge is a no-op (the rule-based
+      # `prometheus` source still fires incidents on its own). Set
+      # INTEL_SERVICES (see .env.example for ready JSON) to ALSO learn
+      # baselines + derive an auto-SLO and page on multi-window burn rate.
+      # Needs a learning window — see README "Standing intelligence".
+      VERSUS_ENTERPRISE_INTEL_PROMETHEUS_ADDRESS: ${INTEL_PROM_ADDRESS:-http://prometheus:9090}
+      VERSUS_ENTERPRISE_INTEL_SERVICES: ${INTEL_SERVICES:-}
+    volumes:
+      - ./config:/app/config:ro
+      - versus-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
+  versus-data:
+  prometheus-data:

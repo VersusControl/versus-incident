@@ -23,7 +23,7 @@ import { ClickableRow } from "@/components/DataTable";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 import { EmptyState } from "@/components/feedback";
 
 type Tab = "detect" | "shadow";

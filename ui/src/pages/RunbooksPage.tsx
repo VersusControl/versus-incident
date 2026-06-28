@@ -21,7 +21,7 @@ import { Modal } from "@/components/Modal";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 
 // RunbooksPage lets operators manage the runbook corpus that backs the
 // find_runbook tool. Runbooks are managed by UPLOADING `.md` files
@@ -56,7 +56,10 @@ export function RunbooksPage() {
   const [toDelete, setToDelete] = useState<Runbook | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
 
-  const runbooks = listQ.data?.runbooks ?? [];
+  const runbooks = useMemo(
+    () => listQ.data?.runbooks ?? [],
+    [listQ.data],
+  );
   const embeddings = listQ.data?.embeddings ?? false;
 
   const filtered = useMemo(() => {

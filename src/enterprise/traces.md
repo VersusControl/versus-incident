@@ -132,7 +132,6 @@ docker run --rm --name versus-enterprise \
   --network host \
   -v "$PWD/config:/app/config" \
   -v "$PWD/data:/app/data" \
-  -e GATEWAY_SECRET=dev-gateway-secret \
   -e REDIS_HOST=localhost -e REDIS_PORT=6379 -e REDIS_PASSWORD=versus \
   -e LICENSE_KEY=... \
   -e AGENT_ENABLE=true \
@@ -215,7 +214,6 @@ docker run --rm --name versus-enterprise \
   --network host \
   -v "$PWD/config:/app/config" \
   -v "$PWD/data:/app/data" \
-  -e GATEWAY_SECRET=dev-gateway-secret \
   -e REDIS_HOST=localhost -e REDIS_PORT=6379 -e REDIS_PASSWORD=versus \
   -e LICENSE_KEY=... \
   -e AGENT_ENABLE=true \

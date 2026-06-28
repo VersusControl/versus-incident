@@ -1,0 +1,14 @@
+# Keep the load balancer backed during voluntary disruptions (node drains, node
+# upgrades): a drain can never remove the last healthy replica.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: versus
+  namespace: versus-ha
+  labels:
+    app.kubernetes.io/name: versus
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: versus

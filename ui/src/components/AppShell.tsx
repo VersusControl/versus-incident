@@ -1,16 +1,12 @@
-import { createContext, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Outlet } from "react-router-dom";
 import { X } from "lucide-react";
 import { Sidebar, SidebarContent } from "./Sidebar";
 import { ToastProvider } from "./Toast";
 import { ShortcutOverlay } from "./ShortcutOverlay";
+import { ShellContext } from "./shellContext";
 import { ReauthModal } from "@/lib/auth";
 import { useShortcuts } from "@/lib/hooks";
-
-// ShellContext lets the page-rendered TopBar open the mobile nav drawer.
-export const ShellContext = createContext<{ openDrawer: () => void } | null>(
-  null,
-);
 
 // AppShell: skip-link (first tab stop), desktop rail / mobile drawer
 // (audit A4), toast outlet, global shortcuts, re-auth modal mount.

@@ -1,0 +1,38 @@
+# Minimal Versus config for the HA example. STORAGE_TYPE and POSTGRES_DSN are
+# also injected as env (which override these), so all replicas share one
+# Postgres. On-call and the agent are off here to keep the example Postgres-only
+# and focused on the HA topology + session/secret convergence; enable them (and
+# add a shared Redis) the same way the metrics-source example does.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: versus-config
+  namespace: versus-ha
+  labels:
+    app.kubernetes.io/name: versus
+data:
+  config.yaml: |
+    name: versus
+    host: 0.0.0.0
+    port: 3000
+
+    alert:
+      debug_body: true
+
+    queue:
+      enable: false
+
+    oncall:
+      enable: false
+      initialized_only: false
+
+    # Shared multi-writer store for ALL replicas. type/dsn are also set via env
+    # (STORAGE_TYPE=postgres, POSTGRES_DSN=...), which take precedence.
+    storage:
+      type: postgres
+      postgres:
+        dsn: ${POSTGRES_DSN}
+        max_incidents: 1000
+
+    agent:
+      enable: false

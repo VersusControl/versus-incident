@@ -8,7 +8,7 @@ import { Pill } from "@/components/Pill";
 import { EmptyState, Spinner } from "@/components/feedback";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 
 type GraceAction = "end" | "restart";
 

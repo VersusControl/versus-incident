@@ -1,0 +1,99 @@
+# Postgres — the ONE shared store for every Versus replica. In production prefer
+# a managed Postgres (e.g. AWS RDS, single-writer Multi-AZ) and delete this file;
+# point versus at it via the postgres_dsn Secret key. This in-cluster Postgres
+# exists so the example is self-contained.
+apiVersion: v1
+kind: Service
+metadata:
+  name: versus-postgres
+  namespace: versus-ha
+  labels:
+    app.kubernetes.io/name: versus-postgres
+spec:
+  clusterIP: None
+  ports:
+    - port: 5432
+      targetPort: postgres
+      name: postgres
+  selector:
+    app.kubernetes.io/name: versus-postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: versus-postgres
+  namespace: versus-ha
+  labels:
+    app.kubernetes.io/name: versus-postgres
+spec:
+  serviceName: versus-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: versus-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: versus-postgres
+    spec:
+      securityContext:
+        fsGroup: 999
+        runAsUser: 999
+        runAsGroup: 999
+        runAsNonRoot: true
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: versus
+            - name: POSTGRES_DB
+              value: versus
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: versus-secrets
+                  key: postgres_password
+            # Lets Postgres write its lock file under a writable dir with a
+            # read-only root filesystem.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U versus -d versus"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U versus -d versus"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi

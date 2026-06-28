@@ -185,6 +185,36 @@ type Lifecycle interface {
 	DeleteByID(domain, id string) error
 }
 
+// BlobCreator is an optional capability a backend may implement on top of
+// Provider (X9-T11). It adds a single atomic create-if-absent blob write
+// used to elect ONE writer across multiple instances that share a store —
+// the substrate for generate-once secrets under HA / multi-instance, where
+// every replica boots the same generate-then-persist path and exactly one
+// must win. It is mechanical and tier-neutral: it carries no org or policy
+// concept and never overwrites an existing blob, so it is strictly additive
+// and does not weaken WriteBlob's last-write-wins semantics.
+//
+// Backends that cannot create atomically (the redis/database stubs) do not
+// implement it; callers type-assert and treat a failed assertion as
+// "unsupported", exactly like Lifecycle/Searcher. The Postgres (shared,
+// multi-writer) and memory (tests) backends implement it because they are
+// the HA substrate and the test path; the file backend implements it
+// best-effort via O_CREATE|O_EXCL, which is coherent only on a single node —
+// the only place file storage is allowed under HA (see the X9-T3
+// file-storage guard).
+type BlobCreator interface {
+	// CreateBlobIfAbsent atomically writes data under key only if key does
+	// not already exist. It returns written==true when THIS call created the
+	// blob, and written==false when the key already existed — because a
+	// concurrent or prior writer won the race, OR because the key was set by
+	// an earlier WriteBlob. On written==false the stored bytes are left
+	// untouched: the caller re-reads them via ReadBlob(key) to adopt the
+	// surviving value. After a nil-error return the blob is durably present,
+	// so ReadBlob(key) observes the one surviving set of bytes regardless of
+	// which caller won.
+	CreateBlobIfAbsent(key string, data []byte) (written bool, err error)
+}
+
 // IncidentRecord is the durable shape of an incident. It mirrors the
 // runtime models.Incident plus the audit fields the UI needs (when it
 // happened, who got notified, was it acked, raw payload for debugging).

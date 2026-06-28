@@ -1,0 +1,38 @@
+# Two Services:
+#  - versus-headless : backs the StatefulSet (stable per-pod DNS); ClusterIP None.
+#  - versus          : the load-balanced entrypoint clients/ingress hit. It
+#                      round-robins across all ready replicas, so a session
+#                      established on one replica is served by any other
+#                      (secrets converge via Postgres).
+apiVersion: v1
+kind: Service
+metadata:
+  name: versus-headless
+  namespace: versus-ha
+  labels:
+    app.kubernetes.io/name: versus
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - port: 3000
+      targetPort: http
+      name: http
+  selector:
+    app.kubernetes.io/name: versus
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: versus
+  namespace: versus-ha
+  labels:
+    app.kubernetes.io/name: versus
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3000
+      targetPort: http
+      name: http
+  selector:
+    app.kubernetes.io/name: versus

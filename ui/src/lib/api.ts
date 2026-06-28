@@ -52,14 +52,19 @@ function notifyAuthExpired() {
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const secret = getSecret() ?? "";
   const headers = new Headers(init.headers);
-  headers.set("X-Gateway-Secret", secret);
+  // OSS/community authenticates the data plane with the gateway secret; the
+  // enterprise console authenticates with the HttpOnly session cookie
+  // (versus_enterprise_session) carried via credentials: same-origin and holds
+  // no secret. Attach the header ONLY when a secret is actually held, so a
+  // licensed binary never sends X-Gateway-Secret — session-only, no fallback.
+  if (secret) headers.set("X-Gateway-Secret", secret);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
-  // credentials: "same-origin" so an established SSO session cookie
+  // credentials: "same-origin" so an established session cookie
   // (versus_enterprise_session) rides along and authenticates the data plane
-  // when no gateway secret is held.
+  // on the enterprise path (built-in default admin or SSO).
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers,
@@ -357,7 +362,10 @@ export interface RunbookUploadResult {
 async function uploadMultipart<T>(path: string, form: FormData): Promise<T> {
   const secret = getSecret() ?? "";
   const headers = new Headers();
-  headers.set("X-Gateway-Secret", secret);
+  // Attach the gateway secret ONLY when one is held (OSS/community). The
+  // enterprise console holds no secret and authenticates with the session
+  // cookie via credentials: same-origin.
+  if (secret) headers.set("X-Gateway-Secret", secret);
 
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",

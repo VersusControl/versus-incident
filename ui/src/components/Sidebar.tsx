@@ -7,7 +7,6 @@ import {
   Flame,
   LineChart,
   Lock,
-  LogOut,
   ScrollText,
   Server,
   Settings,
@@ -19,10 +18,7 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { useQuery } from "@tanstack/react-query";
-import { api, ApiError, clearSecret, getSsoSession, localLogout, ssoLogout } from "@/lib/api";
-import { isLocalAdminSession } from "@/lib/localAdmin";
-import { roleLabel, isAdminRole } from "@/lib/role";
-import { useEffectiveRole } from "@/lib/useEffectiveRole";
+import { api, ApiError } from "@/lib/api";
 import { useOpenIncidentCount } from "@/lib/hooks";
 import { useTheme } from "@/lib/theme";
 
@@ -122,6 +118,8 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
     },
     { to: "/agent/decisions", label: "Decisions", icon: Sparkles },
     { to: "/agent/services", label: "Services", icon: Server },
+  ];
+  const tools: SideItem[] = [
     {
       to: "/agent/runbooks",
       label: "Runbooks",
@@ -149,93 +147,9 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       <nav aria-label="Primary" className="dark-scroll flex-1 overflow-y-auto px-2 py-2">
         <Zone title="Respond" items={respond} onNavigate={onNavigate} />
         <Zone title="Agent" items={agent} onNavigate={onNavigate} />
+        <Zone title="Tools" items={tools} onNavigate={onNavigate} />
         <Zone title="Manage" items={manage} onNavigate={onNavigate} />
       </nav>
-
-      <div className="border-t border-ink-800 px-2 py-2">
-        <SignedInIdentity />
-        <button
-          data-testid="sign-out"
-          className="flex w-full items-center gap-2 rounded-control px-3 py-2
-                     text-xs text-ink-100 hover:bg-ink-800 hover:text-ink-50"
-          onClick={async () => {
-            // Revoke any established enterprise session (HttpOnly cookie) before
-            // clearing local state — clearing the secret alone leaves the cookie
-            // valid and AuthGate would re-admit on reload. The deployment-org
-            // probe 403s on a community/OSS binary (no SSO) and is simply
-            // skipped. A BUILT-IN default-admin (local) session is revoked via
-            // the local-admin logout route; an SSO session via the SSO route
-            // (G4). Both revoke the same shared session cookie, so the SSO route
-            // is a safe fallback when the session kind can't be determined.
-            try {
-              const dep = await api.getSSODeployment();
-              let local = false;
-              try {
-                local = isLocalAdminSession(await getSsoSession(dep.org));
-              } catch {
-                // No live session / cannot determine — fall through to SSO logout.
-              }
-              if (local) {
-                await localLogout();
-              } else {
-                await ssoLogout(dep.org);
-              }
-            } catch {
-              // No enterprise / no SSO session — nothing to revoke.
-            }
-            clearSecret();
-            window.location.reload();
-          }}
-        >
-          <LogOut size={14} />
-          Sign out
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// SignedInIdentity shows WHO the current operator is signed in as and their
-// effective RBAC role, right above the sign-out button. It renders only when a
-// live SSO / built-in-admin session resolves (enterprise binary, signed in) —
-// on a community/OSS binary or a gateway-secret-only operator the whoami 403s
-// and nothing is shown. It is the clarity fix for the SSO viewer-trap: a fresh
-// SSO user lands on the dashboard as a least-privileged VIEWER, and without
-// this had no signal of their identity or that their access is read-only — so a
-// successful, member-provisioned login read as "nothing happened / not synced".
-function SignedInIdentity() {
-  const access = useEffectiveRole();
-  if (access.loading || !access.hasSession) {
-    return null;
-  }
-  const sess = access.session.data;
-  if (!sess) {
-    return null;
-  }
-  const identity = sess.email?.trim() || sess.subject?.trim() || "Signed in";
-  const admin = isAdminRole(access.role);
-  return (
-    <div className="mb-1 rounded-control px-3 py-2">
-      <div className="truncate text-xs font-medium text-ink-50" title={identity}>
-        {identity}
-      </div>
-      <div className="mt-1 flex items-center gap-1.5">
-        <span
-          className={clsx(
-            "inline-flex items-center rounded-full px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide",
-            admin
-              ? "bg-accent-subtle text-accent"
-              : "bg-ink-800 text-ink-200",
-          )}
-        >
-          {roleLabel(access.role)}
-        </span>
-        {!admin && (
-          <span className="text-2xs text-ink-400">
-            Read-only — ask an admin for access
-          </span>
-        )}
-      </div>
     </div>
   );
 }

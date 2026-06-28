@@ -102,6 +102,47 @@ func Reset() {
 	registry = nil
 }
 
+// Process-wide job-ownership seam (X9-T9). Under HA / multi-instance,
+// exactly one instance must run each registered job — otherwise every
+// replica fires the same periodic evaluation and (for the enterprise
+// SLO/burn job) pages on-call twice. A consumer installs a predicate at
+// boot; the scheduler runs a job only when the predicate owns its name.
+//
+// It mirrors the SetModeResolver / middleware.SetOrgResolver last-wins
+// seam: one process-wide slot, mutex-guarded so a boot-time registration
+// is safely visible to the worker goroutine. It is deliberately
+// tier-neutral — the scheduler knows nothing about ordinals, hashing, or
+// replica counts; the predicate (the enterprise cluster.Identity wires
+// `owns(name) := fnv32(name) % count == index` into it) is the consumer's.
+//
+// DEFAULT = OWN-EVERYTHING. OSS installs no predicate, so every job runs
+// exactly as today — community and single-instance are byte-for-byte
+// unchanged (one nil-check before Run, no extra goroutines, no timers).
+var (
+	ownerMu   sync.Mutex
+	ownerSlot func(name string) bool
+)
+
+// SetOwnership installs the process-wide job-ownership predicate. A job
+// runs on this instance only when pred(job.Name) is true. Passing nil
+// clears the slot (back to own-everything). Last-wins: a second call
+// replaces the first. Call at boot, before the worker starts. This is the
+// entry point the enterprise cluster.Identity attaches to (mirror of
+// middleware.SetOrgResolver); community OSS installs none.
+func SetOwnership(pred func(name string) bool) {
+	ownerMu.Lock()
+	defer ownerMu.Unlock()
+	ownerSlot = pred
+}
+
+// ownership returns the installed predicate, or nil when none is set
+// (community / single-instance own-everything).
+func ownership() func(name string) bool {
+	ownerMu.Lock()
+	defer ownerMu.Unlock()
+	return ownerSlot
+}
+
 // Scheduler runs a fixed set of jobs until its context is canceled.
 // Construct it with New (explicit jobs) or NewFromRegistry (the
 // process-wide registry snapshot).
@@ -130,19 +171,46 @@ func (s *Scheduler) SetJitter(d time.Duration) *Scheduler {
 	return s
 }
 
-// Len reports how many jobs the scheduler will run.
+// Len reports how many jobs the scheduler holds in its snapshot. Run starts
+// a goroutine and timer only for the subset this instance owns under the
+// installed ownership predicate; with no predicate (community /
+// single-instance) the owned set is every job, so Run behaves exactly as
+// before.
 func (s *Scheduler) Len() int { return len(s.jobs) }
 
-// Run drives every job until ctx is canceled, one goroutine per job, and
-// returns once all jobs have stopped. With no jobs it returns immediately
-// and starts nothing — the OSS runtime is unaffected.
+// owned returns the subset of this scheduler's jobs that this instance owns
+// under the installed ownership predicate (X9-T9), in registration order.
+// With no predicate (community / single-instance) every job is owned and
+// the result is the full set — so Run starts exactly the goroutines it does
+// today. A job the predicate rejects is never returned here, so Run spins up
+// no goroutine and no timer for it.
+func (s *Scheduler) owned() []Job {
+	pred := ownership()
+	if pred == nil {
+		return s.jobs
+	}
+	out := make([]Job, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		if pred(j.Name) {
+			out = append(out, j)
+		}
+	}
+	return out
+}
+
+// Run drives every owned job until ctx is canceled, one goroutine per job,
+// and returns once all jobs have stopped. With no owned jobs it returns
+// immediately and starts nothing — the OSS runtime is unaffected, and an
+// un-owned job (one the ownership predicate rejects) starts no goroutine and
+// no timer.
 func (s *Scheduler) Run(ctx context.Context) {
-	if len(s.jobs) == 0 {
+	jobs := s.owned()
+	if len(jobs) == 0 {
 		return
 	}
-	log.Printf("scheduler: starting %d recurring evaluation job(s)", len(s.jobs))
+	log.Printf("scheduler: starting %d recurring evaluation job(s)", len(jobs))
 	var wg sync.WaitGroup
-	for _, j := range s.jobs {
+	for _, j := range jobs {
 		wg.Add(1)
 		go func(j Job) {
 			defer wg.Done()

@@ -1,0 +1,5 @@
+# Never commit the local env — it carries the enterprise LICENSE_KEY.
+.env
+
+# Python bytecode from the host-run generator
+scripts/__pycache__/

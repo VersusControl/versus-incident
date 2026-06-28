@@ -15,7 +15,7 @@ import { AdminAccessNotice } from "@/components/AdminAccessNotice";
 import { EnterpriseLockedBody } from "@/components/EnterpriseLocked";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { adminGateState } from "@/lib/role";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 
 // AgentAISettingsControl — the operator surface for the Enterprise runtime
 // AI-settings override (X27). It reads /enterprise/api/agent/ai-settings on

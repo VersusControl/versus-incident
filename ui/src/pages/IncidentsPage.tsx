@@ -26,7 +26,7 @@ import { SegmentedControl } from "@/components/SegmentedControl";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SkLine, SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 
 type StatusFilter = "all" | "open" | "acked" | "resolved";
 

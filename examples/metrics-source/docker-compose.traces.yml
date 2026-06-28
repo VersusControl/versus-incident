@@ -1,0 +1,48 @@
+# OPTIONAL traces overlay. Run alongside the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.traces.yml up -d
+#
+# It adds Tempo and swaps in the `*.traces.yaml` source variant that adds the
+# enterprise `traces` source. The base metrics path is unchanged.
+#
+# Fake trace data comes from the SAME host-run generator as the metrics: run
+# it with `--otlp http://localhost:4318` and each push also POSTs one OTLP/HTTP
+# span to Tempo (error spans during a `--spike`). Tempo's OTLP/HTTP receiver is
+# published on :4318. There is no in-compose generator — all fake data comes
+# from scripts/generate_fake_metrics.py.
+#
+# Note: there is still NO tools.yaml — the `query_traces` analyze tool is
+# AUTO-WIRED from the `traces` source config, exactly like `query_metrics`.
+services:
+  tempo:
+    image: grafana/tempo:2.5.0
+    container_name: versus-ent-metrics-tempo
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    ports:
+      - "3200:3200"
+      - "4318:4318"
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3200/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  versus:
+    depends_on:
+      redis:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    volumes:
+      - ./config:/app/config:ro
+      - ./config/agent_sources.traces.yaml:/app/config/agent_sources.yaml:ro
+      - versus-data:/app/data
+
+volumes:
+  tempo-data:

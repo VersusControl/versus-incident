@@ -1,0 +1,35 @@
+# Detect-path signal sources for the Versus Enterprise `metrics-source` example.
+#
+# The `prometheus` type is an ENTERPRISE DATA SOURCE (epic X10). It is
+# license-gated: the binary only builds it when LICENSE_KEY carries the
+# `intelligence` entitlement. On the OSS image (or an unlicensed enterprise
+# binary) `type: prometheus` returns "requires Versus Enterprise".
+#
+# This source uses the NEW generic `options:` schema the X10 source reads
+# (NOT the legacy nested `prometheus:` block). Each tick the source range-
+# queries every PromQL "anomaly rule" below and emits one signal per firing
+# series. Both rules evaluate to a value > 0 only when something is wrong, so
+# they stay silent under the generator's normal traffic and fire the moment
+# you hit `/spike`.
+#
+# AUTO-WIRE: configuring this source ALONE also lights up the analyze
+# `query_metrics` tool pointed at the SAME Prometheus — there is deliberately
+# no `tools.yaml` in this example. See the README "Auto-wire" section.
+sources:
+  - name: demo-prom
+    type: prometheus
+    enable: true
+    options:
+      address: http://prometheus:9090
+      step: 30s
+      page_size: 500
+      queries:
+        # 5xx error rate above 0.5 req/s (silent at the ~0.5% normal error
+        # ratio; fires hard during a spike).
+        - query: 'sum by (service) (rate(demo_http_requests_total{code=~"5.."}[1m])) > 0.5'
+          severity: critical
+          service_label: service
+        # p95 request latency above 500ms.
+        - query: 'histogram_quantile(0.95, sum by (service, le) (rate(demo_http_request_duration_seconds_bucket[1m]))) > 0.5'
+          severity: high
+          service_label: service

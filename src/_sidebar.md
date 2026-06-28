@@ -38,6 +38,10 @@
     - [Google Workspace](/enterprise/sso/google)
     - [Microsoft Entra ID](/enterprise/sso/azure)
     - [Generic OIDC](/enterprise/sso/oidc)
+  - [High Availability](/enterprise/ha/overview)
+    - [Docker Compose](/enterprise/ha/docker)
+    - [Kubernetes](/enterprise/ha/kubernetes)
+    - [Helm](/enterprise/ha/helm)
   - [Metrics (Prometheus)](/enterprise/metrics)
   - [Traces](/enterprise/traces)
 

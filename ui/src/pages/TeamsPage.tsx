@@ -15,7 +15,7 @@ import { Modal } from "@/components/Modal";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 
 // TeamsPanel lets operators group members into named teams. Teams hold
 // an ordered MemberIDs list — the order is preserved by the backend and

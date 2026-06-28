@@ -25,7 +25,7 @@ import { AssignDialog } from "@/components/AssignDialog";
 import { AnalysisCard } from "@/components/AnalysisCard";
 import { SkCard } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 import { Spinner } from "@/components/feedback";
 
 // Stable keys written into Incident.content by the backend. Agent-emitted

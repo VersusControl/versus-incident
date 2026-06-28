@@ -20,6 +20,7 @@ export function KpiTile({
   foot,
   spark,
   sparkLabel,
+  className,
 }: {
   label: string;
   value: React.ReactNode;
@@ -34,6 +35,8 @@ export function KpiTile({
   spark?: number[];
   /** Required with `spark`: text summary for screen readers. */
   sparkLabel?: string;
+  /** Extra classes for the card element (e.g. grid column spans). */
+  className?: string;
 }) {
   const sparkColor = tone
     ? {
@@ -92,13 +95,16 @@ export function KpiTile({
     return (
       <Link
         to={to}
-        className="stat-card transition-colors hover:border-accent/50"
+        className={clsx(
+          "stat-card transition-colors hover:border-accent/50",
+          className,
+        )}
       >
         {body}
       </Link>
     );
   }
-  return <div className="stat-card">{body}</div>;
+  return <div className={clsx("stat-card", className)}>{body}</div>;
 }
 
 function CountUpValue({ n }: { n: number }) {

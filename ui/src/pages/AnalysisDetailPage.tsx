@@ -8,7 +8,7 @@ import { SkCard } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { AnalysisCard } from "@/components/AnalysisCard";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 
 // AnalysisDetailPage renders a single persisted analysis in full. The
 // record (including its finding) goes straight into AnalysisCard, whose

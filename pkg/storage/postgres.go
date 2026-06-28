@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -57,10 +58,66 @@ func NewPostgres(opts PostgresOptions) (Provider, error) {
 	return p, nil
 }
 
-// migrate applies every migrations/*.sql file in lexical order. Each
-// file is idempotent (IF NOT EXISTS), so re-running on an existing
-// database is a no-op.
+// migrationAdvisoryLockKey is the fixed 64-bit key dedicated to serializing
+// Versus schema-migration runs across every process sharing one Postgres. The
+// value is ASCII "VERSUSM1" (Versus schema Migration, v1) and MUST stay
+// constant forever: every Versus migrator — the OSS runner here and any
+// caller of WithMigrationLock — locks on this same key, so exactly one
+// migrates at a time and the rest wait. Changing it would silently let two
+// migrators run concurrently again.
+const migrationAdvisoryLockKey int64 = 0x5645525355534D31
+
+// WithMigrationLock serializes a schema-migration run across every process
+// that shares db's Postgres. It pins one pooled connection, takes a
+// session-level pg_advisory_lock on the dedicated migrationAdvisoryLockKey,
+// runs fn, then releases the lock — even if fn errors. When N replicas boot
+// at once against a fresh database, exactly one acquires the lock and runs
+// the DDL while the rest block on the lock; once it releases, the losers
+// proceed and find every table already present (the migrations are
+// idempotent), so concurrent first-boot is deterministic and never hits the
+// pg_type / pg_class catalog races that bare `CREATE TABLE IF NOT EXISTS`
+// suffers under concurrency.
+//
+// The lock is released two ways for safety: an explicit pg_advisory_unlock and
+// `defer conn.Close()` — closing the session drops every session-level
+// advisory lock it held, so the lock is freed even if the unlock call itself
+// errors. A subsequent (sequential) call therefore always acquires cleanly and
+// never deadlocks. The helper is generic OSS storage hardening: it carries no
+// tier or migration-set knowledge, so an enterprise migration runner sharing
+// the same pool can wrap its own run in the same WithMigrationLock(db, …) call
+// and serialize against the OSS run on this one key.
+func WithMigrationLock(db *sql.DB, fn func() error) error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("storage: migration lock: acquire connection: %w", err)
+	}
+	// Closing the pinned session releases any session-level advisory lock it
+	// still holds, so the lock can never leak past this function.
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", migrationAdvisoryLockKey); err != nil {
+		return fmt.Errorf("storage: migration lock: acquire: %w", err)
+	}
+	defer func() {
+		_, _ = conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", migrationAdvisoryLockKey)
+	}()
+
+	return fn()
+}
+
+// migrate runs the OSS schema migrations under the shared migration advisory
+// lock so concurrent first-boot replicas serialize instead of racing the
+// Postgres catalog. The actual file application is unchanged from the
+// single-instance path (see applyMigrations).
 func (p *postgresProvider) migrate() error {
+	return WithMigrationLock(p.db, p.applyMigrations)
+}
+
+// applyMigrations applies every migrations/*.sql file in lexical order. Each
+// file is idempotent (IF NOT EXISTS), so re-running on an existing database
+// is a no-op. Callers serialize it via WithMigrationLock.
+func (p *postgresProvider) applyMigrations() error {
 	entries, err := fs.ReadDir(migrationFiles, "migrations")
 	if err != nil {
 		return fmt.Errorf("read migrations dir: %w", err)
@@ -139,6 +196,48 @@ func (p *postgresProvider) WriteBlob(name string, data []byte) error {
 		return fmt.Errorf("storage: write blob %q: %w", name, err)
 	}
 	return nil
+}
+
+// CreateBlobIfAbsent implements the optional storage.BlobCreator capability
+// (X9-T11) on the shared, multi-writer Postgres backend — the HA substrate.
+// It is the atomic single-writer election: `INSERT … ON CONFLICT DO NOTHING`
+// inserts only when the row is absent, so among N replicas racing to
+// generate the same secret exactly one INSERT affects a row (written==true)
+// and the rest no-op (written==false). The read-after-write confirms the
+// authoritative row is durably present before returning, so the loser of the
+// race can immediately ReadBlob(name) and adopt the winner's bytes. The table
+// is chosen from the fixed blobTables allowlist (never caller input) and the
+// name/data are bound as parameters, matching the package's parameterized-SQL
+// convention.
+func (p *postgresProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error) {
+	ins := fmt.Sprintf(`
+		INSERT INTO %s (name, data, updated_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (name) DO NOTHING
+	`, blobTable(name))
+	res, err := p.db.Exec(ins, name, data)
+	if err != nil {
+		return false, fmt.Errorf("storage: create blob %q: %w", name, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("storage: create blob %q rows: %w", name, err)
+	}
+	written := n == 1
+
+	// Read-after-write: the authoritative row MUST exist now (we either
+	// inserted it or a concurrent writer did). Confirming it before returning
+	// guarantees the post-condition that ReadBlob(name) observes the one
+	// surviving value for every caller.
+	sel := fmt.Sprintf(`SELECT 1 FROM %s WHERE name = $1`, blobTable(name))
+	var present int
+	if err := p.db.QueryRow(sel, name).Scan(&present); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("storage: create blob %q: row absent after write", name)
+		}
+		return false, fmt.Errorf("storage: create blob %q read-after-write: %w", name, err)
+	}
+	return written, nil
 }
 
 // ListBlobs returns every blob whose name begins with prefix. A model-state

@@ -140,6 +140,7 @@ function SecretForm({
   const [show, setShow] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const { theme } = useTheme();
   // Login-screen SSO option: only the standalone screen probes whether the
   // deployment has SSO configured, and only then offers the provider button.
   const [sso, setSso] = useState<SSOStatus | null>(null);
@@ -286,7 +287,6 @@ function SecretForm({
     requireSso: Boolean(sso?.require_sso),
   });
 
-  const { theme } = useTheme();
   // Sidebar is force-dark, so we always show the light (white) logo —
   // unless the app theme is light, in which case we show the dark logo
   // so it stays visible if the sidebar ever inherits the light surface.

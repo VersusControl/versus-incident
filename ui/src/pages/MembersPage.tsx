@@ -26,7 +26,7 @@ import { Modal } from "@/components/Modal";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 
 // RbacBinding is what the enterprise RBAC members surface contributes to one
 // roster row: the member's effective role and the subject the role-change

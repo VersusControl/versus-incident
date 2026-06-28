@@ -29,7 +29,7 @@ import { adminGateState } from "@/lib/role";
 import { AdminAccessNotice } from "@/components/AdminAccessNotice";
 import { EnterpriseLockedBody } from "@/components/EnterpriseLocked";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 
 // AgentSSOConnectionsControl — the operator surface for the Enterprise
 // multi-IdP "connections" (the Keycloak-style identity-provider list). An org

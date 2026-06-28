@@ -14,7 +14,7 @@ import { PeekPanel } from "@/components/PeekPanel";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 
 // Verdict filter is URL-synced via SegmentedControl. "uncurated" is a real
 // sentinel value mapping to verdict === "" — never an <option value="">

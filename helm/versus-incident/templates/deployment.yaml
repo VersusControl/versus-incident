@@ -1,3 +1,25 @@
+{{- if .Values.ha.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "versus-incident.fullname" . }}
+  labels:
+    {{- include "versus-incident.labels" . | nindent 4 }}
+spec:
+  # Stable network identity + ordered pod names. Each pod's trailing ordinal
+  # (versus-incident-0, -1, -2) is the authoritative instance index the binary
+  # reads from POD_NAME (Downward API below) to partition signal sources and
+  # the SLO scheduler job by hash-ownership.
+  serviceName: {{ include "versus-incident.headlessServiceName" . }}
+  replicas: {{ .Values.replicaCount }}
+  podManagementPolicy: {{ .Values.ha.podManagementPolicy | default "Parallel" }}
+  updateStrategy:
+    {{- toYaml .Values.ha.updateStrategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "versus-incident.selectorLabels" . | nindent 6 }}
+  template:
+{{- else }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -10,6 +32,7 @@ spec:
     matchLabels:
       {{- include "versus-incident.selectorLabels" . | nindent 6 }}
   template:
+{{- end }}
     metadata:
       labels:
         {{- include "versus-incident.selectorLabels" . | nindent 8 }}
@@ -18,10 +41,38 @@ spec:
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "versus-incident.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | default 30 }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and .Values.ha.enabled .Values.ha.antiAffinity.enabled }}
+      affinity:
+        podAntiAffinity:
+          {{- if .Values.ha.antiAffinity.hard }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "versus-incident.selectorLabels" . | nindent 18 }}
+              topologyKey: {{ .Values.ha.antiAffinity.topologyKey | default "kubernetes.io/hostname" }}
+          {{- else }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "versus-incident.selectorLabels" . | nindent 20 }}
+                topologyKey: {{ .Values.ha.antiAffinity.topologyKey | default "kubernetes.io/hostname" }}
+          {{- end }}
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
-          image: "{{ .Values.image.repository }}:v{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.image.repository }}:{{ include "versus-incident.imageTag" . }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.config.port }}
@@ -40,10 +91,43 @@ spec:
                   name: {{ include "versus-incident.fullname" . }}-secrets
                   key: gateway_secret
 
-            {{- /* Storage backend (file backend honored by the binary today). */}}
-            {{- if .Values.storage.type }}
+            {{- /* HA / multi-instance identity (epic X9). On a StatefulSet the
+                   POD_NAME trailing ordinal (Downward API) is the authoritative
+                   instance index; INSTANCE_COUNT is the replica count. The
+                   binary partitions signal sources + the SLO scheduler job by
+                   hash-ownership so exactly one replica owns each. HA is an
+                   enterprise capability, so LICENSE_KEY is required. */}}
+            {{- if .Values.ha.enabled }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: INSTANCE_COUNT
+              value: {{ .Values.replicaCount | quote }}
+            - name: LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.licenseSecretName" . }}
+                  key: {{ include "versus-incident.licenseSecretKey" . }}
+            {{- if or .Values.enterprise.secretKey .Values.enterprise.secretKeyExistingSecret }}
+            - name: VERSUS_ENTERPRISE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.enterpriseSecretKeyName" . }}
+                  key: {{ include "versus-incident.enterpriseSecretKeyKey" . }}
+            {{- end }}
+            {{- end }}
+
+            {{- /* Storage backend. HA derives postgres (shared multi-writer
+                   store); the binary log.Fatals on file + INSTANCE_COUNT>1. */}}
             - name: STORAGE_TYPE
-              value: {{ .Values.storage.type | quote }}
+              value: {{ include "versus-incident.storageType" . | quote }}
+            {{- if eq (include "versus-incident.storageType" .) "postgres" }}
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.postgresSecretName" . }}
+                  key: {{ include "versus-incident.postgresSecretKey" . }}
             {{- end }}
 
             {{- /* Agent (opt-in). Detect mode requires agent.ai.apiKey. */}}
@@ -452,10 +536,14 @@ spec:
               mountPath: /app/config/tools.yaml
               subPath: tools.yaml
             {{- end }}
-            {{- if eq (.Values.storage.type | default "file") "file" }}
+            {{- if eq (include "versus-incident.storageType" .) "file" }}
             - name: data-volume
               mountPath: /app/data
             {{- end }}
+            {{- /* Writable scratch — keeps the container working with
+                   readOnlyRootFilesystem=true (securityContext hardening). */}}
+            - name: tmp
+              mountPath: /tmp
             {{- if .Values.templates.slack }}
             - name: config-volume
               mountPath: /app/config/slack_message.tmpl
@@ -485,7 +573,9 @@ spec:
         - name: config-volume
           configMap:
             name: {{ include "versus-incident.fullname" . }}-config
-        {{- if eq (.Values.storage.type | default "file") "file" }}
+        - name: tmp
+          emptyDir: {}
+        {{- if eq (include "versus-incident.storageType" .) "file" }}
         - name: data-volume
           {{- if .Values.storage.persistence.enabled }}
           persistentVolumeClaim:

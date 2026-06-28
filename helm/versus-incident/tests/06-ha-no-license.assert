@@ -1,0 +1,2 @@
+# EXPECT_FAIL — ha.enabled without a license is rejected.
+requires a license

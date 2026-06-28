@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { ErrorBox } from "@/components/feedback";
 import { Modal } from "./Modal";
-import { useToast } from "./Toast";
+import { useToast } from "./toastContext";
 
 // AssignDialog — set/clear the team and members on an incident. Rebased on
 // the accessible Modal; success now confirms via toast (audit S3 class:
