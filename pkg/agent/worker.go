@@ -183,6 +183,48 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 	return w, nil
 }
 
+// agentName returns the agent identifier passed to the mode resolver.
+// The agent config carries no name field today, so this is the empty
+// string; it exists as the single seam the resolver keys on, ready for a
+// real identifier without touching the call site.
+func (w *Worker) agentName() string { return "" }
+
+// effectiveMode resolves the lifecycle mode for one tick. It starts from
+// the static YAML floor (cfg.Mode, defaulting to training) and lets a
+// registered ModeResolver override it. It fails closed: a nil resolver, an
+// ok=false result, or an invalid mode all keep the YAML floor. OSS
+// registers no resolver, so this is one nil-check and returns cfg.Mode —
+// byte-for-byte unchanged.
+func (w *Worker) effectiveMode(ctx context.Context) string {
+	yaml := w.cfg.Mode
+	if yaml == "" {
+		yaml = "training"
+	}
+	if r := modeResolver(); r != nil {
+		if m, ok := r.Mode(ctx, w.agentName()); ok && isValidMode(m) {
+			return m
+		}
+	}
+	return yaml
+}
+
+// effectiveAIEnabled reports whether the detect path should call the AI on
+// this tick. It starts from "enabled" (today's behaviour) and lets a
+// registered AISettingsResolver disable it at runtime. It fails open: a nil
+// resolver or an ok=false result keeps today's behaviour, so the worker
+// runs the real detect call exactly as before. OSS registers no resolver,
+// so this is one nil-check returning true — byte-for-byte unchanged. The
+// resolver is read live, so a hot toggle takes effect on the next call
+// without a restart.
+func (w *Worker) effectiveAIEnabled(ctx context.Context) bool {
+	if r := aiSettingsResolver(); r != nil {
+		if enabled, ok := r.EffectiveEnabled(ctx); ok {
+			return enabled
+		}
+	}
+	return true
+}
+
 // Run drives the worker until ctx is canceled. It is intended to be called
 // in a goroutine from cmd/main.go.
 func (w *Worker) Run(ctx context.Context) {
@@ -192,6 +234,15 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 	log.Printf("agent: starting worker mode=%s sources=%d poll=%s",
 		mode, len(w.sources), w.pollInterval)
+
+	// Surface the dead-end config once at boot: detect mode wants to emit
+	// incidents but AI is disabled, so the detect path runs dry. Only warn
+	// in community mode — when a runtime AISettingsResolver is registered
+	// the enable flag can switch AI on later, so it is not a dead end. The
+	// configured mode is left untouched.
+	if mode == "detect" && !w.cfg.AI.Enable && aiSettingsResolver() == nil {
+		log.Printf("agent: WARN detect mode configured but AI disabled — running dry detect, no incidents will be emitted")
+	}
 
 	// Start the recurring-evaluation scheduler (E13). It runs registered
 	// read-only / analyze-kind jobs on their own interval, bound to this
@@ -209,8 +260,10 @@ func (w *Worker) Run(ctx context.Context) {
 	defer persist.Stop()
 
 	// Run one tick immediately so users don't wait `poll_interval` for
-	// signs of life.
-	w.tick(ctx, mode)
+	// signs of life. The effective mode is resolved at the top of every
+	// tick (see tick), so a registered resolver can hot-switch it without
+	// a restart; OSS resolves to the YAML floor unchanged.
+	w.tick(ctx)
 
 	for {
 		select {
@@ -231,7 +284,7 @@ func (w *Worker) Run(ctx context.Context) {
 			}
 			return
 		case <-tick.C:
-			w.tick(ctx, mode)
+			w.tick(ctx)
 		case <-persist.C:
 			if w.catalog.Dirty() {
 				if err := w.catalog.Persist(); err != nil {
@@ -259,8 +312,12 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 // tick runs one poll across every source. Errors from one source never
-// affect the others — the worker keeps moving.
-func (w *Worker) tick(ctx context.Context, mode string) {
+// affect the others — the worker keeps moving. The effective lifecycle
+// mode is resolved once here, at the top of the cycle, so every source in
+// this tick runs under one coherent mode and a hot-switch takes effect on
+// the next cycle.
+func (w *Worker) tick(ctx context.Context) {
+	mode := w.effectiveMode(ctx)
 	var wg sync.WaitGroup
 	for _, src := range w.sources {
 		wg.Add(1)
@@ -469,8 +526,13 @@ func (w *Worker) emitDetect(
 		RuleSeverity: result.RuleSeverity,
 	}
 
-	// 1. Dry detect — analyzer not configured.
-	if w.ai.Detect == nil {
+	// 1. Dry detect — analyzer not configured, or a runtime resolver
+	// disabled AI for this tick. In both cases: classify, log, do not call
+	// AI, do not emit. The resolver is read live so an enterprise off→on
+	// toggle takes effect on the next call without a restart; OSS registers
+	// no resolver so this collapses to the original `w.ai.Detect == nil`
+	// check — byte-for-byte unchanged.
+	if w.ai.Detect == nil || !w.effectiveAIEnabled(ctx) {
 		log.Printf("%sagent[detect:dry]: pattern=%s service=%s verdict=%s freq=%d (ai.enable=false)%s",
 			colorGreen, patternID, service, verdict, len(signals), colorReset)
 		evt.Outcome = "dry"

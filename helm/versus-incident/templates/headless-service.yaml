@@ -1,0 +1,24 @@
+{{- if .Values.ha.enabled }}
+# Headless Service for the StatefulSet — gives each replica a stable DNS name
+# (<pod>.<headless>.<ns>.svc) and backs the StatefulSet's serviceName. The
+# regular ClusterIP Service (service.yaml) is what the Ingress / load balancer
+# targets; this one exists so the StatefulSet has stable per-pod identity.
+# publishNotReadyAddresses keeps pod DNS resolvable during rollout.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "versus-incident.headlessServiceName" . }}
+  labels:
+    {{- include "versus-incident.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "versus-incident.selectorLabels" . | nindent 4 }}
+{{- end }}

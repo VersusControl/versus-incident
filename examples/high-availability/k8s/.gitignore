@@ -1,0 +1,4 @@
+# Never commit the local env — it carries the enterprise LICENSE_KEY + DSN.
+.env
+# A rendered/standalone Secret manifest, if you generate one instead of kustomize.
+secret.yaml

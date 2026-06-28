@@ -48,15 +48,20 @@ type Options struct {
 	BaseURL string
 	// Timeout caps each chat call. Defaults to 30s.
 	Timeout time.Duration
+	// AuthKeyFunc is an OPTIONAL per-request Authorization override passed
+	// straight to the chat model's transport. Nil (the OSS default) leaves
+	// the YAML-keyed header untouched.
+	AuthKeyFunc func(ctx context.Context) (key string, ok bool)
 }
 
 // New constructs a detect Agent. cfg must already be resolved for the
 // detect task (see config.AgentAIConfig.Resolve).
 func New(ctx context.Context, cfg config.AgentAIConfig, opts Options) (*Agent, error) {
 	chat, err := einowrap.NewChatModel(ctx, cfg, einowrap.Options{
-		HTTPClient: opts.HTTPClient,
-		BaseURL:    opts.BaseURL,
-		Timeout:    opts.Timeout,
+		HTTPClient:  opts.HTTPClient,
+		BaseURL:     opts.BaseURL,
+		Timeout:     opts.Timeout,
+		AuthKeyFunc: opts.AuthKeyFunc,
 	})
 	if err != nil {
 		return nil, err

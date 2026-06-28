@@ -1,0 +1,120 @@
+# Versus Enterprise — HA StatefulSet (3 replicas, ONE shared Postgres).
+#
+# Mirrors the Helm chart HA path. Each pod's name (versus-0, versus-1, versus-2)
+# is injected as POD_NAME via the Downward API; its trailing ordinal is the
+# authoritative instance index. INSTANCE_COUNT is the replica count. The binary
+# partitions signal sources + the SLO scheduler job by hash-ownership so the
+# replicas never double-page, and converges managed secrets through Postgres.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: versus
+  namespace: versus-ha
+  labels:
+    app.kubernetes.io/name: versus
+spec:
+  serviceName: versus-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: versus
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: versus
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # Spread replicas across nodes (preferred — won't block scheduling on a
+      # single-node kind/minikube cluster). Make it requiredDuring... on a real
+      # multi-node cluster.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: versus
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: versus
+          # Enterprise image — HA is an enterprise capability. Override the tag
+          # to pin a version.
+          image: ghcr.io/versuscontrol/versus-enterprise:dev
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            # --- HA / multi-instance identity (epic X9) ----------------------
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: INSTANCE_COUNT
+              value: "3"
+            # --- Storage: ONE shared Postgres (required for >1 replica) -------
+            - name: STORAGE_TYPE
+              value: postgres
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: versus-secrets
+                  key: postgres_dsn
+            # --- Enterprise license (required for HA features) ---------------
+            - name: LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: versus-secrets
+                  key: license_key
+            # --- Dev-only: session cookie over plain HTTP --------------------
+            # The data plane / admin UI is authenticated by a live session (the
+            # built-in default admin or SSO) — there is NO gateway secret. This
+            # drops the Secure cookie attribute so the session cookie survives
+            # plain HTTP (e.g. `kubectl port-forward`). Remove behind TLS/ingress.
+            - name: VERSUS_ENTERPRISE_COOKIE_INSECURE
+              value: "1"
+          # Graceful rollout: readiness gates traffic; liveness restarts a wedged
+          # pod. Both hit the OSS health endpoint.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /app/config/config.yaml
+              subPath: config.yaml
+            # Writable scratch for the read-only root filesystem.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: versus-config
+        - name: tmp
+          emptyDir: {}

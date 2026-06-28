@@ -7,13 +7,15 @@ import {
   type Team,
   type TeamInput,
 } from "@/lib/api";
+import { canManageTeams } from "@/lib/role";
+import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { EmptyState, ErrorBox } from "@/components/feedback";
 import { Pill } from "@/components/Pill";
 import { Modal } from "@/components/Modal";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
-import { useToast } from "@/components/Toast";
+import { useToast } from "@/components/toastContext";
 
 // TeamsPanel lets operators group members into named teams. Teams hold
 // an ordered MemberIDs list — the order is preserved by the backend and
@@ -29,6 +31,13 @@ export function TeamsPanel() {
     queryKey: ["members"],
     queryFn: api.listMembers,
   });
+
+  // Enterprise RBAC: on a licensed binary with a live session only admin/owner
+  // may manage teams (a normal user has no "own team"). Off the enterprise path
+  // teams are fully editable, exactly as today.
+  const access = useEffectiveRole();
+  const rbacActive = access.enterprise && access.hasSession;
+  const canManage = canManageTeams(rbacActive, access.isAdmin);
 
   const [q, setQ] = useState("");
   const [editing, setEditing] = useState<Team | "new" | null>(null);
@@ -87,9 +96,15 @@ export function TeamsPanel() {
             onChange={(e) => setQ(e.target.value)}
           />
         </div>
-        <button className="btn" onClick={() => setEditing("new")}>
-          <Plus size={12} /> Add team
-        </button>
+        {canManage && (
+          <button
+            className="btn"
+            data-testid="teams-add"
+            onClick={() => setEditing("new")}
+          >
+            <Plus size={12} /> Add team
+          </button>
+        )}
       </div>
 
       {teamsQ.isError && (
@@ -177,26 +192,32 @@ export function TeamsPanel() {
                     </td>
                     <td>
                       <div className="flex justify-end gap-1">
-                        <button
-                          className="btn"
-                          aria-label={`Edit team ${t.name}`}
-                          title="Edit"
-                          onClick={() => setEditing(t)}
-                        >
-                          <Pencil size={11} />
-                        </button>
-                        <button
-                          className="btn"
-                          aria-label={`Delete team ${t.name}`}
-                          title="Delete"
-                          disabled={del.isPending}
-                          onClick={() => {
-                            del.reset();
-                            setDeleting(t);
-                          }}
-                        >
-                          <Trash2 size={11} />
-                        </button>
+                        {canManage && (
+                          <>
+                            <button
+                              className="btn"
+                              data-testid={`team-edit-${t.id}`}
+                              aria-label={`Edit team ${t.name}`}
+                              title="Edit"
+                              onClick={() => setEditing(t)}
+                            >
+                              <Pencil size={11} />
+                            </button>
+                            <button
+                              className="btn"
+                              data-testid={`team-delete-${t.id}`}
+                              aria-label={`Delete team ${t.name}`}
+                              title="Delete"
+                              disabled={del.isPending}
+                              onClick={() => {
+                                del.reset();
+                                setDeleting(t);
+                              }}
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          </>
+                        )}
                       </div>
                     </td>
                   </tr>

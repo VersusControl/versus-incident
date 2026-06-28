@@ -1,0 +1,25 @@
+# Minimal single-binary Tempo config for the optional traces overlay.
+# Receives OTLP over HTTP (:4318) from the loadgen and serves the search
+# API on :3200 that the Enterprise `traces` source / `query_traces` tool query.
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+ingester:
+  max_block_duration: 5m
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal

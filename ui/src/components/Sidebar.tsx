@@ -7,10 +7,10 @@ import {
   Flame,
   LineChart,
   Lock,
-  LogOut,
   ScrollText,
   Server,
   Settings,
+  ShieldCheck,
   Sparkles,
   Users,
   Waypoints,
@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { useQuery } from "@tanstack/react-query";
-import { api, ApiError, clearSecret } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { useOpenIncidentCount } from "@/lib/hooks";
 import { useTheme } from "@/lib/theme";
 
@@ -118,6 +118,8 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
     },
     { to: "/agent/decisions", label: "Decisions", icon: Sparkles },
     { to: "/agent/services", label: "Services", icon: Server },
+  ];
+  const tools: SideItem[] = [
     {
       to: "/agent/runbooks",
       label: "Runbooks",
@@ -132,6 +134,7 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   ];
   const manage: SideItem[] = [
     { to: "/people", label: "People", icon: Users },
+    { to: "/admin", label: "Admin", icon: ShieldCheck },
     { to: "/settings", label: "Settings", icon: Settings },
   ];
 
@@ -144,22 +147,9 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       <nav aria-label="Primary" className="dark-scroll flex-1 overflow-y-auto px-2 py-2">
         <Zone title="Respond" items={respond} onNavigate={onNavigate} />
         <Zone title="Agent" items={agent} onNavigate={onNavigate} />
+        <Zone title="Tools" items={tools} onNavigate={onNavigate} />
         <Zone title="Manage" items={manage} onNavigate={onNavigate} />
       </nav>
-
-      <div className="border-t border-ink-800 px-2 py-2">
-        <button
-          className="flex w-full items-center gap-2 rounded-control px-3 py-2
-                     text-xs text-ink-100 hover:bg-ink-800 hover:text-ink-50"
-          onClick={() => {
-            clearSecret();
-            window.location.reload();
-          }}
-        >
-          <LogOut size={14} />
-          Sign out
-        </button>
-      </div>
     </div>
   );
 }

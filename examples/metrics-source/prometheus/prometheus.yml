@@ -1,0 +1,22 @@
+# Prometheus scrape config for the Versus Enterprise `metrics-source` example.
+# Scrapes the Pushgateway (which the host-run generator
+# `scripts/generate_fake_metrics.py` pushes synthetic series to) and itself.
+#
+# honor_labels: true preserves the `service` / `code` / `le` labels carried in
+# the pushed exposition instead of letting Prometheus overwrite them with the
+# pushgateway's own job/instance — so the enterprise source's PromQL keeps
+# matching. This mirrors the OSS metrics example exactly.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: pushgateway
+    honor_labels: true
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["pushgateway:9091"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

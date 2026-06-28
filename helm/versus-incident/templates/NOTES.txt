@@ -6,6 +6,24 @@
    http://<service-address>:{{ .Values.service.port }}/api/incidents
 {{- end }}
 
+{{- if .Values.ha.enabled }}
+
+HIGH AVAILABILITY (enterprise) is ENABLED:
+  - Workload : StatefulSet, {{ .Values.replicaCount }} replicas ({{ include "versus-incident.fullname" . }}-0 .. -{{ sub (int .Values.replicaCount) 1 }})
+  - Identity : each replica reads its index from the POD_NAME ordinal (Downward
+               API); INSTANCE_COUNT={{ .Values.replicaCount }}. Sources + the SLO
+               scheduler job are partitioned by hash-ownership (no duplicate pages).
+  - Storage  : postgres (shared across all replicas) — required for >1 replica.
+  - Headless : {{ include "versus-incident.headlessServiceName" . }} (stable per-pod DNS)
+  - Hardening: securityContext (non-root, read-only rootfs), {{ if .Values.ha.networkPolicy.enabled }}NetworkPolicy, {{ end }}{{ if .Values.ha.podDisruptionBudget.enabled }}PodDisruptionBudget, {{ end }}pod anti-affinity
+
+  Watch identity claim on boot:
+    kubectl logs {{ include "versus-incident.fullname" . }}-0 | grep "HA mode"
+
+  Secrets converge via Postgres — a session cookie or the break-glass admin token
+  minted on one replica validates on ALL replicas.
+{{- end }}
+
 {{- if .Values.alert.slack.enable }}
 2. Slack notifications are enabled.
 {{- end }}

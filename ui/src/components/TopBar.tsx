@@ -1,12 +1,21 @@
 import { useContext } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Menu, Moon, Search, Sun } from "lucide-react";
+import { LogOut, Menu, Moon, Search, Sun } from "lucide-react";
 import clsx from "clsx";
-import { api } from "@/lib/api";
+import {
+  api,
+  clearSecret,
+  getSsoSession,
+  localLogout,
+  ssoLogout,
+} from "@/lib/api";
+import { isLocalAdminSession } from "@/lib/localAdmin";
 import { useOpenIncidentCount } from "@/lib/hooks";
 import { useTheme } from "@/lib/theme";
-import { ShellContext } from "./AppShell";
+import { roleLabel, isAdminRole } from "@/lib/role";
+import { useEffectiveRole } from "@/lib/useEffectiveRole";
+import { ShellContext } from "./shellContext";
 
 // TopBar truth table (audit S6 — the old bar showed a red "Agent
 // unreachable" alarm during its own initial load and treated "disabled"
@@ -67,6 +76,8 @@ export function TopBar({ title, subtitle, actions }: Props) {
 
       <div className="flex shrink-0 items-center gap-3">
         {actions}
+        <TopBarIdentity />
+        <SignOutButton />
         <button
           aria-label={
             theme === "dark" ? "Switch to light theme" : "Switch to dark theme"
@@ -182,5 +193,90 @@ function AgentChip({
       <span aria-hidden className={clsx("h-1.5 w-1.5 rounded-full", dot)} />
       {label}
     </Link>
+  );
+}
+
+// SignOutButton relocates the former sidebar sign-out into the top bar, next
+// to TopBarIdentity. It reuses the EXACT revoke-then-clear handler the sidebar
+// used: revoke any established enterprise session (HttpOnly cookie) before
+// clearing local state — clearing the secret alone leaves the cookie valid and
+// AuthGate would re-admit on reload. The deployment-org probe 403s on a
+// community/OSS binary (no SSO) and is simply skipped, so a gateway-secret-only
+// operator just clears the secret. A BUILT-IN default-admin (local) session is
+// revoked via the local-admin logout route; an SSO session via the SSO route
+// (G4). Both revoke the same shared session cookie, so the SSO route is a safe
+// fallback when the session kind can't be determined.
+function SignOutButton() {
+  return (
+    <button
+      data-testid="sign-out"
+      aria-label="Sign out"
+      title="Sign out"
+      className="inline-flex items-center gap-1.5 rounded-full border border-ink-600
+                 px-2 py-0.5 text-2xs font-medium text-ink-300 hover:bg-ink-700
+                 hover:text-ink-100"
+      onClick={async () => {
+        try {
+          const dep = await api.getSSODeployment();
+          let local = false;
+          try {
+            local = isLocalAdminSession(await getSsoSession(dep.org));
+          } catch {
+            // No live session / cannot determine — fall through to SSO logout.
+          }
+          if (local) {
+            await localLogout();
+          } else {
+            await ssoLogout(dep.org);
+          }
+        } catch {
+          // No enterprise / no SSO session — nothing to revoke.
+        }
+        clearSecret();
+        window.location.reload();
+      }}
+    >
+      <LogOut size={13} aria-hidden />
+      <span className="hidden sm:inline">Sign out</span>
+    </button>
+  );
+}
+
+// TopBarIdentity mirrors the sidebar's SignedInIdentity in the shared page
+// header: WHO the operator is signed in as and their effective RBAC role. It
+// renders ONLY when a live SSO / built-in-admin session resolves (an enterprise
+// binary, signed in). On a community/OSS binary or a gateway-secret-only
+// operator the whoami 403s, so nothing renders — no layout shift, no error. It
+// reuses the SAME data path (useEffectiveRole → getSsoSession) and role helpers
+// (roleLabel / isAdminRole) as the sidebar so the two can never disagree.
+function TopBarIdentity() {
+  const access = useEffectiveRole();
+  if (access.loading || !access.hasSession) {
+    return null;
+  }
+  const sess = access.session.data;
+  if (!sess) {
+    return null;
+  }
+  const identity = sess.email?.trim() || sess.subject?.trim() || "Signed in";
+  const admin = isAdminRole(access.role);
+  return (
+    <div className="hidden min-w-0 items-center gap-2 sm:flex" title={identity}>
+      <span
+        data-testid="topbar-identity"
+        className="max-w-[16rem] truncate text-xs text-ink-300"
+      >
+        {identity}
+      </span>
+      <span
+        data-testid="topbar-role"
+        className={clsx(
+          "inline-flex items-center rounded-full px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide",
+          admin ? "bg-accent-subtle text-accent" : "bg-ink-700 text-ink-200",
+        )}
+      >
+        {roleLabel(access.role)}
+      </span>
+    </div>
   );
 }

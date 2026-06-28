@@ -1,0 +1,38 @@
+{{- if and .Values.ha.enabled .Values.ha.networkPolicy.enabled }}
+# Default-deny posture for the replica set: only the declared ingress reaches
+# the app port, and (optionally) egress is restricted. Egress defaults to
+# allow-all because the binary must reach Postgres, Redis, your IdP (SSO),
+# notification providers, and DNS — narrow ha.networkPolicy.egress to your
+# Postgres / Redis / IdP CIDRs in production.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "versus-incident.fullname" . }}
+  labels:
+    {{- include "versus-incident.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "versus-incident.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        # Same-namespace clients (e.g. an ingress-controller running in this
+        # namespace, or sidecars). Add ha.networkPolicy.extraIngress entries to
+        # admit an ingress controller in another namespace.
+        - podSelector: {}
+        {{- with .Values.ha.networkPolicy.extraIngress }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: {{ .Values.config.port }}
+          protocol: TCP
+  egress:
+    {{- if .Values.ha.networkPolicy.allowAllEgress }}
+    - {}
+    {{- else }}
+    {{- toYaml .Values.ha.networkPolicy.egress | nindent 4 }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,20 @@
+{{- if and .Values.ha.enabled .Values.ha.podDisruptionBudget.enabled }}
+# Keep the replica set available through voluntary disruptions (node drains,
+# rolling node upgrades). With minAvailable=1 a drain can never take the last
+# replica down, so the load balancer always has a healthy backend.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "versus-incident.fullname" . }}
+  labels:
+    {{- include "versus-incident.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.ha.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.ha.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ .Values.ha.podDisruptionBudget.minAvailable | default 1 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "versus-incident.selectorLabels" . | nindent 6 }}
+{{- end }}

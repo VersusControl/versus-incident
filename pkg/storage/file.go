@@ -93,6 +93,46 @@ func (p *fileProvider) WriteBlob(name string, data []byte) error {
 	return nil
 }
 
+// CreateBlobIfAbsent implements the optional storage.BlobCreator capability
+// (X9-T11) on the file backend. It is best-effort and coherent only on a
+// single node — the kernel's O_CREATE|O_EXCL guarantees exactly one creator
+// among concurrent openers on the same filesystem, which is the only place
+// file storage is allowed under HA (the X9-T3 guard forces Postgres for
+// count>1). An existing blob (created here or via WriteBlob) is left
+// untouched and the call returns written==false so the caller re-reads the
+// stored bytes via ReadBlob.
+func (p *fileProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error) {
+	target := p.blobPath(name)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return false, fmt.Errorf("storage: mkdir blob dir: %w", err)
+	}
+	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		return false, nil // key already present — caller re-reads via ReadBlob
+	}
+	if err != nil {
+		return false, fmt.Errorf("storage: create blob %s: %w", name, err)
+	}
+	// We are the sole creator. Write + fsync so the bytes survive a crash,
+	// mirroring writeFileAtomicSync's durability. On any failure, remove the
+	// file we created so a later create can retry cleanly.
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(target)
+		return false, fmt.Errorf("storage: create blob %s: %w", name, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(target)
+		return false, fmt.Errorf("storage: create blob %s: %w", name, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(target)
+		return false, fmt.Errorf("storage: create blob %s: %w", name, err)
+	}
+	return true, nil
+}
+
 // ListBlobs walks the data directory and returns every blob whose logical
 // name (the <DataDir>-relative path minus the ".json" suffix) begins with
 // prefix. The one-file-per-blob layout means a namespaced model-state name

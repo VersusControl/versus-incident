@@ -28,6 +28,17 @@ export function clearSecret() {
   localStorage.removeItem(SECRET_KEY);
 }
 
+// signIn verifies the gateway secret against the data plane and persists it.
+// The gateway secret is the read-only machine/data-plane credential (the OSS
+// path and the enterprise read path). Privileged enterprise management is no
+// longer unlocked by a static token here — it rides the SSO session (the RBAC
+// admin user). Throws ApiError(401) when the secret is rejected; other errors
+// propagate unchanged.
+export async function signIn(value: string): Promise<void> {
+  setSecret(value.trim());
+  await api.status();
+}
+
 // AUTH_EXPIRED_EVENT fires when a request that carried a secret comes back
 // 401 — i.e. the secret was rotated server-side mid-session. AppShell's
 // ReauthModal listens and re-prompts over the current page instead of
@@ -41,12 +52,24 @@ function notifyAuthExpired() {
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const secret = getSecret() ?? "";
   const headers = new Headers(init.headers);
-  headers.set("X-Gateway-Secret", secret);
+  // OSS/community authenticates the data plane with the gateway secret; the
+  // enterprise console authenticates with the HttpOnly session cookie
+  // (versus_enterprise_session) carried via credentials: same-origin and holds
+  // no secret. Attach the header ONLY when a secret is actually held, so a
+  // licensed binary never sends X-Gateway-Secret — session-only, no fallback.
+  if (secret) headers.set("X-Gateway-Secret", secret);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
-  const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
+  // credentials: "same-origin" so an established session cookie
+  // (versus_enterprise_session) rides along and authenticates the data plane
+  // on the enterprise path (built-in default admin or SSO).
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers,
+    credentials: "same-origin",
+  });
 
   if (res.status === 204) return undefined as T;
 
@@ -339,12 +362,16 @@ export interface RunbookUploadResult {
 async function uploadMultipart<T>(path: string, form: FormData): Promise<T> {
   const secret = getSecret() ?? "";
   const headers = new Headers();
-  headers.set("X-Gateway-Secret", secret);
+  // Attach the gateway secret ONLY when one is held (OSS/community). The
+  // enterprise console holds no secret and authenticates with the session
+  // cookie via credentials: same-origin.
+  if (secret) headers.set("X-Gateway-Secret", secret);
 
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers,
     body: form,
+    credentials: "same-origin",
   });
 
   if (res.status === 204) return undefined as T;
@@ -369,7 +396,450 @@ async function uploadMultipart<T>(path: string, form: FormData): Promise<T> {
   return body as T;
 }
 
-// ---------- Endpoints ----------
+// sessionRequest authenticates the privileged enterprise control plane with
+// the SSO session cookie (versus_enterprise_session) instead of a static
+// token. The cookie is HttpOnly, so it is sent automatically with
+// credentials: "same-origin"; no secret header is attached. The org and the
+// caller's RBAC role are derived server-side from the session, so the surface
+// is gated by the RBAC permission (sso:manage / runtime:manage / roles:manage
+// / audit:view) — fail-closed (401 no session, 403 insufficient role). Unlike
+// `request` it does NOT dispatch AUTH_EXPIRED_EVENT (the gateway-secret modal
+// must not hijack the SSO surface); the control renders the sign-in / role
+// hint itself off the status.
+async function sessionRequest<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (init.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers,
+    credentials: "same-origin",
+  });
+
+  if (res.status === 204) return undefined as T;
+
+  let body: unknown = null;
+  const text = await res.text();
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+  if (!res.ok) {
+    const msg =
+      (body && typeof body === "object" && "error" in body
+        ? String((body as { error: unknown }).error)
+        : null) || `HTTP ${res.status}`;
+    throw new ApiError(res.status, msg, body);
+  }
+  return body as T;
+}
+
+// ---------- Runtime mode override (Enterprise, RBAC runtime:manage) ----------
+
+export type AgentMode = "training" | "shadow" | "detect";
+
+// AgentModeView mirrors the enterprise pkg/runtimemode handler shape. The
+// endpoint is Enterprise-gated and authorized by the caller's RBAC role carried
+// by the SSO session (runtime:manage) — the SPA gates upfront on the role, so
+// these are terminal "not allowed" answers, not token prompts:
+//   403 — community / unlicensed, or a viewer/responder session → upsell / role notice
+//   404 — OSS binary (route absent)     → render the locked upsell
+//   503 — guard not wired server-side   → treated as "not enterprise"
+//   401 — no SSO session                → ask the caller to sign in
+export interface AgentModeView {
+  effective: AgentMode;
+  yaml: AgentMode;
+  override: AgentMode | ""; // "" when no override is set
+  source: "override" | "yaml";
+}
+
+// ---------- Runtime AI settings (Enterprise, RBAC runtime:manage) ----------
+
+// AISettingsView mirrors the enterprise pkg/runtimeai masked GET/PUT shape. It
+// is MASKED by contract — the server NEVER returns the API key, only whether
+// one is set (`key_set`) plus its last four chars (`last4`). `enabled` is the
+// EFFECTIVE enable (override when set, else the YAML floor); `source` is
+// "override" or "yaml"; `yaml_enabled` is the YAML `ai.enable` floor.
+//
+// The endpoint is Enterprise-gated and authorized by the SSO session's RBAC
+// role (runtime:manage), same status surface as the mode control:
+//   403 — community / unlicensed, or a viewer/responder session → upsell / role notice
+//   404 — OSS binary (route absent)     → render the locked upsell
+//   503 — guard not wired server-side   → treated as "not enterprise"
+//   401 — no SSO session                → ask the caller to sign in
+//   422 — `no_encryption_key` on a key write → server master key not set
+export interface AISettingsView {
+  enabled: boolean;
+  key_set: boolean;
+  last4: string;
+  yaml_enabled: boolean;
+  source: "override" | "yaml";
+}
+
+// AISettingsInput is the PUT body. `api_key` is OPTIONAL: omit/blank to toggle
+// `enabled` without resubmitting the key (the stored key persists). Never
+// persisted client-side — held transiently for the single PUT, then cleared.
+export interface AISettingsInput {
+  enabled: boolean;
+  api_key?: string;
+}
+
+// ---------- Enterprise multi-IdP connections (Keycloak-style, admin-gated) ----------
+
+export type SSOConnectionType = "google" | "azure" | "oidc";
+
+// SSOConnectionView mirrors the enterprise pkg/sso MaskedConnection. MASKED by
+// contract — the server NEVER returns the client secret, only whether one is
+// set and its last-4 hint. `issuer` is the RESOLVED issuer (derived for
+// google/azure, explicit for oidc) so the UI shows where logins go.
+export interface SSOConnectionView {
+  id: string;
+  type: SSOConnectionType;
+  display_name: string;
+  enabled: boolean;
+  client_id: string;
+  client_secret_set: boolean;
+  client_secret_last4?: string;
+  redirect_url: string;
+  scopes?: string[];
+  allowed_domains: string[];
+  azure_tenant?: string;
+  issuer: string;
+}
+
+export interface SSOConnectionsEnvelope {
+  org: string;
+  connections: SSOConnectionView[];
+}
+
+export interface SSOConnectionEnvelope {
+  org: string;
+  connection: SSOConnectionView;
+}
+
+// SSOConnectionInput is the PUT body for one connection. `client_secret` is
+// OPTIONAL: omit/blank to update the non-secret fields without re-sealing the
+// stored secret. For google/azure the issuer is derived server-side; for oidc
+// supply `issuer`. For azure, `azure_tenant` selects the directory (blank ⇒
+// the multi-tenant `common` authority).
+export interface SSOConnectionInput {
+  type: SSOConnectionType;
+  display_name: string;
+  enabled: boolean;
+  client_id: string;
+  client_secret?: string;
+  redirect_url: string;
+  scopes: string[];
+  allowed_domains: string[];
+  azure_tenant?: string;
+  issuer?: string;
+}
+
+// ---------- Enterprise SSO enforcement policy (X4-T4, RBAC sso:manage, per-org) ----------
+
+// SSOPolicyView mirrors the enterprise pkg/sso PolicyView. `require_sso`
+// enforces single sign-on for human access to the org: human users sign in
+// through a configured IdP (the built-in default admin stays available as a
+// break-glass account; the gateway secret is OSS machine/data-plane only and is
+// never a human login on a licensed binary). `require_mfa` (only meaningful
+// with `require_sso`) is the LIVE multi-factor gate — it additionally rejects
+// any SSO login the IdP did not report as multi-factor. The policy + config
+// endpoints are authorized by the caller's SSO-session RBAC role (sso:manage),
+// so an admin can always lift a misconfigured policy from a live session.
+export interface SSOPolicyView {
+  require_sso: boolean;
+  require_mfa: boolean;
+  updated_at?: string;
+  by?: string;
+}
+
+// SSOPolicyEnvelope is the GET / PUT response wrapper.
+export interface SSOPolicyEnvelope {
+  org: string;
+  policy: SSOPolicyView;
+}
+
+// SSOPolicyInput is the PUT body. The server refuses `require_sso` for an org
+// with no enabled IdP config (422 `sso_not_configured`) so an admin can't lock
+// the org out.
+export interface SSOPolicyInput {
+  require_sso: boolean;
+  require_mfa: boolean;
+}
+
+// SSOStatus is the PUBLIC, unauthenticated login-screen probe (no gateway
+// secret). It carries NOTHING sensitive — only whether SSO is
+// enabled for the org and the enabled IdP connections to render a login button
+// for. Any error (OSS binary with the route absent → 404, community mode →
+// 403, network) is swallowed to { enabled: false } so the login screen simply
+// omits the SSO buttons.
+export interface SSOStatus {
+  enabled: boolean;
+  // require_sso is set when the org ENFORCES SSO for human sign-in. The login
+  // screen then offers the IdP button(s) as the way in (on OSS it also drops
+  // the gateway-secret fallback; the gateway secret is never a human login on a
+  // licensed binary).
+  require_sso?: boolean;
+  // connections lists the enabled multi-IdP connections: the login screen
+  // renders one "Sign in with <display_name>" button per entry. SSO is
+  // configured and logged in SOLELY through these — there is no single-config
+  // fallback, so an empty/absent list means no SSO button is shown.
+  connections?: SSOStatusConnection[];
+}
+
+// SSOStatusConnection is one enabled IdP connection on the public login probe:
+// nothing sensitive, just enough to render and start one login button.
+export interface SSOStatusConnection {
+  id: string;
+  type: "google" | "azure" | "oidc";
+  display_name: string;
+  login_url: string;
+}
+
+// SSODeployment is the pre-auth deployment-org probe. The single-tenant binary
+// serves SSO under ONE org sourced from the LICENSE_KEY (not a hardcoded
+// "default"); the UI reads it here — without a session — to
+// drive SSO status/config/connections under that org. The endpoint is inside
+// the enterprise license gate, so a community/unlicensed binary returns 403
+// (the UI treats that as "not enterprise" and offers no SSO).
+export interface SSODeployment {
+  org: string;
+}
+
+// getSSODeployment reads the single-tenant deployment org (license-issued).
+// Plain GET, no gateway secret — the endpoint exposes only the
+// non-secret org id. THROWS ApiError on a non-2xx response (notably 403 in
+// community mode), so the caller can fall back to the non-SSO path.
+export async function getSSODeployment(): Promise<SSODeployment> {
+  const res = await fetch(`${API_BASE}/enterprise/api/sso/deployment`);
+  if (!res.ok) {
+    throw new ApiError(res.status, `HTTP ${res.status}`, null);
+  }
+  return (await res.json()) as SSODeployment;
+}
+
+// getSsoStatus probes whether an org offers SSO, for the login screen's
+// "Sign in with <provider>" button. Deliberately uses a bare fetch (no
+// X-Gateway-Secret): the endpoint is public within the
+// enterprise license gate. Never throws — failures collapse to disabled.
+export async function getSsoStatus(org: string): Promise<SSOStatus> {
+  try {
+    const res = await fetch(
+      `${API_BASE}/enterprise/api/sso/${encodeURIComponent(org)}/status`,
+    );
+    if (!res.ok) return { enabled: false };
+    const body = (await res.json()) as SSOStatus;
+    return body?.enabled ? body : { enabled: false };
+  } catch {
+    return { enabled: false };
+  }
+}
+
+// ssoLogout revokes the caller's SSO session and clears the cookie. The
+// session cookie is sent automatically (same-origin); no secret is involved.
+// Best-effort — a failure still lets the UI fall back to clearing local state.
+export async function ssoLogout(org: string): Promise<void> {
+  try {
+    await fetch(
+      `${API_BASE}/enterprise/api/sso/${encodeURIComponent(org)}/logout`,
+      { method: "POST", credentials: "same-origin" },
+    );
+  } catch {
+    // ignore — logout is best-effort
+  }
+}
+
+// LocalLoginResult is the non-secret identity the built-in default-admin login
+// returns on success: the org-bound owner session it just minted.
+export interface LocalLoginResult {
+  org: string;
+  subject: string;
+  role: string;
+}
+
+// localLogin signs the built-in default admin in against the licensed local
+// login route (POST /enterprise/api/auth/local/login). It carries NO gateway
+// secret — the route sets the same HttpOnly enterprise session cookie an SSO
+// login does (credentials: "same-origin" so the Set-Cookie is honoured). It
+// THROWS ApiError so the form can branch on the status: 401 is a GENERIC
+// invalid-credentials answer (the server never distinguishes wrong-password
+// from disabled — no enumeration), 429 is the lockout, 403 is a
+// community/unlicensed binary.
+export async function localLogin(
+  username: string,
+  password: string,
+): Promise<LocalLoginResult> {
+  const res = await fetch(`${API_BASE}/enterprise/api/auth/local/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+    credentials: "same-origin",
+  });
+  let body: unknown = null;
+  const text = await res.text();
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+  if (!res.ok) {
+    const msg =
+      (body && typeof body === "object" && "error" in body
+        ? String((body as { error: unknown }).error)
+        : null) || `HTTP ${res.status}`;
+    throw new ApiError(res.status, msg, body);
+  }
+  return body as LocalLoginResult;
+}
+
+// localLogout revokes the caller's built-in-admin session and clears the cookie
+// via the local logout route (POST /enterprise/api/auth/local/logout). Like
+// ssoLogout it is best-effort and carries no secret — the session cookie is
+// sent automatically (same-origin).
+export async function localLogout(): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/enterprise/api/auth/local/logout`, {
+      method: "POST",
+      credentials: "same-origin",
+    });
+  } catch {
+    // ignore — logout is best-effort
+  }
+}
+
+// SSOSession is the caller's whoami: the non-secret identity of the current
+// established SSO session bound to the deployment org. The HttpOnly session
+// cookie is sent automatically (same-origin); no secret is involved.
+export interface SSOSession {
+  org: string;
+  email: string;
+  subject: string;
+  mfa: boolean;
+  amr?: string[];
+  // local marks a built-in default-admin (non-SSO) session. The sign-out
+  // affordance uses it to revoke via the local-admin logout route instead of
+  // the SSO one. Absent/false for an SSO session.
+  local?: boolean;
+  // role is the caller's EFFECTIVE RBAC role in the deployment org (viewer /
+  // responder / admin / owner). The SPA gates privileged controls on it — only
+  // admin/owner may manage; everyone else is read-only. "" / absent when the
+  // server could not resolve a role (treated as least-privileged).
+  role?: string;
+  issued_at: string;
+  expires_at: string;
+}
+
+// getSsoSession probes whether the browser holds a live SSO session for org.
+// The versus_enterprise_session cookie is HttpOnly, so it is sent automatically
+// with credentials: "same-origin"; the call carries no gateway secret or admin
+// token. THROWS ApiError(401) when there is no active session, and any other
+// non-2xx, so AuthGate can fall back to the gateway-secret screen.
+export async function getSsoSession(org: string): Promise<SSOSession> {
+  const res = await fetch(
+    `${API_BASE}/enterprise/api/sso/${encodeURIComponent(org)}/session`,
+    { credentials: "same-origin" },
+  );
+  if (!res.ok) {
+    throw new ApiError(res.status, `HTTP ${res.status}`, null);
+  }
+  return (await res.json()) as SSOSession;
+}
+
+// ---------- Enterprise RBAC members + default-admin (roles:manage, per-org) ----------
+
+// MemberRole is the set of assignable RBAC roles. viewer is the least-
+// privileged default; admin/owner are the privileged "admin user" roles.
+export type MemberRole = "viewer" | "responder" | "admin" | "owner";
+
+// MemberView is one row of the RBAC members surface: a provisioned member
+// joined with their EFFECTIVE role (direct assignment OR the highest team-
+// derived role). `role` is "" / absent for a member with no resolvable role.
+export interface MemberView {
+  subject: string;
+  email: string;
+  name?: string;
+  connection?: string;
+  role?: string;
+}
+
+export interface MembersEnvelope {
+  org: string;
+  members: MemberView[];
+}
+
+// BootstrapAdminStatus is the deployment default-admin ("admin user") state.
+// The default admin is the built-in non-SSO root account created on first
+// licensed boot. `can_disable` is the no-lockout guard: it may be turned off
+// only when at least one OTHER owner/admin exists, so disabling can never
+// strand the deployment.
+export interface BootstrapAdminStatus {
+  configured: boolean;
+  username?: string;
+  disabled?: boolean;
+  can_disable?: boolean;
+}
+
+// AuthProbe is the set of side-effecting checks resolveInitialAuth depends on,
+// injected so the decision logic is unit-testable without localStorage, fetch,
+// or a DOM. AuthGate wires the real implementations.
+export interface AuthProbe {
+  // hasSecret reports whether a gateway secret is already held.
+  hasSecret: () => boolean;
+  // checkSecret verifies the held secret against the data plane (api.status).
+  // Resolves on success; rejects with ApiError(401) when the secret is bad.
+  checkSecret: () => Promise<unknown>;
+  // deploymentOrg resolves the SSO deployment org (rejects on a non-enterprise
+  // / community binary).
+  deploymentOrg: () => Promise<string>;
+  // probeSession checks for a live SSO session for org (rejects with
+  // ApiError(401) when there is none).
+  probeSession: (org: string) => Promise<unknown>;
+}
+
+// resolveInitialAuth is the pure decision the AuthGate runs on mount. It
+// returns "ok" when the console should open and "needs-secret" when the
+// gateway-secret screen should show.
+//
+// Order of resolution:
+//   1. A held gateway secret is verified against the data plane.
+//      A 401 means the secret is stale -> needs-secret. A transient/non-401
+//      error deliberately does NOT trap the user -> ok (kept behavior).
+//   2. With no held secret, probe for an established SSO session: resolve the
+//      deployment org, then the session whoami. A live session opens the
+//      console (the cookie now authenticates the data plane). Any failure
+//      (community binary, 401 no-session, network) falls back to needs-secret.
+export async function resolveInitialAuth(
+  p: AuthProbe,
+): Promise<"ok" | "needs-secret"> {
+  if (p.hasSecret()) {
+    try {
+      await p.checkSecret();
+      return "ok";
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return "needs-secret";
+      // Transient/network error: don't trap the user behind the secret screen.
+      return "ok";
+    }
+  }
+  // No gateway secret: an established SSO session is a valid console entry.
+  try {
+    const org = await p.deploymentOrg();
+    await p.probeSession(org);
+    return "ok";
+  } catch {
+    return "needs-secret";
+  }
+}
 
 export const api = {
   status: () => request<Status>("/api/agent/status"),
@@ -402,6 +872,129 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     return request<BaselinesResponse>(`/api/agent/baselines${suffix}`);
   },
+
+  // Runtime mode override (Enterprise, RBAC runtime:manage). These ride the
+  // SSO session cookie via sessionRequest; the org and role are derived from
+  // the session server-side. A non-admin session is 403'd (fail-closed).
+  getAgentMode: () =>
+    sessionRequest<AgentModeView>("/enterprise/api/agent/mode"),
+  setAgentMode: (mode: AgentMode, confirm?: boolean) =>
+    sessionRequest<AgentModeView>("/enterprise/api/agent/mode", {
+      method: "PUT",
+      body: JSON.stringify(confirm ? { mode, confirm: true } : { mode }),
+    }),
+  clearAgentMode: () =>
+    sessionRequest<AgentModeView>("/enterprise/api/agent/mode", {
+      method: "DELETE",
+    }),
+
+  // Runtime AI settings (Enterprise, RBAC runtime:manage). Same sessionRequest
+  // plumbing as the mode control — the SSO session cookie, never a static
+  // token. getAISettings returns the MASKED view (no key, ever). setAISettings
+  // omits api_key when blank so the caller can toggle `enabled` without
+  // resubmitting the key; the key is passed straight through to the single PUT
+  // and never persisted client-side.
+  getAISettings: () =>
+    sessionRequest<AISettingsView>("/enterprise/api/agent/ai-settings"),
+  setAISettings: (enabled: boolean, apiKey?: string) => {
+    const key = apiKey?.trim() ?? "";
+    const body: AISettingsInput = key ? { enabled, api_key: key } : { enabled };
+    return sessionRequest<AISettingsView>("/enterprise/api/agent/ai-settings", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+  },
+  clearAISettings: () =>
+    sessionRequest<AISettingsView>("/enterprise/api/agent/ai-settings", {
+      method: "DELETE",
+    }),
+
+  // getSSODeployment reads the license-issued single-tenant deployment org so
+  // the admin controls drive SSO/connections/policy under it (not "default").
+  // Pre-auth (no session); 403 in community mode signals "not enterprise".
+  getSSODeployment: () => getSSODeployment(),
+
+  // Enterprise multi-IdP connections (Keycloak-style, RBAC sso:manage). Same
+  // sessionRequest plumbing as the SSO config control. The list/get views are
+  // MASKED (never the client secret). setSSOConnection OMITS client_secret when
+  // blank so the caller can toggle/edit without re-sealing the stored secret.
+  listSSOConnections: (org: string) =>
+    sessionRequest<SSOConnectionsEnvelope>(
+      `/enterprise/api/sso/${encodeURIComponent(org)}/connections`,
+    ),
+  getSSOConnection: (org: string, id: string) =>
+    sessionRequest<SSOConnectionEnvelope>(
+      `/enterprise/api/sso/${encodeURIComponent(org)}/connections/${encodeURIComponent(id)}`,
+    ),
+  setSSOConnection: (org: string, id: string, input: SSOConnectionInput) => {
+    const secret = input.client_secret?.trim() ?? "";
+    const body: SSOConnectionInput = { ...input };
+    if (secret) body.client_secret = secret;
+    else delete body.client_secret; // blank/omitted preserves the stored seal
+    return sessionRequest<SSOConnectionEnvelope>(
+      `/enterprise/api/sso/${encodeURIComponent(org)}/connections/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify(body) },
+    );
+  },
+  deleteSSOConnection: (org: string, id: string) =>
+    sessionRequest<{ org: string; deleted: boolean; connection: string }>(
+      `/enterprise/api/sso/${encodeURIComponent(org)}/connections/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
+
+  // Enterprise per-org SSO enforcement policy (X4-T4, RBAC sso:manage). Same
+  // sessionRequest plumbing as the SSO config control. setSSOPolicy with
+  // require_sso=true ENFORCES SSO for human sign-in (and gates require_mfa); the
+  // server rejects it (422 sso_not_configured) unless an enabled IdP config
+  // exists, so it can't strand the org.
+  getSSOPolicy: (org: string) =>
+    sessionRequest<SSOPolicyEnvelope>(
+      `/enterprise/api/sso/${encodeURIComponent(org)}/policy`,
+    ),
+  setSSOPolicy: (org: string, input: SSOPolicyInput) =>
+    sessionRequest<SSOPolicyEnvelope>(
+      `/enterprise/api/sso/${encodeURIComponent(org)}/policy`,
+      { method: "PUT", body: JSON.stringify(input) },
+    ),
+
+  // Enterprise RBAC members + role administration (roles:manage, per-org). Same
+  // sessionRequest plumbing as the SSO controls — the SSO session cookie, never
+  // a static token. listRbacMembers joins the member directory with each
+  // subject's effective role; setMemberRole assigns a direct role to one
+  // subject. (Named distinctly from the OSS responder-roster listMembers below,
+  // which is a different surface — the incident on-call directory.)
+  listRbacMembers: (org: string) =>
+    sessionRequest<MembersEnvelope>(
+      `/enterprise/api/rbac/${encodeURIComponent(org)}/members`,
+    ),
+  setMemberRole: (org: string, subject: string, role: MemberRole) =>
+    sessionRequest<{ org: string; subject: string; role: string }>(
+      `/enterprise/api/rbac/${encodeURIComponent(org)}/roles/${encodeURIComponent(subject)}`,
+      { method: "PUT", body: JSON.stringify({ role }) },
+    ),
+
+  // Deployment default-admin ("admin user") status + disable (roles:manage).
+  // getBootstrapAdmin reports whether one is configured and whether it can be
+  // disabled (the no-lockout guard). disableBootstrapAdmin turns off the
+  // built-in default admin; the server refuses it (422 no_other_admin) unless
+  // another owner/admin exists, so the deployment can never be stranded.
+  getBootstrapAdmin: (org: string) =>
+    sessionRequest<BootstrapAdminStatus>(
+      `/enterprise/api/rbac/${encodeURIComponent(org)}/bootstrap-admin`,
+    ),
+  disableBootstrapAdmin: (org: string) =>
+    sessionRequest<{ org: string; disabled: boolean }>(
+      `/enterprise/api/rbac/${encodeURIComponent(org)}/bootstrap-admin/disable`,
+      { method: "POST" },
+    ),
+  // enableBootstrapAdmin turns a disabled built-in default admin back on
+  // (owner break-glass). It only widens access, so the server applies no
+  // no-lockout check.
+  enableBootstrapAdmin: (org: string) =>
+    sessionRequest<{ org: string; disabled: boolean }>(
+      `/enterprise/api/rbac/${encodeURIComponent(org)}/bootstrap-admin/enable`,
+      { method: "POST" },
+    ),
 
   listShadow: () =>
     request<{ events: ShadowEvent[] }>("/api/agent/shadow").then(

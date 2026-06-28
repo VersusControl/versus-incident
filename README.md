@@ -9,13 +9,13 @@
 </p>
 
 <p align="center">
-  <strong>Versus Incident is the self-hosted AI SRE agent.</strong> It learns what your logs
+  <strong>Versus Incident is the self-hosted AI SRE agent.</strong> It learns what your systems
   normally look like and escalates only what is new or unexpected issues — routing to your chat channels and
   on-call platform.
 </p>
 
 <p align="center">
-  Free with MIT license · <a href="https://docs.versusincident.com/#/pricing">Enterprise Pricing</a>
+  Free with MIT license · <a href="https://versusincident.com/pricing" target="_blank">Enterprise Pricing</a>
 </p>
 
 ![Versus](src/docs/images/versus-dashboard-01.png)

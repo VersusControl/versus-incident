@@ -44,7 +44,7 @@ const STATUS_TOOLTIP =
   "Still learning: the agent is gathering samples and won't flag this signal yet. Ready: it has seen enough to flag unusual behaviour.";
 
 const READONLY_NOTE =
-  "The agent learns these on its own — nothing to set up or edit here.";
+  "The agent learns these on its own.";
 
 type Variant = {
   kind: "metric" | "trace";
@@ -156,7 +156,7 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
     error instanceof ApiError &&
     (error.status === 403 || error.status === 404);
 
-  const rows = data?.baselines ?? [];
+  const rows = useMemo(() => data?.baselines ?? [], [data]);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();

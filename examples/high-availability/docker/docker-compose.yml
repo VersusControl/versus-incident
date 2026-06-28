@@ -1,0 +1,106 @@
+# Versus Enterprise — HA on Docker Compose.
+#
+# Two enterprise replicas (versus-0, versus-1) behind an nginx load balancer,
+# sharing ONE Postgres. Hit http://localhost:8080 and nginx round-robins across
+# both replicas; a session established on one is served by the other because the
+# session key / admin-token hash / AI master key converge through Postgres.
+#
+# Each replica gets a distinct identity via POD_NAME (versus-0 -> index 0,
+# versus-1 -> index 1) + INSTANCE_COUNT=2 — the same mechanism the StatefulSet
+# uses, just set explicitly here. The binary partitions signal sources + the SLO
+# scheduler job by hash-ownership so the two replicas never double-page.
+#
+# LICENSE_KEY comes from a GITIGNORED .env (cp .env.example .env). NEVER commit a
+# real key. Without a license the stack still boots (community mode) so you can
+# see the topology + per-replica instance index; the SSO / session-convergence
+# proof needs a real key.
+
+name: versus-ha
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: versus-ha-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-versus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-versus}
+      POSTGRES_DB: ${POSTGRES_DB:-versus}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  # --- Replica 0 -------------------------------------------------------------
+  versus-0: &versus
+    image: ${VERSUS_ENTERPRISE_IMAGE:-ghcr.io/versuscontrol/versus-enterprise:dev}
+    container_name: versus-ha-0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: &versus-env
+      # Storage: ONE shared Postgres (required for >1 replica). Both replicas
+      # point at the SAME DSN.
+      STORAGE_TYPE: postgres
+      POSTGRES_DSN: postgres://${POSTGRES_USER:-versus}:${POSTGRES_PASSWORD:-versus}@postgres:5432/${POSTGRES_DB:-versus}?sslmode=disable
+      # HA identity. POD_NAME's trailing ordinal is THIS replica's index.
+      POD_NAME: versus-0
+      INSTANCE_COUNT: "2"
+      # Enterprise license (required for HA features). Empty => community mode.
+      LICENSE_KEY: ${LICENSE_KEY:-}
+      # Dev-only: drop the Secure cookie attribute so the session cookie works
+      # over plain HTTP through the local load balancer. NEVER set in production.
+      VERSUS_ENTERPRISE_COOKIE_INSECURE: "1"
+    volumes:
+      - ./config:/app/config:ro
+      - versus-0-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # --- Replica 1 (identical config, distinct POD_NAME) -----------------------
+  versus-1:
+    <<: *versus
+    container_name: versus-ha-1
+    environment:
+      <<: *versus-env
+      POD_NAME: versus-1
+    volumes:
+      - ./config:/app/config:ro
+      - versus-1-data:/app/data
+
+  # --- Load balancer ---------------------------------------------------------
+  # Round-robins across both replicas. No sticky sessions on purpose — sessions
+  # converge via Postgres, so any replica can serve any request.
+  lb:
+    image: nginx:1.27-alpine
+    container_name: versus-ha-lb
+    depends_on:
+      versus-0:
+        condition: service_healthy
+      versus-1:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${LB_PORT:-8080}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  versus-0-data:
+  versus-1-data:

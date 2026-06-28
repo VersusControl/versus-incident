@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { Brain, ChevronDown, ChevronRight } from "lucide-react";
 import type { AnalysisRecord } from "@/lib/api";
-import { fmtAbs, fmtRel } from "@/lib/format";
+import { fmtAbs, fmtRel, formatDuration, jsonString } from "@/lib/format";
 import { Pill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { ErrorBox } from "@/components/feedback";
@@ -271,21 +271,4 @@ function EvidenceList({ items }: { items: NonNullable<AIFindingEvidence> }) {
       </ul>
     </div>
   );
-}
-
-export function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  const s = ms / 1000;
-  if (s < 60) return `${s.toFixed(1)}s`;
-  const m = Math.floor(s / 60);
-  const rem = Math.round(s - m * 60);
-  return `${m}m${rem.toString().padStart(2, "0")}s`;
-}
-
-export function jsonString(v: unknown): string {
-  try {
-    return typeof v === "string" ? v : JSON.stringify(v, null, 2);
-  } catch {
-    return String(v);
-  }
 }

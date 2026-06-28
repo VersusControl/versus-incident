@@ -1,0 +1,53 @@
+# Default-deny ingress for the replica set: only same-namespace clients reach
+# the app port (add an ingress-controller namespaceSelector for external
+# traffic). Egress is left open because the binary needs Postgres + DNS (and, if
+# you enable them, your IdP and notification providers) — narrow the egress
+# block to your Postgres/DNS CIDRs in production.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: versus
+  namespace: versus-ha
+  labels:
+    app.kubernetes.io/name: versus
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: versus
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - port: 3000
+          protocol: TCP
+  egress:
+    # Allow all egress (DNS, Postgres, IdP, notifications). Replace with explicit
+    # `to:`/`ports:` rules in production.
+    - {}
+---
+# Allow Versus pods to reach Postgres (covered by the allow-all egress above;
+# kept explicit so tightening egress to `[]` still leaves Postgres reachable).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: versus-to-postgres
+  namespace: versus-ha
+  labels:
+    app.kubernetes.io/name: versus-postgres
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: versus-postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: versus
+      ports:
+        - port: 5432
+          protocol: TCP

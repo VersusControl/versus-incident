@@ -46,6 +46,7 @@ const TracesPage = lazyPage(
 );
 const PeoplePage = lazyPage(() => import("./pages/PeoplePage"), "PeoplePage");
 const SettingsPage = lazyPage(() => import("./pages/SettingsPage"), "SettingsPage");
+const AdminPage = lazyPage(() => import("./pages/AdminPage"), "AdminPage");
 
 // lazyPage adapts our named-export pages to React.lazy and wraps them in a
 // Suspense fallback that mirrors a loading card (no blank flash).
@@ -117,6 +118,7 @@ export default function App() {
 
           {/* Manage */}
           <Route path="/people" element={<PeoplePage />} />
+          <Route path="/admin" element={<AdminPage />} />
           <Route path="/settings" element={<SettingsPage />} />
 
           {/* Legacy redirects (old IA → new homes) */}

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/services"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/teams"
@@ -62,6 +63,9 @@ func (c *TeamsAdminController) Register(router fiber.Router) {
 }
 
 func (c *TeamsAdminController) authMiddleware(ctx *fiber.Ctx) error {
+	if middleware.RequestAuthorized(ctx) {
+		return ctx.Next()
+	}
 	cfg := config.GetConfig()
 	expected := cfg.GatewaySecret
 	got := ctx.Get("X-Gateway-Secret")

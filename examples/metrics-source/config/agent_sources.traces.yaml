@@ -1,0 +1,33 @@
+# Detect-path sources for the OPTIONAL traces overlay: the same enterprise
+# `prometheus` source as agent_sources.yaml PLUS an enterprise `traces`
+# source that searches Tempo for error traces. Mounted over
+# agent_sources.yaml only when you run with `-f docker-compose.traces.yml`.
+#
+# Both are ENTERPRISE DATA SOURCES (X10), license-gated on the `intelligence`
+# entitlement, and both use the generic `options:` schema. Configuring them
+# auto-wires `query_metrics` (Prometheus) AND `query_traces` (Tempo) with no
+# tools.yaml entry.
+sources:
+  - name: demo-prom
+    type: prometheus
+    enable: true
+    options:
+      address: http://prometheus:9090
+      step: 30s
+      page_size: 500
+      queries:
+        - query: 'sum by (service) (rate(demo_http_requests_total{code=~"5.."}[1m])) > 0.5'
+          severity: critical
+          service_label: service
+        - query: 'histogram_quantile(0.95, sum by (service, le) (rate(demo_http_request_duration_seconds_bucket[1m]))) > 0.5'
+          severity: high
+          service_label: service
+
+  - name: demo-traces
+    type: traces
+    enable: true
+    options:
+      backend: tempo
+      address: http://tempo:3200
+      query: '{ status = error }'
+      page_size: 100

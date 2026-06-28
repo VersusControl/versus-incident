@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Search, X } from "lucide-react";
 import { api } from "@/lib/api";
-import { fmtAbs, fmtRel, incidentTitle } from "@/lib/format";
+import { fmtAbs, fmtRel, formatDuration, incidentTitle } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
 import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
@@ -13,7 +13,6 @@ import { ClickableRow } from "@/components/DataTable";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { EmptyState } from "@/components/feedback";
-import { formatDuration } from "@/components/AnalysisCard";
 
 const COLS = 7;
 

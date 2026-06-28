@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -94,6 +95,18 @@ func LoadCatalog(store storage.Provider) (*Catalog, error) {
 		patterns: make(map[string]*Pattern),
 		services: make(map[string]*ServiceInfo),
 	}
+	// When a CatalogStore is installed the boot load routes through it; the
+	// inline ReadBlob("patterns") path below is the default (nil store).
+	if s := catalogStore(); s != nil {
+		patterns, services, err := s.Load()
+		if patterns != nil {
+			c.patterns = patterns
+		}
+		if services != nil {
+			c.services = services
+		}
+		return c, err
+	}
 	if store == nil {
 		return c, nil
 	}
@@ -138,6 +151,9 @@ func (c *Catalog) Get(id string) *Pattern {
 
 // MarkKnown stamps a pattern as auto-promoted ("known") in the catalog.
 func (c *Catalog) MarkKnown(patternID string) bool {
+	if s := catalogStore(); s != nil {
+		return s.Curate(CatalogEdit{Kind: CatalogEditMarkKnown, PatternID: patternID}) == nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, ok := c.patterns[patternID]
@@ -155,6 +171,18 @@ func (c *Catalog) MarkKnown(patternID string) bool {
 // All returns a stable, sorted snapshot of every pattern (sorted by Count
 // descending so the most-frequent patterns appear first in admin views).
 func (c *Catalog) All() []*Pattern {
+	// Bulk/admin read: route through the store's unified read view when one is
+	// installed. The inline in-memory snapshot below is the default and the
+	// fallback if the store read fails.
+	if s := catalogStore(); s != nil {
+		out, _, err := s.Snapshot()
+		if err != nil {
+			log.Printf("agent: catalog snapshot failed, serving local view: %v", err)
+		} else {
+			sort.Slice(out, func(i, j int) bool { return out[i].Count > out[j].Count })
+			return out
+		}
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	out := make([]*Pattern, 0, len(c.patterns))
@@ -237,6 +265,9 @@ func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alph
 // Label updates operator-curated metadata for a pattern. Empty fields are
 // left unchanged. Returns false when the pattern doesn't exist.
 func (c *Catalog) Label(patternID, verdict string, tags []string) bool {
+	if s := catalogStore(); s != nil {
+		return s.Curate(CatalogEdit{Kind: CatalogEditLabel, PatternID: patternID, Verdict: verdict, Tags: tags}) == nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p, ok := c.patterns[patternID]
@@ -255,6 +286,9 @@ func (c *Catalog) Label(patternID, verdict string, tags []string) bool {
 
 // Delete removes a pattern (e.g. operator marks a false-positive cluster).
 func (c *Catalog) Delete(patternID string) bool {
+	if s := catalogStore(); s != nil {
+		return s.Curate(CatalogEdit{Kind: CatalogEditDelete, PatternID: patternID}) == nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, ok := c.patterns[patternID]; !ok {
@@ -275,6 +309,20 @@ func (c *Catalog) Dirty() bool {
 // Persist flushes the in-memory catalog to the storage backend. Safe to
 // call concurrently with Upsert/Label/Delete.
 func (c *Catalog) Persist() error {
+	// Route this instance's working-set write through the store when one is
+	// installed; the inline WriteBlob("patterns") path below is the default.
+	if s := catalogStore(); s != nil {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if !c.dirty {
+			return nil
+		}
+		if err := s.Persist(c.patterns, c.services); err != nil {
+			return err
+		}
+		c.dirty = false
+		return nil
+	}
 	if c.store == nil {
 		return nil
 	}
@@ -342,6 +390,17 @@ func (c *Catalog) IsServiceInGrace(name string, graceDuration time.Duration) boo
 // AllServices returns a snapshot of every tracked service, sorted by
 // FirstSeen ascending.
 func (c *Catalog) AllServices() map[string]ServiceInfo {
+	// Bulk/admin read: route through the store's unified read view when one is
+	// installed. The inline in-memory snapshot below is the default and the
+	// fallback if the store read fails.
+	if s := catalogStore(); s != nil {
+		_, services, err := s.Snapshot()
+		if err != nil {
+			log.Printf("agent: catalog snapshot failed, serving local services view: %v", err)
+		} else {
+			return services
+		}
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	out := make(map[string]ServiceInfo, len(c.services))
@@ -354,6 +413,9 @@ func (c *Catalog) AllServices() map[string]ServiceInfo {
 // EndServiceGrace forces a service out of its grace period by setting
 // FirstSeen to the zero time. Returns false when the service doesn't exist.
 func (c *Catalog) EndServiceGrace(name string) bool {
+	if s := catalogStore(); s != nil {
+		return s.Curate(CatalogEdit{Kind: CatalogEditEndServiceGrace, Service: name}) == nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	svc, ok := c.services[name]
@@ -368,6 +430,9 @@ func (c *Catalog) EndServiceGrace(name string) bool {
 // RestartServiceGrace resets a service's FirstSeen to now, restarting the
 // grace window. Returns false when the service doesn't exist.
 func (c *Catalog) RestartServiceGrace(name string) bool {
+	if s := catalogStore(); s != nil {
+		return s.Curate(CatalogEdit{Kind: CatalogEditRestartServiceGrace, Service: name}) == nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	svc, ok := c.services[name]

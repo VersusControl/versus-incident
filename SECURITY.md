@@ -110,8 +110,8 @@ the community build; the OSS tree never imports the enterprise module.
   access.
 - **Per-org isolation.** Subject→role assignments persist through the X3
   `tenancy.NewOrgScoped` storage seam, so a role in org A can never be seen or
-  used in org B. The role-assignment API is guarded by the constant-time
-  `X-Versus-Admin-Token`.
+  used in org B. The role-assignment API is guarded by the `roles:manage`
+  permission, resolved from the caller's org-bound SSO session.
 
 ### Audit trail (`versus-enterprise/pkg/audit`)
 
@@ -123,7 +123,8 @@ the community build; the OSS tree never imports the enterprise module.
   `VerifyPersisted` detect any out-of-band edit of the stored log.
 - **No secrets in entries.** Security-relevant events are recorded by name
   (e.g. `sso.config.changed`) — never the secret value. The admin read API
-  `GET /enterprise/api/audit/{org}` uses a constant-time admin-token compare.
+  `GET /enterprise/api/audit/{org}` is gated on the `audit:view` permission
+  resolved from the caller's org-bound SSO session.
 - **Catalog:** `sso.login.success` / `sso.login.failure`,
   `sso.config.changed`, `rbac.denied`, `rbac.role.assigned` /
   `rbac.role.unassigned`, `tenant.created` / `tenant.suspended` /
@@ -140,18 +141,19 @@ the clone is removed and PASS once restored.
 
 ### Environment variables
 
-X5 introduces **no new environment variables**. It reuses the auto-generated
-admin token (RBAC role-assignment + audit read APIs) and the auto-generated SSO
-session pepper (the X4 session the RBAC guard resolves). Both are generated and
-persisted on first licensed boot rather than env-configured, never hardcoded;
-an unset/disabled admin token fails the admin APIs closed (`503`).
+X5 introduces **no new environment variables**. It reuses the auto-generated SSO
+session pepper (the X4 session the RBAC guard resolves): the role-assignment and
+audit read APIs are gated on the caller's RBAC permission carried by that
+session. The pepper is generated and persisted on first licensed boot rather
+than env-configured, never hardcoded; a request with no session fails the admin
+APIs closed (`401`), and an insufficient role is denied (`403`).
 
 ### X5 gate evidence
 
 `go build ./...`, `go vet ./...`, and `go test -race ./...` are green in
 `versus-enterprise/`. Audit immutability (no delete/update API + hash chain),
 per-org isolation (RBAC `RoleOf` and audit `Query` proven not to cross orgs),
-constant-time admin/token compares, and the buffer-aliasing guard were all
+constant-time secret compares, and the buffer-aliasing guard were all
 verified at the X5 gate.
 
 ## Supply chain and dependency provenance
@@ -212,7 +214,7 @@ Reviewed and passed at the Security release gate on 2026-06-10
   a stored org id. This is the confidentiality control behind the SOC 2
   multi-tenancy evidence (epics G7 / X7).
 - **Secret hygiene (X3, M4):** all credentials — session key, gateway secret,
-  enterprise admin token, Postgres DSN, Google OAuth client secret — are read
+  Postgres DSN, Google OAuth client secret — are read
   from environment variables only (no hardcoded literals), compared in constant
   time where applicable, and never written to logs (startup logs print
   non-secret configuration only). Session tokens are 256-bit and stored only as
@@ -427,10 +429,10 @@ covering `versus-enterprise/pkg/sso` (`verify.go`, `oidc.go`, `txstore.go`,
   at exchange time; `IdPConfig.MarshalJSON` redacts it (`***redacted***`) so it
   never leaves over the API, and the stored blob uses a separate non-redacting
   marshaller. `state`/`nonce`/`verifier`/session-handle all from `crypto/rand`;
-  admin token and org binding compared via `secureEqual` (sha256 + `subtle`). The
+  the org binding is compared via `secureEqual` (sha256 + `subtle`). The
   token-exchange error path never echoes the IdP response body.
 - **SSRF:** the OIDC `issuer` (hence discovery URL) is **config-pinned per org**
-  via the admin-token-gated `PUT /:org/config`; it is never taken from request
+  via the `sso:manage`-gated `PUT /:org/config`; it is never taken from request
   input at login/callback time. Discovery requires the document's own `issuer` to
   equal the configured issuer exactly, and `jwks_uri` is taken from that verified
   document — an attacker cannot redirect the JWKS fetch at request time.
@@ -506,3 +508,122 @@ With the belt restored, the rest of the surface is sound:
 **Ruling:** **PASS once `Immutable: true` is restored** (done at the gate).
 Follow-ups (non-blocking): trusted-proxy/`X-Forwarded-For` handling for the
 rate-limit key; correct the `c.IP()` belt comment in `waitlist.go`.
+
+## HA secret convergence + single-org pivot batch — GATE-X9X3-HASINGLEORG
+
+Reviewed and **PASSED** at the founder-authorized Security release gate on
+2026-06-27 (GATE-X9X3-HASINGLEORG), covering five changes that touch auth, tenant
+isolation, audit and secrets: X9-T11 (OSS `storage.CreateBlobIfAbsent`), X9-T12
+(enterprise generate-once secret convergence), X3-T5 (single-org pivot +
+`default`→license-org migration), the SSO↔People `MergeRoster` overlay, and the
+metric/trace `ApplyDeploymentOrg` org-scoping fix. Ran
+`cd versus-incident && go test -race ./pkg/storage/... ./pkg/scheduler/...` and
+`cd versus-enterprise && go test -race ./pkg/{bootstrap,localadmin,tenancy,audit,rbac,sso,members,datasource,intel}/...`
+— all green.
+
+### 1. HA secret convergence (X9-T11 OSS + X9-T12 enterprise) — PASS
+
+- **Atomic single-writer primitive (`pkg/storage`).** Postgres
+  `CreateBlobIfAbsent` is `INSERT … ON CONFLICT (name) DO NOTHING` against a table
+  chosen from the fixed `blobTables` allowlist (or the constant `vs_blobs`
+  fallback) — never caller input — with `name`/`data` bound as `$1`/`$2`. No SQL
+  injection surface. `vs_blobs.name` is `TEXT PRIMARY KEY` (migration `001_init`),
+  so the `ON CONFLICT (name)` arbiter is well-formed. `written = RowsAffected()==1`,
+  then a read-after-write `SELECT 1` confirms the row is durably present so the
+  race loser can `ReadBlob` and adopt the winner. The `file` backend is
+  `O_CREATE|O_EXCL` + write/fsync with cleanup-on-failure (single-node only, the
+  only place file storage is allowed under HA per the X9-T3 guard); `memory` is
+  atomic under the provider mutex. The capability is strictly additive (optional
+  type-assert, like `Lifecycle`/`Searcher`) and never weakens `WriteBlob`.
+  **One-way import preserved:** `pkg/storage` imports nothing from
+  `versus-enterprise` (the only `versus-enterprise` token in the package is a
+  comment).
+- **Enterprise convergence (`bootstrap`, `localadmin`, `tenancy`).** The SSO
+  session HMAC pepper + the AES-256-GCM AI master key (`bootstrap.Resolve`, one
+  blob) and the built-in admin bcrypt hash (`localadmin.EnsureBootstrap`) are each
+  generated locally (`crypto/rand`) then committed via `CreateBlobIfAbsent`; on
+  `written==false` the instance re-reads and **adopts** the persisted bytes, so N
+  replicas on the shared store converge on ONE of each. **No secret value is ever
+  logged:** bootstrap logs the "generated…and persisted" banner only on the
+  winning write; `localadmin` returns the plaintext only when `created==true` and
+  `main.go` prints it once inside the credentials banner, never on adoption. Both
+  paths **fail closed** when the backend lacks `BlobCreator` (redis/database stubs)
+  rather than racing a read-then-write. `tenancy.orgScopedProvider.CreateBlobIfAbsent`
+  namespaces the key under the org and fails closed identically.
+- **Unchanged posture confirmed:** `VERSUS_ENTERPRISE_SECRET_KEY` BYOK precedence
+  intact (`runtimeai.NewCryptoFromEnv` wins over `boot.SecretKey` at the runtimeai
+  layer; the env error logs the variable NAME constant + a validation error, never
+  the key). The plaintext-at-rest posture of the pepper/master key is identical to
+  what was gated at GATE-X27 — the master key and the AI-key ciphertext it seals
+  live in separate blobs. No plaintext-at-rest regression.
+
+### 2. Single-org pivot (X3-T5) + `default`→license-org migration — PASS
+
+- **Boot-pin, fail closed.** `deploymentOrg := strings.TrimSpace(lic.Claims().Org)`
+  is resolved once at boot; enterprise + empty claim ⇒ `log.Fatalf` (no `default`
+  fallback); community ⇒ `storage.DefaultOrgID`. `tenancy.OrgResolver` returns this
+  one server-pinned constant for every request — `X-Versus-Org`, the tenant
+  registry, and `Isolation`/`HeaderOrg` are gone. The org is process state, never
+  request input, so header-spoof is impossible by construction.
+- **No dropped authz.** `RequireOrgParam` no longer compares `pathOrg ==
+  sessionOrg` (there is exactly one org and every session is bound to it), but the
+  check that doubled as authz is re-expressed, not lost: the guard still fails
+  closed on a missing session (`401`) and delegates to `Require` for the
+  permission check, and **no handler scopes data by the `:org` path param** — a
+  workspace-wide search found zero `c.Params("org")` reads; every data path scopes
+  by `middleware.OrgFromContext` (the pinned resolver). The SSO callback binds the
+  session server-side: org from `resolveOrg` (the pinned constant),
+  `secureEqual(tx.Org, org)` cross-org guard, `Sessions.NewWithAuth(org, …)` with
+  `OrgID` `strings.Clone`d; the production `SessionResolver` returns
+  `sess.OrgID`/`sess.Subject` (server-set at creation) — no client can spoof the
+  org.
+- **Migration is re-key, not orphan, and secrets are not silently moved.**
+  `tenancy.RekeyBlob` is copy-only (the `storage.Provider` seam has no delete),
+  idempotent (skips when the target org already holds the blob), and a community
+  no-op (default org ⇒ same namespace). The audit chain is **re-keyed by byte copy
+  so it still verifies** — recomputing per-entry hashes to rewrite the embedded
+  `org_id` would be indistinguishable from forgery, so copy-only is the correct
+  tamper-evident choice; appended entries chain onto the copied tail. rbac role +
+  team-role assignments and the SSO require-SSO/MFA policy re-key cleanly. SSO
+  connection NON-secret config re-keys, but the client secret is AES-GCM
+  AAD-pinned to `sso/<org>/connections/<id>` so it cannot decrypt under the new org
+  — `migrateDeploymentOrg` logs the explicit **RE-ENTER** WARNING and the callback
+  fails login closed (audited) on a decrypt error. No secret value is moved
+  silently or logged.
+
+### 3. SSO↔People `MergeRoster` overlay — PASS
+
+`members.MergeRoster` is a pure read-side function (no write path). The
+`GET /api/admin/members` interceptor resolves the org from `ssoResolver` (the SSO
+**session** org, never a caller-supplied value) and reads `memberStore.List(org)`
+scoped to that org, so per-org isolation is exact (an SSO user in org A never
+appears for org B). Sessionless/community requests pass through untouched. The
+synthetic `sso:<subject>` rows are read-only: they never exist in the mutable OSS
+`teams` store, so `PATCH`/`DELETE /api/admin/members/:id` return `404`
+(`mapStoreErr` → `teams.ErrNotFound`), and the per-row self-edit guard cannot
+match a synthetic id. No privilege escalation, no cross-store leak.
+
+### 4. Metric/trace `ApplyDeploymentOrg` org-scoping — PASS (one non-blocking note)
+
+`ApplyDeploymentOrg` stamps the boot-pinned deployment org onto every
+`prometheus`/`traces` source's `Options["org"]` at boot (before sources/brains are
+built), so learned baselines WRITE and the session-pinned Baselines API READ under
+the same license org — closing the `default`-orphan mismatch. No per-request org
+derivation is reintroduced; a blank deployment org (community) is a no-op; non
+metric/trace sources are never touched. **Note (not a defect):** the helper stamps
+**unconditionally**, overriding any explicit per-tenant `org` left in config
+(`TestApplyDeploymentOrg_OverridesPreexistingOrg`). This diverges from the older
+X10 note's "explicit org wins" phrasing but is the safer single-org behaviour — a
+stale/mismatched config org can no longer split the write org from the read org or
+orphan baselines. Routed to the Enterprise Engineer as a doc-reconciliation item
+only; no code change required.
+
+**Ruling:** **PASS** for the batch. No secret logged, no plaintext-at-rest
+regression, no cross-org or cross-store leak, no unparameterized SQL, no
+fail-open path, no one-way-import violation. Non-blocking follow-ups routed:
+(F1, Enterprise, LOW/doc) reconcile the `ApplyDeploymentOrg` "explicit org wins"
+wording with the shipped unconditional-override behaviour; (F2, Enterprise, INFO)
+migrated audit chains carry mixed per-entry `org_id` (legacy `default` on copied
+entries, license org on new ones) — cosmetic, chain still verifies, no action
+needed. Pre-existing backlog unchanged: B19 (replace the dev ngrok
+`platformBaseURL` before GA), B20 (first-class air-gapped switch).

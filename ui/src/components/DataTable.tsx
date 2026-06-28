@@ -1,8 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 
-export { useTableKeys } from "@/lib/hooks";
-
 // ClickableRow makes the WHOLE row the navigation affordance (audit D4: the
 // only link was the truncated title text while tr:hover promised more).
 // Clicks on nested interactive elements (links, buttons, inputs, labels)

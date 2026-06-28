@@ -1,6 +1,7 @@
 {{- include "versus-incident.validateRedis" . -}}
 {{- include "versus-incident.validateStorage" . -}}
 {{- include "versus-incident.validateAgent" . -}}
+{{- include "versus-incident.validateHA" . -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -20,13 +21,18 @@ data:
     # leaves admin routes unregistered (no silent open surface).
     gateway_secret: ${GATEWAY_SECRET}
 
-    # Pluggable storage backend (file | redis | database). Today only
-    # `file` is implemented end-to-end.
+    # Pluggable storage backend. `file` (single-node) or `postgres` (durable,
+    # multi-writer). HA (ha.enabled) derives `postgres` automatically — all
+    # replicas share ONE Postgres. POSTGRES_DSN is injected from a Secret.
     storage:
-      type: {{ .Values.storage.type | default "file" }}
-      {{- if eq (.Values.storage.type | default "file") "file" }}
+      type: {{ include "versus-incident.storageType" . }}
+      {{- if eq (include "versus-incident.storageType" .) "file" }}
       file:
         max_incidents: {{ .Values.storage.file.maxIncidents | default 1000 }}
+      {{- else if eq (include "versus-incident.storageType" .) "postgres" }}
+      postgres:
+        dsn: ${POSTGRES_DSN}
+        max_incidents: {{ .Values.storage.postgres.maxIncidents | default 1000 }}
       {{- end }}
 
     alert:

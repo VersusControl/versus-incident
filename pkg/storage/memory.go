@@ -47,6 +47,25 @@ func (m *memoryProvider) WriteBlob(name string, data []byte) error {
 	return nil
 }
 
+// CreateBlobIfAbsent implements the optional storage.BlobCreator capability
+// (X9-T11). The write is atomic under the provider mutex, so N concurrent
+// creators serialize and exactly one observes written==true; every other
+// caller observes written==false and reads the survivor's bytes via
+// ReadBlob. An existing key (created here or via WriteBlob) is left
+// untouched.
+func (m *memoryProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.blobs[name]; ok {
+		return false, nil
+	}
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	m.blobs[name] = cp
+	m.blobAt[name] = time.Now().UTC()
+	return true, nil
+}
+
 func (m *memoryProvider) ListBlobs(prefix string) ([]Blob, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

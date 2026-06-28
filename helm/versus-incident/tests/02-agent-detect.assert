@@ -14,4 +14,4 @@ kind: PersistentVolumeClaim
 storage: 2Gi
 persistentVolumeClaim:
 gateway_secret:
-!emptyDir
+name: tmp

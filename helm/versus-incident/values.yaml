@@ -4,7 +4,11 @@ replicaCount: 2
 image:
   repository: ghcr.io/versuscontrol/versus-incident
   pullPolicy: IfNotPresent
-  tag: ""  # Defaults to .Chart.AppVersion if not set
+  # Full image tag. Empty → "v<appVersion>" (the OSS release-tag convention).
+  # Set an explicit tag verbatim — e.g. "dev" for the enterprise image used by
+  # the HA path (values-ha.yaml). NOTE: an explicit tag is used AS-IS (no "v"
+  # is prepended), so include the leading "v" yourself for OSS release tags.
+  tag: ""
 
 nameOverride: ""
 fullnameOverride: ""
@@ -58,6 +62,92 @@ readinessProbe:
   initialDelaySeconds: 5
   periodSeconds: 5
 
+# Graceful rollout: how long Kubernetes waits for the pod to exit cleanly after
+# SIGTERM (drain in-flight requests, flush) before SIGKILL.
+terminationGracePeriodSeconds: 30
+
+# Pod- and container-level security hardening (X9-T7). Applied to BOTH the OSS
+# Deployment and the HA StatefulSet. The static Go binary runs fine as a non-
+# root user; /app/data (file backend) and /tmp are writable volumes, so the
+# root filesystem can be read-only. Override/empty these to relax.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+# High-availability / multi-instance (epic X9 — ENTERPRISE). When ha.enabled the
+# chart renders a StatefulSet (stable POD_NAME ordinals → per-replica instance
+# identity) instead of a Deployment, DERIVES the Postgres backend (one shared
+# Postgres for all replicas), and wires the enterprise LICENSE_KEY. The OSS
+# single-instance path (ha.enabled=false) is byte-for-byte unchanged.
+#
+# Runtime contract (do not change the binary):
+#   * STORAGE_TYPE=postgres is REQUIRED with >1 replica (the binary log.Fatals
+#     on file + INSTANCE_COUNT>1) — derived automatically here.
+#   * INSTANCE_COUNT = replicaCount; each replica's index = its POD_NAME ordinal.
+#   * Managed secrets (session key, AI master key, admin-token hash) converge
+#     across replicas via Postgres, so no per-pod secret env is needed beyond
+#     LICENSE_KEY (+ optional BYOK enterprise.secretKey).
+ha:
+  enabled: false
+  # Headless Service name (defaults to <fullname>-headless).
+  headlessServiceName: ""
+  # Parallel brings replicas up/down together — safe because instances are
+  # symmetric and identity comes from the ordinal, not boot order. Use
+  # OrderedReady for strictly sequential rollout.
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  # Spread replicas across nodes. soft (default) = preferred so scheduling never
+  # blocks on a small cluster; set hard=true to REQUIRE distinct nodes.
+  antiAffinity:
+    enabled: true
+    hard: false
+    topologyKey: kubernetes.io/hostname
+  # Keep the LB backed during voluntary disruptions (node drains/upgrades).
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+    # maxUnavailable: ""   # set EITHER minAvailable OR maxUnavailable
+  networkPolicy:
+    enabled: true
+    # Extra NetworkPolicyPeer ingress sources (in addition to same-namespace),
+    # e.g. an ingress-controller in another namespace:
+    #   - namespaceSelector:
+    #       matchLabels:
+    #         kubernetes.io/metadata.name: ingress-nginx
+    extraIngress: []
+    # Egress defaults to allow-all (the binary needs Postgres, Redis, IdP,
+    # notifications, DNS). Set false and populate `egress` to restrict.
+    allowAllEgress: true
+    egress: []
+
+# Enterprise license + BYOK (used by the HA path). Provide EITHER an inline
+# licenseKey (handy for --set; do NOT commit a real key) OR reference an
+# existing Secret (preferred for production / GitOps). Never commit a real key.
+enterprise:
+  # Inline license JWT — templated into the chart Secret under "license_key".
+  licenseKey: ""
+  # Reference an existing Secret instead (keeps the key out of the release).
+  existingSecret: ""
+  existingSecretKey: "license_key"
+  # Optional BYOK master key for AI-settings encryption
+  # (VERSUS_ENTERPRISE_SECRET_KEY). Empty = the binary generates+converges one
+  # across replicas via Postgres bootstrap.
+  secretKey: ""
+  secretKeyExistingSecret: ""
+  secretKeyExistingSecretKey: "versus_enterprise_secret_key"
+
 config:
   name: versus-incident
   host: 0.0.0.0
@@ -97,14 +187,19 @@ storage:
     existingClaim: ""
 
   # -- Postgres backend (storage.type=postgres) ---------------------------
-  # Set STORAGE_TYPE=postgres and supply a DSN to activate. A single
-  # Postgres backend stores incidents, analyses, AND blobs (agent catalog,
-  # shadow log) — no separate object store is required.
-  # Example DSN: postgres://user:pass@postgres:5432/versus?sslmode=require
-  #
-  # postgres:
-  #   dsn: ""           # env: POSTGRES_DSN (preferred over inline value)
-  #   maxIncidents: 1000
+  # Durable, multi-writer, and REQUIRED for HA (ha.enabled derives it). A
+  # single Postgres stores incidents, analyses, AND blobs (agent catalog,
+  # shadow log, learned baselines, converged secrets) — no separate object
+  # store. Provide EITHER an inline dsn OR reference an existing Secret
+  # (preferred for production). Example DSN:
+  #   postgres://user:pass@postgres:5432/versus?sslmode=require
+  postgres:
+    # Inline DSN — templated into the chart Secret under "postgres_dsn".
+    dsn: ""
+    # Reference an existing Secret instead (keeps the DSN out of the release).
+    dsnExistingSecret: ""
+    dsnExistingSecretKey: "postgres_dsn"
+    maxIncidents: 1000
 
 # AI SRE Agent (opt-in). When agent.enable=false (default) nothing
 # changes: no goroutines start, no AI calls are made, no extra config

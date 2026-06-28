@@ -1,0 +1,28 @@
+# Minimal Versus config for the Compose HA example. STORAGE_TYPE and
+# POSTGRES_DSN are injected as env (which override these), so both replicas share
+# one Postgres. On-call and the agent are off to keep the example Postgres-only
+# and focused on the HA topology + session/secret convergence.
+name: versus
+host: 0.0.0.0
+port: 3000
+
+alert:
+  debug_body: true
+
+queue:
+  enable: false
+
+oncall:
+  enable: false
+  initialized_only: false
+
+# Shared multi-writer store for BOTH replicas. type/dsn are also set via env
+# (STORAGE_TYPE=postgres, POSTGRES_DSN=...), which take precedence.
+storage:
+  type: postgres
+  postgres:
+    dsn: ${POSTGRES_DSN}
+    max_incidents: 1000
+
+agent:
+  enable: false

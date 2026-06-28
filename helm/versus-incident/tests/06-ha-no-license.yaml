@@ -1,0 +1,17 @@
+# HA is an enterprise capability — enabling it without a license must fail fast.
+replicaCount: 3
+gatewaySecret: "test-secret-do-not-use-in-prod"
+
+image:
+  repository: ghcr.io/versuscontrol/versus-enterprise
+  tag: dev
+
+ha:
+  enabled: true
+
+storage:
+  type: postgres
+  postgres:
+    dsn: "postgres://versus:pass@pg:5432/versus?sslmode=require"
+
+# No enterprise.licenseKey and no enterprise.existingSecret → expect failure.

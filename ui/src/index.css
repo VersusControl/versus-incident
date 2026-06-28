@@ -304,13 +304,17 @@ body {
 
   /* Inline form controls */
   .input {
-    /* ink-400 border: inputs have no fill contrast against the card, so
-       the border is the only boundary — ink-500 measured under the 3:1
-       non-text minimum in dark (WCAG 1.4.11). */
-    @apply h-8 w-full rounded-control border border-ink-400 bg-surface-sunken
+    /* Editable fill reads "active": bg-surface is white in the light theme
+       (and the card tone in dark), so an enabled input looks writable while a
+       disabled one drops to the muted bg-surface-sunken gray. The ink-400
+       border is the boundary in dark, where the enabled fill matches the card
+       (WCAG 1.4.11 non-text 3:1). */
+    @apply h-8 w-full rounded-control border border-ink-400 bg-surface
            px-2 text-xs text-ink-100 placeholder:text-ink-400
            focus:border-accent focus:outline-none focus:ring-2
-           focus:ring-accent/20;
+           focus:ring-accent/20
+           disabled:cursor-not-allowed disabled:border-ink-500
+           disabled:bg-surface-sunken disabled:text-ink-400;
   }
   textarea.input {
     @apply h-auto py-2;

@@ -14,6 +14,7 @@ import {
   Power,
   PowerOff,
   Radar,
+  ScrollText,
   Server,
   Sparkles,
   Waypoints,
@@ -87,6 +88,11 @@ export function AgentOverviewPage() {
 
   // Only a SUCCESSFUL config response with enable:false means "disabled".
   const agentDisabled = agentCfg.isSuccess && !agentCfg.data.enable;
+
+  // Enterprise (intelligence license) available when the baselines probe
+  // returned a payload (null = locked OSS / no license). When available, Logs
+  // joins Metrics & Traces in one signals line, so it leaves Lifetime totals.
+  const enterpriseAvailable = baselines.data != null;
 
   const topPatterns = useMemo(() => {
     const list = patterns.data ?? [];
@@ -192,20 +198,22 @@ export function AgentOverviewPage() {
           Lifetime totals
         </div>
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <KpiTile
-            label="Log patterns"
-            value={status.data?.patterns}
-            loading={status.isPending}
-            to="/agent/logs"
-            icon={Layers}
-            foot={
-              status.data
-                ? status.data.dirty
-                  ? "Unsaved changes"
-                  : "Persisted"
-                : undefined
-            }
-          />
+          {!enterpriseAvailable && (
+            <KpiTile
+              label="Log patterns"
+              value={status.data?.patterns}
+              loading={status.isPending}
+              to="/agent/logs"
+              icon={Layers}
+              foot={
+                status.data
+                  ? status.data.dirty
+                    ? "Unsaved changes"
+                    : "Persisted"
+                  : undefined
+              }
+            />
+          )}
           <KpiTile
             label="Shadow events"
             value={status.data?.shadow_events ?? shadowStats.data?.events}
@@ -214,6 +222,7 @@ export function AgentOverviewPage() {
             icon={EyeOff}
             spark={shadowTrend}
             sparkLabel={`${shadowTrend24} shadow events active in the last 24 hours`}
+            className={enterpriseAvailable ? "lg:col-span-2" : undefined}
             foot={
               status.data
                 ? status.data.shadow_dirty
@@ -246,8 +255,6 @@ export function AgentOverviewPage() {
             icon={Server}
             foot="Discovered from logs"
           />
-        </div>
-        <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
           <KpiTile
             label="Incidents emitted"
             value={emitted}
@@ -304,8 +311,13 @@ export function AgentOverviewPage() {
           </div>
         )}
 
-        {/* 3 — Metrics & Traces learning (Enterprise-only) */}
-        <EnterpriseLearningSummary baselines={baselines.data} loading={baselines.isPending} locked={baselines.data === null} />
+        {/* 3 — Logs, Metrics & Traces learning (Logs always; Metrics/Traces Enterprise-only) */}
+        <EnterpriseLearningSummary
+          baselines={baselines.data}
+          loading={baselines.isPending}
+          locked={baselines.data === null}
+          logPatterns={status.data?.patterns}
+        />
 
         {/* 4 — The old Dashboard agent cards */}
         <section className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -950,18 +962,21 @@ function EnterpriseLearningSummary({
   baselines,
   loading,
   locked,
+  logPatterns,
 }: {
   baselines: { baselines: BaselineRow[] } | null | undefined;
   loading: boolean;
   locked: boolean;
+  logPatterns: number | undefined;
 }) {
   if (loading) {
     return (
       <div className="mt-6">
         <div className="mb-2 text-2xs font-semibold uppercase tracking-wide text-ink-400">
-          Metrics &amp; Traces
+          Logs, Metrics &amp; Traces
         </div>
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+          <div className="sk h-24 rounded-card" />
           <div className="sk h-24 rounded-card" />
           <div className="sk h-24 rounded-card" />
         </div>
@@ -995,13 +1010,33 @@ function EnterpriseLearningSummary({
   const traces = rows.filter((r) => r.type === "trace");
   const metricsReady = metrics.filter((r) => r.confident).length;
   const tracesReady = traces.filter((r) => r.confident).length;
+  const logCount = logPatterns ?? 0;
 
   return (
     <div className="mt-6">
       <div className="mb-2 text-2xs font-semibold uppercase tracking-wide text-ink-400">
-        Metrics &amp; Traces
+        Logs, Metrics &amp; Traces
       </div>
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+        <Link
+          to="/agent/logs"
+          className="card transition-colors hover:border-ink-500"
+        >
+          <div className="card-body flex items-center gap-4">
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent-subtle">
+              <ScrollText size={18} className="text-accent" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold text-ink-50">
+                {logCount} log pattern{logCount !== 1 ? "s" : ""}
+              </div>
+              <div className="text-2xs text-ink-300">
+                Learned from your logs
+              </div>
+            </div>
+          </div>
+        </Link>
+
         <Link
           to="/agent/metrics"
           className="card transition-colors hover:border-ink-500"

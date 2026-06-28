@@ -43,6 +43,59 @@ helm upgrade \
 
 ## Configuration
 
+### High Availability / multi-instance (enterprise)
+
+> HA runs the **enterprise** image with a `LICENSE_KEY`. The OSS single-instance
+> path (`ha.enabled: false`, the default) is unchanged.
+
+Setting `ha.enabled: true` switches the workload from a **Deployment** to a
+**StatefulSet** so each replica gets a stable pod name. The binary reads its
+instance index from the `POD_NAME` trailing ordinal (Downward API) and
+`INSTANCE_COUNT` from `replicaCount`, then partitions signal sources and the SLO
+scheduler job by hash-ownership — so multiple replicas never double-page. All
+replicas share **one Postgres** (derived automatically — the binary refuses the
+`file` backend with more than one replica) and converge their managed secrets
+(session key, AI master key, admin-token hash) through it, so a session cookie or
+the break-glass admin token minted on one replica validates on all.
+
+The chart renders, alongside the StatefulSet: a **headless Service** (stable
+per-pod DNS), a **PodDisruptionBudget**, a **NetworkPolicy**, **pod
+anti-affinity** to spread replicas across nodes, a hardened **securityContext**
+(non-root, read-only root filesystem, dropped capabilities), and **readiness +
+liveness** probes against `/healthz` for graceful rollout.
+
+```bash
+helm upgrade --install versus \
+  oci://ghcr.io/versuscontrol/charts/versus-incident \
+  -f values-ha.yaml \
+  --set enterprise.licenseKey="$LICENSE_KEY" \
+  --set storage.postgres.dsn="postgres://versus:PASS@my-rds:5432/versus?sslmode=require" \
+  --set gatewaySecret="$(openssl rand -hex 32)"
+```
+
+For production / GitOps, reference existing Secrets instead of inline values:
+
+```bash
+  --set enterprise.existingSecret=versus-license      # key: license_key
+  --set storage.postgres.dsnExistingSecret=versus-pg  # key: postgres_dsn
+```
+
+See [`values-ha.yaml`](values-ha.yaml) for the full HA value set, and the raw
+(non-Helm) manifests and a Docker Compose walkthrough under
+`versus-enterprise/examples/high-availability/`.
+
+| Key | Default | Description |
+|---|---|---|
+| `ha.enabled` | `false` | Render the StatefulSet HA path (enterprise). |
+| `replicaCount` | `2` | Replicas; becomes `INSTANCE_COUNT`. |
+| `ha.podManagementPolicy` | `Parallel` | StatefulSet pod start/stop ordering. |
+| `ha.updateStrategy.type` | `RollingUpdate` | StatefulSet update strategy. |
+| `ha.antiAffinity.enabled` / `.hard` | `true` / `false` | Spread replicas across nodes (soft by default). |
+| `ha.podDisruptionBudget.enabled` | `true` | Keep the LB backed during node drains. |
+| `ha.networkPolicy.enabled` | `true` | Default-deny ingress; egress allow-all (narrow in prod). |
+| `enterprise.licenseKey` / `.existingSecret` | `""` | Enterprise license (required for HA). |
+| `storage.postgres.dsn` / `.dsnExistingSecret` | `""` | Shared Postgres DSN (required for postgres). |
+
 ### Quick Start Example
 
 ```yaml

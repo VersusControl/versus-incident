@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: versus-ha
+
+resources:
+  - 00-namespace.yaml
+  - 10-postgres.yaml
+  - 20-versus-config.yaml
+  - 30-versus-statefulset.yaml
+  - 40-versus-service.yaml
+  - 50-poddisruptionbudget.yaml
+  - 60-networkpolicy.yaml
+
+# The Secret is generated from a GITIGNORED .env so no LICENSE_KEY / DSN is ever
+# committed. Copy .env.example -> .env and fill it in. disableNameSuffixHash
+# keeps the name stable ("versus-secrets") so the manifests can reference it.
+secretGenerator:
+  - name: versus-secrets
+    envs:
+      - .env
+
+generatorOptions:
+  disableNameSuffixHash: true
