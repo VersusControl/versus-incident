@@ -190,6 +190,9 @@ agent:
 
   ai:
     enable: false
+    # provider selects the model backend (openai | deepseek | qwen | ollama |
+    # claude | gemini). Default openai. The api_key below must match the chosen provider.
+    provider: openai
     api_key: ${AGENT_AI_API_KEY}
     model: "gpt-5.4-mini"
     temperature: 0.2

@@ -102,9 +102,8 @@ tools:
   # SECURITY: embedding a query is an external trust boundary, identical to
   # the chat-completion call. The query is scrubbed through the same redactor
   # (redaction.* in config.yaml) BEFORE it is embedded. To keep embeddings
-  # fully inside your own network, point embedding_base_url at a local
-  # OpenAI-compatible server (Ollama / vLLM / LocalAI) — no code change.
+  # fully inside your own network, set agent.ai.provider to ollama (or gemini)
+  # — the embedder selects its backend from the same provider as the chat path.
   find_runbook:
     embedding_model: ""      # e.g. "text-embedding-3-small"; empty = tool omitted
-    embedding_base_url: ""   # OpenAI-compatible endpoint; empty = OpenAI default. Point at a local server to keep embeddings in your own network
 

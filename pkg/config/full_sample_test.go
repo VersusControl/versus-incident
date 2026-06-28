@@ -36,6 +36,12 @@ func TestLoadFullSampleConfig(t *testing.T) {
 	if c.Agent.Mode != "training" {
 		t.Errorf("Agent.Mode = %q, want training", c.Agent.Mode)
 	}
+	// The AI block's `provider` key must round-trip into AgentAIConfig.Provider
+	// (the field the eino registry selects on). The documented sample carries
+	// the openai default.
+	if c.Agent.AI.Provider != "openai" {
+		t.Errorf("Agent.AI.Provider = %q, want openai", c.Agent.AI.Provider)
+	}
 
 	// Override-map fields must unmarshal as maps, not collapse to scalars.
 	if c.OnCall.AwsIncidentManager.OtherResponsePlanArns == nil {
@@ -100,4 +106,86 @@ alert:
 	if c.Agent.Mode != "training" {
 		t.Errorf("Agent.Mode = %q, want training (default)", c.Agent.Mode)
 	}
+}
+
+// TestAgentAIProviderSelection proves the `agent.ai.provider` selection
+// round-trips through the loader (QA-023): the YAML key maps into
+// AgentAIConfig.Provider, an omitted block keeps the embedded openai default,
+// and the AGENT_AI_PROVIDER env var overrides the YAML value (env wins).
+func TestAgentAIProviderSelection(t *testing.T) {
+	writeConfig := func(t *testing.T, body string) string {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		return path
+	}
+
+	t.Run("yaml provider round-trips", func(t *testing.T) {
+		path := writeConfig(t, `
+agent:
+  ai:
+    provider: qwen
+    model: qwen-plus
+`)
+		c, err := loadConfigFromPath(path)
+		if err != nil {
+			t.Fatalf("loadConfigFromPath: %v", err)
+		}
+		if c.Agent.AI.Provider != "qwen" {
+			t.Errorf("Agent.AI.Provider = %q, want qwen (from YAML)", c.Agent.AI.Provider)
+		}
+	})
+
+	t.Run("omitted provider keeps openai default", func(t *testing.T) {
+		// A sparse config that touches the agent block but not ai.provider must
+		// keep the embedded default of openai.
+		path := writeConfig(t, `
+agent:
+  mode: training
+`)
+		c, err := loadConfigFromPath(path)
+		if err != nil {
+			t.Fatalf("loadConfigFromPath: %v", err)
+		}
+		if c.Agent.AI.Provider != "openai" {
+			t.Errorf("Agent.AI.Provider = %q, want openai (default)", c.Agent.AI.Provider)
+		}
+	})
+
+	t.Run("env overrides yaml", func(t *testing.T) {
+		path := writeConfig(t, `
+agent:
+  ai:
+    provider: qwen
+    model: qwen-plus
+`)
+		t.Setenv("AGENT_AI_PROVIDER", "deepseek")
+		c, err := loadConfigFromPath(path)
+		if err != nil {
+			t.Fatalf("loadConfigFromPath: %v", err)
+		}
+		if c.Agent.AI.Provider != "deepseek" {
+			t.Errorf("Agent.AI.Provider = %q, want deepseek (AGENT_AI_PROVIDER overrides YAML)", c.Agent.AI.Provider)
+		}
+	})
+
+	t.Run("empty env does not clobber yaml", func(t *testing.T) {
+		path := writeConfig(t, `
+agent:
+  ai:
+    provider: ollama
+    model: llama3
+`)
+		t.Setenv("AGENT_AI_PROVIDER", "")
+		c, err := loadConfigFromPath(path)
+		if err != nil {
+			t.Fatalf("loadConfigFromPath: %v", err)
+		}
+		if c.Agent.AI.Provider != "ollama" {
+			t.Errorf("Agent.AI.Provider = %q, want ollama (empty env must not clobber YAML)", c.Agent.AI.Provider)
+		}
+	})
 }

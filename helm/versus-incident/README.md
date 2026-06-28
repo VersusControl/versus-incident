@@ -164,7 +164,6 @@ alert:
 | `agent.tools.recentChanges.git.repos` | Remote git repos read by the `recent_changes` tool (empty = unregistered) | `[]` |
 | `agent.tools.describeDependencies.services` | Service-dependency graph for the `describe_dependencies` tool (empty = unregistered) | `[]` |
 | `agent.tools.findRunbook.embeddingModel` | Embedding model for the `find_runbook` runbook-RAG tool (empty = unregistered) | `""` |
-| `agent.tools.findRunbook.embeddingBaseUrl` | OpenAI-compatible embeddings endpoint (empty = OpenAI default; set to a local server to keep embeddings in-cluster) | `""` |
 | `agent.sources` | Inline list of signal sources (snake_case keys) | `[]` |
 | `alert.slack.enable` | Enable Slack notifications | `false` |
 | `alert.slack.token` | Slack bot token | `""` |

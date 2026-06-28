@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"sync"
+
+	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 )
 
 // aisettings.go — the single-slot runtime AI-settings resolver seam.
@@ -25,6 +27,18 @@ import (
 type AISettingsResolver interface {
 	EffectiveKey(ctx context.Context) (key string, ok bool)
 	EffectiveEnabled(ctx context.Context) (enabled bool, ok bool)
+}
+
+// AIProviderResolver is an OPTIONAL extension of AISettingsResolver: a
+// registered resolver that ALSO implements it can override the model PROVIDER
+// (openai | deepseek | qwen | ollama | claude | gemini) at runtime, so an
+// operator's provider change rebuilds the agent's model on its next run
+// without a process restart. ok=false ⇒ no opinion (use the configured
+// provider). A resolver that does not implement this interface simply has no
+// provider opinion — composition is additive, so the existing X27 key/enabled
+// resolver keeps working unchanged. OSS registers nothing.
+type AIProviderResolver interface {
+	EffectiveProvider(ctx context.Context) (provider string, ok bool)
 }
 
 // Process-wide single slot. A consumer registers a resolver at boot; the
@@ -71,5 +85,42 @@ func aiSettingsKeyFunc() func(context.Context) (string, bool) {
 			return r.EffectiveKey(ctx)
 		}
 		return "", false
+	}
+}
+
+// aiRuntime builds the einowrap.RuntimeAI that the detect/analyze model
+// holders fold into their rebuild signature. When no resolver is registered
+// (OSS) it returns a zero RuntimeAI — every override func is nil, so the
+// holder pins the configured provider and builds the model exactly once,
+// keeping community behaviour byte-for-byte unchanged. Each func re-reads the
+// live slot, so a hot-swapped resolver takes effect without a restart.
+//
+// Provider is wired only when the registered resolver ALSO implements
+// AIProviderResolver; otherwise it returns no opinion, so a key/enabled-only
+// resolver (today's X27 backend) never forces a provider rebuild.
+func aiRuntime() einowrap.RuntimeAI {
+	if aiSettingsResolver() == nil {
+		return einowrap.RuntimeAI{}
+	}
+	return einowrap.RuntimeAI{
+		Provider: func(ctx context.Context) (string, bool) {
+			if pr, ok := aiSettingsResolver().(AIProviderResolver); ok && pr != nil {
+				return pr.EffectiveProvider(ctx)
+			}
+			return "", false
+		},
+		Enabled: func(ctx context.Context) (bool, bool) {
+			if r := aiSettingsResolver(); r != nil {
+				return r.EffectiveEnabled(ctx)
+			}
+			return false, false
+		},
+		KeySet: func(ctx context.Context) (bool, bool) {
+			if r := aiSettingsResolver(); r != nil {
+				_, ok := r.EffectiveKey(ctx)
+				return ok, true
+			}
+			return false, false
+		},
 	}
 }

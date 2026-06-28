@@ -6,8 +6,10 @@ import {
   detectAiDisabledRemedy,
   extractCode,
   extractRemedy,
+  isHeaderAuthProvider,
   keySetLabel,
   noEncryptionKeyMessage,
+  providerKeyNotice,
 } from "@/lib/agentAI";
 
 // These tests pin the pure decision logic the AI-settings control (X27 item
@@ -106,5 +108,66 @@ describe("keySetLabel", () => {
   it("shows 'No key set' when no key is configured", () => {
     expect(keySetLabel(false, "")).toBe("No key set");
     expect(keySetLabel(false, "ab12")).toBe("No key set");
+  });
+});
+
+describe("isHeaderAuthProvider", () => {
+  it("flags claude/gemini as header-auth (per-org key falls back to YAML)", () => {
+    expect(isHeaderAuthProvider("claude")).toBe(true);
+    expect(isHeaderAuthProvider("gemini")).toBe(true);
+    expect(isHeaderAuthProvider(" gemini ")).toBe(true);
+  });
+
+  it("treats the Bearer providers as NOT header-auth", () => {
+    expect(isHeaderAuthProvider("openai")).toBe(false);
+    expect(isHeaderAuthProvider("deepseek")).toBe(false);
+    expect(isHeaderAuthProvider("qwen")).toBe(false);
+    expect(isHeaderAuthProvider("")).toBe(false);
+  });
+});
+
+describe("providerKeyNotice (B35 — provider-switch key prompt)", () => {
+  it("is silent when the provider is unchanged", () => {
+    const n = providerKeyNotice("openai", "openai", false);
+    expect(n.show).toBe(false);
+    expect(n.requireKey).toBe(false);
+    expect(n.message).toBe("");
+  });
+
+  it("warns + requires a key when switching provider with NO new key (Bearer)", () => {
+    const n = providerKeyNotice("openai", "deepseek", false);
+    expect(n.show).toBe(true);
+    expect(n.requireKey).toBe(true);
+    expect(n.tone).toBe("warn");
+    expect(n.message).toMatch(/deepseek/);
+    expect(n.message).toMatch(/existing per-org key will be reused/);
+  });
+
+  it("warns about the YAML fallback when switching to a header-auth provider with no key", () => {
+    const n = providerKeyNotice("openai", "claude", false);
+    expect(n.requireKey).toBe(true);
+    expect(n.tone).toBe("warn");
+    expect(n.message).toMatch(/authenticates by header/);
+    expect(n.message).toMatch(/YAML-configured key/);
+  });
+
+  it("is informational (no key required) when a new key is entered with the switch", () => {
+    const n = providerKeyNotice("openai", "gemini", true);
+    expect(n.show).toBe(true);
+    expect(n.requireKey).toBe(false);
+    expect(n.tone).toBe("info");
+    expect(n.message).toMatch(/key you entered/);
+  });
+
+  it("treats picking 'config default' (blank) as a change off a saved provider", () => {
+    const n = providerKeyNotice("openai", "", false);
+    expect(n.show).toBe(true);
+    expect(n.requireKey).toBe(true);
+    expect(n.message).toMatch(/config default/);
+  });
+
+  it("does not fire when both saved and selected are blank (config default)", () => {
+    const n = providerKeyNotice("", "", false);
+    expect(n.show).toBe(false);
   });
 });

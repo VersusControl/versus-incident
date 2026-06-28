@@ -49,8 +49,17 @@ const (
 // asserts this so future edits cannot silently turn analyze into a
 // notification path.
 type Agent struct {
-	cfg     config.AgentAIConfig
-	agent   *react.Agent
+	cfg config.AgentAIConfig
+	// agent is the ReAct agent used when a fixed ChatModel override was
+	// supplied (tests). It is nil in production, where holder owns the
+	// (re)build instead.
+	agent *react.Agent
+	// holder lazily (re)builds the ReAct agent — tool-calling chat model
+	// plus the bound tool node — when the effective provider (or model id /
+	// runtime state) changes, so an operator's runtime provider switch is
+	// picked up on the next Run without a restart. Nil when a fixed
+	// ChatModel override was supplied.
+	holder  *einowrap.Holder[*react.Agent]
 	tools   map[string]core.AnalyzeTool
 	maxIter int
 }
@@ -65,6 +74,12 @@ type Options struct {
 	// straight to the chat model's transport. Nil (the OSS default) leaves
 	// the YAML-keyed header untouched.
 	AuthKeyFunc func(ctx context.Context) (key string, ok bool)
+
+	// Runtime folds optional runtime overrides (provider / enabled / key
+	// state) into the model holder's rebuild signature. The zero value (the
+	// OSS default) pins the configured provider and builds the agent once.
+	// Ignored when ChatModel is set (a fixed override is never rebuilt).
+	Runtime einowrap.RuntimeAI
 
 	// ChatModel overrides the Eino tool-calling chat model. When
 	// non-nil the agent skips dialing OpenAI; tests pass a fake. The
@@ -104,55 +119,80 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.AnalyzeTool
 	}
 
 	chat := opts.ChatModel
-	if chat == nil {
-		base, err := einowrap.NewToolCallingChatModel(ctx, cfg, einowrap.Options{
-			HTTPClient:  opts.HTTPClient,
-			BaseURL:     opts.BaseURL,
-			Timeout:     opts.Timeout,
-			AuthKeyFunc: opts.AuthKeyFunc,
-		})
-		if err != nil {
-			return nil, err
-		}
-		chat = base
-	}
 
 	maxIter := defaultMaxToolIterations
 
-	// MaxStep bounds the ReAct graph's pregel super-steps. The graph
-	// alternates chat -> tools -> chat ...; N chat calls interleaved
-	// with N-1 tool rounds take 2N-1 steps. Allowing maxIter tool
-	// rounds plus a final answer call (N = maxIter+1) gives the bound
-	// below — the framework-native equivalent of the old maxIter loop
-	// plus its "budget exhausted" guard.
-	reactAgent, err := react.NewAgent(ctx, &react.AgentConfig{
-		ToolCallingModel: chat,
-		ToolsConfig: compose.ToolsNodeConfig{
-			Tools: einoTools,
-			// Repair malformed tool calls from small models instead of
-			// aborting the turn: a hallucinated tool name is answered
-			// with a structured error the model can recover from.
-			UnknownToolsHandler: func(_ context.Context, name, _ string) (string, error) {
-				return fmt.Sprintf(`{"error":"unknown tool %q"}`, name), nil
+	// buildReactAgent wraps a tool-calling chat model in the ReAct graph with
+	// the bound tool node. It is the per-(re)build unit: the holder calls it
+	// each time the effective model signature changes.
+	buildReactAgent := func(ctx context.Context, chat model.ToolCallingChatModel) (*react.Agent, error) {
+		// MaxStep bounds the ReAct graph's pregel super-steps. The graph
+		// alternates chat -> tools -> chat ...; N chat calls interleaved
+		// with N-1 tool rounds take 2N-1 steps. Allowing maxIter tool
+		// rounds plus a final answer call (N = maxIter+1) gives the bound
+		// below — the framework-native equivalent of the old maxIter loop
+		// plus its "budget exhausted" guard.
+		reactAgent, err := react.NewAgent(ctx, &react.AgentConfig{
+			ToolCallingModel: chat,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools: einoTools,
+				// Repair malformed tool calls from small models instead of
+				// aborting the turn: a hallucinated tool name is answered
+				// with a structured error the model can recover from.
+				UnknownToolsHandler: func(_ context.Context, name, _ string) (string, error) {
+					return fmt.Sprintf(`{"error":"unknown tool %q"}`, name), nil
+				},
+				// Tool dispatch is sequential by default; opts.ParallelTools
+				// flips ExecuteSequentially off so multiple tool calls in one
+				// turn fan out concurrently. The audit trace stays ordered
+				// either way (seq-stamped at OnStart, stable-sorted).
+				ExecuteSequentially: !opts.ParallelTools,
 			},
-			// Tool dispatch is sequential by default; opts.ParallelTools
-			// flips ExecuteSequentially off so multiple tool calls in one
-			// turn fan out concurrently. The audit trace stays ordered
-			// either way (seq-stamped at OnStart, stable-sorted).
-			ExecuteSequentially: !opts.ParallelTools,
-		},
-		MaxStep: 2*maxIter + 1,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("analyze: build react agent: %w", err)
+			MaxStep: 2*maxIter + 1,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("analyze: build react agent: %w", err)
+		}
+		return reactAgent, nil
 	}
 
-	return &Agent{
+	a := &Agent{
 		cfg:     cfg,
-		agent:   reactAgent,
 		tools:   reg,
 		maxIter: maxIter,
-	}, nil
+	}
+
+	// A fixed ChatModel override (tests) is never rebuilt: build the ReAct
+	// agent once around it. Otherwise route construction through a holder so
+	// a runtime provider change rebuilds the tool-calling model + ReAct graph
+	// on the next Run without a restart.
+	if chat != nil {
+		reactAgent, err := buildReactAgent(ctx, chat)
+		if err != nil {
+			return nil, err
+		}
+		a.agent = reactAgent
+		return a, nil
+	}
+
+	a.holder = einowrap.NewModelHolder(cfg, einowrap.Options{
+		HTTPClient:  opts.HTTPClient,
+		BaseURL:     opts.BaseURL,
+		Timeout:     opts.Timeout,
+		AuthKeyFunc: opts.AuthKeyFunc,
+	}, opts.Runtime, func(ctx context.Context, c config.AgentAIConfig, o einowrap.Options) (*react.Agent, error) {
+		base, err := einowrap.NewToolCallingChatModel(ctx, c, o)
+		if err != nil {
+			return nil, err
+		}
+		return buildReactAgent(ctx, base)
+	})
+	// Build once up front so a bad config (empty model, explicitly-set
+	// unknown provider) still fails fast at construction.
+	if _, err := a.holder.Get(ctx); err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
 // Name implements core.AIAgent.
@@ -176,11 +216,30 @@ func (a *Agent) Run(ctx context.Context, task core.AITask) (*core.AICallResult, 
 	return a.run(ctx, at.Snapshot)
 }
 
+// reactAgent returns the ReAct agent for the current effective signature.
+// When a fixed ChatModel override was supplied (tests) it returns the
+// statically-built agent; otherwise it consults the holder, which rebuilds
+// the tool-calling model + graph only when the signature changed.
+func (a *Agent) reactAgent(ctx context.Context) (*react.Agent, error) {
+	if a.agent != nil {
+		return a.agent, nil
+	}
+	return a.holder.Get(ctx)
+}
+
 func (a *Agent) run(ctx context.Context, snap core.AnalyzeIncidentSnapshot) (*core.AICallResult, error) {
 	user := BuildUserPrompt(snap)
 	messages := []*schema.Message{
 		schema.SystemMessage(systemPrompt),
 		schema.UserMessage(user),
+	}
+
+	// Resolve the ReAct agent for the current effective signature; the
+	// holder rebuilds the tool-calling model + graph only when the provider
+	// / model / runtime state changed (nil holder ⇒ fixed test override).
+	reactAgent, err := a.reactAgent(ctx)
+	if err != nil {
+		return &core.AICallResult{UserPrompt: user, Model: a.cfg.Model}, fmt.Errorf("analyze: build react agent: %w", err)
 	}
 
 	// The audit trace is built from Eino tool callbacks rather than
@@ -190,7 +249,7 @@ func (a *Agent) run(ctx context.Context, snap core.AnalyzeIncidentSnapshot) (*co
 	handler := utilcb.NewHandlerHelper().Tool(collector.toolHandler()).Handler()
 
 	start := time.Now()
-	out, err := a.agent.Generate(ctx, messages, agent.WithComposeOptions(compose.WithCallbacks(handler)))
+	out, err := reactAgent.Generate(ctx, messages, agent.WithComposeOptions(compose.WithCallbacks(handler)))
 	durationMs := time.Since(start).Milliseconds()
 	traces := collector.ordered()
 

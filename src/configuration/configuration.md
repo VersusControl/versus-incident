@@ -238,7 +238,6 @@ agent:
   # AI analyzer — used in detect mode to assess unknown/spiking patterns.
   ai:
     enable: false                     # master switch (env: AGENT_AI_ENABLE)
-    base_url: ${AGENT_AI_BASE_URL}    # OpenAI-compatible chat/completions endpoint
     api_key: ${AGENT_AI_API_KEY}
     model: "gpt-4o-mini"
     temperature: 0.2
@@ -499,7 +498,6 @@ curl -X POST "http://localhost:3000/api/incidents?oncall_enable=true" \
 | `AGENT_NEW_SERVICE_GRACE` | Duration a newly discovered service stays in implicit training before detect-mode AI analysis begins (e.g. `30m`). `0` disables the grace window. |
 | `AGENT_SERVICE_PATTERNS`  | Comma-separated list of regexes used to extract the service name from each log line. Each pattern must contain at least one capture group. Overrides the YAML list when set. |
 | `AGENT_AI_ENABLE`         | Set to `true` to call the configured LLM in detect mode. When `false`, detect mode classifies but never calls the model (dry-run). |
-| `AGENT_AI_BASE_URL`       | OpenAI-compatible chat/completions endpoint, e.g. `https://api.openai.com/v1`. |
 | `AGENT_AI_API_KEY`        | Bearer token sent in the `Authorization` header when calling the LLM. |
 | `AGENT_AI_MODEL`          | Model identifier, e.g. `gpt-4o-mini`. |
 

@@ -23,7 +23,7 @@ both replicas.
 ## Prerequisites
 
 - Docker + Docker Compose v2.
-- The enterprise image `ghcr.io/versuscontrol/versus-enterprise:dev` (private —
+- The enterprise image `ghcr.io/versuscontrol/versus-enterprise` (private —
   `docker login ghcr.io` first, or set `VERSUS_ENTERPRISE_IMAGE` to a local build
   in `.env`).
 

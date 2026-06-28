@@ -20,11 +20,11 @@
 //
 // Place your *.md runbooks in the data folder under runbooks/ (e.g.
 // ./data/runbooks; /app/data/runbooks in the container image). The embedding
-// model/base-url come from
-// tools.find_runbook.{embedding_model,embedding_base_url} and the API
-// credential is the shared agent.ai.api_key. Pointing the base URL at a
-// local server (Ollama / vLLM / LocalAI) keeps embeddings inside the
-// operator's own network.
+// model comes from tools.find_runbook.embedding_model and the API
+// credential is the shared agent.ai.api_key. The embedding backend is
+// selected by agent.ai.provider (openai / ollama / gemini), so pointing
+// provider at a local Ollama keeps embeddings inside the operator's own
+// network.
 package main
 
 import (
@@ -89,9 +89,10 @@ func main() {
 
 	ctx := context.Background()
 	embedder, err := einowrap.NewEmbedder(ctx, c.AgentAIConfig{
-		Model:  fr.EmbeddingModel,
-		APIKey: cfg.Agent.AI.APIKey,
-	}, einowrap.Options{BaseURL: fr.EmbeddingBaseURL})
+		Provider: cfg.Agent.AI.Provider,
+		Model:    fr.EmbeddingModel,
+		APIKey:   cfg.Agent.AI.APIKey,
+	}, einowrap.Options{})
 	if err != nil {
 		log.Fatalf("runbook-ingest: build embedder: %v", err)
 	}

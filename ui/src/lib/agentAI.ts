@@ -75,3 +75,71 @@ export function keySetLabel(keySet: boolean, last4: string): string {
   const tail = last4.trim();
   return tail ? `Key set ····${tail}` : "Key set";
 }
+
+// HEADER_AUTH_PROVIDERS are the model backends that authenticate with a
+// provider-specific HEADER (claude → `x-api-key`, gemini → `x-goog-api-key`)
+// rather than a Bearer token. The enterprise per-org runtime key override is
+// injected via the Bearer `AuthKeyFunc` path ONLY (B34/X27), so for these
+// providers the per-org key does NOT apply at runtime — the agent falls back to
+// the YAML-configured key. Per-org key rotation today therefore fully applies
+// only to the Bearer providers (openai/deepseek/qwen). This mirrors the
+// enterprise AI-settings doc note (backlog B35).
+export const HEADER_AUTH_PROVIDERS = ["claude", "gemini"] as const;
+
+// isHeaderAuthProvider reports whether a provider authenticates by header
+// (claude/gemini) rather than Bearer.
+export function isHeaderAuthProvider(provider: string): boolean {
+  return (HEADER_AUTH_PROVIDERS as readonly string[]).includes(provider.trim());
+}
+
+// ProviderKeyNotice is the pure verdict for the AI-settings provider `<select>`
+// (backlog B35, Security gate finding F2). It tells the control whether a
+// provider change is staged and, if so, whether the operator still owes the
+// matching key — so Save can warn/confirm before reusing the previous key.
+export interface ProviderKeyNotice {
+  // show — a provider change is staged (the selection differs from the saved
+  // provider); render the inline notice.
+  show: boolean;
+  // requireKey — the provider changed but NO new key was entered, so Save would
+  // reuse the previous per-org key (Bearer providers) or fall back to the YAML
+  // key (claude/gemini). The control should warn + confirm before saving.
+  requireKey: boolean;
+  // tone — "warn" when a key is still owed, "info" when the change is fully
+  // specified (new key entered).
+  tone: "warn" | "info";
+  message: string;
+}
+
+// providerKeyNotice computes the staged-provider-change verdict from the saved
+// provider, the currently-selected provider, and whether a new key was entered.
+// It is the single source of truth for both the inline notice and the Save
+// confirmation, kept DOM-free so it can be unit-tested in the node vitest env.
+export function providerKeyNotice(
+  savedProvider: string,
+  selectedProvider: string,
+  keyEntered: boolean,
+): ProviderKeyNotice {
+  const sel = selectedProvider.trim();
+  const changed = sel !== savedProvider.trim();
+  if (!changed) {
+    return { show: false, requireKey: false, tone: "info", message: "" };
+  }
+  const target = sel || "the config default";
+  if (keyEntered) {
+    return {
+      show: true,
+      requireKey: false,
+      tone: "info",
+      message: `Saving will switch the model provider to ${target} with the key you entered.`,
+    };
+  }
+  const reuse = isHeaderAuthProvider(sel)
+    ? `${sel} authenticates by header (not Bearer), so the per-org key override does not apply to it yet — it will use the YAML-configured key. Enter ${sel}'s key (and rotate the YAML key) to be sure the right credential is used.`
+    : `the existing per-org key will be reused on the new endpoint. Enter the matching key for ${target} to avoid sending the wrong credential.`;
+  return {
+    show: true,
+    requireKey: true,
+    tone: "warn",
+    message: `You're switching the model provider to ${target} without entering a new key — ${reuse}`,
+  };
+}

@@ -313,6 +313,7 @@ export function PatternsPage() {
               <table className="ddt">
                 <thead>
                   <tr>
+                    <th className="w-28">Service</th>
                     <th className="w-10">
                       <input
                         type="checkbox"
@@ -328,7 +329,6 @@ export function PatternsPage() {
                     <th className="w-20 text-right">Count</th>
                     <th className="w-24 text-right">Normal</th>
                     <th>Template</th>
-                    <th className="w-28">Service</th>
                     <th className="w-24">Verdict</th>
                     <th className="w-44">Actions</th>
                   </tr>
@@ -365,6 +365,9 @@ export function PatternsPage() {
                       onOpen={() => setPeekId(p.id)}
                       {...keys.rowProps(i)}
                     >
+                      <td className="font-mono text-2xs text-ink-300">
+                        {displayService(p.service)}
+                      </td>
                       <td>
                         <input
                           type="checkbox"
@@ -387,9 +390,6 @@ export function PatternsPage() {
                         >
                           {p.template}
                         </div>
-                      </td>
-                      <td className="font-mono text-2xs text-ink-300">
-                        {displayService(p.service)}
                       </td>
                       <td>
                         <VerdictPill verdict={p.verdict} />

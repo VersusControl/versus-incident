@@ -147,7 +147,58 @@ export interface BaselinesResponse {
   org: string;
   count: number;
   baselines: BaselineRow[];
-}export interface ShadowEvent {
+}
+
+// --- SLI/SLO auto-define (epic X29) -----------------------------------------
+// The "SLO Advisor" recommends SLIs/SLOs per service. The read endpoint is
+// Enterprise-gated (403 without an `intelligence` license; absent on an OSS
+// binary) and carries an AI-gate status so the page can show a clear OFF
+// reason when AI is disabled. Advisory only — adopting an objective is a human
+// action; the page never mutates cluster state.
+
+export interface SLORecommendationSLI {
+  name: string;
+  type: string; // availability | latency | error_rate | throughput | saturation
+  signal: string;
+  objective: number; // ratio in (0,1), or a latency target in ms
+  window_days: number;
+  rationale: string;
+  confidence: number; // 0..1
+}
+
+export interface SLORecommendation {
+  service: string;
+  generated_at: string;
+  version: number;
+  run_id?: string;
+  model?: string;
+  prompt_hash?: string;
+  summary: string;
+  slis: SLORecommendationSLI[];
+}
+
+export interface SLOGateStatus {
+  enabled: boolean; // the AI hard gate is OPEN
+  off_reason?: string; // the clear reason when the gate is CLOSED
+}
+
+export interface SLORecommendationsResponse {
+  org: string;
+  count: number;
+  recommendations: SLORecommendation[];
+  status: SLOGateStatus;
+}
+
+export interface SLOAutodefineConfig {
+  cadence: string; // a Go duration string, e.g. "24h0m0s"
+  enabled: boolean; // the per-org feature toggle (DISTINCT from status.enabled)
+  updated_at?: string;
+  updated_by?: string;
+  min_cadence: string;
+  status: SLOGateStatus; // the AI hard gate; status.enabled gates the toggle
+}
+
+export interface ShadowEvent {
   pattern_id: string;
   template: string;
   source: string;
@@ -478,17 +529,41 @@ export interface AgentModeView {
 //   422 — `no_encryption_key` on a key write → server master key not set
 export interface AISettingsView {
   enabled: boolean;
+  provider: string;
   key_set: boolean;
   last4: string;
   yaml_enabled: boolean;
   source: "override" | "yaml";
 }
 
-// AISettingsInput is the PUT body. `api_key` is OPTIONAL: omit/blank to toggle
-// `enabled` without resubmitting the key (the stored key persists). Never
-// persisted client-side — held transiently for the single PUT, then cleared.
+// AIProvider is the closed set of model backends the runtime override accepts.
+// It mirrors the OSS chat-model registry (eino.SupportedProviders); the server
+// re-validates on WRITE and rejects an unknown value with 400, so this list is
+// the UI's first line of defence, not the authority.
+export type AIProvider =
+  | "openai"
+  | "deepseek"
+  | "qwen"
+  | "ollama"
+  | "claude"
+  | "gemini";
+
+export const AI_PROVIDERS: AIProvider[] = [
+  "openai",
+  "deepseek",
+  "qwen",
+  "ollama",
+  "claude",
+  "gemini",
+];
+
+// AISettingsInput is the PUT body. `api_key` and `provider` are both OPTIONAL:
+// omit/blank either to leave the stored value untouched while toggling
+// `enabled` (the stored key + provider persist). Never persisted client-side —
+// held transiently for the single PUT, then cleared.
 export interface AISettingsInput {
   enabled: boolean;
+  provider?: string;
   api_key?: string;
 }
 
@@ -873,6 +948,36 @@ export const api = {
     return request<BaselinesResponse>(`/api/agent/baselines${suffix}`);
   },
 
+  // listSLORecommendations reads the Enterprise SLI/SLO auto-define output. Like
+  // listBaselines it does NOT swallow errors: a 403 (unlicensed) or 404 (OSS
+  // binary — endpoint absent) tells the page to render the locked upsell state.
+  // The response carries an AI-gate status so the page can show a clear OFF
+  // reason when AI is disabled.
+  listSLORecommendations: () =>
+    request<SLORecommendationsResponse>("/api/agent/slo-recommendations"),
+
+  // SLI/SLO auto-define cadence (Enterprise, RBAC runtime:manage). These ride
+  // the SSO session cookie via sessionRequest; the org and role are derived
+  // from the session server-side. A non-admin session is 403'd (fail-closed),
+  // a below-floor / unparseable cadence is 400'd.
+  getSLOAutodefineConfig: () =>
+    sessionRequest<SLOAutodefineConfig>(
+      "/enterprise/api/agent/slo-autodefine/config",
+    ),
+  setSLOAutodefineConfig: (cadence: string) =>
+    sessionRequest<SLOAutodefineConfig>(
+      "/enterprise/api/agent/slo-autodefine/config",
+      { method: "PUT", body: JSON.stringify({ cadence }) },
+    ),
+  // setSLOAutodefineEnabled flips the per-org feature toggle. Enabling is
+  // server-validated against the AI hard gate (422 ai_required when AI is off /
+  // no key); disabling is always allowed.
+  setSLOAutodefineEnabled: (enabled: boolean) =>
+    sessionRequest<SLOAutodefineConfig>(
+      "/enterprise/api/agent/slo-autodefine/config",
+      { method: "PUT", body: JSON.stringify({ enabled }) },
+    ),
+
   // Runtime mode override (Enterprise, RBAC runtime:manage). These ride the
   // SSO session cookie via sessionRequest; the org and role are derived from
   // the session server-side. A non-admin session is 403'd (fail-closed).
@@ -896,9 +1001,12 @@ export const api = {
   // and never persisted client-side.
   getAISettings: () =>
     sessionRequest<AISettingsView>("/enterprise/api/agent/ai-settings"),
-  setAISettings: (enabled: boolean, apiKey?: string) => {
+  setAISettings: (enabled: boolean, provider?: string, apiKey?: string) => {
     const key = apiKey?.trim() ?? "";
-    const body: AISettingsInput = key ? { enabled, api_key: key } : { enabled };
+    const prov = provider?.trim() ?? "";
+    const body: AISettingsInput = { enabled };
+    if (prov) body.provider = prov;
+    if (key) body.api_key = key;
     return sessionRequest<AISettingsView>("/enterprise/api/agent/ai-settings", {
       method: "PUT",
       body: JSON.stringify(body),

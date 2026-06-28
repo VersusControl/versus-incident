@@ -50,7 +50,7 @@ spec:
         - name: versus
           # Enterprise image — HA is an enterprise capability. Override the tag
           # to pin a version.
-          image: ghcr.io/versuscontrol/versus-enterprise:dev
+          image: ghcr.io/versuscontrol/versus-enterprise
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

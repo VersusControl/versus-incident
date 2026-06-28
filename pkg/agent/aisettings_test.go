@@ -87,3 +87,60 @@ func TestAISettingsKeyFunc_ReadsLiveSlot(t *testing.T) {
 		t.Fatalf("after swap fn() = (%q,%v), want (\"\",false)", key, ok)
 	}
 }
+
+// stubProviderAISettings is a resolver that ALSO implements
+// AIProviderResolver, so it can override the model provider at runtime.
+type stubProviderAISettings struct {
+	stubAISettings
+	provider   string
+	providerOK bool
+}
+
+func (s *stubProviderAISettings) EffectiveProvider(context.Context) (string, bool) {
+	return s.provider, s.providerOK
+}
+
+// TestAIRuntime_NilResolver_Inert proves the OSS default: with no resolver
+// registered aiRuntime() is a zero RuntimeAI (every override func nil), so the
+// model holder pins the configured provider and never rebuilds.
+func TestAIRuntime_NilResolver_Inert(t *testing.T) {
+	SetAISettingsResolver(nil)
+	t.Cleanup(func() { SetAISettingsResolver(nil) })
+
+	rt := aiRuntime()
+	if rt.Provider != nil || rt.Enabled != nil || rt.KeySet != nil {
+		t.Fatalf("aiRuntime() with no resolver = %+v, want all-nil funcs", rt)
+	}
+}
+
+// TestAIRuntime_ProviderResolver proves a resolver that implements
+// AIProviderResolver feeds its provider opinion through aiRuntime().Provider,
+// while a plain key/enabled-only resolver yields no provider opinion (so it
+// never forces a provider rebuild).
+func TestAIRuntime_ProviderResolver(t *testing.T) {
+	t.Cleanup(func() { SetAISettingsResolver(nil) })
+
+	// Plain resolver (no AIProviderResolver) ⇒ Provider has no opinion.
+	SetAISettingsResolver(&stubAISettings{enabled: true, enabledOK: true, key: "k", keyOK: true})
+	rt := aiRuntime()
+	if rt.Provider == nil {
+		t.Fatal("aiRuntime().Provider = nil with a resolver registered, want non-nil")
+	}
+	if p, ok := rt.Provider(context.Background()); ok {
+		t.Fatalf("plain resolver Provider() = (%q,true), want no opinion", p)
+	}
+	// Enabled/KeySet fold the plain resolver's state.
+	if en, ok := rt.Enabled(context.Background()); !ok || !en {
+		t.Fatalf("Enabled() = (%v,%v), want (true,true)", en, ok)
+	}
+	if set, ok := rt.KeySet(context.Background()); !ok || !set {
+		t.Fatalf("KeySet() = (%v,%v), want (true,true)", set, ok)
+	}
+
+	// Provider-capable resolver ⇒ Provider returns its opinion.
+	SetAISettingsResolver(&stubProviderAISettings{provider: "ollama", providerOK: true})
+	rt = aiRuntime()
+	if p, ok := rt.Provider(context.Background()); !ok || p != "ollama" {
+		t.Fatalf("provider resolver Provider() = (%q,%v), want (ollama,true)", p, ok)
+	}
+}

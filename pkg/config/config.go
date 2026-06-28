@@ -383,6 +383,9 @@ func loadConfigFromPath(path string) (*Config, error) {
 		loaded.Agent.ServicePatterns = list
 	}
 	setEnableFromEnv("AGENT_AI_ENABLE", &loaded.Agent.AI.Enable)
+	if p := os.Getenv("AGENT_AI_PROVIDER"); p != "" {
+		loaded.Agent.AI.Provider = p
+	}
 	if k := os.Getenv("AGENT_AI_API_KEY"); k != "" {
 		loaded.Agent.AI.APIKey = k
 	}
