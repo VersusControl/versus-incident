@@ -45,7 +45,7 @@ jobs:
         uses: actions/configure-pages@v6
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           # `src/` already contains the docsify index.html, _sidebar.md,
           # markdown content, images, CNAME and .nojekyll — it IS the site.
