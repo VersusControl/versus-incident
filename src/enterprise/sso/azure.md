@@ -13,10 +13,6 @@ https://login.microsoftonline.com/<tenant>/v2.0
 Leave the tenant **blank** to use the multi-tenant `common` authority. For a
 single-organization sign-in, supply your directory (tenant) ID.
 
-> New to enterprise SSO? Read the [overview](./overview.md) first for the
-> bootstrap flow, roles, and shared concepts. You add this connection while
-> signed in as the built-in **default admin** (owner).
-
 ## What you'll need
 
 | Item | Where it comes from |

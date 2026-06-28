@@ -93,7 +93,7 @@ against.
 
 ## Configuration
 
-The tool lives in [`tools.yaml`](configuration/configuration.md), next to
+The tool lives in [`tools.yaml`](../../configuration/configuration.md), next to
 your `config.yaml`. List your deploy repositories under
 `tools.recent_changes.git.repos`. With an empty `repos` list the tool is
 not registered, and analyses proceed without change awareness.
@@ -189,4 +189,4 @@ docker run -d --name versus-incident \
 
 ---
 
-Back to the [Analyze Tools overview](agent/analyze-tools/tools.md).
+Back to the [Analyze Tools overview](./tools.md).

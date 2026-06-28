@@ -7,10 +7,6 @@ connection type is `google`; its OIDC issuer is fixed to
 `https://accounts.google.com`, so there is **no issuer field to fill** — you only
 register an OAuth client and paste its credentials.
 
-> New to enterprise SSO? Read the [overview](./overview.md) first for the
-> bootstrap flow, roles, and shared concepts. You add this connection while
-> signed in as the built-in **default admin** (owner).
-
 ## What you'll need
 
 | Item | Where it comes from |
