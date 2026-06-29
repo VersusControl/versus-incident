@@ -95,14 +95,7 @@ services:
       AGENT_AI_ENABLE: ${AGENT_AI_ENABLE:-false}
       AGENT_AI_API_KEY: ${AGENT_AI_API_KEY:-}
       AGENT_AI_MODEL: ${AGENT_AI_MODEL:-gpt-4o-mini}
-      # --- Standing-intelligence layer (X16 baseline / X15 auto-SLO) -------
-      # OPTIONAL. Empty by default = the wedge is a no-op (the rule-based
-      # `prometheus` source still fires incidents on its own). Set
-      # INTEL_SERVICES (see .env.example for ready JSON) to ALSO learn
-      # baselines + derive an auto-SLO and page on multi-window burn rate.
-      # Needs a learning window — see README "Standing intelligence".
-      VERSUS_ENTERPRISE_INTEL_PROMETHEUS_ADDRESS: ${INTEL_PROM_ADDRESS:-http://prometheus:9090}
-      VERSUS_ENTERPRISE_INTEL_SERVICES: ${INTEL_SERVICES:-}
+      PROM_ADDRESS: ${PROM_ADDRESS:-http://prometheus:9090}
     volumes:
       - ./config:/app/config:ro
       - versus-data:/app/data

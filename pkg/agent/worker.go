@@ -358,6 +358,33 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		}
 	}
 
+	// Learn-exclusion chokepoint (X30 "Disable-Learn"). Runs immediately after
+	// redaction and BEFORE the pre-brain matcher / grouping, so an excluded
+	// (service, signal) never folds into the model in ANY mode — the mode
+	// switch (training/shadow/detect) is downstream of learner.Group. OSS
+	// installs no policy ⇒ learnExclusion() is nil ⇒ this block is skipped and
+	// the tick is byte-for-byte unchanged.
+	excluded := 0
+	if x := learnExclusion(); x != nil {
+		kept := signals[:0]
+		for _, sig := range signals {
+			svc, _ := sig.Fields[core.FieldService].(string)
+			if svc == "" {
+				svc = w.services.Extract(sig.Message)
+				if svc == "" {
+					svc = "_unknown"
+				}
+			}
+			signalName, _ := sig.Fields[core.FieldSignal].(string)
+			if x.ExcludeFromLearning(ctx, svc, signalName) {
+				excluded++
+				continue
+			}
+			kept = append(kept, sig)
+		}
+		signals = kept
+	}
+
 	// Decision 1B per-kind override (agent.regex.metrics / agent.regex.traces):
 	// when the operator set it, drop metric/trace signals whose message does NOT
 	// match BEFORE the brain sees them, so the override bites brain-agnostically
@@ -481,8 +508,8 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 
 	w.saveCursor(ctx, src.Name(), newCursor)
 
-	log.Printf("agent: tick %s signals=%d matched=%d patterns=%d skipped_no_match=%d verdicts=%v cursor=%s",
-		src.Name(), pulled, matched, len(observations), pulled-matched, verdicts, newCursor.Format(time.RFC3339))
+	log.Printf("agent: tick %s signals=%d matched=%d patterns=%d skipped_no_match=%d skipped_excluded=%d verdicts=%v cursor=%s",
+		src.Name(), pulled, matched, len(observations), pulled-matched, excluded, verdicts, newCursor.Format(time.RFC3339))
 }
 
 // emitDetect handles one Unknown / Spike pattern in detect mode. Returns

@@ -3,6 +3,8 @@
 // All requests are authenticated with the X-Gateway-Secret header. The secret
 // is read from localStorage; AuthGate prompts for it on first visit.
 
+import type { LearnExclusions } from "@/lib/learnExclude";
+
 const SECRET_KEY = "versus.gatewaySecret";
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ""; // empty → uses Vite proxy
 
@@ -220,6 +222,58 @@ export interface ShadowStats {
 
 export interface ServiceInfo {
   first_seen: string;
+}
+
+// --- Service detail (X30) ----------------------------------------------------
+// The OSS half of the service-detail surface: service meta + grace, the
+// log-pattern catalog scoped to the service, and a bounded incident summary.
+// It carries NO metrics/traces fields — those ride the Enterprise /intel
+// endpoint (ServiceIntel) and the page renders them separately.
+
+export interface ServicePattern {
+  id: string;
+  template: string;
+  count: number;
+  verdict: string; // "" | "known" | operator-set
+  source: string;
+  last_seen: string;
+  tags?: string[];
+}
+
+export interface ServiceIncidentRecent {
+  id: string;
+  title?: string;
+  severity: string;
+  created_at: string;
+}
+
+export interface ServiceIncidentSummary {
+  window_days: number;
+  count: number;
+  severities: Record<string, number>;
+  recent: ServiceIncidentRecent[];
+}
+
+export interface ServiceDetail {
+  service: string;
+  first_seen: string;
+  in_grace: boolean;
+  grace_seconds_remaining: number;
+  patterns: ServicePattern[];
+  incidents: ServiceIncidentSummary;
+  counts: { patterns: number; incidents: number };
+}
+
+// ServiceIntel is the Enterprise metrics/traces half of the service-detail
+// surface (X30-T2). The endpoint is Enterprise-gated (403 unlicensed) and
+// absent on an OSS binary (404) — the page renders the locked upsell in that
+// case, driven purely by HTTP status. No enterprise dependency lives in the OSS
+// UI; the shape reuses the OSS-local BaselineRow type.
+export interface ServiceIntel {
+  org?: string;
+  service: string;
+  metrics?: BaselineRow[];
+  traces?: BaselineRow[];
 }
 
 // AIFinding is the structured response parsed out of the model's JSON.
@@ -566,6 +620,19 @@ export interface AISettingsInput {
   provider?: string;
   api_key?: string;
 }
+
+// ---------- Disable-Learn exclusions (Enterprise, RBAC runtime:manage) ----------
+
+// LearnExclusionsView is the org's Disable-Learn policy as returned by GET
+// /enterprise/api/agent/learn-exclusions: `services` are exact service names
+// fully excluded from learning; `metrics` are signal entries that are exact
+// names AND glob/prefix patterns (e.g. "up", "go_*", "prometheus_*"). Both are
+// always present (possibly empty). It doubles as the PUT input (whole-list
+// replace). The endpoint is Enterprise-gated and RBAC runtime:manage-guarded
+// (401 no session / 403 wrong role / 403 community / 404 OSS binary). The
+// canonical shape lives in lib/learnExclude (pure, where the matcher gate
+// consumes it); re-exported here so it sits with the other API view/input types.
+export type { LearnExclusions as LearnExclusionsView } from "@/lib/learnExclude";
 
 // ---------- Enterprise multi-IdP connections (Keycloak-style, admin-gated) ----------
 
@@ -1017,6 +1084,36 @@ export const api = {
       method: "DELETE",
     }),
 
+  // Disable-Learn exclusions (Enterprise, RBAC runtime:manage). Same
+  // sessionRequest plumbing as the runtime mode / AI controls — the SSO session
+  // cookie, never a static token; the org and role are derived server-side. The
+  // GET is the single state source the toggle + per-metric checkboxes read;
+  // setServiceLearnExclusion toggles ONE service (POST add / DELETE remove);
+  // setLearnExclusions PUTs the whole list (read-modify-write off the GET). All
+  // three return the authoritative post-change lists. Every mutation is audited
+  // server-side and takes effect on the next worker tick (no restart). 403/404
+  // is the terminal community / OSS / wrong-role answer, never retried.
+  getLearnExclusions: () =>
+    sessionRequest<LearnExclusions>(
+      "/enterprise/api/agent/learn-exclusions",
+    ).then((r) => ({
+      services: r.services ?? [],
+      metrics: r.metrics ?? [],
+    })),
+  setLearnExclusions: (input: LearnExclusions) =>
+    sessionRequest<LearnExclusions>("/enterprise/api/agent/learn-exclusions", {
+      method: "PUT",
+      body: JSON.stringify({
+        services: input.services,
+        metrics: input.metrics,
+      }),
+    }).then((r) => ({ services: r.services ?? [], metrics: r.metrics ?? [] })),
+  setServiceLearnExclusion: (name: string, excluded: boolean) =>
+    sessionRequest<LearnExclusions>(
+      `/enterprise/api/agent/learn-exclusions/services/${encodeURIComponent(name)}`,
+      { method: excluded ? "POST" : "DELETE" },
+    ).then((r) => ({ services: r.services ?? [], metrics: r.metrics ?? [] })),
+
   // getSSODeployment reads the license-issued single-tenant deployment org so
   // the admin controls drive SSO/connections/policy under it (not "default").
   // Pre-auth (no session); 403 in community mode signals "not enterprise".
@@ -1122,6 +1219,18 @@ export const api = {
     request<{ services: Record<string, ServiceInfo> }>(
       "/api/agent/services",
     ).then((r) => r.services ?? {}),
+  // getServiceDetail reads the OSS service-detail aggregate (meta + grace +
+  // patterns + bounded incident summary). 404 means the service is unknown.
+  getServiceDetail: (name: string) =>
+    request<ServiceDetail>(`/api/agent/services/${encodeURIComponent(name)}`),
+  // getServiceIntel reads the Enterprise metrics/traces half. Like
+  // listBaselines it does NOT swallow errors: a 403 (unlicensed) or 404 (OSS
+  // binary — endpoint absent) tells the page to render the locked upsell state
+  // for the Metrics & Traces section instead of a panel.
+  getServiceIntel: (name: string) =>
+    request<ServiceIntel>(
+      `/api/agent/services/${encodeURIComponent(name)}/intel`,
+    ),
   controlGrace: (name: string, action: "end" | "restart") =>
     request<{ ok: boolean }>(
       `/api/agent/services/${encodeURIComponent(name)}/grace`,

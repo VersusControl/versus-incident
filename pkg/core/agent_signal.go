@@ -5,6 +5,23 @@ import (
 	"time"
 )
 
+// Canonical Signal.Fields keys shared across the agent pipeline. They name
+// the two attributes every signal type can carry regardless of source: the
+// discovered service and the logical signal name (a metric's golden-signal,
+// a trace operation, or a log template label). They live in OSS so any
+// consumer — the worker's learn-exclusion chokepoint, an enterprise
+// metric/trace brain, a standing data source — keys off ONE definition.
+// Enterprise packages (pkg/intel, pkg/datasource) keep their own copies to
+// stay decoupled; a cross-package drift test pins them equal.
+const (
+	// FieldService is the Signal.Fields key holding the discovered service
+	// name (string). Empty when the source did not stamp one.
+	FieldService = "service"
+	// FieldSignal is the Signal.Fields key holding the logical signal name
+	// (string) — e.g. a metric golden-signal or trace operation label.
+	FieldSignal = "signal"
+)
+
 // Signal is one normalized observation pulled from a SignalSource.
 //
 // Fields holds best-effort structured fields; Raw is the original source

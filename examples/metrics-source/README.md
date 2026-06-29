@@ -227,26 +227,35 @@ emission path (`services.CreateIncidentFromFinding`) and out to on-call.
 
 The burn-rate policy is the Google SRE-workbook 2-window page (fast 1h/5m at
 14.4×, slow 6h/30m at 6×). A 90s spike will **not** page on burn rate in a fresh
-stack — that's by design, and we don't fake it. To **enable and observe** the
-wedge:
+stack — that's by design, and we don't fake it. The wedge is **automatic** with
+a valid intelligence `LICENSE_KEY` — there is nothing to configure. To **observe**
+it:
 
-1. In `.env`, set `INTEL_SERVICES` to the ready JSON (commented in
-   [.env.example](.env.example) — golden-signal queries + good/total event
-   queries for `checkout`):
+1. The wedge registers on the scheduler at boot off the SAME single
+   `prometheus` data source — no per-service query list to author:
 
    ```bash
    docker compose up -d --force-recreate versus
    ```
 
-   On boot you'll see the wedge register on the scheduler:
+   On boot you'll see:
 
    ```
-   intel: registered standing-intelligence jobs (services=1, baseline=10m0s, slo=5m0s)
-   enterprise: standing-intelligence wedge active (2 scheduler job(s))
+   intel: SLO-burn evaluator registered against the agent metric source (objectives auto-derived from discovered RED signals; targets appear as services are discovered; slo=5m0s); X16 baseline runs on the agent worker tick via the per-type seam
+   enterprise: standing-intelligence wedge active (1 scheduler job(s))
    ```
 
-2. Keep traffic flowing so the learners have samples (run the generator in a
-   loop, or with a long `--duration 0` until Ctrl+C). After the first SLO pass:
+   Until the metric brain discovers a service's availability SLI the evaluator
+   logs an explicit, rate-limited idle line — that is expected, not a
+   misconfiguration:
+
+   ```
+   intel: SLO-burn evaluator idle — no service has a discovered availability SLI (request_rate + error_rate) yet; nothing to evaluate (not a misconfiguration)
+   ```
+
+2. Keep traffic flowing so the brain discovers services and the learners have
+   samples (run the generator in a loop, or with a long `--duration 0` until
+   Ctrl+C). After the first SLO pass over a discovered service:
 
    ```
    intel: slo derived org=default service=checkout objective=0.99 window_days=30
@@ -260,8 +269,8 @@ wedge:
    agent[detect]: ... source=intel:slo category=slo severity=critical
    ```
 
-Leave `INTEL_SERVICES` empty (the default) and the wedge is a clean no-op — the
-rule-based source still fires incidents on its own.
+Run the binary in community mode (no `LICENSE_KEY`) and the wedge is a clean
+no-op — the rule-based source still fires incidents on its own.
 
 ## On-call — the end of the flow (page a human)
 
@@ -292,7 +301,7 @@ provider config lives in [config/config.yaml](config/config.yaml) under
 | Fire | `generate_fake_metrics.py --spike` | source range-queries rules → fires N signals |
 | Detect | (automatic) | `agent: tick prometheus:demo-prom signals=2 matched=2` → incident emitted |
 | Analyze | enable AI key, re-spike | auto-wired `query_metrics` / `query_traces` pull PromQL / traces |
-| Intelligence | set `INTEL_SERVICES`, wait | SLO derived; (sustained) burn-rate finding emitted |
+| Intelligence | (automatic, with license) wait | SLO derived; (sustained) burn-rate finding emitted |
 | On-call | enable a channel | incident delivered to Slack/Telegram (or logged dry route) |
 
 ## Auto-wire
