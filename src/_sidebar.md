@@ -46,6 +46,7 @@
     - [Helm](/enterprise/ha/helm)
   - [Metrics (Prometheus)](/enterprise/metrics)
   - [Traces](/enterprise/traces)
+  - [SLI/SLO auto-define](/enterprise/slo)
 
 - Configuration
   - [Overview](/configuration/admin-ui)
