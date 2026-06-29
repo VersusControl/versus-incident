@@ -22,18 +22,7 @@ Run the Enterprise SRE Agent as **multi-instance**. HA is the same binary you al
 
 ## How HA works
 
-```mermaid
-flowchart TB
-  lb["one endpoint<br/>load balancer"]
-  subgraph R["replicas (enterprise image + LICENSE_KEY)"]
-    r0["versus-0<br/>index 0"]
-    r1["versus-1<br/>index 1"]
-    r2["versus-2<br/>index 2"]
-  end
-  pg["Shared Postgres<br/>incidents · sessions · managed secrets"]
-  lb --> r0 & r1 & r2
-  r0 & r1 & r2 --> pg
-```
+![Versus Incident HA](../../docs/images/versus-incident-ha-overview.png)
 
 The binary expects exactly four things — every guide here satisfies them:
 

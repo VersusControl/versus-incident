@@ -17,16 +17,7 @@ refuses to start (see [Troubleshooting](#troubleshooting)).
 
 ## What you'll build
 
-```mermaid
-flowchart LR
-  gen["scripts/generate_fake_metrics.py<br/>--spike --otlp"] -->|OTLP/HTTP spans :4318| tempo["Tempo<br/>:3200"]
-  subgraph VE["Versus (Enterprise build) :3000"]
-    src["traces source<br/>auto-discovered (service, operation)<br/>(+ optional TraceQL)"]
-    worker["detect worker<br/>+ AI classify (gpt-4o-mini)"]
-  end
-  tempo -->|search each tick| src --> worker
-  worker -->|detect.json + incidents.json| out["data/*.json<br/>+ admin UI"]
-```
+![Verus Incident Traces](../docs/images/versus-incident-traces-flow.png)
 
 The host-run generator POSTs OTLP spans to Tempo — during a spike roughly half are
 **error spans** with fat latency. The enterprise `traces` source **auto-discovers each
@@ -93,8 +84,6 @@ when you start the container. The demo walks through them in order:
 | `shadow` | Scores every target against the learned baseline. Writes **"would have alerted"** verdicts to the UI — but **pages no one**. | Validating that the learned baseline is accurate before going live. |
 | `detect` | Opens a **real incident automatically** when a target deviates from the learned baseline. A lightweight **AI classification** writes the incident's title, severity, and summary. (The deep, tool-using **AI analysis** is a separate, on-demand step — see [step 5](#5-watch-the-results).) | Production — the payoff mode. |
 
-### In plain words
-
 Think of the agent like a new on-call engineer learning your systems:
 
 - **Training** — it just *watches* a healthy trace stream and learns the
@@ -106,11 +95,6 @@ Think of the agent like a new on-call engineer learning your systems:
 - **Detect** — it *acts*. When an operation clearly breaks from its
   baseline, it opens a real incident and a lightweight AI classification
   writes the title, severity, and summary.
-
-```mermaid
-flowchart LR
-  t["Training<br/>learn normal"] --> s["Shadow<br/>would-have-alerted"] --> d["Detect<br/>open real incidents"]
-```
 
 The recommended sequence for this demo:
 
