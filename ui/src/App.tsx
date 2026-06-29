@@ -36,6 +36,10 @@ const SystemPromptPage = lazyPage(
   "SystemPromptPage",
 );
 const RunbooksPage = lazyPage(() => import("./pages/RunbooksPage"), "RunbooksPage");
+const ServiceDetailPage = lazyPage(
+  () => import("./pages/ServiceDetailPage"),
+  "ServiceDetailPage",
+);
 const MetricsPage = lazyPage(
   () => import("./pages/LearnedSignalsView"),
   "MetricsPage",
@@ -119,6 +123,10 @@ export default function App() {
             element={<ShadowDetailPage />}
           />
           <Route path="/agent/services" element={<ServicesPage />} />
+          <Route
+            path="/agent/services/:name"
+            element={<ServiceDetailPage />}
+          />
           <Route path="/agent/runbooks" element={<RunbooksPage />} />
 
           {/* Manage */}

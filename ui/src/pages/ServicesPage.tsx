@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { Play, Square } from "lucide-react";
 import { api } from "@/lib/api";
 import { fmtAbs, fmtRel } from "@/lib/format";
@@ -119,7 +120,16 @@ export function ServicesPage() {
                       return (
                         <tr key={name}>
                           <td className="font-mono">
-                            {name}
+                            {isUnknown ? (
+                              name
+                            ) : (
+                              <Link
+                                className="link"
+                                to={`/agent/services/${encodeURIComponent(name)}`}
+                              >
+                                {name}
+                              </Link>
+                            )}
                             {isUnknown && (
                               <Pill tone="warn" className="ml-2">
                                 fallback

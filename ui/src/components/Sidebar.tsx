@@ -96,6 +96,7 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   ];
   const agent: SideItem[] = [
     { to: "/agent", label: "Overview", icon: Activity, end: true },
+    { to: "/agent/services", label: "Services", icon: Server },
     { to: "/agent/logs", label: "Logs", icon: ScrollText },
     {
       to: "/agent/metrics",
@@ -128,7 +129,6 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         : undefined,
     },
     { to: "/agent/decisions", label: "Decisions", icon: Sparkles },
-    { to: "/agent/services", label: "Services", icon: Server },
   ];
   const tools: SideItem[] = [
     {
