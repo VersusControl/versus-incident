@@ -85,8 +85,8 @@ github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg
 github.com/cloudflare/circl v1.6.3/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
 github.com/cloudwego/base64x v0.1.6 h1:t11wG9AECkCDk5fMSoxmufanudBtJ+/HemLstXDLI2M=
 github.com/cloudwego/base64x v0.1.6/go.mod h1:OFcloc187FXDaYHvrNIjxSe8ncn0OOM8gEHfghB2IPU=
-github.com/cloudwego/eino v0.9.10 h1:WcYilVnGZDgec6bBwJ/cG5B3R3SePWuVRX6gCPa2OG0=
-github.com/cloudwego/eino v0.9.10/go.mod h1:OBD1mrkfkt/pJa4rkg1P0VnaMeOVl7l8IAdEqY//3IQ=
+github.com/cloudwego/eino v0.9.12 h1:mHAMo5k7GdvnVD8Lc2sLyfpkxEm0S/y3PkEMhsSYt78=
+github.com/cloudwego/eino v0.9.12/go.mod h1:OBD1mrkfkt/pJa4rkg1P0VnaMeOVl7l8IAdEqY//3IQ=
 github.com/cloudwego/eino-ext/components/embedding/gemini v0.0.0-20260616080858-ab17b7308bf8 h1:WIHNFwFB5OYfg8Eu7GJZhiFk1bvUYGRTNSRDB+LERxs=
 github.com/cloudwego/eino-ext/components/embedding/gemini v0.0.0-20260616080858-ab17b7308bf8/go.mod h1:7kXLm7b2i/uTF/KXOPW9aMxNDYwSbN7wNvsCW14c0NA=
 github.com/cloudwego/eino-ext/components/embedding/ollama v0.0.0-20260616080858-ab17b7308bf8 h1:dIyNzQRY/4+zKNLuTlLX8iKz+HtfXPHTl/jov+DYZYQ=
