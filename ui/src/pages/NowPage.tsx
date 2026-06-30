@@ -62,16 +62,19 @@ export function NowPage() {
     staleTime: 15_000,
   });
   // Same keys as TopBar's chip queries — one cache entry, zero extra load.
-  const status = useQuery({
-    queryKey: ["status-pulse"],
-    queryFn: api.status,
-    refetchInterval: () => (document.hidden ? false : 30_000),
-    retry: 1,
-  });
   const config = useQuery({
     queryKey: ["agent-config"],
     queryFn: api.getAgentConfig,
     staleTime: 60_000,
+    retry: 1,
+  });
+  // Skip the agent liveness poll when the agent is disabled — the status
+  // route is unmounted in that case, so polling it would 404 every 30s.
+  const status = useQuery({
+    queryKey: ["status-pulse"],
+    queryFn: api.status,
+    enabled: config.data?.enable !== false,
+    refetchInterval: () => (document.hidden ? false : 30_000),
     retry: 1,
   });
 
@@ -163,6 +166,10 @@ export function NowPage() {
           ? ("warn" as const)
           : ("info" as const)
       : undefined;
+  // When the agent is off the liveness query is disabled (stays "pending"),
+  // so the status skeleton/error blocks must be suppressed — the agent-off
+  // pill above already communicates the state.
+  const agentOn = config.data?.enable !== false;
 
   return (
     <>
@@ -538,14 +545,14 @@ function AgentPulse({
           </div>
         )}
 
-        {status.isPending && (
+        {agentOn && status.isPending && (
           <div aria-hidden className="grid grid-cols-3 gap-2">
             <div className="sk h-12" />
             <div className="sk h-12" />
             <div className="sk h-12" />
           </div>
         )}
-        {status.isError && (
+        {agentOn && status.isError && (
           <RetryableError
             context="Couldn't load agent status"
             error={status.error}
