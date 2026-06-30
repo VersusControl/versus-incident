@@ -3,8 +3,8 @@ module github.com/VersusControl/versus-incident
 go 1.25.0
 
 require (
-	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.77.0
-	github.com/cloudwego/eino v0.9.9
+	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.78.0
+	github.com/cloudwego/eino v0.9.10
 	github.com/cloudwego/eino-ext/components/embedding/gemini v0.0.0-20260616080858-ab17b7308bf8
 	github.com/cloudwego/eino-ext/components/embedding/ollama v0.0.0-20260616080858-ab17b7308bf8
 	github.com/cloudwego/eino-ext/components/model/claude v0.1.20
@@ -18,9 +18,9 @@ require (
 	github.com/gofiber/fiber/v2 v2.52.13
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/slack-go/slack v0.24.0
+	github.com/slack-go/slack v0.27.0
 	github.com/spf13/viper v1.21.0
-	google.golang.org/genai v1.36.0
+	google.golang.org/genai v1.62.0
 )
 
 require (
@@ -79,7 +79,7 @@ require (
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/net v0.53.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sync v0.21.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
 
@@ -157,5 +157,5 @@ require (
 	github.com/valyala/fasthttp v1.51.0 // indirect
 	github.com/valyala/tcplisten v1.0.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
-	golang.org/x/text v0.37.0
+	golang.org/x/text v0.38.0
 )
