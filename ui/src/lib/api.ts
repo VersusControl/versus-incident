@@ -36,9 +36,15 @@ export function clearSecret() {
 // longer unlocked by a static token here — it rides the SSO session (the RBAC
 // admin user). Throws ApiError(401) when the secret is rejected; other errors
 // propagate unchanged.
+//
+// We verify against /api/admin/config/agent (getAgentConfig), NOT
+// /api/agent/status: the config endpoint is always mounted and gateway-secret
+// gated, whereas the agent status route only exists when agent.enable=true.
+// Verifying against status coupled sign-in to the agent being on, so an
+// alert-router deployment with a gateway secret but no agent could not log in.
 export async function signIn(value: string): Promise<void> {
   setSecret(value.trim());
-  await api.status();
+  await api.getAgentConfig();
 }
 
 // AUTH_EXPIRED_EVENT fires when a request that carried a secret comes back

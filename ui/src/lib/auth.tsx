@@ -27,8 +27,9 @@ interface Props {
 //    probed via the deployment org's whoami. After the OIDC callback redirects
 //    to "/", a held session opens the app directly instead of re-prompting; or
 //  - on an OSS/community binary, the X-Gateway-Secret gateway secret, verified
-//    against /api/agent/status. The gateway secret is OSS-only — a licensed
-//    binary never offers it; its sign-in is the built-in admin / SSO.
+//    against /api/admin/config/agent (always mounted + secret-gated, so it
+//    works whether or not the agent is enabled). The gateway secret is OSS-only
+//    — a licensed binary never offers it; its sign-in is the built-in admin / SSO.
 //    A bad/absent credential AND no session fall through to the sign-in screen.
 //    Transient network errors deliberately do NOT trap the user (kept
 //    behavior). Mid-session OSS secret rotation is handled by <ReauthModal>.
@@ -41,7 +42,7 @@ export function AuthGate({ children }: Props) {
     let alive = true;
     resolveInitialAuth({
       hasSecret: () => Boolean(getSecret()),
-      checkSecret: () => api.status(),
+      checkSecret: () => api.getAgentConfig(),
       deploymentOrg: () => api.getSSODeployment().then((d) => d.org),
       probeSession: (org) => getSsoSession(org),
     }).then((state) => {

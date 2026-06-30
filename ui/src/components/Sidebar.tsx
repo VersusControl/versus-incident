@@ -57,9 +57,24 @@ interface SideItem {
 }
 
 export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+  // Agent config drives whether the Agent zone is usable. Shares the
+  // ["agent-config"] cache key with TopBar/NowPage — one fetch, zero extra
+  // load. enable===false means the agent is deliberately off.
+  const configQ = useQuery({
+    queryKey: ["agent-config"],
+    queryFn: api.getAgentConfig,
+    staleTime: 60_000,
+    retry: 1,
+  });
+  const agentOff = configQ.data?.enable === false;
+
+  // The agent status route (/api/agent/status) is only mounted when the agent
+  // is enabled, so skip the poll when it's off — otherwise it 404s and the
+  // runbooks hint flickers. Disabled query → data undefined → runbooks off.
   const statusQ = useQuery({
     queryKey: ["status"],
     queryFn: api.status,
+    enabled: !agentOff,
     staleTime: 30_000,
     retry: 1,
   });
@@ -149,6 +164,22 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
     { to: "/settings", label: "Settings", icon: Settings },
   ];
 
+  // When the agent is disabled (agent.enable=false) every Agent view and the
+  // agent-backed Runbooks tool are non-functional. Dim + lock them with a
+  // clear hint (visible-with-hint, audit I4) so they read as disabled instead
+  // of navigating to empty/erroring pages.
+  const AGENT_OFF_HINT =
+    "AI agent is disabled — set agent.enable to use these views";
+  const applyAgentOff = (items: SideItem[]): SideItem[] =>
+    agentOff
+      ? items.map((it) => ({
+          ...it,
+          dim: true,
+          locked: true,
+          dimTitle: AGENT_OFF_HINT,
+        }))
+      : items;
+
   return (
     // force-dark: the rail keeps its dark identity in BOTH themes — the
     // CSS variables are re-pinned on this subtree (see index.css).
@@ -157,8 +188,8 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
       <nav aria-label="Primary" className="dark-scroll flex-1 overflow-y-auto px-2 py-2">
         <Zone title="Respond" items={respond} onNavigate={onNavigate} />
-        <Zone title="Agent" items={agent} onNavigate={onNavigate} />
-        <Zone title="Tools" items={tools} onNavigate={onNavigate} />
+        <Zone title="Agent" items={applyAgentOff(agent)} onNavigate={onNavigate} />
+        <Zone title="Tools" items={applyAgentOff(tools)} onNavigate={onNavigate} />
         <Zone title="Manage" items={manage} onNavigate={onNavigate} />
       </nav>
     </div>

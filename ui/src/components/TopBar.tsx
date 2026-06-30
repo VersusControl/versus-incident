@@ -38,16 +38,22 @@ export function TopBar({ title, subtitle, actions }: Props) {
   const { open } = useOpenIncidentCount();
   const { theme, toggle } = useTheme();
 
-  const liveness = useQuery({
-    queryKey: ["status-pulse"],
-    queryFn: api.status,
-    refetchInterval: () => (document.hidden ? false : 30_000),
-    retry: 1,
-  });
   const config = useQuery({
     queryKey: ["agent-config"],
     queryFn: api.getAgentConfig,
     staleTime: 60_000,
+    retry: 1,
+  });
+  // Only poll the agent liveness endpoint when the agent is actually enabled.
+  // /api/agent/status does not exist when agent.enable=false, so polling it
+  // would 404 forever and the chip would show "reconnecting…" for a deployment
+  // that is simply running without the agent. Gate on the config: undefined
+  // (still loading) keeps polling; an explicit false stops it.
+  const liveness = useQuery({
+    queryKey: ["status-pulse"],
+    queryFn: api.status,
+    enabled: config.data?.enable !== false,
+    refetchInterval: () => (document.hidden ? false : 30_000),
     retry: 1,
   });
 
@@ -153,7 +159,12 @@ function AgentChip({
   let dot = "bg-ink-400";
   let label = "agent";
 
-  if (livenessLoading || configLoading) {
+  if (agentEnabled === false) {
+    // Config says the agent is off — this is a deliberate state, not an
+    // error. A 404 from the (unmounted) status endpoint must NOT surface as
+    // "reconnecting…"/"unreachable", so this check comes first.
+    label = "agent off";
+  } else if (livenessLoading || configLoading) {
     label = "connecting…";
     dot = "motion-safe:animate-pulse bg-ink-300";
   } else if (livenessError) {
@@ -166,8 +177,6 @@ function AgentChip({
       cls = "border-sev-warn/40 bg-sev-warn/15 text-sev-warn";
       dot = "motion-safe:animate-pulse bg-sev-warn";
     }
-  } else if (agentEnabled === false) {
-    label = "agent off";
   } else if (mode) {
     label = mode;
     if (mode === "detect") {
