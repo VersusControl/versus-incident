@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.78.0
-	github.com/cloudwego/eino v0.9.10
+	github.com/cloudwego/eino v0.9.12
 	github.com/cloudwego/eino-ext/components/embedding/gemini v0.0.0-20260616080858-ab17b7308bf8
 	github.com/cloudwego/eino-ext/components/embedding/ollama v0.0.0-20260616080858-ab17b7308bf8
 	github.com/cloudwego/eino-ext/components/model/claude v0.1.20
