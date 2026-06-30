@@ -166,10 +166,6 @@ export function NowPage() {
           ? ("warn" as const)
           : ("info" as const)
       : undefined;
-  // When the agent is off the liveness query is disabled (stays "pending"),
-  // so the status skeleton/error blocks must be suppressed — the agent-off
-  // pill above already communicates the state.
-  const agentOn = config.data?.enable !== false;
 
   return (
     <>
@@ -505,6 +501,10 @@ function AgentPulse({
   const traceCount = baselines.data?.baselines?.filter((b) => b.type === "trace").length ?? 0;
   const metricReady = baselines.data?.baselines?.filter((b) => b.type === "metric" && b.confident).length ?? 0;
   const traceReady = baselines.data?.baselines?.filter((b) => b.type === "trace" && b.confident).length ?? 0;
+  // When the agent is off the status query is disabled (stays "pending"), so
+  // suppress the status skeleton/error blocks — the agent-off pill above
+  // already communicates the state.
+  const agentOn = config.data?.enable !== false;
 
   return (
     <div className="card">
