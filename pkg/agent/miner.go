@@ -149,6 +149,19 @@ func (m *Miner) Snapshot() []MinerCluster {
 	return out
 }
 
+// Reset forgets every learned drain cluster and the whole bucket tree so the
+// next Cluster call starts from an empty model. It pairs with the catalog
+// "clear all" admin action: clearing the catalog alone leaves the miner
+// remembering pre-reset templates (it would report recurring lines as already
+// known), so mining only truly restarts from scratch once the miner is reset
+// too. Config (thresholds, depth) is preserved.
+func (m *Miner) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tree = make(map[int]*minerNode)
+	m.clusters = make(map[string]*MinerCluster)
+}
+
 // descend walks (and lazily builds) the bucket tree to a leaf.
 func (m *Miner) descend(tokens []string, create bool) *minerNode {
 	n := m.tree[len(tokens)]

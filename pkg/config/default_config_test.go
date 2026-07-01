@@ -56,12 +56,12 @@ func TestDefaultConfigMatchesSample(t *testing.T) {
 		inDef, inSample := def.IsSet(k), sample.IsSet(k)
 		switch {
 		case inDef && !inSample:
-			t.Errorf("key %q is in default_config.yaml but missing from config/config.yaml — remove it or add it to the sample", k)
+			t.Errorf("config parity: key %q is in pkg/config/default_config.yaml (value %q) but MISSING from config/config.yaml — add %q: %q to the sample's matching block (or delete it from the default)", k, fmt.Sprint(def.Get(k)), k, fmt.Sprint(def.Get(k)))
 		case !inDef && inSample:
-			t.Errorf("key %q is in config/config.yaml but missing from default_config.yaml — add it to the embedded default", k)
+			t.Errorf("config parity: key %q is in config/config.yaml (value %q) but MISSING from pkg/config/default_config.yaml — add %q: %q to the embedded default's matching block (or delete it from the sample)", k, fmt.Sprint(sample.Get(k)), k, fmt.Sprint(sample.Get(k)))
 		default:
 			if dv, sv := fmt.Sprint(def.Get(k)), fmt.Sprint(sample.Get(k)); dv != sv {
-				t.Errorf("key %q diverged: default_config.yaml=%q vs config/config.yaml=%q", k, dv, sv)
+				t.Errorf("config parity: key %q DIVERGED — pkg/config/default_config.yaml=%q vs config/config.yaml=%q; make both files carry the same value for %q", k, dv, sv, k)
 			}
 		}
 	}

@@ -206,6 +206,8 @@ agent:
     - '(?i)\bservice[._-]?name["\s:=]+"?([A-Za-z0-9._-]+)'
     - '(?i)\b(?:service|svc|app|component)\s*=\s*"?([A-Za-z0-9._-]+)'
     - '(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"'
+    - '^\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?\s+([A-Za-z][A-Za-z0-9._-]*)\s+\['
+    - '\[\s*([A-Za-z][A-Za-z0-9._-]*)\s*,\s*(?i:request[_-]?id|trace[_-]?id|span[_-]?id)\b'
     - '\[[^\]]+\]\s+\[([A-Za-z0-9._-]+)\]'
     - '---\s+\[[^\]]*\]\s+\[([A-Za-z0-9._-]+)\]'
     - '([A-Za-z0-9._-]+)\[\d+\]:'

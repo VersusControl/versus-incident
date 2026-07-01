@@ -235,7 +235,7 @@ agent:
     enable: false                   # master switch (env: AGENT_AI_ENABLE)
     # provider selects the model backend (openai | deepseek | qwen | ollama |
     # claude | gemini). Default openai. The api_key below must match the chosen provider.
-    provider: openai
+    provider: openai                # model backend (env: AGENT_AI_PROVIDER)
     api_key: ${AGENT_AI_API_KEY}
     model: "gpt-5.4-mini"
     # temperature: 0.0–2.0 (default 0.2). Set a NEGATIVE value (e.g. -1) to
@@ -273,6 +273,20 @@ agent:
     # Used by: Node.js (Bunyan, Pino, Winston), .NET Serilog (JSON), Java logback-json,
     #          Python python-json-logger, AWS Lambda Powertools, nginx JSON access logs
     - '(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"'
+    # Spring Boot / Logback console (custom pattern that prints the app name where
+    # the level usually goes): "<timestamp>  <service>  [<thread>] ...".
+    #   2026-07-01 05:08:14.502  lead-service  [consumer-0-C-1] WARN k.c.NetworkClient : ...
+    # The service is the first token after the timestamp, anchored by the
+    # bracketed thread that follows it. ANSI colour escapes around the token are
+    # stripped before matching (see ServiceMatcher.Extract). On the vanilla Spring
+    # layout the first token is the LEVEL followed by the PID (not a bracket), so
+    # this rule does not fire and the "---" rule below wins instead.
+    - '^\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?\s+([A-Za-z][A-Za-z0-9._-]*)\s+\['
+    # Bracketed MDC context: "[ <service> , requestID=… , traceID=… , spanID=… ]".
+    # Used by: Java/Logback %X MDC layouts that put the service first in a
+    #          bracketed context block. The trailing request/trace/span id key
+    #          anchors the service so a level token like "[ DEBUG ]" is not caught.
+    - '\[\s*([A-Za-z][A-Za-z0-9._-]*)\s*,\s*(?i:request[_-]?id|trace[_-]?id|span[_-]?id)\b'
     # Two bracketed tokens: [logger] [service] ...
     # Used by: Python Django (`[django.request] [orders] ...`),
     #          some logback layouts that put logger first then MDC service.

@@ -58,7 +58,24 @@ type ServiceInfo struct {
 	// storage.DefaultOrgID ("default"); see Pattern.OrgID.
 	OrgID     string    `json:"org_id,omitempty"`
 	FirstSeen time.Time `json:"first_seen"`
+	// Manual is true when an operator created the service by hand via the admin
+	// API (so it is selectable as an override target BEFORE any signal is
+	// attributed to it). Auto-discovered services leave it false. A manual
+	// service coexists with auto-discovery: RegisterService never clobbers an
+	// existing entry, so a name seen in a real signal keeps its manual flag.
+	Manual bool `json:"manual,omitempty"`
 }
+
+// Sentinel errors for manual-service CRUD, so the admin controller can map them
+// to precise HTTP statuses without string matching.
+var (
+	// ErrServiceExists is returned when creating/renaming to a name that is
+	// already tracked (auto-discovered or manual).
+	ErrServiceExists = fmt.Errorf("service already exists")
+	// ErrServiceNotFound is returned when renaming/deleting a name that is not
+	// tracked.
+	ErrServiceNotFound = fmt.Errorf("service not found")
+)
 
 // Catalog is the in-memory + on-disk pattern store.
 //
@@ -299,6 +316,43 @@ func (c *Catalog) Delete(patternID string) bool {
 	return true
 }
 
+// Reset wipes the entire catalog — every learned pattern AND every discovered
+// service — and persists the empty catalog so training restarts from scratch
+// on the next tick. It returns the number of patterns and services that were
+// removed (the pre-reset view: fleet-wide when a CatalogStore is installed,
+// otherwise this instance's in-memory set).
+//
+// This is the whole-catalog counterpart to Delete/EndServiceGrace: when a
+// CatalogStore is installed the empty state routes through it (so a fleet-wide
+// read view is cleared, not just this instance's working set); otherwise the
+// inline whole-blob path writes an empty "patterns" blob.
+func (c *Catalog) Reset() (patterns int, services int, err error) {
+	// Snapshot the pre-reset counts through the same read view callers see
+	// (store-aware when installed) before clearing.
+	patterns = len(c.All())
+	services = len(c.AllServices())
+
+	c.mu.Lock()
+	c.patterns = make(map[string]*Pattern)
+	c.services = make(map[string]*ServiceInfo)
+	c.dirty = true
+	c.mu.Unlock()
+
+	if s := catalogStore(); s != nil {
+		if err := s.Curate(CatalogEdit{Kind: CatalogEditReset}); err != nil {
+			return patterns, services, err
+		}
+		c.mu.Lock()
+		c.dirty = false
+		c.mu.Unlock()
+		return patterns, services, nil
+	}
+	if err := c.Persist(); err != nil {
+		return patterns, services, err
+	}
+	return patterns, services, nil
+}
+
 // Dirty reports whether there are unflushed changes.
 func (c *Catalog) Dirty() bool {
 	c.mu.RLock()
@@ -442,4 +496,85 @@ func (c *Catalog) RestartServiceGrace(name string) bool {
 	svc.FirstSeen = time.Now().UTC()
 	c.dirty = true
 	return true
+}
+
+// ---------------------------------------------------------------------------
+// Manual service CRUD — operator-curated services
+// ---------------------------------------------------------------------------
+
+// Service returns a copy of one tracked service's info and whether it exists.
+// It reads the same unified view AllServices() serves (store-aware when a
+// CatalogStore is installed), so a manual service created on any instance is
+// visible fleet-wide.
+func (c *Catalog) Service(name string) (ServiceInfo, bool) {
+	info, ok := c.AllServices()[name]
+	return info, ok
+}
+
+// CreateService records an operator-created (manual) service so it is
+// selectable as an override target before any signal is attributed to it. The
+// caller (admin controller) validates non-existence first — this is the write.
+// It routes through the CatalogStore when one is installed so the manual
+// service is fleet-visible; otherwise it writes the in-memory + blob path.
+func (c *Catalog) CreateService(name string) error {
+	if s := catalogStore(); s != nil {
+		return s.Curate(CatalogEdit{Kind: CatalogEditCreateService, Service: name})
+	}
+	c.mu.Lock()
+	if _, ok := c.services[name]; ok {
+		c.mu.Unlock()
+		return ErrServiceExists
+	}
+	c.services[name] = &ServiceInfo{OrgID: storage.DefaultOrgID, FirstSeen: time.Now().UTC(), Manual: true}
+	c.dirty = true
+	c.mu.Unlock()
+	// Persist immediately: a manual service has no signal to re-create it and
+	// its override rules persist synchronously, so the two must not diverge.
+	return c.Persist()
+}
+
+// RenameService moves a service entry from oldName to newName, preserving its
+// FirstSeen and manual flag. The caller validates that oldName exists and
+// newName does not. Pattern attribution is not bulk-rewritten (a pattern's
+// Service is a historical label; future signals re-attribute); the admin
+// controller repoints override rules that target the old name so none dangle.
+func (c *Catalog) RenameService(oldName, newName string) error {
+	if s := catalogStore(); s != nil {
+		return s.Curate(CatalogEdit{Kind: CatalogEditRenameService, Service: oldName, NewService: newName})
+	}
+	c.mu.Lock()
+	svc, ok := c.services[oldName]
+	if !ok {
+		c.mu.Unlock()
+		return ErrServiceNotFound
+	}
+	if _, exists := c.services[newName]; exists {
+		c.mu.Unlock()
+		return ErrServiceExists
+	}
+	moved := *svc
+	delete(c.services, oldName)
+	c.services[newName] = &moved
+	c.dirty = true
+	c.mu.Unlock()
+	return c.Persist()
+}
+
+// DeleteService removes a tracked service entry. Returns false when it does not
+// exist. The admin controller gates this on the service being manual and on
+// having no override rules that target it, so a delete never orphans an
+// override.
+func (c *Catalog) DeleteService(name string) bool {
+	if s := catalogStore(); s != nil {
+		return s.Curate(CatalogEdit{Kind: CatalogEditDeleteService, Service: name}) == nil
+	}
+	c.mu.Lock()
+	if _, ok := c.services[name]; !ok {
+		c.mu.Unlock()
+		return false
+	}
+	delete(c.services, name)
+	c.dirty = true
+	c.mu.Unlock()
+	return c.Persist() == nil
 }

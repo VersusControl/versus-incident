@@ -254,6 +254,17 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		log.Printf("agent: service_patterns warning: %v", e)
 	}
 
+	// Manual-attribution override store (Service-Override seam). It backs the
+	// service-override admin endpoints AND is installed as the process-wide
+	// resolver so a stored correction re-labels future log signals (and, when
+	// the enterprise metric/trace brains are linked, their signals too). OSS
+	// ships this working store so logs override needs no enterprise module.
+	overrideStore, err := agent.LoadServiceOverrideStore(store)
+	if err != nil {
+		log.Printf("agent: service-override load warning: %v (starting fresh)", err)
+	}
+	agent.SetServiceOverride(overrideStore)
+
 	sources, sourceErrs := agent.BuildSources(cfg)
 	for _, e := range sourceErrs {
 		log.Printf("agent: source warning: %v", e)
@@ -298,7 +309,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		return nil, fmt.Errorf("agent: gateway_secret is not configured — /api/agent/* admin endpoints require a secret")
 	}
 	api := app.Group("/api")
-	controllers.NewAgentController(catalog, shadowLog, detectLog, aiBundle.Runbooks != nil).Register(api)
+	controllers.NewAgentController(catalog, miner, shadowLog, detectLog, overrideStore, aiBundle.Runbooks != nil).Register(api)
 	controllers.NewRunbookAdminController(aiBundle.Runbooks).Register(api)
 
 	return catalog, nil

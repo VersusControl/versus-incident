@@ -82,6 +82,63 @@ export function PatternDetailPage() {
     },
   });
 
+  // Reassign the detected service for this log pattern. The regex
+  // service_patterns can mis-attribute a pattern (wrong service, a log level,
+  // _unknown); a log override re-points every future signal keyed to this
+  // pattern id to the chosen service, applied after auto-detection.
+  const services = useQuery({
+    queryKey: ["services"],
+    queryFn: api.listServices,
+  });
+  const overrides = useQuery({
+    queryKey: ["service-overrides"],
+    queryFn: api.listServiceOverrides,
+  });
+  const currentOverride = overrides.data?.find(
+    (o) => o.source_type === "log" && o.match === id,
+  );
+  const [reassignTo, setReassignTo] = useState("");
+
+  const reassign = useMutation({
+    mutationFn: (service: string) =>
+      api.createServiceOverride({ source_type: "log", match: id, service }),
+    onSuccess: (_d, service) => {
+      setReassignTo("");
+      qc.invalidateQueries({ queryKey: ["service-overrides"] });
+      qc.invalidateQueries({ queryKey: ["pattern", id] });
+      qc.invalidateQueries({ queryKey: ["patterns"] });
+      toast.push({ tone: "ok", title: `Reassigned to "${service}"` });
+    },
+    onError: (err) =>
+      toast.push({
+        tone: "error",
+        title: "Couldn't reassign",
+        description: err.message,
+      }),
+  });
+
+  const clearReassign = useMutation({
+    mutationFn: (overrideId: string) => api.deleteServiceOverride(overrideId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["service-overrides"] });
+      qc.invalidateQueries({ queryKey: ["pattern", id] });
+      qc.invalidateQueries({ queryKey: ["patterns"] });
+      toast.push({ tone: "ok", title: "Reassignment cleared" });
+    },
+    onError: (err) =>
+      toast.push({
+        tone: "error",
+        title: "Couldn't clear reassignment",
+        description: err.message,
+      }),
+  });
+
+  const serviceNames = services.data
+    ? Object.keys(services.data)
+        .filter((n) => n !== "_unknown")
+        .sort((a, b) => a.localeCompare(b))
+    : [];
+
   return (
     <>
       <TopBar
@@ -191,6 +248,58 @@ export function PatternDetailPage() {
                     </div>
                   )}
                 </label>
+
+                <div className="border-t border-ink-700 pt-3">
+                  <div className="mb-1 text-2xs uppercase tracking-wider text-ink-300">
+                    Reassign service
+                  </div>
+                  {currentOverride ? (
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-ink-200">
+                      <span>
+                        Overridden to{" "}
+                        <span className="font-mono text-ink-100">
+                          {currentOverride.service}
+                        </span>
+                      </span>
+                      <button
+                        className="btn"
+                        disabled={clearReassign.isPending}
+                        onClick={() =>
+                          clearReassign.mutate(currentOverride.id)
+                        }
+                      >
+                        {clearReassign.isPending ? "Clearing…" : "Clear"}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        className="input"
+                        value={reassignTo}
+                        aria-label="Reassign this pattern to a service"
+                        onChange={(e) => setReassignTo(e.target.value)}
+                      >
+                        <option value="">Select a service…</option>
+                        {serviceNames.map((n) => (
+                          <option key={n} value={n}>
+                            {n}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        className="btn"
+                        disabled={!reassignTo || reassign.isPending}
+                        onClick={() => reassign.mutate(reassignTo)}
+                      >
+                        {reassign.isPending ? "Saving…" : "Reassign"}
+                      </button>
+                    </div>
+                  )}
+                  <p className="mt-1 text-2xs text-ink-400">
+                    Corrects a mis-detected service for this log pattern. Applied
+                    after auto-detection on future signals.
+                  </p>
+                </div>
 
                 <div className="flex flex-wrap gap-2 pt-2">
                   <button

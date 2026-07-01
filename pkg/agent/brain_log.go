@@ -92,6 +92,16 @@ func (b *logBrain) Group(ctx context.Context, batch []core.Signal) ([]core.Obser
 			if svc == "" {
 				svc = "_unknown"
 			}
+			// Manual-attribution override (Service-Override seam): an operator's
+			// stored correction WINS over regex detection (and over "_unknown").
+			// The match key is the mined pattern identity or a message substring.
+			// A nil resolver (no override wired) returns svc unchanged.
+			svc = ResolveServiceOverride(ctx, ServiceOverrideInput{
+				SourceType: OverrideSourceLog,
+				Service:    svc,
+				Pattern:    id,
+				Message:    sig.Message,
+			})
 			bk = &bucket{template: template, isNew: isNew, service: svc}
 			buckets[id] = bk
 			order = append(order, id)

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Save, Search, Zap } from "lucide-react";
+import { Check, Search, Trash2, Zap } from "lucide-react";
 import { api, type Pattern } from "@/lib/api";
 import { displayService, fmtAbs, fmtRel } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
@@ -50,7 +50,7 @@ export function PatternsPage() {
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [peekId, setPeekId] = useState<string | null>(null);
-  const [confirmFlush, setConfirmFlush] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
 
   // ----- inline verdict mutation: optimistic with rollback + Undo ---------
@@ -132,24 +132,25 @@ export function PatternsPage() {
     }
   }
 
-  // ----- flush: ConfirmDialog kept + success/error toasts (audit S3) ------
-  const flush = useMutation({
-    mutationFn: api.flushPatterns,
+  // ----- clear all: destructive reset of every learned pattern + service --
+  const reset = useMutation({
+    mutationFn: api.resetCatalog,
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ["patterns"] });
-      setConfirmFlush(false);
+      qc.invalidateQueries({ queryKey: ["services"] });
+      setConfirmReset(false);
       toast.push({
         tone: "ok",
-        title: "Catalog flushed",
-        description: `${res.patterns} patterns written to disk`,
+        title: "Learned catalog cleared",
+        description: `${res.patterns} patterns and ${res.services} services removed — the agent relearns from scratch`,
       });
     },
     onError: (err) => {
       toast.push({
         tone: "error",
-        title: "Flush failed",
+        title: "Clear all failed",
         description: err.message,
-        action: { label: "Retry", onClick: () => flush.mutate() },
+        action: { label: "Retry", onClick: () => reset.mutate() },
       });
     },
   });
@@ -249,12 +250,12 @@ export function PatternsPage() {
         subtitle={data ? `${data.length} log templates learned` : "The agent learns recurring message templates from your logs so it can spot new or unusual ones."}
         actions={
           <button
-            className="btn"
-            disabled={flush.isPending}
-            onClick={() => setConfirmFlush(true)}
+            className="btn btn-danger"
+            disabled={reset.isPending || !data?.length}
+            onClick={() => setConfirmReset(true)}
           >
-            <Save size={12} />
-            Flush to disk
+            <Trash2 size={12} />
+            Clear all
           </button>
         }
       />
@@ -577,15 +578,16 @@ export function PatternsPage() {
         </PeekPanel>
       )}
 
-      {confirmFlush && (
+      {confirmReset && (
         <ConfirmDialog
-          title="Flush catalog to disk"
-          message="Write the in-memory pattern catalog to persists storage now."
-          confirmLabel="Flush"
-          busy={flush.isPending}
-          error={flush.error}
-          onConfirm={() => flush.mutate()}
-          onClose={() => setConfirmFlush(false)}
+          title="Clear all learned state"
+          message="This removes ALL learned patterns and discovered services. The agent starts over and relearns from scratch on the next tick. This cannot be undone."
+          confirmLabel="Clear all"
+          tone="danger"
+          busy={reset.isPending}
+          error={reset.error}
+          onConfirm={() => reset.mutate()}
+          onClose={() => setConfirmReset(false)}
         />
       )}
     </>
