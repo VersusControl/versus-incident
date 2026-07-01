@@ -1,24 +1,34 @@
-FROM node:26-alpine AS ui-build
+# --- UI build stage: static JS/CSS is platform-independent ---
+FROM --platform=$BUILDPLATFORM node:20-alpine AS ui-build
 WORKDIR /ui
 COPY ui/package.json ui/package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 COPY ui/ ./
 RUN npm run build
 
-FROM golang:1.26-alpine AS build
+# --- Build stage: cross-compile natively (no QEMU) ---
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /build
+
+# Module graph only (cached unless go.mod/go.sum change)
 COPY go.mod go.sum ./
 RUN go mod download && go mod verify
+
+# Source
 COPY . .
+
 # Drop in the freshly-built UI so //go:embed picks it up.
 COPY --from=ui-build /ui/dist ./ui/dist
 
-# Builds the application as a staticly linked one, to allow it to run on alpine
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o run cmd/main.go
+# Cross-compile for the target platform.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -installsuffix cgo -o /build/run cmd/main.go
 
-# Moving the binary to the 'final Image' to make it smaller
-FROM alpine
+# --- Final image ---
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=build /build/config config
 COPY --from=build /build/run .

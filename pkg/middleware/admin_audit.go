@@ -1,8 +1,9 @@
 // admin_audit.go — a generic, unopinionated admin-mutation audit seam
 // (companion to the extension.go org/auth seams).
 //
-// State-changing admin routes (e.g. the agent catalog reset, shadow/detect
-// clears, and the manual service / attribution-override mutations) call
+// State-changing admin routes (e.g. the agent patterns/services clears,
+// shadow/detect clears, and the manual service / attribution-override
+// mutations) call
 // RecordAdminAudit after they succeed OR when they reject a request. OSS ships
 // NO hook, so every call is a community-mode no-op and an untouched OSS binary
 // behaves exactly as before — there is no audit backend in the open-core tree.
@@ -36,7 +37,7 @@ const (
 )
 
 // AdminAuditEvent describes one state-changing admin action for the audit
-// seam. Action is a stable, namespaced verb (e.g. "agent.catalog.reset");
+// seam. Action is a stable, namespaced verb (e.g. "agent.patterns.cleared");
 // Target is the non-secret object acted upon (a service name, override id, or
 // a reset summary); Result is one of the AdminAudit* outcome strings.
 type AdminAuditEvent struct {

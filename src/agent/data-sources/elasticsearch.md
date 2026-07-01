@@ -45,6 +45,24 @@ elasticsearch:
   page_size: 500                   # _search size; capped at 10000
 ```
 
+> **Fluent Bit users — check which field holds your log body.** When you ship
+> container logs to Elasticsearch with Fluent Bit, the real log line is usually
+> stored in the **`log`** field (the CRI/Docker parsers also add `stream`,
+> `logtag`, `time`), and `message` is often empty or absent. If `query` and
+> `message_field` point at `message` but your text is in `log`, the source
+> connects fine and matches **zero** documents — no error, no alert, nothing
+> on the dashboard. Point both at the field that actually carries the text:
+>
+> ```yaml
+>       time_field: "@timestamp"
+>       query: 'log:error'      # was message:error
+>       message_field: log      # was message
+>       page_size: 500
+> ```
+>
+> Not sure which field it is? Query the index and inspect one document:
+> `GET your-index-*/_search { "size": 1, "_source": ["@timestamp","message","log"] }`.
+
 ## Behavior
 
 - **Cursor** — Stored as the maximum `time_field` timestamp returned
@@ -104,3 +122,4 @@ the catalog pick it up on the **Patterns** page in the admin UI.
 | `failed to query elasticsearch: 403` | Role missing `read` on `index`. |
 | Cursor never advances | `time_field` not present in returned docs, or `query` matches nothing. |
 | Only old data, then silence | `time_field` doesn't match the field your docs actually use. |
+| Connects, no error, nothing ingested | Your log body is in a different field than `query`/`message_field` target — Fluent Bit typically stores it in `log`, not `message`. Point both at the real field (see the Fluent Bit note above). |
