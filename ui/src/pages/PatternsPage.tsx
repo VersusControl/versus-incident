@@ -14,6 +14,9 @@ import { PeekPanel } from "@/components/PeekPanel";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { AssignToService } from "@/components/AssignToService";
+import { Pagination } from "@/components/Pagination";
+import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
 
 // Verdict filter is URL-synced via SegmentedControl. "uncurated" is a real
@@ -132,23 +135,22 @@ export function PatternsPage() {
     }
   }
 
-  // ----- clear all: destructive reset of every learned pattern + service --
+  // ----- clear all logs: destructive reset of every learned log pattern -----
   const reset = useMutation({
-    mutationFn: api.resetCatalog,
+    mutationFn: api.clearPatterns,
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ["patterns"] });
-      qc.invalidateQueries({ queryKey: ["services"] });
       setConfirmReset(false);
       toast.push({
         tone: "ok",
-        title: "Learned catalog cleared",
-        description: `${res.patterns} patterns and ${res.services} services removed — the agent relearns from scratch`,
+        title: "Learned log patterns cleared",
+        description: `${res.patterns} patterns removed — the agent relearns log patterns from scratch`,
       });
     },
     onError: (err) => {
       toast.push({
         tone: "error",
-        title: "Clear all failed",
+        title: "Clear all logs failed",
         description: err.message,
         action: { label: "Retry", onClick: () => reset.mutate() },
       });
@@ -181,6 +183,10 @@ export function PatternsPage() {
     };
   }, [data]);
 
+  // ----- pagination (100/page) — resets to page 1 when the verdict filter or
+  // search changes so a filter never strands the operator on an empty page.
+  const pg = usePagination(filtered, { resetKey: `${verdictFilter}|${q}` });
+
   // ----- selection ---------------------------------------------------------
   const toggleOne = (id: string) =>
     setSelected((cur) => {
@@ -190,7 +196,9 @@ export function PatternsPage() {
       return next;
     });
 
-  const visibleIds = filtered.map((p) => p.id);
+  // "Select all visible" is scoped to the rendered page so bulk actions stay
+  // bounded even on a multi-thousand-row catalog.
+  const visibleIds = pg.pageItems.map((p) => p.id);
   const allSelected =
     visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
   const someSelected = visibleIds.some((id) => selected.has(id));
@@ -204,13 +212,13 @@ export function PatternsPage() {
 
   // ----- keyboard: j/k rows · Enter peek · x select · K known · S spike ----
   const keys = useTableKeys({
-    size: filtered.length,
+    size: pg.pageItems.length,
     onOpen: (i) => {
-      const row = filtered[i];
+      const row = pg.pageItems[i];
       if (row) setPeekId(row.id);
     },
     extra: (key, index) => {
-      const row = filtered[index];
+      const row = pg.pageItems[index];
       if (!row) return false;
       if (key === "x") {
         toggleOne(row.id);
@@ -255,7 +263,7 @@ export function PatternsPage() {
             onClick={() => setConfirmReset(true)}
           >
             <Trash2 size={12} />
-            Clear all
+            Clear all logs
           </button>
         }
       />
@@ -331,14 +339,15 @@ export function PatternsPage() {
                     <th className="w-24 text-right">Normal</th>
                     <th>Template</th>
                     <th className="w-24">Verdict</th>
+                    <th className="w-44">Assign to service</th>
                     <th className="w-44">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {isLoading && <SkRows rows={8} cols={7} />}
+                  {isLoading && <SkRows rows={8} cols={8} />}
                   {!isLoading && filtered.length === 0 && (
                     <tr>
-                      <td colSpan={7}>
+                      <td colSpan={8}>
                         {data && data.length === 0 ? (
                           <EmptyState
                             title="No patterns learned yet"
@@ -360,7 +369,7 @@ export function PatternsPage() {
                       </td>
                     </tr>
                   )}
-                  {filtered.map((p, i) => (
+                  {pg.pageItems.map((p, i) => (
                     <ClickableRow
                       key={p.id}
                       onOpen={() => setPeekId(p.id)}
@@ -394,6 +403,9 @@ export function PatternsPage() {
                       </td>
                       <td>
                         <VerdictPill verdict={p.verdict} />
+                      </td>
+                      <td>
+                        <AssignToService sourceType="log" match={p.id} />
                       </td>
                       <td>
                         <div className="flex items-center gap-1.5">
@@ -430,6 +442,7 @@ export function PatternsPage() {
                 </tbody>
               </table>
             </div>
+            <Pagination state={pg} />
           </div>
         )}
       </main>
@@ -580,9 +593,9 @@ export function PatternsPage() {
 
       {confirmReset && (
         <ConfirmDialog
-          title="Clear all learned state"
-          message="This removes ALL learned patterns and discovered services. The agent starts over and relearns from scratch on the next tick. This cannot be undone."
-          confirmLabel="Clear all"
+          title="Clear all learned log patterns"
+          message="This removes ALL learned log patterns and resets the miner, so the agent relearns log patterns from scratch on the next tick. Discovered services are left untouched. This cannot be undone."
+          confirmLabel="Clear all logs"
           tone="danger"
           busy={reset.isPending}
           error={reset.error}

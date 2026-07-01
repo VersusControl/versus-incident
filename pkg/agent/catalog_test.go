@@ -143,12 +143,13 @@ func TestCatalog_LabelAndDelete(t *testing.T) {
 	}
 }
 
-// TestCatalog_Reset_NilStore proves the whole-catalog wipe on the default
-// (nil-store) inline path: every pattern AND service is removed, the correct
-// counts are returned, the empty catalog is persisted (a fresh reload sees
-// nothing), and an unrelated blob in the same store is untouched (the reset
-// only rewrites the "patterns" blob — namespace isolation).
-func TestCatalog_Reset_NilStore(t *testing.T) {
+// TestCatalog_ResetPatterns_NilStore proves the pattern-only wipe on the
+// default (nil-store) inline path: every pattern is removed but services
+// survive, the correct count is returned, the emptied pattern set is persisted
+// (a fresh reload sees no patterns but keeps the services), and an unrelated
+// blob in the same store is untouched (the reset only rewrites the "patterns"
+// blob — namespace isolation).
+func TestCatalog_ResetPatterns_NilStore(t *testing.T) {
 	SetCatalogStore(nil)
 	store := newTestStore(t)
 
@@ -167,24 +168,21 @@ func TestCatalog_Reset_NilStore(t *testing.T) {
 	cat.RegisterService("svc-b")
 	cat.RegisterService("svc-c")
 
-	patterns, services, err := cat.Reset()
+	patterns, err := cat.ResetPatterns()
 	if err != nil {
-		t.Fatalf("Reset: %v", err)
+		t.Fatalf("ResetPatterns: %v", err)
 	}
 	if patterns != 2 {
 		t.Errorf("patterns cleared = %d, want 2", patterns)
 	}
-	if services != 3 {
-		t.Errorf("services cleared = %d, want 3", services)
-	}
 	if cat.Len() != 0 {
 		t.Errorf("catalog not empty after reset: %d patterns", cat.Len())
 	}
-	if n := len(cat.AllServices()); n != 0 {
-		t.Errorf("services not empty after reset: %d", n)
+	if n := len(cat.AllServices()); n != 3 {
+		t.Errorf("services touched by pattern reset: %d, want 3 (services must survive)", n)
 	}
 
-	// Persisted empty: a fresh reload from the same store sees nothing.
+	// Persisted: a fresh reload sees no patterns but keeps every service.
 	reloaded, err := LoadCatalog(store)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
@@ -192,8 +190,8 @@ func TestCatalog_Reset_NilStore(t *testing.T) {
 	if reloaded.Len() != 0 {
 		t.Errorf("reloaded catalog has %d patterns, want 0 (reset must persist empty)", reloaded.Len())
 	}
-	if n := len(reloaded.AllServices()); n != 0 {
-		t.Errorf("reloaded catalog has %d services, want 0", n)
+	if n := len(reloaded.AllServices()); n != 3 {
+		t.Errorf("reloaded catalog has %d services, want 3 (services must survive reload)", n)
 	}
 
 	// Isolation: the unrelated blob is untouched.
@@ -206,12 +204,57 @@ func TestCatalog_Reset_NilStore(t *testing.T) {
 	}
 }
 
-// TestCatalog_Reset_RoutesThroughStore proves that when a CatalogStore is
-// installed the wipe routes through it as a single CatalogEditReset (so a
-// fleet-wide read view is cleared, not just this instance), the in-memory
-// working set is emptied, and the returned counts reflect the store's
-// (fleet-wide) snapshot rather than the local map.
-func TestCatalog_Reset_RoutesThroughStore(t *testing.T) {
+// TestCatalog_ResetServices_NilStore proves the service-only wipe on the
+// default (nil-store) inline path: every service is removed but patterns
+// survive, the correct count is returned, and the emptied service set is
+// persisted (a fresh reload keeps the patterns but sees no services).
+func TestCatalog_ResetServices_NilStore(t *testing.T) {
+	SetCatalogStore(nil)
+	store := newTestStore(t)
+
+	cat, err := LoadCatalog(store)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	cat.Upsert("p-a", "a <*>", "src", 3, 0.2, "", "svc-a")
+	cat.Upsert("p-b", "b <*>", "src", 5, 0.2, "", "svc-b")
+	cat.RegisterService("svc-a")
+	cat.RegisterService("svc-b")
+	cat.RegisterService("svc-c")
+
+	services, err := cat.ResetServices()
+	if err != nil {
+		t.Fatalf("ResetServices: %v", err)
+	}
+	if services != 3 {
+		t.Errorf("services cleared = %d, want 3", services)
+	}
+	if n := len(cat.AllServices()); n != 0 {
+		t.Errorf("services not empty after reset: %d", n)
+	}
+	if cat.Len() != 2 {
+		t.Errorf("patterns touched by service reset: %d, want 2 (patterns must survive)", cat.Len())
+	}
+
+	// Persisted: a fresh reload keeps every pattern but sees no services.
+	reloaded, err := LoadCatalog(store)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Len() != 2 {
+		t.Errorf("reloaded catalog has %d patterns, want 2 (patterns must survive reload)", reloaded.Len())
+	}
+	if n := len(reloaded.AllServices()); n != 0 {
+		t.Errorf("reloaded catalog has %d services, want 0 (reset must persist empty)", n)
+	}
+}
+
+// TestCatalog_ResetPatterns_RoutesThroughStore proves that when a CatalogStore
+// is installed the pattern wipe routes through it as a single
+// CatalogEditResetPatterns (so a fleet-wide read view is cleared, not just this
+// instance), the in-memory pattern set is emptied, and the returned count
+// reflects the store's (fleet-wide) snapshot rather than the local map.
+func TestCatalog_ResetPatterns_RoutesThroughStore(t *testing.T) {
 	fake := &fakeCatalogStore{
 		patterns: map[string]*Pattern{
 			"p-1": {ID: "p-1", Template: "one <*>", Count: 4},
@@ -229,12 +272,49 @@ func TestCatalog_Reset_RoutesThroughStore(t *testing.T) {
 		t.Fatalf("LoadCatalog: %v", err)
 	}
 
-	patterns, services, err := cat.Reset()
+	patterns, err := cat.ResetPatterns()
 	if err != nil {
-		t.Fatalf("Reset: %v", err)
+		t.Fatalf("ResetPatterns: %v", err)
 	}
 	if patterns != 2 {
 		t.Errorf("patterns cleared = %d, want 2 (from store snapshot)", patterns)
+	}
+
+	_, _, _, curates := fake.counts()
+	if curates != 1 {
+		t.Fatalf("store curate calls = %d, want exactly 1", curates)
+	}
+	if got := fake.curates[0].Kind; got != CatalogEditResetPatterns {
+		t.Errorf("curate kind = %q, want %q", got, CatalogEditResetPatterns)
+	}
+}
+
+// TestCatalog_ResetServices_RoutesThroughStore proves that when a CatalogStore
+// is installed the service wipe routes through it as a single
+// CatalogEditResetServices, the in-memory service set is emptied, and the
+// returned count reflects the store's (fleet-wide) snapshot rather than the
+// local map.
+func TestCatalog_ResetServices_RoutesThroughStore(t *testing.T) {
+	fake := &fakeCatalogStore{
+		patterns: map[string]*Pattern{
+			"p-1": {ID: "p-1", Template: "one <*>", Count: 4},
+			"p-2": {ID: "p-2", Template: "two <*>", Count: 9},
+		},
+		services: map[string]*ServiceInfo{
+			"svc-a": {FirstSeen: time.Now().UTC()},
+		},
+	}
+	SetCatalogStore(fake)
+	t.Cleanup(func() { SetCatalogStore(nil) })
+
+	cat, err := LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+
+	services, err := cat.ResetServices()
+	if err != nil {
+		t.Fatalf("ResetServices: %v", err)
 	}
 	if services != 1 {
 		t.Errorf("services cleared = %d, want 1 (from store snapshot)", services)
@@ -244,8 +324,8 @@ func TestCatalog_Reset_RoutesThroughStore(t *testing.T) {
 	if curates != 1 {
 		t.Fatalf("store curate calls = %d, want exactly 1", curates)
 	}
-	if got := fake.curates[0].Kind; got != CatalogEditReset {
-		t.Errorf("curate kind = %q, want %q", got, CatalogEditReset)
+	if got := fake.curates[0].Kind; got != CatalogEditResetServices {
+		t.Errorf("curate kind = %q, want %q", got, CatalogEditResetServices)
 	}
 }
 

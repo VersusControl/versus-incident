@@ -63,7 +63,12 @@ type ServiceInfo struct {
 	// attributed to it). Auto-discovered services leave it false. A manual
 	// service coexists with auto-discovery: RegisterService never clobbers an
 	// existing entry, so a name seen in a real signal keeps its manual flag.
-	Manual bool `json:"manual,omitempty"`
+	//
+	// Serialized WITHOUT omitempty so the origin is ALWAYS determinable in the
+	// services API: an auto-discovered row returns "manual":false explicitly
+	// rather than dropping the key, letting the UI render an "Auto vs Manual"
+	// origin column for every service.
+	Manual bool `json:"manual"`
 }
 
 // Sentinel errors for manual-service CRUD, so the admin controller can map them
@@ -316,41 +321,76 @@ func (c *Catalog) Delete(patternID string) bool {
 	return true
 }
 
-// Reset wipes the entire catalog — every learned pattern AND every discovered
-// service — and persists the empty catalog so training restarts from scratch
-// on the next tick. It returns the number of patterns and services that were
-// removed (the pre-reset view: fleet-wide when a CatalogStore is installed,
-// otherwise this instance's in-memory set).
+// ResetPatterns wipes every learned log pattern — the whole `patterns` map —
+// and persists the empty pattern set so log training restarts from scratch on
+// the next tick. Discovered/manual services are LEFT INTACT. It returns the
+// number of patterns that were removed (the pre-reset view: fleet-wide when a
+// CatalogStore is installed, otherwise this instance's in-memory set).
 //
-// This is the whole-catalog counterpart to Delete/EndServiceGrace: when a
-// CatalogStore is installed the empty state routes through it (so a fleet-wide
-// read view is cleared, not just this instance's working set); otherwise the
-// inline whole-blob path writes an empty "patterns" blob.
-func (c *Catalog) Reset() (patterns int, services int, err error) {
-	// Snapshot the pre-reset counts through the same read view callers see
+// This is the pattern-half counterpart to ResetServices: when a CatalogStore is
+// installed the empty pattern state routes through it (so a fleet-wide read
+// view is cleared, not just this instance's working set); otherwise the inline
+// whole-blob path rewrites the "patterns" blob from the in-memory maps, which
+// still carry the untouched services.
+func (c *Catalog) ResetPatterns() (patterns int, err error) {
+	// Snapshot the pre-reset count through the same read view callers see
 	// (store-aware when installed) before clearing.
 	patterns = len(c.All())
-	services = len(c.AllServices())
 
 	c.mu.Lock()
 	c.patterns = make(map[string]*Pattern)
+	c.dirty = true
+	c.mu.Unlock()
+
+	if s := catalogStore(); s != nil {
+		if err := s.Curate(CatalogEdit{Kind: CatalogEditResetPatterns}); err != nil {
+			return patterns, err
+		}
+		c.mu.Lock()
+		c.dirty = false
+		c.mu.Unlock()
+		return patterns, nil
+	}
+	if err := c.Persist(); err != nil {
+		return patterns, err
+	}
+	return patterns, nil
+}
+
+// ResetServices wipes every discovered/manual service — the whole `services`
+// map — and persists the empty service set so service discovery restarts from
+// scratch on the next tick. Learned log patterns are LEFT INTACT. It returns the
+// number of services that were removed (the pre-reset view: fleet-wide when a
+// CatalogStore is installed, otherwise this instance's in-memory set).
+//
+// This is the service-half counterpart to ResetPatterns: when a CatalogStore is
+// installed the empty service state routes through it (so a fleet-wide read
+// view is cleared, not just this instance's working set); otherwise the inline
+// whole-blob path rewrites the "patterns" blob from the in-memory maps, which
+// still carry the untouched patterns.
+func (c *Catalog) ResetServices() (services int, err error) {
+	// Snapshot the pre-reset count through the same read view callers see
+	// (store-aware when installed) before clearing.
+	services = len(c.AllServices())
+
+	c.mu.Lock()
 	c.services = make(map[string]*ServiceInfo)
 	c.dirty = true
 	c.mu.Unlock()
 
 	if s := catalogStore(); s != nil {
-		if err := s.Curate(CatalogEdit{Kind: CatalogEditReset}); err != nil {
-			return patterns, services, err
+		if err := s.Curate(CatalogEdit{Kind: CatalogEditResetServices}); err != nil {
+			return services, err
 		}
 		c.mu.Lock()
 		c.dirty = false
 		c.mu.Unlock()
-		return patterns, services, nil
+		return services, nil
 	}
 	if err := c.Persist(); err != nil {
-		return patterns, services, err
+		return services, err
 	}
-	return patterns, services, nil
+	return services, nil
 }
 
 // Dirty reports whether there are unflushed changes.

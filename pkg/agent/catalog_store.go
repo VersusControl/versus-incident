@@ -62,11 +62,18 @@ const (
 	CatalogEditEndServiceGrace CatalogEditKind = "end_service_grace"
 	// CatalogEditRestartServiceGrace carries RestartServiceGrace(Service).
 	CatalogEditRestartServiceGrace CatalogEditKind = "restart_service_grace"
-	// CatalogEditReset carries Reset(): wipe EVERY pattern AND service (all
-	// learned + curated catalog state) and persist the empty catalog. It
-	// carries no PatternID/Service — it targets the whole catalog, not one
-	// entry — so a store implementation empties its entire read view.
-	CatalogEditReset CatalogEditKind = "reset"
+	// CatalogEditResetPatterns carries ResetPatterns(): wipe EVERY learned +
+	// curated log pattern and persist the empty pattern set, LEAVING services
+	// untouched. It carries no PatternID/Service — it targets the whole pattern
+	// half, not one entry — so a store implementation empties only its pattern
+	// read view.
+	CatalogEditResetPatterns CatalogEditKind = "reset_patterns"
+	// CatalogEditResetServices carries ResetServices(): wipe EVERY discovered +
+	// manual service and persist the empty service set, LEAVING patterns
+	// untouched. It carries no PatternID/Service — it targets the whole service
+	// half, not one entry — so a store implementation empties only its service
+	// read view.
+	CatalogEditResetServices CatalogEditKind = "reset_services"
 	// CatalogEditCreateService carries CreateService(Service): record an
 	// operator-created (manual) service so it is selectable before any signal.
 	CatalogEditCreateService CatalogEditKind = "create_service"
@@ -87,7 +94,8 @@ const (
 //   - CatalogEditMarkKnown          → PatternID
 //   - CatalogEditEndServiceGrace    → Service
 //   - CatalogEditRestartServiceGrace→ Service
-//   - CatalogEditReset              → (no fields — clears the whole catalog)
+//   - CatalogEditResetPatterns       → (no fields — clears every pattern)
+//   - CatalogEditResetServices       → (no fields — clears every service)
 //   - CatalogEditCreateService      → Service (manual service name)
 //   - CatalogEditRenameService      → Service (old), NewService (new)
 //   - CatalogEditDeleteService      → Service (manual service name)

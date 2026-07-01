@@ -210,6 +210,28 @@ var (
 	reAlphaNum = regexp.MustCompile(`^[A-Za-z0-9_./:\-]+$`)
 	// REDACTED tokens emitted by the redactor are treated as wildcards.
 	reRedacted = regexp.MustCompile(`^<REDACTED:[^>]+>$`)
+
+	// Timestamp / date / time detectors. Log timestamps are pure digits glued
+	// by `-`, `:`, `.` or `,` with NO letter, so neither reNumber (has
+	// separators) nor reAlphaNum (needs a letter) blanks them — every distinct
+	// timestamp would otherwise become its own literal token and route to its
+	// own drain-tree branch, exploding one line shape into thousands of
+	// near-identical templates. Blanking them to <*> collapses those back to a
+	// single pattern. The shapes are kept STRICT (fully anchored, fixed field
+	// widths) so an ordinary hyphenated word, a bare year, or a dotted version
+	// (`1.2.3`) is never mistaken for a timestamp.
+	//
+	//   reDate  — ISO calendar date: 2026-07-01
+	//   reClock — wall-clock time HH:MM:SS with an OPTIONAL fractional part
+	//             separated by `.`, `,` OR `:` (11:21:55, 11:21:55.471,
+	//             11:21:55,471, 11:21:55:471 — the colon-millis form the founder
+	//             hit).
+	//   reISO8601 — combined date+time in ONE token (T-separated, since a space
+	//             would have split it): 2026-07-01T11:21:55, with optional
+	//             fractional seconds and an optional Z / ±HH:MM zone.
+	reDate    = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	reClock   = regexp.MustCompile(`^\d{2}:\d{2}:\d{2}([.,:]\d{1,9})?$`)
+	reISO8601 = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}([.,]\d{1,9})?(Z|[+-]\d{2}:\d{2})?$`)
 )
 
 // tokenize splits on whitespace and a small set of delimiters that frequently
@@ -245,6 +267,12 @@ func isVariable(t string) bool {
 	}
 	if reNumber.MatchString(t) || reHex.MatchString(t) || reUUID.MatchString(t) ||
 		reIPv4.MatchString(t) || reLong.MatchString(t) {
+		return true
+	}
+	// Timestamps: bare date, wall-clock time (with the colon/dot/comma millis
+	// variants), or a combined ISO8601 token. Checked before the alnum rule so
+	// a strict timestamp shape wins on its own terms.
+	if reDate.MatchString(t) || reClock.MatchString(t) || reISO8601.MatchString(t) {
 		return true
 	}
 	if reAlphaNum.MatchString(t) && hasLetter(t) && hasDigit(t) {

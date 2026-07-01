@@ -23,7 +23,8 @@ import (
 // kept in sync with the enterprise audit catalog (pkg/audit) without the OSS
 // tree importing it.
 const (
-	auditActionCatalogReset     = "agent.catalog.reset"
+	auditActionPatternsCleared  = "agent.patterns.cleared"
+	auditActionServicesCleared  = "agent.services.cleared"
 	auditActionShadowCleared    = "agent.shadow.cleared"
 	auditActionDetectCleared    = "agent.detect.cleared"
 	auditActionServiceCreated   = "agent.service.created"
@@ -52,12 +53,12 @@ type AgentController struct {
 // NewAgentController wires the catalog, miner, shadow log, and detect log into
 // a controller. Pass `cat=nil` if the agent is disabled — in that case every
 // endpoint will return 503. `mn` is the shared drain miner; it may be nil (the
-// catalog reset then clears only the persisted catalog, not in-memory miner
-// state). `sl` may be nil to disable the shadow endpoints, and `dl` may be nil
-// to disable the detect-log endpoints. `ov` is the manual-attribution override
-// store backing the service-override endpoints; it may be nil to disable them.
-// `runbooksEnabled` tells the status endpoint whether the runbooks subsystem is
-// available.
+// patterns clear then wipes only the persisted patterns, not in-memory miner
+// state). `sl` may be nil to disable the shadow endpoints, and `dl` may
+// be nil to disable the detect-log endpoints. `ov` is the manual-attribution
+// override store backing the service-override endpoints; it may be nil to
+// disable them. `runbooksEnabled` tells the status endpoint whether the
+// runbooks subsystem is available.
 func NewAgentController(cat *agent.Catalog, mn *agent.Miner, sl *agent.ShadowLog, dl *agent.DetectLog, ov *agent.ServiceOverrideStore, runbooksEnabled bool) *AgentController {
 	return &AgentController{catalog: cat, miner: mn, shadow: sl, detect: dl, overrides: ov, runbooksEnabled: runbooksEnabled}
 }
@@ -70,7 +71,7 @@ func NewAgentController(cat *agent.Catalog, mn *agent.Miner, sl *agent.ShadowLog
 //	GET    /patterns/:id     get one pattern
 //	POST   /patterns/:id     update verdict / tags
 //	DELETE /patterns/:id     remove a pattern
-//	DELETE /catalog          wipe ALL learned patterns + services (relearn fresh)
+//	DELETE /patterns         wipe ALL learned log patterns (relearn fresh)
 //	GET    /status           lightweight status (catalog size, dirty flag)
 //	GET    /shadow           list shadow-mode "would have alerted" events
 //	GET    /shadow/stats     aggregate counts for the shadow log
@@ -82,6 +83,7 @@ func NewAgentController(cat *agent.Catalog, mn *agent.Miner, sl *agent.ShadowLog
 //	POST   /services          create a manual service (selectable override target)
 //	PUT    /services/:name    rename a manual service
 //	DELETE /services/:name    delete a manual service (blocked when overrides target it)
+//	DELETE /services         wipe ALL discovered/manual services (re-discover fresh)
 //	POST   /services/:name/grace  control grace period (end / restart)
 //	GET    /service-overrides       list manual-attribution override rules
 //	POST   /service-overrides       create/replace one override rule
@@ -99,13 +101,14 @@ func (a *AgentController) Register(router fiber.Router) {
 	g.Get("/patterns/:id", a.getPattern)
 	g.Post("/patterns/:id", a.updatePattern)
 	g.Delete("/patterns/:id", a.deletePattern)
-	g.Delete("/catalog", a.resetCatalog)
+	g.Delete("/patterns", a.clearPatterns)
 	g.Get("/shadow", a.listShadow)
 	g.Get("/shadow/stats", a.shadowStats)
 	g.Delete("/shadow", a.clearShadow)
 	g.Post("/shadow/flush", a.flushShadow)
 	g.Get("/services", a.listServices)
 	g.Post("/services", a.createService)
+	g.Delete("/services", a.clearServices)
 	g.Get("/services/:name", a.getServiceDetail)
 	g.Put("/services/:name", a.renameService)
 	g.Delete("/services/:name", a.deleteService)
@@ -203,26 +206,45 @@ func (a *AgentController) deletePattern(c *fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// resetCatalog wipes ALL learned state — every mined log pattern AND every
-// discovered service — and persists the empty catalog, so the agent relearns
-// from scratch on the next tick. It also resets the shared drain miner (when
-// wired) so recurring lines are re-discovered as new rather than resumed
-// against pre-reset templates. Admin-gated by authMiddleware like every other
-// destructive agent mutation; returns a count summary of what was cleared.
-func (a *AgentController) resetCatalog(c *fiber.Ctx) error {
-	patterns, svcs, err := a.catalog.Reset()
+// clearPatterns wipes every learned log pattern — the whole pattern catalog —
+// and persists the empty pattern set, so the agent relearns log patterns from
+// scratch on the next tick. Discovered/manual services are LEFT INTACT. It also
+// resets the shared drain miner (when wired) so recurring lines are
+// re-discovered as new rather than resumed against pre-reset templates.
+// Admin-gated by authMiddleware like every other destructive agent mutation;
+// returns a count of the patterns cleared.
+func (a *AgentController) clearPatterns(c *fiber.Ctx) error {
+	patterns, err := a.catalog.ResetPatterns()
 	if err != nil {
-		middleware.RecordAdminAudit(c, auditActionCatalogReset, "all patterns + services", middleware.AdminAuditDenied)
+		middleware.RecordAdminAudit(c, auditActionPatternsCleared, "all patterns", middleware.AdminAuditDenied)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	if a.miner != nil {
 		a.miner.Reset()
 	}
-	// Reflect the full-reset scope AND the cleared count so the trail records
-	// exactly how much learned state this high-impact action wiped.
-	target := fmt.Sprintf("all patterns + services (patterns=%d services=%d)", patterns, svcs)
-	middleware.RecordAdminAudit(c, auditActionCatalogReset, target, middleware.AdminAuditSuccess)
-	return c.JSON(fiber.Map{"ok": true, "patterns": patterns, "services": svcs})
+	// Reflect the pattern-reset scope AND the cleared count so the trail records
+	// exactly how much learned pattern state this action wiped.
+	target := fmt.Sprintf("all patterns (patterns=%d)", patterns)
+	middleware.RecordAdminAudit(c, auditActionPatternsCleared, target, middleware.AdminAuditSuccess)
+	return c.JSON(fiber.Map{"ok": true, "patterns": patterns})
+}
+
+// clearServices wipes every discovered/manual service — the whole service
+// catalog — and persists the empty service set, so the agent re-discovers
+// services from scratch on the next tick. Learned log patterns and the drain
+// miner are LEFT INTACT. Admin-gated by authMiddleware like every other
+// destructive agent mutation; returns a count of the services cleared.
+func (a *AgentController) clearServices(c *fiber.Ctx) error {
+	services, err := a.catalog.ResetServices()
+	if err != nil {
+		middleware.RecordAdminAudit(c, auditActionServicesCleared, "all services", middleware.AdminAuditDenied)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	// Reflect the service-reset scope AND the cleared count so the trail records
+	// exactly how much discovered service state this action wiped.
+	target := fmt.Sprintf("all services (services=%d)", services)
+	middleware.RecordAdminAudit(c, auditActionServicesCleared, target, middleware.AdminAuditSuccess)
+	return c.JSON(fiber.Map{"ok": true, "services": services})
 }
 
 // listShadow returns every shadow-mode event sorted most-recent first.
