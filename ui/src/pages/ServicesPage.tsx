@@ -2,13 +2,17 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Check, Pencil, Play, Plus, Square, Trash2, X } from "lucide-react";
-import { api, type ServiceOverrideSource } from "@/lib/api";
+import { api } from "@/lib/api";
 import { fmtAbs, fmtRel } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
 import { EmptyState, Spinner } from "@/components/feedback";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { TextInputModal } from "@/components/TextInputModal";
+import { Pagination } from "@/components/Pagination";
+import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
 
 type GraceAction = "end" | "restart";
@@ -64,37 +68,17 @@ export function ServicesPage() {
     },
   });
 
-  // Override rules (manual attribution corrections) + the enterprise probe that
-  // decides whether metric/trace source types are offered. listBaselines 403s /
-  // 404s on a community binary — treat any failure as "not licensed", so the
-  // metric/trace override options stay hidden exactly like the ServiceDetail
-  // Metrics & Traces card degrades.
-  const overrides = useQuery({
-    queryKey: ["service-overrides"],
-    queryFn: api.listServiceOverrides,
-  });
-  const intelProbe = useQuery({
-    queryKey: ["service-overrides-intel-probe"],
-    queryFn: () => api.listBaselines(),
-    retry: false,
-  });
-  const metricsLicensed = intelProbe.isSuccess;
-
   // Manual service create / rename / delete.
-  const [newName, setNewName] = useState("");
+  const [showAdd, setShowAdd] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
   const [renaming, setRenaming] = useState<{ from: string; draft: string } | null>(
     null,
   );
 
-  // Manual-attribution override create form.
-  const [ovSource, setOvSource] = useState<ServiceOverrideSource>("log");
-  const [ovMatch, setOvMatch] = useState("");
-  const [ovService, setOvService] = useState("");
-
   const createService = useMutation({
     mutationFn: (name: string) => api.createService(name),
     onSuccess: (_d, name) => {
-      setNewName("");
+      setShowAdd(false);
       qc.invalidateQueries({ queryKey: ["services"] });
       toast.push({ tone: "ok", title: `Service "${name}" created` });
     },
@@ -146,54 +130,59 @@ export function ServicesPage() {
       }),
   });
 
-  const deleteOverride = useMutation({
-    mutationFn: (id: string) => api.deleteServiceOverride(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["service-overrides"] });
-      toast.push({ tone: "ok", title: "Override removed" });
+  // Clear all services — destructive reset of every discovered/manual service.
+  // Learned log patterns are left intact (that is a separate action on the Logs
+  // page).
+  const clearServices = useMutation({
+    mutationFn: api.clearServices,
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ["services"] });
+      setConfirmClear(false);
+      toast.push({
+        tone: "ok",
+        title: "Discovered services cleared",
+        description: `${res.services} services removed — the agent re-discovers services from scratch`,
+      });
     },
     onError: (err) =>
       toast.push({
         tone: "error",
-        title: "Couldn't remove override",
+        title: "Clear all services failed",
         description: err.message,
-      }),
-  });
-
-  const createOverride = useMutation({
-    mutationFn: (input: {
-      source_type: ServiceOverrideSource;
-      match: string;
-      service: string;
-    }) => api.createServiceOverride(input),
-    onSuccess: () => {
-      setOvMatch("");
-      qc.invalidateQueries({ queryKey: ["service-overrides"] });
-      toast.push({ tone: "ok", title: "Override created" });
-    },
-    onError: (err) =>
-      toast.push({
-        tone: "error",
-        // The 400 "unknown target service; create it first" message is surfaced
-        // verbatim so the operator knows to add the service above first.
-        title: "Couldn't create override",
-        description: err.message,
+        action: { label: "Retry", onClick: () => clearServices.mutate() },
       }),
   });
 
   const entries = data ? Object.entries(data) : [];
-
-  // Override targets: every known service except the _unknown fallback.
-  const serviceNames = entries
-    .map(([name]) => name)
-    .filter((n) => n !== "_unknown")
-    .sort((a, b) => a.localeCompare(b));
+  // Sort A→Z, then paginate at 100/page so a multi-thousand-service estate
+  // never renders every row at once (the freeze the founder hit).
+  const sorted = entries.sort(([a], [b]) => a.localeCompare(b));
+  const pg = usePagination(sorted);
 
   return (
     <>
       <TopBar
         title="Services"
         subtitle={data ? `${entries.length} discovered` : undefined}
+        actions={
+          <div className="flex items-center gap-2">
+            <button
+              className="btn btn-primary"
+              onClick={() => setShowAdd(true)}
+            >
+              <Plus size={12} />
+              Add service
+            </button>
+            <button
+              className="btn btn-danger"
+              disabled={clearServices.isPending || entries.length === 0}
+              onClick={() => setConfirmClear(true)}
+            >
+              <Trash2 size={12} />
+              Clear all services
+            </button>
+          </div>
+        }
       />
 
       <main className="flex-1 overflow-auto p-6">
@@ -210,48 +199,22 @@ export function ServicesPage() {
 
         {(!isError || data) && (
           <div className="card overflow-hidden">
-            {/* Create a manual service so it is selectable as an override
-                target before any signal is attributed to it (X-service-crud). */}
-            <form
-              className="flex flex-wrap items-center gap-2 border-b border-ink-700 p-3"
-              onSubmit={(e) => {
-                e.preventDefault();
-                const name = newName.trim();
-                if (name) createService.mutate(name);
-              }}
-            >
-              <input
-                className="input min-w-[16rem] flex-1"
-                placeholder="New service name (e.g. checkout-api)"
-                value={newName}
-                maxLength={256}
-                onChange={(e) => setNewName(e.target.value)}
-                aria-label="New service name"
-              />
-              <button
-                type="submit"
-                className="btn btn-primary"
-                disabled={!newName.trim() || createService.isPending}
-              >
-                {createService.isPending ? <Spinner /> : <Plus size={12} />} Add
-                service
-              </button>
-            </form>
             <div className="max-h-[calc(100vh-240px)] overflow-auto">
               <table className="ddt">
                 <thead>
                   <tr>
                     <th>Service</th>
                     <th className="w-48">First seen</th>
+                    <th className="w-24">Origin</th>
                     <th className="w-32">Status</th>
                     <th className="w-72">Grace control</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {isLoading && <SkRows rows={6} cols={4} />}
+                  {isLoading && <SkRows rows={6} cols={5} />}
                   {!isLoading && !isError && entries.length === 0 && (
                     <tr>
-                      <td colSpan={4}>
+                      <td colSpan={5}>
                         <EmptyState
                           title="No services discovered yet."
                           hint="Service detection runs on every signal that matches `agent.service_patterns`."
@@ -259,9 +222,7 @@ export function ServicesPage() {
                       </td>
                     </tr>
                   )}
-                  {entries
-                    .sort(([a], [b]) => a.localeCompare(b))
-                    .map(([name, info]) => {
+                  {pg.pageItems.map(([name, info]) => {
                       const isUnknown = name === "_unknown";
                       const endPending = pending.has(graceKey(name, "end"));
                       const restartPending = pending.has(
@@ -333,9 +294,6 @@ export function ServicesPage() {
                                 fallback
                               </Pill>
                             )}
-                            {info.manual && !isRenaming && (
-                              <Pill className="ml-2">manual</Pill>
-                            )}
                           </td>
                           <td
                             className="text-2xs text-ink-300"
@@ -345,6 +303,16 @@ export function ServicesPage() {
                             <span className="text-ink-400">
                               ({fmtRel(info.first_seen)})
                             </span>
+                          </td>
+                          <td>
+                            {/* Origin: whether this service was auto-discovered
+                                from a signal or created by hand (X-service-crud).
+                                info.manual carries this for every row. */}
+                            {info.manual ? (
+                              <Pill tone="accent">Manual</Pill>
+                            ) : (
+                              <Pill>Auto</Pill>
+                            )}
                           </td>
                           <td>
                             <Pill tone="good">tracked</Pill>
@@ -424,184 +392,9 @@ export function ServicesPage() {
                 </tbody>
               </table>
             </div>
+            <Pagination state={pg} />
           </div>
         )}
-
-        {/* Manual-attribution overrides. When the regex service_patterns
-            mis-attributes a signal (wrong service, a log level, _unknown), an
-            override re-points it after detection. Log overrides work on any
-            binary; metric/trace overrides only apply where the Enterprise
-            metric/trace brains run, so those source types are offered only when
-            the /intel probe is licensed. */}
-        <div className="card mt-4 overflow-hidden">
-          <div className="border-b border-ink-700 p-3">
-            <h2 className="text-sm font-semibold text-ink-50">
-              Attribution overrides
-            </h2>
-            <p className="mt-0.5 text-2xs text-ink-400">
-              Re-point a mis-detected signal to the correct service. Matches are
-              applied after auto-detection, per signal source.
-            </p>
-          </div>
-
-          <form
-            className="flex flex-wrap items-end gap-2 border-b border-ink-700 p-3"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const match = ovMatch.trim();
-              if (match && ovService)
-                createOverride.mutate({
-                  source_type: ovSource,
-                  match,
-                  service: ovService,
-                });
-            }}
-          >
-            <label className="flex flex-col gap-1">
-              <span className="text-2xs uppercase tracking-wide text-ink-400">
-                Source
-              </span>
-              <select
-                className="input py-1"
-                value={ovSource}
-                aria-label="Override source type"
-                onChange={(e) =>
-                  setOvSource(e.target.value as ServiceOverrideSource)
-                }
-              >
-                <option value="log">Log</option>
-                {metricsLicensed && <option value="metric">Metric</option>}
-                {metricsLicensed && <option value="trace">Trace</option>}
-              </select>
-            </label>
-            <label className="flex min-w-[16rem] flex-1 flex-col gap-1">
-              <span className="text-2xs uppercase tracking-wide text-ink-400">
-                Match
-              </span>
-              <input
-                className="input py-1"
-                value={ovMatch}
-                aria-label="Override match"
-                placeholder={
-                  ovSource === "log"
-                    ? "pattern id or message substring"
-                    : "signal name (supports * and ? globs)"
-                }
-                onChange={(e) => setOvMatch(e.target.value)}
-              />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-2xs uppercase tracking-wide text-ink-400">
-                Assign to
-              </span>
-              <select
-                className="input py-1 min-w-[12rem]"
-                value={ovService}
-                aria-label="Override target service"
-                onChange={(e) => setOvService(e.target.value)}
-              >
-                <option value="">Select a service…</option>
-                {serviceNames.map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              type="submit"
-              className="btn btn-primary"
-              disabled={
-                !ovMatch.trim() || !ovService || createOverride.isPending
-              }
-            >
-              {createOverride.isPending ? <Spinner /> : <Plus size={12} />} Add
-              override
-            </button>
-          </form>
-
-          <table className="ddt">
-            <thead>
-              <tr>
-                <th className="w-24">Source</th>
-                <th>Match</th>
-                <th className="w-48">Assigned to</th>
-                <th className="w-44">Created</th>
-                <th className="w-16" />
-              </tr>
-            </thead>
-            <tbody>
-              {overrides.isLoading && <SkRows rows={3} cols={5} />}
-              {overrides.isError && (
-                <tr>
-                  <td colSpan={5}>
-                    <RetryableError
-                      error={overrides.error}
-                      onRetry={() => overrides.refetch()}
-                      retrying={overrides.isRefetching}
-                      context="Couldn't load overrides"
-                    />
-                  </td>
-                </tr>
-              )}
-              {overrides.isSuccess && overrides.data.length === 0 && (
-                <tr>
-                  <td colSpan={5}>
-                    <EmptyState
-                      title="No overrides yet."
-                      hint="Add one above to correct a mis-attributed signal."
-                    />
-                  </td>
-                </tr>
-              )}
-              {overrides.data?.map((o) => (
-                <tr key={o.id}>
-                  <td>
-                    <Pill
-                      tone={o.source_type === "log" ? "default" : "accent"}
-                    >
-                      {o.source_type}
-                    </Pill>
-                  </td>
-                  <td
-                    className="font-mono text-2xs text-ink-100"
-                    title={o.match}
-                  >
-                    {o.match}
-                  </td>
-                  <td className="font-mono text-2xs text-ink-100">
-                    {o.service}
-                  </td>
-                  <td
-                    className="text-2xs text-ink-300"
-                    title={fmtAbs(o.created_at)}
-                  >
-                    {fmtRel(o.created_at)}
-                  </td>
-                  <td>
-                    <button
-                      className="btn"
-                      disabled={
-                        deleteOverride.isPending &&
-                        deleteOverride.variables === o.id
-                      }
-                      aria-label={`Delete override ${o.match}`}
-                      title="Delete override"
-                      onClick={() => deleteOverride.mutate(o.id)}
-                    >
-                      {deleteOverride.isPending &&
-                      deleteOverride.variables === o.id ? (
-                        <Spinner />
-                      ) : (
-                        <Trash2 size={11} />
-                      )}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
 
         <p className="mt-3 text-2xs text-ink-400">
           Grace is controlled by{" "}
@@ -609,9 +402,38 @@ export function ServicesPage() {
             agent.new_service_grace
           </code>
           . During the grace window, signals from a service are learned but not
-          surfaced as shadow / detect events.
+          surfaced as shadow / detect events. To re-point a mis-attributed
+          signal to a service, use the “Assign to service” action on the Logs,
+          Metrics or Traces page.
         </p>
       </main>
+
+      {showAdd && (
+        <TextInputModal
+          title="Add service"
+          label="Service name"
+          placeholder="New service name (e.g. checkout-api)"
+          confirmLabel="Add service"
+          maxLength={256}
+          busy={createService.isPending}
+          error={createService.error}
+          onSubmit={(name) => createService.mutate(name)}
+          onClose={() => setShowAdd(false)}
+        />
+      )}
+
+      {confirmClear && (
+        <ConfirmDialog
+          title="Clear all discovered services"
+          message="This removes ALL discovered and manually-created services, so the agent re-discovers services from scratch on the next tick. Learned log patterns are left untouched. This cannot be undone."
+          confirmLabel="Clear all services"
+          tone="danger"
+          busy={clearServices.isPending}
+          error={clearServices.error}
+          onConfirm={() => clearServices.mutate()}
+          onClose={() => setConfirmClear(false)}
+        />
+      )}
     </>
   );
 }
