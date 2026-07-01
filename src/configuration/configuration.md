@@ -195,10 +195,25 @@ agent:
   # Regexes used to extract a service name from each log message. The
   # first capture group of the first matching pattern wins. Empty list
   # disables service detection (everything attributed to "_unknown").
+  # This is the default list that ships in pkg/config/default_config.yaml.
   service_patterns:
+    # ECS / OpenTelemetry: "service.name":"foo", service.name=foo, service_name=foo
     - '(?i)\bservice[._-]?name["\s:=]+"?([A-Za-z0-9._-]+)'
+    # logfmt key=value: service=foo, svc=foo, app=foo, component=foo
     - '(?i)\b(?:service|svc|app|component)\s*=\s*"?([A-Za-z0-9._-]+)'
+    # JSON logs: "service":"foo", "svc":"foo", "app":"foo", "component":"foo"
     - '(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"'
+    # Spring Boot console: first token after the timestamp, before the [thread]
+    - '^\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?\s+([A-Za-z][A-Za-z0-9._-]*)\s+\['
+    # Logback MDC context: "[ <service> , requestID=… , traceID=… ]"
+    - '\[\s*([A-Za-z][A-Za-z0-9._-]*)\s*,\s*(?i:request[_-]?id|trace[_-]?id|span[_-]?id)\b'
+    # Two bracketed tokens: [logger] [service] — the second bracket wins
+    - '\[[^\]]+\]\s+\[([A-Za-z0-9._-]+)\]'
+    # Spring Boot / Java logback default: second bracket after the "---" separator
+    - '---\s+\[[^\]]*\]\s+\[([A-Za-z0-9._-]+)\]'
+    # syslog / journald / Docker: foo[123]: — before the generic bracket rule
+    - '([A-Za-z0-9._-]+)\[\d+\]:'
+    # Generic single bracket: [foo] — most generic, kept last
     - '\[([A-Za-z0-9._-]+)\]'
 
   redaction:
@@ -210,7 +225,7 @@ agent:
 
   catalog:
     persist_interval: 30s
-    auto_promote_after: 50    # in detect mode, this many sightings = "known"
+    auto_promote_after: 100   # in detect mode, this many sightings = "known"
     # Spike detection: a known pattern is re-flagged when its tick-level
     # frequency exceeds the EWMA baseline by `spike_multiplier`.
     spike_multiplier: 5.0

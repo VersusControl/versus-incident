@@ -228,7 +228,29 @@ export interface ShadowStats {
 
 export interface ServiceInfo {
   first_seen: string;
+  // manual is true for an operator-created service (selectable as an override
+  // target) — auto-discovered services omit it. Only manual services can be
+  // renamed/deleted through the admin API.
+  manual?: boolean;
 }
+
+// --- Manual-attribution service overrides ------------------------------------
+// One durable operator correction that re-labels a mis-attributed signal's
+// service. Logs override is an OSS capability; metric/trace rules ride the SAME
+// endpoint but only take effect where the enterprise metric/trace brains run.
+
+export type ServiceOverrideSource = "log" | "metric" | "trace";
+
+export interface ServiceOverride {
+  id: string;
+  source_type: ServiceOverrideSource;
+  // match is the source-appropriate key: a log pattern id / message substring,
+  // or a metric/trace signal name (exact or `*`/`?` glob).
+  match: string;
+  service: string;
+  created_at: string;
+}
+
 
 // --- Service detail (X30) ----------------------------------------------------
 // The OSS half of the service-detail surface: service meta + grace, the
@@ -1004,10 +1026,11 @@ export const api = {
     }),
   deletePattern: (id: string) =>
     request<void>(`/api/agent/patterns/${id}`, { method: "DELETE" }),
-  flushPatterns: () =>
-    request<{ ok: boolean; patterns: number }>("/api/agent/flush", {
-      method: "POST",
-    }),
+  resetCatalog: () =>
+    request<{ ok: boolean; patterns: number; services: number }>(
+      "/api/agent/catalog",
+      { method: "DELETE" },
+    ),
 
   // listBaselines reads the Enterprise learned metric/trace baselines. It
   // does NOT swallow errors: an ApiError with status 403 (unlicensed) or 404
@@ -1241,6 +1264,51 @@ export const api = {
     request<{ ok: boolean }>(
       `/api/agent/services/${encodeURIComponent(name)}/grace`,
       { method: "POST", body: JSON.stringify({ action }) },
+    ),
+
+  // createService records an operator-created (manual) service so it is
+  // selectable as an override target before any signal is attributed to it.
+  createService: (name: string) =>
+    request<{ service: string; manual: boolean }>("/api/agent/services", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  // renameService renames a manual service and repoints any override rules that
+  // targeted the old name. Auto-discovered services cannot be renamed (400).
+  renameService: (oldName: string, newName: string) =>
+    request<{ service: string; manual: boolean; overrides_repointed: number }>(
+      `/api/agent/services/${encodeURIComponent(oldName)}`,
+      { method: "PUT", body: JSON.stringify({ name: newName }) },
+    ),
+  // deleteService removes a manual service. The server blocks deletion (409)
+  // while any override rule still targets it, so the caller must remove those
+  // overrides first.
+  deleteService: (name: string) =>
+    request<void>(`/api/agent/services/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+
+  // listServiceOverrides reads every manual-attribution override rule.
+  listServiceOverrides: () =>
+    request<{ overrides: ServiceOverride[] }>(
+      "/api/agent/service-overrides",
+    ).then((r) => r.overrides ?? []),
+  // createServiceOverride creates (or replaces the same-key) override rule. The
+  // target service must already exist (create it first).
+  createServiceOverride: (input: {
+    source_type: ServiceOverrideSource;
+    match: string;
+    service: string;
+  }) =>
+    request<ServiceOverride>("/api/agent/service-overrides", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  // deleteServiceOverride removes one override rule by id.
+  deleteServiceOverride: (id: string) =>
+    request<void>(
+      `/api/agent/service-overrides/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
     ),
 
   listDetect: () =>

@@ -44,3 +44,30 @@ func TestMiner_TokenizeIgnoresRedactedAsVariable(t *testing.T) {
 		t.Errorf("expected same id, got %s vs %s", id1, id2)
 	}
 }
+
+// TestMiner_Reset proves Reset forgets every learned cluster and the bucket
+// tree, so a line the miner had already learned is re-discovered as new (isNew
+// again) after the reset — mining truly restarts from scratch.
+func TestMiner_Reset(t *testing.T) {
+	m := NewMiner(0.4, 4, 100)
+	msg := "connection refused to database server db-01 port 5432"
+
+	if _, _, isNew := m.Cluster(msg); !isNew {
+		t.Fatalf("first sighting should be new")
+	}
+	if _, _, isNew := m.Cluster(msg); isNew {
+		t.Fatalf("second sighting should not be new before reset")
+	}
+	if n := len(m.Snapshot()); n != 1 {
+		t.Fatalf("miner should hold 1 cluster before reset, got %d", n)
+	}
+
+	m.Reset()
+
+	if n := len(m.Snapshot()); n != 0 {
+		t.Fatalf("miner should hold 0 clusters after reset, got %d", n)
+	}
+	if _, _, isNew := m.Cluster(msg); !isNew {
+		t.Fatalf("after reset the same line must be re-discovered as new")
+	}
+}

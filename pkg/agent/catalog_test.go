@@ -143,6 +143,112 @@ func TestCatalog_LabelAndDelete(t *testing.T) {
 	}
 }
 
+// TestCatalog_Reset_NilStore proves the whole-catalog wipe on the default
+// (nil-store) inline path: every pattern AND service is removed, the correct
+// counts are returned, the empty catalog is persisted (a fresh reload sees
+// nothing), and an unrelated blob in the same store is untouched (the reset
+// only rewrites the "patterns" blob — namespace isolation).
+func TestCatalog_Reset_NilStore(t *testing.T) {
+	SetCatalogStore(nil)
+	store := newTestStore(t)
+
+	// An unrelated blob that MUST survive the reset.
+	if err := store.WriteBlob("unrelated", []byte("keep-me")); err != nil {
+		t.Fatalf("seed unrelated blob: %v", err)
+	}
+
+	cat, err := LoadCatalog(store)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	cat.Upsert("p-a", "a <*>", "src", 3, 0.2, "", "svc-a")
+	cat.Upsert("p-b", "b <*>", "src", 5, 0.2, "", "svc-b")
+	cat.RegisterService("svc-a")
+	cat.RegisterService("svc-b")
+	cat.RegisterService("svc-c")
+
+	patterns, services, err := cat.Reset()
+	if err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if patterns != 2 {
+		t.Errorf("patterns cleared = %d, want 2", patterns)
+	}
+	if services != 3 {
+		t.Errorf("services cleared = %d, want 3", services)
+	}
+	if cat.Len() != 0 {
+		t.Errorf("catalog not empty after reset: %d patterns", cat.Len())
+	}
+	if n := len(cat.AllServices()); n != 0 {
+		t.Errorf("services not empty after reset: %d", n)
+	}
+
+	// Persisted empty: a fresh reload from the same store sees nothing.
+	reloaded, err := LoadCatalog(store)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Len() != 0 {
+		t.Errorf("reloaded catalog has %d patterns, want 0 (reset must persist empty)", reloaded.Len())
+	}
+	if n := len(reloaded.AllServices()); n != 0 {
+		t.Errorf("reloaded catalog has %d services, want 0", n)
+	}
+
+	// Isolation: the unrelated blob is untouched.
+	got, err := store.ReadBlob("unrelated")
+	if err != nil {
+		t.Fatalf("ReadBlob(unrelated): %v", err)
+	}
+	if string(got) != "keep-me" {
+		t.Errorf("unrelated blob = %q, want %q (reset must not touch other blobs)", got, "keep-me")
+	}
+}
+
+// TestCatalog_Reset_RoutesThroughStore proves that when a CatalogStore is
+// installed the wipe routes through it as a single CatalogEditReset (so a
+// fleet-wide read view is cleared, not just this instance), the in-memory
+// working set is emptied, and the returned counts reflect the store's
+// (fleet-wide) snapshot rather than the local map.
+func TestCatalog_Reset_RoutesThroughStore(t *testing.T) {
+	fake := &fakeCatalogStore{
+		patterns: map[string]*Pattern{
+			"p-1": {ID: "p-1", Template: "one <*>", Count: 4},
+			"p-2": {ID: "p-2", Template: "two <*>", Count: 9},
+		},
+		services: map[string]*ServiceInfo{
+			"svc-a": {FirstSeen: time.Now().UTC()},
+		},
+	}
+	SetCatalogStore(fake)
+	t.Cleanup(func() { SetCatalogStore(nil) })
+
+	cat, err := LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+
+	patterns, services, err := cat.Reset()
+	if err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if patterns != 2 {
+		t.Errorf("patterns cleared = %d, want 2 (from store snapshot)", patterns)
+	}
+	if services != 1 {
+		t.Errorf("services cleared = %d, want 1 (from store snapshot)", services)
+	}
+
+	_, _, _, curates := fake.counts()
+	if curates != 1 {
+		t.Fatalf("store curate calls = %d, want exactly 1", curates)
+	}
+	if got := fake.curates[0].Kind; got != CatalogEditReset {
+		t.Errorf("curate kind = %q, want %q", got, CatalogEditReset)
+	}
+}
+
 func TestCatalog_UpsertAppliesRegexTag(t *testing.T) {
 	cat, _ := LoadCatalog(storage.NewMemory())
 
@@ -251,6 +357,8 @@ func TestServiceMatcher_CommonFormats(t *testing.T) {
 		`(?i)\bservice[._-]?name["\s:=]+"?([A-Za-z0-9._-]+)`,
 		`(?i)\b(?:service|svc|app|component)\s*=\s*"?([A-Za-z0-9._-]+)`,
 		`(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"`,
+		`^\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?\s+([A-Za-z][A-Za-z0-9._-]*)\s+\[`,
+		`\[\s*([A-Za-z][A-Za-z0-9._-]*)\s*,\s*(?i:request[_-]?id|trace[_-]?id|span[_-]?id)\b`,
 		`\[[^\]]+\]\s+\[([A-Za-z0-9._-]+)\]`,
 		`---\s+\[[^\]]*\]\s+\[([A-Za-z0-9._-]+)\]`,
 		`([A-Za-z0-9._-]+)\[\d+\]:`,
@@ -276,6 +384,8 @@ func TestServiceMatcher_CommonFormats(t *testing.T) {
 		{"bracket with level prefix", `ERROR [scheduler] cron job failed`, "scheduler"},
 		{"django two-bracket", `ERROR [django.request] [orders] Internal Server Error`, "orders"},
 		{"spring boot", `ERROR 1 --- [main] [payments-service] c.e.p.PaymentCtrl : upstream error`, "payments-service"},
+		{"spring boot console (ansi service before thread)", "2026-07-01 05:08:14.502  \x1b[34mlead-service\x1b[m  \x1b[33;1m[consumer-0-C-1]\x1b[m WARN k.c.NetworkClient : boom", "lead-service"},
+		{"logback mdc bracket", `[ 2026-07-01 05:08:04:661 ] [ DEBUG ] [ account-service , requestID = , traceID = x ] rest`, "account-service"},
 		{"syslog prefix", `nginx[1234]: GET /healthz 200`, "nginx"},
 		{"syslog with level", `ERROR nginx[1234]: GET /healthz 500`, "nginx"},
 		{"no match", `random unstructured line`, ""},

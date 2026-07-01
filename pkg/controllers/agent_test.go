@@ -80,7 +80,7 @@ func newServiceDetailApp(t *testing.T) *fiber.App {
 	services.SetStorage(store)
 	t.Cleanup(func() { services.SetStorage(nil) })
 
-	ctrl := NewAgentController(cat, nil, nil, false)
+	ctrl := NewAgentController(cat, nil, nil, nil, nil, false)
 	app := fiber.New()
 	app.Get("/api/agent/services/:name", ctrl.getServiceDetail)
 	return app
@@ -108,7 +108,7 @@ func getJSON(t *testing.T, app *fiber.App, path string) (int, map[string]any) {
 func TestServiceDetailRouteRegistered(t *testing.T) {
 	app := fiber.New()
 	api := app.Group("/api")
-	NewAgentController(nil, nil, nil, false).Register(api)
+	NewAgentController(nil, nil, nil, nil, nil, false).Register(api)
 
 	have := map[string]bool{}
 	for _, r := range app.GetRoutes(true) {
@@ -209,7 +209,7 @@ func TestServiceDetail_GraceEnded(t *testing.T) {
 	services.SetStorage(storage.NewMemory())
 	t.Cleanup(func() { services.SetStorage(nil) })
 
-	ctrl := NewAgentController(cat, nil, nil, false)
+	ctrl := NewAgentController(cat, nil, nil, nil, nil, false)
 	app := fiber.New()
 	app.Get("/api/agent/services/:name", ctrl.getServiceDetail)
 
@@ -249,7 +249,7 @@ func TestServiceDetail_ServesSingleTenantOrgUnderForeignDeploymentOrg(t *testing
 	middleware.SetOrgResolver(func(*fiber.Ctx) string { return "b" })
 	t.Cleanup(func() { middleware.SetOrgResolver(nil) })
 
-	ctrl := NewAgentController(cat, nil, nil, false)
+	ctrl := NewAgentController(cat, nil, nil, nil, nil, false)
 	app := fiber.New()
 	app.Use(middleware.OrgInjector())
 	app.Get("/api/agent/services/:name", ctrl.getServiceDetail)
@@ -263,5 +263,75 @@ func TestServiceDetail_ServesSingleTenantOrgUnderForeignDeploymentOrg(t *testing
 	}
 	if c, _ := body["counts"].(map[string]any); c["patterns"] != float64(1) {
 		t.Errorf("counts.patterns = %v, want 1 (default-keyed pattern resolved, not foreign org)", c["patterns"])
+	}
+}
+
+// TestResetCatalog_WipesPatternsAndServices proves DELETE /api/agent/catalog
+// empties every learned pattern AND discovered service, resets the shared
+// miner, and returns a count summary of what was cleared.
+func TestResetCatalog_WipesPatternsAndServices(t *testing.T) {
+	cat, err := agent.LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	cat.RegisterService("api")
+	cat.RegisterService("web")
+	cat.Upsert("p-api", "api failed to <*>", "es:prod", 7, 0.2, "default", "api")
+	cat.Upsert("p-web", "web oops <*>", "es:prod", 3, 0.2, "default", "web")
+
+	miner := agent.NewMiner(0.4, 4, 100)
+	miner.Cluster("api failed to connect")
+
+	ctrl := NewAgentController(cat, miner, nil, nil, nil, false)
+	app := fiber.New()
+	app.Delete("/api/agent/catalog", ctrl.resetCatalog)
+
+	resp, err := app.Test(httptest.NewRequest("DELETE", "/api/agent/catalog", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	var body map[string]any
+	if err := json.Unmarshal(b, &body); err != nil {
+		t.Fatalf("unmarshal %q: %v", b, err)
+	}
+	if body["patterns"] != float64(2) {
+		t.Errorf("patterns = %v, want 2", body["patterns"])
+	}
+	if body["services"] != float64(2) {
+		t.Errorf("services = %v, want 2", body["services"])
+	}
+	if cat.Len() != 0 {
+		t.Errorf("catalog not emptied: %d patterns remain", cat.Len())
+	}
+	if n := len(cat.AllServices()); n != 0 {
+		t.Errorf("services not emptied: %d remain", n)
+	}
+	if n := len(miner.Snapshot()); n != 0 {
+		t.Errorf("miner not reset: %d clusters remain", n)
+	}
+}
+
+// TestResetCatalogRouteRegistered guards DELETE /api/agent/catalog in the
+// route table and proves the removed POST /api/agent/flush endpoint is gone.
+func TestResetCatalogRouteRegistered(t *testing.T) {
+	app := fiber.New()
+	api := app.Group("/api")
+	NewAgentController(nil, nil, nil, nil, nil, false).Register(api)
+
+	have := map[string]bool{}
+	for _, r := range app.GetRoutes(true) {
+		have[r.Method+" "+r.Path] = true
+	}
+	if !have["DELETE /api/agent/catalog"] {
+		t.Fatalf("route DELETE /api/agent/catalog not registered; have:\n%v", have)
+	}
+	// The manual flush endpoint was removed — the catalog auto-persists.
+	if have["POST /api/agent/flush"] {
+		t.Errorf("route POST /api/agent/flush should be removed but is still registered")
 	}
 }

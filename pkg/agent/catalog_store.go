@@ -41,9 +41,9 @@ type CatalogStore interface {
 	Snapshot() (patterns []*Pattern, services map[string]ServiceInfo, err error)
 
 	// Curate persists ONE operator edit (label/verdict/tags, delete,
-	// mark-known, end/restart service grace) so it is visible to the read
-	// view. It carries exactly the mutations the Catalog's own curation
-	// methods perform inline.
+	// mark-known, end/restart service grace, or a whole-catalog reset) so it
+	// is visible to the read view. It carries exactly the mutations the
+	// Catalog's own curation methods perform inline.
 	Curate(edit CatalogEdit) error
 }
 
@@ -62,6 +62,20 @@ const (
 	CatalogEditEndServiceGrace CatalogEditKind = "end_service_grace"
 	// CatalogEditRestartServiceGrace carries RestartServiceGrace(Service).
 	CatalogEditRestartServiceGrace CatalogEditKind = "restart_service_grace"
+	// CatalogEditReset carries Reset(): wipe EVERY pattern AND service (all
+	// learned + curated catalog state) and persist the empty catalog. It
+	// carries no PatternID/Service — it targets the whole catalog, not one
+	// entry — so a store implementation empties its entire read view.
+	CatalogEditReset CatalogEditKind = "reset"
+	// CatalogEditCreateService carries CreateService(Service): record an
+	// operator-created (manual) service so it is selectable before any signal.
+	CatalogEditCreateService CatalogEditKind = "create_service"
+	// CatalogEditRenameService carries RenameService(Service, NewService): move
+	// a manual service entry to a new name, preserving FirstSeen + manual flag.
+	CatalogEditRenameService CatalogEditKind = "rename_service"
+	// CatalogEditDeleteService carries DeleteService(Service): remove a manual
+	// service entry.
+	CatalogEditDeleteService CatalogEditKind = "delete_service"
 )
 
 // CatalogEdit is one operator mutation, modelled on the Catalog curation
@@ -73,6 +87,10 @@ const (
 //   - CatalogEditMarkKnown          → PatternID
 //   - CatalogEditEndServiceGrace    → Service
 //   - CatalogEditRestartServiceGrace→ Service
+//   - CatalogEditReset              → (no fields — clears the whole catalog)
+//   - CatalogEditCreateService      → Service (manual service name)
+//   - CatalogEditRenameService      → Service (old), NewService (new)
+//   - CatalogEditDeleteService      → Service (manual service name)
 type CatalogEdit struct {
 	Kind CatalogEditKind
 	// PatternID identifies the pattern for the label/delete/mark-known edits.
@@ -83,8 +101,11 @@ type CatalogEdit struct {
 	// Tags are the operator tags for a label edit (nil leaves them unchanged,
 	// matching Catalog.Label).
 	Tags []string
-	// Service identifies the service for the grace edits.
+	// Service identifies the service for the grace and manual-service edits
+	// (the OLD name for a rename).
 	Service string
+	// NewService is the target name for a rename edit; unused otherwise.
+	NewService string
 }
 
 // Process-wide single slot. A consumer registers a store at boot; the Catalog
