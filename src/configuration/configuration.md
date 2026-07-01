@@ -225,7 +225,7 @@ agent:
 
   catalog:
     persist_interval: 30s
-    auto_promote_after: 50    # in detect mode, this many sightings = "known"
+    auto_promote_after: 100   # in detect mode, this many sightings = "known"
     # Spike detection: a known pattern is re-flagged when its tick-level
     # frequency exceeds the EWMA baseline by `spike_multiplier`.
     spike_multiplier: 5.0

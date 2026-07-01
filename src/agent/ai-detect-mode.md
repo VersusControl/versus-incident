@@ -256,9 +256,9 @@ move accordingly.
   agent sees the service, and is persisted in `patterns.json` so
   it survives restarts.
 - **Rotate the key** if it ever appears in a log line you fed the
-  agent — the redactor scrubs common secret shapes
-  (`sk-…`, `xoxb-…`, AWS keys, JWTs, basic-auth URLs) but treat
-  it as defense-in-depth, not a guarantee.
+  agent — the [redactor](./redaction.md) scrubs common secret
+  shapes (`sk-…`, `xoxb-…`, AWS keys, JWTs, basic-auth URLs) but
+  treat it as defense-in-depth, not a guarantee.
 
 ## Common questions
 

@@ -25,6 +25,11 @@ type Redactor struct {
 type redactRule struct {
 	name string
 	re   *regexp.Regexp
+	// repl is an optional replacement template ($1 / ${1} capture refs). When
+	// empty the whole match is replaced by the fixed `<REDACTED:name>` token;
+	// when set it lets a rule preserve surrounding delimiters it had to match
+	// for context (e.g. basic_auth keeps the `://` and `@host` boundary).
+	repl string
 }
 
 // Default redaction patterns. Order matters — longer / more specific patterns
@@ -32,21 +37,35 @@ type redactRule struct {
 var defaultRedactors = []struct {
 	name    string
 	pattern string
+	repl    string // optional replacement template; empty ⇒ whole-match token
 }{
 	// JSON web tokens (header.payload.signature)
-	{"jwt", `eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+`},
+	{name: "jwt", pattern: `eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+`},
 	// AWS access keys (AKIA... / ASIA...)
-	{"aws_key", `\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`},
+	{name: "aws_key", pattern: `\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`},
+	// OpenAI-style API keys (sk-..., incl. project keys sk-proj-...). The
+	// {20,} floor keeps short "sk-foo" identifiers from matching.
+	{name: "openai_key", pattern: `\bsk-[A-Za-z0-9_\-]{20,}`},
+	// Slack tokens: bot (xoxb), user (xoxp), app (xoxa), refresh (xoxr),
+	// config (xoxc/xoxs), export (xoxe), legacy/cookie (xoxd). The letter
+	// class deliberately EXCLUDES "o" so a near-miss like "xoxo-…" stays
+	// untouched. The {10,} floor avoids matching a bare prefix.
+	{name: "slack_token", pattern: `\bxox[abcdeprs]-[A-Za-z0-9\-]{10,}`},
+	// Basic-auth credentials embedded in a URL (scheme://user:pass@host).
+	// The `://` and the trailing `@` are matched only for context and put back
+	// via the replacement template, so the credentials are fully scrubbed while
+	// the separators survive: `://user:pass@host` → `://<REDACTED:basic_auth>@host`.
+	{name: "basic_auth", pattern: `(://)[^/\s:@]+:[^/\s@]+(@)`, repl: `${1}<REDACTED:basic_auth>${2}`},
 	// Bearer / Authorization headers
-	{"bearer", `(?i)Authorization:\s*Bearer\s+[A-Za-z0-9._\-]+`},
+	{name: "bearer", pattern: `(?i)Authorization:\s*Bearer\s+[A-Za-z0-9._\-]+`},
 	// Generic password=... / token=...
-	{"password", `(?i)\b(?:password|passwd|pwd|secret|token|api[_-]?key)\s*[=:]\s*\S+`},
+	{name: "password", pattern: `(?i)\b(?:password|passwd|pwd|secret|token|api[_-]?key)\s*[=:]\s*\S+`},
 	// Email addresses
-	{"email", `[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`},
+	{name: "email", pattern: `[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`},
 	// UUIDs
-	{"uuid", `\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`},
+	{name: "uuid", pattern: `\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`},
 	// User-Agent strings
-	{"user_agent", `Mozilla/[0-9.]+\s*\([^)]*\)(?:[^"\n]*?(?:Gecko|Chrome|Safari|Firefox|Edg|Trident|OPR|MSIE)[^"\n]*)?`},
+	{name: "user_agent", pattern: `Mozilla/[0-9.]+\s*\([^)]*\)(?:[^"\n]*?(?:Gecko|Chrome|Safari|Firefox|Edg|Trident|OPR|MSIE)[^"\n]*)?`},
 }
 
 // IPv4/IPv6 redactor — opt-in because it removes a lot of useful context.
@@ -72,7 +91,7 @@ func NewRedactor(redactIPs bool, extra []string) (*Redactor, []error) {
 			errs = append(errs, fmt.Errorf("default redactor %q: %w", d.name, err))
 			continue
 		}
-		r.rules = append(r.rules, redactRule{name: d.name, re: re})
+		r.rules = append(r.rules, redactRule{name: d.name, re: re, repl: d.repl})
 	}
 	if redactIPs {
 		for _, d := range ipRedactors {
@@ -96,14 +115,18 @@ func NewRedactor(redactIPs bool, extra []string) (*Redactor, []error) {
 }
 
 // Scrub returns s with every match of every rule replaced by
-// `<REDACTED:<rule>>`.
+// `<REDACTED:<rule>>` (or the rule's own replacement template, when set, so a
+// rule like basic_auth can keep the delimiters it only matched for context).
 func (r *Redactor) Scrub(s string) string {
 	if r == nil || len(r.rules) == 0 || s == "" {
 		return s
 	}
 	for _, rule := range r.rules {
-		token := "<REDACTED:" + rule.name + ">"
-		s = rule.re.ReplaceAllString(s, token)
+		repl := rule.repl
+		if repl == "" {
+			repl = "<REDACTED:" + rule.name + ">"
+		}
+		s = rule.re.ReplaceAllString(s, repl)
 	}
 	return s
 }

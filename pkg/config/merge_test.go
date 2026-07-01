@@ -76,4 +76,11 @@ oncall:
 	if c.Agent.Mode != "training" {
 		t.Errorf("Agent.Mode = %q, want training (default)", c.Agent.Mode)
 	}
+	// An OMITTED auto_promote_after must inherit the embedded default 100, NOT
+	// the zero value 0. Since 0 now DISABLES count-based promotion (QA-028), an
+	// unset key that fell through to 0 would silently turn promotion off — this
+	// asserts unset ≠ disabled.
+	if c.Agent.Catalog.AutoPromoteAfter != 100 {
+		t.Errorf("Agent.Catalog.AutoPromoteAfter = %d, want 100 (embedded default for an omitted key; unset ≠ disabled)", c.Agent.Catalog.AutoPromoteAfter)
+	}
 }

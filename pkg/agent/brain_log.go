@@ -174,11 +174,15 @@ func (b *logBrain) Classify(obs core.Observation, mean, std float64, confident b
 	prevCount := postCount - tickFreq // recover the pre-fold count
 	prevVerdict := p.Verdict          // Upsert never mutates Verdict, so == pre-fold
 
+	// AutoPromoteAfter ≤ 0 disables count-based promotion entirely ("0 disables
+	// the promotion"): a pattern is never marked "known" by sighting count
+	// alone, so it keeps flowing to detect-AI however often it is seen. The 100
+	// default for an UNSET key is supplied by the embedded default_config layer
+	// (loaded as the base before user overrides), so an omitted key arrives here
+	// as 100 — only an explicit 0 (or negative) reaches the disabled branch. A
+	// pattern already promoted to "known" stays known regardless of threshold.
 	threshold := b.cat.AutoPromoteAfter
-	if threshold <= 0 {
-		threshold = 100
-	}
-	isKnown := prevVerdict == "known" || postCount >= threshold
+	isKnown := prevVerdict == "known" || (threshold > 0 && postCount >= threshold)
 	if isKnown {
 		if prevVerdict != "known" {
 			b.catalog.MarkKnown(obs.Key)
