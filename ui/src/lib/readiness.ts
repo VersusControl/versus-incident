@@ -48,18 +48,3 @@ export function deriveReadiness(r: Readiness): DerivedReadiness {
 
   return { state, ready, indeterminate, stalled, remaining, progress, etaMinutes };
 }
-
-// humanizeMinutes renders a minute count as a compact, prefixed estimate:
-//   0.4  → "~<1m"      12   → "~12m"
-//   90   → "~1h 30m"   130  → "~2h 10m"   120 → "~2h"
-// It is only ever called with a positive, finite value (deriveReadiness returns
-// null otherwise), but it guards defensively so it never prints "~NaNm" or "~∞".
-export function humanizeMinutes(min: number): string {
-  if (!isFinite(min) || min <= 0) return "~<1m";
-  if (min < 1) return "~<1m";
-  const total = Math.round(min);
-  if (total < 60) return `~${total}m`;
-  const h = Math.floor(total / 60);
-  const m = total % 60;
-  return m > 0 ? `~${h}h ${m}m` : `~${h}h`;
-}

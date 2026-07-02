@@ -47,7 +47,7 @@ import { usePagination } from "@/lib/pagination";
 const PAGE_TITLE = "What the agent knows right now";
 
 // VALUE_TOOLTIP is the §3.2 one-line gloss for the "what's normal" concept.
-// The status concept is now owned by the shared ReadinessCell + its column
+// The status concept is now owned by the shared ReadinessProgress + its column
 // header InfoHint, so there is no local status tooltip constant.
 const VALUE_TOOLTIP =
   "The usual range for this signal. Anything inside it is normal.";

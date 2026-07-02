@@ -9,8 +9,8 @@ import { deriveReadiness } from "@/lib/readiness";
 //   learning       → accent bar + "seen / needed"
 //   indeterminate  → seen count + "mark known by hand" (auto-promotion off)
 //   absent         → "—"
-// It reads the same server Readiness facts as ReadinessCell (via
-// lib/readiness.ts) so the number can never drift from the table.
+// It reads the server Readiness facts via lib/readiness.ts so the number
+// stays consistent across every table, peek and detail surface.
 export function ReadinessProgress({ readiness }: { readiness?: Readiness }) {
   if (!readiness) return <span className="text-ink-400">—</span>;
   const d = deriveReadiness(readiness);

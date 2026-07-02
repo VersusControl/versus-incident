@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { Readiness } from "./api";
-import { deriveReadiness, humanizeMinutes } from "./readiness";
+import { deriveReadiness } from "./readiness";
 
 // base returns a Readiness with sensible defaults so each test tweaks only the
 // field under test.
@@ -58,29 +58,5 @@ describe("deriveReadiness", () => {
     expect(d.remaining).toBe(0);
     expect(d.etaMinutes).toBeNull(); // no remaining ⇒ no honest ETA
     expect(d.state).toBe("stalled");
-  });
-});
-
-describe("humanizeMinutes", () => {
-  it("sub-minute → ~<1m", () => {
-    expect(humanizeMinutes(0.4)).toBe("~<1m");
-    expect(humanizeMinutes(0)).toBe("~<1m");
-    expect(humanizeMinutes(-3)).toBe("~<1m");
-  });
-
-  it("minutes under an hour → ~Nm (rounded)", () => {
-    expect(humanizeMinutes(12)).toBe("~12m");
-    expect(humanizeMinutes(59.4)).toBe("~59m");
-  });
-
-  it("hours → ~Hh Mm, dropping a zero minute", () => {
-    expect(humanizeMinutes(130)).toBe("~2h 10m");
-    expect(humanizeMinutes(90)).toBe("~1h 30m");
-    expect(humanizeMinutes(120)).toBe("~2h");
-  });
-
-  it("non-finite → ~<1m (never ~NaNm / ~∞)", () => {
-    expect(humanizeMinutes(Infinity)).toBe("~<1m");
-    expect(humanizeMinutes(NaN)).toBe("~<1m");
   });
 });
