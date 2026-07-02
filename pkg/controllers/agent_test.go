@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http/httptest"
@@ -314,6 +315,46 @@ func TestClearPatterns_WipesPatternsKeepsServices(t *testing.T) {
 	}
 	if n := len(miner.Snapshot()); n != 0 {
 		t.Errorf("miner not reset: %d clusters remain", n)
+	}
+}
+
+// TestClearPatterns_RewindsWiredCursors proves DELETE /api/agent/patterns
+// rewinds the wired poll-cursor store so the SAME running worker re-reads its
+// lookback window and relearns — the fix for the founder's "cleared patterns
+// never come back until I recreate the container" halt. It asserts the exact
+// shared CursorStore the worker mines through is emptied by the clear.
+func TestClearPatterns_RewindsWiredCursors(t *testing.T) {
+	cat, err := agent.LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	cat.Upsert("p-api", "api failed to <*>", "es:prod", 7, 0.2, "default", "api")
+
+	miner := agent.NewMiner(0.4, 4, 100)
+	cursors := agent.NewCursorStore(nil) // in-memory
+	ctx := context.Background()
+	if err := cursors.Set(ctx, "es:prod", time.Now().UTC()); err != nil {
+		t.Fatalf("seed cursor: %v", err)
+	}
+	if _, ok := cursors.Get(ctx, "es:prod"); !ok {
+		t.Fatal("cursor should be seeded before the clear")
+	}
+
+	ctrl := NewAgentController(cat, miner, nil, nil, nil, false).SetCursorStore(cursors)
+	app := fiber.New()
+	app.Delete("/api/agent/patterns", ctrl.clearPatterns)
+
+	resp, err := app.Test(httptest.NewRequest("DELETE", "/api/agent/patterns", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	if _, ok := cursors.Get(ctx, "es:prod"); ok {
+		t.Error("cursor still present after clear-patterns; the worker will not re-read the window and learning stays halted")
 	}
 }
 

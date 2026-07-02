@@ -25,6 +25,7 @@ For each log line, the agent runs these steps in order:
 3. **First match wins.** The moment a pattern matches, the agent stops — later patterns are not tried.
 4. **Take the captured name.** Each pattern has one capture group `( … )`; the text it captures is the service name.
 5. **Skip bare log levels.** If that captured text is exactly a log level (`TRACE`, `DEBUG`, `INFO`, `WARN`, `WARNING`, `ERROR`, `FATAL`), the agent ignores this match and continues to the next pattern — a service is never named `DEBUG`.
+6. **Skip purely-numeric tokens.** If that captured text has no letters at all — only digits and separators like `1210`, `8080`, or `10.0.0.1` — it's a thread id / PID / port / address, never a service. The agent skips it and continues to the next pattern. A name that merely *contains* digits (`s3`, `api-v2`, `auth-service-2`) still has a letter and is kept.
 
 If nothing matches (or the list is empty), the service is `_unknown`.
 
@@ -46,12 +47,13 @@ Versus ships a default `service_patterns` list (from `pkg/config/default_config.
 | 8 | syslog / journald `name[pid]:` | `orders-api[1234]: connection reset` | `orders-api` |
 | 9 | Generic single bracket (last resort) | `[orders-api] cache miss` | `orders-api` |
 
-### Colour codes and log levels
+### Colour codes, log levels, and numeric tokens
 
-Two guards run automatically for **every** pattern, default or custom:
+Three guards run automatically for **every** pattern, default or custom:
 
 - **ANSI colour codes are stripped first.** A Spring-Boot console line like `2026-06-30 12:00:01 \x1b[34morders-api\x1b[m [main] WARN …` is matched as if it read `2026-06-30 12:00:01 orders-api [main] WARN …`, so pattern 4 detects `orders-api`. Without stripping, the colour bytes sit right against the name and defeat the pattern.
 - **A bare log level is never a service.** If a pattern's capture group is exactly `TRACE` / `DEBUG` / `INFO` / `WARN` / `WARNING` / `ERROR` / `FATAL`, the match is skipped and the next pattern is tried. So a line like `[DEBUG] starting up` is never filed under a service called `DEBUG` — it falls through to a later pattern or to `_unknown`. Only a *bare* level is refused; `error-service` is a perfectly valid name.
+- **A purely-numeric token is never a service.** If a pattern's capture group has no letters at all — only digits and separators such as `1210`, `8080`, or `10.0.0.1` — it's a thread id / PID / port / address, so the match is skipped and the next pattern is tried. A bracketed thread id like `[1210]` never surfaces as the service. A name that merely *contains* digits (`s3`, `api-v2`, `auth-service-2`) still has a letter and is kept.
 
 ## Define your own service pattern
 
@@ -118,6 +120,7 @@ export AGENT_SERVICE_PATTERNS='\b(authen-service|billing-service)\b,\b([a-z]+-se
 | Startup log says `missing capture group` and the pattern is ignored | The regex has no `( … )` group | Wrap the service part in parentheses: `.*authen-service.*` → `\b(authen-service)\b`. |
 | A colourised console name isn't detected | (Shouldn't happen — colours are stripped automatically) | Confirm the name really is the captured field once colours are removed, then match the plain-text layout. |
 | A level like `DEBUG` used to show as the service | A greedy pattern captured the level word | Handled by the built-in level guard; if you wrote the pattern, anchor it to the service field, not the level bracket. |
+| A bare number (`1210`, `8080`) showed as the service | A bracket/generic pattern captured a thread id, PID, or port | Handled by the built-in numeric guard; if you wrote the pattern, anchor it to the service field so it doesn't grab a bracketed number. |
 
 ## See also
 

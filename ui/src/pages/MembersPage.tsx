@@ -20,10 +20,12 @@ import {
   roleLabel,
 } from "@/lib/role";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
+import { usePagination } from "@/lib/pagination";
 import { EmptyState, ErrorBox } from "@/components/feedback";
 import { Pill } from "@/components/Pill";
 import { Modal } from "@/components/Modal";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { Pagination } from "@/components/Pagination";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
 import { useToast } from "@/components/toastContext";
@@ -104,6 +106,10 @@ export function MembersPanel() {
         ),
     );
   }, [data, q]);
+
+  // Paginate the roster at 100/page AFTER search; reset to page 1 when the
+  // search changes.
+  const pg = usePagination(filtered, { resetKey: q });
 
   const del = useMutation({
     mutationFn: (m: Member) => api.deleteMember(m.id),
@@ -226,7 +232,7 @@ export function MembersPanel() {
                     </td>
                   </tr>
                 )}
-                {filtered.map((m) => {
+                {pg.pageItems.map((m) => {
                   const emailKey = normalizeEmail(m.meta?.email);
                   const binding = emailKey
                     ? rbacByEmail.get(emailKey)
@@ -311,6 +317,7 @@ export function MembersPanel() {
               </tbody>
             </table>
           </div>
+          <Pagination state={pg} />
         </div>
       )}
 

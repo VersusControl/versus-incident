@@ -19,9 +19,11 @@ import { EmptyState, Spinner } from "@/components/feedback";
 import { Pill } from "@/components/Pill";
 import { Modal } from "@/components/Modal";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { Pagination } from "@/components/Pagination";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
 import { useToast } from "@/components/toastContext";
+import { usePagination } from "@/lib/pagination";
 
 // RunbooksPage lets operators manage the runbook corpus that backs the
 // find_runbook tool. Runbooks are managed by UPLOADING `.md` files
@@ -73,6 +75,9 @@ export function RunbooksPage() {
         (r.tags ?? []).some((t) => t.toLowerCase().includes(needle)),
     );
   }, [runbooks, q]);
+
+  // Paginate at 100/page AFTER search; reset to page 1 when the search changes.
+  const pg = usePagination(filtered, { resetKey: q });
 
   const upload = useMutation({
     mutationFn: (files: File[]) => api.uploadRunbooks(files),
@@ -249,7 +254,7 @@ export function RunbooksPage() {
                       </td>
                     </tr>
                   )}
-                  {filtered.map((r) => {
+                  {pg.pageItems.map((r) => {
                     const viewPending =
                       view.isPending && view.variables?.id === r.id;
                     return (
@@ -318,6 +323,7 @@ export function RunbooksPage() {
                 </tbody>
               </table>
             </div>
+            <Pagination state={pg} />
           </div>
         )}
       </main>

@@ -181,3 +181,127 @@ func TestWorker_Seam_UsesRegisteredBrain(t *testing.T) {
 		t.Fatalf("emitted %d times, want 1 (fake brain returned one Unknown)", emit)
 	}
 }
+
+// singlePattern returns the sole pattern in the catalog, failing unless there
+// is exactly one — the tests below drive a single template.
+func singlePattern(t *testing.T, c *Catalog) *Pattern {
+	t.Helper()
+	all := c.All()
+	if len(all) != 1 {
+		t.Fatalf("expected exactly 1 pattern, got %d", len(all))
+	}
+	return all[0]
+}
+
+// newTrainingWorker builds a training-mode worker over a fresh in-memory
+// catalog with the given auto_promote_after, returning both so the test can
+// inspect the persisted verdict. Spike is disabled (irrelevant in training,
+// which never classifies).
+func newTrainingWorker(t *testing.T, autoPromoteAfter int, src core.SignalSource) (*Worker, *Catalog) {
+	t.Helper()
+	cat, err := LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	m, errs := NewRegexMatcher(config.AgentRegexConfig{DefaultPattern: ".*"})
+	if len(errs) > 0 {
+		t.Fatalf("NewRegexMatcher: %v", errs)
+	}
+	svc, errs := NewServiceMatcher([]string{`service=(\w+)`})
+	if len(errs) > 0 {
+		t.Fatalf("NewServiceMatcher: %v", errs)
+	}
+	w, err := NewWorker(WorkerOptions{
+		Cfg: config.AgentConfig{
+			Mode: "training",
+			Catalog: config.AgentCatalogConfig{
+				AutoPromoteAfter: autoPromoteAfter,
+				SpikeMultiplier:  0,
+			},
+		},
+		Sources:  []core.SignalSource{src},
+		Matcher:  m,
+		Miner:    NewMiner(0.4, 4, 100),
+		Catalog:  cat,
+		Services: svc,
+	})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+	return w, cat
+}
+
+// TestWorker_Seam_TrainingPromotesVerdictToKnown is the founder's exact repro:
+// in TRAINING mode the worker folds/learns but never calls Classify, yet a
+// pattern that crosses auto_promote_after must still have its stored Verdict
+// persisted to "known", so the Verdict column and the readiness "To known"
+// column agree. On the pre-fix code — where promotion lived ONLY inside
+// Classify, which training never calls — the stored Verdict stayed "" while
+// LogReadiness (count-based) reported Ready, and the two diverged. This asserts
+// they agree in training; it fails on the old code and passes on the new.
+func TestWorker_Seam_TrainingPromotesVerdictToKnown(t *testing.T) {
+	const threshold = 10
+	const poll = 30 * time.Second
+	// 5 signals sharing a template per tick → count grows 5, 10, …
+	src := &batchSource{name: "es", signals: repeatSignals("service=api steady id=", 5)}
+	w, cat := newTrainingWorker(t, threshold, src)
+
+	// Tick 1: 5 sightings, below the threshold. Verdict uncurated, not ready —
+	// and the two views agree while below the line too.
+	w.tickSource(context.Background(), src, "training")
+	p := singlePattern(t, cat)
+	if p.Count != 5 {
+		t.Fatalf("count after 1 training tick = %d, want 5", p.Count)
+	}
+	if p.Verdict == "known" {
+		t.Fatalf("promoted early at count=5 (threshold %d)", threshold)
+	}
+	if LogReadiness(p, threshold, poll).Ready {
+		t.Fatalf("readiness Ready at count=5, want not ready (below threshold)")
+	}
+
+	// Tick 2: crosses the threshold (count=10). The stored Verdict MUST now be
+	// "known" AND readiness Ready — the two agree in training. This is the
+	// assertion that bites the pre-fix code.
+	w.tickSource(context.Background(), src, "training")
+	p = singlePattern(t, cat)
+	if p.Count != 10 {
+		t.Fatalf("count after 2 training ticks = %d, want 10", p.Count)
+	}
+	if p.Verdict != "known" {
+		t.Fatalf("training crossed threshold but stored Verdict = %q, want %q "+
+			"(promotion must run on the learn path in training mode)", p.Verdict, "known")
+	}
+	if !LogReadiness(p, threshold, poll).Ready {
+		t.Fatalf("LogReadiness.Ready = false after crossing threshold, want true")
+	}
+	// The founder's exact invariant: the persisted-verdict view and the
+	// count-based readiness view agree.
+	if (p.Verdict == "known") != LogReadiness(p, threshold, poll).Ready {
+		t.Fatalf("Verdict/readiness disagree: verdict=%q ready=%v",
+			p.Verdict, LogReadiness(p, threshold, poll).Ready)
+	}
+}
+
+// TestWorker_Seam_TrainingDisabledNeverPromotes proves auto_promote_after<=0
+// disables count-based promotion on the training learn path too: a pattern seen
+// well past any default is never marked "known", and readiness stays not-ready
+// — so the disabled contract holds in training, not just in shadow/detect.
+func TestWorker_Seam_TrainingDisabledNeverPromotes(t *testing.T) {
+	src := &batchSource{name: "es", signals: repeatSignals("service=api chatter id=", 5)}
+	w, cat := newTrainingWorker(t, 0, src) // 0 disables count-based promotion
+
+	for i := 0; i < 30; i++ { // 150 sightings, well past the 100 default
+		w.tickSource(context.Background(), src, "training")
+	}
+	p := singlePattern(t, cat)
+	if p.Count != 150 {
+		t.Fatalf("count = %d, want 150", p.Count)
+	}
+	if p.Verdict == "known" {
+		t.Fatalf("auto_promote_after=0 promoted in training to %q; 0 must disable promotion", p.Verdict)
+	}
+	if LogReadiness(p, 0, 30*time.Second).Ready {
+		t.Fatalf("readiness Ready with promotion disabled, want not ready")
+	}
+}

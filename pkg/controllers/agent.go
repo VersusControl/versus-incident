@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/analyze"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/detect"
 	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/services"
 	"github.com/VersusControl/versus-incident/pkg/storage"
@@ -44,10 +46,20 @@ const (
 type AgentController struct {
 	catalog         *agent.Catalog
 	miner           *agent.Miner
+	cursors         *agent.CursorStore
+	sources         []core.SignalSource
 	shadow          *agent.ShadowLog
 	detect          *agent.DetectLog
 	overrides       *agent.ServiceOverrideStore
 	runbooksEnabled bool
+
+	// catalogCfg + pollInterval let listPatterns compute per-pattern readiness
+	// (core.Readiness) without reaching into package globals. Wired at boot via
+	// SetCatalogConfig from AgentConfig.Catalog + AgentConfig.PollInterval. Left
+	// unset (zero value), readiness degrades to Needed=0/RatePerMin=0 — the row
+	// still carries the field, just as "Learning" with no ETA (safe).
+	catalogCfg   config.AgentCatalogConfig
+	pollInterval time.Duration
 }
 
 // NewAgentController wires the catalog, miner, shadow log, and detect log into
@@ -61,6 +73,50 @@ type AgentController struct {
 // runbooks subsystem is available.
 func NewAgentController(cat *agent.Catalog, mn *agent.Miner, sl *agent.ShadowLog, dl *agent.DetectLog, ov *agent.ServiceOverrideStore, runbooksEnabled bool) *AgentController {
 	return &AgentController{catalog: cat, miner: mn, shadow: sl, detect: dl, overrides: ov, runbooksEnabled: runbooksEnabled}
+}
+
+// SetCursorStore wires the worker's poll-cursor store into the controller so
+// that clearing the pattern catalog also rewinds every source cursor. This
+// makes the SAME running worker re-read its lookback window and relearn
+// immediately after a clear — the in-place equivalent of a fresh process
+// start. It MUST be the exact CursorStore the worker mines through (shared
+// pointer), or the rewind won't reach the worker's learn loop. Optional: when
+// left unset (e.g. the agent runs no worker in this process), clearPatterns
+// leaves cursors untouched. Returns the receiver for fluent wiring.
+func (a *AgentController) SetCursorStore(cs *agent.CursorStore) *AgentController {
+	a.cursors = cs
+	return a
+}
+
+// SetSources wires the worker's live signal sources into the controller so that
+// clearing the pattern catalog can also rewind the read position of any source
+// that keeps its OWN (a core.SourceRewinder — e.g. the file source's byte
+// offset). Rewinding the poll cursor (SetCursorStore) only re-reads
+// cursor-driven backends (Elasticsearch, Loki, …); a file source ignores the
+// poll cursor, so without this it stays pinned at EOF after a clear and the
+// SAME running worker never re-emits its backlog — the "clear stops learning
+// until the container is recreated" halt. MUST be the exact source slice the
+// worker polls (shared pointers). Optional and nil-safe: sources without their
+// own position simply never implement SourceRewinder. Returns the receiver for
+// fluent wiring.
+func (a *AgentController) SetSources(sources []core.SignalSource) *AgentController {
+	a.sources = sources
+	return a
+}
+
+// SetCatalogConfig wires the catalog threshold + worker poll interval into the
+// controller so listPatterns can attach a computed core.Readiness to each
+// pattern row WITHOUT reaching into package globals. `cat.AutoPromoteAfter`
+// supplies the readiness `Needed` gate (≤0 → indeterminate/manual-only) and
+// `poll` converts each pattern's per-tick sighting EWMA into a per-minute
+// arrival rate for the ETA. Optional and safe to omit: left unset the readiness
+// degrades to Needed=0/RatePerMin=0 (renders as "Learning", no ETA), so a
+// process that runs no worker still serves well-formed rows. Returns the
+// receiver for fluent wiring.
+func (a *AgentController) SetCatalogConfig(cat config.AgentCatalogConfig, poll time.Duration) *AgentController {
+	a.catalogCfg = cat
+	a.pollInterval = poll
+	return a
 }
 
 // Register attaches the agent admin endpoints to the given fiber group.
@@ -164,7 +220,26 @@ func (a *AgentController) getStatus(c *fiber.Ctx) error {
 }
 
 func (a *AgentController) listPatterns(c *fiber.Ctx) error {
-	return c.JSON(fiber.Map{"patterns": a.catalog.All()})
+	all := a.catalog.All()
+	rows := make([]patternRow, 0, len(all))
+	for _, p := range all {
+		rows = append(rows, patternRow{
+			Pattern:   p,
+			Readiness: agent.LogReadiness(p, a.catalogCfg.AutoPromoteAfter, a.pollInterval),
+		})
+	}
+	return c.JSON(fiber.Map{"patterns": rows})
+}
+
+// patternRow is the GET /api/agent/patterns response DTO. It embeds the on-disk
+// *agent.Pattern (so every existing field marshals byte-identically) and
+// attaches a computed core.Readiness. Readiness is computed at the read
+// boundary, never persisted — the Pattern on-disk schema stays untouched. The
+// embedded pointer promotes the Pattern JSON fields to the top level, so
+// clients see the same object plus an additive `readiness` object.
+type patternRow struct {
+	*agent.Pattern
+	Readiness core.Readiness `json:"readiness"`
 }
 
 func (a *AgentController) getPattern(c *fiber.Ctx) error {
@@ -176,8 +251,16 @@ func (a *AgentController) getPattern(c *fiber.Ctx) error {
 	return c.JSON(p)
 }
 
+// updatePatternRequest is the POST /patterns/:id body. Verdict is a pointer so
+// the controller can distinguish three intents the UI sends:
+//   - key absent ({"tags":[...]})   → Verdict nil   → leave the verdict alone
+//   - {"verdict":""}                → Verdict &""   → CLEAR the verdict
+//   - {"verdict":"known"}           → Verdict &"..." → SET the verdict
+//
+// A plain string would collapse the first two into "" and make "Clear verdict"
+// a silent no-op; the pointer preserves the distinction end to end.
 type updatePatternRequest struct {
-	Verdict string   `json:"verdict"`
+	Verdict *string  `json:"verdict"`
 	Tags    []string `json:"tags"`
 }
 
@@ -210,10 +293,37 @@ func (a *AgentController) deletePattern(c *fiber.Ctx) error {
 // and persists the empty pattern set, so the agent relearns log patterns from
 // scratch on the next tick. Discovered/manual services are LEFT INTACT. It also
 // resets the shared drain miner (when wired) so recurring lines are
-// re-discovered as new rather than resumed against pre-reset templates.
-// Admin-gated by authMiddleware like every other destructive agent mutation;
-// returns a count of the patterns cleared.
+// re-discovered as new rather than resumed against pre-reset templates, AND
+// rewinds every poll cursor (when a CursorStore is wired) so the SAME running
+// worker re-reads its lookback window and relearns immediately — the in-place
+// equivalent of a fresh process start. For a source that keeps its OWN read
+// position independent of the poll cursor (a core.SourceRewinder — e.g. the
+// file source's byte offset), it ALSO rewinds that position, because such a
+// source ignores the poll cursor and would otherwise stay pinned past the
+// already-consumed data and never re-emit. Without BOTH rewinds the worker
+// appears to halt after a clear until the container is recreated (only recreate
+// reconstructs the source from scratch). Admin-gated by authMiddleware like
+// every other destructive agent mutation; returns a count of the patterns
+// cleared.
 func (a *AgentController) clearPatterns(c *fiber.Ctx) error {
+	// Rewind the poll cursors FIRST so a cursor-store failure aborts before we
+	// wipe the catalog, leaving the system consistent. If this succeeds but the
+	// catalog reset below fails, the worker simply re-reads the window and
+	// relearns the still-present patterns (idempotent), which is harmless.
+	if a.cursors != nil {
+		if err := a.cursors.Reset(c.Context()); err != nil {
+			middleware.RecordAdminAudit(c, auditActionPatternsCleared, "all patterns", middleware.AdminAuditDenied)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+	}
+	// Reconcile the second cursor of truth: rewind the internal read position of
+	// any source that keeps its own (the file source's byte offset), so it
+	// re-reads its window in place. A rewind failure aborts before the catalog
+	// wipe for the same consistency reason as the cursor reset above.
+	if err := a.rewindOwnPositionSources(c.Context()); err != nil {
+		middleware.RecordAdminAudit(c, auditActionPatternsCleared, "all patterns", middleware.AdminAuditDenied)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
 	patterns, err := a.catalog.ResetPatterns()
 	if err != nil {
 		middleware.RecordAdminAudit(c, auditActionPatternsCleared, "all patterns", middleware.AdminAuditDenied)
@@ -227,6 +337,27 @@ func (a *AgentController) clearPatterns(c *fiber.Ctx) error {
 	target := fmt.Sprintf("all patterns (patterns=%d)", patterns)
 	middleware.RecordAdminAudit(c, auditActionPatternsCleared, target, middleware.AdminAuditSuccess)
 	return c.JSON(fiber.Map{"ok": true, "patterns": patterns})
+}
+
+// rewindOwnPositionSources rewinds the internal read position of every wired
+// source that keeps its own (implements core.SourceRewinder). It is the second
+// half of the clear rewind: the CursorStore reset handles cursor-driven
+// backends, this handles sources like the file source that ignore the poll
+// cursor and track a byte offset instead. Returns the first rewind error so the
+// caller can abort the clear before wiping the catalog, keeping the system
+// consistent. A nil/empty source slice (e.g. no worker in this process) is a
+// no-op, as are sources that do not implement SourceRewinder.
+func (a *AgentController) rewindOwnPositionSources(ctx context.Context) error {
+	for _, src := range a.sources {
+		r, ok := src.(core.SourceRewinder)
+		if !ok {
+			continue
+		}
+		if err := r.Rewind(ctx); err != nil {
+			return fmt.Errorf("rewind source %s: %w", src.Name(), err)
+		}
+	}
+	return nil
 }
 
 // clearServices wipes every discovered/manual service — the whole service
@@ -688,6 +819,20 @@ func (a *AgentController) createServiceOverride(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	middleware.RecordAdminAudit(c, auditActionOverrideSet, rule.ID+" -> "+service, middleware.AdminAuditSuccess)
+	// Retroactive re-point: make the reassignment take effect IMMEDIATELY, not
+	// only when a fresh matching log line re-clusters the pattern. For a log
+	// override the UI sends the mined pattern id as the match key, so re-point
+	// that existing pattern's Service now — GET /api/agent/patterns reflects it
+	// on the very next read. When the match is a message substring (no pattern
+	// has that id) RepointService is a no-op and the existing lazy
+	// re-observation path (brain_log.Learn → Catalog.Upsert) still applies the
+	// override on the next matching tick. Metric/trace overrides target the
+	// enterprise metric/trace baselines, not the log-pattern catalog, so they
+	// keep their lazy behaviour here; the audit row above already records the
+	// override itself, so this side effect does not re-audit.
+	if a.catalog != nil && rule.SourceType == agent.OverrideSourceLog {
+		a.catalog.RepointService(rule.Match, service)
+	}
 	return c.Status(fiber.StatusCreated).JSON(rule)
 }
 

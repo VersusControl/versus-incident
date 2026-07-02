@@ -88,7 +88,7 @@ func TestCatalog_NilStore_GoldenBlobUnchanged(t *testing.T) {
 	cat.Upsert("p-aaa", "user <*> failed login", "src1", 5, 0.2, "auth-rule", "auth")
 	cat.Upsert("p-bbb", "connection refused <*>", "src1", 12, 0.2, "", "")
 	cat.RegisterService("auth")
-	if !cat.Label("p-aaa", "known", []string{"reviewed"}) {
+	if !cat.Label("p-aaa", strptr("known"), []string{"reviewed"}) {
 		t.Fatalf("Label should succeed for existing pattern")
 	}
 	if err := cat.Persist(); err != nil {
@@ -178,7 +178,7 @@ func TestCatalog_InstalledStore_RoutesAtCallSites(t *testing.T) {
 	}
 
 	// Curation routes through Curate — one per call, correct Kind/fields.
-	cat.Label("p-seed", "known", []string{"t1"})
+	cat.Label("p-seed", strptr("known"), []string{"t1"})
 	cat.MarkKnown("p-seed")
 	cat.Delete("p-seed")
 	cat.EndServiceGrace("svc-seed")
@@ -191,7 +191,7 @@ func TestCatalog_InstalledStore_RoutesAtCallSites(t *testing.T) {
 		t.Fatalf("Curate calls = %d, want 5", len(edits))
 	}
 	want := []CatalogEdit{
-		{Kind: CatalogEditLabel, PatternID: "p-seed", Verdict: "known", Tags: []string{"t1"}},
+		{Kind: CatalogEditLabel, PatternID: "p-seed", Verdict: strptr("known"), Tags: []string{"t1"}},
 		{Kind: CatalogEditMarkKnown, PatternID: "p-seed"},
 		{Kind: CatalogEditDelete, PatternID: "p-seed"},
 		{Kind: CatalogEditEndServiceGrace, Service: "svc-seed"},
@@ -199,7 +199,7 @@ func TestCatalog_InstalledStore_RoutesAtCallSites(t *testing.T) {
 	}
 	for i, w := range want {
 		if edits[i].Kind != w.Kind || edits[i].PatternID != w.PatternID ||
-			edits[i].Verdict != w.Verdict || edits[i].Service != w.Service {
+			!verdictPtrEq(edits[i].Verdict, w.Verdict) || edits[i].Service != w.Service {
 			t.Fatalf("edit[%d] = %+v, want %+v", i, edits[i], w)
 		}
 	}

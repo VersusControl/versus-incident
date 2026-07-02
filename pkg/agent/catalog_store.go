@@ -34,6 +34,16 @@ type CatalogStore interface {
 	Load() (patterns map[string]*Pattern, services map[string]*ServiceInfo, err error)
 
 	// Persist writes the Catalog's current in-memory working set.
+	//
+	// Persist carries re-observation updates as well as fresh patterns: an
+	// existing pattern's Service is REFRESHED in the working set whenever a real
+	// attribution (an operator override or regex detection) resolves for it on a
+	// tick (see Catalog.Upsert). A store MUST apply upsert semantics for the
+	// Service field — overwrite the stored Service from the working-set value
+	// rather than treating an existing pattern as immutable — or an operator's
+	// "Reassign to service" never re-points an already-learned pattern in the
+	// read view. Upsert stays off the store hot path (it never calls Curate);
+	// this Service change rides Persist like every other working-set mutation.
 	Persist(patterns map[string]*Pattern, services map[string]*ServiceInfo) error
 
 	// Snapshot returns the unified read view for the bulk/admin list reads
@@ -58,6 +68,18 @@ const (
 	CatalogEditDelete CatalogEditKind = "delete"
 	// CatalogEditMarkKnown carries MarkKnown(PatternID).
 	CatalogEditMarkKnown CatalogEditKind = "mark_known"
+	// CatalogEditRepointService carries RepointService(PatternID, Service): set
+	// an EXISTING pattern's Service immediately — the retroactive half of an
+	// operator "Reassign to service" correction. Unlike a Persist-carried
+	// re-observation re-point (which only lands when a fresh matching log line
+	// re-clusters the pattern via Upsert), this takes effect on the very next
+	// read view, so a reassignment of a pattern that is not currently receiving
+	// traffic is reflected immediately. It carries PatternID + Service (Service
+	// is the NEW target, guaranteed by the caller to be a real, non-"_unknown"
+	// service). A store MUST treat a missing PatternID as a no-op (the log
+	// override match can be a message substring, not a pattern id) rather than
+	// an error, exactly as the in-memory path does.
+	CatalogEditRepointService CatalogEditKind = "repoint_service"
 	// CatalogEditEndServiceGrace carries EndServiceGrace(Service).
 	CatalogEditEndServiceGrace CatalogEditKind = "end_service_grace"
 	// CatalogEditRestartServiceGrace carries RestartServiceGrace(Service).
@@ -80,7 +102,8 @@ const (
 	// CatalogEditRenameService carries RenameService(Service, NewService): move
 	// a manual service entry to a new name, preserving FirstSeen + manual flag.
 	CatalogEditRenameService CatalogEditKind = "rename_service"
-	// CatalogEditDeleteService carries DeleteService(Service): remove a manual
+	// CatalogEditDelRepointService     → PatternID, Service (new target)
+	//   - CatalogEditeteService carries DeleteService(Service): remove a manual
 	// service entry.
 	CatalogEditDeleteService CatalogEditKind = "delete_service"
 )
@@ -103,14 +126,19 @@ type CatalogEdit struct {
 	Kind CatalogEditKind
 	// PatternID identifies the pattern for the label/delete/mark-known edits.
 	PatternID string
-	// Verdict is the operator verdict for a label edit ("" leaves it
-	// unchanged, matching Catalog.Label).
-	Verdict string
+	// Verdict is the operator verdict for a label edit — a tri-state pointer
+	// matching Catalog.Label: nil leaves the stored verdict unchanged (a
+	// tags-only edit), a non-nil pointer SETS it, and a non-nil pointer to the
+	// empty string CLEARS it. A store MUST honour the &"" case (clear) — a
+	// plain empty string can never clear, which is exactly the "Clear verdict"
+	// no-op bug this seam change fixes.
+	Verdict *string
 	// Tags are the operator tags for a label edit (nil leaves them unchanged,
 	// matching Catalog.Label).
 	Tags []string
 	// Service identifies the service for the grace and manual-service edits
-	// (the OLD name for a rename).
+	// (the OLD name for a rename) and the NEW target service for a
+	// CatalogEditRepointService.
 	Service string
 	// NewService is the target name for a rename edit; unused otherwise.
 	NewService string

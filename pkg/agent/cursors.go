@@ -58,3 +58,40 @@ func (s *CursorStore) Set(ctx context.Context, source string, t time.Time) error
 	}
 	return s.rdb.Set(ctx, s.keyPrefix+source, t.UTC().Format(time.RFC3339Nano), 0).Err()
 }
+
+// Reset forgets every recorded cursor so the next Pull for each source starts
+// from the worker's lookback window again (loadCursor falls back to
+// now-lookback when no cursor exists). It is the in-place equivalent of a
+// fresh process start with empty in-memory cursors: after an operator wipes
+// the learned catalog, the SAME running worker re-reads the available history
+// and relearns immediately, instead of sitting idle until brand-new-timestamp
+// signals arrive because its cursor is still pinned past the consumed window.
+//
+// The in-memory map is always cleared; when Redis backs the store every
+// persisted cursor key under the prefix is deleted too. Redis errors are
+// returned so the caller can decide whether the rewind fully succeeded.
+func (s *CursorStore) Reset(ctx context.Context) error {
+	s.mu.Lock()
+	s.mem = make(map[string]time.Time)
+	s.mu.Unlock()
+	if s.rdb == nil {
+		return nil
+	}
+	var cursor uint64
+	for {
+		keys, next, err := s.rdb.Scan(ctx, cursor, s.keyPrefix+"*", 100).Result()
+		if err != nil {
+			return err
+		}
+		if len(keys) > 0 {
+			if err := s.rdb.Del(ctx, keys...).Err(); err != nil {
+				return err
+			}
+		}
+		if next == 0 {
+			break
+		}
+		cursor = next
+	}
+	return nil
+}

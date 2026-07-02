@@ -190,8 +190,48 @@ func (c *Catalog) MarkKnown(patternID string) bool {
 	return true
 }
 
-// All returns a stable, sorted snapshot of every pattern (sorted by Count
-// descending so the most-frequent patterns appear first in admin views).
+// RepointService immediately sets an EXISTING pattern's Service to service —
+// the retroactive half of an operator "Reassign to service" correction. Unlike
+// Upsert's re-observation re-point (which only lands when a fresh matching log
+// line re-clusters the pattern on a later tick), this takes effect on the very
+// next catalog read, so reassigning a pattern that is not currently receiving
+// traffic is reflected immediately instead of after an unbounded delay.
+//
+// service MUST be a real service (non-"" and not the "_unknown" sentinel); a
+// blank/"_unknown" target is rejected so a reassignment can never blank out or
+// unknown-out a pattern's attribution. The caller (createServiceOverride) also
+// validates the target exists in the catalog first.
+//
+// Returns true when a pattern's Service was changed; false when the guard
+// fails, the pattern does not exist (e.g. the override match was a message
+// substring, not a pattern id — the lazy re-observation path still applies it),
+// or the pattern already points at service.
+//
+// Store-aware: when a CatalogStore is installed the re-point routes through
+// Curate(CatalogEditRepointService) so a fleet-wide read view (the enterprise
+// partition store) re-points too; otherwise it mutates the in-memory pattern
+// under lock and marks the catalog dirty for the next Persist flush.
+func (c *Catalog) RepointService(patternID, service string) bool {
+	if service == "" || service == "_unknown" {
+		return false
+	}
+	if s := catalogStore(); s != nil {
+		return s.Curate(CatalogEdit{Kind: CatalogEditRepointService, PatternID: patternID, Service: service}) == nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p, ok := c.patterns[patternID]
+	if !ok {
+		return false
+	}
+	if p.Service == service {
+		return false
+	}
+	p.Service = service
+	c.dirty = true
+	return true
+}
+
 func (c *Catalog) All() []*Pattern {
 	// Bulk/admin read: route through the store's unified read view when one is
 	// installed. The inline in-memory snapshot below is the default and the
@@ -233,10 +273,15 @@ func (c *Catalog) Len() int {
 // worker tick — used to update the EWMA baseline.
 //
 // service is the service name extracted from the log via
-// agent.service_patterns. It is stamped on the pattern only on first sighting
-// (subsequent observations preserve the original attribution to keep the
-// catalog stable). Pass "" when service detection is disabled or the
-// pattern's regexes did not match.
+// agent.service_patterns, then run through the manual-attribution override
+// resolver by the caller. It is stamped on a new pattern verbatim; on an
+// existing pattern it is REFRESHED whenever the incoming attribution is real
+// (non-empty and not "_unknown"), so an operator override resolved on a later
+// tick re-points an already-learned pattern's Service instead of leaving the
+// stale first-sighting label. A "" or "_unknown" attribution on a later tick
+// never clobbers a good stored Service, so a tick where detection/override
+// yields nothing keeps the last real attribution. Pass "" when service
+// detection is disabled or the pattern's regexes did not match.
 //
 // ruleName comes from the regex pre-filter and is applied:
 //   - on first-seen: always
@@ -268,6 +313,18 @@ func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alph
 		} else if p.RuleName == "" && ruleName != "" {
 			p.RuleName = ruleName
 		}
+		// Re-point Service on re-observation when the incoming attribution is
+		// real. An operator's manual override resolves on every tick (see
+		// brain_log.Group → ResolveServiceOverride), so an already-learned
+		// pattern must adopt the corrected service rather than keep its stale
+		// first-sighting label. The guard keeps a good service from being
+		// clobbered back to "_unknown"/"" on a later tick where detection and
+		// override both yield nothing. Verdict/grace are untouched here:
+		// Service is only the attribution label, and RegisterService/grace key
+		// off the service map independently.
+		if service != "" && service != "_unknown" {
+			p.Service = service
+		}
 	}
 	p.Template = template // keep template fresh as miner refines it
 	p.LastSeen = now
@@ -284,9 +341,16 @@ func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alph
 	return p
 }
 
-// Label updates operator-curated metadata for a pattern. Empty fields are
-// left unchanged. Returns false when the pattern doesn't exist.
-func (c *Catalog) Label(patternID, verdict string, tags []string) bool {
+// Label updates operator-curated metadata for a pattern.
+//
+// verdict is a tri-state pointer that lets the admin API distinguish "verdict
+// absent (leave it)" from "verdict present and empty (clear it)":
+//   - nil            → leave the stored verdict unchanged (a tags-only update)
+//   - non-nil, ""    → CLEAR the verdict (operator "Clear verdict")
+//   - non-nil, "..." → SET the verdict to that value
+//
+// tags nil leaves tags unchanged. Returns false when the pattern doesn't exist.
+func (c *Catalog) Label(patternID string, verdict *string, tags []string) bool {
 	if s := catalogStore(); s != nil {
 		return s.Curate(CatalogEdit{Kind: CatalogEditLabel, PatternID: patternID, Verdict: verdict, Tags: tags}) == nil
 	}
@@ -296,8 +360,8 @@ func (c *Catalog) Label(patternID, verdict string, tags []string) bool {
 	if !ok {
 		return false
 	}
-	if verdict != "" {
-		p.Verdict = verdict
+	if verdict != nil {
+		p.Verdict = *verdict
 	}
 	if tags != nil {
 		p.Tags = append([]string(nil), tags...)

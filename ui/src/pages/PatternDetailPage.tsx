@@ -6,6 +6,7 @@ import { api } from "@/lib/api";
 import { fmtAbs, fmtRel } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
 import { Pill, VerdictPill } from "@/components/Pill";
+import { ReadinessProgress } from "@/components/ReadinessProgress";
 import { ErrorBox } from "@/components/feedback";
 import { SkCard } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
@@ -185,6 +186,10 @@ export function PatternDetailPage() {
                   <Fact
                     label="Normal"
                     value={`≈ ${data.baseline_frequency.toFixed(1)}`}
+                  />
+                  <Fact
+                    label="To known"
+                    value={<ReadinessProgress readiness={data.readiness} />}
                   />
                   <Fact
                     label="First seen"

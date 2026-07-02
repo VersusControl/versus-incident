@@ -41,7 +41,7 @@ versus-agent/
 ├── config/
 │   ├── config.yaml          # main settings (step 2)
 │   └── agent_sources.yaml   # list of log sources (step 3)
-├── data/                    # patterns.json is saved here
+├── data/                    # agent state is saved here
 └── logs/                    # the file the agent will read
 ```
 
@@ -127,7 +127,7 @@ sources:
 ## 4. Run with Docker
 
 Mount four things from your machine: the two config files, the data
-folder (so `patterns.json` survives restarts), and the logs folder
+folder (so the learned catalog survives restarts), and the logs folder
 (so the agent can read your application's log file).
 
 ```bash
@@ -158,7 +158,7 @@ docker logs -f versus-agent
 You should see:
 
 ```
-agent: starting worker mode=training sources=1 poll=10s catalog=/app/data/patterns.json
+agent: starting worker mode=training sources=1 poll=10s
 ```
 
 If there are no log lines yet, the agent just waits and checks
@@ -228,8 +228,8 @@ one:
 1. Stop the agent: `docker stop versus-agent`.
 2. Edit `config/agent_sources.yaml` so `file.path` points at your
    application's log file (mount it read-only into `/app/logs`).
-3. (Optional) Delete the old test catalog so the agent starts
-   fresh: `rm -f data/patterns.json`.
+3. (Optional) Clear the learned catalog from the **Patterns** page
+   in the UI so the agent starts fresh.
 4. Start the agent again.
 
 After a few days in training, when the new-pattern rate has
@@ -249,15 +249,13 @@ mode.
 
 **Q: Does training mode send any alerts?**
 No. Training only watches. The agent learns templates and saves
-them to `patterns.json`. No Slack, no email, no on-call.
+them to the catalog. No Slack, no email, no on-call.
 
-**Q: Where does `patterns.json` live and what's in it?**
-At `data/patterns.json` (`/app/data/patterns.json` in the container
-image). Each
-entry is one pattern: ID, the template the agent learned, when it
-was first and last seen, how many times it has been seen, an
-average rate, the filter rule that matched it, and any labels you
-add.
+**Q: Where can I see what the agent has learned?**
+Open the **Patterns** page in the UI. Each entry shows the
+pattern ID, the template the agent learned, when it was first and
+last seen, how many times it has been seen, an average rate, the
+filter rule that matched it, and any labels you add.
 
 **Q: What if my log file rotates?**
 The file reader notices rotation by comparing the file's current
@@ -280,14 +278,16 @@ Three ways, easiest first:
 1. Make `agent.regex.default_pattern` stricter (or set it to empty
    and only use named rules) so noisy lines never reach the
    grouper.
-2. Delete bad patterns one by one from the **Patterns** page.
-3. Wipe and start over: stop the agent, delete `data/patterns.json*`,
-   start it again. You'll lose your training history.
+2. Delete bad patterns one by one from the **Patterns** page in
+   the UI.
+3. Wipe and start over: stop the agent, clear all patterns from
+   the **Patterns** page, and restart. You'll lose your training
+   history.
 
 **Q: Can I run multiple agents against the same Redis?**
 Yes, as long as the source `name`s are different (bookmark keys
-include the source name). Each agent should run with its own
-working directory so they don't fight over `patterns.json`.
+include the source name). Each agent should have its own data
+directory so they don't conflict.
 
 **Q: What's the smallest config I can run with?**
 Roughly: root-level `gateway_secret=…`, `agent.enable=true`, plus

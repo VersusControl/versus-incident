@@ -1,11 +1,14 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Check, Pencil, Play, Plus, Square, Trash2, X } from "lucide-react";
+import { Check, Pencil, Play, Plus, Search, Square, Trash2, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { fmtAbs, fmtRel } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
+import { InfoHint } from "@/components/InfoHint";
+import { AutoRefreshControl } from "@/components/AutoRefreshControl";
+import { useAutoRefresh } from "@/lib/useAutoRefresh";
 import { EmptyState, Spinner } from "@/components/feedback";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
@@ -25,10 +28,14 @@ const graceKey = (name: string, action: GraceAction) => `${name}:${action}`;
 export function ServicesPage() {
   const qc = useQueryClient();
   const toast = useToast();
+  const refresh = useAutoRefresh();
   const { data, isLoading, isError, error, refetch, isRefetching } = useQuery({
     queryKey: ["services"],
     queryFn: api.listServices,
+    refetchInterval: refresh.refetchInterval,
   });
+
+  const [q, setQ] = useState("");
 
   const [pending, setPending] = useState<Set<string>>(new Set());
 
@@ -157,7 +164,11 @@ export function ServicesPage() {
   // Sort A→Z, then paginate at 100/page so a multi-thousand-service estate
   // never renders every row at once (the freeze the founder hit).
   const sorted = entries.sort(([a], [b]) => a.localeCompare(b));
-  const pg = usePagination(sorted);
+  const needle = q.trim().toLowerCase();
+  const filtered = needle
+    ? sorted.filter(([name]) => name.toLowerCase().includes(needle))
+    : sorted;
+  const pg = usePagination(filtered, { resetKey: q });
 
   return (
     <>
@@ -186,6 +197,24 @@ export function ServicesPage() {
       />
 
       <main className="flex-1 overflow-auto p-6">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <div className="relative w-full max-w-md sm:w-auto sm:flex-1">
+            <Search
+              size={12}
+              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
+            />
+            <input
+              data-page-search
+              className="input pl-7"
+              placeholder="Search service…  ( / )"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          </div>
+
+          <AutoRefreshControl state={refresh} />
+        </div>
+
         {isError && (
           <div className="mb-3">
             <RetryableError
@@ -199,7 +228,7 @@ export function ServicesPage() {
 
         {(!isError || data) && (
           <div className="card overflow-hidden">
-            <div className="max-h-[calc(100vh-240px)] overflow-auto">
+            <div className="max-h-[calc(100vh-190px)] overflow-auto">
               <table className="ddt">
                 <thead>
                   <tr>
@@ -207,18 +236,32 @@ export function ServicesPage() {
                     <th className="w-48">First seen</th>
                     <th className="w-24">Origin</th>
                     <th className="w-32">Status</th>
-                    <th className="w-72">Grace control</th>
+                    <th className="w-72 whitespace-nowrap">
+                      Grace control
+                      <InfoHint
+                        label="About grace and service attribution"
+                        text="When the agent first sees a brand-new service it opens a grace window (set by agent.new_service_grace, default 30m). During grace the service's signals are learned but not alerted on — so a new service can't page you before the agent knows what's normal for it. 'End' closes grace now so alerts can fire immediately; 'Restart' resets the timer, treating the service as new again. To re-point a mis-attributed signal, use the 'Assign to service' action on the Logs, Metrics or Traces page."
+                        example="A service first seen at 10:00 with a 30m grace is learned quietly until 10:30, then starts detecting. Click 'End' at 10:10 to begin detecting right away."
+                      />
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   {isLoading && <SkRows rows={6} cols={5} />}
-                  {!isLoading && !isError && entries.length === 0 && (
+                  {!isLoading && !isError && filtered.length === 0 && (
                     <tr>
                       <td colSpan={5}>
-                        <EmptyState
-                          title="No services discovered yet."
-                          hint="Service detection runs on every signal that matches `agent.service_patterns`."
-                        />
+                        {entries.length === 0 ? (
+                          <EmptyState
+                            title="No services discovered yet."
+                            hint="Service detection runs on every signal that matches `agent.service_patterns`."
+                          />
+                        ) : (
+                          <EmptyState
+                            title="No services match your search"
+                            hint="Try a different name or clear the search."
+                          />
+                        )}
                       </td>
                     </tr>
                   )}
@@ -395,17 +438,6 @@ export function ServicesPage() {
             <Pagination state={pg} />
           </div>
         )}
-
-        <p className="mt-3 text-2xs text-ink-400">
-          Grace is controlled by{" "}
-          <code className="rounded bg-ink-700 px-1 text-ink-200">
-            agent.new_service_grace
-          </code>
-          . During the grace window, signals from a service are learned but not
-          surfaced as shadow / detect events. To re-point a mis-attributed
-          signal to a service, use the “Assign to service” action on the Logs,
-          Metrics or Traces page.
-        </p>
       </main>
 
       {showAdd && (

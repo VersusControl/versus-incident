@@ -12,14 +12,17 @@ import {
   humanSignal,
 } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
-import { Pill } from "@/components/Pill";
+import { InfoHint } from "@/components/InfoHint";
+import { ReadinessProgress } from "@/components/ReadinessProgress";
+import { AutoRefreshControl } from "@/components/AutoRefreshControl";
+import { useAutoRefresh } from "@/lib/useAutoRefresh";
 import { EmptyState } from "@/components/feedback";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { ClickableRow } from "@/components/DataTable";
 import { PeekPanel } from "@/components/PeekPanel";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
-import { AssignToService } from "@/components/AssignToService";
+import { ServiceCell } from "@/components/ServiceCell";
 import { Pagination } from "@/components/Pagination";
 import { usePagination } from "@/lib/pagination";
 
@@ -36,18 +39,18 @@ import { usePagination } from "@/lib/pagination";
 // locked upsell state, never real data. No enterprise dependency lives here:
 // the lock is driven purely by the HTTP status, so OSS-only builds stay green.
 // The learned baselines themselves are read-only (no label / delete / reset —
-// the agent learns these on its own); the only write is the per-row "Assign to
-// service" attribution correction, which only appears in the licensed render
-// path (so it is absent on OSS / unlicensed, like the old override section).
+// the agent learns these on its own); the only write is the in-column "Reassign
+// service" attribution correction (the pencil in the Service cell), which only
+// appears in the licensed render path (so it is absent on OSS / unlicensed,
+// like the old override section).
 
 const PAGE_TITLE = "What the agent knows right now";
 
-// VALUE_TOOLTIP / STATUS_TOOLTIP are the §3.2 one-line glosses for the two
-// concepts that must survive in plain words.
+// VALUE_TOOLTIP is the §3.2 one-line gloss for the "what's normal" concept.
+// The status concept is now owned by the shared ReadinessCell + its column
+// header InfoHint, so there is no local status tooltip constant.
 const VALUE_TOOLTIP =
-  "The everyday range the agent has seen for this signal. Values inside it are business-as-usual.";
-const STATUS_TOOLTIP =
-  "Still learning: the agent is gathering samples and won't flag this signal yet. Ready: it has seen enough to flag unusual behaviour.";
+  "The usual range for this signal. Anything inside it is normal.";
 
 const READONLY_NOTE =
   "The agent learns these on its own.";
@@ -95,28 +98,6 @@ function rowKey(r: BaselineRow): string {
   return `${r.type}:${r.service}:${r.operation ?? ""}:${r.signal}`;
 }
 
-// StatusPill is the one thing that matters: will the agent flag a problem on
-// this signal yet? Green "Ready to detect", or amber "Still learning — N of 20".
-function StatusPill({ row, compact }: { row: BaselineRow; compact?: boolean }) {
-  if (row.confident) {
-    return (
-      <Pill tone="good" title={STATUS_TOOLTIP}>
-        Ready to detect
-      </Pill>
-    );
-  }
-  return (
-    <Pill
-      tone="warn"
-      title={`Still learning — ${row.observations} of ${row.threshold} samples. ${STATUS_TOOLTIP}`}
-    >
-      {compact
-        ? `Still learning ${row.observations}/${row.threshold}`
-        : `Still learning — ${row.observations} of ${row.threshold} samples`}
-    </Pill>
-  );
-}
-
 // NormalValue renders "what's normal right now" with units. While the signal is
 // still settling the value is shown but prefixed "So far …" so the operator
 // reads it as provisional, never authoritative.
@@ -140,9 +121,11 @@ function NormalValue({ row, compact }: { row: BaselineRow; compact?: boolean }) 
 }
 
 export function LearnedSignalsView({ variant }: { variant: Variant }) {
+  const refresh = useAutoRefresh();
   const { data, isLoading, isError, error, refetch, isRefetching } = useQuery({
     queryKey: ["baselines", variant.kind],
     queryFn: () => api.listBaselines({ type: variant.kind }),
+    refetchInterval: refresh.refetchInterval,
     retry: (count, err) => {
       // The locked state — 403 (unlicensed) / 404 (OSS) — is terminal, not
       // transient, so never retry it.
@@ -167,8 +150,9 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return rows.filter((r) => {
-      if (statusFilter === "ready" && !r.confident) return false;
-      if (statusFilter === "learning" && r.confident) return false;
+      const ready = r.readiness?.ready ?? r.confident;
+      if (statusFilter === "ready" && !ready) return false;
+      if (statusFilter === "learning" && ready) return false;
       if (!needle) return true;
       return (
         r.service.toLowerCase().includes(needle) ||
@@ -184,7 +168,7 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
   const pg = usePagination(filtered, { resetKey: `${statusFilter}|${q}` });
 
   const peek = peekKey ? rows.find((r) => rowKey(r) === peekKey) : undefined;
-  const cols = variant.hasOperation ? 8 : 7;
+  const cols = variant.hasOperation ? 7 : 6;
 
   // ----- locked / upsell state (OSS or unlicensed) ------------------------
   if (locked) {
@@ -251,6 +235,8 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
               onChange={(e) => setQ(e.target.value)}
             />
           </div>
+
+          <AutoRefreshControl state={refresh} />
         </div>
 
         {isError && !locked ? (
@@ -266,14 +252,57 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
               <table className="ddt">
                 <thead>
                   <tr>
-                    <th className="w-28">Service</th>
-                    {variant.hasOperation && <th className="w-40">Operation</th>}
-                    <th className="w-32">Signal</th>
-                    <th className="w-56">What's normal now</th>
-                    <th className="w-44">Status</th>
-                    <th className="w-20 text-right">Seen</th>
-                    <th className="w-28">Last seen</th>
-                    <th className="w-44">Assign to service</th>
+                    <th className="w-36">Service</th>
+                    {variant.hasOperation && (
+                      <th className="w-40 whitespace-nowrap">
+                        Operation
+                        <InfoHint
+                          label="About the Operation column"
+                          text="The exact request or step this is measured on, like a specific endpoint or database call. The agent learns normal speed and error rate per operation, not just per service."
+                          example="'POST /payments' is one operation and 'GET /health' is another — each gets its own normal range."
+                        />
+                      </th>
+                    )}
+                    <th className="w-32 whitespace-nowrap">
+                      Signal
+                      <InfoHint
+                        label="About the Signal column"
+                        text="What's being measured for this service or operation — traffic (request rate), errors (how often requests fail), or latency (how long they take). Each signal is learned on its own."
+                        example="'Latency' tracks how long requests take; 'Errors' tracks how often they fail."
+                      />
+                    </th>
+                    <th className="w-56 whitespace-nowrap">
+                      What's normal now
+                      <InfoHint
+                        label="About the What's normal now column"
+                        text="The everyday range the agent has learned for this signal, in real units (req/s for traffic, ms for speed, % for errors). The 'usually ± X' part is how much it normally wiggles around the middle value — anything far outside that range looks wrong and can be flagged."
+                        example="≈ 40 ms, usually ± 5 ms means requests normally finish in about 35–45 ms; a sudden 400 ms looks wrong."
+                      />
+                    </th>
+                    <th className="w-44 whitespace-nowrap">
+                      To known
+                      <InfoHint
+                        label="About the To known"
+                        text="How much more evidence until the agent treats this signal as known and starts flagging anomalies on it — a progress meter, not a status. '8 / 20' means it has 8 of the ~20 samples it needs; a full bar with a check means it got there. This is distinct from Verdict, which is the current classification (still learning / known / spike)."
+                        example="'8 / 20' means 12 more samples to go; once it reaches 20 the bar fills and shows a check."
+                      />
+                    </th>
+                    <th className="w-20 whitespace-nowrap text-right">
+                      Seen
+                      <InfoHint
+                        label="About the Seen column"
+                        text="How many data points (samples) the agent has collected for this signal so far. More samples mean a more trustworthy normal range."
+                        example="'18' means 18 measurements have been folded in; the agent usually needs about 20 before it's ready."
+                      />
+                    </th>
+                    <th className="w-28 whitespace-nowrap">
+                      Last seen
+                      <InfoHint
+                        label="About the Last seen column"
+                        text="When the agent last received a fresh data point for this signal. If this is old, the signal may have stopped flowing."
+                        example="'2m ago' means the last sample arrived two minutes ago; '3d ago' suggests the source has gone quiet."
+                      />
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -301,7 +330,13 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                       onOpen={() => setPeekKey(rowKey(r))}
                     >
                       <td className="font-medium text-ink-100">
-                        {displayService(r.service)}
+                        <ServiceCell
+                          service={r.service}
+                          sourceType={variant.kind}
+                          match={r.signal}
+                          label={humanSignal(r.signal)}
+                          invalidateKeys={[["baselines", variant.kind]]}
+                        />
                       </td>
                       {variant.hasOperation && (
                         <td className="font-mono text-2xs text-ink-200">
@@ -313,24 +348,13 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                         <NormalValue row={r} compact />
                       </td>
                       <td>
-                        <StatusPill row={r} compact />
+                        <ReadinessProgress readiness={r.readiness} />
                       </td>
                       <td className="text-right tabular-nums text-ink-200">
                         {r.observations}
                       </td>
                       <td className="text-ink-300" title={fmtAbs(r.last_updated)}>
                         {fmtRel(r.last_updated)}
-                      </td>
-                      <td>
-                        {/* Re-point this signal to a service (source_type =
-                            metric/trace, match = signal name). Enterprise-gated:
-                            this table only renders on a licensed binary, so the
-                            column is absent on OSS / unlicensed, exactly like the
-                            old Services-page override section. */}
-                        <AssignToService
-                          sourceType={variant.kind}
-                          match={r.signal}
-                        />
                       </td>
                     </ClickableRow>
                   ))}
@@ -353,8 +377,8 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
       >
         {peek && (
           <dl className="space-y-3 text-xs">
-            <Field label="Status">
-              <StatusPill row={peek} />
+            <Field label="To known">
+              <ReadinessProgress readiness={peek.readiness} />
             </Field>
             <Field label="What's normal right now">
               <NormalValue row={peek} />

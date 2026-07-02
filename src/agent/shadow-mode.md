@@ -25,21 +25,17 @@ docker run -d \
 
 Or change `agent.mode` in `config.yaml` and restart.
 
-The catalog and the shadow log live next to each other in the file
-backend's fixed `./data` directory (`/app/data` in the container image):
+The catalog and the shadow log are accessible from the UI:
 
-```
-data/
-├── patterns.json     # learned templates (kept growing in shadow)
-└── shadow.json       # would-have-alerted entries (only written in shadow)
-```
+- **Patterns page** — learned templates (kept growing in shadow)
+- **Shadow page** — would-have-alerted entries (only written in shadow)
 
 ## How shadow mode works
 
 Shadow mode runs the same steps as training (read → hide secrets →
 filter → group → save) and adds **one extra step at the end**:
-look at the result and, if it isn't already known, write a row to
-`shadow.json`.
+look at the result and, if it isn't already known, record it in
+the shadow log.
 
 ![AI Agent](../docs/images/shadow-mode.png)
 
@@ -52,8 +48,8 @@ Three things to remember:
   either (a) you labeled it `known` through the admin API, or (b)
   it has been seen at least `auto_promote_after` times. Anything
   else is "unknown" and ends up in the shadow log.
-- **No real alerts.** Would-have-alerted entries land in
-  `shadow.json` (saved on disk, read through the API) and also
+- **No real alerts.** Would-have-alerted entries land in the
+  shadow log (viewable on the **Shadow** page in the UI) and also
   print a green line in stdout.
 
 ## What gets recorded
@@ -80,8 +76,8 @@ A pattern is "known" when **either** of these is true:
   This takes effect right away and stays until you change it.
 - It has been seen at least `agent.catalog.auto_promote_after`
   times (default `100`). The agent saves this auto-promotion to
-  `patterns.json` so you can check which patterns it considers
-  baseline.
+  the catalog so you can check which patterns it considers
+  baseline on the **Patterns** page.
 
 ### When a known pattern can still fire (spike)
 
@@ -179,8 +175,8 @@ Watch the agent logs: the `agent: new pattern` lines should slow
 down within a minute or two. That's your baseline.
 
 **Step 2 — switch to shadow mode.** Stop the container, start it
-again with `AGENT_MODE=shadow`. The catalog you just built is
-saved to disk (`data/patterns.json`), so the agent already knows
+again with `AGENT_MODE=shadow`. The catalog you built is
+persisted, so the agent already knows
 what "normal" looks like.
 
 **Step 3 — keep generating logs.** Restart the live script (or

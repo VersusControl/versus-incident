@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/agent"
 	c "github.com/VersusControl/versus-incident/pkg/config"
@@ -309,7 +310,17 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		return nil, fmt.Errorf("agent: gateway_secret is not configured — /api/agent/* admin endpoints require a secret")
 	}
 	api := app.Group("/api")
-	controllers.NewAgentController(catalog, miner, shadowLog, detectLog, overrideStore, aiBundle.Runbooks != nil).Register(api)
+	// The worker parses PollInterval with a 30s default (agent.parseDurationOr);
+	// mirror that here so the readiness ETA rate matches the real tick cadence.
+	pollInterval, err := time.ParseDuration(cfg.PollInterval)
+	if err != nil || pollInterval <= 0 {
+		pollInterval = 30 * time.Second
+	}
+	controllers.NewAgentController(catalog, miner, shadowLog, detectLog, overrideStore, aiBundle.Runbooks != nil).
+		SetCursorStore(cursors).
+		SetSources(sources).
+		SetCatalogConfig(cfg.Catalog, pollInterval).
+		Register(api)
 	controllers.NewRunbookAdminController(aiBundle.Runbooks).Register(api)
 
 	return catalog, nil

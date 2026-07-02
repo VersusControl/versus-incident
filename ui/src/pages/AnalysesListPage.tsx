@@ -5,11 +5,13 @@ import { Search, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { fmtAbs, fmtRel, formatDuration, incidentTitle } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
+import { usePagination } from "@/lib/pagination";
 import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { ClickableRow } from "@/components/DataTable";
+import { Pagination } from "@/components/Pagination";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { EmptyState } from "@/components/feedback";
@@ -70,16 +72,22 @@ export function AnalysesListPage() {
     });
   }, [data, q, status, incidentFilter, titleByID]);
 
+  // Paginate at 100/page AFTER filter/search; reset to page 1 when any filter
+  // or the search changes so a filter never strands the operator on an empty
+  // page.
+  const pg = usePagination(filtered, {
+    resetKey: `${status}|${incidentFilter ?? ""}|${q}`,
+  });
+
   const keys = useTableKeys({
-    size: filtered.length,
+    size: pg.pageItems.length,
     onOpen: (i) => {
-      const rec = filtered[i];
+      const rec = pg.pageItems[i];
       if (rec) navigate(`/incidents/${rec.incident_id}/analyses/${rec.id}`);
     },
   });
 
   const hasFilters = Boolean(q || status !== "all" || incidentFilter);
-
   return (
     <>
       <TopBar
@@ -218,7 +226,7 @@ export function AnalysesListPage() {
                         </td>
                       </tr>
                     )}
-                    {filtered.map((rec, i) => (
+                    {pg.pageItems.map((rec, i) => (
                       <ClickableRow
                         key={rec.id}
                         to={`/incidents/${rec.incident_id}/analyses/${rec.id}`}
@@ -272,6 +280,7 @@ export function AnalysesListPage() {
                   </tbody>
                 </table>
               </div>
+              <Pagination state={pg} />
             </div>
           </>
         )}

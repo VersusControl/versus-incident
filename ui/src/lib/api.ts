@@ -73,10 +73,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   // credentials: "same-origin" so an established session cookie
   // (versus_enterprise_session) rides along and authenticates the data plane
   // on the enterprise path (built-in default admin or SSO).
+  //
+  // cache: "no-store" — the admin surfaces show live agent state (patterns,
+  // shadow/detect events, incidents). Without it the browser HTTP cache can
+  // hand back a stale GET body on reload, so an operator hits F5 and sees old
+  // numbers. no-store forces every request to the network for fresh data.
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers,
     credentials: "same-origin",
+    cache: "no-store",
   });
 
   if (res.status === 204) return undefined as T;
@@ -103,6 +109,20 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 // ---------- Types matching pkg/agent shapes ----------
 
+// Readiness mirrors the OSS core.Readiness shape — how close a signal is to its
+// settled/known state. It is present on every pattern and baseline row (logs
+// always; metrics/traces only where the enterprise brain runs). Presentation
+// (remaining, ETA, progress bar) is DERIVED by the UI from these facts — see
+// lib/readiness.ts. Sentinels: needed === 0 ⇒ indeterminate (no count gate,
+// e.g. logs with auto-promotion disabled); rate_per_min === 0 ⇒ no honest ETA
+// (no rate yet / stalled / already ready).
+export interface Readiness {
+  ready: boolean;
+  seen: number;
+  needed: number; // 0 ⇒ indeterminate (manual-only promotion)
+  rate_per_min: number; // 0 ⇒ unknown/stalled ⇒ no ETA
+}
+
 export interface Pattern {
   id: string;
   template: string;
@@ -115,6 +135,7 @@ export interface Pattern {
   source: string;
   service?: string;
   tags?: string[];
+  readiness: Readiness; // learning-readiness / time-to-known (always present)
 }
 
 export interface Status {
@@ -149,6 +170,7 @@ export interface BaselineRow {
   observations: number; // samples folded so far
   threshold: number; // samples needed before the signal is ready
   last_updated: string;
+  readiness: Readiness; // same shape as logs; ready === confident
 }
 
 export interface BaselinesResponse {
