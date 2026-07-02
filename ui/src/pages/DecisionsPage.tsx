@@ -23,6 +23,8 @@ import { ClickableRow } from "@/components/DataTable";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { Pagination } from "@/components/Pagination";
+import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
 import { EmptyState } from "@/components/feedback";
 
@@ -241,10 +243,12 @@ function DetectTab() {
     return events.data.filter((e) => e.outcome === filter);
   }, [events.data, filter]);
 
+  const pg = usePagination(list, { resetKey: filter });
+
   const keys = useTableKeys({
-    size: list.length,
+    size: pg.pageItems.length,
     onOpen: (i) => {
-      const e = list[i];
+      const e = pg.pageItems[i];
       if (e) navigate(`/agent/decisions/detect/${encodeURIComponent(e.id)}`);
     },
   });
@@ -352,12 +356,13 @@ function DetectTab() {
                   </td>
                 </tr>
               )}
-              {list.map((e, i) => (
+              {pg.pageItems.map((e, i) => (
                 <DetectRow key={e.id} e={e} rowProps={keys.rowProps(i)} />
               ))}
             </tbody>
           </table>
         </div>
+        <Pagination state={pg} />
       </div>
     </>
   );
@@ -494,10 +499,12 @@ function ShadowTab() {
     return events.data.filter((e) => e.verdict === filter);
   }, [events.data, filter]);
 
+  const pg = usePagination(list, { resetKey: filter });
+
   const keys = useTableKeys({
-    size: list.length,
+    size: pg.pageItems.length,
     onOpen: (i) => {
-      const e = list[i];
+      const e = pg.pageItems[i];
       if (e)
         navigate(
           `/agent/decisions/shadow/${encodeURIComponent(e.pattern_id)}`,
@@ -588,7 +595,7 @@ function ShadowTab() {
                   </td>
                 </tr>
               )}
-              {list.map((e, i) => {
+              {pg.pageItems.map((e, i) => {
                 const href = `/agent/decisions/shadow/${encodeURIComponent(e.pattern_id)}`;
                 return (
                   <ClickableRow
@@ -636,6 +643,7 @@ function ShadowTab() {
             </tbody>
           </table>
         </div>
+        <Pagination state={pg} />
       </div>
     </>
   );

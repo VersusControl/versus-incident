@@ -228,10 +228,11 @@ export interface ShadowStats {
 
 export interface ServiceInfo {
   first_seen: string;
-  // manual is true for an operator-created service (selectable as an override
-  // target) — auto-discovered services omit it. Only manual services can be
-  // renamed/deleted through the admin API.
-  manual?: boolean;
+  // manual distinguishes an operator-created service (true — selectable as an
+  // override target, renameable/deletable through the admin API) from an
+  // auto-discovered one (false). The server always sends it, so the Services
+  // table renders an explicit "Manual"/"Auto" origin for every row.
+  manual: boolean;
 }
 
 // --- Manual-attribution service overrides ------------------------------------
@@ -1026,11 +1027,19 @@ export const api = {
     }),
   deletePattern: (id: string) =>
     request<void>(`/api/agent/patterns/${id}`, { method: "DELETE" }),
-  resetCatalog: () =>
-    request<{ ok: boolean; patterns: number; services: number }>(
-      "/api/agent/catalog",
-      { method: "DELETE" },
-    ),
+  // clearPatterns wipes every learned log pattern (and resets the drain miner)
+  // so the agent relearns log patterns from scratch. Discovered services are
+  // left intact — that is a separate clearServices action.
+  clearPatterns: () =>
+    request<{ ok: boolean; patterns: number }>("/api/agent/patterns", {
+      method: "DELETE",
+    }),
+  // clearServices wipes every discovered/manual service so the agent
+  // re-discovers services from scratch. Learned log patterns are left intact.
+  clearServices: () =>
+    request<{ ok: boolean; services: number }>("/api/agent/services", {
+      method: "DELETE",
+    }),
 
   // listBaselines reads the Enterprise learned metric/trace baselines. It
   // does NOT swallow errors: an ApiError with status 403 (unlicensed) or 404

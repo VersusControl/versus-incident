@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -266,10 +267,10 @@ func TestServiceDetail_ServesSingleTenantOrgUnderForeignDeploymentOrg(t *testing
 	}
 }
 
-// TestResetCatalog_WipesPatternsAndServices proves DELETE /api/agent/catalog
-// empties every learned pattern AND discovered service, resets the shared
-// miner, and returns a count summary of what was cleared.
-func TestResetCatalog_WipesPatternsAndServices(t *testing.T) {
+// TestClearPatterns_WipesPatternsKeepsServices proves DELETE /api/agent/patterns
+// empties every learned pattern, resets the shared miner, LEAVES discovered
+// services intact, and returns a count of the patterns cleared.
+func TestClearPatterns_WipesPatternsKeepsServices(t *testing.T) {
 	cat, err := agent.LoadCatalog(storage.NewMemory())
 	if err != nil {
 		t.Fatalf("LoadCatalog: %v", err)
@@ -284,9 +285,9 @@ func TestResetCatalog_WipesPatternsAndServices(t *testing.T) {
 
 	ctrl := NewAgentController(cat, miner, nil, nil, nil, false)
 	app := fiber.New()
-	app.Delete("/api/agent/catalog", ctrl.resetCatalog)
+	app.Delete("/api/agent/patterns", ctrl.clearPatterns)
 
-	resp, err := app.Test(httptest.NewRequest("DELETE", "/api/agent/catalog", nil))
+	resp, err := app.Test(httptest.NewRequest("DELETE", "/api/agent/patterns", nil))
 	if err != nil {
 		t.Fatalf("app.Test: %v", err)
 	}
@@ -302,23 +303,73 @@ func TestResetCatalog_WipesPatternsAndServices(t *testing.T) {
 	if body["patterns"] != float64(2) {
 		t.Errorf("patterns = %v, want 2", body["patterns"])
 	}
-	if body["services"] != float64(2) {
-		t.Errorf("services = %v, want 2", body["services"])
+	if _, ok := body["services"]; ok {
+		t.Errorf("clear-patterns response carries a services count %v, want none", body["services"])
 	}
 	if cat.Len() != 0 {
-		t.Errorf("catalog not emptied: %d patterns remain", cat.Len())
+		t.Errorf("patterns not emptied: %d remain", cat.Len())
 	}
-	if n := len(cat.AllServices()); n != 0 {
-		t.Errorf("services not emptied: %d remain", n)
+	if n := len(cat.AllServices()); n != 2 {
+		t.Errorf("services touched by clear-patterns: %d, want 2 (services must survive)", n)
 	}
 	if n := len(miner.Snapshot()); n != 0 {
 		t.Errorf("miner not reset: %d clusters remain", n)
 	}
 }
 
-// TestResetCatalogRouteRegistered guards DELETE /api/agent/catalog in the
-// route table and proves the removed POST /api/agent/flush endpoint is gone.
-func TestResetCatalogRouteRegistered(t *testing.T) {
+// TestClearServices_WipesServicesKeepsPatterns proves DELETE /api/agent/services
+// empties every discovered service, LEAVES learned patterns AND the miner
+// intact, and returns a count of the services cleared.
+func TestClearServices_WipesServicesKeepsPatterns(t *testing.T) {
+	cat, err := agent.LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	cat.RegisterService("api")
+	cat.RegisterService("web")
+	cat.Upsert("p-api", "api failed to <*>", "es:prod", 7, 0.2, "default", "api")
+	cat.Upsert("p-web", "web oops <*>", "es:prod", 3, 0.2, "default", "web")
+
+	miner := agent.NewMiner(0.4, 4, 100)
+	miner.Cluster("api failed to connect")
+
+	ctrl := NewAgentController(cat, miner, nil, nil, nil, false)
+	app := fiber.New()
+	app.Delete("/api/agent/services", ctrl.clearServices)
+
+	resp, err := app.Test(httptest.NewRequest("DELETE", "/api/agent/services", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	var body map[string]any
+	if err := json.Unmarshal(b, &body); err != nil {
+		t.Fatalf("unmarshal %q: %v", b, err)
+	}
+	if body["services"] != float64(2) {
+		t.Errorf("services = %v, want 2", body["services"])
+	}
+	if _, ok := body["patterns"]; ok {
+		t.Errorf("clear-services response carries a patterns count %v, want none", body["patterns"])
+	}
+	if n := len(cat.AllServices()); n != 0 {
+		t.Errorf("services not emptied: %d remain", n)
+	}
+	if cat.Len() != 2 {
+		t.Errorf("patterns touched by clear-services: %d, want 2 (patterns must survive)", cat.Len())
+	}
+	if n := len(miner.Snapshot()); n != 1 {
+		t.Errorf("miner touched by clear-services: %d clusters, want 1 (miner must survive)", n)
+	}
+}
+
+// TestClearRoutesRegistered guards the two scoped clear routes in the route
+// table and proves the removed combined DELETE /api/agent/catalog is gone.
+func TestClearRoutesRegistered(t *testing.T) {
 	app := fiber.New()
 	api := app.Group("/api")
 	NewAgentController(nil, nil, nil, nil, nil, false).Register(api)
@@ -327,11 +378,192 @@ func TestResetCatalogRouteRegistered(t *testing.T) {
 	for _, r := range app.GetRoutes(true) {
 		have[r.Method+" "+r.Path] = true
 	}
-	if !have["DELETE /api/agent/catalog"] {
-		t.Fatalf("route DELETE /api/agent/catalog not registered; have:\n%v", have)
+	if !have["DELETE /api/agent/patterns"] {
+		t.Fatalf("route DELETE /api/agent/patterns not registered; have:\n%v", have)
 	}
-	// The manual flush endpoint was removed — the catalog auto-persists.
-	if have["POST /api/agent/flush"] {
-		t.Errorf("route POST /api/agent/flush should be removed but is still registered")
+	if !have["DELETE /api/agent/services"] {
+		t.Fatalf("route DELETE /api/agent/services not registered; have:\n%v", have)
+	}
+	// The combined catalog reset was split into the two scoped routes above.
+	if have["DELETE /api/agent/catalog"] {
+		t.Errorf("route DELETE /api/agent/catalog should be removed but is still registered")
+	}
+	// The per-id delete routes are DISTINCT from the collection-level clears.
+	if !have["DELETE /api/agent/patterns/:id"] {
+		t.Errorf("route DELETE /api/agent/patterns/:id must still be registered")
+	}
+	if !have["DELETE /api/agent/services/:name"] {
+		t.Errorf("route DELETE /api/agent/services/:name must still be registered")
+	}
+}
+
+// loadGatewayConfig loads a minimal global config carrying a gateway secret so
+// the full agent admin router (authMiddleware) admits requests presenting it.
+func loadGatewayConfig(t *testing.T, secret string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := `name: test
+host: 0.0.0.0
+port: 3000
+public_host: http://localhost:3000
+gateway_secret: "` + secret + `"
+alert:
+  slack:
+    enable: false
+oncall:
+  enable: false
+redis:
+  host: localhost
+  port: 6379
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := config.LoadConfig(path); err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+}
+
+// TestScopedDeleteRoutes_ResolveToCorrectHandler proves Fiber's path-shape
+// routing keeps the collection-level clears (DELETE /patterns, /services)
+// distinct from the item-level deletes (DELETE /patterns/:id, /services/:name):
+// each request resolves to its OWN handler, never colliding. Driven through the
+// full Register() router (authMiddleware included) so it exercises the real
+// route table, not a hand-mounted subset.
+func TestScopedDeleteRoutes_ResolveToCorrectHandler(t *testing.T) {
+	agent.SetCatalogStore(nil)
+	const secret = "test-gateway-secret"
+	// config.LoadConfig is sync.Once-guarded, so a sibling test may have already
+	// consumed the one-shot load with a secret-less config. Ensure the global
+	// config exists, then pin the gateway secret directly (restored after) so
+	// authMiddleware admits our requests regardless of suite order.
+	loadGatewayConfig(t, secret)
+	prevSecret := config.GetConfig().GatewaySecret
+	config.GetConfig().GatewaySecret = secret
+	t.Cleanup(func() { config.GetConfig().GatewaySecret = prevSecret })
+
+	cat, err := agent.LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	cat.Upsert("p-1", "one <*>", "es", 3, 0.2, "", "api")
+	cat.Upsert("p-2", "two <*>", "es", 5, 0.2, "", "web")
+	cat.RegisterService("api")
+	if err := cat.CreateService("manual-svc"); err != nil {
+		t.Fatalf("CreateService: %v", err)
+	}
+	miner := agent.NewMiner(0.4, 4, 100)
+	miner.Cluster("one 1")
+
+	app := fiber.New()
+	api := app.Group("/api")
+	NewAgentController(cat, miner, nil, nil, nil, false).Register(api)
+
+	del := func(path string) (int, map[string]any) {
+		req := httptest.NewRequest("DELETE", path, nil)
+		req.Header.Set("X-Gateway-Secret", secret)
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("app.Test %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		var out map[string]any
+		if len(body) > 0 {
+			_ = json.Unmarshal(body, &out)
+		}
+		return resp.StatusCode, out
+	}
+
+	// Item-DELETE → deletePattern: removes exactly ONE pattern (204), p-2 stays.
+	if code, _ := del("/api/agent/patterns/p-1"); code != fiber.StatusNoContent {
+		t.Fatalf("DELETE /patterns/p-1 code=%d, want 204 (item handler)", code)
+	}
+	if cat.Len() != 1 || cat.Get("p-2") == nil {
+		t.Fatalf("item-DELETE did not resolve to deletePattern: Len=%d (want 1, p-2 present)", cat.Len())
+	}
+
+	// Collection-DELETE → clearPatterns: wipes ALL (200, {ok, patterns}).
+	code, body := del("/api/agent/patterns")
+	if code != fiber.StatusOK {
+		t.Fatalf("DELETE /patterns code=%d, want 200 (collection handler)", code)
+	}
+	if body["ok"] != true || body["patterns"] != float64(1) {
+		t.Fatalf("collection-DELETE body = %v, want {ok:true, patterns:1}", body)
+	}
+	if cat.Len() != 0 {
+		t.Fatalf("collection-DELETE left %d patterns, want 0", cat.Len())
+	}
+
+	// Item-DELETE → deleteService: removes the manual service (204), api stays.
+	if code, _ := del("/api/agent/services/manual-svc"); code != fiber.StatusNoContent {
+		t.Fatalf("DELETE /services/manual-svc code=%d, want 204 (item handler)", code)
+	}
+	if _, ok := cat.AllServices()["manual-svc"]; ok {
+		t.Fatalf("item-DELETE did not remove the manual service (wrong handler)")
+	}
+	if _, ok := cat.AllServices()["api"]; !ok {
+		t.Fatalf("item-DELETE wrongly wiped the auto service (collection handler ran)")
+	}
+
+	// Collection-DELETE → clearServices: wipes ALL services (200, {ok, services}).
+	code, body = del("/api/agent/services")
+	if code != fiber.StatusOK {
+		t.Fatalf("DELETE /services code=%d, want 200 (collection handler)", code)
+	}
+	if body["ok"] != true {
+		t.Fatalf("collection-DELETE services body = %v, want ok:true", body)
+	}
+	if n := len(cat.AllServices()); n != 0 {
+		t.Fatalf("collection-DELETE left %d services, want 0", n)
+	}
+}
+
+// TestListServices_AlwaysSerializesManualFlag proves the services API returns
+// the "manual" origin for EVERY row — an auto-discovered row returns
+// "manual":false EXPLICITLY (not dropped by omitempty) so the UI can always
+// render an Auto-vs-Manual origin column.
+func TestListServices_AlwaysSerializesManualFlag(t *testing.T) {
+	agent.SetCatalogStore(nil)
+	cat, err := agent.LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	cat.RegisterService("auto-svc") // auto-discovered → manual:false
+	if err := cat.CreateService("manual-svc"); err != nil {
+		t.Fatalf("CreateService: %v", err)
+	}
+
+	ctrl := NewAgentController(cat, nil, nil, nil, nil, false)
+	app := fiber.New()
+	app.Get("/api/agent/services", ctrl.listServices)
+
+	resp, err := app.Test(httptest.NewRequest("GET", "/api/agent/services", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+
+	// Assert on the RAW bytes so an omitempty regression (which drops the key
+	// for false) is caught, not silently defaulted back to false on decode.
+	if !strings.Contains(string(raw), `"manual":false`) {
+		t.Fatalf("auto service dropped explicit manual:false; body=%s", raw)
+	}
+
+	var body struct {
+		Services map[string]struct {
+			Manual bool `json:"manual"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("unmarshal %s: %v", raw, err)
+	}
+	if body.Services["auto-svc"].Manual {
+		t.Errorf("auto-svc manual=true, want false")
+	}
+	if !body.Services["manual-svc"].Manual {
+		t.Errorf("manual-svc manual=false, want true")
 	}
 }

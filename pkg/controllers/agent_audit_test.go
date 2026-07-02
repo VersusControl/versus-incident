@@ -97,7 +97,8 @@ func newAuditApp(t *testing.T) (*fiber.App, *agent.Catalog) {
 	}
 	ctrl := NewAgentController(cat, nil, shadow, detectLog, ov, false)
 	app := fiber.New()
-	app.Delete("/api/agent/catalog", ctrl.resetCatalog)
+	app.Delete("/api/agent/patterns", ctrl.clearPatterns)
+	app.Delete("/api/agent/services", ctrl.clearServices)
 	app.Delete("/api/agent/shadow", ctrl.clearShadow)
 	app.Delete("/api/agent/detect", ctrl.clearDetect)
 	app.Post("/api/agent/services", ctrl.createService)
@@ -108,27 +109,60 @@ func newAuditApp(t *testing.T) (*fiber.App, *agent.Catalog) {
 	return app, cat
 }
 
-// TestAdminAudit_ResetCatalog_SuccessScopeAndCount proves the Clear-all reset
-// emits agent.catalog.reset:success with a target that reflects the full-reset
-// scope AND the cleared pattern/service counts.
-func TestAdminAudit_ResetCatalog_SuccessScopeAndCount(t *testing.T) {
+// TestAdminAudit_ClearPatterns_SuccessScopeAndCount proves the Clear-all-logs
+// reset emits agent.patterns.cleared:success with a target that reflects the
+// pattern-reset scope AND the cleared pattern count, leaving services intact.
+func TestAdminAudit_ClearPatterns_SuccessScopeAndCount(t *testing.T) {
 	cap := installCapture(t)
 	app, cat := newAuditApp(t)
 
-	// Seed some learned state so the cleared counts are non-zero.
+	// Seed some learned state so the cleared count is non-zero.
 	cat.RegisterService("payments")
 	cat.Upsert("p1", "boom <*>", "es:prod", 5, 0.2, "default", "payments")
 
-	code, _ := doJSON(t, app, "DELETE", "/api/agent/catalog", nil)
+	code, _ := doJSON(t, app, "DELETE", "/api/agent/patterns", nil)
 	if code != fiber.StatusOK {
-		t.Fatalf("reset status = %d, want 200", code)
+		t.Fatalf("clear patterns status = %d, want 200", code)
 	}
-	ev := cap.only(t, auditActionCatalogReset, middleware.AdminAuditSuccess)
+	ev := cap.only(t, auditActionPatternsCleared, middleware.AdminAuditSuccess)
 	if ev.org != storage.DefaultOrgID {
 		t.Errorf("org = %q, want %q", ev.org, storage.DefaultOrgID)
 	}
-	if want := "all patterns + services (patterns=1 services=1)"; ev.target != want {
+	if want := "all patterns (patterns=1)"; ev.target != want {
 		t.Errorf("target = %q, want %q", ev.target, want)
+	}
+	// Services survive a pattern-only clear.
+	if n := len(cat.AllServices()); n != 1 {
+		t.Errorf("services after clear-patterns = %d, want 1 (services must survive)", n)
+	}
+}
+
+// TestAdminAudit_ClearServices_SuccessScopeAndCount proves the Clear-all-
+// services reset emits agent.services.cleared:success with a target that
+// reflects the service-reset scope AND the cleared service count, leaving
+// patterns intact.
+func TestAdminAudit_ClearServices_SuccessScopeAndCount(t *testing.T) {
+	cap := installCapture(t)
+	app, cat := newAuditApp(t)
+
+	// Seed some learned state so the cleared count is non-zero.
+	cat.RegisterService("payments")
+	cat.Upsert("p1", "boom <*>", "es:prod", 5, 0.2, "default", "payments")
+
+	code, _ := doJSON(t, app, "DELETE", "/api/agent/services", nil)
+	if code != fiber.StatusOK {
+		t.Fatalf("clear services status = %d, want 200", code)
+	}
+	ev := cap.only(t, auditActionServicesCleared, middleware.AdminAuditSuccess)
+	if ev.org != storage.DefaultOrgID {
+		t.Errorf("org = %q, want %q", ev.org, storage.DefaultOrgID)
+	}
+	if want := "all services (services=1)"; ev.target != want {
+		t.Errorf("target = %q, want %q", ev.target, want)
+	}
+	// Patterns survive a service-only clear.
+	if n := cat.Len(); n != 1 {
+		t.Errorf("patterns after clear-services = %d, want 1 (patterns must survive)", n)
 	}
 }
 
@@ -297,8 +331,8 @@ func TestAdminAudit_CommunityNoHook_NoOp(t *testing.T) {
 	middleware.SetAdminAuditHook(nil) // ensure the slot is empty (community)
 	app, _ := newAuditApp(t)
 
-	if code, _ := doJSON(t, app, "DELETE", "/api/agent/catalog", nil); code != fiber.StatusOK {
-		t.Errorf("reset status = %d, want 200", code)
+	if code, _ := doJSON(t, app, "DELETE", "/api/agent/patterns", nil); code != fiber.StatusOK {
+		t.Errorf("clear patterns status = %d, want 200", code)
 	}
 	if code, _ := doJSON(t, app, "DELETE", "/api/agent/shadow", nil); code != fiber.StatusOK {
 		t.Errorf("clear shadow status = %d, want 200", code)

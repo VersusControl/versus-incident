@@ -19,6 +19,9 @@ import { ClickableRow } from "@/components/DataTable";
 import { PeekPanel } from "@/components/PeekPanel";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
+import { AssignToService } from "@/components/AssignToService";
+import { Pagination } from "@/components/Pagination";
+import { usePagination } from "@/lib/pagination";
 
 // LearnedSignalsView — the read-only "what the agent knows right now" view for
 // ONE telemetry type (Metrics or Traces). It makes the Enterprise metric/trace
@@ -32,7 +35,10 @@ import { RetryableError } from "@/components/RetryableError";
 // and is absent (404) on an OSS binary — either way the page renders the
 // locked upsell state, never real data. No enterprise dependency lives here:
 // the lock is driven purely by the HTTP status, so OSS-only builds stay green.
-// Read-only v1: no label / delete / reset — the agent learns these on its own.
+// The learned baselines themselves are read-only (no label / delete / reset —
+// the agent learns these on its own); the only write is the per-row "Assign to
+// service" attribution correction, which only appears in the licensed render
+// path (so it is absent on OSS / unlicensed, like the old override section).
 
 const PAGE_TITLE = "What the agent knows right now";
 
@@ -173,8 +179,12 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
     });
   }, [rows, q, statusFilter]);
 
+  // Paginate at 100/page; reset to page 1 when the status filter or search
+  // changes so a filter never lands the operator on an empty page.
+  const pg = usePagination(filtered, { resetKey: `${statusFilter}|${q}` });
+
   const peek = peekKey ? rows.find((r) => rowKey(r) === peekKey) : undefined;
-  const cols = variant.hasOperation ? 7 : 6;
+  const cols = variant.hasOperation ? 8 : 7;
 
   // ----- locked / upsell state (OSS or unlicensed) ------------------------
   if (locked) {
@@ -263,6 +273,7 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                     <th className="w-44">Status</th>
                     <th className="w-20 text-right">Seen</th>
                     <th className="w-28">Last seen</th>
+                    <th className="w-44">Assign to service</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -284,7 +295,7 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                       </td>
                     </tr>
                   )}
-                  {filtered.map((r) => (
+                  {pg.pageItems.map((r) => (
                     <ClickableRow
                       key={rowKey(r)}
                       onOpen={() => setPeekKey(rowKey(r))}
@@ -310,11 +321,23 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                       <td className="text-ink-300" title={fmtAbs(r.last_updated)}>
                         {fmtRel(r.last_updated)}
                       </td>
+                      <td>
+                        {/* Re-point this signal to a service (source_type =
+                            metric/trace, match = signal name). Enterprise-gated:
+                            this table only renders on a licensed binary, so the
+                            column is absent on OSS / unlicensed, exactly like the
+                            old Services-page override section. */}
+                        <AssignToService
+                          sourceType={variant.kind}
+                          match={r.signal}
+                        />
+                      </td>
                     </ClickableRow>
                   ))}
                 </tbody>
               </table>
             </div>
+            <Pagination state={pg} />
           </div>
         )}
       </main>
