@@ -111,3 +111,17 @@ export function signalOverrideGate(input: {
   if (!input.canManage) return "readonly";
   return "editable";
 }
+
+// assignableServices turns the known-service map (the ["services"] query) into
+// the sorted list of valid reassignment targets: every service except the
+// _unknown fallback, which is a display sentinel and never a real target. It is
+// the shared option source for the in-column reassign picker (ServiceCell), so
+// the picker's contents stay unit-testable without React.
+export function assignableServices(
+  services: Record<string, unknown> | undefined | null,
+): string[] {
+  if (!services) return [];
+  return Object.keys(services)
+    .filter((n) => n !== "_unknown")
+    .sort((a, b) => a.localeCompare(b));
+}

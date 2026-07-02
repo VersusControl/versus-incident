@@ -184,6 +184,13 @@ type AgentElasticsearchSourceConfig struct {
 	SeverityField      string   `mapstructure:"severity_field"`
 	ExtraFields        []string `mapstructure:"extra_fields"`
 	PageSize           int      `mapstructure:"page_size"`
+	// ReorderWindow is how far back (a Go duration, e.g. "1m") each tick
+	// re-scans below the cursor to catch documents that were indexed with a
+	// timestamp behind the newest one already seen — refresh lag, clock skew,
+	// or bursty/late ingestion. Docs indexed more than ReorderWindow behind the
+	// cursor are NOT recovered; this is the bounded trade-off that keeps the
+	// per-tick dedup set memory-bounded. Empty/invalid → 1m default.
+	ReorderWindow string `mapstructure:"reorder_window"`
 }
 
 // AgentLokiSourceConfig drives the Grafana Loki SignalSource.

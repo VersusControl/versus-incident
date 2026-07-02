@@ -229,6 +229,57 @@ func TestListAndDeleteServiceOverride(t *testing.T) {
 	}
 }
 
+// TestCreateServiceOverride_ImmediatelyRepointsLogPattern is the regression
+// proof for the "reassign never takes effect" bug: creating a log override
+// whose match is an existing pattern id must re-point that pattern's Service
+// IMMEDIATELY — visible on the very next read, with NO re-observation / fresh
+// matching traffic. A substring match (no pattern with that id) must NOT touch
+// any pattern (it falls back to the lazy re-observation path).
+func TestCreateServiceOverride_ImmediatelyRepointsLogPattern(t *testing.T) {
+	agent.SetCatalogStore(nil)
+	app, cat, _ := newOverrideApp(t)
+
+	// A pattern is already learned and attributed to the wrong service. No
+	// worker is running, so NO fresh matching log line will ever re-cluster it.
+	const patternID = "p-ec7767235887"
+	cat.Upsert(patternID, "cache miss for key <*>", "app-logs", 3, 0.2, "", "web")
+	if got := cat.Get(patternID); got == nil || got.Service != "web" {
+		t.Fatalf("seed Service = %v, want web", got)
+	}
+
+	// The operator creates the target service, then reassigns the pattern.
+	_ = cat.CreateService("cache")
+	code, body := doJSON(t, app, "POST", "/api/agent/service-overrides", map[string]any{
+		"source_type": "log", "match": patternID, "service": "cache",
+	})
+	if code != fiber.StatusCreated {
+		t.Fatalf("override create status = %d, want 201; body=%v", code, body)
+	}
+
+	// IMMEDIATELY — the very next read — reflects the new service, with no
+	// re-observation. This is exactly what GET /api/agent/patterns serves.
+	if got := cat.Get(patternID); got == nil || got.Service != "cache" {
+		t.Fatalf("Service after reassign = %v, want cache (immediate re-point, no re-observation)", got)
+	}
+	// Nothing else regressed: the fold count is untouched.
+	if got := cat.Get(patternID); got.Count != 3 {
+		t.Errorf("Count = %d, want 3 (re-point must not disturb the fold)", got.Count)
+	}
+
+	// A substring-match override (no pattern with that id) must NOT retroactively
+	// touch any pattern — it relies on the lazy re-observation path instead.
+	cat.Upsert("p-other", "connection refused <*>", "app-logs", 1, 0.2, "", "web")
+	code, _ = doJSON(t, app, "POST", "/api/agent/service-overrides", map[string]any{
+		"source_type": "log", "match": "connection refused", "service": "cache",
+	})
+	if code != fiber.StatusCreated {
+		t.Fatalf("substring override create status = %d, want 201", code)
+	}
+	if got := cat.Get("p-other"); got == nil || got.Service != "web" {
+		t.Errorf("substring override retroactively re-pointed p-other to %v; want web untouched", got)
+	}
+}
+
 // TestServiceOverrideRoutesRegistered guards the new routes in the table.
 func TestServiceOverrideRoutesRegistered(t *testing.T) {
 	app := fiber.New()

@@ -111,6 +111,42 @@ func NewFileSource(name string, cfg config.AgentFileSourceConfig) (*FileSource, 
 
 func (s *FileSource) Name() string { return "file:" + s.name }
 
+// Rewind resets the read position to what a brand-new FileSource would use when
+// it finds no persisted sidecar cursor: offset 0 when from_beginning is set (so
+// the whole file is re-read), else the current EOF (so history the operator
+// chose to skip stays skipped). It also removes the sidecar so a restart
+// mid-rewind starts from the same place.
+//
+// This implements core.SourceRewinder. The file source's byte offset is its own
+// cursor of truth and it ignores the worker's `since` cursor, so a catalog clear
+// that only rewinds the worker cursor would leave this source pinned at EOF and
+// unable to re-emit already-consumed lines. Rewind reconciles the two so a clear
+// makes the SAME running worker re-read the file in place — the in-memory
+// equivalent of recreating the container.
+func (s *FileSource) Rewind(_ context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Drop the persisted byte offset so this matches a fresh process with no
+	// sidecar yet. A missing sidecar is not an error.
+	if err := os.Remove(s.cursorFP); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("file source %q: reset cursor %s: %w", s.name, s.cursorFP, err)
+	}
+
+	if s.cfg.FromBeginning {
+		s.offset = 0
+		return nil
+	}
+	// from_beginning=false: a fresh start jumps to the current EOF so the
+	// backlog the operator opted out of is not replayed by a clear.
+	if fi, err := os.Stat(s.cfg.Path); err == nil {
+		s.offset = fi.Size()
+	} else {
+		s.offset = 0
+	}
+	return nil
+}
+
 // Pull reads new content from the file since the last recorded byte offset.
 // Errors from a single tick are returned (worker logs and continues); the
 // offset is only advanced for content that was successfully read.

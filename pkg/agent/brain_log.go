@@ -182,11 +182,15 @@ func (b *logBrain) Classify(obs core.Observation, mean, std float64, confident b
 	// as 100 — only an explicit 0 (or negative) reaches the disabled branch. A
 	// pattern already promoted to "known" stays known regardless of threshold.
 	threshold := b.cat.AutoPromoteAfter
-	isKnown := prevVerdict == "known" || (threshold > 0 && postCount >= threshold)
+	isKnown := isLogKnown(prevVerdict, postCount, threshold)
 	if isKnown {
-		if prevVerdict != "known" {
-			b.catalog.MarkKnown(obs.Key)
-		}
+		// Classify is a PURE scoring read: it does not persist the promotion.
+		// Persisting "known" is done on the LEARN path by Promote (called by
+		// the worker after this Classify has consumed the pre-fold verdict), so
+		// a pattern is promoted in EVERY mode — training included — not only on
+		// the shadow/detect classify path. Both gate on the same isLogKnown
+		// predicate, so the verdict and readiness views can never drift.
+		//
 		// A known pattern can still spike — a steady drip suddenly flooding is
 		// exactly what detect-AI should see. Spike supersedes known.
 		if isSpike(prevBaseline, prevCount, tickFreq,
@@ -205,4 +209,78 @@ func (b *logBrain) Classify(obs core.Observation, mean, std float64, confident b
 		return core.TypedVerdict{Class: core.VerdictKnownPattern, Confident: true, Baseline: prevBaseline}
 	}
 	return core.TypedVerdict{Class: core.VerdictUnknown, Confident: true, Baseline: prevBaseline}
+}
+
+// Promote persists a count-based auto-promotion on the LEARN path so it runs in
+// EVERY mode — training, shadow and detect — not only when Classify runs. The
+// worker calls it (via the signalPromoter seam) once per folded observation,
+// AFTER any Classify has read the pre-fold verdict for this tick, so promotion
+// never corrupts the detector's spike-vs-known math (Classify still recovers
+// prevCount = postCount − tickFreq and reads the pre-fold verdict).
+//
+// It gates on the SAME isLogKnown predicate the detector and the readiness view
+// use, and persists only on the CROSSING — the guard prevVerdict != "known"
+// makes it a no-op once already promoted — so a pattern that reaches
+// auto_promote_after has its stored Verdict flipped to "known" exactly once. In
+// training this is what keeps the Verdict column and the readiness "To known"
+// column in agreement (both derive from isLogKnown).
+//
+// AutoPromoteAfter <= 0 disables count-based promotion entirely: for a not-yet-
+// known pattern isLogKnown then returns false, so Promote never marks a pattern
+// known by count in any mode; an operator-set "known" is untouched.
+func (b *logBrain) Promote(key string) {
+	p := b.catalog.Get(key)
+	if p == nil {
+		return
+	}
+	if p.Verdict != "known" && isLogKnown(p.Verdict, p.Count, b.cat.AutoPromoteAfter) {
+		b.catalog.MarkKnown(key)
+	}
+}
+
+// isLogKnown is the SINGLE definition of log "known" — the exact predicate
+// logBrain.Classify gates promotion on. Both Classify and LogReadiness call it
+// so the classifier and the read-side readiness view can never drift; a drift
+// test pins them equal. A pattern is known when an operator (or a prior
+// auto-promotion) already marked it "known", OR count-based promotion is
+// enabled (autoPromoteAfter > 0) and the sighting count has reached it.
+// autoPromoteAfter <= 0 disables count-based promotion, so only a pre-set
+// "known" verdict counts.
+func isLogKnown(prevVerdict string, count, autoPromoteAfter int) bool {
+	return prevVerdict == "known" || (autoPromoteAfter > 0 && count >= autoPromoteAfter)
+}
+
+// LogReadiness computes the readiness of one log pattern as a generic
+// core.Readiness — the read-side view of "how close is this pattern to being
+// treated as routine baseline (known)". It is a pure function that does NOT
+// mutate the pattern: it reads the pattern's own counters (the same ones the
+// gate compares) and the catalog's AutoPromoteAfter threshold.
+//
+//   - Seen   = the pattern's sighting count (the gate's own counter).
+//   - Needed = autoPromoteAfter when count-promotion is enabled (>0); 0 is the
+//     indeterminate sentinel when promotion is disabled (autoPromoteAfter<=0 →
+//     manual-only).
+//   - Ready  = isLogKnown(...), so an already-"known"/"spike"-marked or
+//     count-promoted pattern reports Ready.
+//   - RatePerMin = the pattern's per-tick sighting EWMA (BaselineFrequency)
+//     converted to sightings/minute via pollInterval, used to derive an ETA.
+//     0 is the stalled/unknown sentinel (no rate yet, no flow, or no poll
+//     interval wired) — the UI then shows no ETA. It is only computed while the
+//     pattern is not yet Ready, since a Ready pattern has no countdown.
+func LogReadiness(p *Pattern, autoPromoteAfter int, pollInterval time.Duration) core.Readiness {
+	if p == nil {
+		return core.Readiness{}
+	}
+	r := core.Readiness{
+		Seen:  p.Count,
+		Ready: isLogKnown(p.Verdict, p.Count, autoPromoteAfter),
+	}
+	if autoPromoteAfter > 0 {
+		r.Needed = autoPromoteAfter
+	} // else Needed=0 → indeterminate (manual-only promotion)
+	if !r.Ready && pollInterval > 0 && p.BaselineFrequency > 0 {
+		// BaselineFrequency is sightings/tick; convert to sightings/min.
+		r.RatePerMin = p.BaselineFrequency / pollInterval.Minutes()
+	}
+	return r
 }

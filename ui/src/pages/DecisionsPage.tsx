@@ -6,13 +6,11 @@ import {
   Database,
   Eraser,
   EyeOff,
-  FileTerminal,
-  Save,
   Send,
   Timer,
 } from "lucide-react";
 import clsx from "clsx";
-import { api, type DetectEvent } from "@/lib/api";
+import { api, type DetectEvent, type ShadowEvent } from "@/lib/api";
 import { fmtAbs, fmtRel, truncate } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
 import { TopBar } from "@/components/TopBar";
@@ -28,16 +26,18 @@ import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
 import { EmptyState } from "@/components/feedback";
 
-type Tab = "detect" | "shadow";
+type Tab = "detect" | "shadow" | "spike";
 
-// Decisions — Detect + Shadow as TABS of one page (UX_REDESIGN §2.1). One
-// mental model: what the agent decided (detect) / would have decided
-// (shadow). The active tab lives in ?tab= so every view is shareable;
-// legacy /detect and /shadow land here via App.tsx redirects with ?tab=.
+// Decisions — Detect + Shadow + Spike as TABS of one page (UX_REDESIGN §2.1).
+// One mental model: what the agent decided (detect) / would have decided
+// (shadow) / the log templates that surged past baseline (spike). The active
+// tab lives in ?tab= so every view is shareable; legacy /detect and /shadow
+// land here via App.tsx redirects with ?tab=.
 export function DecisionsPage() {
   const [params] = useSearchParams();
   const raw = params.get("tab");
-  const tab: Tab = raw === "shadow" ? "shadow" : "detect";
+  const tab: Tab =
+    raw === "shadow" ? "shadow" : raw === "spike" ? "spike" : "detect";
 
   const detectStats = useQuery({
     queryKey: ["detect-stats"],
@@ -48,14 +48,19 @@ export function DecisionsPage() {
     queryFn: api.shadowStats,
   });
 
+  const spikeCount = shadowStats.data?.verdicts?.spike ?? 0;
   const subtitle =
     tab === "detect"
       ? detectStats.data
         ? `${detectStats.data.events ?? 0} AI calls audited`
         : undefined
-      : shadowStats.data
-        ? `${shadowStats.data.events} entries · ${shadowStats.data.total_signals} signals`
-        : undefined;
+      : tab === "spike"
+        ? shadowStats.data
+          ? `${spikeCount} spikes detected`
+          : undefined
+        : shadowStats.data
+          ? `${shadowStats.data.events} entries · ${shadowStats.data.total_signals} signals`
+          : undefined;
 
   return (
     <>
@@ -78,30 +83,39 @@ export function DecisionsPage() {
                 label: "Shadow",
                 badge: shadowStats.data?.events,
               },
+              {
+                value: "spike",
+                label: "Spike",
+                badge: shadowStats.data ? spikeCount : undefined,
+              },
             ]}
           />
           <div className="flex flex-wrap items-center gap-2">
-            <Link to="/agent/decisions/system-prompt" className="btn">
-              <FileTerminal size={12} aria-hidden /> System prompt
-            </Link>
             {/* key={tab} resets confirm/mutation state when the tab flips so a
-                pending Clear dialog can never target the other log. */}
-            <LogActions key={tab} tab={tab} />
+                pending Clear dialog can never target the other log. Spike is a
+                read-only view of shadow data — no clear there. */}
+            {tab !== "spike" && <LogActions key={tab} tab={tab} />}
           </div>
         </div>
 
-        {tab === "detect" ? <DetectTab /> : <ShadowTab />}
+        {tab === "detect" ? (
+          <DetectTab />
+        ) : tab === "spike" ? (
+          <SpikeTab />
+        ) : (
+          <ShadowTab />
+        )}
       </main>
     </>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Flush / Clear for the ACTIVE tab's log. The audit (S3) found both mutations
-// failing silently — every outcome now lands a toast, and Clear keeps its
+// Clear for the ACTIVE tab's log. The audit (S3) found the mutation failing
+// silently — every outcome now lands a toast, and Clear keeps its
 // confirmation (on the accessible ConfirmDialog, no window.confirm).
 // ---------------------------------------------------------------------------
-function LogActions({ tab }: { tab: Tab }) {
+function LogActions({ tab }: { tab: "detect" | "shadow" }) {
   const qc = useQueryClient();
   const toast = useToast();
   const [confirmClear, setConfirmClear] = useState(false);
@@ -111,31 +125,6 @@ function LogActions({ tab }: { tab: Tab }) {
     qc.invalidateQueries({ queryKey: [tab] });
     qc.invalidateQueries({ queryKey: [`${tab}-stats`] });
   };
-
-  const flush = useMutation({
-    mutationFn: tab === "detect" ? api.flushDetect : api.flushShadow,
-    onSuccess: (r) => {
-      invalidate();
-      toast.push({
-        tone: "ok",
-        title: `${name} log flushed`,
-        description: `${r.events} events persisted to disk.`,
-      });
-    },
-    onError: (err) => {
-      toast.push({
-        tone: "error",
-        title: `Couldn't flush the ${tab} log`,
-        description: err instanceof Error ? err.message : String(err),
-        action: { label: "Retry", onClick: doFlush },
-      });
-    },
-  });
-  // Function declaration (hoisted) so the toast's Retry can reference it
-  // from inside flush's own initializer.
-  function doFlush() {
-    flush.mutate();
-  }
 
   const clear = useMutation({
     mutationFn: tab === "detect" ? api.clearDetect : api.clearShadow,
@@ -161,10 +150,6 @@ function LogActions({ tab }: { tab: Tab }) {
 
   return (
     <>
-      <button className="btn" onClick={doFlush} disabled={flush.isPending}>
-        <Save size={12} aria-hidden />
-        {flush.isPending ? "Flushing…" : "Flush"}
-      </button>
       <button
         className="btn btn-danger"
         onClick={() => {
@@ -483,8 +468,110 @@ type VerdictFilter = (typeof VERDICT_FILTERS)[number];
 
 const SHADOW_COLS = 8;
 
-function ShadowTab() {
+function ShadowEventsTable({
+  list,
+  isLoading,
+  resetKey,
+  empty,
+}: {
+  list: ShadowEvent[];
+  isLoading: boolean;
+  resetKey: string;
+  empty: React.ReactNode;
+}) {
   const navigate = useNavigate();
+  const pg = usePagination(list, { resetKey });
+
+  const keys = useTableKeys({
+    size: pg.pageItems.length,
+    onOpen: (i) => {
+      const e = pg.pageItems[i];
+      if (e)
+        navigate(
+          `/agent/decisions/shadow/${encodeURIComponent(e.pattern_id)}`,
+        );
+    },
+  });
+
+  return (
+    <div className="card overflow-hidden">
+      <div
+        className="max-h-[calc(100vh-260px)] overflow-auto"
+        aria-label="Shadow decisions table — j/k to move, Enter to open"
+        {...keys.containerProps}
+      >
+        <table className="ddt">
+          <thead>
+            <tr>
+              <th className="w-28">Verdict</th>
+              <th className="w-32">Pattern</th>
+              <th className="w-28">Source</th>
+              <th className="w-24">Rule</th>
+              <th className="w-20 text-right">Signals</th>
+              <th className="w-20 text-right">Ticks</th>
+              <th>Sample</th>
+              <th className="w-32">Last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {isLoading && <SkRows rows={6} cols={SHADOW_COLS} />}
+            {!isLoading && list.length === 0 && (
+              <tr>
+                <td colSpan={SHADOW_COLS}>{empty}</td>
+              </tr>
+            )}
+            {pg.pageItems.map((e, i) => {
+              const href = `/agent/decisions/shadow/${encodeURIComponent(e.pattern_id)}`;
+              return (
+                <ClickableRow
+                  key={`${e.pattern_id}-${e.first_seen}`}
+                  to={href}
+                  {...keys.rowProps(i)}
+                >
+                  <td>
+                    <VerdictPill verdict={e.verdict} />
+                  </td>
+                  <td className="font-mono text-2xs">
+                    <Link
+                      to={`/agent/logs/${encodeURIComponent(e.pattern_id)}`}
+                      className="text-link hover:underline"
+                      title={`Open pattern ${e.pattern_id}`}
+                    >
+                      {e.pattern_id}
+                    </Link>
+                  </td>
+                  <td className="text-2xs text-ink-200">{e.source}</td>
+                  <td className="text-2xs text-ink-200">
+                    {e.rule_name || "—"}
+                  </td>
+                  <td className="text-right tabular-nums">{e.count}</td>
+                  <td className="text-right tabular-nums">{e.occurrences}</td>
+                  <td className="font-mono text-2xs text-ink-200">
+                    <Link
+                      to={href}
+                      className="hover:text-link hover:underline"
+                    >
+                      {truncate(e.sample_message, 120)}
+                    </Link>
+                  </td>
+                  <td
+                    className="text-2xs text-ink-300"
+                    title={fmtAbs(e.last_seen)}
+                  >
+                    {fmtRel(e.last_seen)}
+                  </td>
+                </ClickableRow>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <Pagination state={pg} />
+    </div>
+  );
+}
+
+function ShadowTab() {
   const events = useQuery({ queryKey: ["shadow"], queryFn: api.listShadow });
   const stats = useQuery({
     queryKey: ["shadow-stats"],
@@ -498,19 +585,6 @@ function ShadowTab() {
     if (filter === "all") return events.data;
     return events.data.filter((e) => e.verdict === filter);
   }, [events.data, filter]);
-
-  const pg = usePagination(list, { resetKey: filter });
-
-  const keys = useTableKeys({
-    size: pg.pageItems.length,
-    onOpen: (i) => {
-      const e = pg.pageItems[i];
-      if (e)
-        navigate(
-          `/agent/decisions/shadow/${encodeURIComponent(e.pattern_id)}`,
-        );
-    },
-  });
 
   const verdictCount = (v: "spike" | "unknown") =>
     stats.data ? ` (${stats.data.verdicts?.[v] ?? 0})` : "";
@@ -564,87 +638,63 @@ function ShadowTab() {
         </div>
       )}
 
-      <div className="card overflow-hidden">
-        <div
-          className="max-h-[calc(100vh-260px)] overflow-auto"
-          aria-label="Shadow decisions table — j/k to move, Enter to open"
-          {...keys.containerProps}
-        >
-          <table className="ddt">
-            <thead>
-              <tr>
-                <th className="w-28">Verdict</th>
-                <th className="w-32">Pattern</th>
-                <th className="w-28">Source</th>
-                <th className="w-24">Rule</th>
-                <th className="w-20 text-right">Signals</th>
-                <th className="w-20 text-right">Ticks</th>
-                <th>Sample</th>
-                <th className="w-32">Last seen</th>
-              </tr>
-            </thead>
-            <tbody>
-              {events.isLoading && <SkRows rows={6} cols={SHADOW_COLS} />}
-              {!events.isLoading && !events.isError && list.length === 0 && (
-                <tr>
-                  <td colSpan={SHADOW_COLS}>
-                    <EmptyState
-                      title="No shadow events match this filter."
-                      hint="Switch to shadow mode and inject some traffic."
-                    />
-                  </td>
-                </tr>
-              )}
-              {pg.pageItems.map((e, i) => {
-                const href = `/agent/decisions/shadow/${encodeURIComponent(e.pattern_id)}`;
-                return (
-                  <ClickableRow
-                    key={`${e.pattern_id}-${e.first_seen}`}
-                    to={href}
-                    {...keys.rowProps(i)}
-                  >
-                    <td>
-                      <VerdictPill verdict={e.verdict} />
-                    </td>
-                    <td className="font-mono text-2xs">
-                      <Link
-                        to={`/agent/logs/${encodeURIComponent(e.pattern_id)}`}
-                        className="text-link hover:underline"
-                        title={`Open pattern ${e.pattern_id}`}
-                      >
-                        {e.pattern_id}
-                      </Link>
-                    </td>
-                    <td className="text-2xs text-ink-200">{e.source}</td>
-                    <td className="text-2xs text-ink-200">
-                      {e.rule_name || "—"}
-                    </td>
-                    <td className="text-right tabular-nums">{e.count}</td>
-                    <td className="text-right tabular-nums">
-                      {e.occurrences}
-                    </td>
-                    <td className="font-mono text-2xs text-ink-200">
-                      <Link
-                        to={href}
-                        className="hover:text-link hover:underline"
-                      >
-                        {truncate(e.sample_message, 120)}
-                      </Link>
-                    </td>
-                    <td
-                      className="text-2xs text-ink-300"
-                      title={fmtAbs(e.last_seen)}
-                    >
-                      {fmtRel(e.last_seen)}
-                    </td>
-                  </ClickableRow>
-                );
-              })}
-            </tbody>
-          </table>
+      <ShadowEventsTable
+        list={list}
+        isLoading={events.isLoading}
+        resetKey={filter}
+        empty={
+          <EmptyState
+            title="No shadow events match this filter."
+            hint="Switch to shadow mode and inject some traffic."
+          />
+        }
+      />
+    </>
+  );
+}
+
+// Spike tab — the spike "signals": log templates the agent watched surge well
+// past their learned baseline (verdict === "spike"), pulled from the shadow log
+// and shown on their own so operators can review just the surges. Read-only —
+// it's a lens over the shadow data, so it carries no clear action.
+function SpikeTab() {
+  const events = useQuery({ queryKey: ["shadow"], queryFn: api.listShadow });
+
+  const list = useMemo(
+    () => (events.data ?? []).filter((e) => e.verdict === "spike"),
+    [events.data],
+  );
+
+  return (
+    <>
+      <p className="mb-3 max-w-3xl text-xs text-ink-300">
+        Log templates the agent watched surge well past their learned baseline —
+        the “spike” signals it flags. Open one to see the pattern and why it
+        tripped.
+      </p>
+
+      {events.isError && (
+        <div className="mb-3">
+          <RetryableError
+            error={events.error}
+            onRetry={() => events.refetch()}
+            retrying={events.isRefetching}
+            context="Couldn't load spike signals"
+          />
         </div>
-        <Pagination state={pg} />
-      </div>
+      )}
+
+      <ShadowEventsTable
+        list={list}
+        isLoading={events.isLoading}
+        resetKey="spike"
+        empty={
+          <EmptyState
+            title="No spikes yet"
+            hint="When a known log template surges past its baseline, it shows up here."
+          />
+        }
+      />
     </>
   );
 }

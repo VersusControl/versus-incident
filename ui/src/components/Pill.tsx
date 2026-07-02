@@ -32,7 +32,9 @@ export function VerdictPill({ verdict }: { verdict: string }) {
   if (v === "spike") return <Pill tone="bad">spike</Pill>;
   if (v === "known") return <Pill tone="good">known</Pill>;
   if (v === "unknown") return <Pill tone="warn">unknown</Pill>;
-  if (v === "") return <Pill>—</Pill>;
+  // Empty verdict = a pattern the agent is still figuring out. Label it
+  // "learning" (matching the column help) instead of a bare "—".
+  if (v === "") return <Pill>learning</Pill>;
   return <Pill tone="accent">{verdict}</Pill>;
 }
 

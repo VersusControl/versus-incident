@@ -94,3 +94,45 @@ func TestCloneConfigCarriesToolsConfig(t *testing.T) {
 		t.Fatalf("tools block = %+v, want %+v", dst.Agent.Tools, src.Agent.Tools)
 	}
 }
+
+// TestCloneConfigCarriesElasticsearchReorderWindow asserts the ES source's
+// reorder_window survives a full cloneConfig round-trip (per-request configs are
+// built by cloning the base) and that the cloned Sources slice — including the
+// Addresses/ExtraFields slices — is independent from the source, so a mutation
+// on one config never bleeds into another.
+func TestCloneConfigCarriesElasticsearchReorderWindow(t *testing.T) {
+	src := &Config{}
+	src.Agent.Sources = []AgentSourceConfig{
+		{
+			Name: "prod",
+			Type: "elasticsearch",
+			Elasticsearch: AgentElasticsearchSourceConfig{
+				Addresses:     []string{"http://es:9200"},
+				Index:         "logs-*",
+				ExtraFields:   []string{"error.stack_trace"},
+				ReorderWindow: "90s",
+			},
+		},
+	}
+	dst := cloneConfig(src)
+	if got := dst.Agent.Sources[0].Elasticsearch.ReorderWindow; got != "90s" {
+		t.Fatalf("cloned reorder_window = %q, want %q", got, "90s")
+	}
+	if !reflect.DeepEqual(dst.Agent.Sources[0].Elasticsearch, src.Agent.Sources[0].Elasticsearch) {
+		t.Fatalf("cloned ES source = %+v, want %+v", dst.Agent.Sources[0].Elasticsearch, src.Agent.Sources[0].Elasticsearch)
+	}
+
+	// Mutating the clone must not touch the source (deep copy, no shared slices).
+	dst.Agent.Sources[0].Elasticsearch.ReorderWindow = "mutated"
+	dst.Agent.Sources[0].Elasticsearch.Addresses[0] = "http://mutated:9200"
+	dst.Agent.Sources[0].Elasticsearch.ExtraFields[0] = "mutated"
+	if src.Agent.Sources[0].Elasticsearch.ReorderWindow != "90s" {
+		t.Error("clone shares reorder_window with the source")
+	}
+	if src.Agent.Sources[0].Elasticsearch.Addresses[0] != "http://es:9200" {
+		t.Error("clone shares the Addresses slice with the source")
+	}
+	if src.Agent.Sources[0].Elasticsearch.ExtraFields[0] != "error.stack_trace" {
+		t.Error("clone shares the ExtraFields slice with the source")
+	}
+}

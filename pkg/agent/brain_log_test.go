@@ -155,15 +155,18 @@ func TestLogBrain_LearnUpserts(t *testing.T) {
 }
 
 // classifyOnce reproduces the worker's per-observation ordering exactly:
-// snapshot Expected (pre-fold), fold via Learn, then Classify against the
-// snapshot. This is the contract the seam refactor must preserve.
+// snapshot Expected (pre-fold), fold via Learn, Classify against the snapshot,
+// then Promote on the learn path (sequenced AFTER Classify so the detector read
+// the pre-fold verdict). This is the contract the seam refactor must preserve.
 func classifyOnce(t *testing.T, b *logBrain, o core.Observation) core.TypedVerdict {
 	t.Helper()
 	mean, std, conf := b.Expected(context.Background(), o.Key, o.Timestamp)
 	if err := b.Learn(context.Background(), []core.Observation{o}); err != nil {
 		t.Fatalf("Learn: %v", err)
 	}
-	return b.Classify(o, mean, std, conf)
+	v := b.Classify(o, mean, std, conf)
+	b.Promote(o.Key)
+	return v
 }
 
 func logObs(key string, freq int) core.Observation {

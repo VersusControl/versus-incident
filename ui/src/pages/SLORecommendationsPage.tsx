@@ -19,8 +19,10 @@ import {
 import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
 import { EmptyState } from "@/components/feedback";
+import { Pagination } from "@/components/Pagination";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
+import { usePagination } from "@/lib/pagination";
 
 // SLORecommendationsPage — the read-only "SLI/SLO auto-define" view (epic X29).
 // Per service it shows the SLIs/SLOs the SLO Advisor recommends (indicator,
@@ -54,6 +56,10 @@ export function SLORecommendationsPage() {
     () => recs.data?.recommendations ?? [],
     [recs.data],
   );
+
+  // Paginate the per-service cards at 100/page. Called before the locked early
+  // return so hook order stays stable; renders nothing until >1 page.
+  const pg = usePagination(list);
 
   // ----- locked / upsell state (OSS or unlicensed) ------------------------
   if (locked) {
@@ -131,9 +137,13 @@ export function SLORecommendationsPage() {
           />
         ) : (
           <div className="grid gap-3">
-            {list.map((r) => (
+            {pg.pageItems.map((r) => (
               <ServiceCard key={r.service} rec={r} />
             ))}
+            <Pagination
+              state={pg}
+              className="rounded-card border border-ink-600 bg-surface-raised"
+            />
           </div>
         )}
       </main>

@@ -9,10 +9,12 @@ import {
 } from "@/lib/api";
 import { canManageTeams } from "@/lib/role";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
+import { usePagination } from "@/lib/pagination";
 import { EmptyState, ErrorBox } from "@/components/feedback";
 import { Pill } from "@/components/Pill";
 import { Modal } from "@/components/Modal";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { Pagination } from "@/components/Pagination";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
 import { useToast } from "@/components/toastContext";
@@ -60,6 +62,9 @@ export function TeamsPanel() {
         (t.description ?? "").toLowerCase().includes(needle),
     );
   }, [teamsQ.data, q]);
+
+  // Paginate at 100/page AFTER search; reset to page 1 when the search changes.
+  const pg = usePagination(filtered, { resetKey: q });
 
   const del = useMutation({
     mutationFn: (t: Team) => api.deleteTeam(t.id),
@@ -161,7 +166,7 @@ export function TeamsPanel() {
                       </td>
                     </tr>
                   )}
-                {filtered.map((t) => (
+                {pg.pageItems.map((t) => (
                   <tr key={t.id}>
                     <td className="py-2.5">
                       <div className="font-medium text-ink-50">{t.name}</div>
@@ -225,6 +230,7 @@ export function TeamsPanel() {
               </tbody>
             </table>
           </div>
+          <Pagination state={pg} />
         </div>
       )}
 

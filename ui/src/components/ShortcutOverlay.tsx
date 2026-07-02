@@ -24,7 +24,6 @@ const GROUPS: Array<{ title: string; keys: Array<[string, string]> }> = [
     keys: [
       ["x", "Select / deselect row"],
       ["K", "Mark known"],
-      ["S", "Mark spike"],
     ],
   },
 ];

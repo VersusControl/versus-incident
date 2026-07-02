@@ -1,12 +1,16 @@
 import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Search, Trash2, Zap } from "lucide-react";
+import { Check, Search, Trash2 } from "lucide-react";
 import { api, type Pattern } from "@/lib/api";
 import { displayService, fmtAbs, fmtRel } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
 import { TopBar } from "@/components/TopBar";
 import { Pill, VerdictPill } from "@/components/Pill";
+import { InfoHint } from "@/components/InfoHint";
+import { ReadinessProgress } from "@/components/ReadinessProgress";
+import { AutoRefreshControl } from "@/components/AutoRefreshControl";
+import { useAutoRefresh } from "@/lib/useAutoRefresh";
 import { EmptyState } from "@/components/feedback";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { ClickableRow } from "@/components/DataTable";
@@ -14,7 +18,7 @@ import { PeekPanel } from "@/components/PeekPanel";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { AssignToService } from "@/components/AssignToService";
+import { ServiceCell } from "@/components/ServiceCell";
 import { Pagination } from "@/components/Pagination";
 import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
@@ -43,11 +47,13 @@ export function PatternsPage() {
   const qc = useQueryClient();
   const toast = useToast();
   const [params] = useSearchParams();
-  const verdictFilter = params.get(VERDICT_PARAM) ?? "uncurated";
+  const verdictFilter = params.get(VERDICT_PARAM) ?? "all";
 
+  const refresh = useAutoRefresh();
   const { data, isLoading, isError, error, refetch, isRefetching } = useQuery({
     queryKey: ["patterns"],
     queryFn: api.listPatterns,
+    refetchInterval: refresh.refetchInterval,
   });
 
   const [q, setQ] = useState("");
@@ -228,10 +234,6 @@ export function PatternsPage() {
         verdictMutation.mutate({ id: row.id, verdict: "known" });
         return true;
       }
-      if (key === "S") {
-        verdictMutation.mutate({ id: row.id, verdict: "spike" });
-        return true;
-      }
       return false;
     },
   });
@@ -269,25 +271,23 @@ export function PatternsPage() {
       />
 
       <main className="flex-1 overflow-auto p-4 lg:p-6">
-        <p className="mb-3 max-w-3xl text-xs text-ink-300">
+        <p className="mb-4 max-w-4xl text-xs text-ink-400">
           The recurring log messages the agent has learned for each service —
-          and how often each normally shows up — so it can spot a new or surging
-          one.
+          and how often each normally shows up.
         </p>
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <SegmentedControl
             param={VERDICT_PARAM}
-            defaultValue="uncurated"
+            defaultValue="all"
             aria-label="Verdict filter"
             options={[
+              { value: "all", label: "All", badge: counts?.all },
               {
                 value: "uncurated",
-                label: "Uncurated",
+                label: "Still learning",
                 badge: counts?.uncurated,
               },
               { value: "known", label: "Known", badge: counts?.known },
-              { value: "spike", label: "Spike", badge: counts?.spike },
-              { value: "all", label: "All", badge: counts?.all },
             ]}
           />
           <div className="relative w-full max-w-md sm:w-auto sm:flex-1">
@@ -303,6 +303,8 @@ export function PatternsPage() {
               onChange={(e) => setQ(e.target.value)}
             />
           </div>
+
+          <AutoRefreshControl state={refresh} />
         </div>
 
         {isError ? (
@@ -322,32 +324,61 @@ export function PatternsPage() {
               <table className="ddt">
                 <thead>
                   <tr>
-                    <th className="w-28">Service</th>
-                    <th className="w-10">
-                      <input
-                        type="checkbox"
-                        aria-label="Select all visible patterns"
-                        className="h-3.5 w-3.5 accent-accent"
-                        checked={allSelected}
-                        ref={(el) => {
-                          if (el) el.indeterminate = !allSelected && someSelected;
-                        }}
-                        onChange={toggleAll}
+                    <th className="w-36">Service</th>
+                    <th className="whitespace-nowrap">
+                      Template
+                      <InfoHint
+                        label="About the Template"
+                        text="A recurring log message the agent has learned. The parts that change from line to line — numbers, IDs, timestamps — are blanked out, so many similar lines group into one template instead of thousands of separate messages."
+                        example="The lines 'user 8471 login failed' and 'user 22 login failed' both become the template 'user <*> login failed'."
                       />
                     </th>
-                    <th className="w-20 text-right">Count</th>
-                    <th className="w-24 text-right">Normal</th>
-                    <th>Template</th>
-                    <th className="w-24">Verdict</th>
-                    <th className="w-44">Assign to service</th>
-                    <th className="w-44">Actions</th>
+                    <th className="w-20 whitespace-nowrap text-right">
+                      Count
+                      <InfoHint
+                        label="About the Count"
+                        text="The total number of times the agent has seen this exact message shape since it started learning — a running lifetime total, not a per-check number."
+                        example="12,480 means this template has matched 12,480 log lines so far."
+                      />
+                    </th>
+                    <th className="w-24 whitespace-nowrap text-right">
+                      Normal
+                      <InfoHint
+                        label="About the Normal"
+                        text="How often this message normally appears each time the agent checks (it polls every ~30s). The agent learns this baseline from history, so 'normal' is a small range, not an exact number. A 'big jump' means far more sightings than usual in one check — that's what gets flagged as a possible problem."
+                        example="'payment failed' normally appears ~2 times per check; if it suddenly appears 25 times, the agent flags it as a spike."
+                      />
+                    </th>
+                    <th className="w-24 whitespace-nowrap">
+                      Verdict
+                      <InfoHint
+                        label="About the Verdict"
+                        text="The agent's current label for this template. 'Still learning' = not reviewed yet, the agent is still working out what's normal — the count next to it (e.g. 40 / 100) shows how close it is to being treated as known automatically. 'Known' = an operator marked it as normal, so it won't raise an alert. 'Spike' = it recently showed up far more often than its usual range."
+                        example="A login-error template shows 'Still learning 40 / 100' — 40 of the ~100 sightings it needs; once you're sure it's harmless you mark it 'Known' and it stops alerting, but if it later floods in it flips to 'Spike'."
+                      />
+                    </th>
+                    <th className="w-24">
+                      <div className="flex items-center gap-1.5">
+                        <span>Actions</span>
+                        <input
+                          type="checkbox"
+                          aria-label="Select all visible patterns"
+                          className="h-3.5 w-3.5 accent-accent"
+                          checked={allSelected}
+                          ref={(el) => {
+                            if (el) el.indeterminate = !allSelected && someSelected;
+                          }}
+                          onChange={toggleAll}
+                        />
+                      </div>
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {isLoading && <SkRows rows={8} cols={8} />}
+                  {isLoading && <SkRows rows={8} cols={6} />}
                   {!isLoading && filtered.length === 0 && (
                     <tr>
-                      <td colSpan={8}>
+                      <td colSpan={6}>
                         {data && data.length === 0 ? (
                           <EmptyState
                             title="No patterns learned yet"
@@ -359,7 +390,7 @@ export function PatternsPage() {
                             }
                           />
                         ) : verdictFilter === "uncurated" && !q.trim() ? (
-                          <EmptyState title="No uncurated patterns — the catalog is fully labeled." />
+                          <EmptyState title="No patterns still learning — the catalog is fully labeled." />
                         ) : (
                           <EmptyState
                             title="No patterns match your filters"
@@ -376,22 +407,13 @@ export function PatternsPage() {
                       {...keys.rowProps(i)}
                     >
                       <td className="font-mono text-2xs text-ink-300">
-                        {displayService(p.service)}
-                      </td>
-                      <td>
-                        <input
-                          type="checkbox"
-                          aria-label={`Select pattern ${p.id}`}
-                          className="h-3.5 w-3.5 accent-accent"
-                          checked={selected.has(p.id)}
-                          onChange={() => toggleOne(p.id)}
+                        <ServiceCell
+                          service={p.service}
+                          sourceType="log"
+                          match={p.id}
+                          label={p.id}
+                          invalidateKeys={[["patterns"]]}
                         />
-                      </td>
-                      <td className="text-right tabular-nums text-ink-100">
-                        {p.count}
-                      </td>
-                      <td className="text-right tabular-nums text-ink-300">
-                        ≈ {p.baseline_frequency.toFixed(1)}
                       </td>
                       <td className="max-w-0">
                         <div
@@ -401,41 +423,54 @@ export function PatternsPage() {
                           {p.template}
                         </div>
                       </td>
-                      <td>
-                        <VerdictPill verdict={p.verdict} />
+                      <td className="text-right tabular-nums text-ink-100">
+                        {p.count}
+                      </td>
+                      <td className="text-right tabular-nums text-ink-300">
+                        ≈ {p.baseline_frequency.toFixed(1)}
                       </td>
                       <td>
-                        <AssignToService sourceType="log" match={p.id} />
-                      </td>
-                      <td>
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            aria-label={`Mark pattern ${p.id} as known`}
-                            className="btn px-2 py-1 text-2xs"
-                            disabled={p.verdict === "known"}
-                            onClick={() =>
-                              verdictMutation.mutate({
-                                id: p.id,
-                                verdict: "known",
-                              })
-                            }
-                          >
-                            <Check size={11} /> known
-                          </button>
-                          <button
-                            aria-label={`Mark pattern ${p.id} as spike`}
-                            className="btn px-2 py-1 text-2xs"
-                            disabled={p.verdict === "spike"}
-                            onClick={() =>
-                              verdictMutation.mutate({
-                                id: p.id,
-                                verdict: "spike",
-                              })
-                            }
-                          >
-                            <Zap size={11} /> spike
-                          </button>
+                        <div className="flex items-center gap-2">
+                          <VerdictPill verdict={p.verdict} />
+                          {p.verdict === "" &&
+                            p.readiness &&
+                            !p.readiness.ready &&
+                            p.readiness.needed > 0 && (
+                              <span
+                                className="inline-flex items-center gap-1.5"
+                                title={`Seen ${p.readiness.seen} of ${p.readiness.needed} sightings needed before the agent treats this pattern as known`}
+                              >
+                                <span
+                                  className="h-1 w-12 overflow-hidden rounded-full bg-ink-700"
+                                  role="progressbar"
+                                  aria-valuenow={p.readiness.seen}
+                                  aria-valuemin={0}
+                                  aria-valuemax={p.readiness.needed}
+                                >
+                                  <span
+                                    className="block h-full rounded-full bg-accent transition-[width]"
+                                    style={{
+                                      width: `${Math.min(100, Math.round((p.readiness.seen / p.readiness.needed) * 100))}%`,
+                                    }}
+                                  />
+                                </span>
+                                <span className="text-2xs tabular-nums text-ink-400">
+                                  {p.readiness.seen}
+                                  <span className="text-ink-600">/</span>
+                                  {p.readiness.needed}
+                                </span>
+                              </span>
+                            )}
                         </div>
+                      </td>
+                      <td>
+                        <input
+                          type="checkbox"
+                          aria-label={`Select pattern ${p.id}`}
+                          className="h-3.5 w-3.5 accent-accent"
+                          checked={selected.has(p.id)}
+                          onChange={() => toggleOne(p.id)}
+                        />
                       </td>
                     </ClickableRow>
                   ))}
@@ -464,13 +499,6 @@ export function PatternsPage() {
             onClick={() => void runBulk([...selected], "known")}
           >
             <Check size={12} /> Mark known
-          </button>
-          <button
-            className="btn"
-            disabled={bulkBusy}
-            onClick={() => void runBulk([...selected], "spike")}
-          >
-            <Zap size={12} /> Mark spike
           </button>
           <button
             className="btn"
@@ -527,6 +555,9 @@ export function PatternsPage() {
                   ≈ {peek.baseline_frequency.toFixed(1)}
                 </span>
               </PeekFact>
+              <PeekFact label="To known">
+                <ReadinessProgress readiness={peek.readiness} />
+              </PeekFact>
               <PeekFact label="First seen">
                 <span title={fmtAbs(peek.first_seen)}>
                   {fmtRel(peek.first_seen)}
@@ -565,16 +596,6 @@ export function PatternsPage() {
                 }
               >
                 <Check size={12} /> Mark known
-              </button>
-              <button
-                aria-label={`Mark pattern ${peek.id} as spike`}
-                className="btn"
-                disabled={peek.verdict === "spike"}
-                onClick={() =>
-                  verdictMutation.mutate({ id: peek.id, verdict: "spike" })
-                }
-              >
-                <Zap size={12} /> Mark spike
               </button>
               <button
                 aria-label={`Clear verdict for pattern ${peek.id}`}

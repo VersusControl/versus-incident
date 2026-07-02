@@ -72,6 +72,20 @@ func newTestStore(t *testing.T) storage.Provider {
 	return s
 }
 
+// strptr returns a pointer to s. Catalog.Label / CatalogEdit.Verdict take a
+// tri-state *string (nil = leave, &"" = clear, &"x" = set); tests use this to
+// express the "set" and "clear" intents.
+func strptr(s string) *string { return &s }
+
+// verdictPtrEq compares two tri-state verdict pointers by value (both nil, or
+// both non-nil pointing at the same string).
+func verdictPtrEq(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
 func TestCatalog_RoundTrip(t *testing.T) {
 	store := newTestStore(t)
 
@@ -121,10 +135,10 @@ func TestCatalog_LabelAndDelete(t *testing.T) {
 	cat, _ := LoadCatalog(storage.NewMemory())
 	cat.Upsert("p-x", "hello <*>", "src", 1, 0.2, "", "")
 
-	if !cat.Label("p-x", "known", []string{"auth", "noisy"}) {
+	if !cat.Label("p-x", strptr("known"), []string{"auth", "noisy"}) {
 		t.Fatalf("Label should return true for existing pattern")
 	}
-	if cat.Label("missing", "known", nil) {
+	if cat.Label("missing", strptr("known"), nil) {
 		t.Fatalf("Label should return false for missing pattern")
 	}
 	got := cat.Get("p-x")

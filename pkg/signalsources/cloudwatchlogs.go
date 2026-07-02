@@ -28,6 +28,10 @@ type CloudWatchLogsSource struct {
 	name   string
 	cfg    config.AgentCloudWatchLogsSourceConfig
 	client *cloudwatchlogs.Client
+
+	// nowFn is the wall clock the tail reads to upper-bound the scan (EndTime)
+	// and clamp the cursor (ClampCursor). Overridable in tests; nil ⇒ time.Now.
+	nowFn func() time.Time
 }
 
 // NewCloudWatchLogsSource validates config and returns a ready source.
@@ -62,21 +66,49 @@ func NewCloudWatchLogsSource(name string, cfg config.AgentCloudWatchLogsSourceCo
 
 func (s *CloudWatchLogsSource) Name() string { return "cloudwatchlogs:" + s.name }
 
+// now returns the source's wall clock. Tests override nowFn to freeze it; the
+// nil-guard keeps struct-literal construction working.
+func (s *CloudWatchLogsSource) now() time.Time {
+	if s.nowFn != nil {
+		return s.nowFn().UTC()
+	}
+	return time.Now().UTC()
+}
+
 // Pull issues a FilterLogEvents request with `startTime = since + 1ms`
-// (CloudWatch's startTime is inclusive). It walks NextToken pagination
-// until the page is short, the requested page size has been collected,
-// or we've made `maxPages` calls (safety cap).
+// (CloudWatch's startTime is inclusive) and `endTime = now`. It walks
+// NextToken pagination until the page is short, the requested page size has
+// been collected, or we've made `maxPages` calls (safety cap).
 //
-// Events are appended in API order. The cursor is the maximum event
-// timestamp seen, never lower than `since`.
+// Events are appended in API order. The cursor is the maximum event timestamp
+// seen, never lower than `since` and never past `now` (ClampCursor). The
+// `endTime = now` bound plus the clamp are the same invariant the Elasticsearch
+// source enforces: a future-dated event — an untrusted producer timestamp —
+// must not advance the cursor past the wall clock, or every following
+// `startTime = cursor + 1ms` query would return nothing until that future time
+// actually arrives (the tailing stall). Future-dated events are intentionally
+// not tailed; minor clock skew is recovered once the wall clock passes it.
 func (s *CloudWatchLogsSource) Pull(ctx context.Context, since time.Time) ([]core.Signal, time.Time, error) {
+	now := s.now()
+	// Heal a persisted future cursor so the [since, now] window is never
+	// inverted (startTime > endTime), which the API rejects.
+	if since.After(now) {
+		since = now
+	}
 	cursor := since
 	startMs := since.UTC().UnixMilli() + 1
+	endMs := now.UTC().UnixMilli()
+	// A caught-up cursor at the wall-clock boundary leaves nothing to scan; skip
+	// the call (an inverted window would error) and hold the cursor.
+	if startMs > endMs {
+		return nil, ClampCursor(cursor, since, now), nil
+	}
 
 	limit := int32(s.cfg.PageSize)
 	in := &cloudwatchlogs.FilterLogEventsInput{
 		LogGroupName: &s.cfg.LogGroupName,
 		StartTime:    &startMs,
+		EndTime:      &endMs,
 		Limit:        &limit,
 	}
 	if s.cfg.LogStreamPrefix != "" {
@@ -111,7 +143,10 @@ func (s *CloudWatchLogsSource) Pull(ctx context.Context, since time.Time) ([]cor
 		}
 		in.NextToken = out.NextToken
 	}
-	return signals, cursor, nil
+	// Clamp so an event timestamp (untrusted producer clock) can never advance
+	// the cursor past the wall clock. The EndTime bound already excludes future
+	// events server-side; this enforces the invariant regardless.
+	return signals, ClampCursor(cursor, since, now), nil
 }
 
 func signalFromCWEvent(srcName string, e cwltypes.FilteredLogEvent) (core.Signal, bool) {

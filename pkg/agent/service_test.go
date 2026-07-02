@@ -170,3 +170,89 @@ func TestStripANSI(t *testing.T) {
 		}
 	}
 }
+
+// TestServiceMatcher_NumericGuard proves the number guard: a bracketed thread
+// id / PID / port (a token with NO ASCII letter) is never returned as a
+// service — it is skipped and the loop falls through, exactly like the level
+// guard — while a real service name that merely CONTAINS digits still passes.
+func TestServiceMatcher_NumericGuard(t *testing.T) {
+	m, errs := NewServiceMatcher(servicePatterns)
+	if len(errs) != 0 {
+		t.Fatalf("shipped patterns must compile cleanly, got %v", errs)
+	}
+
+	// Shipped patterns: a bracketed pure number must NEVER surface. Where no
+	// later pattern finds a real service the guard falls through to "" (the
+	// worker attributes such a signal to "_unknown"); where a real service is
+	// present later on the line it wins.
+	shipped := []struct{ name, line, want string }{
+		{"single-bracket thread id", "WARN [1210] error while fetching metadata", ""},
+		{"single-bracket pid", "[1431] application starting up", ""},
+		{"two-bracket, real service in 2nd bracket", "ERROR [1210] [account-service] boom", "account-service"},
+		{"syslog keeps app name, not pid", "myapp[1210]: connection refused", "myapp"},
+	}
+	for _, tc := range shipped {
+		got := m.Extract(tc.line)
+		if got == "1210" || got == "1431" || got == "8080" {
+			t.Errorf("%s: Extract(%q) = %q — a numeric thread id/PID/port must never be a service", tc.name, tc.line, got)
+		}
+		if got != tc.want {
+			t.Errorf("%s: Extract(%q) = %q, want %q", tc.name, tc.line, got, tc.want)
+		}
+	}
+
+	// The guard is generic: it also protects an operator-custom, space-tolerant
+	// bracket pattern whose class permits pure numbers. A purely
+	// numeric/separator token is skipped; a real name with a digit is kept.
+	custom, cerrs := NewServiceMatcher([]string{`\[\s*([A-Za-z0-9._-]+)\s*\]`})
+	if len(cerrs) != 0 {
+		t.Fatalf("custom pattern must compile, got %v", cerrs)
+	}
+	customCases := []struct{ name, line, want string }{
+		{"padded port", "listening on [ 8080 ]", ""},
+		{"padded ip", "peer [ 10.0.0.1 ]", ""},
+		{"padded dashed number", "job [ 12-34 ]", ""},
+		{"padded real service with digit", "worker [ api2 ]", "api2"},
+	}
+	for _, tc := range customCases {
+		if got := custom.Extract(tc.line); got != tc.want {
+			t.Errorf("%s: Extract(%q) = %q, want %q", tc.name, tc.line, got, tc.want)
+		}
+	}
+
+	// Real service names that merely CONTAIN digits must still be extracted by
+	// the shipped key=value / service.name rules — the guard only rejects
+	// tokens with NO letter at all.
+	digitNames := []struct{ line, want string }{
+		{"service.name=s3", "s3"},
+		{"service=api2", "api2"},
+		{"service=api-v2", "api-v2"},
+		{"service=service1", "service1"},
+		{"service=auth-service-2", "auth-service-2"},
+		{"service.name=svc7 handling request", "svc7"},
+		{"svc=v2-gateway ready", "v2-gateway"},
+	}
+	for _, tc := range digitNames {
+		if got := m.Extract(tc.line); got != tc.want {
+			t.Errorf("digit-in-name: Extract(%q) = %q, want %q", tc.line, got, tc.want)
+		}
+	}
+}
+
+// TestHasLetterGuard exercises the numeric-capture guard helper directly: a
+// token with at least one ASCII letter is kept; a token made only of digits
+// and separators is rejected.
+func TestHasLetterGuard(t *testing.T) {
+	keep := []string{"s3", "api2", "api-v2", "service1", "v2-gateway", "auth-service-2", "svc7", "lead-service", "account-service", "myapp", "nginx"}
+	for _, s := range keep {
+		if !hasLetterRe.MatchString(s) {
+			t.Errorf("hasLetterRe should match %q (contains a letter → kept as a service)", s)
+		}
+	}
+	skip := []string{"1210", "1431", "8080", "10.0.0.1", "12-34", "0", "1.2.3", "9:9", "80-443", "127.0.0.1"}
+	for _, s := range skip {
+		if hasLetterRe.MatchString(s) {
+			t.Errorf("hasLetterRe should NOT match %q (no letter → skipped as numeric-like)", s)
+		}
+	}
+}

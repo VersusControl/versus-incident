@@ -16,21 +16,29 @@ import {
 import { api, type IncidentSummary } from "@/lib/api";
 import { fmtAbs, fmtRel, incidentTitle, truncate } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
+import {
+  INCIDENT_STATUS_VALUES,
+  filterIncidentsByText,
+  matchesStatus,
+  type IncidentStatusFilter,
+} from "@/lib/incidentList";
+import { usePagination } from "@/lib/pagination";
 import { TopBar } from "@/components/TopBar";
 import { Pill, SourceBadge } from "@/components/Pill";
 import { EmptyState } from "@/components/feedback";
 import { AssignDialog } from "@/components/AssignDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ClickableRow } from "@/components/DataTable";
+import { Pagination } from "@/components/Pagination";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SkLine, SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { useToast } from "@/components/toastContext";
 
-type StatusFilter = "all" | "open" | "acked" | "resolved";
+type StatusFilter = IncidentStatusFilter;
 
-const STATUS_VALUES: StatusFilter[] = ["open", "acked", "resolved", "all"];
+const STATUS_VALUES = INCIDENT_STATUS_VALUES;
 
 // Column count for colSpan cells (skeleton / empty / notify-error rows):
 // sev · when · service · title · channels · assigned · notify · status · id · actions
@@ -45,13 +53,6 @@ function useDebounced<T>(value: T, delay = 300): T {
     return () => clearTimeout(t);
   }, [value, delay]);
   return debounced;
-}
-
-function matchesStatus(i: IncidentSummary, status: StatusFilter): boolean {
-  if (status === "open") return !i.resolved && !i.acked_at;
-  if (status === "acked") return !!i.acked_at && !i.resolved;
-  if (status === "resolved") return i.resolved;
-  return true;
 }
 
 // IncidentsPage shows the persisted incident history pulled from the
@@ -124,21 +125,12 @@ export function IncidentsPage() {
 
   // Text filter first (counts per status are computed on this set so the
   // segmented-control badges reflect the current search), then status.
-  const textFiltered = useMemo(() => {
-    if (!data) return [];
+  const textFiltered = useMemo(
     // When the server already ran the text search, don't re-filter on text
     // (it matches fields the client can't see, e.g. payload body).
-    const needle = useServerSearch
-      ? ""
-      : q.trim().replace(/^#/, "").toLowerCase();
-    if (!needle) return data;
-    return data.filter(
-      (i) =>
-        (i.title ?? "").toLowerCase().includes(needle) ||
-        (i.service ?? "").toLowerCase().includes(needle) ||
-        i.id.toLowerCase().includes(needle),
-    );
-  }, [data, q, useServerSearch]);
+    () => filterIncidentsByText(data, q, useServerSearch),
+    [data, q, useServerSearch],
+  );
 
   const counts = useMemo(
     () => ({
@@ -153,6 +145,11 @@ export function IncidentsPage() {
     () => textFiltered.filter((i) => matchesStatus(i, status)),
     [textFiltered, status],
   );
+
+  // Paginate at 100/page AFTER filter/search. Reset to page 1 whenever the
+  // status filter or the search text changes so a filter never strands the
+  // operator on a now-empty page.
+  const pg = usePagination(filtered, { resetKey: `${status}|${trimmed}` });
 
   // Resolve is optimistic (§2.4): cache flips immediately, rollback +
   // error toast with Retry on failure, invalidate on settle.
@@ -198,15 +195,16 @@ export function IncidentsPage() {
   });
 
   // j/k + Enter navigation; a/r act on the active row (modals trap focus,
-  // so these can't fire while a dialog is open).
+  // so these can't fire while a dialog is open). Scoped to the rendered page
+  // so navigation stays bounded on a multi-thousand-row history.
   const { containerProps, rowProps } = useTableKeys({
-    size: filtered.length,
+    size: pg.pageItems.length,
     onOpen: (i) => {
-      const row = filtered[i];
+      const row = pg.pageItems[i];
       if (row) navigate(`/incidents/${row.id}`);
     },
     extra: (key, i) => {
-      const row = filtered[i];
+      const row = pg.pageItems[i];
       if (!row) return;
       if (key === "a") {
         setAssignFor(row);
@@ -332,7 +330,7 @@ export function IncidentsPage() {
                     </tr>
                   )}
                   {!isLoading &&
-                    filtered.map((i, idx) => (
+                    pg.pageItems.map((i, idx) => (
                       <IncidentRow
                         key={i.id}
                         i={i}
@@ -353,6 +351,7 @@ export function IncidentsPage() {
                 </tbody>
               </table>
             </div>
+            <Pagination state={pg} />
             <div className="hidden border-t border-ink-600 px-3 py-1.5 text-2xs text-ink-400 md:block">
               j/k navigate · Enter open · a assign · r resolve · / search
             </div>

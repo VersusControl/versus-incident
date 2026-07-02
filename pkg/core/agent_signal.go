@@ -45,7 +45,40 @@ type SignalSource interface {
 
 	// Pull returns all signals strictly newer than `since`, plus the new
 	// cursor (== max timestamp seen, or `since` if no signals were returned).
+	//
+	// Tailing invariant: the returned cursor MUST NOT exceed the wall-clock
+	// time at pull, and a cursor-driven source MUST NOT scan past `now`.
+	// Document timestamps are untrusted producer data; a single future-dated
+	// record would otherwise push the cursor ahead of real time and make every
+	// following `>= cursor` query match nothing until that time arrives — the
+	// source stops emitting until its cursor is wiped. Sources bound their scan
+	// at `now` (Loki `end`, Graylog `to`, Splunk `latest`, Elasticsearch `lte`,
+	// CloudWatch `EndTime`) and clamp the returned cursor via
+	// signalsources.ClampCursor.
 	Pull(ctx context.Context, since time.Time) ([]Signal, time.Time, error)
+}
+
+// SourceRewinder is the OPTIONAL capability a SignalSource implements when it
+// keeps its OWN internal read position — a byte offset, page token, or similar
+// — that is INDEPENDENT of the poll cursor the worker passes to Pull as
+// `since`. The file source is the canonical example: it tails a log file by
+// byte offset (persisted in a sidecar) and ignores `since` entirely.
+//
+// Clearing the learned catalog rewinds the worker's poll cursor, which makes
+// cursor-driven sources (Elasticsearch, Loki, CloudWatch, …) re-read their
+// lookback window on the next tick. A source that tracks its own position must
+// additionally rewind THAT position here — otherwise the clear leaves it pinned
+// past the already-consumed data and it never re-emits, so the SAME running
+// worker stops learning until the process is recreated (which reconstructs the
+// source from scratch). Rewind reconciles the two cursors of truth so a clear
+// behaves like a fresh process start in-place.
+//
+// Sources whose position is driven purely by `since` do not implement it; the
+// worker skips them. Implementations must be safe to call concurrently with
+// Pull and must leave the source in the state a freshly-constructed instance
+// would have.
+type SourceRewinder interface {
+	Rewind(ctx context.Context) error
 }
 
 // AgentVerdict is the classification a Detector pipeline assigns to a batch
@@ -170,4 +203,32 @@ type ToolCallTrace struct {
 	Output     string
 	DurationMs int64
 	Error      string
+}
+
+// Readiness is how close a signal is to its settled/known state — the point at
+// which the agent's judgment of it is final rather than provisional. It is a
+// generic, type-agnostic value produced at each read boundary (the log catalog
+// reader in OSS, the enterprise metric/trace baseline reader). It is a plain
+// value type with no behaviour: presentation (remaining evidence, ETA, progress
+// bar) is DERIVED from these facts by the UI — the server ships facts, not
+// formatted strings.
+//
+// Derivations the UI does: remaining = max(0, Needed-Seen) (when Needed>0);
+// etaMinutes = remaining / RatePerMin (when RatePerMin>0, Needed>0, !Ready);
+// progress = Seen/Needed (when Needed>0).
+type Readiness struct {
+	// Ready reports the signal has reached its settled/known state.
+	Ready bool `json:"ready"`
+	// Seen is the evidence folded so far (log sightings / folded samples).
+	Seen int `json:"seen"`
+	// Needed is the evidence required to reach Ready. 0 is the INDETERMINATE
+	// sentinel: no count gate applies (e.g. logs with AutoPromoteAfter<=0 —
+	// count-promotion is disabled, promotion is manual-only). The UI shows
+	// "Manual only", never "X of 0".
+	Needed int `json:"needed"`
+	// RatePerMin is the observed arrival rate of NEW evidence for this key,
+	// in evidence/minute, used to derive the ETA. 0 is the UNKNOWN/STALLED
+	// sentinel: no honest rate yet, or the signal stopped flowing — the UI
+	// shows no ETA (never ∞).
+	RatePerMin float64 `json:"rate_per_min"`
 }

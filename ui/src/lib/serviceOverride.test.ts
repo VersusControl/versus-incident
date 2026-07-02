@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ServiceOverride } from "./api";
 import {
+  assignableServices,
   logOverrideGate,
   matchSignalGlob,
   overrideMatches,
@@ -114,5 +115,23 @@ describe("gates", () => {
     expect(signalOverrideGate({ licensed: false, canManage: true })).toBe("absent");
     expect(signalOverrideGate({ licensed: true, canManage: false })).toBe("readonly");
     expect(signalOverrideGate({ licensed: true, canManage: true })).toBe("editable");
+  });
+});
+
+describe("assignableServices", () => {
+  it("returns every known service except the _unknown fallback, sorted", () => {
+    expect(
+      assignableServices({ payments: {}, _unknown: {}, api: {}, billing: {} }),
+    ).toEqual(["api", "billing", "payments"]);
+  });
+
+  it("is empty when there are no assignable targets", () => {
+    expect(assignableServices({ _unknown: {} })).toEqual([]);
+    expect(assignableServices({})).toEqual([]);
+  });
+
+  it("tolerates a missing services map (query still loading)", () => {
+    expect(assignableServices(undefined)).toEqual([]);
+    expect(assignableServices(null)).toEqual([]);
   });
 });

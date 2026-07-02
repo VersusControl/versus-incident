@@ -370,6 +370,7 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 					MessageField:       s.Elasticsearch.MessageField,
 					SeverityField:      s.Elasticsearch.SeverityField,
 					PageSize:           s.Elasticsearch.PageSize,
+					ReorderWindow:      s.Elasticsearch.ReorderWindow,
 				},
 				File: AgentFileSourceConfig{
 					Path:            s.File.Path,

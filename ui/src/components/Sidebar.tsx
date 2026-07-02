@@ -111,6 +111,7 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   ];
   const agent: SideItem[] = [
     { to: "/agent", label: "Overview", icon: Activity, end: true },
+    { to: "/agent/decisions", label: "Decisions", icon: Sparkles },
     { to: "/agent/services", label: "Services", icon: Server },
     { to: "/agent/logs", label: "Logs", icon: ScrollText },
     {
@@ -143,7 +144,6 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         ? "Enterprise feature — requires an intelligence license"
         : undefined,
     },
-    { to: "/agent/decisions", label: "Decisions", icon: Sparkles },
   ];
   const tools: SideItem[] = [
     {

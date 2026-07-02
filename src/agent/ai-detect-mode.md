@@ -253,7 +253,7 @@ move accordingly.
   issues.
 - **`new_service_grace`** — silences a brand-new service for the
   configured duration. The window starts the first time the
-  agent sees the service, and is persisted in `patterns.json` so
+  agent sees the service, and is persisted in the catalog so
   it survives restarts.
 - **Rotate the key** if it ever appears in a log line you fed the
   agent — the [redactor](./redaction.md) scrubs common secret
