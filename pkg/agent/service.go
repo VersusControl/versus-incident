@@ -31,6 +31,47 @@ var logLevelRe = regexp.MustCompile(`^(?i:TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FA
 // "svc7") and is kept.
 var hasLetterRe = regexp.MustCompile(`[A-Za-z]`)
 
+// threadNameRe matches a capture that is unmistakably a JVM / servlet-container
+// / reactor THREAD name rather than a service. Console loggers (Spring Boot /
+// Logback in particular) print the worker thread in a bracket — e.g.
+// "[nio-8080-exec-8]" or "[pool-2-thread-1]" — right where a bracket rule looks
+// for a service, and because those names contain letters ("nio", "exec") the
+// numeric guard (hasLetterRe) does not reject them. This third guard skips such
+// a capture so Extract falls through to the next pattern (the logger / real
+// service), exactly like logLevelRe and hasLetterRe.
+//
+// It is anchored (^…$, case-insensitive) and deliberately tight so it rejects
+// ONLY clear thread-name shapes and never a legitimate service that merely
+// contains digits/dashes ("api2", "auth-service", "order-service-2",
+// "nio-gateway" — the "nio-<port>-exec-<n>" shape is specific enough not to
+// catch that). Each alternative below targets one common thread family.
+var threadNameRe = regexp.MustCompile(`(?i)^(?:` +
+	// Tomcat / servlet-container connector exec threads:
+	//   nio-8080-exec-8, http-nio-8080-exec-3, https-jsse-nio-8443-exec-1
+	`(?:https?-)?(?:jsse-)?nio-\d+-exec-\d+` + `|` +
+	//   ajp-nio-8009-exec-2 (AJP connector)
+	`ajp-nio-\d+-exec-\d+` + `|` +
+	//   bare exec worker: exec-4
+	`exec-\d+` + `|` +
+	// Standard java.util.concurrent / JVM threads:
+	//   pool-2-thread-1, Thread-5
+	`pool-\d+-thread-\d+` + `|` +
+	`thread-\d+` + `|` +
+	//   ForkJoinPool-1-worker-3, ForkJoinPool.commonPool-worker-3
+	`forkjoinpool[-.].*worker[-.]?\d*` + `|` +
+	// Spring task / scheduler executors:
+	//   taskExecutor-1, task-3, scheduling-1
+	`taskexecutor-\d+` + `|` +
+	`task-\d+` + `|` +
+	`scheduling-\d+` + `|` +
+	// Netty / Project Reactor event loops & schedulers:
+	//   nioEventLoopGroup-2-1, reactor-http-nio-4, boundedElastic-1, parallel-2
+	`.*eventloopgroup-\d+-\d+` + `|` +
+	`reactor-http-nio-\d+` + `|` +
+	`boundedelastic-\d+` + `|` +
+	`parallel-\d+` +
+	`)$`)
+
 // stripANSI removes ANSI escape sequences from s. It fast-paths the common
 // case (no ESC byte at all) so it costs nothing on the vast majority of log
 // lines and only pays the regex on genuinely colourised console output.
@@ -80,7 +121,7 @@ func NewServiceMatcher(patterns []string) (*ServiceMatcher, []error) {
 // Extract returns the first capture group of the first matching pattern, or
 // "" when nothing matches.
 //
-// Three generic correctness guards run here so they benefit every configured
+// Four generic correctness guards run here so they benefit every configured
 // pattern at once:
 //   - ANSI escape sequences are stripped from the message before matching, so
 //     a colour-wrapped token (e.g. Spring Boot's "\x1b[34mlead-service\x1b[m")
@@ -95,6 +136,12 @@ func NewServiceMatcher(patterns []string) (*ServiceMatcher, []error) {
 //     "[1210]" would otherwise surface as the service; the number guard skips
 //     it and continues to the next pattern. A name that merely CONTAINS digits
 //     (has a letter) — "s3", "api-v2" — is kept.
+//   - A JVM / servlet-container / reactor THREAD name (e.g. "nio-8080-exec-8",
+//     "pool-2-thread-1", "reactor-http-nio-4") is never returned as a service.
+//     Those names contain letters, so the number guard does not catch them; a
+//     bracket rule would otherwise file a signal under the Tomcat worker thread
+//     instead of the service. The thread-name guard skips such a capture and
+//     continues to the next pattern (the logger / real service).
 func (m *ServiceMatcher) Extract(message string) string {
 	if m == nil || message == "" {
 		return ""
@@ -107,6 +154,9 @@ func (m *ServiceMatcher) Extract(message string) string {
 				continue
 			}
 			if !hasLetterRe.MatchString(sub[1]) {
+				continue
+			}
+			if threadNameRe.MatchString(sub[1]) {
 				continue
 			}
 			return sub[1]
