@@ -26,6 +26,7 @@ For each log line, the agent runs these steps in order:
 4. **Take the captured name.** Each pattern has one capture group `( … )`; the text it captures is the service name.
 5. **Skip bare log levels.** If that captured text is exactly a log level (`TRACE`, `DEBUG`, `INFO`, `WARN`, `WARNING`, `ERROR`, `FATAL`), the agent ignores this match and continues to the next pattern — a service is never named `DEBUG`.
 6. **Skip purely-numeric tokens.** If that captured text has no letters at all — only digits and separators like `1210`, `8080`, or `10.0.0.1` — it's a thread id / PID / port / address, never a service. The agent skips it and continues to the next pattern. A name that merely *contains* digits (`s3`, `api-v2`, `auth-service-2`) still has a letter and is kept.
+7. **Skip known thread names.** If that captured text is a recognisable JVM / servlet-container / reactor thread name — a Tomcat connector worker like `nio-8080-exec-8`, a pool thread like `pool-2-thread-1`, `Thread-5`, `ForkJoinPool-1-worker-3`, or a reactor loop like `reactor-http-nio-4` — it's a worker thread, never a service. These contain letters (so the numeric guard alone can't catch them), so a dedicated guard skips them and continues to the next pattern. A real service that merely *looks* similar (`nio-gateway`, `task-runner`, `order-service-2`) is **not** rejected.
 
 If nothing matches (or the list is empty), the service is `_unknown`.
 
@@ -44,16 +45,18 @@ Versus ships a default `service_patterns` list (from `pkg/config/default_config.
 | 5 | Logback MDC: first name inside `[ svc , requestID=… ]` | `[ INFO ] [ orders-api , requestID=abc ] …` | `orders-api` |
 | 6 | Two brackets — take the second `[ … ] [ svc ]` | `[INFO] [orders-api] request handled` | `orders-api` |
 | 7 | Spring `--- [thread] [name]` — take the second bracket | `… --- [main] [orders-api] Started` | `orders-api` |
-| 8 | syslog / journald `name[pid]:` | `orders-api[1234]: connection reset` | `orders-api` |
-| 9 | Generic single bracket (last resort) | `[orders-api] cache miss` | `orders-api` |
+| 8 | Spring DEFAULT `--- [thread] logger :` — take the logger after the (thread-only) bracket | `… --- [nio-8080-exec-8] c.example.OrderController : …` | `c.example.OrderController` |
+| 9 | syslog / journald `name[pid]:` | `orders-api[1234]: connection reset` | `orders-api` |
+| 10 | Generic single bracket (last resort) | `[orders-api] cache miss` | `orders-api` |
 
-### Colour codes, log levels, and numeric tokens
+### Colour codes, log levels, numeric tokens, and thread names
 
-Three guards run automatically for **every** pattern, default or custom:
+Four guards run automatically for **every** pattern, default or custom:
 
 - **ANSI colour codes are stripped first.** A Spring-Boot console line like `2026-06-30 12:00:01 \x1b[34morders-api\x1b[m [main] WARN …` is matched as if it read `2026-06-30 12:00:01 orders-api [main] WARN …`, so pattern 4 detects `orders-api`. Without stripping, the colour bytes sit right against the name and defeat the pattern.
 - **A bare log level is never a service.** If a pattern's capture group is exactly `TRACE` / `DEBUG` / `INFO` / `WARN` / `WARNING` / `ERROR` / `FATAL`, the match is skipped and the next pattern is tried. So a line like `[DEBUG] starting up` is never filed under a service called `DEBUG` — it falls through to a later pattern or to `_unknown`. Only a *bare* level is refused; `error-service` is a perfectly valid name.
 - **A purely-numeric token is never a service.** If a pattern's capture group has no letters at all — only digits and separators such as `1210`, `8080`, or `10.0.0.1` — it's a thread id / PID / port / address, so the match is skipped and the next pattern is tried. A bracketed thread id like `[1210]` never surfaces as the service. A name that merely *contains* digits (`s3`, `api-v2`, `auth-service-2`) still has a letter and is kept.
+- **A known thread name is never a service.** If a pattern's capture group is a recognisable JVM / servlet-container / reactor worker-thread name — a Tomcat connector thread (`nio-8080-exec-8`, `http-nio-8080-exec-3`, `https-jsse-nio-8443-exec-1`, `ajp-nio-8009-exec-2`), a pool/JVM thread (`pool-2-thread-1`, `Thread-5`, `ForkJoinPool-1-worker-3`), a Spring executor (`taskExecutor-1`, `scheduling-1`), or a Netty/Reactor loop (`reactor-http-nio-4`, `boundedElastic-1`, `parallel-2`) — it's a worker thread, so the match is skipped and the next pattern is tried. These contain letters, so the numeric guard alone can't catch them. The guard is deliberately tight and anchored so it rejects **only** clear thread shapes: a real service such as `nio-gateway`, `task-runner`, or `order-service-2` still passes. Thread-name conventions vary across frameworks — this guard covers the common JVM / Tomcat / Netty / Reactor shapes; if your stack emits a different thread name, add a `service_patterns` rule that anchors on your service field rather than the thread bracket.
 
 ## Define your own service pattern
 
@@ -121,6 +124,7 @@ export AGENT_SERVICE_PATTERNS='\b(authen-service|billing-service)\b,\b([a-z]+-se
 | A colourised console name isn't detected | (Shouldn't happen — colours are stripped automatically) | Confirm the name really is the captured field once colours are removed, then match the plain-text layout. |
 | A level like `DEBUG` used to show as the service | A greedy pattern captured the level word | Handled by the built-in level guard; if you wrote the pattern, anchor it to the service field, not the level bracket. |
 | A bare number (`1210`, `8080`) showed as the service | A bracket/generic pattern captured a thread id, PID, or port | Handled by the built-in numeric guard; if you wrote the pattern, anchor it to the service field so it doesn't grab a bracketed number. |
+| A Tomcat/JVM thread (`nio-8080-exec-8`, `pool-2-thread-1`, `reactor-http-nio-4`) showed as the service | A bracket rule captured the worker thread instead of the logger/service | Handled by the built-in thread-name guard for the common JVM/Tomcat/Netty/Reactor shapes; if your stack uses a different thread name, add a `service_patterns` rule that anchors on your service field, not the thread bracket. |
 
 ## See also
 

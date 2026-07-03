@@ -36,6 +36,7 @@ var servicePatterns = []string{
 	`\[\s*([A-Za-z][A-Za-z0-9._-]*)\s*,\s*(?i:request[_-]?id|trace[_-]?id|span[_-]?id)\b`,
 	`\[[^\]]+\]\s+\[([A-Za-z0-9._-]+)\]`,
 	`---\s+\[[^\]]*\]\s+\[([A-Za-z0-9._-]+)\]`,
+	`---\s+\[[^\]]*\]\s+([A-Za-z][A-Za-z0-9._-]*)\s*:`,
 	`([A-Za-z0-9._-]+)\[\d+\]:`,
 	`\[([A-Za-z0-9._-]+)\]`,
 }
@@ -253,6 +254,114 @@ func TestHasLetterGuard(t *testing.T) {
 	for _, s := range skip {
 		if hasLetterRe.MatchString(s) {
 			t.Errorf("hasLetterRe should NOT match %q (no letter → skipped as numeric-like)", s)
+		}
+	}
+}
+
+// springDefaultLine is the vanilla Spring Boot / Logback DEFAULT console
+// layout: "<ts> <LEVEL> <PID> --- [<thread>] <logger> : <msg>". The ONE bracket
+// is the Tomcat NIO connector worker thread ([nio-8080-exec-8]); the real
+// service-ish token is the logger (c.example.OrderController) right after it.
+const springDefaultLine = "2026-07-03 09:15:02.114  INFO 1210 --- " +
+	"[nio-8080-exec-8] c.example.OrderController : handled request"
+
+// TestServiceMatcher_ThreadNameGuard proves the third-class guard: a JVM /
+// servlet-container / reactor THREAD name (which CONTAINS letters, so the
+// numeric guard cannot catch it) is never returned as a service. It is skipped
+// and the loop falls through to the logger / real service (or "_unknown"),
+// exactly like the level and numeric guards — and it benefits every pattern,
+// including operator-custom ones.
+func TestServiceMatcher_ThreadNameGuard(t *testing.T) {
+	m, errs := NewServiceMatcher(servicePatterns)
+	if len(errs) != 0 {
+		t.Fatalf("shipped patterns must compile cleanly, got %v", errs)
+	}
+
+	// A bracketed thread name must NEVER surface. With no later real service on
+	// the line the guard falls through to "" (attributed to "_unknown").
+	threadOnly := []struct{ name, line string }{
+		{"tomcat nio exec", "WARN [nio-8080-exec-8] handling request"},
+		{"tomcat http-nio exec", "ERROR [http-nio-8080-exec-3] boom"},
+		{"tomcat https jsse exec", "INFO [https-jsse-nio-8443-exec-1] tls handshake"},
+		{"ajp nio exec", "DEBUG [ajp-nio-8009-exec-2] proxied"},
+		{"jUC pool thread", "WARN [pool-2-thread-1] task ran"},
+		{"bare Thread-N", "INFO [Thread-5] started"},
+		{"fork/join worker", "DEBUG [ForkJoinPool-1-worker-3] split"},
+		{"spring scheduler", "INFO [scheduling-1] tick"},
+		{"reactor http nio", "WARN [reactor-http-nio-4] request"},
+	}
+	for _, tc := range threadOnly {
+		got := m.Extract(tc.line)
+		if got != "" {
+			t.Errorf("%s: Extract(%q) = %q — a thread name must never surface as a service (want \"\")", tc.name, tc.line, got)
+		}
+	}
+
+	// The reported bug line, end to end: the thread bracket must NOT win; the
+	// logger after it is the service-ish token the tightened Spring rule prefers.
+	if got := m.Extract(springDefaultLine); got != "c.example.OrderController" {
+		t.Errorf("Spring default line: Extract = %q, want the logger %q (never the thread nio-8080-exec-8)", got, "c.example.OrderController")
+	}
+	if got := m.Extract(springDefaultLine); got == "nio-8080-exec-8" {
+		t.Fatalf("Spring default line: Extract returned the Tomcat worker thread — the regression is NOT fixed")
+	}
+
+	// Real services with digits/dashes — including the tricky nio-* / *-N shapes
+	// the guard must NOT swallow — still resolve via the shipped rules.
+	realServices := []struct{ line, want string }{
+		{"service.name=order-service handled", "order-service"},
+		{"service=order-service-2 ready", "order-service-2"},
+		{"svc=auth-service-2 ok", "auth-service-2"},
+		{"service=api2 up", "api2"},
+		{"service.name=nio-gateway routing", "nio-gateway"}, // nio- prefix, NOT a thread
+		{"[ order-service , requestId = abc ] parsing", "order-service"},
+	}
+	for _, tc := range realServices {
+		if got := m.Extract(tc.line); got != tc.want {
+			t.Errorf("real service: Extract(%q) = %q, want %q", tc.line, got, tc.want)
+		}
+	}
+
+	// The guard is generic: it also protects an operator-custom bracket pattern
+	// whose class would otherwise grab a Tomcat worker thread.
+	custom, cerrs := NewServiceMatcher([]string{`\[([A-Za-z0-9._-]+)\]`})
+	if len(cerrs) != 0 {
+		t.Fatalf("custom pattern must compile, got %v", cerrs)
+	}
+	if got := custom.Extract("[nio-8080-exec-8] handling request"); got != "" {
+		t.Errorf("custom bracket pattern: Extract = %q, want \"\" (thread-name guard must apply to operator patterns too)", got)
+	}
+	if got := custom.Extract("[order-service] cache miss"); got != "order-service" {
+		t.Errorf("custom bracket pattern: Extract = %q, want %q (a real service must still pass)", got, "order-service")
+	}
+}
+
+// TestThreadNameGuard exercises the threadNameRe helper directly: every common
+// JVM / Tomcat / Netty thread-name shape is recognised (→ skipped), while a
+// legitimate service that merely contains digits/dashes is NOT.
+func TestThreadNameGuard(t *testing.T) {
+	threads := []string{
+		"nio-8080-exec-8", "http-nio-8080-exec-3", "https-jsse-nio-8443-exec-1",
+		"ajp-nio-8009-exec-2", "exec-4",
+		"pool-2-thread-1", "Thread-5", "thread-12",
+		"ForkJoinPool-1-worker-3", "ForkJoinPool.commonPool-worker-3",
+		"taskExecutor-1", "task-3", "scheduling-1",
+		"nioEventLoopGroup-2-1", "reactor-http-nio-4", "boundedElastic-1", "parallel-2",
+	}
+	for _, s := range threads {
+		if !threadNameRe.MatchString(s) {
+			t.Errorf("threadNameRe should match thread name %q (→ skipped as a thread)", s)
+		}
+	}
+	// Legitimate service names — must NOT be mistaken for threads.
+	services := []string{
+		"order-service", "order-service-2", "auth-service", "auth-service-2",
+		"api2", "nio-gateway", "lead-service", "account-service",
+		"c.example.OrderController", "nginx", "s3", "task-runner", "exec-worker",
+	}
+	for _, s := range services {
+		if threadNameRe.MatchString(s) {
+			t.Errorf("threadNameRe must NOT match service name %q (only clear thread shapes are rejected)", s)
 		}
 	}
 }

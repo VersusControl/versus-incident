@@ -298,6 +298,14 @@ agent:
     #   2026-05-02 12:34:56.789 ERROR 1 --- [thread-name] [service-name] com.foo.Bar : ...
     # The service is the SECOND bracketed token after the "---" separator.
     - '---\s+\[[^\]]*\]\s+\[([A-Za-z0-9._-]+)\]'
+    # Spring Boot / Java logback DEFAULT layout with a single (thread-only) bracket:
+    #   2026-07-03 09:15:02.114  INFO 1210 --- [nio-8080-exec-8] c.example.OrderController : ...
+    # After "---" the ONE bracket is the THREAD (never the service); the
+    # service-ish token is the LOGGER right after it, before the " : ". Prefer
+    # that logger over the thread bracket so a Tomcat worker thread like
+    # "[nio-8080-exec-8]" is never mistaken for the service. (The thread-name
+    # guard in ServiceMatcher.Extract is the generic backstop for custom patterns.)
+    - '---\s+\[[^\]]*\]\s+([A-Za-z][A-Za-z0-9._-]*)\s*:'
     # syslog/journald/Docker: foo[123]:
     # Used by: Linux syslog (rsyslog/syslog-ng), systemd-journald, Docker JSON-file
     #          driver with tag, Postfix, sshd, cron, kernel
