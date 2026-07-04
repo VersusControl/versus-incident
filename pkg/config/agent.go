@@ -68,6 +68,13 @@ type AgentCatalogConfig struct {
 	// a pattern before spike detection considers it. Avoids treating a
 	// barely-seen pattern's first big tick as a spike. Default 20.
 	SpikeMinBaselineCount int `mapstructure:"spike_min_baseline_count"`
+	// EmitOnSpike enables the deterministic (no-LLM) alerting mode: when the
+	// AI analyzer is disabled, a VerdictSpike still emits an incident built
+	// from the spike statistics (template, observed rate, learned baseline,
+	// multiple-over-baseline) instead of being dropped. This is the
+	// "silence is the feature; alert only on known-pattern spikes, no LLM"
+	// path. Default false (preserves the existing dry-detect behaviour).
+	EmitOnSpike bool `mapstructure:"emit_on_spike"`
 }
 
 // CatalogBlobName is the storage blob key used by the agent catalog.

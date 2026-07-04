@@ -630,6 +630,35 @@ func (w *Worker) emitDetect(
 	// no resolver so this collapses to the original `w.ai.Detect == nil`
 	// check — byte-for-byte unchanged.
 	if w.ai.Detect == nil || !w.effectiveAIEnabled(ctx) {
+		// Deterministic (no-LLM) alerting mode: a known pattern that suddenly
+		// spikes is emitted from the spike statistics alone — no model call.
+		// "Silence is the feature": only known-pattern spikes speak, and they
+		// speak deterministically.
+		if w.cfg.Catalog.EmitOnSpike && verdict == core.VerdictSpike {
+			multiple := 0.0
+			if prevBaseline > 0 {
+				multiple = float64(len(signals)) / prevBaseline
+			}
+			finding := &core.AIFinding{
+				Title: fmt.Sprintf("Frequency spike: %s", truncateString(template, 80)),
+				Summary: fmt.Sprintf(
+					"Known pattern spiked to %d/tick vs learned baseline %.2f (%.1fx). "+
+						"Deterministic detector — no LLM in the verdict path.",
+					len(signals), prevBaseline, multiple),
+				Severity:   "high",
+				Category:   "anomaly",
+				Confidence: 1.0,
+				SampleIDs:  []string{patternID},
+			}
+			evt.Finding = finding
+			outcome := w.send(finding, result, source, service, "emitted-stat")
+			evt.Outcome = outcome
+			if outcome == "send_error" {
+				evt.Error = "emitter returned error (see logs)"
+			}
+			w.detect.Record(evt)
+			return outcome
+		}
 		log.Printf("%sagent[detect:dry]: pattern=%s service=%s verdict=%s freq=%d (ai.enable=false)%s",
 			colorGreen, patternID, service, verdict, len(signals), colorReset)
 		evt.Outcome = "dry"
