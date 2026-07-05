@@ -41,9 +41,8 @@ func cloneStorageConfig(src StorageConfig) StorageConfig {
 			MaxIncidents:       src.Redis.MaxIncidents,
 		},
 		Database: StorageDatabaseConfig{
-			Driver:       src.Database.Driver,
-			DSN:          src.Database.DSN,
-			MaxIncidents: src.Database.MaxIncidents,
+			Driver: src.Database.Driver,
+			DSN:    src.Database.DSN,
 		},
 	}
 }

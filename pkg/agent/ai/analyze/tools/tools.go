@@ -40,11 +40,30 @@ type PatternView struct {
 	Baseline  float64
 	FirstSeen time.Time
 	LastSeen  time.Time
+	// Samples is the pattern's bounded ring of redacted example log lines
+	// (oldest→newest, latest last). Populated from agent.Pattern.Samples by the
+	// catalog adapter; the analyze tools surface only the latest few to keep the
+	// token budget bounded.
+	Samples []string
 }
 
 // ServiceInfo mirrors agent.ServiceInfo for the tools layer.
 type ServiceInfo struct {
 	FirstSeen time.Time
+}
+
+// latestSamples returns up to n most-recent entries from a redacted sample ring
+// (ordered oldest→newest), preserving order (newest last). It bounds the
+// examples fed into analyze tool results so the token budget stays sane
+// (SampleRingCap is 10; the tools pass 3 or 1). Returns nil when empty.
+func latestSamples(ring []string, n int) []string {
+	if n <= 0 || len(ring) == 0 {
+		return nil
+	}
+	if len(ring) > n {
+		ring = ring[len(ring)-n:]
+	}
+	return append([]string(nil), ring...)
 }
 
 // SignalReader is the read-only slice of the configured signal sources

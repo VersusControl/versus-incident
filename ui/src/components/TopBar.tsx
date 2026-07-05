@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { isLocalAdminSession } from "@/lib/localAdmin";
 import { useOpenIncidentCount } from "@/lib/hooks";
+import { formatOriginCounts } from "@/lib/incidentList";
 import { useTheme } from "@/lib/theme";
 import { roleLabel, isAdminRole } from "@/lib/role";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
@@ -35,7 +36,7 @@ interface Props {
 export function TopBar({ title, subtitle, actions }: Props) {
   const shell = useContext(ShellContext);
   const navigate = useNavigate();
-  const { open } = useOpenIncidentCount();
+  const { open, originCounts } = useOpenIncidentCount();
   const { theme, toggle } = useTheme();
 
   const config = useQuery({
@@ -122,9 +123,10 @@ export function TopBar({ title, subtitle, actions }: Props) {
         {open > 0 && (
           <Link
             to="/incidents?status=open"
+            title={`${open} open — AI-detected vs webhook/alerts`}
             className="rounded-full bg-sev-critical/15 px-2 py-0.5 text-2xs font-semibold tabular-nums text-sev-critical hover:bg-sev-critical/25"
           >
-            {open} open
+            {formatOriginCounts(originCounts)}
           </Link>
         )}
         <AgentChip

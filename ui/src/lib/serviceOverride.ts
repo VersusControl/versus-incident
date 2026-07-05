@@ -84,6 +84,60 @@ export function resolveOverrideService(
   return hit ? hit.service : undefined;
 }
 
+// cellOverrideInput builds the source-appropriate OverrideInput a service-cell
+// control uses to look itself up in the rule set: a log cell keys on the mined
+// pattern id, a metric/trace cell on the signal name. It keeps the ServiceCell
+// free of the source-type branching so the match logic stays in one place.
+export function cellOverrideInput(
+  sourceType: ServiceOverrideSource,
+  match: string,
+): OverrideInput {
+  return sourceType === "log"
+    ? { sourceType, pattern: match }
+    : { sourceType, signal: match };
+}
+
+// ResolvedServiceCell is the effective attribution a service cell renders: the
+// service to SHOW plus whether that shown service is a still-settling override.
+export interface ResolvedServiceCell {
+  // service is the service the cell displays. When a matching override exists it
+  // is the override TARGET — so a reassignment is reflected INSTANTLY on every
+  // surface (logs, metrics, traces alike), independent of whether the backend
+  // read model has re-pointed yet. Otherwise it is the signal's own attributed
+  // service.
+  service: string | null | undefined;
+  // pending is true when an override target is shown but the signal's OWN
+  // attribution has not caught up to it (current !== target) — the "saved,
+  // awaiting the next re-observation" window. It is false when no override
+  // applies or the signal has already adopted the target. The rule is identical
+  // for logs and metrics/traces, so the "(pending)" qualifier means the same
+  // thing on all three pages. Blank/_unknown current counts as "not yet the
+  // target", so a reassign away from _unknown reads as pending too.
+  pending: boolean;
+}
+
+// resolveServiceCell computes the effective attribution a ServiceCell shows for
+// one signal, with a single rule shared across logs, metrics, and traces so the
+// reassign affordance is consistent on all three surfaces. A manual override
+// wins IMMEDIATELY in the UI: the cell displays the override target the instant
+// the override exists (driven off the override list the UI already fetches), so
+// the reassign gives instant feedback everywhere — closing the gap where the
+// logs patterns reader re-points on write (service flips at once) but the
+// metrics/traces baseline reader re-points only on re-observation (service lags),
+// which used to make the SAME reassign look instant on logs yet stuck "pending"
+// on metrics/traces. The "(pending)" qualifier then rides purely on whether the
+// signal's own attribution has caught up to the target, so it never reads as
+// "the reassign didn't work" on one page and "instant" on another.
+export function resolveServiceCell(
+  rules: ServiceOverride[] | undefined,
+  input: OverrideInput,
+  currentService: string | null | undefined,
+): ResolvedServiceCell {
+  const target = resolveOverrideService(rules, input);
+  if (!target) return { service: currentService, pending: false };
+  return { service: target, pending: target !== (currentService ?? "") };
+}
+
 // ServiceOverrideGate is how the reassign controls route themselves, matching
 // the learnExcludeGate tri-state:
 //   "absent"   — the surface is not available (e.g. metric/trace reassign on an

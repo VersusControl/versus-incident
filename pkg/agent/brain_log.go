@@ -25,11 +25,16 @@ type logBrain struct {
 	services  *ServiceMatcher
 	ewmaAlpha float64
 	cat       config.AgentCatalogConfig
+	// scrubber re-scrubs the captured sample line at the storage boundary
+	// (defence-in-depth) inside RecordSample. It is the worker's pipeline
+	// redactor; nil disables the re-scrub (input is already redacted).
+	scrubber core.Scrubber
 }
 
 // newLogBrain wires a log brain over the worker's shared miner/catalog plus the
-// per-source name used for catalog attribution.
-func newLogBrain(source string, miner *Miner, catalog *Catalog, matcher *RegexMatcher, services *ServiceMatcher, ewmaAlpha float64, cat config.AgentCatalogConfig) *logBrain {
+// per-source name used for catalog attribution. scrub is the pipeline redactor,
+// re-applied when the brain records a redacted sample line for the pattern.
+func newLogBrain(source string, miner *Miner, catalog *Catalog, matcher *RegexMatcher, services *ServiceMatcher, ewmaAlpha float64, cat config.AgentCatalogConfig, scrub core.Scrubber) *logBrain {
 	if ewmaAlpha <= 0 {
 		ewmaAlpha = 0.2
 	}
@@ -41,6 +46,7 @@ func newLogBrain(source string, miner *Miner, catalog *Catalog, matcher *RegexMa
 		services:  services,
 		ewmaAlpha: ewmaAlpha,
 		cat:       cat,
+		scrubber:  scrub,
 	}
 }
 
@@ -150,6 +156,13 @@ func (b *logBrain) Learn(ctx context.Context, obs []core.Observation) error {
 			ruleName = b.matcher.Match(o.Samples[0].Message).RuleName
 		}
 		b.catalog.Upsert(o.Key, o.Signal, b.source, o.Frequency, b.ewmaAlpha, ruleName, o.Service)
+		// Capture the representative POST-REDACTION example line for this
+		// pattern. o.Samples[0].Message was already scrubbed by the worker before
+		// Group ran; Signal.Raw is never read. RecordSample re-scrubs + caps it
+		// and rides the same dirty→Persist path as the Upsert above.
+		if len(o.Samples) > 0 {
+			b.catalog.RecordSample(o.Key, o.Samples[0].Message, b.scrubber)
+		}
 	}
 	return nil
 }

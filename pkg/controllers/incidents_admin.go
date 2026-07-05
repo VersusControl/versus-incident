@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
@@ -75,7 +76,7 @@ func (i *IncidentAdminController) authMiddleware(c *fiber.Ctx) error {
 func (i *IncidentAdminController) list(c *fiber.Ctx) error {
 	store := services.Storage()
 	if store == nil {
-		return c.JSON(fiber.Map{"incidents": []any{}})
+		return c.JSON(fiber.Map{"incidents": []any{}, "counts": originCounts(nil)})
 	}
 	limit := 0
 	if v := c.Query("limit"); v != "" {
@@ -83,17 +84,15 @@ func (i *IncidentAdminController) list(c *fiber.Ctx) error {
 			limit = n
 		}
 	}
-	recs, err := store.ListIncidents(limit)
+	// Pull the full window (limit 0) so per-origin counts are computed
+	// over every record and the origin filter is applied here, not at the
+	// storage layer. The list backends already hold the capped history in
+	// memory, so this is the same read the UI has always issued.
+	recs, err := store.ListIncidents(0)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	// Strip the (potentially large) Content blob from list responses;
-	// the UI fetches the detail endpoint to see it.
-	out := make([]fiber.Map, 0, len(recs))
-	for _, r := range recs {
-		out = append(out, summarize(r))
-	}
-	return c.JSON(fiber.Map{"incidents": out})
+	return c.JSON(incidentListResponse(recs, c.Query("origin"), c.Query("page"), c.Query("page_size"), limit))
 }
 
 // capabilities reports which optional storage features the running
@@ -103,7 +102,50 @@ func (i *IncidentAdminController) list(c *fiber.Ctx) error {
 func (i *IncidentAdminController) capabilities(c *fiber.Ctx) error {
 	store := services.Storage()
 	_, searchable := store.(storage.Searcher)
-	return c.JSON(fiber.Map{"search": searchable})
+	cfg := config.GetConfig()
+	settings := services.LoadReportSettings(store)
+	return c.JSON(fiber.Map{
+		"search": searchable,
+		// report tells the UI whether to show the incidents-analytics Reports
+		// action, the default channel/window, and which enabled channels to
+		// offer — so it never guesses. Sourced from the runtime settings store
+		// (no YAML block anymore). public_host_set drives whether URL-capable
+		// channel fallbacks can carry a link.
+		"report": fiber.Map{
+			"enable":          settings.Enable,
+			"default_channel": settings.DefaultChannel,
+			"default_window":  settings.DefaultWindow,
+			"include_chart":   settings.IncludeChart,
+			"channels":        enabledAlertChannels(cfg),
+			"public_host_set": strings.TrimSpace(cfg.PublicHost) != "",
+		},
+	})
+}
+
+// enabledAlertChannels lists the notification channels currently enabled in
+// config, in a stable order, for the report channel picker. Returns an empty
+// (non-nil) slice so it serializes as [] not null.
+func enabledAlertChannels(cfg *config.Config) []string {
+	out := []string{}
+	if cfg.Alert.Slack.Enable {
+		out = append(out, "slack")
+	}
+	if cfg.Alert.Telegram.Enable {
+		out = append(out, "telegram")
+	}
+	if cfg.Alert.Viber.Enable {
+		out = append(out, "viber")
+	}
+	if cfg.Alert.Email.Enable {
+		out = append(out, "email")
+	}
+	if cfg.Alert.MSTeams.Enable {
+		out = append(out, "msteams")
+	}
+	if cfg.Alert.Lark.Enable {
+		out = append(out, "lark")
+	}
+	return out
 }
 
 // search runs server-side full-text search over stored incidents using
@@ -128,15 +170,11 @@ func (i *IncidentAdminController) search(c *fiber.Ctx) error {
 			limit = n
 		}
 	}
-	recs, err := searcher.SearchIncidents(c.Query("q"), limit)
+	recs, err := searcher.SearchIncidents(c.Query("q"), 0)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	out := make([]fiber.Map, 0, len(recs))
-	for _, r := range recs {
-		out = append(out, summarize(r))
-	}
-	return c.JSON(fiber.Map{"incidents": out})
+	return c.JSON(incidentListResponse(recs, c.Query("origin"), c.Query("page"), c.Query("page_size"), limit))
 }
 
 func (i *IncidentAdminController) get(c *fiber.Ctx) error {
@@ -161,6 +199,7 @@ func summarize(r *storage.IncidentRecord) fiber.Map {
 		"team_id":             r.TeamID,
 		"title":               r.Title,
 		"source":              r.Source,
+		"origin":              r.EffectiveOrigin(),
 		"service":             r.Service,
 		"resolved":            r.Resolved,
 		"channels_notified":   r.ChannelsNotified,
@@ -173,6 +212,98 @@ func summarize(r *storage.IncidentRecord) fiber.Map {
 		"assigned_team_id":    r.AssignedTeamID,
 		"assigned_member_ids": r.AssignedMemberIDs,
 	}
+}
+
+// originCounts tallies incidents per coarse origin over the full result
+// set. It is computed BEFORE any origin filter so the UI top-bar can show
+// "AI: N · Webhook: M" regardless of which tab is active. Legacy records
+// without an explicit Origin are classified from their Source via
+// EffectiveOrigin so they are never dropped into an empty bucket.
+func originCounts(recs []*storage.IncidentRecord) fiber.Map {
+	var ai, webhook int
+	for _, r := range recs {
+		switch r.EffectiveOrigin() {
+		case storage.OriginAIDetect:
+			ai++
+		default:
+			webhook++
+		}
+	}
+	return fiber.Map{
+		"ai_detect": ai,
+		"webhook":   webhook,
+		"total":     len(recs),
+	}
+}
+
+// filterByOrigin keeps only records whose EffectiveOrigin matches origin.
+// An empty or unrecognized origin returns the input unchanged (all
+// origins), so existing callers that pass no origin are unaffected. The
+// result is a fresh slice — the input is never aliased or mutated.
+func filterByOrigin(recs []*storage.IncidentRecord, origin string) []*storage.IncidentRecord {
+	if origin != storage.OriginAIDetect && origin != storage.OriginWebhook {
+		return recs
+	}
+	out := make([]*storage.IncidentRecord, 0, len(recs))
+	for _, r := range recs {
+		if r.EffectiveOrigin() == origin {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// defaultIncidentPageSize mirrors the UI's PAGE_SIZE (100): the incidents
+// list paginates in 100-row windows so a 10k+ webhook history never ships
+// to the browser in one response.
+const defaultIncidentPageSize = 100
+
+// incidentListResponse is the shared post-processing for the list and
+// search endpoints. It computes per-origin counts over the FULL result
+// set (so the top-bar shows both feeds regardless of the active tab),
+// applies the optional origin filter, then paginates. pageParam /
+// pageSizeParam are the raw query strings; when pageParam is empty the
+// endpoint returns the full origin-filtered window capped at limit — the
+// back-compat shape existing callers depend on.
+func incidentListResponse(recs []*storage.IncidentRecord, origin, pageParam, pageSizeParam string, limit int) fiber.Map {
+	counts := originCounts(recs)
+	recs = filterByOrigin(recs, origin)
+	total := len(recs)
+
+	resp := fiber.Map{"counts": counts, "total": total}
+
+	if pageParam != "" {
+		page := 1
+		if n, err := strconv.Atoi(pageParam); err == nil && n > 1 {
+			page = n
+		}
+		size := defaultIncidentPageSize
+		if n, err := strconv.Atoi(pageSizeParam); err == nil && n > 0 {
+			size = n
+		}
+		start := (page - 1) * size
+		if start > total {
+			start = total
+		}
+		end := start + size
+		if end > total {
+			end = total
+		}
+		recs = recs[start:end]
+		resp["page"] = page
+		resp["page_size"] = size
+	} else if limit > 0 && len(recs) > limit {
+		recs = recs[:limit]
+	}
+
+	// Strip the (potentially large) Content blob from list responses; the
+	// UI fetches the detail endpoint to see it.
+	out := make([]fiber.Map, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, summarize(r))
+	}
+	resp["incidents"] = out
+	return resp
 }
 
 // resolve marks an incident as resolved. Idempotent: re-resolving an

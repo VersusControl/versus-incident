@@ -565,6 +565,13 @@ func TestScopedDeleteRoutes_ResolveToCorrectHandler(t *testing.T) {
 // the "manual" origin for EVERY row — an auto-discovered row returns
 // "manual":false EXPLICITLY (not dropped by omitempty) so the UI can always
 // render an Auto-vs-Manual origin column.
+//
+// This test intentionally does NOT load a global config: listServices' grace
+// computation (serviceGraceDuration) guards config access through
+// GetConfigOrNil and degrades to grace-disabled when config is unloaded, so the
+// handler must not panic here. Keeping the test config-free makes it
+// order-independent — it passes standalone (`-run TestListServices…`) as well
+// as in a full-package run where a sibling has already loaded config.
 func TestListServices_AlwaysSerializesManualFlag(t *testing.T) {
 	agent.SetCatalogStore(nil)
 	cat, err := agent.LoadCatalog(storage.NewMemory())
@@ -606,5 +613,89 @@ func TestListServices_AlwaysSerializesManualFlag(t *testing.T) {
 	}
 	if !body.Services["manual-svc"].Manual {
 		t.Errorf("manual-svc manual=false, want true")
+	}
+}
+
+// TestListServices_ReportsGraceStatus proves the services LIST now carries the
+// per-service grace status (in_grace + grace_seconds_remaining) that only the
+// service DETAIL endpoint used to return — the fix for the founder's bug where
+// the list showed every service as "tracked" even while it was still in grace.
+func TestListServices_ReportsGraceStatus(t *testing.T) {
+	agent.SetCatalogStore(nil)
+	loadServiceDetailConfig(t, "30m")
+
+	cat, err := agent.LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	cat.RegisterService("fresh")   // just seen → still inside its 30m grace
+	cat.RegisterService("expired") // seen, then forced out of grace
+	if !cat.EndServiceGrace("expired") {
+		t.Fatal("EndServiceGrace(expired) = false, want true")
+	}
+
+	ctrl := NewAgentController(cat, nil, nil, nil, nil, false)
+	app := fiber.New()
+	app.Get("/api/agent/services", ctrl.listServices)
+
+	code, body := getJSON(t, app, "/api/agent/services")
+	if code != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%v", code, body)
+	}
+	svcs, _ := body["services"].(map[string]any)
+
+	fresh, _ := svcs["fresh"].(map[string]any)
+	if fresh["in_grace"] != true {
+		t.Errorf("fresh in_grace = %v, want true (just registered, 30m grace)", fresh["in_grace"])
+	}
+	if rem, _ := fresh["grace_seconds_remaining"].(float64); rem <= 0 {
+		t.Errorf("fresh grace_seconds_remaining = %v, want > 0", rem)
+	}
+
+	expired, _ := svcs["expired"].(map[string]any)
+	if expired["in_grace"] != false {
+		t.Errorf("expired in_grace = %v, want false (grace ended)", expired["in_grace"])
+	}
+	if rem, _ := expired["grace_seconds_remaining"].(float64); rem != 0 {
+		t.Errorf("expired grace_seconds_remaining = %v, want 0", rem)
+	}
+}
+
+// TestListServices_GraceStatusAgreesWithDetail is the direct guard for the
+// list-vs-detail status inconsistency: both endpoints now derive grace from the
+// SAME graceStatus helper, so the "in grace" status they report for the same
+// service must agree.
+func TestListServices_GraceStatusAgreesWithDetail(t *testing.T) {
+	agent.SetCatalogStore(nil)
+	loadServiceDetailConfig(t, "30m")
+
+	cat, err := agent.LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	cat.RegisterService("api")
+
+	store := storage.NewMemory()
+	services.SetStorage(store)
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	ctrl := NewAgentController(cat, nil, nil, nil, nil, false)
+	app := fiber.New()
+	app.Get("/api/agent/services", ctrl.listServices)
+	app.Get("/api/agent/services/:name", ctrl.getServiceDetail)
+
+	_, list := getJSON(t, app, "/api/agent/services")
+	svcs, _ := list["services"].(map[string]any)
+	api, _ := svcs["api"].(map[string]any)
+
+	_, detail := getJSON(t, app, "/api/agent/services/api")
+
+	if api["in_grace"] != detail["in_grace"] {
+		t.Errorf("in_grace disagreement: list=%v detail=%v", api["in_grace"], detail["in_grace"])
+	}
+	lr, _ := api["grace_seconds_remaining"].(float64)
+	dr, _ := detail["grace_seconds_remaining"].(float64)
+	if diff := lr - dr; diff < -2 || diff > 2 {
+		t.Errorf("grace_seconds_remaining differ by >2s: list=%v detail=%v", lr, dr)
 	}
 }

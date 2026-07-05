@@ -208,6 +208,21 @@ export function PatternDetailPage() {
                     }
                   />
                 </dl>
+
+                <div className="mt-4">
+                  <div className="mb-1 text-2xs uppercase tracking-wider text-ink-300">
+                    Example log line
+                  </div>
+                  {data.samples && data.samples.length > 0 ? (
+                    <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-3 font-mono text-2xs leading-relaxed text-ink-100">
+                      {data.samples[data.samples.length - 1]}
+                    </pre>
+                  ) : (
+                    <p className="text-xs text-ink-400">
+                      No example captured yet
+                    </p>
+                  )}
+                </div>
               </div>
             </section>
 

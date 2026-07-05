@@ -32,7 +32,6 @@ data:
       {{- else if eq (include "versus-incident.storageType" .) "postgres" }}
       postgres:
         dsn: ${POSTGRES_DSN}
-        max_incidents: {{ .Values.storage.postgres.maxIncidents | default 1000 }}
       {{- end }}
 
     alert:

@@ -19,6 +19,7 @@ type ShadowEvent struct {
 	PatternID     string    `json:"pattern_id"`
 	Template      string    `json:"template"`
 	Source        string    `json:"source"`
+	Service       string    `json:"service,omitempty"` // attributed service (may be blank/_unknown)
 	RuleName      string    `json:"rule_name,omitempty"`
 	Verdict       string    `json:"verdict"` // "unknown" | "spike"
 	SampleMessage string    `json:"sample_message"`
@@ -107,7 +108,7 @@ func shadowKey(source, patternID string) string {
 // (source, pattern_id); repeat hits bump Count and Occurrences instead of
 // appending a new entry. `freq` is the number of signals observed in the
 // current worker tick.
-func (s *ShadowLog) Record(source, patternID, template, sample, rule, verdict string, freq int) {
+func (s *ShadowLog) Record(source, patternID, service, template, sample, rule, verdict string, freq int) {
 	if patternID == "" {
 		return
 	}
@@ -126,6 +127,9 @@ func (s *ShadowLog) Record(source, patternID, template, sample, rule, verdict st
 	if e, ok := s.events[k]; ok {
 		e.Template = template // keep refreshed as the miner refines it
 		e.Verdict = verdict
+		if service != "" {
+			e.Service = service
+		}
 		if rule != "" {
 			e.RuleName = rule
 		}
@@ -147,6 +151,7 @@ func (s *ShadowLog) Record(source, patternID, template, sample, rule, verdict st
 		PatternID:     patternID,
 		Template:      template,
 		Source:        source,
+		Service:       service,
 		RuleName:      rule,
 		Verdict:       verdict,
 		SampleMessage: sample,

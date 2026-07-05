@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
@@ -48,6 +49,16 @@ type Pattern struct {
 	Service string `json:"service,omitempty"`
 	// Tags are arbitrary operator-supplied markers.
 	Tags []string `json:"tags,omitempty"`
+	// Samples is a bounded ring (≤ SampleRingCap) of the most recent
+	// POST-REDACTION example log lines this pattern was learned from, ordered
+	// oldest→newest so the LATEST is Samples[len-1]. Populated inside
+	// Catalog.RecordSample via PushSample (re-scrubbed at the storage boundary);
+	// Signal.Raw is NEVER a source — the log brain passes the already-redacted
+	// Observation sample message. It rides the whole-blob catalog Persist with
+	// no new persistence wiring, is STRIPPED from the /api/agent/patterns list
+	// rows (surfaced only on the pattern detail read), and is `omitempty` so a
+	// pre-feature catalog reads back byte-identical.
+	Samples []string `json:"samples,omitempty"`
 }
 
 // ServiceInfo tracks when a service was first seen by the agent. Stored in
@@ -339,6 +350,31 @@ func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alph
 	}
 	c.dirty = true
 	return p
+}
+
+// RecordSample appends a redacted example log line to a pattern's bounded
+// sample ring (drop-oldest past SampleRingCap) and marks the catalog dirty, so
+// the ring rides the existing debounced Persist path (and, under an installed
+// CatalogStore, the same per-partition Persist) with NO new persistence wiring
+// — exactly like the Service re-point Upsert already carries. It is the log
+// brain's post-Upsert companion: the brain holds the pipeline's redactor and
+// passes the representative POST-REDACTION Observation message; Signal.Raw is
+// never a source. scrub re-scrubs the line at the storage boundary
+// (defence-in-depth) and MAY be nil. A missing pattern or empty sample is a
+// no-op. It stays OFF the store hot path (never calls Curate), so community and
+// single-instance behaviour is unchanged.
+func (c *Catalog) RecordSample(patternID, sample string, scrub core.Scrubber) {
+	if sample == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p, ok := c.patterns[patternID]
+	if !ok {
+		return
+	}
+	p.Samples = PushSample(p.Samples, sample, scrub)
+	c.dirty = true
 }
 
 // Label updates operator-curated metadata for a pattern.

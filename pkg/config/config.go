@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"fmt"
 	"os"
@@ -61,8 +62,7 @@ type StorageConfig struct {
 // Activated when storage.type == "postgres". A single Postgres backend
 // stores incidents, analyses, and blobs — no separate object store needed.
 type StoragePostgresConfig struct {
-	DSN          string `mapstructure:"dsn"`           // env: POSTGRES_DSN
-	MaxIncidents int    `mapstructure:"max_incidents"` // rolling cap; default 1000
+	DSN string `mapstructure:"dsn"` // env: POSTGRES_DSN
 }
 
 // StorageFileConfig is the file backend's options. Only consulted when
@@ -84,9 +84,8 @@ type StorageRedisConfig struct {
 
 // StorageDatabaseConfig is the database backend's options. Stub today.
 type StorageDatabaseConfig struct {
-	Driver       string `mapstructure:"driver"` // postgres | mysql | sqlite
-	DSN          string `mapstructure:"dsn"`
-	MaxIncidents int    `mapstructure:"max_incidents"`
+	Driver string `mapstructure:"driver"` // postgres | mysql | sqlite
+	DSN    string `mapstructure:"dsn"`
 }
 
 type ProxyConfig struct {
@@ -488,10 +487,71 @@ func GetConfig() *Config {
 	return cfg
 }
 
+// GetConfigOrNil returns the global config, or nil when it has not been loaded
+// yet. Unlike GetConfig it NEVER panics, so callers that only read optional
+// config can run on paths that may execute before Load (or in tests that don't
+// load config) and degrade safely by treating a nil return as "unconfigured".
+// Handlers must never mutate the returned pointer (golden rule #4).
+func GetConfigOrNil() *Config {
+	return cfg
+}
+
 func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 	// Clone the global cfg
 	clonedCfg := cloneConfig(cfg)
+	applyParamsOverwrite(clonedCfg, paramsOverwrite)
+	return clonedCfg
+}
 
+// GetConfigForAlert resolves the effective config for a single incident
+// emission, applying the runtime-override → YAML → default precedence on a
+// per-request CLONE (golden rule #4: global config is NEVER mutated).
+//
+// Precedence, highest wins, all on the clone:
+//  1. clone the global cfg                       (cloneConfig — never touch the global pointer)
+//  2. runtime channel override (creds + enable)  (applyAlertResolver — the runtime seam)
+//  3. per-incident routing params on top         (applyParamsOverwrite — slack_channel_id, …)
+//
+// Step 2 supplies a channel's CREDENTIALS + ENABLE from the runtime override
+// (nil-inert in OSS). Step 3 is the EXISTING per-incident routing overlay
+// (slack_channel_id, telegram_chat_id, email_to, msteams_other_power_url, …)
+// and still applies ON TOP of the resolved credentials — an operator who
+// rotated a token at runtime AND set a per-incident channel id both take
+// effect. Routing is a distinct axis from credential config, so layering them
+// keeps the two from fighting.
+//
+// OSS fast path: when no resolver is registered AND there are no params, this
+// returns the global cfg with NO clone — community behaviour is byte-for-byte
+// unchanged (one nil-check, zero allocation).
+//
+// ctx carries the effective org for a future multi-tenant build; the single-org
+// resolver uses its boot-pinned org (CreateIncident may pass context.Background).
+func GetConfigForAlert(ctx context.Context, paramsOverwrite *map[string]string) *Config {
+	hasParams := paramsOverwrite != nil && len(*paramsOverwrite) > 0
+	hasResolver := alertConfigResolver() != nil
+
+	// OSS fast path: nothing to overlay -> global cfg, no clone.
+	if !hasParams && !hasResolver {
+		return GetConfig()
+	}
+
+	clonedCfg := cloneConfig(cfg)
+	// Step 2: runtime channel override (fail-safe — a panicking/misbehaving
+	// resolver leaves the clone at its YAML floor, never breaking alerting).
+	applyAlertResolver(ctx, clonedCfg)
+	// Step 3: per-incident routing params overlay, unchanged, on top.
+	if hasParams {
+		applyParamsOverwrite(clonedCfg, paramsOverwrite)
+	}
+	return clonedCfg
+}
+
+// applyParamsOverwrite overlays the per-incident ROUTING params onto an
+// already-cloned config, in place. It is the existing per-incident overlay
+// (slack_channel_id, telegram_chat_id, email_to, …, oncall_*), extracted so the
+// runtime channel override can slot BENEATH it in GetConfigForAlert. It must
+// only ever be handed a clone — it mutates its argument.
+func applyParamsOverwrite(clonedCfg *Config, paramsOverwrite *map[string]string) {
 	if v := (*paramsOverwrite)["slack_channel_id"]; v != "" {
 		clonedCfg.Alert.Slack.ChannelID = v
 	}
@@ -587,6 +647,4 @@ func GetConfigWitParamsOverwrite(paramsOverwrite *map[string]string) *Config {
 			}
 		}
 	}
-
-	return clonedCfg
 }

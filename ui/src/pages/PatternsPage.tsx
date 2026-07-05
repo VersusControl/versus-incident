@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Search, Trash2 } from "lucide-react";
+import { Check, Eye, Search, Trash2 } from "lucide-react";
 import { api, type Pattern } from "@/lib/api";
 import { displayService, fmtAbs, fmtRel } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
@@ -13,12 +13,28 @@ import { AutoRefreshControl } from "@/components/AutoRefreshControl";
 import { useAutoRefresh } from "@/lib/useAutoRefresh";
 import { EmptyState } from "@/components/feedback";
 import { SegmentedControl } from "@/components/SegmentedControl";
-import { ClickableRow } from "@/components/DataTable";
 import { PeekPanel } from "@/components/PeekPanel";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { ServiceCell } from "@/components/ServiceCell";
+import { ReassignModal, ServiceCell } from "@/components/ServiceCell";
+import {
+  BulkActionBar,
+  RowSelectCheckbox,
+  SelectAllCheckbox,
+} from "@/components/BulkActionBar";
+import {
+  useIntelLicensed,
+  useLearnExclusions,
+} from "@/lib/useLearnExclusions";
+import {
+  countExcluded,
+  filterByScope,
+  isExclusionScope,
+  SCOPE_PARAM,
+} from "@/lib/rowActions";
+import { buildLogsBulkActions } from "@/lib/bulkSelect";
+import { useBulkSelection } from "@/lib/useBulkSelection";
 import { Pagination } from "@/components/Pagination";
 import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
@@ -48,6 +64,7 @@ export function PatternsPage() {
   const toast = useToast();
   const [params] = useSearchParams();
   const verdictFilter = params.get(VERDICT_PARAM) ?? "all";
+  const scope = isExclusionScope(params.get(SCOPE_PARAM));
 
   const refresh = useAutoRefresh();
   const { data, isLoading, isError, error, refetch, isRefetching } = useQuery({
@@ -57,10 +74,24 @@ export function PatternsPage() {
   });
 
   const [q, setQ] = useState("");
-  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [peekId, setPeekId] = useState<string | null>(null);
+  // Bulk reassign: the selected pattern ids captured when "Assign to service"
+  // is picked in the action bar (null = modal closed). Reassign is one flow for
+  // one row or many — a single-row correction is just a one-row selection.
+  const [reassignMatches, setReassignMatches] = useState<string[] | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
-  const [bulkBusy, setBulkBusy] = useState(false);
+
+  // Disable-Learn (X30 / E1) control. Log learning is OSS, so listPatterns
+  // succeeds regardless of license — an explicit enterprise probe decides
+  // whether the surface is licensed. Exclusion here is at the per-PATTERN grain
+  // (E1): ignoring one log pattern holds out ONLY that pattern, keyed on its
+  // stable id — the log analogue of the metric/trace per-signal exclusion
+  // (whole-service exclusion still lives on the service detail page). The action
+  // lives in the checkbox action bar (Ignore/Resume) and renders only for a
+  // licensed admin (runtime:manage); it is absent on community / OSS and hidden
+  // from a viewer (excl.visible).
+  const licensed = useIntelLicensed();
+  const excl = useLearnExclusions(licensed);
 
   // ----- inline verdict mutation: optimistic with rollback + Undo ---------
   const verdictMutation = useMutation<
@@ -107,39 +138,6 @@ export function PatternsPage() {
     },
     onSettled: () => qc.invalidateQueries({ queryKey: ["patterns"] }),
   });
-
-  // ----- bulk labeling: sequential PATCHes with progress + retry ----------
-  async function runBulk(ids: string[], verdict: string) {
-    setBulkBusy(true);
-    toast.push({ tone: "info", title: `Labeling ${ids.length} patterns…` });
-    const failed: string[] = [];
-    let lastError = "";
-    for (const id of ids) {
-      try {
-        await api.updatePattern(id, { verdict });
-      } catch (e) {
-        failed.push(id);
-        lastError = e instanceof Error ? e.message : String(e);
-      }
-    }
-    await qc.invalidateQueries({ queryKey: ["patterns"] });
-    setBulkBusy(false);
-    if (failed.length === 0) {
-      toast.push({ tone: "ok", title: `${ids.length}/${ids.length} labeled` });
-      setSelected(new Set());
-    } else {
-      toast.push({
-        tone: "error",
-        title: `${ids.length - failed.length}/${ids.length} labeled`,
-        description: `${failed.length} failed${lastError ? ` — ${lastError}` : ""}`,
-        action: {
-          label: "Retry failed",
-          onClick: () => void runBulk(failed, verdict),
-        },
-      });
-      setSelected(new Set(failed));
-    }
-  }
 
   // ----- clear all logs: destructive reset of every learned log pattern -----
   const reset = useMutation({
@@ -189,34 +187,79 @@ export function PatternsPage() {
     };
   }, [data]);
 
-  // ----- pagination (100/page) — resets to page 1 when the verdict filter or
-  // search changes so a filter never strands the operator on an empty page.
-  const pg = usePagination(filtered, { resetKey: `${verdictFilter}|${q}` });
+  // ----- Active | Ignored scope (D3) --------------------------------------
+  // A log row is "ignored" when its PATTERN is held out of learning (E1, keyed
+  // on the pattern's stable id). The scope control is gated on excl.visible —
+  // absent for community / viewers, so scope stays "active" and nothing is
+  // partitioned out. The server stays authority: this only re-partitions what
+  // the loaded policy already reports.
+  const isRowExcluded = (p: Pattern) => excl.isPatternExcluded(p.id);
+  const scopeCounts = useMemo(
+    () => ({
+      active: filtered.length - countExcluded(filtered, isRowExcluded),
+      ignored: countExcluded(filtered, isRowExcluded),
+    }),
+    // isRowExcluded closes over excl; recompute when the policy or list changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filtered, excl],
+  );
+  const scoped = useMemo(
+    () =>
+      excl.visible ? filterByScope(filtered, scope, isRowExcluded) : filtered,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filtered, scope, excl],
+  );
 
-  // ----- selection ---------------------------------------------------------
-  const toggleOne = (id: string) =>
-    setSelected((cur) => {
-      const next = new Set(cur);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  // ----- pagination (100/page) — resets to page 1 when the verdict filter,
+  // scope tab, or search changes so a filter never strands the operator on an
+  // empty page.
+  const pg = usePagination(scoped, {
+    resetKey: `${verdictFilter}|${scope}|${q}`,
+  });
 
-  // "Select all visible" is scoped to the rendered page so bulk actions stay
-  // bounded even on a multi-thousand-row catalog.
-  const visibleIds = pg.pageItems.map((p) => p.id);
-  const allSelected =
-    visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
-  const someSelected = visibleIds.some((id) => selected.has(id));
-  const toggleAll = () =>
-    setSelected((cur) => {
-      const next = new Set(cur);
-      if (allSelected) visibleIds.forEach((id) => next.delete(id));
-      else visibleIds.forEach((id) => next.add(id));
-      return next;
-    });
+  // ----- selection + action bar -------------------------------------------
+  // The checkbox selection is the ONE row-action model: a select-all checkbox
+  // in the header, a checkbox per row, and an action bar that APPEARS when rows
+  // are selected (no per-row ⋯ menu). Logs actions = relabel (Mark known / Clear
+  // verdict, ungated) + Ignore/Resume (gated on the exclude surface) +
+  // Assign-to-service (always — log attribution override is OSS). Selection
+  // resets on verdict / scope / search / PAGE change.
+  const bulkActions = buildLogsBulkActions({ scope, excludeVisible: excl.visible });
+  const bulkEnabled = bulkActions.length > 0;
+  const pageKeys = useMemo(() => pg.pageItems.map((p) => p.id), [pg.pageItems]);
+  const bulk = useBulkSelection(
+    pageKeys,
+    `${verdictFilter}|${scope}|${q}|${pg.page}`,
+  );
 
-  // ----- keyboard: j/k rows · Enter peek · x select · K known · S spike ----
+  const onBulkAction = (spec: { id: string }) => {
+    const ids = bulk.selectedKeys;
+    switch (spec.id) {
+      case "reassign":
+        // Open the picker for the selection; keep the selection until the modal
+        // finishes (onDone clears it). Every other action fires immediately.
+        setReassignMatches([...ids]);
+        return;
+      case "mark-known":
+        ids.forEach((id) => verdictMutation.mutate({ id, verdict: "known" }));
+        break;
+      case "clear-verdict":
+        ids.forEach((id) => verdictMutation.mutate({ id, verdict: "" }));
+        break;
+      case "ignore":
+        excl.togglePatterns(ids, true);
+        break;
+      case "resume":
+        excl.togglePatterns(ids, false);
+        break;
+    }
+    bulk.clear();
+  };
+
+  // Columns: Service, Template, Count, Normal, Verdict, Action (+ checkbox).
+  const cols = 6 + (bulkEnabled ? 1 : 0);
+
+  // ----- keyboard: j/k rows · Enter view · K known -------------------------
   const keys = useTableKeys({
     size: pg.pageItems.length,
     onOpen: (i) => {
@@ -226,10 +269,6 @@ export function PatternsPage() {
     extra: (key, index) => {
       const row = pg.pageItems[index];
       if (!row) return false;
-      if (key === "x") {
-        toggleOne(row.id);
-        return true;
-      }
       if (key === "K") {
         verdictMutation.mutate({ id: row.id, verdict: "known" });
         return true;
@@ -238,16 +277,8 @@ export function PatternsPage() {
     },
   });
 
-  // Esc clears the bulk selection too (the hook only resets the active row).
   // The PeekPanel owns Escape while open (document capture + stopPropagation).
   const onTableKeyDown = (e: React.KeyboardEvent) => {
-    if (
-      e.key === "Escape" &&
-      !(e.target as HTMLElement).hasAttribute("data-page-search") &&
-      selected.size > 0
-    ) {
-      setSelected(new Set());
-    }
     keys.containerProps.onKeyDown(e);
   };
 
@@ -290,6 +321,21 @@ export function PatternsPage() {
               { value: "known", label: "Known", badge: counts?.known },
             ]}
           />
+          {excl.visible && (
+            <SegmentedControl
+              param={SCOPE_PARAM}
+              defaultValue="active"
+              aria-label="Learning scope"
+              options={[
+                { value: "active", label: "Active", badge: scopeCounts.active },
+                {
+                  value: "ignored",
+                  label: "Ignored",
+                  badge: scopeCounts.ignored,
+                },
+              ]}
+            />
+          )}
           <div className="relative w-full max-w-md sm:w-auto sm:flex-1">
             <Search
               size={12}
@@ -316,6 +362,15 @@ export function PatternsPage() {
           />
         ) : (
           <div className="card overflow-hidden">
+            {bulkEnabled && bulk.count > 0 && (
+              <BulkActionBar
+                count={bulk.count}
+                actions={bulkActions}
+                onAction={onBulkAction}
+                onClear={bulk.clear}
+                busy={excl.busy || verdictMutation.isPending}
+              />
+            )}
             <div
               tabIndex={0}
               onKeyDown={onTableKeyDown}
@@ -324,6 +379,14 @@ export function PatternsPage() {
               <table className="ddt">
                 <thead>
                   <tr>
+                    {bulkEnabled && (
+                      <th className="w-8">
+                        <SelectAllCheckbox
+                          state={bulk.headerState}
+                          onChange={bulk.toggleAll}
+                        />
+                      </th>
+                    )}
                     <th className="w-36">Service</th>
                     <th className="whitespace-nowrap">
                       Template
@@ -357,28 +420,16 @@ export function PatternsPage() {
                         example="A login-error template shows 'Still learning 40 / 100' — 40 of the ~100 sightings it needs; once you're sure it's harmless you mark it 'Known' and it stops alerting, but if it later floods in it flips to 'Spike'."
                       />
                     </th>
-                    <th className="w-24">
-                      <div className="flex items-center gap-1.5">
-                        <span>Actions</span>
-                        <input
-                          type="checkbox"
-                          aria-label="Select all visible patterns"
-                          className="h-3.5 w-3.5 accent-accent"
-                          checked={allSelected}
-                          ref={(el) => {
-                            if (el) el.indeterminate = !allSelected && someSelected;
-                          }}
-                          onChange={toggleAll}
-                        />
-                      </div>
+                    <th className="w-12 text-right">
+                      <span className="sr-only">Action</span>
                     </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {isLoading && <SkRows rows={8} cols={6} />}
-                  {!isLoading && filtered.length === 0 && (
+                  {isLoading && <SkRows rows={8} cols={cols} />}
+                  {!isLoading && scoped.length === 0 && (
                     <tr>
-                      <td colSpan={6}>
+                      <td colSpan={cols}>
                         {data && data.length === 0 ? (
                           <EmptyState
                             title="No patterns learned yet"
@@ -388,6 +439,11 @@ export function PatternsPage() {
                                 Learning metrics or traces? See Metrics
                               </Link>
                             }
+                          />
+                        ) : scope === "ignored" ? (
+                          <EmptyState
+                            title="No patterns ignored"
+                            hint="Select a noisy pattern and choose Ignore from the action bar and it moves here, held out of learning until you resume it."
                           />
                         ) : verdictFilter === "uncurated" && !q.trim() ? (
                           <EmptyState title="No patterns still learning — the catalog is fully labeled." />
@@ -401,18 +457,21 @@ export function PatternsPage() {
                     </tr>
                   )}
                   {pg.pageItems.map((p, i) => (
-                    <ClickableRow
-                      key={p.id}
-                      onOpen={() => setPeekId(p.id)}
-                      {...keys.rowProps(i)}
-                    >
+                    <tr key={p.id} {...keys.rowProps(i)}>
+                      {bulkEnabled && (
+                        <td className="w-8">
+                          <RowSelectCheckbox
+                            checked={bulk.isSelected(p.id)}
+                            onChange={() => bulk.toggle(p.id)}
+                            label={`Select pattern ${p.id}`}
+                          />
+                        </td>
+                      )}
                       <td className="font-mono text-2xs text-ink-300">
                         <ServiceCell
                           service={p.service}
                           sourceType="log"
                           match={p.id}
-                          label={p.id}
-                          invalidateKeys={[["patterns"]]}
                         />
                       </td>
                       <td className="max-w-0">
@@ -464,15 +523,19 @@ export function PatternsPage() {
                         </div>
                       </td>
                       <td>
-                        <input
-                          type="checkbox"
-                          aria-label={`Select pattern ${p.id}`}
-                          className="h-3.5 w-3.5 accent-accent"
-                          checked={selected.has(p.id)}
-                          onChange={() => toggleOne(p.id)}
-                        />
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            type="button"
+                            className="btn p-1"
+                            aria-label={`View pattern ${p.id}`}
+                            title="View details"
+                            onClick={() => setPeekId(p.id)}
+                          >
+                            <Eye size={14} aria-hidden />
+                          </button>
+                        </div>
                       </td>
-                    </ClickableRow>
+                    </tr>
                   ))}
                 </tbody>
               </table>
@@ -481,42 +544,6 @@ export function PatternsPage() {
           </div>
         )}
       </main>
-
-      {/* Bulk action bar — appears on selection; sequential PATCHes. */}
-      {selected.size > 0 && (
-        <div
-          role="toolbar"
-          aria-label="Bulk pattern actions"
-          className="fixed bottom-4 left-1/2 z-overlay flex -translate-x-1/2 flex-wrap items-center
-                     gap-2 rounded-card border border-ink-500 bg-surface-raised px-4 py-2.5 shadow-overlay"
-        >
-          <span className="text-xs font-medium tabular-nums text-ink-50">
-            {selected.size} selected
-          </span>
-          <button
-            className="btn"
-            disabled={bulkBusy}
-            onClick={() => void runBulk([...selected], "known")}
-          >
-            <Check size={12} /> Mark known
-          </button>
-          <button
-            className="btn"
-            disabled={bulkBusy}
-            onClick={() => void runBulk([...selected], "")}
-          >
-            Clear verdict
-          </button>
-          <button
-            aria-label="Clear selection"
-            className="text-2xs text-ink-300 hover:text-ink-100"
-            disabled={bulkBusy}
-            onClick={() => setSelected(new Set())}
-          >
-            Esc
-          </button>
-        </div>
-      )}
 
       {/* Peek panel — inspect without losing list position. No sparkline:
           the API exposes no bucketed counts (UX_REDESIGN §3.5 ask #6), so the
@@ -622,6 +649,18 @@ export function PatternsPage() {
           error={reset.error}
           onConfirm={() => reset.mutate()}
           onClose={() => setConfirmReset(false)}
+        />
+      )}
+
+      {/* Reassign picker — opened from the "Assign to service" action in the
+          checkbox action bar; reassigns the selected pattern(s). */}
+      {reassignMatches && (
+        <ReassignModal
+          sourceType="log"
+          matches={reassignMatches}
+          invalidateKeys={[["patterns"]]}
+          onClose={() => setReassignMatches(null)}
+          onDone={() => bulk.clear()}
         />
       )}
     </>

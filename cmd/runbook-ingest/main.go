@@ -73,13 +73,11 @@ func main() {
 			MaxIncidents:       cfg.Storage.Redis.MaxIncidents,
 		},
 		Database: storage.DatabaseOptions{
-			Driver:       cfg.Storage.Database.Driver,
-			DSN:          cfg.Storage.Database.DSN,
-			MaxIncidents: cfg.Storage.Database.MaxIncidents,
+			Driver: cfg.Storage.Database.Driver,
+			DSN:    cfg.Storage.Database.DSN,
 		},
 		Postgres: storage.PostgresOptions{
-			DSN:          cfg.Storage.Postgres.DSN,
-			MaxIncidents: cfg.Storage.Postgres.MaxIncidents,
+			DSN: cfg.Storage.Postgres.DSN,
 		},
 	})
 	if err != nil {

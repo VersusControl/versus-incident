@@ -23,6 +23,7 @@ package storage
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -83,6 +84,37 @@ func NormalizeOrgID(s string) string {
 	return s
 }
 
+// Origin is the coarse, tier-neutral classifier for HOW an incident
+// entered the system. It is deliberately small and extensible: the UI
+// separates the AI-detected feed from the inbound-alert firehose so a
+// flood of webhook incidents cannot bury the high-signal ones. New
+// origins (e.g. a future "api" or "scheduler" source) can be added
+// without changing existing rows.
+const (
+	// OriginAIDetect marks incidents emitted by the AI detect agent
+	// (services.CreateIncidentFromFinding).
+	OriginAIDetect = "ai_detect"
+	// OriginWebhook marks incidents ingested from an inbound alert —
+	// the public webhook plus every transport hint (sns, sqs, ...).
+	OriginWebhook = "webhook"
+)
+
+// OriginFromSource derives an Origin from the durable Source label. It is
+// the back-compat path for records persisted before the Origin field
+// existed: agent-emitted incidents carry a Source of "agent" or
+// "agent:<...>", so they classify as OriginAIDetect; every other Source
+// (webhook/sns/sqs/empty) is inbound ingestion and classifies as
+// OriginWebhook. Choosing OriginWebhook for the unknown/empty case never
+// misattributes an inbound alert as AI-detected — the conservative
+// default the UI relies on.
+func OriginFromSource(source string) string {
+	s := strings.TrimSpace(source)
+	if s == "agent" || strings.HasPrefix(s, "agent:") {
+		return OriginAIDetect
+	}
+	return OriginWebhook
+}
+
 // Provider is the storage interface used by the agent and incident
 // service.
 type Provider interface {
@@ -105,9 +137,10 @@ type Provider interface {
 
 	// SaveIncident appends a new incident to the store. Subsequent
 	// SaveIncident calls with the same ID overwrite the existing record
-	// (used by the ack path). Implementations are responsible for
-	// trimming the history to a sane upper bound — the file backend
-	// caps at MaxIncidents.
+	// (used by the ack path). The file backend caps its single-file
+	// history at MaxIncidents (dropping the oldest on save); database
+	// backends keep history unbounded and rely on storage.Lifecycle for
+	// retention instead.
 	SaveIncident(rec *IncidentRecord) error
 	// UpdateIncidentAck stamps an existing incident as acknowledged.
 	// Returns ErrNotFound when the id is unknown.
@@ -161,6 +194,22 @@ type Searcher interface {
 	// case-insensitive query, newest first. limit <= 0 returns the
 	// full window.
 	SearchAnalyses(query string, limit int) ([]*AnalysisRecord, error)
+}
+
+// RangeLister is an optional capability a backend may implement on top of
+// Provider: return only the incidents whose CreatedAt falls in a
+// [start, end) window, newest first. It exists so a large backend
+// (Postgres, enterprise/HA) can push the CreatedAt bound into SQL and avoid
+// scanning the full history for a windowed aggregate report. OSS never
+// requires it — the aggregate assembler type-asserts it (mirror of Searcher)
+// and falls back to ListIncidents(0) + an in-service CreatedAt filter when a
+// backend does not implement it, so file/memory backends work unchanged.
+// end.IsZero() means "no upper bound" (open-ended window).
+type RangeLister interface {
+	// ListIncidentsInRange returns incidents with start <= CreatedAt < end,
+	// newest first. limit <= 0 returns the full window. A zero end is
+	// treated as an open upper bound (all incidents at or after start).
+	ListIncidentsInRange(start, end time.Time, limit int) ([]*IncidentRecord, error)
 }
 
 // Lifecycle is an optional capability a backend may implement on top of
@@ -224,11 +273,18 @@ type IncidentRecord struct {
 	// storage.DefaultOrgID ("default") so single-tenant OSS users never
 	// see or set it; enterprise multi-tenant routing reads it to isolate
 	// orgs.
-	OrgID    string `json:"org_id,omitempty"`
-	TeamID   string `json:"team_id,omitempty"`
-	Title    string `json:"title,omitempty"`
-	Source   string `json:"source,omitempty"`  // "webhook" | "sns" | "sqs" | ...
-	Service  string `json:"service,omitempty"` // best-effort from payload
+	OrgID   string `json:"org_id,omitempty"`
+	TeamID  string `json:"team_id,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Source  string `json:"source,omitempty"`  // "webhook" | "sns" | "sqs" | ...
+	Service string `json:"service,omitempty"` // best-effort from payload
+	// Origin is the coarse classifier for how the incident entered the
+	// system: OriginAIDetect (agent detect emit) or OriginWebhook
+	// (inbound alert ingestion). Stamped at creation on both paths. Legacy
+	// records persisted before this field default to empty on disk;
+	// EffectiveOrigin derives a value from Source so they are never
+	// miscounted.
+	Origin   string `json:"origin,omitempty"`
 	Resolved bool   `json:"resolved"`
 	// ChannelsEnabled is the snapshot of channels that were configured
 	// when the alert fired. ChannelsNotified is the subset that
@@ -257,6 +313,18 @@ type IncidentRecord struct {
 	// holds the references. Empty means unassigned.
 	AssignedTeamID    string   `json:"assigned_team_id,omitempty"`
 	AssignedMemberIDs []string `json:"assigned_member_ids,omitempty"`
+}
+
+// EffectiveOrigin returns the record's explicit Origin, or derives one
+// from Source when Origin is empty — the case for records persisted
+// before the Origin field existed. Callers that classify or count by
+// origin MUST use this rather than reading Origin directly so legacy rows
+// are attributed instead of dropped into an "" bucket.
+func (r *IncidentRecord) EffectiveOrigin() string {
+	if r.Origin != "" {
+		return r.Origin
+	}
+	return OriginFromSource(r.Source)
 }
 
 // AnalysisRecord is the durable shape of one analyze-mode run. The

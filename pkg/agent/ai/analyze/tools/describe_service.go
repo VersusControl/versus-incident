@@ -53,6 +53,9 @@ type describePatternEntry struct {
 	Count    int     `json:"count"`
 	Baseline float64 `json:"baseline"`
 	Verdict  string  `json:"verdict,omitempty"`
+	// Sample is the latest REDACTED example log line for the pattern (only the
+	// most recent one, to save tokens in the compact per-service listing).
+	Sample string `json:"sample,omitempty"`
 }
 
 // Invoke implements core.AnalyzeTool.
@@ -91,13 +94,17 @@ func (d DescribeService) Invoke(_ context.Context, args json.RawMessage) (*core.
 		if !strings.EqualFold(p.Service, a.Service) {
 			continue
 		}
-		matches = append(matches, describePatternEntry{
+		entry := describePatternEntry{
 			ID:       p.ID,
 			Template: p.Template,
 			Count:    p.Count,
 			Baseline: p.Baseline,
 			Verdict:  p.Verdict,
-		})
+		}
+		if s := latestSamples(p.Samples, 1); len(s) > 0 {
+			entry.Sample = s[0]
+		}
+		matches = append(matches, entry)
 	}
 	sort.SliceStable(matches, func(i, j int) bool {
 		return matches[i].Count > matches[j].Count

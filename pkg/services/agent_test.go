@@ -75,6 +75,9 @@ func TestCreateIncidentFromFinding_HighSeverityNoOnCall(t *testing.T) {
 	if got[0].Source != "agent:metrics:ec2-i-0abcd1234" {
 		t.Fatalf("Source = %q, want agent:metrics:ec2-i-0abcd1234", got[0].Source)
 	}
+	if got[0].Origin != storage.OriginAIDetect {
+		t.Fatalf("Origin = %q, want %q (AI detect emit)", got[0].Origin, storage.OriginAIDetect)
+	}
 	if got[0].OnCallTriggered {
 		t.Fatal("OnCallTriggered should be false when the on-call workflow is not initialized")
 	}

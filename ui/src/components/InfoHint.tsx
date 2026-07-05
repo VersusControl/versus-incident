@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Info } from "lucide-react";
+import { ExternalLink, Info } from "lucide-react";
 import clsx from "clsx";
 import { PeekPanel } from "./PeekPanel";
 
@@ -11,14 +11,23 @@ import { PeekPanel } from "./PeekPanel";
 // `example` is optional: when set it renders below the main text as a
 // visually distinct, muted "Example" block so a non-expert operator can
 // anchor the explanation to a concrete case.
+//
+// `href` is optional: when set the panel renders a "Learn more" link at the
+// bottom (opens in a new tab) so the icon doubles as a discoverable pointer to
+// the full documentation page — used by the settings sections that link into
+// the docsify docs site.
 export function InfoHint({
   text,
   label,
   example,
+  href,
+  linkLabel = "Learn more",
 }: {
   text: string;
   label?: string;
   example?: string;
+  href?: string;
+  linkLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -61,6 +70,17 @@ export function InfoHint({
               {example}
             </p>
           </div>
+        )}
+        {href && (
+          <a
+            href={href}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-3 inline-flex items-center gap-1 text-xs font-medium normal-case text-link hover:underline"
+          >
+            {linkLabel}
+            <ExternalLink size={12} aria-hidden />
+          </a>
         )}
       </PeekPanel>
     </>

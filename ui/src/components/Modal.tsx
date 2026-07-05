@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import clsx from "clsx";
 
@@ -7,7 +8,15 @@ import clsx from "clsx";
 // shortcut overlay). It provides what the audited plain-div modals lacked:
 // role="dialog" + aria-modal + labelled title, Escape-to-close, a focus
 // trap, initial focus, focus restore on close, and body scroll lock.
-// Dep-free by design.
+//
+// It renders through a portal to document.body so the fixed backdrop is always
+// centered in the VIEWPORT — not clipped to whatever ancestor happens to
+// establish a containing block. This bit the incident-detail Resolve dialog:
+// it mounts inside the sticky PageHeader, whose `backdrop-blur` (a
+// backdrop-filter) makes the header a containing block for fixed descendants,
+// so an inline `position: fixed` modal was constrained to the header strip
+// instead of overlaying the page. The portal escapes that entirely.
+// Dep-free by design (createPortal ships with react-dom).
 const FOCUSABLE =
   "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
@@ -68,7 +77,7 @@ export function Modal({
     };
   }, [onClose, closeDisabled]);
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-modal flex items-center justify-center bg-black/50 p-4"
       onClick={() => !closeDisabled && onClose()}
@@ -107,6 +116,7 @@ export function Modal({
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

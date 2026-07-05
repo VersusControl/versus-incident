@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
 import { api } from "@/lib/api";
+import { SYSTEM_PROMPT_PARENT } from "@/lib/systemPromptNav";
 import { TopBar } from "@/components/TopBar";
 import { SkCard } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
@@ -21,7 +22,7 @@ export function SystemPromptPage() {
         title="System prompt"
         subtitle="Constant header sent to the model on every detect-mode AI call."
         actions={
-          <Link to="/agent/decisions" className="btn">
+          <Link to={SYSTEM_PROMPT_PARENT} className="btn">
             <ArrowLeft size={12} aria-hidden /> Back
           </Link>
         }

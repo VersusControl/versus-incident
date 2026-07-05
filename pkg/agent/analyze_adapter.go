@@ -128,6 +128,7 @@ func toView(p *Pattern) analyzetools.PatternView {
 		Baseline:  p.BaselineFrequency,
 		FirstSeen: p.FirstSeen,
 		LastSeen:  p.LastSeen,
+		Samples:   append([]string(nil), p.Samples...),
 	}
 }
 

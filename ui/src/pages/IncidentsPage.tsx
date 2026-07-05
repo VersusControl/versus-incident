@@ -4,7 +4,6 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
-  type QueryKey,
 } from "@tanstack/react-query";
 import {
   CheckCircle2,
@@ -13,19 +12,23 @@ import {
   Search,
   UserPlus,
 } from "lucide-react";
-import { api, type IncidentSummary } from "@/lib/api";
+import { api, type IncidentIndex, type IncidentSummary } from "@/lib/api";
 import { fmtAbs, fmtRel, incidentTitle, truncate } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
 import {
   INCIDENT_STATUS_VALUES,
   filterIncidentsByText,
+  formatOriginCounts,
+  incidentResetKey,
   matchesStatus,
+  normalizeOrigin,
+  originLabel,
   type IncidentStatusFilter,
 } from "@/lib/incidentList";
 import { usePagination } from "@/lib/pagination";
 import { TopBar } from "@/components/TopBar";
 import { Pill, SourceBadge } from "@/components/Pill";
-import { EmptyState } from "@/components/feedback";
+import { EmptyState, EmptyValue } from "@/components/feedback";
 import { AssignDialog } from "@/components/AssignDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ClickableRow } from "@/components/DataTable";
@@ -34,6 +37,7 @@ import { SegmentedControl } from "@/components/SegmentedControl";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SkLine, SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
+import { ReportsButton } from "@/components/ReportsDialog";
 import { useToast } from "@/components/toastContext";
 
 type StatusFilter = IncidentStatusFilter;
@@ -41,7 +45,7 @@ type StatusFilter = IncidentStatusFilter;
 const STATUS_VALUES = INCIDENT_STATUS_VALUES;
 
 // Column count for colSpan cells (skeleton / empty / notify-error rows):
-// sev · when · service · title · channels · assigned · notify · status · id · actions
+// service · sev · when · title · channels · assigned · notify · status · id · actions
 const COLS = 10;
 
 // useDebounced returns a value that only updates after `delay` ms of no
@@ -73,6 +77,10 @@ export function IncidentsPage() {
   )
     ? (rawStatus as StatusFilter)
     : "open";
+  // Origin tab: AI-detected is the high-signal DEFAULT so a flood of
+  // webhook incidents never buries it; webhook is one click away. The
+  // rows are fetched per-origin so the AI tab never loads the firehose.
+  const origin = normalizeOrigin(params.get("origin"));
 
   // Dialog state lives at page level so the table-level keyboard shortcuts
   // (a = assign, r = resolve) can open them for the active row.
@@ -100,10 +108,17 @@ export function IncidentsPage() {
   const useServerSearch = searchSupported && trimmed !== "";
 
   const { data, isLoading, isError, error, refetch, isRefetching } = useQuery({
-    queryKey: useServerSearch ? ["incidents", "search", trimmed] : ["incidents"],
+    queryKey: useServerSearch
+      ? ["incident-index", "search", trimmed, origin]
+      : ["incident-index", origin],
     queryFn: () =>
-      useServerSearch ? api.searchIncidents(trimmed) : api.listIncidents(),
+      useServerSearch
+        ? api.searchIncidentsIndex(trimmed, { origin })
+        : api.listIncidentsIndex({ origin }),
   });
+  // rows for the active origin tab; originCounts is whole-set so the
+  // top-bar shows both feeds separately regardless of the active tab.
+  const originCounts = data?.counts;
 
   // Roster lookups are shared by every row — resolve them once here.
   const teamsQ = useQuery({ queryKey: ["teams"], queryFn: api.listTeams });
@@ -128,8 +143,8 @@ export function IncidentsPage() {
   const textFiltered = useMemo(
     // When the server already ran the text search, don't re-filter on text
     // (it matches fields the client can't see, e.g. payload body).
-    () => filterIncidentsByText(data, q, useServerSearch),
-    [data, q, useServerSearch],
+    () => filterIncidentsByText(data?.incidents, q, useServerSearch),
+    [data?.incidents, q, useServerSearch],
   );
 
   const counts = useMemo(
@@ -147,9 +162,11 @@ export function IncidentsPage() {
   );
 
   // Paginate at 100/page AFTER filter/search. Reset to page 1 whenever the
-  // status filter or the search text changes so a filter never strands the
-  // operator on a now-empty page.
-  const pg = usePagination(filtered, { resetKey: `${status}|${trimmed}` });
+  // origin tab, status filter, or search text changes so a filter never
+  // strands the operator on a now-empty page.
+  const pg = usePagination(filtered, {
+    resetKey: incidentResetKey(origin, status, trimmed),
+  });
 
   // Resolve is optimistic (§2.4): cache flips immediately, rollback +
   // error toast with Retry on failure, invalidate on settle.
@@ -158,22 +175,33 @@ export function IncidentsPage() {
     onMutate: async (i) => {
       setResolveFor(null);
       await qc.cancelQueries({ queryKey: ["incidents"] });
-      const prev = qc.getQueriesData<IncidentSummary[]>({
+      await qc.cancelQueries({ queryKey: ["incident-index"] });
+      // Two cache shapes carry incidents: the plain arrays behind
+      // ["incidents"] (TopBar/Sidebar/Now badges, analyses lookup) and
+      // this page's origin index behind ["incident-index"]. Flip the
+      // resolved row in both, snapshotting each for rollback.
+      const prevArrays = qc.getQueriesData<IncidentSummary[]>({
         queryKey: ["incidents"],
       });
+      const prevIndex = qc.getQueriesData<IncidentIndex>({
+        queryKey: ["incident-index"],
+      });
+      const flip = (x: IncidentSummary) =>
+        x.id === i.id
+          ? { ...x, resolved: true, resolved_at: new Date().toISOString() }
+          : x;
       qc.setQueriesData<IncidentSummary[]>({ queryKey: ["incidents"] }, (old) =>
-        old?.map((x) =>
-          x.id === i.id
-            ? { ...x, resolved: true, resolved_at: new Date().toISOString() }
-            : x,
-        ),
+        old?.map(flip),
       );
-      return { prev };
+      qc.setQueriesData<IncidentIndex>(
+        { queryKey: ["incident-index"] },
+        (old) => (old ? { ...old, incidents: old.incidents.map(flip) } : old),
+      );
+      return { prevArrays, prevIndex };
     },
     onError: (err, i, ctx) => {
-      ctx?.prev.forEach(([key, snap]: [QueryKey, IncidentSummary[] | undefined]) =>
-        qc.setQueryData(key, snap),
-      );
+      ctx?.prevArrays.forEach(([key, snap]) => qc.setQueryData(key, snap));
+      ctx?.prevIndex.forEach(([key, snap]) => qc.setQueryData(key, snap));
       toast.push({
         tone: "error",
         title: "Resolve failed",
@@ -191,6 +219,7 @@ export function IncidentsPage() {
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["incidents"] });
+      qc.invalidateQueries({ queryKey: ["incident-index"] });
     },
   });
 
@@ -229,15 +258,31 @@ export function IncidentsPage() {
     <>
       <TopBar
         title="Incidents"
-        subtitle={
-          data
-            ? `${data.length} ${useServerSearch ? "found" : "stored"}`
-            : undefined
-        }
+        subtitle={formatOriginCounts(originCounts)}
       />
 
       <main className="flex-1 overflow-auto p-4 lg:p-6">
         <div className="mb-3 flex flex-wrap items-center gap-2">
+          {/* Origin is the primary split: AI-detected (default) vs the
+              inbound webhook/alert firehose, each with its whole-set
+              count so neither buries the other. */}
+          <SegmentedControl
+            param="origin"
+            defaultValue="ai_detect"
+            aria-label="Filter incidents by origin"
+            options={[
+              {
+                value: "ai_detect",
+                label: originLabel("ai_detect"),
+                badge: originCounts?.ai_detect,
+              },
+              {
+                value: "webhook",
+                label: originLabel("webhook"),
+                badge: originCounts?.webhook,
+              },
+            ]}
+          />
           <div className="relative max-w-md flex-1">
             <Search
               size={12}
@@ -273,6 +318,10 @@ export function IncidentsPage() {
               { value: "all", label: "All", badge: data ? textFiltered.length : undefined },
             ]}
           />
+          {/* Window-scoped incidents-analytics report — spans both origins, so
+              it lives in the toolbar, not on any one incident/tab. Hidden when
+              the runtime report setting is disabled (via capabilities). */}
+          <ReportsButton className="ml-auto" />
         </div>
 
         {isError ? (
@@ -293,9 +342,9 @@ export function IncidentsPage() {
               <table className="ddt">
                 <thead>
                   <tr>
-                    <th className="w-24">Sev</th>
-                    <th className="w-32">When</th>
                     <th className="w-28">Service</th>
+                    <th className="w-24">Severity</th>
+                    <th className="w-32">When</th>
                     <th>Title</th>
                     <th className="w-32">Channels</th>
                     <th className="w-32">Assigned</th>
@@ -434,13 +483,19 @@ function IncidentRow({
     <>
       <ClickableRow to={`/incidents/${i.id}`} {...rowProps}>
         <td>
-          {/* Severity stays "—" until the backend ships a severity field on
+          {i.service && i.service !== "_unknown" ? (
+            <span className="text-ink-200">{i.service}</span>
+          ) : (
+            <EmptyValue />
+          )}
+        </td>
+        <td>
+          {/* Severity stays empty until the backend ships a severity field on
               list summaries (UX_REDESIGN §3.5 ask #1) — IncidentSummary
               carries no content for the detail page's parser to read. */}
           <SeverityBadge severity={null} />
         </td>
         <td title={fmtAbs(i.created_at)}>{fmtRel(i.created_at)}</td>
-        <td className="text-ink-200">{i.service || "—"}</td>
         <td>
           {/* Single-line flex — inline content made the source chip wrap
               under long titles but sit beside short ones, so the column
@@ -463,9 +518,7 @@ function IncidentRow({
             {(i.channels_notified ?? []).map((c) => (
               <Pill key={c}>{c}</Pill>
             ))}
-            {!i.channels_notified?.length && (
-              <span className="text-ink-400">—</span>
-            )}
+            {!i.channels_notified?.length && <EmptyValue />}
           </div>
         </td>
         <td>
@@ -481,12 +534,12 @@ function IncidentRow({
               </div>
             )
           ) : (
-            <span className="text-ink-400">—</span>
+            <EmptyValue />
           )}
         </td>
         <td>
           {!i.notify_status ? (
-            <span className="text-ink-400">—</span>
+            <EmptyValue />
           ) : i.notify_status === "sent" ? (
             <Pill tone="good">sent</Pill>
           ) : notifyFailed ? (

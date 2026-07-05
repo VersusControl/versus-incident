@@ -78,3 +78,34 @@ func (l *LarkProvider) SendAlert(i *m.Incident) error {
 
 	return nil
 }
+
+// SendText implements core.TextSender: the image-fallback path for Lark,
+// which cannot upload a binary over a custom-bot webhook. It posts the
+// already-redacted report caption + note as an interactive text card. No
+// raw incident content is referenced.
+func (l *LarkProvider) SendText(i *m.Incident, text string) error {
+	larkMsg := utils.CreateLarkMessage(text, i.Resolved)
+
+	jsonData, err := json.Marshal(larkMsg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal text message: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", l.webhookURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := l.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send text: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("lark API returned non-200 status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}

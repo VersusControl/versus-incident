@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/VersusControl/versus-incident/pkg/agent"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/analyze"
@@ -36,6 +38,14 @@ const (
 	auditActionOverrideDeleted  = "agent.service_override.deleted"
 	auditActionPatternRelabeled = "agent.pattern.relabeled"
 	auditActionPatternDeleted   = "agent.pattern.deleted"
+	// grace-control + the two flush routes are state-changing admin actions
+	// (B46/B47): grace-control ends/restarts a service's new-service grace
+	// window; the flushes force-persist the in-memory shadow/detect log to
+	// disk. They are gated + audited to parity with the rest of the mutating
+	// agent surface.
+	auditActionServiceGraceControlled = "agent.service.grace_controlled"
+	auditActionShadowFlushed          = "agent.shadow.flushed"
+	auditActionDetectFlushed          = "agent.detect.flushed"
 )
 
 // AgentController exposes admin endpoints for inspecting and curating the
@@ -223,6 +233,11 @@ func (a *AgentController) listPatterns(c *fiber.Ctx) error {
 	all := a.catalog.All()
 	rows := make([]patternRow, 0, len(all))
 	for _, p := range all {
+		// Strip the redacted sample ring from list rows: the list is
+		// potentially thousands of patterns and the ring belongs only on the
+		// detail read (getPattern). a.catalog.All() already returns copies, so
+		// nil-ing this field never touches the stored pattern.
+		p.Samples = nil
 		rows = append(rows, patternRow{
 			Pattern:   p,
 			Readiness: agent.LogReadiness(p, a.catalogCfg.AutoPromoteAfter, a.pollInterval),
@@ -413,17 +428,45 @@ func (a *AgentController) clearShadow(c *fiber.Ctx) error {
 // flushShadow force-writes the shadow log to disk.
 func (a *AgentController) flushShadow(c *fiber.Ctx) error {
 	if a.shadow == nil {
+		middleware.RecordAdminAudit(c, auditActionShadowFlushed, "shadow log", middleware.AdminAuditDenied)
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "shadow log not enabled"})
 	}
 	if err := a.shadow.Persist(); err != nil {
+		middleware.RecordAdminAudit(c, auditActionShadowFlushed, "shadow log", middleware.AdminAuditDenied)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
+	middleware.RecordAdminAudit(c, auditActionShadowFlushed, fmt.Sprintf("shadow log (events=%d)", a.shadow.Len()), middleware.AdminAuditSuccess)
 	return c.JSON(fiber.Map{"ok": true, "events": a.shadow.Len()})
 }
 
-// listServices returns every known service with its first-seen timestamp.
+// listServices returns every known service with its first-seen timestamp AND
+// its new-service grace status. The grace fields are computed by the SAME
+// graceStatus helper getServiceDetail uses, so the "in grace" status the
+// Services LIST shows and the status the service DETAIL page shows are one
+// computation and can never disagree. (Previously the list returned only
+// first_seen/manual and the UI hard-coded every row as "tracked", so a service
+// still inside its grace window read as "tracked" in the list but "in grace" on
+// its detail page.)
 func (a *AgentController) listServices(c *fiber.Ctx) error {
-	return c.JSON(fiber.Map{"services": a.catalog.AllServices()})
+	grace := serviceGraceDuration()
+	all := a.catalog.AllServices()
+	out := make(map[string]fiber.Map, len(all))
+	for name, info := range all {
+		inGrace, remaining := graceStatus(info.FirstSeen, grace)
+		m := fiber.Map{
+			"first_seen":              info.FirstSeen,
+			"manual":                  info.Manual,
+			"in_grace":                inGrace,
+			"grace_seconds_remaining": remaining,
+		}
+		// Preserve the org_id field exactly as ServiceInfo serialized it
+		// (omitempty) so no existing consumer of this shape regresses.
+		if info.OrgID != "" {
+			m["org_id"] = info.OrgID
+		}
+		out[name] = m
+	}
+	return c.JSON(fiber.Map{"services": out})
 }
 
 // serviceIncidentScanLimit bounds the incident-history scan for the
@@ -468,14 +511,7 @@ func (a *AgentController) getServiceDetail(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "service not found"})
 	}
 
-	inGrace := false
-	graceRemaining := 0
-	if grace := serviceGraceDuration(); grace > 0 {
-		if rem := time.Until(info.FirstSeen.Add(grace)); rem > 0 {
-			inGrace = true
-			graceRemaining = int(rem.Seconds())
-		}
-	}
+	inGrace, graceRemaining := graceStatus(info.FirstSeen, serviceGraceDuration())
 
 	// Patterns attributed to this service (org-scoped). catalog.All() is already
 	// sorted by Count desc, so the most-frequent patterns lead.
@@ -514,12 +550,40 @@ func (a *AgentController) getServiceDetail(c *fiber.Ctx) error {
 // serviceGraceDuration parses the configured new-service grace window, or 0
 // when unset/invalid (grace disabled). Mirrors agent.parseDurationOr without
 // importing the unexported helper.
+//
+// The config read is guarded through GetConfigOrNil (never GetConfig, which
+// panics): this read-only status helper can run before config.Load in a test
+// or an early request, and an unloaded config simply means grace is not
+// configured. In that case we degrade to 0 (grace disabled → in_grace=false,
+// no remaining) instead of dereferencing a nil config. When config IS loaded
+// the behavior is unchanged.
 func serviceGraceDuration() time.Duration {
-	d, err := time.ParseDuration(config.GetConfig().Agent.NewServiceGrace)
+	cfg := config.GetConfigOrNil()
+	if cfg == nil {
+		return 0
+	}
+	d, err := time.ParseDuration(cfg.Agent.NewServiceGrace)
 	if err != nil || d <= 0 {
 		return 0
 	}
 	return d
+}
+
+// graceStatus reports whether a service first seen at firstSeen is still inside
+// its new-service grace window and, when it is, how many whole seconds remain.
+// It is the SINGLE grace computation shared by the service LIST (listServices)
+// and the service DETAIL (getServiceDetail) endpoints, so the "in grace" status
+// they report is derived identically and can never drift. A zero grace duration
+// (unset/disabled) is never in grace; a service pushed out of grace (FirstSeen
+// zeroed by EndServiceGrace) reads as not in grace.
+func graceStatus(firstSeen time.Time, grace time.Duration) (bool, int) {
+	if grace <= 0 {
+		return false, 0
+	}
+	if rem := time.Until(firstSeen.Add(grace)); rem > 0 {
+		return true, int(rem.Seconds())
+	}
+	return false, 0
 }
 
 // serviceIncidentSummary builds the bounded, org-scoped incident summary for
@@ -599,26 +663,66 @@ func (a *AgentController) controlServiceGrace(c *fiber.Ctx) error {
 	name := c.Params("name")
 	var req serviceGraceRequest
 	if err := c.BodyParser(&req); err != nil {
+		middleware.RecordAdminAudit(c, auditActionServiceGraceControlled, name, middleware.AdminAuditDenied)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid body"})
 	}
+	// Non-secret target: the service name + the requested action. Only the
+	// two allowed actions are ever reflected verbatim; a rejected client value
+	// is bounded + sanitized (see the default branch) so an arbitrary/oversized
+	// string can never land in the audit trail unbounded (log-injection guard).
+	var target string
 	switch req.Action {
 	case "end":
+		target = fmt.Sprintf("%s (action=end)", name)
 		if !a.catalog.EndServiceGrace(name) {
+			middleware.RecordAdminAudit(c, auditActionServiceGraceControlled, target, middleware.AdminAuditDenied)
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "service not found"})
 		}
 	case "restart":
+		target = fmt.Sprintf("%s (action=restart)", name)
 		if !a.catalog.RestartServiceGrace(name) {
+			middleware.RecordAdminAudit(c, auditActionServiceGraceControlled, target, middleware.AdminAuditDenied)
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "service not found"})
 		}
 	default:
+		// Reflect only a bounded, control-char-stripped view of the rejected
+		// action — never the raw client string.
+		middleware.RecordAdminAudit(c, auditActionServiceGraceControlled,
+			fmt.Sprintf("%s (action=invalid:%s)", name, sanitizeAuditToken(req.Action)),
+			middleware.AdminAuditDenied)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "action must be \"end\" or \"restart\""})
 	}
+	middleware.RecordAdminAudit(c, auditActionServiceGraceControlled, target, middleware.AdminAuditSuccess)
 	return c.JSON(fiber.Map{"ok": true})
 }
 
 // maxServiceNameLen bounds a manual service name so a runaway request can never
 // grow the catalog blob without limit.
 const maxServiceNameLen = 256
+
+// maxAuditActionLen bounds how much of a rejected, client-supplied action
+// string is reflected into an audit target, so an arbitrary/oversized value can
+// never land in the trail verbatim.
+const maxAuditActionLen = 32
+
+// sanitizeAuditToken bounds and cleans a client-supplied string before it is
+// reflected into an audit target: control/newline characters are dropped (so a
+// value cannot inject fake trail lines) and the result is capped to
+// maxAuditActionLen bytes. Used only on rejection paths that want to preserve a
+// little diagnostic value without echoing raw client input.
+func sanitizeAuditToken(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r == '\n' || r == '\r' || unicode.IsControl(r) {
+			continue
+		}
+		if b.Len()+utf8.RuneLen(r) > maxAuditActionLen {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
 
 // createServiceRequest is the POST /services body.
 type createServiceRequest struct {
@@ -803,9 +907,16 @@ func (a *AgentController) createServiceOverride(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid body"})
 	}
 	service := strings.TrimSpace(req.Service)
+	// On the denial branches below the client `service` is only trimmed, never
+	// clamped to maxServiceNameLen (on the unknown-target branch it definitionally
+	// failed the catalog existence check), so it is bounded + control-char-stripped
+	// via sanitizeAuditToken before it reaches the audit target — an arbitrary
+	// client string can never land in the trail verbatim/unbounded (log-injection
+	// guard). The success target below (rule.ID+" -> "+service) is safe when a
+	// catalog is present: the existence check guarantees service ≤ maxServiceNameLen.
 	if a.catalog != nil {
 		if _, exists := a.catalog.Service(service); !exists {
-			middleware.RecordAdminAudit(c, auditActionOverrideSet, "service "+service, middleware.AdminAuditDenied)
+			middleware.RecordAdminAudit(c, auditActionOverrideSet, "service "+sanitizeAuditToken(service), middleware.AdminAuditDenied)
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "unknown target service; create it first"})
 		}
 	}
@@ -815,7 +926,7 @@ func (a *AgentController) createServiceOverride(c *fiber.Ctx) error {
 		Service:    service,
 	})
 	if err != nil {
-		middleware.RecordAdminAudit(c, auditActionOverrideSet, "service "+service, middleware.AdminAuditDenied)
+		middleware.RecordAdminAudit(c, auditActionOverrideSet, "service "+sanitizeAuditToken(service), middleware.AdminAuditDenied)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	middleware.RecordAdminAudit(c, auditActionOverrideSet, rule.ID+" -> "+service, middleware.AdminAuditSuccess)
@@ -905,11 +1016,14 @@ func (a *AgentController) clearDetect(c *fiber.Ctx) error {
 // flushDetect force-writes the detect log to disk.
 func (a *AgentController) flushDetect(c *fiber.Ctx) error {
 	if a.detect == nil {
+		middleware.RecordAdminAudit(c, auditActionDetectFlushed, "detect log", middleware.AdminAuditDenied)
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "detect log not enabled"})
 	}
 	if err := a.detect.Persist(); err != nil {
+		middleware.RecordAdminAudit(c, auditActionDetectFlushed, "detect log", middleware.AdminAuditDenied)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
+	middleware.RecordAdminAudit(c, auditActionDetectFlushed, fmt.Sprintf("detect log (events=%d)", a.detect.Len()), middleware.AdminAuditSuccess)
 	return c.JSON(fiber.Map{"ok": true, "events": a.detect.Len()})
 }
 

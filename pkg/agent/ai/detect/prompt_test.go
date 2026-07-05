@@ -58,6 +58,31 @@ func TestBuildPrompt_TruncatesSamples(t *testing.T) {
 	}
 }
 
+// TestBuildPrompt_EmitsRedactedSampleLine pins that the detect prompt carries
+// the per-pattern redacted example log line(s) under the `samples:` block. The
+// worker fills this from sampleMessages (post-redaction .Message), so the model
+// gets a concrete redacted example — the log half of the raw-sample-store AI
+// wiring (design §5). A redacted token in the sample must survive verbatim.
+func TestBuildPrompt_EmitsRedactedSampleLine(t *testing.T) {
+	r := core.AgentResult{
+		Verdict:   core.VerdictUnknown,
+		PatternID: "p1",
+		Template:  "auth failed <*>",
+		Frequency: 5,
+	}
+	redacted := "auth failed for password=<REDACTED:password> from host"
+	_, user := BuildPrompt(r, "es:prod", "auth", []string{redacted})
+	if !strings.Contains(user, "samples:") {
+		t.Fatalf("prompt missing samples block:\n%s", user)
+	}
+	if !strings.Contains(user, redacted) {
+		t.Fatalf("prompt missing the redacted sample line:\n%s", user)
+	}
+	if !strings.Contains(user, "<REDACTED:") {
+		t.Fatalf("redaction token dropped from sample line:\n%s", user)
+	}
+}
+
 func TestSystemPrompt_AssemblesAllFragments(t *testing.T) {
 	// Each fragment must contribute its own marker — guards against
 	// promptOrder drifting away from the actual prompts/*.md files.

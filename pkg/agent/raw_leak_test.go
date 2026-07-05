@@ -67,7 +67,7 @@ func TestSignalRaw_NeverLeaksIntoShadowLog(t *testing.T) {
 		t.Fatalf("LoadShadowLog: %v", err)
 	}
 	// The worker records the redacted Message as the shadow sample.
-	sl.Record(sig.Source, "p1", "tmpl", sig.Message, "default", "unknown", 1)
+	sl.Record(sig.Source, "p1", "api", "tmpl", sig.Message, "default", "unknown", 1)
 	if err := sl.Persist(); err != nil {
 		t.Fatalf("Persist: %v", err)
 	}

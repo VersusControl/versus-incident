@@ -1,12 +1,15 @@
 package common
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"text/template"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/core"
 	m "github.com/VersusControl/versus-incident/pkg/models"
 	"github.com/VersusControl/versus-incident/pkg/utils"
 
@@ -31,6 +34,29 @@ func NewSlackProvider(cfg config.SlackConfig) *SlackProvider {
 
 // Name implements core.AlertProvider.
 func (s *SlackProvider) Name() string { return "slack" }
+
+// SendAttachment implements core.AttachmentSender: it uploads the report
+// PNG to the configured channel with the caption as the message. It uses
+// the slack-go three-step external-upload flow (files.getUploadURLExternal
+// → upload → files.completeUploadExternal), which is the modern replacement
+// for the retired files.upload endpoint.
+func (s *SlackProvider) SendAttachment(i *m.Incident, att core.Attachment) error {
+	if len(att.Data) == 0 {
+		return fmt.Errorf("slack: empty attachment")
+	}
+	_, err := s.client.UploadFileContext(context.Background(), slack.UploadFileParameters{
+		Reader:         bytes.NewReader(att.Data),
+		FileSize:       len(att.Data),
+		Filename:       att.Filename,
+		Title:          att.Filename,
+		InitialComment: att.Caption,
+		Channel:        s.channelID,
+	})
+	if err != nil {
+		return fmt.Errorf("slack upload: %w", err)
+	}
+	return nil
+}
 
 // SendAlert determines whether to process a resolved or unresolved incident
 func (s *SlackProvider) SendAlert(i *m.Incident) error {

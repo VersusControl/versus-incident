@@ -1,6 +1,7 @@
 import { useSearchParams } from "react-router-dom";
 import { TopBar } from "@/components/TopBar";
 import { SegmentedControl } from "@/components/SegmentedControl";
+import { ReportSettingsControl } from "@/components/ReportSettingsControl";
 import { IncidentsConfigPanel } from "./IncidentsConfigPage";
 import { AgentConfigPanel } from "./AgentConfigPage";
 
@@ -32,7 +33,14 @@ export function SettingsPage() {
             ]}
           />
         </div>
-        {tab === "incidents" ? <IncidentsConfigPanel /> : <AgentConfigPanel />}
+        {tab === "incidents" ? (
+          <div className="space-y-4">
+            <IncidentsConfigPanel />
+            <ReportSettingsControl />
+          </div>
+        ) : (
+          <AgentConfigPanel />
+        )}
       </main>
     </>
   );

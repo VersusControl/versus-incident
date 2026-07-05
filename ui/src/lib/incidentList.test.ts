@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import type { IncidentSummary } from "./api";
+import type { IncidentSummary, OriginCounts } from "./api";
 import {
+  INCIDENT_ORIGIN_VALUES,
   INCIDENT_STATUS_VALUES,
+  countByOrigin,
   filterIncidentsByText,
+  formatOriginCounts,
+  incidentOrigin,
+  incidentResetKey,
+  matchesOrigin,
   matchesStatus,
+  normalizeOrigin,
+  originLabel,
   type IncidentStatusFilter,
 } from "./incidentList";
 import { pageSlice } from "./pagination";
@@ -113,5 +121,153 @@ describe("Incidents pagination (filter → 100/page)", () => {
     // Was on page 2 of the wider list, but resolved-only still has a page 2.
     const s = pageSlice(resolvedOnly.length, 9);
     expect(s.page).toBe(2);
+  });
+});
+
+describe("origin tabs", () => {
+  it("exposes exactly the two feeds, AI-detected first", () => {
+    expect(INCIDENT_ORIGIN_VALUES).toEqual(["ai_detect", "webhook"]);
+  });
+
+  it("normalizes the URL param, defaulting to the high-signal ai_detect", () => {
+    expect(normalizeOrigin("ai_detect")).toBe("ai_detect");
+    expect(normalizeOrigin("webhook")).toBe("webhook");
+    // Missing or unexpected values fall back to the AI feed so the flood
+    // never becomes the default view.
+    expect(normalizeOrigin(null)).toBe("ai_detect");
+    expect(normalizeOrigin(undefined)).toBe("ai_detect");
+    expect(normalizeOrigin("garbage")).toBe("ai_detect");
+  });
+
+  it("labels each tab", () => {
+    expect(originLabel("ai_detect")).toBe("AI Detected");
+    expect(originLabel("webhook")).toBe("Webhook / Alerts");
+  });
+});
+
+describe("formatOriginCounts", () => {
+  it("renders the two feeds separately, never one lumped total", () => {
+    const counts: OriginCounts = { ai_detect: 7, webhook: 12043, total: 12050 };
+    expect(formatOriginCounts(counts)).toBe("AI: 7 · Webhook: 12043");
+  });
+
+  it("stays blank while counts are still loading", () => {
+    expect(formatOriginCounts(undefined)).toBeUndefined();
+  });
+});
+
+describe("incidentOrigin / matchesOrigin (client-side split)", () => {
+  it("classifies an explicit webhook row as webhook", () => {
+    expect(incidentOrigin(inc({ origin: "webhook" }))).toBe("webhook");
+  });
+
+  it("treats ai_detect and anything else as the high-signal ai_detect feed", () => {
+    expect(incidentOrigin(inc({ origin: "ai_detect" }))).toBe("ai_detect");
+    // Missing or unexpected origin must never hide a row from the default
+    // AI view — mirrors normalizeOrigin's fallback.
+    expect(incidentOrigin(inc({ origin: undefined }))).toBe("ai_detect");
+    expect(incidentOrigin(inc({ origin: "garbage" }))).toBe("ai_detect");
+  });
+
+  it("filters a loaded set to the active tab", () => {
+    const ai = inc({ id: "a", origin: "ai_detect" });
+    const wh = inc({ id: "w", origin: "webhook" });
+    expect(matchesOrigin(ai, "ai_detect")).toBe(true);
+    expect(matchesOrigin(ai, "webhook")).toBe(false);
+    expect(matchesOrigin(wh, "webhook")).toBe(true);
+    expect(matchesOrigin(wh, "ai_detect")).toBe(false);
+  });
+});
+
+describe("countByOrigin (client-split whole-set tally)", () => {
+  it("tallies both feeds separately so a webhook flood never lumps into AI", () => {
+    const list = [
+      inc({ id: "a1", origin: "ai_detect" }),
+      inc({ id: "a2", origin: "ai_detect" }),
+      ...Array.from({ length: 500 }, (_, n) =>
+        inc({ id: `w${n}`, origin: "webhook" }),
+      ),
+    ];
+    expect(countByOrigin(list)).toEqual({
+      ai_detect: 2,
+      webhook: 500,
+      total: 502,
+    });
+  });
+
+  it("counts a missing origin as ai_detect and tolerates an empty/undefined list", () => {
+    expect(countByOrigin([inc({ origin: undefined })])).toEqual({
+      ai_detect: 1,
+      webhook: 0,
+      total: 1,
+    });
+    expect(countByOrigin(undefined)).toEqual({
+      ai_detect: 0,
+      webhook: 0,
+      total: 0,
+    });
+  });
+
+  it("feeds formatOriginCounts so the Now top-bar shows both feeds", () => {
+    const counts = countByOrigin([
+      inc({ origin: "ai_detect" }),
+      inc({ origin: "webhook" }),
+      inc({ origin: "webhook" }),
+    ]);
+    expect(formatOriginCounts(counts)).toBe("AI: 1 · Webhook: 2");
+  });
+});
+
+describe("Now page origin split (default-to-AI, client-side scope)", () => {
+  // The Now feed fetches the whole set once (shared with the TopBar/Sidebar
+  // badges) and splits it client-side: the active tab scopes the feed while
+  // the whole-set counts keep both feeds visible.
+  const sorted: IncidentSummary[] = [
+    inc({ id: "ai-open", origin: "ai_detect", resolved: false, acked_at: null }),
+    inc({ id: "wh-1", origin: "webhook", resolved: false, acked_at: null }),
+    inc({ id: "wh-2", origin: "webhook", resolved: false, acked_at: null }),
+    inc({ id: "wh-3", origin: "webhook", resolved: true }),
+  ];
+
+  it("defaults to the AI-detected tab so the webhook flood never dominates", () => {
+    // Missing ?origin= param → ai_detect.
+    const origin = normalizeOrigin(null);
+    expect(origin).toBe("ai_detect");
+    const scoped = sorted.filter((i) => matchesOrigin(i, origin));
+    expect(scoped.map((i) => i.id)).toEqual(["ai-open"]);
+  });
+
+  it("scopes the feed to the webhook tab when selected", () => {
+    const origin = normalizeOrigin("webhook");
+    const scoped = sorted.filter((i) => matchesOrigin(i, origin));
+    expect(scoped.map((i) => i.id)).toEqual(["wh-1", "wh-2", "wh-3"]);
+  });
+
+  it("shows separate per-origin counts regardless of the active tab", () => {
+    expect(countByOrigin(sorted)).toEqual({
+      ai_detect: 1,
+      webhook: 3,
+      total: 4,
+    });
+  });
+});
+
+describe("incidentResetKey (pagination reset on tab/filter change)", () => {
+  it("changes when the origin tab changes so page resets to 1", () => {
+    const ai = incidentResetKey("ai_detect", "open", "");
+    const webhook = incidentResetKey("webhook", "open", "");
+    expect(ai).not.toBe(webhook);
+  });
+
+  it("changes when the status filter or search text changes", () => {
+    const base = incidentResetKey("ai_detect", "open", "");
+    expect(incidentResetKey("ai_detect", "resolved", "")).not.toBe(base);
+    expect(incidentResetKey("ai_detect", "open", "db")).not.toBe(base);
+  });
+
+  it("is stable for the same origin/status/query", () => {
+    expect(incidentResetKey("webhook", "all", "latency")).toBe(
+      incidentResetKey("webhook", "all", "latency"),
+    );
   });
 });

@@ -15,9 +15,9 @@ func TestShadowLog_RecordCoalescesByPattern(t *testing.T) {
 		t.Fatalf("LoadShadowLog: %v", err)
 	}
 
-	s.Record("src-a", "p1", "tmpl one", "msg one", "oom", "unknown", 3)
-	s.Record("src-a", "p1", "tmpl one v2", "msg two", "oom", "unknown", 2)
-	s.Record("src-a", "p2", "tmpl two", "other", "", "unknown", 1)
+	s.Record("src-a", "p1", "api", "tmpl one", "msg one", "oom", "unknown", 3)
+	s.Record("src-a", "p1", "api", "tmpl one v2", "msg two", "oom", "unknown", 2)
+	s.Record("src-a", "p2", "db", "tmpl two", "other", "", "unknown", 1)
 
 	if got := s.Len(); got != 2 {
 		t.Fatalf("Len=%d want 2 (p1 should coalesce)", got)
@@ -46,11 +46,14 @@ func TestShadowLog_RecordCoalescesByPattern(t *testing.T) {
 	if p1.SampleMessage != "msg two" {
 		t.Errorf("SampleMessage not refreshed: %q", p1.SampleMessage)
 	}
+	if p1.Service != "api" {
+		t.Errorf("Service not carried/refreshed: %q", p1.Service)
+	}
 }
 
 func TestShadowLog_RecordEmptyPatternIgnored(t *testing.T) {
 	s, _ := LoadShadowLog(nil, 0)
-	s.Record("src", "", "tmpl", "msg", "", "unknown", 1)
+	s.Record("src", "", "api", "tmpl", "msg", "", "unknown", 1)
 	if s.Len() != 0 {
 		t.Fatalf("expected empty, got %d", s.Len())
 	}
@@ -60,7 +63,7 @@ func TestShadowLog_EvictsOldestWhenFull(t *testing.T) {
 	s, _ := LoadShadowLog(nil, 3)
 	// Insert with monotonically advancing LastSeen so eviction is deterministic.
 	for i := 0; i < 5; i++ {
-		s.Record("src", "p"+string(rune('a'+i)), "tmpl", "msg", "", "unknown", 1)
+		s.Record("src", "p"+string(rune('a'+i)), "", "tmpl", "msg", "", "unknown", 1)
 		// Force a measurable LastSeen difference.
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -80,7 +83,7 @@ func TestShadowLog_EvictsOldestWhenFull(t *testing.T) {
 func TestShadowLog_SampleMessageTruncated(t *testing.T) {
 	s, _ := LoadShadowLog(nil, 0)
 	huge := strings.Repeat("x", shadowSampleMaxBytes+200)
-	s.Record("src", "p1", "tmpl", huge, "", "unknown", 1)
+	s.Record("src", "p1", "", "tmpl", huge, "", "unknown", 1)
 	got := s.All()[0].SampleMessage
 	if len(got) > shadowSampleMaxBytes+10 { // +ellipsis bytes
 		t.Errorf("SampleMessage not truncated: len=%d", len(got))
@@ -97,8 +100,8 @@ func TestShadowLog_PersistAndReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadShadowLog: %v", err)
 	}
-	s.Record("src", "p1", "tmpl one", "msg one", "oom", "unknown", 4)
-	s.Record("src", "p2", "tmpl two", "msg two", "", "spike", 7)
+	s.Record("src", "p1", "api", "tmpl one", "msg one", "oom", "unknown", 4)
+	s.Record("src", "p2", "db", "tmpl two", "msg two", "", "spike", 7)
 	if !s.Dirty() {
 		t.Fatal("expected dirty after Record")
 	}
@@ -129,7 +132,7 @@ func TestShadowLog_PersistAndReload(t *testing.T) {
 func TestShadowLog_ClearPersists(t *testing.T) {
 	store := newTestStore(t)
 	s, _ := LoadShadowLog(store, 0)
-	s.Record("src", "p1", "t", "m", "", "unknown", 1)
+	s.Record("src", "p1", "", "t", "m", "", "unknown", 1)
 	if err := s.Persist(); err != nil {
 		t.Fatalf("Persist: %v", err)
 	}
@@ -170,7 +173,7 @@ func TestShadowLog_CorruptFileStartsFresh(t *testing.T) {
 		t.Fatalf("expected fresh empty log on corrupt file")
 	}
 	// Should be writable from a clean state.
-	s.Record("src", "p1", "t", "m", "", "unknown", 1)
+	s.Record("src", "p1", "", "t", "m", "", "unknown", 1)
 	if err := s.Persist(); err != nil {
 		t.Fatalf("Persist: %v", err)
 	}

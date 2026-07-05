@@ -39,3 +39,17 @@ export function ErrorBox({ error }: { error: unknown }) {
     </div>
   );
 }
+
+// EmptyValue is the ONE shared treatment for a null / empty / unknown cell
+// value across every table (severity, service, rule, duration, …): a quiet,
+// muted em dash. Using a single component keeps "no value here" reading the
+// same everywhere instead of drifting between a bare dot, a plain "—", and
+// differently-toned dashes. It is decorative — screen readers get an explicit
+// "none" label rather than an ambiguous punctuation glyph.
+export function EmptyValue({ className }: { className?: string }) {
+  return (
+    <span className={clsx("text-ink-400", className)} aria-label="none">
+      <span aria-hidden>—</span>
+    </span>
+  );
+}

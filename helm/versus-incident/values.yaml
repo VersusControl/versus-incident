@@ -199,7 +199,6 @@ storage:
     # Reference an existing Secret instead (keeps the DSN out of the release).
     dsnExistingSecret: ""
     dsnExistingSecretKey: "postgres_dsn"
-    maxIncidents: 1000
 
 # AI SRE Agent (opt-in). When agent.enable=false (default) nothing
 # changes: no goroutines start, no AI calls are made, no extra config

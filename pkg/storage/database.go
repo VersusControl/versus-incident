@@ -5,9 +5,8 @@ package storage
 // ErrUnsupported. The struct exists so the config layer can validate
 // its shape.
 type DatabaseOptions struct {
-	Driver       string // postgres | mysql | sqlite
-	DSN          string
-	MaxIncidents int
+	Driver string // postgres | mysql | sqlite
+	DSN    string
 }
 
 // NewDatabase is a placeholder that returns ErrUnsupported.

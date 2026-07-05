@@ -9,12 +9,15 @@
 // exact same exclusion decision the agent makes on its next tick.
 
 // LearnExclusions is the GET view AND the PUT input shape of the policy
-// endpoint — one org's Disable-Learn lists. The two halves are independent:
+// endpoint — one org's Disable-Learn lists. The three halves are independent:
 // `services` are fully-excluded service names, `metrics` are signal entries
-// (exact OR glob/prefix). Both are always present (possibly empty).
+// (exact OR glob/prefix), and `patterns` are excluded LOG PATTERN keys/ids (the
+// stable miner id shown in the patterns list — the per-log-pattern grain, E1).
+// All three are always present (possibly empty).
 export interface LearnExclusions {
   services: string[];
   metrics: string[];
+  patterns: string[];
 }
 
 // escapeRegExp escapes every regex metacharacter in a literal run so a glob
@@ -68,6 +71,37 @@ export function metricExcluded(
   return metrics.some((m) => matchesMetricPattern(signal, m));
 }
 
+// serviceExcluded reports whether a whole service is held out of learning — an
+// exact-name membership test against the policy's `services` list (the server
+// matches services by exact name, never by glob). It is the checked-state
+// source for the LOGS-page per-row "Ignore service" control and mirrors the
+// ServiceDetailPage overview toggle: an excluded service is fully ignored
+// across training, shadow and detect in EVERY telemetry type (logs, metrics,
+// traces). A blank name, or an absent list, is never excluded.
+export function serviceExcluded(
+  service: string,
+  services: string[] | undefined,
+): boolean {
+  if (!service || !services) return false;
+  return services.includes(service);
+}
+
+// patternExcluded reports whether one LOG PATTERN is held out of learning — an
+// exact-name membership test against the policy's `patterns` list, keyed on the
+// pattern's stable Key/id (the miner cluster id shown in the patterns list and
+// used by relabel/reassign). It mirrors the Go seam's ExcludeLogPattern
+// (matched by exact key, never by glob) and is the checked-state source for the
+// LOGS-page per-row "Ignore this pattern" action — the log analogue of
+// metricExcluded for the per-signal metric/trace grain. A blank key, or an
+// absent list, is never excluded.
+export function patternExcluded(
+  patternKey: string,
+  patterns: string[] | undefined,
+): boolean {
+  if (!patternKey || !patterns) return false;
+  return patterns.includes(patternKey);
+}
+
 // toggleMetricExclusion computes the new metrics list for a read-modify-write
 // PUT when one metric row's checkbox is toggled:
 //   • exclude=true  → add the exact signal name (no-op if already matched, so a
@@ -85,6 +119,61 @@ export function toggleMetricExclusion(
     return [...metrics, signal];
   }
   return metrics.filter((m) => !matchesMetricPattern(signal, m));
+}
+
+// toggleMetricExclusions folds MANY signal toggles into one new metrics list —
+// the read-modify-write basis for a BULK Ignore/Resume of metric/trace rows in
+// a SINGLE PUT (firing one PUT per signal would race: each reads the same stale
+// list and the last write wins, dropping the rest). It applies each signal in
+// turn through toggleMetricExclusion, so the exact-add / match-drop semantics
+// are identical to the single-row path. The input list is never mutated.
+export function toggleMetricExclusions(
+  metrics: string[],
+  signals: string[],
+  exclude: boolean,
+): string[] {
+  return signals.reduce(
+    (acc, signal) => toggleMetricExclusion(acc, signal, exclude),
+    metrics.slice(),
+  );
+}
+
+// toggleLogPatternExclusion computes the new patterns list for a
+// read-modify-write PUT when one LOG PATTERN is toggled. Log patterns match by
+// EXACT Key/id (never glob — mirrors the Go seam's ExcludeLogPattern), so the
+// toggle is a plain add (idempotent) / remove:
+//   • exclude=true  → add the pattern key (no-op if already present),
+//   • exclude=false → drop the pattern key.
+// The returned list is a new array; the input is never mutated. This is the
+// log analogue of toggleMetricExclusion — the whole-list PUT is the ONLY write
+// path for the log-pattern grain (there is no per-pattern POST/DELETE route),
+// so this is how an Ignore/Resume of a log pattern is persisted.
+export function toggleLogPatternExclusion(
+  patterns: string[],
+  patternKey: string,
+  exclude: boolean,
+): string[] {
+  if (exclude) {
+    if (patterns.includes(patternKey)) return patterns.slice();
+    return [...patterns, patternKey];
+  }
+  return patterns.filter((p) => p !== patternKey);
+}
+
+// toggleLogPatternExclusions folds MANY log-pattern toggles into one new
+// patterns list — the read-modify-write basis for a BULK Ignore/Resume of log
+// rows in a SINGLE PUT (firing one PUT per pattern would race on the same stale
+// list). It applies each key in turn through toggleLogPatternExclusion, so the
+// add/remove semantics match the single-row path. The input is never mutated.
+export function toggleLogPatternExclusions(
+  patterns: string[],
+  patternKeys: string[],
+  exclude: boolean,
+): string[] {
+  return patternKeys.reduce(
+    (acc, key) => toggleLogPatternExclusion(acc, key, exclude),
+    patterns.slice(),
+  );
 }
 
 // LearnExcludeGate is how the Disable-Learn controls route themselves:
@@ -112,4 +201,16 @@ export function learnExcludeGate(input: {
   if (!input.licensed) return "absent";
   if (!input.canManage) return "readonly";
   return "editable";
+}
+
+// listExcludeControlVisible decides whether the per-row exclude control renders
+// on a LIST page (logs / metrics / traces). Unlike the ServiceDetailPage detail
+// surface — which shows the state read-only to a viewer — a dense list row
+// carries NO control unless the caller can actually act on it: the control is
+// shown ONLY for a licensed runtime:manage session ("editable"). It is entirely
+// absent on community / OSS ("absent") and for a licensed viewer ("readonly"),
+// so the feature never leaks a header or an inert widget to a non-admin. This
+// is the boolean the list pages gate both the column header AND the cell on.
+export function listExcludeControlVisible(gate: LearnExcludeGate): boolean {
+  return gate === "editable";
 }

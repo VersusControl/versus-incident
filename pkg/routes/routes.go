@@ -30,4 +30,5 @@ func SetupRoutes(app *fiber.App, teamsStore *teams.Store) {
 	controllers.NewIncidentAdminController().Register(api)
 	controllers.NewConfigAdminController().Register(api)
 	controllers.NewTeamsAdminController(teamsStore).Register(api)
+	controllers.NewReportsAdminController().Register(api)
 }

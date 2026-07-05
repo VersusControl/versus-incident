@@ -116,7 +116,7 @@ func TestKindOf_AgreesWithLogBrainSeam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCatalog: %v", err)
 	}
-	var lb core.SignalLearner = newLogBrain("x", NewMiner(0.4, 4, 100), cat, nil, nil, 0.2, config.AgentCatalogConfig{})
+	var lb core.SignalLearner = newLogBrain("x", NewMiner(0.4, 4, 100), cat, nil, nil, 0.2, config.AgentCatalogConfig{}, nil)
 	for _, typ := range []string{"elasticsearch", "file", "loki", "cloudwatchlogs", "graylog", "splunk"} {
 		if got := string(signalsources.KindOf(typ)); got != lb.Kind() {
 			t.Errorf("KindOf(%q) = %q, log brain Kind() = %q (drift)", typ, got, lb.Kind())

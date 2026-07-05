@@ -10,6 +10,7 @@ export function TextInputModal({
   title,
   label,
   placeholder,
+  initialValue = "",
   confirmLabel = "Save",
   cancelLabel = "Cancel",
   maxLength,
@@ -21,6 +22,7 @@ export function TextInputModal({
   title: string;
   label: string;
   placeholder?: string;
+  initialValue?: string;
   confirmLabel?: string;
   cancelLabel?: string;
   maxLength?: number;
@@ -29,7 +31,7 @@ export function TextInputModal({
   onSubmit: (value: string) => void;
   onClose: () => void;
 }) {
-  const [value, setValue] = useState("");
+  const [value, setValue] = useState(initialValue);
   const submit = () => {
     const v = value.trim();
     if (v) onSubmit(v);
