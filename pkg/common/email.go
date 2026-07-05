@@ -3,13 +3,16 @@ package common
 import (
 	"bytes"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
+	"html"
 	"html/template"
 	"net/smtp"
 	"path/filepath"
 	"strings"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/core"
 	m "github.com/VersusControl/versus-incident/pkg/models"
 	"github.com/VersusControl/versus-incident/pkg/utils"
 )
@@ -119,6 +122,13 @@ func (e *EmailProvider) SendAlert(i *m.Incident) error {
 	message.WriteString("\r\n")
 	message.Write(body.Bytes())
 
+	return e.sendMessage(message.Bytes(), recipients)
+}
+
+// sendMessage opens an authenticated SMTP connection and writes the raw
+// message to the recipients. Shared by SendAlert (template body) and
+// SendAttachment (MIME report).
+func (e *EmailProvider) sendMessage(message []byte, recipients []string) error {
 	// Get appropriate auth based on SMTP host
 	auth := e.getAuth()
 
@@ -162,13 +172,11 @@ func (e *EmailProvider) SendAlert(i *m.Incident) error {
 		return fmt.Errorf("failed to open data connection: %w", err)
 	}
 
-	_, err = w.Write(message.Bytes())
-	if err != nil {
+	if _, err = w.Write(message); err != nil {
 		return fmt.Errorf("failed to write message: %w", err)
 	}
 
-	err = w.Close()
-	if err != nil {
+	if err = w.Close(); err != nil {
 		return fmt.Errorf("failed to close data connection: %w", err)
 	}
 
@@ -178,6 +186,62 @@ func (e *EmailProvider) SendAlert(i *m.Incident) error {
 	}
 
 	return nil
+}
+
+// SendAttachment implements core.AttachmentSender: it emails the report as
+// a multipart/related MIME message with the PNG inline (referenced by a
+// Content-ID) and the redacted caption as the text body.
+func (e *EmailProvider) SendAttachment(i *m.Incident, att core.Attachment) error {
+	if len(att.Data) == 0 {
+		return fmt.Errorf("email: empty attachment")
+	}
+	recipients := parseRecipients(e.to)
+	if len(recipients) == 0 {
+		return fmt.Errorf("no valid email recipients found")
+	}
+	subject := e.subject
+	if subject == "" {
+		subject = "Incident report"
+	}
+	msg := buildReportMIME(e.username, e.to, subject, att)
+	return e.sendMessage(msg, recipients)
+}
+
+// buildReportMIME assembles a multipart/related message with the report
+// image inline (cid:report) and the caption as the HTML body. Pure and
+// side-effect free so it is unit-testable without an SMTP server.
+func buildReportMIME(from, to, subject string, att core.Attachment) []byte {
+	const boundary = "versus-report-boundary-8f2a1c"
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "From: %s\r\n", from)
+	fmt.Fprintf(&b, "To: %s\r\n", to)
+	fmt.Fprintf(&b, "Subject: %s\r\n", subject)
+	b.WriteString("MIME-Version: 1.0\r\n")
+	fmt.Fprintf(&b, "Content-Type: multipart/related; boundary=%q\r\n\r\n", boundary)
+
+	// HTML body part (caption).
+	fmt.Fprintf(&b, "--%s\r\n", boundary)
+	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n\r\n")
+	caption := strings.ReplaceAll(html.EscapeString(att.Caption), "\n", "<br/>")
+	fmt.Fprintf(&b, "<p>%s</p>\r\n<img src=\"cid:report\" alt=\"incident report\"/>\r\n\r\n", caption)
+
+	// Image part (base64, inline via Content-ID).
+	fmt.Fprintf(&b, "--%s\r\n", boundary)
+	fmt.Fprintf(&b, "Content-Type: %s\r\n", att.MIME)
+	b.WriteString("Content-Transfer-Encoding: base64\r\n")
+	b.WriteString("Content-ID: <report>\r\n")
+	fmt.Fprintf(&b, "Content-Disposition: inline; filename=%q\r\n\r\n", att.Filename)
+	enc := base64.StdEncoding.EncodeToString(att.Data)
+	for i := 0; i < len(enc); i += 76 {
+		end := i + 76
+		if end > len(enc) {
+			end = len(enc)
+		}
+		b.WriteString(enc[i:end])
+		b.WriteString("\r\n")
+	}
+	fmt.Fprintf(&b, "\r\n--%s--\r\n", boundary)
+	return b.Bytes()
 }
 
 // parseRecipients splits a comma-separated list of email addresses

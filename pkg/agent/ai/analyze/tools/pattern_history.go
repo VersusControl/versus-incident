@@ -62,21 +62,27 @@ func (p PatternHistory) Invoke(_ context.Context, args json.RawMessage) (*core.T
 			Data:  map[string]any{"pattern_id": a.PatternID},
 		}, nil
 	}
+	data := map[string]any{
+		"pattern_id": pat.ID,
+		"template":   pat.Template,
+		"source":     pat.Source,
+		"service":    pat.Service,
+		"rule_name":  pat.RuleName,
+		"verdict":    pat.Verdict,
+		"tags":       pat.Tags,
+		"count":      pat.Count,
+		"baseline":   pat.Baseline,
+		"first_seen": pat.FirstSeen,
+		"last_seen":  pat.LastSeen,
+	}
+	// Include the latest few REDACTED example log lines (bounded to keep the
+	// analyze token budget sane). Omitted entirely when the pattern has none.
+	if s := latestSamples(pat.Samples, 3); len(s) > 0 {
+		data["samples"] = s
+	}
 	return &core.ToolResult{
 		Tool:  PatternHistory{}.Name(),
 		Found: true,
-		Data: map[string]any{
-			"pattern_id": pat.ID,
-			"template":   pat.Template,
-			"source":     pat.Source,
-			"service":    pat.Service,
-			"rule_name":  pat.RuleName,
-			"verdict":    pat.Verdict,
-			"tags":       pat.Tags,
-			"count":      pat.Count,
-			"baseline":   pat.Baseline,
-			"first_seen": pat.FirstSeen,
-			"last_seen":  pat.LastSeen,
-		},
+		Data:  data,
 	}, nil
 }

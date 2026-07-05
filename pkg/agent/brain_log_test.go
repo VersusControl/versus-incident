@@ -24,7 +24,7 @@ func newLogBrainForTest(t *testing.T, cat config.AgentCatalogConfig) (*logBrain,
 	if len(errs) > 0 {
 		t.Fatalf("NewServiceMatcher: %v", errs)
 	}
-	return newLogBrain("es:test", NewMiner(0.4, 4, 100), c, m, svc, 0.2, cat), c
+	return newLogBrain("es:test", NewMiner(0.4, 4, 100), c, m, svc, 0.2, cat, nil), c
 }
 
 func TestLogBrain_Kind(t *testing.T) {
@@ -85,7 +85,7 @@ func TestLogBrain_GroupRespectsRegexFilter(t *testing.T) {
 		t.Fatalf("NewRegexMatcher: %v", errs)
 	}
 	svc, _ := NewServiceMatcher(nil)
-	b := newLogBrain("es:test", NewMiner(0.4, 4, 100), c, m, svc, 0.2, config.AgentCatalogConfig{})
+	b := newLogBrain("es:test", NewMiner(0.4, 4, 100), c, m, svc, 0.2, config.AgentCatalogConfig{}, nil)
 
 	obs, err := b.Group(context.Background(), []core.Signal{
 		{Message: "ERROR boom happened code=1"},

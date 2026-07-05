@@ -1,6 +1,10 @@
 import { Suspense, lazy } from "react";
 import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import { AuthGate } from "./lib/auth";
+import {
+  LEGACY_SYSTEM_PROMPT_REDIRECT,
+  SYSTEM_PROMPT_PATH,
+} from "./lib/systemPromptNav";
 import { AppShell } from "./components/AppShell";
 import { SkCard } from "./components/Skeleton";
 // Hot paths (the 3am set) stay in the main chunk:
@@ -111,7 +115,7 @@ export default function App() {
           <Route path="/agent/slo" element={<SLORecommendationsPage />} />
           <Route path="/agent/decisions" element={<DecisionsPage />} />
           <Route
-            path="/agent/decisions/system-prompt"
+            path={SYSTEM_PROMPT_PATH}
             element={<SystemPromptPage />}
           />
           <Route
@@ -155,8 +159,8 @@ export default function App() {
             element={<Navigate to="/agent/decisions?tab=detect" replace />}
           />
           <Route
-            path="/detect/system-prompt"
-            element={<Navigate to="/agent/decisions/system-prompt" replace />}
+            path={LEGACY_SYSTEM_PROMPT_REDIRECT}
+            element={<Navigate to={SYSTEM_PROMPT_PATH} replace />}
           />
           <Route path="/detect/:id" element={<DetectIdRedirect />} />
           <Route

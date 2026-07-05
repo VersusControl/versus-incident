@@ -66,3 +66,38 @@ func (a *Alert) SendAllAlerts(incident *m.Incident) AlertResult {
 func (a *Alert) SendAlert(incident *m.Incident) error {
 	return a.SendAllAlerts(incident).Err
 }
+
+// Attachment is one rendered artifact (today, an incident report image)
+// bound for a channel. Caption is the short text summary that image-capable
+// channels attach alongside the binary AND that image-incapable channels
+// fall back to. The Data bytes are already the final encoded image; the
+// text is already redacted by the report assembler.
+type Attachment struct {
+	Filename string // "incident-<shortid>.png"
+	MIME     string // "image/png"
+	Data     []byte // the rendered image bytes
+	Caption  string // short redacted text summary (also the fallback body)
+}
+
+// AttachmentSender is an OPTIONAL capability a notification channel may
+// implement on top of the mandatory AlertProvider — exactly like
+// storage.Searcher / storage.Lifecycle. A channel that can upload a binary
+// image (Slack, Telegram, Email) implements it; a channel that cannot
+// (Teams, Viber, Lark webhooks) simply does not, and the report delivery
+// path detects the difference with a type assertion. The interface is
+// deliberately generic: no per-channel special-casing leaks into the
+// caller.
+type AttachmentSender interface {
+	SendAttachment(incident *m.Incident, att Attachment) error
+}
+
+// TextSender is the OPTIONAL text-fallback sibling of AttachmentSender. A
+// channel that cannot upload a binary but CAN post text (Teams, Viber, Lark
+// webhooks) implements it so the report delivery path can still deliver the
+// already-redacted caption + a short note to that channel. Like
+// AttachmentSender it is generic and detected via type assertion; a channel
+// that implements neither simply receives no report and the caller records
+// a graceful fallback outcome.
+type TextSender interface {
+	SendText(incident *m.Incident, text string) error
+}

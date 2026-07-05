@@ -114,3 +114,46 @@ func TestPatternHistory_Found(t *testing.T) {
 		}
 	}
 }
+
+func TestPatternHistory_SamplesLatestThree(t *testing.T) {
+	pat := &PatternView{
+		ID:      "p1",
+		Service: "api",
+		// Ring is oldest→newest; the tool should return only the latest 3.
+		Samples: []string{"s1", "s2", "s3", "s4", "s5"},
+	}
+	cat := &fakeCatalog{byID: map[string]*PatternView{"p1": pat}}
+	tool := PatternHistory{Catalog: cat}
+
+	res, err := tool.Invoke(context.Background(), mustArgs(t, patternHistoryArgs{PatternID: "p1"}))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	got, ok := res.Data["samples"].([]string)
+	if !ok {
+		t.Fatalf("Data[samples] = %v (%T), want []string", res.Data["samples"], res.Data["samples"])
+	}
+	want := []string{"s3", "s4", "s5"}
+	if len(got) != len(want) {
+		t.Fatalf("samples = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("samples[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestPatternHistory_NoSamplesOmitsKey(t *testing.T) {
+	pat := &PatternView{ID: "p1", Service: "api"}
+	cat := &fakeCatalog{byID: map[string]*PatternView{"p1": pat}}
+	tool := PatternHistory{Catalog: cat}
+
+	res, err := tool.Invoke(context.Background(), mustArgs(t, patternHistoryArgs{PatternID: "p1"}))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if _, present := res.Data["samples"]; present {
+		t.Errorf("samples key must be omitted when the ring is empty, got %v", res.Data["samples"])
+	}
+}

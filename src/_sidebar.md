@@ -29,6 +29,7 @@
     - [Recent Changes Tool](/agent/analyze-tools/recent-changes)
     - [Find Runbook Tool](/agent/analyze-tools/find-runbook)
   - [Redaction](/agent/redaction)
+  - [Incidents Report](/agent/incident-report)
   - [Catalog](/agent/catalog)
   - [Miner](/agent/miner)
   - [Regex](/agent/regex)

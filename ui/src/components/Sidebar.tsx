@@ -20,7 +20,6 @@ import {
 import clsx from "clsx";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "@/lib/api";
-import { useOpenIncidentCount } from "@/lib/hooks";
 import { useTheme } from "@/lib/theme";
 
 // Theme-aware sidebar brand — uses the same SVG logo approach as the
@@ -50,7 +49,6 @@ interface SideItem {
   label: string;
   icon: LucideIcon;
   end?: boolean;
-  badge?: number;
   dim?: boolean;
   dimTitle?: string;
   locked?: boolean;
@@ -78,7 +76,6 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
     staleTime: 30_000,
     retry: 1,
   });
-  const { open } = useOpenIncidentCount();
 
   // Probe the enterprise baselines endpoint once to determine if Metrics/Traces
   // are available. A 403 (no intelligence license) or 404 (OSS binary — route
@@ -106,12 +103,10 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
   const respond: SideItem[] = [
     { to: "/now", label: "Now", icon: Flame },
-    { to: "/incidents", label: "Incidents", icon: AlertTriangle, badge: open },
-    { to: "/analyses", label: "Analyses", icon: Brain },
+    { to: "/incidents", label: "Incidents", icon: AlertTriangle },
   ];
   const agent: SideItem[] = [
     { to: "/agent", label: "Overview", icon: Activity, end: true },
-    { to: "/agent/decisions", label: "Decisions", icon: Sparkles },
     { to: "/agent/services", label: "Services", icon: Server },
     { to: "/agent/logs", label: "Logs", icon: ScrollText },
     {
@@ -134,9 +129,17 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         ? "Enterprise feature — requires an intelligence license"
         : undefined,
     },
+  ];
+  // AI groups the agent's reasoning surfaces — the Decisions it makes and
+  // the SLIs/SLOs it recommends — apart from the raw learned-catalog views
+  // above. SLIs/SLOs stays enterprise-gated; Decisions is ungated. Both keep
+  // their existing routes; this is purely a nav regrouping.
+  const ai: SideItem[] = [
+    { to: "/agent/decisions", label: "Decisions", icon: Sparkles },
+    { to: "/analyses", label: "Analyses", icon: Brain },
     {
       to: "/agent/slo",
-      label: "SLOs",
+      label: "SLIs/SLOs",
       icon: Target,
       locked: enterpriseLocked,
       dim: enterpriseLocked,
@@ -189,6 +192,7 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       <nav aria-label="Primary" className="dark-scroll flex-1 overflow-y-auto px-2 py-2">
         <Zone title="Respond" items={respond} onNavigate={onNavigate} />
         <Zone title="Agent" items={applyAgentOff(agent)} onNavigate={onNavigate} />
+        <Zone title="AI" items={applyAgentOff(ai)} onNavigate={onNavigate} />
         <Zone title="Tools" items={applyAgentOff(tools)} onNavigate={onNavigate} />
         <Zone title="Manage" items={manage} onNavigate={onNavigate} />
       </nav>
@@ -232,7 +236,6 @@ function SideLink({
   label,
   icon: Icon,
   end,
-  badge,
   dim,
   dimTitle,
   locked,
@@ -267,11 +270,6 @@ function SideLink({
           <span className="flex-1">{label}</span>
           {locked && (
             <Lock size={12} className="text-ink-500" aria-label="Enterprise" />
-          )}
-          {badge !== undefined && badge > 0 && (
-            <span className="rounded-full bg-sev-critical/20 px-1.5 text-2xs tabular-nums text-sev-critical">
-              {badge}
-            </span>
           )}
         </>
       )}

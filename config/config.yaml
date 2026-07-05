@@ -164,7 +164,6 @@ storage:
   # database:                    # not yet implemented
   #   driver: postgres           # postgres | mysql | sqlite
   #   dsn: ${DATABASE_DSN}
-  #   max_incidents: 5000
 
 # -----------------------------------------------------------------------------
 # AI agent mode (training | shadow | detect) — opt-in.
@@ -186,7 +185,6 @@ agent:
   lookback: 5m                    # initial backfill window on startup
   batch_max: 5000                 # safety cap per tick
   signal_max_bytes: 65536         # cap on Signal.Raw
-
 
   redaction:
     enable: true
@@ -258,7 +256,7 @@ agent:
   # New-service grace: when a previously unseen service starts emitting logs
   # in detect mode, it enters an implicit training window so the catalog can
   # build up before AI analysis kicks in. Set to "0" to disable.
-  new_service_grace: 30m            # duration (env: AGENT_NEW_SERVICE_GRACE), ex 10m, 2h, etc.
+  new_service_grace: 24h            # duration (env: AGENT_NEW_SERVICE_GRACE), ex 10m, 2h, etc.
   # Service detection — regexes applied to each log message to extract the
   # service name.
   service_patterns:

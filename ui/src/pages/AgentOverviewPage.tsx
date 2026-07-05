@@ -198,22 +198,21 @@ export function AgentOverviewPage() {
           Lifetime totals
         </div>
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          {!enterpriseAvailable && (
-            <KpiTile
-              label="Log patterns"
-              value={status.data?.patterns}
-              loading={status.isPending}
-              to="/agent/logs"
-              icon={Layers}
-              foot={
-                status.data
-                  ? status.data.dirty
-                    ? "Unsaved changes"
-                    : "Persisted"
-                  : undefined
-              }
-            />
-          )}
+          {/* Service first (Service · Shadow · Detect), then Logs (OSS only)
+              and the rest. Shadow/Detect are enterprise-fed once a license is
+              present, but they render from the same status query in BOTH the
+              OSS and enterprise paths, so the ordering is a pure ui/ change
+              that holds for both — no separate enterprise component. */}
+          <KpiTile
+            label="Services tracked"
+            value={
+              services.data ? Object.keys(services.data).length : undefined
+            }
+            loading={services.isPending}
+            to="/agent/services"
+            icon={Server}
+            foot="Discovered from logs"
+          />
           <KpiTile
             label="Shadow events"
             value={status.data?.shadow_events ?? shadowStats.data?.events}
@@ -222,7 +221,6 @@ export function AgentOverviewPage() {
             icon={EyeOff}
             spark={shadowTrend}
             sparkLabel={`${shadowTrend24} shadow events active in the last 24 hours`}
-            className={enterpriseAvailable ? "lg:col-span-2" : undefined}
             foot={
               status.data
                 ? status.data.shadow_dirty
@@ -245,16 +243,22 @@ export function AgentOverviewPage() {
                 : undefined
             }
           />
-          <KpiTile
-            label="Services tracked"
-            value={
-              services.data ? Object.keys(services.data).length : undefined
-            }
-            loading={services.isPending}
-            to="/agent/services"
-            icon={Server}
-            foot="Discovered from logs"
-          />
+          {!enterpriseAvailable && (
+            <KpiTile
+              label="Log patterns"
+              value={status.data?.patterns}
+              loading={status.isPending}
+              to="/agent/logs"
+              icon={Layers}
+              foot={
+                status.data
+                  ? status.data.dirty
+                    ? "Unsaved changes"
+                    : "Persisted"
+                  : undefined
+              }
+            />
+          )}
           <KpiTile
             label="Incidents emitted"
             value={emitted}
@@ -557,8 +561,6 @@ function RuntimeBanner({ cfg }: { cfg: AgentConfigView }) {
     );
   }
 
-  const enabledSources = cfg.sources?.filter((s) => s.enable) ?? [];
-  const totalSources = cfg.sources?.length ?? 0;
   const aiEnabled = !!cfg.ai?.enable;
 
   return (
@@ -576,23 +578,11 @@ function RuntimeBanner({ cfg }: { cfg: AgentConfigView }) {
           </div>
         )}
         <div className="flex items-center gap-2">
-          <span className="text-ink-300">Sources</span>
-          <span className="font-mono text-ink-100">
-            {enabledSources.length}/{totalSources} enabled
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
           <span className="text-ink-300">AI SRE</span>
           <Pill tone={aiEnabled ? "accent" : undefined}>
             {aiEnabled ? cfg.ai.model || "on" : "off"}
           </Pill>
         </div>
-        {cfg.poll_interval && (
-          <div className="flex items-center gap-2 text-ink-300">
-            Poll every{" "}
-            <span className="font-mono text-ink-100">{cfg.poll_interval}</span>
-          </div>
-        )}
       </div>
     </div>
   );

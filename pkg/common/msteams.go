@@ -67,3 +67,25 @@ func (m *MSTeamsProvider) SendAlert(i *m.Incident) error {
 
 	return nil
 }
+
+// SendText implements core.TextSender: the image-fallback path for Teams,
+// which cannot upload a binary over its Power Automate webhook. It posts the
+// already-redacted text (report caption + note) as a Teams message. The
+// incident carrier has no raw content, so nothing unredacted is passed
+// through ConvertToTeamsPayload.
+func (m *MSTeamsProvider) SendText(i *m.Incident, text string) error {
+	payload, err := utils.ConvertToTeamsPayload(m.powerAutomateURL, text, i)
+	if err != nil {
+		return fmt.Errorf("failed to prepare text payload: %w", err)
+	}
+	resp, err := http.Post(m.powerAutomateURL, "application/json", bytes.NewBuffer(payload))
+	if err != nil {
+		return fmt.Errorf("failed to send text: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("MS Teams API returned %d status code: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}

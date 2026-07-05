@@ -106,3 +106,30 @@ func TestDescribeService_TopPatternsClamp(t *testing.T) {
 		t.Errorf("pattern_count = %v, want 1", res.Data["pattern_count"])
 	}
 }
+
+func TestDescribeService_IncludesLatestSample(t *testing.T) {
+	cat := &fakeCatalog{
+		all: []*PatternView{
+			// Ring oldest→newest; the listing should carry only the latest one.
+			{ID: "p1", Service: "api", Count: 5, Samples: []string{"old line", "newest redacted line"}},
+			{ID: "p2", Service: "api", Count: 3}, // no samples → omitted
+		},
+	}
+	tool := DescribeService{Catalog: cat}
+
+	res, err := tool.Invoke(context.Background(), mustArgs(t, describeServiceArgs{Service: "api"}))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	top := res.Data["top_patterns"].([]describePatternEntry)
+	byID := map[string]describePatternEntry{}
+	for _, e := range top {
+		byID[e.ID] = e
+	}
+	if got := byID["p1"].Sample; got != "newest redacted line" {
+		t.Errorf("p1 sample = %q, want the latest ring entry", got)
+	}
+	if got := byID["p2"].Sample; got != "" {
+		t.Errorf("p2 sample = %q, want empty (no ring)", got)
+	}
+}

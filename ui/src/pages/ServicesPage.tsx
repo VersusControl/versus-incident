@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Check, Pencil, Play, Plus, Search, Square, Trash2, X } from "lucide-react";
+import { Plus, Search, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { fmtAbs, fmtRel } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
@@ -9,7 +9,7 @@ import { Pill } from "@/components/Pill";
 import { InfoHint } from "@/components/InfoHint";
 import { AutoRefreshControl } from "@/components/AutoRefreshControl";
 import { useAutoRefresh } from "@/lib/useAutoRefresh";
-import { EmptyState, Spinner } from "@/components/feedback";
+import { EmptyState } from "@/components/feedback";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -17,13 +17,23 @@ import { TextInputModal } from "@/components/TextInputModal";
 import { Pagination } from "@/components/Pagination";
 import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
-
-type GraceAction = "end" | "restart";
-
-// Pending key for one {service, action} pair — per-row mutation tracking so
-// only the clicked button disables/spins (audit S3: grace actions used to
-// disable both buttons globally and fail silently).
-const graceKey = (name: string, action: GraceAction) => `${name}:${action}`;
+import {
+  BulkActionBar,
+  RowSelectCheckbox,
+  SelectAllCheckbox,
+  type ActionBarItem,
+} from "@/components/BulkActionBar";
+import { useBulkSelection } from "@/lib/useBulkSelection";
+import {
+  useIntelLicensed,
+  useLearnExclusions,
+} from "@/lib/useLearnExclusions";
+import {
+  GRACE_ACTION_LABEL,
+  graceActionsForSelection,
+  graceRemainingLabel,
+  type GraceAction,
+} from "@/lib/serviceGrace";
 
 export function ServicesPage() {
   const qc = useQueryClient();
@@ -37,21 +47,15 @@ export function ServicesPage() {
 
   const [q, setQ] = useState("");
 
-  const [pending, setPending] = useState<Set<string>>(new Set());
+  // Enterprise Disable-Learn ("ignore") controls — gated to a licensed admin,
+  // hidden on community / viewer. Drives the Ignore/Resume bulk actions and the
+  // "Ignored services" table below the list.
+  const licensed = useIntelLicensed();
+  const ignore = useLearnExclusions(licensed);
 
   const control = useMutation({
     mutationFn: ({ name, action }: { name: string; action: GraceAction }) =>
       api.controlGrace(name, action),
-    onMutate: ({ name, action }) => {
-      setPending((prev) => new Set(prev).add(graceKey(name, action)));
-    },
-    onSettled: (_data, _err, { name, action }) => {
-      setPending((prev) => {
-        const next = new Set(prev);
-        next.delete(graceKey(name, action));
-        return next;
-      });
-    },
     onSuccess: (_data, { name, action }) => {
       qc.invalidateQueries({ queryKey: ["services"] });
       toast.push({
@@ -78,7 +82,8 @@ export function ServicesPage() {
   // Manual service create / rename / delete.
   const [showAdd, setShowAdd] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
-  const [renaming, setRenaming] = useState<{ from: string; draft: string } | null>(
+  const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState<string[] | null>(
     null,
   );
 
@@ -101,7 +106,7 @@ export function ServicesPage() {
     mutationFn: (v: { from: string; to: string }) =>
       api.renameService(v.from, v.to),
     onSuccess: (res, v) => {
-      setRenaming(null);
+      setRenameTarget(null);
       qc.invalidateQueries({ queryKey: ["services"] });
       qc.invalidateQueries({ queryKey: ["service-overrides"] });
       toast.push({
@@ -170,6 +175,100 @@ export function ServicesPage() {
     : sorted;
   const pg = usePagination(filtered, { resetKey: q });
 
+  // ----- selection + grace action bar -------------------------------------
+  // The SAME checkbox action model the learned-signal pages use: a select-all
+  // checkbox in the header, a checkbox per row, and an action bar that APPEARS
+  // when services are selected. Grace control lives ONLY in the bar now (no
+  // inline End/Restart per row). The offered action is contextual per the
+  // selection's grace state — "End grace" for services in grace, "Restart grace"
+  // for those not — never both at once for one service. Selection resets on
+  // search / PAGE change.
+  const pageNames = useMemo(
+    () => pg.pageItems.map(([name]) => name),
+    [pg.pageItems],
+  );
+  const bulk = useBulkSelection(pageNames, `${q}|${pg.page}`);
+
+  const selectedInGrace = bulk.selectedKeys.map(
+    (name) => data?.[name]?.in_grace ?? false,
+  );
+  const selectedManual = bulk.selectedKeys.filter(
+    (name) => data?.[name]?.manual,
+  );
+  const anyNotIgnored =
+    ignore.visible &&
+    bulk.selectedKeys.some((name) => !ignore.isServiceExcluded(name));
+  const anyIgnored =
+    ignore.visible &&
+    bulk.selectedKeys.some((name) => ignore.isServiceExcluded(name));
+
+  // The action bar offers every action applicable to the selection: grace
+  // (end/restart, contextual per each service's grace state), Ignore/Resume
+  // learning (Enterprise — hidden on community / viewer), and manual-service
+  // CRUD (Rename for a single manual service, Delete for any manual ones).
+  // Auto-discovered services carry no manual CRUD.
+  const bulkActions: ActionBarItem[] = [
+    ...graceActionsForSelection(selectedInGrace).map((a) => ({
+      id: a,
+      label: GRACE_ACTION_LABEL[a],
+    })),
+    ...(anyNotIgnored ? [{ id: "ignore", label: "Ignore learning" }] : []),
+    ...(anyIgnored ? [{ id: "resume", label: "Resume learning" }] : []),
+    ...(selectedManual.length === 1
+      ? [{ id: "rename", label: "Rename" }]
+      : []),
+    ...(selectedManual.length > 0
+      ? [{ id: "delete", label: "Delete", danger: true }]
+      : []),
+  ];
+
+  // Route each bar action to its handler. Grace splits a mixed selection so
+  // "end" only touches services IN grace and "restart" only those NOT in grace;
+  // Ignore/Resume touch only the applicable subset; Delete confirms first.
+  const onBulkAction = (spec: ActionBarItem) => {
+    switch (spec.id) {
+      case "end":
+      case "restart": {
+        const action = spec.id as GraceAction;
+        bulk.selectedKeys
+          .filter((name) => {
+            const inGrace = data?.[name]?.in_grace ?? false;
+            return action === "end" ? inGrace : !inGrace;
+          })
+          .forEach((name) => control.mutate({ name, action }));
+        bulk.clear();
+        break;
+      }
+      case "ignore":
+        bulk.selectedKeys
+          .filter((name) => !ignore.isServiceExcluded(name))
+          .forEach((name) => ignore.toggleService(name, true));
+        bulk.clear();
+        break;
+      case "resume":
+        bulk.selectedKeys
+          .filter((name) => ignore.isServiceExcluded(name))
+          .forEach((name) => ignore.toggleService(name, false));
+        bulk.clear();
+        break;
+      case "rename":
+        if (selectedManual.length === 1) setRenameTarget(selectedManual[0]);
+        break;
+      case "delete":
+        if (selectedManual.length > 0) setConfirmBulkDelete(selectedManual);
+        break;
+    }
+  };
+
+  const bulkBusy =
+    control.isPending ||
+    ignore.busy ||
+    renameService.isPending ||
+    deleteService.isPending;
+
+  // Columns: checkbox + Service + First seen + Origin + Status + Grace.
+  const cols = 6;
+
   return (
     <>
       <TopBar
@@ -228,29 +327,51 @@ export function ServicesPage() {
 
         {(!isError || data) && (
           <div className="card overflow-hidden">
+            {bulk.count > 0 && (
+              <BulkActionBar
+                count={bulk.count}
+                actions={bulkActions}
+                onAction={onBulkAction}
+                onClear={bulk.clear}
+                busy={bulkBusy}
+              />
+            )}
             <div className="max-h-[calc(100vh-190px)] overflow-auto">
               <table className="ddt">
                 <thead>
                   <tr>
+                    <th className="w-8">
+                      <SelectAllCheckbox
+                        state={bulk.headerState}
+                        onChange={bulk.toggleAll}
+                      />
+                    </th>
                     <th>Service</th>
                     <th className="w-48">First seen</th>
                     <th className="w-24">Origin</th>
-                    <th className="w-32">Status</th>
-                    <th className="w-72 whitespace-nowrap">
-                      Grace control
+                    <th className="w-32">
+                      Status
                       <InfoHint
-                        label="About grace and service attribution"
-                        text="When the agent first sees a brand-new service it opens a grace window (set by agent.new_service_grace, default 30m). During grace the service's signals are learned but not alerted on — so a new service can't page you before the agent knows what's normal for it. 'End' closes grace now so alerts can fire immediately; 'Restart' resets the timer, treating the service as new again. To re-point a mis-attributed signal, use the 'Assign to service' action on the Logs, Metrics or Traces page."
-                        example="A service first seen at 10:00 with a 30m grace is learned quietly until 10:30, then starts detecting. Click 'End' at 10:10 to begin detecting right away."
+                        label="About grace and service status"
+                        text="When the agent first sees a brand-new service it opens a grace window (set by agent.new_service_grace, default 30m). During grace the service's signals are learned but not alerted on — so a new service can't page you before the agent knows what's normal for it. 'In grace' means it is still inside that window; 'tracked' means it has passed grace and is being detected on. This is the SAME status the service detail page shows. To change grace, select one or more services and use the action bar."
+                        example="A service first seen at 10:00 with a 30m grace shows 'in grace' with ~20m remaining at 10:10, then 'tracked' after 10:30."
+                      />
+                    </th>
+                    <th className="w-28 whitespace-nowrap">
+                      Grace
+                      <InfoHint
+                        label="About the Grace column"
+                        text="How much of the new-service grace window is left. It shows the remaining time while the service is in grace, or '—' once it is tracked (grace has ended or was never open)."
+                        example="'12m30s' means detection starts in about 12 and a half minutes; '—' means the service is already being detected on."
                       />
                     </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {isLoading && <SkRows rows={6} cols={5} />}
+                  {isLoading && <SkRows rows={6} cols={cols} />}
                   {!isLoading && !isError && filtered.length === 0 && (
                     <tr>
-                      <td colSpan={5}>
+                      <td colSpan={cols}>
                         {entries.length === 0 ? (
                           <EmptyState
                             title="No services discovered yet."
@@ -267,62 +388,17 @@ export function ServicesPage() {
                   )}
                   {pg.pageItems.map(([name, info]) => {
                       const isUnknown = name === "_unknown";
-                      const endPending = pending.has(graceKey(name, "end"));
-                      const restartPending = pending.has(
-                        graceKey(name, "restart"),
-                      );
-                      const isRenaming = renaming?.from === name;
                       return (
                         <tr key={name}>
+                          <td className="w-8">
+                            <RowSelectCheckbox
+                              checked={bulk.isSelected(name)}
+                              onChange={() => bulk.toggle(name)}
+                              label={`Select service ${name}`}
+                            />
+                          </td>
                           <td className="font-mono">
-                            {isRenaming ? (
-                              <form
-                                className="flex items-center gap-1"
-                                onSubmit={(e) => {
-                                  e.preventDefault();
-                                  const to = renaming.draft.trim();
-                                  if (to && to !== name)
-                                    renameService.mutate({ from: name, to });
-                                  else setRenaming(null);
-                                }}
-                              >
-                                <input
-                                  className="input py-1"
-                                  autoFocus
-                                  value={renaming.draft}
-                                  maxLength={256}
-                                  aria-label={`New name for ${name}`}
-                                  onChange={(e) =>
-                                    setRenaming({
-                                      from: name,
-                                      draft: e.target.value,
-                                    })
-                                  }
-                                />
-                                <button
-                                  type="submit"
-                                  className="btn"
-                                  disabled={renameService.isPending}
-                                  aria-label="Save rename"
-                                  title="Save"
-                                >
-                                  {renameService.isPending ? (
-                                    <Spinner />
-                                  ) : (
-                                    <Check size={11} />
-                                  )}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn"
-                                  aria-label="Cancel rename"
-                                  title="Cancel"
-                                  onClick={() => setRenaming(null)}
-                                >
-                                  <X size={11} />
-                                </button>
-                              </form>
-                            ) : isUnknown ? (
+                            {isUnknown ? (
                               name
                             ) : (
                               <Link
@@ -358,76 +434,20 @@ export function ServicesPage() {
                             )}
                           </td>
                           <td>
-                            <Pill tone="good">tracked</Pill>
+                            {/* Status: the SAME server-computed grace status the
+                                service detail page shows (in_grace), so the list
+                                and detail never disagree. */}
+                            {info.in_grace ? (
+                              <Pill tone="warn">in grace</Pill>
+                            ) : (
+                              <Pill tone="good">tracked</Pill>
+                            )}
                           </td>
-                          <td>
-                            <div className="flex gap-1">
-                              <button
-                                className="btn"
-                                disabled={endPending}
-                                aria-label={`End grace period for ${name}`}
-                                title="End grace period now"
-                                onClick={() =>
-                                  control.mutate({ name, action: "end" })
-                                }
-                              >
-                                {endPending ? (
-                                  <Spinner />
-                                ) : (
-                                  <Square size={11} />
-                                )}{" "}
-                                End
-                              </button>
-                              <button
-                                className="btn"
-                                disabled={restartPending}
-                                aria-label={`Restart grace timer for ${name}`}
-                                title="Restart grace timer (treat as new)"
-                                onClick={() =>
-                                  control.mutate({ name, action: "restart" })
-                                }
-                              >
-                                {restartPending ? (
-                                  <Spinner />
-                                ) : (
-                                  <Play size={11} />
-                                )}{" "}
-                                Restart
-                              </button>
-                              {info.manual && (
-                                <>
-                                  <button
-                                    className="btn"
-                                    disabled={isRenaming}
-                                    aria-label={`Rename ${name}`}
-                                    title="Rename this manual service"
-                                    onClick={() =>
-                                      setRenaming({ from: name, draft: name })
-                                    }
-                                  >
-                                    <Pencil size={11} /> Rename
-                                  </button>
-                                  <button
-                                    className="btn"
-                                    disabled={
-                                      deleteService.isPending &&
-                                      deleteService.variables === name
-                                    }
-                                    aria-label={`Delete ${name}`}
-                                    title="Delete this manual service"
-                                    onClick={() => deleteService.mutate(name)}
-                                  >
-                                    {deleteService.isPending &&
-                                    deleteService.variables === name ? (
-                                      <Spinner />
-                                    ) : (
-                                      <Trash2 size={11} />
-                                    )}{" "}
-                                    Delete
-                                  </button>
-                                </>
-                              )}
-                            </div>
+                          <td className="tabular-nums text-2xs text-ink-300">
+                            {graceRemainingLabel(
+                              info.in_grace,
+                              info.grace_seconds_remaining,
+                            )}
                           </td>
                         </tr>
                       );
@@ -438,7 +458,101 @@ export function ServicesPage() {
             <Pagination state={pg} />
           </div>
         )}
+
+        {/* Ignored services — the Enterprise Disable-Learn "services" list.
+            Only a licensed admin sees it (ignore.visible); absent on
+            community / viewer. */}
+        {ignore.visible && (
+          <section className="mt-6">
+            <div className="mb-2 flex items-center gap-1.5">
+              <h2 className="text-2xs font-semibold uppercase tracking-wide text-ink-400">
+                Ignored services
+              </h2>
+              <InfoHint
+                label="About ignored services"
+                text="Services held out of learning. The agent still receives their signals but never learns a baseline or raises alerts for them — useful for noisy infrastructure you don't want to page on. Select services above and choose ‘Ignore learning’ to add one; ‘Resume learning’ brings it back."
+                example="Ignoring ‘prometheus’ stops the agent learning or alerting on the monitoring stack itself."
+              />
+            </div>
+            <div className="card overflow-hidden">
+              {ignore.excludedServices.length === 0 ? (
+                <div className="p-4">
+                  <EmptyState
+                    title="No services are ignored"
+                    hint="Select one or more services above and choose ‘Ignore learning’."
+                  />
+                </div>
+              ) : (
+                <table className="ddt">
+                  <thead>
+                    <tr>
+                      <th>Service</th>
+                      <th className="w-36 text-right">
+                        <span className="sr-only">Actions</span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...ignore.excludedServices]
+                      .sort((a, b) => a.localeCompare(b))
+                      .map((name) => (
+                        <tr key={name}>
+                          <td className="font-mono">{name}</td>
+                          <td className="text-right">
+                            <button
+                              className="btn"
+                              disabled={ignore.busy}
+                              aria-label={`Resume learning for ${name}`}
+                              onClick={() => ignore.toggleService(name, false)}
+                            >
+                              Resume learning
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </section>
+        )}
       </main>
+
+      {renameTarget && (
+        <TextInputModal
+          title="Rename service"
+          label="New name"
+          initialValue={renameTarget}
+          placeholder="New service name"
+          confirmLabel="Rename"
+          maxLength={256}
+          busy={renameService.isPending}
+          error={renameService.error}
+          onSubmit={(to) => {
+            if (to !== renameTarget)
+              renameService.mutate({ from: renameTarget, to });
+            else setRenameTarget(null);
+          }}
+          onClose={() => setRenameTarget(null)}
+        />
+      )}
+
+      {confirmBulkDelete && (
+        <ConfirmDialog
+          title={`Delete ${confirmBulkDelete.length} manual service${confirmBulkDelete.length > 1 ? "s" : ""}`}
+          message="This deletes the selected manually-created service(s). Auto-discovered services and learned patterns are untouched. A service still targeted by an override rule can't be deleted until that override is cleared."
+          confirmLabel="Delete"
+          tone="danger"
+          busy={deleteService.isPending}
+          error={deleteService.error}
+          onConfirm={() => {
+            confirmBulkDelete.forEach((name) => deleteService.mutate(name));
+            setConfirmBulkDelete(null);
+            bulk.clear();
+          }}
+          onClose={() => setConfirmBulkDelete(null)}
+        />
+      )}
 
       {showAdd && (
         <TextInputModal

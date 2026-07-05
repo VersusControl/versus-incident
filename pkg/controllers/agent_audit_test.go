@@ -1,8 +1,10 @@
 package controllers
 
 import (
+	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/VersusControl/versus-incident/pkg/agent"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
@@ -97,6 +99,7 @@ func newAuditApp(t *testing.T) (*fiber.App, *agent.Catalog) {
 	}
 	ctrl := NewAgentController(cat, nil, shadow, detectLog, ov, false)
 	app := fiber.New()
+	app.Post("/api/agent/patterns/:id", ctrl.updatePattern)
 	app.Delete("/api/agent/patterns", ctrl.clearPatterns)
 	app.Delete("/api/agent/services", ctrl.clearServices)
 	app.Delete("/api/agent/shadow", ctrl.clearShadow)
@@ -104,6 +107,7 @@ func newAuditApp(t *testing.T) (*fiber.App, *agent.Catalog) {
 	app.Post("/api/agent/services", ctrl.createService)
 	app.Put("/api/agent/services/:name", ctrl.renameService)
 	app.Delete("/api/agent/services/:name", ctrl.deleteService)
+	app.Post("/api/agent/services/:name/grace", ctrl.controlServiceGrace)
 	app.Post("/api/agent/service-overrides", ctrl.createServiceOverride)
 	app.Delete("/api/agent/service-overrides/:id", ctrl.deleteServiceOverride)
 	return app, cat
@@ -134,6 +138,40 @@ func TestAdminAudit_ClearPatterns_SuccessScopeAndCount(t *testing.T) {
 	// Services survive a pattern-only clear.
 	if n := len(cat.AllServices()); n != 1 {
 		t.Errorf("services after clear-patterns = %d, want 1 (services must survive)", n)
+	}
+}
+
+// TestAdminAudit_PatternRelabel_SuccessAndDenial proves the pattern relabel/
+// clear route emits agent.pattern.relabeled:success (target = the pattern id,
+// org from ctx) on a live pattern AND a denial row when the pattern id is
+// unknown — the branches the audit-test file had left uncovered.
+func TestAdminAudit_PatternRelabel_SuccessAndDenial(t *testing.T) {
+	cap := installCapture(t)
+	app, cat := newAuditApp(t)
+
+	// Seed a learned pattern so the relabel targets a live row.
+	cat.RegisterService("payments")
+	cat.Upsert("p1", "boom <*>", "es:prod", 5, 0.2, "default", "payments")
+
+	// relabel success (set verdict "known")
+	if code, _ := doJSON(t, app, "POST", "/api/agent/patterns/p1", map[string]any{"verdict": "known"}); code != fiber.StatusOK {
+		t.Fatalf("relabel status = %d, want 200", code)
+	}
+	ev := cap.only(t, auditActionPatternRelabeled, middleware.AdminAuditSuccess)
+	if ev.org != storage.DefaultOrgID {
+		t.Errorf("org = %q, want %q", ev.org, storage.DefaultOrgID)
+	}
+	if ev.target != "p1" {
+		t.Errorf("relabel target = %q, want p1", ev.target)
+	}
+
+	// relabel denial (unknown pattern id)
+	cap.reset()
+	if code, _ := doJSON(t, app, "POST", "/api/agent/patterns/ghost", map[string]any{"verdict": "known"}); code != fiber.StatusNotFound {
+		t.Fatalf("relabel missing status = %d, want 404", code)
+	}
+	if ev := cap.only(t, auditActionPatternRelabeled, middleware.AdminAuditDenied); ev.target != "ghost" {
+		t.Errorf("relabel denial target = %q, want ghost", ev.target)
 	}
 }
 
@@ -321,6 +359,195 @@ func TestAdminAudit_OverrideMutations_SuccessAndDenial(t *testing.T) {
 	}
 	if ev := cap.only(t, auditActionOverrideDeleted, middleware.AdminAuditDenied); ev.target != "nope" {
 		t.Errorf("override delete denial target = %q, want nope", ev.target)
+	}
+}
+
+// TestAdminAudit_GraceControl_ValidActionsAndBoundedInvalidTarget proves the
+// grace-control route records `<name> (action=end|restart)` on the valid paths
+// (unchanged) and, on an INVALID action, records a bounded, control-char-
+// stripped target — never the raw client string (B52 log-injection guard).
+func TestAdminAudit_GraceControl_ValidActionsAndBoundedInvalidTarget(t *testing.T) {
+	cap := installCapture(t)
+	app, cat := newAuditApp(t)
+	cat.RegisterService("payments")
+
+	// valid: end → success target unchanged.
+	if code, _ := doJSON(t, app, "POST", "/api/agent/services/payments/grace", map[string]any{"action": "end"}); code != fiber.StatusOK {
+		t.Fatalf("end status = %d, want 200", code)
+	}
+	if ev := cap.only(t, auditActionServiceGraceControlled, middleware.AdminAuditSuccess); ev.target != "payments (action=end)" {
+		t.Errorf("end target = %q, want 'payments (action=end)'", ev.target)
+	}
+
+	// valid: restart → success target unchanged.
+	cap.reset()
+	if code, _ := doJSON(t, app, "POST", "/api/agent/services/payments/grace", map[string]any{"action": "restart"}); code != fiber.StatusOK {
+		t.Fatalf("restart status = %d, want 200", code)
+	}
+	if ev := cap.only(t, auditActionServiceGraceControlled, middleware.AdminAuditSuccess); ev.target != "payments (action=restart)" {
+		t.Errorf("restart target = %q, want 'payments (action=restart)'", ev.target)
+	}
+
+	// invalid: an oversized, control-char-laden client action must be rejected
+	// (400) AND must never reach the audit target verbatim/unbounded.
+	cap.reset()
+	evil := "delete\n\rDROP TABLE audit;" + strings.Repeat("A", 500)
+	if code, _ := doJSON(t, app, "POST", "/api/agent/services/payments/grace", map[string]any{"action": evil}); code != fiber.StatusBadRequest {
+		t.Fatalf("invalid action status = %d, want 400", code)
+	}
+	ev := cap.only(t, auditActionServiceGraceControlled, middleware.AdminAuditDenied)
+	if strings.Contains(ev.target, evil) {
+		t.Fatalf("audit target echoed the raw client action verbatim: %q", ev.target)
+	}
+	if strings.ContainsAny(ev.target, "\n\r") {
+		t.Errorf("audit target contains control/newline chars (log-injection surface): %q", ev.target)
+	}
+	if got, max := len(ev.target), len("payments (action=invalid:)")+maxAuditActionLen; got > max {
+		t.Errorf("audit target not bounded: len=%d > %d target=%q", got, max, ev.target)
+	}
+	if !strings.HasPrefix(ev.target, "payments (action=invalid:") {
+		t.Errorf("target = %q, want it to name the service + a bounded action=invalid token", ev.target)
+	}
+
+	// invalid on a non-existent service still audits a denial with a bounded
+	// target (the raw action never lands verbatim regardless of service state).
+	cap.reset()
+	if code, _ := doJSON(t, app, "POST", "/api/agent/services/ghost/grace", map[string]any{"action": strings.Repeat("z", 300)}); code != fiber.StatusBadRequest {
+		t.Fatalf("invalid action (missing svc) status = %d, want 400", code)
+	}
+	if ev := cap.only(t, auditActionServiceGraceControlled, middleware.AdminAuditDenied); len(ev.target) > len("ghost (action=invalid:)")+maxAuditActionLen {
+		t.Errorf("audit target not bounded: len=%d target=%q", len(ev.target), ev.target)
+	}
+}
+
+// TestAdminAudit_CreateServiceOverride_BoundedDenialTarget proves the override-
+// create route (B53 / QA-031) never echoes a raw, unbounded client `service`
+// into the audit target on EITHER denial branch — the unknown-target-service
+// 400 and the overrides.Put-error 400 — while the valid create target stays
+// unchanged. Same class + guard as the B52 grace-control fix.
+func TestAdminAudit_CreateServiceOverride_BoundedDenialTarget(t *testing.T) {
+	overrideMaxTargetLen := len("service ") + maxAuditActionLen
+	evil := "ghost\n\rDROP TABLE audit;" + strings.Repeat("A", 500)
+
+	// (1) unknown-target-service denial: catalog non-nil ⇒ the existence check
+	// fires and rejects the arbitrary client service. The denial target must be
+	// bounded + control-char-stripped, never the raw client string.
+	t.Run("unknown target service branch", func(t *testing.T) {
+		cap := installCapture(t)
+		app, _ := newAuditApp(t) // catalog non-nil
+		code, _ := doJSON(t, app, "POST", "/api/agent/service-overrides", map[string]any{
+			"source_type": "log", "match": "p-1", "service": evil,
+		})
+		if code != fiber.StatusBadRequest {
+			t.Fatalf("unknown-target status = %d, want 400", code)
+		}
+		ev := cap.only(t, auditActionOverrideSet, middleware.AdminAuditDenied)
+		assertBoundedOverrideTarget(t, ev.target, evil, overrideMaxTargetLen)
+	})
+
+	// (2) overrides.Put-error denial: catalog nil ⇒ the existence check is
+	// skipped, so an oversized service reaches Put, which rejects it ("entry
+	// exceeds maximum length"). The denial target must still be bounded, so an
+	// arbitrary client service can never reach the trail verbatim/unbounded even
+	// when no catalog gates it.
+	t.Run("overrides.Put error branch", func(t *testing.T) {
+		cap := installCapture(t)
+		ov, err := agent.LoadServiceOverrideStore(storage.NewMemory())
+		if err != nil {
+			t.Fatalf("LoadServiceOverrideStore: %v", err)
+		}
+		ctrl := NewAgentController(nil, nil, nil, nil, ov, false) // nil catalog
+		app := fiber.New()
+		app.Post("/api/agent/service-overrides", ctrl.createServiceOverride)
+		code, _ := doJSON(t, app, "POST", "/api/agent/service-overrides", map[string]any{
+			"source_type": "log", "match": "p-1", "service": evil,
+		})
+		if code != fiber.StatusBadRequest {
+			t.Fatalf("put-error status = %d, want 400", code)
+		}
+		ev := cap.only(t, auditActionOverrideSet, middleware.AdminAuditDenied)
+		assertBoundedOverrideTarget(t, ev.target, evil, overrideMaxTargetLen)
+	})
+
+	// (3) valid create target unchanged: an existing, in-bounds service still
+	// records `<id> -> <service>` verbatim (never sanitized/truncated).
+	t.Run("valid create target unchanged", func(t *testing.T) {
+		cap := installCapture(t)
+		app, cat := newAuditApp(t)
+		_ = cat.CreateService("payments")
+		_, body := doJSON(t, app, "POST", "/api/agent/service-overrides", map[string]any{
+			"source_type": "log", "match": "p-1", "service": "payments",
+		})
+		id, _ := body["id"].(string)
+		if id == "" {
+			t.Fatalf("override create returned no id; body=%v", body)
+		}
+		if ev := cap.only(t, auditActionOverrideSet, middleware.AdminAuditSuccess); ev.target != id+" -> payments" {
+			t.Errorf("valid create target = %q, want %q", ev.target, id+" -> payments")
+		}
+	})
+}
+
+// assertBoundedOverrideTarget checks a createServiceOverride denial target is a
+// bounded, control-char-stripped "service <token>" — never the raw client
+// string, no newline/CR, length-capped (B53 log-injection guard).
+func assertBoundedOverrideTarget(t *testing.T, target, raw string, max int) {
+	t.Helper()
+	if strings.Contains(target, raw) {
+		t.Fatalf("audit target echoed the raw client service verbatim: %q", target)
+	}
+	if strings.ContainsAny(target, "\n\r") {
+		t.Errorf("audit target contains control/newline chars (log-injection surface): %q", target)
+	}
+	if len(target) > max {
+		t.Errorf("audit target not bounded: len=%d > %d target=%q", len(target), max, target)
+	}
+	if !strings.HasPrefix(target, "service ") {
+		t.Errorf("target = %q, want a 'service <bounded token>' shape", target)
+	}
+}
+
+// TestSanitizeAuditToken exercises the B52 helper directly: it strips
+// control/newline runes, caps the result at maxAuditActionLen bytes without
+// ever exceeding it (or splitting a multi-byte rune), and is a clean pass-
+// through for empty/normal input.
+func TestSanitizeAuditToken(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"normal short", "end", "end"},
+		{"normal restart", "restart", "restart"},
+		{"strips newline+cr", "de\nle\rte", "delete"},
+		{"strips tab+control", "a\tb\x00c\x1bd", "abcd"},
+		{"caps oversized", strings.Repeat("A", 500), strings.Repeat("A", maxAuditActionLen)},
+		{"strip then cap", "x\n\r" + strings.Repeat("B", 500), "x" + strings.Repeat("B", maxAuditActionLen-1)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeAuditToken(tc.in)
+			if got != tc.want {
+				t.Errorf("sanitizeAuditToken(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if len(got) > maxAuditActionLen {
+				t.Errorf("sanitizeAuditToken(%q) len=%d exceeds cap %d", tc.in, len(got), maxAuditActionLen)
+			}
+			if strings.ContainsAny(got, "\n\r") {
+				t.Errorf("sanitizeAuditToken(%q) leaked a newline/CR: %q", tc.in, got)
+			}
+		})
+	}
+
+	// Multi-byte runes: the byte cap must never be exceeded nor split a rune.
+	multi := sanitizeAuditToken(strings.Repeat("€", 40)) // 3 bytes each
+	if len(multi) > maxAuditActionLen {
+		t.Errorf("multibyte cap exceeded: len=%d > %d", len(multi), maxAuditActionLen)
+	}
+	if !utf8.ValidString(multi) {
+		t.Errorf("multibyte result split a rune (invalid UTF-8): %q", multi)
 	}
 }
 

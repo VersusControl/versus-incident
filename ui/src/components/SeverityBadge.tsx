@@ -13,6 +13,7 @@ import {
   severityLabel,
   type Severity,
 } from "@/lib/severity";
+import { EmptyValue } from "@/components/feedback";
 
 const ICONS: Record<Severity, LucideIcon> = {
   critical: AlertOctagon,
@@ -23,9 +24,9 @@ const ICONS: Record<Severity, LucideIcon> = {
 };
 
 // SeverityBadge: icon + label + tone — never color-only (WCAG color-not-only).
-// Accepts any raw severity string; unknown/absent renders a quiet "—" so the
-// list column degrades exactly as specified while the backend lacks the
-// severity field on summaries (UX_REDESIGN.md §3.5 ask #1).
+// Accepts any raw severity string; unknown/absent renders the shared muted
+// EmptyValue "—" so a null severity reads the same as any other empty cell
+// (and never as a bare dot that looks like a rendering bug).
 export function SeverityBadge({
   severity,
   className,
@@ -35,18 +36,7 @@ export function SeverityBadge({
 }) {
   const sev = normalizeSeverity(severity);
   if (!sev) {
-    // Unknown severity: a quiet dot, not a dash — a column of "—" reads as
-    // a broken UI when the list API doesn't carry severity yet (§3.5 #1).
-    return (
-      <span
-        className={clsx("inline-flex items-center", className)}
-        aria-label="severity unknown"
-        title="Severity unavailable on list summaries"
-      >
-        {/* ink-400, not 500 — the dot measured 1.5:1 in dark (invisible). */}
-        <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-ink-400" />
-      </span>
-    );
+    return <EmptyValue className={className} />;
   }
   const Icon = ICONS[sev];
   return (

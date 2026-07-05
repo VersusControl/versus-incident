@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -37,7 +37,15 @@ import { SeverityBadge } from "@/components/SeverityBadge";
 import { KpiTile } from "@/components/KpiTile";
 import { ChannelIcon } from "@/components/ChannelIcon";
 import { ClickableRow } from "@/components/DataTable";
+import { SegmentedControl } from "@/components/SegmentedControl";
 import { useNowTick, useTableKeys } from "@/lib/hooks";
+import {
+  countByOrigin,
+  formatOriginCounts,
+  matchesOrigin,
+  normalizeOrigin,
+  originLabel,
+} from "@/lib/incidentList";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { EmptyState } from "@/components/feedback";
@@ -51,6 +59,12 @@ import { EmptyState } from "@/components/feedback";
 // windowed stats exist (ask #6).
 export function NowPage() {
   const navigate = useNavigate();
+  const [params] = useSearchParams();
+  // Origin tab: AI-detected is the high-signal DEFAULT so a webhook/alert
+  // flood can never dominate the live view; webhook is one click away.
+  // The URL param IS the state (shareable / restorable), mirroring the
+  // Incidents page.
+  const origin = normalizeOrigin(params.get("origin"));
 
   // Shares ["incidents","list"] with useOpenIncidentCount (TopBar/Sidebar
   // badges) so the page and the badges never disagree. 15s auto-refresh,
@@ -87,45 +101,60 @@ export function NowPage() {
     return list;
   }, [incidents.data]);
 
+  // Whole-set per-origin tally (both feeds), computed client-side from the
+  // one shared ["incidents","list"] cache so the segmented-control badges
+  // and the top-bar summary show BOTH feeds separately regardless of the
+  // active tab — the webhook count never lumps into the AI count.
+  const originCounts = useMemo(() => countByOrigin(sorted), [sorted]);
+
+  // The active tab scopes the whole live view (banner, KPI counts, feed,
+  // trends) to one origin — split client-side rather than refetching, so
+  // the TopBar/Sidebar open badge (which needs the whole set) keeps
+  // sharing this cache.
+  const scoped = useMemo(
+    () => sorted.filter((i) => matchesOrigin(i, origin)),
+    [sorted, origin],
+  );
+
   // open = !resolved && !acked_at; acked = acked_at && !resolved.
   const openIncidents = useMemo(
-    () => sorted.filter((i) => !i.resolved && !i.acked_at),
-    [sorted],
+    () => scoped.filter((i) => !i.resolved && !i.acked_at),
+    [scoped],
   );
   const counts = useMemo(
     () => ({
       open: openIncidents.length,
-      acked: sorted.filter((i) => !i.resolved && !!i.acked_at).length,
-      resolved: sorted.filter((i) => i.resolved).length,
+      acked: scoped.filter((i) => !i.resolved && !!i.acked_at).length,
+      resolved: scoped.filter((i) => i.resolved).length,
     }),
-    [sorted, openIncidents],
+    [scoped, openIncidents],
   );
-  const feed = useMemo(() => sorted.slice(0, 10), [sorted]);
+  const feed = useMemo(() => scoped.slice(0, 10), [scoped]);
 
   // Most recently resolved incident — context for the all-clear banner.
   const lastResolved = useMemo(
     () =>
-      sorted
+      scoped
         .filter((i) => i.resolved && i.resolved_at)
         .sort(
           (a, b) =>
             new Date(b.resolved_at!).getTime() -
             new Date(a.resolved_at!).getTime(),
         )[0],
-    [sorted],
+    [scoped],
   );
 
   // 24h hourly buckets from real incident timestamps — the only windowed
   // series the API already carries (created/acked/resolved stamps). The
   // sums double as honest "· 24h" tile footers. nowTick keeps the window
-  // sliding on quiet dashboards where `sorted` never changes identity.
+  // sliding on quiet dashboards where `scoped` never changes identity.
   const nowTick = useNowTick();
   const trends = useMemo(() => {
     const sum = (b: number[]) => b.reduce((a, n) => a + n, 0);
-    const created = hourlyBuckets(sorted.map((i) => i.created_at), 24, nowTick);
-    const acked = hourlyBuckets(sorted.map((i) => i.acked_at), 24, nowTick);
+    const created = hourlyBuckets(scoped.map((i) => i.created_at), 24, nowTick);
+    const acked = hourlyBuckets(scoped.map((i) => i.acked_at), 24, nowTick);
     const resolved = hourlyBuckets(
-      sorted.map((i) => i.resolved_at),
+      scoped.map((i) => i.resolved_at),
       24,
       nowTick,
     );
@@ -137,7 +166,7 @@ export function NowPage() {
       acked24: sum(acked),
       resolved24: sum(resolved),
     };
-  }, [sorted, nowTick]);
+  }, [scoped, nowTick]);
 
   const keys = useTableKeys({
     size: feed.length,
@@ -150,6 +179,17 @@ export function NowPage() {
     incidents.refetch();
     status.refetch();
     config.refetch();
+  };
+
+  // Carry the active origin into every /incidents deep-link so a KPI tile
+  // or "view all" click lands on the SAME tab the operator is viewing.
+  // ai_detect is the Incidents-page default, so only webhook needs the
+  // explicit param.
+  const withOrigin = (path: string) => {
+    if (origin !== "webhook") return path;
+    return path.includes("?")
+      ? `${path}&origin=webhook`
+      : `${path}?origin=webhook`;
   };
 
   const agentMode = config.data?.mode;
@@ -171,7 +211,9 @@ export function NowPage() {
     <>
       <TopBar
         title="Now"
-        subtitle="auto-refresh 15s"
+        subtitle={
+          incidents.data ? formatOriginCounts(originCounts) : "auto-refresh 15s"
+        }
         actions={
           <button
             aria-label="Refresh now"
@@ -188,6 +230,28 @@ export function NowPage() {
       />
 
       <main className="flex-1 space-y-4 overflow-auto p-4 lg:p-6">
+        {/* Origin split — the primary filter for the live view. AI-detected
+            (default) vs the inbound webhook/alert firehose, each with its
+            whole-set count so neither buries the other. Scopes the banner,
+            KPI counts and feed below to the active tab. */}
+        <SegmentedControl
+          param="origin"
+          defaultValue="ai_detect"
+          aria-label="Filter the Now view by origin"
+          options={[
+            {
+              value: "ai_detect",
+              label: originLabel("ai_detect"),
+              badge: incidents.data ? originCounts.ai_detect : undefined,
+            },
+            {
+              value: "webhook",
+              label: originLabel("webhook"),
+              badge: incidents.data ? originCounts.webhook : undefined,
+            },
+          ]}
+        />
+
         {/* (1) Open-incident banner — recency-sorted until backend ask #1
             ships severity on summaries; whole card opens the incident. */}
         {incidents.isPending && (
@@ -232,7 +296,7 @@ export function NowPage() {
                 {counts.open} open incident{counts.open > 1 ? "s" : ""}
               </span>
               <Link
-                to="/incidents"
+                to={withOrigin("/incidents")}
                 className="text-2xs font-medium text-link hover:underline"
               >
                 view all →
@@ -278,7 +342,7 @@ export function NowPage() {
             label="Open"
             value={incidents.data ? counts.open : undefined}
             loading={incidents.isPending}
-            to="/incidents"
+            to={withOrigin("/incidents")}
             icon={AlertTriangle}
             tone={
               incidents.data
@@ -297,7 +361,7 @@ export function NowPage() {
             label="Acked"
             value={incidents.data ? counts.acked : undefined}
             loading={incidents.isPending}
-            to="/incidents?status=acked"
+            to={withOrigin("/incidents?status=acked")}
             icon={BellRing}
             tone={incidents.data && counts.acked > 0 ? "warn" : undefined}
             spark={incidents.data ? trends.acked : undefined}
@@ -308,7 +372,7 @@ export function NowPage() {
             label="Resolved"
             value={incidents.data ? counts.resolved : undefined}
             loading={incidents.isPending}
-            to="/incidents?status=resolved"
+            to={withOrigin("/incidents?status=resolved")}
             icon={CheckCircle2}
             spark={incidents.data ? trends.resolved : undefined}
             sparkLabel={`${trends.resolved24} incidents resolved in the last 24 hours`}
@@ -335,7 +399,7 @@ export function NowPage() {
             <div className="card-header">
               <span className="card-title">Incident feed</span>
               <Link
-                to="/incidents"
+                to={withOrigin("/incidents")}
                 className="text-2xs text-link hover:underline"
               >
                 View all →

@@ -71,7 +71,7 @@ func TestLogBrain_ReObservationRepointsServiceViaOverride(t *testing.T) {
 	miner := NewMiner(0.4, 4, 100)
 	// nil matcher (no regex pre-filter) + nil service matcher (Extract → "",
 	// so auto-detection yields "_unknown") isolate the override behaviour.
-	brain := newLogBrain("src", miner, cat, nil, nil, 0.2, config.AgentCatalogConfig{})
+	brain := newLogBrain("src", miner, cat, nil, nil, 0.2, config.AgentCatalogConfig{}, nil)
 	ctx := context.Background()
 
 	const msg = "checkout failed for order 123"

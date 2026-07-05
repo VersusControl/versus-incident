@@ -233,7 +233,7 @@ func TestCatalog_InstalledStore_HotPathNeverCallsStore(t *testing.T) {
 	_ = cat.Get("p1")
 	_ = cat.Get("missing")
 
-	brain := newLogBrain("src", nil, cat, nil, nil, 0.2, config.AgentCatalogConfig{})
+	brain := newLogBrain("src", nil, cat, nil, nil, 0.2, config.AgentCatalogConfig{}, nil)
 	_, _, _ = brain.Expected(context.Background(), "p1", time.Now())
 	_, _, _ = brain.Expected(context.Background(), "missing", time.Now())
 

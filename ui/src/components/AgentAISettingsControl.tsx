@@ -387,8 +387,7 @@ function SettingsBody({
       </div>
 
       <p className="text-2xs text-ink-400">
-        Detect mode requires AI to be enabled. The key is held only for this
-        save and is never stored in your browser.
+        Detect mode requires AI to be enabled.
       </p>
     </div>
   );

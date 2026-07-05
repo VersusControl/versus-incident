@@ -38,7 +38,6 @@ storage:
     #   --set storage.postgres.dsnExistingSecret=...    (your own Secret)
     dsn: ""
     dsnExistingSecret: ""
-    maxIncidents: 1000
 
 # Enterprise license (REQUIRED — HA is enterprise). Provide one of these:
 #   --set enterprise.licenseKey=...        (inline → chart Secret)

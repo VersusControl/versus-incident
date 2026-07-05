@@ -452,6 +452,7 @@ function MetricsTracesSection({ name }: { name: string }) {
                                     m.signal,
                                     e.target.checked,
                                   ),
+                                  patterns: ex.data?.patterns ?? [],
                                 })
                               }
                             />

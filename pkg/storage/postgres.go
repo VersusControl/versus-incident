@@ -23,13 +23,11 @@ var migrationFiles embed.FS
 // empty in code when the factory will fall back to the POSTGRES_DSN
 // environment variable.
 type PostgresOptions struct {
-	DSN          string // postgres connection string or DSN URL
-	MaxIncidents int    // rolling cap; default MaxIncidentsDefault
+	DSN string // postgres connection string or DSN URL
 }
 
 type postgresProvider struct {
-	db           *sql.DB
-	maxIncidents int
+	db *sql.DB
 }
 
 // NewPostgres opens a connection to Postgres, runs idempotent migrations,
@@ -46,11 +44,7 @@ func NewPostgres(opts PostgresOptions) (Provider, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("storage: ping postgres: %w", err)
 	}
-	max := opts.MaxIncidents
-	if max <= 0 {
-		max = MaxIncidentsDefault
-	}
-	p := &postgresProvider{db: db, maxIncidents: max}
+	p := &postgresProvider{db: db}
 	if err := p.migrate(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("storage: postgres migrate: %w", err)
@@ -305,16 +299,10 @@ func (p *postgresProvider) SaveIncident(rec *IncidentRecord) error {
 	if err != nil {
 		return fmt.Errorf("storage: save incident: %w", err)
 	}
-	// Trim to maxIncidents: drop the oldest records beyond the cap.
-	_, err = p.db.Exec(`
-		DELETE FROM vs_incidents
-		WHERE id IN (
-			SELECT id FROM vs_incidents
-			ORDER BY created_at ASC
-			OFFSET $1
-		)
-	`, p.maxIncidents)
-	return err
+	// The database keeps incident history unbounded; retention is a
+	// deliberate policy applied through the storage.Lifecycle purge
+	// primitive rather than an implicit drop on every save.
+	return nil
 }
 
 func (p *postgresProvider) UpdateIncidentAck(id string, ackedAt time.Time) error {

@@ -1,7 +1,14 @@
 import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { LineChart, Lock, Search, Waypoints, type LucideIcon } from "lucide-react";
+import {
+  Eye,
+  LineChart,
+  Lock,
+  Search,
+  Waypoints,
+  type LucideIcon,
+} from "lucide-react";
 import { api, ApiError, type BaselineRow } from "@/lib/api";
 import {
   displayService,
@@ -18,11 +25,24 @@ import { AutoRefreshControl } from "@/components/AutoRefreshControl";
 import { useAutoRefresh } from "@/lib/useAutoRefresh";
 import { EmptyState } from "@/components/feedback";
 import { SegmentedControl } from "@/components/SegmentedControl";
-import { ClickableRow } from "@/components/DataTable";
 import { PeekPanel } from "@/components/PeekPanel";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
-import { ServiceCell } from "@/components/ServiceCell";
+import { ReassignModal, ServiceCell } from "@/components/ServiceCell";
+import {
+  BulkActionBar,
+  RowSelectCheckbox,
+  SelectAllCheckbox,
+} from "@/components/BulkActionBar";
+import { useLearnExclusions } from "@/lib/useLearnExclusions";
+import {
+  countExcluded,
+  filterByScope,
+  isExclusionScope,
+  SCOPE_PARAM,
+} from "@/lib/rowActions";
+import { buildSignalBulkActions } from "@/lib/bulkSelect";
+import { useBulkSelection } from "@/lib/useBulkSelection";
 import { Pagination } from "@/components/Pagination";
 import { usePagination } from "@/lib/pagination";
 
@@ -64,6 +84,9 @@ type Variant = {
   searchPlaceholder: string;
   lockedTitle: string;
   lockedBody: string;
+  // sampleLabel is the per-type wording for the peek's raw-example field — the
+  // metric/trace parity of the logs page's "Example log line".
+  sampleLabel: string;
 };
 
 const METRIC: Variant = {
@@ -77,6 +100,7 @@ const METRIC: Variant = {
   lockedTitle: "Metrics learning is an Enterprise capability",
   lockedBody:
     "Metrics learning is an Enterprise capability — the agent learns what's normal for each service's request rate, errors and latency so it can catch problems automatically.",
+  sampleLabel: "Example metric",
 };
 
 const TRACE: Variant = {
@@ -90,6 +114,7 @@ const TRACE: Variant = {
   lockedTitle: "Traces learning is an Enterprise capability",
   lockedBody:
     "Traces learning is an Enterprise capability — the agent learns the normal speed and error rate of each operation so it can catch slow or failing requests automatically.",
+  sampleLabel: "Example trace",
 };
 
 const STATUS_PARAM = "status";
@@ -137,13 +162,26 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
 
   const [params] = useSearchParams();
   const statusFilter = params.get(STATUS_PARAM) ?? "all";
+  const scope = isExclusionScope(params.get(SCOPE_PARAM));
   const [q, setQ] = useState("");
   const [peekKey, setPeekKey] = useState<string | null>(null);
+  // Bulk reassign: the selected signal names captured when "Assign to service"
+  // is picked in the action bar (null = modal closed). One flow for one row or
+  // many — a single-row correction is just a one-row selection.
+  const [reassignMatches, setReassignMatches] = useState<string[] | null>(null);
 
   const locked =
     isError &&
     error instanceof ApiError &&
     (error.status === 403 || error.status === 404);
+
+  // Disable-Learn (X30) control. The page's own baselines query is the license
+  // probe — a settled `data` means the surface is licensed (a 403/404 renders
+  // the locked upsell below, never the table). The action lives in the checkbox
+  // action bar (Ignore/Resume) and renders only for a licensed admin
+  // (runtime:manage); it is absent on community / OSS and hidden from a viewer
+  // (excl.visible).
+  const excl = useLearnExclusions(data !== undefined);
 
   const rows = useMemo(() => data?.baselines ?? [], [data]);
 
@@ -163,12 +201,75 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
     });
   }, [rows, q, statusFilter]);
 
-  // Paginate at 100/page; reset to page 1 when the status filter or search
-  // changes so a filter never lands the operator on an empty page.
-  const pg = usePagination(filtered, { resetKey: `${statusFilter}|${q}` });
+  // ----- Active | Ignored scope (D3) --------------------------------------
+  // A metric/trace row is "ignored" when its SIGNAL is held out of learning
+  // (matched by name across every service). The scope control is gated on
+  // excl.visible — absent for community / viewers, so scope stays "active" and
+  // nothing is partitioned. The server stays authority: this only re-partitions
+  // what the loaded policy already reports.
+  const isRowExcluded = (r: BaselineRow) => excl.isSignalExcluded(r.signal);
+  const scopeCounts = useMemo(
+    () => ({
+      active: filtered.length - countExcluded(filtered, isRowExcluded),
+      ignored: countExcluded(filtered, isRowExcluded),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filtered, excl],
+  );
+  const scoped = useMemo(
+    () =>
+      excl.visible ? filterByScope(filtered, scope, isRowExcluded) : filtered,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filtered, scope, excl],
+  );
+
+  // Paginate at 100/page; reset to page 1 when the status filter, scope tab, or
+  // search changes so a filter never lands the operator on an empty page.
+  const pg = usePagination(scoped, {
+    resetKey: `${statusFilter}|${scope}|${q}`,
+  });
+
+  // ----- selection + action bar -------------------------------------------
+  // The SAME checkbox action model the logs page uses. For metrics/traces every
+  // action (Ignore/Resume + Assign-to-service) requires the licensed
+  // runtime:manage surface, so the checkbox column + bar appear ONLY when the
+  // exclude surface is visible — absent on community / OSS and hidden from a
+  // viewer. Selection resets on status / scope / search / PAGE change.
+  const bulkActions = buildSignalBulkActions({
+    scope,
+    excludeVisible: excl.visible,
+  });
+  const bulkEnabled = bulkActions.length > 0;
+  const pageKeys = useMemo(() => pg.pageItems.map(rowKey), [pg.pageItems]);
+  const bulk = useBulkSelection(
+    pageKeys,
+    `${statusFilter}|${scope}|${q}|${pg.page}`,
+  );
+
+  // A metric/trace action operates on SIGNAL names (deduped — a signal is
+  // matched by name across every service, so two selected rows sharing a signal
+  // fold into one entry). Ignore/Resume go through a SINGLE PUT
+  // (excl.toggleSignals); Assign-to-service opens the picker for the selection.
+  const onBulkAction = (spec: { id: string }) => {
+    const signals = Array.from(
+      new Set(
+        bulk.selectedKeys
+          .map((k) => rows.find((r) => rowKey(r) === k)?.signal)
+          .filter((s): s is string => !!s),
+      ),
+    );
+    if (spec.id === "reassign") {
+      // Keep the selection until the modal finishes (onDone clears it).
+      setReassignMatches(signals);
+      return;
+    }
+    if (spec.id === "ignore") excl.toggleSignals(signals, true);
+    else if (spec.id === "resume") excl.toggleSignals(signals, false);
+    bulk.clear();
+  };
 
   const peek = peekKey ? rows.find((r) => rowKey(r) === peekKey) : undefined;
-  const cols = variant.hasOperation ? 7 : 6;
+  const cols = (variant.hasOperation ? 7 : 6) + 1 + (bulkEnabled ? 1 : 0);
 
   // ----- locked / upsell state (OSS or unlicensed) ------------------------
   if (locked) {
@@ -222,6 +323,22 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
             ]}
           />
 
+          {excl.visible && (
+            <SegmentedControl
+              param={SCOPE_PARAM}
+              defaultValue="active"
+              aria-label="Learning scope"
+              options={[
+                { value: "active", label: "Active", badge: scopeCounts.active },
+                {
+                  value: "ignored",
+                  label: "Ignored",
+                  badge: scopeCounts.ignored,
+                },
+              ]}
+            />
+          )}
+
           <div className="relative w-full max-w-md sm:w-auto sm:flex-1">
             <Search
               size={12}
@@ -248,16 +365,33 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
           />
         ) : (
           <div className="card overflow-hidden">
+            {bulkEnabled && bulk.count > 0 && (
+              <BulkActionBar
+                count={bulk.count}
+                actions={bulkActions}
+                onAction={onBulkAction}
+                onClear={bulk.clear}
+                busy={excl.busy}
+              />
+            )}
             <div className="max-h-[calc(100vh-260px)] overflow-auto">
               <table className="ddt">
                 <thead>
                   <tr>
+                    {bulkEnabled && (
+                      <th className="w-8">
+                        <SelectAllCheckbox
+                          state={bulk.headerState}
+                          onChange={bulk.toggleAll}
+                        />
+                      </th>
+                    )}
                     <th className="w-36">Service</th>
                     {variant.hasOperation && (
                       <th className="w-40 whitespace-nowrap">
                         Operation
                         <InfoHint
-                          label="About the Operation column"
+                          label="About the Operation"
                           text="The exact request or step this is measured on, like a specific endpoint or database call. The agent learns normal speed and error rate per operation, not just per service."
                           example="'POST /payments' is one operation and 'GET /health' is another — each gets its own normal range."
                         />
@@ -266,7 +400,7 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                     <th className="w-32 whitespace-nowrap">
                       Signal
                       <InfoHint
-                        label="About the Signal column"
+                        label="About the Signal"
                         text="What's being measured for this service or operation — traffic (request rate), errors (how often requests fail), or latency (how long they take). Each signal is learned on its own."
                         example="'Latency' tracks how long requests take; 'Errors' tracks how often they fail."
                       />
@@ -274,7 +408,7 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                     <th className="w-56 whitespace-nowrap">
                       What's normal now
                       <InfoHint
-                        label="About the What's normal now column"
+                        label="About the What's normal now"
                         text="The everyday range the agent has learned for this signal, in real units (req/s for traffic, ms for speed, % for errors). The 'usually ± X' part is how much it normally wiggles around the middle value — anything far outside that range looks wrong and can be flagged."
                         example="≈ 40 ms, usually ± 5 ms means requests normally finish in about 35–45 ms; a sudden 400 ms looks wrong."
                       />
@@ -290,7 +424,7 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                     <th className="w-20 whitespace-nowrap text-right">
                       Seen
                       <InfoHint
-                        label="About the Seen column"
+                        label="About the Seen"
                         text="How many data points (samples) the agent has collected for this signal so far. More samples mean a more trustworthy normal range."
                         example="'18' means 18 measurements have been folded in; the agent usually needs about 20 before it's ready."
                       />
@@ -298,22 +432,30 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                     <th className="w-28 whitespace-nowrap">
                       Last seen
                       <InfoHint
-                        label="About the Last seen column"
+                        label="About the Last seen"
                         text="When the agent last received a fresh data point for this signal. If this is old, the signal may have stopped flowing."
                         example="'2m ago' means the last sample arrived two minutes ago; '3d ago' suggests the source has gone quiet."
                       />
+                    </th>
+                    <th className="w-12 text-right">
+                      <span className="sr-only">Action</span>
                     </th>
                   </tr>
                 </thead>
                 <tbody>
                   {isLoading && <SkRows rows={8} cols={cols} />}
-                  {!isLoading && filtered.length === 0 && (
+                  {!isLoading && scoped.length === 0 && (
                     <tr>
                       <td colSpan={cols}>
                         {rows.length === 0 ? (
                           <EmptyState
                             title="Nothing learned yet"
                             hint="The agent starts learning the moment a metric or trace source runs in training mode. Give it a few minutes, then refresh."
+                          />
+                        ) : scope === "ignored" ? (
+                          <EmptyState
+                            title="No signals ignored"
+                            hint="Select a noisy signal and choose Ignore from the action bar and it moves here, held out of learning until you resume it."
                           />
                         ) : (
                           <EmptyState
@@ -325,17 +467,21 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                     </tr>
                   )}
                   {pg.pageItems.map((r) => (
-                    <ClickableRow
-                      key={rowKey(r)}
-                      onOpen={() => setPeekKey(rowKey(r))}
-                    >
+                    <tr key={rowKey(r)}>
+                      {bulkEnabled && (
+                        <td className="w-8">
+                          <RowSelectCheckbox
+                            checked={bulk.isSelected(rowKey(r))}
+                            onChange={() => bulk.toggle(rowKey(r))}
+                            label={`Select ${humanSignal(r.signal)}`}
+                          />
+                        </td>
+                      )}
                       <td className="font-medium text-ink-100">
                         <ServiceCell
                           service={r.service}
                           sourceType={variant.kind}
                           match={r.signal}
-                          label={humanSignal(r.signal)}
-                          invalidateKeys={[["baselines", variant.kind]]}
                         />
                       </td>
                       {variant.hasOperation && (
@@ -356,7 +502,20 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                       <td className="text-ink-300" title={fmtAbs(r.last_updated)}>
                         {fmtRel(r.last_updated)}
                       </td>
-                    </ClickableRow>
+                      <td>
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            type="button"
+                            className="btn p-1"
+                            aria-label={`View ${humanSignal(r.signal)}`}
+                            title="View details"
+                            onClick={() => setPeekKey(rowKey(r))}
+                          >
+                            <Eye size={14} aria-hidden />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
                   ))}
                 </tbody>
               </table>
@@ -403,10 +562,31 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
               </span>
             </Field>
             <Field label="Source">{variant.sourceLabel}</Field>
+            <Field label={variant.sampleLabel}>
+              {peek.latest_sample ? (
+                <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
+                  {peek.latest_sample}
+                </pre>
+              ) : (
+                <span className="text-ink-400">No example captured yet</span>
+              )}
+            </Field>
             <p className="pt-2 text-2xs text-ink-400">{READONLY_NOTE}</p>
           </dl>
         )}
       </PeekPanel>
+
+      {/* Reassign picker — opened from the "Assign to service" action in the
+          checkbox action bar; reassigns the selected signal(s) by name. */}
+      {reassignMatches && (
+        <ReassignModal
+          sourceType={variant.kind}
+          matches={reassignMatches}
+          invalidateKeys={[["baselines", variant.kind]]}
+          onClose={() => setReassignMatches(null)}
+          onDone={() => bulk.clear()}
+        />
+      )}
     </>
   );
 }

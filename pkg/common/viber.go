@@ -83,6 +83,17 @@ func (v *ViberProvider) SendAlert(i *m.Incident) error {
 	return v.sendBotMessage(message.String())
 }
 
+// SendText implements core.TextSender: the image-fallback path for Viber,
+// which posts the already-redacted report caption + note as a text message
+// through the configured (bot or channel) API. No raw incident content is
+// referenced.
+func (v *ViberProvider) SendText(i *m.Incident, text string) error {
+	if v.apiType == "channel" {
+		return v.sendChannelMessage(text)
+	}
+	return v.sendBotMessage(text)
+}
+
 // sendBotMessage sends a message using Viber Bot API
 func (v *ViberProvider) sendBotMessage(text string) error {
 	viberMsg := ViberBotMessage{

@@ -6,6 +6,7 @@ import {
   Database,
   Eraser,
   EyeOff,
+  ScrollText,
   Send,
   Timer,
 } from "lucide-react";
@@ -13,6 +14,7 @@ import clsx from "clsx";
 import { api, type DetectEvent, type ShadowEvent } from "@/lib/api";
 import { fmtAbs, fmtRel, truncate } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
+import { buildSpikeRows, type SpikeRow } from "@/lib/spikeRows";
 import { TopBar } from "@/components/TopBar";
 import { Pill, VerdictPill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
@@ -24,7 +26,8 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Pagination } from "@/components/Pagination";
 import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
-import { EmptyState } from "@/components/feedback";
+import { EmptyState, EmptyValue } from "@/components/feedback";
+import { SYSTEM_PROMPT_PATH } from "@/lib/systemPromptNav";
 
 type Tab = "detect" | "shadow" | "spike";
 
@@ -48,14 +51,21 @@ export function DecisionsPage() {
     queryFn: api.shadowStats,
   });
 
-  const spikeCount = shadowStats.data?.verdicts?.spike ?? 0;
+  // Spike count spans BOTH logs: shadow-mode "would have alerted" spikes AND
+  // the detect-mode spikes the agent acted on (verdict_spike in detect stats).
+  // The badge/subtitle wait until both stat queries settle so they never show
+  // a partial (shadow-only) count.
+  const spikeReady = shadowStats.data != null && detectStats.data != null;
+  const spikeCount =
+    (shadowStats.data?.verdicts?.spike ?? 0) +
+    (detectStats.data?.["verdict_spike"] ?? 0);
   const subtitle =
     tab === "detect"
       ? detectStats.data
         ? `${detectStats.data.events ?? 0} AI calls audited`
         : undefined
       : tab === "spike"
-        ? shadowStats.data
+        ? spikeReady
           ? `${spikeCount} spikes detected`
           : undefined
         : shadowStats.data
@@ -64,7 +74,15 @@ export function DecisionsPage() {
 
   return (
     <>
-      <TopBar title="Decisions" subtitle={subtitle} />
+      <TopBar
+        title="Decisions"
+        subtitle={subtitle}
+        actions={
+          <Link to={SYSTEM_PROMPT_PATH} className="btn">
+            <ScrollText size={12} aria-hidden /> System prompt
+          </Link>
+        }
+      />
 
       <main className="flex-1 overflow-auto p-6">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -86,7 +104,7 @@ export function DecisionsPage() {
               {
                 value: "spike",
                 label: "Spike",
-                badge: shadowStats.data ? spikeCount : undefined,
+                badge: spikeReady ? spikeCount : undefined,
               },
             ]}
           />
@@ -158,7 +176,7 @@ function LogActions({ tab }: { tab: "detect" | "shadow" }) {
         }}
         disabled={clear.isPending}
       >
-        <Eraser size={12} aria-hidden /> Clear log
+        <Eraser size={12} aria-hidden /> Clear
       </button>
       {confirmClear && (
         <ConfirmDialog
@@ -171,7 +189,7 @@ function LogActions({ tab }: { tab: "detect" | "shadow" }) {
               This cannot be undone.
             </>
           }
-          confirmLabel="Clear log"
+          confirmLabel="Clear"
           tone="danger"
           busy={clear.isPending}
           error={clear.error instanceof Error ? clear.error : null}
@@ -302,11 +320,11 @@ function DetectTab() {
           <table className="ddt">
             <thead>
               <tr>
+                <th className="w-32">Service</th>
                 <th className="w-32">When</th>
                 <th className="w-28">Outcome</th>
                 <th className="w-24">Verdict</th>
                 <th className="w-24">Severity</th>
-                <th className="w-32">Service</th>
                 <th className="w-32">Pattern</th>
                 <th>Title / Sample</th>
                 <th className="w-16 text-right">Freq</th>
@@ -369,6 +387,9 @@ function DetectRow({
   const href = `/agent/decisions/detect/${encodeURIComponent(e.id)}`;
   return (
     <ClickableRow to={href} {...rowProps}>
+      <td className="text-2xs text-ink-200">
+        {e.service && e.service !== "_unknown" ? e.service : <EmptyValue />}
+      </td>
       <td className="text-2xs text-ink-300" title={fmtAbs(e.timestamp)}>
         {fmtRel(e.timestamp)}
       </td>
@@ -381,7 +402,6 @@ function DetectRow({
       <td>
         <SeverityBadge severity={e.finding?.Severity} />
       </td>
-      <td className="text-2xs text-ink-200">{e.service || "—"}</td>
       <td className="font-mono text-2xs">
         <Link
           to={`/agent/logs/${encodeURIComponent(e.pattern_id)}`}
@@ -398,7 +418,7 @@ function DetectRow({
       </td>
       <td className="text-right tabular-nums">{e.frequency}</td>
       <td className="text-right tabular-nums text-ink-400">
-        {e.duration_ms ?? "—"}
+        {e.duration_ms ?? <EmptyValue />}
       </td>
     </ClickableRow>
   );
@@ -466,7 +486,7 @@ export function OutcomePill({ outcome }: { outcome: string }) {
 const VERDICT_FILTERS = ["all", "spike", "unknown"] as const;
 type VerdictFilter = (typeof VERDICT_FILTERS)[number];
 
-const SHADOW_COLS = 8;
+const SHADOW_COLS = 9;
 
 function ShadowEventsTable({
   list,
@@ -503,6 +523,7 @@ function ShadowEventsTable({
         <table className="ddt">
           <thead>
             <tr>
+              <th className="w-28">Service</th>
               <th className="w-28">Verdict</th>
               <th className="w-32">Pattern</th>
               <th className="w-28">Source</th>
@@ -528,6 +549,13 @@ function ShadowEventsTable({
                   to={href}
                   {...keys.rowProps(i)}
                 >
+                  <td className="text-2xs text-ink-200">
+                    {e.service && e.service !== "_unknown" ? (
+                      e.service
+                    ) : (
+                      <EmptyValue />
+                    )}
+                  </td>
                   <td>
                     <VerdictPill verdict={e.verdict} />
                   </td>
@@ -542,7 +570,7 @@ function ShadowEventsTable({
                   </td>
                   <td className="text-2xs text-ink-200">{e.source}</td>
                   <td className="text-2xs text-ink-200">
-                    {e.rule_name || "—"}
+                    {e.rule_name ? e.rule_name : <EmptyValue />}
                   </td>
                   <td className="text-right tabular-nums">{e.count}</td>
                   <td className="text-right tabular-nums">{e.occurrences}</td>
@@ -653,48 +681,146 @@ function ShadowTab() {
   );
 }
 
-// Spike tab — the spike "signals": log templates the agent watched surge well
-// past their learned baseline (verdict === "spike"), pulled from the shadow log
-// and shown on their own so operators can review just the surges. Read-only —
-// it's a lens over the shadow data, so it carries no clear action.
+// Spike tab — every spike the agent flagged, from BOTH decision logs: the
+// detect-mode spikes it acted on (which fire incidents) and the shadow-mode
+// "would have alerted" surges. Merging them here is the fix for a spike
+// AI-detect incident being invisible on Decisions: detect spikes live in the
+// detect log, so a shadow-only Spike view hid them (and showed nothing at all
+// while the agent ran in detect mode). Read-only — no clear action.
 function SpikeTab() {
-  const events = useQuery({ queryKey: ["shadow"], queryFn: api.listShadow });
+  const detect = useQuery({ queryKey: ["detect"], queryFn: api.listDetect });
+  const shadow = useQuery({ queryKey: ["shadow"], queryFn: api.listShadow });
 
-  const list = useMemo(
-    () => (events.data ?? []).filter((e) => e.verdict === "spike"),
-    [events.data],
+  const rows = useMemo(
+    () => buildSpikeRows(detect.data, shadow.data),
+    [detect.data, shadow.data],
   );
+
+  const isLoading = detect.isLoading || shadow.isLoading;
+  const failed = detect.isError ? detect : shadow.isError ? shadow : null;
 
   return (
     <>
       <p className="mb-3 max-w-3xl text-xs text-ink-300">
-        Log templates the agent watched surge well past their learned baseline —
-        the “spike” signals it flags. Open one to see the pattern and why it
-        tripped.
+        Every spike the agent flagged — the AI-detect events it acted on and the
+        shadow-mode “would have alerted” surges, in one place. Open one to see
+        the pattern and why it tripped.
       </p>
 
-      {events.isError && (
+      {failed && (
         <div className="mb-3">
           <RetryableError
-            error={events.error}
-            onRetry={() => events.refetch()}
-            retrying={events.isRefetching}
+            error={failed.error}
+            onRetry={() => failed.refetch()}
+            retrying={failed.isRefetching}
             context="Couldn't load spike signals"
           />
         </div>
       )}
 
-      <ShadowEventsTable
-        list={list}
-        isLoading={events.isLoading}
-        resetKey="spike"
-        empty={
-          <EmptyState
-            title="No spikes yet"
-            hint="When a known log template surges past its baseline, it shows up here."
-          />
-        }
-      />
+      <SpikeTable rows={rows} isLoading={isLoading} />
     </>
+  );
+}
+
+const SPIKE_COLS = 7;
+
+// SpikeKindPill labels which decision log a spike came from — AI-detect (the
+// agent acted) vs Shadow (would have alerted). Text, never color alone.
+function SpikeKindPill({ kind }: { kind: SpikeRow["kind"] }) {
+  return kind === "detect" ? (
+    <Pill tone="accent">AI-detect</Pill>
+  ) : (
+    <Pill tone="warn">Shadow</Pill>
+  );
+}
+
+function SpikeTable({
+  rows,
+  isLoading,
+}: {
+  rows: SpikeRow[];
+  isLoading: boolean;
+}) {
+  const navigate = useNavigate();
+  const pg = usePagination(rows, { resetKey: "spike" });
+
+  const keys = useTableKeys({
+    size: pg.pageItems.length,
+    onOpen: (i) => {
+      const r = pg.pageItems[i];
+      if (r) navigate(r.href);
+    },
+  });
+
+  return (
+    <div className="card overflow-hidden">
+      <div
+        className="max-h-[calc(100vh-260px)] overflow-auto"
+        aria-label="Spike signals table — j/k to move, Enter to open"
+        {...keys.containerProps}
+      >
+        <table className="ddt">
+          <thead>
+            <tr>
+              <th className="w-28">Service</th>
+              <th className="w-24">Kind</th>
+              <th className="w-32">Pattern</th>
+              <th className="w-28">Source</th>
+              <th>Sample</th>
+              <th className="w-20 text-right">Signals</th>
+              <th className="w-32">When</th>
+            </tr>
+          </thead>
+          <tbody>
+            {isLoading && <SkRows rows={6} cols={SPIKE_COLS} />}
+            {!isLoading && rows.length === 0 && (
+              <tr>
+                <td colSpan={SPIKE_COLS}>
+                  <EmptyState
+                    title="No spikes yet"
+                    hint="When a pattern surges past its baseline in shadow or detect mode, it shows up here."
+                  />
+                </td>
+              </tr>
+            )}
+            {pg.pageItems.map((r, i) => (
+              <ClickableRow key={r.key} to={r.href} {...keys.rowProps(i)}>
+                <td className="text-2xs text-ink-200">
+                  {r.service && r.service !== "_unknown" ? (
+                    r.service
+                  ) : (
+                    <EmptyValue />
+                  )}
+                </td>
+                <td>
+                  <SpikeKindPill kind={r.kind} />
+                </td>
+                <td className="font-mono text-2xs">
+                  <Link
+                    to={`/agent/logs/${encodeURIComponent(r.patternId)}`}
+                    className="text-link hover:underline"
+                    title={`Open pattern ${r.patternId}`}
+                  >
+                    {truncate(r.patternId, 14)}
+                  </Link>
+                </td>
+                <td className="text-2xs text-ink-200">{r.source}</td>
+                <td className="font-mono text-2xs text-ink-200">
+                  <Link to={r.href} className="hover:text-link hover:underline">
+                    {r.sample ? truncate(r.sample, 120) : <EmptyValue />}
+                  </Link>
+                </td>
+                <td className="text-right tabular-nums">{r.count}</td>
+                <td className="text-2xs text-ink-300" title={fmtAbs(r.when)}>
+                  {fmtRel(r.when)}
+                </td>
+              </ClickableRow>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Pagination state={pg} />
+    </div>
   );
 }

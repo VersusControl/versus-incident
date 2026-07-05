@@ -21,9 +21,13 @@ import (
 type fakeLearnExclusion struct {
 	services map[string]bool
 	signals  map[string]bool
+	// patterns denies a LOG PATTERN by its stable Key/id (the post-Group,
+	// per-pattern grain, E1). Empty ⇒ no pattern is excluded on that grain.
+	patterns map[string]bool
 
-	mu    sync.Mutex
-	calls int
+	mu          sync.Mutex
+	calls       int
+	patternCall int
 }
 
 func (f *fakeLearnExclusion) ExcludeFromLearning(_ context.Context, service, signal string) bool {
@@ -31,6 +35,16 @@ func (f *fakeLearnExclusion) ExcludeFromLearning(_ context.Context, service, sig
 	f.calls++
 	f.mu.Unlock()
 	return f.services[service] || f.signals[signal]
+}
+
+// ExcludeLogPattern is the per-log-pattern grain: it drops an observation when
+// its stable pattern Key is in the patterns deny set. It never consults the
+// service set — a whole-service exclusion is enforced at the pre-Group hook.
+func (f *fakeLearnExclusion) ExcludeLogPattern(_ context.Context, _, patternKey string) bool {
+	f.mu.Lock()
+	f.patternCall++
+	f.mu.Unlock()
+	return f.patterns[patternKey]
 }
 
 // installExclusion sets the process-wide slot for one test and restores nil.
@@ -180,6 +194,102 @@ func TestLearnExclusion_TickStatReportsExcluded(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "skipped_excluded=2") {
 		t.Fatalf("tick log missing skipped_excluded=2; got:\n%s", buf.String())
+	}
+}
+
+// patternIDByTemplate returns the catalog id of the single pattern whose learned
+// template contains marker, failing the test if zero or many match. It lets the
+// per-log-pattern tests target ONE pattern's stable Key without hard-coding the
+// miner's id.
+func patternIDByTemplate(t *testing.T, w *Worker, marker string) string {
+	t.Helper()
+	var id string
+	for _, p := range w.catalog.All() {
+		if strings.Contains(p.Template, marker) {
+			if id != "" {
+				t.Fatalf("template marker %q matched more than one pattern", marker)
+			}
+			id = p.ID
+		}
+	}
+	if id == "" {
+		t.Fatalf("no pattern learned whose template contains %q", marker)
+	}
+	return id
+}
+
+// TestLearnExclusion_PerLogPattern_DropsBeforeLearn is the core E1 proof: an
+// excluded LOG PATTERN's observations are dropped POST-Group and BEFORE Learn,
+// so its catalog Count stops growing — while a SIBLING pattern of the SAME
+// service keeps folding. This is the true per-signal grain the pre-Group hook
+// could not express (a plain log carries no pattern identity there).
+func TestLearnExclusion_PerLogPattern_DropsBeforeLearn(t *testing.T) {
+	// Two distinct templates for the same service; only a trailing integer
+	// varies within each, so the miner folds each into one pattern.
+	batch := append(repeatSignals("service=api alpha id=", 5),
+		repeatSignals("service=api bravo id=", 5)...)
+	src := &batchSource{name: "es", signals: batch}
+	w := newSeamWorker(t, "training", src, AIBundle{}, nil)
+
+	// Tick 1 with NO exclusion learns both patterns (Count 5 each).
+	w.tickSource(context.Background(), src, "training")
+	alpha := patternIDByTemplate(t, w, "alpha")
+	bravo := patternIDByTemplate(t, w, "bravo")
+	if got := w.catalog.Get(alpha).Count; got != 5 {
+		t.Fatalf("alpha Count after tick 1 = %d, want 5", got)
+	}
+
+	// Exclude ONLY the alpha pattern by its stable Key, then tick again with the
+	// same batch.
+	installExclusion(t, &fakeLearnExclusion{patterns: map[string]bool{alpha: true}})
+	w.tickSource(context.Background(), src, "training")
+
+	if got := w.catalog.Get(alpha).Count; got != 5 {
+		t.Errorf("alpha Count after exclusion tick = %d, want 5 (excluded pattern must not fold)", got)
+	}
+	if got := w.catalog.Get(bravo).Count; got != 10 {
+		t.Errorf("bravo Count after tick 2 = %d, want 10 (sibling pattern of the same service must keep folding)", got)
+	}
+}
+
+// TestLearnExclusion_ServiceExcludeStillDropsWholeService is the coexistence
+// guard: the whole-service (pre-Group) exclusion continues to drop EVERY pattern
+// of a service even with the per-pattern grain in place.
+func TestLearnExclusion_ServiceExcludeStillDropsWholeService(t *testing.T) {
+	installExclusion(t, &fakeLearnExclusion{services: map[string]bool{"payments": true}})
+
+	src := &batchSource{name: "es"}
+	src.signals = append(repeatSignals("service=api ok id=", 4), repeatSignals("service=payments boom id=", 4)...)
+	w := newSeamWorker(t, "training", src, AIBundle{}, nil)
+	w.tickSource(context.Background(), src, "training")
+
+	for _, p := range w.catalog.All() {
+		if p.Service == "payments" || strings.Contains(p.Template, "boom") {
+			t.Fatalf("service exclude leaked a pattern for the whole-service grain: %+v", p)
+		}
+	}
+	if w.catalog.Len() == 0 {
+		t.Fatal("kept service produced no pattern; service exclude dropped too much")
+	}
+}
+
+// TestLearnExclusion_PerLogPattern_NilResolverInert confirms the nil (community /
+// OSS) slot never reaches the per-pattern hook: everything folds, and the log
+// stat reports nothing excluded.
+func TestLearnExclusion_PerLogPattern_NilResolverInert(t *testing.T) {
+	if learnExclusion() != nil {
+		t.Fatal("precondition: slot must be nil")
+	}
+	src := &batchSource{name: "es", signals: repeatSignals("service=api steady id=", 6)}
+	w := newSeamWorker(t, "training", src, AIBundle{}, nil)
+	w.tickSource(context.Background(), src, "training")
+
+	total := 0
+	for _, p := range w.catalog.All() {
+		total += p.Count
+	}
+	if total != 6 {
+		t.Fatalf("nil resolver folded total Count = %d, want 6 (no per-pattern drop)", total)
 	}
 }
 

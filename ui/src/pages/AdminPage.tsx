@@ -1,6 +1,7 @@
 import { TopBar } from "@/components/TopBar";
 import { AgentModeControl } from "@/components/AgentModeControl";
 import { AgentAISettingsControl } from "@/components/AgentAISettingsControl";
+import { AgentChannelsSettingsControl } from "@/components/AgentChannelsSettingsControl";
 import { AgentSSOConnectionsControl } from "@/components/AgentSSOConnectionsControl";
 import { AdminMembersControl } from "@/components/AdminMembersControl";
 
@@ -29,6 +30,12 @@ export function AdminPage() {
         {/* AI settings control (Enterprise; RBAC runtime:manage). The mode
             control's detect guard links here when AI is off. */}
         <AgentAISettingsControl />
+
+        {/* Notification-channel settings control (Enterprise; RBAC
+            runtime:manage). Per-channel runtime creds + enable override; masked
+            write-only secrets, save takes effect without restart. Locked upsell
+            on OSS / community. */}
+        <AgentChannelsSettingsControl />
 
         {/* SSO / identity providers (Enterprise; RBAC sso:manage, per-org). The
             single canonical SSO panel: a Keycloak-style list of Google /

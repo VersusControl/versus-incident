@@ -5,6 +5,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	m "github.com/VersusControl/versus-incident/pkg/models"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 // TestResolveSource covers the Source-label decision for every ingress
@@ -138,6 +139,47 @@ func TestBuildIncidentRecord_Source(t *testing.T) {
 			rec := buildIncidentRecord(inc, cfg, tc.content, false, tc.hint)
 			if rec.Source != tc.want {
 				t.Fatalf("Source = %q, want %q", rec.Source, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildIncidentRecord_Origin asserts the coarse origin classifier is
+// stamped at creation: agent-originated payloads (a Source prefix or a
+// PatternID) classify as ai_detect; every ingress path — the plain
+// webhook and the SNS/SQS hints — classifies as webhook.
+func TestBuildIncidentRecord_Origin(t *testing.T) {
+	cfg := &config.Config{}
+
+	tests := []struct {
+		name    string
+		content map[string]interface{}
+		hint    string
+		want    string
+	}{
+		{"plain webhook", map[string]interface{}{"title": "disk full"}, "", storage.OriginWebhook},
+		{"sns hint stays webhook origin", map[string]interface{}{"title": "t"}, "sns", storage.OriginWebhook},
+		{"sqs hint stays webhook origin", map[string]interface{}{"title": "t"}, "sqs", storage.OriginWebhook},
+		{
+			"agent via Source prefix",
+			map[string]interface{}{"Source": "agent:elasticsearch:prod-app"},
+			"sqs",
+			storage.OriginAIDetect,
+		},
+		{
+			"agent via PatternID",
+			map[string]interface{}{"PatternID": "p-123"},
+			"",
+			storage.OriginAIDetect,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inc := m.NewIncident("", &tc.content, false)
+			rec := buildIncidentRecord(inc, cfg, tc.content, false, tc.hint)
+			if rec.Origin != tc.want {
+				t.Fatalf("Origin = %q, want %q", rec.Origin, tc.want)
 			}
 		})
 	}

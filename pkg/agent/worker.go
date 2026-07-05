@@ -432,6 +432,32 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		return
 	}
 
+	// Per-log-pattern learn-exclusion (E1). The pre-Group chokepoint above can
+	// only see a signal's service + signal name; a plain log line carries no
+	// pattern identity there, so a single noisy LOG PATTERN could not be held
+	// out without excluding its whole service. Now that Group has assigned each
+	// observation its stable pattern Key, consult the resolver once per
+	// observation and drop the excluded PATTERNS before Learn — the log analogue
+	// of the metric/trace per-signal exclusion. LOG brains only: metric/trace
+	// signal exclusion already bit at the pre-Group hook, so re-checking their
+	// keys here would be redundant (and their Key is not a log pattern id). A
+	// nil resolver (community/OSS) is never installed, so this block is skipped
+	// and the tick is byte-for-byte unchanged. Excluded observations' signal
+	// frequency is booked as excluded (not as no-match) so the tick stat stays
+	// honest.
+	excludedPatternFreq := 0
+	if x := learnExclusion(); x != nil && learner.Kind() == "logs" {
+		kept := observations[:0]
+		for _, o := range observations {
+			if x.ExcludeLogPattern(ctx, o.Service, o.Key) {
+				excludedPatternFreq += o.Frequency
+				continue
+			}
+			kept = append(kept, o)
+		}
+		observations = kept
+	}
+
 	// Update the model and produce verdicts, one observation at a time.
 	verdicts := make(map[string]int) // verdict-name → count, for stats
 	matched := 0                     // signals that landed in an observation
@@ -475,7 +501,7 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 	w.saveCursor(ctx, src.Name(), newCursor)
 
 	log.Printf("agent: tick %s signals=%d matched=%d patterns=%d skipped_no_match=%d skipped_excluded=%d verdicts=%v cursor=%s",
-		src.Name(), pulled, matched, len(observations), pulled-matched, excluded, verdicts, newCursor.Format(time.RFC3339))
+		src.Name(), pulled, matched, len(observations), pulled-matched-excludedPatternFreq, excluded+excludedPatternFreq, verdicts, newCursor.Format(time.RFC3339))
 }
 
 // handleObservation runs the mode-specific tail for one ALREADY-FOLDED
@@ -543,7 +569,7 @@ func (w *Worker) handleObservation(
 				sample = o.Samples[0].Message
 			}
 			if w.shadow != nil {
-				w.shadow.Record(src.Name(), o.Key, o.Signal, sample,
+				w.shadow.Record(src.Name(), o.Key, o.Service, o.Signal, sample,
 					w.shadowTag(o), v.Class.String(), o.Frequency)
 			}
 			log.Printf("%sagent[shadow]: would alert pattern=%s service=%s tag=%s verdict=%s freq=%d%s",

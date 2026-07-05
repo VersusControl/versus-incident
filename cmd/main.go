@@ -18,6 +18,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/controllers"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
+	"github.com/VersusControl/versus-incident/pkg/report"
 	"github.com/VersusControl/versus-incident/pkg/routes"
 	"github.com/VersusControl/versus-incident/pkg/services"
 	"github.com/VersusControl/versus-incident/pkg/storage"
@@ -58,13 +59,11 @@ func main() {
 			MaxIncidents:       cfg.Storage.Redis.MaxIncidents,
 		},
 		Database: storage.DatabaseOptions{
-			Driver:       cfg.Storage.Database.Driver,
-			DSN:          cfg.Storage.Database.DSN,
-			MaxIncidents: cfg.Storage.Database.MaxIncidents,
+			Driver: cfg.Storage.Database.Driver,
+			DSN:    cfg.Storage.Database.DSN,
 		},
 		Postgres: storage.PostgresOptions{
-			DSN:          cfg.Storage.Postgres.DSN,
-			MaxIncidents: cfg.Storage.Postgres.MaxIncidents,
+			DSN: cfg.Storage.Postgres.DSN,
 		},
 	})
 	if err != nil {
@@ -75,6 +74,25 @@ func main() {
 	// Make storage available to the incident service (used to persist every
 	// alert + record acks).
 	services.SetStorage(store)
+
+	// Wire the incident-report feature (OSS default). The renderer is the
+	// pure-Go in-binary PNG card renderer; an enterprise build may swap it
+	// via services.SetReportRenderer behind the same core.ReportRenderer
+	// seam. Installed unconditionally so report works for webhook incidents
+	// even when the AI agent is disabled.
+	if renderer, rerr := report.NewRenderer(); rerr != nil {
+		log.Printf("report: renderer unavailable: %v", rerr)
+	} else {
+		services.SetReportRenderer(renderer)
+	}
+	// Reuse the operator-configured redaction rules so every text field on
+	// the shared card is scrubbed (defence-in-depth: webhook Content is
+	// attacker-influenced). Built here independent of agent.enable.
+	reportRedactor, redErrs := agent.NewRedactor(cfg.Agent.Redaction.Enable && cfg.Agent.Redaction.RedactIPs, cfg.Agent.Redaction.ExtraPatterns)
+	for _, e := range redErrs {
+		log.Printf("report: redactor warning: %v", e)
+	}
+	services.SetReportRedactor(reportRedactor)
 
 	// Initialize the operator-defined teams / members registry on the
 	// same storage backend. Nil-tolerant: the controller responds with

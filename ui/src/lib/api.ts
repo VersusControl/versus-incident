@@ -5,6 +5,18 @@
 
 import type { LearnExclusions } from "@/lib/learnExclude";
 
+// LearnExclusionsWire is the raw enterprise learn-exclusion policy shape ON THE
+// WIRE. It differs from the UI's LearnExclusions in ONE field name: the
+// per-log-pattern grain is `log_patterns` on the wire (the UI models it as
+// `patterns`). The api client maps across this seam so a caller never has to
+// know the wire name — and never silently reads the wrong field, which is what
+// left an ignored log pattern stranded in the Active tab.
+interface LearnExclusionsWire {
+  services?: string[];
+  metrics?: string[];
+  log_patterns?: string[];
+}
+
 const SECRET_KEY = "versus.gatewaySecret";
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ""; // empty → uses Vite proxy
 
@@ -136,6 +148,10 @@ export interface Pattern {
   service?: string;
   tags?: string[];
   readiness: Readiness; // learning-readiness / time-to-known (always present)
+  // samples is the bounded ring of the most recent POST-REDACTION example log
+  // lines this pattern was learned from (oldest→newest, latest last). Present
+  // only on the pattern detail read (getPattern) — the list rows strip it.
+  samples?: string[];
 }
 
 export interface Status {
@@ -171,6 +187,13 @@ export interface BaselineRow {
   threshold: number; // samples needed before the signal is ready
   last_updated: string;
   readiness: Readiness; // same shape as logs; ready === confident
+  // latest_sample is the most recent POST-REDACTION compact example this
+  // signal was learned from — the metric/trace parity of the log pattern's
+  // "Example log line". The peek renders it as "Example metric" / "Example
+  // trace". Enterprise-gated with the rest of the row: absent (omitempty) on a
+  // community/OSS build or until the signal has folded at least one sample, so
+  // the peek degrades to "No example captured yet".
+  latest_sample?: string;
 }
 
 export interface BaselinesResponse {
@@ -232,6 +255,7 @@ export interface ShadowEvent {
   pattern_id: string;
   template: string;
   source: string;
+  service?: string; // attributed service (may be blank/_unknown)
   rule_name?: string;
   verdict: string; // "unknown" | "spike"
   sample_message: string;
@@ -255,6 +279,13 @@ export interface ServiceInfo {
   // auto-discovered one (false). The server always sends it, so the Services
   // table renders an explicit "Manual"/"Auto" origin for every row.
   manual: boolean;
+  // in_grace + grace_seconds_remaining are the new-service grace status the
+  // server computes with the SAME helper the service-detail endpoint uses, so
+  // the Services LIST and the service DETAIL page report the same status. A
+  // service inside its grace window is learned-but-not-alerted; the list shows
+  // "in grace" and the remaining time, else "tracked" and "—".
+  in_grace: boolean;
+  grace_seconds_remaining: number;
 }
 
 // --- Manual-attribution service overrides ------------------------------------
@@ -371,6 +402,11 @@ export interface IncidentSummary {
   team_id?: string;
   title?: string;
   source?: string;
+  // origin is the coarse classifier for how the incident entered the
+  // system: "ai_detect" (AI detect agent) or "webhook" (inbound alert).
+  // The Incidents page separates the two feeds on it. Always present on
+  // fresh responses; legacy rows are classified server-side from source.
+  origin?: string;
   service?: string;
   resolved: boolean;
   channels_notified?: string[];
@@ -382,6 +418,28 @@ export interface IncidentSummary {
   resolved_at?: string | null;
   assigned_team_id?: string;
   assigned_member_ids?: string[];
+}
+
+// OriginCounts is the per-origin tally the list/search endpoints return
+// alongside the rows, computed over the FULL result set so the Incidents
+// top-bar can show both feeds ("AI: N · Webhook: M") regardless of the
+// active tab. total is ai_detect + webhook.
+export interface OriginCounts {
+  ai_detect: number;
+  webhook: number;
+  total: number;
+}
+
+// IncidentIndex is the full list/search response: one (optionally
+// origin-filtered, optionally paginated) window of rows plus the
+// whole-set origin counts. `total` is the number of rows matching the
+// active origin filter before pagination.
+export interface IncidentIndex {
+  incidents: IncidentSummary[];
+  counts: OriginCounts;
+  total: number;
+  page?: number;
+  page_size?: number;
 }
 
 export interface IncidentDetail extends IncidentSummary {
@@ -670,6 +728,47 @@ export interface AISettingsInput {
   enabled: boolean;
   provider?: string;
   api_key?: string;
+}
+
+// ---------- Runtime notification-channel settings (Enterprise, RBAC runtime:manage) ----------
+
+// ChannelMaskedField is one field's masked view. It is MASKED by contract — a
+// secret field NEVER carries a raw value, only whether one is `set` plus a
+// `hint` (last-4 for tokens, scheme+host for webhook URLs). A non-secret field
+// echoes its value in `hint`.
+export interface ChannelMaskedField {
+  set: boolean;
+  hint: string;
+}
+
+// ChannelSettingsView mirrors the enterprise pkg/runtimechannels masked GET/PUT
+// shape for ONE channel. `enabled` is the EFFECTIVE enable (override when set,
+// else the YAML floor); `configured` is whether a runtime override exists;
+// `source` is "override" or "yaml"; `yaml_enabled` is the YAML floor. `fields`
+// is the per-field masked view. NO secret value is ever present.
+export interface ChannelSettingsView {
+  enabled: boolean;
+  configured: boolean;
+  source: "override" | "yaml";
+  yaml_enabled: boolean;
+  fields: Record<string, ChannelMaskedField>;
+}
+
+// ChannelSettingsMap is the masked view of all six channels, keyed by channel
+// name (slack | telegram | viber | email | msteams | lark).
+export type ChannelSettingsMap = Record<string, ChannelSettingsView>;
+
+// ChannelFieldSchema is an optional server-provided per-field descriptor
+// (forward-compat). The UI falls back to its static schema when absent.
+export type ChannelFieldSchema = Record<string, { secret: boolean }>;
+
+// ChannelSettingsInput is the PUT body for one channel. A secret field is
+// OMITTED when blank so the server preserves the stored value (write-only); a
+// bool field is a real JSON boolean. Never persisted client-side — held
+// transiently for the single PUT, then cleared.
+export interface ChannelSettingsInput {
+  enable: boolean;
+  fields: Record<string, string | boolean>;
 }
 
 // ---------- Disable-Learn exclusions (Enterprise, RBAC runtime:manage) ----------
@@ -1034,9 +1133,52 @@ export async function resolveInitialAuth(
   }
 }
 
+// ReportCapabilities is the report block of the capabilities probe: whether
+// the incidents-analytics Reports action is available, the configured default
+// channel + window, whether charts are on, the enabled channels to offer, and
+// whether a root public_host is set (so a text-only channel fallback can carry
+// a link). Sourced from the runtime settings store, not YAML.
+export interface ReportCapabilities {
+  enable: boolean;
+  default_channel: string;
+  default_window: string;
+  include_chart: boolean;
+  channels: string[];
+  public_host_set: boolean;
+}
+
+// Capabilities is the shape of GET /api/admin/capabilities. `search` gates
+// server-side full-text search; `report` (optional) gates the incidents
+// report action.
+export interface Capabilities {
+  search: boolean;
+  report?: ReportCapabilities;
+}
+
+// ReportSettings is the non-secret runtime configuration for the incidents
+// analytics report, exchanged with GET/PUT /api/admin/reports/settings.
+export interface ReportSettings {
+  enable: boolean;
+  default_channel: string;
+  include_chart: boolean;
+  rate_per_minute: number;
+  default_window: string;
+}
+
+// ReportSendResult is the per-channel outcome of POST /reports/incidents.
+// `sent` = image delivered; `fallback` = text summary + note delivered
+// (image-incapable channel); `failed` = channel returned an error (the PNG is
+// still downloadable via GET report.png). `window` echoes the rendered window.
+export interface ReportSendResult {
+  window: string;
+  sent: string[];
+  fallback: string[];
+  failed: Record<string, string>;
+  bytes: number;
+}
+
 export const api = {
   status: () => request<Status>("/api/agent/status"),
-
   listPatterns: () =>
     request<{ patterns: Pattern[] }>("/api/agent/patterns").then(
       (r) => r.patterns ?? [],
@@ -1144,35 +1286,83 @@ export const api = {
       method: "DELETE",
     }),
 
+  // Runtime notification-channel settings (Enterprise, RBAC runtime:manage).
+  // Same sessionRequest plumbing as the AI-settings control — the SSO session
+  // cookie, never a static token. getChannelSettings returns the MASKED view of
+  // all six channels (no secret, ever). setChannelSettings PUTs ONE channel;
+  // blank secret fields are omitted by buildChannelPut so the server preserves
+  // the stored secret. clearChannelSettings reverts ONE channel to its YAML
+  // floor. testChannel triggers a rate-limited synthetic test-send. All return
+  // the authoritative post-change masked map (test returns { ok }).
+  getChannelSettings: () =>
+    sessionRequest<{ channels: ChannelSettingsMap }>(
+      "/enterprise/api/agent/channel-settings",
+    ).then((r) => r.channels ?? {}),
+  setChannelSettings: (channel: string, body: ChannelSettingsInput) =>
+    sessionRequest<{ channels: ChannelSettingsMap }>(
+      `/enterprise/api/agent/channel-settings/${encodeURIComponent(channel)}`,
+      { method: "PUT", body: JSON.stringify(body) },
+    ).then((r) => r.channels ?? {}),
+  clearChannelSettings: (channel: string) =>
+    sessionRequest<{ channels: ChannelSettingsMap }>(
+      `/enterprise/api/agent/channel-settings/${encodeURIComponent(channel)}`,
+      { method: "DELETE" },
+    ).then((r) => r.channels ?? {}),
+  testChannel: (channel: string) =>
+    sessionRequest<{ ok: boolean }>(
+      `/enterprise/api/agent/channel-settings/${encodeURIComponent(channel)}/test`,
+      { method: "POST" },
+    ),
+
   // Disable-Learn exclusions (Enterprise, RBAC runtime:manage). Same
   // sessionRequest plumbing as the runtime mode / AI controls — the SSO session
   // cookie, never a static token; the org and role are derived server-side. The
   // GET is the single state source the toggle + per-metric checkboxes read;
   // setServiceLearnExclusion toggles ONE service (POST add / DELETE remove);
-  // setLearnExclusions PUTs the whole list (read-modify-write off the GET). All
-  // three return the authoritative post-change lists. Every mutation is audited
+  // setLearnExclusions PUTs the whole list (read-modify-write off the GET),
+  // which is ALSO how a per-log-pattern exclusion is toggled (the server has no
+  // per-pattern POST/DELETE convenience route — the whole-list PUT is the sole
+  // write path for the `patterns` grain, same as metric/trace signals). All
+  // return the authoritative post-change lists. Every mutation is audited
   // server-side and takes effect on the next worker tick (no restart). 403/404
   // is the terminal community / OSS / wrong-role answer, never retried.
+  //
+  // WIRE FIELD NOTE: the enterprise policy serializes the per-log-pattern grain
+  // as `log_patterns` (the metric grain is `metrics`, service grain is
+  // `services`). The UI models it as `patterns` for brevity, so both the GET
+  // response and the PUT body are mapped across the `patterns` ⇄ `log_patterns`
+  // seam here — reading the wrong field is exactly what left an ignored log
+  // pattern stuck in the Active tab.
   getLearnExclusions: () =>
-    sessionRequest<LearnExclusions>(
+    sessionRequest<LearnExclusionsWire>(
       "/enterprise/api/agent/learn-exclusions",
     ).then((r) => ({
       services: r.services ?? [],
       metrics: r.metrics ?? [],
+      patterns: r.log_patterns ?? [],
     })),
   setLearnExclusions: (input: LearnExclusions) =>
-    sessionRequest<LearnExclusions>("/enterprise/api/agent/learn-exclusions", {
+    sessionRequest<LearnExclusionsWire>("/enterprise/api/agent/learn-exclusions", {
       method: "PUT",
       body: JSON.stringify({
         services: input.services,
         metrics: input.metrics,
+        log_patterns: input.patterns,
       }),
-    }).then((r) => ({ services: r.services ?? [], metrics: r.metrics ?? [] })),
+    }).then((r) => ({
+      services: r.services ?? [],
+      metrics: r.metrics ?? [],
+      patterns: r.log_patterns ?? [],
+    })),
   setServiceLearnExclusion: (name: string, excluded: boolean) =>
-    sessionRequest<LearnExclusions>(
+    sessionRequest<LearnExclusionsWire>(
       `/enterprise/api/agent/learn-exclusions/services/${encodeURIComponent(name)}`,
       { method: excluded ? "POST" : "DELETE" },
-    ).then((r) => ({ services: r.services ?? [], metrics: r.metrics ?? [] })),
+    ).then((r) => ({
+      services: r.services ?? [],
+      metrics: r.metrics ?? [],
+      patterns: r.log_patterns ?? [],
+    })),
 
   // getSSODeployment reads the license-issued single-tenant deployment org so
   // the admin controls drive SSO/connections/policy under it (not "default").
@@ -1368,12 +1558,33 @@ export const api = {
       `/api/admin/incidents${qs}`,
     ).then((r) => r.incidents ?? []);
   },
+  // listIncidentsIndex is the Incidents-page variant: it returns the rows
+  // for one origin tab PLUS the whole-set per-origin counts (so the
+  // top-bar shows both feeds separately) in a single request. Pass an
+  // origin to scope the rows; the counts stay whole-set regardless.
+  listIncidentsIndex: (opts?: {
+    origin?: string;
+    page?: number;
+    pageSize?: number;
+    limit?: number;
+  }) => {
+    const p = new URLSearchParams();
+    if (opts?.origin) p.set("origin", opts.origin);
+    if (opts?.page) p.set("page", String(opts.page));
+    if (opts?.pageSize) p.set("page_size", String(opts.pageSize));
+    if (opts?.limit) p.set("limit", String(opts.limit));
+    const qs = p.toString();
+    return request<IncidentIndex>(
+      `/api/admin/incidents${qs ? `?${qs}` : ""}`,
+    );
+  },
   // capabilities reports which optional storage features the running
   // backend supports. `search` is true only when the backend implements
   // server-side full-text search (Postgres); memory/file return false and
-  // the UI falls back to client-side filtering.
+  // the UI falls back to client-side filtering. `report` gates the incident
+  // report → channel share action.
   capabilities: () =>
-    request<{ search: boolean }>("/api/admin/capabilities"),
+    request<Capabilities>("/api/admin/capabilities"),
   // searchIncidents runs server-side full-text search. Only call it when
   // capabilities().search is true; otherwise the endpoint returns 501.
   searchIncidents: (q: string, limit?: number) => {
@@ -1382,6 +1593,21 @@ export const api = {
     return request<{ incidents: IncidentSummary[] }>(
       `/api/admin/incidents/search?${params.toString()}`,
     ).then((r) => r.incidents ?? []);
+  },
+  // searchIncidentsIndex mirrors listIncidentsIndex for the server-side
+  // search path: origin-scoped rows plus whole-(match)-set origin counts.
+  searchIncidentsIndex: (
+    q: string,
+    opts?: { origin?: string; page?: number; pageSize?: number; limit?: number },
+  ) => {
+    const p = new URLSearchParams({ q });
+    if (opts?.origin) p.set("origin", opts.origin);
+    if (opts?.page) p.set("page", String(opts.page));
+    if (opts?.pageSize) p.set("page_size", String(opts.pageSize));
+    if (opts?.limit) p.set("limit", String(opts.limit));
+    return request<IncidentIndex>(
+      `/api/admin/incidents/search?${p.toString()}`,
+    );
   },
   getIncident: (id: string) =>
     request<IncidentDetail>(`/api/admin/incidents/${id}`),
@@ -1463,6 +1689,82 @@ export const api = {
       `/api/admin/incidents/${id}/resolve`,
       { method: "POST" },
     ),
+
+  // sendIncidentsReport renders the aggregate dashboard for a window and
+  // delivers it to a channel. A 502 (partial — at least one channel failed)
+  // still resolves with the outcome (the image stays downloadable), so the UI
+  // can show per-channel results instead of a bare error; other statuses
+  // propagate as ApiError.
+  sendIncidentsReport: async (
+    window: string,
+    channel?: string,
+    requestedBy?: string,
+  ): Promise<ReportSendResult> => {
+    const qs = window ? `?window=${encodeURIComponent(window)}` : "";
+    try {
+      return await request<ReportSendResult>(
+        `/api/admin/reports/incidents${qs}`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            channel: channel ?? "",
+            requested_by: requestedBy ?? "",
+          }),
+        },
+      );
+    } catch (e) {
+      if (
+        e instanceof ApiError &&
+        e.status === 502 &&
+        e.body &&
+        typeof e.body === "object" &&
+        "sent" in e.body
+      ) {
+        return e.body as ReportSendResult;
+      }
+      throw e;
+    }
+  },
+
+  // fetchIncidentsReportImage fetches the rendered PNG for a window with the
+  // gateway-secret header and returns a Blob — an <img src> cannot carry the
+  // header, so the preview loads the bytes here and renders via an object URL.
+  fetchIncidentsReportImage: async (window: string): Promise<Blob> => {
+    const secret = getSecret() ?? "";
+    const headers = new Headers();
+    if (secret) headers.set("X-Gateway-Secret", secret);
+    const qs = window ? `?window=${encodeURIComponent(window)}` : "";
+    const res = await fetch(
+      `${API_BASE}/api/admin/reports/incidents/report.png${qs}`,
+      { headers, credentials: "same-origin", cache: "no-store" },
+    );
+    if (!res.ok) {
+      if (res.status === 401 && secret) notifyAuthExpired();
+      let msg = `HTTP ${res.status}`;
+      try {
+        const b = await res.json();
+        if (b && typeof b === "object" && "error" in b) {
+          msg = String((b as { error: unknown }).error);
+        }
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new ApiError(res.status, msg);
+    }
+    return res.blob();
+  },
+
+  // getReportSettings reads the runtime report settings (non-secret toggles).
+  getReportSettings: () =>
+    request<ReportSettings>("/api/admin/reports/settings"),
+
+  // updateReportSettings replaces the runtime report settings and returns the
+  // effective (sanitized) values.
+  updateReportSettings: (s: ReportSettings) =>
+    request<ReportSettings>("/api/admin/reports/settings", {
+      method: "PUT",
+      body: JSON.stringify(s),
+    }),
 
   listRunbooks: () =>
     request<{ runbooks: Runbook[]; embeddings: boolean }>(

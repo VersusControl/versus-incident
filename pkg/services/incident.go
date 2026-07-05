@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -18,11 +19,20 @@ import (
 func CreateIncident(teamID string, content *map[string]interface{}, params ...*map[string]string) error {
 	var cfg *config.Config
 
+	// Resolve the effective config for THIS incident with runtime-override →
+	// YAML → default precedence, on a per-request clone (never mutating global
+	// config). The runtime channel override (nil-inert in OSS) overlays a
+	// channel's credentials + enable; the existing per-incident routing params
+	// still apply on top. CreateIncident has no request ctx today, so the
+	// single-org resolver uses its boot-pinned org via context.Background — no
+	// signature change to the emission path. Providers are rebuilt from this
+	// clone every call (no sender cache), so a runtime channel change takes
+	// effect on the NEXT incident with no restart (read-through hot-reload).
+	var p *map[string]string
 	if len(params) > 0 {
-		cfg = config.GetConfigWitParamsOverwrite(params[0])
-	} else {
-		cfg = config.GetConfig()
+		p = params[0]
 	}
+	cfg = config.GetConfigForAlert(context.Background(), p)
 
 	// Initialization of providers and alert
 	factory := common.NewAlertProviderFactory(cfg)
@@ -148,6 +158,15 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 // source hint ("sns"/"sqs"/...) supplied by the calling adapter; it is
 // ignored for agent-originated incidents, which carry their own Source.
 func buildIncidentRecord(incident *m.Incident, cfg *config.Config, content map[string]interface{}, resolved bool, hint string) *storage.IncidentRecord {
+	// Origin is the coarse classifier the UI uses to separate the
+	// AI-detected feed from the inbound-alert firehose. Agent-originated
+	// incidents (built by CreateIncidentFromFinding) classify as
+	// OriginAIDetect; every ingress path — the public webhook plus the
+	// SNS/SQS hints — classifies as OriginWebhook.
+	origin := storage.OriginWebhook
+	if utils.IsAgentIncident(content) {
+		origin = storage.OriginAIDetect
+	}
 	rec := &storage.IncidentRecord{
 		ID:              incident.ID,
 		OrgID:           storage.DefaultOrgID,
@@ -155,6 +174,7 @@ func buildIncidentRecord(incident *m.Incident, cfg *config.Config, content map[s
 		Title:           firstString(content, "title", "alertname", "summary", "subject", "name"),
 		Service:         firstString(content, "service", "service_name", "app", "component"),
 		Source:          resolveSource(content, hint),
+		Origin:          origin,
 		Resolved:        resolved,
 		ChannelsEnabled: enabledChannels(cfg),
 		OnCallTriggered: !resolved && cfg.OnCall.Enable,

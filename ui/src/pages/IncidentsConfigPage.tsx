@@ -333,9 +333,7 @@ function SecretBanner() {
     <div className="flex items-start gap-2 rounded-md border border-ink-600 bg-surface-raised px-3 py-2 text-xs text-ink-300">
       <Lock size={13} className="mt-0.5 shrink-0 text-ink-400" />
       <div>
-        Read-only view. Tokens, webhook URLs, and other secrets are{" "}
-        <strong className="text-ink-100">never sent to the browser</strong> —
-        only their presence is shown. To change any value edit{" "}
+        Read-only view. To change any value edit{" "}
         <code className="rounded bg-ink-700 px-1 py-0.5 font-mono text-ink-200">
           config/config.yaml
         </code>{" "}
