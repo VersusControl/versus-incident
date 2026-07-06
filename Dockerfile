@@ -27,7 +27,7 @@ COPY --from=ui-build /ui/dist ./ui/dist
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -installsuffix cgo -o /build/run cmd/main.go
 
 # --- Final image ---
-FROM alpine:3.21
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=build /build/config config
