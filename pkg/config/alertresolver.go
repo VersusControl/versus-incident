@@ -16,14 +16,14 @@ import (
 // `alert.*` config for the life of the process.
 //
 // It is the direct sibling of the pkg/agent AISettingsResolver /
-// SetAISettingsResolver seam (X27): one process-wide slot, registered once at
+// SetAISettingsResolver seam: one process-wide slot, registered once at
 // boot, mutex-guarded. OSS registers nothing, so alertConfigResolver() returns
 // nil and the emission path uses the static YAML `alert.*` config unchanged —
 // community behaviour is byte-for-byte unchanged (one nil-check, no clone, no
 // allocations, no goroutines).
 //
 // ============================================================================
-// CONTROL-API CONTRACT for the Enterprise consumer (design C1 / tasks E1–E4)
+// CONTROL-API CONTRACT for the Enterprise consumer
 // ============================================================================
 //
 // The enterprise module (versus-enterprise/pkg/runtimechannels) fills this

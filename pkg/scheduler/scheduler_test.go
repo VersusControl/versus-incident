@@ -195,7 +195,7 @@ func TestScheduler_PanicIsIsolated(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Job-ownership seam (X9-T9)
+// Job-ownership seam
 //
 // Under HA / multi-instance, a consumer installs an ownership predicate so
 // each registered job runs on exactly one instance. These tests drive the

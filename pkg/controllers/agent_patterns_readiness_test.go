@@ -26,7 +26,7 @@ func patternsApp(t *testing.T, cat *agent.Catalog, cfg config.AgentCatalogConfig
 
 // TestListPatterns_CarriesReadiness proves each /api/agent/patterns row carries
 // an additive `readiness` object computed at the read boundary, with the exact
-// shape the UI (C4) consumes. Logs need no license — the field is always
+// shape the UI consumes. Logs need no license — the field is always
 // present.
 func TestListPatterns_CarriesReadiness(t *testing.T) {
 	cat, err := agent.LoadCatalog(storage.NewMemory())

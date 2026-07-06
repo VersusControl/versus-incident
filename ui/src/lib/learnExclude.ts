@@ -1,4 +1,4 @@
-// learnExclude.ts — pure logic for the Disable-Learn UI (X30-T8), kept free of
+// learnExclude.ts — pure logic for the Disable-Learn UI, kept free of
 // React / fetch so the client-side metric matcher and the render gate are
 // unit-testable in isolation (the project's lib/*.ts + lib/*.test.ts pattern).
 //
@@ -12,7 +12,7 @@
 // endpoint — one org's Disable-Learn lists. The three halves are independent:
 // `services` are fully-excluded service names, `metrics` are signal entries
 // (exact OR glob/prefix), and `patterns` are excluded LOG PATTERN keys/ids (the
-// stable miner id shown in the patterns list — the per-log-pattern grain, E1).
+// stable miner id shown in the patterns list — the per-log-pattern grain).
 // All three are always present (possibly empty).
 export interface LearnExclusions {
   services: string[];

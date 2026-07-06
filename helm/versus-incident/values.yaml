@@ -66,7 +66,7 @@ readinessProbe:
 # SIGTERM (drain in-flight requests, flush) before SIGKILL.
 terminationGracePeriodSeconds: 30
 
-# Pod- and container-level security hardening (X9-T7). Applied to BOTH the OSS
+# Pod- and container-level security hardening. Applied to BOTH the OSS
 # Deployment and the HA StatefulSet. The static Go binary runs fine as a non-
 # root user; /app/data (file backend) and /tmp are writable volumes, so the
 # root filesystem can be read-only. Override/empty these to relax.
@@ -85,7 +85,7 @@ securityContext:
     drop:
       - ALL
 
-# High-availability / multi-instance (epic X9 — ENTERPRISE). When ha.enabled the
+# High-availability / multi-instance (ENTERPRISE). When ha.enabled the
 # chart renders a StatefulSet (stable POD_NAME ordinals → per-replica instance
 # identity) instead of a Deployment, DERIVES the Postgres backend (one shared
 # Postgres for all replicas), and wires the enterprise LICENSE_KEY. The OSS

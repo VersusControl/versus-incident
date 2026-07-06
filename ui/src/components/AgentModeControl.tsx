@@ -26,7 +26,7 @@ import { detectAiDisabledRemedy } from "@/lib/agentAI";
 import { useToast } from "@/components/toastContext";
 
 // AgentModeControl — the operator surface for the Enterprise runtime
-// mode-override (X26). It reads /enterprise/api/agent/mode on mount, shows the
+// mode-override. It reads /enterprise/api/agent/mode on mount, shows the
 // EFFECTIVE mode, and lets an admin switch training / shadow / detect (PUT).
 //
 // Unlike the read-only learned-signals views (gateway secret), every request

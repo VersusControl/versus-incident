@@ -9,7 +9,7 @@ import { ErrorBox } from "@/components/feedback";
 
 // AnalysisCard renders one AnalysisRecord. The header leads with the
 // finding's own conclusion — Title, SeverityBadge, Category and
-// Confidence (audit S5: none of these had a render path before); the
+// Confidence (none of these had a render path before); the
 // static `title` prop is only the fallback when the model produced no
 // parseable finding. Below: summary, root-cause hypotheses, evidence
 // (collapsible per item), suggestions, next steps, raw payload fallback,

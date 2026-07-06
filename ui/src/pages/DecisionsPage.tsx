@@ -129,7 +129,7 @@ export function DecisionsPage() {
 }
 
 // ---------------------------------------------------------------------------
-// Clear for the ACTIVE tab's log. The audit (S3) found the mutation failing
+// Clear for the ACTIVE tab's log. The audit found the mutation failing
 // silently — every outcome now lands a toast, and Clear keeps its
 // confirmation (on the accessible ConfirmDialog, no window.confirm).
 // ---------------------------------------------------------------------------

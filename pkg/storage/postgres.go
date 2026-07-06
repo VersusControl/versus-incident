@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
-	"sort"
 	"strings"
 	"time"
 
@@ -29,6 +27,12 @@ type PostgresOptions struct {
 type postgresProvider struct {
 	db *sql.DB
 }
+
+// DB implements the optional storage.SQLAccessor capability: it
+// exposes the pooled *sql.DB so the enterprise module and the OSS Postgres
+// catalog store can run their own migrations and typed queries on the same
+// pool. The pool is owned by this provider — callers MUST NOT Close it.
+func (p *postgresProvider) DB() *sql.DB { return p.db }
 
 // NewPostgres opens a connection to Postgres, runs idempotent migrations,
 // and returns a ready Provider. Callers must call Close when done.
@@ -100,39 +104,23 @@ func WithMigrationLock(db *sql.DB, fn func() error) error {
 	return fn()
 }
 
+// ossMigrationLedger is the table RunSQLMigrations records applied OSS
+// migration filenames in, so each file runs exactly once. It is a Go
+// constant (never caller input), distinct from the enterprise ledger
+// (versus_enterprise_schema_migrations) so the two migration sets track
+// independently on the same pool.
+const ossMigrationLedger = "versus_schema_migrations"
+
 // migrate runs the OSS schema migrations under the shared migration advisory
 // lock so concurrent first-boot replicas serialize instead of racing the
-// Postgres catalog. The actual file application is unchanged from the
-// single-instance path (see applyMigrations).
+// Postgres catalog. The files are applied once each and tracked in the
+// ledger by RunSQLMigrations, so a re-run is a no-op — which is REQUIRED now
+// that migration 003 drops the whole-blob catalog table (an un-ledgered
+// re-run would drop the typed tables on every boot).
 func (p *postgresProvider) migrate() error {
-	return WithMigrationLock(p.db, p.applyMigrations)
-}
-
-// applyMigrations applies every migrations/*.sql file in lexical order. Each
-// file is idempotent (IF NOT EXISTS), so re-running on an existing database
-// is a no-op. Callers serialize it via WithMigrationLock.
-func (p *postgresProvider) applyMigrations() error {
-	entries, err := fs.ReadDir(migrationFiles, "migrations")
-	if err != nil {
-		return fmt.Errorf("read migrations dir: %w", err)
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() {
-			names = append(names, e.Name())
-		}
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		data, err := migrationFiles.ReadFile("migrations/" + name)
-		if err != nil {
-			return fmt.Errorf("read migration %s: %w", name, err)
-		}
-		if _, err := p.db.Exec(string(data)); err != nil {
-			return fmt.Errorf("apply migration %s: %w", name, err)
-		}
-	}
-	return nil
+	return WithMigrationLock(p.db, func() error {
+		return RunSQLMigrations(p.db, migrationFiles, "migrations", ossMigrationLedger)
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -148,12 +136,20 @@ func (p *postgresProvider) applyMigrations() error {
 
 // blobTables maps a blob name to its dedicated Postgres table. Names not
 // present here are stored in the shared vs_blobs table.
+//
+// "patterns" is deliberately ABSENT: the log-pattern catalog no longer
+// rides a whole-blob table on Postgres. Migration 003 drops the old
+// whole-blob vs_patterns and replaces it with the typed signal tables
+// (vs_patterns root + vs_logs + vs_services); the Postgres catalog store
+// (agent.NewPostgresCatalogStore) reads/writes those typed tables instead.
+// Any residual whole-blob write under the "patterns" name (e.g. the file
+// backend's inline path exercised on a Postgres deployment that has not
+// installed the catalog store) falls back to vs_blobs, so nothing crashes.
 var blobTables = map[string]string{
-	"patterns": "vs_patterns",
-	"shadow":   "vs_shadow",
-	"detect":   "vs_detect",
-	"members":  "vs_members",
-	"teams":    "vs_teams",
+	"shadow":  "vs_shadow",
+	"detect":  "vs_detect",
+	"members": "vs_members",
+	"teams":   "vs_teams",
 }
 
 // blobTable returns the table backing name. The result is always one of
@@ -193,7 +189,7 @@ func (p *postgresProvider) WriteBlob(name string, data []byte) error {
 }
 
 // CreateBlobIfAbsent implements the optional storage.BlobCreator capability
-// (X9-T11) on the shared, multi-writer Postgres backend — the HA substrate.
+// on the shared, multi-writer Postgres backend — the HA substrate.
 // It is the atomic single-writer election: `INSERT … ON CONFLICT DO NOTHING`
 // inserts only when the row is absent, so among N replicas racing to
 // generate the same secret exactly one INSERT affects a row (written==true)
@@ -588,7 +584,7 @@ func (p *postgresProvider) Close() error {
 }
 
 // ---------------------------------------------------------------------------
-// Lifecycle (implements the optional storage.Lifecycle capability — X1-T7)
+// Lifecycle (implements the optional storage.Lifecycle capability)
 //
 // A mechanical delete primitive with no org/policy concept. The blob
 // domain spans every physical blob table (the fixed allowlist + vs_blobs),

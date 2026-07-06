@@ -29,8 +29,8 @@ import { EnterpriseLockedBody } from "@/components/EnterpriseLocked";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/toastContext";
 
-// AdminMembersControl — the operator surface for Enterprise RBAC membership
-// (X5). It lists provisioned members joined with their EFFECTIVE role and lets
+// AdminMembersControl — the operator surface for Enterprise RBAC membership.
+// It lists provisioned members joined with their EFFECTIVE role and lets
 // an admin assign a direct role to a member, plus manage the deployment's
 // "default admin user" (the built-in non-SSO root account created on first
 // licensed boot).

@@ -25,7 +25,7 @@ export function KpiTile({
   label: string;
   value: React.ReactNode;
   loading?: boolean;
-  /** Deep link WITH its filter (e.g. /incidents?status=open) — audit D5. */
+  /** Deep link WITH its filter (e.g. /incidents?status=open). */
   to?: string;
   icon?: LucideIcon;
   tone?: "critical" | "warn" | "ok" | "info";

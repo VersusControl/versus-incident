@@ -365,7 +365,7 @@ func TestAdminAudit_OverrideMutations_SuccessAndDenial(t *testing.T) {
 // TestAdminAudit_GraceControl_ValidActionsAndBoundedInvalidTarget proves the
 // grace-control route records `<name> (action=end|restart)` on the valid paths
 // (unchanged) and, on an INVALID action, records a bounded, control-char-
-// stripped target — never the raw client string (B52 log-injection guard).
+// stripped target — never the raw client string (log-injection guard).
 func TestAdminAudit_GraceControl_ValidActionsAndBoundedInvalidTarget(t *testing.T) {
 	cap := installCapture(t)
 	app, cat := newAuditApp(t)
@@ -421,10 +421,10 @@ func TestAdminAudit_GraceControl_ValidActionsAndBoundedInvalidTarget(t *testing.
 }
 
 // TestAdminAudit_CreateServiceOverride_BoundedDenialTarget proves the override-
-// create route (B53 / QA-031) never echoes a raw, unbounded client `service`
+// create route never echoes a raw, unbounded client `service`
 // into the audit target on EITHER denial branch — the unknown-target-service
 // 400 and the overrides.Put-error 400 — while the valid create target stays
-// unchanged. Same class + guard as the B52 grace-control fix.
+// unchanged. Same class + guard as the grace-control fix.
 func TestAdminAudit_CreateServiceOverride_BoundedDenialTarget(t *testing.T) {
 	overrideMaxTargetLen := len("service ") + maxAuditActionLen
 	evil := "ghost\n\rDROP TABLE audit;" + strings.Repeat("A", 500)
@@ -490,7 +490,7 @@ func TestAdminAudit_CreateServiceOverride_BoundedDenialTarget(t *testing.T) {
 
 // assertBoundedOverrideTarget checks a createServiceOverride denial target is a
 // bounded, control-char-stripped "service <token>" — never the raw client
-// string, no newline/CR, length-capped (B53 log-injection guard).
+// string, no newline/CR, length-capped (log-injection guard).
 func assertBoundedOverrideTarget(t *testing.T, target, raw string, max int) {
 	t.Helper()
 	if strings.Contains(target, raw) {
@@ -507,7 +507,7 @@ func assertBoundedOverrideTarget(t *testing.T, target, raw string, max int) {
 	}
 }
 
-// TestSanitizeAuditToken exercises the B52 helper directly: it strips
+// TestSanitizeAuditToken exercises the sanitizer helper directly: it strips
 // control/newline runes, caps the result at maxAuditActionLen bytes without
 // ever exceeding it (or splitting a multi-byte rune), and is a clean pass-
 // through for empty/normal input.

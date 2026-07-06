@@ -1,7 +1,7 @@
 import { useSearchParams } from "react-router-dom";
 import clsx from "clsx";
 
-// SegmentedControl — URL-synced filter tabs. The audit's D5/D6 root cause
+// SegmentedControl — URL-synced filter tabs. The root cause
 // was filters living in useState: dashboard tiles couldn't deep-link and
 // back-navigation lost state. The param IS the state here, so every filter
 // view is shareable and restorable.

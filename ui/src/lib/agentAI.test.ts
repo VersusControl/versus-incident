@@ -12,8 +12,8 @@ import {
   providerKeyNotice,
 } from "@/lib/agentAI";
 
-// These tests pin the pure decision logic the AI-settings control (X27 item
-// 9a) and the mode control's detect cross-wire (item 9b) hang off, since the
+// These tests pin the pure decision logic the AI-settings control and the
+// mode control's detect cross-wire hang off, since the
 // UI has no DOM test harness. The contracts that matter to operators:
 //   1. a 422 with code "ai_disabled" surfaces the server remedy inline on the
 //      detect path — never a generic error.

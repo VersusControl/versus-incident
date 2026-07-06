@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { matchesMetricPattern } from "@/lib/learnExclude";
 
-// learnExcludeParity.test.ts — backlog B51 cross-language parity guard.
+// learnExcludeParity.test.ts — cross-language parity guard.
 //
 // The Go server matcher (versus-enterprise/pkg/learnexclude compileMetricPattern)
 // is the SOLE authority for the Disable-Learn metric glob/prefix/exact

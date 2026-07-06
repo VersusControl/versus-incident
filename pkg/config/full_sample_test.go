@@ -109,7 +109,7 @@ alert:
 }
 
 // TestAgentAIProviderSelection proves the `agent.ai.provider` selection
-// round-trips through the loader (QA-023): the YAML key maps into
+// round-trips through the loader: the YAML key maps into
 // AgentAIConfig.Provider, an omitted block keeps the embedded openai default,
 // and the AGENT_AI_PROVIDER env var overrides the YAML value (env wins).
 func TestAgentAIProviderSelection(t *testing.T) {

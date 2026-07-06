@@ -1,4 +1,4 @@
-// Package license is the OSS base of the Versus license shim (X2-T2).
+// Package license is the OSS base of the Versus license shim.
 //
 // It reads a signed license token from the LICENSE_KEY environment
 // variable and validates it OFFLINE against an embedded Ed25519 public

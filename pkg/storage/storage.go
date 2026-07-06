@@ -21,6 +21,7 @@
 package storage
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -53,7 +54,7 @@ const (
 	// compared against requested_at.
 	DomainAnalyses = "analyses"
 	// DomainBlobs targets opaque blobs written via WriteBlob — including
-	// the learned model-state artifacts under the models/ namespace (E14);
+	// the learned model-state artifacts under the models/ namespace;
 	// age is compared against the blob's updated_at.
 	DomainBlobs = "blobs"
 )
@@ -213,7 +214,7 @@ type RangeLister interface {
 }
 
 // Lifecycle is an optional capability a backend may implement on top of
-// Provider (X1-T7). It is a mechanical, tier-neutral delete primitive: it
+// Provider. It is a mechanical, tier-neutral delete primitive: it
 // carries NO org or policy concept — the caller decides what to purge and
 // when. The enterprise retention policy engine consumes it; single-tenant
 // OSS may call it directly. Backends that cannot delete efficiently (file,
@@ -235,7 +236,7 @@ type Lifecycle interface {
 }
 
 // BlobCreator is an optional capability a backend may implement on top of
-// Provider (X9-T11). It adds a single atomic create-if-absent blob write
+// Provider. It adds a single atomic create-if-absent blob write
 // used to elect ONE writer across multiple instances that share a store —
 // the substrate for generate-once secrets under HA / multi-instance, where
 // every replica boots the same generate-then-persist path and exactly one
@@ -249,7 +250,7 @@ type Lifecycle interface {
 // multi-writer) and memory (tests) backends implement it because they are
 // the HA substrate and the test path; the file backend implements it
 // best-effort via O_CREATE|O_EXCL, which is coherent only on a single node —
-// the only place file storage is allowed under HA (see the X9-T3
+// the only place file storage is allowed under HA (see the
 // file-storage guard).
 type BlobCreator interface {
 	// CreateBlobIfAbsent atomically writes data under key only if key does
@@ -262,6 +263,29 @@ type BlobCreator interface {
 	// so ReadBlob(key) observes the one surviving set of bytes regardless of
 	// which caller won.
 	CreateBlobIfAbsent(key string, data []byte) (written bool, err error)
+}
+
+// SQLAccessor is an optional capability a backend may implement on top of
+// Provider. It exposes the backend's underlying *sql.DB so an
+// out-of-tree consumer — the enterprise module and the OSS Postgres catalog
+// store — can run its OWN table-agnostic migrations (via RunSQLMigrations)
+// and typed queries on the SAME connection pool the Provider already owns,
+// instead of opening a second pool.
+//
+// Only the Postgres backend implements it; file / memory / redis do not, so
+// a type assertion `store.(storage.SQLAccessor)` IS the backend-type switch
+// the boot path selects on (Postgres ⇒ typed signal tables; anything else ⇒
+// the inline whole-blob path). It carries no tier or table knowledge: OSS
+// exposes only the pool and never names or creates an enterprise table, so
+// the one-way import stays intact — the enterprise module obtains the pool
+// through this seam and manages its own schema on it.
+//
+// The returned *sql.DB is owned by the Provider; callers MUST NOT Close it
+// (the Provider's own Close does that). It is safe for concurrent use.
+type SQLAccessor interface {
+	// DB returns the live *sql.DB backing this Provider. Never nil for a
+	// backend that implements SQLAccessor.
+	DB() *sql.DB
 }
 
 // IncidentRecord is the durable shape of an incident. It mirrors the
@@ -308,7 +332,7 @@ type IncidentRecord struct {
 	Content      map[string]interface{} `json:"content,omitempty"`
 
 	// AssignedTeamID and AssignedMemberIDs record an operator's
-	// assignment for this incident. Routing logic (Phase 2) will read
+	// assignment for this incident. Routing logic will read
 	// these to pick channels per assignee; the storage layer only
 	// holds the references. Empty means unassigned.
 	AssignedTeamID    string   `json:"assigned_team_id,omitempty"`

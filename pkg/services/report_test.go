@@ -115,7 +115,7 @@ func TestWindowBounds(t *testing.T) {
 	}
 }
 
-// --- aggregate assembler (R1) ----------------------------------------------
+// --- aggregate assembler ----------------------------------------------
 
 func TestBuildAggregateReportModel_CountsOriginsSeverityServices(t *testing.T) {
 	start := time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC)
@@ -315,7 +315,7 @@ func TestIncidentsInWindow_UsesRangeLister(t *testing.T) {
 	}
 }
 
-// --- delivery path (R3) ----------------------------------------------------
+// --- delivery path ----------------------------------------------------
 
 // enableReport writes runtime settings enabling the report so the delivery
 // helpers see it on (settings live in the store now, not YAML).

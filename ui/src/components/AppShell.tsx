@@ -8,8 +8,8 @@ import { ShellContext } from "./shellContext";
 import { ReauthModal } from "@/lib/auth";
 import { useShortcuts } from "@/lib/hooks";
 
-// AppShell: skip-link (first tab stop), desktop rail / mobile drawer
-// (audit A4), toast outlet, global shortcuts, re-auth modal mount.
+// AppShell: skip-link (first tab stop), desktop rail / mobile drawer,
+// toast outlet, global shortcuts, re-auth modal mount.
 export function AppShell() {
   const [drawer, setDrawer] = useState(false);
   const [help, setHelp] = useState(false);

@@ -12,7 +12,7 @@ import (
 
 // loadAgentTestConfig writes a minimal config to a temp dir and loads it
 // into the global singleton. On-call is globally disabled and the workflow
-// is never initialized — exactly the default that QA-003 crashes under.
+// is never initialized — exactly the default that crashed the emit path before the fix.
 func loadAgentTestConfig(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
@@ -39,7 +39,7 @@ redis:
 	}
 }
 
-// TestCreateIncidentFromFinding_HighSeverityNoOnCall reproduces QA-003: a
+// TestCreateIncidentFromFinding_HighSeverityNoOnCall reproduces the crash: a
 // high-severity AI finding force-sets oncall_enable=true, but with the
 // on-call workflow uninitialized the emit path must persist the incident
 // and return without panicking (on-call simply skipped).

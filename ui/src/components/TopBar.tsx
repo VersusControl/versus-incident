@@ -18,7 +18,7 @@ import { roleLabel, isAdminRole } from "@/lib/role";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { ShellContext } from "./shellContext";
 
-// TopBar truth table (audit S6 — the old bar showed a red "Agent
+// TopBar truth table (the old bar showed a red "Agent
 // unreachable" alarm during its own initial load and treated "disabled"
 // and "down" identically):
 //   config says enable:false      → neutral gray "agent off"

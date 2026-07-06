@@ -1,5 +1,5 @@
 // agentAI — pure, DOM-free decision logic shared by the Enterprise AI-settings
-// control (X27 item 9a) and the mode control's detect cross-wire (item 9b).
+// control and the mode control's detect cross-wire.
 //
 // Everything here is intentionally side-effect-free so it can be unit-tested in
 // the node vitest env (the UI has no jsdom/testing-library). The components are
@@ -79,11 +79,11 @@ export function keySetLabel(keySet: boolean, last4: string): string {
 // HEADER_AUTH_PROVIDERS are the model backends that authenticate with a
 // provider-specific HEADER (claude → `x-api-key`, gemini → `x-goog-api-key`)
 // rather than a Bearer token. The enterprise per-org runtime key override is
-// injected via the Bearer `AuthKeyFunc` path ONLY (B34/X27), so for these
+// injected via the Bearer `AuthKeyFunc` path ONLY, so for these
 // providers the per-org key does NOT apply at runtime — the agent falls back to
 // the YAML-configured key. Per-org key rotation today therefore fully applies
 // only to the Bearer providers (openai/deepseek/qwen). This mirrors the
-// enterprise AI-settings doc note (backlog B35).
+// enterprise AI-settings doc note.
 export const HEADER_AUTH_PROVIDERS = ["claude", "gemini"] as const;
 
 // isHeaderAuthProvider reports whether a provider authenticates by header
@@ -92,8 +92,8 @@ export function isHeaderAuthProvider(provider: string): boolean {
   return (HEADER_AUTH_PROVIDERS as readonly string[]).includes(provider.trim());
 }
 
-// ProviderKeyNotice is the pure verdict for the AI-settings provider `<select>`
-// (backlog B35, Security gate finding F2). It tells the control whether a
+// ProviderKeyNotice is the pure verdict for the AI-settings provider `<select>`.
+// It tells the control whether a
 // provider change is staged and, if so, whether the operator still owes the
 // matching key — so Save can warn/confirm before reusing the previous key.
 export interface ProviderKeyNotice {

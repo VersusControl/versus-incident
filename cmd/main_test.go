@@ -6,7 +6,7 @@ import (
 	c "github.com/VersusControl/versus-incident/pkg/config"
 )
 
-// TestHandlerRedisOptionsTLS covers QA-002: with TLS disabled the Redis
+// TestHandlerRedisOptionsTLS covers the plaintext-Redis case: with TLS disabled the Redis
 // client must not set TLSConfig (so a plaintext Redis can connect), while
 // the existing default-on / insecure_skip_verify TLS behaviour is preserved.
 func TestHandlerRedisOptionsTLS(t *testing.T) {

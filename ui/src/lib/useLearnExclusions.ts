@@ -16,9 +16,9 @@ import {
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { useToast } from "@/components/toastContext";
 
-// useLearnExclusions — the shared control state behind the X30 Disable-Learn
+// useLearnExclusions — the shared control state behind the Disable-Learn
 // (learn-exclusion) action on the three learned-signal LIST pages: logs
-// (PatternsPage, per-pattern grain — E1), metrics and traces (LearnedSignalsView,
+// (PatternsPage, per-pattern grain), metrics and traces (LearnedSignalsView,
 // signal-level). It mirrors the per-control gate + enterprise API the
 // ServiceDetailPage toggle/checkbox already use, so a licensed admin gets ONE
 // coherent "Ignore from learning" action everywhere the agent shows what it has
@@ -36,7 +36,7 @@ import { useToast } from "@/components/toastContext";
 // — it is absent on community / OSS and hidden from a licensed viewer, so the
 // feature never leaks a header or an inert widget to a non-admin.
 //
-// X30 semantics are preserved end to end: toggling calls the SAME enterprise
+// Disable-Learn semantics are preserved end to end: toggling calls the SAME enterprise
 // endpoints (POST/DELETE .../services/:name for a service; the whole-list PUT
 // for a metric/trace signal AND for a log pattern — the log-pattern grain has
 // no per-pattern POST/DELETE route, so it rides the same read-modify-write PUT

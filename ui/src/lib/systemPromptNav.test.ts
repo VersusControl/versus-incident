@@ -7,7 +7,7 @@ import {
 } from "./systemPromptNav";
 
 // The System-prompt page was reachable only by direct URL after its Decisions
-// button was removed (B50). It is now surfaced by an in-app nav entry on the
+// button was removed. It is now surfaced by an in-app nav entry on the
 // Decisions header. These assert the wiring the entry, the route mount, the
 // "Back" link, and the legacy redirect all share, so they can never drift apart
 // and re-orphan the page.

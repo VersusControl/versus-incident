@@ -9,7 +9,7 @@ import (
 )
 
 // -----------------------------------------------------------------------------
-// Typed-brain registration hook (Phase 8B).
+// Typed-brain registration hook.
 //
 // The worker runs ONE generic lifecycle (training → shadow → detect → analyze)
 // and plugs a per-type "brain" — a core.SignalLearner + core.SignalDetector —

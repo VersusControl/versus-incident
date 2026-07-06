@@ -231,7 +231,7 @@ func TestServiceDetail_GraceEnded(t *testing.T) {
 // the service-detail read resolves: the OSS pattern catalog/service registry is
 // single-tenant (always storage.DefaultOrgID), so the endpoint must serve it
 // even when an enterprise org resolver stamps a non-default deployment org onto
-// the request. This is the QA-025 regression: before the fix the read filtered
+// the request. This is the regression guard: before the fix the read filtered
 // the default-keyed registry by OrgFromContext ("b") and 404'd, gating the page
 // out for a licensed deployment whose intel/baselines key under "b".
 func TestServiceDetail_ServesSingleTenantOrgUnderForeignDeploymentOrg(t *testing.T) {

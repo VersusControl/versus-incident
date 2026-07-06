@@ -233,7 +233,7 @@ func TestLogBrain_ClassifyLifecycle(t *testing.T) {
 	}
 }
 
-// --- auto_promote_after threshold semantics (QA-028) --------------------------
+// --- auto_promote_after threshold semantics --------------------------
 // Spike is left disabled (SpikeMultiplier == 0) throughout so it can never mask
 // the count-based promotion verdict under test.
 
@@ -287,7 +287,7 @@ func TestLogBrain_AutoPromoteAfter_CustomThresholdPromotes(t *testing.T) {
 	}
 }
 
-// (c) QA-028: auto_promote_after: 0 DISABLES count-based promotion — a pattern
+// (c) auto_promote_after: 0 DISABLES count-based promotion — a pattern
 // is never marked "known" no matter how many times it is seen. Drives well past
 // the old 100 fallback to prove the explicit 0 is honoured, not re-mapped.
 func TestLogBrain_AutoPromoteAfter_ZeroDisablesPromotion(t *testing.T) {

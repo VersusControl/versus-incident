@@ -6,7 +6,7 @@ import (
 )
 
 // -----------------------------------------------------------------------------
-// Learn-exclusion seam (X30 "Disable-Learn").
+// Learn-exclusion seam ("Disable-Learn").
 //
 // A process-wide chokepoint that lets a consumer drop signals from the agent's
 // learning pipeline BEFORE they reach the per-type brain (miner / catalog /
@@ -40,7 +40,7 @@ import (
 //     (empty for plain logs — which is exactly why a single LOG PATTERN cannot
 //     be singled out here, see ExcludeLogPattern).
 //
-//   - ExcludeLogPattern is the POST-Group per-LOG-PATTERN grain (E1). A plain
+//   - ExcludeLogPattern is the POST-Group per-LOG-PATTERN grain. A plain
 //     log line carries no signal identity before grouping, so the pre-Group
 //     hook can only exclude a log pattern's whole SERVICE. Once the log brain's
 //     Group has assigned each observation its stable pattern Key/id, the worker

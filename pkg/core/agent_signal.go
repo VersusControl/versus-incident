@@ -150,7 +150,7 @@ type AIFinding struct {
 	SampleIDs   []string // signal IDs / pattern IDs for traceability
 
 	// Analyze-mode fields. All optional; omitempty so detect-mode
-	// payloads stay byte-compatible with the pre-E1 shape.
+	// payloads stay byte-compatible with the detect-only shape.
 	RootCauseHypotheses []RootCauseHypothesis `json:"root_cause_hypotheses,omitempty"`
 	Evidence            []EvidenceItem        `json:"evidence,omitempty"`
 	RelatedPatternIDs   []string              `json:"related_pattern_ids,omitempty"`

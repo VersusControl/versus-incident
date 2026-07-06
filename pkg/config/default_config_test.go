@@ -22,7 +22,7 @@ func parseRawYAML(t *testing.T, data []byte) *viper.Viper {
 	return v
 }
 
-// TestDefaultConfigMatchesSample enforces B33: the embedded best-practice
+// TestDefaultConfigMatchesSample enforces that the embedded best-practice
 // baseline (default_config.yaml) and the documented sample (config/config.yaml)
 // must carry the same keys and the same values, so a change to one can never
 // silently diverge from the other.

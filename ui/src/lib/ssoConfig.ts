@@ -1,5 +1,5 @@
 // ssoConfig — pure, DOM-free decision logic shared by the Enterprise SSO
-// config control (X4 item 2). It mirrors lib/agentAI: everything here is
+// config control. It mirrors lib/agentAI: everything here is
 // side-effect-free so it can be unit-tested in the node vitest env (the UI has
 // no jsdom/testing-library); the component is a thin shell over these helpers.
 

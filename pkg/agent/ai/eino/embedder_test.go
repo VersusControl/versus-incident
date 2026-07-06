@@ -97,7 +97,7 @@ func TestEmbedder_RequiresModel(t *testing.T) {
 }
 
 // TestEmbedder_FailsFast_ForProvidersWithoutEmbedding locks in the deliberate
-// no-fallback contract (QA-022): a provider that ships a chat model but NO
+// no-fallback contract: a provider that ships a chat model but NO
 // embedding component (deepseek, claude) must fail fast when RAG asks for an
 // embedder — with a clear error naming the supported embedder providers — and
 // must NOT silently fall back to openai. This is the most security-relevant
@@ -131,7 +131,7 @@ func TestEmbedder_FailsFast_ForProvidersWithoutEmbedding(t *testing.T) {
 }
 
 // TestEmbedder_Ollama_BuildsViaRegistry exercises the ollama embedder build
-// path (QA-022): the registry resolves the "ollama" provider, the keyless
+// path: the registry resolves the "ollama" provider, the keyless
 // native Ollama embeddings endpoint is hit at /api/embed, and the returned
 // vectors are narrowed to []float32 — mirroring the openai/gemini embedder
 // egress tests. No Authorization header is sent (ollama is keyless).

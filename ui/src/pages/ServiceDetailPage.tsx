@@ -28,17 +28,17 @@ import { SkCard, SkRows } from "@/components/Skeleton";
 
 // ServiceDetailPage — the per-service drill-down reached from the Services list.
 // It stitches together four sections:
-//   • Overview        — first-seen + grace status (OSS, X30-T1)
+//   • Overview        — first-seen + grace status (OSS)
 //   • Logs & patterns — the log-pattern catalog scoped to this service (OSS)
 //   • Incidents       — a bounded recent-incident summary (OSS)
-//   • Metrics & Traces — the Enterprise /intel half (X30-T2)
+//   • Metrics & Traces — the Enterprise /intel half
 //
 // The Metrics & Traces section degrades PURELY off HTTP status: 403 (licensed
 // but feature-off) or 404 (OSS binary — endpoint absent) renders the locked
 // upsell card, never real data. No enterprise dependency lives here — the lock
 // is driven by the status code alone, so OSS-only builds stay green.
 //
-// The Disable-Learn controls (X30-T8) ride the SAME HTTP-status degrade: the
+// The Disable-Learn controls ride the SAME HTTP-status degrade: the
 // "Ignore this service" toggle (Overview) and the per-metric "Ignore"
 // checkboxes (Metrics section) render ONLY when the
 // /intel probe returned 200 (licensed). Their editable/read-only split is the
@@ -125,8 +125,8 @@ function RecentIncidentRow({ inc }: { inc: ServiceIncidentRecent }) {
   );
 }
 
-// ServiceLearnToggle is the Overview "Ignore this service" switch
-// (X30-T8). It shares the /intel probe (licensed?) and the policy GET (current
+// ServiceLearnToggle is the Overview "Ignore this service" switch.
+// It shares the /intel probe (licensed?) and the policy GET (current
 // state) with the Metrics section. It renders nothing on an unlicensed surface,
 // read-only (disabled) without runtime:manage, and live for an admin/owner —
 // toggling POSTs/DELETEs the one service and refetches the shared policy.
@@ -623,7 +623,7 @@ export function ServiceDetailPage() {
                   </dd>
                 </div>
               </dl>
-              {/* Disable-Learn toggle (Enterprise, X30-T8) — absent on an
+              {/* Disable-Learn toggle (Enterprise) — absent on an
                   unlicensed/OSS binary, read-only without runtime:manage. */}
               {name && <ServiceLearnToggle name={name} />}
             </section>

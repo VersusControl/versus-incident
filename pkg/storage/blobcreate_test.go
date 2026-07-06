@@ -1,7 +1,7 @@
 package storage_test
 
-// blobcreate_test.go — covers the optional storage.BlobCreator capability
-// (X9-T11): the atomic create-if-absent blob primitive that elects ONE
+// blobcreate_test.go — covers the optional storage.BlobCreator capability:
+// the atomic create-if-absent blob primitive that elects ONE
 // writer across instances sharing a store (the substrate for generate-once
 // secrets under HA / multi-instance).
 //
@@ -77,7 +77,7 @@ func runCreateIfAbsent(t *testing.T, p storage.Provider) {
 
 	// Create over a key already set by WriteBlob is a no-op read returning
 	// the stored bytes.
-	const wkey = "patterns"
+	const wkey = "shadow"
 	stored := []byte(`{"version":1}`)
 	if err := p.WriteBlob(wkey, stored); err != nil {
 		t.Fatalf("WriteBlob(%s): %v", wkey, err)

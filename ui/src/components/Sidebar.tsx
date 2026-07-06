@@ -154,7 +154,7 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       label: "Runbooks",
       icon: Book,
       // Visible-with-hint instead of vanishing while status loads/fails
-      // (audit I4 / empty-nav-state rule). The page explains the 503 case.
+      // (empty-nav-state rule). The page explains the 503 case.
       dim: !runbooksAvailable,
       dimTitle: runbooksAvailable
         ? undefined
@@ -169,7 +169,7 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
   // When the agent is disabled (agent.enable=false) every Agent view and the
   // agent-backed Runbooks tool are non-functional. Dim + lock them with a
-  // clear hint (visible-with-hint, audit I4) so they read as disabled instead
+  // clear hint (visible-with-hint) so they read as disabled instead
   // of navigating to empty/erroring pages.
   const AGENT_OFF_HINT =
     "AI agent is disabled — set agent.enable to use these views";
@@ -201,7 +201,7 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 // Desktop rail. <1024px the AppShell renders SidebarContent inside a drawer
-// instead (audit A4: the fixed 224px rail ate 60% of a phone viewport).
+// instead (the fixed 224px rail ate 60% of a phone viewport).
 export function Sidebar() {
   return (
     <aside className="hidden h-full w-56 shrink-0 border-r border-ink-800 lg:block">

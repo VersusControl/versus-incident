@@ -43,7 +43,7 @@ type Router struct {
 
 // New builds a Router from the given per-kind entries. nil agents are
 // dropped so callers can pass `Entry{}` for kinds they have not wired
-// up yet (e.g. analyze remains unset until E4).
+// up yet (e.g. analyze remains unset until it is added).
 func New(entries map[core.AITaskKind]Entry) *Router {
 	out := make(map[core.AITaskKind]Entry, len(entries))
 	for k, e := range entries {

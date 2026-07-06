@@ -47,8 +47,8 @@ func (m *memoryProvider) WriteBlob(name string, data []byte) error {
 	return nil
 }
 
-// CreateBlobIfAbsent implements the optional storage.BlobCreator capability
-// (X9-T11). The write is atomic under the provider mutex, so N concurrent
+// CreateBlobIfAbsent implements the optional storage.BlobCreator capability.
+// The write is atomic under the provider mutex, so N concurrent
 // creators serialize and exactly one observes written==true; every other
 // caller observes written==false and reads the survivor's bytes via
 // ReadBlob. An existing key (created here or via WriteBlob) is left
@@ -222,7 +222,7 @@ func (m *memoryProvider) DeleteAnalysis(id string) error {
 }
 
 // ---------------------------------------------------------------------------
-// Lifecycle (implements the optional storage.Lifecycle capability — X1-T7)
+// Lifecycle (implements the optional storage.Lifecycle capability)
 // ---------------------------------------------------------------------------
 
 func (m *memoryProvider) PurgeOlderThan(domain string, cutoff time.Time) (int, error) {

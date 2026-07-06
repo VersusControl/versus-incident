@@ -189,7 +189,9 @@ func truncateAllTables(t *testing.T, dsn string) {
 	}
 	rows.Close()
 	for _, tbl := range tables {
-		if _, err := db.Exec("TRUNCATE TABLE " + tbl); err != nil {
+		// CASCADE: vs_logs FK-references vs_patterns (typed signal tables),
+		// so a plain per-table TRUNCATE of a referenced table is rejected.
+		if _, err := db.Exec("TRUNCATE TABLE " + tbl + " CASCADE"); err != nil {
 			t.Fatalf("truncate %s: %v", tbl, err)
 		}
 	}
@@ -414,21 +416,23 @@ func TestPostgresAnalysisCRUD(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Postgres backend — per-document blob tables
 //
-// Each agent JSON document lands in its own table (patterns→vs_patterns,
-// shadow→vs_shadow, …). Writing one must not touch another, and an
-// unknown name falls back to vs_blobs.
+// Each remaining agent JSON document lands in its own table (shadow→vs_shadow,
+// …). Writing one must not touch another, and an unknown name falls back to
+// vs_blobs. "patterns" is NO LONGER a whole-blob table (the log catalog
+// moved to the typed vs_patterns/vs_logs/vs_services tables via the Postgres
+// catalog store), so it now falls back to vs_blobs like any other name.
 // ---------------------------------------------------------------------------
 
 func TestPostgresBlobPerTable(t *testing.T) {
 	p := newTestPostgres(t)
 
 	cases := map[string][]byte{
-		"patterns": []byte(`{"doc":"patterns"}`),
 		"shadow":   []byte(`{"doc":"shadow"}`),
 		"detect":   []byte(`{"doc":"detect"}`),
 		"members":  []byte(`{"doc":"members"}`),
 		"teams":    []byte(`{"doc":"teams"}`),
-		"ai_cache": []byte(`{"doc":"fallback"}`), // no dedicated table → vs_blobs
+		"patterns": []byte(`{"doc":"fallback-patterns"}`), // no dedicated table now → vs_blobs
+		"ai_cache": []byte(`{"doc":"fallback"}`),          // no dedicated table → vs_blobs
 	}
 	for name, data := range cases {
 		if err := p.WriteBlob(name, data); err != nil {

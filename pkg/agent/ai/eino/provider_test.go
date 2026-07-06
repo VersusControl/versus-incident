@@ -21,7 +21,7 @@ import (
 
 // This file is the per-provider proving suite for the four chat backends that
 // ship in the registry alongside openai/gemini — deepseek, qwen, ollama and
-// claude (QA-021). It mirrors the egress-capture pattern of
+// claude. It mirrors the egress-capture pattern of
 // chatmodel_test.go / gemini_test.go: each provider either round-trips a
 // finding through an httptest server (asserting the outbound auth header and
 // JSON-mode knob) or, where the SDK cannot be hit via httptest, asserts the
@@ -31,7 +31,7 @@ import (
 // constructs every non-openai/gemini provider via NewChatModel — including
 // provider-casing normalisation — with no network at build time. This is the
 // "provider registered + builds via registry" half of A.3 for the four
-// backends QA-021 flagged.
+// backends flagged.
 func TestChatModel_RegistryBuildsAllProviders(t *testing.T) {
 	cases := []struct {
 		provider string
