@@ -14,6 +14,7 @@ import { useAutoRefresh } from "@/lib/useAutoRefresh";
 import { EmptyState } from "@/components/feedback";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { PeekPanel } from "@/components/PeekPanel";
+import { PatternBaselines } from "@/components/PatternBaselines";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -284,6 +285,18 @@ export function PatternsPage() {
 
   const peek = peekId ? (data ?? []).find((p) => p.id === peekId) : undefined;
 
+  // The list endpoint strips `samples` and (on the Postgres backend) can carry
+  // a leaner baseline set than the full record. So the peek fetches the SAME
+  // detail the full page reads — the complete, correct pattern incl. samples,
+  // every baseline, and the seasonal grid — keyed on the open pattern. The list
+  // row is the graceful fallback for the header fields while the detail loads.
+  const peekDetail = useQuery({
+    queryKey: ["pattern", peekId],
+    queryFn: () => api.getPattern(peekId as string),
+    enabled: !!peekId,
+  });
+  const detail = peekDetail.data;
+
   return (
     <>
       <TopBar
@@ -408,8 +421,8 @@ export function PatternsPage() {
                       Normal
                       <InfoHint
                         label="About the Normal"
-                        text="How often this message normally appears each time the agent checks (it polls every ~30s). The agent learns this baseline from history, so 'normal' is a small range, not an exact number. A 'big jump' means far more sightings than usual in one check — that's what gets flagged as a possible problem."
-                        example="'payment failed' normally appears ~2 times per check; if it suddenly appears 25 times, the agent flags it as a spike."
+                        text="How often this message normally appears, as a per-second rate the agent learns from history (so it stays the same no matter how often the agent polls). 'Normal' is a small range, not an exact number. A tick that runs far above this learned range — several standard deviations — gets flagged as a possible spike."
+                        example="'payment failed' normally runs ~1.3/s; if it suddenly jumps to ~40/s, that's many standard deviations above normal and the agent flags it as a spike."
                       />
                     </th>
                     <th className="w-24 whitespace-nowrap">
@@ -486,7 +499,7 @@ export function PatternsPage() {
                         {p.count}
                       </td>
                       <td className="text-right tabular-nums text-ink-300">
-                        ≈ {p.baseline_frequency.toFixed(1)}
+                        ≈ {p.baseline_frequency.toFixed(1)}/s
                       </td>
                       <td>
                         <div className="flex items-center gap-2">
@@ -569,18 +582,13 @@ export function PatternsPage() {
               <span className="text-2xs text-ink-400">{peek.rule_name || "no rule"}</span>
             </div>
 
-            <pre className="overflow-auto rounded-md border border-ink-600 bg-surface-sunken p-3 font-mono text-2xs leading-relaxed text-ink-100">
+            <pre className="whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-3 font-mono text-2xs leading-relaxed text-ink-100">
               {peek.template}
             </pre>
 
             <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
               <PeekFact label="Count">
                 <span className="tabular-nums">{peek.count}</span>
-              </PeekFact>
-              <PeekFact label="Normal">
-                <span className="tabular-nums">
-                  ≈ {peek.baseline_frequency.toFixed(1)}
-                </span>
               </PeekFact>
               <PeekFact label="To known">
                 <ReadinessProgress readiness={peek.readiness} />
@@ -612,6 +620,39 @@ export function PatternsPage() {
                 )}
               </PeekFact>
             </dl>
+
+            <div className="border-t border-ink-600 pt-3">
+              <div className="mb-2 text-2xs uppercase tracking-wider text-ink-400">
+                What's normal
+              </div>
+              {peekDetail.isLoading ? (
+                <p className="text-2xs text-ink-400">Loading baselines…</p>
+              ) : (
+                <PatternBaselines
+                  frequency={
+                    detail?.baseline_frequency ?? peek.baseline_frequency
+                  }
+                  variance={detail?.baseline_variance ?? peek.baseline_variance}
+                  avg={detail?.baseline_avg ?? peek.baseline_avg}
+                  seasonal={detail?.seasonal ?? peek.seasonal}
+                />
+              )}
+            </div>
+
+            <div className="border-t border-ink-600 pt-3">
+              <div className="mb-1 text-2xs uppercase tracking-wider text-ink-400">
+                Example log line
+              </div>
+              {peekDetail.isLoading ? (
+                <p className="text-2xs text-ink-400">Loading example…</p>
+              ) : detail?.samples && detail.samples.length > 0 ? (
+                <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-3 font-mono text-2xs leading-relaxed text-ink-100">
+                  {detail.samples[detail.samples.length - 1]}
+                </pre>
+              ) : (
+                <p className="text-xs text-ink-400">No example captured yet</p>
+              )}
+            </div>
 
             <div className="flex flex-wrap gap-2 border-t border-ink-600 pt-3">
               <button

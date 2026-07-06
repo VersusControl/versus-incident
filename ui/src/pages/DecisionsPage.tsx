@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   Database,
   Eraser,
+  Eye,
   EyeOff,
   ScrollText,
   Send,
@@ -15,6 +16,7 @@ import { api, type DetectEvent, type ShadowEvent } from "@/lib/api";
 import { fmtAbs, fmtRel, truncate } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
 import { buildSpikeRows, type SpikeRow } from "@/lib/spikeRows";
+import { useBulkSelection } from "@/lib/useBulkSelection";
 import { TopBar } from "@/components/TopBar";
 import { Pill, VerdictPill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
@@ -24,6 +26,12 @@ import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Pagination } from "@/components/Pagination";
+import { PeekPanel, PeekField } from "@/components/PeekPanel";
+import {
+  BulkActionBar,
+  RowSelectCheckbox,
+  SelectAllCheckbox,
+} from "@/components/BulkActionBar";
 import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
 import { EmptyState, EmptyValue } from "@/components/feedback";
@@ -228,7 +236,7 @@ const OUTCOME_LABELS: Record<OutcomeFilter, string> = {
   send_error: "Send error",
 };
 
-const DETECT_COLS = 9;
+const DETECT_COLS = 11;
 
 function DetectTab() {
   const navigate = useNavigate();
@@ -239,6 +247,7 @@ function DetectTab() {
   });
 
   const [filter, setFilter] = useState<OutcomeFilter>("all");
+  const [peekId, setPeekId] = useState<string | null>(null);
 
   const list = useMemo(() => {
     if (!events.data) return [];
@@ -248,6 +257,13 @@ function DetectTab() {
 
   const pg = usePagination(list, { resetKey: filter });
 
+  // Selection + bar — the same checkbox model the learned-signal tables use.
+  // The detect log is a read-only audit trail (no per-row mutation), so the bar
+  // carries no actions: it collapses to the selection count + Clear. The eye is
+  // the real affordance here, opening a peek without leaving the audit list.
+  const pageKeys = useMemo(() => pg.pageItems.map((e) => e.id), [pg.pageItems]);
+  const bulk = useBulkSelection(pageKeys, `${filter}|${pg.page}`);
+
   const keys = useTableKeys({
     size: pg.pageItems.length,
     onOpen: (i) => {
@@ -255,6 +271,8 @@ function DetectTab() {
       if (e) navigate(`/agent/decisions/detect/${encodeURIComponent(e.id)}`);
     },
   });
+
+  const peek = peekId ? events.data?.find((e) => e.id === peekId) : undefined;
 
   return (
     <>
@@ -312,6 +330,14 @@ function DetectTab() {
       )}
 
       <div className="card overflow-hidden">
+        {bulk.count > 0 && (
+          <BulkActionBar
+            count={bulk.count}
+            actions={[]}
+            onAction={() => {}}
+            onClear={bulk.clear}
+          />
+        )}
         <div
           className="max-h-[calc(100vh-260px)] overflow-auto"
           aria-label="Detect decisions table — j/k to move, Enter to open"
@@ -320,6 +346,12 @@ function DetectTab() {
           <table className="ddt">
             <thead>
               <tr>
+                <th className="w-8">
+                  <SelectAllCheckbox
+                    state={bulk.headerState}
+                    onChange={bulk.toggleAll}
+                  />
+                </th>
                 <th className="w-32">Service</th>
                 <th className="w-32">When</th>
                 <th className="w-28">Outcome</th>
@@ -329,6 +361,9 @@ function DetectTab() {
                 <th>Title / Sample</th>
                 <th className="w-16 text-right">Freq</th>
                 <th className="w-16 text-right">ms</th>
+                <th className="w-12 text-right">
+                  <span className="sr-only">Action</span>
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -360,13 +395,110 @@ function DetectTab() {
                 </tr>
               )}
               {pg.pageItems.map((e, i) => (
-                <DetectRow key={e.id} e={e} rowProps={keys.rowProps(i)} />
+                <DetectRow
+                  key={e.id}
+                  e={e}
+                  rowProps={keys.rowProps(i)}
+                  selected={bulk.isSelected(e.id)}
+                  onToggleSelect={() => bulk.toggle(e.id)}
+                  onPeek={() => setPeekId(e.id)}
+                />
               ))}
             </tbody>
           </table>
         </div>
         <Pagination state={pg} />
       </div>
+
+      <PeekPanel
+        open={!!peek}
+        onClose={() => setPeekId(null)}
+        title={peek ? peek.finding?.Title || peek.pattern_id : ""}
+        footer={
+          peek ? (
+            <Link
+              to={`/agent/decisions/detect/${encodeURIComponent(peek.id)}`}
+              className="btn"
+              onClick={() => setPeekId(null)}
+            >
+              Open full page ↗
+            </Link>
+          ) : undefined
+        }
+      >
+        {peek && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <OutcomePill outcome={peek.outcome} />
+              <VerdictPill verdict={peek.verdict} />
+              <SeverityBadge severity={peek.finding?.Severity} />
+            </div>
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+              <PeekField label="Service">
+                {peek.service && peek.service !== "_unknown"
+                  ? peek.service
+                  : "—"}
+              </PeekField>
+              <PeekField label="When">
+                <span title={fmtAbs(peek.timestamp)}>
+                  {fmtRel(peek.timestamp)}
+                </span>
+              </PeekField>
+              <PeekField label="Pattern">
+                <Link
+                  to={`/agent/logs/${encodeURIComponent(peek.pattern_id)}`}
+                  className="font-mono text-2xs text-link hover:underline"
+                  onClick={() => setPeekId(null)}
+                >
+                  {peek.pattern_id}
+                </Link>
+              </PeekField>
+              <PeekField label="Frequency">
+                <span className="tabular-nums">{peek.frequency}/s</span>
+              </PeekField>
+              <PeekField label="Baseline">
+                <span className="tabular-nums">
+                  {peek.baseline.toFixed(1)}/s
+                  {peek.baseline_std !== undefined && (
+                    <span className="text-ink-300">
+                      {" "}
+                      ± {peek.baseline_std.toFixed(1)}
+                    </span>
+                  )}
+                </span>
+              </PeekField>
+              <PeekField label="Duration">
+                {peek.duration_ms !== undefined
+                  ? `${peek.duration_ms} ms`
+                  : "—"}
+              </PeekField>
+            </dl>
+            {peek.explanation && (
+              <div>
+                <div className="mb-1 text-2xs uppercase tracking-wide text-ink-400">
+                  Why it tripped
+                </div>
+                <p className="font-mono text-2xs text-ink-100">
+                  {peek.explanation}
+                </p>
+              </div>
+            )}
+            <div>
+              <div className="mb-1 text-2xs uppercase tracking-wide text-ink-400">
+                Sample
+              </div>
+              <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
+                {peek.samples?.[0] || peek.template || "—"}
+              </pre>
+            </div>
+            {peek.error && (
+              <div className="rounded-control border border-sev-critical/40 bg-sev-critical/5 p-2 text-2xs text-sev-critical">
+                <span className="font-semibold">Error:</span> {peek.error}
+              </div>
+            )}
+          </div>
+        )}
+      </PeekPanel>
     </>
   );
 }
@@ -374,9 +506,15 @@ function DetectTab() {
 function DetectRow({
   e,
   rowProps,
+  selected,
+  onToggleSelect,
+  onPeek,
 }: {
   e: DetectEvent;
   rowProps: React.HTMLAttributes<HTMLTableRowElement>;
+  selected: boolean;
+  onToggleSelect: () => void;
+  onPeek: () => void;
 }) {
   const titleOrSample =
     e.finding?.Title ||
@@ -387,6 +525,13 @@ function DetectRow({
   const href = `/agent/decisions/detect/${encodeURIComponent(e.id)}`;
   return (
     <ClickableRow to={href} {...rowProps}>
+      <td className="w-8">
+        <RowSelectCheckbox
+          checked={selected}
+          onChange={onToggleSelect}
+          label={`Select detect event ${e.id}`}
+        />
+      </td>
       <td className="text-2xs text-ink-200">
         {e.service && e.service !== "_unknown" ? e.service : <EmptyValue />}
       </td>
@@ -419,6 +564,19 @@ function DetectRow({
       <td className="text-right tabular-nums">{e.frequency}</td>
       <td className="text-right tabular-nums text-ink-400">
         {e.duration_ms ?? <EmptyValue />}
+      </td>
+      <td>
+        <div className="flex items-center justify-end gap-1">
+          <button
+            type="button"
+            className="btn p-1"
+            aria-label={`View detect event ${e.id}`}
+            title="View details"
+            onClick={onPeek}
+          >
+            <Eye size={14} aria-hidden />
+          </button>
+        </div>
       </td>
     </ClickableRow>
   );
@@ -486,7 +644,14 @@ export function OutcomePill({ outcome }: { outcome: string }) {
 const VERDICT_FILTERS = ["all", "spike", "unknown"] as const;
 type VerdictFilter = (typeof VERDICT_FILTERS)[number];
 
-const SHADOW_COLS = 9;
+const SHADOW_COLS = 11;
+
+// shadowKey is the stable per-row key: a shadow event is one coalesced pattern,
+// keyed on pattern id + first-seen so two windows of the same pattern stay
+// distinct.
+function shadowKey(e: ShadowEvent): string {
+  return `${e.pattern_id}-${e.first_seen}`;
+}
 
 function ShadowEventsTable({
   list,
@@ -501,6 +666,15 @@ function ShadowEventsTable({
 }) {
   const navigate = useNavigate();
   const pg = usePagination(list, { resetKey });
+  const [peekKey, setPeekKey] = useState<string | null>(null);
+
+  // Selection + bar — same model as the other tables; the shadow log is
+  // read-only so the bar collapses to count + Clear, and the eye opens a peek.
+  const pageKeys = useMemo(
+    () => pg.pageItems.map(shadowKey),
+    [pg.pageItems],
+  );
+  const bulk = useBulkSelection(pageKeys, `${resetKey}|${pg.page}`);
 
   const keys = useTableKeys({
     size: pg.pageItems.length,
@@ -513,8 +687,18 @@ function ShadowEventsTable({
     },
   });
 
+  const peek = peekKey ? list.find((e) => shadowKey(e) === peekKey) : undefined;
+
   return (
     <div className="card overflow-hidden">
+      {bulk.count > 0 && (
+        <BulkActionBar
+          count={bulk.count}
+          actions={[]}
+          onAction={() => {}}
+          onClear={bulk.clear}
+        />
+      )}
       <div
         className="max-h-[calc(100vh-260px)] overflow-auto"
         aria-label="Shadow decisions table — j/k to move, Enter to open"
@@ -523,6 +707,12 @@ function ShadowEventsTable({
         <table className="ddt">
           <thead>
             <tr>
+              <th className="w-8">
+                <SelectAllCheckbox
+                  state={bulk.headerState}
+                  onChange={bulk.toggleAll}
+                />
+              </th>
               <th className="w-28">Service</th>
               <th className="w-28">Verdict</th>
               <th className="w-32">Pattern</th>
@@ -532,6 +722,9 @@ function ShadowEventsTable({
               <th className="w-20 text-right">Ticks</th>
               <th>Sample</th>
               <th className="w-32">Last seen</th>
+              <th className="w-12 text-right">
+                <span className="sr-only">Action</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -543,12 +736,16 @@ function ShadowEventsTable({
             )}
             {pg.pageItems.map((e, i) => {
               const href = `/agent/decisions/shadow/${encodeURIComponent(e.pattern_id)}`;
+              const key = shadowKey(e);
               return (
-                <ClickableRow
-                  key={`${e.pattern_id}-${e.first_seen}`}
-                  to={href}
-                  {...keys.rowProps(i)}
-                >
+                <ClickableRow key={key} to={href} {...keys.rowProps(i)}>
+                  <td className="w-8">
+                    <RowSelectCheckbox
+                      checked={bulk.isSelected(key)}
+                      onChange={() => bulk.toggle(key)}
+                      label={`Select shadow event ${e.pattern_id}`}
+                    />
+                  </td>
                   <td className="text-2xs text-ink-200">
                     {e.service && e.service !== "_unknown" ? (
                       e.service
@@ -588,6 +785,19 @@ function ShadowEventsTable({
                   >
                     {fmtRel(e.last_seen)}
                   </td>
+                  <td>
+                    <div className="flex items-center justify-end gap-1">
+                      <button
+                        type="button"
+                        className="btn p-1"
+                        aria-label={`View shadow event ${e.pattern_id}`}
+                        title="View details"
+                        onClick={() => setPeekKey(key)}
+                      >
+                        <Eye size={14} aria-hidden />
+                      </button>
+                    </div>
+                  </td>
                 </ClickableRow>
               );
             })}
@@ -595,6 +805,66 @@ function ShadowEventsTable({
         </table>
       </div>
       <Pagination state={pg} />
+
+      <PeekPanel
+        open={!!peek}
+        onClose={() => setPeekKey(null)}
+        title={peek ? peek.pattern_id : ""}
+        footer={
+          peek ? (
+            <Link
+              to={`/agent/decisions/shadow/${encodeURIComponent(peek.pattern_id)}`}
+              className="btn"
+              onClick={() => setPeekKey(null)}
+            >
+              Open full page ↗
+            </Link>
+          ) : undefined
+        }
+      >
+        {peek && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <VerdictPill verdict={peek.verdict} />
+              <span className="text-2xs text-ink-400">
+                {peek.rule_name || "no rule"}
+              </span>
+            </div>
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+              <PeekField label="Service">
+                {peek.service && peek.service !== "_unknown"
+                  ? peek.service
+                  : "—"}
+              </PeekField>
+              <PeekField label="Source">{peek.source || "—"}</PeekField>
+              <PeekField label="Signals">
+                <span className="tabular-nums">{peek.count}</span>
+              </PeekField>
+              <PeekField label="Ticks">
+                <span className="tabular-nums">{peek.occurrences}</span>
+              </PeekField>
+              <PeekField label="First seen">
+                <span title={fmtAbs(peek.first_seen)}>
+                  {fmtRel(peek.first_seen)}
+                </span>
+              </PeekField>
+              <PeekField label="Last seen">
+                <span title={fmtAbs(peek.last_seen)}>
+                  {fmtRel(peek.last_seen)}
+                </span>
+              </PeekField>
+            </dl>
+            <div>
+              <div className="mb-1 text-2xs uppercase tracking-wide text-ink-400">
+                Sample
+              </div>
+              <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
+                {peek.sample_message || peek.template || "—"}
+              </pre>
+            </div>
+          </div>
+        )}
+      </PeekPanel>
     </div>
   );
 }
@@ -723,7 +993,7 @@ function SpikeTab() {
   );
 }
 
-const SPIKE_COLS = 7;
+const SPIKE_COLS = 9;
 
 // SpikeKindPill labels which decision log a spike came from — AI-detect (the
 // agent acted) vs Shadow (would have alerted). Text, never color alone.
@@ -744,6 +1014,13 @@ function SpikeTable({
 }) {
   const navigate = useNavigate();
   const pg = usePagination(rows, { resetKey: "spike" });
+  const [peekKey, setPeekKey] = useState<string | null>(null);
+
+  // Selection + bar — same model as the other tables; the spike view is a
+  // read-only merge of two logs, so the bar is count + Clear and the eye opens
+  // a peek.
+  const pageKeys = useMemo(() => pg.pageItems.map((r) => r.key), [pg.pageItems]);
+  const bulk = useBulkSelection(pageKeys, `spike|${pg.page}`);
 
   const keys = useTableKeys({
     size: pg.pageItems.length,
@@ -753,8 +1030,18 @@ function SpikeTable({
     },
   });
 
+  const peek = peekKey ? rows.find((r) => r.key === peekKey) : undefined;
+
   return (
     <div className="card overflow-hidden">
+      {bulk.count > 0 && (
+        <BulkActionBar
+          count={bulk.count}
+          actions={[]}
+          onAction={() => {}}
+          onClear={bulk.clear}
+        />
+      )}
       <div
         className="max-h-[calc(100vh-260px)] overflow-auto"
         aria-label="Spike signals table — j/k to move, Enter to open"
@@ -763,6 +1050,12 @@ function SpikeTable({
         <table className="ddt">
           <thead>
             <tr>
+              <th className="w-8">
+                <SelectAllCheckbox
+                  state={bulk.headerState}
+                  onChange={bulk.toggleAll}
+                />
+              </th>
               <th className="w-28">Service</th>
               <th className="w-24">Kind</th>
               <th className="w-32">Pattern</th>
@@ -770,6 +1063,9 @@ function SpikeTable({
               <th>Sample</th>
               <th className="w-20 text-right">Signals</th>
               <th className="w-32">When</th>
+              <th className="w-12 text-right">
+                <span className="sr-only">Action</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -786,6 +1082,13 @@ function SpikeTable({
             )}
             {pg.pageItems.map((r, i) => (
               <ClickableRow key={r.key} to={r.href} {...keys.rowProps(i)}>
+                <td className="w-8">
+                  <RowSelectCheckbox
+                    checked={bulk.isSelected(r.key)}
+                    onChange={() => bulk.toggle(r.key)}
+                    label={`Select spike ${r.patternId}`}
+                  />
+                </td>
                 <td className="text-2xs text-ink-200">
                   {r.service && r.service !== "_unknown" ? (
                     r.service
@@ -815,12 +1118,72 @@ function SpikeTable({
                 <td className="text-2xs text-ink-300" title={fmtAbs(r.when)}>
                   {fmtRel(r.when)}
                 </td>
+                <td>
+                  <div className="flex items-center justify-end gap-1">
+                    <button
+                      type="button"
+                      className="btn p-1"
+                      aria-label={`View spike ${r.patternId}`}
+                      title="View details"
+                      onClick={() => setPeekKey(r.key)}
+                    >
+                      <Eye size={14} aria-hidden />
+                    </button>
+                  </div>
+                </td>
               </ClickableRow>
             ))}
           </tbody>
         </table>
       </div>
       <Pagination state={pg} />
+
+      <PeekPanel
+        open={!!peek}
+        onClose={() => setPeekKey(null)}
+        title={peek ? peek.patternId : ""}
+        footer={
+          peek ? (
+            <Link
+              to={peek.href}
+              className="btn"
+              onClick={() => setPeekKey(null)}
+            >
+              Open full page ↗
+            </Link>
+          ) : undefined
+        }
+      >
+        {peek && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <SpikeKindPill kind={peek.kind} />
+            </div>
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+              <PeekField label="Service">
+                {peek.service && peek.service !== "_unknown"
+                  ? peek.service
+                  : "—"}
+              </PeekField>
+              <PeekField label="Source">{peek.source || "—"}</PeekField>
+              <PeekField label="Signals">
+                <span className="tabular-nums">{peek.count}</span>
+              </PeekField>
+              <PeekField label="When">
+                <span title={fmtAbs(peek.when)}>{fmtRel(peek.when)}</span>
+              </PeekField>
+            </dl>
+            <div>
+              <div className="mb-1 text-2xs uppercase tracking-wide text-ink-400">
+                Sample
+              </div>
+              <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
+                {peek.sample || "—"}
+              </pre>
+            </div>
+          </div>
+        )}
+      </PeekPanel>
     </div>
   );
 }

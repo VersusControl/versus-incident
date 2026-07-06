@@ -143,7 +143,7 @@ func (w *Worker) brainFor(name string) (core.SignalLearner, core.SignalDetector)
 	if b, ok := w.brains[name]; ok {
 		return b.learner, b.detector
 	}
-	lb := newLogBrain(name, w.miner, w.catalog, w.matcherForSource(name), w.services, w.ewmaAlpha, w.cfg.Catalog, w.redactor)
+	lb := newLogBrain(name, w.miner, w.catalog, w.matcherForSource(name), w.services, w.ewmaAlpha, w.cfg.Catalog, w.redactor, w.pollInterval.Seconds())
 	w.brains[name] = typedBrain{learner: lb, detector: lb}
 	return lb, lb
 }

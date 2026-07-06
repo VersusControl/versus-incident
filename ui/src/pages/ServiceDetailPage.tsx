@@ -1,15 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
+import { useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
   Clock,
+  Eye,
   LineChart,
   Lock,
   ScrollText,
   ShieldAlert,
 } from "lucide-react";
-import { api, ApiError, type ServiceIncidentRecent, type ServiceOverride, type ServiceOverrideSource } from "@/lib/api";
+import { api, ApiError, type ServiceIncidentRecent, type ServiceOverride, type ServiceOverrideSource, type ServicePattern } from "@/lib/api";
 import { fmtAbs, fmtRel, formatDuration, incidentTitle } from "@/lib/format";
 import {
   learnExcludeGate,
@@ -25,6 +27,8 @@ import { Pill, VerdictPill } from "@/components/Pill";
 import { EmptyState, Spinner } from "@/components/feedback";
 import { RetryableError } from "@/components/RetryableError";
 import { SkCard, SkRows } from "@/components/Skeleton";
+import { PeekPanel, PeekField } from "@/components/PeekPanel";
+import { PatternBaselines } from "@/components/PatternBaselines";
 
 // ServiceDetailPage — the per-service drill-down reached from the Services list.
 // It stitches together four sections:
@@ -544,6 +548,11 @@ export function ServiceDetailPage() {
     },
   });
 
+  // Peek state for the Logs & patterns table — the eye opens a slide-out with
+  // the redacted sample lines and the learned baselines, without leaving the
+  // service page. The row's link to the full pattern page stays.
+  const [peekPattern, setPeekPattern] = useState<ServicePattern | null>(null);
+
   const notFound =
     isError && error instanceof ApiError && error.status === 404;
 
@@ -645,12 +654,15 @@ export function ServiceDetailPage() {
                     <th className="w-28">Verdict</th>
                     <th className="w-40">Source</th>
                     <th className="w-44">Last seen</th>
+                    <th className="w-12 text-right">
+                      <span className="sr-only">Action</span>
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   {data.patterns.length === 0 && (
                     <tr>
-                      <td colSpan={5}>
+                      <td colSpan={6}>
                         <EmptyState
                           title="No log patterns for this service yet."
                           hint="Patterns appear once the agent clusters this service's logs."
@@ -681,6 +693,19 @@ export function ServiceDetailPage() {
                         title={fmtAbs(p.last_seen)}
                       >
                         {fmtRel(p.last_seen)}
+                      </td>
+                      <td>
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            type="button"
+                            className="btn p-1"
+                            aria-label={`View pattern ${p.id}`}
+                            title="View details"
+                            onClick={() => setPeekPattern(p)}
+                          >
+                            <Eye size={14} aria-hidden />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -744,6 +769,87 @@ export function ServiceDetailPage() {
           </div>
         )}
       </main>
+
+      <PeekPanel
+        open={!!peekPattern}
+        onClose={() => setPeekPattern(null)}
+        title={
+          peekPattern ? (
+            <span className="font-mono">{peekPattern.id}</span>
+          ) : (
+            ""
+          )
+        }
+        footer={
+          peekPattern ? (
+            <Link
+              to={`/agent/logs/${peekPattern.id}`}
+              className="btn"
+              onClick={() => setPeekPattern(null)}
+            >
+              Open full page ↗
+            </Link>
+          ) : undefined
+        }
+      >
+        {peekPattern && (
+          <div className="space-y-4">
+            <div className="flex items-center gap-2">
+              <VerdictPill verdict={peekPattern.verdict} />
+              <span className="text-2xs text-ink-400">
+                {peekPattern.source || "no source"}
+              </span>
+            </div>
+
+            <pre className="overflow-auto rounded-md border border-ink-600 bg-surface-sunken p-3 font-mono text-2xs leading-relaxed text-ink-100">
+              {peekPattern.template || peekPattern.id}
+            </pre>
+
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+              <PeekField label="Count">
+                <span className="tabular-nums">{peekPattern.count}</span>
+              </PeekField>
+              <PeekField label="Last seen">
+                <span title={fmtAbs(peekPattern.last_seen)}>
+                  {fmtRel(peekPattern.last_seen)}
+                </span>
+              </PeekField>
+            </dl>
+
+            <div className="border-t border-ink-600 pt-3">
+              <div className="mb-1 text-2xs uppercase tracking-wider text-ink-400">
+                Sample log lines
+              </div>
+              {peekPattern.samples && peekPattern.samples.length > 0 ? (
+                <div className="space-y-1.5">
+                  {[...peekPattern.samples].reverse().map((s, i) => (
+                    <pre
+                      key={i}
+                      className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100"
+                    >
+                      {s}
+                    </pre>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-ink-400">No samples captured yet</p>
+              )}
+            </div>
+
+            <div className="border-t border-ink-600 pt-3">
+              <div className="mb-2 text-2xs uppercase tracking-wider text-ink-400">
+                What's normal
+              </div>
+              <PatternBaselines
+                frequency={peekPattern.baseline_frequency}
+                variance={peekPattern.baseline_variance}
+                avg={peekPattern.baseline_avg}
+                seasonal={peekPattern.seasonal}
+              />
+            </div>
+          </div>
+        )}
+      </PeekPanel>
     </>
   );
 }

@@ -84,6 +84,9 @@ export function DetectDetailPage() {
                     label="Baseline"
                     value={event.data.baseline.toFixed(2)}
                   />
+                  {event.data.explanation && (
+                    <Field label="Why" value={event.data.explanation} />
+                  )}
                   <Field label="Model" value={event.data.model || "—"} />
                   <Field
                     label="Duration"

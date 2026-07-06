@@ -22,7 +22,7 @@ func learnOneSample(t *testing.T, red core.Scrubber, sig core.Signal) (*Catalog,
 	if err != nil {
 		t.Fatalf("LoadCatalog: %v", err)
 	}
-	b := newLogBrain("src", NewMiner(0.4, 4, 100), cat, nil, nil, 0.2, config.AgentCatalogConfig{}, red)
+	b := newLogBrain("src", NewMiner(0.4, 4, 100), cat, nil, nil, 0.2, config.AgentCatalogConfig{}, red, 0)
 	ctx := context.Background()
 	obs, err := b.Group(ctx, []core.Signal{sig})
 	if err != nil {

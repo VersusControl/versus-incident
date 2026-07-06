@@ -7,6 +7,7 @@ import { fmtAbs, fmtRel } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
 import { Pill, VerdictPill } from "@/components/Pill";
 import { ReadinessProgress } from "@/components/ReadinessProgress";
+import { PatternBaselines } from "@/components/PatternBaselines";
 import { ErrorBox } from "@/components/feedback";
 import { SkCard } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
@@ -184,10 +185,6 @@ export function PatternDetailPage() {
                   <Fact label="Source" value={data.source} />
                   <Fact label="Count" value={data.count} />
                   <Fact
-                    label="Normal"
-                    value={`≈ ${data.baseline_frequency.toFixed(1)}`}
-                  />
-                  <Fact
                     label="To known"
                     value={<ReadinessProgress readiness={data.readiness} />}
                   />
@@ -208,6 +205,22 @@ export function PatternDetailPage() {
                     }
                   />
                 </dl>
+
+                <div className="mt-4 border-t border-ink-700 pt-4">
+                  <div className="mb-2 text-2xs uppercase tracking-wider text-ink-300">
+                    What's normal
+                  </div>
+                  <p className="mb-3 max-w-2xl text-2xs text-ink-400">
+                    The agent tracks three views of normal for this pattern — the
+                    spike mode decides which one a surge is measured against.
+                  </p>
+                  <PatternBaselines
+                    frequency={data.baseline_frequency}
+                    variance={data.baseline_variance}
+                    avg={data.baseline_avg}
+                    seasonal={data.seasonal}
+                  />
+                </div>
 
                 <div className="mt-4">
                   <div className="mb-1 text-2xs uppercase tracking-wider text-ink-300">

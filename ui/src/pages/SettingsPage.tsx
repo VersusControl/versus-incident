@@ -2,18 +2,25 @@ import { useSearchParams } from "react-router-dom";
 import { TopBar } from "@/components/TopBar";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { ReportSettingsControl } from "@/components/ReportSettingsControl";
+import { SpikeSettingsControl } from "@/components/SpikeSettingsControl";
 import { IncidentsConfigPanel } from "./IncidentsConfigPage";
 import { AgentConfigPanel } from "./AgentConfigPage";
 
-// SettingsPage — the Manage-zone home for the read-only configuration
-// views. Incidents and Agent config are URL-synced tabs
-// (?tab=incidents|agent) so each view is deep-linkable; the legacy
-// /config/incidents and /config/agent routes redirect here. Both panels
-// keep their SecretBanner: secrets never reach the browser, only their
-// presence is shown.
+// SettingsPage — the Manage-zone home for the configuration views, grouped by
+// intent into URL-synced tabs (?tab=alerting|agent|tuning) so each view is
+// deep-linkable:
+//   • Alerting  — how the agent alerts: the incident delivery / on-call config.
+//   • Agent     — the AI runtime configuration.
+//   • Detection & reports — the two editable runtime knobs: the spike-detector
+//     baseline mode and the periodic incident report.
+// The legacy /config/incidents route redirects to the default (Alerting) tab
+// and /config/agent to ?tab=agent. Every panel keeps its SecretBanner: secrets
+// never reach the browser, only their presence is shown.
 export function SettingsPage() {
   const [params] = useSearchParams();
-  const tab = params.get("tab") === "agent" ? "agent" : "incidents";
+  const raw = params.get("tab");
+  const tab =
+    raw === "agent" ? "agent" : raw === "tuning" ? "tuning" : "alerting";
 
   return (
     <>
@@ -25,21 +32,28 @@ export function SettingsPage() {
         <div className="mb-4">
           <SegmentedControl
             param="tab"
-            defaultValue="incidents"
+            defaultValue="alerting"
             aria-label="Settings tabs"
             options={[
-              { value: "incidents", label: "Incidents" },
+              { value: "alerting", label: "Alerting" },
               { value: "agent", label: "Agent" },
+              { value: "tuning", label: "Detection & reports" },
             ]}
           />
         </div>
-        {tab === "incidents" ? (
+        {tab === "alerting" ? (
           <div className="space-y-4">
             <IncidentsConfigPanel />
-            <ReportSettingsControl />
+          </div>
+        ) : tab === "agent" ? (
+          <div className="space-y-4">
+            <AgentConfigPanel />
           </div>
         ) : (
-          <AgentConfigPanel />
+          <div className="space-y-4">
+            <SpikeSettingsControl />
+            <ReportSettingsControl />
+          </div>
         )}
       </main>
     </>

@@ -135,13 +135,34 @@ export interface Readiness {
   rate_per_min: number; // 0 ⇒ unknown/stalled ⇒ no ETA
 }
 
+// SeasonalBucket is one hour-of-day (0–23) EWMA bucket backing the time-of-day
+// spike baseline: the learned mean rate for that hour, its variance (spread),
+// and how many samples have folded into it. An unwarmed hour reads count === 0
+// and its mean is not yet meaningful — the UI renders those as "—".
+export interface SeasonalBucket {
+  mean: number;
+  variance: number;
+  count: number;
+}
+
 export interface Pattern {
   id: string;
   template: string;
   first_seen: string;
   last_seen: string;
   count: number;
+  // baseline_frequency is the default (EWMA) baseline — the smoothed normal
+  // per-second rate the spike detector scores against by default.
   baseline_frequency: number;
+  // baseline_variance is the EWMA baseline's variance; its square root is the
+  // standard deviation the "several σ above normal" spike test uses.
+  baseline_variance?: number;
+  // baseline_avg is the cumulative-mean baseline — the "average" spike mode's
+  // center, which never decays (distinct from the decaying EWMA above).
+  baseline_avg?: number;
+  // seasonal is the 24 hour-of-day EWMA buckets backing the time-of-day spike
+  // mode (index === hour). Empty/unwarmed hours carry count 0.
+  seasonal?: SeasonalBucket[];
   verdict: string; // "" | "known" | operator-set
   rule_name: string;
   source: string;
@@ -320,6 +341,18 @@ export interface ServicePattern {
   source: string;
   last_seen: string;
   tags?: string[];
+  // samples is the bounded ring of the most recent POST-REDACTION example log
+  // lines this pattern was learned from (oldest→newest, latest last). Now
+  // carried on the service-detail read so the peek can show them without a
+  // second per-pattern fetch.
+  samples?: string[];
+  // Baselines mirror the Pattern shape: the default (EWMA) per-second rate and
+  // its variance, the cumulative-mean "average" baseline, and the 24
+  // hour-of-day seasonal buckets — so the peek explains all three spike modes.
+  baseline_frequency?: number;
+  baseline_variance?: number;
+  baseline_avg?: number;
+  seasonal?: SeasonalBucket[];
 }
 
 export interface ServiceIncidentRecent {
@@ -381,6 +414,9 @@ export interface DetectEvent {
   verdict: string; // unknown | spike | known
   frequency: number;
   baseline: number;
+  baseline_std?: number; // learned σ the spike z-score was measured against
+  score?: number; // spike z-score (σ above the learned baseline)
+  explanation?: string; // deterministic spike math, e.g. "47.3/s = 4.2σ above 38.4/s ± 3.1"
   samples?: string[];
   model?: string;
   user_prompt?: string;
@@ -1164,8 +1200,13 @@ export interface ReportSettings {
   rate_per_minute: number;
   default_window: string;
 }
-
-// ReportSendResult is the per-channel outcome of POST /reports/incidents.
+// SpikeSettings is the non-secret runtime configuration for the log
+// volume-spike detector's GLOBAL default baseline mode, exchanged with
+// GET/PUT /api/admin/agent/spike-settings. baseline_mode is one of
+// "default" | "average" | "time_of_day".
+export interface SpikeSettings {
+  baseline_mode: string;
+}// ReportSendResult is the per-channel outcome of POST /reports/incidents.
 // `sent` = image delivered; `fallback` = text summary + note delivered
 // (image-incapable channel); `failed` = channel returned an error (the PNG is
 // still downloadable via GET report.png). `window` echoes the rendered window.
@@ -1762,6 +1803,18 @@ export const api = {
   // effective (sanitized) values.
   updateReportSettings: (s: ReportSettings) =>
     request<ReportSettings>("/api/admin/reports/settings", {
+      method: "PUT",
+      body: JSON.stringify(s),
+    }),
+
+  // getSpikeSettings reads the global spike-detector baseline mode setting.
+  getSpikeSettings: () =>
+    request<SpikeSettings>("/api/admin/agent/spike-settings"),
+
+  // updateSpikeSettings replaces the global spike baseline mode and returns the
+  // effective value. An unknown mode is rejected with a 400.
+  updateSpikeSettings: (s: SpikeSettings) =>
+    request<SpikeSettings>("/api/admin/agent/spike-settings", {
       method: "PUT",
       body: JSON.stringify(s),
     }),

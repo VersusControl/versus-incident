@@ -94,6 +94,16 @@ export function AgentOverviewPage() {
   // joins Metrics & Traces in one signals line, so it leaves Lifetime totals.
   const enterpriseAvailable = baselines.data != null;
 
+  // Services breakdown for the wide enterprise Services tile's ring: what
+  // fraction of discovered services have passed the new-service grace window
+  // (tracked) vs are still in grace (learning, not alerting yet).
+  const svcTotal = services.data ? Object.keys(services.data).length : 0;
+  const svcInGrace = services.data
+    ? Object.values(services.data).filter((s) => s.in_grace).length
+    : 0;
+  const svcTracked = svcTotal - svcInGrace;
+  const svcTrackedFrac = svcTotal > 0 ? svcTracked / svcTotal : 0;
+
   const topPatterns = useMemo(() => {
     const list = patterns.data ?? [];
     return [...list].sort((a, b) => b.count - a.count).slice(0, 5);
@@ -211,7 +221,17 @@ export function AgentOverviewPage() {
             loading={services.isPending}
             to="/agent/services"
             icon={Server}
-            foot="Discovered from logs"
+            className={enterpriseAvailable ? "lg:col-span-2" : undefined}
+            chart={
+              enterpriseAvailable && svcTotal > 0 ? (
+                <ProgressRing progress={svcTrackedFrac} />
+              ) : undefined
+            }
+            foot={
+              enterpriseAvailable && svcTotal > 0
+                ? `${svcTracked} tracked · ${svcInGrace} in grace`
+                : "Discovered from logs"
+            }
           />
           <KpiTile
             label="Shadow events"
@@ -384,9 +404,9 @@ export function AgentOverviewPage() {
                         </td>
                         <td
                           className="text-right font-mono text-2xs text-ink-300"
-                          title="Expected frequency per tick"
+                          title="Learned normal match rate (per second)"
                         >
-                          ≈{p.baseline_frequency.toFixed(1)}
+                          ≈{p.baseline_frequency.toFixed(1)}/s
                         </td>
                         <td>
                           <VerdictPill verdict={p.verdict} />
@@ -795,9 +815,6 @@ function EnterpriseLearningSummary({
                 )}
               </div>
             </div>
-            {metrics.length > 0 && (
-              <ProgressRing progress={metricsReady / metrics.length} />
-            )}
           </div>
         </Link>
 
@@ -820,9 +837,6 @@ function EnterpriseLearningSummary({
                 )}
               </div>
             </div>
-            {traces.length > 0 && (
-              <ProgressRing progress={tracesReady / traces.length} />
-            )}
           </div>
         </Link>
       </div>

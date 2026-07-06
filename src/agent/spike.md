@@ -13,137 +13,166 @@ suddenly jumps well above the pattern's normal rate.
 
 ## How it works
 
-The agent keeps a running average for each pattern — specifically an
-**EWMA** (Exponentially Weighted Moving Average). Each time the agent
-polls for new logs, it updates the average with that tick's count,
-giving more weight to recent ticks and fading out older ones.
+For each pattern the agent learns two things from history, updated every
+time it polls (a "tick"):
 
-Before updating the average the agent takes a snapshot of the
-current average and compares the incoming tick count against it. If
-the tick count is far above the snapshot, the pattern is flagged as a
-spike and written to the shadow log (or forwarded to the AI analyzer
-in detect mode), even if it was previously `known`.
+- **A normal rate** — how many matches per second this pattern usually
+  produces. It is an **EWMA** (Exponentially Weighted Moving Average), so
+  recent ticks weigh more than old ones. Scoring a *rate* (matches ÷ poll
+  seconds) instead of a raw per-tick count means the baseline reads
+  intuitively (e.g. `~38/s`) and does not change when you change
+  `poll_interval`.
+- **A normal spread** — how much that rate naturally wobbles (its standard
+  deviation), folded alongside the mean.
 
-The comparison has three guards:
+Before folding a tick, the agent snapshots the current mean and spread and
+asks: **how many standard deviations above normal is this tick's rate?**
+That number is the **z-score**:
 
-1. **The tick must be above a raw minimum** — so a baseline of `0.5`
-   and a single-match tick doesn't look like a spike.
-2. **The pattern must have been seen enough times overall** — so the
-   first big burst from a brand-new pattern doesn't get mislabeled
-   before any real average exists.
-3. **The multiplier must be positive** — setting it to `0` turns the
-   whole feature off.
+```
+z = (this tick's rate − normal rate) / normal spread
+```
 
-All three must be true at the same time for a spike to be recorded.
+A pattern is flagged as a **spike** — even if it was previously `known` —
+when either of these is true:
+
+- **`z ≥ spike_z`** — the rate is far enough above its own learned normal
+  (the bar self-scales to each pattern's volatility, so a `+1000` burst on a
+  busy, high-volume pattern trips even though its average is large), **or**
+- **the tick crosses `spike_abs_ceiling`** — a hard "always page above N
+  matches" safety net that fires regardless of the baseline or warmup.
+
+Two guards keep noise out:
+
+1. **A raw minimum (`spike_min_frequency`)** — a tick must have at least this
+   many matches, so a near-silent pattern can't page on a couple of lines.
+2. **A warmup gate (`spike_min_baseline_count`)** — the pattern must have been
+   seen enough times overall before the z-score is trusted. During warmup only
+   the absolute ceiling can fire.
+
+Two refinements make the baseline robust:
+
+- **Outlier-resistant learning.** Once the baseline is confident, a burst tick
+  is *held out* of the average, so one spike can't drag "normal" up and blind
+  the detector to the next one.
+- **Time-of-day awareness (always on).** The agent always keeps a separate
+  normal for each hour of the day (24 UTC buckets), so a 2 a.m. batch job can be
+  treated as normal-for-2 a.m. while the same rate at 2 p.m. still pages. You
+  choose whether the spike score is measured against that hour-of-day baseline,
+  the global baseline, or the running average with `spike_baseline_mode` —
+  because all three baselines are always learned, switching between them takes
+  effect immediately, with no re-learn.
 
 ## Configuration
 
-These three keys live under `agent.catalog` in `config.yaml`:
+These keys live under `agent.catalog` in `config.yaml`:
 
 ```yaml
 agent:
   catalog:
-    spike_multiplier: 5.0        # how many times above average triggers a spike
+    spike_z: 3.0                 # fire when the rate is this many σ above normal
+    spike_abs_ceiling: 0         # hard "always page above N matches" net (0 = off)
+    spike_sustain_ticks: 1       # consecutive spiking ticks before firing (1 = no debounce)
+    spike_baseline_mode: default # which baseline to score against: default | average | time_of_day
     spike_min_frequency: 5       # tick must have at least this many matches
     spike_min_baseline_count: 20 # pattern must have been seen this many times overall
 ```
 
-### Spike Multiplier
+### Spike Z
 
-**Default:** `5.0`
+**Default:** `3.0`
 
-Think of this as a sensitivity dial. It answers the question:
-*"How much bigger than normal does a burst need to be before I
-should care?"*
+The sensitivity dial. It answers: *"How far above its own normal does a
+burst have to be before I care?"* — measured in standard deviations (σ), so
+it means the same thing for a quiet pattern and a chatty one.
 
-If a certain error usually shows up about 2 times every time the
-agent checks, and you set this to `5.0`, the agent will only flag
-it when it suddenly sees more than **5 × 2 = 10** of them in one
-check. Anything below that is treated as normal noise.
-
-- **Set it higher** (e.g. `8.0`) if you're getting too many false
-  alarms — only really big jumps will count.
-- **Set it lower** (e.g. `3.0`) if you want to catch smaller
-  surges earlier.
-- **Set it to `0`** to turn off spike detection completely.
+- **Set it higher** (e.g. `4.0`) if you get too many false alarms — only
+  extreme jumps count.
+- **Set it lower** (e.g. `2.5`) to catch smaller surges earlier.
 
 **Examples:**
 
-| Normal rate | Multiplier | This check saw | Spike? | Why |
+| Normal rate | Normal spread | This tick's rate | z | Spike at `spike_z: 3.0`? |
 |---|---|---|---|---|
-| 2 | `5.0` | 8 | No | 8 is under 10 (5 × 2) |
-| 2 | `5.0` | 11 | Yes | 11 is over 10 |
-| 2 | `3.0` | 7 | Yes | 7 is over 6 (3 × 2) — lower bar catches it |
-| 2 | `0` | 100 | No | Feature is off |
-| 1 | `5.0` | 6 | Yes | 6 is over 5 (5 × 1) |
+| 38.4/s | ± 1.0 | 47.3/s | 8.9σ | Yes |
+| 38.4/s | ± 5.0 | 47.3/s | 1.8σ | No — within its normal wobble |
+| 1.5/s | ± 0.3 | 6.0/s | 15σ | Yes (if past the min-frequency floor) |
+
+### Spike Absolute Ceiling
+
+**Default:** `0` (disabled)
+
+A deterministic safety net independent of the learned baseline: a tick with
+at least this many matches always surfaces, even while the pattern is still
+warming up. Leave it at `0` to rely purely on the z-score, or set a hard line
+(e.g. `1000`) for "no matter what, page me if a single tick sees this many".
+
+### Spike Sustain Ticks
+
+**Default:** `1`
+
+How many **consecutive** spiking ticks are required before firing — a
+debounce against a single noisy tick. The default of `1` fires on the first
+spiking tick (no debounce). Raise it (e.g. `3`) to page only on a sustained
+surge; an absolute-ceiling hit always fires immediately, bypassing the
+debounce.
+
+### Spike Baseline Mode
+
+**Default:** `default`
+
+Picks **which learned baseline** the z-score is measured against. All three
+baselines are always learned, so you can switch modes at any time without a
+re-learn:
+
+- `"default"` — the **global** rate baseline (the pattern's overall normal rate
+  and spread).
+- `"average"` — the **cumulative arithmetic mean** of the rate as the center,
+  reusing the global spread as the scale. Useful when you want the center to be
+  a plain running average rather than the recency-weighted EWMA.
+- `"time_of_day"` — the **current hour-of-day** bucket (24 buckets, UTC), so a
+  nightly batch job is normal-for-that-hour. A sparse hour (not enough samples
+  yet) falls back to the global baseline, so turning this on never causes a
+  cold-bucket false-alarm flood. Bucketing is in UTC.
+
+The explanation in the audit log names the baseline that fired, e.g.
+`"47.3/s = 1.5σ above the 02:00 baseline 44.0/s ± 2.0"` (time-of-day) or
+`"47.3/s = 13.5σ above the average baseline 20.0/s ± 2.0"` (average).
 
 ### Spike Min Frequency
 
 **Default:** `5`
 
-This is a minimum count. Even if the multiplier math says "that's
-a spike!", the agent will ignore it unless there are **at least
-this many errors** in one check.
+A minimum count. Even if the z-score says "spike!", the agent ignores it
+unless there are at least this many matches in one tick — so a near-silent
+pattern (say `0.02/s`) can't page on a coincidental handful of lines.
 
-Why? Imagine an error that almost never happens — say 0.4 times
-per check on average. If one check happens to have 3 of them,
-the math says that's 7.5× the normal rate. But 3 errors is
-probably just a coincidence, not a real problem. This setting
-stops the agent from overreacting to tiny numbers.
-
-- **Set it higher** (e.g. `10`) if your logs are noisy and you
-  only want to hear about genuinely large bursts.
-- **Set it to `1`** if you trust the multiplier alone to decide.
-
-**Examples:**
-
-| Normal rate | Multiplier | Min frequency | This check saw | Spike? | Why |
-|---|---|---|---|---|---|
-| 0.4 | `5.0` | `5` | 3 | No | 3 errors is under the minimum of 5 |
-| 0.4 | `5.0` | `5` | 5 | Yes | 5 meets the minimum, and 5 > 2.0 |
-| 1 | `5.0` | `10` | 8 | No | 8 errors is under the minimum of 10 |
-| 1 | `5.0` | `10` | 12 | Yes | 12 meets the minimum, and 12 > 5 |
-| 0.5 | `5.0` | `1` | 3 | Yes | Minimum is just 1, so the multiplier decides |
+- **Set it higher** (e.g. `10`) if your logs are noisy and you only want
+  genuinely large bursts.
+- **Set it to `1`** to let the z-score decide alone.
 
 ### Spike Min Baseline Count
 
 **Default:** `20`
 
-The agent needs to see an error pattern enough times before it
-knows what "normal" looks like. This setting says: *"Don't even
-try to detect spikes until you've seen this pattern at least
-N times total."*
+The warmup gate: the agent won't trust the z-score until it has seen the
+pattern at least this many times total. Like a new employee learning what a
+busy day looks like before judging one. During warmup the absolute ceiling is
+the only thing that can fire.
 
-Think of it like a new employee. On their first week they have no
-idea what a busy day looks like. After a few weeks they know the
-difference between "a little more than usual" and "something is
-actually wrong". This setting is that learning period.
-
-- **Set it higher** (e.g. `50`) if you want the agent to learn
-  longer before it starts judging.
-- **Set it lower** (e.g. `5`) if you have low-traffic services
-  where errors take a long time to add up.
-
-**Examples:**
-
-| Times seen so far | Min baseline count | This check saw | Spike? | Why |
-|---|---|---|---|---|
-| 3 | `20` | 30 | No | Only seen 3 times — still learning |
-| 15 | `20` | 30 | No | Seen 15 times — not enough yet |
-| 25 | `20` | 30 | Yes | Seen 25 times — ready to judge |
-| 4 | `5` | 30 | No | Seen 4 times — almost ready but not yet |
-| 100 | `20` | 30 | Yes | Well past the learning period |
+- **Set it higher** (e.g. `50`) to learn longer before judging.
+- **Set it lower** (e.g. `5`) for low-traffic services.
 
 ## Example
 
-Say the error `db-conn-refused` normally shows up about 1–2 times
-every check. After a few days of training, the agent's average
-for this pattern settles at roughly `1.5`.
+Say `db-conn-refused` normally runs about `1.5/s`, wobbling by about
+`± 0.3/s`, and the agent has seen it well over 20 times.
 
-With the default settings, a spike fires when the agent sees
-**8 or more** of them in one check — because `8 > 5.0 (spike_multiplier) × 1.5 (baseline) = 7.5`
-and `8 ≥ 5` (`spike_min_frequency`: the minimum count) and the pattern has been seen more
-than 20 times (`spike_min_baseline_count`) overall (so the agent trusts its average).
+With the defaults, a tick that jumps to `6.0/s` scores
+`(6.0 − 1.5) / 0.3 = 15σ` — far past `spike_z: 3.0` — and (assuming the tick
+has at least `spike_min_frequency` matches) is flagged as a spike, even though
+the pattern is `known`. The audit log records the exact math:
+`"6.0/s = 15.0σ above 1.5/s ± 0.3"`.
 
 ## What the shadow log shows
 

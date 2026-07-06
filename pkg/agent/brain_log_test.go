@@ -24,7 +24,21 @@ func newLogBrainForTest(t *testing.T, cat config.AgentCatalogConfig) (*logBrain,
 	if len(errs) > 0 {
 		t.Fatalf("NewServiceMatcher: %v", errs)
 	}
-	return newLogBrain("es:test", NewMiner(0.4, 4, 100), c, m, svc, 0.2, cat, nil), c
+	// Wire the fold the way the worker does (30s tick), so Upsert folds a
+	// per-second rate through the same estimator the detector scores against.
+	const pollSeconds = 30.0
+	c.SetBaselineFold(resolveSpikeParams(cat, pollSeconds).fold())
+	return newLogBrain("es:test", NewMiner(0.4, 4, 100), c, m, svc, 0.2, cat, nil, pollSeconds), c
+}
+
+// setGlobalBaselineMode persists the GLOBAL spike baseline mode into the
+// brain's catalog store, the same seam resolveBaseline reads through as the
+// runtime default (the mode is no longer a YAML config key).
+func setGlobalBaselineMode(t *testing.T, c *Catalog, mode string) {
+	t.Helper()
+	if err := SaveSpikeSettings(c.store, SpikeSettings{BaselineMode: mode}); err != nil {
+		t.Fatalf("SaveSpikeSettings(%q): %v", mode, err)
+	}
 }
 
 func TestLogBrain_Kind(t *testing.T) {
@@ -85,7 +99,7 @@ func TestLogBrain_GroupRespectsRegexFilter(t *testing.T) {
 		t.Fatalf("NewRegexMatcher: %v", errs)
 	}
 	svc, _ := NewServiceMatcher(nil)
-	b := newLogBrain("es:test", NewMiner(0.4, 4, 100), c, m, svc, 0.2, config.AgentCatalogConfig{}, nil)
+	b := newLogBrain("es:test", NewMiner(0.4, 4, 100), c, m, svc, 0.2, config.AgentCatalogConfig{}, nil, 30)
 
 	obs, err := b.Group(context.Background(), []core.Signal{
 		{Message: "ERROR boom happened code=1"},
@@ -182,7 +196,7 @@ func logObs(key string, freq int) core.Observation {
 func TestLogBrain_ClassifyLifecycle(t *testing.T) {
 	cat := config.AgentCatalogConfig{
 		AutoPromoteAfter:      100,
-		SpikeMultiplier:       5,
+		SpikeZ:                3.0,
 		SpikeMinFrequency:     5,
 		SpikeMinBaselineCount: 20,
 	}
@@ -234,8 +248,9 @@ func TestLogBrain_ClassifyLifecycle(t *testing.T) {
 }
 
 // --- auto_promote_after threshold semantics --------------------------
-// Spike is left disabled (SpikeMultiplier == 0) throughout so it can never mask
-// the count-based promotion verdict under test.
+// The freq=1 ticks below sit under spike_min_frequency (5), so the spike
+// detector can never fire and mask the count-based promotion verdict under
+// test.
 
 // (a) The shipped default (100, supplied by the embedded default_config layer
 // for an unset key) still promotes exactly at the 100th sighting.

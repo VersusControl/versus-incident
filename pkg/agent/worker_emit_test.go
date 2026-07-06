@@ -107,7 +107,7 @@ func TestWorker_EmitDetect_HappyPath(t *testing.T) {
 		"test", "pid-1", "boom",
 		"svc-x", signals,
 		core.VerdictUnknown,
-		0,
+		0, 0, 0, "",
 	)
 
 	if outcome != "emitted" {
@@ -145,7 +145,7 @@ func TestWorker_EmitDetect_DryWhenNoAgent(t *testing.T) {
 		"test", "pid-2", "boom", "svc-x",
 		[]core.Signal{{Message: "boom"}},
 		core.VerdictUnknown,
-		0,
+		0, 0, 0, "",
 	)
 
 	if outcome != "dry" {
@@ -201,7 +201,7 @@ func TestWorker_EmitDetect_HonorsDeclaredSeverityFloor(t *testing.T) {
 				"demo-prom", "pid-sev", "metric <*> = <*>",
 				"svc", signals,
 				core.VerdictSpike,
-				0,
+				0, 0, 0, "",
 			)
 
 			if outcome != "emitted" {

@@ -21,6 +21,7 @@ export function KpiTile({
   spark,
   sparkLabel,
   className,
+  chart,
 }: {
   label: string;
   value: React.ReactNode;
@@ -37,6 +38,9 @@ export function KpiTile({
   sparkLabel?: string;
   /** Extra classes for the card element (e.g. grid column spans). */
   className?: string;
+  /** Optional visual for a wide (column-spanning) tile — rendered in a second
+      internal column so it lines up with the tiles in the next grid column. */
+  chart?: React.ReactNode;
 }) {
   const sparkColor = tone
     ? {
@@ -55,12 +59,18 @@ export function KpiTile({
   const shown =
     typeof value === "number" ? <CountUpValue n={value} /> : (value ?? "—");
 
-  const body = (
+  // Header (label + icon far-right) is split out so a chart tile can keep the
+  // icon at the FULL-WIDTH top-right while the value/foot + chart sit in the
+  // columns below it.
+  const header = (
+    <div className="flex items-center justify-between">
+      <span className="stat-label">{label}</span>
+      {Icon && <Icon size={14} className="text-ink-400" aria-hidden />}
+    </div>
+  );
+
+  const valueFoot = (
     <>
-      <div className="flex items-center justify-between">
-        <span className="stat-label">{label}</span>
-        {Icon && <Icon size={14} className="text-ink-400" aria-hidden />}
-      </div>
       {loading ? (
         <div aria-hidden className="sk mt-1 h-7 w-12" />
       ) : (
@@ -91,6 +101,28 @@ export function KpiTile({
     </>
   );
 
+  const body = (
+    <>
+      {header}
+      {valueFoot}
+    </>
+  );
+
+  // With a chart, keep the header (and its top-right icon) spanning the full
+  // width, then put the value/foot on the left and the chart on the right of a
+  // wide (column-spanning) tile so the extra space reads as one card.
+  const inner = chart ? (
+    <>
+      {header}
+      <div className="flex items-center gap-3">
+        <div className="min-w-0 flex-1">{valueFoot}</div>
+        <div className="shrink-0">{chart}</div>
+      </div>
+    </>
+  ) : (
+    body
+  );
+
   if (to) {
     return (
       <Link
@@ -100,11 +132,11 @@ export function KpiTile({
           className,
         )}
       >
-        {body}
+        {inner}
       </Link>
     );
   }
-  return <div className={clsx("stat-card", className)}>{body}</div>;
+  return <div className={clsx("stat-card", className)}>{inner}</div>;
 }
 
 function CountUpValue({ n }: { n: number }) {

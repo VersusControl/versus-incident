@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/stats"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
@@ -28,9 +30,39 @@ type Pattern struct {
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
 	Count     int       `json:"count"`
-	// BaselineFrequency is the EWMA of per-tick counts. Computed during
-	// training; consumed by the spike detector in detect mode.
+	// BaselineFrequency is the EWMA of the pattern's per-second match RATE
+	// (tick matches ÷ poll seconds). Folding a rate rather than the raw per-tick
+	// count makes the number intuitive (~38/s, not ~1151/30s-tick) and
+	// independent of the poll interval. Computed during training; consumed by
+	// the spike detector in detect mode. (When no fold config is wired — the
+	// pre-rate default, exercised by unit tests — it folds the raw per-tick
+	// count, unchanged.)
 	BaselineFrequency float64 `json:"baseline_frequency"`
+	// BaselineVariance is the EWMA variance folded alongside BaselineFrequency
+	// (West's incremental form), giving the spike detector the dispersion its
+	// z-score needs. 0 until the pattern re-learns after the variance migration
+	// (`omitempty` keeps a pre-feature catalog byte-identical on read-back).
+	BaselineVariance float64 `json:"baseline_variance,omitempty"`
+	// BaselineAvg is the cumulative arithmetic mean of the per-second match RATE
+	// (total ÷ number of folded ticks), updated incrementally each fold. It is
+	// the CENTER the "average" baseline mode scores against; that mode reuses
+	// the global EWMA spread (BaselineVariance) as its scale, so there is one
+	// dispersion source and only the center differs from the default mode. 0
+	// until the pattern re-learns after the baseline-mode migration
+	// (`omitempty` keeps a pre-feature catalog byte-identical on read-back).
+	BaselineAvg float64 `json:"baseline_avg,omitempty"`
+	// Seasonal is the per-time-bucket EWMA rate (hour-of-day = 24 buckets, or
+	// hour-of-week = 168, UTC), letting the detector score a tick against the
+	// normal-for-this-hour rate. Empty unless seasonal spike detection is
+	// enabled; length is the configured period. `omitempty` keeps a pre-feature
+	// catalog byte-identical on read-back.
+	Seasonal []stats.EWMA `json:"seasonal,omitempty"`
+	// SpikeBaselineMode is the operator's per-pattern override of which learned
+	// baseline the spike z-score is scored against ("default" | "average" |
+	// "time_of_day"). Empty means inherit the agent.catalog.spike_baseline_mode
+	// config default. `omitempty` keeps a pre-feature catalog byte-identical on
+	// read-back.
+	SpikeBaselineMode string `json:"spike_baseline_mode,omitempty"`
 	// Verdict is the agent's classification of this pattern: "known" once
 	// it is part of baseline (auto-promoted by count or set explicitly via
 	// the admin API), otherwise empty. Operators flip a pattern to
@@ -105,6 +137,32 @@ type Catalog struct {
 	patterns map[string]*Pattern
 	services map[string]*ServiceInfo
 	dirty    bool
+	fold     BaselineFold
+}
+
+// BaselineFold configures how Catalog.Upsert folds a tick into a pattern's
+// baseline. The zero value is the legacy mean-only fold of the raw per-tick
+// count (so a catalog with no fold wired — every unit test, and any pre-rate
+// caller — behaves exactly as before). The agent worker wires the real config
+// from the poll interval + spike settings via SetBaselineFold.
+type BaselineFold struct {
+	// PollSeconds is the tick duration; the folded value is tickCount /
+	// PollSeconds, a per-second rate. <= 0 folds the raw per-tick count (legacy).
+	PollSeconds float64
+	// RejectZ holds out a tick whose rate sits >= this many σ from the pre-fold
+	// baseline once the estimator is confident, so a burst can't drag the mean.
+	// <= 0 disables the hold-out (every tick folds).
+	RejectZ float64
+	// SeasonalPeriod selects the seasonal buckets: 0 = off (global only),
+	// 24 = hour-of-day, 168 = hour-of-week.
+	SeasonalPeriod int
+	// MinBaselineCount is the confidence gate for the global outlier hold-out:
+	// the estimator is confident once the pattern's total sighting count reaches
+	// this. <= 0 leaves the global fold always cold (never rejects).
+	MinBaselineCount int
+	// MinBucketSamples is the confidence gate for a seasonal bucket's own
+	// hold-out (mirrors the detector's bucket-fallback threshold).
+	MinBucketSamples int
 }
 
 // catalogFile is the on-disk schema. Versioned so we can evolve the
@@ -339,17 +397,110 @@ func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alph
 	}
 	p.Template = template // keep template fresh as miner refines it
 	p.LastSeen = now
+	prevCount := p.Count // pre-fold total sightings — the confidence gate
 	p.Count += tickCount
 	if alpha <= 0 {
 		alpha = 0.2
 	}
-	if p.BaselineFrequency == 0 {
-		p.BaselineFrequency = float64(tickCount)
-	} else {
-		p.BaselineFrequency = alpha*float64(tickCount) + (1-alpha)*p.BaselineFrequency
-	}
+	c.foldBaseline(p, tickCount, alpha, now, prevCount)
 	c.dirty = true
 	return p
+}
+
+// SetBaselineFold wires the baseline-fold configuration the agent worker
+// derives from its poll interval + spike settings. It is set once at
+// construction; the zero value (never set) keeps the legacy mean-only
+// per-tick-count fold.
+func (c *Catalog) SetBaselineFold(f BaselineFold) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.fold = f
+}
+
+// foldBaseline updates a pattern's learned baseline with this tick. Caller
+// holds c.mu.
+//
+// With no fold config wired it is the original mean-only EWMA of the raw
+// per-tick count — byte-identical to the pre-rate behavior. With a fold config
+// it folds a per-SECOND rate (poll-independent), tracks the variance the
+// z-score needs, holds out a strong outlier once confident so a burst can't
+// drag the mean, and (when seasonal is enabled) folds the same rate into the
+// current time bucket.
+func (c *Catalog) foldBaseline(p *Pattern, tickCount int, alpha float64, now time.Time, prevCount int) {
+	f := c.fold
+
+	// Legacy path: no fold config → the original mean-only fold of the raw
+	// per-tick count. No variance, no seasonal, so a pre-feature catalog reads
+	// back byte-identical.
+	if f.PollSeconds <= 0 && f.SeasonalPeriod <= 0 && f.RejectZ <= 0 {
+		if p.BaselineFrequency == 0 {
+			p.BaselineFrequency = float64(tickCount)
+		} else {
+			p.BaselineFrequency = alpha*float64(tickCount) + (1-alpha)*p.BaselineFrequency
+		}
+		return
+	}
+
+	// The value we fold: a per-second rate when a poll interval is configured.
+	value := float64(tickCount)
+	if f.PollSeconds > 0 {
+		value = float64(tickCount) / f.PollSeconds
+	}
+
+	// Global mean + variance. The first fold seeds the mean at the value (as
+	// the pre-rate seed did); later folds run the incremental update unless the
+	// tick is a confident outlier, in which case it is held out.
+	if p.BaselineFrequency == 0 {
+		p.BaselineFrequency = value
+		p.BaselineVariance = 0
+	} else {
+		std := math.Sqrt(math.Max(0, p.BaselineVariance))
+		confident := f.MinBaselineCount > 0 && prevCount >= f.MinBaselineCount
+		if !stats.ShouldReject(value, p.BaselineFrequency, std, confident, f.RejectZ) {
+			g := stats.EWMA{Mean: p.BaselineFrequency, Variance: p.BaselineVariance, Count: 2}
+			g.Observe(value, alpha)
+			p.BaselineFrequency = g.Mean
+			p.BaselineVariance = g.Variance
+		}
+	}
+
+	// Seasonal buckets: fold the same rate into the current hour's bucket, with
+	// the same confident-outlier hold-out per bucket.
+	if f.SeasonalPeriod > 0 {
+		if len(p.Seasonal) != f.SeasonalPeriod {
+			grown := make([]stats.EWMA, f.SeasonalPeriod)
+			copy(grown, p.Seasonal)
+			p.Seasonal = grown
+		}
+		idx := stats.SeasonalIndex(now, f.SeasonalPeriod)
+		bucket := p.Seasonal[idx]
+		bConfident := f.MinBucketSamples > 0 && bucket.Count >= f.MinBucketSamples
+		if !stats.ShouldReject(value, bucket.Mean, bucket.Std(), bConfident, f.RejectZ) {
+			bucket.Observe(value, alpha)
+			p.Seasonal[idx] = bucket
+			// Cumulative arithmetic mean of the rate, folded over the SAME
+			// accepted ticks the seasonal buckets are. The fold count is exactly
+			// the total seasonal observation count (every accepted tick bumps
+			// one bucket), so no separate counter column is needed and the
+			// backends stay byte-identical: avg += (value − avg) / n, where n is
+			// the seasonal total AFTER this tick. A strong outlier held out of
+			// the seasonal baseline is held out of the average too.
+			if n := seasonalCount(p.Seasonal); n > 0 {
+				p.BaselineAvg += (value - p.BaselineAvg) / float64(n)
+			}
+		}
+	}
+}
+
+// seasonalCount sums the observation counts across every seasonal bucket — the
+// total number of ticks folded into the seasonal baseline, which doubles as the
+// fold count for the cumulative arithmetic mean (BaselineAvg).
+func seasonalCount(buckets []stats.EWMA) int {
+	total := 0
+	for _, b := range buckets {
+		total += b.Count
+	}
+	return total
 }
 
 // RecordSample appends a redacted example log line to a pattern's bounded

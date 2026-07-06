@@ -33,6 +33,9 @@ func TestListPatterns_CarriesReadiness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCatalog: %v", err)
 	}
+	// Fold a per-second rate the way the worker does (30s tick), so
+	// BaselineFrequency reads as a rate and RatePerMin is poll-independent.
+	cat.SetBaselineFold(agent.BaselineFold{PollSeconds: 30})
 	// Count-promoted (150 >= 100 threshold) → Ready by the gate even though the
 	// on-disk verdict is still "" (Classify never ran in this read-only test).
 	cat.Upsert("p-known", "known thing <*>", "es:prod", 150, 0.2, "default", "api")
@@ -103,7 +106,7 @@ func TestListPatterns_CarriesReadiness(t *testing.T) {
 	if lr["needed"] != float64(100) {
 		t.Errorf("p-learning readiness.needed = %v, want 100", lr["needed"])
 	}
-	// BaselineFrequency 40/tick ÷ 0.5 min/tick = 80/min.
+	// 40 matches in a 30s tick = 1.33/s; rendered as sightings/min = 1.33 × 60 = 80.
 	if lr["rate_per_min"] != float64(80) {
 		t.Errorf("p-learning readiness.rate_per_min = %v, want 80", lr["rate_per_min"])
 	}

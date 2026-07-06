@@ -65,7 +65,23 @@ agent:
   catalog:
     persist_interval: 30s
     auto_promote_after: 50
-    spike_multiplier: 5.0
+    # Spike detection: a known pattern is re-flagged when its per-second match
+    # RATE jumps well above the learned normal. The bar is a z-score, so it
+    # self-scales to each pattern's own volatility — a burst on a high-volume
+    # pattern trips even though its baseline is large.
+    #   - spike_z: fire when the rate is this many standard deviations above
+    #     the learned baseline.
+    #   - spike_abs_ceiling: a hard safety net — a tick with at least this many
+    #     matches always surfaces (0 = disabled / opt-in).
+    #   - spike_sustain_ticks: require this many CONSECUTIVE spiking ticks
+    #     before firing (1 = fire on the first tick, no debounce).
+    #   - spike_min_frequency: absolute noise floor — the tick must have at
+    #     least this many matches.
+    #   - spike_min_baseline_count: warmup gate — the pattern must have been
+    #     seen this many times before the z-score is trusted.
+    spike_z: 3.0
+    spike_abs_ceiling: 0
+    spike_sustain_ticks: 1
     spike_min_frequency: 5
     spike_min_baseline_count: 20
 

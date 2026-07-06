@@ -268,6 +268,165 @@ func TestServiceDetail_ServesSingleTenantOrgUnderForeignDeploymentOrg(t *testing
 	}
 }
 
+// orgScopedCatalogStore is a minimal CatalogStore whose unified read view keys
+// its service + patterns under a caller-chosen org, mirroring an enterprise
+// partition store that keys a deployment's catalog under a non-default org.
+// Load/Persist/Curate are no-ops; only Snapshot feeds the admin list + detail
+// reads under test.
+type orgScopedCatalogStore struct {
+	patterns []*agent.Pattern
+	services map[string]agent.ServiceInfo
+}
+
+func (s *orgScopedCatalogStore) Load() (map[string]*agent.Pattern, map[string]*agent.ServiceInfo, error) {
+	return nil, nil, nil
+}
+
+func (s *orgScopedCatalogStore) Persist(map[string]*agent.Pattern, map[string]*agent.ServiceInfo) error {
+	return nil
+}
+
+func (s *orgScopedCatalogStore) Snapshot() ([]*agent.Pattern, map[string]agent.ServiceInfo, error) {
+	return s.patterns, s.services, nil
+}
+
+func (s *orgScopedCatalogStore) Curate(agent.CatalogEdit) error { return nil }
+
+// TestServiceDetail_ResolvesServiceStoredUnderNonDefaultOrg proves the
+// list/detail invariant: a service whose catalog entry is keyed under a
+// NON-default org (an enterprise deployment org) both appears in listServices
+// AND resolves via getServiceDetail. Before the fix the list showed it (no org
+// filter) while the detail 404'd it (a hardcoded default-org filter), so a
+// service in the list failed to open.
+func TestServiceDetail_ResolvesServiceStoredUnderNonDefaultOrg(t *testing.T) {
+	loadServiceDetailConfig(t, "30m")
+
+	const deploymentOrg = "b"
+	store := &orgScopedCatalogStore{
+		patterns: []*agent.Pattern{
+			{ID: "p-api", OrgID: deploymentOrg, Template: "api failed to <*>", Service: "api", Count: 7, Source: "es:prod"},
+		},
+		services: map[string]agent.ServiceInfo{
+			"api": {OrgID: deploymentOrg, FirstSeen: time.Now().UTC()},
+		},
+	}
+	agent.SetCatalogStore(store)
+	t.Cleanup(func() { agent.SetCatalogStore(nil) })
+
+	cat, err := agent.LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	services.SetStorage(storage.NewMemory())
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	ctrl := NewAgentController(cat, nil, nil, nil, nil, false)
+	app := fiber.New()
+	app.Get("/api/agent/services", ctrl.listServices)
+	app.Get("/api/agent/services/:name", ctrl.getServiceDetail)
+
+	// The list surfaces the non-default-org service...
+	code, listBody := getJSON(t, app, "/api/agent/services")
+	if code != fiber.StatusOK {
+		t.Fatalf("list status = %d, want 200; body=%v", code, listBody)
+	}
+	svcs, _ := listBody["services"].(map[string]any)
+	if _, ok := svcs["api"]; !ok {
+		t.Fatalf("listServices must surface the non-default-org service; got %v", svcs)
+	}
+
+	// ...and the detail resolves it (was a 404 before the fix).
+	code, body := getJSON(t, app, "/api/agent/services/api")
+	if code != fiber.StatusOK {
+		t.Fatalf("detail status = %d, want 200 (a service in the list must resolve in the detail); body=%v", code, body)
+	}
+	if body["service"] != "api" {
+		t.Errorf("service = %v, want api", body["service"])
+	}
+	if c, _ := body["counts"].(map[string]any); c["patterns"] != float64(1) {
+		t.Errorf("counts.patterns = %v, want 1 (non-default-org pattern resolved)", c["patterns"])
+	}
+}
+
+// TestServiceDetail_PatternRowsCarryRedactedSamplesAndBaselines proves the
+// service-detail pattern rows now carry the same redacted sample ring + learned
+// baseline numbers the pattern-detail read returns, and that redaction holds: a
+// secret planted in a recorded raw line must never reach the response.
+func TestServiceDetail_PatternRowsCarryRedactedSamplesAndBaselines(t *testing.T) {
+	loadServiceDetailConfig(t, "30m")
+
+	cat, err := agent.LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	red, errs := agent.NewRedactor(false, nil)
+	if len(errs) != 0 {
+		t.Fatalf("NewRedactor: %v", errs)
+	}
+	// Fold a per-second rate into hour-of-day buckets so the pattern carries a
+	// real average, variance, and seasonal baseline (not just the legacy
+	// frequency), matching what the log-patterns page shows.
+	cat.SetBaselineFold(agent.BaselineFold{PollSeconds: 1, SeasonalPeriod: 24})
+	cat.RegisterService("api")
+	cat.Upsert("p-api", "api failed to <*>", "es:prod", 7, 0.2, "default", "api") // seed
+	cat.Upsert("p-api", "api failed to <*>", "es:prod", 3, 0.2, "default", "api") // fold → variance
+	// A secret in the recorded line must be re-scrubbed at the storage boundary
+	// so it never reaches the detail response.
+	cat.RecordSample("p-api", "api failed to auth password=hunter2 for order", red)
+	cat.RecordSample("p-api", "api failed to connect to db", red)
+
+	services.SetStorage(storage.NewMemory())
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	ctrl := NewAgentController(cat, nil, nil, nil, nil, false)
+	app := fiber.New()
+	app.Get("/api/agent/services/:name", ctrl.getServiceDetail)
+
+	code, body := getJSON(t, app, "/api/agent/services/api")
+	if code != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%v", code, body)
+	}
+
+	patterns, _ := body["patterns"].([]any)
+	if len(patterns) != 1 {
+		t.Fatalf("patterns len = %d, want 1", len(patterns))
+	}
+	row, _ := patterns[0].(map[string]any)
+
+	// Samples: present, redacted, and the same oldest→newest ring the
+	// pattern-detail read returns.
+	samples, ok := row["samples"].([]any)
+	if !ok || len(samples) != 2 {
+		t.Fatalf("samples = %v, want a 2-entry redacted ring", row["samples"])
+	}
+	for _, s := range samples {
+		if line, _ := s.(string); strings.Contains(line, "hunter2") {
+			t.Fatalf("secret leaked into a service-detail sample: %q", line)
+		}
+	}
+	if latest, _ := samples[len(samples)-1].(string); latest != "api failed to connect to db" {
+		t.Errorf("latest sample = %q, want the most-recently recorded line", latest)
+	}
+
+	// Baseline numbers: every field the log-patterns page shows must be present
+	// under the same JSON names as the pattern model.
+	for _, k := range []string{"baseline_frequency", "baseline_avg", "baseline_variance", "seasonal"} {
+		if _, present := row[k]; !present {
+			t.Errorf("service-detail pattern row missing %q", k)
+		}
+	}
+	if f, _ := row["baseline_frequency"].(float64); f <= 0 {
+		t.Errorf("baseline_frequency = %v, want > 0 (folded during learn)", row["baseline_frequency"])
+	}
+	if avg, _ := row["baseline_avg"].(float64); avg <= 0 {
+		t.Errorf("baseline_avg = %v, want > 0 (folded during learn)", row["baseline_avg"])
+	}
+	seasonal, ok := row["seasonal"].([]any)
+	if !ok || len(seasonal) != 24 {
+		t.Fatalf("seasonal = %v, want 24 hour-of-day buckets", row["seasonal"])
+	}
+}
+
 // TestClearPatterns_WipesPatternsKeepsServices proves DELETE /api/agent/patterns
 // empties every learned pattern, resets the shared miner, LEAVES discovered
 // services intact, and returns a count of the patterns cleared.

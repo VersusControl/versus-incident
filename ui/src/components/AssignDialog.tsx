@@ -7,18 +7,24 @@ import { useToast } from "./toastContext";
 
 // AssignDialog — set/clear the team and members on an incident. Rebased on
 // the accessible Modal; success now confirms via toast (previously a
-// silent outcome).
+// silent outcome). `incidentID` accepts a single id or a list: passing a list
+// assigns the SAME team/members to every selected incident in one save, which
+// is how the Incidents-page bulk "Assign" action reuses this dialog.
 export function AssignDialog({
   incidentID,
   initialTeamID,
   initialMemberIDs,
   onClose,
+  onDone,
 }: {
-  incidentID: string;
+  incidentID: string | string[];
   initialTeamID?: string;
   initialMemberIDs?: string[];
   onClose: () => void;
+  onDone?: () => void;
 }) {
+  const ids = Array.isArray(incidentID) ? incidentID : [incidentID];
+  const bulk = ids.length > 1;
   const qc = useQueryClient();
   const toast = useToast();
   const teamsQ = useQuery({ queryKey: ["teams"], queryFn: api.listTeams });
@@ -38,14 +44,27 @@ export function AssignDialog({
 
   const save = useMutation({
     mutationFn: () =>
-      api.assignIncident(incidentID, {
-        team_id: team || null,
-        member_ids: memberIDs,
-      }),
+      Promise.all(
+        ids.map((id) =>
+          api.assignIncident(id, {
+            team_id: team || null,
+            member_ids: memberIDs,
+          }),
+        ),
+      ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["incidents"] });
-      qc.invalidateQueries({ queryKey: ["incident", incidentID] });
-      toast.push({ title: "Assignment saved", tone: "ok" });
+      qc.invalidateQueries({ queryKey: ["incident-index"] });
+      ids.forEach((id) =>
+        qc.invalidateQueries({ queryKey: ["incident", id] }),
+      );
+      toast.push({
+        title: bulk
+          ? `Assignment saved for ${ids.length} incidents`
+          : "Assignment saved",
+        tone: "ok",
+      });
+      onDone?.();
       onClose();
     },
   });
@@ -79,7 +98,16 @@ export function AssignDialog({
     >
       <div className="space-y-3">
         <div className="text-2xs text-ink-400">
-          Incident <span className="font-mono">{incidentID.slice(0, 8)}</span>
+          {bulk ? (
+            <>
+              <span className="font-medium text-ink-200">{ids.length}</span>{" "}
+              incidents selected
+            </>
+          ) : (
+            <>
+              Incident <span className="font-mono">{ids[0].slice(0, 8)}</span>
+            </>
+          )}
         </div>
         <div>
           <label className="field-label" htmlFor="assign-team">
