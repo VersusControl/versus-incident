@@ -226,6 +226,21 @@ func main() {
 // admin routes on the fiber app. It returns the catalog so the caller can
 // hold a reference (and so future hot-reload code has a handle to it).
 func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewaySecret string, store storage.Provider, rdb *redis.Client) (*agent.Catalog, error) {
+	// X28 Phase A: on the Postgres backend, install the typed signal-table
+	// catalog store so the log catalog reads/writes the explicit
+	// vs_patterns/vs_logs/vs_services tables (searchable, indexed) instead of
+	// the whole-blob "patterns" path. Selected ONCE at boot by backend type —
+	// only the Postgres provider satisfies storage.SQLAccessor; the file
+	// backend (nil store) keeps the inline patterns.json whole-blob path
+	// byte-for-byte unchanged. OSS is single-instance, so instance_index = 0.
+	// Must run BEFORE LoadCatalog so the boot read routes through the store.
+	var pgCatalog agent.CatalogStore
+	if acc, ok := store.(storage.SQLAccessor); ok {
+		pgCatalog = agent.NewPostgresCatalogStore(acc.DB(), storage.DefaultOrgID, 0)
+		agent.SetCatalogStore(pgCatalog)
+		log.Printf("agent: postgres typed catalog store installed (instance 0)")
+	}
+
 	catalog, err := agent.LoadCatalog(store)
 	if err != nil {
 		log.Printf("agent: catalog load warning: %v (starting fresh)", err)
@@ -261,6 +276,14 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 	redactor, redactErrs := agent.NewRedactor(cfg.Redaction.Enable && cfg.Redaction.RedactIPs, cfg.Redaction.ExtraPatterns)
 	for _, e := range redactErrs {
 		log.Printf("agent: redactor warning: %v", e)
+	}
+
+	// B57: thread the pipeline redactor onto the typed catalog store so the
+	// learned samples ring is re-scrubbed at the storage boundary on Persist
+	// (defence in depth), symmetric with the enterprise intel store. No-op on
+	// the file backend (pgCatalog == nil) — the ring is left unchanged there.
+	if setter, ok := pgCatalog.(interface{ SetSampleScrubber(core.Scrubber) }); ok {
+		setter.SetSampleScrubber(redactor)
 	}
 
 	matcher, regexErrs := agent.NewRegexMatcher(cfg.Regex)

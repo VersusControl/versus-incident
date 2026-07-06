@@ -48,7 +48,7 @@ agent:
     spike_min_baseline_count: 20 # pattern must have been seen this many times overall
 ```
 
-### `spike_multiplier`
+### Spike Multiplier
 
 **Default:** `5.0`
 
@@ -77,7 +77,7 @@ check. Anything below that is treated as normal noise.
 | 2 | `0` | 100 | No | Feature is off |
 | 1 | `5.0` | 6 | Yes | 6 is over 5 (5 × 1) |
 
-### `spike_min_frequency`
+### Spike Min Frequency
 
 **Default:** `5`
 
@@ -105,7 +105,7 @@ stops the agent from overreacting to tiny numbers.
 | 1 | `5.0` | `10` | 12 | Yes | 12 meets the minimum, and 12 > 5 |
 | 0.5 | `5.0` | `1` | 3 | Yes | Minimum is just 1, so the multiplier decides |
 
-### `spike_min_baseline_count`
+### Spike Min Baseline Count
 
 **Default:** `20`
 

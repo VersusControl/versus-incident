@@ -25,10 +25,13 @@ import (
 )
 
 // expectedSchemaTables is every table the OSS migrations create. After any
-// migrate run — single or concurrent — each must exist exactly once.
+// migrate run — single or concurrent — each must exist exactly once. The X28
+// migration 003 drops the old whole-blob vs_patterns and recreates it as the
+// typed catalog root alongside vs_logs / vs_services.
 var expectedSchemaTables = []string{
 	"vs_blobs", "vs_incidents", "vs_analyses",
-	"vs_patterns", "vs_shadow", "vs_detect", "vs_members", "vs_teams",
+	"vs_patterns", "vs_logs", "vs_services",
+	"vs_shadow", "vs_detect", "vs_members", "vs_teams",
 }
 
 // dropAllVersusTables drops every vs_* table so the next migrate runs against
@@ -60,6 +63,13 @@ func dropAllVersusTables(t *testing.T, dsn string) {
 		if _, err := db.Exec("DROP TABLE IF EXISTS " + tbl + " CASCADE"); err != nil {
 			t.Fatalf("drop %s: %v", tbl, err)
 		}
+	}
+	// The migration ledger (X28-A2) is NOT a vs_* table, so drop it explicitly:
+	// leaving it would make RunSQLMigrations treat every file as already
+	// applied and skip re-creating the just-dropped schema, defeating the
+	// fresh-boot repro this helper sets up.
+	if _, err := db.Exec("DROP TABLE IF EXISTS versus_schema_migrations CASCADE"); err != nil {
+		t.Fatalf("drop migration ledger: %v", err)
 	}
 }
 

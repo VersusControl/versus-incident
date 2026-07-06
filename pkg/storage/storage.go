@@ -21,6 +21,7 @@
 package storage
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -262,6 +263,29 @@ type BlobCreator interface {
 	// so ReadBlob(key) observes the one surviving set of bytes regardless of
 	// which caller won.
 	CreateBlobIfAbsent(key string, data []byte) (written bool, err error)
+}
+
+// SQLAccessor is an optional capability a backend may implement on top of
+// Provider (X28-A1). It exposes the backend's underlying *sql.DB so an
+// out-of-tree consumer — the enterprise module and the OSS Postgres catalog
+// store — can run its OWN table-agnostic migrations (via RunSQLMigrations)
+// and typed queries on the SAME connection pool the Provider already owns,
+// instead of opening a second pool.
+//
+// Only the Postgres backend implements it; file / memory / redis do not, so
+// a type assertion `store.(storage.SQLAccessor)` IS the backend-type switch
+// the boot path selects on (Postgres ⇒ typed signal tables; anything else ⇒
+// the inline whole-blob path). It carries no tier or table knowledge: OSS
+// exposes only the pool and never names or creates an enterprise table, so
+// the one-way import stays intact — the enterprise module obtains the pool
+// through this seam and manages its own schema on it.
+//
+// The returned *sql.DB is owned by the Provider; callers MUST NOT Close it
+// (the Provider's own Close does that). It is safe for concurrent use.
+type SQLAccessor interface {
+	// DB returns the live *sql.DB backing this Provider. Never nil for a
+	// backend that implements SQLAccessor.
+	DB() *sql.DB
 }
 
 // IncidentRecord is the durable shape of an incident. It mirrors the

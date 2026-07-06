@@ -28,9 +28,7 @@ The window is one of three:
 
 An unknown or missing window falls back to `today`.
 
-> **Note:** The card is **redacted before it's drawn**. Every text field on the report — service names, captions, everything — passes through the same [redaction](./redaction.md) rules the agent uses everywhere else, *before* a single pixel is rendered. No secrets, tokens, ack URLs, or config values ever land on the image. See [Redaction](./redaction.md) for what gets scrubbed.
-
-> **Note:** Rendering is **in-binary and air-gapped**. The PNG is drawn by Versus itself using a bundled font — no headless browser, no external rendering service, no network call. It runs the same in a locked-down, offline environment as it does anywhere else.
+> **Note:** The card is **redacted before it's drawn**. Every text field on the report — service names, captions, everything — passes through the same [redaction](./redaction.md) rules the agent uses everywhere else, *before* a single pixel is rendered.
 
 ### Example report
 

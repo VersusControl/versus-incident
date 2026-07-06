@@ -77,7 +77,7 @@ func runCreateIfAbsent(t *testing.T, p storage.Provider) {
 
 	// Create over a key already set by WriteBlob is a no-op read returning
 	// the stored bytes.
-	const wkey = "patterns"
+	const wkey = "shadow"
 	stored := []byte(`{"version":1}`)
 	if err := p.WriteBlob(wkey, stored); err != nil {
 		t.Fatalf("WriteBlob(%s): %v", wkey, err)

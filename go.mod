@@ -1,6 +1,8 @@
 module github.com/VersusControl/versus-incident
 
-go 1.25.0
+go 1.26.0
+
+toolchain go1.26.4
 
 require (
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.78.1
@@ -20,7 +22,7 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/slack-go/slack v0.27.0
 	github.com/spf13/viper v1.21.0
-	golang.org/x/image v0.22.0
+	golang.org/x/image v0.39.0
 	golang.org/x/time v0.6.0
 	google.golang.org/genai v1.62.0
 )
@@ -40,7 +42,7 @@ require (
 	github.com/google/s2a-go v0.1.8 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/joho/godotenv v1.5.1 // indirect
-	github.com/ollama/ollama v0.9.6 // indirect
+	github.com/ollama/ollama v0.20.3 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
@@ -78,8 +80,8 @@ require (
 	github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3 // indirect
 	github.com/skeema/knownhosts v1.3.1 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
-	golang.org/x/crypto v0.50.0 // indirect
-	golang.org/x/net v0.53.0 // indirect
+	golang.org/x/crypto v0.52.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
@@ -142,7 +144,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssmincidents v1.40.7
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/klauspost/compress v1.17.9 // indirect
+	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
@@ -157,6 +159,6 @@ require (
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.51.0 // indirect
 	github.com/valyala/tcplisten v1.0.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.38.0
 )
