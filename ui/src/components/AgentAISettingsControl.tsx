@@ -19,7 +19,7 @@ import { adminGateState } from "@/lib/role";
 import { useToast } from "@/components/toastContext";
 
 // AgentAISettingsControl — the operator surface for the Enterprise runtime
-// AI-settings override (X27). It reads /enterprise/api/agent/ai-settings on
+// AI-settings override. It reads /enterprise/api/agent/ai-settings on
 // mount, shows the EFFECTIVE enable (override or YAML floor), whether a key is
 // set (masked — last4 only, NEVER the key), and lets an admin toggle AI and
 // rotate the key (PUT) or revert to the YAML floor (DELETE).
@@ -217,7 +217,7 @@ function SettingsBody({
   const onOverride = view.source === "override";
   const noKeyMsg = noEncryptionKeyMessage(save.error);
 
-  // B35 (Security gate finding F2): when the operator stages a provider change
+  // When the operator stages a provider change
   // without entering the matching key, warn that the previous key would be
   // reused (Bearer providers) or fall back to the YAML key (claude/gemini
   // header-auth). Save then asks for an explicit confirmation.

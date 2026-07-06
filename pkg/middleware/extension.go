@@ -1,4 +1,4 @@
-// extension.go — generic, unopinionated extension seams (X2-T3).
+// extension.go — generic, unopinionated extension seams.
 //
 // These are registration hooks the OSS server exposes so an external
 // module (the enterprise build, or any third-party wrapper) can attach

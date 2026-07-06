@@ -63,7 +63,7 @@ spec:
             - name: http
               containerPort: 3000
           env:
-            # --- HA / multi-instance identity (epic X9) ----------------------
+            # --- HA / multi-instance identity ----------------------
             - name: POD_NAME
               valueFrom:
                 fieldRef:

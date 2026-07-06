@@ -272,7 +272,7 @@ func (m *mutatingAlertResolver) ResolveAlert(_ context.Context, base *AlertConfi
 	return true
 }
 
-// TestGetConfigForAlert_ReadThrough_HotReload proves the C3 hot-reload
+// TestGetConfigForAlert_ReadThrough_HotReload proves the hot-reload
 // semantics at the layer the effective config is resolved: with the SAME
 // resolver registered once, a credential change between two resolves is
 // observed on the SECOND call (the emission path re-resolves per incident and

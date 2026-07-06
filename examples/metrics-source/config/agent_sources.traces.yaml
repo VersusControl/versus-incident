@@ -3,7 +3,7 @@
 # source that searches Tempo for error traces. Mounted over
 # agent_sources.yaml only when you run with `-f docker-compose.traces.yml`.
 #
-# Both are ENTERPRISE DATA SOURCES (X10), license-gated on the `intelligence`
+# Both are ENTERPRISE DATA SOURCES, license-gated on the `intelligence`
 # entitlement, and both use the generic `options:` schema. Configuring them
 # auto-wires `query_metrics` (Prometheus) AND `query_traces` (Tempo) with no
 # tools.yaml entry.

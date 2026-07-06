@@ -35,7 +35,7 @@ type AISettingsResolver interface {
 // operator's provider change rebuilds the agent's model on its next run
 // without a process restart. ok=false ⇒ no opinion (use the configured
 // provider). A resolver that does not implement this interface simply has no
-// provider opinion — composition is additive, so the existing X27 key/enabled
+// provider opinion — composition is additive, so the existing key/enabled
 // resolver keeps working unchanged. OSS registers nothing.
 type AIProviderResolver interface {
 	EffectiveProvider(ctx context.Context) (provider string, ok bool)
@@ -97,7 +97,7 @@ func aiSettingsKeyFunc() func(context.Context) (string, bool) {
 //
 // Provider is wired only when the registered resolver ALSO implements
 // AIProviderResolver; otherwise it returns no opinion, so a key/enabled-only
-// resolver (today's X27 backend) never forces a provider rebuild.
+// resolver (today's backend) never forces a provider rebuild.
 func aiRuntime() einowrap.RuntimeAI {
 	if aiSettingsResolver() == nil {
 		return einowrap.RuntimeAI{}

@@ -12,8 +12,8 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
-// catalog_pg_store.go — X28 Phase A (Core, OSS): the Postgres-explicit
-// implementation of the agent.CatalogStore seam (X9-T13) over the typed
+// catalog_pg_store.go — the Postgres-explicit
+// implementation of the agent.CatalogStore seam over the typed
 // signal tables (migration 003): the vs_patterns catalog root, its vs_logs
 // 1:1 child, and the catalog-scoped vs_services entity.
 //
@@ -28,8 +28,8 @@ import (
 //
 // Partition-aware, tier-neutral. Every learned row carries an instance_index
 // ordinal in the vs_logs PK: OSS single-instance always writes 0 (one row per
-// pattern), so the store names no HA policy. The enterprise HA install (Phase
-// B) constructs the SAME store with the instance ordinal, making each
+// pattern), so the store names no HA policy. The enterprise HA install
+// constructs the SAME store with the instance ordinal, making each
 // instance the single writer of its own instance_index rows; the fleet read
 // (Snapshot) SUMs across partitions in SQL (SUM … GROUP BY), which is the
 // exact disjoint-stream union with no lost updates and no advisory lock.
@@ -49,7 +49,7 @@ const (
 	tblServices = "vs_services"
 
 	// pgPatternKindLog is the vs_patterns.kind the OSS catalog store owns.
-	// The enterprise intel store (Phase B) owns 'metric'/'trace' on the same
+	// The enterprise intel store owns 'metric'/'trace' on the same
 	// root; the id namespacing keeps them from colliding under (org_id, id).
 	pgPatternKindLog = "log"
 	// pgVerdictKnown is the OSS brain's only alert-suppression verdict. A
@@ -194,7 +194,7 @@ type pgCatalogStore struct {
 // instanceIndex is the write-shard ordinal (0 for OSS single-instance; the
 // enterprise HA install passes the cluster ordinal). Install it via
 // agent.SetCatalogStore at boot, before the worker starts and before
-// LoadCatalog. This is the seam the Enterprise Engineer's Phase B rides: the
+// LoadCatalog. This is the seam the Enterprise Engineer rides: the
 // enterprise intel store adds vs_metrics/vs_traces on the SAME vs_patterns
 // root, and the enterprise HA install constructs THIS store with the ordinal.
 func NewPostgresCatalogStore(db *sql.DB, orgID string, instanceIndex int) CatalogStore {

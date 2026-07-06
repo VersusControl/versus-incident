@@ -1,7 +1,7 @@
 package storage_test
 
 // migrate_test.go — proves the Postgres schema migration is concurrency-safe
-// (QA-019). When N replicas boot at once against ONE fresh shared Postgres
+// when N replicas boot at once against ONE fresh shared Postgres
 // (e.g. a StatefulSet with podManagementPolicy: Parallel) the migration runner
 // must serialize on the shared advisory lock so exactly one migrator creates
 // the schema while the rest wait then no-op — no `duplicate key …
@@ -25,7 +25,7 @@ import (
 )
 
 // expectedSchemaTables is every table the OSS migrations create. After any
-// migrate run — single or concurrent — each must exist exactly once. The X28
+// migrate run — single or concurrent — each must exist exactly once. The
 // migration 003 drops the old whole-blob vs_patterns and recreates it as the
 // typed catalog root alongside vs_logs / vs_services.
 var expectedSchemaTables = []string{
@@ -64,7 +64,7 @@ func dropAllVersusTables(t *testing.T, dsn string) {
 			t.Fatalf("drop %s: %v", tbl, err)
 		}
 	}
-	// The migration ledger (X28-A2) is NOT a vs_* table, so drop it explicitly:
+	// The migration ledger is NOT a vs_* table, so drop it explicitly:
 	// leaving it would make RunSQLMigrations treat every file as already
 	// applied and skip re-creating the just-dropped schema, defeating the
 	// fresh-boot repro this helper sets up.
@@ -97,7 +97,7 @@ func assertSchemaComplete(t *testing.T, dsn string) {
 // TestPostgresConcurrentMigrate fires N replicas' first boots at once against
 // the SAME fresh database. With the advisory lock every NewPostgres (which
 // runs migrate) must succeed — no duplicate-key / catalog error — and the
-// resulting schema is complete and consistent. This is the QA-019 repro.
+// resulting schema is complete and consistent. This is the concurrency repro.
 func TestPostgresConcurrentMigrate(t *testing.T) {
 	dsn := os.Getenv("TEST_POSTGRES_DSN")
 	if dsn == "" {

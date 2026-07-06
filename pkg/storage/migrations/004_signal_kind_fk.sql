@@ -1,4 +1,4 @@
--- 004_signal_kind_fk.sql — B21/X28 hardening (B58, Core, OSS).
+-- 004_signal_kind_fk.sql — signal-kind FK hardening (Core, OSS).
 -- Fold `kind` into the child→root foreign key so a child signal row can NEVER
 -- attach to a wrong-kind vs_patterns root.
 --
@@ -32,7 +32,7 @@
 -- IDEMPOTENCY: ledger-tracked by RunSQLMigrations under
 -- versus_schema_migrations, so this file runs EXACTLY ONCE (a re-run is a
 -- no-op — the ledger, not IF NOT EXISTS, is the source of truth, per the 003
--- convention and QA-019). Each ADD is named so a stray manual re-run fails
+-- convention). Each ADD is named so a stray manual re-run fails
 -- loudly rather than silently double-applying.
 --
 -- SQLi-safety: static DDL — no value is interpolated. All runtime DML against

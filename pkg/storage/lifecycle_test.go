@@ -1,7 +1,7 @@
 package storage_test
 
-// lifecycle_test.go — covers the optional storage.Lifecycle capability
-// (X1-T7): the mechanical, tier-neutral purge/delete primitive the
+// lifecycle_test.go — covers the optional storage.Lifecycle capability:
+// the mechanical, tier-neutral purge/delete primitive the
 // enterprise retention engine consumes. Exercised against the memory
 // backend; the Postgres backend is covered by the integration parity
 // suite when a real database is configured.

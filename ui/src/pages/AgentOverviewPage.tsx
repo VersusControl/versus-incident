@@ -32,7 +32,7 @@ import { RetryableError } from "@/components/RetryableError";
 import { EmptyState } from "@/components/feedback";
 
 // Agent Overview (/agent) — StatusPage merged with the old Dashboard's
-// agent cards. The runtime banner implements the S4 truth table:
+// agent cards. The runtime banner implements the runtime truth table:
 //   config query loading  → skeleton banner (never the disabled treatment)
 //   config query error    → RetryableError (the agent may be fine — WE
 //                           couldn't ask)
@@ -170,7 +170,7 @@ export function AgentOverviewPage() {
       />
 
       <main className="flex-1 overflow-auto p-6">
-        {/* 1 — Runtime banner (S4 truth table) */}
+        {/* 1 — Runtime banner (truth table) */}
         {agentCfg.isPending ? (
           <div className="card mb-4" aria-hidden>
             <div className="card-body flex flex-wrap items-center gap-6">

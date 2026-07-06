@@ -4,7 +4,7 @@ import "testing"
 
 // TestIsOnCallWorkflowInitialized verifies the initialization probe so the
 // emit path can skip on-call instead of panicking when the singleton was
-// never set up at boot (QA-003).
+// never set up at boot.
 func TestIsOnCallWorkflowInitialized(t *testing.T) {
 	onCallWorkflow = nil
 	if IsOnCallWorkflowInitialized() {

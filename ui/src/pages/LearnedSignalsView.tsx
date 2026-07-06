@@ -175,7 +175,7 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
     error instanceof ApiError &&
     (error.status === 403 || error.status === 404);
 
-  // Disable-Learn (X30) control. The page's own baselines query is the license
+  // Disable-Learn control. The page's own baselines query is the license
   // probe — a settled `data` means the surface is licensed (a 403/404 renders
   // the locked upsell below, never the table). The action lives in the checkbox
   // action bar (Ignore/Resume) and renders only for a licensed admin
@@ -201,7 +201,7 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
     });
   }, [rows, q, statusFilter]);
 
-  // ----- Active | Ignored scope (D3) --------------------------------------
+  // ----- Active | Ignored scope --------------------------------------
   // A metric/trace row is "ignored" when its SIGNAL is held out of learning
   // (matched by name across every service). The scope control is gated on
   // excl.visible — absent for community / viewers, so scope stays "active" and

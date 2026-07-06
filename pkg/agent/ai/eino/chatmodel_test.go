@@ -20,8 +20,8 @@ import (
 // TestChatModel_ProducesParseableFinding asserts that a chat model
 // built by NewChatModel against a canned chat/completions backend
 // returns a JSON payload that detect.ParseFinding round-trips into the
-// expected AIFinding. This is the wiring test for E2: it does NOT
-// exercise the prompt content or the DetectAgent — those land in E3.
+// expected AIFinding. This is the chat-model wiring test: it does NOT
+// exercise the prompt content or the DetectAgent — those are covered separately.
 func TestChatModel_ProducesParseableFinding(t *testing.T) {
 	expected := core.AIFinding{
 		Title:      "Database connection refused",

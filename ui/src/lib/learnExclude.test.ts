@@ -12,7 +12,7 @@ import {
   toggleMetricExclusions,
 } from "@/lib/learnExclude";
 
-// Pure-logic tests for the Disable-Learn UI (X30-T8). The console has no DOM
+// Pure-logic tests for the Disable-Learn UI. The console has no DOM
 // test harness, so the two contracts that matter are pinned here:
 //   1. the client-side metric matcher mirrors the server's exact-name AND
 //      glob/prefix (`*`/`?`) semantics, so a checkbox reflects the same
@@ -148,7 +148,7 @@ describe("toggleMetricExclusions (bulk fold, one PUT)", () => {
   });
 });
 
-// The per-log-pattern grain (E1) rides the whole-list PUT — there is no
+// The per-log-pattern grain rides the whole-list PUT — there is no
 // per-pattern POST/DELETE route — so these read-modify-write helpers are the
 // ONLY way an ignored log pattern lands in the policy's `patterns` list, which
 // is exactly what moves the row into the Ignored tab. Log patterns match by

@@ -20,7 +20,7 @@ describe("Active | Ignored partition (D3)", () => {
     { id: "b", service: "web" },
     { id: "c", service: "api" },
   ];
-  // Per-pattern grain (E1): the policy excludes by row id, not by service.
+  // Per-pattern grain: the policy excludes by row id, not by service.
   const excludedIds = new Set(["a", "c"]);
   const isExcluded = (r: Row) => excludedIds.has(r.id);
 

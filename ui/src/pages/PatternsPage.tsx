@@ -41,7 +41,7 @@ import { useToast } from "@/components/toastContext";
 
 // Verdict filter is URL-synced via SegmentedControl. "uncurated" is a real
 // sentinel value mapping to verdict === "" — never an <option value="">
-// duplicate (audit S1: the old select had two empty options fighting).
+// duplicate (the old select had two empty options fighting).
 const VERDICT_PARAM = "verdict";
 
 function matchesVerdict(p: Pattern, v: string): boolean {
@@ -81,10 +81,10 @@ export function PatternsPage() {
   const [reassignMatches, setReassignMatches] = useState<string[] | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
 
-  // Disable-Learn (X30 / E1) control. Log learning is OSS, so listPatterns
+  // Disable-Learn control. Log learning is OSS, so listPatterns
   // succeeds regardless of license — an explicit enterprise probe decides
-  // whether the surface is licensed. Exclusion here is at the per-PATTERN grain
-  // (E1): ignoring one log pattern holds out ONLY that pattern, keyed on its
+  // whether the surface is licensed. Exclusion here is at the per-PATTERN grain:
+  // ignoring one log pattern holds out ONLY that pattern, keyed on its
   // stable id — the log analogue of the metric/trace per-signal exclusion
   // (whole-service exclusion still lives on the service detail page). The action
   // lives in the checkbox action bar (Ignore/Resume) and renders only for a
@@ -187,8 +187,8 @@ export function PatternsPage() {
     };
   }, [data]);
 
-  // ----- Active | Ignored scope (D3) --------------------------------------
-  // A log row is "ignored" when its PATTERN is held out of learning (E1, keyed
+  // ----- Active | Ignored scope --------------------------------------
+  // A log row is "ignored" when its PATTERN is held out of learning (keyed
   // on the pattern's stable id). The scope control is gated on excl.visible —
   // absent for community / viewers, so scope stays "active" and nothing is
   // partitioned out. The server stays authority: this only re-partitions what

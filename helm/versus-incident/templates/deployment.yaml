@@ -91,7 +91,7 @@ spec:
                   name: {{ include "versus-incident.fullname" . }}-secrets
                   key: gateway_secret
 
-            {{- /* HA / multi-instance identity (epic X9). On a StatefulSet the
+            {{- /* HA / multi-instance identity. On a StatefulSet the
                    POD_NAME trailing ordinal (Downward API) is the authoritative
                    instance index; INSTANCE_COUNT is the replica count. The
                    binary partitions signal sources + the SLO scheduler job by

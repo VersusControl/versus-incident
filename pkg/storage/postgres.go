@@ -189,7 +189,7 @@ func (p *postgresProvider) WriteBlob(name string, data []byte) error {
 }
 
 // CreateBlobIfAbsent implements the optional storage.BlobCreator capability
-// (X9-T11) on the shared, multi-writer Postgres backend — the HA substrate.
+// on the shared, multi-writer Postgres backend — the HA substrate.
 // It is the atomic single-writer election: `INSERT … ON CONFLICT DO NOTHING`
 // inserts only when the row is absent, so among N replicas racing to
 // generate the same secret exactly one INSERT affects a row (written==true)
@@ -584,7 +584,7 @@ func (p *postgresProvider) Close() error {
 }
 
 // ---------------------------------------------------------------------------
-// Lifecycle (implements the optional storage.Lifecycle capability — X1-T7)
+// Lifecycle (implements the optional storage.Lifecycle capability)
 //
 // A mechanical delete primitive with no org/policy concept. The blob
 // domain spans every physical blob table (the fixed allowlist + vs_blobs),

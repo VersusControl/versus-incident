@@ -4,7 +4,7 @@
 // it to admin endpoints under task kind core.AITaskDetect.
 //
 // Detect MUST stay tool-free. Tool wiring is reserved for the
-// analyze-kind agent (E4) — letting detect call tools would turn every
+// analyze-kind agent — letting detect call tools would turn every
 // noisy log line into a multi-step LLM workflow.
 package detect
 

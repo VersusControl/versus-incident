@@ -7,7 +7,7 @@ import (
 )
 
 // TestTools_ImportGraphStaysReadOnly is the static import-graph guard
-// for the analyze tool catalog. The find_runbook tool (E12) declares its
+// for the analyze tool catalog. The find_runbook tool declares its
 // own local interfaces (RunbookSearcher, core.Embedder) and must NOT
 // pull in any write/emit path. This asserts the whole tools package
 // graph never transitively imports:

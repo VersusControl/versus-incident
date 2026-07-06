@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { ApiError, resolveInitialAuth, type AuthProbe } from "@/lib/api";
 
 // resolveInitialAuth is the pure console-entry decision AuthGate runs on mount.
-// These tests pin the X4 two-credential contract without a DOM harness:
+// These tests pin the two-credential contract without a DOM harness:
 //   1. a held gateway secret that verifies -> ok; a 401 -> needs-secret;
 //      a transient (non-401) error must NOT trap the user -> ok.
 //   2. with NO secret, an established SSO session opens the console; a 401

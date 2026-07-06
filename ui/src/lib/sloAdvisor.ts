@@ -1,7 +1,7 @@
 import { ApiError, type SLORecommendationSLI } from "@/lib/api";
 
-// sloAdvisor.ts — pure presentation logic for the SLI/SLO auto-define page
-// (epic X29), extracted so it is unit-testable in isolation (the project's
+// sloAdvisor.ts — pure presentation logic for the SLI/SLO auto-define page,
+// extracted so it is unit-testable in isolation (the project's
 // lib/*.ts + lib/*.test.ts convention).
 
 // isLockedStatus reports whether an error is the terminal Enterprise-locked

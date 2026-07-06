@@ -189,7 +189,7 @@ func truncateAllTables(t *testing.T, dsn string) {
 	}
 	rows.Close()
 	for _, tbl := range tables {
-		// CASCADE: vs_logs FK-references vs_patterns (X28 typed signal tables),
+		// CASCADE: vs_logs FK-references vs_patterns (typed signal tables),
 		// so a plain per-table TRUNCATE of a referenced table is rejected.
 		if _, err := db.Exec("TRUNCATE TABLE " + tbl + " CASCADE"); err != nil {
 			t.Fatalf("truncate %s: %v", tbl, err)
@@ -418,7 +418,7 @@ func TestPostgresAnalysisCRUD(t *testing.T) {
 //
 // Each remaining agent JSON document lands in its own table (shadow→vs_shadow,
 // …). Writing one must not touch another, and an unknown name falls back to
-// vs_blobs. "patterns" is NO LONGER a whole-blob table (X28: the log catalog
+// vs_blobs. "patterns" is NO LONGER a whole-blob table (the log catalog
 // moved to the typed vs_patterns/vs_logs/vs_services tables via the Postgres
 // catalog store), so it now falls back to vs_blobs like any other name.
 // ---------------------------------------------------------------------------

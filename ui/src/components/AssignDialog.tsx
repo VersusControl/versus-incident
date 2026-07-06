@@ -6,8 +6,8 @@ import { Modal } from "./Modal";
 import { useToast } from "./toastContext";
 
 // AssignDialog — set/clear the team and members on an incident. Rebased on
-// the accessible Modal; success now confirms via toast (audit S3 class:
-// silent outcomes).
+// the accessible Modal; success now confirms via toast (previously a
+// silent outcome).
 export function AssignDialog({
   incidentID,
   initialTeamID,

@@ -145,7 +145,7 @@ func reportAllow(key string, perMinute int) bool {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Window resolution + aggregate assembler (R1) — query the incidents in a
+// Window resolution + aggregate assembler — query the incidents in a
 // window and scrub EVERY attacker-influenced text field (service names,
 // titles). No AckURL / token / config value is ever placed on the model.
 // ---------------------------------------------------------------------------

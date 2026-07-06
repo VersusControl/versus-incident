@@ -1,6 +1,6 @@
 package agent
 
-// catalog_pg_store_test.go — X28-A4. Two layers:
+// catalog_pg_store_test.go — Two layers:
 //
 //  1. SQLi-safety / query-construction unit tests that run EVERYWHERE (no DB):
 //     every query is a static constant that names only the fixed signal
@@ -337,7 +337,7 @@ func (r redactScrubber) Scrub(s string) string {
 	return strings.ReplaceAll(s, r.secret, "<REDACTED>")
 }
 
-// TestPGCatalog_RedactionAtStorageBoundary (B57) proves a secret planted
+// TestPGCatalog_RedactionAtStorageBoundary proves a secret planted
 // directly in a pattern's samples ring — bypassing the learn-boundary scrub —
 // is re-scrubbed at the STORAGE boundary before it reaches vs_logs, so no
 // secret ever lands in a signal table. It mirrors the enterprise

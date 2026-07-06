@@ -70,7 +70,7 @@ func newWorkerForTest(t *testing.T, bundle AIBundle, emitter Emitter) *Worker {
 //   - the emitter sees the same finding the agent returned
 //   - the worker's outcome label is "emitted"
 //
-// This is the post-E3 contract: Detect (not the legacy SRE) routes
+// This is the Detect contract: Detect (not the legacy SRE) routes
 // through the agent, and findings still land in the emitter unchanged.
 func TestWorker_EmitDetect_HappyPath(t *testing.T) {
 	finding := &core.AIFinding{
@@ -156,7 +156,7 @@ func TestWorker_EmitDetect_DryWhenNoAgent(t *testing.T) {
 	}
 }
 
-// TestWorker_EmitDetect_HonorsDeclaredSeverityFloor covers QA-006: when an
+// TestWorker_EmitDetect_HonorsDeclaredSeverityFloor covers the severity-floor case: when an
 // incoming Signal carries an operator-declared Severity (e.g. an anomaly rule's
 // `severity: critical`), the emitted finding must not be demoted below it even
 // when the AI rates it lower. A signal with no declared severity defers to the

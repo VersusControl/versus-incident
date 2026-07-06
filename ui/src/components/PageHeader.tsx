@@ -5,7 +5,7 @@ import clsx from "clsx";
 // PageHeader is the sticky identity strip every page leads with: back link,
 // title, status meta (pills/badges) and the page's primary actions — always
 // visible, fixing the audited pattern where incident state + Resolve sat
-// below a viewport of content (D2/D3).
+// below a viewport of content.
 export function PageHeader({
   back,
   title,

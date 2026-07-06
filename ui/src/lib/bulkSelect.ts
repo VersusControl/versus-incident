@@ -104,7 +104,7 @@ const REASSIGN_ACTION: BulkActionSpec = {
 // Assign-to-service. Assign-to-service is ALWAYS offered: log attribution
 // override is an OSS capability (the server authorizes the write), the same way
 // the ungated relabel actions are always present. The Ignore/Resume grain is
-// the PATTERN (E1).
+// the PATTERN.
 export function buildLogsBulkActions(input: {
   scope: ExclusionScope;
   excludeVisible: boolean;

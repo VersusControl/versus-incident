@@ -1,11 +1,11 @@
 # Detect-path signal sources for the Versus Enterprise `metrics-source` example.
 #
-# The `prometheus` type is an ENTERPRISE DATA SOURCE (epic X10). It is
+# The `prometheus` type is an ENTERPRISE DATA SOURCE. It is
 # license-gated: the binary only builds it when LICENSE_KEY carries the
 # `intelligence` entitlement. On the OSS image (or an unlicensed enterprise
 # binary) `type: prometheus` returns "requires Versus Enterprise".
 #
-# This source uses the NEW generic `options:` schema the X10 source reads
+# This source uses the NEW generic `options:` schema the source reads
 # (NOT the legacy nested `prometheus:` block). Each tick the source range-
 # queries every PromQL "anomaly rule" below and emits one signal per firing
 # series. Both rules evaluate to a value > 0 only when something is wrong, so

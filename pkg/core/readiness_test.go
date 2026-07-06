@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// TestReadiness_JSONTags pins the wire shape the UI (C4) and the enterprise
-// metric/trace reader (E1) both consume. The JSON tags are the contract; a
+// TestReadiness_JSONTags pins the wire shape the UI and the enterprise
+// metric/trace reader both consume. The JSON tags are the contract; a
 // rename here would silently break every consumer, so assert them explicitly.
 func TestReadiness_JSONTags(t *testing.T) {
 	r := Readiness{Ready: true, Seen: 7, Needed: 20, RatePerMin: 1.5}

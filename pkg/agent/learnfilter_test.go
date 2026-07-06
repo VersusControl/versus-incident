@@ -22,7 +22,7 @@ type fakeLearnExclusion struct {
 	services map[string]bool
 	signals  map[string]bool
 	// patterns denies a LOG PATTERN by its stable Key/id (the post-Group,
-	// per-pattern grain, E1). Empty ⇒ no pattern is excluded on that grain.
+	// per-pattern grain). Empty ⇒ no pattern is excluded on that grain.
 	patterns map[string]bool
 
 	mu          sync.Mutex
@@ -92,7 +92,7 @@ func TestSetLearnExclusion_SlotRoundTrip(t *testing.T) {
 	}
 }
 
-// TestLearnExclusion_NilSlotUnchanged is the OSS golden guard (X30-T4 a): with
+// TestLearnExclusion_NilSlotUnchanged is the OSS golden guard: with
 // no policy installed the tick is byte-for-byte unchanged — every signal is
 // learned and the stat reports skipped_excluded=0.
 func TestLearnExclusion_NilSlotUnchanged(t *testing.T) {
@@ -118,7 +118,7 @@ func TestLearnExclusion_NilSlotUnchanged(t *testing.T) {
 	}
 }
 
-// TestLearnExclusion_DropsBeforeGroup_AllModes is the core X30-T4 (b) proof: an
+// TestLearnExclusion_DropsBeforeGroup_AllModes is the core proof: an
 // installed exclusion drops an excluded SERVICE and an excluded METRIC signal
 // BEFORE the brain's Group is called — verified identically in training, shadow
 // AND detect (the mode switch is downstream of Group). Because the excluded
@@ -179,7 +179,7 @@ func TestLearnExclusion_ExcludedNeverReachesCatalog(t *testing.T) {
 	}
 }
 
-// TestLearnExclusion_TickStatReportsExcluded is X30-T4 (c): the tick stat line
+// TestLearnExclusion_TickStatReportsExcluded proves the tick stat line
 // reports the excluded count.
 func TestLearnExclusion_TickStatReportsExcluded(t *testing.T) {
 	installExclusion(t, &fakeLearnExclusion{services: map[string]bool{"payments": true}})
@@ -218,7 +218,7 @@ func patternIDByTemplate(t *testing.T, w *Worker, marker string) string {
 	return id
 }
 
-// TestLearnExclusion_PerLogPattern_DropsBeforeLearn is the core E1 proof: an
+// TestLearnExclusion_PerLogPattern_DropsBeforeLearn is the core proof: an
 // excluded LOG PATTERN's observations are dropped POST-Group and BEFORE Learn,
 // so its catalog Count stops growing — while a SIBLING pattern of the SAME
 // service keeps folding. This is the true per-signal grain the pre-Group hook
@@ -361,7 +361,7 @@ func newModeOutputWorker(t *testing.T, mode string, src core.SignalSource, bundl
 }
 
 // TestLearnExclusion_ExcludedProducesNoOutput_ShadowAndDetect is the founder's
-// "invisible in ALL modes" proof (X30). The learn-time drop test above asserts
+// "invisible in ALL modes" proof. The learn-time drop test above asserts
 // the excluded signal never reaches the brain's Group; this one goes one step
 // further and asserts the OUTPUT of the downstream tails: an excluded SERVICE
 // and an excluded METRIC produce ZERO shadow events in shadow mode and ZERO

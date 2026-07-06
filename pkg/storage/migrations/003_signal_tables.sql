@@ -1,13 +1,13 @@
--- 003_signal_tables.sql — X28 Phase A (Core, OSS).
+-- 003_signal_tables.sql — Core, OSS.
 -- Refactor the log-pattern catalog from a whole-blob row into explicit,
 -- searchable, typed signal tables. The old whole-blob vs_patterns (created
--- by 002) is DROPPED — its data is regenerable (see the plan's §5 re-learn
--- cutover) — and replaced by the typed catalog root plus its log/service
+-- by 002) is DROPPED — its data is regenerable — and replaced by the typed
+-- catalog root plus its log/service
 -- children. "patterns" is also removed from the Postgres blobTables allowlist
 -- (pkg/storage/postgres.go) so the catalog no longer routes through a
 -- whole-blob table.
 --
--- This file is ledger-tracked by RunSQLMigrations (X28-A2) and therefore runs
+-- This file is ledger-tracked by RunSQLMigrations and therefore runs
 -- EXACTLY ONCE — the DROP below is safe because it never re-runs on a later
 -- boot. It is NOT written with IF NOT EXISTS on the typed tables for that
 -- reason: the ledger, not IF-NOT-EXISTS, provides idempotency.
@@ -18,7 +18,7 @@
 
 -- Drop the old whole-blob catalog table (name, data, updated_at). Its
 -- learned/curated content is regenerable and self-heals within one learning
--- window; there is no lossy blob->columns copy (plan §5).
+-- window; there is no lossy blob->columns copy.
 DROP TABLE IF EXISTS vs_patterns;
 
 -- Catalog ROOT: one partition-neutral row per learned signal identity, shared
@@ -26,7 +26,7 @@ DROP TABLE IF EXISTS vs_patterns;
 -- service across kinds. Holds identity + the fleet-wide operator-curated
 -- overlay (verdict/tags/tombstone/service reassignment) — this REPLACES the
 -- enterprise shared `overlay` blob. The OSS catalog store only ever
--- reads/writes kind='log' rows; the enterprise intel store (Phase B) owns
+-- reads/writes kind='log' rows; the enterprise intel store owns
 -- kind IN ('metric','trace') on this SAME root.
 CREATE TABLE vs_patterns (
     org_id     TEXT        NOT NULL,
@@ -45,7 +45,7 @@ CREATE INDEX idx_patterns_service ON vs_patterns (org_id, service);
 CREATE INDEX idx_patterns_verdict ON vs_patterns (org_id, verdict);
 
 -- Log-pattern LEARNED properties. PARTITIONED: log sources fan out across HA
--- instances (X9), so each instance is the single writer for its
+-- instances, so each instance is the single writer for its
 -- instance_index rows and the fleet view SUMs across partitions (no lost
 -- updates). Single-instance / OSS writes instance_index = 0 (one row per
 -- pattern), so the column names no HA policy — it is a tier-neutral

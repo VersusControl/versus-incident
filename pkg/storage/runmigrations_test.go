@@ -1,6 +1,6 @@
 package storage_test
 
-// runmigrations_test.go — X28-A2. Proves storage.RunSQLMigrations is
+// runmigrations_test.go — Proves storage.RunSQLMigrations is
 // FS/table-agnostic, tx-per-file, ledger-tracked and idempotent.
 //
 // The behavioural (DB) cases are Postgres-gated on TEST_POSTGRES_DSN exactly

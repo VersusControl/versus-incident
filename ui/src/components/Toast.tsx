@@ -8,8 +8,8 @@ import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
 import clsx from "clsx";
 import { ToastCtx, type ToastInput } from "./toastContext";
 
-// Toast system — the answer to the audit's "mutations fail silently" class
-// (S3): every mutation outcome gets a visible, screen-reader-announced
+// Toast system — the answer to the audit's "mutations fail silently" class:
+// every mutation outcome gets a visible, screen-reader-announced
 // confirmation. aria-live="polite" so toasts never steal focus; optional
 // action slot powers Undo for optimistic updates.
 

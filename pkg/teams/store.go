@@ -42,7 +42,7 @@ var ErrInvalid = errors.New("teams: invalid input")
 // allows operators to edit it independently afterwards.
 //
 // Meta carries typed per-channel identifiers. Each field is optional;
-// only set the ones the operator actually uses. Routing logic (Phase 2)
+// only set the ones the operator actually uses. Routing logic
 // reads these to pick channels per assignee — the store itself does
 // not interpret them.
 type Member struct {

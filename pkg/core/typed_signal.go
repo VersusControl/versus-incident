@@ -6,7 +6,7 @@ import (
 )
 
 // -----------------------------------------------------------------------------
-// Per-type Learner/Detector seam (Phase 8B).
+// Per-type Learner/Detector seam.
 //
 // One shared worker lifecycle — training → shadow → detect → analyze — driving
 // a per-type pair of plug-ins:
@@ -40,7 +40,7 @@ type Observation struct {
 	// IsNew reports whether Group saw this Key for the first time during this
 	// tick (a freshly discovered template / metric / operation). It is used
 	// only for discovery logging and never affects classification. (Additive
-	// to the design-doc struct; see the E15 hand-back notes.)
+	// to the design-doc struct.)
 	IsNew bool
 }
 

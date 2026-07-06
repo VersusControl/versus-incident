@@ -2,7 +2,7 @@ import { Lock } from "lucide-react";
 
 // EnterpriseLockedBody — the shared Enterprise-only locked state (Lock glyph,
 // upsell copy, Learn-more CTA), sized for an embedded card rather than a full
-// page. Used by the admin-gated controls (runtime mode X26, AI settings X27)
+// page. Used by the admin-gated controls (runtime mode and AI settings)
 // when the endpoint reports 403 (community / unlicensed) or 404 (OSS binary —
 // route absent). Callers wrap this in their own card shell and supply the
 // feature-specific heading and blurb.

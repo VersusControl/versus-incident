@@ -1,7 +1,7 @@
 package storage_test
 
 // modelstate_test.go — covers the learned-state / model-artifact
-// persistence seam (E14): the opaque-bytes ModelStore over a Provider.
+// persistence seam: the opaque-bytes ModelStore over a Provider.
 
 import (
 	"bytes"

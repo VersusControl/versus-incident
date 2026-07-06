@@ -2,7 +2,7 @@ package config
 
 import "testing"
 
-// TestRedisConfigTLSEnabled covers the QA-002 escape hatch: TLS is the
+// TestRedisConfigTLSEnabled covers the TLS escape hatch: TLS is the
 // default when the flag is omitted, an explicit true keeps TLS, and an
 // explicit false dials plaintext.
 func TestRedisConfigTLSEnabled(t *testing.T) {
@@ -29,7 +29,7 @@ func TestRedisConfigTLSEnabled(t *testing.T) {
 	}
 }
 
-// TestRedisTLSFromEnv covers the QA-005 fail-closed parse: only an explicit
+// TestRedisTLSFromEnv covers the fail-closed parse: only an explicit
 // off-value disables TLS; every other (non-empty) value — including an
 // enable-intent typo like "1"/"yes" or garbage — keeps TLS on. Unset is
 // handled by the caller (no override) and stays on via TLSEnabled().

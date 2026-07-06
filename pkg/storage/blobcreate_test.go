@@ -1,7 +1,7 @@
 package storage_test
 
-// blobcreate_test.go — covers the optional storage.BlobCreator capability
-// (X9-T11): the atomic create-if-absent blob primitive that elects ONE
+// blobcreate_test.go — covers the optional storage.BlobCreator capability:
+// the atomic create-if-absent blob primitive that elects ONE
 // writer across instances sharing a store (the substrate for generate-once
 // secrets under HA / multi-instance).
 //

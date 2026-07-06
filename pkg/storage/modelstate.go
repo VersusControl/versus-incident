@@ -8,20 +8,20 @@ import (
 	"time"
 )
 
-// modelstate.go — the learned-state / model-artifact persistence seam
-// (E14). It is the OSS *place to persist* opaque, derived model state
+// modelstate.go — the learned-state / model-artifact persistence seam.
+// It is the OSS *place to persist* opaque, derived model state
 // (learned baselines, SLO definitions, forecast models, …) keyed by org +
 // agent + logical key. It is deliberately unopinionated: the bytes are
 // opaque and the OSS tree never interprets them. The training loop and the
-// meaning of the bytes belong to the enterprise consumer (X15/X16/X20/
-// X21/X22), which keeps the intelligence private to versus-enterprise.
+// meaning of the bytes belong to the enterprise consumer, which keeps the
+// intelligence private to versus-enterprise.
 //
 // Storage rides the existing blob seam (ReadBlob/WriteBlob — never
-// os.WriteFile) under a namespaced name, and purge rides the X1-T7
+// os.WriteFile) under a namespaced name, and purge rides the
 // storage.Lifecycle seam. Per-org isolation is structural: the OrgID is a
 // path component of the blob name, so org A's artifacts never collide with
 // or resolve for org B. The enterprise consumer supplies the OrgID from
-// the request context resolved by the X3 tenancy seam — no OSS change.
+// the request context resolved by the tenancy seam — no OSS change.
 
 // ModelStateNamespace is the blob-name prefix under which every learned
 // model artifact is persisted: <namespace>/<org>/<agent>/<key>.
@@ -151,7 +151,7 @@ func (s *ModelStore) List(orgID, agent string) ([]*ModelState, error) {
 	return out, nil
 }
 
-// Purge removes the artifact (org, agent, key) via the X1-T7
+// Purge removes the artifact (org, agent, key) via the
 // storage.Lifecycle delete primitive. It returns ErrUnsupported when the
 // backend does not implement Lifecycle (file / community), so a retention
 // caller fails closed rather than silently no-op'ing. ErrNotFound is

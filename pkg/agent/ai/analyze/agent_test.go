@@ -109,7 +109,7 @@ func newAgentWithFake(t *testing.T, fake *fakeChat, tools []core.AnalyzeTool, ma
 	return a
 }
 
-// TestAgent_NoEmitterField is the static guard from E4-T5. The struct
+// TestAgent_NoEmitterField is the static guard on the struct. The struct
 // must never grow an Emitter / Notifier / Sender field — analyze is
 // read-only by contract.
 func TestAgent_NoEmitterField(t *testing.T) {

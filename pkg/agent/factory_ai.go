@@ -158,7 +158,7 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		}
 
 		// Optional metric/trace readers for the query_metrics / query_traces
-		// tools (X10). Each is configured independently in tools.yaml
+		// tools. Each is configured independently in tools.yaml
 		// (tools.query_metrics.prometheus / tools.query_traces.tempo) so an
 		// on-demand analyze query never touches a detect-path source cursor.
 		// A blank endpoint yields a nil reader so analyzetools.Default omits

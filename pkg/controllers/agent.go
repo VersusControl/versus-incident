@@ -38,8 +38,8 @@ const (
 	auditActionOverrideDeleted  = "agent.service_override.deleted"
 	auditActionPatternRelabeled = "agent.pattern.relabeled"
 	auditActionPatternDeleted   = "agent.pattern.deleted"
-	// grace-control + the two flush routes are state-changing admin actions
-	// (B46/B47): grace-control ends/restarts a service's new-service grace
+	// grace-control + the two flush routes are state-changing admin actions:
+	// grace-control ends/restarts a service's new-service grace
 	// window; the flushes force-persist the in-memory shadow/detect log to
 	// disk. They are gated + audited to parity with the rest of the mutating
 	// agent surface.
@@ -487,7 +487,7 @@ const serviceRecentIncidentMax = 10
 // first-seen + grace status, the patterns attributed to it, and a bounded
 // summary of its recent incidents.
 //
-// This is the OSS half of the X30 service-detail surface — logs (patterns) and
+// This is the OSS half of the service-detail surface — logs (patterns) and
 // incidents only. Metrics/traces are an Enterprise capability and ride a
 // separate /intel endpoint; they are intentionally absent from this response so
 // the OSS shape carries no metric/trace fields. An unknown service (not in the

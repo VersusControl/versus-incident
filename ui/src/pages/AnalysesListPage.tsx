@@ -19,7 +19,7 @@ import { EmptyState } from "@/components/feedback";
 const COLS = 7;
 
 // AnalysesListPage lists every analysis recorded across all incidents,
-// newest first. Rows open the analysis DETAIL page (audit I2 — that route
+// newest first. Rows open the analysis DETAIL page (that route
 // had no inbound link); the Incident column keeps a small secondary link
 // to the parent incident. The Post-mortems tab is the explained future
 // feature that used to be a dead sidebar item (empty-nav-state rule).

@@ -55,10 +55,10 @@ func newPreFilterWorker(t *testing.T, kindType string, kind signalsources.Kind, 
 	return w, fb, src
 }
 
-// TestWorker_PerKindOverride_FiltersMetricsBeforeBrain is the QA-008 regression
+// TestWorker_PerKindOverride_FiltersMetricsBeforeBrain is the regression
 // guard: with agent.regex.metrics set, a metric signal whose message does NOT
 // match is dropped BEFORE the enterprise-style brain's Group is called, while a
-// matching one flows. This proves the Decision 1B override bites on the
+// matching one flows. This proves the per-kind override bites on the
 // kind-proper (enterprise-brain) dispatch path, not just the log-brain fallback.
 func TestWorker_PerKindOverride_FiltersMetricsBeforeBrain(t *testing.T) {
 	w, fb, src := newPreFilterWorker(t, "test-prefilter-metrics", signalsources.KindMetrics,

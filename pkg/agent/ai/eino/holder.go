@@ -11,7 +11,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
 
-// holder.go — the runtime model-construction lifecycle (B34).
+// holder.go — the runtime model-construction lifecycle.
 //
 // The model PROVIDER (openai | deepseek | qwen | ollama | claude | gemini) is
 // chosen at CONSTRUCTION time: each provider picks a different SDK/builder

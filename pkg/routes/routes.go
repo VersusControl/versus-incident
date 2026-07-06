@@ -15,7 +15,7 @@ func SetupRoutes(app *fiber.App, teamsStore *teams.Store) {
 	// API routes
 	api := app.Group("/api")
 
-	// Enterprise auth slot (X2-T3). No-op pass-through in community mode;
+	// Enterprise auth slot. No-op pass-through in community mode;
 	// an external module registers SSO/JWT enforcement via
 	// middleware.SetAuthMiddleware before the server starts.
 	api.Use(middleware.AuthMiddleware())

@@ -350,7 +350,7 @@ type AgentAIConfig struct {
 	// to the top-level defaults above, so a single shared block keeps
 	// working unchanged. Detect is used by the worker for unknown /
 	// spiking pattern classification; Analyze is used by the on-demand
-	// analyzer (E4).
+	// analyzer.
 	//
 	// There is no `framework` knob: Eino is the only LLM path.
 	Detect  AgentAITaskConfig    `mapstructure:"detect"`

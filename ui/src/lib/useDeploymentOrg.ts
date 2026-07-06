@@ -2,7 +2,7 @@ import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { ApiError, api, type SSODeployment } from "@/lib/api";
 
 // useDeploymentOrg resolves the single-tenant deployment org this enterprise
-// binary serves. The org is sourced server-side from the LICENSE_KEY (X4) — it
+// binary serves. The org is sourced server-side from the LICENSE_KEY — it
 // is NOT operator-selectable — so every admin SSO control targets it instead of
 // a hardcoded "default". The pre-auth /enterprise/api/sso/deployment route is
 // license-gated, so a community/unlicensed binary 403s it; the caller treats

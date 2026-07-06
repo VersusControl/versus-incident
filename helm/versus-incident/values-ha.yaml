@@ -1,4 +1,4 @@
-# values-ha.yaml — High-Availability / multi-instance (epic X9, ENTERPRISE).
+# values-ha.yaml — High-Availability / multi-instance (ENTERPRISE).
 #
 # Renders a StatefulSet of 3 enterprise replicas behind one Service, sharing ONE
 # Postgres, partitioning signal sources + the SLO scheduler job by hash-

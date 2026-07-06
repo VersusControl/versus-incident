@@ -1,6 +1,6 @@
 package storage_test
 
-// org_test.go — covers the OrgID defaulting seam (X2-T1). Records saved
+// org_test.go — covers the OrgID defaulting seam. Records saved
 // without an explicit OrgID must come back stamped with the default org
 // so single-tenant OSS users never have to think about orgs, while
 // explicit orgs are preserved verbatim for enterprise multi-tenant use.

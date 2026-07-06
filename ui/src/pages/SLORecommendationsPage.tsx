@@ -24,7 +24,7 @@ import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { usePagination } from "@/lib/pagination";
 
-// SLORecommendationsPage — the read-only "SLI/SLO auto-define" view (epic X29).
+// SLORecommendationsPage — the read-only "SLI/SLO auto-define" view.
 // Per service it shows the SLIs/SLOs the SLO Advisor recommends (indicator,
 // target, window, rationale, confidence) plus when they were generated, and an
 // admin-only cadence control.

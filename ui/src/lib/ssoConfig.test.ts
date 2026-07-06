@@ -8,7 +8,7 @@ import {
   ssoErrorText,
 } from "@/lib/ssoConfig";
 
-// These tests pin the pure decision logic the SSO connections control (X4)
+// These tests pin the pure decision logic the SSO connections control
 // hangs off, since the UI has no DOM test harness. The contracts that matter:
 //   1. a 404 disambiguates between OSS route-absent (locked), a licensed but
 //      unconfigured org (editable form), and an unprovisioned org.

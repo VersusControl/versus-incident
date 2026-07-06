@@ -1,5 +1,5 @@
 // Package scheduler is the generic, in-process recurring-evaluation seam
-// (E13) on the agent runtime. It runs registered jobs at a fixed interval
+// on the agent runtime. It runs registered jobs at a fixed interval
 // inside the worker lifecycle, so a consumer can re-pull signals and derive
 // standing state on a schedule (e.g. learn metric baselines, evaluate SLO
 // burn) without adding any new mutation path.
@@ -102,7 +102,7 @@ func Reset() {
 	registry = nil
 }
 
-// Process-wide job-ownership seam (X9-T9). Under HA / multi-instance,
+// Process-wide job-ownership seam. Under HA / multi-instance,
 // exactly one instance must run each registered job — otherwise every
 // replica fires the same periodic evaluation and (for the enterprise
 // SLO/burn job) pages on-call twice. A consumer installs a predicate at
@@ -179,7 +179,7 @@ func (s *Scheduler) SetJitter(d time.Duration) *Scheduler {
 func (s *Scheduler) Len() int { return len(s.jobs) }
 
 // owned returns the subset of this scheduler's jobs that this instance owns
-// under the installed ownership predicate (X9-T9), in registration order.
+// under the installed ownership predicate, in registration order.
 // With no predicate (community / single-instance) every job is owned and
 // the result is the full set — so Run starts exactly the goroutines it does
 // today. A job the predicate rejects is never returned here, so Run spins up

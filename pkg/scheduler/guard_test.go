@@ -7,7 +7,7 @@ import (
 )
 
 // TestScheduler_ImportGraphStaysReadOnly is the static import-graph guard
-// for the recurring-evaluation seam (E13-T2). Scheduler-driven jobs are
+// for the recurring-evaluation seam. Scheduler-driven jobs are
 // bound by the SAME read-only analyze invariant as on-demand analyze: the
 // scheduler package itself must never gain a write/mutation/emit import, so
 // a registered job cannot acquire write capability through it. Findings a

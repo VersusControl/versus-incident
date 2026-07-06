@@ -1,7 +1,7 @@
 package storage_test
 
-// signal_schema_test.go — X28-A3. Verifies migration 003 lands the typed
-// signal schema exactly as the plan §3.1 specifies: the FK from vs_logs to the
+// signal_schema_test.go — Verifies migration 003 lands the typed
+// signal schema: the FK from vs_logs to the
 // vs_patterns root, the tuned indexes, the instance_index write-shard default,
 // and the security invariant that NO signal table carries a secret/cipher
 // column. Postgres-gated on TEST_POSTGRES_DSN.
@@ -94,7 +94,7 @@ func TestSignalSchema_InstanceIndexDefaultZero(t *testing.T) {
 	}
 }
 
-// TestSignalSchema_NoSecretColumns is the security pre-check (S1): signal data
+// TestSignalSchema_NoSecretColumns is the security pre-check: signal data
 // is post-redaction and non-secret, so NO column on the three signal tables
 // may look like a secret/cipher/token/key store.
 func TestSignalSchema_NoSecretColumns(t *testing.T) {
@@ -125,7 +125,7 @@ func TestSignalSchema_NoSecretColumns(t *testing.T) {
 	}
 }
 
-// TestSignalSchema_KindInForeignKey (B58) proves migration 004 folded `kind`
+// TestSignalSchema_KindInForeignKey proves migration 004 folded `kind`
 // into the child→root FK: vs_patterns carries a UNIQUE (org_id, id, kind) key,
 // vs_logs pins kind='log' via a CHECK, and vs_logs FK-references
 // vs_patterns (org_id, id, kind) — so a vs_logs row can only attach to a
@@ -182,7 +182,7 @@ func TestSignalSchema_KindInForeignKey(t *testing.T) {
 	}
 }
 
-// TestSignalSchema_KindFKRejectsWrongKind (B58) proves the DB rejects a vs_logs
+// TestSignalSchema_KindFKRejectsWrongKind proves the DB rejects a vs_logs
 // row FK'd to a non-'log' root and accepts one FK'd to a 'log' root — the
 // wrong-kind link is impossible at the storage layer, not merely unlikely by
 // the id-scheme.
@@ -223,7 +223,7 @@ func TestSignalSchema_KindFKRejectsWrongKind(t *testing.T) {
 	}
 }
 
-// TestSignalSchema_Migration004Idempotent (B58) proves re-running the OSS
+// TestSignalSchema_Migration004Idempotent proves re-running the OSS
 // migration set is a no-op: the ledger skips the already-applied 004 (if it
 // re-applied, its named ADD CONSTRAINTs would error on the duplicate), and
 // each new constraint exists exactly once.

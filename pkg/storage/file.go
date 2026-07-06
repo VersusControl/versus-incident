@@ -94,10 +94,10 @@ func (p *fileProvider) WriteBlob(name string, data []byte) error {
 }
 
 // CreateBlobIfAbsent implements the optional storage.BlobCreator capability
-// (X9-T11) on the file backend. It is best-effort and coherent only on a
+// on the file backend. It is best-effort and coherent only on a
 // single node — the kernel's O_CREATE|O_EXCL guarantees exactly one creator
 // among concurrent openers on the same filesystem, which is the only place
-// file storage is allowed under HA (the X9-T3 guard forces Postgres for
+// file storage is allowed under HA (the guard forces Postgres for
 // count>1). An existing blob (created here or via WriteBlob) is left
 // untouched and the call returns written==false so the caller re-reads the
 // stored bytes via ReadBlob.

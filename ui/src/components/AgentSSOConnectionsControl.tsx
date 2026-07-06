@@ -38,7 +38,7 @@ import { useToast } from "@/components/toastContext";
 // the login screen. It reads /enterprise/api/sso/:org/connections and lets an
 // admin add / edit / delete a connection and seal its client secret.
 //
-// This is the single, canonical SSO/identity panel: it also owns the X4-T4
+// This is the single, canonical SSO/identity panel: it also owns the
 // login-enforcement policy (require_sso / require_mfa) as an "Enforcement"
 // subsection, so the admin page renders ONE SSO section.
 //
@@ -63,7 +63,7 @@ const TYPE_LABELS: Record<SSOConnectionType, string> = {
 export function AgentSSOConnectionsControl() {
   const qc = useQueryClient();
   const toast = useToast();
-  // The org is sourced from the LICENSE_KEY (X4) via the pre-auth /deployment
+  // The org is sourced from the LICENSE_KEY via the pre-auth /deployment
   // route, not a hardcoded "default". It is not operator-selectable — this
   // panel targets the deployment's own org.
   const dep = useDeploymentOrg();
@@ -230,7 +230,7 @@ export function AgentSSOConnectionsControl() {
         )}
       </div>
 
-      {/* Enforcement (X4-T4): require_sso / require_mfa. Absorbed from the
+      {/* Enforcement: require_sso / require_mfa. Absorbed from the
           retired single-IdP form so this is the ONE place SSO is configured.
           Only shown once an IdP is enabled — the server refuses require_sso
           without an enabled IdP. */}
@@ -764,13 +764,13 @@ function Field({
   );
 }
 
-// SSOEnforcementControl — the X4-T4 per-org human-access enforcement toggle,
+// SSOEnforcementControl — the per-org human-access enforcement toggle,
 // absorbed from the retired single-IdP settings form so the multi-IdP panel is
 // the single SSO surface. "Enforce SSO" requires human users to sign in through
 // a configured IdP; the built-in default admin stays available as a break-glass
 // account, and the gateway secret is OSS machine/data-plane only (never a human
 // login on a licensed binary). With SSO enforced, "require MFA" is the LIVE
-// X4-T4 multi-factor gate — it rejects any SSO login the IdP did not report as
+// multi-factor gate — it rejects any SSO login the IdP did not report as
 // multi-factor across the privileged surfaces. It reads/writes
 // /enterprise/api/sso/:org/policy over the SSO session cookie, authorized by the
 // caller's RBAC role (sso:manage), the same as the connections list. Mounted

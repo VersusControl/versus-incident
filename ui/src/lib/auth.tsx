@@ -153,7 +153,7 @@ function SecretForm({
   useEffect(() => {
     if (!standalone) return;
     let alive = true;
-    // Source the org from the license-issued deployment org (X4), not a
+    // Source the org from the license-issued deployment org, not a
     // hardcoded "default": ask the pre-auth /deployment route first, then probe
     // SSO status for that org. A community/unlicensed binary 403s /deployment;
     // any failure leaves sso null AND enterprise false, so the screen falls back

@@ -202,7 +202,7 @@ export interface BaselinesResponse {
   baselines: BaselineRow[];
 }
 
-// --- SLI/SLO auto-define (epic X29) -----------------------------------------
+// --- SLI/SLO auto-define ----------------------------------------------------
 // The "SLO Advisor" recommends SLIs/SLOs per service. The read endpoint is
 // Enterprise-gated (403 without an `intelligence` license; absent on an OSS
 // binary) and carries an AI-gate status so the page can show a clear OFF
@@ -306,7 +306,7 @@ export interface ServiceOverride {
 }
 
 
-// --- Service detail (X30) ----------------------------------------------------
+// --- Service detail ----------------------------------------------------------
 // The OSS half of the service-detail surface: service meta + grace, the
 // log-pattern catalog scoped to the service, and a bounded incident summary.
 // It carries NO metrics/traces fields — those ride the Enterprise /intel
@@ -347,7 +347,7 @@ export interface ServiceDetail {
 }
 
 // ServiceIntel is the Enterprise metrics/traces half of the service-detail
-// surface (X30-T2). The endpoint is Enterprise-gated (403 unlicensed) and
+// surface. The endpoint is Enterprise-gated (403 unlicensed) and
 // absent on an OSS binary (404) — the page renders the locked upsell in that
 // case, driven purely by HTTP status. No enterprise dependency lives in the OSS
 // UI; the shape reuses the OSS-local BaselineRow type.
@@ -835,7 +835,7 @@ export interface SSOConnectionInput {
   issuer?: string;
 }
 
-// ---------- Enterprise SSO enforcement policy (X4-T4, RBAC sso:manage, per-org) ----------
+// ---------- Enterprise SSO enforcement policy (RBAC sso:manage, per-org) ----------
 
 // SSOPolicyView mirrors the enterprise pkg/sso PolicyView. `require_sso`
 // enforces single sign-on for human access to the org: human users sign in
@@ -1397,7 +1397,7 @@ export const api = {
       { method: "DELETE" },
     ),
 
-  // Enterprise per-org SSO enforcement policy (X4-T4, RBAC sso:manage). Same
+  // Enterprise per-org SSO enforcement policy (RBAC sso:manage). Same
   // sessionRequest plumbing as the SSO config control. setSSOPolicy with
   // require_sso=true ENFORCES SSO for human sign-in (and gates require_mfa); the
   // server rejects it (422 sso_not_configured) unless an enabled IdP config

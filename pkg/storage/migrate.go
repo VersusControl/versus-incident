@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// migrate.go — RunSQLMigrations (X28-A2): a fully FS- and table-agnostic
+// migrate.go — RunSQLMigrations: a fully FS- and table-agnostic
 // Postgres migration runner.
 //
 // It is the ONE seam both the OSS backend and the out-of-tree enterprise
@@ -22,7 +22,7 @@ import (
 // same pool, so the two track independently and never re-apply each other's
 // files.
 //
-// Guarantees (the A2 acceptance):
+// Guarantees:
 //   - each `*.sql` file is applied AT MOST ONCE — its filename is recorded
 //     in the ledger inside the SAME transaction that applies it, so a crash
 //     mid-file rolls back both the DDL and the ledger row (tx-per-file);

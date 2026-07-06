@@ -244,7 +244,7 @@ func (w *Worker) Run(ctx context.Context) {
 		log.Printf("agent: WARN detect mode configured but AI disabled — running dry detect, no incidents will be emitted")
 	}
 
-	// Start the recurring-evaluation scheduler (E13). It runs registered
+	// Start the recurring-evaluation scheduler. It runs registered
 	// read-only / analyze-kind jobs on their own interval, bound to this
 	// worker's context so shutdown cancels in-flight jobs. In community
 	// mode no job is registered, so this starts nothing and OSS behaviour
@@ -370,7 +370,7 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		}
 	}
 
-	// Learn-exclusion chokepoint (X30 "Disable-Learn"). Runs immediately after
+	// Learn-exclusion chokepoint ("Disable-Learn"). Runs immediately after
 	// redaction and BEFORE the pre-brain matcher / grouping, so an excluded
 	// (service, signal) never folds into the model in ANY mode — the mode
 	// switch (training/shadow/detect) is downstream of learner.Group. OSS
@@ -397,7 +397,7 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		signals = kept
 	}
 
-	// Decision 1B per-kind override (agent.regex.metrics / agent.regex.traces):
+	// Per-kind override (agent.regex.metrics / agent.regex.traces):
 	// when the operator set it, drop metric/trace signals whose message does NOT
 	// match BEFORE the brain sees them, so the override bites brain-agnostically
 	// — including a licensed source bound to its enterprise brain, which never
@@ -432,7 +432,7 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		return
 	}
 
-	// Per-log-pattern learn-exclusion (E1). The pre-Group chokepoint above can
+	// Per-log-pattern learn-exclusion. The pre-Group chokepoint above can
 	// only see a signal's service + signal name; a plain log line carries no
 	// pattern identity there, so a single noisy LOG PATTERN could not be held
 	// out without excluding its whole service. Now that Group has assigned each
@@ -716,7 +716,7 @@ func (w *Worker) emitDetect(
 // the worker's outcome vocabulary.
 func (w *Worker) send(finding *core.AIFinding, result core.AgentResult, source, service, okLabel string) string {
 	// Honour an operator-declared severity as a floor: the AI may escalate
-	// but must not silently demote below the rule-declared severity (QA-006).
+	// but must not silently demote below the rule-declared severity.
 	clampSeverityFloor(finding, result.RuleSeverity)
 	if w.emitter == nil {
 		log.Printf("%sagent[detect]: pattern=%s service=%s severity=%s confidence=%.2f title=%q (no emitter wired)%s",
@@ -757,8 +757,8 @@ func (w *Worker) shadowTag(o core.Observation) string {
 //     unknown/unregistered type (which KindOf defaults to KindLogs).
 //
 // Only the log-brain path consults this; metric/trace sources bound to their
-// proper enterprise brain group by fields and never hit it. The Decision 1B
-// per-kind override still bites those sources via preBrainMatcher, which the
+// proper enterprise brain group by fields and never hit it. The per-kind
+// override still bites those sources via preBrainMatcher, which the
 // worker applies to the signals before any brain (enterprise or log) sees them.
 func (w *Worker) matcherForSource(name string) *RegexMatcher {
 	switch w.kindByName[name] {
@@ -780,7 +780,7 @@ func (w *Worker) matcherForSource(name string) *RegexMatcher {
 // preBrainMatcher returns the OPTIONAL per-kind text pre-filter applied to a
 // metrics/traces source's signals BEFORE they reach its brain (enterprise or
 // log). It is non-nil only when the operator set agent.regex.metrics /
-// agent.regex.traces for that kind (Decision 1B); logs and the learn-all
+// agent.regex.traces for that kind; logs and the learn-all
 // default return nil, so no pre-filter runs — logs are filtered inside the log
 // brain, and an unset override lets metrics/traces learn all. Applying the
 // override here (rather than inside a brain) makes it bite brain-agnostically,

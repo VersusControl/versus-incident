@@ -13,7 +13,7 @@ import {
 
 // Pure-logic tests for the RBAC role helpers the enterprise admin SPA gates on.
 // The console has no DOM test harness, so every privileged-gating decision is
-// kept pure here and pinned. The contracts that matter for X4/X5:
+// kept pure here and pinned. The contracts that matter:
 //   1. only admin/owner may manage; everything else (incl. unknown) is closed.
 //   2. adminGateState fails closed at every step — a non-admin / sessionless /
 //      community caller can never reach the live "admin" state.

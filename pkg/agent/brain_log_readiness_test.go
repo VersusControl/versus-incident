@@ -9,7 +9,7 @@ import (
 )
 
 // TestLogReadiness_DriftAgainstClassify is the anti-drift guard the design
-// requires (§8 C2). It drives a log pattern to a range of states across
+// requires. It drives a log pattern to a range of states across
 // thresholds {below-default, at-default, below-custom, at-custom, disabled(0),
 // disabled(negative), already-known} and asserts THREE views of "known" all
 // agree for every row:
