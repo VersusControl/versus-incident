@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   useMutation,
   useQuery,
@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Eye,
   Search,
   UserPlus,
 } from "lucide-react";
@@ -26,13 +27,19 @@ import {
   type IncidentStatusFilter,
 } from "@/lib/incidentList";
 import { usePagination } from "@/lib/pagination";
+import { useBulkSelection } from "@/lib/useBulkSelection";
 import { TopBar } from "@/components/TopBar";
 import { Pill, SourceBadge } from "@/components/Pill";
 import { EmptyState, EmptyValue } from "@/components/feedback";
 import { AssignDialog } from "@/components/AssignDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { ClickableRow } from "@/components/DataTable";
 import { Pagination } from "@/components/Pagination";
+import { PeekPanel, PeekField } from "@/components/PeekPanel";
+import {
+  BulkActionBar,
+  RowSelectCheckbox,
+  SelectAllCheckbox,
+} from "@/components/BulkActionBar";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SkLine, SkRows } from "@/components/Skeleton";
@@ -45,8 +52,8 @@ type StatusFilter = IncidentStatusFilter;
 const STATUS_VALUES = INCIDENT_STATUS_VALUES;
 
 // Column count for colSpan cells (skeleton / empty / notify-error rows):
-// service · sev · when · title · channels · assigned · notify · status · id · actions
-const COLS = 10;
+// select · service · sev · when · title · channels · assigned · notify · status · id · actions
+const COLS = 11;
 
 // useDebounced returns a value that only updates after `delay` ms of no
 // change — keeps server-side search from firing on every keystroke.
@@ -66,7 +73,6 @@ function useDebounced<T>(value: T, delay = 300): T {
 // search (Postgres), the query runs on the server; otherwise it falls back
 // to filtering the already-loaded page client-side.
 export function IncidentsPage() {
-  const navigate = useNavigate();
   const qc = useQueryClient();
   const toast = useToast();
   const [q, setQ] = useState("");
@@ -89,6 +95,12 @@ export function IncidentsPage() {
   const [expandedNotify, setExpandedNotify] = useState<Set<string>>(
     () => new Set(),
   );
+  // Peek + bulk state. The eye opens a detail slide-out (peekId); the action
+  // bar's Assign/Resolve capture the current selection into these when picked
+  // (null = closed), so a single-row action is just a one-row selection.
+  const [peekId, setPeekId] = useState<string | null>(null);
+  const [bulkAssignIds, setBulkAssignIds] = useState<string[] | null>(null);
+  const [bulkResolveIds, setBulkResolveIds] = useState<string[] | null>(null);
 
   // Probe backend capabilities once; default to no server search until
   // known. The probe degrades silently — when it fails the page simply
@@ -168,6 +180,21 @@ export function IncidentsPage() {
     resetKey: incidentResetKey(origin, status, trimmed),
   });
 
+  // ----- selection + action bar -------------------------------------------
+  // The SAME checkbox model the learned-signal tables use: a select-all
+  // checkbox in the header, a checkbox per row, and a bar that APPEARS on
+  // selection surfacing the per-row actions (Assign / Resolve) as bulk actions.
+  // Selection resets on origin / status / search / PAGE change.
+  const pageKeys = useMemo(() => pg.pageItems.map((i) => i.id), [pg.pageItems]);
+  const bulk = useBulkSelection(
+    pageKeys,
+    `${incidentResetKey(origin, status, trimmed)}|${pg.page}`,
+  );
+  const bulkActions = [
+    { id: "assign", label: "Assign" },
+    { id: "resolve", label: "Resolve" },
+  ];
+
   // Resolve is optimistic (§2.4): cache flips immediately, rollback +
   // error toast with Retry on failure, invalidate on settle.
   const resolveMut = useMutation({
@@ -223,14 +250,15 @@ export function IncidentsPage() {
     },
   });
 
-  // j/k + Enter navigation; a/r act on the active row (modals trap focus,
-  // so these can't fire while a dialog is open). Scoped to the rendered page
-  // so navigation stays bounded on a multi-thousand-row history.
+  // j/k move the active row; Enter opens the peek (the eye's action) — the
+  // row itself is not a navigation control. a/r act on the active row (modals
+  // trap focus, so these can't fire while a dialog is open). Scoped to the
+  // rendered page so navigation stays bounded on a multi-thousand-row history.
   const { containerProps, rowProps } = useTableKeys({
     size: pg.pageItems.length,
     onOpen: (i) => {
       const row = pg.pageItems[i];
-      if (row) navigate(`/incidents/${row.id}`);
+      if (row) setPeekId(row.id);
     },
     extra: (key, i) => {
       const row = pg.pageItems[i];
@@ -253,6 +281,31 @@ export function IncidentsPage() {
       else next.add(id);
       return next;
     });
+
+  // Map an id back to its row for the selection actions + peek. The whole
+  // loaded set is the source so the peek survives a page/filter change.
+  const byId = useMemo(() => {
+    const m = new Map<string, IncidentSummary>();
+    for (const i of data?.incidents ?? []) m.set(i.id, i);
+    return m;
+  }, [data?.incidents]);
+
+  const onBulkAction = (spec: { id: string }) => {
+    const ids = bulk.selectedKeys;
+    if (ids.length === 0) return;
+    if (spec.id === "assign") {
+      // Keep the selection until the dialog finishes (onDone clears it).
+      setBulkAssignIds([...ids]);
+      return;
+    }
+    if (spec.id === "resolve") {
+      // Resolve only the ones not already resolved; a confirm gates the write.
+      const unresolved = ids.filter((id) => !byId.get(id)?.resolved);
+      setBulkResolveIds(unresolved);
+    }
+  };
+
+  const peek = peekId ? byId.get(peekId) : undefined;
 
   return (
     <>
@@ -333,6 +386,15 @@ export function IncidentsPage() {
           />
         ) : (
           <div className="card overflow-hidden">
+            {bulk.count > 0 && (
+              <BulkActionBar
+                count={bulk.count}
+                actions={bulkActions}
+                onAction={onBulkAction}
+                onClear={bulk.clear}
+                busy={resolveMut.isPending}
+              />
+            )}
             <div
               {...containerProps}
               role="region"
@@ -342,6 +404,12 @@ export function IncidentsPage() {
               <table className="ddt">
                 <thead>
                   <tr>
+                    <th className="w-8">
+                      <SelectAllCheckbox
+                        state={bulk.headerState}
+                        onChange={bulk.toggleAll}
+                      />
+                    </th>
                     <th className="w-28">Service</th>
                     <th className="w-24">Severity</th>
                     <th className="w-32">When</th>
@@ -387,14 +455,11 @@ export function IncidentsPage() {
                         teamById={teamById}
                         memberById={memberById}
                         rosterLoading={rosterLoading}
+                        selected={bulk.isSelected(i.id)}
+                        onToggleSelect={() => bulk.toggle(i.id)}
+                        onPeek={() => setPeekId(i.id)}
                         notifyExpanded={expandedNotify.has(i.id)}
                         onToggleNotify={() => toggleNotify(i.id)}
-                        onAssign={() => setAssignFor(i)}
-                        onResolve={() => setResolveFor(i)}
-                        resolvePending={
-                          resolveMut.isPending &&
-                          resolveMut.variables?.id === i.id
-                        }
                       />
                     ))}
                 </tbody>
@@ -437,7 +502,186 @@ export function IncidentsPage() {
           }}
         />
       )}
+
+      {/* Bulk assign — one team/member set applied to every selected incident,
+          via the shared AssignDialog. onDone clears the selection. */}
+      {bulkAssignIds && (
+        <AssignDialog
+          incidentID={bulkAssignIds}
+          onClose={() => setBulkAssignIds(null)}
+          onDone={() => bulk.clear()}
+        />
+      )}
+
+      {/* Bulk resolve — a single confirm gates resolving the selection; each
+          not-yet-resolved incident is resolved through the same mutation. */}
+      {bulkResolveIds && (
+        <ConfirmDialog
+          title="Resolve incidents"
+          message={
+            bulkResolveIds.length === 0 ? (
+              <>All selected incidents are already resolved.</>
+            ) : (
+              <>
+                Mark{" "}
+                <span className="font-medium text-ink-50">
+                  {bulkResolveIds.length}
+                </span>{" "}
+                {bulkResolveIds.length === 1 ? "incident" : "incidents"} as
+                resolved? This stamps a resolved-at timestamp and cannot be
+                undone from the UI today.
+              </>
+            )
+          }
+          confirmLabel="Resolve"
+          busy={resolveMut.isPending}
+          onConfirm={() => {
+            for (const id of bulkResolveIds) {
+              const inc = byId.get(id);
+              if (inc && !inc.resolved) resolveMut.mutate(inc);
+            }
+            setBulkResolveIds(null);
+            bulk.clear();
+          }}
+          onClose={() => {
+            if (!resolveMut.isPending) setBulkResolveIds(null);
+          }}
+        />
+      )}
+
+      {/* Peek — inspect an incident without leaving the list; the footer link
+          opens the full incident page. */}
+      {peek && (
+        <PeekPanel
+          open
+          onClose={() => setPeekId(null)}
+          title={truncate(incidentTitle(peek), 60)}
+          footer={
+            <Link
+              to={`/incidents/${peek.id}`}
+              className="btn"
+              onClick={() => setPeekId(null)}
+            >
+              Open full page ↗
+            </Link>
+          }
+        >
+          <IncidentPeekBody
+            i={peek}
+            teamById={teamById}
+            memberById={memberById}
+            onAssign={() => {
+              setPeekId(null);
+              setAssignFor(peek);
+            }}
+            onResolve={() => {
+              setPeekId(null);
+              setResolveFor(peek);
+            }}
+          />
+        </PeekPanel>
+      )}
     </>
+  );
+}
+
+// IncidentPeekBody — the read-only detail shown in the slide-out, plus the same
+// Assign / Resolve actions the row offers so the peek is a full stand-in for the
+// row.
+function IncidentPeekBody({
+  i,
+  teamById,
+  memberById,
+  onAssign,
+  onResolve,
+}: {
+  i: IncidentSummary;
+  teamById: Map<string, string>;
+  memberById: Map<string, string>;
+  onAssign: () => void;
+  onResolve: () => void;
+}) {
+  const statusLabel = i.resolved ? "resolved" : i.acked_at ? "acked" : "open";
+  const statusTone = i.resolved ? "good" : i.acked_at ? "accent" : "bad";
+  const teamName = i.assigned_team_id
+    ? teamById.get(i.assigned_team_id)
+    : undefined;
+  const memberNames = (i.assigned_member_ids ?? []).map(
+    (id) => memberById.get(id) ?? id.slice(0, 8),
+  );
+  const hasAssignment =
+    !!i.assigned_team_id || (i.assigned_member_ids ?? []).length > 0;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <Pill tone={statusTone}>{statusLabel}</Pill>
+        <SourceBadge source={i.source} />
+      </div>
+
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+        <PeekField label="Service">
+          {i.service && i.service !== "_unknown" ? i.service : "—"}
+        </PeekField>
+        <PeekField label="When">
+          <span title={fmtAbs(i.created_at)}>{fmtRel(i.created_at)}</span>
+        </PeekField>
+        <PeekField label="Channels">
+          {i.channels_notified && i.channels_notified.length > 0 ? (
+            <span className="flex flex-wrap gap-1">
+              {i.channels_notified.map((c) => (
+                <Pill key={c}>{c}</Pill>
+              ))}
+            </span>
+          ) : (
+            "—"
+          )}
+        </PeekField>
+        <PeekField label="Assigned">
+          {hasAssignment ? (
+            <span className="flex flex-wrap gap-1">
+              {teamName && <Pill tone="accent">{teamName}</Pill>}
+              {memberNames.map((n, idx) => (
+                <Pill key={idx}>{n}</Pill>
+              ))}
+            </span>
+          ) : (
+            "—"
+          )}
+        </PeekField>
+        <PeekField label="Notify">{i.notify_status || "—"}</PeekField>
+        <PeekField label="ID">
+          <span className="font-mono text-2xs" title={i.id}>
+            {i.id.slice(0, 8)}
+          </span>
+        </PeekField>
+      </dl>
+
+      {i.notify_status === "failed" && i.notify_error && (
+        <div className="rounded-control border border-sev-critical/40 bg-sev-critical/5 p-2 text-2xs text-sev-critical">
+          <span className="font-semibold">Notify failed:</span> {i.notify_error}
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2 border-t border-ink-600 pt-3">
+        <button
+          className="btn"
+          aria-label="Assign team or member"
+          onClick={onAssign}
+        >
+          <UserPlus size={12} aria-hidden />{" "}
+          {hasAssignment ? "Change assignment" : "Assign"}
+        </button>
+        <button
+          className="btn"
+          aria-label="Mark incident resolved"
+          disabled={i.resolved}
+          onClick={onResolve}
+        >
+          <CheckCircle2 size={12} aria-hidden /> Resolve
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -447,22 +691,22 @@ function IncidentRow({
   teamById,
   memberById,
   rosterLoading,
+  selected,
+  onToggleSelect,
+  onPeek,
   notifyExpanded,
   onToggleNotify,
-  onAssign,
-  onResolve,
-  resolvePending,
 }: {
   i: IncidentSummary;
   rowProps: Record<string, unknown>;
   teamById: Map<string, string>;
   memberById: Map<string, string>;
   rosterLoading: boolean;
+  selected: boolean;
+  onToggleSelect: () => void;
+  onPeek: () => void;
   notifyExpanded: boolean;
   onToggleNotify: () => void;
-  onAssign: () => void;
-  onResolve: () => void;
-  resolvePending: boolean;
 }) {
   const status = i.resolved
     ? { label: "resolved", tone: "good" as const }
@@ -481,7 +725,14 @@ function IncidentRow({
 
   return (
     <>
-      <ClickableRow to={`/incidents/${i.id}`} {...rowProps}>
+      <tr {...rowProps}>
+        <td className="w-8">
+          <RowSelectCheckbox
+            checked={selected}
+            onChange={onToggleSelect}
+            label={`Select incident ${i.id.slice(0, 8)}`}
+          />
+        </td>
         <td>
           {i.service && i.service !== "_unknown" ? (
             <span className="text-ink-200">{i.service}</span>
@@ -577,30 +828,15 @@ function IncidentRow({
           <div className="flex justify-end gap-1">
             <button
               className="btn p-2"
-              aria-label="Assign team or member"
-              title={
-                hasAssignment ? "Change assignment" : "Assign team or member"
-              }
-              onClick={onAssign}
+              aria-label={`View incident ${i.id.slice(0, 8)}`}
+              title="View details"
+              onClick={onPeek}
             >
-              <UserPlus size={12} />
-            </button>
-            <button
-              className="btn p-2"
-              aria-label="Mark incident resolved"
-              title={
-                i.resolved
-                  ? "Already resolved"
-                  : "Mark this incident as resolved"
-              }
-              disabled={i.resolved || resolvePending}
-              onClick={onResolve}
-            >
-              <CheckCircle2 size={12} />
+              <Eye size={12} aria-hidden />
             </button>
           </div>
         </td>
-      </ClickableRow>
+      </tr>
       {notifyFailed && notifyExpanded && (
         <tr id={`notify-err-${i.id}`}>
           <td

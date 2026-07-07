@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/stats"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -115,6 +117,12 @@ func newPGCatalog(t *testing.T) (*Catalog, *sql.DB) {
 	if err != nil {
 		t.Fatalf("LoadCatalog: %v", err)
 	}
+	// Wire the same baseline fold the agent worker installs at boot
+	// (worker.go), so Upsert folds a real per-second rate: the global
+	// EWMA + variance, the 24 hour-of-day seasonal buckets, and the
+	// cumulative arithmetic average. Without this the catalog uses the
+	// legacy mean-only fold and baseline_avg/variance/seasonal never move.
+	cat.SetBaselineFold(resolveSpikeParams(config.AgentCatalogConfig{}, 30).fold())
 	return cat, db
 }
 
@@ -327,6 +335,117 @@ func TestPGCatalog_ReloadRoundTrip(t *testing.T) {
 	if len(got.Tags) != 1 || got.Tags[0] != "routine" {
 		t.Fatalf("reloaded tags = %v, want [routine]", got.Tags)
 	}
+	// The arithmetic-average baseline is folded during Upsert and must survive
+	// the round-trip through the new vs_logs.baseline_avg column. An unset
+	// per-pattern mode round-trips as '' (inherit the config default).
+	if got.BaselineAvg <= 0 {
+		t.Fatalf("reloaded baseline_avg = %v, want > 0 (folded during learn)", got.BaselineAvg)
+	}
+	if got.SpikeBaselineMode != "" {
+		t.Fatalf("reloaded spike_baseline_mode = %q, want empty (inherit config default)", got.SpikeBaselineMode)
+	}
+}
+
+// TestPGCatalog_BaselineModeRoundTrip proves every spike-baseline column added
+// by migration 007 — baseline_avg (DOUBLE) and spike_baseline_mode (TEXT) —
+// together with the pre-existing baseline_variance and the 24 hour-of-day
+// seasonal buckets, survives a write→reload cycle through the typed vs_logs
+// row unchanged, in EACH of the three per-pattern modes. It constructs the
+// patterns directly (not via the learner) so the asserted values are exact and
+// the mode string is the one persisted, isolating the column round-trip.
+func TestPGCatalog_BaselineModeRoundTrip(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("TEST_POSTGRES_DSN not set; skipping postgres tests")
+	}
+	store, err := storage.NewPostgres(storage.PostgresOptions{DSN: dsn})
+	if err != nil {
+		t.Fatalf("NewPostgres: %v", err)
+	}
+	acc, ok := store.(storage.SQLAccessor)
+	if !ok {
+		t.Fatal("postgres provider must implement storage.SQLAccessor")
+	}
+	db := acc.DB()
+	if _, err := db.Exec(`TRUNCATE TABLE vs_patterns, vs_logs, vs_services CASCADE`); err != nil {
+		t.Fatalf("truncate signal tables: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// One pattern per mode. Each carries a distinct global stat, a cumulative
+	// average, and a populated hour-of-day seasonal bucket, so a lost/rewritten
+	// column shows up as a mismatched read-back.
+	seasonal := make([]stats.EWMA, stats.HoursPerDay)
+	seasonal[2] = stats.EWMA{Mean: 44, Variance: 6.25, Count: 100}
+	seasonal[9] = stats.EWMA{Mean: 12.5, Variance: 1.5, Count: 37}
+	now := time.Now().UTC()
+	want := map[string]struct {
+		mode     string
+		freq     float64
+		variance float64
+		avg      float64
+	}{
+		"p-default":     {"default", 10, 4, 20},
+		"p-average":     {"average", 8.5, 2.25, 17.75},
+		"p-time-of-day": {"time_of_day", 44, 6.25, 30.5},
+	}
+	patterns := make(map[string]*Pattern, len(want))
+	for id, w := range want {
+		patterns[id] = &Pattern{
+			ID:                id,
+			OrgID:             storage.DefaultOrgID,
+			Template:          "boom <*>",
+			Count:             200,
+			BaselineFrequency: w.freq,
+			BaselineVariance:  w.variance,
+			BaselineAvg:       w.avg,
+			SpikeBaselineMode: w.mode,
+			Seasonal:          seasonal,
+			FirstSeen:         now,
+			LastSeen:          now,
+		}
+	}
+
+	cs := NewPostgresCatalogStore(db, storage.DefaultOrgID, 0)
+	if err := cs.Persist(patterns, nil); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+
+	// Fresh store + Load simulates a process restart: the columns are read
+	// straight back from vs_logs, not served from an in-memory cache.
+	reloaded := NewPostgresCatalogStore(db, storage.DefaultOrgID, 0)
+	got, _, err := reloaded.Load()
+	if err != nil {
+		t.Fatalf("reload Load: %v", err)
+	}
+	for id, w := range want {
+		p := got[id]
+		if p == nil {
+			t.Fatalf("pattern %q missing after reload", id)
+		}
+		if p.SpikeBaselineMode != w.mode {
+			t.Fatalf("%s spike_baseline_mode = %q, want %q", id, p.SpikeBaselineMode, w.mode)
+		}
+		if p.BaselineAvg != w.avg {
+			t.Fatalf("%s baseline_avg = %v, want %v", id, p.BaselineAvg, w.avg)
+		}
+		if p.BaselineFrequency != w.freq {
+			t.Fatalf("%s baseline_frequency = %v, want %v", id, p.BaselineFrequency, w.freq)
+		}
+		if p.BaselineVariance != w.variance {
+			t.Fatalf("%s baseline_variance = %v, want %v", id, p.BaselineVariance, w.variance)
+		}
+		// The 24 seasonal buckets survive intact (values + counts).
+		if len(p.Seasonal) != stats.HoursPerDay {
+			t.Fatalf("%s seasonal len = %d, want %d", id, len(p.Seasonal), stats.HoursPerDay)
+		}
+		if p.Seasonal[2] != seasonal[2] {
+			t.Fatalf("%s seasonal[2] = %+v, want %+v", id, p.Seasonal[2], seasonal[2])
+		}
+		if p.Seasonal[9] != seasonal[9] {
+			t.Fatalf("%s seasonal[9] = %+v, want %+v", id, p.Seasonal[9], seasonal[9])
+		}
+	}
 }
 
 // redactScrubber redacts a fixed secret token so the storage-boundary re-scrub
@@ -408,5 +527,107 @@ func TestPGCatalog_RedactionAtStorageBoundary(t *testing.T) {
 	}
 	if len(got.Samples) != 1 || strings.Contains(got.Samples[0], "hunter2") {
 		t.Fatalf("secret survived the storage-boundary re-scrub: %v", got.Samples)
+	}
+}
+
+// TestPGCatalog_SnapshotLoadBaselineParity guards the fleet-read/per-pattern-read
+// column-parity bug: for a single-instance pattern (instance_index = 0, the
+// common OSS case) the fleet-wide Snapshot (backing the list/peek) must return
+// the exact same learned baseline fields as the per-partition Load (backing the
+// detail page) — baseline_frequency, baseline_variance, baseline_avg,
+// spike_baseline_mode, and the hour-of-day seasonal buckets. A regression that
+// drops any of these columns from the Snapshot query/scan (leaving the list with
+// an empty seasonal baseline or a zeroed average/variance while the detail is
+// correct) fails here.
+func TestPGCatalog_SnapshotLoadBaselineParity(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("TEST_POSTGRES_DSN not set; skipping postgres tests")
+	}
+	store, err := storage.NewPostgres(storage.PostgresOptions{DSN: dsn})
+	if err != nil {
+		t.Fatalf("NewPostgres: %v", err)
+	}
+	acc, ok := store.(storage.SQLAccessor)
+	if !ok {
+		t.Fatal("postgres provider must implement storage.SQLAccessor")
+	}
+	db := acc.DB()
+	if _, err := db.Exec(`TRUNCATE TABLE vs_patterns, vs_logs, vs_services CASCADE`); err != nil {
+		t.Fatalf("truncate signal tables: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// A single-instance pattern carrying every learned baseline: a global
+	// EWMA + variance, a cumulative average, a per-pattern mode override, and
+	// two populated hour-of-day seasonal buckets.
+	seasonal := make([]stats.EWMA, stats.HoursPerDay)
+	seasonal[3] = stats.EWMA{Mean: 44, Variance: 6.25, Count: 100}
+	seasonal[14] = stats.EWMA{Mean: 12.5, Variance: 1.5, Count: 37}
+	now := time.Now().UTC()
+	want := &Pattern{
+		ID:                "p-parity",
+		OrgID:             storage.DefaultOrgID,
+		Template:          "boom <*>",
+		Count:             321,
+		BaselineFrequency: 3.82,
+		BaselineVariance:  63.4,
+		BaselineAvg:       11.63,
+		SpikeBaselineMode: "average",
+		Seasonal:          seasonal,
+		FirstSeen:         now,
+		LastSeen:          now,
+	}
+
+	cs := NewPostgresCatalogStore(db, storage.DefaultOrgID, 0)
+	if err := cs.Persist(map[string]*Pattern{want.ID: want}, nil); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+
+	// Load (detail path) and Snapshot (list path) must agree on every baseline.
+	loaded, _, err := cs.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	det := loaded[want.ID]
+	if det == nil {
+		t.Fatalf("pattern %q missing from Load", want.ID)
+	}
+	snap, _, err := cs.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	lst := patternByID(snap, want.ID)
+	if lst == nil {
+		t.Fatalf("pattern %q missing from Snapshot", want.ID)
+	}
+
+	if lst.BaselineFrequency != det.BaselineFrequency {
+		t.Fatalf("baseline_frequency: snapshot %v != load %v", lst.BaselineFrequency, det.BaselineFrequency)
+	}
+	if lst.BaselineVariance != det.BaselineVariance {
+		t.Fatalf("baseline_variance: snapshot %v != load %v", lst.BaselineVariance, det.BaselineVariance)
+	}
+	if lst.BaselineAvg != det.BaselineAvg {
+		t.Fatalf("baseline_avg: snapshot %v != load %v", lst.BaselineAvg, det.BaselineAvg)
+	}
+	if lst.SpikeBaselineMode != det.SpikeBaselineMode {
+		t.Fatalf("spike_baseline_mode: snapshot %q != load %q", lst.SpikeBaselineMode, det.SpikeBaselineMode)
+	}
+	if len(lst.Seasonal) != len(det.Seasonal) {
+		t.Fatalf("seasonal len: snapshot %d != load %d", len(lst.Seasonal), len(det.Seasonal))
+	}
+	for i := range det.Seasonal {
+		if lst.Seasonal[i] != det.Seasonal[i] {
+			t.Fatalf("seasonal[%d]: snapshot %+v != load %+v", i, lst.Seasonal[i], det.Seasonal[i])
+		}
+	}
+
+	// And each round-trips to the value written (Default is populated, not 0).
+	if det.BaselineFrequency != want.BaselineFrequency {
+		t.Fatalf("baseline_frequency load = %v, want %v", det.BaselineFrequency, want.BaselineFrequency)
+	}
+	if det.BaselineAvg != want.BaselineAvg {
+		t.Fatalf("baseline_avg load = %v, want %v", det.BaselineAvg, want.BaselineAvg)
 	}
 }

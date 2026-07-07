@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/stats"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
@@ -72,7 +73,9 @@ const (
 	sqlCatalogLoadLogs = `
 		SELECT p.id, COALESCE(p.service, ''), COALESCE(p.verdict, ''), p.tags, p.deleted,
 		       l.template, COALESCE(l.source, ''), COALESCE(l.rule_name, ''),
-		       l.count, l.baseline_frequency, l.samples, l.first_seen, l.last_seen
+		       l.count, l.baseline_frequency, l.baseline_variance, l.baseline_avg,
+		       COALESCE(l.spike_baseline_mode, ''), l.seasonal,
+		       l.samples, l.first_seen, l.last_seen
 		FROM vs_logs l
 		JOIN vs_patterns p
 		  ON p.org_id = l.org_id AND p.id = l.pattern_id AND p.kind = 'log'
@@ -102,14 +105,19 @@ const (
 	sqlCatalogUpsertLog = `
 		INSERT INTO vs_logs
 		    (org_id, pattern_id, instance_index, template, source, rule_name,
-		     count, baseline_frequency, samples, first_seen, last_seen)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		     count, baseline_frequency, baseline_variance, baseline_avg,
+		     spike_baseline_mode, seasonal, samples, first_seen, last_seen)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		ON CONFLICT (org_id, pattern_id, instance_index) DO UPDATE
 		SET template            = EXCLUDED.template,
 		    source              = EXCLUDED.source,
 		    rule_name           = EXCLUDED.rule_name,
 		    count               = EXCLUDED.count,
 		    baseline_frequency  = EXCLUDED.baseline_frequency,
+		    baseline_variance   = EXCLUDED.baseline_variance,
+		    baseline_avg        = EXCLUDED.baseline_avg,
+		    spike_baseline_mode = EXCLUDED.spike_baseline_mode,
+		    seasonal            = EXCLUDED.seasonal,
 		    samples             = EXCLUDED.samples,
 		    last_seen           = EXCLUDED.last_seen`
 
@@ -120,12 +128,24 @@ const (
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (org_id, name) DO NOTHING`
 
-	// Snapshot: fleet-wide read view — SUM/MIN/MAX across partitions, joined
-	// to the curated root, scalar attributes from the lowest-index partition.
+	// Snapshot: fleet-wide read view. Fleet-additive counters (count and the
+	// per-second-rate baseline_frequency) are SUMmed across every instance's
+	// partition, first/last-seen are MIN/MAX across them, and the remaining
+	// scalar attributes — template, source, rule_name, samples AND the learned
+	// dispersion baselines (baseline_variance, baseline_avg, spike_baseline_mode,
+	// seasonal) — are all taken from the single lowest-instance_index partition.
+	// Under the single-writer-per-partition model each instance owns its own
+	// partition, so those non-additive learned stats cannot be meaningfully
+	// summed; reading them all from the same lowest-index partition keeps them
+	// mutually consistent, and for the common single-instance case
+	// (instance_index = 0, one row per pattern) this makes Snapshot return the
+	// exact same baseline columns as the per-partition Load.
 	sqlCatalogSnapshotLogs = `
 		SELECT p.id, COALESCE(p.service, ''), COALESCE(p.verdict, ''), p.tags,
 		       agg.total_count, agg.first_seen, agg.last_seen, agg.total_baseline,
-		       lo.template, COALESCE(lo.source, ''), COALESCE(lo.rule_name, ''), lo.samples
+		       lo.template, COALESCE(lo.source, ''), COALESCE(lo.rule_name, ''),
+		       lo.baseline_variance, lo.baseline_avg,
+		       COALESCE(lo.spike_baseline_mode, ''), lo.seasonal, lo.samples
 		FROM vs_patterns p
 		JOIN LATERAL (
 		    SELECT SUM(count) AS total_count, MIN(first_seen) AS first_seen,
@@ -134,7 +154,8 @@ const (
 		    WHERE org_id = p.org_id AND pattern_id = p.id
 		) agg ON agg.total_count IS NOT NULL
 		JOIN LATERAL (
-		    SELECT template, source, rule_name, samples
+		    SELECT template, source, rule_name,
+		           baseline_variance, baseline_avg, spike_baseline_mode, seasonal, samples
 		    FROM vs_logs
 		    WHERE org_id = p.org_id AND pattern_id = p.id
 		    ORDER BY instance_index ASC
@@ -231,15 +252,20 @@ func (s *pgCatalogStore) Load() (map[string]*Pattern, map[string]*ServiceInfo, e
 		var (
 			id, service, verdict       string
 			tagsRaw, samplesRaw        []byte
+			seasonalRaw                []byte
 			deleted                    bool
 			template, source, ruleName string
 			count                      int64
 			baselineFreq               float64
+			baselineVar                float64
+			baselineAvg                float64
+			spikeBaselineMode          string
 			firstSeen, lastSeen        time.Time
 		)
 		if err := rows.Scan(&id, &service, &verdict, &tagsRaw, &deleted,
-			&template, &source, &ruleName, &count, &baselineFreq,
-			&samplesRaw, &firstSeen, &lastSeen); err != nil {
+			&template, &source, &ruleName, &count, &baselineFreq, &baselineVar,
+			&baselineAvg, &spikeBaselineMode, &seasonalRaw, &samplesRaw,
+			&firstSeen, &lastSeen); err != nil {
 			rows.Close()
 			return patterns, services, fmt.Errorf("agent: pg catalog scan log: %w", err)
 		}
@@ -251,6 +277,10 @@ func (s *pgCatalogStore) Load() (map[string]*Pattern, map[string]*ServiceInfo, e
 			LastSeen:          lastSeen,
 			Count:             int(count),
 			BaselineFrequency: baselineFreq,
+			BaselineVariance:  baselineVar,
+			BaselineAvg:       baselineAvg,
+			SpikeBaselineMode: spikeBaselineMode,
+			Seasonal:          decodeSeasonal(seasonalRaw),
 			Verdict:           verdict,
 			RuleName:          ruleName,
 			Source:            source,
@@ -321,8 +351,10 @@ func (s *pgCatalogStore) Persist(patterns map[string]*Pattern, services map[stri
 		}
 		if _, err := tx.Exec(sqlCatalogUpsertLog,
 			s.orgID, id, s.instanceIndex, p.Template, nullIfEmpty(p.Source),
-			nullIfEmpty(p.RuleName), int64(p.Count), p.BaselineFrequency,
-			encodeStringSlice(rescrubSamples(p.Samples, s.scrub)), utcOrNow(p.FirstSeen), utcOrNow(p.LastSeen),
+			nullIfEmpty(p.RuleName), int64(p.Count), p.BaselineFrequency, p.BaselineVariance,
+			p.BaselineAvg, p.SpikeBaselineMode, encodeSeasonal(p.Seasonal),
+			encodeStringSlice(rescrubSamples(p.Samples, s.scrub)),
+			utcOrNow(p.FirstSeen), utcOrNow(p.LastSeen),
 		); err != nil {
 			return fmt.Errorf("agent: pg catalog persist log %q: %w", id, err)
 		}
@@ -343,9 +375,12 @@ func (s *pgCatalogStore) Persist(patterns map[string]*Pattern, services map[stri
 	return nil
 }
 
-// Snapshot returns the unified fleet-wide read view: counts SUMmed across
-// partitions, scalar attributes from the lowest-index partition, curated root
-// columns applied, tombstoned patterns/services excluded.
+// Snapshot returns the unified fleet-wide read view: counts and baseline
+// frequency SUMmed across partitions, the remaining scalar attributes (template,
+// source, rule_name, samples, and the learned dispersion baselines
+// variance/avg/mode/seasonal) taken from the lowest-index partition, curated
+// root columns applied, tombstoned patterns/services excluded. For the common
+// single-instance case this returns the exact same baseline columns as Load.
 func (s *pgCatalogStore) Snapshot() ([]*Pattern, map[string]ServiceInfo, error) {
 	rows, err := s.db.Query(sqlCatalogSnapshotLogs, s.orgID)
 	if err != nil {
@@ -356,14 +391,19 @@ func (s *pgCatalogStore) Snapshot() ([]*Pattern, map[string]ServiceInfo, error) 
 		var (
 			id, service, verdict       string
 			tagsRaw, samplesRaw        []byte
+			seasonalRaw                []byte
 			totalCount                 int64
 			firstSeen, lastSeen        time.Time
 			totalBaseline              float64
+			baselineVar                float64
+			baselineAvg                float64
+			spikeBaselineMode          string
 			template, source, ruleName string
 		)
 		if err := rows.Scan(&id, &service, &verdict, &tagsRaw,
 			&totalCount, &firstSeen, &lastSeen, &totalBaseline,
-			&template, &source, &ruleName, &samplesRaw); err != nil {
+			&template, &source, &ruleName, &baselineVar, &baselineAvg,
+			&spikeBaselineMode, &seasonalRaw, &samplesRaw); err != nil {
 			rows.Close()
 			return nil, nil, fmt.Errorf("agent: pg catalog snapshot scan: %w", err)
 		}
@@ -375,6 +415,10 @@ func (s *pgCatalogStore) Snapshot() ([]*Pattern, map[string]ServiceInfo, error) 
 			LastSeen:          lastSeen,
 			Count:             int(totalCount),
 			BaselineFrequency: totalBaseline,
+			BaselineVariance:  baselineVar,
+			BaselineAvg:       baselineAvg,
+			SpikeBaselineMode: spikeBaselineMode,
+			Seasonal:          decodeSeasonal(seasonalRaw),
 			Verdict:           verdict,
 			RuleName:          ruleName,
 			Source:            source,
@@ -589,6 +633,35 @@ func decodeStringSlice(raw []byte) []string {
 		return nil
 	}
 	var out []string
+	if err := json.Unmarshal(raw, &out); err != nil || len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// encodeSeasonal marshals the seasonal EWMA buckets to their JSONB payload,
+// mirroring the enterprise vs_metrics/vs_traces seasonal encoding (an array of
+// {mean,variance,count}). An empty/nil slice emits "[]" so the column never
+// stores SQL NULL or JSON "null" (the NOT NULL / DEFAULT '[]' contract).
+func encodeSeasonal(v []stats.EWMA) []byte {
+	if len(v) == 0 {
+		return []byte("[]")
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return []byte("[]")
+	}
+	return b
+}
+
+// decodeSeasonal unmarshals the seasonal JSONB payload back to the bucket
+// slice, normalizing empty/"[]"/"null" to nil so a pattern with no seasonal
+// buckets reads back byte-identical (omitempty).
+func decodeSeasonal(raw []byte) []stats.EWMA {
+	if len(raw) == 0 {
+		return nil
+	}
+	var out []stats.EWMA
 	if err := json.Unmarshal(raw, &out); err != nil || len(out) == 0 {
 		return nil
 	}

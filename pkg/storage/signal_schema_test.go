@@ -125,6 +125,39 @@ func TestSignalSchema_NoSecretColumns(t *testing.T) {
 	}
 }
 
+// TestSignalSchema_BaselineModeColumns proves migration 007 landed the two
+// remaining spike-baseline columns on vs_logs additively and default-safe:
+// baseline_avg is a NOT NULL double defaulting to 0, and spike_baseline_mode is
+// a NOT NULL text defaulting to ” — so every pre-migration row reads back
+// byte-identically and simply re-learns.
+func TestSignalSchema_BaselineModeColumns(t *testing.T) {
+	db := migratedDB(t)
+	for _, tc := range []struct {
+		column, dataType, defaultLike string
+	}{
+		{"baseline_avg", "double precision", "0"},
+		{"spike_baseline_mode", "text", "''"},
+	} {
+		var dataType, isNullable, colDefault string
+		if err := db.QueryRow(`
+			SELECT data_type, is_nullable, COALESCE(column_default, '')
+			FROM information_schema.columns
+			WHERE table_name='vs_logs' AND column_name=$1`, tc.column,
+		).Scan(&dataType, &isNullable, &colDefault); err != nil {
+			t.Fatalf("vs_logs.%s missing (migration 007 not applied?): %v", tc.column, err)
+		}
+		if dataType != tc.dataType {
+			t.Fatalf("vs_logs.%s data_type = %q, want %q", tc.column, dataType, tc.dataType)
+		}
+		if isNullable != "NO" {
+			t.Fatalf("vs_logs.%s is_nullable = %q, want NO", tc.column, isNullable)
+		}
+		if !strings.Contains(colDefault, tc.defaultLike) {
+			t.Fatalf("vs_logs.%s default = %q, want it to contain %q", tc.column, colDefault, tc.defaultLike)
+		}
+	}
+}
+
 // TestSignalSchema_KindInForeignKey proves migration 004 folded `kind`
 // into the child→root FK: vs_patterns carries a UNIQUE (org_id, id, kind) key,
 // vs_logs pins kind='log' via a CHECK, and vs_logs FK-references

@@ -153,6 +153,19 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 	w.ewmaAlpha = 0.2 // configurable once spike detection lands
 	w.newServiceGrace = parseDurationOr(opt.Cfg.NewServiceGrace, 0)
 
+	// Wire the baseline fold from the poll interval + spike settings so
+	// Catalog.Upsert folds a poll-independent per-second rate through the
+	// outlier-resistant EWMA (and seasonal buckets when enabled), sharing the
+	// detector's reject cutoff / seasonal period / confidence gate.
+	w.catalog.SetBaselineFold(resolveSpikeParams(opt.Cfg.Catalog, w.pollInterval.Seconds()).fold())
+
+	// One-time deprecation notice: spike_multiplier no longer drives detection
+	// (the threshold moved from a volume-blind ratio to the z-score). It is
+	// accepted-and-ignored so an existing config still loads.
+	if opt.Cfg.Catalog.SpikeMultiplier != 0 {
+		log.Printf("agent: config key `spike_multiplier` is DEPRECATED and ignored — spike detection now uses `spike_z` (a z-score). Remove spike_multiplier from your config; see docs/agent/spike.")
+	}
+
 	// Per-source-KIND regex default. The logs matcher is the global default
 	// (w.matcher); metrics/traces get a build-once match-all matcher so their
 	// non-"error" messages flow with zero operator config. The OPTIONAL
@@ -575,7 +588,7 @@ func (w *Worker) handleObservation(
 			log.Printf("%sagent[shadow]: would alert pattern=%s service=%s tag=%s verdict=%s freq=%d%s",
 				colorGreen, o.Key, o.Service, w.shadowTag(o), v.Class, o.Frequency, colorReset)
 		} else {
-			outcome := w.emitDetect(ctx, src.Name(), o.Key, o.Signal, o.Service, o.Samples, v.Class, v.Baseline)
+			outcome := w.emitDetect(ctx, src.Name(), o.Key, o.Signal, o.Service, o.Samples, v.Class, v.Baseline, v.Score, std, v.Reason)
 			verdicts["emit_"+outcome]++
 		}
 
@@ -624,6 +637,8 @@ func (w *Worker) emitDetect(
 	signals []core.Signal,
 	verdict core.AgentVerdict,
 	prevBaseline float64,
+	score, baselineStd float64,
+	explanation string,
 ) string {
 	result := core.AgentResult{
 		Verdict:       verdict,
@@ -645,6 +660,9 @@ func (w *Worker) emitDetect(
 		Verdict:      verdict.String(),
 		Frequency:    len(signals),
 		Baseline:     prevBaseline,
+		BaselineStd:  baselineStd,
+		Score:        score,
+		Explanation:  explanation,
 		Samples:      sampleMessages(signals, 3),
 		RuleSeverity: result.RuleSeverity,
 	}
@@ -795,39 +813,6 @@ func (w *Worker) preBrainMatcher(name string) *RegexMatcher {
 	default:
 		return nil
 	}
-}
-
-// isSpike returns true when the current tick frequency exceeds the
-// pattern's prior EWMA baseline by `multiplier`, subject to two safety
-// floors:
-//
-//   - tickFreq must be at least minFreq (don't trigger on absolute counts
-//     so small the ratio is meaningless).
-//   - prevCount must be at least minBaselineCount (don't treat a
-//     barely-seen pattern's first big tick as a spike; let it accumulate
-//     a real baseline first).
-//
-// multiplier <= 0 disables spike detection entirely.
-func isSpike(prevBaseline float64, prevCount, tickFreq int, multiplier float64, minFreq, minBaselineCount int) bool {
-	if multiplier <= 0 {
-		return false
-	}
-	if minFreq <= 0 {
-		minFreq = 5
-	}
-	if minBaselineCount <= 0 {
-		minBaselineCount = 20
-	}
-	if tickFreq < minFreq {
-		return false
-	}
-	if prevCount < minBaselineCount {
-		return false
-	}
-	if prevBaseline <= 0 {
-		return false
-	}
-	return float64(tickFreq) > multiplier*prevBaseline
 }
 
 // -----------------------------------------------------------------------------

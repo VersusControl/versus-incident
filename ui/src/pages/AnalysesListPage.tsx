@@ -1,30 +1,36 @@
-import { useMemo } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Search, X } from "lucide-react";
-import { api } from "@/lib/api";
+import { Eye, Search, X } from "lucide-react";
+import { api, type AnalysisRecord } from "@/lib/api";
 import { fmtAbs, fmtRel, formatDuration, incidentTitle } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
 import { usePagination } from "@/lib/pagination";
+import { useBulkSelection } from "@/lib/useBulkSelection";
 import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SegmentedControl } from "@/components/SegmentedControl";
-import { ClickableRow } from "@/components/DataTable";
 import { Pagination } from "@/components/Pagination";
+import { PeekPanel, PeekField } from "@/components/PeekPanel";
+import {
+  BulkActionBar,
+  RowSelectCheckbox,
+  SelectAllCheckbox,
+} from "@/components/BulkActionBar";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { EmptyState } from "@/components/feedback";
 
-const COLS = 7;
+const COLS = 9;
 
 // AnalysesListPage lists every analysis recorded across all incidents,
-// newest first. Rows open the analysis DETAIL page (that route
-// had no inbound link); the Incident column keeps a small secondary link
-// to the parent incident. The Post-mortems tab is the explained future
-// feature that used to be a dead sidebar item (empty-nav-state rule).
+// newest first. The per-row eye opens a peek slide-out (rows themselves do
+// not navigate); the peek footer links to the analysis DETAIL page. The
+// Incident column keeps a small secondary link to the parent incident. The
+// Post-mortems tab is the explained future feature that used to be a dead
+// sidebar item (empty-nav-state rule).
 export function AnalysesListPage() {
-  const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const tab = params.get("tab") ?? "analyses";
   const status = params.get("status") ?? "all";
@@ -79,11 +85,23 @@ export function AnalysesListPage() {
     resetKey: `${status}|${incidentFilter ?? ""}|${q}`,
   });
 
+  // Peek + selection. The analyses list is read-only, so the action bar
+  // carries no actions — it collapses to the selection count + Clear, matching
+  // the learned-signal tables — and the eye opens a peek without leaving the
+  // list. Rows do not navigate; the peek footer is the way to the full page.
+  const [peekId, setPeekId] = useState<string | null>(null);
+  const pageKeys = useMemo(() => pg.pageItems.map((r) => r.id), [pg.pageItems]);
+  const bulk = useBulkSelection(
+    pageKeys,
+    `${status}|${incidentFilter ?? ""}|${q}|${pg.page}`,
+  );
+  const peek = peekId ? (data ?? []).find((r) => r.id === peekId) : undefined;
+
   const keys = useTableKeys({
     size: pg.pageItems.length,
     onOpen: (i) => {
       const rec = pg.pageItems[i];
-      if (rec) navigate(`/incidents/${rec.incident_id}/analyses/${rec.id}`);
+      if (rec) setPeekId(rec.id);
     },
   });
 
@@ -186,6 +204,14 @@ export function AnalysesListPage() {
             )}
 
             <div className="card overflow-hidden">
+              {bulk.count > 0 && (
+                <BulkActionBar
+                  count={bulk.count}
+                  actions={[]}
+                  onAction={() => {}}
+                  onClear={bulk.clear}
+                />
+              )}
               <div
                 className="max-h-[calc(100vh-220px)] overflow-auto"
                 aria-label="Analyses table — j/k to move, Enter to open"
@@ -194,6 +220,12 @@ export function AnalysesListPage() {
                 <table className="ddt">
                   <thead>
                     <tr>
+                      <th className="w-8">
+                        <SelectAllCheckbox
+                          state={bulk.headerState}
+                          onChange={bulk.toggleAll}
+                        />
+                      </th>
                       <th className="w-32">When</th>
                       <th>Incident</th>
                       <th>Finding</th>
@@ -201,6 +233,9 @@ export function AnalysesListPage() {
                       <th className="w-32">Model</th>
                       <th className="w-20">Duration</th>
                       <th className="w-20">Status</th>
+                      <th className="w-12 text-right">
+                        <span className="sr-only">Action</span>
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
@@ -227,11 +262,14 @@ export function AnalysesListPage() {
                       </tr>
                     )}
                     {pg.pageItems.map((rec, i) => (
-                      <ClickableRow
-                        key={rec.id}
-                        to={`/incidents/${rec.incident_id}/analyses/${rec.id}`}
-                        {...keys.rowProps(i)}
-                      >
+                      <tr key={rec.id} {...keys.rowProps(i)}>
+                        <td className="w-8">
+                          <RowSelectCheckbox
+                            checked={bulk.isSelected(rec.id)}
+                            onChange={() => bulk.toggle(rec.id)}
+                            label={`Select analysis ${rec.id}`}
+                          />
+                        </td>
                         <td
                           className="text-ink-300"
                           title={fmtAbs(rec.requested_at)}
@@ -275,7 +313,20 @@ export function AnalysesListPage() {
                             {rec.status}
                           </Pill>
                         </td>
-                      </ClickableRow>
+                        <td>
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              type="button"
+                              className="btn p-1"
+                              aria-label={`View analysis ${rec.id}`}
+                              title="View details"
+                              onClick={() => setPeekId(rec.id)}
+                            >
+                              <Eye size={14} aria-hidden />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
                     ))}
                   </tbody>
                 </table>
@@ -285,6 +336,93 @@ export function AnalysesListPage() {
           </>
         )}
       </main>
+
+      {peek && (
+        <PeekPanel
+          open
+          onClose={() => setPeekId(null)}
+          title={peek.finding?.Title || `Analysis ${peek.id.slice(0, 8)}`}
+          footer={
+            <Link
+              to={`/incidents/${peek.incident_id}/analyses/${peek.id}`}
+              className="btn"
+              onClick={() => setPeekId(null)}
+            >
+              Open full page ↗
+            </Link>
+          }
+        >
+          <AnalysisPeekBody
+            rec={peek}
+            incidentTitleText={
+              titleByID.get(peek.incident_id) ||
+              incidentTitle({ id: peek.incident_id })
+            }
+            onOpenIncident={() => setPeekId(null)}
+          />
+        </PeekPanel>
+      )}
     </>
+  );
+}
+
+// AnalysisPeekBody — the read-only detail slide-out for one analysis, matching
+// the peek shape used across the incident / decision tables.
+function AnalysisPeekBody({
+  rec,
+  incidentTitleText,
+  onOpenIncident,
+}: {
+  rec: AnalysisRecord;
+  incidentTitleText: string;
+  onOpenIncident: () => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <Pill tone={rec.status === "ok" ? "good" : "bad"}>{rec.status}</Pill>
+        <SeverityBadge severity={rec.finding?.Severity} />
+      </div>
+
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+        <PeekField label="When">
+          <span title={fmtAbs(rec.requested_at)}>
+            {fmtRel(rec.requested_at)}
+          </span>
+        </PeekField>
+        <PeekField label="Model">{rec.model || "—"}</PeekField>
+        <PeekField label="Duration">
+          {rec.duration_ms !== undefined
+            ? formatDuration(rec.duration_ms)
+            : "—"}
+        </PeekField>
+        <PeekField label="Incident">
+          <Link
+            to={`/incidents/${rec.incident_id}`}
+            className="text-link hover:underline"
+            onClick={onOpenIncident}
+          >
+            {incidentTitleText}
+          </Link>
+        </PeekField>
+      </dl>
+
+      {rec.finding?.Summary && (
+        <div>
+          <div className="mb-1 text-2xs uppercase tracking-wide text-ink-400">
+            Summary
+          </div>
+          <p className="text-xs leading-relaxed text-ink-100">
+            {rec.finding.Summary}
+          </p>
+        </div>
+      )}
+
+      {rec.error && (
+        <div className="rounded-control border border-sev-critical/40 bg-sev-critical/5 p-2 text-2xs text-sev-critical">
+          <span className="font-semibold">Error:</span> {rec.error}
+        </div>
+      )}
+    </div>
   );
 }

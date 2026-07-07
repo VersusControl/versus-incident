@@ -73,3 +73,21 @@ export function PeekPanel({
     </div>
   );
 }
+
+// PeekField — one labelled fact inside a PeekPanel body. Shared by the peeks
+// added to the incident / decision / analysis tables so their detail slide-outs
+// read identically to the logs and metrics/traces peeks.
+export function PeekField({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <dt className="text-2xs uppercase tracking-wide text-ink-400">{label}</dt>
+      <dd className="mt-0.5 text-ink-100">{children}</dd>
+    </div>
+  );
+}

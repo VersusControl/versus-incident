@@ -216,12 +216,12 @@ func TestLogReadiness_EdgeCases(t *testing.T) {
 		}
 	})
 
-	t.Run("learning with a live baseline → RatePerMin = EWMA/pollMinutes", func(t *testing.T) {
-		// BaselineFrequency is sightings/tick; poll=30s=0.5min ⇒ 6/0.5 = 12/min.
-		p := &Pattern{Count: 10, BaselineFrequency: 6}
+	t.Run("learning with a live baseline → RatePerMin = rate × 60", func(t *testing.T) {
+		// BaselineFrequency is now a per-second rate; 0.2/s ⇒ 0.2 × 60 = 12/min.
+		p := &Pattern{Count: 10, BaselineFrequency: 0.2}
 		r := LogReadiness(p, 100, poll)
 		if r.RatePerMin != 12 {
-			t.Errorf("RatePerMin = %v, want 12 (6 sightings/tick ÷ 0.5 min/tick)", r.RatePerMin)
+			t.Errorf("RatePerMin = %v, want 12 (0.2/s × 60)", r.RatePerMin)
 		}
 	})
 }

@@ -1,12 +1,13 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
-import { Plus, Search, Trash2 } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+import { Plus, Search, Trash2, Eye } from "lucide-react";
 import { api } from "@/lib/api";
 import { fmtAbs, fmtRel } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
 import { InfoHint } from "@/components/InfoHint";
+import { SegmentedControl } from "@/components/SegmentedControl";
 import { AutoRefreshControl } from "@/components/AutoRefreshControl";
 import { useAutoRefresh } from "@/lib/useAutoRefresh";
 import { EmptyState } from "@/components/feedback";
@@ -15,6 +16,7 @@ import { SkRows } from "@/components/Skeleton";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { TextInputModal } from "@/components/TextInputModal";
 import { Pagination } from "@/components/Pagination";
+import { PeekPanel, PeekField } from "@/components/PeekPanel";
 import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
 import {
@@ -28,6 +30,12 @@ import {
   useIntelLicensed,
   useLearnExclusions,
 } from "@/lib/useLearnExclusions";
+import {
+  countExcluded,
+  filterByScope,
+  isExclusionScope,
+  SCOPE_PARAM,
+} from "@/lib/rowActions";
 import {
   GRACE_ACTION_LABEL,
   graceActionsForSelection,
@@ -46,10 +54,25 @@ export function ServicesPage() {
   });
 
   const [q, setQ] = useState("");
+  const [params] = useSearchParams();
+  const scope = isExclusionScope(params.get(SCOPE_PARAM));
+
+  // Eye → peek slide-out. Rows never navigate; the eye opens a read-only peek
+  // of the key service facts and the peek footer links to the full detail
+  // page. The list row carries origin/grace/first-seen; the pattern & incident
+  // counts come from the service-detail read (fetched on open, same shape the
+  // full page uses), so the peek shows a loading state until they arrive.
+  const [peekName, setPeekName] = useState<string | null>(null);
+  const peekInfo = peekName ? data?.[peekName] : undefined;
+  const peekDetail = useQuery({
+    queryKey: ["service-detail", peekName],
+    queryFn: () => api.getServiceDetail(peekName as string),
+    enabled: !!peekName,
+  });
 
   // Enterprise Disable-Learn ("ignore") controls — gated to a licensed admin,
   // hidden on community / viewer. Drives the Ignore/Resume bulk actions and the
-  // "Ignored services" table below the list.
+  // Active | Ignored scope toggle.
   const licensed = useIntelLicensed();
   const ignore = useLearnExclusions(licensed);
 
@@ -173,7 +196,33 @@ export function ServicesPage() {
   const filtered = needle
     ? sorted.filter(([name]) => name.toLowerCase().includes(needle))
     : sorted;
-  const pg = usePagination(filtered, { resetKey: q });
+
+  // ----- Active | Ignored scope --------------------------------------
+  // A service is "ignored" when it is held out of learning (the whole-service
+  // exclude). The scope control is gated on ignore.visible — absent for
+  // community / viewers, so scope stays "active" and nothing is partitioned
+  // out. The server stays authority: this only re-partitions what the loaded
+  // policy already reports.
+  const isRowExcluded = ([name]: [string, unknown]) =>
+    ignore.isServiceExcluded(name);
+  const scopeCounts = useMemo(
+    () => ({
+      active: filtered.length - countExcluded(filtered, isRowExcluded),
+      ignored: countExcluded(filtered, isRowExcluded),
+    }),
+    // isRowExcluded closes over ignore; recompute when the policy or list
+    // changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filtered, ignore],
+  );
+  const scoped = useMemo(
+    () =>
+      ignore.visible ? filterByScope(filtered, scope, isRowExcluded) : filtered,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filtered, scope, ignore],
+  );
+
+  const pg = usePagination(scoped, { resetKey: `${scope}|${q}` });
 
   // ----- selection + grace action bar -------------------------------------
   // The SAME checkbox action model the learned-signal pages use: a select-all
@@ -187,7 +236,7 @@ export function ServicesPage() {
     () => pg.pageItems.map(([name]) => name),
     [pg.pageItems],
   );
-  const bulk = useBulkSelection(pageNames, `${q}|${pg.page}`);
+  const bulk = useBulkSelection(pageNames, `${scope}|${q}|${pg.page}`);
 
   const selectedInGrace = bulk.selectedKeys.map(
     (name) => data?.[name]?.in_grace ?? false,
@@ -266,8 +315,8 @@ export function ServicesPage() {
     renameService.isPending ||
     deleteService.isPending;
 
-  // Columns: checkbox + Service + First seen + Origin + Status + Grace.
-  const cols = 6;
+  // Columns: checkbox + Service + First seen + Origin + Status + Grace + Action.
+  const cols = 7;
 
   return (
     <>
@@ -297,6 +346,21 @@ export function ServicesPage() {
 
       <main className="flex-1 overflow-auto p-6">
         <div className="mb-3 flex flex-wrap items-center gap-2">
+          {ignore.visible && (
+            <SegmentedControl
+              param={SCOPE_PARAM}
+              defaultValue="active"
+              aria-label="Learning scope"
+              options={[
+                { value: "active", label: "Active", badge: scopeCounts.active },
+                {
+                  value: "ignored",
+                  label: "Ignored",
+                  badge: scopeCounts.ignored,
+                },
+              ]}
+            />
+          )}
           <div className="relative w-full max-w-md sm:w-auto sm:flex-1">
             <Search
               size={12}
@@ -346,7 +410,7 @@ export function ServicesPage() {
                         onChange={bulk.toggleAll}
                       />
                     </th>
-                    <th>Service</th>
+                    <th className="w-48">Service</th>
                     <th className="w-48">First seen</th>
                     <th className="w-24">Origin</th>
                     <th className="w-32">
@@ -365,17 +429,25 @@ export function ServicesPage() {
                         example="'12m30s' means detection starts in about 12 and a half minutes; '—' means the service is already being detected on."
                       />
                     </th>
+                    <th className="w-12 text-right">
+                      <span className="sr-only">Action</span>
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   {isLoading && <SkRows rows={6} cols={cols} />}
-                  {!isLoading && !isError && filtered.length === 0 && (
+                  {!isLoading && !isError && scoped.length === 0 && (
                     <tr>
                       <td colSpan={cols}>
                         {entries.length === 0 ? (
                           <EmptyState
                             title="No services discovered yet."
                             hint="Service detection runs on every signal that matches `agent.service_patterns`."
+                          />
+                        ) : scope === "ignored" ? (
+                          <EmptyState
+                            title="No services are ignored"
+                            hint="Select one or more services and choose ‘Ignore learning’ and it moves here, held out of learning until you resume it."
                           />
                         ) : (
                           <EmptyState
@@ -398,16 +470,7 @@ export function ServicesPage() {
                             />
                           </td>
                           <td className="font-mono">
-                            {isUnknown ? (
-                              name
-                            ) : (
-                              <Link
-                                className="link"
-                                to={`/agent/services/${encodeURIComponent(name)}`}
-                              >
-                                {name}
-                              </Link>
-                            )}
+                            {name}
                             {isUnknown && (
                               <Pill tone="warn" className="ml-2">
                                 fallback
@@ -449,6 +512,23 @@ export function ServicesPage() {
                               info.grace_seconds_remaining,
                             )}
                           </td>
+                          <td>
+                            <div className="flex items-center justify-end gap-1">
+                              {isUnknown ? (
+                                <span className="text-ink-600">—</span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="btn p-1"
+                                  aria-label={`View service ${name}`}
+                                  title="View details"
+                                  onClick={() => setPeekName(name)}
+                                >
+                                  <Eye size={14} aria-hidden />
+                                </button>
+                              )}
+                            </div>
+                          </td>
                         </tr>
                       );
                     })}
@@ -457,64 +537,6 @@ export function ServicesPage() {
             </div>
             <Pagination state={pg} />
           </div>
-        )}
-
-        {/* Ignored services — the Enterprise Disable-Learn "services" list.
-            Only a licensed admin sees it (ignore.visible); absent on
-            community / viewer. */}
-        {ignore.visible && (
-          <section className="mt-6">
-            <div className="mb-2 flex items-center gap-1.5">
-              <h2 className="text-2xs font-semibold uppercase tracking-wide text-ink-400">
-                Ignored services
-              </h2>
-              <InfoHint
-                label="About ignored services"
-                text="Services held out of learning. The agent still receives their signals but never learns a baseline or raises alerts for them — useful for noisy infrastructure you don't want to page on. Select services above and choose ‘Ignore learning’ to add one; ‘Resume learning’ brings it back."
-                example="Ignoring ‘prometheus’ stops the agent learning or alerting on the monitoring stack itself."
-              />
-            </div>
-            <div className="card overflow-hidden">
-              {ignore.excludedServices.length === 0 ? (
-                <div className="p-4">
-                  <EmptyState
-                    title="No services are ignored"
-                    hint="Select one or more services above and choose ‘Ignore learning’."
-                  />
-                </div>
-              ) : (
-                <table className="ddt">
-                  <thead>
-                    <tr>
-                      <th>Service</th>
-                      <th className="w-36 text-right">
-                        <span className="sr-only">Actions</span>
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...ignore.excludedServices]
-                      .sort((a, b) => a.localeCompare(b))
-                      .map((name) => (
-                        <tr key={name}>
-                          <td className="font-mono">{name}</td>
-                          <td className="text-right">
-                            <button
-                              className="btn"
-                              disabled={ignore.busy}
-                              aria-label={`Resume learning for ${name}`}
-                              onClick={() => ignore.toggleService(name, false)}
-                            >
-                              Resume learning
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </section>
         )}
       </main>
 
@@ -579,6 +601,77 @@ export function ServicesPage() {
           onConfirm={() => clearServices.mutate()}
           onClose={() => setConfirmClear(false)}
         />
+      )}
+
+      {peekName && peekInfo && (
+        <PeekPanel
+          open
+          onClose={() => setPeekName(null)}
+          title={<span className="font-mono">{peekName}</span>}
+          footer={
+            <Link
+              to={`/agent/services/${encodeURIComponent(peekName)}`}
+              className="btn"
+              onClick={() => setPeekName(null)}
+            >
+              Open full page ↗
+            </Link>
+          }
+        >
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2">
+              {peekInfo.manual ? (
+                <Pill tone="accent">Manual</Pill>
+              ) : (
+                <Pill>Auto</Pill>
+              )}
+              {peekInfo.in_grace ? (
+                <Pill tone="warn">in grace</Pill>
+              ) : (
+                <Pill tone="good">tracked</Pill>
+              )}
+            </div>
+
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+              <PeekField label="First seen">
+                <span title={fmtAbs(peekInfo.first_seen)}>
+                  {fmtRel(peekInfo.first_seen)}
+                </span>
+              </PeekField>
+              <PeekField label="Grace remaining">
+                {graceRemainingLabel(
+                  peekInfo.in_grace,
+                  peekInfo.grace_seconds_remaining,
+                )}
+              </PeekField>
+              <PeekField label="Log patterns">
+                {peekDetail.isLoading ? (
+                  <span className="text-ink-400">…</span>
+                ) : (
+                  <span className="tabular-nums">
+                    {peekDetail.data?.counts.patterns ?? "—"}
+                  </span>
+                )}
+              </PeekField>
+              <PeekField label="Incidents">
+                {peekDetail.isLoading ? (
+                  <span className="text-ink-400">…</span>
+                ) : (
+                  <span className="tabular-nums">
+                    {peekDetail.data?.counts.incidents ?? "—"}
+                  </span>
+                )}
+              </PeekField>
+            </dl>
+
+            {peekDetail.isError && (
+              <p className="text-2xs text-ink-400">
+                Couldn't load pattern and incident counts — open the full page
+                for details.
+              </p>
+            )}
+          </div>
+        </PeekPanel>
       )}
     </>
   );

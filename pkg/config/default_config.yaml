@@ -169,7 +169,9 @@ agent:
   catalog:
     persist_interval: 30s
     auto_promote_after: 100
-    spike_multiplier: 5.0
+    spike_z: 3.0
+    spike_abs_ceiling: 0
+    spike_sustain_ticks: 1
     spike_min_frequency: 5
     spike_min_baseline_count: 20
 

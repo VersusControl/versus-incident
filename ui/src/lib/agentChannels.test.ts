@@ -44,6 +44,12 @@ describe("CHANNEL_SCHEMA", () => {
     expect(secretOf("msteams")).toEqual(["power_automate_url"]);
     expect(secretOf("lark")).toEqual(["webhook_url"]);
   });
+
+  it("no channel exposes a template_path field (it is a system/yaml setting)", () => {
+    for (const c of CHANNELS) {
+      expect((CHANNEL_SCHEMA[c] ?? []).some((f) => f.name === "template_path")).toBe(false);
+    }
+  });
 });
 
 describe("buildChannelPut", () => {
@@ -51,19 +57,17 @@ describe("buildChannelPut", () => {
     const body = buildChannelPut("slack", true, {
       token: "   ",
       channel_id: "C123",
-      template_path: "t.tmpl",
     });
     expect(body.enable).toBe(true);
     expect("token" in body.fields).toBe(false); // blank secret omitted
     expect(body.fields.channel_id).toBe("C123");
-    expect(body.fields.template_path).toBe("t.tmpl");
+    expect("template_path" in body.fields).toBe(false);
   });
 
   it("sends a rotated (non-blank) secret", () => {
     const body = buildChannelPut("slack", true, {
       token: "xoxb-new",
       channel_id: "C123",
-      template_path: "t.tmpl",
     });
     expect(body.fields.token).toBe("xoxb-new");
   });
@@ -72,13 +76,11 @@ describe("buildChannelPut", () => {
     const on = buildChannelPut("telegram", true, {
       bot_token: "",
       chat_id: "-100",
-      template_path: "t.tmpl",
       use_proxy: "true",
     });
     expect(on.fields.use_proxy).toBe(true);
     const off = buildChannelPut("telegram", true, {
       chat_id: "-100",
-      template_path: "t.tmpl",
       use_proxy: "false",
     });
     expect(off.fields.use_proxy).toBe(false);
@@ -94,14 +96,12 @@ describe("initialChannelValues", () => {
     fields: {
       token: { set: true, hint: "…x9f2" },
       channel_id: { set: true, hint: "C0123" },
-      template_path: { set: true, hint: "slack.tmpl" },
     },
   };
 
   it("pre-fills non-secret fields from the echoed hint but never seeds a secret", () => {
     const vals = initialChannelValues("slack", view);
     expect(vals.channel_id).toBe("C0123");
-    expect(vals.template_path).toBe("slack.tmpl");
     // The secret input ALWAYS starts blank — the UI never receives the value.
     expect(vals.token).toBe("");
   });

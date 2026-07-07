@@ -56,19 +56,42 @@ type AgentRedactionConfig struct {
 type AgentCatalogConfig struct {
 	PersistInterval  string `mapstructure:"persist_interval"`   // e.g. "30s"
 	AutoPromoteAfter int    `mapstructure:"auto_promote_after"` // 0 = never
-	// SpikeMultiplier flags a tick as a frequency spike when the tick
-	// count exceeds the pattern's prior EWMA baseline by this factor.
-	// 0 disables spike detection. Default 5.0.
-	SpikeMultiplier float64 `mapstructure:"spike_multiplier"`
-	// SpikeMinFrequency is the minimum tick count required before a spike
-	// can fire. Avoids triggering on tiny absolute counts (e.g. baseline
-	// 0.5 → tickFreq 3 is technically 6× but not interesting). Default 5.
+	// SpikeZ is the z-score threshold: a known pattern is re-flagged as a spike
+	// when its per-second rate sits this many standard deviations above the
+	// learned baseline (self-scaling, so a burst on a high-volume pattern trips
+	// even though its mean is large). Default 3.0.
+	SpikeZ float64 `mapstructure:"spike_z"`
+	// SpikeAbsCeiling is a deterministic safety net: a tick with at least this
+	// many matches always surfaces, regardless of the z-score or warmup. 0
+	// disables it (opt-in). Default 0.
+	SpikeAbsCeiling int `mapstructure:"spike_abs_ceiling"`
+	// SpikeSustainTicks is how many CONSECUTIVE spiking ticks are required
+	// before firing — a debounce against single noisy ticks. 1 (the default)
+	// fires on the first tick (no debounce).
+	SpikeSustainTicks int `mapstructure:"spike_sustain_ticks"`
+	// SpikeMinFrequency is the minimum tick count required before a spike can
+	// fire — an absolute noise floor so a low-count pattern can't page on a
+	// couple of matches. Default 5.
 	SpikeMinFrequency int `mapstructure:"spike_min_frequency"`
-	// SpikeMinBaselineCount is the minimum total observations required on
-	// a pattern before spike detection considers it. Avoids treating a
-	// barely-seen pattern's first big tick as a spike. Default 20.
+	// SpikeMinBaselineCount is the warmup/confidence gate: the pattern must
+	// have been seen this many times overall before the z-score is trusted
+	// (until then only the absolute ceiling can fire). Default 20.
 	SpikeMinBaselineCount int `mapstructure:"spike_min_baseline_count"`
+	// SpikeMultiplier is DEPRECATED and no longer drives detection (the
+	// threshold moved from a volume-blind ratio to the z-score above). It is
+	// still parsed so an existing config loads without error; a one-time
+	// deprecation notice is logged when it is set. Remove it from your config.
+	SpikeMultiplier float64 `mapstructure:"spike_multiplier"`
 }
+
+// Spike-detection defaults, applied when the corresponding config key is unset
+// (zero). They mirror the founder-approved locked defaults.
+const (
+	DefaultSpikeZ                = 3.0
+	DefaultSpikeMinFrequency     = 5
+	DefaultSpikeMinBaselineCount = 20
+	DefaultSpikeSustainTicks     = 1
+)
 
 // CatalogBlobName is the storage blob key used by the agent catalog.
 // Backends translate this into a path / redis key / row.

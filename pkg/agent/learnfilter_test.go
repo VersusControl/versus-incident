@@ -340,7 +340,7 @@ func newModeOutputWorker(t *testing.T, mode string, src core.SignalSource, bundl
 			Mode: mode,
 			Catalog: config.AgentCatalogConfig{
 				AutoPromoteAfter:      100,
-				SpikeMultiplier:       5,
+				SpikeZ:                3.0,
 				SpikeMinFrequency:     5,
 				SpikeMinBaselineCount: 20,
 			},

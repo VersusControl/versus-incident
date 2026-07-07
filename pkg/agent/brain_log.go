@@ -2,10 +2,13 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/stats"
 )
 
 // logBrain is the OSS default SignalLearner + SignalDetector: the drain-miner
@@ -25,16 +28,25 @@ type logBrain struct {
 	services  *ServiceMatcher
 	ewmaAlpha float64
 	cat       config.AgentCatalogConfig
+	// params are the resolved spike-detection knobs (defaults applied, poll
+	// interval folded in) the detector scores against.
+	params spikeParams
 	// scrubber re-scrubs the captured sample line at the storage boundary
 	// (defence-in-depth) inside RecordSample. It is the worker's pipeline
 	// redactor; nil disables the re-scrub (input is already redacted).
 	scrubber core.Scrubber
+
+	// spikeMu guards streak, the per-pattern consecutive-spike counter that
+	// implements the sustained-tick debounce.
+	spikeMu sync.Mutex
+	streak  map[string]int
 }
 
 // newLogBrain wires a log brain over the worker's shared miner/catalog plus the
 // per-source name used for catalog attribution. scrub is the pipeline redactor,
 // re-applied when the brain records a redacted sample line for the pattern.
-func newLogBrain(source string, miner *Miner, catalog *Catalog, matcher *RegexMatcher, services *ServiceMatcher, ewmaAlpha float64, cat config.AgentCatalogConfig, scrub core.Scrubber) *logBrain {
+// pollSeconds is the worker's tick duration, used to score a per-second rate.
+func newLogBrain(source string, miner *Miner, catalog *Catalog, matcher *RegexMatcher, services *ServiceMatcher, ewmaAlpha float64, cat config.AgentCatalogConfig, scrub core.Scrubber, pollSeconds float64) *logBrain {
 	if ewmaAlpha <= 0 {
 		ewmaAlpha = 0.2
 	}
@@ -46,7 +58,9 @@ func newLogBrain(source string, miner *Miner, catalog *Catalog, matcher *RegexMa
 		services:  services,
 		ewmaAlpha: ewmaAlpha,
 		cat:       cat,
+		params:    resolveSpikeParams(cat, pollSeconds),
 		scrubber:  scrub,
+		streak:    make(map[string]int),
 	}
 }
 
@@ -133,15 +147,80 @@ func (b *logBrain) Group(ctx context.Context, batch []core.Signal) ([]core.Obser
 	return obs, nil
 }
 
-// Expected returns the pre-fold EWMA baseline for a pattern. Logs have no
-// per-key training gate (the lifecycle gates on MODE, not on a confidence
-// flag), so confident is always true — log novelty is expressed through the
-// Detector's VerdictUnknown, not through suppression. std is unused for logs.
+// Expected returns the pre-fold baseline for a pattern at ts. It is the mean
+// and standard deviation the spike detector scores against — the current
+// seasonal bucket's rate once that bucket is confident, otherwise the global
+// baseline. Logs have no per-key training gate (the lifecycle gates on MODE,
+// not a confidence flag), so confident is always true — log novelty is
+// expressed through the Detector's VerdictUnknown, not through suppression.
 func (b *logBrain) Expected(ctx context.Context, key string, ts time.Time) (mean, std float64, confident bool) {
-	if p := b.catalog.Get(key); p != nil {
-		return p.BaselineFrequency, 0, true
+	p := b.catalog.Get(key)
+	if p == nil {
+		return 0, 0, true
 	}
-	return 0, 0, true
+	mean, std = b.baselineExpected(p, ts)
+	return mean, std, true
+}
+
+// baselineExpected picks the mean/std to score against at ts per the pattern's
+// baseline mode. It reuses resolveBaseline (which also produces the human label
+// the detector names in its explanation) and drops the label.
+func (b *logBrain) baselineExpected(p *Pattern, ts time.Time) (mean, std float64) {
+	mean, std, _ = b.resolveBaseline(p, ts)
+	return mean, std
+}
+
+// resolveBaseline selects WHICH learned baseline the spike z-score is measured
+// against for this pattern at ts, and returns a human label naming it for the
+// explanation string. The mode is the pattern's own spike_baseline_mode when
+// set, else the config default; an unrecognized value folds to "default".
+//
+// Time-of-day buckets are always folded, so any mode can be chosen with no
+// re-learn:
+//   - default     → the global rate baseline (mean = baseline_frequency,
+//     spread = its variance); no label (reads as the plain baseline).
+//   - average     → the cumulative arithmetic mean of the rate as the CENTER,
+//     reusing the global EWMA spread as the scale. There is deliberately one
+//     dispersion source: the arithmetic average is the center, the EWMA spread
+//     is the wobble, so "average" and "default" differ only in the center.
+//   - time_of_day → the current hour-of-day bucket once it has enough samples,
+//     else the global baseline (a sparse hour never fires a spurious spike).
+func (b *logBrain) resolveBaseline(p *Pattern, ts time.Time) (mean, std float64, label string) {
+	global := stats.EWMA{Mean: p.BaselineFrequency, Variance: p.BaselineVariance, Count: p.Count}
+	// The stored GLOBAL default applies unless the pattern carries its own
+	// explicit override.
+	mode := b.globalBaselineMode()
+	if p.SpikeBaselineMode != "" {
+		mode = normalizeBaselineMode(p.SpikeBaselineMode)
+	}
+	switch mode {
+	case baselineModeAverage:
+		return p.BaselineAvg, global.Std(), "the average baseline"
+	case baselineModeTimeOfDay:
+		if len(p.Seasonal) == stats.HoursPerDay {
+			idx := stats.SeasonalIndex(ts, stats.HoursPerDay)
+			bucket := p.Seasonal[idx]
+			if bucket.Count >= b.params.MinBucketSamples {
+				return bucket.Mean, bucket.Std(), fmt.Sprintf("the %02d:00 baseline", idx)
+			}
+		}
+		// Sparse (or not-yet-folded) hour: fall back to the global baseline.
+		return global.Mean, global.Std(), "the baseline"
+	default:
+		return global.Mean, global.Std(), ""
+	}
+}
+
+// globalBaselineMode returns the operator-configured GLOBAL default baseline
+// mode, read through the storage-backed spike settings on every call — the
+// same read-through the report settings use, so there is no process-wide
+// mutable settings global. A nil catalog (or an install with no persistence)
+// yields the built-in default.
+func (b *logBrain) globalBaselineMode() string {
+	if b.catalog == nil {
+		return baselineModeDefault
+	}
+	return LoadSpikeSettings(b.catalog.store).BaselineMode
 }
 
 // Learn folds the tick's observations into the catalog (one Upsert per
@@ -167,12 +246,13 @@ func (b *logBrain) Learn(ctx context.Context, obs []core.Observation) error {
 	return nil
 }
 
-// Classify reproduces the pre-seam classify()/isSpike() decision exactly. It is
-// called AFTER Learn has folded the tick, so the catalog holds the post-upsert
-// count; the pre-fold baseline arrives via mean (snapshotted by Expected before
-// Learn ran) and the pre-fold count is recovered as post-count − tick frequency.
-// Logs always report Confident=true (see Expected); the worker suppresses a
-// non-spiking known pattern via the VerdictKnownPattern gate, as before.
+// Classify scores an already-folded observation against the pre-fold baseline
+// snapshot (mean/std captured by Expected before Learn ran). A known pattern
+// that is not spiking is normal; a burst — the tick's per-second rate sitting
+// spike_z standard deviations above the learned normal, or crossing the
+// absolute ceiling — supersedes "known" and flows to detect-AI. Logs always
+// report Confident=true (see Expected); the worker suppresses a non-spiking
+// known pattern via the VerdictKnownPattern gate.
 func (b *logBrain) Classify(obs core.Observation, mean, std float64, confident bool) core.TypedVerdict {
 	tickFreq := obs.Frequency
 	prevBaseline := mean
@@ -206,22 +286,44 @@ func (b *logBrain) Classify(obs core.Observation, mean, std float64, confident b
 		//
 		// A known pattern can still spike — a steady drip suddenly flooding is
 		// exactly what detect-AI should see. Spike supersedes known.
-		if isSpike(prevBaseline, prevCount, tickFreq,
-			b.cat.SpikeMultiplier, b.cat.SpikeMinFrequency, b.cat.SpikeMinBaselineCount) {
-			score := 0.0
-			if prevBaseline > 0 {
-				score = float64(tickFreq) / prevBaseline
-			}
+		res := evalSpike(mean, std, prevCount, tickFreq, b.params)
+		if b.confirmSpike(obs.Key, res) {
+			// Name the baseline the tick was scored against in the explanation.
+			// The scored mean/std are the pre-fold snapshot the worker captured
+			// (passed in); only the textual label — which mode, and the hour for
+			// time-of-day — is re-derived from the post-fold pattern here.
+			_, _, label := b.resolveBaseline(p, obs.Timestamp)
 			return core.TypedVerdict{
 				Class:     core.VerdictSpike,
 				Confident: true,
-				Score:     score,
+				Score:     res.Z,
 				Baseline:  prevBaseline,
+				Reason:    spikeReason(res, mean, std, tickFreq, b.params.PollSeconds, label),
 			}
 		}
 		return core.TypedVerdict{Class: core.VerdictKnownPattern, Confident: true, Baseline: prevBaseline}
 	}
 	return core.TypedVerdict{Class: core.VerdictUnknown, Confident: true, Baseline: prevBaseline}
+}
+
+// confirmSpike applies the sustained-tick debounce to a spike candidate. A
+// non-spike resets the streak. An absolute-ceiling hit fires immediately (the
+// deterministic safety net bypasses the debounce). Otherwise the z-score spike
+// must persist for spike_sustain_ticks consecutive ticks before firing; the
+// default of 1 fires on the first tick (no debounce). Once sustained it keeps
+// firing every tick until a non-spiking tick resets the streak.
+func (b *logBrain) confirmSpike(key string, res spikeResult) bool {
+	b.spikeMu.Lock()
+	defer b.spikeMu.Unlock()
+	if !res.Spike {
+		delete(b.streak, key)
+		return false
+	}
+	if res.Ceiling {
+		return true
+	}
+	b.streak[key]++
+	return b.streak[key] >= b.params.SustainTicks
 }
 
 // Promote persists a count-based auto-promotion on the LEARN path so it runs in
@@ -275,11 +377,11 @@ func isLogKnown(prevVerdict string, count, autoPromoteAfter int) bool {
 //     manual-only).
 //   - Ready  = isLogKnown(...), so an already-"known"/"spike"-marked or
 //     count-promoted pattern reports Ready.
-//   - RatePerMin = the pattern's per-tick sighting EWMA (BaselineFrequency)
-//     converted to sightings/minute via pollInterval, used to derive an ETA.
-//     0 is the stalled/unknown sentinel (no rate yet, no flow, or no poll
-//     interval wired) — the UI then shows no ETA. It is only computed while the
-//     pattern is not yet Ready, since a Ready pattern has no countdown.
+//   - RatePerMin = the pattern's learned per-second sighting rate
+//     (BaselineFrequency) rendered as sightings/minute (rate × 60), used to
+//     derive an ETA. 0 is the stalled/unknown sentinel (no rate yet, no flow,
+//     or no poll interval wired) — the UI then shows no ETA. It is only computed
+//     while the pattern is not yet Ready, since a Ready pattern has no countdown.
 func LogReadiness(p *Pattern, autoPromoteAfter int, pollInterval time.Duration) core.Readiness {
 	if p == nil {
 		return core.Readiness{}
@@ -292,8 +394,11 @@ func LogReadiness(p *Pattern, autoPromoteAfter int, pollInterval time.Duration) 
 		r.Needed = autoPromoteAfter
 	} // else Needed=0 → indeterminate (manual-only promotion)
 	if !r.Ready && pollInterval > 0 && p.BaselineFrequency > 0 {
-		// BaselineFrequency is sightings/tick; convert to sightings/min.
-		r.RatePerMin = p.BaselineFrequency / pollInterval.Minutes()
+		// BaselineFrequency is now a per-second sighting rate, so sightings/min
+		// is just rate × 60 — poll-interval-independent. pollInterval is kept as
+		// the "worker wired?" guard: unset (0) means no live agent, so degrade
+		// to no ETA.
+		r.RatePerMin = p.BaselineFrequency * 60
 	}
 	return r
 }

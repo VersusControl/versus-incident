@@ -85,7 +85,8 @@ describe("Decisions Shadow + Spike — a Service column was ADDED (Service first
     expect(/>Service<\/th>\s*<th className="w-28">Verdict<\/th>/.test(src)).toBe(
       true,
     );
-    expect(src.includes("const SHADOW_COLS = 9")).toBe(true);
+    // Includes the shared select + eye columns added for table parity.
+    expect(src.includes("const SHADOW_COLS = 11")).toBe(true);
   });
   it("the Spike view is a unified detect+shadow table, Service first", () => {
     expect(src.includes("buildSpikeRows")).toBe(true);

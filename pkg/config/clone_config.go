@@ -317,9 +317,12 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 		Catalog: AgentCatalogConfig{
 			PersistInterval:       src.Catalog.PersistInterval,
 			AutoPromoteAfter:      src.Catalog.AutoPromoteAfter,
-			SpikeMultiplier:       src.Catalog.SpikeMultiplier,
+			SpikeZ:                src.Catalog.SpikeZ,
+			SpikeAbsCeiling:       src.Catalog.SpikeAbsCeiling,
+			SpikeSustainTicks:     src.Catalog.SpikeSustainTicks,
 			SpikeMinFrequency:     src.Catalog.SpikeMinFrequency,
 			SpikeMinBaselineCount: src.Catalog.SpikeMinBaselineCount,
+			SpikeMultiplier:       src.Catalog.SpikeMultiplier,
 		},
 		Miner: AgentMinerConfig{
 			SimilarityThreshold: src.Miner.SimilarityThreshold,

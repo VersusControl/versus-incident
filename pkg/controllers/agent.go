@@ -493,23 +493,28 @@ const serviceRecentIncidentMax = 10
 // the OSS shape carries no metric/trace fields. An unknown service (not in the
 // catalog) returns 404.
 //
-// The pattern catalog, service registry, and incident store are single-tenant
-// OSS state: every entry is keyed under storage.DefaultOrgID. We resolve org the
-// same way the data-plane reads of that OSS-owned state do — to the catalog's
-// single-tenant org — so a single-org licensed deployment serves this endpoint
-// AND the enterprise /intel endpoint under the same deployment. (Enterprise
-// learned baselines key under the deployment org separately; this read is the
-// OSS catalog's, which is default.)
+// Org resolution mirrors the service LIST (listServices): the service is looked
+// up by name in the catalog's unified service view WITHOUT an org filter, so
+// the invariant holds — any service the list surfaces resolves here too. The
+// service's OWN stored org then scopes its patterns and incidents, so the read
+// path's org always matches the list path's org. This serves both a
+// single-tenant OSS deployment (everything keyed under the default org) and a
+// deployment whose registry is keyed under a non-default org, where a hardcoded
+// default filter would 404 a service the list still shows.
 func (a *AgentController) getServiceDetail(c *fiber.Ctx) error {
 	name := c.Params("name")
-	org := storage.DefaultOrgID
 
-	// Service meta + grace. AllServices() is the trusted catalog view; the key
-	// is the catalog service name, never a redacted value.
+	// Service meta + grace. AllServices() is the same trusted catalog view
+	// listServices reads; the key is the catalog service name, never a redacted
+	// value. No org filter here — the list has none, so applying one would
+	// reject services the list still returns.
 	info, ok := a.catalog.AllServices()[name]
-	if !ok || storage.NormalizeOrgID(info.OrgID) != org {
+	if !ok {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "service not found"})
 	}
+	// Scope the patterns and incidents to the service's OWN stored org so the
+	// read path aligns with the list path.
+	org := storage.NormalizeOrgID(info.OrgID)
 
 	inGrace, graceRemaining := graceStatus(info.FirstSeen, serviceGraceDuration())
 
@@ -528,6 +533,17 @@ func (a *AgentController) getServiceDetail(c *fiber.Ctx) error {
 			"source":    p.Source,
 			"last_seen": p.LastSeen,
 			"tags":      p.Tags,
+			// Redacted sample ring + learned baselines, matching the pattern-detail
+			// read (GET /patterns/:id) field-for-field so the UI can render the same
+			// detail/peek on a service-detail row. Samples ride the ring already
+			// scrubbed at the storage boundary (Catalog.RecordSample → PushSample);
+			// we surface that same redacted slice — never a raw line — bounded by the
+			// same SampleRingCap the pattern-detail read returns.
+			"samples":            p.Samples,
+			"baseline_frequency": p.BaselineFrequency,
+			"baseline_avg":       p.BaselineAvg,
+			"baseline_variance":  p.BaselineVariance,
+			"seasonal":           p.Seasonal,
 		})
 	}
 

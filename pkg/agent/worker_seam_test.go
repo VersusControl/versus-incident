@@ -52,7 +52,7 @@ func newSeamWorker(t *testing.T, mode string, src core.SignalSource, bundle AIBu
 			Mode: mode,
 			Catalog: config.AgentCatalogConfig{
 				AutoPromoteAfter:      100,
-				SpikeMultiplier:       5,
+				SpikeZ:                3.0,
 				SpikeMinFrequency:     5,
 				SpikeMinBaselineCount: 20,
 			},

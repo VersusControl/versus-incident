@@ -218,9 +218,11 @@ function ChannelCard({
       </div>
       <div className="px-3 py-2">
         <Grid>
-          {channel.fields.map((f) => (
-            <FieldRow key={f.label} field={f} />
-          ))}
+          {channel.fields
+            .filter((f) => f.label !== "Template")
+            .map((f) => (
+              <FieldRow key={f.label} field={f} />
+            ))}
         </Grid>
       </div>
     </div>

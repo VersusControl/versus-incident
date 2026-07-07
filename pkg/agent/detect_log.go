@@ -27,14 +27,25 @@ type DetectEvent struct {
 	Timestamp time.Time `json:"timestamp"` // worker decision time
 
 	// Pattern context
-	Source    string   `json:"source"`
-	PatternID string   `json:"pattern_id"`
-	Template  string   `json:"template"`
-	Service   string   `json:"service,omitempty"`
-	Verdict   string   `json:"verdict"` // unknown | spike
-	Frequency int      `json:"frequency"`
-	Baseline  float64  `json:"baseline"`
-	Samples   []string `json:"samples,omitempty"` // up to 3, redacted
+	Source    string  `json:"source"`
+	PatternID string  `json:"pattern_id"`
+	Template  string  `json:"template"`
+	Service   string  `json:"service,omitempty"`
+	Verdict   string  `json:"verdict"` // unknown | spike
+	Frequency int     `json:"frequency"`
+	Baseline  float64 `json:"baseline"`
+	// BaselineStd is the learned standard deviation the spike z-score was
+	// computed against (0 when not a spike or no dispersion learned yet).
+	// Together with Baseline (the mean) and Score (the z-score) it makes every
+	// spike verdict reconstructable from the stored numbers.
+	BaselineStd float64 `json:"baseline_std,omitempty"`
+	// Score is the spike z-score: how many standard deviations the tick's
+	// per-second rate sat above the learned baseline.
+	Score float64 `json:"score,omitempty"`
+	// Explanation is the deterministic human-readable spike math, e.g.
+	// "47.3/s = 4.2σ above 38.4/s ± 3.1".
+	Explanation string   `json:"explanation,omitempty"`
+	Samples     []string `json:"samples,omitempty"` // up to 3, redacted
 	// RuleSeverity is the operator-declared severity floor carried from the
 	// source signals (empty for auto-discovered signals). Persisted so the
 	// declared-severity-honoured path is auditable/testable.

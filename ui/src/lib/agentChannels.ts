@@ -52,12 +52,10 @@ export const CHANNEL_SCHEMA: Record<string, FieldSpec[]> = {
   slack: [
     { name: "token", label: "Bot token", secret: true, bool: false },
     { name: "channel_id", label: "Channel ID", secret: false, bool: false },
-    { name: "template_path", label: "Template path", secret: false, bool: false },
   ],
   telegram: [
     { name: "bot_token", label: "Bot token", secret: true, bool: false },
     { name: "chat_id", label: "Chat ID", secret: false, bool: false },
-    { name: "template_path", label: "Template path", secret: false, bool: false },
     { name: "use_proxy", label: "Use proxy", secret: false, bool: true },
   ],
   viber: [
@@ -65,7 +63,6 @@ export const CHANNEL_SCHEMA: Record<string, FieldSpec[]> = {
     { name: "api_type", label: "API type (bot | channel)", secret: false, bool: false },
     { name: "user_id", label: "User ID", secret: false, bool: false },
     { name: "channel_id", label: "Channel ID", secret: false, bool: false },
-    { name: "template_path", label: "Template path", secret: false, bool: false },
     { name: "use_proxy", label: "Use proxy", secret: false, bool: true },
   ],
   email: [
@@ -75,15 +72,12 @@ export const CHANNEL_SCHEMA: Record<string, FieldSpec[]> = {
     { name: "password", label: "SMTP password", secret: true, bool: false },
     { name: "to", label: "To", secret: false, bool: false },
     { name: "subject", label: "Subject", secret: false, bool: false },
-    { name: "template_path", label: "Template path", secret: false, bool: false },
   ],
   msteams: [
     { name: "power_automate_url", label: "Power Automate URL", secret: true, bool: false },
-    { name: "template_path", label: "Template path", secret: false, bool: false },
   ],
   lark: [
     { name: "webhook_url", label: "Webhook URL", secret: true, bool: false },
-    { name: "template_path", label: "Template path", secret: false, bool: false },
     { name: "use_proxy", label: "Use proxy", secret: false, bool: true },
   ],
 };

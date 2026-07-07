@@ -151,10 +151,10 @@ export function ShadowDetailPage() {
                       }
                     />
                     <Fact
-                      k="Baseline freq."
+                      k="Baseline rate"
                       v={
                         <span className="tabular-nums">
-                          {pattern.data.baseline_frequency.toFixed(2)}
+                          {pattern.data.baseline_frequency.toFixed(2)}/s
                         </span>
                       }
                     />

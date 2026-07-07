@@ -47,7 +47,7 @@ func TestEmitDetect_ResolverDisabled_RunsDry(t *testing.T) {
 		context.Background(),
 		"test", "pid-off", "boom", "svc-x",
 		[]core.Signal{{Message: "boom"}},
-		core.VerdictUnknown, 0,
+		core.VerdictUnknown, 0, 0, 0, "",
 	)
 
 	if outcome != "dry" {
@@ -86,7 +86,7 @@ func TestEmitDetect_ResolverEnabled_RunsAI(t *testing.T) {
 				context.Background(),
 				"test", "pid-on", "boom", "svc-x",
 				[]core.Signal{{Message: "boom"}},
-				core.VerdictUnknown, 0,
+				core.VerdictUnknown, 0, 0, 0, "",
 			)
 
 			if outcome != "emitted" {
