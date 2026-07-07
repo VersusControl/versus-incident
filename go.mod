@@ -17,13 +17,13 @@ require (
 	github.com/cloudwego/eino-ext/components/model/qwen v0.1.9
 	github.com/go-git/go-git/v5 v5.19.1
 	github.com/go-redis/redis/v8 v8.11.5
-	github.com/gofiber/fiber/v2 v2.52.13
+	github.com/gofiber/fiber/v2 v2.52.14
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/slack-go/slack v0.27.0
 	github.com/spf13/viper v1.21.0
-	golang.org/x/image v0.39.0
-	golang.org/x/time v0.6.0
+	golang.org/x/image v0.43.0
+	golang.org/x/time v0.15.0
 	google.golang.org/genai v1.62.0
 )
 
