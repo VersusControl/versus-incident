@@ -379,3 +379,39 @@ func TestLogBrain_AutoPromoteAfter_AlreadyKnownStaysKnown(t *testing.T) {
 		t.Fatalf("catalog verdict = %q, want known (an already-known pattern must stay known)", c.Get("p").Verdict)
 	}
 }
+
+// (f) The operator's real "first fetch" scenario: an Elasticsearch source's
+// FIRST batch lands a pattern whose sighting count is already far above the
+// threshold (e.g. 3304 >= 100) in a single tick. It must classify known
+// immediately — Promote flips the stored verdict and LogReadiness reports Ready
+// — not sit "still learning" forever. This pins the count clause of isLogKnown
+// on the first-batch path so a large first pull is never stuck learning once the
+// threshold is the (non-zero) default.
+func TestLogBrain_AutoPromoteAfter_FirstBatchAboveThresholdIsKnown(t *testing.T) {
+	cat := config.AgentCatalogConfig{
+		AutoPromoteAfter: 100, // the embedded default an omitted key resolves to
+		SpikeMultiplier:  0,   // isolate the count-promotion path from spike
+	}
+	b, c := newLogBrainForTest(t, cat)
+
+	v := classifyOnce(t, b, logObs("p", 3304)) // single first-fetch batch
+	if got := c.Get("p").Count; got != 3304 {
+		t.Fatalf("count = %d, want 3304", got)
+	}
+	if v.Class != core.VerdictKnownPattern {
+		t.Fatalf("first-batch verdict = %v, want known (3304 >= 100)", v.Class)
+	}
+	if c.Get("p").Verdict != "known" {
+		t.Fatalf("catalog verdict = %q, want known (Promote must fire on the first batch)", c.Get("p").Verdict)
+	}
+	// The read-side readiness the UI consumes must agree with the classifier:
+	// Ready, with the threshold as the target — never the Needed=0 "no target"
+	// state for a pattern already past the (non-zero) threshold.
+	r := LogReadiness(c.Get("p"), cat.AutoPromoteAfter, 30*time.Second)
+	if !r.Ready {
+		t.Fatalf("LogReadiness.Ready = false, want true (3304 >= 100)")
+	}
+	if r.Needed != 100 {
+		t.Fatalf("LogReadiness.Needed = %d, want 100 (threshold target, not the no-target sentinel)", r.Needed)
+	}
+}

@@ -151,3 +151,50 @@ describe("PatternsPage peek — fetches the pattern DETAIL", () => {
     expect(pre.className).not.toContain("overflow-auto");
   });
 });
+
+// The Logs Verdict cell renders a learning hint next to the "Still learning"
+// pill. Which hint it shows depends on whether count-based auto-promotion is
+// enabled (readiness.needed):
+//   needed > 0  → a seen/needed progress meter ("40 / 100").
+//   needed === 0 → auto-promotion is disabled, so the pattern never becomes
+//     known by count; the cell must say so and point the operator at the manual
+//     path, instead of showing a bare "Still learning" with no progress and no
+//     reason (the operator's "learning without progress" report).
+describe("PatternsPage — Verdict cell learning hint", () => {
+  beforeEach(() => {
+    vi.mocked(api.listServiceOverrides).mockResolvedValue([]);
+    vi.mocked(api.getPattern).mockResolvedValue(detail());
+  });
+
+  it("shows the seen/needed progress meter when a count target exists", async () => {
+    vi.mocked(api.listPatterns).mockResolvedValue([
+      listRow({
+        readiness: { ready: false, seen: 40, needed: 100, rate_per_min: 2 },
+      }),
+    ]);
+    renderPage();
+    const row = await screen.findByText("payment <*> failed");
+    const cell = row.closest("tr")!;
+    expect(within(cell).getByRole("progressbar")).toBeTruthy();
+    expect(cell.textContent).toContain("40");
+    expect(cell.textContent).toContain("100");
+    expect(within(cell).queryByText(/auto-promotion off/)).toBeNull();
+  });
+
+  it("explains auto-promotion is off when there is no count target (needed === 0)", async () => {
+    vi.mocked(api.listPatterns).mockResolvedValue([
+      listRow({
+        count: 3304,
+        readiness: { ready: false, seen: 3304, needed: 0, rate_per_min: 12.6 },
+      }),
+    ]);
+    renderPage();
+    const row = await screen.findByText("payment <*> failed");
+    const cell = row.closest("tr")!;
+    expect(within(cell).getByText(/auto-promotion off/)).toBeTruthy();
+    expect(within(cell).getByText(/mark known by hand/)).toBeTruthy();
+    // No progressbar meter for the indeterminate state.
+    expect(within(cell).queryByRole("progressbar")).toBeNull();
+  });
+});
+

@@ -533,6 +533,21 @@ export function PatternsPage() {
                                 </span>
                               </span>
                             )}
+                          {p.verdict === "" &&
+                            p.readiness &&
+                            !p.readiness.ready &&
+                            p.readiness.needed === 0 && (
+                              <span
+                                className="text-2xs text-ink-400"
+                                title="Auto-promotion is off (auto_promote_after is 0 or negative), so this pattern never becomes known by sighting count — mark it known by hand, or set a positive auto_promote_after."
+                              >
+                                auto-promotion off
+                                <span className="text-ink-600">
+                                  {" "}
+                                  · mark known by hand
+                                </span>
+                              </span>
+                            )}
                         </div>
                       </td>
                       <td>

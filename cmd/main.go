@@ -145,13 +145,11 @@ func main() {
 
 	// Shared Redis client used by both on-call and the agent worker. We open
 	// it once here so both subsystems share connections.
-	var sharedRedis *redis.Client
+	var sharedRedis redis.UniversalClient
 
 	if cfg.OnCall.Enable || cfg.OnCall.InitializedOnly {
-		redisOptions := handlerRedisOptions(cfg.Redis)
-
-		// Initialize Redis client
-		redisClient := redis.NewClient(redisOptions)
+		// Initialize Redis client (cluster-aware when redis.cluster is set)
+		redisClient := newRedisClient(cfg.Redis)
 
 		// Test Redis connection
 		if err := redisClient.Ping(context.Background()).Err(); err != nil {
@@ -179,7 +177,7 @@ func main() {
 		// in-memory cursors when Redis isn't reachable).
 		rdb := sharedRedis
 		if rdb == nil && cfg.Redis.Host != "" {
-			rdb = redis.NewClient(handlerRedisOptions(cfg.Redis))
+			rdb = newRedisClient(cfg.Redis)
 			if err := rdb.Ping(context.Background()).Err(); err != nil {
 				log.Printf("agent: Redis unavailable (%v); cursors will be in-memory only", err)
 				rdb = nil
@@ -225,7 +223,7 @@ func main() {
 // startAgent constructs the worker, starts it in a goroutine, and registers
 // admin routes on the fiber app. It returns the catalog so the caller can
 // hold a reference (and so future hot-reload code has a handle to it).
-func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewaySecret string, store storage.Provider, rdb *redis.Client) (*agent.Catalog, error) {
+func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewaySecret string, store storage.Provider, rdb redis.UniversalClient) (*agent.Catalog, error) {
 	// On the Postgres backend, install the typed signal-table
 	// catalog store so the log catalog reads/writes the explicit
 	// vs_patterns/vs_logs/vs_services tables (searchable, indexed) instead of
@@ -406,6 +404,24 @@ func handleQueueMessage(content *map[string]interface{}) error {
 	// their own Source and ignore this hint.
 	overwrite := map[string]string{"incident_source": "sqs"}
 	return services.CreateIncident("", content, &overwrite) // teamID as empty string
+}
+
+// newRedisClient builds the Redis client both subsystems share. It reuses
+// handlerRedisOptions for the addr/password/TLS settings, then returns either a
+// single-node client (the default) or a cluster-aware client when the operator
+// opts in via redis.cluster / REDIS_CLUSTER. Both concrete types satisfy
+// redis.UniversalClient, so callers thread the interface and single-key
+// Get/Set follow MOVED/ASK redirects transparently in cluster mode.
+func newRedisClient(rc c.RedisConfig) redis.UniversalClient {
+	opts := handlerRedisOptions(rc)
+	if rc.ClusterEnabled() {
+		return redis.NewClusterClient(&redis.ClusterOptions{
+			Addrs:     []string{opts.Addr},
+			Password:  opts.Password,
+			TLSConfig: opts.TLSConfig,
+		})
+	}
+	return redis.NewClient(opts)
 }
 
 func handlerRedisOptions(rc c.RedisConfig) *redis.Options {
