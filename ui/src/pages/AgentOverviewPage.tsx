@@ -22,7 +22,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { api, ApiError, type AgentConfigView, type BaselineRow } from "@/lib/api";
-import { fmtAbs, fmtRel, hourlyBuckets, truncate } from "@/lib/format";
+import { fmtAbs, fmtRel, hourlyBuckets } from "@/lib/format";
 import { useNowTick } from "@/lib/hooks";
 import { TopBar } from "@/components/TopBar";
 import { Pill, VerdictPill } from "@/components/Pill";
@@ -411,13 +411,13 @@ export function AgentOverviewPage() {
                         <td>
                           <VerdictPill verdict={p.verdict} />
                         </td>
-                        <td>
+                        <td className="max-w-0">
                           <Link
                             to={`/agent/logs/${p.id}`}
                             title={p.template}
-                            className="font-mono text-2xs text-link hover:underline"
+                            className="block truncate font-mono text-2xs text-link hover:underline"
                           >
-                            {truncate(p.template, 80)}
+                            {p.template}
                           </Link>
                         </td>
                       </tr>
@@ -483,15 +483,15 @@ export function AgentOverviewPage() {
                         <td>
                           <VerdictPill verdict={e.verdict} />
                         </td>
-                        <td>
+                        <td className="max-w-0">
                           <Link
                             to={`/agent/decisions/shadow/${encodeURIComponent(
                               e.pattern_id,
                             )}`}
                             title={e.sample_message}
-                            className="font-mono text-2xs text-ink-100 hover:text-link hover:underline"
+                            className="block truncate font-mono text-2xs text-ink-100 hover:text-link hover:underline"
                           >
-                            {truncate(e.sample_message, 80)}
+                            {e.sample_message}
                           </Link>
                         </td>
                         <td
