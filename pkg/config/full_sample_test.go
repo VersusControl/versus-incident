@@ -189,3 +189,60 @@ agent:
 		}
 	})
 }
+
+// TestAutoPromoteAfterNormalization proves the load chokepoint folds any
+// non-positive auto_promote_after up to the default: an explicit 0, a negative
+// value, and an omitted key all arrive as the default, while a positive value
+// passes through untouched. This is the single guard that stops a present-but-
+// empty key or a ${VAR} that expands to empty from silently becoming a
+// "promotion disabled" state.
+func TestAutoPromoteAfterNormalization(t *testing.T) {
+	writeConfig := func(t *testing.T, body string) string {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		return path
+	}
+
+	cases := []struct {
+		name string
+		yaml string
+		want int
+	}{
+		{
+			name: "explicit zero normalizes to default",
+			yaml: "agent:\n  catalog:\n    auto_promote_after: 0\n",
+			want: DefaultAutoPromoteAfter,
+		},
+		{
+			name: "negative normalizes to default",
+			yaml: "agent:\n  catalog:\n    auto_promote_after: -7\n",
+			want: DefaultAutoPromoteAfter,
+		},
+		{
+			name: "omitted keeps default",
+			yaml: "agent:\n  mode: training\n",
+			want: DefaultAutoPromoteAfter,
+		},
+		{
+			name: "positive passes through unchanged",
+			yaml: "agent:\n  catalog:\n    auto_promote_after: 42\n",
+			want: 42,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfig(t, tc.yaml)
+			c, err := loadConfigFromPath(path)
+			if err != nil {
+				t.Fatalf("loadConfigFromPath: %v", err)
+			}
+			if c.Agent.Catalog.AutoPromoteAfter != tc.want {
+				t.Errorf("AutoPromoteAfter = %d, want %d", c.Agent.Catalog.AutoPromoteAfter, tc.want)
+			}
+		})
+	}
+}

@@ -151,3 +151,30 @@ describe("PatternsPage peek — fetches the pattern DETAIL", () => {
     expect(pre.className).not.toContain("overflow-auto");
   });
 });
+
+// The Logs Verdict cell renders a learning hint next to the "Still learning"
+// pill: a seen/needed progress meter ("40 / 100"). The server always ships a
+// positive `needed` (a non-positive auto_promote_after is normalized to the
+// default upstream), so the cell always has a count target to render against.
+describe("PatternsPage — Verdict cell learning hint", () => {
+  beforeEach(() => {
+    vi.mocked(api.listServiceOverrides).mockResolvedValue([]);
+    vi.mocked(api.getPattern).mockResolvedValue(detail());
+  });
+
+  it("shows the seen/needed progress meter when a count target exists", async () => {
+    vi.mocked(api.listPatterns).mockResolvedValue([
+      listRow({
+        readiness: { ready: false, seen: 40, needed: 100, rate_per_min: 2 },
+      }),
+    ]);
+    renderPage();
+    const row = await screen.findByText("payment <*> failed");
+    const cell = row.closest("tr")!;
+    expect(within(cell).getByRole("progressbar")).toBeTruthy();
+    expect(cell.textContent).toContain("40");
+    expect(cell.textContent).toContain("100");
+    expect(within(cell).queryByText(/auto-promotion off/)).toBeNull();
+  });
+});
+

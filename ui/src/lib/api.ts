@@ -125,13 +125,14 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 // settled/known state. It is present on every pattern and baseline row (logs
 // always; metrics/traces only where the enterprise brain runs). Presentation
 // (remaining, ETA, progress bar) is DERIVED by the UI from these facts — see
-// lib/readiness.ts. Sentinels: needed === 0 ⇒ indeterminate (no count gate,
-// e.g. logs with auto-promotion disabled); rate_per_min === 0 ⇒ no honest ETA
-// (no rate yet / stalled / already ready).
+// lib/readiness.ts. Log patterns always ship a positive `needed` (a non-positive
+// auto_promote_after is normalized to the default upstream); `needed === 0` is a
+// defensive sentinel only. rate_per_min === 0 ⇒ no honest ETA (no rate yet /
+// stalled / already ready).
 export interface Readiness {
   ready: boolean;
   seen: number;
-  needed: number; // 0 ⇒ indeterminate (manual-only promotion)
+  needed: number; // always positive for logs; 0 is a defensive sentinel
   rate_per_min: number; // 0 ⇒ unknown/stalled ⇒ no ETA
 }
 

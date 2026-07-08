@@ -114,8 +114,10 @@ func TestListPatterns_CarriesReadiness(t *testing.T) {
 
 // TestListPatterns_UnsetCatalogConfigDegradesSafely proves that when no
 // worker/config is wired (SetCatalogConfig never called), readiness is still
-// present and degrades to Needed=0/RatePerMin=0 (renders as "Learning", no ETA)
-// rather than being absent or panicking.
+// present: the zero-value AutoPromoteAfter is normalized to the default gate by
+// LogReadiness, so Needed reads as the default (not zero) and RatePerMin=0
+// (renders as "Learning" toward that target, no ETA) rather than being absent
+// or panicking.
 func TestListPatterns_UnsetCatalogConfigDegradesSafely(t *testing.T) {
 	cat, err := agent.LoadCatalog(storage.NewMemory())
 	if err != nil {
@@ -141,15 +143,16 @@ func TestListPatterns_UnsetCatalogConfigDegradesSafely(t *testing.T) {
 	if r == nil {
 		t.Fatal("readiness object missing even with unset config")
 	}
-	if r["needed"] != float64(0) {
-		t.Errorf("readiness.needed = %v, want 0 (unset threshold → indeterminate)", r["needed"])
+	if r["needed"] != float64(100) {
+		t.Errorf("readiness.needed = %v, want 100 (unset threshold normalizes to the default gate)", r["needed"])
 	}
 	if r["rate_per_min"] != float64(0) {
 		t.Errorf("readiness.rate_per_min = %v, want 0 (unset poll → no ETA)", r["rate_per_min"])
 	}
-	// Ready is false: threshold unset (0) disables count promotion and verdict is "".
-	if r["ready"] != false {
-		t.Errorf("readiness.ready = %v, want false (no count gate, verdict empty)", r["ready"])
+	// count 150 >= the default gate 100, so an unwired controller now reports
+	// the pattern as ready rather than stuck learning forever.
+	if r["ready"] != true {
+		t.Errorf("readiness.ready = %v, want true (count past the default gate)", r["ready"])
 	}
 }
 

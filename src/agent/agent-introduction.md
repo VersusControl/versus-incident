@@ -87,8 +87,7 @@ grouping is.
 The agent's long-term memory. Every template it learns is saved
 with: when it was first seen, when it was last seen, how many times
 it has appeared, an average rate, the filter rule that matched it,
-and any labels you add. The catalog is saved to
-`data/patterns.json`.
+and any labels you add. The catalog is saved to backend storage.
 
 ### 6. The worker and modes
 The worker is the loop that runs everything on a timer. There are

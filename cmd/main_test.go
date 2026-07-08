@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	c "github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/redis/go-redis/v9"
 )
 
 // TestHandlerRedisOptionsTLS covers the plaintext-Redis case: with TLS disabled the Redis
@@ -39,5 +40,37 @@ func TestHandlerRedisOptionsTLS(t *testing.T) {
 		if opts.TLSConfig == nil || !opts.TLSConfig.InsecureSkipVerify {
 			t.Fatal("expected InsecureSkipVerify TLSConfig when redis.tls=true and insecure_skip_verify=true")
 		}
+	})
+}
+
+// TestNewRedisClientClusterType verifies that enabling cluster mode builds a
+// cluster-aware client (*redis.ClusterClient) rather than a single-node one.
+// The cluster client is what parses the Redis 7 / Valkey CLUSTER SLOTS reply
+// (which carries a 4th per-node metadata element) correctly, so cursor
+// persistence keeps working against ElastiCache in cluster mode instead of
+// falling back to in-memory. Both concrete clients are threaded as the shared
+// redis.UniversalClient interface, which the assertions below also confirm.
+func TestNewRedisClientClusterType(t *testing.T) {
+	tru := true
+	fls := false
+
+	t.Run("cluster enabled returns *redis.ClusterClient", func(t *testing.T) {
+		client := newRedisClient(c.RedisConfig{Host: "localhost", Port: 6379, TLS: &fls, Cluster: &tru})
+		defer client.Close()
+
+		if _, ok := client.(*redis.ClusterClient); !ok {
+			t.Fatalf("expected *redis.ClusterClient when redis.cluster=true, got %T", client)
+		}
+		var _ redis.UniversalClient = client
+	})
+
+	t.Run("cluster disabled returns single-node *redis.Client", func(t *testing.T) {
+		client := newRedisClient(c.RedisConfig{Host: "localhost", Port: 6379, TLS: &fls})
+		defer client.Close()
+
+		if _, ok := client.(*redis.Client); !ok {
+			t.Fatalf("expected *redis.Client when cluster is off, got %T", client)
+		}
+		var _ redis.UniversalClient = client
 	})
 }

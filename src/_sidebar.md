@@ -53,6 +53,7 @@
 - Configuration
   - [Overview](/configuration/admin-ui)
   - [Configuration](/configuration/configuration)
+  - [PostgreSQL Storage](/configuration/postgres-storage)
   - [Deploy on Kubernetes](/configuration/kubernetes)
   - [Helm Chart](/configuration/helm)
 

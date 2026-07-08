@@ -168,6 +168,8 @@ redis: # Required for on-call functionality and the AI agent
   port: ${REDIS_PORT}
   password: ${REDIS_PASSWORD}
   db: 0
+  # tls: true       # default true; set false (or REDIS_TLS=false) for a plaintext dev Redis
+  # cluster: false  # default false; set true (or REDIS_CLUSTER=true) for a cluster-mode Redis/Valkey
 
 # -----------------------------------------------------------------------------
 # AI agent (training | shadow | detect) — opt-in.
@@ -304,9 +306,12 @@ The application relies on several environment variables to configure alerting se
 | `GATEWAY_SECRET` | Shared secret required to access the admin dashboard and every `/api/admin/*` and `/api/agent/*` endpoint. Sent by clients in the `X-Gateway-Secret` header. **When unset the admin endpoints are not registered at all.** |
 
 ### Storage
-| Variable                 | Description |
-|--------------------------|-------------|
-| `STORAGE_TYPE`           | Storage backend for incidents and agent state. One of `file` (default and the only implemented backend today), `redis`, `database`. |
+| Variable       | Description |
+|----------------|-------------|
+| `STORAGE_TYPE` | Storage backend for incidents and agent state. One of `file` (default) or `postgres`. |
+| `POSTGRES_DSN` | Postgres connection string — **required when `STORAGE_TYPE=postgres`**. e.g. `postgres://versus:your_strong_password@host:5432/versus_incident?sslmode=require`. Keep the password out of source control — set the DSN via env only. |
+
+> Using the PostgreSQL backend? See [PostgreSQL storage backend](/configuration/postgres-storage) for how to provision the database and role.
 
 ### Slack Configuration
 | Variable          | Description |
@@ -503,6 +508,32 @@ curl -X POST "http://localhost:3000/api/incidents?oncall_enable=true" \
 | `REDIS_HOST`     | The hostname or IP address of the Redis server. Required if on-call is enabled. |
 | `REDIS_PORT`     | The port number of the Redis server. Required if on-call is enabled. |
 | `REDIS_PASSWORD` | The password for authenticating with the Redis server. Required if on-call is enabled and Redis requires authentication. |
+| `REDIS_TLS`      | Whether to dial Redis over TLS. **TLS is on by default** — only an explicit off-value (`false`/`0`/`no`/`off`, any case) disables it. Any other value keeps TLS on. |
+| `REDIS_CA_CERT`  | Path to a CA bundle used to verify the Redis server certificate when TLS is on. |
+| `REDIS_CLUSTER`  | Set to `true` to build a **cluster-aware** Redis client (see below). **Default is `false`** (single-node client — unchanged behaviour). Only `true`/`1`/`yes`/`on` (any case) enable cluster mode; any other value stays single-node. |
+
+#### Cluster mode (Redis / Valkey)
+
+By default Versus uses a **single-node** Redis client. Set `redis.cluster: true`
+in `config.yaml` (or `REDIS_CLUSTER=true`) to build a **cluster-aware** client
+instead. Turn this on when you point Versus at a managed Redis/Valkey running
+with **cluster mode enabled** — e.g. AWS ElastiCache for Valkey/Redis with
+cluster mode on — which shards keys across nodes and returns
+`MOVED <slot> <node>` redirects that a single-node client cannot follow.
+
+The symptom this fixes is repeated log lines like:
+
+```text
+agent: failed to persist cursor for my-source: MOVED 14450 clustercfg.example.amazonaws.com:6379
+```
+
+A single primary/replicas deployment (**cluster mode disabled**) does **not**
+need this flag — leave it `false`.
+
+Cluster mode **composes with the existing Redis settings** — `redis.tls` /
+`REDIS_TLS`, `redis.password`, `redis.host` / `redis.port`, and `REDIS_CA_CERT`
+all apply unchanged. In particular, the default-TLS behaviour is intact: TLS
+stays on unless you set `REDIS_TLS=false`.
 
 ### AI Agent Configuration
 | Variable                  | Description |

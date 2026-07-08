@@ -48,6 +48,14 @@ Every source is cursor-based:
 This means restarts are safe: the agent picks up exactly where it left
 off, and no signal is processed twice or skipped.
 
+> **Using a cluster-mode Redis/Valkey?** If cursor writes fail with repeated
+> log lines like `agent: failed to persist cursor for <source>: MOVED 14450 <node>:6379`,
+> your Redis has **cluster mode enabled** (e.g. AWS ElastiCache for Valkey/Redis)
+> and shards keys across nodes. Set `redis.cluster: true` (or `REDIS_CLUSTER=true`)
+> to build a cluster-aware client that follows those `MOVED` redirects. See
+> [Cluster mode (Redis / Valkey)](../configuration/configuration.md#cluster-mode-redis--valkey)
+> for details. A single primary/replicas setup does not need this flag.
+
 ## Try it locally
 
 The runnable [docker-compose example](https://github.com/VersusControl/versus-incident/tree/main/examples/docker-compose)

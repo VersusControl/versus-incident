@@ -283,25 +283,46 @@ func TestWorker_Seam_TrainingPromotesVerdictToKnown(t *testing.T) {
 	}
 }
 
-// TestWorker_Seam_TrainingDisabledNeverPromotes proves auto_promote_after<=0
-// disables count-based promotion on the training learn path too: a pattern seen
-// well past any default is never marked "known", and readiness stays not-ready
-// — so the disabled contract holds in training, not just in shadow/detect.
-func TestWorker_Seam_TrainingDisabledNeverPromotes(t *testing.T) {
-	src := &batchSource{name: "es", signals: repeatSignals("service=api chatter id=", 5)}
-	w, cat := newTrainingWorker(t, 0, src) // 0 disables count-based promotion
+// TestWorker_Seam_TrainingZeroThresholdNormalizesAndPromotes proves a
+// non-positive auto_promote_after is treated as the default (100) on the
+// training learn path — there is no "promotion disabled" state. A pattern seen
+// past the default IS marked "known" and readiness flips to ready, exactly as
+// it would with the default configured explicitly.
+func TestWorker_Seam_TrainingZeroThresholdNormalizesAndPromotes(t *testing.T) {
+	for _, threshold := range []int{0, -5} {
+		src := &batchSource{name: "es", signals: repeatSignals("service=api chatter id=", 5)}
+		w, cat := newTrainingWorker(t, threshold, src) // <=0 normalizes to the default 100
 
-	for i := 0; i < 30; i++ { // 150 sightings, well past the 100 default
+		// Below the default: 19 ticks × 5 = 95 sightings, not yet known.
+		for i := 0; i < 19; i++ {
+			w.tickSource(context.Background(), src, "training")
+		}
+		p := singlePattern(t, cat)
+		if p.Count != 95 {
+			t.Fatalf("threshold=%d: count = %d, want 95", threshold, p.Count)
+		}
+		if p.Verdict == "known" {
+			t.Fatalf("threshold=%d: promoted early at count=95 (default gate is 100)", threshold)
+		}
+		if LogReadiness(p, threshold, 30*time.Second).Ready {
+			t.Fatalf("threshold=%d: readiness Ready below the default gate, want not ready", threshold)
+		}
+
+		// Cross the default: 20th tick → 100 sightings, now known.
 		w.tickSource(context.Background(), src, "training")
-	}
-	p := singlePattern(t, cat)
-	if p.Count != 150 {
-		t.Fatalf("count = %d, want 150", p.Count)
-	}
-	if p.Verdict == "known" {
-		t.Fatalf("auto_promote_after=0 promoted in training to %q; 0 must disable promotion", p.Verdict)
-	}
-	if LogReadiness(p, 0, 30*time.Second).Ready {
-		t.Fatalf("readiness Ready with promotion disabled, want not ready")
+		p = singlePattern(t, cat)
+		if p.Count != 100 {
+			t.Fatalf("threshold=%d: count = %d, want 100", threshold, p.Count)
+		}
+		if p.Verdict != "known" {
+			t.Fatalf("threshold=%d: count reached 100 but Verdict = %q, want %q "+
+				"(<=0 must normalize to the default, not disable promotion)", threshold, p.Verdict, "known")
+		}
+		if !LogReadiness(p, threshold, 30*time.Second).Ready {
+			t.Fatalf("threshold=%d: readiness not Ready at the default gate, want ready", threshold)
+		}
+		if got := LogReadiness(p, threshold, 30*time.Second).Needed; got != 100 {
+			t.Fatalf("threshold=%d: readiness Needed = %d, want 100 (normalized default)", threshold, got)
+		}
 	}
 }

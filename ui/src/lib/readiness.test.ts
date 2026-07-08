@@ -38,9 +38,11 @@ describe("deriveReadiness", () => {
     expect(d.etaMinutes).toBeNull();
   });
 
-  it("needed === 0 → indeterminate: no remaining/progress/eta", () => {
+  // Defensive only: the server always ships a positive `needed` (a non-positive
+  // auto_promote_after is normalized to the default upstream), but deriveReadiness
+  // must still stay sane if a zero target ever appears rather than dividing by zero.
+  it("needed === 0 → stays robust: no remaining/progress/eta", () => {
     const d = deriveReadiness(base({ seen: 5, needed: 0, rate_per_min: 3 }));
-    expect(d.state).toBe("indeterminate");
     expect(d.indeterminate).toBe(true);
     expect(d.remaining).toBeNull();
     expect(d.progress).toBeNull();

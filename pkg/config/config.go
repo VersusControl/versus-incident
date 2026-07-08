@@ -236,6 +236,16 @@ type RedisConfig struct {
 	DB                 int    `mapstructure:"db"`
 	TLS                *bool  `mapstructure:"tls"`
 	InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"`
+	Cluster            *bool  `mapstructure:"cluster"`
+}
+
+// ClusterEnabled reports whether the Redis client should be built in
+// cluster mode (redis.NewClusterClient) so it follows MOVED/ASK redirects
+// across shards — required for AWS ElastiCache Valkey/Redis in cluster mode.
+// Single-node is the default: a nil flag (key omitted) preserves today's
+// behaviour. Set redis.cluster: true (or REDIS_CLUSTER=true) to opt in.
+func (r RedisConfig) ClusterEnabled() bool {
+	return r.Cluster != nil && *r.Cluster
 }
 
 // TLSEnabled reports whether the Redis client should dial over TLS. TLS is
@@ -253,6 +263,16 @@ func (r RedisConfig) TLSEnabled() bool {
 func redisTLSFromEnv(v string) *bool {
 	off := map[string]bool{"false": true, "0": true, "no": true, "off": true}
 	enabled := !off[strings.ToLower(strings.TrimSpace(v))]
+	return &enabled
+}
+
+// redisClusterFromEnv resolves a non-empty REDIS_CLUSTER value to a cluster
+// flag, fail-safe OFF: only an explicit on-value (true/1/yes/on, any case)
+// enables cluster mode; every other value (a typo, empty, off, ...) keeps the
+// single-node default so an operator never accidentally switches topology.
+func redisClusterFromEnv(v string) *bool {
+	on := map[string]bool{"true": true, "1": true, "yes": true, "on": true}
+	enabled := on[strings.ToLower(strings.TrimSpace(v))]
 	return &enabled
 }
 
@@ -316,6 +336,16 @@ func loadConfigFromPath(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
+	// Normalize the auto-promotion threshold at the single load chokepoint so
+	// every downstream consumer (worker brain, controller readiness, the
+	// /api/agent/config admin read) sees a positive gate. A present-but-empty
+	// key, a ${VAR} that expands to empty, or an explicit 0/negative all arrive
+	// here as <= 0; they are folded up to the default rather than becoming a
+	// silent "promotion disabled" state that leaves patterns learning forever.
+	if loaded.Agent.Catalog.AutoPromoteAfter <= 0 {
+		loaded.Agent.Catalog.AutoPromoteAfter = DefaultAutoPromoteAfter
+	}
+
 	setEnableFromEnv := func(envVar string, config *bool) {
 		if value := os.Getenv(envVar); value != "" {
 			*config = strings.ToLower(value) == "true"
@@ -350,6 +380,14 @@ func loadConfigFromPath(path string) (*Config, error) {
 	// silently downgrades the connection to plaintext.
 	if val := os.Getenv("REDIS_TLS"); val != "" {
 		loaded.Redis.TLS = redisTLSFromEnv(val)
+	}
+
+	// Redis env override: REDIS_CLUSTER toggles cluster-mode client
+	// construction. Fail-safe OFF: only an explicit on-value (true/1/yes/on,
+	// any case) enables cluster mode; unset or any other value keeps the
+	// single-node default so topology is never switched by accident.
+	if val := os.Getenv("REDIS_CLUSTER"); val != "" {
+		loaded.Redis.Cluster = redisClusterFromEnv(val)
 	}
 
 	// Storage env overrides

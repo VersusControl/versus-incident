@@ -302,33 +302,43 @@ func TestLogBrain_AutoPromoteAfter_CustomThresholdPromotes(t *testing.T) {
 	}
 }
 
-// (c) auto_promote_after: 0 DISABLES count-based promotion — a pattern
-// is never marked "known" no matter how many times it is seen. Drives well past
-// the old 100 fallback to prove the explicit 0 is honoured, not re-mapped.
-func TestLogBrain_AutoPromoteAfter_ZeroDisablesPromotion(t *testing.T) {
+// (c) auto_promote_after: 0 NORMALIZES to the default gate — a non-positive
+// value is not a "disabled" state. Drive past the default 100 and the pattern
+// becomes "known", exactly as it would with the default configured explicitly.
+func TestLogBrain_AutoPromoteAfter_ZeroNormalizesToDefault(t *testing.T) {
 	cat := config.AgentCatalogConfig{
-		AutoPromoteAfter: 0, // documented: disables promotion
+		AutoPromoteAfter: 0, // non-positive → resolved to the default 100
 		SpikeMultiplier:  0, // disable spike so it can't mask the verdict
 	}
 	b, c := newLogBrainForTest(t, cat)
 
+	// Below the default gate: 9 × 10 = 90 sightings, not yet known.
 	var v core.TypedVerdict
-	for i := 0; i < 12; i++ {
-		v = classifyOnce(t, b, logObs("p", 10)) // 120 sightings, well past 100
-	}
-	if got := c.Get("p").Count; got != 120 {
-		t.Fatalf("count = %d, want 120", got)
+	for i := 0; i < 9; i++ {
+		v = classifyOnce(t, b, logObs("p", 10))
 	}
 	if c.Get("p").Verdict == "known" {
-		t.Fatalf("auto_promote_after=0 promoted pattern to %q; 0 must disable promotion (QA-028)", c.Get("p").Verdict)
+		t.Fatalf("promoted early at count=90 (default gate is 100)")
 	}
 	if v.Class != core.VerdictUnknown {
-		t.Fatalf("verdict at count=120 = %v, want unknown (0 disables promotion)", v.Class)
+		t.Fatalf("verdict at count=90 = %v, want unknown (below the default gate)", v.Class)
+	}
+
+	// Cross the default gate: 10th batch → 100 sightings, now known.
+	v = classifyOnce(t, b, logObs("p", 10))
+	if got := c.Get("p").Count; got != 100 {
+		t.Fatalf("count = %d, want 100", got)
+	}
+	if c.Get("p").Verdict != "known" {
+		t.Fatalf("auto_promote_after=0 did not promote at count=100; <=0 must normalize to the default")
+	}
+	if v.Class != core.VerdictKnownPattern {
+		t.Fatalf("verdict at count=100 = %v, want known (0 normalizes to the default gate)", v.Class)
 	}
 }
 
-// (d) A negative threshold (any value ≤ 0) also disables promotion.
-func TestLogBrain_AutoPromoteAfter_NegativeDisablesPromotion(t *testing.T) {
+// (d) A negative threshold (any value ≤ 0) also normalizes to the default gate.
+func TestLogBrain_AutoPromoteAfter_NegativeNormalizesToDefault(t *testing.T) {
 	cat := config.AgentCatalogConfig{
 		AutoPromoteAfter: -1,
 		SpikeMultiplier:  0,
@@ -337,30 +347,29 @@ func TestLogBrain_AutoPromoteAfter_NegativeDisablesPromotion(t *testing.T) {
 
 	var v core.TypedVerdict
 	for i := 0; i < 12; i++ {
-		v = classifyOnce(t, b, logObs("p", 10)) // 120 sightings
+		v = classifyOnce(t, b, logObs("p", 10)) // 120 sightings, past the default 100
 	}
-	if c.Get("p").Verdict == "known" {
-		t.Fatalf("auto_promote_after=-1 promoted pattern to %q; any value ≤0 must disable promotion", c.Get("p").Verdict)
+	if c.Get("p").Verdict != "known" {
+		t.Fatalf("auto_promote_after=-1 did not promote at count=120; any value ≤0 must normalize to the default")
 	}
-	if v.Class != core.VerdictUnknown {
-		t.Fatalf("verdict = %v, want unknown (negative disables promotion)", v.Class)
+	if v.Class != core.VerdictKnownPattern {
+		t.Fatalf("verdict = %v, want known (negative normalizes to the default gate)", v.Class)
 	}
 }
 
-// (e) An operator-labelled "known" pattern STAYS known even when count-based
-// promotion is disabled (threshold 0). This bites the `prevVerdict == "known"`
-// clause independently of the count clause: were the guard rewritten as
-// `threshold > 0 && (prevVerdict == "known" || postCount >= threshold)`, a
-// disabled threshold would silently un-suppress a hand-labelled pattern.
+// (e) An operator-labelled "known" pattern STAYS known regardless of the
+// effective count threshold. This bites the `prevVerdict == "known"` clause
+// independently of the count clause: were the guard rewritten to require the
+// count clause, a hand-labelled pattern below the gate would be un-suppressed.
 func TestLogBrain_AutoPromoteAfter_AlreadyKnownStaysKnown(t *testing.T) {
 	cat := config.AgentCatalogConfig{
-		AutoPromoteAfter: 0, // count-based promotion disabled
+		AutoPromoteAfter: 0, // non-positive → resolved to the default 100
 		SpikeMultiplier:  0, // disable spike so it can't mask the verdict
 	}
 	b, c := newLogBrainForTest(t, cat)
 
-	// Seed the pattern (stays Unknown — 0 disables count-based promotion), then
-	// label it known by hand as an operator would.
+	// Seed the pattern (stays Unknown — count 5 is far below the default gate),
+	// then label it known by hand as an operator would.
 	classifyOnce(t, b, logObs("p", 5))
 	if !c.MarkKnown("p") {
 		t.Fatalf("MarkKnown(p) did not mark the seeded pattern")
@@ -370,12 +379,48 @@ func TestLogBrain_AutoPromoteAfter_AlreadyKnownStaysKnown(t *testing.T) {
 	}
 
 	// Further sightings must keep it known — the prior "known" verdict wins even
-	// though the count threshold is disabled.
+	// though the count is still below the gate.
 	v := classifyOnce(t, b, logObs("p", 5))
 	if v.Class != core.VerdictKnownPattern {
-		t.Fatalf("already-known verdict = %v, want known (prior known must win with threshold 0)", v.Class)
+		t.Fatalf("already-known verdict = %v, want known (prior known must win below the gate)", v.Class)
 	}
 	if c.Get("p").Verdict != "known" {
 		t.Fatalf("catalog verdict = %q, want known (an already-known pattern must stay known)", c.Get("p").Verdict)
+	}
+}
+
+// (f) The operator's real "first fetch" scenario: an Elasticsearch source's
+// FIRST batch lands a pattern whose sighting count is already far above the
+// threshold (e.g. 3304 >= 100) in a single tick. It must classify known
+// immediately — Promote flips the stored verdict and LogReadiness reports Ready
+// — not sit "still learning" forever. This pins the count clause of isLogKnown
+// on the first-batch path so a large first pull is never stuck learning once the
+// threshold is the (non-zero) default.
+func TestLogBrain_AutoPromoteAfter_FirstBatchAboveThresholdIsKnown(t *testing.T) {
+	cat := config.AgentCatalogConfig{
+		AutoPromoteAfter: 100, // the embedded default an omitted key resolves to
+		SpikeMultiplier:  0,   // isolate the count-promotion path from spike
+	}
+	b, c := newLogBrainForTest(t, cat)
+
+	v := classifyOnce(t, b, logObs("p", 3304)) // single first-fetch batch
+	if got := c.Get("p").Count; got != 3304 {
+		t.Fatalf("count = %d, want 3304", got)
+	}
+	if v.Class != core.VerdictKnownPattern {
+		t.Fatalf("first-batch verdict = %v, want known (3304 >= 100)", v.Class)
+	}
+	if c.Get("p").Verdict != "known" {
+		t.Fatalf("catalog verdict = %q, want known (Promote must fire on the first batch)", c.Get("p").Verdict)
+	}
+	// The read-side readiness the UI consumes must agree with the classifier:
+	// Ready, with the threshold as the target — never the Needed=0 "no target"
+	// state for a pattern already past the (non-zero) threshold.
+	r := LogReadiness(c.Get("p"), cat.AutoPromoteAfter, 30*time.Second)
+	if !r.Ready {
+		t.Fatalf("LogReadiness.Ready = false, want true (3304 >= 100)")
+	}
+	if r.Needed != 100 {
+		t.Fatalf("LogReadiness.Needed = %d, want 100 (threshold target, not the no-target sentinel)", r.Needed)
 	}
 }

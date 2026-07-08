@@ -7,10 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
 	// pgx stdlib driver — registers "pgx" with database/sql.
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -34,8 +38,164 @@ type postgresProvider struct {
 // pool. The pool is owned by this provider — callers MUST NOT Close it.
 func (p *postgresProvider) DB() *sql.DB { return p.db }
 
+// defaultConnectBudget bounds the total time NewPostgres will spend retrying
+// the initial Postgres reachability check before giving up. It is overridable
+// per deployment via the POSTGRES_CONNECT_TIMEOUT env var.
+const defaultConnectBudget = 60 * time.Second
+
+// perPingTimeout bounds a single reachability probe so a black-holed host
+// (dropped packets, wrong host, firewall) can never block on the OS TCP
+// connect timeout — the probe fails fast and the retry loop logs and backs off.
+const perPingTimeout = 5 * time.Second
+
+// connectBudget resolves the total connect budget from POSTGRES_CONNECT_TIMEOUT
+// (a Go duration string such as "90s"), falling back to defaultConnectBudget
+// when the var is unset, unparseable, or non-positive.
+func connectBudget() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("POSTGRES_CONNECT_TIMEOUT"))
+	if raw == "" {
+		return defaultConnectBudget
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return defaultConnectBudget
+	}
+	return d
+}
+
+// redactDSN returns a safe "host:port/dbname" summary of a Postgres DSN for
+// logs and errors. It NEVER returns the password: URL-form userinfo is stripped
+// of its password and keyword-form drops the password= token entirely. If the
+// DSN cannot be understood it returns the constant "postgres" rather than
+// risk leaking any raw connection string.
+func redactDSN(dsn string) string {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return "postgres"
+	}
+	// URL form: postgres://user:pass@host:5432/db?...
+	if strings.Contains(dsn, "://") {
+		u, err := url.Parse(dsn)
+		if err != nil || u.Host == "" {
+			return "postgres"
+		}
+		hostPort := u.Host
+		db := strings.TrimPrefix(u.Path, "/")
+		summary := hostPort
+		if db != "" {
+			summary = hostPort + "/" + db
+		}
+		if u.User != nil {
+			if name := u.User.Username(); name != "" {
+				summary = name + "@" + summary
+			}
+		}
+		return summary
+	}
+	// Keyword form: host=... port=... dbname=... password=...
+	var host, port, dbname string
+	for _, field := range strings.Fields(dsn) {
+		kv := strings.SplitN(field, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		switch strings.ToLower(kv[0]) {
+		case "host":
+			host = kv[1]
+		case "port":
+			port = kv[1]
+		case "dbname":
+			dbname = kv[1]
+		}
+	}
+	if host == "" {
+		return "postgres"
+	}
+	summary := host
+	if port != "" {
+		summary = host + ":" + port
+	}
+	if dbname != "" {
+		summary = summary + "/" + dbname
+	}
+	return summary
+}
+
+// dsnDBName extracts just the database name from a Postgres DSN (URL form
+// postgres://…/dbname or keyword form dbname=…), returning "" when it cannot
+// be determined. It shares the URL/keyword shapes with redactDSN but yields
+// only the dbname so pgSetupHint can name the real database in its guide
+// without ever touching the password.
+func dsnDBName(dsn string) string {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return ""
+	}
+	if strings.Contains(dsn, "://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimPrefix(u.Path, "/")
+	}
+	for _, field := range strings.Fields(dsn) {
+		kv := strings.SplitN(field, "=", 2)
+		if len(kv) == 2 && strings.ToLower(kv[0]) == "dbname" {
+			return kv[1]
+		}
+	}
+	return ""
+}
+
+// pgSetupHint returns an actionable, operator-facing provisioning guide when
+// err is a Postgres login/permission failure, or "" for anything else. It
+// inspects for the SQLSTATEs an operator hits when the role can't log in
+// (28P01/28000), the database is missing (3D000), or the role lacks the
+// GRANTs needed to migrate (42501/3F000 — the PostgreSQL 15+ "permission
+// denied for schema public" case). The guide is STATIC text plus dbName only,
+// so it can never leak a password or the DSN. dbName falls back to
+// "versus_enterprise" when the connection string didn't name a database.
+func pgSetupHint(err error, dbName string) string {
+	if err == nil {
+		return ""
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return ""
+	}
+	switch pgErr.Code {
+	case "28P01", "28000", // auth failed: invalid_password / invalid_authorization
+		"3D000",          // database does not exist: invalid_catalog_name
+		"42501", "3F000": // missing GRANTs: insufficient_privilege / invalid_schema_name
+	default:
+		return ""
+	}
+	if strings.TrimSpace(dbName) == "" {
+		dbName = "versus_enterprise"
+	}
+	return fmt.Sprintf(`postgres rejected the connection: the role/database may be missing or lack privileges.
+Provision it once as a superuser (psql), substituting your own db / user / password:
+
+  CREATE DATABASE %[1]s;
+  CREATE USER versus WITH PASSWORD 'your_strong_password';
+  GRANT ALL PRIVILEGES ON DATABASE %[1]s TO versus;
+  \c %[1]s
+  GRANT ALL ON SCHEMA public TO versus;   -- required on PostgreSQL 15+
+
+On PostgreSQL 15+ the public schema no longer allows CREATE by default, so the
+final grant (run while connected to %[1]s) is the usual fix for
+"permission denied for schema public" during migration.`, dbName)
+}
+
 // NewPostgres opens a connection to Postgres, runs idempotent migrations,
 // and returns a ready Provider. Callers must call Close when done.
+//
+// The initial reachability check is bounded, retried, and logged so an
+// unreachable or slow-to-start database can never turn into a silent restart
+// loop: each probe is capped at perPingTimeout, the loop retries with backoff
+// until the connectBudget is exhausted, and every attempt logs to stderr
+// (captured by `docker logs`) using a redacted host:port/dbname target that
+// never contains the password.
 func NewPostgres(opts PostgresOptions) (Provider, error) {
 	if opts.DSN == "" {
 		return nil, fmt.Errorf("storage: postgres DSN is required (set POSTGRES_DSN)")
@@ -44,12 +204,45 @@ func NewPostgres(opts PostgresOptions) (Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("storage: open postgres: %w", err)
 	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("storage: ping postgres: %w", err)
+
+	redacted := redactDSN(opts.DSN)
+	dbName := dsnDBName(opts.DSN)
+	budget := connectBudget()
+	deadline := time.Now().Add(budget)
+
+	log.Printf("storage: connecting to postgres at %s", redacted)
+
+	var lastErr error
+	for attempt := 1; ; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), perPingTimeout)
+		lastErr = db.PingContext(ctx)
+		cancel()
+		if lastErr == nil {
+			log.Printf("storage: connected to postgres at %s", redacted)
+			break
+		}
+		// Backoff grows linearly from ~1s and is capped at ~5s, but never
+		// past the remaining budget.
+		backoff := time.Duration(attempt) * time.Second
+		if backoff > 5*time.Second {
+			backoff = 5 * time.Second
+		}
+		if time.Now().Add(backoff).After(deadline) {
+			if hint := pgSetupHint(lastErr, dbName); hint != "" {
+				log.Printf("%s", hint)
+			}
+			_ = db.Close()
+			return nil, fmt.Errorf("storage: cannot reach postgres at %s after %s: %w", redacted, budget, lastErr)
+		}
+		log.Printf("storage: cannot reach postgres at %s (attempt %d): %v; retrying in %s", redacted, attempt, lastErr, backoff)
+		time.Sleep(backoff)
 	}
+
 	p := &postgresProvider{db: db}
 	if err := p.migrate(); err != nil {
+		if hint := pgSetupHint(err, dbName); hint != "" {
+			log.Printf("%s", hint)
+		}
 		_ = db.Close()
 		return nil, fmt.Errorf("storage: postgres migrate: %w", err)
 	}

@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 // CursorStore persists the last-seen timestamp for each SignalSource. Redis
@@ -13,7 +13,7 @@ import (
 // falls back to in-memory storage when Redis is unavailable so that
 // development setups don't require Redis just to try training mode.
 type CursorStore struct {
-	rdb       *redis.Client
+	rdb       redis.UniversalClient
 	keyPrefix string
 
 	mu  sync.RWMutex
@@ -21,7 +21,7 @@ type CursorStore struct {
 }
 
 // NewCursorStore returns a CursorStore. Pass `rdb=nil` for in-memory only.
-func NewCursorStore(rdb *redis.Client) *CursorStore {
+func NewCursorStore(rdb redis.UniversalClient) *CursorStore {
 	return &CursorStore{
 		rdb:       rdb,
 		keyPrefix: "versus:agent:cursor:",
@@ -77,14 +77,30 @@ func (s *CursorStore) Reset(ctx context.Context) error {
 	if s.rdb == nil {
 		return nil
 	}
+	// In cluster mode a plain SCAN only walks the node the call routes to,
+	// so sweep every master shard; in single-node mode there is exactly one
+	// backend and the single deleteCursorKeys pass covers it.
+	if cc, ok := s.rdb.(*redis.ClusterClient); ok {
+		return cc.ForEachMaster(ctx, func(ctx context.Context, m *redis.Client) error {
+			return s.deleteCursorKeys(ctx, m)
+		})
+	}
+	return s.deleteCursorKeys(ctx, s.rdb)
+}
+
+// deleteCursorKeys scans one Redis backend for every cursor key under the
+// prefix and deletes them ONE AT A TIME. Single-key Del always routes to the
+// key's owning slot, so it is correct on a *redis.ClusterClient too — a
+// multi-key Del across different hash slots would fail with CROSSSLOT.
+func (s *CursorStore) deleteCursorKeys(ctx context.Context, c redis.Cmdable) error {
 	var cursor uint64
 	for {
-		keys, next, err := s.rdb.Scan(ctx, cursor, s.keyPrefix+"*", 100).Result()
+		keys, next, err := c.Scan(ctx, cursor, s.keyPrefix+"*", 100).Result()
 		if err != nil {
 			return err
 		}
-		if len(keys) > 0 {
-			if err := s.rdb.Del(ctx, keys...).Err(); err != nil {
+		for _, k := range keys {
+			if err := c.Del(ctx, k).Err(); err != nil {
 				return err
 			}
 		}

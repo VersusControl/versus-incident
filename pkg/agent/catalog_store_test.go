@@ -208,6 +208,52 @@ func TestCatalog_InstalledStore_RoutesAtCallSites(t *testing.T) {
 	}
 }
 
+// TestCatalog_MarkKnown_MutatesInMemoryWithStore pins the fix for the
+// "auto-promoted pattern still shows learning" bug: with a store installed,
+// MarkKnown must ALSO stamp the in-memory pattern "known" (not only route the
+// Curate), so the single-pattern read (catalog.Get → the detail page) and the
+// Promote idempotency guard see the promotion immediately instead of a stale
+// empty verdict. Regression: previously MarkKnown returned right after Curate
+// and left the in-memory verdict blank, so the detail page rendered "-".
+func TestCatalog_MarkKnown_MutatesInMemoryWithStore(t *testing.T) {
+	fake := &fakeCatalogStore{
+		patterns: map[string]*Pattern{
+			"p-hot": {ID: "p-hot", Template: "hot <*>", Count: 3304, Verdict: ""},
+		},
+	}
+	SetCatalogStore(fake)
+	t.Cleanup(func() { SetCatalogStore(nil) })
+
+	cat, err := LoadCatalog(nil)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	if p := cat.Get("p-hot"); p == nil || p.Verdict != "" {
+		t.Fatalf("precondition: p-hot should load with empty verdict, got %+v", p)
+	}
+
+	cat.MarkKnown("p-hot")
+
+	// In-memory read (the detail page path) now reflects the promotion.
+	if p := cat.Get("p-hot"); p == nil || p.Verdict != "known" {
+		t.Fatalf("after MarkKnown, in-memory verdict = %q, want \"known\" (detail page must not show '-')", verdictOf(p))
+	}
+	// And the curation was still routed to the durable store.
+	fake.mu.Lock()
+	edits := append([]CatalogEdit(nil), fake.curates...)
+	fake.mu.Unlock()
+	if len(edits) != 1 || edits[0].Kind != CatalogEditMarkKnown || edits[0].PatternID != "p-hot" {
+		t.Fatalf("Curate edits = %+v, want one CatalogEditMarkKnown for p-hot", edits)
+	}
+}
+
+func verdictOf(p *Pattern) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return p.Verdict
+}
+
 // TestCatalog_InstalledStore_HotPathNeverCallsStore proves Get/Upsert and the
 // log brain's Expected stay in-memory and partition-local: they never consult
 // the store.

@@ -9,7 +9,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssmincidents"
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 // OnCallProvider defines the interface for on-call notification providers
@@ -23,7 +23,7 @@ var CreateOnCallProvider func(cfg *config.Config, awsClient *ssmincidents.Client
 // OnCallWorkflow coordinates on-call escalation with a single provider
 type OnCallWorkflow struct {
 	provider    OnCallProvider
-	redisClient *redis.Client
+	redisClient redis.UniversalClient
 }
 
 // Global instance for singleton access
@@ -33,7 +33,7 @@ var (
 )
 
 // NewOnCallWorkflow creates a new on-call workflow with the given provider
-func NewOnCallWorkflow(redisClient *redis.Client, provider OnCallProvider) *OnCallWorkflow {
+func NewOnCallWorkflow(redisClient redis.UniversalClient, provider OnCallProvider) *OnCallWorkflow {
 	return &OnCallWorkflow{
 		provider:    provider,
 		redisClient: redisClient,
@@ -42,7 +42,7 @@ func NewOnCallWorkflow(redisClient *redis.Client, provider OnCallProvider) *OnCa
 
 // InitOnCallWorkflow initializes the global singleton instance
 // This is called once from main.go with the Redis client and AWS client
-func InitOnCallWorkflow(awsClient *ssmincidents.Client, redisClient *redis.Client) {
+func InitOnCallWorkflow(awsClient *ssmincidents.Client, redisClient redis.UniversalClient) {
 	once.Do(func() {
 		cfg := config.GetConfig()
 
