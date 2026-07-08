@@ -10,8 +10,8 @@ import (
 
 // TestLogReadiness_DriftAgainstClassify is the anti-drift guard the design
 // requires. It drives a log pattern to a range of states across
-// thresholds {below-default, at-default, below-custom, at-custom, disabled(0),
-// disabled(negative), already-known} and asserts THREE views of "known" all
+// thresholds {below-default, at-default, below-custom, at-custom, zero,
+// negative, already-known} and asserts THREE views of "known" all
 // agree for every row:
 //
 //  1. isLogKnown(...)            — the single extracted predicate
@@ -75,7 +75,7 @@ func TestLogReadiness_DriftAgainstClassify(t *testing.T) {
 			},
 		},
 		{
-			name:      "auto-promote disabled (0), high count never known",
+			name:      "zero threshold normalizes to default, high count becomes known",
 			threshold: 0,
 			build: func(t *testing.T, b *logBrain, c *Catalog) core.TypedVerdict {
 				var v core.TypedVerdict
@@ -86,7 +86,7 @@ func TestLogReadiness_DriftAgainstClassify(t *testing.T) {
 			},
 		},
 		{
-			name:      "auto-promote disabled (negative), high count never known",
+			name:      "negative threshold normalizes to default, high count becomes known",
 			threshold: -1,
 			build: func(t *testing.T, b *logBrain, c *Catalog) core.TypedVerdict {
 				var v core.TypedVerdict
@@ -97,12 +97,12 @@ func TestLogReadiness_DriftAgainstClassify(t *testing.T) {
 			},
 		},
 		{
-			name:      "operator-marked known stays known even with promotion disabled",
+			name:      "operator-marked known stays known regardless of threshold",
 			threshold: 0,
 			build: func(t *testing.T, b *logBrain, c *Catalog) core.TypedVerdict {
 				// Create the pattern, hand-mark it known, then re-classify: the
-				// prevVerdict=="known" clause must win independently of the
-				// (disabled) count clause.
+				// prevVerdict=="known" clause must win independently of the count
+				// clause.
 				classifyOnce(t, b, logObs("p", 1))
 				if !c.MarkKnown("p") {
 					t.Fatalf("MarkKnown(p) returned false")
@@ -171,19 +171,32 @@ func TestLogReadiness_EdgeCases(t *testing.T) {
 		}
 	})
 
-	t.Run("AutoPromoteAfter<=0 → Needed=0 indeterminate, not ready", func(t *testing.T) {
+	t.Run("AutoPromoteAfter<=0 normalizes to the default gate", func(t *testing.T) {
 		for _, threshold := range []int{0, -1, -100} {
-			p := &Pattern{Count: 500, BaselineFrequency: 0} // huge count, still not known
+			// A huge count is past the default gate, so a non-positive threshold
+			// (normalized to the default) makes the pattern ready.
+			p := &Pattern{Count: 500, BaselineFrequency: 0}
 			r := LogReadiness(p, threshold, poll)
-			if r.Needed != 0 {
-				t.Errorf("threshold %d: Needed = %d, want 0 (indeterminate sentinel — manual-only)", threshold, r.Needed)
+			if r.Needed != config.DefaultAutoPromoteAfter {
+				t.Errorf("threshold %d: Needed = %d, want %d (normalized default)", threshold, r.Needed, config.DefaultAutoPromoteAfter)
 			}
-			if r.Ready {
-				t.Errorf("threshold %d: Ready = true, want false (count promotion disabled, verdict empty)", threshold)
+			if !r.Ready {
+				t.Errorf("threshold %d: Ready = false, want true (count past the normalized default gate)", threshold)
 			}
 			if r.RatePerMin != 0 {
-				t.Errorf("threshold %d: RatePerMin = %v, want 0 (no baseline frequency yet)", threshold, r.RatePerMin)
+				t.Errorf("threshold %d: RatePerMin = %v, want 0 (Ready ⇒ no ETA)", threshold, r.RatePerMin)
 			}
+		}
+	})
+
+	t.Run("threshold 0 with count below default is not ready, Needed=default", func(t *testing.T) {
+		p := &Pattern{Count: 40, BaselineFrequency: 0}
+		r := LogReadiness(p, 0, poll)
+		if r.Needed != config.DefaultAutoPromoteAfter {
+			t.Errorf("Needed = %d, want %d (normalized default)", r.Needed, config.DefaultAutoPromoteAfter)
+		}
+		if r.Ready {
+			t.Errorf("Ready = true, want false (40 < %d)", config.DefaultAutoPromoteAfter)
 		}
 	})
 

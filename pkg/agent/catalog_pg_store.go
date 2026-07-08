@@ -164,9 +164,20 @@ const (
 		WHERE p.org_id = $1 AND p.kind = 'log' AND p.deleted = FALSE`
 
 	// Curate — one statement per operator mutation (all values bound).
-	sqlCurateVerdict        = `UPDATE vs_patterns SET verdict = $3, updated_at = NOW() WHERE org_id = $1 AND id = $2 AND kind = 'log'`
-	sqlCurateTags           = `UPDATE vs_patterns SET tags = $3, updated_at = NOW() WHERE org_id = $1 AND id = $2 AND kind = 'log'`
-	sqlCurateMarkKnown      = `UPDATE vs_patterns SET verdict = 'known', updated_at = NOW() WHERE org_id = $1 AND id = $2 AND kind = 'log' AND COALESCE(verdict, '') <> 'known'`
+	sqlCurateVerdict = `UPDATE vs_patterns SET verdict = $3, updated_at = NOW() WHERE org_id = $1 AND id = $2 AND kind = 'log'`
+	sqlCurateTags    = `UPDATE vs_patterns SET tags = $3, updated_at = NOW() WHERE org_id = $1 AND id = $2 AND kind = 'log'`
+	// MarkKnown must persist even when the pattern crossed auto_promote_after on
+	// its VERY FIRST tick — i.e. before the debounced Persist has written the
+	// pattern's identity row. An UPDATE would match 0 rows then and silently lose
+	// the promotion (worse: the caller caches it in markedKnown and never
+	// retries), so this UPSERTs the identity root: it creates the row with
+	// verdict='known' if absent, or promotes an existing one. Persist only ever
+	// updates `service` on conflict, so this curated verdict survives the later
+	// learned-row write and Snapshot then reports the pattern "known".
+	sqlCurateMarkKnown = `INSERT INTO vs_patterns (org_id, id, kind, verdict)
+		VALUES ($1, $2, 'log', 'known')
+		ON CONFLICT (org_id, id) DO UPDATE SET verdict = 'known', updated_at = NOW()
+		WHERE COALESCE(vs_patterns.verdict, '') <> 'known'`
 	sqlCurateRepointService = `UPDATE vs_patterns SET service = $3, updated_at = NOW() WHERE org_id = $1 AND id = $2 AND kind = 'log'`
 	sqlCurateDelete         = `UPDATE vs_patterns SET deleted = TRUE, updated_at = NOW() WHERE org_id = $1 AND id = $2 AND kind = 'log'`
 	sqlCurateResetPatterns  = `DELETE FROM vs_patterns WHERE org_id = $1 AND kind = 'log'`

@@ -267,13 +267,13 @@ func (b *logBrain) Classify(obs core.Observation, mean, std float64, confident b
 	prevCount := postCount - tickFreq // recover the pre-fold count
 	prevVerdict := p.Verdict          // Upsert never mutates Verdict, so == pre-fold
 
-	// AutoPromoteAfter ≤ 0 disables count-based promotion entirely ("0 disables
-	// the promotion"): a pattern is never marked "known" by sighting count
-	// alone, so it keeps flowing to detect-AI however often it is seen. The 100
-	// default for an UNSET key is supplied by the embedded default_config layer
-	// (loaded as the base before user overrides), so an omitted key arrives here
-	// as 100 — only an explicit 0 (or negative) reaches the disabled branch. A
-	// pattern already promoted to "known" stays known regardless of threshold.
+	// The effective auto-promotion threshold gates count-based promotion: once
+	// a pattern's sighting count reaches it, the pattern is marked "known" and
+	// stops flowing to detect-AI on count alone. A non-positive configured
+	// value is resolved to the default by isLogKnown (there is no way to turn
+	// count-based promotion off), and an omitted key already arrives here as the
+	// default via the config layer. A pattern already promoted to "known" stays
+	// known regardless of threshold.
 	threshold := b.cat.AutoPromoteAfter
 	isKnown := isLogKnown(prevVerdict, postCount, threshold)
 	if isKnown {
@@ -340,9 +340,9 @@ func (b *logBrain) confirmSpike(key string, res spikeResult) bool {
 // training this is what keeps the Verdict column and the readiness "To known"
 // column in agreement (both derive from isLogKnown).
 //
-// AutoPromoteAfter <= 0 disables count-based promotion entirely: for a not-yet-
-// known pattern isLogKnown then returns false, so Promote never marks a pattern
-// known by count in any mode; an operator-set "known" is untouched.
+// A non-positive AutoPromoteAfter is resolved to the default by isLogKnown, so
+// count-based promotion is always in effect; there is no "promotion disabled"
+// state.
 func (b *logBrain) Promote(key string) {
 	p := b.catalog.Get(key)
 	if p == nil {
@@ -353,16 +353,30 @@ func (b *logBrain) Promote(key string) {
 	}
 }
 
+// effectiveAutoPromote resolves the auto-promotion threshold used everywhere in
+// the learning engine. A non-positive value (an operator who omitted, blanked,
+// or zeroed the key, or a test that passes 0 directly) is treated as the
+// default rather than as a "promotion disabled" state — there is no way to turn
+// count-based promotion off. The config loader already normalizes the loaded
+// config to a positive value; this is the belt-and-suspenders guard so a 0 that
+// reaches the engine by any other path still resolves to a sane gate.
+func effectiveAutoPromote(n int) int {
+	if n <= 0 {
+		return config.DefaultAutoPromoteAfter
+	}
+	return n
+}
+
 // isLogKnown is the SINGLE definition of log "known" — the exact predicate
 // logBrain.Classify gates promotion on. Both Classify and LogReadiness call it
 // so the classifier and the read-side readiness view can never drift; a drift
 // test pins them equal. A pattern is known when an operator (or a prior
-// auto-promotion) already marked it "known", OR count-based promotion is
-// enabled (autoPromoteAfter > 0) and the sighting count has reached it.
-// autoPromoteAfter <= 0 disables count-based promotion, so only a pre-set
-// "known" verdict counts.
+// auto-promotion) already marked it "known", OR the sighting count has reached
+// the effective auto-promotion threshold. A non-positive autoPromoteAfter is
+// resolved to the default (see effectiveAutoPromote), so count-based promotion
+// is always in effect.
 func isLogKnown(prevVerdict string, count, autoPromoteAfter int) bool {
-	return prevVerdict == "known" || (autoPromoteAfter > 0 && count >= autoPromoteAfter)
+	return prevVerdict == "known" || count >= effectiveAutoPromote(autoPromoteAfter)
 }
 
 // LogReadiness computes the readiness of one log pattern as a generic
@@ -372,9 +386,9 @@ func isLogKnown(prevVerdict string, count, autoPromoteAfter int) bool {
 // gate compares) and the catalog's AutoPromoteAfter threshold.
 //
 //   - Seen   = the pattern's sighting count (the gate's own counter).
-//   - Needed = autoPromoteAfter when count-promotion is enabled (>0); 0 is the
-//     indeterminate sentinel when promotion is disabled (autoPromoteAfter<=0 →
-//     manual-only).
+//   - Needed = the effective auto-promotion threshold — always a positive gate
+//     (a non-positive configured value is resolved to the default), so there is
+//     no indeterminate/manual-only case.
 //   - Ready  = isLogKnown(...), so an already-"known"/"spike"-marked or
 //     count-promoted pattern reports Ready.
 //   - RatePerMin = the pattern's learned per-second sighting rate
@@ -387,12 +401,10 @@ func LogReadiness(p *Pattern, autoPromoteAfter int, pollInterval time.Duration) 
 		return core.Readiness{}
 	}
 	r := core.Readiness{
-		Seen:  p.Count,
-		Ready: isLogKnown(p.Verdict, p.Count, autoPromoteAfter),
+		Seen:   p.Count,
+		Needed: effectiveAutoPromote(autoPromoteAfter),
+		Ready:  isLogKnown(p.Verdict, p.Count, autoPromoteAfter),
 	}
-	if autoPromoteAfter > 0 {
-		r.Needed = autoPromoteAfter
-	} // else Needed=0 → indeterminate (manual-only promotion)
 	if !r.Ready && pollInterval > 0 && p.BaselineFrequency > 0 {
 		// BaselineFrequency is now a per-second sighting rate, so sightings/min
 		// is just rate × 60 — poll-interval-independent. pollInterval is kept as

@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 // CursorStore persists the last-seen timestamp for each SignalSource. Redis

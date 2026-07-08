@@ -7,7 +7,6 @@ import { deriveReadiness } from "@/lib/readiness";
 // (matches the Logs Verdict cell). States:
 //   ready          → full bar + check + "Ready"
 //   learning       → accent bar + "seen / needed"
-//   indeterminate  → seen count + "mark known by hand" (auto-promotion off)
 //   absent         → "—"
 // It reads the server Readiness facts via lib/readiness.ts so the number
 // stays consistent across every table, peek and detail surface.
@@ -26,11 +25,12 @@ export function ReadinessProgress({ readiness }: { readiness?: Readiness }) {
     );
   }
 
+  // Defensive: the server always ships a positive `needed`, but guard against a
+  // zero target (never expected) rather than dividing by zero into a NaN bar.
   if (d.indeterminate) {
     return (
       <span className="text-2xs text-ink-300">
         <span className="tabular-nums text-ink-100">{readiness.seen}</span> seen
-        <span className="text-ink-500"> · mark known by hand</span>
       </span>
     );
   }

@@ -9,7 +9,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssmincidents"
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 // OnCallProvider defines the interface for on-call notification providers

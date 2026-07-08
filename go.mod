@@ -16,10 +16,10 @@ require (
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 	github.com/cloudwego/eino-ext/components/model/qwen v0.1.9
 	github.com/go-git/go-git/v5 v5.19.1
-	github.com/go-redis/redis/v8 v8.11.5
 	github.com/gofiber/fiber/v2 v2.52.14
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/redis/go-redis/v9 v9.21.0
 	github.com/slack-go/slack v0.27.0
 	github.com/spf13/viper v1.21.0
 	golang.org/x/image v0.43.0
@@ -53,6 +53,7 @@ require (
 	go.opentelemetry.io/otel v1.29.0 // indirect
 	go.opentelemetry.io/otel/metric v1.29.0 // indirect
 	go.opentelemetry.io/otel/trace v1.29.0 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
 	google.golang.org/api v0.197.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
@@ -131,7 +132,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.43.5 // indirect
 	github.com/aws/smithy-go v1.27.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 )

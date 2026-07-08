@@ -222,9 +222,9 @@ type Readiness struct {
 	// Seen is the evidence folded so far (log sightings / folded samples).
 	Seen int `json:"seen"`
 	// Needed is the evidence required to reach Ready. 0 is the INDETERMINATE
-	// sentinel: no count gate applies (e.g. logs with AutoPromoteAfter<=0 —
-	// count-promotion is disabled, promotion is manual-only). The UI shows
-	// "Manual only", never "X of 0".
+	// sentinel: no count gate applies for this signal kind. The UI shows
+	// "Manual only", never "X of 0". (Log patterns always ship a positive
+	// Needed — a non-positive auto_promote_after is normalized to the default.)
 	Needed int `json:"needed"`
 	// RatePerMin is the observed arrival rate of NEW evidence for this key,
 	// in evidence/minute, used to derive the ETA. 0 is the UNKNOWN/STALLED

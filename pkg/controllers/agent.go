@@ -66,8 +66,9 @@ type AgentController struct {
 	// catalogCfg + pollInterval let listPatterns compute per-pattern readiness
 	// (core.Readiness) without reaching into package globals. Wired at boot via
 	// SetCatalogConfig from AgentConfig.Catalog + AgentConfig.PollInterval. Left
-	// unset (zero value), readiness degrades to Needed=0/RatePerMin=0 — the row
-	// still carries the field, just as "Learning" with no ETA (safe).
+	// unset (zero value), AutoPromoteAfter reads as 0 and LogReadiness resolves
+	// it to the default threshold, so the row still shows a sane target — just
+	// as "Learning" with no ETA (RatePerMin=0) until a worker is wired.
 	catalogCfg   config.AgentCatalogConfig
 	pollInterval time.Duration
 }
@@ -117,12 +118,13 @@ func (a *AgentController) SetSources(sources []core.SignalSource) *AgentControll
 // SetCatalogConfig wires the catalog threshold + worker poll interval into the
 // controller so listPatterns can attach a computed core.Readiness to each
 // pattern row WITHOUT reaching into package globals. `cat.AutoPromoteAfter`
-// supplies the readiness `Needed` gate (≤0 → indeterminate/manual-only) and
-// `poll` converts each pattern's per-tick sighting EWMA into a per-minute
-// arrival rate for the ETA. Optional and safe to omit: left unset the readiness
-// degrades to Needed=0/RatePerMin=0 (renders as "Learning", no ETA), so a
-// process that runs no worker still serves well-formed rows. Returns the
-// receiver for fluent wiring.
+// supplies the readiness `Needed` gate — always a positive target, since
+// LogReadiness resolves a non-positive value to the default — and `poll`
+// converts each pattern's per-tick sighting EWMA into a per-minute arrival rate
+// for the ETA. Optional and safe to omit: left unset the threshold reads as 0
+// and resolves to the default (renders as "Learning" toward that target, no
+// ETA), so a process that runs no worker still serves well-formed rows. Returns
+// the receiver for fluent wiring.
 func (a *AgentController) SetCatalogConfig(cat config.AgentCatalogConfig, poll time.Duration) *AgentController {
 	a.catalogCfg = cat
 	a.pollInterval = poll

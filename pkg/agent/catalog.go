@@ -242,21 +242,30 @@ func (c *Catalog) Get(id string) *Pattern {
 
 // MarkKnown stamps a pattern as auto-promoted ("known") in the catalog.
 func (c *Catalog) MarkKnown(patternID string) bool {
+	// Always reflect the promotion in the in-memory working set so the
+	// single-pattern read (catalog.Get → the pattern detail page), the brain's
+	// verdict guard, and the Promote idempotency check see "known" immediately.
+	// When a store is installed its Snapshot backs the LIST view but NOT Get, so
+	// without this the detail page and the every-tick Promote guard would keep
+	// reading a stale empty verdict.
+	c.mu.Lock()
+	p, ok := c.patterns[patternID]
+	changed := ok && p.Verdict != "known"
+	if changed {
+		p.Verdict = "known"
+		c.dirty = true
+	}
+	c.mu.Unlock()
+
+	// When a durable store is installed, route the curation so the promotion is
+	// persisted (and applied fleet-wide). The store's MarkKnown creates the
+	// pattern's identity row if it does not exist yet, so a pattern that crossed
+	// auto_promote_after on its very first tick — before the debounced Persist has
+	// written it — is still promoted instead of silently lost.
 	if s := catalogStore(); s != nil {
 		return s.Curate(CatalogEdit{Kind: CatalogEditMarkKnown, PatternID: patternID}) == nil
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	p, ok := c.patterns[patternID]
-	if !ok {
-		return false
-	}
-	if p.Verdict == "known" {
-		return false
-	}
-	p.Verdict = "known"
-	c.dirty = true
-	return true
+	return changed
 }
 
 // RepointService immediately sets an EXISTING pattern's Service to service —

@@ -127,8 +127,8 @@ catalog:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `persist_interval` | duration | `30s` | How often the in-memory catalog is flushed to `data/patterns.json`. |
-| `auto_promote_after` | int | `100` | A pattern seen this many times in `detect` mode is treated as known (won't alert). `0` disables the promotion. |
+| `persist_interval` | duration | `30s` | How often the in-memory catalog is flushed to backend storage. |
+| `auto_promote_after` | int | `100` | Number of sightings before a log pattern is auto-promoted to *known*. Default `100`. Any value `<= 0` (or a blank/unset key) is treated as the default `100`. To keep a pattern out of *known*, label/curate it instead. |
 
 The storage backend itself is selected at the **root** of `config.yaml`
 (`storage.type`), not here. The on-disk filename is fixed

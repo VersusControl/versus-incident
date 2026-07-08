@@ -4,6 +4,14 @@ package config
 // Agent mode (AI incident detection)
 // -----------------------------------------------------------------------------
 
+// DefaultAutoPromoteAfter is the sighting count at which a learned pattern is
+// auto-promoted to "known" when the operator omits, blanks, or sets a
+// non-positive auto_promote_after. It is the single source of truth for that
+// default: the config loader normalizes any value <= 0 up to this, and the
+// learning engine and readiness view fall back to it as well, so there is no
+// "disabled / manual-only" promotion state.
+const DefaultAutoPromoteAfter = 100
+
 type AgentConfig struct {
 	Enable         bool   `mapstructure:"enable"`
 	Mode           string `mapstructure:"mode"`          // training | shadow | detect
@@ -55,7 +63,7 @@ type AgentRedactionConfig struct {
 
 type AgentCatalogConfig struct {
 	PersistInterval  string `mapstructure:"persist_interval"`   // e.g. "30s"
-	AutoPromoteAfter int    `mapstructure:"auto_promote_after"` // 0 = never
+	AutoPromoteAfter int    `mapstructure:"auto_promote_after"` // sightings to "known"; <=0 is normalized to DefaultAutoPromoteAfter
 	// SpikeZ is the z-score threshold: a known pattern is re-flagged as a spike
 	// when its per-second rate sits this many standard deviations above the
 	// learned baseline (self-scaling, so a burst on a high-volume pattern trips

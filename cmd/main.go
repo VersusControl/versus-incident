@@ -25,7 +25,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/teams"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssmincidents"
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/VersusControl/versus-incident/pkg/common"
 

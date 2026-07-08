@@ -24,7 +24,10 @@ export interface DerivedReadiness {
 //   remaining   = max(0, needed - seen)            (needed > 0)
 //   progress    = seen / needed                    (needed > 0)
 //   etaMinutes  = remaining / rate_per_min         (rate > 0, needed > 0, !ready)
-// needed === 0 is the indeterminate sentinel; rate_per_min === 0 means no ETA.
+// The server always ships a positive `needed` (a non-positive auto_promote_after
+// is normalized to the default upstream), so `indeterminate` is a defensive
+// guard for a zero target that is never expected in practice; rate_per_min === 0
+// means no ETA.
 export function deriveReadiness(r: Readiness): DerivedReadiness {
   const ready = r.ready;
   const hasTarget = r.needed > 0;

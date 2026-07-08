@@ -336,6 +336,16 @@ func loadConfigFromPath(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
+	// Normalize the auto-promotion threshold at the single load chokepoint so
+	// every downstream consumer (worker brain, controller readiness, the
+	// /api/agent/config admin read) sees a positive gate. A present-but-empty
+	// key, a ${VAR} that expands to empty, or an explicit 0/negative all arrive
+	// here as <= 0; they are folded up to the default rather than becoming a
+	// silent "promotion disabled" state that leaves patterns learning forever.
+	if loaded.Agent.Catalog.AutoPromoteAfter <= 0 {
+		loaded.Agent.Catalog.AutoPromoteAfter = DefaultAutoPromoteAfter
+	}
+
 	setEnableFromEnv := func(envVar string, config *bool) {
 		if value := os.Getenv(envVar); value != "" {
 			*config = strings.ToLower(value) == "true"
