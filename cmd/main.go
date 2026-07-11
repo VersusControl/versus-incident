@@ -171,6 +171,12 @@ func main() {
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	defer rootCancel()
 
+	// Start the recurring daily incident-report scheduler. It is independent
+	// of agent.enable (the report covers webhook incidents too) and is inert
+	// unless an operator turns the daily digest on in the report settings, so a
+	// default install starts a single idle ticker and sends nothing.
+	services.StartReportScheduler(rootCtx, store)
+
 	if cfg.Agent.Enable {
 		// Try to attach to the existing Redis client; if on-call wasn't
 		// enabled but agent is, open one now (best effort — fall back to

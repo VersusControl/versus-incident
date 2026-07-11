@@ -136,10 +136,22 @@ func (rc *ReportsAdminController) putSettings(c *fiber.Ctx) error {
 	if err := c.BodyParser(&s); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid settings body"})
 	}
-	// Copy the string off the pooled request buffer before it outlives the
+	// Copy the strings off the pooled request buffer before they outlive the
 	// request.
 	s.DefaultChannel = strings.Clone(strings.TrimSpace(s.DefaultChannel))
 	s.DefaultWindow = strings.Clone(strings.TrimSpace(s.DefaultWindow))
+	s.SendTime = strings.Clone(strings.TrimSpace(s.SendTime))
+	s.Timezone = strings.Clone(strings.TrimSpace(s.Timezone))
+	// Validate the scheduler fields at the HTTP boundary. Empty is allowed —
+	// the store sanitizes it back to the built-in default (09:00 / UTC) — but
+	// a non-empty value must be well-formed: send_time must be "HH:MM" 24h and
+	// timezone must be "UTC" or a loadable IANA name.
+	if s.SendTime != "" && !services.ValidSendTime(s.SendTime) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid send_time (want HH:MM, 24-hour)"})
+	}
+	if s.Timezone != "" && !services.ValidTimezone(s.Timezone) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid timezone (want UTC or an IANA name like Asia/Ho_Chi_Minh)"})
+	}
 	if err := services.SaveReportSettings(services.Storage(), s); err != nil {
 		if errors.Is(err, services.ErrReportNoStorage) {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "storage not configured"})

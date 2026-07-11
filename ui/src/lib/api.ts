@@ -1194,12 +1194,28 @@ export interface Capabilities {
 
 // ReportSettings is the non-secret runtime configuration for the incidents
 // analytics report, exchanged with GET/PUT /api/admin/reports/settings.
+// schedule_enabled/send_time/timezone drive the daily scheduled delivery:
+// send_time is "HH:MM" (24h) and timezone is either "UTC" or a concrete IANA
+// name (e.g. "Asia/Ho_Chi_Minh"). The backend gates delivery on
+// enable && schedule_enabled and rejects a malformed send_time/timezone with
+// a 400.
 export interface ReportSettings {
   enable: boolean;
   default_channel: string;
   include_chart: boolean;
   rate_per_minute: number;
   default_window: string;
+  schedule_enabled: boolean;
+  send_time: string;
+  timezone: string;
+}
+
+// IntakeSettings is the non-secret runtime configuration for webhook incident
+// intake, exchanged with GET/PUT /api/admin/incidents/intake-settings. When
+// auto_resolve_webhook is on, incidents created via POST /api/incidents are
+// marked resolved immediately after the alert is sent. Defaults ON.
+export interface IntakeSettings {
+  auto_resolve_webhook: boolean;
 }
 // SpikeSettings is the non-secret runtime configuration for the log
 // volume-spike detector's GLOBAL default baseline mode, exchanged with
@@ -1801,9 +1817,23 @@ export const api = {
     request<ReportSettings>("/api/admin/reports/settings"),
 
   // updateReportSettings replaces the runtime report settings and returns the
-  // effective (sanitized) values.
+  // effective (sanitized) values. A malformed send_time/timezone surfaces as
+  // an ApiError with status 400.
   updateReportSettings: (s: ReportSettings) =>
     request<ReportSettings>("/api/admin/reports/settings", {
+      method: "PUT",
+      body: JSON.stringify(s),
+    }),
+
+  // getIntakeSettings reads the runtime webhook intake settings (the
+  // auto-resolve toggle).
+  getIntakeSettings: () =>
+    request<IntakeSettings>("/api/admin/incidents/intake-settings"),
+
+  // updateIntakeSettings replaces the runtime webhook intake settings and
+  // returns the effective values.
+  updateIntakeSettings: (s: IntakeSettings) =>
+    request<IntakeSettings>("/api/admin/incidents/intake-settings", {
       method: "PUT",
       body: JSON.stringify(s),
     }),

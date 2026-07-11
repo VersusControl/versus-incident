@@ -180,7 +180,7 @@ func (r *Renderer) Render(ctx context.Context, m core.ReportModel) (*core.Report
 	y := padding + 30
 	drawString(img, fc.title, colText, padding, y, "Incident report")
 	y += 30
-	sub := fmt.Sprintf("%s → %s UTC", fmtTime(m.WindowStart), fmtTime(m.WindowEnd))
+	sub := fmt.Sprintf("%s → %s %s", fmtTime(m.WindowStart), fmtTime(m.WindowEnd), tzLabelOf(m))
 	drawString(img, fc.body, colTextMuted, padding, y, sub)
 	y += 26
 	divider(img, padding, y, contentRight)
@@ -241,7 +241,7 @@ func (r *Renderer) Render(ctx context.Context, m core.ReportModel) (*core.Report
 	if footer == "" {
 		footer = "Versus Incident"
 	}
-	left := "generated " + fmtTime(m.GeneratedAt) + " UTC"
+	left := "generated " + fmtTime(m.GeneratedAt) + " " + tzLabelOf(m)
 	drawString(img, fc.footer, colTextFaint, padding, footerY, left)
 	fw := textWidth(fc.footer, footer)
 	drawString(img, fc.footer, colTextMuted, contentRight-fw, footerY, footer)
@@ -251,7 +251,7 @@ func (r *Renderer) Render(ctx context.Context, m core.ReportModel) (*core.Report
 	if err := png.Encode(&buf, img); err != nil {
 		return nil, fmt.Errorf("report: encode png: %w", err)
 	}
-	filename := "incidents-" + m.Window + "-" + m.WindowEnd.UTC().Format("20060102") + ".png"
+	filename := "incidents-" + m.Window + "-" + m.WindowEnd.Format("20060102") + ".png"
 	return &core.ReportImage{
 		Data:     buf.Bytes(),
 		MIME:     "image/png",
@@ -494,8 +494,22 @@ func truncateToWidth(face font.Face, s string, maxW int) string {
 	return "…"
 }
 
+// fmtTime renders a timestamp in ITS OWN location. The model's times are
+// already expressed in the report's timezone (UTC by default), so the renderer
+// must NOT force UTC here — doing so would undo the timezone conversion. For a
+// UTC model this is byte-for-byte identical to the previous behaviour.
 func fmtTime(t time.Time) string {
-	return t.UTC().Format("2006-01-02 15:04")
+	return t.Format("2006-01-02 15:04")
+}
+
+// tzLabelOf returns the timezone label drawn beside the card's timestamps,
+// defaulting to "UTC" for a model built without one so the card never shows a
+// dangling, unlabelled time.
+func tzLabelOf(m core.ReportModel) string {
+	if strings.TrimSpace(m.TZLabel) == "" {
+		return "UTC"
+	}
+	return m.TZLabel
 }
 
 func sanitizeFilename(s string) string {

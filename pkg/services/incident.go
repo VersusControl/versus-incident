@@ -46,9 +46,25 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	// Skip AckURL and On-Call if resolved alert
 	resolved := isResolved(*content)
 
+	// Webhook auto-resolve: an incident that arrived via the PUBLIC webhook
+	// intake — and is NOT already resolved by its payload — runs the FULL
+	// normal unresolved webhook flow (AckURL injection when on-call is enabled,
+	// persist, fan out, start on-call escalation), and is THEN stamped resolved
+	// in backend storage as a follow-up write. The only delta versus a normal
+	// webhook incident is the persisted resolved / resolved_at: alerting,
+	// AckURL, and on-call are identical. It is default ON and operator-
+	// toggleable, and scoped STRICTLY to the webhook origin (durable source ==
+	// "webhook"), so SNS/SQS transports and agent-emitted incidents are never
+	// auto-resolved. The intake blob is read once per request, mirroring how
+	// effective config is resolved above.
+	hint := sourceHint(params...)
+	autoResolve := shouldAutoResolveWebhook(resolved, resolveSource(*content, hint), LoadIntakeSettings(store))
+
 	incident := m.NewIncident(teamID, content, resolved)
 
-	// Dereference the Pointer and add AckURL if needed
+	// Dereference the Pointer and add AckURL if needed. Auto-resolve does NOT
+	// gate this: only a payload-resolved incident skips the AckURL, exactly as
+	// a normal incident would.
 	contentClone := make(map[string]interface{})
 	for k, v := range *content {
 		contentClone[k] = v
@@ -62,10 +78,13 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	}
 
 	// Persist FIRST so every received alert is recorded, even if a
-	// downstream channel later fails. Failures here are non-fatal.
+	// downstream channel later fails. Failures here are non-fatal. The record
+	// is persisted with its live resolved state (payload-resolved only); a
+	// webhook auto-resolve is applied as a follow-up write AFTER fan-out and
+	// on-call, so it never gates them.
 	var rec *storage.IncidentRecord
 	if store != nil {
-		rec = buildIncidentRecord(incident, cfg, contentClone, resolved, sourceHint(params...))
+		rec = buildIncidentRecord(incident, cfg, contentClone, resolved, hint)
 		rec.NotifyStatus = "pending"
 		if err := store.SaveIncident(rec); err != nil {
 			log.Printf("incident: persist warning: %v", err)
@@ -138,6 +157,20 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 		}
 	}
 
+	// Webhook auto-resolve finalize: the full unresolved flow above (AckURL,
+	// fan-out, on-call) has already run byte-for-byte as a normal incident.
+	// The ONLY additional effect is to stamp the stored record resolved so it
+	// leaves the open list — the same load / set resolved+resolved_at / save
+	// the admin resolve endpoint performs.
+	if autoResolve && store != nil && rec != nil {
+		now := time.Now().UTC()
+		rec.Resolved = true
+		rec.ResolvedAt = &now
+		if err := store.SaveIncident(rec); err != nil {
+			log.Printf("incident: persist auto-resolve warning: %v", err)
+		}
+	}
+
 	switch {
 	case sendErr != nil && oncallErr != nil:
 		return fmt.Errorf("send: %w; oncall: %v", sendErr, oncallErr)
@@ -200,6 +233,12 @@ func sourceHint(params ...*map[string]string) string {
 	return strings.TrimSpace((*params[0])[sourceHintKey])
 }
 
+// webhookSource is the durable Source label resolveSource assigns to the plain
+// public-webhook intake path (no transport hint, not agent-emitted). The
+// webhook auto-resolve gate keys on it, so only true webhook-origin incidents
+// are affected — SNS/SQS transports and agent emits carry a different Source.
+const webhookSource = "webhook"
+
 // resolveSource decides the durable Source label for an incident.
 // Agent-originated incidents are self-describing: they carry a Source
 // like "agent:elasticsearch:prod-app" in their content, so that value
@@ -215,7 +254,23 @@ func resolveSource(content map[string]interface{}, hint string) string {
 	if hint != "" {
 		return hint
 	}
-	return "webhook"
+	return webhookSource
+}
+
+// shouldAutoResolveWebhook decides whether an incident should be auto-resolved
+// on intake: it must have arrived via the PUBLIC webhook (durable source ==
+// "webhook"), must NOT already be resolved by its payload, and the operator
+// must have the auto-resolve toggle enabled. It is the single decision point
+// that keeps SNS/SQS transports and agent-emitted incidents (whose source is
+// never "webhook") out of the auto-resolve path.
+func shouldAutoResolveWebhook(alreadyResolved bool, source string, settings IntakeSettings) bool {
+	if alreadyResolved {
+		return false
+	}
+	if !settings.AutoResolveWebhook {
+		return false
+	}
+	return source == webhookSource
 }
 
 // enabledChannels returns the names of every alert channel currently

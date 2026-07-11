@@ -143,6 +143,26 @@ func ownership() func(name string) bool {
 	return ownerSlot
 }
 
+// Owns reports whether THIS instance should run the unit of work named `name`
+// under the installed ownership predicate. With no predicate installed
+// (community / single-instance) it returns true — own-everything — so a
+// single-instance deployment always owns every named job.
+//
+// It is the query companion to SetOwnership, for a consumer that runs a
+// wall-clock action OUTSIDE the Scheduler.Run loop (e.g. a scheduled report
+// send driven by its own ticker) but still wants the SAME single-owner gate
+// under HA: gate the action behind Owns(name) and exactly one replica fires it,
+// keyed by the enterprise cluster.Identity predicate. Tier-neutral: OSS
+// installs no predicate, so Owns is a constant true and community behaviour is
+// unchanged.
+func Owns(name string) bool {
+	pred := ownership()
+	if pred == nil {
+		return true
+	}
+	return pred(name)
+}
+
 // Scheduler runs a fixed set of jobs until its context is canceled.
 // Construct it with New (explicit jobs) or NewFromRegistry (the
 // process-wide registry snapshot).

@@ -174,18 +174,32 @@ func severityBand(s string) string {
 }
 
 // WindowBounds resolves a window label to a [start, end) UTC range and the
-// trend unit ("hour" for today/24h, "day" for 7d). An unknown/absent window
-// defaults to today. now is the reference time (UTC); callers pass
-// time.Now().UTC() in production and a fixed time in tests.
+// trend unit ("hour" for today/24h, "day" for 7d). It is the UTC convenience
+// wrapper over WindowBoundsIn; timezone-aware callers use WindowBoundsIn
+// directly.
 func WindowBounds(window string, now time.Time) (start, end time.Time, unit string) {
-	now = now.UTC()
+	return WindowBoundsIn(window, now, time.UTC)
+}
+
+// WindowBoundsIn resolves a window label to a [start, end) range and the trend
+// unit ("hour" for today/24h, "day" for 7d), computed in loc. An unknown/absent
+// window defaults to today. now is the reference time; callers pass time.Now()
+// in production and a fixed time in tests. A nil loc is treated as UTC, so
+// WindowBoundsIn(window, now, nil) equals the legacy UTC behaviour byte-for-
+// byte. "today" is the start of the calendar day IN loc (e.g. local midnight),
+// which is why the timezone controls both the window and the printed times.
+func WindowBoundsIn(window string, now time.Time, loc *time.Location) (start, end time.Time, unit string) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	now = now.In(loc)
 	switch normalizeReportWindow(window) {
 	case reportWindow24h:
 		return now.Add(-24 * time.Hour), now, "hour"
 	case reportWindow7d:
 		return now.Add(-7 * 24 * time.Hour), now, "day"
 	default: // today
-		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 		return startOfDay, now, "hour"
 	}
 }
@@ -195,8 +209,14 @@ func WindowBounds(window string, now time.Time) (start, end time.Time, unit stri
 // falls in [start, end) (newest first). scrubber MUST be non-nil in
 // production (callers pass reportScrubber()); it is the DLP boundary for
 // every attacker-influenced label. window/start/end/unit come from
-// WindowBounds.
-func BuildAggregateReportModel(recs []*storage.IncidentRecord, window string, start, end time.Time, unit string, scrubber core.Scrubber, includeCharts bool) core.ReportModel {
+// WindowBoundsIn. loc is the timezone the model's timestamps are expressed in
+// (its IANA name is stamped on the model so the renderer/caption print it); a
+// nil loc is treated as UTC, keeping the model byte-for-byte identical to the
+// pre-timezone behaviour.
+func BuildAggregateReportModel(recs []*storage.IncidentRecord, window string, start, end time.Time, unit string, scrubber core.Scrubber, includeCharts bool, loc *time.Location) core.ReportModel {
+	if loc == nil {
+		loc = time.UTC
+	}
 	scrub := func(s string) string {
 		if scrubber == nil {
 			return s
@@ -206,9 +226,10 @@ func BuildAggregateReportModel(recs []*storage.IncidentRecord, window string, st
 
 	model := core.ReportModel{
 		Window:        normalizeReportWindow(window),
-		WindowStart:   start.UTC(),
-		WindowEnd:     end.UTC(),
-		GeneratedAt:   end.UTC(),
+		WindowStart:   start.In(loc),
+		WindowEnd:     end.In(loc),
+		GeneratedAt:   end.In(loc),
+		TZLabel:       loc.String(),
 		ByOrigin:      map[string]int{storage.OriginAIDetect: 0, storage.OriginWebhook: 0},
 		TrendUnit:     unit,
 		IncludeCharts: includeCharts,
@@ -278,7 +299,7 @@ func BuildAggregateReportModel(recs []*storage.IncidentRecord, window string, st
 				Title:     truncateRunes(title, 80),
 				Service:   truncateRunes(svcLabel, 40),
 				Severity:  band,
-				CreatedAt: rec.CreatedAt.UTC(),
+				CreatedAt: rec.CreatedAt.In(loc),
 			})
 		}
 	}
@@ -295,7 +316,7 @@ func BuildAggregateReportModel(recs []*storage.IncidentRecord, window string, st
 	}
 
 	// Trend buckets (bounded: ≤24 hourly / ≤7 daily).
-	model.Trend = buildTrend(recs, start.UTC(), end.UTC(), unit)
+	model.Trend = buildTrend(recs, start, end, unit, loc)
 
 	// Top services by count, deterministic (count desc, then label asc);
 	// bounded to the top 5.
@@ -329,8 +350,15 @@ func BuildAggregateReportModel(recs []*storage.IncidentRecord, window string, st
 // bucket per hour (unit "hour") or per day (unit "day"), bounded to ≤24 / ≤7
 // buckets. Each bucket carries the per-origin split for a stacked bar. recs
 // outside the window are ignored (defence-in-depth — the query should have
-// already scoped them).
-func buildTrend(recs []*storage.IncidentRecord, start, end time.Time, unit string) []core.Bucket {
+// already scoped them). Bucket boundaries and labels are computed in loc so a
+// non-UTC report groups by LOCAL hour/day; a nil loc is treated as UTC, which
+// keeps the series byte-for-byte identical to the pre-timezone behaviour.
+func buildTrend(recs []*storage.IncidentRecord, start, end time.Time, unit string, loc *time.Location) []core.Bucket {
+	if loc == nil {
+		loc = time.UTC
+	}
+	start = start.In(loc)
+	end = end.In(loc)
 	var step time.Duration
 	var maxBuckets int
 	var labelFmt string
@@ -338,12 +366,12 @@ func buildTrend(recs []*storage.IncidentRecord, start, end time.Time, unit strin
 		step = 24 * time.Hour
 		maxBuckets = 7
 		labelFmt = "01-02"
-		start = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
+		start = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, loc)
 	} else {
 		step = time.Hour
 		maxBuckets = 24
 		labelFmt = "15:04"
-		start = start.Truncate(time.Hour)
+		start = time.Date(start.Year(), start.Month(), start.Day(), start.Hour(), 0, 0, 0, loc)
 	}
 
 	// Build the slot boundaries first so empty windows still render an axis.
@@ -361,7 +389,7 @@ func buildTrend(recs []*storage.IncidentRecord, start, end time.Time, unit strin
 		if rec == nil {
 			continue
 		}
-		created := rec.CreatedAt.UTC()
+		created := rec.CreatedAt.In(loc)
 		idx := int(created.Sub(start) / step)
 		if idx < 0 || idx >= len(buckets) {
 			continue
@@ -445,12 +473,13 @@ func buildWindowModel(st storage.Provider, scrubber core.Scrubber, settings Repo
 	if !reportAllow("report:"+window, settings.RatePerMinute) {
 		return core.ReportModel{}, ErrReportRateLimited
 	}
-	start, end, unit := WindowBounds(window, time.Now().UTC())
+	loc := settings.Location()
+	start, end, unit := WindowBoundsIn(window, time.Now(), loc)
 	recs, err := incidentsInWindow(st, start, end)
 	if err != nil {
 		return core.ReportModel{}, err
 	}
-	return BuildAggregateReportModel(recs, window, start, end, unit, scrubber, settings.IncludeChart), nil
+	return BuildAggregateReportModel(recs, window, start, end, unit, scrubber, settings.IncludeChart, loc), nil
 }
 
 func renderReport(ctx context.Context, cfg *config.Config, st storage.Provider, renderer core.ReportRenderer, scrubber core.Scrubber, window string) (*core.ReportImage, error) {
@@ -594,10 +623,11 @@ func reportCaption(model core.ReportModel) string {
 	b.WriteString("\n")
 	b.WriteString(fmt.Sprintf("%d open · %d resolved · %d critical/high", model.Open, model.Resolved, model.CriticalHigh))
 	b.WriteString("\nWindow ")
-	b.WriteString(model.WindowStart.UTC().Format("2006-01-02 15:04"))
+	b.WriteString(model.WindowStart.Format("2006-01-02 15:04"))
 	b.WriteString(" → ")
-	b.WriteString(model.WindowEnd.UTC().Format("2006-01-02 15:04"))
-	b.WriteString(" UTC")
+	b.WriteString(model.WindowEnd.Format("2006-01-02 15:04"))
+	b.WriteString(" ")
+	b.WriteString(reportTZLabel(model))
 	if len(model.TopServices) > 0 {
 		names := make([]string, 0, len(model.TopServices))
 		for _, s := range model.TopServices {
@@ -619,6 +649,17 @@ func windowLabel(window string) string {
 	default:
 		return "today"
 	}
+}
+
+// reportTZLabel returns the timezone label printed beside the caption's window
+// timestamps. It defaults to "UTC" for a model built without a TZLabel (e.g. a
+// direct construction or an enterprise renderer), so the caption is never left
+// with a dangling, unlabelled time.
+func reportTZLabel(model core.ReportModel) string {
+	if strings.TrimSpace(model.TZLabel) == "" {
+		return "UTC"
+	}
+	return model.TZLabel
 }
 
 // fallbackNote is the trailing note for image-incapable channels. Link

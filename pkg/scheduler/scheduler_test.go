@@ -426,6 +426,34 @@ func TestOwnership_UnownedJobStartsNothing(t *testing.T) {
 	}
 }
 
+// TestOwns_Predicate exercises the Owns query companion to SetOwnership: it is
+// the gate a wall-clock action (e.g. the daily report send) checks OUTSIDE the
+// Scheduler.Run loop so exactly one replica fires under HA.
+func TestOwns_Predicate(t *testing.T) {
+	t.Cleanup(func() { scheduler.SetOwnership(nil) })
+
+	// No predicate installed → own-everything (community / single-instance).
+	scheduler.SetOwnership(nil)
+	if !scheduler.Owns("report-daily-digest") {
+		t.Fatal("Owns must be true with no predicate (own-everything)")
+	}
+
+	// A predicate that owns nothing → Owns is false for every name.
+	scheduler.SetOwnership(func(string) bool { return false })
+	if scheduler.Owns("report-daily-digest") {
+		t.Fatal("Owns must be false when the predicate owns nothing")
+	}
+
+	// A selective predicate is consulted by name.
+	scheduler.SetOwnership(func(name string) bool { return name == "mine" })
+	if !scheduler.Owns("mine") {
+		t.Fatal("Owns(mine) must be true")
+	}
+	if scheduler.Owns("theirs") {
+		t.Fatal("Owns(theirs) must be false")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Ownership test helpers
 // ---------------------------------------------------------------------------

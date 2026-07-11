@@ -10,10 +10,11 @@ import {
   ChevronDown,
   ChevronUp,
   Eye,
+  Loader2,
   Search,
   UserPlus,
 } from "lucide-react";
-import { api, type IncidentIndex, type IncidentSummary } from "@/lib/api";
+import { api, type IncidentIndex, type IncidentSummary, type IntakeSettings } from "@/lib/api";
 import { fmtAbs, fmtRel, incidentTitle, truncate } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
 import {
@@ -64,6 +65,62 @@ function useDebounced<T>(value: T, delay = 300): T {
     return () => clearTimeout(t);
   }, [value, delay]);
   return debounced;
+}
+
+// WebhookAutoResolveToggle is the single interactive control on the webhook
+// origin tab: the auto-resolve toggle, backed by GET/PUT
+// /api/admin/incidents/intake-settings. It saves on toggle (there is one
+// boolean, so no explicit Save button) and mirrors the report settings save
+// flow — a toast on success/failure. It is only mounted on the webhook tab, so
+// the intake request never fires on the AI-detected tab.
+function WebhookAutoResolveToggle() {
+  const qc = useQueryClient();
+  const toast = useToast();
+
+  const intake = useQuery({
+    queryKey: ["intake-settings"],
+    queryFn: api.getIntakeSettings,
+    staleTime: 30_000,
+  });
+
+  const save = useMutation({
+    mutationFn: (s: IntakeSettings) => api.updateIntakeSettings(s),
+    onSuccess: (saved) => {
+      qc.setQueryData(["intake-settings"], saved);
+      toast.push({ tone: "ok", title: "Intake settings saved" });
+    },
+    onError: (err) => {
+      toast.push({
+        tone: "error",
+        title: "Couldn't save intake settings",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    },
+  });
+
+  // Defaults ON — the backend default — until the current value loads.
+  const value = intake.data?.auto_resolve_webhook ?? true;
+  const busy = intake.isLoading || save.isPending;
+
+  return (
+    <label
+      className="flex items-center gap-1.5 whitespace-nowrap text-sm text-ink-100"
+      title="Webhook incidents are stored as resolved on arrival — alerting and on-call still fire. Default on."
+    >
+      <input
+        type="checkbox"
+        data-testid="intake-auto-resolve"
+        checked={value}
+        disabled={busy}
+        aria-disabled={busy}
+        onChange={(e) => save.mutate({ auto_resolve_webhook: e.target.checked })}
+      />
+      Auto-resolve
+      {save.isPending && (
+        <Loader2 size={13} className="animate-spin text-ink-400" />
+      )}
+    </label>
+  );
 }
 
 // IncidentsPage shows the persisted incident history pulled from the
@@ -374,7 +431,13 @@ export function IncidentsPage() {
           {/* Window-scoped incidents-analytics report — spans both origins, so
               it lives in the toolbar, not on any one incident/tab. Hidden when
               the runtime report setting is disabled (via capabilities). */}
-          <ReportsButton className="ml-auto" />
+          <div className="ml-auto flex items-center gap-3">
+            {/* Auto-resolve is a webhook-origin concept only — it controls
+                whether inbound webhook incidents land resolved. Mounted only on
+                the webhook tab, so no intake request fires on the AI tab. */}
+            {origin === "webhook" && <WebhookAutoResolveToggle />}
+            <ReportsButton />
+          </div>
         </div>
 
         {isError ? (
@@ -748,10 +811,9 @@ function IncidentRow({
         </td>
         <td title={fmtAbs(i.created_at)}>{fmtRel(i.created_at)}</td>
         <td>
-          {/* Single-line flex — inline content made the source chip wrap
-              under long titles but sit beside short ones, so the column
-              read as two different layouts. nowrap keeps title + chip on
-              one line in one consistent order. */}
+          {/* Origin is already split by the top tabs (AI-detected vs
+              Webhook), so the per-row source chip is redundant here — the
+              title stands alone. */}
           <div className="flex min-w-0 items-center gap-2">
             <Link
               to={`/incidents/${i.id}`}
@@ -759,9 +821,6 @@ function IncidentRow({
             >
               {truncate(incidentTitle(i), 80)}
             </Link>
-            <span className="shrink-0">
-              <SourceBadge source={i.source} />
-            </span>
           </div>
         </td>
         <td>

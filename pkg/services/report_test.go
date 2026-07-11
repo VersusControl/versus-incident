@@ -115,6 +115,79 @@ func TestWindowBounds(t *testing.T) {
 	}
 }
 
+// TestWindowBoundsIn_TimezoneShiftsTodayStart proves "today" is the start of
+// the LOCAL calendar day: the same instant yields a different window start in
+// UTC vs a +7 timezone, while a nil location stays byte-for-byte UTC.
+func TestWindowBoundsIn_TimezoneShiftsTodayStart(t *testing.T) {
+	// 00:30 UTC on 2026-07-10 is already 07:30 the same day in ICT, so local
+	// "today" started at 00:00 ICT (== 17:00 UTC on 2026-07-09).
+	now := time.Date(2026, 7, 10, 0, 30, 0, 0, time.UTC)
+
+	utcStart, _, _ := WindowBoundsIn("today", now, time.UTC)
+	if !utcStart.Equal(time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("utc today start = %v", utcStart)
+	}
+
+	ict, err := time.LoadLocation("Asia/Ho_Chi_Minh")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	ictStart, _, _ := WindowBoundsIn("today", now, ict)
+	if !ictStart.Equal(time.Date(2026, 7, 10, 0, 0, 0, 0, ict)) {
+		t.Fatalf("ict today start = %v, want local midnight", ictStart)
+	}
+	if ictStart.Equal(utcStart) {
+		t.Fatal("today start must differ between UTC and a +7 timezone")
+	}
+
+	// A nil location behaves exactly like UTC (back-compat contract).
+	nilStart, _, _ := WindowBoundsIn("today", now, nil)
+	if !nilStart.Equal(utcStart) {
+		t.Fatalf("nil-loc start = %v, want == utc %v", nilStart, utcStart)
+	}
+}
+
+// TestBuildAggregateReportModel_TimezoneRendering asserts the SAME window
+// renders its timestamps + caption in the configured timezone: UTC keeps the
+// "… UTC" label byte-for-byte, while a non-UTC location shifts the printed
+// wall-clock time and stamps the IANA label.
+func TestBuildAggregateReportModel_TimezoneRendering(t *testing.T) {
+	ict, err := time.LoadLocation("Asia/Ho_Chi_Minh")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	now := time.Date(2026, 7, 10, 10, 0, 0, 0, time.UTC)
+
+	us, ue, uu := WindowBoundsIn("24h", now, time.UTC)
+	utcModel := BuildAggregateReportModel(nil, "24h", us, ue, uu, testScrubber(t), true, time.UTC)
+	if utcModel.TZLabel != "UTC" {
+		t.Fatalf("utc TZLabel = %q, want UTC", utcModel.TZLabel)
+	}
+	if got := utcModel.WindowEnd.Format("15:04"); got != "10:00" {
+		t.Fatalf("utc window end = %q, want 10:00", got)
+	}
+	if cap := reportCaption(utcModel); !strings.Contains(cap, "10:00 UTC") {
+		t.Fatalf("utc caption missing '10:00 UTC': %q", cap)
+	}
+
+	is, ie, iu := WindowBoundsIn("24h", now, ict)
+	ictModel := BuildAggregateReportModel(nil, "24h", is, ie, iu, testScrubber(t), true, ict)
+	if ictModel.TZLabel != "Asia/Ho_Chi_Minh" {
+		t.Fatalf("ict TZLabel = %q, want Asia/Ho_Chi_Minh", ictModel.TZLabel)
+	}
+	// 10:00 UTC == 17:00 ICT (UTC+7).
+	if got := ictModel.WindowEnd.Format("15:04"); got != "17:00" {
+		t.Fatalf("ict window end = %q, want 17:00", got)
+	}
+	if cap := reportCaption(ictModel); !strings.Contains(cap, "17:00 Asia/Ho_Chi_Minh") {
+		t.Fatalf("ict caption missing '17:00 Asia/Ho_Chi_Minh': %q", cap)
+	}
+	// Both models describe the same instant — only the printed zone differs.
+	if !utcModel.WindowEnd.Equal(ictModel.WindowEnd) {
+		t.Fatal("UTC and ICT models must describe the same window-end instant")
+	}
+}
+
 // --- aggregate assembler ----------------------------------------------
 
 func TestBuildAggregateReportModel_CountsOriginsSeverityServices(t *testing.T) {
@@ -131,7 +204,7 @@ func TestBuildAggregateReportModel_CountsOriginsSeverityServices(t *testing.T) {
 		rec("legacy2", "checkout", "", "", "webhook", true, end.Add(-4*time.Hour)),
 	}
 
-	m := BuildAggregateReportModel(recs, "today", start, end, "hour", testScrubber(t), true)
+	m := BuildAggregateReportModel(recs, "today", start, end, "hour", testScrubber(t), true, time.UTC)
 
 	if m.Total != 4 {
 		t.Fatalf("total = %d, want 4", m.Total)
@@ -171,7 +244,7 @@ func TestBuildAggregateReportModel_CountsOriginsSeverityServices(t *testing.T) {
 func TestBuildAggregateReportModel_EmptyWindow(t *testing.T) {
 	start := time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
-	m := BuildAggregateReportModel(nil, "today", start, end, "hour", testScrubber(t), true)
+	m := BuildAggregateReportModel(nil, "today", start, end, "hour", testScrubber(t), true, time.UTC)
 	if m.Total != 0 {
 		t.Fatalf("total = %d, want 0", m.Total)
 	}
@@ -196,7 +269,7 @@ func TestBuildAggregateReportModel_RedactsServiceAndTitle(t *testing.T) {
 	end := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
 	r := rec("x1", "svc-AKIAIOSFODNN7EXAMPLE", "critical", storage.OriginWebhook, "webhook", false, end.Add(-time.Hour))
 	r.Title = "leaked bob@example.com in handler"
-	m := BuildAggregateReportModel([]*storage.IncidentRecord{r}, "today", end.Add(-12*time.Hour), end, "hour", testScrubber(t), true)
+	m := BuildAggregateReportModel([]*storage.IncidentRecord{r}, "today", end.Add(-12*time.Hour), end, "hour", testScrubber(t), true, time.UTC)
 
 	blob, _ := json.Marshal(m)
 	s := string(blob)
@@ -219,7 +292,7 @@ func TestReport_EndToEnd_NoSecretInRenderedPNG(t *testing.T) {
 	end := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
 	r := rec("x1", "svc-"+secret, "critical", storage.OriginWebhook, "webhook", false, end.Add(-time.Hour))
 	r.Title = "leaked " + secret + " bob@example.com"
-	model := BuildAggregateReportModel([]*storage.IncidentRecord{r}, "today", end.Add(-12*time.Hour), end, "hour", testScrubber(t), true)
+	model := BuildAggregateReportModel([]*storage.IncidentRecord{r}, "today", end.Add(-12*time.Hour), end, "hour", testScrubber(t), true, time.UTC)
 
 	renderer, err := report.NewRenderer()
 	if err != nil {
@@ -245,7 +318,7 @@ func TestBuildTrend_HourlyBucketing(t *testing.T) {
 		rec("b", "s", "high", storage.OriginWebhook, "webhook", false, time.Date(2026, 7, 4, 8, 45, 0, 0, time.UTC)),
 		rec("c", "s", "high", storage.OriginAIDetect, "agent", false, time.Date(2026, 7, 4, 11, 5, 0, 0, time.UTC)),
 	}
-	buckets := buildTrend(recs, start, end, "hour")
+	buckets := buildTrend(recs, start, end, "hour", time.UTC)
 	if len(buckets) != 4 {
 		t.Fatalf("buckets = %d, want 4", len(buckets))
 	}
@@ -264,7 +337,7 @@ func TestBuildTrend_DailyBoundedTo7(t *testing.T) {
 	start := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC) // 7 daily slots
 	var recs []*storage.IncidentRecord
-	buckets := buildTrend(recs, start, end, "day")
+	buckets := buildTrend(recs, start, end, "day", time.UTC)
 	if len(buckets) != 7 {
 		t.Fatalf("daily buckets = %d, want 7 (bounded)", len(buckets))
 	}
