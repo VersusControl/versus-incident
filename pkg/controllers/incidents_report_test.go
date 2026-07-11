@@ -3,6 +3,7 @@ package controllers
 import (
 	"encoding/json"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -289,5 +290,64 @@ func TestReportSettings_GetPutRoundTrip(t *testing.T) {
 	getResp2.Body.Close()
 	if !updated.Enable || updated.DefaultChannel != "slack" || updated.IncludeChart || updated.RatePerMinute != 10 || updated.DefaultWindow != "7d" {
 		t.Fatalf("updated = %+v", updated)
+	}
+}
+
+// TestReportSettings_ScheduleValidation drives the scheduler-field validation
+// on PUT /settings: a well-formed send_time + timezone is accepted and
+// round-trips, while a malformed send_time or an unloadable timezone is
+// rejected with 400 and never persisted.
+func TestReportSettings_ScheduleValidation(t *testing.T) {
+	loadGatewayConfig(t, reportSecret)
+	config.GetConfig().GatewaySecret = reportSecret
+	st := storage.NewMemory()
+	services.SetStorage(st)
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	app := fiber.New()
+	api := app.Group("/api")
+	NewReportsAdminController().Register(api)
+
+	put := func(body string) *http.Response {
+		t.Helper()
+		req := httptest.NewRequest("PUT", "/api/admin/reports/settings", strings.NewReader(body))
+		req.Header.Set("X-Gateway-Secret", reportSecret)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req, -1)
+		if err != nil {
+			t.Fatalf("PUT: %v", err)
+		}
+		return resp
+	}
+
+	// Valid scheduler fields → 200 and round-trip.
+	ok := put(`{"enable":true,"default_window":"24h","schedule_enabled":true,"send_time":"07:30","timezone":"Asia/Ho_Chi_Minh"}`)
+	if ok.StatusCode != fiber.StatusOK {
+		t.Fatalf("valid PUT status = %d, want 200", ok.StatusCode)
+	}
+	var got services.ReportSettings
+	_ = json.NewDecoder(ok.Body).Decode(&got)
+	ok.Body.Close()
+	if !got.ScheduleEnabled || got.SendTime != "07:30" || got.Timezone != "Asia/Ho_Chi_Minh" {
+		t.Fatalf("valid schedule not persisted: %+v", got)
+	}
+
+	// Bad send_time → 400, and the stored value is unchanged.
+	badTime := put(`{"enable":true,"schedule_enabled":true,"send_time":"25:00","timezone":"UTC"}`)
+	if badTime.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("bad send_time status = %d, want 400", badTime.StatusCode)
+	}
+	badTime.Body.Close()
+
+	// Bad timezone → 400.
+	badTZ := put(`{"enable":true,"schedule_enabled":true,"send_time":"09:00","timezone":"Mars/Phobos"}`)
+	if badTZ.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("bad timezone status = %d, want 400", badTZ.StatusCode)
+	}
+	badTZ.Body.Close()
+
+	// The rejected writes never landed: settings still carry the valid values.
+	if cur := services.LoadReportSettings(st); cur.SendTime != "07:30" || cur.Timezone != "Asia/Ho_Chi_Minh" {
+		t.Fatalf("rejected PUT mutated the store: %+v", cur)
 	}
 }

@@ -31,10 +31,12 @@ func NewIncidentAdminController() *IncidentAdminController {
 
 // Register attaches the admin endpoints under /api/admin/incidents.
 //
-//	GET  /api/admin/incidents              list (newest first; ?limit=NN)
-//	GET  /api/admin/incidents/search       full-text search (?q=&limit=NN)
-//	GET  /api/admin/incidents/:id          single record
-//	POST /api/admin/incidents/:id/resolve  mark resolved (idempotent)
+//	GET  /api/admin/incidents                 list (newest first; ?limit=NN)
+//	GET  /api/admin/incidents/search          full-text search (?q=&limit=NN)
+//	GET  /api/admin/incidents/intake-settings  read intake settings
+//	PUT  /api/admin/incidents/intake-settings  update intake settings
+//	GET  /api/admin/incidents/:id             single record
+//	POST /api/admin/incidents/:id/resolve     mark resolved (idempotent)
 func (i *IncidentAdminController) Register(router fiber.Router) {
 	// Capabilities probe — lets the UI enable/disable search depending on
 	// whether the active storage backend implements storage.Searcher.
@@ -45,6 +47,10 @@ func (i *IncidentAdminController) Register(router fiber.Router) {
 	// /search MUST be registered before /:id so the literal path is not
 	// swallowed by the :id parameter route.
 	g.Get("/search", i.search)
+	// /intake-settings likewise MUST precede /:id so the literal settings
+	// path is not captured as an incident id.
+	g.Get("/intake-settings", i.getIntakeSettings)
+	g.Put("/intake-settings", i.putIntakeSettings)
 	g.Get("/:id", i.get)
 	g.Post("/:id/resolve", i.resolve)
 	g.Post("/:id/analyze", i.analyze)
@@ -333,6 +339,32 @@ func (i *IncidentAdminController) resolve(c *fiber.Ctx) error {
 		"resolved":    rec.Resolved,
 		"resolved_at": rec.ResolvedAt,
 	})
+}
+
+// getIntakeSettings returns the current runtime intake settings (or the
+// built-in defaults — auto-resolve ON — when none are stored). Same
+// X-Gateway-Secret guard as the other admin settings routes (the group's
+// authMiddleware).
+func (i *IncidentAdminController) getIntakeSettings(c *fiber.Ctx) error {
+	return c.JSON(services.LoadIntakeSettings(services.Storage()))
+}
+
+// putIntakeSettings persists updated runtime intake settings. The whole
+// settings object is replaced (idempotent). 503 when no storage backend is
+// configured, mirroring the report settings PUT.
+func (i *IncidentAdminController) putIntakeSettings(c *fiber.Ctx) error {
+	var s services.IntakeSettings
+	if err := c.BodyParser(&s); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid settings body"})
+	}
+	if err := services.SaveIntakeSettings(services.Storage(), s); err != nil {
+		if errors.Is(err, services.ErrIntakeNoStorage) {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "storage not configured"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	// Return the effective settings after the write.
+	return c.JSON(services.LoadIntakeSettings(services.Storage()))
 }
 
 // ---------------------------------------------------------------------------

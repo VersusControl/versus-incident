@@ -413,9 +413,9 @@ export function NowPage() {
               <table className="ddt">
                 <thead>
                   <tr>
-                    <th className="w-12">Sev</th>
-                    <th className="w-24">When</th>
                     <th className="w-28">Service</th>
+                    <th className="w-12">Severity</th>
+                    <th className="w-24">When</th>
                     <th>Title</th>
                     <th className="w-28">Notify</th>
                     <th className="w-24">State</th>
@@ -430,6 +430,9 @@ export function NowPage() {
                         to={`/incidents/${i.id}`}
                         {...keys.rowProps(idx)}
                       >
+                        <td className="text-2xs text-ink-200">
+                          {i.service || "—"}
+                        </td>
                         <td>
                           <SeverityBadge severity={null} />
                         </td>
@@ -438,9 +441,6 @@ export function NowPage() {
                           title={fmtAbs(i.created_at)}
                         >
                           {fmtRel(i.created_at)}
-                        </td>
-                        <td className="text-2xs text-ink-200">
-                          {i.service || "—"}
                         </td>
                         <td>
                           <span className="text-ink-50">

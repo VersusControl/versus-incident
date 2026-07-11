@@ -44,7 +44,26 @@ Open the admin UI and go to **Settings → Incidents report**. A fresh install h
 | **Default channel** | channel | *(none)* | The channel the report goes to when you don't pick one. With no default set, you must choose a channel each time. |
 | **Include chart** | toggle | `on` | Whether the trend chart is drawn on the card. Off gives a text-only summary card. |
 | **Rate limit** | number/min | `6` | How many renders/sends are allowed per window, per minute. A guard so a repeated click can't hammer the full-window scan. |
-| **Default window** | `today` / `24h` / `7d` | `today` | The window pre-selected in the Report picker. |
+| **Default window** | `today` / `24h` / `7d` | `today` | The window pre-selected in the Report picker, and the window used for the daily schedule. |
+| **Daily schedule** | toggle | `off` | Turns on automatic daily delivery. See [Scheduled daily delivery](#scheduled-daily-delivery) below. |
+| **Send time** | `HH:MM`, 24h | `09:00` | The wall-clock time the daily report is sent, read in the chosen timezone. |
+| **Timezone** | `UTC` or IANA name | `UTC` | The timezone for the send time **and** the report's printed timestamps. |
+
+## Scheduled daily delivery
+
+By default the report is something you send by hand from the Incidents page. Turn on **Daily schedule** and Versus also delivers it automatically, once a day, unattended — the same card, dropped into your channel every morning without anyone clicking **Send**.
+
+When the schedule is on, every day at send time (a 24-hour `"HH:MM"` wall-clock time) in the chosen timezone, Versus renders the report over the existing **Default window** and sends it to the **Default channel**. The window is measured *ending at the send time*, so:
+
+| Default window | A daily send at send time covers |
+|---|---|
+| `today` | Since midnight (in your timezone) |
+| `24h` | The last 24 hours ending at the send time |
+| `7d` | The last 7 days ending at the send time |
+
+Nothing new to configure for delivery — the schedule reuses the channel, window, chart, and rate-limit settings you already set above.
+
+> **The report must be enabled too.** The schedule only runs when the report itself is on. With **Enable** off, daily schedule has no effect — turn on the master switch first, then the daily schedule.
 
 ### Which channels get the image
 
@@ -75,7 +94,8 @@ The report is **read-only** — it only reads stored incidents to tally them up.
 
 ## Behavior and edge cases
 
-- **Feature off → nothing happens.** With Enable off, the Report action isn't available and the render endpoints refuse.
+- **Feature off → nothing happens.** With Enable off, the Report action isn't available, the render endpoints refuse, and the daily schedule never fires.
+- **Schedule on, report off → no send.** The daily schedule is gated on the report being enabled; `schedule_enabled` alone does nothing.
 - **No storage backend → the report can't run.** The report reads stored incidents; with no storage configured it returns an error rather than an empty card.
 - **Rate limited.** Past the per-minute cap for a window, further renders/sends are refused until the bucket refills — the guard against a repeated click driving a full-window scan.
 - **Empty window.** A window with no incidents still renders — a valid card showing zeros — so a quiet week reads as "quiet," not "broken."

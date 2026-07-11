@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import {
+  render,
+  screen,
+  cleanup,
+} from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ToastProvider } from "@/components/Toast";
 import { IncidentsConfigPanel } from "./IncidentsConfigPage";
 import { api, type IncidentsConfig } from "@/lib/api";
 
@@ -74,7 +79,9 @@ function renderPanel() {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <IncidentsConfigPanel />
+      <ToastProvider>
+        <IncidentsConfigPanel />
+      </ToastProvider>
     </QueryClientProvider>,
   );
 }

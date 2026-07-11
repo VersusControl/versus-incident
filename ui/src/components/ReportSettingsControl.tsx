@@ -1,8 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { api, type ReportSettings } from "@/lib/api";
 import { REPORT_WINDOWS } from "@/lib/reportAnalytics";
+import {
+  detectLocalZone,
+  resolveTimezone,
+  scheduleSummary,
+  timezoneKind,
+} from "@/lib/reportSchedule";
 import { ErrorBox } from "@/components/feedback";
 import { InfoHint } from "@/components/InfoHint";
 import { useToast } from "@/components/toastContext";
@@ -40,6 +46,9 @@ export function ReportSettingsControl() {
     if (settings.data) setForm(settings.data);
   }, [settings.data]);
 
+  // The browser's IANA zone is stable for the session; resolve it once.
+  const localZone = useMemo(detectLocalZone, []);
+
   const save = useMutation({
     mutationFn: (s: ReportSettings) => api.updateReportSettings(s),
     onSuccess: (saved) => {
@@ -76,6 +85,11 @@ export function ReportSettingsControl() {
   const channels = cap.data?.report?.channels ?? [];
   const set = <K extends keyof ReportSettings>(key: K, value: ReportSettings[K]) =>
     setForm((f) => (f ? { ...f, [key]: value } : f));
+
+  const tzKind = timezoneKind(form.timezone);
+  // The displayed zone is the stored IANA name when Local is selected, else the
+  // freshly detected browser zone the operator would switch to.
+  const displayZone = tzKind === "local" ? form.timezone : localZone;
 
   return (
     <div className="card space-y-4 p-4">
@@ -157,6 +171,89 @@ export function ReportSettingsControl() {
         Include charts
       </label>
 
+      <div className="space-y-3 rounded-md border border-ink-600 bg-surface-sunken p-3">
+        <div>
+          <h4 className="text-sm font-medium text-ink-100">
+            Scheduled delivery
+          </h4>
+          <p className="text-2xs text-ink-400">
+            Deliver the report automatically once a day.
+          </p>
+        </div>
+
+        <label className="flex items-center gap-2 text-sm text-ink-200">
+          <input
+            type="checkbox"
+            data-testid="report-schedule-enabled"
+            checked={form.schedule_enabled}
+            onChange={(e) => set("schedule_enabled", e.target.checked)}
+          />
+          Send the report on a daily schedule
+        </label>
+
+        <div
+          className={form.schedule_enabled ? "space-y-3" : "space-y-3 opacity-50"}
+          aria-disabled={!form.schedule_enabled}
+        >
+          <div>
+            <label className="field-label" htmlFor="rs-send-time">
+              Send time
+            </label>
+            <input
+              id="rs-send-time"
+              type="time"
+              data-testid="report-send-time"
+              className="input w-32"
+              value={form.send_time}
+              disabled={!form.schedule_enabled}
+              onChange={(e) => set("send_time", e.target.value)}
+            />
+            <p className="mt-1 text-2xs text-ink-400">
+              Sends the report every day at this time.
+            </p>
+          </div>
+
+          <fieldset disabled={!form.schedule_enabled}>
+            <legend className="field-label">Time zone</legend>
+            <div className="space-y-1">
+              <label className="flex items-center gap-2 text-sm text-ink-200">
+                <input
+                  type="radio"
+                  name="rs-timezone"
+                  data-testid="report-timezone-utc"
+                  checked={tzKind === "utc"}
+                  onChange={() => set("timezone", resolveTimezone("utc", localZone))}
+                />
+                UTC
+              </label>
+              <label className="flex items-center gap-2 text-sm text-ink-200">
+                <input
+                  type="radio"
+                  name="rs-timezone"
+                  data-testid="report-timezone-local"
+                  checked={tzKind === "local"}
+                  onChange={() =>
+                    set("timezone", resolveTimezone("local", localZone))
+                  }
+                />
+                Local time
+                <span className="text-2xs text-ink-400">({displayZone})</span>
+              </label>
+            </div>
+          </fieldset>
+
+          <p className="text-2xs text-ink-300">
+            {scheduleSummary(form.send_time, form.timezone, form.default_window)}
+          </p>
+        </div>
+
+        {form.schedule_enabled && !form.enable && (
+          <p className="text-2xs text-amber-300/80">
+            The schedule is inactive until the incidents report is enabled above.
+          </p>
+        )}
+      </div>
+
       <div>
         <label className="field-label" htmlFor="rs-rate">
           Rate limit (renders/min, 0 = unlimited)
@@ -176,6 +273,7 @@ export function ReportSettingsControl() {
       <div className="flex justify-end">
         <button
           className="btn btn-primary"
+          data-testid="report-settings-save"
           onClick={() => form && save.mutate(form)}
           disabled={save.isPending}
         >

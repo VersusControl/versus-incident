@@ -27,12 +27,11 @@ Then open <http://localhost:3000/> in your browser.
 > address. With `public_host` empty, Versus falls back to
 > `http://<host>:<port>`.
 
-> **`GATEWAY_SECRET` is required for the dashboard to function.** All
-> admin endpoints (`/api/admin/*` and `/api/agent/*`) are gated by the
-> `X-Gateway-Secret` HTTP header. The dashboard prompts you for this
-> value the first time you load it and stores it in your browser's
-> `localStorage`. With no secret configured the admin endpoints are not
-> registered at all.
+
+> **OSS vs Enterprise auth.** The `X-Gateway-Secret` credential is the
+> **OSS/community** admin auth. The **Enterprise** binary retires the
+> gateway secret and instead authenticates the **signed-in admin
+> session** (SSO or the default-admin login).
 
 ## What you can do
 

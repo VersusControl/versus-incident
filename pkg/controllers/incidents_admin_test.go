@@ -28,6 +28,8 @@ func TestResolveRouteRegistered(t *testing.T) {
 	}{
 		{"GET", "/api/admin/incidents/"},
 		{"GET", "/api/admin/incidents/search"},
+		{"GET", "/api/admin/incidents/intake-settings"},
+		{"PUT", "/api/admin/incidents/intake-settings"},
 		{"GET", "/api/admin/incidents/:id"},
 		{"POST", "/api/admin/incidents/:id/resolve"},
 		{"POST", "/api/admin/incidents/:id/analyze"},

@@ -2,14 +2,17 @@ import { NavLink } from "react-router-dom";
 import {
   Activity,
   AlertTriangle,
+  BellOff,
   Book,
   Brain,
   Flame,
+  KeyRound,
   LineChart,
   Lock,
   ScrollText,
   Server,
   Settings,
+  ShieldAlert,
   ShieldCheck,
   Sparkles,
   Target,
@@ -45,13 +48,18 @@ function SidebarBrand() {
 // (UX_REDESIGN §2.1): RESPOND is the 3am zone and always comes first;
 // AGENT is calm curation; MANAGE is admin.
 interface SideItem {
-  to: string;
+  // Absent for in-development placeholders — those aren't wired to a route yet.
+  to?: string;
   label: string;
   icon: LucideIcon;
   end?: boolean;
   dim?: boolean;
   dimTitle?: string;
   locked?: boolean;
+  // A greenlit-but-unbuilt capability: renders as a non-clickable, dimmed row
+  // with an "in development" indicator instead of a NavLink. Never navigates
+  // and never shows active state, independent of agent/enterprise state.
+  inDev?: boolean;
 }
 
 export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
@@ -147,7 +155,12 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         ? "Enterprise feature — requires an intelligence license"
         : undefined,
     },
+    // inDev
+    { label: "Alert fatigue", icon: BellOff, inDev: true },
+    { label: "Secret scanning", icon: KeyRound, inDev: true },
+    { label: "Fraud detection", icon: ShieldAlert, inDev: true },
   ];
+
   const tools: SideItem[] = [
     {
       to: "/agent/runbooks",
@@ -225,7 +238,7 @@ function Zone({
         {title}
       </div>
       {items.map((item) => (
-        <SideLink key={item.to} {...item} onNavigate={onNavigate} />
+        <SideLink key={item.to ?? item.label} {...item} onNavigate={onNavigate} />
       ))}
     </>
   );
@@ -239,11 +252,40 @@ function SideLink({
   dim,
   dimTitle,
   locked,
+  inDev,
   onNavigate,
 }: SideItem & { onNavigate?: () => void }) {
+  // In-development placeholder: a greenlit capability with no route yet.
+  // Render a non-navigable, dimmed row (a div, never a NavLink) so it can't
+  // navigate or show an active state regardless of agent/enterprise flags.
+  if (inDev) {
+    const indevSlug = label
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return (
+      <div
+        aria-disabled="true"
+        title="In development — coming soon"
+        data-testid={`nav-indev-${indevSlug}`}
+        className="group flex min-h-9 cursor-default items-center gap-2 rounded-control px-3 py-2 text-xs text-ink-400"
+      >
+        <span className="h-4 w-0.5 rounded-full bg-transparent" />
+        <Icon size={14} />
+        <span className="flex-1">{label}</span>
+        <span
+          data-testid="nav-indev-indicator"
+          className="rounded-full bg-ink-800 px-1.5 py-px text-2xs font-medium uppercase tracking-wider text-ink-500"
+        >
+          Dev
+        </span>
+      </div>
+    );
+  }
+
   return (
     <NavLink
-      to={to}
+      to={to as string}
       end={end}
       title={dimTitle}
       onClick={onNavigate}

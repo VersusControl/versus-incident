@@ -305,6 +305,8 @@ The application relies on several environment variables to configure alerting se
 |------------------|-------------|
 | `GATEWAY_SECRET` | Shared secret required to access the admin dashboard and every `/api/admin/*` and `/api/agent/*` endpoint. Sent by clients in the `X-Gateway-Secret` header. **When unset the admin endpoints are not registered at all.** |
 
+> **OSS vs Enterprise.** `GATEWAY_SECRET` / `X-Gateway-Secret` is the admin credential on the **OSS/community** binary. The **Enterprise** binary retires the gateway secret and authenticates the **signed-in admin session** (SSO or the default-admin login) instead.
+
 ### Storage
 | Variable       | Description |
 |----------------|-------------|

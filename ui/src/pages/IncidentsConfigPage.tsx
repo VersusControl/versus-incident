@@ -12,6 +12,16 @@ import { api, type ConfigField } from "@/lib/api";
 // `config/config.yaml` or the relevant environment variable on the host.
 // Exported as a panel so SettingsPage can compose it as the Incidents tab.
 export function IncidentsConfigPanel() {
+  return (
+    <div className="space-y-6">
+      <IncidentsReadOnlyConfig />
+    </div>
+  );
+}
+
+// IncidentsReadOnlyConfig renders the live, non-editable alert / queue /
+// on-call configuration.
+function IncidentsReadOnlyConfig() {
   const cfg = useQuery({
     queryKey: ["config-incidents"],
     queryFn: api.getIncidentsConfig,

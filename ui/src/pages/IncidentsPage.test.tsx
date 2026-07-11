@@ -5,6 +5,7 @@ import {
   screen,
   cleanup,
   fireEvent,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -27,6 +28,8 @@ vi.mock("@/lib/api", async (importActual) => {
       capabilities: vi.fn().mockResolvedValue({ search: false }),
       listTeams: vi.fn().mockResolvedValue([]),
       listMembers: vi.fn().mockResolvedValue([]),
+      getIntakeSettings: vi.fn(),
+      updateIntakeSettings: vi.fn(),
     },
   };
 });
@@ -83,6 +86,30 @@ function renderPage() {
   );
 }
 
+// renderPageAt renders the page at a specific URL so the origin tab under test
+// (?origin=webhook vs the default ai_detect) is active from first paint.
+function renderPageAt(entry: string) {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={qc}>
+      <ToastProvider>
+        <MemoryRouter initialEntries={[entry]}>
+          <LocationProbe />
+          <Routes>
+            <Route path="/incidents" element={<IncidentsPage />} />
+            <Route
+              path="/incidents/:id"
+              element={<div>incident detail</div>}
+            />
+          </Routes>
+        </MemoryRouter>
+      </ToastProvider>
+    </QueryClientProvider>,
+  );
+}
+
 describe("IncidentsPage row actions", () => {
   beforeEach(() => {
     vi.mocked(api.listIncidentsIndex).mockResolvedValue(index([incident()]));
@@ -114,5 +141,47 @@ describe("IncidentsPage row actions", () => {
     const panel = screen.getByRole("dialog", { name: "Details panel" });
     expect(within(panel).getByText("checkout")).toBeTruthy();
     expect(screen.getByTestId("path").textContent).toBe("/incidents");
+  });
+});
+
+// The webhook auto-resolve toggle lives in the Incidents toolbar and is scoped
+// to the webhook origin tab — it is the toggle's meaning ("Auto-resolve"), not
+// an "Incident intake" settings card. It must be absent on the AI-detected tab.
+describe("IncidentsPage — webhook auto-resolve toggle", () => {
+  beforeEach(() => {
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue(index([incident()]));
+    vi.mocked(api.getIntakeSettings).mockResolvedValue({
+      auto_resolve_webhook: true,
+    });
+    vi.mocked(api.updateIntakeSettings).mockImplementation((s) =>
+      Promise.resolve(s),
+    );
+  });
+
+  it("is absent on the AI-detected (default) tab", async () => {
+    renderPage();
+    // Wait for the page to settle so a late mount can't be mistaken for absence.
+    await screen.findByLabelText(/View incident/);
+    expect(screen.queryByTestId("intake-auto-resolve")).toBeNull();
+    expect(api.getIntakeSettings).not.toHaveBeenCalled();
+  });
+
+  it("renders on the webhook tab, defaults ON, and PUTs on toggle", async () => {
+    renderPageAt("/incidents?origin=webhook");
+
+    const toggle = (await screen.findByTestId(
+      "intake-auto-resolve",
+    )) as HTMLInputElement;
+    // Default ON — mirrors the backend default.
+    await waitFor(() => expect(toggle.checked).toBe(true));
+    // Short label only — no "Incident intake" wording.
+    expect(screen.getByText("Auto-resolve")).toBeTruthy();
+
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(api.updateIntakeSettings).toHaveBeenCalledWith({
+        auto_resolve_webhook: false,
+      }),
+    );
   });
 });

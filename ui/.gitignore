@@ -7,3 +7,9 @@ dist-ssr
 .DS_Store
 .env
 .env.*.local
+
+# Playwright browser e2e (tests/e2e)
+test-results/
+playwright-report/
+playwright/.cache/
+tests/e2e/.env

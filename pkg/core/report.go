@@ -47,11 +47,17 @@ type NotableIncident struct {
 // so a renderer draws it verbatim and must never reach back into raw incident
 // content. No AckURL, token, or config value is ever placed here.
 type ReportModel struct {
-	// Window identity. All timestamps are UTC for determinism.
+	// Window identity. Timestamps are expressed in TZLabel's location (UTC by
+	// default), so a renderer/caption can print them verbatim.
 	Window      string    // "today" | "24h" | "7d"
 	WindowStart time.Time // inclusive
 	WindowEnd   time.Time // exclusive (== GeneratedAt for today/24h)
 	GeneratedAt time.Time
+	// TZLabel is the IANA name of the timezone WindowStart/WindowEnd/
+	// GeneratedAt are expressed in (e.g. "UTC" or "Asia/Ho_Chi_Minh"). The
+	// renderer and channel caption print it beside the times so a reader knows
+	// the wall-clock zone. Empty is treated as "UTC".
+	TZLabel string
 
 	// Headline stats.
 	Total        int            // incidents in the window
