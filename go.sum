@@ -101,8 +101,8 @@ github.com/cloudwego/eino-ext/components/model/claude v0.1.20 h1:0MXfcDfVszjj8jG
 github.com/cloudwego/eino-ext/components/model/claude v0.1.20/go.mod h1:bn+3SiK1LSlZq9J3y/ubAI4aZHtlrNJZ/dkBnmPgJu8=
 github.com/cloudwego/eino-ext/components/model/deepseek v0.1.6 h1:t/1zvkXIKJZbTADrTL1AEdd7MHxQUiheR9otFfkUBsY=
 github.com/cloudwego/eino-ext/components/model/deepseek v0.1.6/go.mod h1:YVjkAAxwLqk/dyA7AfVksaxPMG7snikx0hjje8iIZBE=
-github.com/cloudwego/eino-ext/components/model/gemini v0.1.32 h1:2Ny8dgt+Zpi8fpKfdp6+F9OLMN+jQIhdYU3jIdB2nv4=
-github.com/cloudwego/eino-ext/components/model/gemini v0.1.32/go.mod h1:snXILkr06Zr2jm6WlqcWeytwiCramhNVPfxASgbjH40=
+github.com/cloudwego/eino-ext/components/model/gemini v0.1.33 h1:LnzDQ3Psf0cPxvR5Ui070x9EPWyszIEifEHq7AJw8tw=
+github.com/cloudwego/eino-ext/components/model/gemini v0.1.33/go.mod h1:snXILkr06Zr2jm6WlqcWeytwiCramhNVPfxASgbjH40=
 github.com/cloudwego/eino-ext/components/model/ollama v0.1.9 h1:+eZbquy5lF3WHvK9+T7UUqI0CTRqDEniP7fzL85lJuk=
 github.com/cloudwego/eino-ext/components/model/ollama v0.1.9/go.mod h1:C3rf3yy2nEoXFP/CQJne4gbiu1pREKplHKmFlhuOzPE=
 github.com/cloudwego/eino-ext/components/model/openai v0.1.13 h1:5XHRTiTD5bt9KQrMHcfvuWNklEC3tpm3XHejdozt9vM=
