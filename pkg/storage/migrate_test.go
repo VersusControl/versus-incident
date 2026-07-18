@@ -59,6 +59,9 @@ func dropAllVersusTables(t *testing.T, dsn string) {
 		tables = append(tables, name)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows iteration error: %v", err)
+	}
 	for _, tbl := range tables {
 		if _, err := db.Exec("DROP TABLE IF EXISTS " + tbl + " CASCADE"); err != nil {
 			t.Fatalf("drop %s: %v", tbl, err)
