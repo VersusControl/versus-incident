@@ -188,6 +188,9 @@ func truncateAllTables(t *testing.T, dsn string) {
 		tables = append(tables, name)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows iteration error: %v", err)
+	}
 	for _, tbl := range tables {
 		// CASCADE: vs_logs FK-references vs_patterns (typed signal tables),
 		// so a plain per-table TRUNCATE of a referenced table is rejected.

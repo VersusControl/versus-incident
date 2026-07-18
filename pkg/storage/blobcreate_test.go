@@ -124,7 +124,7 @@ func runCreateRace(t *testing.T, p storage.Provider) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			payload := []byte(fmt.Sprintf("writer-%02d", i))
+			payload := fmt.Appendf(nil, "writer-%02d", i)
 			<-start // line every goroutine up so they race
 			written, err := bc.CreateBlobIfAbsent(key, payload)
 			mu.Lock()
