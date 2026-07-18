@@ -5,13 +5,13 @@ go 1.26.0
 toolchain go1.26.5
 
 require (
-	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.78.2
+	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.79.0
 	github.com/cloudwego/eino v0.9.12
 	github.com/cloudwego/eino-ext/components/embedding/gemini v0.0.0-20260616080858-ab17b7308bf8
 	github.com/cloudwego/eino-ext/components/embedding/ollama v0.0.0-20260616080858-ab17b7308bf8
-	github.com/cloudwego/eino-ext/components/model/claude v0.1.20
+	github.com/cloudwego/eino-ext/components/model/claude v0.1.22
 	github.com/cloudwego/eino-ext/components/model/deepseek v0.1.6
-	github.com/cloudwego/eino-ext/components/model/gemini v0.1.32
+	github.com/cloudwego/eino-ext/components/model/gemini v0.1.33
 	github.com/cloudwego/eino-ext/components/model/ollama v0.1.9
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 	github.com/cloudwego/eino-ext/components/model/qwen v0.1.9
@@ -22,9 +22,9 @@ require (
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/slack-go/slack v0.27.0
 	github.com/spf13/viper v1.21.0
-	golang.org/x/image v0.43.0
+	golang.org/x/image v0.44.0
 	golang.org/x/time v0.15.0
-	google.golang.org/genai v1.62.0
+	google.golang.org/genai v1.63.0
 )
 
 require (
@@ -32,7 +32,7 @@ require (
 	cloud.google.com/go/auth v0.9.3 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.4 // indirect
 	cloud.google.com/go/compute/metadata v0.5.0 // indirect
-	github.com/anthropics/anthropic-sdk-go v1.26.0 // indirect
+	github.com/anthropics/anthropic-sdk-go v1.56.0 // indirect
 	github.com/cohesion-org/deepseek-go v1.3.4 // indirect
 	github.com/eino-contrib/ollama v0.1.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
@@ -41,8 +41,11 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/s2a-go v0.1.8 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
+	github.com/invopop/jsonschema v0.14.0 // indirect
 	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/ollama/ollama v0.20.3 // indirect
+	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
+	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
@@ -54,6 +57,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.29.0 // indirect
 	go.opentelemetry.io/otel/trace v1.29.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
+	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
 	google.golang.org/api v0.197.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
@@ -83,7 +87,7 @@ require (
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
 
@@ -119,17 +123,17 @@ require (
 
 require (
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.14 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.19.26
+	github.com/aws/aws-sdk-go-v2/credentials v1.19.28
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.30 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.30 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.30 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.31 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.13 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.30 // indirect
-	github.com/aws/aws-sdk-go-v2/service/signin v1.2.2 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sso v1.31.5 // indirect
-	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.36.8 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.43.5 // indirect
+	github.com/aws/aws-sdk-go-v2/service/signin v1.4.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sso v1.32.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.37.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.44.0 // indirect
 	github.com/aws/smithy-go v1.27.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
@@ -139,9 +143,9 @@ require (
 require (
 	github.com/andybalholm/brotli v1.1.0 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.42.1
-	github.com/aws/aws-sdk-go-v2/config v1.32.27
-	github.com/aws/aws-sdk-go-v2/service/sns v1.40.3
-	github.com/aws/aws-sdk-go-v2/service/ssmincidents v1.40.8
+	github.com/aws/aws-sdk-go-v2/config v1.32.29
+	github.com/aws/aws-sdk-go-v2/service/sns v1.41.0
+	github.com/aws/aws-sdk-go-v2/service/ssmincidents v1.41.0
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/klauspost/compress v1.18.3 // indirect
@@ -160,5 +164,5 @@ require (
 	github.com/valyala/fasthttp v1.51.0 // indirect
 	github.com/valyala/tcplisten v1.0.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.38.0
+	golang.org/x/text v0.40.0
 )
