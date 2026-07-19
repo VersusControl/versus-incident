@@ -1,7 +1,7 @@
 import { useContext } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { LogOut, Menu, Moon, Search, Sun } from "lucide-react";
+import { LogOut, Menu, Moon, Sun } from "lucide-react";
 import clsx from "clsx";
 import {
   api,
@@ -35,7 +35,6 @@ interface Props {
 
 export function TopBar({ title, subtitle, actions }: Props) {
   const shell = useContext(ShellContext);
-  const navigate = useNavigate();
   const { open, originCounts } = useOpenIncidentCount();
   const { theme, toggle } = useTheme();
 
@@ -96,29 +95,6 @@ export function TopBar({ title, subtitle, actions }: Props) {
           onClick={toggle}
         >
           {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
-        </button>
-        <button
-          aria-label="Search (press /)"
-          title="Search — press /"
-          className="hidden rounded-control p-1.5 text-ink-400 hover:bg-ink-700 hover:text-ink-100 sm:block"
-          onClick={() => {
-            const el =
-              document.querySelector<HTMLElement>("[data-page-search]");
-            if (el) {
-              el.focus();
-            } else {
-              // Same fallback as the "/" shortcut (§2.4): pages without a
-              // search land on Incidents instead of a silent no-op.
-              navigate("/incidents");
-              window.setTimeout(() => {
-                document
-                  .querySelector<HTMLElement>("[data-page-search]")
-                  ?.focus();
-              }, 80);
-            }
-          }}
-        >
-          <Search size={15} />
         </button>
         {open > 0 && (
           <Link

@@ -45,6 +45,8 @@ import { buildSignalBulkActions } from "@/lib/bulkSelect";
 import { useBulkSelection } from "@/lib/useBulkSelection";
 import { Pagination } from "@/components/Pagination";
 import { usePagination } from "@/lib/pagination";
+import { SortHeader } from "@/components/SortHeader";
+import { tsValue, useSortableRows, type SortAccessor } from "@/lib/sortRows";
 
 // LearnedSignalsView — the read-only "what the agent knows right now" view for
 // ONE telemetry type (Metrics or Traces). It makes the Enterprise metric/trace
@@ -75,11 +77,39 @@ const VALUE_TOOLTIP =
 const READONLY_NOTE =
   "The agent learns these on its own.";
 
+// SOURCE_LABELS turns a row's telemetry `source` into a friendly label for the
+// "Source" field. It is source-agnostic: the field reads the ACTUAL row.source
+// rather than a static per-type string, so a Prometheus metric reads
+// "Prometheus", a CloudWatch metric reads "CloudWatch", and a trace reads
+// "Traces" — all driven by the same map. A new source type still renders
+// sensibly via the title-cased fallback instead of a wrong hardcoded value.
+const SOURCE_LABELS: Record<string, string> = {
+  prometheus: "Prometheus",
+  traces: "Traces",
+  cloudwatch_metrics: "CloudWatch",
+};
+
+function sourceLabel(source: string): string {
+  const s = (source || "").trim();
+  if (!s) return "—";
+  if (SOURCE_LABELS[s]) return SOURCE_LABELS[s];
+  // Unknown source: title-case the raw type so a future source still renders
+  // reasonably rather than showing a wrong hardcoded label.
+  return s.replace(/[_:]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// unitLabel renders a row's display unit, falling back to a neutral placeholder
+// when the backend reports a raw gauge (empty unit) so the cell never shows a
+// dangling separator or "undefined".
+function unitLabel(unit: string): string {
+  const u = (unit || "").trim();
+  return u ? u : "—";
+}
+
 type Variant = {
   kind: "metric" | "trace";
   icon: LucideIcon;
   subtitle: string;
-  sourceLabel: string;
   hasOperation: boolean;
   searchPlaceholder: string;
   lockedTitle: string;
@@ -94,7 +124,6 @@ const METRIC: Variant = {
   icon: LineChart,
   subtitle:
     "The agent is learning what's normal for each service's numbers — request rate, errors, latency — so it can catch a value that suddenly looks wrong.",
-  sourceLabel: "Prometheus",
   hasOperation: false,
   searchPlaceholder: "Search service or signal…  ( / )",
   lockedTitle: "Metrics learning is an Enterprise capability",
@@ -108,7 +137,6 @@ const TRACE: Variant = {
   icon: Waypoints,
   subtitle:
     "The agent is learning the normal speed and error rate of each service operation, so it can catch requests that suddenly get slow or start failing.",
-  sourceLabel: "Traces",
   hasOperation: true,
   searchPlaceholder: "Search service, operation or signal…  ( / )",
   lockedTitle: "Traces learning is an Enterprise capability",
@@ -223,10 +251,28 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
     [filtered, scope, excl],
   );
 
-  // Paginate at 100/page; reset to page 1 when the status filter, scope tab, or
-  // search changes so a filter never lands the operator on an empty page.
-  const pg = usePagination(scoped, {
-    resetKey: `${statusFilter}|${scope}|${q}`,
+  // Click-to-sort on the time / evidence columns. Default: most-recently-seen
+  // first (Last seen descending, by the real last_updated timestamp — never the
+  // humanized "2m ago" string). Seen (observations) is a numeric sort too. The
+  // accessors carry an explicit type so both column keys are recognized
+  // regardless of generic inference order.
+  const sortAccessors: Record<
+    "last_seen" | "observations",
+    SortAccessor<BaselineRow>
+  > = {
+    last_seen: (r) => tsValue(r.last_updated),
+    observations: (r) => r.observations,
+  };
+  const sorted = useSortableRows(scoped, sortAccessors, {
+    key: "last_seen",
+    dir: "desc",
+  });
+
+  // Paginate at 100/page; reset to page 1 when the status filter, scope tab,
+  // search, or sort changes so a filter never lands the operator on an empty
+  // page.
+  const pg = usePagination(sorted.rows, {
+    resetKey: `${statusFilter}|${scope}|${q}|${sorted.signature}`,
   });
 
   // ----- selection + action bar -------------------------------------------
@@ -243,7 +289,7 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
   const pageKeys = useMemo(() => pg.pageItems.map(rowKey), [pg.pageItems]);
   const bulk = useBulkSelection(
     pageKeys,
-    `${statusFilter}|${scope}|${q}|${pg.page}`,
+    `${statusFilter}|${scope}|${q}|${sorted.signature}|${pg.page}`,
   );
 
   // A metric/trace action operates on SIGNAL names (deduped — a signal is
@@ -269,7 +315,8 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
   };
 
   const peek = peekKey ? rows.find((r) => rowKey(r) === peekKey) : undefined;
-  const cols = (variant.hasOperation ? 7 : 6) + 1 + (bulkEnabled ? 1 : 0);
+
+  const cols = (variant.hasOperation ? 8 : 7) + 1 + (bulkEnabled ? 1 : 0);
 
   // ----- locked / upsell state (OSS or unlicensed) ------------------------
   if (locked) {
@@ -386,6 +433,9 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                         />
                       </th>
                     )}
+                    <th className="w-12 text-right">
+                      <span className="sr-only">Action</span>
+                    </th>
                     <th className="w-36">Service</th>
                     {variant.hasOperation && (
                       <th className="w-40 whitespace-nowrap">
@@ -409,8 +459,16 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                       What's normal now
                       <InfoHint
                         label="About the What's normal now"
-                        text="The everyday range the agent has learned for this signal, in real units (req/s for traffic, ms for speed, % for errors). The 'usually ± X' part is how much it normally wiggles around the middle value — anything far outside that range looks wrong and can be flagged."
+                        text="The everyday range the agent has learned for this signal, shown in its real unit (req/s for traffic, ms for speed, % for errors, and source-specific units like Bytes/Second, Percent or Count for CloudWatch metrics). The 'usually ± X' part is how much it normally wiggles around the middle value — anything far outside that range looks wrong and can be flagged."
                         example="≈ 40 ms, usually ± 5 ms means requests normally finish in about 35–45 ms; a sudden 400 ms looks wrong."
+                      />
+                    </th>
+                    <th className="w-24 whitespace-nowrap">
+                      Unit
+                      <InfoHint
+                        label="About the Unit"
+                        text="The real-world unit this signal's normal value is measured in, so you can tell what the numbers mean. It comes straight from the source — req/s, ms and % for Prometheus and traces, and source-specific units like Bytes/Second, Percent or Count for CloudWatch metrics."
+                        example="'Bytes/Second' means the value is a throughput; 'Percent' means it's already a percentage. A raw gauge with no unit shows '—'."
                       />
                     </th>
                     <th className="w-44 whitespace-nowrap">
@@ -421,25 +479,31 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                         example="'8 / 20' means 12 more samples to go; once it reaches 20 the bar fills and shows a check."
                       />
                     </th>
-                    <th className="w-20 whitespace-nowrap text-right">
-                      Seen
-                      <InfoHint
-                        label="About the Seen"
-                        text="How many data points (samples) the agent has collected for this signal so far. More samples mean a more trustworthy normal range."
-                        example="'18' means 18 measurements have been folded in; the agent usually needs about 20 before it's ready."
-                      />
-                    </th>
-                    <th className="w-28 whitespace-nowrap">
-                      Last seen
-                      <InfoHint
-                        label="About the Last seen"
-                        text="When the agent last received a fresh data point for this signal. If this is old, the signal may have stopped flowing."
-                        example="'2m ago' means the last sample arrived two minutes ago; '3d ago' suggests the source has gone quiet."
-                      />
-                    </th>
-                    <th className="w-12 text-right">
-                      <span className="sr-only">Action</span>
-                    </th>
+                    <SortHeader
+                      className="w-20 whitespace-nowrap text-right"
+                      align="right"
+                      label="Seen"
+                      hint={
+                        <InfoHint
+                          label="About the Seen"
+                          text="How many data points (samples) the agent has collected for this signal so far. More samples mean a more trustworthy normal range."
+                          example="'18' means 18 measurements have been folded in; the agent usually needs about 20 before it's ready."
+                        />
+                      }
+                      {...sorted.headerProps("observations")}
+                    />
+                    <SortHeader
+                      className="w-28 whitespace-nowrap"
+                      label="Last seen"
+                      hint={
+                        <InfoHint
+                          label="About the Last seen"
+                          text="When the agent last received a fresh data point for this signal. If this is old, the signal may have stopped flowing."
+                          example="'2m ago' means the last sample arrived two minutes ago; '3d ago' suggests the source has gone quiet."
+                        />
+                      }
+                      {...sorted.headerProps("last_seen")}
+                    />
                   </tr>
                 </thead>
                 <tbody>
@@ -477,31 +541,6 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                           />
                         </td>
                       )}
-                      <td className="font-medium text-ink-100">
-                        <ServiceCell
-                          service={r.service}
-                          sourceType={variant.kind}
-                          match={r.signal}
-                        />
-                      </td>
-                      {variant.hasOperation && (
-                        <td className="font-mono text-2xs text-ink-200">
-                          {r.operation || "—"}
-                        </td>
-                      )}
-                      <td className="text-ink-100">{humanSignal(r.signal)}</td>
-                      <td className="tabular-nums">
-                        <NormalValue row={r} compact />
-                      </td>
-                      <td>
-                        <ReadinessProgress readiness={r.readiness} />
-                      </td>
-                      <td className="text-right tabular-nums text-ink-200">
-                        {r.observations}
-                      </td>
-                      <td className="text-ink-300" title={fmtAbs(r.last_updated)}>
-                        {fmtRel(r.last_updated)}
-                      </td>
                       <td>
                         <div className="flex items-center justify-end gap-1">
                           <button
@@ -514,6 +553,41 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                             <Eye size={14} aria-hidden />
                           </button>
                         </div>
+                      </td>
+                      <td className="font-medium text-ink-100">
+                        <ServiceCell
+                          service={r.service}
+                          sourceType={variant.kind}
+                          match={r.signal}
+                        />
+                      </td>
+                      {variant.hasOperation && (
+                        <td className="text-ink-200">
+                          <div
+                            className="truncate font-mono text-2xs"
+                            title={r.operation || undefined}
+                          >
+                            {r.operation || "—"}
+                          </div>
+                        </td>
+                      )}
+                      <td className="text-ink-100">{humanSignal(r.signal)}</td>
+                      <td className="tabular-nums">
+                        <NormalValue row={r} compact />
+                      </td>
+                      <td className="text-ink-200">
+                        <div className="truncate" title={unitLabel(r.unit)}>
+                          {unitLabel(r.unit)}
+                        </div>
+                      </td>
+                      <td>
+                        <ReadinessProgress readiness={r.readiness} />
+                      </td>
+                      <td className="text-right tabular-nums text-ink-200">
+                        {r.observations}
+                      </td>
+                      <td className="text-ink-300" title={fmtAbs(r.last_updated)}>
+                        {fmtRel(r.last_updated)}
                       </td>
                     </tr>
                   ))}
@@ -561,7 +635,8 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                 {peek.signal}
               </span>
             </Field>
-            <Field label="Source">{variant.sourceLabel}</Field>
+            <Field label="Source">{sourceLabel(peek.source)}</Field>
+            <Field label="Unit">{unitLabel(peek.unit)}</Field>
             <Field label={variant.sampleLabel}>
               {peek.latest_sample ? (
                 <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">

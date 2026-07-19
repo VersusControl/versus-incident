@@ -1,0 +1,100 @@
+# Standalone CloudWatch Metrics variant of the metrics-source example.
+#
+# CloudWatch reads from a real AWS account, so — unlike the Prometheus base —
+# there is NO local metric stack to run. This file is COMPLETE on its own
+# (Redis + the enterprise agent); run it directly, not as an overlay:
+#
+#   cp .env.example .env      # paste LICENSE_KEY + set AWS_REGION and creds
+#   docker compose -f docker-compose.cloudwatch.yml up -d
+#
+# It reuses the shared config/config.yaml (file storage) and swaps in the
+# CloudWatch source variant (config/agent_sources.cloudwatch.yaml).
+#
+# Enterprise-only: the versus image + a LICENSE_KEY carrying the `intelligence`
+# entitlement are REQUIRED. On the OSS image the `cloudwatch_metrics` type is
+# unavailable and the source fails closed.
+name: versus-cloudwatch-metrics
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: versus-cw-metrics-redis
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:-versus}
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-versus}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # The ENTERPRISE image. The CloudWatch metric DATA SOURCE is enterprise-only,
+  # so this MUST run the enterprise image AND supply a LICENSE_KEY carrying the
+  # `intelligence` entitlement. Without it the source logs "requires Versus
+  # Enterprise" on the next tick.
+  versus:
+    image: ${VERSUS_ENTERPRISE_IMAGE:-ghcr.io/versuscontrol/versus-enterprise}
+    container_name: versus-cw-metrics-app
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      # --- Enterprise license (REQUIRED; MUST carry `intelligence`) --------
+      # Offline-verified Ed25519 JWT. Supplied from your local .env — NEVER
+      # commit a real key.
+      LICENSE_KEY: ${LICENSE_KEY:-}
+      # --- Data-plane auth: built-in default admin (session) ---------------
+      # The admin UI is authenticated by a LIVE SESSION — the built-in default
+      # admin (username `admin`; password printed ONCE in the logs on first
+      # boot) or SSO. The shim below drops the Secure cookie attribute so that
+      # session cookie survives plain HTTP on localhost. Dev-only — NEVER set
+      # behind TLS in production.
+      VERSUS_ENTERPRISE_COOKIE_INSECURE: "1"
+      # --- Shared / OSS config ---------------------------------------------
+      STORAGE_TYPE: file
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-versus}
+      # Local Redis is plaintext — dial without TLS (matches the run harness).
+      REDIS_TLS: "false"
+      SLACK_ENABLE: ${SLACK_ENABLE:-false}
+      SLACK_TOKEN: ${SLACK_TOKEN:-}
+      SLACK_CHANNEL_ID: ${SLACK_CHANNEL_ID:-}
+      TELEGRAM_ENABLE: ${TELEGRAM_ENABLE:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      AGENT_ENABLE: ${AGENT_ENABLE:-true}
+      # CloudWatch is a STANDING baseline source — start in `training` to learn
+      # each signal's normal, then move to `shadow` and `detect` (see the guide).
+      AGENT_MODE: ${AGENT_MODE:-training}
+      AGENT_AI_ENABLE: ${AGENT_AI_ENABLE:-false}
+      AGENT_AI_API_KEY: ${AGENT_AI_API_KEY:-}
+      AGENT_AI_MODEL: ${AGENT_AI_MODEL:-gpt-4o-mini}
+      # --- AWS auth: STANDARD SDK chain. AWS_REGION is REQUIRED. -----------
+      # Do NOT quote values in .env — compose forwards them literally, so a
+      # quoted region ("us-east-1") becomes an invalid region and every AWS
+      # call fails. Leave the key/secret empty to use an instance/task role.
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+    volumes:
+      - ./config:/app/config:ro
+      - ./config/agent_sources.cloudwatch.yaml:/app/config/agent_sources.yaml:ro
+      - versus-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
+  versus-data:

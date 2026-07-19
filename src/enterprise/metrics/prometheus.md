@@ -1,4 +1,4 @@
-# Metrics demo — Prometheus
+# Prometheus Guide
 
 _Enterprise_
 
@@ -7,17 +7,11 @@ data source at it, drive a synthetic **EC2-style 5xx + latency spike**, and watc
 Versus discover the signals, fire an anomaly, classify it with the detect AI, and open a
 real incident.
 
-This is the **demo companion** to the reference page
-[Prometheus / Metrics](../agent/data-sources/prometheus.md). That page explains the
-options and the learning model; this page is the copy-paste reproduction.
-
-> This walkthrough is the **baseline-first** demo path: run steady, healthy traffic
-> until the source has learned each signal's normal, then spike it so the now-anomalous
-> signal pages.
+This walkthrough is the **baseline-first** demo path: run steady, healthy traffic until the source has learned each signal's normal, then spike it so the now-anomalous signal pages.
 
 ## What you'll build
 
-![Versus Incident Metrics](../docs/images/versus-incident-metrics-flow.png)
+![Versus Incident Metrics](../../docs/images/versus-incident-metrics-flow.png)
 
 A host-run generator **pushes** synthetic series to a Pushgateway; Prometheus scrapes
 them; the enterprise `prometheus` source **auto-discovers the golden signals** for each
@@ -34,14 +28,14 @@ and then goes clearly anomalous, it emits a signal.
 | **Python 3** | runs `scripts/generate_fake_metrics.py` (stdlib only — no `pip install`) |
 
 > **First time running Enterprise?** Start with
-> [Getting Started — Running the Enterprise Agent](./getting-started.md). It
+> [Getting Started — Running the Enterprise Agent](../getting-started.md). It
 > covers signing in as the default admin, turning on AI, and switching modes
 > from the UI — the controls this walkthrough uses.
 
 ## 1. Bring up the stack
 
 Everything runs from assets shipped in this repo. Start the **Pushgateway + Prometheus + Redis** from the metrics example
-([examples/docker-compose/metrics/](../../examples/docker-compose/metrics/)):
+([examples/docker-compose/metrics/](../../../examples/docker-compose/metrics/)):
 
 ```bash
 cd examples/docker-compose/metrics
@@ -54,7 +48,7 @@ Check Prometheus is up at <http://localhost:9090> and the Pushgateway at
 ## 2. Configure the source
 
 Declare the enterprise `prometheus` source in
-[config/agent_sources.yaml](../../config/agent_sources.yaml) — the file Versus loads
+[config/agent_sources.yaml](../../../config/agent_sources.yaml) — the file Versus loads
 from next to `config.yaml`. The headline config is **auto-learning**: give it the
 `address` (and auth if needed). The
 source auto-discovers each service's golden signals (traffic, errors, latency, resource
@@ -212,7 +206,7 @@ its job: catching the right service, paging no one.
 Happy with what shadow flagged? Switch the agent to **`detect`** — again from
 the **Agent** page (or restart with `AGENT_MODE=detect`). Detect **requires AI
 to be enabled**, which you set up in
-[Getting Started → activate the AI key](./getting-started.md#5-activate-the-ai-key).
+[Getting Started → activate the AI key](../getting-started.md#5-activate-the-ai-key).
 
 If you're using the restart path instead of the UI control, the full command
 is just the training one with `AGENT_MODE=detect`:
@@ -274,11 +268,7 @@ ran during detect.
 ## Going further: name your own signals (optional)
 
 Once the demo is running on auto-discovery, you can also have the source watch **signals
-you name yourself** — pick the exact PromQL and attach a declared `severity`. Edit
-`demo-prom` in [config/agent_sources.yaml](../../config/agent_sources.yaml) to append a
-`queries:` block, then restart the run command. These pinned signals are layered **on top
-of** auto-discovery and mirror the reference page's
-*Advanced: custom signals* (see [Prometheus / Metrics](../agent/data-sources/prometheus.md)):
+you name yourself** — pick the exact PromQL and attach a declared `severity`:
 
 ```yaml
 sources:
@@ -334,8 +324,4 @@ docker compose down -v
 
 ## See also
 
-- New here? [Getting Started — Running the Enterprise Agent](./getting-started.md)
-- Reference: [Prometheus / Metrics (Enterprise)](../agent/data-sources/prometheus.md)
-- The trace twin of this demo: [Traces demo, end to end](./traces.md)
-- The logs lifecycle this mirrors: [Shadow Mode](../agent/shadow-mode.md) · [AI Detect Mode](../agent/ai-detect-mode.md) · [AI Analyze Mode](../agent/ai-analyze-mode.md)
-- On-demand correlation tools: [Analyze Tools](../agent/analyze-tools/tools.md)
+- New here? [Getting Started — Running the Enterprise Agent](../getting-started.md)

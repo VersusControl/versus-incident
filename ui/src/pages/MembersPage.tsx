@@ -196,11 +196,11 @@ export function MembersPanel() {
             <table className="ddt">
               <thead>
                 <tr>
+                  <th className="w-24" />
                   <th className="w-56">Name</th>
                   <th className="w-40">Alias</th>
                   <th>Channel identifiers</th>
                   {rbacActive && <th className="w-40">Role</th>}
-                  <th className="w-24" />
                 </tr>
               </thead>
               <tbody>
@@ -246,6 +246,36 @@ export function MembersPanel() {
                   });
                   return (
                     <tr key={m.id} data-testid={`member-row-${m.id}`}>
+                      <td>
+                        <div className="flex justify-end gap-1">
+                          {aff.canEdit && (
+                            <button
+                              className="btn"
+                              data-testid={`member-edit-${m.id}`}
+                              aria-label={`Edit ${m.name}`}
+                              title="Edit"
+                              onClick={() => setEditing(m)}
+                            >
+                              <Pencil size={11} />
+                            </button>
+                          )}
+                          {aff.canDelete && (
+                            <button
+                              className="btn"
+                              data-testid={`member-delete-${m.id}`}
+                              aria-label={`Delete ${m.name}`}
+                              title="Delete"
+                              disabled={del.isPending}
+                              onClick={() => {
+                                del.reset();
+                                setDeleting(m);
+                              }}
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          )}
+                        </div>
+                      </td>
                       <td className="py-2.5 font-medium text-ink-50">
                         <span>{m.name}</span>
                         {rbacActive && isSelf && (
@@ -281,36 +311,6 @@ export function MembersPanel() {
                           />
                         </td>
                       )}
-                      <td>
-                        <div className="flex justify-end gap-1">
-                          {aff.canEdit && (
-                            <button
-                              className="btn"
-                              data-testid={`member-edit-${m.id}`}
-                              aria-label={`Edit ${m.name}`}
-                              title="Edit"
-                              onClick={() => setEditing(m)}
-                            >
-                              <Pencil size={11} />
-                            </button>
-                          )}
-                          {aff.canDelete && (
-                            <button
-                              className="btn"
-                              data-testid={`member-delete-${m.id}`}
-                              aria-label={`Delete ${m.name}`}
-                              title="Delete"
-                              disabled={del.isPending}
-                              onClick={() => {
-                                del.reset();
-                                setDeleting(m);
-                              }}
-                            >
-                              <Trash2 size={11} />
-                            </button>
-                          )}
-                        </div>
-                      </td>
                     </tr>
                   );
                 })}

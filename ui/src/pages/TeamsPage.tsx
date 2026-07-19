@@ -139,10 +139,10 @@ export function TeamsPanel() {
             <table className="ddt">
               <thead>
                 <tr>
+                  <th className="w-24" />
                   <th className="w-56">Name</th>
                   <th className="w-40">Alias</th>
                   <th>Members</th>
-                  <th className="w-24" />
                 </tr>
               </thead>
               <tbody>
@@ -168,33 +168,6 @@ export function TeamsPanel() {
                   )}
                 {pg.pageItems.map((t) => (
                   <tr key={t.id}>
-                    <td className="py-2.5">
-                      <div className="font-medium text-ink-50">{t.name}</div>
-                      {t.description && (
-                        <div className="text-2xs text-ink-300">
-                          {t.description}
-                        </div>
-                      )}
-                    </td>
-                    <td className="font-mono text-2xs text-ink-300">
-                      {t.alias}
-                    </td>
-                    <td>
-                      {t.member_ids.length === 0 ? (
-                        <span className="text-ink-400">—</span>
-                      ) : (
-                        <div className="flex flex-wrap gap-1">
-                          {t.member_ids.map((id) => {
-                            const m = memberById.get(id);
-                            return (
-                              <Pill key={id}>
-                                {m ? m.name : id.slice(0, 8)}
-                              </Pill>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </td>
                     <td>
                       <div className="flex justify-end gap-1">
                         {canManage && (
@@ -224,6 +197,33 @@ export function TeamsPanel() {
                           </>
                         )}
                       </div>
+                    </td>
+                    <td className="py-2.5">
+                      <div className="font-medium text-ink-50">{t.name}</div>
+                      {t.description && (
+                        <div className="text-2xs text-ink-300">
+                          {t.description}
+                        </div>
+                      )}
+                    </td>
+                    <td className="font-mono text-2xs text-ink-300">
+                      {t.alias}
+                    </td>
+                    <td>
+                      {t.member_ids.length === 0 ? (
+                        <span className="text-ink-400">—</span>
+                      ) : (
+                        <div className="flex flex-wrap gap-1">
+                          {t.member_ids.map((id) => {
+                            const m = memberById.get(id);
+                            return (
+                              <Pill key={id}>
+                                {m ? m.name : id.slice(0, 8)}
+                              </Pill>
+                            );
+                          })}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ))}

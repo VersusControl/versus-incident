@@ -7,6 +7,8 @@ import { fmtAbs, fmtRel } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
 import { InfoHint } from "@/components/InfoHint";
+import { SortHeader } from "@/components/SortHeader";
+import { tsValue, useSortableRows } from "@/lib/sortRows";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { AutoRefreshControl } from "@/components/AutoRefreshControl";
 import { useAutoRefresh } from "@/lib/useAutoRefresh";
@@ -222,7 +224,15 @@ export function ServicesPage() {
     [filtered, scope, ignore],
   );
 
-  const pg = usePagination(scoped, { resetKey: `${scope}|${q}` });
+  // Click-to-sort on First seen (by the real first_seen timestamp). No default
+  // sort, so the list keeps its A→Z-by-name order until the operator clicks.
+  const timeSort = useSortableRows(scoped, {
+    first_seen: ([, info]) => tsValue(info.first_seen),
+  });
+
+  const pg = usePagination(timeSort.rows, {
+    resetKey: `${scope}|${q}|${timeSort.signature}`,
+  });
 
   // ----- selection + grace action bar -------------------------------------
   // The SAME checkbox action model the learned-signal pages use: a select-all
@@ -236,7 +246,7 @@ export function ServicesPage() {
     () => pg.pageItems.map(([name]) => name),
     [pg.pageItems],
   );
-  const bulk = useBulkSelection(pageNames, `${scope}|${q}|${pg.page}`);
+  const bulk = useBulkSelection(pageNames, `${scope}|${q}|${timeSort.signature}|${pg.page}`);
 
   const selectedInGrace = bulk.selectedKeys.map(
     (name) => data?.[name]?.in_grace ?? false,
@@ -410,8 +420,15 @@ export function ServicesPage() {
                         onChange={bulk.toggleAll}
                       />
                     </th>
+                    <th className="w-12 text-right">
+                      <span className="sr-only">Action</span>
+                    </th>
                     <th className="w-48">Service</th>
-                    <th className="w-48">First seen</th>
+                    <SortHeader
+                      className="w-48"
+                      label="First seen"
+                      {...timeSort.headerProps("first_seen")}
+                    />
                     <th className="w-24">Origin</th>
                     <th className="w-32">
                       Status
@@ -428,9 +445,6 @@ export function ServicesPage() {
                         text="How much of the new-service grace window is left. It shows the remaining time while the service is in grace, or '—' once it is tracked (grace has ended or was never open)."
                         example="'12m30s' means detection starts in about 12 and a half minutes; '—' means the service is already being detected on."
                       />
-                    </th>
-                    <th className="w-12 text-right">
-                      <span className="sr-only">Action</span>
                     </th>
                   </tr>
                 </thead>
@@ -468,6 +482,23 @@ export function ServicesPage() {
                               onChange={() => bulk.toggle(name)}
                               label={`Select service ${name}`}
                             />
+                          </td>
+                          <td>
+                            <div className="flex items-center justify-end gap-1">
+                              {isUnknown ? (
+                                <span className="text-ink-600">—</span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="btn p-1"
+                                  aria-label={`View service ${name}`}
+                                  title="View details"
+                                  onClick={() => setPeekName(name)}
+                                >
+                                  <Eye size={14} aria-hidden />
+                                </button>
+                              )}
+                            </div>
                           </td>
                           <td className="font-mono">
                             {name}
@@ -511,23 +542,6 @@ export function ServicesPage() {
                               info.in_grace,
                               info.grace_seconds_remaining,
                             )}
-                          </td>
-                          <td>
-                            <div className="flex items-center justify-end gap-1">
-                              {isUnknown ? (
-                                <span className="text-ink-600">—</span>
-                              ) : (
-                                <button
-                                  type="button"
-                                  className="btn p-1"
-                                  aria-label={`View service ${name}`}
-                                  title="View details"
-                                  onClick={() => setPeekName(name)}
-                                >
-                                  <Eye size={14} aria-hidden />
-                                </button>
-                              )}
-                            </div>
                           </td>
                         </tr>
                       );

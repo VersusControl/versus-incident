@@ -380,17 +380,44 @@ signal per matching trace; `query_traces` (also auto-wired, no tools.yaml) lets
 the AI pull redacted span summaries during investigation. Tempo's API is on
 `:3200`, OTLP on `:4318`.
 
+## Optional: CloudWatch Metrics (AWS)
+
+To watch a **real AWS account** instead of the local Prometheus stack, use the
+standalone CloudWatch variant. CloudWatch reads from AWS, so there is no local
+metric stack — this compose file runs just Redis and the enterprise agent:
+
+```bash
+cp .env.example .env      # paste LICENSE_KEY, then set AWS_REGION + credentials
+docker compose -f docker-compose.cloudwatch.yml up -d
+```
+
+The `cloudwatch_metrics` source needs only an **AWS region** (auth comes from the
+standard AWS SDK credential chain) and read-only CloudWatch access
+(`cloudwatch:ListMetrics` + `cloudwatch:GetMetricData`). It discovers every
+`AWS/*` metric it can attribute to a service, learns each one's baseline, and —
+in `detect` mode — pages on a real, sustained deviation. Unlike the Prometheus
+demo there is no synthetic spike: it watches your real AWS metrics. Full
+walkthrough: [CloudWatch Metrics guide](../../src/enterprise/metrics/cloudwatch-metrics.md).
+
+Tear down:
+
+```bash
+docker compose -f docker-compose.cloudwatch.yml down -v
+```
+
 ## Layout
 
 ```
 metrics-source/
 ├── docker-compose.yml              # enterprise versus + redis + prometheus + pushgateway
 ├── docker-compose.traces.yml       # optional overlay: + tempo
+├── docker-compose.cloudwatch.yml   # standalone: CloudWatch (AWS) — redis + versus, no local stack
 ├── .env.example                    # copy to .env; holds LICENSE_KEY (gitignored)
 ├── config/
 │   ├── config.yaml                 # mode=detect, new_service_grace=0
 │   ├── agent_sources.yaml          # enterprise prometheus source (options: schema)
-│   └── agent_sources.traces.yaml   # + traces source (overlay only)
+│   ├── agent_sources.traces.yaml   # + traces source (traces overlay only)
+│   └── agent_sources.cloudwatch.yaml # CloudWatch metrics source (cloudwatch compose only)
 │   #  NOTE: no tools.yaml — query_metrics/query_traces are auto-wired
 ├── prometheus/
 │   └── prometheus.yml              # scrapes the pushgateway (honor_labels: true)
@@ -407,6 +434,8 @@ python3 scripts/generate_fake_metrics.py --clear   # drop the pushed series
 docker compose down -v
 # or, if you ran the traces overlay:
 docker compose -f docker-compose.yml -f docker-compose.traces.yml down -v
+# or, if you ran the CloudWatch variant:
+docker compose -f docker-compose.cloudwatch.yml down -v
 ```
 
 ## Reference

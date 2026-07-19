@@ -229,10 +229,10 @@ export function RunbooksPage() {
               <table className="ddt">
                 <thead>
                   <tr>
+                    <th className="w-28" />
                     <th>Title</th>
                     <th className="w-48">Services</th>
                     <th className="w-28">Searchable</th>
-                    <th className="w-28" />
                   </tr>
                 </thead>
                 <tbody>
@@ -259,6 +259,30 @@ export function RunbooksPage() {
                       view.isPending && view.variables?.id === r.id;
                     return (
                       <tr key={r.id}>
+                        <td>
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              className="btn"
+                              title="View"
+                              aria-label={`View runbook "${r.title}"`}
+                              disabled={viewPending}
+                              onClick={() => view.mutate(r)}
+                            >
+                              {viewPending ? <Spinner /> : <Eye size={11} />}
+                            </button>
+                            <button
+                              className="btn"
+                              title="Delete"
+                              aria-label={`Delete runbook "${r.title}"`}
+                              onClick={() => {
+                                del.reset();
+                                setToDelete(r);
+                              }}
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          </div>
+                        </td>
                         <td>
                           <div className="flex items-center gap-2">
                             <FileText
@@ -292,30 +316,6 @@ export function RunbooksPage() {
                               no vector
                             </span>
                           )}
-                        </td>
-                        <td>
-                          <div className="flex items-center justify-end gap-1">
-                            <button
-                              className="btn"
-                              title="View"
-                              aria-label={`View runbook "${r.title}"`}
-                              disabled={viewPending}
-                              onClick={() => view.mutate(r)}
-                            >
-                              {viewPending ? <Spinner /> : <Eye size={11} />}
-                            </button>
-                            <button
-                              className="btn"
-                              title="Delete"
-                              aria-label={`Delete runbook "${r.title}"`}
-                              onClick={() => {
-                                del.reset();
-                                setToDelete(r);
-                              }}
-                            >
-                              <Trash2 size={11} />
-                            </button>
-                          </div>
                         </td>
                       </tr>
                     );

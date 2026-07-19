@@ -54,7 +54,7 @@ describe("Incidents table — Service column is FIRST", () => {
   it("puts the Service header before Severity/When", () => {
     const service = src.indexOf(">Service</th>");
     const severity = src.indexOf(">Severity</th>");
-    const when = src.indexOf(">When</th>");
+    const when = src.indexOf('label="When"');
     expect(service).toBeGreaterThan(-1);
     expect(service).toBeLessThan(severity);
     expect(service).toBeLessThan(when);
@@ -70,7 +70,7 @@ describe("Decisions Detect table — Service column is FIRST", () => {
   const src = read("../pages/DecisionsPage.tsx");
   it("puts Service before When/Outcome in the detect header", () => {
     const service = src.indexOf(">Service</th>");
-    const when = src.indexOf(">When</th>");
+    const when = src.indexOf('label="When"');
     const outcome = src.indexOf(">Outcome</th>");
     expect(service).toBeGreaterThan(-1);
     expect(service).toBeLessThan(when);

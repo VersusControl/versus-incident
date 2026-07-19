@@ -194,14 +194,14 @@ export interface Status {
 // /`display_std`, so the UI formats numbers but never converts a wire unit.
 export interface BaselineRow {
   type: "metric" | "trace";
-  source: string; // "prometheus" | "traces"
+  source: string; // "prometheus" | "traces" | "cloudwatch_metrics" | future source types
   service: string;
   signal: string;
   operation?: string; // trace rows only
   kind: string; // traffic | errors | latency | saturation | other
   expected_mean: number; // raw learned value, in the wire unit
   expected_std: number;
-  unit: string; // display unit: "req/s" | "ms" | "%" | "" (raw)
+  unit: string; // display unit — a real backend unit like "req/s" | "ms" | "%" | "Bytes/Second" | "Percent" | "" (raw gauge)
   display_mean: number; // expected_mean converted into `unit`
   display_std: number; // expected_std converted into `unit`
   confident: boolean; // still-learning (false) vs ready-to-detect (true)

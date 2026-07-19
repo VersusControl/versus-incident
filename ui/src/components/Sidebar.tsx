@@ -1,23 +1,14 @@
+import { useState } from "react";
 import { NavLink } from "react-router-dom";
 import {
   Activity,
-  AlertTriangle,
-  BellOff,
-  Book,
-  Brain,
+  ChevronLeft,
+  ChevronRight,
   Flame,
-  KeyRound,
-  LineChart,
   Lock,
-  ScrollText,
-  Server,
-  Settings,
-  ShieldAlert,
   ShieldCheck,
   Sparkles,
-  Target,
-  Users,
-  Waypoints,
+  Wrench,
   type LucideIcon,
 } from "lucide-react";
 import clsx from "clsx";
@@ -25,9 +16,11 @@ import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "@/lib/api";
 import { useTheme } from "@/lib/theme";
 
+const COLLAPSE_KEY = "versus.sidebar.collapsed";
+
 // Theme-aware sidebar brand — uses the same SVG logo approach as the
 // management platform TopNav Brand component.
-function SidebarBrand() {
+function SidebarBrand({ collapsed }: { collapsed?: boolean }) {
   const { theme } = useTheme();
   // Sidebar is force-dark, so we always show the light (white) logo —
   // unless the app theme is light, in which case we show the dark logo
@@ -35,11 +28,18 @@ function SidebarBrand() {
   const logoSrc = theme === "dark" ? "/versus-logo-light.svg" : "/versus-logo-light.svg";
 
   return (
-    <div className="flex items-center gap-2 px-4 py-4">
+    <div
+      className={clsx(
+        "flex items-center gap-2 py-4",
+        collapsed ? "justify-center px-2" : "px-4",
+      )}
+    >
       <img src={logoSrc} alt="Versus" className="h-5 w-auto" />
-      <div className="text-2xs uppercase tracking-wider text-ink-200">
-        Versus Incident
-      </div>
+      {!collapsed && (
+        <div className="text-2xs uppercase tracking-wider text-ink-200">
+          Versus Incident
+        </div>
+      )}
     </div>
   );
 }
@@ -51,7 +51,6 @@ interface SideItem {
   // Absent for in-development placeholders — those aren't wired to a route yet.
   to?: string;
   label: string;
-  icon: LucideIcon;
   end?: boolean;
   dim?: boolean;
   dimTitle?: string;
@@ -62,7 +61,26 @@ interface SideItem {
   inDev?: boolean;
 }
 
-export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+// A nav zone: a job-grouped section with a representative icon (shown beside the
+// header when expanded, and as the sole section marker when the rail is
+// collapsed) and its items.
+interface SideZone {
+  title: string;
+  icon: LucideIcon;
+  items: SideItem[];
+}
+
+export function SidebarContent({
+  onNavigate,
+  collapsed = false,
+  onToggleCollapse,
+}: {
+  onNavigate?: () => void;
+  collapsed?: boolean;
+  // When provided, the desktop collapse/expand toggle is rendered. The mobile
+  // drawer omits it (it passes only onNavigate), so the drawer stays unchanged.
+  onToggleCollapse?: () => void;
+}) {
   // Agent config drives whether the Agent zone is usable. Shares the
   // ["agent-config"] cache key with TopBar/NowPage — one fetch, zero extra
   // load. enable===false means the agent is deliberately off.
@@ -110,17 +128,16 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const runbooksAvailable = statusQ.data?.runbooks_available ?? false;
 
   const respond: SideItem[] = [
-    { to: "/now", label: "Now", icon: Flame },
-    { to: "/incidents", label: "Incidents", icon: AlertTriangle },
+    { to: "/now", label: "Now" },
+    { to: "/incidents", label: "Incidents" },
   ];
   const agent: SideItem[] = [
-    { to: "/agent", label: "Overview", icon: Activity, end: true },
-    { to: "/agent/services", label: "Services", icon: Server },
-    { to: "/agent/logs", label: "Logs", icon: ScrollText },
+    { to: "/agent", label: "Overview", end: true },
+    { to: "/agent/services", label: "Services" },
+    { to: "/agent/logs", label: "Logs" },
     {
       to: "/agent/metrics",
       label: "Metrics",
-      icon: LineChart,
       locked: enterpriseLocked,
       dim: enterpriseLocked,
       dimTitle: enterpriseLocked
@@ -130,7 +147,6 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
     {
       to: "/agent/traces",
       label: "Traces",
-      icon: Waypoints,
       locked: enterpriseLocked,
       dim: enterpriseLocked,
       dimTitle: enterpriseLocked
@@ -143,12 +159,11 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   // above. SLIs/SLOs stays enterprise-gated; Decisions is ungated. Both keep
   // their existing routes; this is purely a nav regrouping.
   const ai: SideItem[] = [
-    { to: "/agent/decisions", label: "Decisions", icon: Sparkles },
-    { to: "/analyses", label: "Analyses", icon: Brain },
+    { to: "/agent/decisions", label: "Decisions" },
+    { to: "/analyses", label: "Analyses" },
     {
       to: "/agent/slo",
       label: "SLIs/SLOs",
-      icon: Target,
       locked: enterpriseLocked,
       dim: enterpriseLocked,
       dimTitle: enterpriseLocked
@@ -156,16 +171,15 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         : undefined,
     },
     // inDev
-    { label: "Alert fatigue", icon: BellOff, inDev: true },
-    { label: "Secret scanning", icon: KeyRound, inDev: true },
-    { label: "Fraud detection", icon: ShieldAlert, inDev: true },
+    { label: "Alert fatigue", inDev: true },
+    { label: "Secret scanning", inDev: true },
+    { label: "Fraud detection", inDev: true },
   ];
 
   const tools: SideItem[] = [
     {
       to: "/agent/runbooks",
       label: "Runbooks",
-      icon: Book,
       // Visible-with-hint instead of vanishing while status loads/fails
       // (empty-nav-state rule). The page explains the 503 case.
       dim: !runbooksAvailable,
@@ -175,9 +189,9 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
     },
   ];
   const manage: SideItem[] = [
-    { to: "/people", label: "People", icon: Users },
-    { to: "/admin", label: "Admin", icon: ShieldCheck },
-    { to: "/settings", label: "Settings", icon: Settings },
+    { to: "/people", label: "People" },
+    { to: "/admin", label: "Admin" },
+    { to: "/settings", label: "Settings" },
   ];
 
   // When the agent is disabled (agent.enable=false) every Agent view and the
@@ -196,46 +210,110 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         }))
       : items;
 
+  const zones: SideZone[] = [
+    { title: "Respond", icon: Flame, items: respond },
+    { title: "Agent", icon: Activity, items: applyAgentOff(agent) },
+    { title: "AI", icon: Sparkles, items: applyAgentOff(ai) },
+    { title: "Tools", icon: Wrench, items: applyAgentOff(tools) },
+    { title: "Manage", icon: ShieldCheck, items: manage },
+  ];
+
   return (
     // force-dark: the rail keeps its dark identity in BOTH themes — the
     // CSS variables are re-pinned on this subtree (see index.css).
     <div className="force-dark flex h-full flex-col bg-ink-950 text-ink-100">
-      <SidebarBrand />
+      <SidebarBrand collapsed={collapsed} />
 
-      <nav aria-label="Primary" className="dark-scroll flex-1 overflow-y-auto px-2 py-2">
-        <Zone title="Respond" items={respond} onNavigate={onNavigate} />
-        <Zone title="Agent" items={applyAgentOff(agent)} onNavigate={onNavigate} />
-        <Zone title="AI" items={applyAgentOff(ai)} onNavigate={onNavigate} />
-        <Zone title="Tools" items={applyAgentOff(tools)} onNavigate={onNavigate} />
-        <Zone title="Manage" items={manage} onNavigate={onNavigate} />
+      <nav
+        aria-label="Primary"
+        className="dark-scroll flex-1 overflow-y-auto px-2 py-2"
+      >
+        {zones.map((zone) =>
+          collapsed ? (
+            <CollapsedZone key={zone.title} {...zone} onNavigate={onNavigate} />
+          ) : (
+            <Zone key={zone.title} {...zone} onNavigate={onNavigate} />
+          ),
+        )}
       </nav>
+
+      {onToggleCollapse && (
+        <div className="border-t border-ink-800 p-2">
+          <button
+            type="button"
+            onClick={onToggleCollapse}
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            className={clsx(
+              "flex min-h-9 w-full items-center gap-2 rounded-control py-2 text-xs text-ink-300 transition-colors hover:bg-ink-800 hover:text-ink-100",
+              collapsed ? "justify-center px-0" : "px-3",
+            )}
+          >
+            {collapsed ? (
+              <ChevronRight size={16} aria-hidden />
+            ) : (
+              <>
+                <ChevronLeft size={16} aria-hidden />
+                <span className="flex-1 text-left">Collapse</span>
+              </>
+            )}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
 // Desktop rail. <1024px the AppShell renders SidebarContent inside a drawer
-// instead (the fixed 224px rail ate 60% of a phone viewport).
+// instead (the fixed 224px rail ate 60% of a phone viewport). The rail can be
+// collapsed to a narrow icon-only strip; the choice persists across reloads.
 export function Sidebar() {
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(COLLAPSE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  const toggle = () =>
+    setCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0");
+      } catch {
+        // localStorage unavailable (private mode / SSR) — the toggle still
+        // works for the session, it just won't persist.
+      }
+      return next;
+    });
+
   return (
-    <aside className="hidden h-full w-56 shrink-0 border-r border-ink-800 lg:block">
-      <SidebarContent />
+    <aside
+      className={clsx(
+        "hidden h-full shrink-0 border-r border-ink-800 transition-[width] duration-150 lg:block",
+        collapsed ? "w-14" : "w-56",
+      )}
+    >
+      <SidebarContent collapsed={collapsed} onToggleCollapse={toggle} />
     </aside>
   );
 }
 
 function Zone({
   title,
+  icon: Icon,
   items,
   onNavigate,
-}: {
-  title: string;
-  items: SideItem[];
+}: SideZone & {
   onNavigate?: () => void;
 }) {
   return (
     <>
-      <div className="mt-2 px-2 py-2 text-2xs uppercase tracking-wider text-ink-300 first:mt-0">
-        {title}
+      <div className="mt-2 flex items-center gap-2 px-2 py-2 text-2xs uppercase tracking-wider text-ink-300 first:mt-0">
+        <Icon size={13} aria-hidden />
+        <span>{title}</span>
       </div>
       {items.map((item) => (
         <SideLink key={item.to ?? item.label} {...item} onNavigate={onNavigate} />
@@ -244,10 +322,57 @@ function Zone({
   );
 }
 
+// CollapsedZone renders one zone as a single group-icon link in the narrow
+// rail: it points at the zone's primary (first navigable) item and exposes the
+// zone name via the tooltip, so the collapsed rail stays usable with icons
+// alone. Zones with no navigable item (nothing but in-dev placeholders) render
+// a non-interactive icon marker instead of a dead link.
+function CollapsedZone({
+  title,
+  icon: Icon,
+  items,
+  onNavigate,
+}: SideZone & {
+  onNavigate?: () => void;
+}) {
+  const primary = items.find((it) => it.to && !it.inDev);
+
+  if (!primary?.to) {
+    return (
+      <div
+        title={title}
+        aria-label={title}
+        className="mx-auto my-0.5 flex h-9 w-9 items-center justify-center rounded-control text-ink-500"
+      >
+        <Icon size={18} aria-hidden />
+      </div>
+    );
+  }
+
+  return (
+    <NavLink
+      to={primary.to}
+      end={primary.end}
+      title={title}
+      aria-label={title}
+      onClick={onNavigate}
+      className={({ isActive }) =>
+        clsx(
+          "mx-auto my-0.5 flex h-9 w-9 items-center justify-center rounded-control transition-colors",
+          isActive
+            ? "bg-accent-subtle text-ink-50"
+            : "text-ink-200 hover:bg-ink-800 hover:text-ink-50",
+        )
+      }
+    >
+      <Icon size={18} aria-hidden />
+    </NavLink>
+  );
+}
+
 function SideLink({
   to,
   label,
-  icon: Icon,
   end,
   dim,
   dimTitle,
@@ -271,7 +396,6 @@ function SideLink({
         className="group flex min-h-9 cursor-default items-center gap-2 rounded-control px-3 py-2 text-xs text-ink-400"
       >
         <span className="h-4 w-0.5 rounded-full bg-transparent" />
-        <Icon size={14} />
         <span className="flex-1">{label}</span>
         <span
           data-testid="nav-indev-indicator"
@@ -308,7 +432,6 @@ function SideLink({
               isActive ? "bg-accent" : "bg-transparent",
             )}
           />
-          <Icon size={14} />
           <span className="flex-1">{label}</span>
           {locked && (
             <Lock size={12} className="text-ink-500" aria-label="Enterprise" />

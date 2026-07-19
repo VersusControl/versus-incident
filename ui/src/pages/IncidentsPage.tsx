@@ -29,6 +29,8 @@ import {
 } from "@/lib/incidentList";
 import { usePagination } from "@/lib/pagination";
 import { useBulkSelection } from "@/lib/useBulkSelection";
+import { SortHeader } from "@/components/SortHeader";
+import { tsValue, useSortableRows } from "@/lib/sortRows";
 import { TopBar } from "@/components/TopBar";
 import { Pill, SourceBadge } from "@/components/Pill";
 import { EmptyState, EmptyValue } from "@/components/feedback";
@@ -230,11 +232,19 @@ export function IncidentsPage() {
     [textFiltered, status],
   );
 
+  // Click-to-sort on When (by the real created_at timestamp, not the "2m ago"
+  // string). Default: newest first, matching the incoming server order.
+  const sorted = useSortableRows(
+    filtered,
+    { when: (i: IncidentSummary) => tsValue(i.created_at) },
+    { key: "when", dir: "desc" },
+  );
+
   // Paginate at 100/page AFTER filter/search. Reset to page 1 whenever the
-  // origin tab, status filter, or search text changes so a filter never
+  // origin tab, status filter, search text, or sort changes so a filter never
   // strands the operator on a now-empty page.
-  const pg = usePagination(filtered, {
-    resetKey: incidentResetKey(origin, status, trimmed),
+  const pg = usePagination(sorted.rows, {
+    resetKey: `${incidentResetKey(origin, status, trimmed)}|${sorted.signature}`,
   });
 
   // ----- selection + action bar -------------------------------------------
@@ -245,7 +255,7 @@ export function IncidentsPage() {
   const pageKeys = useMemo(() => pg.pageItems.map((i) => i.id), [pg.pageItems]);
   const bulk = useBulkSelection(
     pageKeys,
-    `${incidentResetKey(origin, status, trimmed)}|${pg.page}`,
+    `${incidentResetKey(origin, status, trimmed)}|${sorted.signature}|${pg.page}`,
   );
   const bulkActions = [
     { id: "assign", label: "Assign" },
@@ -473,16 +483,20 @@ export function IncidentsPage() {
                         onChange={bulk.toggleAll}
                       />
                     </th>
+                    <th className="w-24" />
                     <th className="w-28">Service</th>
                     <th className="w-24">Severity</th>
-                    <th className="w-32">When</th>
+                    <SortHeader
+                      className="w-32"
+                      label="When"
+                      {...sorted.headerProps("when")}
+                    />
                     <th>Title</th>
                     <th className="w-32">Channels</th>
                     <th className="w-32">Assigned</th>
                     <th className="w-24">Notify</th>
                     <th className="w-24">Status</th>
                     <th className="w-28">ID</th>
-                    <th className="w-24" />
                   </tr>
                 </thead>
                 <tbody>
@@ -797,6 +811,18 @@ function IncidentRow({
           />
         </td>
         <td>
+          <div className="flex justify-end gap-1">
+            <button
+              className="btn p-2"
+              aria-label={`View incident ${i.id.slice(0, 8)}`}
+              title="View details"
+              onClick={onPeek}
+            >
+              <Eye size={12} aria-hidden />
+            </button>
+          </div>
+        </td>
+        <td>
           {i.service && i.service !== "_unknown" ? (
             <span className="text-ink-200">{i.service}</span>
           ) : (
@@ -882,18 +908,6 @@ function IncidentRow({
         </td>
         <td className="font-mono text-2xs text-ink-400" title={i.id}>
           {i.id.slice(0, 8)}
-        </td>
-        <td>
-          <div className="flex justify-end gap-1">
-            <button
-              className="btn p-2"
-              aria-label={`View incident ${i.id.slice(0, 8)}`}
-              title="View details"
-              onClick={onPeek}
-            >
-              <Eye size={12} aria-hidden />
-            </button>
-          </div>
         </td>
       </tr>
       {notifyFailed && notifyExpanded && (

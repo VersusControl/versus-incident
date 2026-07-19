@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { api, ApiError, type ServiceIncidentRecent, type ServiceOverride, type ServiceOverrideSource, type ServicePattern } from "@/lib/api";
 import { fmtAbs, fmtRel, formatDuration, incidentTitle } from "@/lib/format";
+import { tsValue, useSortableRows } from "@/lib/sortRows";
 import {
   learnExcludeGate,
   metricExcluded,
@@ -29,6 +30,7 @@ import { RetryableError } from "@/components/RetryableError";
 import { SkCard, SkRows } from "@/components/Skeleton";
 import { PeekPanel, PeekField } from "@/components/PeekPanel";
 import { PatternBaselines } from "@/components/PatternBaselines";
+import { SortHeader } from "@/components/SortHeader";
 
 // ServiceDetailPage — the per-service drill-down reached from the Services list.
 // It stitches together four sections:
@@ -553,6 +555,20 @@ export function ServiceDetailPage() {
   // service page. The row's link to the full pattern page stays.
   const [peekPattern, setPeekPattern] = useState<ServicePattern | null>(null);
 
+  // Click-to-sort on the two time columns: the patterns table's Last seen and
+  // the incidents table's Created, both by the real timestamp (not the "2m ago"
+  // string) and defaulting to most-recent-first.
+  const patternSort = useSortableRows(
+    data?.patterns ?? [],
+    { last_seen: (p: ServicePattern) => tsValue(p.last_seen) },
+    { key: "last_seen", dir: "desc" },
+  );
+  const incidentSort = useSortableRows(
+    data?.incidents.recent ?? [],
+    { created_at: (inc: ServiceIncidentRecent) => tsValue(inc.created_at) },
+    { key: "created_at", dir: "desc" },
+  );
+
   const notFound =
     isError && error instanceof ApiError && error.status === 404;
 
@@ -649,14 +665,18 @@ export function ServiceDetailPage() {
               <table className="ddt">
                 <thead>
                   <tr>
+                    <th className="w-12 text-right">
+                      <span className="sr-only">Action</span>
+                    </th>
                     <th>Pattern</th>
                     <th className="w-20">Count</th>
                     <th className="w-28">Verdict</th>
                     <th className="w-40">Source</th>
-                    <th className="w-44">Last seen</th>
-                    <th className="w-12 text-right">
-                      <span className="sr-only">Action</span>
-                    </th>
+                    <SortHeader
+                      className="w-44"
+                      label="Last seen"
+                      {...patternSort.headerProps("last_seen")}
+                    />
                   </tr>
                 </thead>
                 <tbody>
@@ -670,8 +690,21 @@ export function ServiceDetailPage() {
                       </td>
                     </tr>
                   )}
-                  {data.patterns.map((p) => (
+                  {patternSort.rows.map((p) => (
                     <tr key={p.id}>
+                      <td>
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            type="button"
+                            className="btn p-1"
+                            aria-label={`View pattern ${p.id}`}
+                            title="View details"
+                            onClick={() => setPeekPattern(p)}
+                          >
+                            <Eye size={14} aria-hidden />
+                          </button>
+                        </div>
+                      </td>
                       <td>
                         <Link
                           className="link font-mono text-2xs"
@@ -693,19 +726,6 @@ export function ServiceDetailPage() {
                         title={fmtAbs(p.last_seen)}
                       >
                         {fmtRel(p.last_seen)}
-                      </td>
-                      <td>
-                        <div className="flex items-center justify-end gap-1">
-                          <button
-                            type="button"
-                            className="btn p-1"
-                            aria-label={`View pattern ${p.id}`}
-                            title="View details"
-                            onClick={() => setPeekPattern(p)}
-                          >
-                            <Eye size={14} aria-hidden />
-                          </button>
-                        </div>
                       </td>
                     </tr>
                   ))}
@@ -737,7 +757,11 @@ export function ServiceDetailPage() {
                   <tr>
                     <th>Incident</th>
                     <th className="w-28">Severity</th>
-                    <th className="w-48">Created</th>
+                    <SortHeader
+                      className="w-48"
+                      label="Created"
+                      {...incidentSort.headerProps("created_at")}
+                    />
                   </tr>
                 </thead>
                 <tbody>
@@ -751,7 +775,7 @@ export function ServiceDetailPage() {
                       </td>
                     </tr>
                   )}
-                  {data.incidents.recent.map((inc) => (
+                  {incidentSort.rows.map((inc) => (
                     <RecentIncidentRow key={inc.id} inc={inc} />
                   ))}
                 </tbody>
