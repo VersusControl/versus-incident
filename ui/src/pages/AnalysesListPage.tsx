@@ -7,6 +7,8 @@ import { fmtAbs, fmtRel, formatDuration, incidentTitle } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
 import { usePagination } from "@/lib/pagination";
 import { useBulkSelection } from "@/lib/useBulkSelection";
+import { SortHeader } from "@/components/SortHeader";
+import { tsValue, useSortableRows } from "@/lib/sortRows";
 import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
@@ -78,11 +80,19 @@ export function AnalysesListPage() {
     });
   }, [data, q, status, incidentFilter, titleByID]);
 
-  // Paginate at 100/page AFTER filter/search; reset to page 1 when any filter
-  // or the search changes so a filter never strands the operator on an empty
-  // page.
-  const pg = usePagination(filtered, {
-    resetKey: `${status}|${incidentFilter ?? ""}|${q}`,
+  // Click-to-sort on When (by the real requested_at timestamp, not the "2m
+  // ago" string). Default: newest first, matching the incoming order.
+  const sorted = useSortableRows(
+    filtered,
+    { when: (rec: AnalysisRecord) => tsValue(rec.requested_at) },
+    { key: "when", dir: "desc" },
+  );
+
+  // Paginate at 100/page AFTER filter/search; reset to page 1 when any filter,
+  // the search, or the sort changes so a filter never strands the operator on
+  // an empty page.
+  const pg = usePagination(sorted.rows, {
+    resetKey: `${status}|${incidentFilter ?? ""}|${q}|${sorted.signature}`,
   });
 
   // Peek + selection. The analyses list is read-only, so the action bar
@@ -93,7 +103,7 @@ export function AnalysesListPage() {
   const pageKeys = useMemo(() => pg.pageItems.map((r) => r.id), [pg.pageItems]);
   const bulk = useBulkSelection(
     pageKeys,
-    `${status}|${incidentFilter ?? ""}|${q}|${pg.page}`,
+    `${status}|${incidentFilter ?? ""}|${q}|${sorted.signature}|${pg.page}`,
   );
   const peek = peekId ? (data ?? []).find((r) => r.id === peekId) : undefined;
 
@@ -226,16 +236,20 @@ export function AnalysesListPage() {
                           onChange={bulk.toggleAll}
                         />
                       </th>
-                      <th className="w-32">When</th>
+                      <th className="w-12 text-right">
+                        <span className="sr-only">Action</span>
+                      </th>
+                      <SortHeader
+                        className="w-32"
+                        label="When"
+                        {...sorted.headerProps("when")}
+                      />
                       <th>Incident</th>
                       <th>Finding</th>
                       <th className="w-28">Severity</th>
                       <th className="w-32">Model</th>
                       <th className="w-20">Duration</th>
                       <th className="w-20">Status</th>
-                      <th className="w-12 text-right">
-                        <span className="sr-only">Action</span>
-                      </th>
                     </tr>
                   </thead>
                   <tbody>
@@ -269,6 +283,19 @@ export function AnalysesListPage() {
                             onChange={() => bulk.toggle(rec.id)}
                             label={`Select analysis ${rec.id}`}
                           />
+                        </td>
+                        <td>
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              type="button"
+                              className="btn p-1"
+                              aria-label={`View analysis ${rec.id}`}
+                              title="View details"
+                              onClick={() => setPeekId(rec.id)}
+                            >
+                              <Eye size={14} aria-hidden />
+                            </button>
+                          </div>
                         </td>
                         <td
                           className="text-ink-300"
@@ -312,19 +339,6 @@ export function AnalysesListPage() {
                           >
                             {rec.status}
                           </Pill>
-                        </td>
-                        <td>
-                          <div className="flex items-center justify-end gap-1">
-                            <button
-                              type="button"
-                              className="btn p-1"
-                              aria-label={`View analysis ${rec.id}`}
-                              title="View details"
-                              onClick={() => setPeekId(rec.id)}
-                            >
-                              <Eye size={14} aria-hidden />
-                            </button>
-                          </div>
                         </td>
                       </tr>
                     ))}

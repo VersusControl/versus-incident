@@ -1,0 +1,42 @@
+# Enterprise `cloudwatch_metrics` DATA SOURCE for the metrics-source example.
+#
+# CloudWatch twin of agent_sources.yaml. The ONLY required field is `region`;
+# authentication comes from the standard AWS SDK credential chain (the AWS_*
+# env vars docker-compose.cloudwatch.yml forwards from your .env). There are NO
+# static keys in this file.
+#
+# Enterprise-only: needs a LICENSE_KEY with the `intelligence` entitlement. On an
+# OSS build the `cloudwatch_metrics` type is unavailable and the source fails
+# closed with "requires Versus Enterprise".
+sources:
+  - name: demo-cloudwatch
+    type: cloudwatch_metrics
+    enable: true
+    options:
+      region: ${AWS_REGION}          # REQUIRED — the only required field
+      namespaces:
+        - AWS/*                       # discover every AWS-service namespace
+
+      # ---------------------------------------------------------------------
+      # OPTIONAL knobs — every one defaults when omitted. Uncomment to tune
+      # scope or cost; the documented path is region-only.
+      #
+      # poll_interval: 60s            # sampling cadence (default 60s)
+      # query_delay: 120s             # offset for CloudWatch ingestion lag —
+      #                               # queries a window ending at now-query_delay
+      # period: 60                    # GetMetricData period, seconds (default 60)
+      #
+      # namespaces:                   # narrow discovery to bound cost on large
+      #   - AWS/ApplicationELB        # accounts. Custom (non-AWS/) namespaces are
+      #   - AWS/RDS                   # EXCLUDED unless you list them here.
+      #   - AWS/SQS
+      #
+      # default_statistic: Average    # statistic sampled for every metric
+      # statistic_overrides:          # per-namespace override (extended stats OK)
+      #   AWS/ApplicationELB: p99     #   latency — track the slow tail
+      #   AWS/SQS: Sum                #   queue depth — total, not average
+      #
+      # max_services: 200             # discovery cap: distinct services
+      # max_signals: 2000             # discovery cap: total signals
+      # discovery_interval: 1h        # how often the watch-set is refreshed
+      # ---------------------------------------------------------------------

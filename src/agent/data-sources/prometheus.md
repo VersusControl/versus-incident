@@ -1,4 +1,4 @@
-# Prometheus / Metrics
+# Prometheus
 
 _Enterprise_
 
@@ -8,33 +8,11 @@ something is genuinely wrong and stays wrong. You don't write a single query or 
 single threshold.
 
 Think of it as a teammate who watches your dashboards: first they learn your service's
-usual rhythm, then they only call you when something is clearly off — not at every blip.
-
-> **Same idea as the logs agent, tuned for metrics.** Every data source follows the same
-> three steps: **learn what's normal (`training`) → double-check quietly (`shadow`) →
-> start paging (`detect`)**. Logs learn your common log patterns; metrics learn your
-> normal traffic, errors, and latency; traces learn how long each operation usually
-> takes. If you know the [logs flow](../ai-detect-mode.md), you already know this one.
+usual rhythm, then they escalates only what is new or unexpected issues.
 
 ## How it works
 
-```mermaid
-flowchart LR
-  prom["Prometheus<br/>:9090"]
-
-  subgraph VE["Versus Enterprise"]
-    conn["connect<br/>address + auth only"]
-    disc["find the signals<br/>traffic · errors · latency · resource use"]
-    train["learn normal<br/>for each signal"]
-    shadow["double-check<br/>quietly (no paging)"]
-    detect["page on a real,<br/>lasting problem"]
-  end
-
-  oncall["on-call<br/>Slack / Telegram / page"]
-
-  prom --> conn --> disc --> train --> shadow --> detect --> oncall
-  detect -. "keeps learning as<br/>traffic changes" .-> train
-```
+![Versus Incident Metrics](../../docs/images/prometheus-metrics.png)
 
 You give it an address. It looks at your services, picks the signals that matter, and
 writes the queries for you. It learns what each signal normally does, watches quietly for
@@ -163,21 +141,6 @@ you coverage is **thin** rather than inventing signals. It watches the signals t
 matter, not every metric (which would just be noise) — and the `queries:` option below
 covers anything special it can't find on its own.
 
-## License gate
-
-The source and its learned baselines require a Versus Enterprise license, supplied via the `LICENSE_KEY` environment variable. On an **OSS build**, a source with `type: prometheus` returns **"requires Versus Enterprise"** and refuses to build.
-
-## OSS vs Enterprise
-
-| Capability | OSS | Enterprise |
-|---|---|---|
-| On-demand `query_metrics` correlation during an investigation | ✅ | ✅ |
-| Standing `prometheus` source that **starts incidents itself** | ❌ | ✅ |
-| **Auto-discovered** golden signals (no PromQL) | ❌ | ✅ |
-| **Learned** seasonal baseline + sustained-deviation paging | ❌ | ✅ |
-
-The **standing, auto-learned** source on this page is the Enterprise wedge.
-
 ## Advanced: custom signals
 
 If you have something specific to watch that the agent won't find on its own (say a
@@ -206,6 +169,6 @@ sources:
 
 ## See also
 
-- OSS on-demand correlation tools: [Analyze Tools](../analyze-tools/tools.md)
-- The trace twin of this flow: [Traces / Tempo (Enterprise)](./traces.md)
-- The logs lifecycle this mirrors: [Shadow Mode](../shadow-mode.md) · [AI Detect Mode](../ai-detect-mode.md) · [AI Analyze Mode](../ai-analyze-mode.md)
+- Full hands-on walkthrough: [Prometheus Metrics Demo](../../enterprise/metrics/prometheus.md)
+- Both metric sources and the licensing model: [Metrics overview](./metrics.md)
+

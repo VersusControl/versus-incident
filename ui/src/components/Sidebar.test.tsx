@@ -1,9 +1,49 @@
 // @vitest-environment jsdom
-import { describe, it, expect, afterEach, vi } from "vitest";
-import { render, screen, cleanup, within } from "@testing-library/react";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
+import {
+  render,
+  screen,
+  cleanup,
+  fireEvent,
+  within,
+} from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
-import { SidebarContent } from "./Sidebar";
+import { Sidebar, SidebarContent } from "./Sidebar";
+
+// This runner exposes node's experimental global localStorage, whose methods
+// aren't callable without a backing file. Install a tiny in-memory Storage so
+// the rail's persistence (window.localStorage) is exercised deterministically.
+class MemoryStorage {
+  private m = new Map<string, string>();
+  get length() {
+    return this.m.size;
+  }
+  clear() {
+    this.m.clear();
+  }
+  getItem(key: string) {
+    return this.m.has(key) ? (this.m.get(key) as string) : null;
+  }
+  setItem(key: string, value: string) {
+    this.m.set(key, String(value));
+  }
+  removeItem(key: string) {
+    this.m.delete(key);
+  }
+  key(i: number) {
+    return Array.from(this.m.keys())[i] ?? null;
+  }
+}
+const memStore = new MemoryStorage();
+Object.defineProperty(window, "localStorage", {
+  value: memStore,
+  configurable: true,
+});
+Object.defineProperty(globalThis, "localStorage", {
+  value: memStore,
+  configurable: true,
+});
 
 // Nav regrouping — the agent's reasoning surfaces (Decisions, Analyses,
 // SLIs/SLOs) live in their own "AI" nav section, distinct from the raw
@@ -30,6 +70,14 @@ vi.mock("@/lib/api", async (importActual) => {
 });
 
 afterEach(cleanup);
+
+afterEach(() => {
+  try {
+    window.localStorage.clear();
+  } catch {
+    // no-op — jsdom always has localStorage, this guards non-DOM runs.
+  }
+});
 
 function renderSidebar() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -153,4 +201,110 @@ describe("Sidebar — in-development AI placeholders", () => {
     expect(within(nav).queryByText("Security")).toBeNull();
   });
 });
+
+// Icons live on the GROUP headers, not on individual items. Each zone header
+// (Respond / Agent / AI / Tools / Manage) carries a representative Lucide icon
+// beside its title, while individual nav rows are text-only — the leading
+// per-item icon was removed. The active accent bar, the enterprise Lock badge,
+// the dim styling and the in-dev "Dev" chip all stay intact.
+describe("Sidebar — icons on group headers, not on items", () => {
+  const GROUPS = ["Respond", "Agent", "AI", "Tools", "Manage"];
+
+  it("renders an icon beside every group header title", async () => {
+    await renderSettled();
+    for (const title of GROUPS) {
+      const header = screen.getByText(title).closest("div");
+      expect(header).not.toBeNull();
+      // The header carries exactly one leading icon (an <svg>) next to its text.
+      expect(header?.querySelector("svg")).not.toBeNull();
+    }
+  });
+
+  it("renders plain nav items with no leading icon", async () => {
+    await renderSettled();
+    // An ordinary, ungated item is text-only — no svg at all.
+    const now = screen.getByRole("link", { name: "Now" });
+    expect(now.querySelector("svg")).toBeNull();
+  });
+
+  it("keeps the enterprise Lock badge on a locked item (its only svg)", async () => {
+    await renderSettled();
+    // A locked item drops its leading icon but KEEPS the Lock badge — so the
+    // single remaining svg is the lock, not a per-item nav icon.
+    const metrics = screen.getByRole("link", { name: /Metrics/ });
+    expect(metrics.querySelectorAll("svg")).toHaveLength(1);
+    within(metrics).getByLabelText("Enterprise");
+  });
+
+  it("keeps the in-dev 'Dev' chip on placeholder rows and no leading icon", async () => {
+    renderSidebar();
+    const label = await screen.findByText("Secret scanning");
+    const row = label.closest("[aria-disabled='true']") as HTMLElement;
+    // The Dev chip is still there…
+    within(row).getByText("Dev");
+    // …and the row has no leading nav icon (the accent bar span is not an svg).
+    expect(row.querySelector("svg")).toBeNull();
+  });
+});
+
+// The desktop rail can collapse to a narrow icon-only strip and expand back.
+// The collapsed rail shows only the group icons (as links to each zone's
+// primary route); the choice persists in localStorage across reloads. This is
+// the desktop (lg) rail — the mobile drawer keeps rendering SidebarContent
+// expanded, unaffected.
+describe("Sidebar desktop rail — collapse / expand toggle", () => {
+  beforeEach(() => {
+    try {
+      window.localStorage.clear();
+    } catch {
+      // no-op
+    }
+  });
+
+  function renderRail() {
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    return render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <Sidebar />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  it("collapses to a group-icon rail, updates aria-expanded, and persists", async () => {
+    renderRail();
+    // Expanded: full labeled item link + a collapse control.
+    expect(await screen.findByRole("link", { name: "Now" })).toBeTruthy();
+    const collapse = screen.getByRole("button", { name: "Collapse sidebar" });
+    expect(collapse.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(collapse);
+
+    // Collapsed: the labeled item is gone; the zone's group-icon link remains,
+    // pointing at the zone's primary route.
+    expect(screen.queryByRole("link", { name: "Now" })).toBeNull();
+    const respondGroup = screen.getByRole("link", { name: "Respond" });
+    expect(respondGroup.getAttribute("href")).toBe("/now");
+
+    // The toggle flips to expand and the collapsed state is persisted.
+    const expand = screen.getByRole("button", { name: "Expand sidebar" });
+    expect(expand.getAttribute("aria-expanded")).toBe("false");
+    expect(window.localStorage.getItem("versus.sidebar.collapsed")).toBe("1");
+  });
+
+  it("restores the collapsed rail from localStorage on mount", async () => {
+    window.localStorage.setItem("versus.sidebar.collapsed", "1");
+    renderRail();
+    // Boots collapsed: expand control present, labeled item absent.
+    expect(
+      await screen.findByRole("button", { name: "Expand sidebar" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Now" })).toBeNull();
+    expect(screen.getByRole("link", { name: "Respond" })).toBeTruthy();
+  });
+});
+
 

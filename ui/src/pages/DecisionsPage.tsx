@@ -27,6 +27,8 @@ import { RetryableError } from "@/components/RetryableError";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Pagination } from "@/components/Pagination";
 import { PeekPanel, PeekField } from "@/components/PeekPanel";
+import { SortHeader } from "@/components/SortHeader";
+import { tsValue, useSortableRows } from "@/lib/sortRows";
 import {
   BulkActionBar,
   RowSelectCheckbox,
@@ -255,14 +257,24 @@ function DetectTab() {
     return events.data.filter((e) => e.outcome === filter);
   }, [events.data, filter]);
 
-  const pg = usePagination(list, { resetKey: filter });
+  // Click-to-sort on When (by the real decision timestamp). Default: newest
+  // first, matching the incoming order.
+  const sorted = useSortableRows(
+    list,
+    { when: (e: DetectEvent) => tsValue(e.timestamp) },
+    { key: "when", dir: "desc" },
+  );
+
+  const pg = usePagination(sorted.rows, {
+    resetKey: `${filter}|${sorted.signature}`,
+  });
 
   // Selection + bar — the same checkbox model the learned-signal tables use.
   // The detect log is a read-only audit trail (no per-row mutation), so the bar
   // carries no actions: it collapses to the selection count + Clear. The eye is
   // the real affordance here, opening a peek without leaving the audit list.
   const pageKeys = useMemo(() => pg.pageItems.map((e) => e.id), [pg.pageItems]);
-  const bulk = useBulkSelection(pageKeys, `${filter}|${pg.page}`);
+  const bulk = useBulkSelection(pageKeys, `${filter}|${sorted.signature}|${pg.page}`);
 
   const keys = useTableKeys({
     size: pg.pageItems.length,
@@ -352,8 +364,15 @@ function DetectTab() {
                     onChange={bulk.toggleAll}
                   />
                 </th>
+                <th className="w-12 text-right">
+                  <span className="sr-only">Action</span>
+                </th>
                 <th className="w-32">Service</th>
-                <th className="w-32">When</th>
+                <SortHeader
+                  className="w-32"
+                  label="When"
+                  {...sorted.headerProps("when")}
+                />
                 <th className="w-28">Outcome</th>
                 <th className="w-24">Verdict</th>
                 <th className="w-24">Severity</th>
@@ -361,9 +380,6 @@ function DetectTab() {
                 <th>Title / Sample</th>
                 <th className="w-16 text-right">Freq</th>
                 <th className="w-16 text-right">ms</th>
-                <th className="w-12 text-right">
-                  <span className="sr-only">Action</span>
-                </th>
               </tr>
             </thead>
             <tbody>
@@ -532,6 +548,19 @@ function DetectRow({
           label={`Select detect event ${e.id}`}
         />
       </td>
+      <td>
+        <div className="flex items-center justify-end gap-1">
+          <button
+            type="button"
+            className="btn p-1"
+            aria-label={`View detect event ${e.id}`}
+            title="View details"
+            onClick={onPeek}
+          >
+            <Eye size={14} aria-hidden />
+          </button>
+        </div>
+      </td>
       <td className="text-2xs text-ink-200">
         {e.service && e.service !== "_unknown" ? e.service : <EmptyValue />}
       </td>
@@ -564,19 +593,6 @@ function DetectRow({
       <td className="text-right tabular-nums">{e.frequency}</td>
       <td className="text-right tabular-nums text-ink-400">
         {e.duration_ms ?? <EmptyValue />}
-      </td>
-      <td>
-        <div className="flex items-center justify-end gap-1">
-          <button
-            type="button"
-            className="btn p-1"
-            aria-label={`View detect event ${e.id}`}
-            title="View details"
-            onClick={onPeek}
-          >
-            <Eye size={14} aria-hidden />
-          </button>
-        </div>
       </td>
     </ClickableRow>
   );
@@ -665,7 +681,17 @@ function ShadowEventsTable({
   empty: React.ReactNode;
 }) {
   const navigate = useNavigate();
-  const pg = usePagination(list, { resetKey });
+
+  // Click-to-sort on Last seen (by the real last_seen timestamp). Default:
+  // most-recently-seen first, matching the incoming order.
+  const sorted = useSortableRows(
+    list,
+    { last_seen: (e: ShadowEvent) => tsValue(e.last_seen) },
+    { key: "last_seen", dir: "desc" },
+  );
+  const pg = usePagination(sorted.rows, {
+    resetKey: `${resetKey}|${sorted.signature}`,
+  });
   const [peekKey, setPeekKey] = useState<string | null>(null);
 
   // Selection + bar — same model as the other tables; the shadow log is
@@ -674,8 +700,10 @@ function ShadowEventsTable({
     () => pg.pageItems.map(shadowKey),
     [pg.pageItems],
   );
-  const bulk = useBulkSelection(pageKeys, `${resetKey}|${pg.page}`);
-
+  const bulk = useBulkSelection(
+    pageKeys,
+    `${resetKey}|${sorted.signature}|${pg.page}`,
+  );
   const keys = useTableKeys({
     size: pg.pageItems.length,
     onOpen: (i) => {
@@ -713,6 +741,9 @@ function ShadowEventsTable({
                   onChange={bulk.toggleAll}
                 />
               </th>
+              <th className="w-12 text-right">
+                <span className="sr-only">Action</span>
+              </th>
               <th className="w-28">Service</th>
               <th className="w-28">Verdict</th>
               <th className="w-32">Pattern</th>
@@ -721,10 +752,11 @@ function ShadowEventsTable({
               <th className="w-20 text-right">Signals</th>
               <th className="w-20 text-right">Ticks</th>
               <th>Sample</th>
-              <th className="w-32">Last seen</th>
-              <th className="w-12 text-right">
-                <span className="sr-only">Action</span>
-              </th>
+              <SortHeader
+                className="w-32"
+                label="Last seen"
+                {...sorted.headerProps("last_seen")}
+              />
             </tr>
           </thead>
           <tbody>
@@ -745,6 +777,19 @@ function ShadowEventsTable({
                       onChange={() => bulk.toggle(key)}
                       label={`Select shadow event ${e.pattern_id}`}
                     />
+                  </td>
+                  <td>
+                    <div className="flex items-center justify-end gap-1">
+                      <button
+                        type="button"
+                        className="btn p-1"
+                        aria-label={`View shadow event ${e.pattern_id}`}
+                        title="View details"
+                        onClick={() => setPeekKey(key)}
+                      >
+                        <Eye size={14} aria-hidden />
+                      </button>
+                    </div>
                   </td>
                   <td className="text-2xs text-ink-200">
                     {e.service && e.service !== "_unknown" ? (
@@ -784,19 +829,6 @@ function ShadowEventsTable({
                     title={fmtAbs(e.last_seen)}
                   >
                     {fmtRel(e.last_seen)}
-                  </td>
-                  <td>
-                    <div className="flex items-center justify-end gap-1">
-                      <button
-                        type="button"
-                        className="btn p-1"
-                        aria-label={`View shadow event ${e.pattern_id}`}
-                        title="View details"
-                        onClick={() => setPeekKey(key)}
-                      >
-                        <Eye size={14} aria-hidden />
-                      </button>
-                    </div>
                   </td>
                 </ClickableRow>
               );
@@ -1013,14 +1045,24 @@ function SpikeTable({
   isLoading: boolean;
 }) {
   const navigate = useNavigate();
-  const pg = usePagination(rows, { resetKey: "spike" });
+
+  // Click-to-sort on When (by the real spike timestamp). Default: newest first,
+  // matching the merged newest-first order.
+  const sorted = useSortableRows(
+    rows,
+    { when: (r: SpikeRow) => tsValue(r.when) },
+    { key: "when", dir: "desc" },
+  );
+  const pg = usePagination(sorted.rows, {
+    resetKey: `spike|${sorted.signature}`,
+  });
   const [peekKey, setPeekKey] = useState<string | null>(null);
 
   // Selection + bar — same model as the other tables; the spike view is a
   // read-only merge of two logs, so the bar is count + Clear and the eye opens
   // a peek.
   const pageKeys = useMemo(() => pg.pageItems.map((r) => r.key), [pg.pageItems]);
-  const bulk = useBulkSelection(pageKeys, `spike|${pg.page}`);
+  const bulk = useBulkSelection(pageKeys, `spike|${sorted.signature}|${pg.page}`);
 
   const keys = useTableKeys({
     size: pg.pageItems.length,
@@ -1056,16 +1098,20 @@ function SpikeTable({
                   onChange={bulk.toggleAll}
                 />
               </th>
+              <th className="w-12 text-right">
+                <span className="sr-only">Action</span>
+              </th>
               <th className="w-28">Service</th>
               <th className="w-24">Kind</th>
               <th className="w-32">Pattern</th>
               <th className="w-28">Source</th>
               <th>Sample</th>
               <th className="w-20 text-right">Signals</th>
-              <th className="w-32">When</th>
-              <th className="w-12 text-right">
-                <span className="sr-only">Action</span>
-              </th>
+              <SortHeader
+                className="w-32"
+                label="When"
+                {...sorted.headerProps("when")}
+              />
             </tr>
           </thead>
           <tbody>
@@ -1088,6 +1134,19 @@ function SpikeTable({
                     onChange={() => bulk.toggle(r.key)}
                     label={`Select spike ${r.patternId}`}
                   />
+                </td>
+                <td>
+                  <div className="flex items-center justify-end gap-1">
+                    <button
+                      type="button"
+                      className="btn p-1"
+                      aria-label={`View spike ${r.patternId}`}
+                      title="View details"
+                      onClick={() => setPeekKey(r.key)}
+                    >
+                      <Eye size={14} aria-hidden />
+                    </button>
+                  </div>
                 </td>
                 <td className="text-2xs text-ink-200">
                   {r.service && r.service !== "_unknown" ? (
@@ -1117,19 +1176,6 @@ function SpikeTable({
                 <td className="text-right tabular-nums">{r.count}</td>
                 <td className="text-2xs text-ink-300" title={fmtAbs(r.when)}>
                   {fmtRel(r.when)}
-                </td>
-                <td>
-                  <div className="flex items-center justify-end gap-1">
-                    <button
-                      type="button"
-                      className="btn p-1"
-                      aria-label={`View spike ${r.patternId}`}
-                      title="View details"
-                      onClick={() => setPeekKey(r.key)}
-                    >
-                      <Eye size={14} aria-hidden />
-                    </button>
-                  </div>
                 </td>
               </ClickableRow>
             ))}

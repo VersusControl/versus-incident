@@ -38,6 +38,8 @@ import { buildLogsBulkActions } from "@/lib/bulkSelect";
 import { useBulkSelection } from "@/lib/useBulkSelection";
 import { Pagination } from "@/components/Pagination";
 import { usePagination } from "@/lib/pagination";
+import { SortHeader } from "@/components/SortHeader";
+import { useSortableRows } from "@/lib/sortRows";
 import { useToast } from "@/components/toastContext";
 
 // Verdict filter is URL-synced via SegmentedControl. "uncurated" is a real
@@ -211,11 +213,19 @@ export function PatternsPage() {
     [filtered, scope, excl],
   );
 
+  // Click-to-sort. The list view carries no time column (first/last seen live
+  // in the peek), so Count is the sortable column here — highest first on the
+  // first click. No default sort, so the incoming order is preserved until the
+  // operator clicks.
+  const sorted = useSortableRows(scoped, {
+    count: (p: Pattern) => p.count,
+  });
+
   // ----- pagination (100/page) — resets to page 1 when the verdict filter,
-  // scope tab, or search changes so a filter never strands the operator on an
-  // empty page.
-  const pg = usePagination(scoped, {
-    resetKey: `${verdictFilter}|${scope}|${q}`,
+  // scope tab, search, or sort changes so a filter never strands the operator
+  // on an empty page.
+  const pg = usePagination(sorted.rows, {
+    resetKey: `${verdictFilter}|${scope}|${q}|${sorted.signature}`,
   });
 
   // ----- selection + action bar -------------------------------------------
@@ -230,7 +240,7 @@ export function PatternsPage() {
   const pageKeys = useMemo(() => pg.pageItems.map((p) => p.id), [pg.pageItems]);
   const bulk = useBulkSelection(
     pageKeys,
-    `${verdictFilter}|${scope}|${q}|${pg.page}`,
+    `${verdictFilter}|${scope}|${q}|${sorted.signature}|${pg.page}`,
   );
 
   const onBulkAction = (spec: { id: string }) => {
@@ -400,6 +410,9 @@ export function PatternsPage() {
                         />
                       </th>
                     )}
+                    <th className="w-12 text-right">
+                      <span className="sr-only">Action</span>
+                    </th>
                     <th className="w-36">Service</th>
                     <th className="whitespace-nowrap">
                       Template
@@ -409,14 +422,19 @@ export function PatternsPage() {
                         example="The lines 'user 8471 login failed' and 'user 22 login failed' both become the template 'user <*> login failed'."
                       />
                     </th>
-                    <th className="w-20 whitespace-nowrap text-right">
-                      Count
-                      <InfoHint
-                        label="About the Count"
-                        text="The total number of times the agent has seen this exact message shape since it started learning — a running lifetime total, not a per-check number."
-                        example="12,480 means this template has matched 12,480 log lines so far."
-                      />
-                    </th>
+                    <SortHeader
+                      className="w-20 whitespace-nowrap text-right"
+                      align="right"
+                      label="Count"
+                      hint={
+                        <InfoHint
+                          label="About the Count"
+                          text="The total number of times the agent has seen this exact message shape since it started learning — a running lifetime total, not a per-check number."
+                          example="12,480 means this template has matched 12,480 log lines so far."
+                        />
+                      }
+                      {...sorted.headerProps("count")}
+                    />
                     <th className="w-24 whitespace-nowrap text-right">
                       Normal
                       <InfoHint
@@ -432,9 +450,6 @@ export function PatternsPage() {
                         text="The agent's current label for this template. 'Still learning' = not reviewed yet, the agent is still working out what's normal — the count next to it (e.g. 40 / 100) shows how close it is to being treated as known automatically. 'Known' = an operator marked it as normal, so it won't raise an alert. 'Spike' = it recently showed up far more often than its usual range."
                         example="A login-error template shows 'Still learning 40 / 100' — 40 of the ~100 sightings it needs; once you're sure it's harmless you mark it 'Known' and it stops alerting, but if it later floods in it flips to 'Spike'."
                       />
-                    </th>
-                    <th className="w-12 text-right">
-                      <span className="sr-only">Action</span>
                     </th>
                   </tr>
                 </thead>
@@ -480,6 +495,19 @@ export function PatternsPage() {
                           />
                         </td>
                       )}
+                      <td>
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            type="button"
+                            className="btn p-1"
+                            aria-label={`View pattern ${p.id}`}
+                            title="View details"
+                            onClick={() => setPeekId(p.id)}
+                          >
+                            <Eye size={14} aria-hidden />
+                          </button>
+                        </div>
+                      </td>
                       <td className="font-mono text-2xs text-ink-300">
                         <ServiceCell
                           service={p.service}
@@ -533,19 +561,6 @@ export function PatternsPage() {
                                 </span>
                               </span>
                             )}
-                        </div>
-                      </td>
-                      <td>
-                        <div className="flex items-center justify-end gap-1">
-                          <button
-                            type="button"
-                            className="btn p-1"
-                            aria-label={`View pattern ${p.id}`}
-                            title="View details"
-                            onClick={() => setPeekId(p.id)}
-                          >
-                            <Eye size={14} aria-hidden />
-                          </button>
                         </div>
                       </td>
                     </tr>

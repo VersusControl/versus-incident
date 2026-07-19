@@ -49,7 +49,9 @@ describe("Item 2 — top-bar AI/webhook split + no sidebar count", () => {
     // No open-count source, no badge field, no badge render on the nav item.
     expect(sidebar.includes("useOpenIncidentCount")).toBe(false);
     expect(sidebar.includes("badge")).toBe(false);
-    expect(/Incidents",\s*icon:\s*AlertTriangle\s*}/.test(sidebar)).toBe(true);
+    // The Incidents item is a plain text row that ends right after its label —
+    // no trailing badge/count field. (Per-item icons now live on group headers.)
+    expect(/label:\s*"Incidents"\s*}/.test(sidebar)).toBe(true);
   });
 });
 
