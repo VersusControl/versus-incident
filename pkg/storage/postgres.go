@@ -897,6 +897,39 @@ func (p *postgresProvider) ListAnalyses(limit int) ([]*AnalysisRecord, error) {
 	return scanAnalysisRows(rows)
 }
 
+// CountAnalyses implements the optional storage.AnalysisPager capability: the
+// total number of stored analyses in one COUNT query, without shipping a row
+// to Go so a large vs_analyses never has to be loaded to render a count.
+func (p *postgresProvider) CountAnalyses() (int, error) {
+	var n int
+	if err := p.db.QueryRow(`SELECT COUNT(*) FROM vs_analyses`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("storage: count analyses: %w", err)
+	}
+	return n, nil
+}
+
+// ListAnalysesPage implements the optional storage.AnalysisPager capability:
+// one bounded, newest-first page pushed entirely into SQL (ORDER BY
+// requested_at DESC LIMIT/OFFSET), so a large vs_analyses is never fetched
+// whole to render one page.
+func (p *postgresProvider) ListAnalysesPage(offset, limit int) ([]*AnalysisRecord, error) {
+	if limit <= 0 {
+		limit = DefaultAnalysisPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := p.db.Query(
+		`SELECT data FROM vs_analyses ORDER BY requested_at DESC LIMIT $1 OFFSET $2`,
+		limit, offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list analyses page: %w", err)
+	}
+	defer rows.Close()
+	return scanAnalysisRows(rows)
+}
+
 func scanAnalysisRows(rows *sql.Rows) ([]*AnalysisRecord, error) {
 	var out []*AnalysisRecord
 	for rows.Next() {

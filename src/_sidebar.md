@@ -90,3 +90,6 @@
   - [vs Datadog Watchdog](/compare/datadog-watchdog)
   - [vs Keep](/compare/keep)
   - [vs Alertmanager](/compare/alertmanager)
+
+- Migration
+  - [v1.4.13](/migration/migration-v1.4.13.md)

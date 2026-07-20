@@ -99,7 +99,7 @@ oncall:
   # /api/incidents?oncall_wait_minutes=0 => Set the number of minutes to wait for acknowledgment before triggering on-call. Set to `0` to trigger immediately
   initialized_only: false  # Initialize on-call feature but don't enable by default, requires 'oncall_enable=true' in query parameters
   enable: false # Use this to enable or disable on-call for all alerts
-  wait_minutes: 3 # If you set it to 0, it means there's no need to check for an acknowledgment, and the on-call will trigger immediately
+  wait_minutes: 3 # If you set it to 0, it means there's no need to check for an acknowledgment, and the on-call will trigger immediately. The acknowledgment link sent with each alert expires after this window (no link is sent when this is 0).
   provider: aws_incident_manager # Valid values: "aws_incident_manager", "pagerduty", "servicenow" or "incident_io"
 
   aws_incident_manager: # Used when provider is "aws_incident_manager"

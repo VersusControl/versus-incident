@@ -522,6 +522,42 @@ func (p *fileProvider) ListAnalyses(limit int) ([]*AnalysisRecord, error) {
 	return out, nil
 }
 
+// CountAnalyses implements the optional storage.AnalysisPager capability. The
+// file backend keeps a rolling in-memory cap, so a len() is the whole count.
+func (p *fileProvider) CountAnalyses() (int, error) {
+	p.analysesMu.RLock()
+	defer p.analysesMu.RUnlock()
+	return len(p.analyses), nil
+}
+
+// ListAnalysesPage implements the optional storage.AnalysisPager capability:
+// one bounded, newest-first page over the in-memory slice, skipping offset
+// rows and returning at most limit rows.
+func (p *fileProvider) ListAnalysesPage(offset, limit int) ([]*AnalysisRecord, error) {
+	if limit <= 0 {
+		limit = DefaultAnalysisPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	p.analysesMu.RLock()
+	defer p.analysesMu.RUnlock()
+	out := make([]*AnalysisRecord, 0, limit)
+	skipped := 0
+	for i := len(p.analyses) - 1; i >= 0; i-- {
+		if skipped < offset {
+			skipped++
+			continue
+		}
+		cp := *p.analyses[i]
+		out = append(out, &cp)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
 func (p *fileProvider) DeleteAnalysis(id string) error {
 	p.analysesMu.Lock()
 	defer p.analysesMu.Unlock()

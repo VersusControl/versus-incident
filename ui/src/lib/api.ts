@@ -540,6 +540,20 @@ export interface AnalysisRecord {
   error?: string;
 }
 
+// AnalysisIndex is the paged analyses list response: one bounded, most-recent
+// page of analyses plus the whole-set `total` computed cheaply on the server
+// (never by loading every row). `offset` is where this page began and
+// `next_offset` is where the caller resumes to load the next chunk (null when
+// this page reached the end).
+export interface AnalysisIndex {
+  analyses: AnalysisRecord[];
+  total: number;
+  offset?: number;
+  next_offset?: number | null;
+  page?: number;
+  page_size?: number;
+}
+
 // ---------- Team / member management ----------
 
 // MemberMeta mirrors pkg/teams.MemberMeta — typed per-channel ids.
@@ -1703,6 +1717,25 @@ export const api = {
     return request<{ analyses: AnalysisRecord[] }>(
       `/api/admin/analyses${qs}`,
     ).then((r) => r.analyses ?? []);
+  },
+  // listAllAnalysesIndex is the Analyses-page variant: it returns one bounded,
+  // most-recent page of analyses PLUS the whole-set total in a single request,
+  // so the first render is fast even on a large vs_analyses table. Pass
+  // `offset` to load the next chunk on demand; the response's `next_offset` is
+  // where to resume (null at the end). `pageSize` overrides the server default.
+  listAllAnalysesIndex: (opts?: {
+    offset?: number;
+    pageSize?: number;
+    page?: number;
+  }) => {
+    const p = new URLSearchParams();
+    if (opts?.offset) p.set("offset", String(opts.offset));
+    if (opts?.pageSize) p.set("page_size", String(opts.pageSize));
+    if (opts?.page) p.set("page", String(opts.page));
+    const qs = p.toString();
+    return request<AnalysisIndex>(
+      `/api/admin/analyses${qs ? `?${qs}` : ""}`,
+    );
   },
   getAnalysis: (analysisID: string) =>
     request<AnalysisRecord>(`/api/admin/analyses/${analysisID}`),
