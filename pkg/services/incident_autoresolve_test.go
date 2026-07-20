@@ -18,6 +18,9 @@ func autoResolveTestConfig(t *testing.T) {
 
 	prev := *cfg // shallow snapshot is enough for the scalar flags we touch
 	cfg.OnCall.Enable = true
+	// A positive wait window is what makes the ack link meaningful (and what
+	// gates its injection); keep it non-zero so AckURL is emitted.
+	cfg.OnCall.WaitMinutes = 3
 	cfg.Alert.Slack.Enable = false
 	cfg.Alert.Telegram.Enable = false
 	cfg.Alert.Viber.Enable = false

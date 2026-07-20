@@ -76,6 +76,12 @@ func main() {
 	// alert + record acks).
 	services.SetStorage(store)
 
+	// Resolve the HMAC key used to sign and verify acknowledgment-link tokens.
+	// Generated once and persisted via storage so every replica signs the same
+	// key and links survive restarts; falls back to gateway_secret, then an
+	// ephemeral in-memory key. Never logged.
+	services.InitAckSigningKey(store, cfg)
+
 	// Wire the incident-report feature (OSS default). The renderer is the
 	// pure-Go in-binary PNG card renderer; an enterprise build may swap it
 	// via services.SetReportRenderer behind the same core.ReportRenderer

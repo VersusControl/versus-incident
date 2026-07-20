@@ -70,8 +70,15 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 		contentClone[k] = v
 	}
 
-	if !resolved && cfg.OnCall.Enable {
-		ackURL := fmt.Sprintf("%s/api/ack/%s", cfg.PublicHost, incident.ID)
+	// The ack link only has value until on-call escalates, so its lifetime is
+	// the effective on-call acknowledgment wait window for THIS incident
+	// (cfg.OnCall.WaitMinutes already reflects any oncall_wait_minutes override
+	// applied during config resolution above). When that window is zero on-call
+	// triggers immediately, so an ack can never forestall escalation — a
+	// dead/instantly-expired link is worse than none, so we emit no AckURL.
+	if !resolved && cfg.OnCall.Enable && cfg.OnCall.WaitMinutes > 0 {
+		ttl := time.Duration(cfg.OnCall.WaitMinutes) * time.Minute
+		ackURL := AckURL(cfg, incident.ID, ttl)
 		contentClone["AckURL"] = ackURL
 
 		incident.Content = &contentClone

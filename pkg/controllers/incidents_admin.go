@@ -337,6 +337,24 @@ func parsePageSize(v string) int {
 	return n
 }
 
+// parseAnalysisPageSize resolves the requested page size for the bounded
+// analyses read: the storage default (1000) when unset, clamped to
+// [1, maxIncidentPageSize] otherwise so a single request stays bounded — the
+// analyses twin of parsePageSize.
+func parseAnalysisPageSize(v string) int {
+	if v == "" {
+		return storage.DefaultAnalysisPageSize
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return storage.DefaultAnalysisPageSize
+	}
+	if n > maxIncidentPageSize {
+		return maxIncidentPageSize
+	}
+	return n
+}
+
 // pageOffset resolves the starting row offset and the 1-based page number for
 // a bounded list/search read from the two accepted params. An explicit
 // zero-based offset cursor (what the UI's infinite scroll sends via
@@ -423,7 +441,33 @@ func pagedIncidentResponse(recs []*storage.IncidentRecord, counts storage.Incide
 	return resp
 }
 
-// incidentListResponse is the shared post-processing for the list and
+// pagedAnalysisResponse builds the analyses list response from the CHEAP total
+// count and ONE bounded page of rows. It preserves the existing `analyses`
+// array and adds total + offset-based continuation (offset / next_offset /
+// page / page_size), mirroring pagedIncidentResponse: the UI shows the true
+// total, renders the first page, and fetches the next chunk only on demand. A
+// full page (len == size) implies at least one more page; an underfull page is
+// the last one.
+func pagedAnalysisResponse(recs []*storage.AnalysisRecord, total, offset, size, page int) fiber.Map {
+	out := recs
+	if out == nil {
+		out = []*storage.AnalysisRecord{}
+	}
+	resp := fiber.Map{
+		"analyses":  out,
+		"total":     total,
+		"offset":    offset,
+		"page":      page,
+		"page_size": size,
+	}
+	if len(recs) == size {
+		resp["next_offset"] = offset + len(recs)
+	} else {
+		resp["next_offset"] = nil
+	}
+	return resp
+}
+
 // search endpoints. It computes per-origin counts over the FULL result
 // set (so the top-bar shows both feeds regardless of the active tab),
 // applies the optional origin filter, then paginates. pageParam /
@@ -624,19 +668,37 @@ func (i *IncidentAdminController) listAnalyses(c *fiber.Ctx) error {
 func (i *IncidentAdminController) listAllAnalyses(c *fiber.Ctx) error {
 	store := services.Storage()
 	if store == nil {
-		return c.JSON(fiber.Map{"analyses": []any{}})
+		return c.JSON(fiber.Map{"analyses": []any{}, "total": 0})
 	}
-	limit := 0
-	if v := c.Query("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = n
+	// Preferred path: the backend implements the pager capability, so we render
+	// a page from ONE bounded query plus ONE cheap count query and never load
+	// the whole vs_analyses table. Postgres (unbounded) and the file/memory
+	// backends (already capped) all implement it.
+	if pager, ok := store.(storage.AnalysisPager); ok {
+		total, err := pager.CountAnalyses()
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 		}
+		size := parseAnalysisPageSize(c.Query("page_size"))
+		offset, page := pageOffset(c.Query("page"), c.Query("offset"), size)
+		recs, err := pager.ListAnalysesPage(offset, size)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(pagedAnalysisResponse(recs, total, offset, size, page))
+	}
+	// Fallback for backends without the pager capability (the redis stub): a
+	// BOUNDED read so it can never load the whole table. Legacy shape (just
+	// analyses) — the caller-supplied limit is clamped to the default page.
+	limit := parseLimit(c.Query("limit"))
+	if limit <= 0 || limit > storage.DefaultAnalysisPageSize {
+		limit = storage.DefaultAnalysisPageSize
 	}
 	recs, err := store.ListAnalyses(limit)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"analyses": recs})
+	return c.JSON(fiber.Map{"analyses": recs, "total": len(recs)})
 }
 
 func (i *IncidentAdminController) getAnalysis(c *fiber.Ctx) error {

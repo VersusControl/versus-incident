@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { Eye, Search, X } from "lucide-react";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { Eye, Loader2, Search, X } from "lucide-react";
 import { api, type AnalysisRecord } from "@/lib/api";
 import { fmtAbs, fmtRel, formatDuration, incidentTitle } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
@@ -39,11 +39,34 @@ export function AnalysesListPage() {
   const incidentFilter = params.get("incident");
   const q = params.get("q") ?? "";
 
-  const analysesQ = useQuery({
+  const analysesQ = useInfiniteQuery({
     queryKey: ["analyses-all"],
-    queryFn: () => api.listAllAnalyses(),
+    queryFn: ({ pageParam }) =>
+      api.listAllAnalysesIndex({ offset: pageParam }),
+    initialPageParam: 0,
+    // next_offset is the resume cursor; null/undefined means no more rows.
+    getNextPageParam: (last) => last.next_offset ?? undefined,
   });
-  const { data, isLoading, isError, error, refetch, isRefetching } = analysesQ;
+  const {
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isRefetching,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = analysesQ;
+
+  // Accumulate the loaded pages into a single list; total comes from the first
+  // page (the true whole-set count, never data.length). The server ships only
+  // the most-recent page, so a large vs_analyses never loads whole up front.
+  const data = useMemo<AnalysisRecord[] | undefined>(() => {
+    const pages = analysesQ.data?.pages;
+    if (!pages || pages.length === 0) return undefined;
+    return pages.flatMap((p) => p.analyses);
+  }, [analysesQ.data]);
+  const total = analysesQ.data?.pages[0]?.total;
 
   const incidentsQ = useQuery({
     queryKey: ["incidents"],
@@ -120,7 +143,7 @@ export function AnalysesListPage() {
     <>
       <TopBar
         title="Analyses"
-        subtitle={data ? `${data.length} stored` : undefined}
+        subtitle={total !== undefined ? `${total} stored` : undefined}
       />
 
       <main className="flex-1 overflow-auto p-6">
@@ -346,6 +369,27 @@ export function AnalysesListPage() {
                 </table>
               </div>
               <Pagination state={pg} />
+              {(isFetchingNextPage || hasNextPage) && (
+                <div
+                  className="flex items-center justify-center gap-1.5 border-t border-ink-600 px-3 py-2 text-2xs text-ink-400"
+                  data-testid="analysis-load-more"
+                >
+                  {isFetchingNextPage ? (
+                    <>
+                      <Loader2 size={12} className="animate-spin" />
+                      Loading more…
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="text-brand-300 hover:underline"
+                      onClick={() => fetchNextPage()}
+                    >
+                      Load more ({total?.toLocaleString() ?? ""} total)
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           </>
         )}

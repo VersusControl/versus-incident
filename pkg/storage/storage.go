@@ -187,6 +187,13 @@ type Blob struct {
 // the total from the cheap count and loads further pages only on demand.
 const DefaultIncidentPageSize = 1000
 
+// DefaultAnalysisPageSize is the bounded page the analyses list read returns
+// when the caller does not request a specific size: the most-recent 1000
+// analyze-mode runs. It is the analyses twin of DefaultIncidentPageSize —
+// vs_analyses grows unbounded on Postgres, so the list serves one cheap count
+// plus one bounded page rather than the whole table.
+const DefaultAnalysisPageSize = 1000
+
 // IncidentCounts is the cheap, whole-set tally the list surfaces show: how
 // many UNRESOLVED (open) incidents are AI-detected vs inbound webhook/alert,
 // and the open grand total. Counts reflect OPEN WORK — resolved incidents are
@@ -232,6 +239,27 @@ type IncidentPager interface {
 	// returns all origins. limit <= 0 uses DefaultIncidentPageSize; a
 	// negative offset is treated as 0.
 	ListIncidentsPage(origin string, offset, limit int) ([]*IncidentRecord, error)
+}
+
+// AnalysisPager is an optional capability a backend may implement on top of
+// Provider to serve the analyses list without ever loading the whole table.
+// It is the analyses twin of IncidentPager: it splits the two things the list
+// endpoint needs — a cheap count and a bounded page — so a large backend
+// (Postgres, unbounded vs_analyses) pushes both into SQL (COUNT(*) and ORDER
+// BY requested_at DESC LIMIT/OFFSET). File and memory backends implement it
+// over their already-capped in-memory slice (a len() count and a slice
+// window). Backends that cannot (the redis/database stubs) do not implement
+// it; callers type-assert and fall back to a bounded ListAnalyses, exactly
+// like IncidentPager.
+type AnalysisPager interface {
+	// CountAnalyses returns the total number of stored analyses, computed
+	// without materializing rows.
+	CountAnalyses() (int, error)
+	// ListAnalysesPage returns one bounded page of analyses, newest first by
+	// requested_at, skipping the first offset rows and returning at most limit
+	// rows. limit <= 0 uses DefaultAnalysisPageSize; a negative offset is
+	// treated as 0.
+	ListAnalysesPage(offset, limit int) ([]*AnalysisRecord, error)
 }
 
 // IncidentSearchPager is an optional capability a backend may implement on
