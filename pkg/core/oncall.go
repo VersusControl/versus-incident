@@ -74,6 +74,14 @@ func IsOnCallWorkflowInitialized() bool {
 	return onCallWorkflow != nil
 }
 
+// SetOnCallWorkflow installs (or, with a nil argument, clears) the global
+// on-call workflow singleton directly, bypassing the one-shot boot path in
+// InitOnCallWorkflow. It lets callers wire a pre-built workflow after startup
+// (or reset it) without the sync.Once guard.
+func SetOnCallWorkflow(w *OnCallWorkflow) {
+	onCallWorkflow = w
+}
+
 // triggerProvider triggers the on-call provider
 func (w *OnCallWorkflow) triggerProvider(ctx context.Context, incidentID string, cfg *config.OnCallConfig) error {
 	if err := w.provider.TriggerOnCall(ctx, incidentID, cfg); err != nil {

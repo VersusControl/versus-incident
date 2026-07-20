@@ -12,6 +12,13 @@ import (
 func HandleAck(c *fiber.Ctx) error {
 	incidentID := c.Params("incidentID")
 
+	// On-call is disabled by default. Skip the singleton entirely when it
+	// isn't initialized so an unauthenticated request can't panic (and take
+	// down) the process.
+	if !core.IsOnCallWorkflowInitialized() {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "on-call is not enabled"})
+	}
+
 	if err := core.GetOnCallWorkflow().Ack(incidentID); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}

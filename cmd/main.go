@@ -30,6 +30,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/common"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/recover"
 )
 
 func main() {
@@ -111,6 +112,10 @@ func main() {
 		// off the buffer so they can safely outlive the request.
 		Immutable: true,
 	})
+
+	// Defense-in-depth: a panic in any handler is recovered and turned into a
+	// 500 instead of crashing the process.
+	app.Use(recover.New())
 
 	app.Use(middleware.Logger())
 
