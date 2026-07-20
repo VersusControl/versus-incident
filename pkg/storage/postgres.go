@@ -463,28 +463,148 @@ func escapeLike(s string) string {
 
 // ---------------------------------------------------------------------------
 // Incidents
+//
+// Every IncidentRecord property is persisted in its own typed column on
+// vs_incidents — the legacy `data` JSONB blob is neither read nor written by
+// this backend. The write path is a full-column upsert; every read selects the
+// explicit columns and scans them back into the record. String slices are
+// stored in native TEXT[] columns and the arbitrary Content map in a JSONB
+// column.
 // ---------------------------------------------------------------------------
+
+// incidentColumns is the SELECT list every incident read uses. The two array
+// columns are wrapped in to_jsonb(...) so the pgx stdlib driver returns them as
+// JSON bytes we unmarshal into []string (the driver otherwise surfaces a
+// TEXT[] as its raw Postgres text form). Content is already JSONB. The order
+// here MUST match the Scan order in scanIncidentRow.
+const incidentColumns = `id, created_at, acked_at, org_id, team_id, title,
+	source, service, origin, resolved,
+	to_jsonb(channels_enabled)    AS channels_enabled,
+	to_jsonb(channels_notified)   AS channels_notified,
+	oncall_triggered, oncall_error, notify_status, notify_error,
+	resolved_at, content, assigned_team_id,
+	to_jsonb(assigned_member_ids) AS assigned_member_ids`
+
+// rowScanner is satisfied by both *sql.Row and *sql.Rows, so scanIncidentRow
+// serves the single-row GetIncident path and the multi-row list/search paths
+// without duplication.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// utcPtr returns a UTC copy of t, or nil when t is nil, so a nil *time.Time
+// binds as SQL NULL and a set one binds as a normalized timestamptz.
+func utcPtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	u := t.UTC()
+	return &u
+}
+
+// textArrayParam prepares a string slice for binding to a TEXT[] column. An
+// empty or nil slice binds as SQL NULL (via an untyped nil) so it round-trips
+// back to a nil slice; a non-empty slice is passed straight through and the
+// pgx driver encodes it as a Postgres array.
+func textArrayParam(s []string) any {
+	if len(s) == 0 {
+		return nil
+	}
+	return s
+}
+
+// marshalIncidentContent renders the Content map for the JSONB column. An
+// empty or nil map binds as SQL NULL so it reads back as a nil map.
+func marshalIncidentContent(m map[string]interface{}) (any, error) {
+	if len(m) == 0 {
+		return nil, nil
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// jsonStringSlice decodes a to_jsonb(TEXT[]) column back into a string slice.
+// A NULL column (raw is empty) yields a nil slice.
+func jsonStringSlice(raw []byte) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var out []string
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// unmarshalIncidentContent decodes the JSONB content column. A NULL column or
+// a JSON null yields a nil map.
+func unmarshalIncidentContent(raw []byte) (map[string]interface{}, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
 
 func (p *postgresProvider) SaveIncident(rec *IncidentRecord) error {
 	if rec == nil || rec.ID == "" {
 		return fmt.Errorf("storage: SaveIncident: missing id")
 	}
 	rec.OrgID = NormalizeOrgID(rec.OrgID)
-	data, err := json.Marshal(rec)
+	content, err := marshalIncidentContent(rec.Content)
 	if err != nil {
-		return fmt.Errorf("storage: marshal incident: %w", err)
+		return fmt.Errorf("storage: marshal incident content: %w", err)
 	}
-	var ackedAt *time.Time
-	if rec.AckedAt != nil {
-		t := rec.AckedAt.UTC()
-		ackedAt = &t
-	}
+	// Full-column upsert: this is the one incident write path (create, resolve,
+	// and ack all funnel through it), so every column is (re)written from the
+	// record ON CONFLICT and the row never drifts. Origin is persisted as the
+	// EffectiveOrigin so a legacy-derived origin is stamped explicitly.
 	_, err = p.db.Exec(`
-		INSERT INTO vs_incidents (id, data, created_at, acked_at)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (id) DO UPDATE
-		SET data = EXCLUDED.data, acked_at = EXCLUDED.acked_at
-	`, rec.ID, data, rec.CreatedAt.UTC(), ackedAt)
+		INSERT INTO vs_incidents (
+			id, created_at, acked_at, org_id, team_id, title, source, service,
+			origin, resolved, channels_enabled, channels_notified,
+			oncall_triggered, oncall_error, notify_status, notify_error,
+			resolved_at, content, assigned_team_id, assigned_member_ids
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12,
+			$13, $14, $15, $16,
+			$17, $18, $19, $20
+		)
+		ON CONFLICT (id) DO UPDATE SET
+			created_at          = EXCLUDED.created_at,
+			acked_at            = EXCLUDED.acked_at,
+			org_id              = EXCLUDED.org_id,
+			team_id             = EXCLUDED.team_id,
+			title               = EXCLUDED.title,
+			source              = EXCLUDED.source,
+			service             = EXCLUDED.service,
+			origin              = EXCLUDED.origin,
+			resolved            = EXCLUDED.resolved,
+			channels_enabled    = EXCLUDED.channels_enabled,
+			channels_notified   = EXCLUDED.channels_notified,
+			oncall_triggered    = EXCLUDED.oncall_triggered,
+			oncall_error        = EXCLUDED.oncall_error,
+			notify_status       = EXCLUDED.notify_status,
+			notify_error        = EXCLUDED.notify_error,
+			resolved_at         = EXCLUDED.resolved_at,
+			content             = EXCLUDED.content,
+			assigned_team_id    = EXCLUDED.assigned_team_id,
+			assigned_member_ids = EXCLUDED.assigned_member_ids
+	`,
+		rec.ID, rec.CreatedAt.UTC(), utcPtr(rec.AckedAt), rec.OrgID, rec.TeamID,
+		rec.Title, rec.Source, rec.Service, rec.EffectiveOrigin(), rec.Resolved,
+		textArrayParam(rec.ChannelsEnabled), textArrayParam(rec.ChannelsNotified),
+		rec.OnCallTriggered, rec.OnCallError, rec.NotifyStatus, rec.NotifyError,
+		utcPtr(rec.ResolvedAt), content, rec.AssignedTeamID,
+		textArrayParam(rec.AssignedMemberIDs),
+	)
 	if err != nil {
 		return fmt.Errorf("storage: save incident: %w", err)
 	}
@@ -495,60 +615,32 @@ func (p *postgresProvider) SaveIncident(rec *IncidentRecord) error {
 }
 
 func (p *postgresProvider) UpdateIncidentAck(id string, ackedAt time.Time) error {
-	tx, err := p.db.Begin()
-	if err != nil {
-		return fmt.Errorf("storage: begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var raw []byte
-	err = tx.QueryRow(
-		`SELECT data FROM vs_incidents WHERE id = $1 FOR UPDATE`, id,
-	).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return fmt.Errorf("storage: ack fetch: %w", err)
-	}
-
-	var rec IncidentRecord
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return fmt.Errorf("storage: ack unmarshal: %w", err)
-	}
 	t := ackedAt.UTC()
-	rec.AckedAt = &t
-
-	updated, err := json.Marshal(&rec)
-	if err != nil {
-		return fmt.Errorf("storage: ack re-marshal: %w", err)
-	}
-	_, err = tx.Exec(
-		`UPDATE vs_incidents SET data = $2, acked_at = $3 WHERE id = $1`,
-		id, updated, t,
+	res, err := p.db.Exec(
+		`UPDATE vs_incidents SET acked_at = $2 WHERE id = $1`, id, t,
 	)
 	if err != nil {
 		return fmt.Errorf("storage: ack update: %w", err)
 	}
-	return tx.Commit()
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (p *postgresProvider) GetIncident(id string) (*IncidentRecord, error) {
-	var raw []byte
-	err := p.db.QueryRow(
-		`SELECT data FROM vs_incidents WHERE id = $1`, id,
-	).Scan(&raw)
+	row := p.db.QueryRow(
+		`SELECT `+incidentColumns+` FROM vs_incidents WHERE id = $1`, id,
+	)
+	rec, err := scanIncidentRow(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("storage: get incident: %w", err)
 	}
-	var rec IncidentRecord
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		return nil, fmt.Errorf("storage: unmarshal incident: %w", err)
-	}
-	return &rec, nil
+	return rec, nil
 }
 
 func (p *postgresProvider) ListIncidents(limit int) ([]*IncidentRecord, error) {
@@ -558,11 +650,11 @@ func (p *postgresProvider) ListIncidents(limit int) ([]*IncidentRecord, error) {
 	)
 	if limit > 0 {
 		rows, err = p.db.Query(
-			`SELECT data FROM vs_incidents ORDER BY created_at DESC LIMIT $1`, limit,
+			`SELECT `+incidentColumns+` FROM vs_incidents ORDER BY created_at DESC LIMIT $1`, limit,
 		)
 	} else {
 		rows, err = p.db.Query(
-			`SELECT data FROM vs_incidents ORDER BY created_at DESC`,
+			`SELECT ` + incidentColumns + ` FROM vs_incidents ORDER BY created_at DESC`,
 		)
 	}
 	if err != nil {
@@ -572,20 +664,143 @@ func (p *postgresProvider) ListIncidents(limit int) ([]*IncidentRecord, error) {
 	return scanIncidentRows(rows)
 }
 
+// scanIncidentRow reads one row selected via incidentColumns into an
+// IncidentRecord. Nullable columns scan through sql.Null* / []byte holders so
+// a NULL becomes the field's zero value (empty string, nil slice, nil map).
+func scanIncidentRow(sc rowScanner) (*IncidentRecord, error) {
+	var (
+		rec         IncidentRecord
+		ackedAt     sql.NullTime
+		resolvedAt  sql.NullTime
+		teamID      sql.NullString
+		title       sql.NullString
+		source      sql.NullString
+		service     sql.NullString
+		origin      sql.NullString
+		oncallTrig  sql.NullBool
+		oncallErr   sql.NullString
+		notifyStat  sql.NullString
+		notifyErr   sql.NullString
+		assignTeam  sql.NullString
+		chEnabled   []byte
+		chNotified  []byte
+		assignedIDs []byte
+		content     []byte
+	)
+	if err := sc.Scan(
+		&rec.ID, &rec.CreatedAt, &ackedAt, &rec.OrgID, &teamID, &title,
+		&source, &service, &origin, &rec.Resolved,
+		&chEnabled, &chNotified,
+		&oncallTrig, &oncallErr, &notifyStat, &notifyErr,
+		&resolvedAt, &content, &assignTeam, &assignedIDs,
+	); err != nil {
+		return nil, err
+	}
+	rec.CreatedAt = rec.CreatedAt.UTC()
+	if ackedAt.Valid {
+		t := ackedAt.Time.UTC()
+		rec.AckedAt = &t
+	}
+	if resolvedAt.Valid {
+		t := resolvedAt.Time.UTC()
+		rec.ResolvedAt = &t
+	}
+	rec.TeamID = teamID.String
+	rec.Title = title.String
+	rec.Source = source.String
+	rec.Service = service.String
+	rec.Origin = origin.String
+	rec.OnCallTriggered = oncallTrig.Bool
+	rec.OnCallError = oncallErr.String
+	rec.NotifyStatus = notifyStat.String
+	rec.NotifyError = notifyErr.String
+	rec.AssignedTeamID = assignTeam.String
+
+	var err error
+	if rec.ChannelsEnabled, err = jsonStringSlice(chEnabled); err != nil {
+		return nil, fmt.Errorf("decode channels_enabled: %w", err)
+	}
+	if rec.ChannelsNotified, err = jsonStringSlice(chNotified); err != nil {
+		return nil, fmt.Errorf("decode channels_notified: %w", err)
+	}
+	if rec.AssignedMemberIDs, err = jsonStringSlice(assignedIDs); err != nil {
+		return nil, fmt.Errorf("decode assigned_member_ids: %w", err)
+	}
+	if rec.Content, err = unmarshalIncidentContent(content); err != nil {
+		return nil, fmt.Errorf("decode content: %w", err)
+	}
+	return &rec, nil
+}
+
 func scanIncidentRows(rows *sql.Rows) ([]*IncidentRecord, error) {
 	var out []*IncidentRecord
 	for rows.Next() {
-		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		rec, err := scanIncidentRow(rows)
+		if err != nil {
 			return nil, fmt.Errorf("storage: scan incident row: %w", err)
 		}
-		var rec IncidentRecord
-		if err := json.Unmarshal(raw, &rec); err != nil {
-			return nil, fmt.Errorf("storage: unmarshal incident row: %w", err)
-		}
-		out = append(out, &rec)
+		out = append(out, rec)
 	}
 	return out, rows.Err()
+}
+
+// CountIncidents implements the optional storage.IncidentPager capability:
+// the per-origin tally and grand total of UNRESOLVED (open) incidents in one
+// COUNT query, without shipping a single row to Go. Counts reflect open work,
+// so resolved incidents are excluded (WHERE resolved = false); the badge shows
+// the backlog, not the full history. The per-origin split reads the promoted
+// origin column, and the unresolved predicate is served by the partial
+// unresolved index so the count stays index-backed on a large history.
+func (p *postgresProvider) CountIncidents() (IncidentCounts, error) {
+	const q = `
+		SELECT
+			COUNT(*) FILTER (WHERE origin = 'ai_detect') AS ai,
+			COUNT(*) FILTER (WHERE origin = 'webhook')   AS webhook,
+			COUNT(*)                                      AS total
+		FROM vs_incidents
+		WHERE resolved = false`
+	var c IncidentCounts
+	if err := p.db.QueryRow(q).Scan(&c.AIDetect, &c.Webhook, &c.Total); err != nil {
+		return IncidentCounts{}, fmt.Errorf("storage: count incidents: %w", err)
+	}
+	return c, nil
+}
+
+// ListIncidentsPage implements the optional storage.IncidentPager
+// capability: one bounded, newest-first page pushed entirely into SQL
+// (ORDER BY created_at DESC LIMIT/OFFSET). When origin is one of the known
+// values the promoted origin column filters the page in SQL so a filtered
+// page is bounded too — it never fetches the whole feed to filter in Go. The
+// page lists ALL incidents (resolved and open alike) so resolved incidents
+// remain reachable; only the counts are unresolved-only.
+func (p *postgresProvider) ListIncidentsPage(origin string, offset, limit int) ([]*IncidentRecord, error) {
+	if limit <= 0 {
+		limit = DefaultIncidentPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if origin == OriginAIDetect || origin == OriginWebhook {
+		rows, err = p.db.Query(`
+			SELECT `+incidentColumns+` FROM vs_incidents
+			WHERE origin = $1
+			ORDER BY created_at DESC
+			LIMIT $2 OFFSET $3`, origin, limit, offset)
+	} else {
+		rows, err = p.db.Query(
+			`SELECT `+incidentColumns+` FROM vs_incidents ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+			limit, offset,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: list incidents page: %w", err)
+	}
+	defer rows.Close()
+	return scanIncidentRows(rows)
 }
 
 // ---------------------------------------------------------------------------
@@ -715,7 +930,7 @@ func (p *postgresProvider) DeleteAnalysis(id string) error {
 // ---------------------------------------------------------------------------
 
 // SearchIncidents matches the query (case-insensitive) against the
-// title/service/source fields and, as a fallback, the whole JSON body.
+// title/service/source columns and, as a fallback, the content JSON body.
 // An empty query degrades to ListIncidents. Results are newest first.
 func (p *postgresProvider) SearchIncidents(query string, limit int) ([]*IncidentRecord, error) {
 	if query == "" {
@@ -723,11 +938,8 @@ func (p *postgresProvider) SearchIncidents(query string, limit int) ([]*Incident
 	}
 	pattern := "%" + query + "%"
 	base := `
-		SELECT data FROM vs_incidents
-		WHERE data->>'title'   ILIKE $1
-		   OR data->>'service' ILIKE $1
-		   OR data->>'source'  ILIKE $1
-		   OR data::text       ILIKE $1
+		SELECT ` + incidentColumns + ` FROM vs_incidents
+		WHERE ` + searchIncidentsWhereSQL + `
 		ORDER BY created_at DESC`
 	var (
 		rows *sql.Rows
@@ -740,6 +952,86 @@ func (p *postgresProvider) SearchIncidents(query string, limit int) ([]*Incident
 	}
 	if err != nil {
 		return nil, fmt.Errorf("storage: search incidents: %w", err)
+	}
+	defer rows.Close()
+	return scanIncidentRows(rows)
+}
+
+// searchIncidentsWhereSQL is the shared ILIKE predicate for incident search:
+// it matches the query against the title/service/source columns and, as a
+// fallback, the content JSON body. The pattern binds as $1. Kept as one
+// constant so the count and page queries search the exact same columns as
+// SearchIncidents.
+const searchIncidentsWhereSQL = `title      ILIKE $1
+		   OR service    ILIKE $1
+		   OR source     ILIKE $1
+		   OR content::text ILIKE $1`
+
+// CountIncidentsMatching implements the optional storage.IncidentSearchPager
+// capability: the per-origin tally and total of UNRESOLVED (open) search
+// matches in one COUNT query, without materializing rows. Counts are
+// unresolved-only (WHERE resolved = false) to match CountIncidents, so the
+// badge over a filtered feed still reflects open work. An empty query degrades
+// to counting every unresolved incident, matching CountIncidents.
+func (p *postgresProvider) CountIncidentsMatching(query string) (IncidentCounts, error) {
+	if query == "" {
+		return p.CountIncidents()
+	}
+	pattern := "%" + query + "%"
+	q := fmt.Sprintf(`
+		SELECT
+			COUNT(*) FILTER (WHERE origin = 'ai_detect') AS ai,
+			COUNT(*) FILTER (WHERE origin = 'webhook')   AS webhook,
+			COUNT(*)                                      AS total
+		FROM vs_incidents
+		WHERE (%[1]s)
+		  AND resolved = false`, searchIncidentsWhereSQL)
+	var c IncidentCounts
+	if err := p.db.QueryRow(q, pattern).Scan(&c.AIDetect, &c.Webhook, &c.Total); err != nil {
+		return IncidentCounts{}, fmt.Errorf("storage: count matching incidents: %w", err)
+	}
+	return c, nil
+}
+
+// SearchIncidentsPage implements the optional storage.IncidentSearchPager
+// capability: one bounded, newest-first page of search matches, with the
+// query, the origin filter, the ordering, and the LIMIT/OFFSET all pushed
+// into SQL so a broad query over a large history never loads the whole match
+// set. The page lists ALL matching incidents (resolved and open alike); only
+// the counts are unresolved-only. An empty query degrades to ListIncidentsPage.
+func (p *postgresProvider) SearchIncidentsPage(query, origin string, offset, limit int) ([]*IncidentRecord, error) {
+	if query == "" {
+		return p.ListIncidentsPage(origin, offset, limit)
+	}
+	if limit <= 0 {
+		limit = DefaultIncidentPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	pattern := "%" + query + "%"
+	if origin == OriginAIDetect || origin == OriginWebhook {
+		q := fmt.Sprintf(`
+			SELECT %[2]s FROM vs_incidents
+			WHERE (%[1]s)
+			  AND origin = $2
+			ORDER BY created_at DESC
+			LIMIT $3 OFFSET $4`, searchIncidentsWhereSQL, incidentColumns)
+		rows, err := p.db.Query(q, pattern, origin, limit, offset)
+		if err != nil {
+			return nil, fmt.Errorf("storage: search incidents page: %w", err)
+		}
+		defer rows.Close()
+		return scanIncidentRows(rows)
+	}
+	q := fmt.Sprintf(`
+		SELECT %[2]s FROM vs_incidents
+		WHERE %[1]s
+		ORDER BY created_at DESC
+		LIMIT $2 OFFSET $3`, searchIncidentsWhereSQL, incidentColumns)
+	rows, err := p.db.Query(q, pattern, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("storage: search incidents page: %w", err)
 	}
 	defer rows.Close()
 	return scanIncidentRows(rows)

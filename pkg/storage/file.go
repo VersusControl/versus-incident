@@ -332,6 +332,63 @@ func (p *fileProvider) ListIncidents(limit int) ([]*IncidentRecord, error) {
 	return out, nil
 }
 
+// CountIncidents implements the optional storage.IncidentPager capability.
+// The file backend keeps a rolling in-memory cap, so a linear tally is
+// cheap. Counts reflect open work: resolved incidents are skipped so the
+// tally matches the unresolved-only counts the SQL backend returns. Legacy
+// rows are classified via EffectiveOrigin, matching the SQL backend.
+func (p *fileProvider) CountIncidents() (IncidentCounts, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var c IncidentCounts
+	for _, rec := range p.incidents {
+		if rec.Resolved {
+			continue
+		}
+		if rec.EffectiveOrigin() == OriginAIDetect {
+			c.AIDetect++
+		} else {
+			c.Webhook++
+		}
+	}
+	c.Total = c.AIDetect + c.Webhook
+	return c, nil
+}
+
+// ListIncidentsPage implements the optional storage.IncidentPager
+// capability: one bounded, newest-first page over the in-memory slice,
+// skipping offset matches and returning at most limit rows. The origin
+// filter is applied while walking so a filtered page stays bounded.
+func (p *fileProvider) ListIncidentsPage(origin string, offset, limit int) ([]*IncidentRecord, error) {
+	if limit <= 0 {
+		limit = DefaultIncidentPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	filtered := origin == OriginAIDetect || origin == OriginWebhook
+	out := make([]*IncidentRecord, 0, limit)
+	skipped := 0
+	for i := len(p.incidents) - 1; i >= 0; i-- {
+		rec := p.incidents[i]
+		if filtered && rec.EffectiveOrigin() != origin {
+			continue
+		}
+		if skipped < offset {
+			skipped++
+			continue
+		}
+		cp := *rec
+		out = append(out, &cp)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
 func (p *fileProvider) Close() error { return nil }
 
 // ---------------------------------------------------------------------------

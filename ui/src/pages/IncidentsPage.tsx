@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
+  type InfiniteData,
 } from "@tanstack/react-query";
 import {
   CheckCircle2,
@@ -67,6 +69,54 @@ function useDebounced<T>(value: T, delay = 300): T {
     return () => clearTimeout(t);
   }, [value, delay]);
   return debounced;
+}
+
+// useIncidentIndex fetches the incident list one BOUNDED page at a time and
+// accumulates the loaded pages into a single IncidentIndex. The server sends
+// only the most-recent page (default 1000) plus the true whole-set counts, so
+// the first render is fast on a 100k+ history; further chunks load on demand
+// via the returned listQuery.fetchNextPage (wired to next_offset). Counts and
+// total come from the first page — the true totals, never `incidents.length`.
+function useIncidentIndex(
+  useServerSearch: boolean,
+  trimmed: string,
+  origin: string,
+) {
+  const listQuery = useInfiniteQuery({
+    queryKey: useServerSearch
+      ? ["incident-index", "search", trimmed, origin]
+      : ["incident-index", origin],
+    queryFn: ({ pageParam }) =>
+      useServerSearch
+        ? api.searchIncidentsIndex(trimmed, { origin, offset: pageParam })
+        : api.listIncidentsIndex({ origin, offset: pageParam }),
+    initialPageParam: 0,
+    // next_offset is the resume cursor; null/undefined means no more rows.
+    getNextPageParam: (last) => last.next_offset ?? undefined,
+  });
+
+  // Flatten the loaded pages into the single-index shape the page already
+  // consumes; counts/total come from the first page (the whole-set totals).
+  const data = useMemo<IncidentIndex | undefined>(() => {
+    const pages = listQuery.data?.pages;
+    if (!pages || pages.length === 0) return undefined;
+    const first = pages[0];
+    return {
+      incidents: pages.flatMap((p) => p.incidents),
+      counts: first.counts,
+      total: first.total,
+    };
+  }, [listQuery.data]);
+
+  return {
+    data,
+    isLoading: listQuery.isLoading,
+    isError: listQuery.isError,
+    error: listQuery.error,
+    refetch: listQuery.refetch,
+    isRefetching: listQuery.isRefetching,
+    listQuery,
+  };
 }
 
 // WebhookAutoResolveToggle is the single interactive control on the webhook
@@ -178,15 +228,8 @@ export function IncidentsPage() {
   const trimmed = debouncedQ.trim().replace(/^#/, "");
   const useServerSearch = searchSupported && trimmed !== "";
 
-  const { data, isLoading, isError, error, refetch, isRefetching } = useQuery({
-    queryKey: useServerSearch
-      ? ["incident-index", "search", trimmed, origin]
-      : ["incident-index", origin],
-    queryFn: () =>
-      useServerSearch
-        ? api.searchIncidentsIndex(trimmed, { origin })
-        : api.listIncidentsIndex({ origin }),
-  });
+  const { data, isLoading, isError, error, refetch, isRefetching, listQuery } =
+    useIncidentIndex(useServerSearch, trimmed, origin);
   // rows for the active origin tab; originCounts is whole-set so the
   // top-bar shows both feeds separately regardless of the active tab.
   const originCounts = data?.counts;
@@ -247,6 +290,25 @@ export function IncidentsPage() {
     resetKey: `${incidentResetKey(origin, status, trimmed)}|${sorted.signature}`,
   });
 
+  // Load-more on demand: the server ships only the most-recent page, so when
+  // the operator pages to the last loaded window and the backend has more
+  // rows (next_offset present), fetch the next chunk. Client-side filters can
+  // hide every loaded row of a matching origin, so this also keeps loading
+  // until a status/text filter finds matches or the history is exhausted —
+  // always a bounded page at a time, never the whole table up front.
+  const { fetchNextPage, hasNextPage, isFetchingNextPage } = listQuery;
+  useEffect(() => {
+    if (pg.page >= pg.pageCount && hasNextPage && !isFetchingNextPage) {
+      fetchNextPage();
+    }
+  }, [
+    pg.page,
+    pg.pageCount,
+    hasNextPage,
+    isFetchingNextPage,
+    fetchNextPage,
+  ]);
+
   // ----- selection + action bar -------------------------------------------
   // The SAME checkbox model the learned-signal tables use: a select-all
   // checkbox in the header, a checkbox per row, and a bar that APPEARS on
@@ -272,12 +334,13 @@ export function IncidentsPage() {
       await qc.cancelQueries({ queryKey: ["incident-index"] });
       // Two cache shapes carry incidents: the plain arrays behind
       // ["incidents"] (TopBar/Sidebar/Now badges, analyses lookup) and
-      // this page's origin index behind ["incident-index"]. Flip the
-      // resolved row in both, snapshotting each for rollback.
+      // this page's origin index behind ["incident-index"], which is an
+      // infinite query holding pages of IncidentIndex. Flip the resolved
+      // row in both, snapshotting each for rollback.
       const prevArrays = qc.getQueriesData<IncidentSummary[]>({
         queryKey: ["incidents"],
       });
-      const prevIndex = qc.getQueriesData<IncidentIndex>({
+      const prevIndex = qc.getQueriesData<InfiniteData<IncidentIndex>>({
         queryKey: ["incident-index"],
       });
       const flip = (x: IncidentSummary) =>
@@ -287,9 +350,18 @@ export function IncidentsPage() {
       qc.setQueriesData<IncidentSummary[]>({ queryKey: ["incidents"] }, (old) =>
         old?.map(flip),
       );
-      qc.setQueriesData<IncidentIndex>(
+      qc.setQueriesData<InfiniteData<IncidentIndex>>(
         { queryKey: ["incident-index"] },
-        (old) => (old ? { ...old, incidents: old.incidents.map(flip) } : old),
+        (old) =>
+          old
+            ? {
+                ...old,
+                pages: old.pages.map((p) => ({
+                  ...p,
+                  incidents: p.incidents.map(flip),
+                })),
+              }
+            : old,
       );
       return { prevArrays, prevIndex };
     },
@@ -543,6 +615,27 @@ export function IncidentsPage() {
               </table>
             </div>
             <Pagination state={pg} />
+            {(isFetchingNextPage || hasNextPage) && (
+              <div
+                className="flex items-center justify-center gap-1.5 border-t border-ink-600 px-3 py-2 text-2xs text-ink-400"
+                data-testid="incident-load-more"
+              >
+                {isFetchingNextPage ? (
+                  <>
+                    <Loader2 size={12} className="animate-spin" />
+                    Loading more…
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="text-brand-300 hover:underline"
+                    onClick={() => fetchNextPage()}
+                  >
+                    Load more ({data?.total?.toLocaleString() ?? ""} total)
+                  </button>
+                )}
+              </div>
+            )}
             <div className="hidden border-t border-ink-600 px-3 py-1.5 text-2xs text-ink-400 md:block">
               j/k navigate · Enter open · a assign · r resolve · / search
             </div>

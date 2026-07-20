@@ -180,6 +180,83 @@ type Blob struct {
 	Data []byte
 }
 
+// DefaultIncidentPageSize is the bounded page the incident list read returns
+// when the caller does not request a specific size: the most-recent 1000
+// rows. It caps the first list load so a backend with unbounded history
+// (Postgres) never ships the whole table to render one page — the UI shows
+// the total from the cheap count and loads further pages only on demand.
+const DefaultIncidentPageSize = 1000
+
+// IncidentCounts is the cheap, whole-set tally the list surfaces show: how
+// many UNRESOLVED (open) incidents are AI-detected vs inbound webhook/alert,
+// and the open grand total. Counts reflect OPEN WORK — resolved incidents are
+// excluded — so the badge shows the backlog, not the full history (webhook
+// incidents auto-resolve on arrival, so the full history is dominated by
+// resolved rows). It is computed WITHOUT materializing rows (COUNT/GROUP BY on
+// SQL backends, a len()/map tally in memory) so a 100k+ history never has to
+// be loaded to render a count badge. AIDetect+Webhook always equals Total.
+//
+// Because the counts are unresolved-only they can no longer double as the
+// list's pagination total (the list stays all-incidents so resolved rows
+// remain reachable); the list endpoint drives "load more" off page-fullness
+// instead.
+type IncidentCounts struct {
+	AIDetect int
+	Webhook  int
+	Total    int
+}
+
+// IncidentPager is an optional capability a backend may implement on top of
+// Provider to serve the incident list without ever loading the whole table.
+// It splits the two things the list endpoint needs — a cheap count and a
+// bounded page — so a large backend (Postgres, unbounded history) can push
+// both into SQL: the per-origin tally becomes a COUNT with FILTER and a page
+// becomes ORDER BY created_at DESC LIMIT/OFFSET. File and memory backends
+// implement it over their already-capped in-memory slice (a len()/map tally
+// and a slice window), so callers get one uniform seam. Backends that cannot
+// (the redis stub) do not implement it; callers type-assert and fall back to
+// ListIncidents, exactly like Searcher/Lifecycle.
+type IncidentPager interface {
+	// CountIncidents returns the whole-set per-origin tally and grand total of
+	// UNRESOLVED (open) incidents, computed without materializing rows.
+	// Resolved incidents are excluded so the count reflects open work. Legacy
+	// rows with no explicit Origin are classified from Source exactly as
+	// EffectiveOrigin does, so they are never dropped into an empty bucket.
+	CountIncidents() (IncidentCounts, error)
+	// ListIncidentsPage returns one bounded page of incidents, newest first,
+	// skipping the first offset rows and returning at most limit rows. The
+	// page lists ALL incidents (resolved and open alike) so resolved
+	// incidents remain reachable — only the counts are unresolved-only. When
+	// origin is OriginAIDetect or OriginWebhook the page is filtered to that
+	// origin in the backend so a filtered page stays bounded; any other value
+	// returns all origins. limit <= 0 uses DefaultIncidentPageSize; a
+	// negative offset is treated as 0.
+	ListIncidentsPage(origin string, offset, limit int) ([]*IncidentRecord, error)
+}
+
+// IncidentSearchPager is an optional capability a backend may implement on
+// top of Searcher: the search-path twin of IncidentPager. It lets a backend
+// count and page full-text search matches without materializing the whole
+// match set, so a broad query against a large history returns the first page
+// in one bounded query plus one count query. Only the Postgres backend
+// implements it (it is the only unbounded Searcher); callers type-assert and
+// fall back to a bounded SearchIncidents when the assertion fails.
+type IncidentSearchPager interface {
+	// CountIncidentsMatching returns the per-origin tally and total of
+	// UNRESOLVED (open) incidents matching query, computed without
+	// materializing rows. Resolved matches are excluded, mirroring
+	// CountIncidents. An empty query counts every unresolved incident (same as
+	// IncidentPager.CountIncidents).
+	CountIncidentsMatching(query string) (IncidentCounts, error)
+	// SearchIncidentsPage returns one bounded page of incidents matching
+	// query, newest first, filtered to origin (empty = all origins), skipping
+	// offset rows and returning at most limit rows. The page lists ALL
+	// matching incidents (resolved and open alike); only the counts are
+	// unresolved-only. An empty query degrades to the plain list page.
+	// limit <= 0 uses DefaultIncidentPageSize.
+	SearchIncidentsPage(query, origin string, offset, limit int) ([]*IncidentRecord, error)
+}
+
 // Searcher is an optional capability a backend may implement on top of
 // Provider. It exposes full-text-style search over incidents and
 // analyses. Backends that cannot search efficiently (memory, file) do

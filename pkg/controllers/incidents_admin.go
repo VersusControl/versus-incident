@@ -82,23 +82,34 @@ func (i *IncidentAdminController) authMiddleware(c *fiber.Ctx) error {
 func (i *IncidentAdminController) list(c *fiber.Ctx) error {
 	store := services.Storage()
 	if store == nil {
-		return c.JSON(fiber.Map{"incidents": []any{}, "counts": originCounts(nil)})
+		return c.JSON(fiber.Map{"incidents": []any{}, "counts": originCounts(nil), "total": 0})
 	}
-	limit := 0
-	if v := c.Query("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = n
+	origin := c.Query("origin")
+	// Preferred path: the backend implements the pager capability, so we
+	// render a page from ONE bounded query plus ONE cheap count query and
+	// never load the whole table. Postgres (unbounded history) and the
+	// file/memory backends (already capped) all implement it.
+	if pager, ok := store.(storage.IncidentPager); ok {
+		counts, err := pager.CountIncidents()
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 		}
+		size := parsePageSize(c.Query("page_size"))
+		offset, page := pageOffset(c.Query("page"), c.Query("offset"), size)
+		recs, err := pager.ListIncidentsPage(origin, offset, size)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(pagedIncidentResponse(recs, counts, origin, offset, size, page))
 	}
-	// Pull the full window (limit 0) so per-origin counts are computed
-	// over every record and the origin filter is applied here, not at the
-	// storage layer. The list backends already hold the capped history in
-	// memory, so this is the same read the UI has always issued.
+	// Fallback for backends without the pager capability (the redis stub):
+	// the legacy full-window read + in-memory pagination. Correct but
+	// unbounded — only reached by a backend that has no bounded read.
 	recs, err := store.ListIncidents(0)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(incidentListResponse(recs, c.Query("origin"), c.Query("page"), c.Query("page_size"), limit))
+	return c.JSON(incidentListResponse(recs, origin, c.Query("page"), c.Query("page_size"), parseLimit(c.Query("limit"))))
 }
 
 // capabilities reports which optional storage features the running
@@ -170,17 +181,33 @@ func (i *IncidentAdminController) search(c *fiber.Ctx) error {
 			"search": false,
 		})
 	}
-	limit := 0
-	if v := c.Query("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = n
+	query := c.Query("q")
+	origin := c.Query("origin")
+	// Preferred path: the backend implements the search pager, so a broad
+	// query against a large history returns the first page from one bounded
+	// query plus one count query — never the whole match set. Postgres
+	// implements it; it is the only unbounded Searcher.
+	if sp, ok := store.(storage.IncidentSearchPager); ok {
+		counts, err := sp.CountIncidentsMatching(query)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 		}
+		size := parsePageSize(c.Query("page_size"))
+		offset, page := pageOffset(c.Query("page"), c.Query("offset"), size)
+		recs, err := sp.SearchIncidentsPage(query, origin, offset, size)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(pagedIncidentResponse(recs, counts, origin, offset, size, page))
 	}
-	recs, err := searcher.SearchIncidents(c.Query("q"), 0)
+	// Fallback: a Searcher without the pager capability. Bound the read to
+	// one page so it can never load the whole match set; counts are computed
+	// over that bounded page.
+	recs, err := searcher.SearchIncidents(query, storage.DefaultIncidentPageSize)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(incidentListResponse(recs, c.Query("origin"), c.Query("page"), c.Query("page_size"), limit))
+	return c.JSON(incidentListResponse(recs, origin, c.Query("page"), c.Query("page_size"), parseLimit(c.Query("limit"))))
 }
 
 func (i *IncidentAdminController) get(c *fiber.Ctx) error {
@@ -263,6 +290,138 @@ func filterByOrigin(recs []*storage.IncidentRecord, origin string) []*storage.In
 // list paginates in 100-row windows so a 10k+ webhook history never ships
 // to the browser in one response.
 const defaultIncidentPageSize = 100
+
+// maxIncidentPageSize caps the caller-requested page_size so one request can
+// never ask the backend for an unbounded window and reintroduce the
+// load-everything problem the pager exists to fix.
+const maxIncidentPageSize = 5000
+
+// parseLimit parses a positive integer limit query param, returning 0 (no
+// limit) for a missing, empty, non-numeric, or non-positive value.
+func parseLimit(v string) int {
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return n
+	}
+	return 0
+}
+
+// parseNonNegInt parses a non-negative integer query param (offset/cursor),
+// returning 0 for anything missing, non-numeric, or negative.
+func parseNonNegInt(v string) int {
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		return n
+	}
+	return 0
+}
+
+// parsePageSize resolves the requested page size for the bounded list/search
+// read: the storage default (1000) when unset, clamped to
+// [1, maxIncidentPageSize] otherwise so a single request stays bounded.
+func parsePageSize(v string) int {
+	if v == "" {
+		return storage.DefaultIncidentPageSize
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return storage.DefaultIncidentPageSize
+	}
+	if n > maxIncidentPageSize {
+		return maxIncidentPageSize
+	}
+	return n
+}
+
+// pageOffset resolves the starting row offset and the 1-based page number for
+// a bounded list/search read from the two accepted params. An explicit
+// zero-based offset cursor (what the UI's infinite scroll sends via
+// next_offset) takes precedence; otherwise a 1-based page number is converted
+// to an offset. When neither is set the read starts at the first page. size is
+// the resolved page size (always > 0, from parsePageSize).
+func pageOffset(pageParam, offsetParam string, size int) (offset, page int) {
+	if offsetParam != "" {
+		offset = parseNonNegInt(offsetParam)
+		page = offset/size + 1
+		return offset, page
+	}
+	page = 1
+	if n, err := strconv.Atoi(pageParam); err == nil && n > 1 {
+		page = n
+	}
+	offset = (page - 1) * size
+	return offset, page
+}
+
+// originCountsMap renders a storage.IncidentCounts into the {ai_detect,
+// webhook, total} shape the UI top-bar reads — the same shape originCounts
+// produces from a materialized slice, so the paged and fallback paths return
+// an identical counts object. The counts are unresolved-only (open work).
+func originCountsMap(c storage.IncidentCounts) fiber.Map {
+	return fiber.Map{
+		"ai_detect": c.AIDetect,
+		"webhook":   c.Webhook,
+		"total":     c.Total,
+	}
+}
+
+// filteredTotal returns the unresolved count that matches the active origin
+// filter, derived from the whole-set breakdown so the badge for the active
+// tab shows that tab's open count, while the counts object stays the full
+// both-feeds breakdown. This is the badge total, NOT the pagination total:
+// counts are unresolved-only, so "load more" is driven off page-fullness (a
+// full page implies another page) rather than this number.
+func filteredTotal(c storage.IncidentCounts, origin string) int {
+	switch origin {
+	case storage.OriginAIDetect:
+		return c.AIDetect
+	case storage.OriginWebhook:
+		return c.Webhook
+	default:
+		return c.Total
+	}
+}
+
+// pagedIncidentResponse builds the list/search response from the CHEAP count
+// (the unresolved whole-set breakdown + the filtered open total) and ONE
+// bounded page of rows. It preserves the existing shape — counts / total /
+// incidents / page / page_size — and adds offset-based continuation: offset is
+// where this page started and next_offset is where the caller resumes to load
+// more, so the UI shows the open counts, renders the first page, and fetches
+// the next chunk only on demand.
+//
+// Because counts are unresolved-only they cannot bound the list (the list is
+// all-incidents so resolved rows stay reachable). "Has more" is therefore
+// driven off PAGE-FULLNESS: a full page (len == size) implies at least one
+// more page, an underfull page is the last one. This lets the operator page
+// past the unresolved count — and past row 1000 — through the entire history.
+func pagedIncidentResponse(recs []*storage.IncidentRecord, counts storage.IncidentCounts, origin string, offset, size, page int) fiber.Map {
+	total := filteredTotal(counts, origin)
+	out := make([]fiber.Map, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, summarize(r))
+	}
+	resp := fiber.Map{
+		"counts":    originCountsMap(counts),
+		"total":     total,
+		"incidents": out,
+		"offset":    offset,
+		"page":      page,
+		"page_size": size,
+	}
+	// A full page implies the backend may hold more rows; the caller resumes
+	// from the row just past this page. An underfull page is the last one.
+	if len(recs) == size {
+		resp["next_offset"] = offset + len(recs)
+	} else {
+		resp["next_offset"] = nil
+	}
+	return resp
+}
 
 // incidentListResponse is the shared post-processing for the list and
 // search endpoints. It computes per-origin counts over the FULL result

@@ -467,14 +467,19 @@ export interface OriginCounts {
   total: number;
 }
 
-// IncidentIndex is the full list/search response: one (optionally
-// origin-filtered, optionally paginated) window of rows plus the
-// whole-set origin counts. `total` is the number of rows matching the
-// active origin filter before pagination.
+// IncidentIndex is the full list/search response: one bounded, most-recent
+// page of rows plus the whole-set origin counts computed cheaply on the
+// server (never by loading every row). `total` is the number of rows matching
+// the active origin filter — the true total from the cheap count, used to
+// drive load-more, not `incidents.length`. `offset` is where this page began
+// and `next_offset` is where the caller resumes to load the next chunk (null
+// when this page reached the end).
 export interface IncidentIndex {
   incidents: IncidentSummary[];
   counts: OriginCounts;
   total: number;
+  offset?: number;
+  next_offset?: number | null;
   page?: number;
   page_size?: number;
 }
@@ -1616,20 +1621,24 @@ export const api = {
       `/api/admin/incidents${qs}`,
     ).then((r) => r.incidents ?? []);
   },
-  // listIncidentsIndex is the Incidents-page variant: it returns the rows
-  // for one origin tab PLUS the whole-set per-origin counts (so the
-  // top-bar shows both feeds separately) in a single request. Pass an
-  // origin to scope the rows; the counts stay whole-set regardless.
+  // listIncidentsIndex is the Incidents-page variant: it returns one bounded,
+  // most-recent page of rows for one origin tab PLUS the whole-set per-origin
+  // counts (so the top-bar shows both feeds separately and the true total) in
+  // a single request. Pass `offset` to load the next chunk on demand; the
+  // response's `next_offset` is where to resume (null at the end). `pageSize`
+  // overrides the server default page (1000).
   listIncidentsIndex: (opts?: {
     origin?: string;
-    page?: number;
+    offset?: number;
     pageSize?: number;
+    page?: number;
     limit?: number;
   }) => {
     const p = new URLSearchParams();
     if (opts?.origin) p.set("origin", opts.origin);
-    if (opts?.page) p.set("page", String(opts.page));
+    if (opts?.offset) p.set("offset", String(opts.offset));
     if (opts?.pageSize) p.set("page_size", String(opts.pageSize));
+    if (opts?.page) p.set("page", String(opts.page));
     if (opts?.limit) p.set("limit", String(opts.limit));
     const qs = p.toString();
     return request<IncidentIndex>(
@@ -1653,15 +1662,23 @@ export const api = {
     ).then((r) => r.incidents ?? []);
   },
   // searchIncidentsIndex mirrors listIncidentsIndex for the server-side
-  // search path: origin-scoped rows plus whole-(match)-set origin counts.
+  // search path: origin-scoped rows plus whole-(match)-set origin counts,
+  // bounded to one page with `offset`-based load-more.
   searchIncidentsIndex: (
     q: string,
-    opts?: { origin?: string; page?: number; pageSize?: number; limit?: number },
+    opts?: {
+      origin?: string;
+      offset?: number;
+      pageSize?: number;
+      page?: number;
+      limit?: number;
+    },
   ) => {
     const p = new URLSearchParams({ q });
     if (opts?.origin) p.set("origin", opts.origin);
-    if (opts?.page) p.set("page", String(opts.page));
+    if (opts?.offset) p.set("offset", String(opts.offset));
     if (opts?.pageSize) p.set("page_size", String(opts.pageSize));
+    if (opts?.page) p.set("page", String(opts.page));
     if (opts?.limit) p.set("limit", String(opts.limit));
     return request<IncidentIndex>(
       `/api/admin/incidents/search?${p.toString()}`,
