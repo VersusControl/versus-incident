@@ -16,7 +16,7 @@ import {
   Search,
   UserPlus,
 } from "lucide-react";
-import { api, type IncidentIndex, type IncidentSummary, type IntakeSettings } from "@/lib/api";
+import { api, type IncidentIndex, type IncidentSummary, type IntakeSettings, type OriginCounts } from "@/lib/api";
 import { fmtAbs, fmtRel, incidentTitle, truncate } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
 import {
@@ -230,9 +230,12 @@ export function IncidentsPage() {
 
   const { data, isLoading, isError, error, refetch, isRefetching, listQuery } =
     useIncidentIndex(useServerSearch, trimmed, origin);
-  // rows for the active origin tab; originCounts is whole-set so the
-  // top-bar shows both feeds separately regardless of the active tab.
-  const originCounts = data?.counts;
+  // Whole-set per-origin totals (all statuses) from the server drive the
+  // origin-tab badges and the top-bar summary, so both feeds stay visible
+  // regardless of the active tab. by_status is the authoritative per-origin ×
+  // per-status breakdown the status-tab counts read.
+  const byStatus = data?.counts?.by_status;
+  const originCounts = byStatus?.all;
 
   // Roster lookups are shared by every row — resolve them once here.
   const teamsQ = useQuery({ queryKey: ["teams"], queryFn: api.listTeams });
@@ -252,8 +255,9 @@ export function IncidentsPage() {
   }, [membersQ.data]);
   const rosterLoading = teamsQ.isLoading || membersQ.isLoading;
 
-  // Text filter first (counts per status are computed on this set so the
-  // segmented-control badges reflect the current search), then status.
+  // Text filter first (drives the client-side pagination of the VISIBLE rows),
+  // then status. The COUNTS are server-authoritative (see below) — this filter
+  // only decides which loaded rows render.
   const textFiltered = useMemo(
     // When the server already ran the text search, don't re-filter on text
     // (it matches fields the client can't see, e.g. payload body).
@@ -261,14 +265,30 @@ export function IncidentsPage() {
     [data?.incidents, q, useServerSearch],
   );
 
-  const counts = useMemo(
-    () => ({
+  // The text filter runs CLIENT-SIDE only when the backend has no server
+  // search and a query is present; then the loaded page IS the whole capped
+  // set (memory/file), so counting the filtered rows is correct. Otherwise
+  // every count comes from the server's per-origin × per-status breakdown.
+  const clientFiltering = !useServerSearch && trimmed !== "";
+
+  const counts = useMemo(() => {
+    const pick = (c?: OriginCounts) =>
+      origin === "webhook" ? c?.webhook ?? 0 : c?.ai_detect ?? 0;
+    if (byStatus && !clientFiltering) {
+      return {
+        open: pick(byStatus.open),
+        acked: pick(byStatus.acked),
+        resolved: pick(byStatus.resolved),
+        all: pick(byStatus.all),
+      };
+    }
+    return {
       open: textFiltered.filter((i) => matchesStatus(i, "open")).length,
       acked: textFiltered.filter((i) => matchesStatus(i, "acked")).length,
       resolved: textFiltered.filter((i) => matchesStatus(i, "resolved")).length,
-    }),
-    [textFiltered],
-  );
+      all: textFiltered.length,
+    };
+  }, [byStatus, clientFiltering, textFiltered, origin]);
 
   const filtered = useMemo(
     () => textFiltered.filter((i) => matchesStatus(i, status)),
@@ -507,7 +527,7 @@ export function IncidentsPage() {
                 label: "Resolved",
                 badge: data ? counts.resolved : undefined,
               },
-              { value: "all", label: "All", badge: data ? textFiltered.length : undefined },
+              { value: "all", label: "All", badge: data ? counts.all : undefined },
             ]}
           />
           {/* Window-scoped incidents-analytics report — spans both origins, so

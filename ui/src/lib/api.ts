@@ -467,6 +467,27 @@ export interface OriginCounts {
   total: number;
 }
 
+// IncidentStatusCounts is the whole-set per-origin × per-status breakdown the
+// server computes cheaply (COUNT/FILTER on Postgres, one in-memory pass on
+// file/memory — never materializing rows). Every NUMBER the count surfaces
+// show (the header badge, the Now KPI tiles + origin badges, the Incidents
+// status/origin tabs) is read from here, so those surfaces can never disagree.
+// Each status bucket is split ai_detect / webhook / total, and
+// open+acked+resolved === all per origin.
+export interface IncidentStatusCounts {
+  open: OriginCounts;
+  acked: OriginCounts;
+  resolved: OriginCounts;
+  all: OriginCounts;
+}
+
+// IncidentCounts is the counts object the list / search / counts endpoints
+// return: the back-compat top-level unresolved (open-work) per-origin tally,
+// plus the authoritative per-origin × per-status breakdown under by_status.
+export interface IncidentCounts extends OriginCounts {
+  by_status?: IncidentStatusCounts;
+}
+
 // IncidentIndex is the full list/search response: one bounded, most-recent
 // page of rows plus the whole-set origin counts computed cheaply on the
 // server (never by loading every row). `total` is the number of rows matching
@@ -476,7 +497,7 @@ export interface OriginCounts {
 // when this page reached the end).
 export interface IncidentIndex {
   incidents: IncidentSummary[];
-  counts: OriginCounts;
+  counts: IncidentCounts;
   total: number;
   offset?: number;
   next_offset?: number | null;
@@ -1635,6 +1656,13 @@ export const api = {
       `/api/admin/incidents${qs}`,
     ).then((r) => r.incidents ?? []);
   },
+  // incidentCounts fetches the whole-set per-origin × per-status tally WITHOUT
+  // loading a single row — the cheap COUNT/FILTER endpoint. The header badge
+  // and the Now page read their numbers from here so they never count a
+  // bounded, loaded page. The Incidents page reads the same breakdown off its
+  // list/search response's `counts.by_status` instead of a second request.
+  incidentCounts: () =>
+    request<IncidentCounts>("/api/admin/incidents/counts"),
   // listIncidentsIndex is the Incidents-page variant: it returns one bounded,
   // most-recent page of rows for one origin tab PLUS the whole-set per-origin
   // counts (so the top-bar shows both feeds separately and the true total) in

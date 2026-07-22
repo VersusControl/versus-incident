@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
-import { countByOrigin } from "./incidentList";
 
 // ---------------------------------------------------------------------------
 // useTableKeys — j/k row navigation + Enter to open, for dense tables.
@@ -148,22 +147,22 @@ export function useShortcuts({ onHelp }: { onHelp: () => void }) {
 
 // ---------------------------------------------------------------------------
 // useOpenIncidentCount — shared by the TopBar count + the Now page. Polls the
-// incident list every 30s, pauses while the tab is hidden. Alongside the plain
-// open count it exposes the per-ORIGIN tally of the OPEN incidents (AI-detect
-// vs webhook), computed from the SAME ["incidents","list"] cache via the shared
-// countByOrigin helper, so the top bar can show the two feeds separately
-// ("AI: N · Webhook: M") without a second request. The Sidebar deliberately
-// shows NO count.
+// cheap server counts endpoint every 30s (never loads incident rows), pausing
+// while the tab is hidden. It exposes the OPEN grand total plus the per-ORIGIN
+// OPEN tally (AI-detect vs webhook) straight from the server's authoritative
+// per-origin × per-status breakdown, so the top bar shows the two feeds
+// separately ("AI: N · Webhook: M") without ever counting a bounded, loaded
+// page. The Sidebar deliberately shows NO count.
 // ---------------------------------------------------------------------------
 export function useOpenIncidentCount() {
   const q = useQuery({
-    queryKey: ["incidents", "list"],
-    queryFn: () => api.listIncidents(),
+    queryKey: ["incidents", "counts"],
+    queryFn: () => api.incidentCounts(),
     refetchInterval: () => (document.hidden ? false : 30_000),
     staleTime: 15_000,
   });
-  const openList = (q.data ?? []).filter((i) => !i.resolved && !i.acked_at);
-  return { open: openList.length, originCounts: countByOrigin(openList), query: q };
+  const open = q.data?.by_status?.open;
+  return { open: open?.total ?? 0, originCounts: open, query: q };
 }
 
 // ---------------------------------------------------------------------------

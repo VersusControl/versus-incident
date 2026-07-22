@@ -33,6 +33,7 @@ func NewIncidentAdminController() *IncidentAdminController {
 //
 //	GET  /api/admin/incidents                 list (newest first; ?limit=NN)
 //	GET  /api/admin/incidents/search          full-text search (?q=&limit=NN)
+//	GET  /api/admin/incidents/counts          cheap per-origin × per-status tally
 //	GET  /api/admin/incidents/intake-settings  read intake settings
 //	PUT  /api/admin/incidents/intake-settings  update intake settings
 //	GET  /api/admin/incidents/:id             single record
@@ -47,6 +48,10 @@ func (i *IncidentAdminController) Register(router fiber.Router) {
 	// /search MUST be registered before /:id so the literal path is not
 	// swallowed by the :id parameter route.
 	g.Get("/search", i.search)
+	// /counts is the cheap, rows-free per-origin × per-status tally the Now
+	// page and header badge read; like /search it MUST precede /:id so the
+	// literal path is not captured as an incident id.
+	g.Get("/counts", i.counts)
 	// /intake-settings likewise MUST precede /:id so the literal settings
 	// path is not captured as an incident id.
 	g.Get("/intake-settings", i.getIntakeSettings)
@@ -90,7 +95,7 @@ func (i *IncidentAdminController) list(c *fiber.Ctx) error {
 	// never load the whole table. Postgres (unbounded history) and the
 	// file/memory backends (already capped) all implement it.
 	if pager, ok := store.(storage.IncidentPager); ok {
-		counts, err := pager.CountIncidents()
+		counts, err := pager.CountIncidentsByStatus()
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -188,7 +193,7 @@ func (i *IncidentAdminController) search(c *fiber.Ctx) error {
 	// query plus one count query — never the whole match set. Postgres
 	// implements it; it is the only unbounded Searcher.
 	if sp, ok := store.(storage.IncidentSearchPager); ok {
-		counts, err := sp.CountIncidentsMatching(query)
+		counts, err := sp.CountIncidentsMatchingByStatus(query)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -208,6 +213,31 @@ func (i *IncidentAdminController) search(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(incidentListResponse(recs, origin, c.Query("page"), c.Query("page_size"), parseLimit(c.Query("limit"))))
+}
+
+// counts returns the whole-set per-origin × per-status incident tally in one
+// cheap, rows-free response so the Now page and the header badge can show
+// authoritative numbers WITHOUT loading a page of rows. Preferred path is the
+// bounded pager's single COUNT query; the fallback (a backend with no pager)
+// tallies a materialized window. The shape matches the list response's counts
+// object (top-level unresolved + by_status), so both surfaces read one type.
+func (i *IncidentAdminController) counts(c *fiber.Ctx) error {
+	store := services.Storage()
+	if store == nil {
+		return c.JSON(countsMap(storage.IncidentStatusCounts{}))
+	}
+	if pager, ok := store.(storage.IncidentPager); ok {
+		sc, err := pager.CountIncidentsByStatus()
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(countsMap(sc))
+	}
+	recs, err := store.ListIncidents(0)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(countsMap(storage.StatusCountsOf(recs)))
 }
 
 func (i *IncidentAdminController) get(c *fiber.Ctx) error {
@@ -387,6 +417,49 @@ func originCountsMap(c storage.IncidentCounts) fiber.Map {
 	}
 }
 
+// perOriginMap renders one status bucket across origins into the {ai_detect,
+// webhook, total} shape the UI reads for a single status row.
+func perOriginMap(ai, webhook, total int) fiber.Map {
+	return fiber.Map{"ai_detect": ai, "webhook": webhook, "total": total}
+}
+
+// statusCountsMap renders the whole-set per-origin × per-status tally into the
+// nested by_status shape the UI consumes: one {ai_detect, webhook, total}
+// object per status bucket (open / acked / resolved / all). It is additive to
+// the existing {ai_detect, webhook, total} counts object — consumers that read
+// only the top-level unresolved counts are unaffected.
+func statusCountsMap(c storage.IncidentStatusCounts) fiber.Map {
+	return fiber.Map{
+		"open":     perOriginMap(c.AIDetect.Open, c.Webhook.Open, c.Total.Open),
+		"acked":    perOriginMap(c.AIDetect.Acked, c.Webhook.Acked, c.Total.Acked),
+		"resolved": perOriginMap(c.AIDetect.Resolved, c.Webhook.Resolved, c.Total.Resolved),
+		"all":      perOriginMap(c.AIDetect.Total, c.Webhook.Total, c.Total.Total),
+	}
+}
+
+// unresolvedCounts derives the open-work (unresolved = open + acked) per-origin
+// tally from the full per-status breakdown, so the back-compat top-level counts
+// object stays identical to what CountIncidents returned while the whole
+// response is built from ONE by-status count.
+func unresolvedCounts(c storage.IncidentStatusCounts) storage.IncidentCounts {
+	return storage.IncidentCounts{
+		AIDetect: c.AIDetect.Open + c.AIDetect.Acked,
+		Webhook:  c.Webhook.Open + c.Webhook.Acked,
+		Total:    c.Total.Open + c.Total.Acked,
+	}
+}
+
+// countsMap renders the full count object the list / search / counts responses
+// carry: the back-compat top-level unresolved (open-work) per-origin tally PLUS
+// the additive by_status breakdown, both from ONE per-status count. Existing
+// consumers read ai_detect/webhook/total unchanged; the count surfaces read
+// by_status for the authoritative per-origin × per-status numbers.
+func countsMap(c storage.IncidentStatusCounts) fiber.Map {
+	m := originCountsMap(unresolvedCounts(c))
+	m["by_status"] = statusCountsMap(c)
+	return m
+}
+
 // filteredTotal returns the unresolved count that matches the active origin
 // filter, derived from the whole-set breakdown so the badge for the active
 // tab shows that tab's open count, while the counts object stays the full
@@ -417,14 +490,14 @@ func filteredTotal(c storage.IncidentCounts, origin string) int {
 // driven off PAGE-FULLNESS: a full page (len == size) implies at least one
 // more page, an underfull page is the last one. This lets the operator page
 // past the unresolved count — and past row 1000 — through the entire history.
-func pagedIncidentResponse(recs []*storage.IncidentRecord, counts storage.IncidentCounts, origin string, offset, size, page int) fiber.Map {
-	total := filteredTotal(counts, origin)
+func pagedIncidentResponse(recs []*storage.IncidentRecord, counts storage.IncidentStatusCounts, origin string, offset, size, page int) fiber.Map {
+	total := filteredTotal(unresolvedCounts(counts), origin)
 	out := make([]fiber.Map, 0, len(recs))
 	for _, r := range recs {
 		out = append(out, summarize(r))
 	}
 	resp := fiber.Map{
-		"counts":    originCountsMap(counts),
+		"counts":    countsMap(counts),
 		"total":     total,
 		"incidents": out,
 		"offset":    offset,
@@ -476,6 +549,10 @@ func pagedAnalysisResponse(recs []*storage.AnalysisRecord, total, offset, size, 
 // back-compat shape existing callers depend on.
 func incidentListResponse(recs []*storage.IncidentRecord, origin, pageParam, pageSizeParam string, limit int) fiber.Map {
 	counts := originCounts(recs)
+	// by_status is the authoritative per-origin × per-status breakdown; on this
+	// fallback path (a backend with no bounded pager) it is tallied over the
+	// materialized window so the count surfaces still read the same shape.
+	counts["by_status"] = statusCountsMap(storage.StatusCountsOf(recs))
 	recs = filterByOrigin(recs, origin)
 	total := len(recs)
 

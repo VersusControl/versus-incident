@@ -213,6 +213,83 @@ type IncidentCounts struct {
 	Total    int
 }
 
+// StatusCounts is the per-status split of a set of incidents: how many are
+// open, acked, and resolved, with Total the sum of the three. The buckets are
+// mutually exclusive and match both how the UI labels an incident and how the
+// row is stored:
+//
+//	Open     = resolved = false AND acked_at IS NULL
+//	Acked    = resolved = false AND acked_at IS NOT NULL
+//	Resolved = resolved = true
+//	Total    = Open + Acked + Resolved (every row)
+type StatusCounts struct {
+	Open     int
+	Acked    int
+	Resolved int
+	Total    int
+}
+
+// IncidentStatusCounts is the whole-set per-origin × per-status tally the
+// count surfaces (the Now page, the header badge, the Incidents page) display.
+// Each origin bucket carries its own open/acked/resolved/total and Total is
+// the both-origins sum, so AIDetect.X + Webhook.X == Total.X for every status
+// X. Like IncidentCounts it is computed WITHOUT materializing rows — one
+// COUNT(*) FILTER (…) on SQL backends, a single pass over the capped in-memory
+// slice on file/memory — so a large history never has to be loaded to render a
+// count. It is the single authoritative source for every number the count
+// surfaces show, so those surfaces can never disagree.
+type IncidentStatusCounts struct {
+	AIDetect StatusCounts
+	Webhook  StatusCounts
+	Total    StatusCounts
+}
+
+// StatusCountsOf tallies a materialized set of records into the per-origin ×
+// per-status breakdown, classifying each row via EffectiveOrigin (so legacy
+// empty-origin rows land in webhook) and bucketing by its stored status. The
+// file and memory backends use it over their capped in-memory slice, and the
+// controllers' fallback path (a backend with no bounded pager) uses it over
+// the materialized window, so every path produces the identical shape.
+func StatusCountsOf(recs []*IncidentRecord) IncidentStatusCounts {
+	var out IncidentStatusCounts
+	for _, rec := range recs {
+		bucket := &out.Webhook
+		if rec.EffectiveOrigin() == OriginAIDetect {
+			bucket = &out.AIDetect
+		}
+		switch {
+		case rec.Resolved:
+			bucket.Resolved++
+			out.Total.Resolved++
+		case rec.AckedAt != nil:
+			bucket.Acked++
+			out.Total.Acked++
+		default:
+			bucket.Open++
+			out.Total.Open++
+		}
+		bucket.Total++
+		out.Total.Total++
+	}
+	return out
+}
+
+// AssembleStatusCounts builds the per-origin × per-status result from the
+// whole-set totals and the ai_detect slice, deriving webhook as the complement
+// (total − ai_detect) so AIDetect + Webhook == Total for every status
+// regardless of how a legacy empty-origin row is classified in SQL. SQL
+// backends compute `total` and `ai_detect` with COUNT/FILTER and hand them
+// here rather than counting webhook separately.
+func AssembleStatusCounts(total, ai StatusCounts) IncidentStatusCounts {
+	web := StatusCounts{
+		Open:     total.Open - ai.Open,
+		Acked:    total.Acked - ai.Acked,
+		Resolved: total.Resolved - ai.Resolved,
+		Total:    total.Total - ai.Total,
+	}
+	return IncidentStatusCounts{AIDetect: ai, Webhook: web, Total: total}
+}
+
 // IncidentPager is an optional capability a backend may implement on top of
 // Provider to serve the incident list without ever loading the whole table.
 // It splits the two things the list endpoint needs — a cheap count and a
@@ -230,6 +307,14 @@ type IncidentPager interface {
 	// rows with no explicit Origin are classified from Source exactly as
 	// EffectiveOrigin does, so they are never dropped into an empty bucket.
 	CountIncidents() (IncidentCounts, error)
+	// CountIncidentsByStatus returns the whole-set per-origin × per-status
+	// tally (open / acked / resolved / total, each split ai_detect vs webhook),
+	// computed without materializing rows. It is the authoritative source for
+	// every count the list surfaces display, so the header badge, the Now page
+	// and the Incidents page can never disagree. Legacy rows with no explicit
+	// Origin are classified from Source exactly as EffectiveOrigin does, so
+	// AIDetect + Webhook always equals Total for each status.
+	CountIncidentsByStatus() (IncidentStatusCounts, error)
 	// ListIncidentsPage returns one bounded page of incidents, newest first,
 	// skipping the first offset rows and returning at most limit rows. The
 	// page lists ALL incidents (resolved and open alike) so resolved
@@ -276,6 +361,13 @@ type IncidentSearchPager interface {
 	// CountIncidents. An empty query counts every unresolved incident (same as
 	// IncidentPager.CountIncidents).
 	CountIncidentsMatching(query string) (IncidentCounts, error)
+	// CountIncidentsMatchingByStatus returns the per-origin × per-status tally
+	// of incidents matching query, computed without materializing rows — the
+	// search-path twin of IncidentPager.CountIncidentsByStatus. An empty query
+	// counts every incident (same as CountIncidentsByStatus), so the Incidents
+	// page shows server-authoritative per-status counts over a filtered feed
+	// too, never a tally of the loaded page.
+	CountIncidentsMatchingByStatus(query string) (IncidentStatusCounts, error)
 	// SearchIncidentsPage returns one bounded page of incidents matching
 	// query, newest first, filtered to origin (empty = all origins), skipping
 	// offset rows and returning at most limit rows. The page lists ALL

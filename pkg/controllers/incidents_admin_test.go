@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/services"
 	"github.com/VersusControl/versus-incident/pkg/storage"
@@ -28,6 +29,7 @@ func TestResolveRouteRegistered(t *testing.T) {
 	}{
 		{"GET", "/api/admin/incidents/"},
 		{"GET", "/api/admin/incidents/search"},
+		{"GET", "/api/admin/incidents/counts"},
 		{"GET", "/api/admin/incidents/intake-settings"},
 		{"PUT", "/api/admin/incidents/intake-settings"},
 		{"GET", "/api/admin/incidents/:id"},
@@ -170,6 +172,22 @@ func TestSearchSupportedReturnsResults(t *testing.T) {
 	}
 }
 
+// perOriginJSON mirrors one {ai_detect, webhook, total} status bucket.
+type perOriginJSON struct {
+	AIDetect int `json:"ai_detect"`
+	Webhook  int `json:"webhook"`
+	Total    int `json:"total"`
+}
+
+// byStatusJSON mirrors the additive counts.by_status breakdown: one per-origin
+// bucket per status.
+type byStatusJSON struct {
+	Open     perOriginJSON `json:"open"`
+	Acked    perOriginJSON `json:"acked"`
+	Resolved perOriginJSON `json:"resolved"`
+	All      perOriginJSON `json:"all"`
+}
+
 // incidentListResp mirrors the JSON shape returned by the list/search
 // endpoints, including the additive origin counts and pagination meta.
 type incidentListResp struct {
@@ -178,9 +196,10 @@ type incidentListResp struct {
 		Origin string `json:"origin"`
 	} `json:"incidents"`
 	Counts struct {
-		AIDetect int `json:"ai_detect"`
-		Webhook  int `json:"webhook"`
-		Total    int `json:"total"`
+		AIDetect int          `json:"ai_detect"`
+		Webhook  int          `json:"webhook"`
+		Total    int          `json:"total"`
+		ByStatus byStatusJSON `json:"by_status"`
 	} `json:"counts"`
 	Total    int `json:"total"`
 	Page     int `json:"page"`
@@ -335,5 +354,110 @@ func TestListPagination(t *testing.T) {
 	ai2 := doList(t, ctrl, "?origin=ai_detect&page=2&page_size=2")
 	if len(ai2.Incidents) != 2 || ai2.Total != 4 {
 		t.Fatalf("ai_detect page 2 = rows:%d total:%d, want 2/4", len(ai2.Incidents), ai2.Total)
+	}
+}
+
+// seedStatusStore returns a memory store with a known per-origin × per-status
+// spread so the by_status breakdown has a non-trivial truth to match:
+//
+//	ai_detect: 2 open, 1 acked, 1 resolved (total 4)
+//	webhook:   1 open, 1 acked, 2 resolved (total 4, incl. a legacy row)
+func seedStatusStore(t *testing.T) storage.Provider {
+	t.Helper()
+	mem := storage.NewMemory()
+	acked := time.Unix(1_700_000_000, 0).UTC()
+	recs := []*storage.IncidentRecord{
+		{ID: "ai-open-1", Origin: storage.OriginAIDetect, Source: "agent"},
+		{ID: "ai-open-2", Origin: storage.OriginAIDetect, Source: "agent"},
+		{ID: "ai-acked", Origin: storage.OriginAIDetect, Source: "agent", AckedAt: &acked},
+		{ID: "ai-resolved", Origin: storage.OriginAIDetect, Source: "agent", Resolved: true},
+		{ID: "wh-open", Origin: storage.OriginWebhook, Source: "webhook"},
+		{ID: "wh-acked", Origin: storage.OriginWebhook, Source: "sns", AckedAt: &acked},
+		{ID: "wh-resolved", Origin: storage.OriginWebhook, Source: "webhook", Resolved: true},
+		{ID: "legacy-resolved", Source: "sqs", Resolved: true}, // derives webhook
+	}
+	for _, r := range recs {
+		if err := mem.SaveIncident(r); err != nil {
+			t.Fatalf("SaveIncident: %v", err)
+		}
+	}
+	return mem
+}
+
+func wantByStatus() byStatusJSON {
+	return byStatusJSON{
+		Open:     perOriginJSON{AIDetect: 2, Webhook: 1, Total: 3},
+		Acked:    perOriginJSON{AIDetect: 1, Webhook: 1, Total: 2},
+		Resolved: perOriginJSON{AIDetect: 1, Webhook: 2, Total: 3},
+		All:      perOriginJSON{AIDetect: 4, Webhook: 4, Total: 8},
+	}
+}
+
+// TestCountsEndpointByStatus verifies the dedicated /counts endpoint returns
+// the authoritative per-origin × per-status breakdown — the single source of
+// truth the header badge and the Now page read instead of tallying a bounded
+// page of rows.
+func TestCountsEndpointByStatus(t *testing.T) {
+	t.Cleanup(func() { services.SetStorage(nil) })
+	services.SetStorage(seedStatusStore(t))
+	ctrl := NewIncidentAdminController()
+
+	app := fiber.New()
+	app.Get("/counts", ctrl.counts)
+	resp, err := app.Test(httptest.NewRequest("GET", "/counts", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var got struct {
+		AIDetect int          `json:"ai_detect"`
+		Webhook  int          `json:"webhook"`
+		Total    int          `json:"total"`
+		ByStatus byStatusJSON `json:"by_status"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal %q: %v", body, err)
+	}
+
+	if got.ByStatus != wantByStatus() {
+		t.Fatalf("by_status = %+v, want %+v", got.ByStatus, wantByStatus())
+	}
+	// The back-compat top-level counts stay unresolved-only (open + acked).
+	if got.AIDetect != 3 || got.Webhook != 2 || got.Total != 5 {
+		t.Fatalf("top-level unresolved counts = ai:%d wh:%d total:%d, want 3/2/5",
+			got.AIDetect, got.Webhook, got.Total)
+	}
+}
+
+// TestListCarriesByStatus verifies the list response carries the same
+// authoritative by_status breakdown, so the Incidents page reads server counts
+// off its existing page fetch (no extra request) — and those counts reflect the
+// WHOLE set even when only a bounded page of rows is returned.
+func TestListCarriesByStatus(t *testing.T) {
+	t.Cleanup(func() { services.SetStorage(nil) })
+	services.SetStorage(seedStatusStore(t))
+	ctrl := NewIncidentAdminController()
+
+	// A tiny page so the returned rows are a strict subset of the set; the
+	// counts must still describe all 8 incidents.
+	got := doList(t, ctrl, "?page_size=2")
+	if len(got.Incidents) != 2 {
+		t.Fatalf("page rows = %d, want 2 (bounded)", len(got.Incidents))
+	}
+	if got.Counts.ByStatus != wantByStatus() {
+		t.Fatalf("list by_status = %+v, want %+v", got.Counts.ByStatus, wantByStatus())
+	}
+	// Reconciliation invariants: statuses sum to origin total, origins sum to
+	// the status total — the same guarantee every UI surface now relies on.
+	bs := got.Counts.ByStatus
+	if bs.Open.AIDetect+bs.Acked.AIDetect+bs.Resolved.AIDetect != bs.All.AIDetect {
+		t.Errorf("ai_detect statuses do not sum to its total: %+v", bs)
+	}
+	if bs.Open.AIDetect+bs.Open.Webhook != bs.Open.Total {
+		t.Errorf("open origins do not sum to open total: %+v", bs.Open)
 	}
 }

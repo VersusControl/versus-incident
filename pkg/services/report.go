@@ -445,7 +445,14 @@ func RenderIncidentsReport(ctx context.Context, window string) (*core.ReportImag
 // note where not. Per-channel outcomes are aggregated without
 // short-circuiting.
 func SendIncidentsReport(ctx context.Context, opts ReportSendOptions) (*ReportOutcome, error) {
-	cfg := config.GetConfig()
+	// Resolve the effective config the SAME way the alert path does so the
+	// report targets the runtime-overridden channel + token instead of the
+	// stale YAML config. nil params = no per-incident routing overlay (an
+	// aggregate report has no single incident to route), but the runtime
+	// channel override (credentials + channel-id + enable) still applies.
+	// OSS with no resolver + nil params hits GetConfigForAlert's fast path and
+	// returns the global cfg unchanged, so community behaviour is identical.
+	cfg := config.GetConfigForAlert(ctx, nil)
 	providers, err := common.NewAlertProviderFactory(cfg).CreateProviders()
 	if err != nil {
 		return nil, fmt.Errorf("report: build providers: %w", err)
