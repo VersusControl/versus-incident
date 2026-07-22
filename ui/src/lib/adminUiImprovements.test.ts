@@ -31,11 +31,15 @@ const learnedSignals = read("../pages/LearnedSignalsView.tsx");
 const servicesPage = read("../pages/ServicesPage.tsx");
 
 describe("Item 2 — top-bar AI/webhook split + no sidebar count", () => {
-  it("useOpenIncidentCount tallies open incidents by origin from the shared cache", () => {
-    expect(hooks.includes("countByOrigin")).toBe(true);
-    // Same cache key the Now page + badges share — one fetch, no extra load.
-    expect(/queryKey:\s*\["incidents",\s*"list"\]/.test(hooks)).toBe(true);
-    expect(/originCounts:\s*countByOrigin\(openList\)/.test(hooks)).toBe(true);
+  it("useOpenIncidentCount reads the AUTHORITATIVE server counts, not a loaded page", () => {
+    // The badge must never tally a bounded, loaded array — it reads the cheap
+    // per-origin × per-status server count endpoint and takes the OPEN slice.
+    expect(hooks.includes("countByOrigin")).toBe(false);
+    expect(hooks.includes("api.incidentCounts()")).toBe(true);
+    // Shared counts cache key the Now page uses too — one fetch, no rows.
+    expect(/queryKey:\s*\["incidents",\s*"counts"\]/.test(hooks)).toBe(true);
+    // Open grand total + per-origin open both come from by_status.open.
+    expect(/by_status\?\.open/.test(hooks)).toBe(true);
   });
 
   it("the top bar renders the AI/webhook split via formatOriginCounts", () => {

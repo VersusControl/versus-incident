@@ -27,6 +27,13 @@ Enable from the environment instead of YAML with `SLACK_ENABLE=true`.
 4. Invite the bot to the target channel and copy its **Channel ID** (the
    `C…` value in the channel details) into `SLACK_CHANNEL_ID`.
 
+> **Reports need channel membership.** Alerts post a message and work as
+> long as the bot can post to the channel, but the scheduled/aggregate
+> **report** uploads a PNG file, and Slack only lets a bot share a file into
+> a channel it has *joined*. Make sure the bot is invited to the channel
+> (`/invite @<bot>`) or grant it the `channels:join` scope so Versus can
+> auto-join public channels before uploading.
+
 ## Full reference
 
 ```yaml

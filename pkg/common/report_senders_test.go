@@ -88,9 +88,14 @@ func pngAttachment() core.Attachment {
 func TestSlackProvider_SendAttachment(t *testing.T) {
 	var uploadedBody []byte
 	var completeForm string
+	var joined bool
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case strings.HasSuffix(r.URL.Path, "/conversations.join"):
+			joined = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"ok":true,"channel":{"id":"C123"}}`)
 		case strings.HasSuffix(r.URL.Path, "/files.getUploadURLExternal"):
 			w.Header().Set("Content-Type", "application/json")
 			// upload_url points back at this server's /upload route.
@@ -115,11 +120,64 @@ func TestSlackProvider_SendAttachment(t *testing.T) {
 	if err := p.SendAttachment(&m.Incident{}, pngAttachment()); err != nil {
 		t.Fatalf("SendAttachment: %v", err)
 	}
+	if !joined {
+		t.Fatal("expected a best-effort conversations.join before upload")
+	}
 	if !strings.Contains(string(uploadedBody), "FAKEPNGDATA") {
 		t.Fatalf("upload did not carry the PNG bytes; got %q", uploadedBody)
 	}
 	if !strings.Contains(completeForm, "initial_comment") {
 		t.Fatalf("complete step missing caption/initial_comment: %q", completeForm)
+	}
+}
+
+// TestSlackProvider_SendAttachment_NotInChannel verifies that when the upload
+// is rejected with not_in_channel (the bot isn't a member), the failure is
+// wrapped in an operator-actionable message — and that no token/secret leaks
+// into the error.
+func TestSlackProvider_SendAttachment_NotInChannel(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/conversations.join"):
+			// Simulate a private channel / missing scope: join fails, and we
+			// still proceed to the upload (which then gets rejected).
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"ok":false,"error":"method_not_supported_for_channel_type"}`)
+		case strings.HasSuffix(r.URL.Path, "/files.getUploadURLExternal"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"ok":true,"upload_url":"`+srv.URL+`/upload","file_id":"F1"}`)
+		case strings.HasSuffix(r.URL.Path, "/upload"):
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/files.completeUploadExternal"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"ok":false,"error":"not_in_channel"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := slack.New("xoxb-secret-token", slack.OptionAPIURL(srv.URL+"/"))
+	p := &SlackProvider{client: client, channelID: "C123"}
+
+	err := p.SendAttachment(&m.Incident{}, pngAttachment())
+	if err == nil {
+		t.Fatal("expected an error when the upload is rejected with not_in_channel")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"not a member of channel C123",
+		"channels:join",
+		"/invite",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("actionable error missing %q; got: %s", want, msg)
+		}
+	}
+	// The token/secret must never appear in the surfaced error.
+	if strings.Contains(msg, "xoxb-secret-token") {
+		t.Fatalf("error leaked the bot token: %s", msg)
 	}
 }
 

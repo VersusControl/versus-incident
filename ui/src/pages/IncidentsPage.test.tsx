@@ -12,7 +12,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { ToastProvider } from "@/components/Toast";
 import { IncidentsPage } from "./IncidentsPage";
-import { api, type IncidentIndex, type IncidentSummary } from "@/lib/api";
+import {
+  api,
+  type IncidentIndex,
+  type IncidentStatusCounts,
+  type IncidentSummary,
+  type OriginCounts,
+} from "@/lib/api";
 
 // The Incidents table row exposes ONLY the eye (Assign / Resolve moved to the
 // bulk-action bar), and the row itself is no longer a navigation control —
@@ -49,10 +55,32 @@ function incident(overrides: Partial<IncidentSummary> = {}): IncidentSummary {
   };
 }
 
-function index(rows: IncidentSummary[]): IncidentIndex {
+function oc(ai: number, webhook: number): OriginCounts {
+  return { ai_detect: ai, webhook, total: ai + webhook };
+}
+
+// index builds a list response. by_status is the server's authoritative
+// per-origin × per-status breakdown; when omitted it is derived treating every
+// loaded row as an open ai_detect incident (the common single-row fixture).
+function index(
+  rows: IncidentSummary[],
+  by_status?: IncidentStatusCounts,
+): IncidentIndex {
+  const bs =
+    by_status ?? {
+      open: oc(rows.length, 0),
+      acked: oc(0, 0),
+      resolved: oc(0, 0),
+      all: oc(rows.length, 0),
+    };
   return {
     incidents: rows,
-    counts: { ai_detect: rows.length, webhook: 0, total: rows.length },
+    counts: {
+      ai_detect: bs.open.ai_detect + bs.acked.ai_detect,
+      webhook: bs.open.webhook + bs.acked.webhook,
+      total: bs.open.total + bs.acked.total,
+      by_status: bs,
+    },
     total: rows.length,
   };
 }
@@ -183,5 +211,42 @@ describe("IncidentsPage — webhook auto-resolve toggle", () => {
         auto_resolve_webhook: false,
       }),
     );
+  });
+});
+
+// The status- and origin-tab counts must be the SERVER's authoritative
+// per-origin × per-status totals — never a tally of the bounded loaded page.
+// This is the fix for the "three surfaces, three numbers" bug: with a webhook
+// history that auto-resolves, the loaded page holds a single OPEN row yet the
+// server sees 277 resolved, so the Resolved tab must read 277 (server), not 0
+// (loaded page), and origin All must read the whole-set 278.
+describe("IncidentsPage — tab counts come from server by_status", () => {
+  it("shows server per-status totals, not the loaded page", async () => {
+    const loaded = incident({
+      id: "wh-open-1",
+      origin: "webhook",
+      source: "webhook",
+      resolved: false,
+    });
+    const byStatus: IncidentStatusCounts = {
+      open: oc(0, 2),
+      acked: oc(0, 5),
+      resolved: oc(0, 277),
+      all: oc(0, 284),
+    };
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue(
+      index([loaded], byStatus),
+    );
+
+    renderPageAt("/incidents?origin=webhook&status=resolved");
+
+    // The Resolved status tab shows the server's 277 — the loaded page has zero
+    // resolved rows, so a client tally would have shown 0.
+    expect(await screen.findByText("277")).toBeTruthy();
+    // The Acked tab shows the server's 5 (also absent from the loaded page).
+    expect(screen.getByText("5")).toBeTruthy();
+    // The webhook feed total (284) reconciles across the origin tab and the
+    // "All" status tab — the SAME server number in both places.
+    expect(screen.getAllByText("284").length).toBeGreaterThanOrEqual(2);
   });
 });

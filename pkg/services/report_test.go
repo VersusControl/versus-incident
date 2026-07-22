@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/agent"
+	"github.com/VersusControl/versus-incident/pkg/common"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/report"
@@ -580,4 +581,128 @@ func TestResolveReportChannels_Precedence(t *testing.T) {
 	if got := resolveReportChannels("", ""); got != nil {
 		t.Fatalf("no channel: %v", got)
 	}
+}
+
+// reportChannelResolver is a runtime channel-override stub mirroring an
+// operator who changed the Slack channel's credentials/channel-id/enable at
+// runtime (the hot-reload seam). It overlays only the Slack channel and leaves
+// every other channel at its YAML floor.
+type reportChannelResolver struct {
+	enable    bool
+	token     string
+	channelID string
+}
+
+func (r reportChannelResolver) ResolveAlert(_ context.Context, base *config.AlertConfig) bool {
+	base.Slack.Enable = r.enable
+	base.Slack.Token = r.token
+	base.Slack.ChannelID = r.channelID
+	return true
+}
+
+// TestSendIncidentsReport_HonorsRuntimeChannelOverride proves the report send
+// path resolves its channel config the SAME way alerts do (via
+// GetConfigForAlert), so a runtime channel override reaches the report's
+// providers instead of the stale YAML config — and that with NO resolver the
+// report is byte-for-byte identical to the pre-fix behaviour (OSS parity).
+func TestSendIncidentsReport_HonorsRuntimeChannelOverride(t *testing.T) {
+	loadAgentTestConfig(t)
+	base := config.GetConfigOrNil()
+	if base == nil {
+		t.Fatal("global config not loaded")
+	}
+	// Known YAML floor: Slack enabled with a YAML channel + token.
+	savedAlert := base.Alert
+	t.Cleanup(func() { base.Alert = savedAlert })
+	base.Alert = config.AlertConfig{
+		Slack: config.SlackConfig{
+			Enable:       true,
+			Token:        "yaml-token",
+			ChannelID:    "C-YAML",
+			TemplatePath: "slack.tmpl",
+		},
+	}
+
+	st := windowStore(t)
+	prevStore := Storage()
+	SetStorage(st)
+	t.Cleanup(func() { SetStorage(prevStore) })
+	enableReport(t, st, ReportSettings{Enable: true, DefaultChannel: "slack"})
+	prevRenderer := ReportRenderer()
+	SetReportRenderer(fakeRenderer{})
+	t.Cleanup(func() { SetReportRenderer(prevRenderer) })
+	t.Cleanup(func() { config.SetAlertConfigResolver(nil) })
+
+	ctx := context.Background()
+
+	// 1. A registered runtime override changes the channel-id + token + enable
+	//    the report's providers are built from — matching the alert path.
+	t.Run("runtime override reaches report providers", func(t *testing.T) {
+		config.SetAlertConfigResolver(reportChannelResolver{enable: true, token: "runtime-token", channelID: "C-RUNTIME"})
+		t.Cleanup(func() { config.SetAlertConfigResolver(nil) })
+
+		// The exact resolution SendIncidentsReport performs.
+		eff := config.GetConfigForAlert(ctx, nil)
+		if eff.Alert.Slack.ChannelID != "C-RUNTIME" || eff.Alert.Slack.Token != "runtime-token" || !eff.Alert.Slack.Enable {
+			t.Fatalf("effective slack = %+v, want runtime override (channel-id + token + enable)", eff.Alert.Slack)
+		}
+		// The report's providers are built from that resolved config, so the
+		// Slack provider now targets the overridden channel + token.
+		providers, err := common.NewAlertProviderFactory(eff).CreateProviders()
+		if err != nil {
+			t.Fatalf("build providers: %v", err)
+		}
+		if !hasProviderNamed(providers, "slack") {
+			t.Fatalf("report providers missing overridden slack channel: %v", providerNames(providers))
+		}
+		// The runtime overlay never mutates the global config (golden rule #4).
+		if base.Alert.Slack.ChannelID != "C-YAML" || base.Alert.Slack.Token != "yaml-token" {
+			t.Fatalf("global cfg mutated by overlay: %+v", base.Alert.Slack)
+		}
+	})
+
+	// 2. A runtime override that DISABLES the target propagates through the
+	//    real send path (network-free): no provider is built, so the send
+	//    resolves no channel — proving SendIncidentsReport honors the override
+	//    (with the old GetConfig() it would still target the enabled YAML slack).
+	t.Run("runtime override changes the real send path", func(t *testing.T) {
+		config.SetAlertConfigResolver(reportChannelResolver{enable: false})
+		t.Cleanup(func() { config.SetAlertConfigResolver(nil) })
+
+		if _, err := SendIncidentsReport(ctx, ReportSendOptions{Window: "today"}); !errors.Is(err, ErrReportNoChannel) {
+			t.Fatalf("err = %v, want ErrReportNoChannel (runtime override disabled the slack target)", err)
+		}
+	})
+
+	// 3. OSS parity: with NO resolver and nil params, GetConfigForAlert returns
+	//    the GLOBAL cfg pointer unchanged (documented fast path), so a pure-OSS
+	//    report is byte-for-byte identical to the pre-fix GetConfig() behaviour.
+	t.Run("no resolver uses YAML config unchanged (OSS parity)", func(t *testing.T) {
+		config.SetAlertConfigResolver(nil)
+
+		if got := config.GetConfigForAlert(ctx, nil); got != config.GetConfig() {
+			t.Fatal("OSS fast path must return the global cfg pointer unchanged (byte-for-byte parity)")
+		}
+		eff := config.GetConfigForAlert(ctx, nil)
+		if eff.Alert.Slack.ChannelID != "C-YAML" || eff.Alert.Slack.Token != "yaml-token" || !eff.Alert.Slack.Enable {
+			t.Fatalf("effective slack = %+v, want YAML floor unchanged", eff.Alert.Slack)
+		}
+	})
+}
+
+func hasProviderNamed(providers []core.AlertProvider, name string) bool {
+	for _, p := range providers {
+		if p.Name() == name {
+			return true
+		}
+	}
+	return false
+}
+
+func providerNames(providers []core.AlertProvider) []string {
+	names := make([]string, 0, len(providers))
+	for _, p := range providers {
+		names = append(names, p.Name())
+	}
+	return names
 }

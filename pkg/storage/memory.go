@@ -162,6 +162,17 @@ func (m *memoryProvider) CountIncidents() (IncidentCounts, error) {
 	return c, nil
 }
 
+// CountIncidentsByStatus implements the optional storage.IncidentPager
+// capability. The in-memory history is already capped, so a single pass over
+// the slice is cheap; the shared StatusCountsOf helper classifies each row via
+// EffectiveOrigin and buckets it by stored status, matching the SQL backend
+// exactly.
+func (m *memoryProvider) CountIncidentsByStatus() (IncidentStatusCounts, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return StatusCountsOf(m.incidents), nil
+}
+
 // ListIncidentsPage implements the optional storage.IncidentPager
 // capability: one bounded, newest-first page over the in-memory slice,
 // skipping offset matches and returning at most limit rows. The origin

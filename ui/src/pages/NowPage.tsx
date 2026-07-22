@@ -22,6 +22,7 @@ import {
   ApiError,
   type AgentConfigView,
   type IncidentSummary,
+  type OriginCounts,
   type Status,
 } from "@/lib/api";
 import {
@@ -40,7 +41,6 @@ import { ClickableRow } from "@/components/DataTable";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { useNowTick, useTableKeys } from "@/lib/hooks";
 import {
-  countByOrigin,
   formatOriginCounts,
   matchesOrigin,
   normalizeOrigin,
@@ -66,15 +66,27 @@ export function NowPage() {
   // Incidents page.
   const origin = normalizeOrigin(params.get("origin"));
 
-  // Shares ["incidents","list"] with useOpenIncidentCount (TopBar/Sidebar
-  // badges) so the page and the badges never disagree. 15s auto-refresh,
-  // paused while the tab is hidden; the TopBar ⟳ is the manual path.
+  // Shares ["incidents","list"] with the feed elsewhere — the loaded rows back
+  // the latest-10 feed and the 24h trend sparklines below. Every NUMBER on the
+  // page, though, comes from the server counts query (below), never this
+  // bounded page. 15s auto-refresh, paused while the tab is hidden.
   const incidents = useQuery({
     queryKey: ["incidents", "list"],
     queryFn: () => api.listIncidents(),
     refetchInterval: () => (document.hidden ? false : 15_000),
     staleTime: 15_000,
   });
+  // The authoritative per-origin × per-status count — one cheap, rows-free
+  // request shared with the header badge (useOpenIncidentCount, same key). The
+  // KPI tiles, the origin-tab badges and the open-banner count all read this,
+  // so the Now page, the header badge and the Incidents page never disagree.
+  const countsQ = useQuery({
+    queryKey: ["incidents", "counts"],
+    queryFn: () => api.incidentCounts(),
+    refetchInterval: () => (document.hidden ? false : 15_000),
+    staleTime: 15_000,
+  });
+  const byStatus = countsQ.data?.by_status;
   // Same keys as TopBar's chip queries — one cache entry, zero extra load.
   const config = useQuery({
     queryKey: ["agent-config"],
@@ -101,34 +113,36 @@ export function NowPage() {
     return list;
   }, [incidents.data]);
 
-  // Whole-set per-origin tally (both feeds), computed client-side from the
-  // one shared ["incidents","list"] cache so the segmented-control badges
-  // and the top-bar summary show BOTH feeds separately regardless of the
-  // active tab — the webhook count never lumps into the AI count.
-  const originCounts = useMemo(() => countByOrigin(sorted), [sorted]);
+  // Whole-set per-origin totals (all statuses) from the server drive the
+  // origin-tab badges and the top-bar summary, so both feeds stay visible
+  // regardless of the active tab — the webhook count never lumps into AI.
+  const originCounts = byStatus?.all;
 
-  // The active tab scopes the whole live view (banner, KPI counts, feed,
-  // trends) to one origin — split client-side rather than refetching, so
-  // the TopBar/Sidebar open badge (which needs the whole set) keeps
-  // sharing this cache.
+  // The active tab scopes the live view (banner PREVIEW rows, feed, trends) to
+  // one origin. Rows are split client-side (they share the list cache); the
+  // COUNTS are read from the server breakdown for the active origin below.
   const scoped = useMemo(
     () => sorted.filter((i) => matchesOrigin(i, origin)),
     [sorted, origin],
   );
 
-  // open = !resolved && !acked_at; acked = acked_at && !resolved.
+  // Loaded open rows for the banner PREVIEW list only — the open COUNT shown is
+  // the server number (counts.open), which may exceed these loaded rows.
   const openIncidents = useMemo(
     () => scoped.filter((i) => !i.resolved && !i.acked_at),
     [scoped],
   );
-  const counts = useMemo(
-    () => ({
-      open: openIncidents.length,
-      acked: scoped.filter((i) => !i.resolved && !!i.acked_at).length,
-      resolved: scoped.filter((i) => i.resolved).length,
-    }),
-    [scoped, openIncidents],
-  );
+  // KPI + banner numbers for the active origin, straight from the server's
+  // per-origin × per-status breakdown — never a tally of the loaded page.
+  const counts = useMemo(() => {
+    const pick = (c?: OriginCounts) =>
+      origin === "webhook" ? c?.webhook ?? 0 : c?.ai_detect ?? 0;
+    return {
+      open: pick(byStatus?.open),
+      acked: pick(byStatus?.acked),
+      resolved: pick(byStatus?.resolved),
+    };
+  }, [byStatus, origin]);
   const feed = useMemo(() => scoped.slice(0, 10), [scoped]);
 
   // Most recently resolved incident — context for the all-clear banner.
@@ -174,9 +188,13 @@ export function NowPage() {
   });
 
   const refreshing =
-    incidents.isFetching || status.isFetching || config.isFetching;
+    incidents.isFetching ||
+    countsQ.isFetching ||
+    status.isFetching ||
+    config.isFetching;
   const refreshAll = () => {
     incidents.refetch();
+    countsQ.refetch();
     status.refetch();
     config.refetch();
   };
@@ -212,7 +230,7 @@ export function NowPage() {
       <TopBar
         title="Now"
         subtitle={
-          incidents.data ? formatOriginCounts(originCounts) : "auto-refresh 15s"
+          originCounts ? formatOriginCounts(originCounts) : "auto-refresh 15s"
         }
         actions={
           <button
@@ -242,30 +260,34 @@ export function NowPage() {
             {
               value: "ai_detect",
               label: originLabel("ai_detect"),
-              badge: incidents.data ? originCounts.ai_detect : undefined,
+              badge: originCounts?.ai_detect,
             },
             {
               value: "webhook",
               label: originLabel("webhook"),
-              badge: incidents.data ? originCounts.webhook : undefined,
+              badge: originCounts?.webhook,
             },
           ]}
         />
 
-        {/* (1) Open-incident banner — recency-sorted until backend ask #1
-            ships severity on summaries; whole card opens the incident. */}
-        {incidents.isPending && (
+        {/* (1) Open-incident banner — the OPEN count is the server number;
+            the preview rows are the loaded page. Recency-sorted until backend
+            ask #1 ships severity on summaries. */}
+        {(incidents.isPending || countsQ.isPending) && (
           <div aria-hidden className="sk h-14 rounded-card" />
         )}
-        {incidents.isError && (
+        {(incidents.isError || countsQ.isError) && (
           <RetryableError
             context="Couldn't load incidents"
-            error={incidents.error}
-            onRetry={() => incidents.refetch()}
-            retrying={incidents.isFetching}
+            error={incidents.error ?? countsQ.error}
+            onRetry={() => {
+              incidents.refetch();
+              countsQ.refetch();
+            }}
+            retrying={incidents.isFetching || countsQ.isFetching}
           />
         )}
-        {incidents.isSuccess && openIncidents.length === 0 && (
+        {byStatus && counts.open === 0 && (
           <div className="flex items-center gap-3 rounded-card border border-sev-ok/30 bg-sev-ok/10 px-4 py-3">
             <CheckCircle2 size={18} className="shrink-0 text-sev-ok" aria-hidden />
             <div className="min-w-0">
@@ -288,7 +310,7 @@ export function NowPage() {
             </div>
           </div>
         )}
-        {incidents.isSuccess && openIncidents.length > 0 && (
+        {byStatus && counts.open > 0 && (
           <section aria-label="Open incidents" className="card overflow-hidden">
             <div className="card-header py-2">
               <span className="inline-flex items-center gap-2 text-xs font-semibold text-sev-critical">
@@ -340,12 +362,12 @@ export function NowPage() {
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <KpiTile
             label="Open"
-            value={incidents.data ? counts.open : undefined}
-            loading={incidents.isPending}
+            value={byStatus ? counts.open : undefined}
+            loading={countsQ.isPending}
             to={withOrigin("/incidents")}
             icon={AlertTriangle}
             tone={
-              incidents.data
+              byStatus
                 ? counts.open > 0
                   ? "critical"
                   : "ok"
@@ -359,19 +381,19 @@ export function NowPage() {
           />
           <KpiTile
             label="Acked"
-            value={incidents.data ? counts.acked : undefined}
-            loading={incidents.isPending}
+            value={byStatus ? counts.acked : undefined}
+            loading={countsQ.isPending}
             to={withOrigin("/incidents?status=acked")}
             icon={BellRing}
-            tone={incidents.data && counts.acked > 0 ? "warn" : undefined}
+            tone={byStatus && counts.acked > 0 ? "warn" : undefined}
             spark={incidents.data ? trends.acked : undefined}
             sparkLabel={`${trends.acked24} incidents acknowledged in the last 24 hours`}
             foot={incidents.data ? `${trends.acked24} acked · 24h` : undefined}
           />
           <KpiTile
             label="Resolved"
-            value={incidents.data ? counts.resolved : undefined}
-            loading={incidents.isPending}
+            value={byStatus ? counts.resolved : undefined}
+            loading={countsQ.isPending}
             to={withOrigin("/incidents?status=resolved")}
             icon={CheckCircle2}
             spark={incidents.data ? trends.resolved : undefined}

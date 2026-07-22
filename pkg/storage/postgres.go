@@ -766,6 +766,37 @@ func (p *postgresProvider) CountIncidents() (IncidentCounts, error) {
 	return c, nil
 }
 
+// CountIncidentsByStatus implements the optional storage.IncidentPager
+// capability: the whole-set per-origin × per-status tally in ONE COUNT query,
+// without shipping a single row to Go. The per-status buckets read the
+// promoted resolved / acked_at columns and the per-origin split reads the
+// promoted origin column, so the whole query is index-friendly. Only the
+// whole-set totals and the ai_detect slice are counted in SQL; webhook is
+// derived as (total − ai_detect) by AssembleStatusCounts so a legacy row with
+// an empty origin — which classifies as webhook via EffectiveOrigin — is
+// counted as webhook here too, keeping AIDetect + Webhook == Total.
+func (p *postgresProvider) CountIncidentsByStatus() (IncidentStatusCounts, error) {
+	const q = `
+		SELECT
+			COUNT(*) FILTER (WHERE resolved = false AND acked_at IS NULL)     AS open_total,
+			COUNT(*) FILTER (WHERE resolved = false AND acked_at IS NOT NULL) AS acked_total,
+			COUNT(*) FILTER (WHERE resolved = true)                           AS resolved_total,
+			COUNT(*)                                                          AS all_total,
+			COUNT(*) FILTER (WHERE origin = 'ai_detect' AND resolved = false AND acked_at IS NULL)     AS open_ai,
+			COUNT(*) FILTER (WHERE origin = 'ai_detect' AND resolved = false AND acked_at IS NOT NULL) AS acked_ai,
+			COUNT(*) FILTER (WHERE origin = 'ai_detect' AND resolved = true)                           AS resolved_ai,
+			COUNT(*) FILTER (WHERE origin = 'ai_detect')                                               AS all_ai
+		FROM vs_incidents`
+	var total, ai StatusCounts
+	if err := p.db.QueryRow(q).Scan(
+		&total.Open, &total.Acked, &total.Resolved, &total.Total,
+		&ai.Open, &ai.Acked, &ai.Resolved, &ai.Total,
+	); err != nil {
+		return IncidentStatusCounts{}, fmt.Errorf("storage: count incidents by status: %w", err)
+	}
+	return AssembleStatusCounts(total, ai), nil
+}
+
 // ListIncidentsPage implements the optional storage.IncidentPager
 // capability: one bounded, newest-first page pushed entirely into SQL
 // (ORDER BY created_at DESC LIMIT/OFFSET). When origin is one of the known
@@ -1024,6 +1055,40 @@ func (p *postgresProvider) CountIncidentsMatching(query string) (IncidentCounts,
 		return IncidentCounts{}, fmt.Errorf("storage: count matching incidents: %w", err)
 	}
 	return c, nil
+}
+
+// CountIncidentsMatchingByStatus implements the optional
+// storage.IncidentSearchPager capability: the per-origin × per-status tally of
+// search matches in ONE COUNT query — the search-path twin of
+// CountIncidentsByStatus. An empty query degrades to counting every incident,
+// matching CountIncidentsByStatus. Like the plain count only the whole-match
+// totals and the ai_detect slice are counted; webhook is the complement so
+// AIDetect + Webhook == Total holds over the match set too.
+func (p *postgresProvider) CountIncidentsMatchingByStatus(query string) (IncidentStatusCounts, error) {
+	if query == "" {
+		return p.CountIncidentsByStatus()
+	}
+	pattern := "%" + query + "%"
+	q := fmt.Sprintf(`
+		SELECT
+			COUNT(*) FILTER (WHERE resolved = false AND acked_at IS NULL)     AS open_total,
+			COUNT(*) FILTER (WHERE resolved = false AND acked_at IS NOT NULL) AS acked_total,
+			COUNT(*) FILTER (WHERE resolved = true)                           AS resolved_total,
+			COUNT(*)                                                          AS all_total,
+			COUNT(*) FILTER (WHERE origin = 'ai_detect' AND resolved = false AND acked_at IS NULL)     AS open_ai,
+			COUNT(*) FILTER (WHERE origin = 'ai_detect' AND resolved = false AND acked_at IS NOT NULL) AS acked_ai,
+			COUNT(*) FILTER (WHERE origin = 'ai_detect' AND resolved = true)                           AS resolved_ai,
+			COUNT(*) FILTER (WHERE origin = 'ai_detect')                                               AS all_ai
+		FROM vs_incidents
+		WHERE (%[1]s)`, searchIncidentsWhereSQL)
+	var total, ai StatusCounts
+	if err := p.db.QueryRow(q, pattern).Scan(
+		&total.Open, &total.Acked, &total.Resolved, &total.Total,
+		&ai.Open, &ai.Acked, &ai.Resolved, &ai.Total,
+	); err != nil {
+		return IncidentStatusCounts{}, fmt.Errorf("storage: count matching incidents by status: %w", err)
+	}
+	return AssembleStatusCounts(total, ai), nil
 }
 
 // SearchIncidentsPage implements the optional storage.IncidentSearchPager
