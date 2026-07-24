@@ -2,10 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/agent/ai"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
@@ -127,14 +130,17 @@ func TestWorker_EmitDetect_HappyPath(t *testing.T) {
 	}
 }
 
-// TestWorker_EmitDetect_DryWhenNoAgent asserts the worker preserves
-// the "dry detect" behaviour when AIBundle.Detect is nil — the bundle
-// is allowed to be zero-valued, and emitDetect must not panic / not
-// call the emitter.
-func TestWorker_EmitDetect_DryWhenNoAgent(t *testing.T) {
+// TestWorker_EmitDetect_TemplatedWhenNoAgent asserts that when
+// AIBundle.Detect is nil the worker no longer drops the detection: it
+// builds a deterministic (templated) finding and emits it exactly once,
+// marked as a heuristic. Detection is AI-free, so a real anomaly must
+// still page even with no AI key.
+func TestWorker_EmitDetect_TemplatedWhenNoAgent(t *testing.T) {
+	var got *core.AIFinding
 	called := 0
-	emitter := func(*core.AIFinding, core.AgentResult, string, string) error {
+	emitter := func(f *core.AIFinding, _ core.AgentResult, _, _ string) error {
 		called++
+		got = f
 		return nil
 	}
 
@@ -148,11 +154,20 @@ func TestWorker_EmitDetect_DryWhenNoAgent(t *testing.T) {
 		0, 0, 0, "",
 	)
 
-	if outcome != "dry" {
-		t.Fatalf("outcome = %q, want dry", outcome)
+	if outcome != "emitted_basic" {
+		t.Fatalf("outcome = %q, want emitted_basic", outcome)
 	}
-	if called != 0 {
-		t.Fatalf("emitter called %d times in dry mode, want 0", called)
+	if called != 1 {
+		t.Fatalf("emitter called %d times, want 1 (templated alert)", called)
+	}
+	if got == nil {
+		t.Fatal("emitter never received a finding")
+	}
+	if got.Category != "anomaly" {
+		t.Fatalf("finding category = %q, want anomaly", got.Category)
+	}
+	if !strings.Contains(got.Summary, heuristicMarker) {
+		t.Fatalf("finding summary missing heuristic marker: %q", got.Summary)
 	}
 }
 
@@ -214,5 +229,91 @@ func TestWorker_EmitDetect_HonorsDeclaredSeverityFloor(t *testing.T) {
 				t.Fatalf("emitted severity = %q, want %q", got.Severity, tc.wantSeverity)
 			}
 		})
+	}
+}
+
+// TestWorker_EmitDetect_TemplatedOnQuota proves the rate guard no longer
+// drops the page: when the AI hourly budget is exhausted the worker sends
+// a deterministic templated alert instead. The AI agent is never called,
+// the emitter fires exactly once, the finding is marked heuristic, and the
+// outcome is emitted_basic_quota.
+func TestWorker_EmitDetect_TemplatedOnQuota(t *testing.T) {
+	agent := &fakeAgent{finding: &core.AIFinding{Title: "ai", Severity: "high"}}
+
+	// A one-call budget, spent before emitDetect runs, so its Allow() sees
+	// the bucket exhausted.
+	rate := ai.NewRateLimiter(1)
+	if !rate.Allow() {
+		t.Fatal("precondition: first Allow() should pass")
+	}
+
+	var got *core.AIFinding
+	called := 0
+	emitter := func(f *core.AIFinding, _ core.AgentResult, _, _ string) error {
+		called++
+		got = f
+		return nil
+	}
+
+	w := newWorkerForTest(t, AIBundle{Detect: agent, Rate: rate}, emitter)
+
+	outcome := w.emitDetect(
+		context.Background(),
+		"test", "pid-quota", "boom", "svc-x",
+		[]core.Signal{{Message: "boom"}},
+		core.VerdictSpike,
+		0, 6, 1, "",
+	)
+
+	if outcome != "emitted_basic_quota" {
+		t.Fatalf("outcome = %q, want emitted_basic_quota", outcome)
+	}
+	if n := atomic.LoadInt32(&agent.calls); n != 0 {
+		t.Fatalf("agent.calls = %d, want 0 (no AI call under quota)", n)
+	}
+	if called != 1 {
+		t.Fatalf("emitter called %d times, want 1", called)
+	}
+	if got == nil || !strings.Contains(got.Summary, heuristicMarker) {
+		t.Fatalf("emitted finding missing heuristic marker: %+v", got)
+	}
+}
+
+// TestWorker_EmitDetect_TemplatedOnAIError proves a transient AI failure no
+// longer drops the page: the worker calls the model, sees the error, and
+// falls back to a deterministic templated alert. The emitter fires exactly
+// once and the outcome is emitted_basic_error.
+func TestWorker_EmitDetect_TemplatedOnAIError(t *testing.T) {
+	agent := &fakeAgent{err: errors.New("model exploded")}
+
+	var got *core.AIFinding
+	called := 0
+	emitter := func(f *core.AIFinding, _ core.AgentResult, _, _ string) error {
+		called++
+		got = f
+		return nil
+	}
+
+	w := newWorkerForTest(t, AIBundle{Detect: agent}, emitter)
+
+	outcome := w.emitDetect(
+		context.Background(),
+		"test", "pid-err", "boom", "svc-x",
+		[]core.Signal{{Message: "boom"}},
+		core.VerdictSpike,
+		0, 6, 1, "",
+	)
+
+	if outcome != "emitted_basic_error" {
+		t.Fatalf("outcome = %q, want emitted_basic_error", outcome)
+	}
+	if n := atomic.LoadInt32(&agent.calls); n != 1 {
+		t.Fatalf("agent.calls = %d, want 1 (AI was attempted)", n)
+	}
+	if called != 1 {
+		t.Fatalf("emitter called %d times, want 1", called)
+	}
+	if got == nil || !strings.Contains(got.Summary, heuristicMarker) {
+		t.Fatalf("emitted finding missing heuristic marker: %+v", got)
 	}
 }

@@ -96,13 +96,13 @@ func TestDetectLog_Stats(t *testing.T) {
 	d.Record(&DetectEvent{Outcome: "emitted", Verdict: "unknown",
 		Finding: &core.AIFinding{Severity: "high"}})
 	d.Record(&DetectEvent{Outcome: "cached", Verdict: "unknown"})
-	d.Record(&DetectEvent{Outcome: "ai_error", Verdict: "spike"})
+	d.Record(&DetectEvent{Outcome: "emitted_basic_error", Verdict: "spike"})
 
 	s := d.Stats()
 	if s["events"] != 3 {
 		t.Fatalf("events=%d", s["events"])
 	}
-	if s["outcome_emitted"] != 1 || s["outcome_cached"] != 1 || s["outcome_ai_error"] != 1 {
+	if s["outcome_emitted"] != 1 || s["outcome_cached"] != 1 || s["outcome_emitted_basic_error"] != 1 {
 		t.Fatalf("outcome stats wrong: %+v", s)
 	}
 	if s["verdict_unknown"] != 2 || s["verdict_spike"] != 1 {

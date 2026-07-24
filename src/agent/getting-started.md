@@ -3,7 +3,7 @@
 This guide takes you from nothing to a running agent in **training
 mode**, reading from a local file and saving what it learns to disk.
 
-![Training Mode](../docs/images/training-mode.png)
+![Training Mode](../docs/images/agent-training-mode.png)
 
 By the end you'll have:
 

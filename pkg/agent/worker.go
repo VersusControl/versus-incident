@@ -74,7 +74,8 @@ type Worker struct {
 	tracesMatcher  *RegexMatcher
 
 	// Detect-mode dependencies. All three are nil-safe: when ai.Detect
-	// is nil the worker logs a "dry detect" line and skips emission.
+	// is nil the worker emits a deterministic templated alert instead of
+	// calling AI, so a detection is never dropped for lack of a key.
 	ai      AIBundle
 	emitter Emitter
 
@@ -248,13 +249,13 @@ func (w *Worker) Run(ctx context.Context) {
 	log.Printf("agent: starting worker mode=%s sources=%d poll=%s",
 		mode, len(w.sources), w.pollInterval)
 
-	// Surface the dead-end config once at boot: detect mode wants to emit
-	// incidents but AI is disabled, so the detect path runs dry. Only warn
-	// in community mode — when a runtime AISettingsResolver is registered
-	// the enable flag can switch AI on later, so it is not a dead end. The
-	// configured mode is left untouched.
+	// Surface at boot that detect mode is running without AI: detections still
+	// emit incidents, but as deterministic templated alerts rather than
+	// AI-enriched ones. Only note it in community mode — when a runtime
+	// AISettingsResolver is registered the enable flag can switch AI on later.
+	// The configured mode is left untouched.
 	if mode == "detect" && !w.cfg.AI.Enable && aiSettingsResolver() == nil {
-		log.Printf("agent: WARN detect mode configured but AI disabled — running dry detect, no incidents will be emitted")
+		log.Printf("agent: detect mode without AI — emitting deterministic templated alerts (configure agent.ai to enrich them)")
 	}
 
 	// Start the recurring-evaluation scheduler. It runs registered
@@ -622,15 +623,22 @@ func promoteByCount(learner core.SignalLearner, key string) {
 }
 
 // emitDetect handles one Unknown / Spike pattern in detect mode. Returns
-// a short outcome label ("emitted" | "cached" | "dry" | "quota" |
-// "ai_error" | "send_error") used as a stat suffix in the tick log.
+// a short outcome label ("emitted" | "cached" | "emitted_basic" |
+// "emitted_basic_quota" | "emitted_basic_error" | "send_error") used as a
+// stat suffix in the tick log.
 //
-// The function is nil-safe through and through:
-//   - w.ai.Detect == nil       → "dry detect": classify, log, do not emit.
-//   - w.ai.Cache hit           → reuse the prior finding without re-calling AI.
-//   - w.ai.Rate.Allow == false → skip this call (would-be cost shed).
-//   - w.emitter == nil         → AI was called and cached, but no incident is sent
-//     (shadow-of-detect: useful for validating AI output without alerting).
+// A brain-detected anomaly is NEVER silently dropped: detection is AI-free, so
+// whenever AI is unavailable the worker builds a deterministic (templated)
+// finding and sends it through the exact same emitter path the AI finding uses.
+// AI is an enrichment layer on top of that finding, not the switch that decides
+// whether anyone is paged.
+//
+//   - w.ai.Detect == nil / AI disabled → deterministic finding → emit (emitted_basic).
+//   - w.ai.Cache hit                   → reuse the prior AI finding (cached).
+//   - w.ai.Rate.Allow == false         → deterministic finding → emit (emitted_basic_quota).
+//   - w.ai.Detect.Run error            → deterministic finding → emit (emitted_basic_error).
+//   - w.emitter == nil                 → still no incident is sent; send() logs the
+//     would-be call and returns the ok label (shadow-of-detect).
 func (w *Worker) emitDetect(
 	ctx context.Context,
 	source, patternID, template, service string,
@@ -667,18 +675,26 @@ func (w *Worker) emitDetect(
 		RuleSeverity: result.RuleSeverity,
 	}
 
-	// 1. Dry detect — analyzer not configured, or a runtime resolver
-	// disabled AI for this tick. In both cases: classify, log, do not call
-	// AI, do not emit. The resolver is read live so an enterprise off→on
-	// toggle takes effect on the next call without a restart; OSS registers
-	// no resolver so this collapses to the original `w.ai.Detect == nil`
-	// check — byte-for-byte unchanged.
+	// 1. AI unavailable — analyzer not configured, or a runtime resolver
+	// disabled AI for this tick. Detection already happened AI-free, so build
+	// a deterministic (templated) finding and emit it: a real anomaly must
+	// never silently drop just because AI is off. The resolver is read live so
+	// an enterprise off→on toggle takes effect on the next call without a
+	// restart; OSS registers no resolver so this collapses to the original
+	// `w.ai.Detect == nil` check.
 	if w.ai.Detect == nil || !w.effectiveAIEnabled(ctx) {
-		log.Printf("%sagent[detect:dry]: pattern=%s service=%s verdict=%s freq=%d (ai.enable=false)%s",
+		log.Printf("%sagent[detect:basic]: templated alert pattern=%s service=%s verdict=%s freq=%d %s",
 			colorGreen, patternID, service, verdict, len(signals), colorReset)
-		evt.Outcome = "dry"
+		finding := deterministicFinding(result, verdict, service, score, baselineStd, explanation)
+		evt.Finding = finding
+		evt.Model = "heuristic"
+		outcome := w.send(finding, result, source, service, "emitted_basic")
+		evt.Outcome = outcome
+		if outcome == "send_error" {
+			evt.Error = "emitter returned error"
+		}
 		w.detect.Record(evt)
-		return "dry"
+		return outcome
 	}
 
 	// 2. Cache hit — reuse the prior finding.
@@ -695,22 +711,36 @@ func (w *Worker) emitDetect(
 		return outcome
 	}
 
-	// 3. Rate limit guard.
+	// 3. Rate limit guard. AI is over its hourly cap — fall back to the
+	// deterministic finding so a transient budget exhaustion never drops a
+	// page.
 	if !w.ai.Rate.Allow() {
-		log.Printf("agent[detect]: AI quota exceeded; skipping pattern=%s freq=%d", patternID, len(signals))
-		evt.Outcome = "quota"
+		log.Printf("agent[detect]: AI quota exceeded; templated alert pattern=%s freq=%d", patternID, len(signals))
+		finding := deterministicFinding(result, verdict, service, score, baselineStd, explanation)
+		evt.Finding = finding
+		evt.Model = "heuristic"
+		outcome := w.send(finding, result, source, service, "emitted_basic_quota")
+		evt.Outcome = outcome
+		if outcome == "send_error" {
+			evt.Error = "emitter returned error"
+		}
 		w.detect.Record(evt)
-		return "quota"
+		return outcome
 	}
 
-	// 4. Real AI call.
+	// 4. Real AI call. On error, fall back to the deterministic finding so a
+	// transient AI outage never drops a page.
 	call, err := w.ai.Detect.Run(ctx, core.DetectTask{Result: result})
 	if err != nil {
-		log.Printf("agent[detect]: AI analyze failed pattern=%s: %v", patternID, err)
-		evt.Outcome = "ai_error"
+		log.Printf("agent[detect]: AI analyze failed pattern=%s: %v; sending templated alert", patternID, err)
+		finding := deterministicFinding(result, verdict, service, score, baselineStd, explanation)
+		evt.Finding = finding
+		evt.Model = "heuristic"
 		evt.Error = err.Error()
+		outcome := w.send(finding, result, source, service, "emitted_basic_error")
+		evt.Outcome = outcome
 		w.detect.Record(evt)
-		return "ai_error"
+		return outcome
 	}
 	finding := call.Finding
 	w.ai.Cache.Put(patternID, finding)
