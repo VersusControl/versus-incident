@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1420 520" font-family="'Segoe UI', system-ui, -apple-system, Arial, sans-serif">
+  <rect width="1420" height="520" fill="#ffffff"/>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3a4750"/>
+    </marker>
+  </defs>
+
+  <!-- arrows -->
+  <g fill="none" stroke="#3a4750" stroke-width="2" marker-end="url(#ah)">
+    <line x1="180" y1="200" x2="206" y2="200"/>
+    <line x1="358" y1="200" x2="384" y2="200"/>
+    <line x1="546" y1="200" x2="572" y2="200"/>
+    <line x1="724" y1="200" x2="726" y2="200"/>
+    <line x1="872" y1="200" x2="920" y2="164"/>            <!-- known -->
+    <line x1="800" y1="272" x2="800" y2="348"/>            <!-- new/spike down -->
+    <line x1="904" y1="400" x2="950" y2="400"/>            <!-- AI -> incident -->
+    <line x1="1148" y1="400" x2="1194" y2="400"/>          <!-- incident -> route -->
+  </g>
+
+  <g font-size="14" fill="#5b6b78">
+    <text x="905" y="188" text-anchor="middle">known</text>
+    <text x="812" y="312">new / unusual</text>
+  </g>
+
+  <!-- 1. Read (pink) -->
+  <g>
+    <rect x="30" y="140" width="150" height="120" rx="16" fill="#ffffff" stroke="#E8477B" stroke-width="2.5"/>
+    <g transform="translate(105,178)" stroke="#E8477B" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="-13" y="-13" width="26" height="30" rx="3"/>
+      <line x1="-7" y1="-5" x2="7" y2="-5"/><line x1="-7" y1="1" x2="7" y2="1"/><line x1="-7" y1="7" x2="3" y2="7"/>
+    </g>
+    <text x="105" y="222" text-anchor="middle" font-size="14.5" font-weight="500" fill="#24303a">
+      <tspan x="105" dy="0">Read the</tspan><tspan x="105" dy="17">logs source</tspan>
+    </text>
+  </g>
+
+  <!-- 2. Hide (blue) -->
+  <g>
+    <rect x="208" y="140" width="150" height="120" rx="16" fill="#ffffff" stroke="#2E86DE" stroke-width="2.5"/>
+    <g transform="translate(283,180)" stroke="#2E86DE" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="-11" y="-2" width="22" height="17" rx="3"/><path d="M-6,-2 v-4 a6,6 0 0 1 12,0 v4"/>
+      <circle cx="-5" cy="6.5" r="1.4" fill="#2E86DE" stroke="none"/><circle cx="0" cy="6.5" r="1.4" fill="#2E86DE" stroke="none"/><circle cx="5" cy="6.5" r="1.4" fill="#2E86DE" stroke="none"/>
+    </g>
+    <text x="283" y="222" text-anchor="middle" font-size="14.5" font-weight="500" fill="#24303a">
+      <tspan x="283" dy="0">Hide</tspan><tspan x="283" dy="17">sensitive bits</tspan>
+    </text>
+  </g>
+
+  <!-- 3. Group (green) -->
+  <g>
+    <rect x="386" y="140" width="160" height="120" rx="16" fill="#ffffff" stroke="#27AE60" stroke-width="2.5"/>
+    <g transform="translate(466,178)" stroke="#27AE60" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="-11" cy="-4" r="3.6"/><path d="M-17,7 a6,6 0 0 1 12,0"/>
+      <circle cx="11" cy="-4" r="3.6"/><path d="M5,7 a6,6 0 0 1 12,0"/>
+      <circle cx="0" cy="-7" r="4.2"/><path d="M-7,8 a7,6 0 0 1 14,0"/>
+    </g>
+    <text x="466" y="222" text-anchor="middle" font-size="14.5" font-weight="500" fill="#24303a">
+      <tspan x="466" dy="0">Group with</tspan><tspan x="466" dy="17">similar lines</tspan>
+    </text>
+  </g>
+
+  <!-- 4. Remember (orange) -->
+  <g>
+    <rect x="574" y="140" width="150" height="120" rx="16" fill="#ffffff" stroke="#F39C12" stroke-width="2.5"/>
+    <g transform="translate(649,182)" stroke="#F39C12" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <ellipse cx="0" cy="-9" rx="13" ry="4.2"/><path d="M-13,-9 v18 a13,4.2 0 0 0 26,0 v-18"/><path d="M-13,0 a13,4.2 0 0 0 26,0"/>
+    </g>
+    <text x="649" y="224" text-anchor="middle" font-size="14.5" font-weight="500" fill="#24303a">
+      <tspan x="649" dy="0">Remember</tspan><tspan x="649" dy="17">the group</tspan>
+    </text>
+  </g>
+
+  <!-- Diamond: seen before? (purple) -->
+  <g>
+    <polygon points="800,128 872,200 800,272 728,200" fill="#ffffff" stroke="#8E44AD" stroke-width="2.5"/>
+    <text x="800" y="190" text-anchor="middle" font-size="13" font-weight="500" fill="#24303a">
+      <tspan x="800" dy="0">Seen this</tspan><tspan x="800" dy="15">before?</tspan>
+    </text>
+  </g>
+
+  <!-- endpoint: known (teal) -->
+  <g>
+    <rect x="922" y="118" width="210" height="92" rx="16" fill="#ffffff" stroke="#12B5A5" stroke-width="2.5"/>
+    <g transform="translate(960,164)" stroke="#12B5A5" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="0" cy="0" r="11"/><path d="M-5,0 l3.5,4 l7.5,-8.5"/>
+    </g>
+    <text x="1008" y="160" text-anchor="middle" font-size="14" font-weight="500" fill="#24303a">
+      <tspan x="1008" dy="0">Quietly update,</tspan><tspan x="1008" dy="17">move on</tspan>
+    </text>
+  </g>
+
+  <!-- AI takes a look (purple) -->
+  <g>
+    <rect x="700" y="350" width="204" height="100" rx="16" fill="#ffffff" stroke="#8E44AD" stroke-width="2.5"/>
+    <g transform="translate(738,388)" stroke="#8E44AD" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M-2,-10 a6,6 0 0 0 -6,6 a5,5 0 0 0 0,8 a5,5 0 0 0 6,4 z"/>
+      <path d="M2,-10 a6,6 0 0 1 6,6 a5,5 0 0 1 0,8 a5,5 0 0 1 -6,4 z"/>
+      <line x1="0" y1="-10" x2="0" y2="8"/>
+    </g>
+    <text x="784" y="384" text-anchor="middle" font-size="14" font-weight="500" fill="#24303a">
+      <tspan x="784" dy="0">AI takes a look</tspan><tspan x="784" dy="17" font-size="12.5" fill="#5b6b78">optional — enriches it</tspan>
+    </text>
+  </g>
+
+  <!-- Open a real incident (red) -->
+  <g>
+    <rect x="952" y="350" width="196" height="100" rx="16" fill="#ffffff" stroke="#E74C3C" stroke-width="2.5"/>
+    <g transform="translate(988,388)" stroke="#E74C3C" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M-8,7 v-4 a8,8 0 0 1 16,0 v4 l2,3 h-20 z"/><circle cx="0" cy="-11" r="1.5"/><path d="M-2.5,12 a2.6,2.2 0 0 0 5,0"/>
+    </g>
+    <text x="1032" y="384" text-anchor="middle" font-size="14" font-weight="500" fill="#24303a">
+      <tspan x="1032" dy="0">Open a real</tspan><tspan x="1032" dy="17">incident</tspan>
+    </text>
+  </g>
+
+  <!-- Route to channels & on-call (green) -->
+  <g>
+    <rect x="1196" y="350" width="196" height="100" rx="16" fill="#ffffff" stroke="#27AE60" stroke-width="2.5"/>
+    <g transform="translate(1232,388)" stroke="#27AE60" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M-13,-2 L13,-11 L6,13 L1,3 z"/><line x1="1" y1="3" x2="13" y2="-11"/>
+    </g>
+    <text x="1278" y="384" text-anchor="middle" font-size="14" font-weight="500" fill="#24303a">
+      <tspan x="1278" dy="0">Route to your</tspan><tspan x="1278" dy="17">channels &amp; on-call</tspan>
+    </text>
+  </g>
+</svg>

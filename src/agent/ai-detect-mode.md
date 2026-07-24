@@ -2,7 +2,7 @@
 
 Detect mode leverages AI to identify and alert on new or unusual patterns in real-time. It is designed for production environments where timely detection of anomalies is critical. Before enabling detect mode, ensure that your pattern catalog is well-curated and that shadow mode has been used to validate the system's behavior.
 
-Detect mode is the **go-live** step. The agent classifies log patterns the same way it does in [shadow](./shadow-mode.md), and when something new or unexpected issues or anomalous shows up it asks an **AI SRE** to triage it and emits a real incident. Think of it as: "shadow mode, but with a hand on the alert button — and the AI writes the page."
+Detect mode is the **go-live** step. The agent classifies log patterns the same way it does in [shadow](./shadow-mode.md), and when something new or unexpected or anomalous shows up it emits a real incident.
 
 ## When to Switch to Detect Mode
 
@@ -11,7 +11,8 @@ Switch to detect mode when:
 - The catalog of patterns has stabilized, and new patterns are rare.
 - You have spent at least one release cycle in shadow mode and reviewed the results.
 - Noisy patterns have been labeled as `known` to prevent unnecessary alerts.
-- An OpenAI-compatible API key is configured.
+
+Configuring an OpenAI-compatible API key is **optional** — it upgrades the emitted alerts from templated to AI-enriched, but detect mode pages with or without it.
 
 Detect mode is ideal for production environments where real-time alerts for new or unusual patterns are critical.
 
@@ -22,26 +23,31 @@ The pipeline is the same as shadow mode for the first few steps:
 ![AI Agent](../docs/images/detect-mode.png)
 
 When a new or anomalous pattern reaches the detect step, the
-agent does five things in order:
+agent does the following:
 
-1. **Dry guard** — if the AI is not configured, it stops here.
-   The pattern is still recorded in the catalog.
+1. **Templated alert (no AI key)** — if the AI is not configured (or a
+   runtime toggle turned it off), the agent builds a **deterministic
+   finding** from the pattern — title, sigma-derived severity, and up to
+   three redacted sample lines — and emits it. The Summary carries a
+   `Heuristic detection — AI enrichment not configured or unavailable.`
+   marker so operators know no model looked at it.
 2. **Cache lookup** — if the same pattern was analyzed recently,
-   the previous finding is reused instead of calling the model
+   the previous AI finding is reused instead of calling the model
    again (saves time and cost).
 3. **Rate guard** — `agent.ai.max_calls_per_hour` caps how many
-   times the model can be called, so a noisy day doesn't run up
-   your bill.
-4. **Analyze** — the AI SRE reviews the redacted sample,
+   times the model can be called. When the cap is hit the agent
+   **still alerts**, falling back to the templated finding.
+4. **Analyze (enrichment)** — the AI SRE reviews the redacted sample,
    template, frequency, and baseline, then writes a triage
-   verdict.
-5. **Emit** — the AI's finding (severity, summary, category,
+   verdict. If the model call errors, the agent falls back to the
+   templated finding rather than dropping the page.
+5. **Emit** — the finding (severity, summary, category,
    confidence, suggestions) becomes a real incident. All
    per-channel templates and the on-call workflow trigger
-   unchanged.
+   unchanged — templated and AI-enriched incidents use the same path.
 
-Each outcome — including skips and failures — is recorded so you
-can spot misconfigured keys or channels at a glance on the
+Each outcome — including templated fallbacks and failures — is recorded
+so you can spot misconfigured keys or channels at a glance on the
 **Detect** page.
 
 ## Configuration
@@ -102,8 +108,8 @@ nginx, and friends.
 
 ## What gets recorded
 
-Every AI call (and every cache / dry / quota outcome) is kept as
-a rolling history of the **most recent 500 events**; older
+Every emitted incident — AI-enriched, cached, or templated — is
+kept as a rolling history of the **most recent 500 events**; older
 entries are dropped automatically.
 
 Each event captures:
@@ -114,8 +120,10 @@ Each event captures:
   long it took.
 - **Parsed finding** — severity, summary, category, confidence,
   suggestions.
-- **Outcome** — whether the incident was emitted, served from
-  cache, skipped (dry / quota), or errored.
+- **Outcome** — whether the incident was AI-enriched (`emitted`),
+  served from cache (`cached`), or emitted as a templated alert
+  because AI was off, over quota, or errored (`emitted_basic`,
+  `emitted_basic_quota`, `emitted_basic_error`).
 
 Look at it through the admin UI (the **Detect** page in the
 sidebar):

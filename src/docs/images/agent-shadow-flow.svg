@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 560" font-family="'Segoe UI', system-ui, -apple-system, Arial, sans-serif">
+  <rect width="1400" height="560" fill="#ffffff"/>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3a4750"/>
+    </marker>
+  </defs>
+
+  <!-- arrows -->
+  <g fill="none" stroke="#3a4750" stroke-width="2" marker-end="url(#ah)">
+    <line x1="188" y1="280" x2="218" y2="280"/>
+    <line x1="378" y1="280" x2="388" y2="280"/>
+    <line x1="528" y1="280" x2="558" y2="280"/>
+    <line x1="458" y1="350" x2="458" y2="392"/>
+    <line x1="736" y1="280" x2="754" y2="280"/>
+    <line x1="914" y1="280" x2="924" y2="280"/>
+    <line x1="1076" y1="280" x2="1118" y2="196"/>
+    <line x1="1076" y1="280" x2="1118" y2="352"/>
+  </g>
+
+  <g font-size="14" fill="#5b6b78">
+    <text x="540" y="268">yes</text>
+    <text x="470" y="378">no</text>
+    <text x="1092" y="222" text-anchor="middle">known</text>
+    <text x="1090" y="330" text-anchor="middle">new / spike</text>
+  </g>
+
+  <!-- 1. Read (pink) -->
+  <g>
+    <rect x="28" y="220" width="160" height="120" rx="16" fill="#ffffff" stroke="#E8477B" stroke-width="2.5"/>
+    <g transform="translate(108,258)" stroke="#E8477B" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="-13" y="-13" width="26" height="30" rx="3"/>
+      <line x1="-7" y1="-5" x2="7" y2="-5"/><line x1="-7" y1="1" x2="7" y2="1"/><line x1="-7" y1="7" x2="3" y2="7"/>
+    </g>
+    <text x="108" y="302" text-anchor="middle" font-size="14.5" font-weight="500" fill="#24303a">
+      <tspan x="108" dy="0">Read from the</tspan><tspan x="108" dy="17">logs data source</tspan>
+    </text>
+  </g>
+
+  <!-- 2. Hide (blue) -->
+  <g>
+    <rect x="220" y="220" width="158" height="120" rx="16" fill="#ffffff" stroke="#2E86DE" stroke-width="2.5"/>
+    <g transform="translate(299,260)" stroke="#2E86DE" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="-11" y="-2" width="22" height="17" rx="3"/>
+      <path d="M-6,-2 v-4 a6,6 0 0 1 12,0 v4"/>
+      <circle cx="-5" cy="6.5" r="1.4" fill="#2E86DE" stroke="none"/><circle cx="0" cy="6.5" r="1.4" fill="#2E86DE" stroke="none"/><circle cx="5" cy="6.5" r="1.4" fill="#2E86DE" stroke="none"/>
+    </g>
+    <text x="299" y="302" text-anchor="middle" font-size="14.5" font-weight="500" fill="#24303a">
+      <tspan x="299" dy="0">Hide sensitive bits</tspan><tspan x="299" dy="17" font-style="italic" font-size="13" fill="#5b6b78">passwords, tokens…</tspan>
+    </text>
+  </g>
+
+  <!-- Diamond A: worth learning? (teal) -->
+  <g>
+    <polygon points="458,210 528,280 458,350 388,280" fill="#ffffff" stroke="#12B5A5" stroke-width="2.5"/>
+    <text x="458" y="270" text-anchor="middle" font-size="13" font-weight="500" fill="#24303a">
+      <tspan x="458" dy="0">Worth</tspan><tspan x="458" dy="15">learning?</tspan>
+    </text>
+  </g>
+
+  <!-- ignore cylinder (purple) -->
+  <g stroke="#8E44AD" fill="#ffffff" stroke-width="2.5">
+    <path d="M420,394 a38,10 0 0 0 76,0 v52 a38,10 0 0 1 -76,0 z"/>
+    <ellipse cx="458" cy="394" rx="38" ry="10"/>
+  </g>
+  <text x="458" y="428" text-anchor="middle" font-size="14" font-weight="500" fill="#8E44AD">ignore</text>
+
+  <!-- 3. Group (green) -->
+  <g>
+    <rect x="560" y="220" width="176" height="120" rx="16" fill="#ffffff" stroke="#27AE60" stroke-width="2.5"/>
+    <g transform="translate(648,258)" stroke="#27AE60" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="-11" cy="-4" r="3.6"/><path d="M-17,7 a6,6 0 0 1 12,0"/>
+      <circle cx="11" cy="-4" r="3.6"/><path d="M5,7 a6,6 0 0 1 12,0"/>
+      <circle cx="0" cy="-7" r="4.2"/><path d="M-7,8 a7,6 0 0 1 14,0"/>
+    </g>
+    <text x="648" y="302" text-anchor="middle" font-size="14.5" font-weight="500" fill="#24303a">
+      <tspan x="648" dy="0">Group with</tspan><tspan x="648" dy="17">similar lines</tspan>
+    </text>
+  </g>
+
+  <!-- 4. Remember (orange) -->
+  <g>
+    <rect x="756" y="220" width="158" height="120" rx="16" fill="#ffffff" stroke="#F39C12" stroke-width="2.5"/>
+    <g transform="translate(835,262)" stroke="#F39C12" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <ellipse cx="0" cy="-9" rx="13" ry="4.2"/><path d="M-13,-9 v18 a13,4.2 0 0 0 26,0 v-18"/><path d="M-13,0 a13,4.2 0 0 0 26,0"/>
+    </g>
+    <text x="835" y="304" text-anchor="middle" font-size="14.5" font-weight="500" fill="#24303a">
+      <tspan x="835" dy="0">Remember</tspan><tspan x="835" dy="17">the group</tspan>
+    </text>
+  </g>
+
+  <!-- Diamond B: seen before? (purple) -->
+  <g>
+    <polygon points="1000,204 1076,280 1000,356 924,280" fill="#ffffff" stroke="#8E44AD" stroke-width="2.5"/>
+    <text x="1000" y="270" text-anchor="middle" font-size="13" font-weight="500" fill="#24303a">
+      <tspan x="1000" dy="0">Seen this</tspan><tspan x="1000" dy="15">before?</tspan>
+    </text>
+  </g>
+
+  <!-- endpoint: known -> quietly update (teal) -->
+  <g>
+    <rect x="1120" y="150" width="234" height="92" rx="16" fill="#ffffff" stroke="#12B5A5" stroke-width="2.5"/>
+    <g transform="translate(1158,196)" stroke="#12B5A5" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="0" cy="0" r="11"/><path d="M-5,0 l3.5,4 l7.5,-8.5"/>
+    </g>
+    <text x="1205" y="192" text-anchor="middle" font-size="14" font-weight="500" fill="#24303a">
+      <tspan x="1205" dy="0">Quietly update,</tspan><tspan x="1205" dy="17">move on</tspan>
+    </text>
+  </g>
+
+  <!-- endpoint: new/spike -> would have alerted, log only (orange) -->
+  <g>
+    <rect x="1120" y="306" width="234" height="112" rx="16" fill="#ffffff" stroke="#F39C12" stroke-width="2.5"/>
+    <g transform="translate(1156,346)" stroke="#F39C12" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M-13,0 Q0,-10 13,0 Q0,10 -13,0 Z"/><circle cx="0" cy="0" r="3.2"/><line x1="-13" y1="-9" x2="13" y2="9"/>
+    </g>
+    <text x="1200" y="342" text-anchor="middle" font-size="14" font-weight="500" fill="#24303a">
+      <tspan x="1200" dy="0">Would have alerted</tspan><tspan x="1200" dy="17">write to review log</tspan>
+    </text>
+  </g>
+
+  <!-- badge: pages no one -->
+  <g>
+    <rect x="1148" y="452" width="178" height="34" rx="17" fill="#fdecea" stroke="#E74C3C" stroke-width="1.6"/>
+    <text x="1237" y="474" text-anchor="middle" font-size="13.5" font-weight="600" fill="#E74C3C">it pages no one</text>
+  </g>
+</svg>

@@ -159,7 +159,7 @@ during an AI investigation, never as a standing detector on OSS.
 |---|---|---|
 | `training` | observes & learns log patterns only — no verdict, no incident | not consulted |
 | `shadow` | classifies log lines; logs a "would alert" + records to the shadow file; **no** incident | not consulted |
-| `detect` | classifies log lines; with AI enabled, the analyzer runs **and** pulls `query_metrics` / `query_traces` to correlate, then an incident is emitted; with AI off, it logs a "dry detect" | pulled on-demand by the analyze tools |
+| `detect` | classifies log lines; with AI enabled, the analyzer runs **and** pulls `query_metrics` / `query_traces` to correlate, then an incident is emitted; with AI off, it emits a deterministic templated alert (no enrichment) | pulled on-demand by the analyze tools |
 
 > **The honest framing:** in OSS, *detection* is driven by the log source +
 > your patterns. The metric/trace value is in **investigation and

@@ -20,8 +20,9 @@ import (
 // end.
 //
 // One DetectEvent is recorded per worker decision — including
-// "cached", "quota", "ai_error", and "send_error" outcomes — so the
-// log doubles as a debugging aid when alerts disappear.
+// "cached", the "emitted_basic*" templated-alert outcomes, and
+// "send_error" — so the log doubles as a debugging aid when alerts
+// disappear.
 type DetectEvent struct {
 	ID        string    `json:"id"`        // 16-byte hex; stable over restarts
 	Timestamp time.Time `json:"timestamp"` // worker decision time
@@ -51,9 +52,9 @@ type DetectEvent struct {
 	// declared-severity-honoured path is auditable/testable.
 	RuleSeverity string `json:"rule_severity,omitempty"`
 
-	// AI call (empty when outcome != "emitted" — cached/dry/quota/etc.
-	// did not invoke the model; ai_error fills RawResponse only when
-	// available).
+	// AI call (empty when the model was not invoked — cached and the
+	// "emitted_basic*" templated-alert outcomes carry no model call;
+	// Model is "heuristic" for the deterministic templated alerts).
 	Model       string `json:"model,omitempty"`
 	UserPrompt  string `json:"user_prompt,omitempty"`
 	RawResponse string `json:"raw_response,omitempty"`
@@ -62,10 +63,11 @@ type DetectEvent struct {
 	// Final structured finding (nil when no finding was produced).
 	Finding *core.AIFinding `json:"finding,omitempty"`
 
-	// Outcome label — see Worker.emitDetect: emitted | cached | dry |
-	// quota | ai_error | send_error.
+	// Outcome label — see Worker.emitDetect: emitted | cached |
+	// emitted_basic | emitted_basic_quota | emitted_basic_error |
+	// send_error.
 	Outcome string `json:"outcome"`
-	// Error message when Outcome is ai_error / send_error.
+	// Error message when Outcome is emitted_basic_error / send_error.
 	Error string `json:"error,omitempty"`
 }
 

@@ -23,24 +23,27 @@ func TestEffectiveAIEnabled_NoResolver_OSSUnchanged(t *testing.T) {
 	}
 }
 
-// TestEmitDetect_ResolverDisabled_RunsDry proves the runtime enable gate:
-// a fake resolver that returns enabled=false drives the detect path to the
-// dry branch — the AI agent is never called and nothing is emitted — even
+// TestEmitDetect_ResolverDisabled_EmitsTemplated proves the runtime enable
+// gate: a fake resolver that returns enabled=false drives the detect path to
+// the AI-off branch — the AI agent is never called — but the detection is NOT
+// dropped. The worker emits a deterministic templated alert exactly once, even
 // though AIBundle.Detect is wired.
-func TestEmitDetect_ResolverDisabled_RunsDry(t *testing.T) {
+func TestEmitDetect_ResolverDisabled_EmitsTemplated(t *testing.T) {
 	t.Cleanup(func() { SetAISettingsResolver(nil) })
 
 	finding := &core.AIFinding{Title: "boom", Severity: "high", Confidence: 0.9}
 	agent := &fakeAgent{finding: finding}
 
 	emitted := 0
-	emitter := func(*core.AIFinding, core.AgentResult, string, string) error {
+	var got *core.AIFinding
+	emitter := func(f *core.AIFinding, _ core.AgentResult, _, _ string) error {
 		emitted++
+		got = f
 		return nil
 	}
 	w := newWorkerForTest(t, AIBundle{Detect: agent}, emitter)
 
-	// enabled=false, ok=true -> runtime says "AI off" -> dry.
+	// enabled=false, ok=true -> runtime says "AI off" -> templated alert.
 	SetAISettingsResolver(&stubAISettings{enabled: false, enabledOK: true})
 
 	outcome := w.emitDetect(
@@ -50,14 +53,17 @@ func TestEmitDetect_ResolverDisabled_RunsDry(t *testing.T) {
 		core.VerdictUnknown, 0, 0, 0, "",
 	)
 
-	if outcome != "dry" {
-		t.Fatalf("outcome = %q, want dry when resolver disables AI", outcome)
+	if outcome != "emitted_basic" {
+		t.Fatalf("outcome = %q, want emitted_basic when resolver disables AI", outcome)
 	}
-	if got := atomic.LoadInt32(&agent.calls); got != 0 {
-		t.Fatalf("agent.calls = %d, want 0 (no AI call in dry)", got)
+	if calls := atomic.LoadInt32(&agent.calls); calls != 0 {
+		t.Fatalf("agent.calls = %d, want 0 (no AI call when disabled)", calls)
 	}
-	if emitted != 0 {
-		t.Fatalf("emitter called %d times, want 0 in dry", emitted)
+	if emitted != 1 {
+		t.Fatalf("emitter called %d times, want 1 (templated alert)", emitted)
+	}
+	if got == nil || got.Title == finding.Title {
+		t.Fatalf("emitted finding should be the deterministic one, not the AI stub: %+v", got)
 	}
 }
 

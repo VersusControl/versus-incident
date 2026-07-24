@@ -11,7 +11,7 @@ import {
   ScrollText,
   ShieldAlert,
 } from "lucide-react";
-import { api, ApiError, type ServiceIncidentRecent, type ServiceOverride, type ServiceOverrideSource, type ServicePattern } from "@/lib/api";
+import { api, ApiError, type ServiceIncidentRecent, type ServicePattern } from "@/lib/api";
 import { fmtAbs, fmtRel, formatDuration, incidentTitle } from "@/lib/format";
 import { tsValue, useSortableRows } from "@/lib/sortRows";
 import {
@@ -20,7 +20,6 @@ import {
   toggleMetricExclusion,
   type LearnExclusions,
 } from "@/lib/learnExclude";
-import { signalOverrideGate } from "@/lib/serviceOverride";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { useToast } from "@/components/toastContext";
 import { TopBar } from "@/components/TopBar";
@@ -204,97 +203,6 @@ function ServiceLearnToggle({ name }: { name: string }) {
   );
 }
 
-// SignalReassignCell renders the per-row "Reassign" control for a metric/trace
-// baseline. It re-points every future signal matching this baseline's name to
-// the chosen service (a metric/trace attribution override), or clears an
-// existing override. Read-only callers see the current target only; the whole
-// control is absent on an unlicensed surface (the parent never renders it).
-function SignalReassignCell({
-  source,
-  signal,
-  current,
-  services,
-  editable,
-}: {
-  source: ServiceOverrideSource;
-  signal: string;
-  current?: ServiceOverride;
-  services: string[];
-  editable: boolean;
-}) {
-  const qc = useQueryClient();
-  const toast = useToast();
-
-  const reassign = useMutation({
-    mutationFn: (service: string) =>
-      api.createServiceOverride({ source_type: source, match: signal, service }),
-    onSuccess: (_d, service) => {
-      qc.invalidateQueries({ queryKey: ["service-overrides"] });
-      toast.push({ tone: "ok", title: `Reassigned to "${service}"` });
-    },
-    onError: (err) =>
-      toast.push({
-        tone: "error",
-        title: "Couldn't reassign",
-        description: err instanceof Error ? err.message : String(err),
-      }),
-  });
-  const clear = useMutation({
-    mutationFn: (id: string) => api.deleteServiceOverride(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["service-overrides"] });
-      toast.push({ tone: "ok", title: "Reassignment cleared" });
-    },
-    onError: (err) =>
-      toast.push({
-        tone: "error",
-        title: "Couldn't clear reassignment",
-        description: err instanceof Error ? err.message : String(err),
-      }),
-  });
-
-  if (!editable) {
-    return (
-      <span className="text-2xs text-ink-300">
-        {current ? current.service : "—"}
-      </span>
-    );
-  }
-  if (current) {
-    return (
-      <span className="inline-flex items-center gap-1 text-2xs">
-        <span className="font-mono text-ink-100">{current.service}</span>
-        <button
-          className="btn"
-          disabled={clear.isPending}
-          aria-label={`Clear reassignment for ${signal}`}
-          onClick={() => clear.mutate(current.id)}
-        >
-          {clear.isPending ? <Spinner /> : "Clear"}
-        </button>
-      </span>
-    );
-  }
-  return (
-    <select
-      className="input py-0.5 text-2xs"
-      value=""
-      disabled={reassign.isPending}
-      aria-label={`Reassign ${signal}`}
-      onChange={(e) => {
-        if (e.target.value) reassign.mutate(e.target.value);
-      }}
-    >
-      <option value="">Reassign…</option>
-      {services.map((n) => (
-        <option key={n} value={n}>
-          {n}
-        </option>
-      ))}
-    </select>
-  );
-}
-
 // MetricsTracesSection isolates the Enterprise /intel fetch so its locked /
 // loading / error states never block the OSS sections above it.
 function MetricsTracesSection({ name }: { name: string }) {
@@ -332,35 +240,6 @@ function MetricsTracesSection({ name }: { name: string }) {
 
   const excludeDisabled =
     gate !== "editable" || ex.isPending || putEx.isPending || !ex.data;
-
-  // Attribution-override plumbing (metric/trace reassign). The gate rides the
-  // SAME /intel-licensed + RBAC signal as the exclude checkboxes, so it only
-  // resolves to read-only / editable on this licensed surface. The service list
-  // and override rules feed the per-row Reassign control.
-  const overrideGate = signalOverrideGate({
-    licensed,
-    canManage: access.isAdmin,
-  });
-  const svcQuery = useQuery({
-    queryKey: ["services"],
-    queryFn: api.listServices,
-    enabled: licensed,
-  });
-  const overridesQuery = useQuery({
-    queryKey: ["service-overrides"],
-    queryFn: api.listServiceOverrides,
-    enabled: licensed,
-  });
-  const overrideServices = svcQuery.data
-    ? Object.keys(svcQuery.data)
-        .filter((n) => n !== "_unknown")
-        .sort((a, b) => a.localeCompare(b))
-    : [];
-  const overrideEditable = overrideGate === "editable";
-  const findOverride = (source: ServiceOverrideSource, signal: string) =>
-    overridesQuery.data?.find(
-      (o) => o.source_type === source && o.match === signal,
-    );
 
   return (
     <section className="card p-4">
@@ -418,110 +297,83 @@ function MetricsTracesSection({ name }: { name: string }) {
           </div>
 
           {data.metrics && data.metrics.length > 0 && (
-            <div className="overflow-hidden rounded border border-ink-700">
-              <table className="ddt">
-                <thead>
-                  <tr>
-                    <th>Metric signal</th>
-                    <th className="w-24">Kind</th>
-                    <th className="w-44">Ignore</th>
-                    <th className="w-44">Service</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.metrics.map((m) => {
-                    const checked = metricExcluded(
-                      m.signal,
-                      ex.data?.metrics,
-                    );
-                    return (
-                      <tr key={`${m.signal}:${m.kind}`}>
-                        <td
-                          className="font-mono text-2xs text-ink-100"
-                          title={m.signal}
-                        >
-                          {m.signal}
-                        </td>
-                        <td className="text-2xs text-ink-300">{m.kind}</td>
-                        <td>
-                          <label className="inline-flex items-center gap-2 text-2xs text-ink-300">
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              disabled={excludeDisabled}
-                              aria-label={`Ignore ${m.signal}`}
-                              onChange={(e) =>
-                                putEx.mutate({
-                                  services: ex.data?.services ?? [],
-                                  metrics: toggleMetricExclusion(
-                                    ex.data?.metrics ?? [],
-                                    m.signal,
-                                    e.target.checked,
-                                  ),
-                                  patterns: ex.data?.patterns ?? [],
-                                })
-                              }
-                            />
-                            {checked ? "Ignored" : "Active"}
-                          </label>
-                        </td>
-                        <td>
-                          <SignalReassignCell
-                            source="metric"
-                            signal={m.signal}
-                            current={findOverride("metric", m.signal)}
-                            services={overrideServices}
-                            editable={overrideEditable}
+            <table className="ddt">
+              <thead>
+                <tr>
+                  <th>Metric signal</th>
+                  <th className="w-24">Kind</th>
+                  <th className="w-44">Ignore</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.metrics.map((m) => {
+                  const checked = metricExcluded(m.signal, ex.data?.metrics);
+                  return (
+                    <tr key={`${m.signal}:${m.kind}`}>
+                      <td
+                        className="font-mono text-2xs text-ink-100"
+                        title={m.signal}
+                      >
+                        {m.signal}
+                      </td>
+                      <td className="text-2xs text-ink-300">{m.kind}</td>
+                      <td>
+                        <label className="inline-flex items-center gap-2 text-2xs text-ink-300">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={excludeDisabled}
+                            aria-label={`Ignore ${m.signal}`}
+                            onChange={(e) =>
+                              putEx.mutate({
+                                services: ex.data?.services ?? [],
+                                metrics: toggleMetricExclusion(
+                                  ex.data?.metrics ?? [],
+                                  m.signal,
+                                  e.target.checked,
+                                ),
+                                patterns: ex.data?.patterns ?? [],
+                              })
+                            }
                           />
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                          {checked ? "Ignored" : "Active"}
+                        </label>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           )}
 
           {data.traces && data.traces.length > 0 && (
-            <div className="overflow-hidden rounded border border-ink-700">
-              <table className="ddt">
-                <thead>
-                  <tr>
-                    <th>Trace signal</th>
-                    <th className="w-24">Kind</th>
-                    <th className="w-44">Service</th>
+            <table className="ddt">
+              <thead>
+                <tr>
+                  <th>Trace signal</th>
+                  <th className="w-24">Kind</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.traces.map((t) => (
+                  <tr key={`${t.signal}:${t.kind}`}>
+                    <td
+                      className="font-mono text-2xs text-ink-100"
+                      title={t.signal}
+                    >
+                      {t.signal}
+                    </td>
+                    <td className="text-2xs text-ink-300">{t.kind}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {data.traces.map((t) => (
-                    <tr key={`${t.signal}:${t.kind}`}>
-                      <td
-                        className="font-mono text-2xs text-ink-100"
-                        title={t.signal}
-                      >
-                        {t.signal}
-                      </td>
-                      <td className="text-2xs text-ink-300">{t.kind}</td>
-                      <td>
-                        <SignalReassignCell
-                          source="trace"
-                          signal={t.signal}
-                          current={findOverride("trace", t.signal)}
-                          services={overrideServices}
-                          editable={overrideEditable}
-                        />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                ))}
+              </tbody>
+            </table>
           )}
 
           {gate === "readonly" && (
             <p className="text-2xs text-ink-400">
-              Ignore rules and service reassignment are read-only — the admin
-              role (runtime:manage) is required to change them.
+              Ignore rules are read-only — the admin role (runtime:manage) is
+              required to change them.
             </p>
           )}
 

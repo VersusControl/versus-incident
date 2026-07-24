@@ -20,13 +20,13 @@ import (
 )
 
 // AIBundle bundles every AI-side dependency. All fields are nil-safe:
-// when AI is disabled the worker accepts a zero bundle and falls back
-// to "dry detect" (classify, log, do not emit).
+// when AI is disabled the worker accepts a zero bundle and emits a
+// deterministic templated alert instead of enriching via AI.
 //
 // Router exposes the typed task dispatcher to non-worker consumers
 // (admin endpoints, future analyze controller). The worker keeps using
 // Detect + Cache + Rate directly so its per-outcome logging
-// (dry / cache / quota / ai_error / emitted) stays explicit.
+// (emitted / cached / emitted_basic*) stays explicit.
 type AIBundle struct {
 	Router      *router.Router
 	Detect      core.AIAgent // kind=AITaskDetect
