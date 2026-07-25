@@ -31,7 +31,7 @@ Whichever source raises it, an incident is templated, fanned out to every channe
 
 ## Features
 
-- 🤖 **AI SRE Agent** *(Beta)*: An AI agent that reads your logs, learns what normal looks like, and automatically opens an incident only when something new and unexpected appears.
+- 🤖 **AI SRE Agent**: An AI agent that reads your logs, learns what normal looks like, and automatically opens an incident only when something new and unexpected appears.
 - 🌐 **Webhook Alerts**: Receive incidents from any tool that can POST a webhook — Alertmanager, Grafana, Sentry, CloudWatch SNS, FluentBit, and more.
 - 🚨 **Multi-channel Notifications**: Fan out every incident to Slack, Microsoft Teams, Telegram, Viber, Email, and Lark (more channels coming!)
 - 📝 **Custom Templates**: Define your own alert messages using Go templates

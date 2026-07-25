@@ -1,4 +1,4 @@
-# AI Agent — Analyze Tools
+# AI Analyze
 
 This page covers the **configuration** required by analyze tools that
 read external data, plus a worked Docker example.
