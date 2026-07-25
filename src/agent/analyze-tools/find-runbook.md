@@ -125,16 +125,46 @@ tools:
 
 ### 2. Add your runbooks
 
-Place your `*.md` runbooks in the data folder under `runbooks/`
-(`./data/runbooks`; `/app/data/runbooks` in the container image). The
-server auto-ingests them at boot — it scans `*.md` files, embeds any that
+Place your `*.md` runbooks in the data folder under `runbooks/`:
+
+```text
+data/
+└── runbooks/
+    ├── postgres-pool-exhausted.md
+    ├── redis-oom.md
+    └── api-5xx-spike.md
+```
+
+Mount that `data/` folder into the container so the agent sees the corpus
+at `/app/data/runbooks`:
+
+```bash
+docker run -d --name versus-incident \
+  -p 3000:3000 \
+  -v "$PWD/config:/app/config" \
+  -v "$PWD/data:/app/data" \
+  -e AGENT_ENABLE=true \
+  -e AGENT_MODE=detect \
+  -e AGENT_AI_ENABLE=true \
+  -e AGENT_AI_API_KEY=sk-... \
+  ghcr.io/versuscontrol/versus-incident:latest
+```
+
+The `-v "$PWD/data:/app/data"` mount maps your host `./data/runbooks`
+straight to `/app/data/runbooks`. With Docker Compose it's the same volume:
+
+```yaml
+services:
+  versus:
+    image: ghcr.io/versuscontrol/versus-incident:latest
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data       # runbooks live in ./data/runbooks
+```
+
+The server auto-ingests them at boot — it scans `*.md` files, embeds any that
 are new or edited, and persists the vectors to the same storage backend
 it reads at boot.
-
-> **Tip:** Ingestion is incremental. A runbook whose content is unchanged
-> since the last boot reuses its cached embedding, so a restart with no
-> edits makes zero embedding calls. Only new or edited runbooks are
-> re-embedded.
 
 On a successful boot you'll see both lines in the log:
 
@@ -146,7 +176,7 @@ agent: find_runbook enabled model=text-embedding-3-small runbooks=6
 ## Runbook format
 
 A runbook is just a Markdown file. Optional YAML front-matter enriches the
-record; without it, the title is derived from the first `# ` heading or
+record; without it, the title is derived from the first `#` heading or
 the filename.
 
 ```markdown
@@ -166,7 +196,7 @@ Front-matter fields, all optional:
 
 | Field | Type | Purpose |
 |---|---|---|
-| `title` | string | Display title. Falls back to the first `# ` heading, then the filename. |
+| `title` | string | Display title. Falls back to the first `#` heading, then the filename. |
 | `service` | string | Single service this runbook applies to. Feeds the `service` filter. |
 | `services` | list | Multiple services, when one runbook covers several. |
 | `tags` | list | Free-form labels for organization. |
@@ -199,9 +229,7 @@ populated:
 runbook-ingest -config config/config.yaml
 ```
 
-It reads the same `data/runbooks` directory, the same
-`tools.find_runbook.embedding_model`, and the same
-`agent.ai.api_key` the server uses.
+It reads the same `data/runbooks` directory.
 
 ## Managing runbooks from the admin UI
 
