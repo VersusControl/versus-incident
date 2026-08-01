@@ -302,6 +302,29 @@ deviation pages. The `> 0.5` in the PromQL shapes *which* series the source trac
 declared `severity` rides along; it does **not** open an incident the instant a series
 crosses it. The working trigger is still **baseline-first**.
 
+## Going further: scope discovery with a filter (optional)
+
+On a large or multi-tenant Prometheus, discovering **every** service can watch a lot of
+series. Add an `options.filter` — a PromQL label-matcher selector — to scope discovery
+**and** sampling to a subset, the Prometheus analogue of the CloudWatch `namespaces`
+scope:
+
+```yaml
+sources:
+  - name: demo-prom
+    type: prometheus
+    enable: true
+    options:
+      address: http://localhost:9090
+      filter: '{namespace="prod", tier!="batch"}'   # discover + sample only this scope
+```
+
+The matchers are merged into every generated sampling query, so a watched signal samples
+exactly the scoped series. The filter applies to auto-discovery only — it does **not**
+touch operator-authored `queries:` (those stay raw PromQL) — and a malformed selector
+fails the source fast at startup. See the full behavior and more examples in the
+[Prometheus reference → Scope discovery with `filter`](../../agent/data-sources/prometheus.md#scope-discovery-with-filter).
+
 ## 6. Tear down
 
 ```bash

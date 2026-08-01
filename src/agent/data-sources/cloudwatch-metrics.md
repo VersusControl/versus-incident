@@ -207,5 +207,5 @@ service to attribute them to.
 ## See also
 
 - Full hands-on walkthrough: [CloudWatch Metrics Demo](../../enterprise/metrics/cloudwatch-metrics.md)
-- Both metric sources and the licensing model: [Metrics overview](./metrics.md)
+- Both metric sources and the licensing model: [Metrics overview](../../enterprise/metrics/overview.md)
 - The OSS logs source with the same auth: [CloudWatch Logs](./cloudwatch-logs.md)

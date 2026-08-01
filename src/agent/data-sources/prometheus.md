@@ -110,12 +110,20 @@ sources:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `address` | — (required) | Prometheus base URL the source reads (GET-only). |
-| `bearer_token` / `username` / `password` | unset | Bearer auth, else HTTP Basic. |
+| `address` | — (required) | Prometheus-compatible base URL the source reads (GET-only). Works against Prometheus, Mimir, Cortex, Thanos, VictoriaMetrics, and Grafana Cloud. |
+| `bearer_token` | unset | `Authorization: Bearer <token>` auth. |
+| `username` / `password` | unset | HTTP Basic auth — used when no `bearer_token` is set. |
 | `insecure_skip_verify` | `false` | Skip TLS verification — **local dev only**, never production. |
-| `step` | `60s` | Sampling resolution. |
+| `step` | `60s` | Range-query step (sampling resolution). |
+| `filter` | unset (watch all) | PromQL label-matcher selector that scopes **both** discovery and sampling to a subset of series. See [Scope discovery with `filter`](#scope-discovery-with-filter). |
+| `discovery_interval` | `1h` | How often the watched set is refreshed (cadence ceiling). |
+| `discovery_lookback` | `1h` | `[now − lookback, now]` window applied to the discovery reads; **floored at `5m`**. Lets Prometheus-compatible backends (Mimir, Cortex, Thanos, VictoriaMetrics, Grafana Cloud) resolve label/series/metadata endpoints that require an explicit window. |
+| `max_services` | `50` | Discovery cap on distinct services. |
+| `max_signals` | `200` | Discovery cap on total watched signals (per tenant). |
+| `queries` | unset | Optional pinned PromQL signals appended to auto-discovery — see [Advanced: custom signals](#advanced-custom-signals). |
 
-That is the whole operator surface for the auto flow.
+Only `address` is required; every other field defaults, so the documented path is
+connection-only. That is the whole operator surface for the auto flow.
 
 ### What it watches
 
@@ -140,6 +148,47 @@ through unwatched. If the data is sparse, it falls back to common metric names a
 you coverage is **thin** rather than inventing signals. It watches the signals that
 matter, not every metric (which would just be noise) — and the `queries:` option below
 covers anything special it can't find on its own.
+
+## Scope discovery with `filter`
+
+By default the source watches **everything** it can attribute to a service. On a large or
+multi-tenant Prometheus, use `filter` to scope discovery **and** sampling to a subset of
+series — the Prometheus analogue of the CloudWatch metrics source's
+[`namespaces`](./cloudwatch-metrics.md#options) scope.
+
+`filter` is a **PromQL label-matcher selector**. Only the `{...}` label-matcher body
+matters (a leading metric name is accepted and ignored), so the documented form is the
+bare selector:
+
+```yaml
+sources:
+  - name: prod-metrics
+    type: prometheus
+    enable: true
+    options:
+      address: http://prometheus:9090
+      filter: '{namespace="prod"}'        # discover + sample only prod series
+```
+
+More selectors:
+
+| `filter` value | Scope |
+|---|---|
+| `'{namespace="prod"}'` | series in the `prod` namespace |
+| `'{cluster=~"prod-workload-.*\|prod-data-.*"}'` | either prod cluster family (regex match) |
+| `'{namespace="prod", tier!="batch"}'` | prod, excluding the `batch` tier |
+| unset / `'*'` / `'{}'` | **watch everything** (unchanged default behavior) |
+
+What an operator needs to know:
+
+- **It scopes both stages.** The label matchers are passed to auto-discovery and are
+  **merged into every generated sampling query**, so a watched signal samples exactly the
+  scoped series — not the whole fleet.
+- **It applies only to auto-discovery.** Operator-authored `queries:` are raw PromQL you
+  write yourself and are left **exactly as written** — `filter` does not touch them.
+- **A malformed selector fails fast at startup.** A bad matcher (e.g. `{namespace=prod}`
+  with an unquoted value) is rejected when the source is constructed, so a
+  misconfiguration is surfaced rather than silently watching everything.
 
 ## Advanced: custom signals
 
@@ -170,5 +219,5 @@ sources:
 ## See also
 
 - Full hands-on walkthrough: [Prometheus Metrics Demo](../../enterprise/metrics/prometheus.md)
-- Both metric sources and the licensing model: [Metrics overview](./metrics.md)
+- Both metric sources and the licensing model: [Metrics overview](../../enterprise/metrics/overview.md)
 
