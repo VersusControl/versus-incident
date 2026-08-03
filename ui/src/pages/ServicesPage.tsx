@@ -1,8 +1,13 @@
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
-import { Plus, Search, Trash2, Eye } from "lucide-react";
-import { api } from "@/lib/api";
+import { Loader2, Plus, Search, Trash2, Eye } from "lucide-react";
+import { api, type ServiceInfo } from "@/lib/api";
 import { fmtAbs, fmtRel } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
@@ -49,11 +54,45 @@ export function ServicesPage() {
   const qc = useQueryClient();
   const toast = useToast();
   const refresh = useAutoRefresh();
-  const { data, isLoading, isError, error, refetch, isRefetching } = useQuery({
-    queryKey: ["services"],
-    queryFn: api.listServices,
+  // The service list is served as bounded pages (a cheap total + one page of
+  // services) instead of the whole estate, mirroring the analyses/patterns
+  // lists. useInfiniteQuery accumulates loaded pages into one name→facts map;
+  // the client-side sort/search/scope below operate over what is loaded and
+  // "Load more" pulls the next page on demand.
+  const servicesQ = useInfiniteQuery({
+    queryKey: ["services-all"],
+    queryFn: ({ pageParam }) => api.listServicesIndex({ offset: pageParam }),
+    initialPageParam: 0,
+    // next_offset is the resume cursor; null/undefined means no more rows.
+    getNextPageParam: (last) => last.next_offset ?? undefined,
     refetchInterval: refresh.refetchInterval,
   });
+  const {
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isRefetching,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = servicesQ;
+
+  // Merge the loaded pages into one name→facts map; total comes from the first
+  // page (the true whole-set count, never the loaded size). The server ships
+  // only one bounded page up front, so a large estate never loads whole. Every
+  // downstream reader (peek lookup, Object.entries, grace flags) keeps working
+  // on this merged Record unchanged.
+  const data = useMemo<Record<string, ServiceInfo> | undefined>(() => {
+    const pages = servicesQ.data?.pages;
+    if (!pages || pages.length === 0) return undefined;
+    const merged: Record<string, ServiceInfo> = {};
+    for (const page of pages) {
+      Object.assign(merged, page.services);
+    }
+    return merged;
+  }, [servicesQ.data]);
+  const total = servicesQ.data?.pages[0]?.total;
 
   const [q, setQ] = useState("");
   const [params] = useSearchParams();
@@ -82,6 +121,7 @@ export function ServicesPage() {
     mutationFn: ({ name, action }: { name: string; action: GraceAction }) =>
       api.controlGrace(name, action),
     onSuccess: (_data, { name, action }) => {
+      qc.invalidateQueries({ queryKey: ["services-all"] });
       qc.invalidateQueries({ queryKey: ["services"] });
       toast.push({
         tone: "ok",
@@ -116,6 +156,7 @@ export function ServicesPage() {
     mutationFn: (name: string) => api.createService(name),
     onSuccess: (_d, name) => {
       setShowAdd(false);
+      qc.invalidateQueries({ queryKey: ["services-all"] });
       qc.invalidateQueries({ queryKey: ["services"] });
       toast.push({ tone: "ok", title: `Service "${name}" created` });
     },
@@ -132,6 +173,7 @@ export function ServicesPage() {
       api.renameService(v.from, v.to),
     onSuccess: (res, v) => {
       setRenameTarget(null);
+      qc.invalidateQueries({ queryKey: ["services-all"] });
       qc.invalidateQueries({ queryKey: ["services"] });
       qc.invalidateQueries({ queryKey: ["service-overrides"] });
       toast.push({
@@ -154,6 +196,7 @@ export function ServicesPage() {
   const deleteService = useMutation({
     mutationFn: (name: string) => api.deleteService(name),
     onSuccess: (_d, name) => {
+      qc.invalidateQueries({ queryKey: ["services-all"] });
       qc.invalidateQueries({ queryKey: ["services"] });
       toast.push({ tone: "ok", title: `Service "${name}" deleted` });
     },
@@ -173,6 +216,7 @@ export function ServicesPage() {
   const clearServices = useMutation({
     mutationFn: api.clearServices,
     onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ["services-all"] });
       qc.invalidateQueries({ queryKey: ["services"] });
       setConfirmClear(false);
       toast.push({
@@ -332,7 +376,7 @@ export function ServicesPage() {
     <>
       <TopBar
         title="Services"
-        subtitle={data ? `${entries.length} discovered` : undefined}
+        subtitle={total != null ? `${total.toLocaleString()} discovered` : undefined}
         actions={
           <div className="flex items-center gap-2">
             <button
@@ -550,6 +594,27 @@ export function ServicesPage() {
               </table>
             </div>
             <Pagination state={pg} />
+            {(isFetchingNextPage || hasNextPage) && (
+              <div
+                className="flex items-center justify-center gap-1.5 border-t border-ink-600 px-3 py-2 text-2xs text-ink-400"
+                data-testid="service-load-more"
+              >
+                {isFetchingNextPage ? (
+                  <>
+                    <Loader2 size={12} className="animate-spin" />
+                    Loading more…
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="text-brand-300 hover:underline"
+                    onClick={() => fetchNextPage()}
+                  >
+                    Load more ({total?.toLocaleString() ?? ""} total)
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
       </main>

@@ -1,8 +1,14 @@
 import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Eye, Search, Trash2 } from "lucide-react";
-import { api, type Pattern } from "@/lib/api";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type InfiniteData,
+} from "@tanstack/react-query";
+import { Check, Eye, Loader2, Search, Trash2 } from "lucide-react";
+import { api, type Pattern, type PatternIndex } from "@/lib/api";
 import { displayService, fmtAbs, fmtRel } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
 import { TopBar } from "@/components/TopBar";
@@ -70,11 +76,39 @@ export function PatternsPage() {
   const scope = isExclusionScope(params.get(SCOPE_PARAM));
 
   const refresh = useAutoRefresh();
-  const { data, isLoading, isError, error, refetch, isRefetching } = useQuery({
-    queryKey: ["patterns"],
-    queryFn: api.listPatterns,
+  // The pattern list is served as bounded pages (a cheap total + one page of
+  // learned patterns) instead of the whole catalog, mirroring the analyses
+  // list. useInfiniteQuery accumulates loaded pages; the client-side
+  // filter/sort/search below operates over what is loaded, and "Load more"
+  // pulls the next page on demand.
+  const patternsQ = useInfiniteQuery({
+    queryKey: ["patterns-all"],
+    queryFn: ({ pageParam }) => api.listPatternsIndex({ offset: pageParam }),
+    initialPageParam: 0,
+    // next_offset is the resume cursor; null/undefined means no more rows.
+    getNextPageParam: (last) => last.next_offset ?? undefined,
     refetchInterval: refresh.refetchInterval,
   });
+  const {
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isRefetching,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = patternsQ;
+
+  // Accumulate the loaded pages into a single list; total comes from the first
+  // page (the true whole-set count, never data.length). The server ships only
+  // one bounded page up front, so a large learned catalog never loads whole.
+  const data = useMemo<Pattern[] | undefined>(() => {
+    const pages = patternsQ.data?.pages;
+    if (!pages || pages.length === 0) return undefined;
+    return pages.flatMap((p) => p.patterns);
+  }, [patternsQ.data]);
+  const total = patternsQ.data?.pages[0]?.total;
 
   const [q, setQ] = useState("");
   const [peekId, setPeekId] = useState<string | null>(null);
@@ -101,19 +135,31 @@ export function PatternsPage() {
     Pattern,
     Error,
     VerdictVars,
-    { prev?: Pattern[] }
+    { prev?: InfiniteData<PatternIndex> }
   >({
     mutationFn: ({ id, verdict }) => api.updatePattern(id, { verdict }),
     onMutate: async ({ id, verdict }) => {
-      await qc.cancelQueries({ queryKey: ["patterns"] });
-      const prev = qc.getQueryData<Pattern[]>(["patterns"]);
-      qc.setQueryData<Pattern[]>(["patterns"], (old) =>
-        (old ?? []).map((p) => (p.id === id ? { ...p, verdict } : p)),
+      await qc.cancelQueries({ queryKey: ["patterns-all"] });
+      const prev = qc.getQueryData<InfiniteData<PatternIndex>>([
+        "patterns-all",
+      ]);
+      qc.setQueryData<InfiniteData<PatternIndex>>(["patterns-all"], (old) =>
+        old
+          ? {
+              ...old,
+              pages: old.pages.map((page) => ({
+                ...page,
+                patterns: page.patterns.map((p) =>
+                  p.id === id ? { ...p, verdict } : p,
+                ),
+              })),
+            }
+          : old,
       );
       return { prev };
     },
     onError: (err, vars, ctx) => {
-      if (ctx?.prev) qc.setQueryData(["patterns"], ctx.prev);
+      if (ctx?.prev) qc.setQueryData(["patterns-all"], ctx.prev);
       toast.push({
         tone: "error",
         title: "Verdict update failed",
@@ -123,7 +169,9 @@ export function PatternsPage() {
     },
     onSuccess: (_data, vars, ctx) => {
       const prevVerdict =
-        ctx?.prev?.find((p) => p.id === vars.id)?.verdict ?? "";
+        ctx?.prev?.pages
+          .flatMap((p) => p.patterns)
+          .find((p) => p.id === vars.id)?.verdict ?? "";
       toast.push({
         tone: "ok",
         title:
@@ -139,13 +187,19 @@ export function PatternsPage() {
         },
       });
     },
-    onSettled: () => qc.invalidateQueries({ queryKey: ["patterns"] }),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["patterns-all"] });
+      // Keep the overview/detail readers of the bounded ["patterns"] query in
+      // sync with the verdict change made here.
+      qc.invalidateQueries({ queryKey: ["patterns"] });
+    },
   });
 
   // ----- clear all logs: destructive reset of every learned log pattern -----
   const reset = useMutation({
     mutationFn: api.clearPatterns,
     onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ["patterns-all"] });
       qc.invalidateQueries({ queryKey: ["patterns"] });
       setConfirmReset(false);
       toast.push({
@@ -311,7 +365,7 @@ export function PatternsPage() {
     <>
       <TopBar
         title="What the agent knows right now"
-        subtitle={data ? `${data.length} log templates learned` : "The agent learns recurring message templates from your logs so it can spot new or unusual ones."}
+        subtitle={total != null ? `${total.toLocaleString()} log templates learned` : "The agent learns recurring message templates from your logs so it can spot new or unusual ones."}
         actions={
           <button
             className="btn btn-danger"
@@ -569,6 +623,27 @@ export function PatternsPage() {
               </table>
             </div>
             <Pagination state={pg} />
+            {(isFetchingNextPage || hasNextPage) && (
+              <div
+                className="flex items-center justify-center gap-1.5 border-t border-ink-600 px-3 py-2 text-2xs text-ink-400"
+                data-testid="pattern-load-more"
+              >
+                {isFetchingNextPage ? (
+                  <>
+                    <Loader2 size={12} className="animate-spin" />
+                    Loading more…
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="text-brand-300 hover:underline"
+                    onClick={() => fetchNextPage()}
+                  >
+                    Load more ({total?.toLocaleString() ?? ""} total)
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
       </main>
@@ -714,7 +789,7 @@ export function PatternsPage() {
         <ReassignModal
           sourceType="log"
           matches={reassignMatches}
-          invalidateKeys={[["patterns"]]}
+          invalidateKeys={[["patterns-all"], ["patterns"]]}
           onClose={() => setReassignMatches(null)}
           onDone={() => bulk.clear()}
         />

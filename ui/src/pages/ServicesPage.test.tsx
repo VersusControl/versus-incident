@@ -25,6 +25,7 @@ vi.mock("@/lib/api", async (importActual) => {
     api: {
       ...actual.api,
       listServices: vi.fn(),
+      listServicesIndex: vi.fn(),
       getServiceDetail: vi.fn(),
       listBaselines: vi
         .fn()
@@ -83,7 +84,11 @@ function renderPage() {
 
 describe("ServicesPage row actions", () => {
   beforeEach(() => {
-    vi.mocked(api.listServices).mockResolvedValue({ checkout: svc() });
+    vi.mocked(api.listServicesIndex).mockResolvedValue({
+      services: { checkout: svc() },
+      total: 1,
+      next_offset: null,
+    });
     vi.mocked(api.getServiceDetail).mockResolvedValue({
       service: "checkout",
       first_seen: new Date().toISOString(),
@@ -145,9 +150,13 @@ describe("ServicesPage Active/Ignored scope", () => {
   // succeeds), an admin session (deployment org + admin whoami), and a policy
   // that already ignores one of the two services.
   function renderScoped(initialEntry = "/agent/services") {
-    vi.mocked(api.listServices).mockResolvedValue({
-      checkout: svc(),
-      payments: svc(),
+    vi.mocked(api.listServicesIndex).mockResolvedValue({
+      services: {
+        checkout: svc(),
+        payments: svc(),
+      },
+      total: 2,
+      next_offset: null,
     });
     vi.mocked(api.getServiceDetail).mockResolvedValue({
       service: "checkout",
@@ -235,7 +244,11 @@ describe("ServicesPage Active/Ignored scope", () => {
 
   it("keeps the scope toggle absent on a community / unlicensed binary", async () => {
     // Community defaults from the module mock: baselines + deployment 403.
-    vi.mocked(api.listServices).mockResolvedValue({ checkout: svc() });
+    vi.mocked(api.listServicesIndex).mockResolvedValue({
+      services: { checkout: svc() },
+      total: 1,
+      next_offset: null,
+    });
     vi.mocked(api.listBaselines).mockRejectedValue(
       new (await import("@/lib/api")).ApiError(403, "community"),
     );
@@ -245,6 +258,58 @@ describe("ServicesPage Active/Ignored scope", () => {
     renderPage();
     await screen.findByLabelText("View service checkout");
     expect(screen.queryByRole("tablist", { name: "Learning scope" })).toBeNull();
+  });
+});
+
+// The Services list is served as bounded pages (a cheap total + one page),
+// keeping the back-compat name→facts map shape. These pin the paged wiring:
+// the whole-set total drives the header, and a server-advertised next page
+// surfaces a "Load more" control that merges the following page in.
+describe("ServicesPage — server-side paging", () => {
+  beforeEach(() => {
+    vi.mocked(api.getServiceDetail).mockResolvedValue({
+      service: "checkout",
+      first_seen: new Date().toISOString(),
+      in_grace: false,
+      grace_seconds_remaining: 0,
+      patterns: [],
+      incidents: { window_days: 30, count: 0, severities: {}, recent: [] },
+      counts: { patterns: 0, incidents: 0 },
+    });
+  });
+
+  it("renders the whole-set total in the header, not the loaded page size", async () => {
+    vi.mocked(api.listServicesIndex).mockResolvedValue({
+      services: { checkout: svc() },
+      total: 3100,
+      next_offset: null,
+    });
+    renderPage();
+    expect(await screen.findByText(/3,100 discovered/)).toBeTruthy();
+  });
+
+  it("loads and merges the next page when Load more is clicked", async () => {
+    vi.mocked(api.listServicesIndex)
+      .mockResolvedValueOnce({
+        services: { checkout: svc() },
+        total: 2,
+        next_offset: 1,
+      })
+      .mockResolvedValueOnce({
+        services: { payments: svc() },
+        total: 2,
+        next_offset: null,
+      });
+    renderPage();
+
+    expect(await screen.findByText("checkout")).toBeTruthy();
+    const more = await screen.findByTestId("service-load-more");
+    fireEvent.click(more.querySelector("button")!);
+
+    // The second page is fetched and merged into the same table.
+    expect(await screen.findByText("payments")).toBeTruthy();
+    expect(screen.getByText("checkout")).toBeTruthy();
+    expect(api.listServicesIndex).toHaveBeenCalledWith({ offset: 1 });
   });
 });
 

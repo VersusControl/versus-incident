@@ -57,6 +57,57 @@ type CatalogStore interface {
 	Curate(edit CatalogEdit) error
 }
 
+// DefaultCatalogPageSize is the bounded page the pattern/service list reads
+// return when the caller does not request a specific size. It is the catalog
+// twin of storage.DefaultIncidentPageSize / DefaultAnalysisPageSize: on a
+// backend with an unbounded catalog (Postgres) the list serves one cheap
+// COUNT plus one bounded page rather than the whole table, so a large learned
+// catalog never ships whole to render one list load.
+const DefaultCatalogPageSize = 1000
+
+// CatalogPageOptions is one bounded read request against the catalog: skip
+// Offset rows and return at most Limit, optionally filtered to Search. A
+// non-positive Limit means DefaultCatalogPageSize; a negative Offset is
+// treated as 0. Search is a case-insensitive substring matched against the
+// pattern template/id/service (patterns) or the service name (services); an
+// empty Search returns the unfiltered ordering.
+type CatalogPageOptions struct {
+	Offset int
+	Limit  int
+	Search string
+}
+
+// ServiceRow is one ordered service list row: the service name plus its
+// ServiceInfo. The paged service read returns an ordered slice (services
+// sorted by FirstSeen then name) rather than the map AllServices returns,
+// because a page needs a stable order the map cannot carry.
+type ServiceRow struct {
+	Name string
+	Info ServiceInfo
+}
+
+// CatalogPager is the OPTIONAL paged-read capability a CatalogStore may
+// implement on top of the base seam, mirroring storage.IncidentPager /
+// AnalysisPager: it splits the two things the list endpoints need — a cheap
+// total COUNT and one bounded page — so an unbounded backend (Postgres) pushes
+// both into SQL (LIMIT/OFFSET + COUNT with an optional ILIKE search) instead
+// of loading the whole catalog per list load. A store that does not implement
+// it (a store with only the base Snapshot) is served by the Catalog folding
+// Snapshot into an in-memory page, so callers get one uniform seam; the OSS
+// Postgres store implements it directly. Consumers discover it via a type
+// assertion, exactly like the storage pagers.
+type CatalogPager interface {
+	// ListPatternsPage returns one bounded page of patterns ordered by Count
+	// descending (id ascending as a stable tie-break) — the same order
+	// Catalog.All sorts by — filtered to opts.Search when set, plus the
+	// whole-(filtered-)set total computed without materializing the page.
+	ListPatternsPage(opts CatalogPageOptions) (patterns []*Pattern, total int, err error)
+	// ListServicesPage returns one bounded page of services ordered by
+	// FirstSeen ascending (name ascending as a stable tie-break), filtered to
+	// opts.Search when set, plus the whole-(filtered-)set total.
+	ListServicesPage(opts CatalogPageOptions) (services []ServiceRow, total int, err error)
+}
+
 // CatalogEditKind discriminates which operator mutation a CatalogEdit carries.
 // The set mirrors the Catalog curation method set one-for-one.
 type CatalogEditKind string

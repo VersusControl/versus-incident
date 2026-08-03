@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -232,20 +233,122 @@ func (a *AgentController) getStatus(c *fiber.Ctx) error {
 }
 
 func (a *AgentController) listPatterns(c *fiber.Ctx) error {
-	all := a.catalog.All()
-	rows := make([]patternRow, 0, len(all))
-	for _, p := range all {
+	size := parsePatternPageSize(c.Query("page_size"))
+	offset, page := pageOffset(c.Query("page"), c.Query("offset"), size)
+	patterns, total, err := a.catalog.PatternsPage(agent.CatalogPageOptions{
+		Offset: offset,
+		Limit:  size,
+		Search: c.Query("q"),
+	})
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	rows := make([]patternRow, 0, len(patterns))
+	for _, p := range patterns {
 		// Strip the redacted sample ring from list rows: the list is
 		// potentially thousands of patterns and the ring belongs only on the
-		// detail read (getPattern). a.catalog.All() already returns copies, so
-		// nil-ing this field never touches the stored pattern.
+		// detail read (getPattern). PatternsPage already returns copies, so
+		// nil-ing this field never touches the stored pattern. Readiness is
+		// computed ONLY for the returned page, never the whole catalog.
 		p.Samples = nil
 		rows = append(rows, patternRow{
 			Pattern:   p,
 			Readiness: agent.LogReadiness(p, a.catalogCfg.AutoPromoteAfter, a.pollInterval),
 		})
 	}
-	return c.JSON(fiber.Map{"patterns": rows})
+	return c.JSON(pagedPatternResponse(rows, total, offset, size, page))
+}
+
+// DefaultPatternPageSize / DefaultServicePageSize are the bounded default page
+// the pattern / service list reads return when the caller requests no size.
+// They mirror storage.DefaultAnalysisPageSize: one cheap count + one bounded
+// page instead of the whole catalog per list load.
+const (
+	DefaultPatternPageSize = agent.DefaultCatalogPageSize
+	DefaultServicePageSize = agent.DefaultCatalogPageSize
+)
+
+// parsePatternPageSize resolves the requested pattern page size: the catalog
+// default when unset, clamped to [1, maxIncidentPageSize] otherwise so a single
+// request stays bounded — the pattern twin of parseAnalysisPageSize.
+func parsePatternPageSize(v string) int {
+	if v == "" {
+		return DefaultPatternPageSize
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return DefaultPatternPageSize
+	}
+	if n > maxIncidentPageSize {
+		return maxIncidentPageSize
+	}
+	return n
+}
+
+// parseServicePageSize is the service twin of parsePatternPageSize.
+func parseServicePageSize(v string) int {
+	if v == "" {
+		return DefaultServicePageSize
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return DefaultServicePageSize
+	}
+	if n > maxIncidentPageSize {
+		return maxIncidentPageSize
+	}
+	return n
+}
+
+// pagedPatternResponse builds the patterns list response from the CHEAP total
+// count and ONE bounded page of rows. It preserves the existing `patterns`
+// array (so consumers reading only `patterns` keep working) and adds total +
+// offset-based continuation (offset / next_offset / page / page_size),
+// mirroring pagedAnalysisResponse. A full page (len == size) implies at least
+// one more page; an underfull page is the last one.
+func pagedPatternResponse(rows []patternRow, total, offset, size, page int) fiber.Map {
+	out := rows
+	if out == nil {
+		out = []patternRow{}
+	}
+	resp := fiber.Map{
+		"patterns":  out,
+		"total":     total,
+		"offset":    offset,
+		"page":      page,
+		"page_size": size,
+	}
+	if len(rows) == size {
+		resp["next_offset"] = offset + len(rows)
+	} else {
+		resp["next_offset"] = nil
+	}
+	return resp
+}
+
+// pagedServiceResponse builds the services list response. The back-compat
+// `services` key stays a name→facts MAP (existing consumers — the reassign
+// dropdown, the overview — read it unchanged); pagination is additive (total +
+// offset / next_offset / page / page_size). The deterministic page ORDER lives
+// server-side (first_seen then name); the map carries only this page's entries,
+// so a name appears in at most one page and the union across pages is exact.
+func pagedServiceResponse(services map[string]fiber.Map, total, offset, size, page int) fiber.Map {
+	if services == nil {
+		services = map[string]fiber.Map{}
+	}
+	resp := fiber.Map{
+		"services":  services,
+		"total":     total,
+		"offset":    offset,
+		"page":      page,
+		"page_size": size,
+	}
+	if len(services) == size {
+		resp["next_offset"] = offset + len(services)
+	} else {
+		resp["next_offset"] = nil
+	}
+	return resp
 }
 
 // patternRow is the GET /api/agent/patterns response DTO. It embeds the on-disk
@@ -451,24 +554,33 @@ func (a *AgentController) flushShadow(c *fiber.Ctx) error {
 // its detail page.)
 func (a *AgentController) listServices(c *fiber.Ctx) error {
 	grace := serviceGraceDuration()
-	all := a.catalog.AllServices()
-	out := make(map[string]fiber.Map, len(all))
-	for name, info := range all {
-		inGrace, remaining := graceStatus(info.FirstSeen, grace)
+	size := parseServicePageSize(c.Query("page_size"))
+	offset, page := pageOffset(c.Query("page"), c.Query("offset"), size)
+	svcs, total, err := a.catalog.ServicesPage(agent.CatalogPageOptions{
+		Offset: offset,
+		Limit:  size,
+		Search: c.Query("q"),
+	})
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	out := make(map[string]fiber.Map, len(svcs))
+	for _, row := range svcs {
+		inGrace, remaining := graceStatus(row.Info.FirstSeen, grace)
 		m := fiber.Map{
-			"first_seen":              info.FirstSeen,
-			"manual":                  info.Manual,
+			"first_seen":              row.Info.FirstSeen,
+			"manual":                  row.Info.Manual,
 			"in_grace":                inGrace,
 			"grace_seconds_remaining": remaining,
 		}
 		// Preserve the org_id field exactly as ServiceInfo serialized it
 		// (omitempty) so no existing consumer of this shape regresses.
-		if info.OrgID != "" {
-			m["org_id"] = info.OrgID
+		if row.Info.OrgID != "" {
+			m["org_id"] = row.Info.OrgID
 		}
-		out[name] = m
+		out[row.Name] = m
 	}
-	return c.JSON(fiber.Map{"services": out})
+	return c.JSON(pagedServiceResponse(out, total, offset, size, page))
 }
 
 // serviceIncidentScanLimit bounds the incident-history scan for the
