@@ -27,6 +27,7 @@ import (
 var allCatalogQueries = []string{
 	sqlCatalogLoadLogs, sqlCatalogSelectServices, sqlCatalogUpsertRoot,
 	sqlCatalogUpsertLog, sqlCatalogInsertServiceIfAbsent, sqlCatalogSnapshotLogs,
+	sqlCatalogPageLogs, sqlCatalogCountLogs, sqlCatalogPageServices, sqlCatalogCountServices,
 	sqlCurateVerdict, sqlCurateTags, sqlCurateMarkKnown, sqlCurateRepointService,
 	sqlCurateDelete, sqlCurateResetPatterns, sqlCurateResetServices,
 	sqlCurateEndGrace, sqlCurateRestartGrace, sqlCurateCreateService,

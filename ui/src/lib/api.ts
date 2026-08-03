@@ -575,6 +575,31 @@ export interface AnalysisIndex {
   page_size?: number;
 }
 
+// PatternIndex is the paged pattern-list envelope: one bounded page of learned
+// log patterns plus the whole-set total, so the Patterns page first render is
+// fast even on a large learned catalog. It mirrors AnalysisIndex; `next_offset`
+// is where to resume (null at the end).
+export interface PatternIndex {
+  patterns: Pattern[];
+  total: number;
+  offset?: number;
+  next_offset?: number | null;
+  page?: number;
+  page_size?: number;
+}
+
+// ServiceIndex is the paged service-list envelope. It keeps the back-compat
+// name→facts MAP shape the reassign dropdown and overview already read, and
+// adds the same bounded paging fields as PatternIndex.
+export interface ServiceIndex {
+  services: Record<string, ServiceInfo>;
+  total: number;
+  offset?: number;
+  next_offset?: number | null;
+  page?: number;
+  page_size?: number;
+}
+
 // ---------- Team / member management ----------
 
 // MemberMeta mirrors pkg/teams.MemberMeta — typed per-channel ids.
@@ -1281,6 +1306,28 @@ export const api = {
     request<{ patterns: Pattern[] }>("/api/agent/patterns").then(
       (r) => r.patterns ?? [],
     ),
+  // listPatternsIndex is the Patterns-page variant: it returns one bounded page
+  // of learned patterns (ordered by fleet count) PLUS the whole-set total in a
+  // single request, so the first render is fast on a large catalog. Pass
+  // `offset` to load the next chunk; the response's `next_offset` is where to
+  // resume (null at the end). `pageSize` overrides the server default; `q`
+  // filters by template/id/service.
+  listPatternsIndex: (opts?: {
+    offset?: number;
+    pageSize?: number;
+    page?: number;
+    q?: string;
+  }) => {
+    const p = new URLSearchParams();
+    if (opts?.offset) p.set("offset", String(opts.offset));
+    if (opts?.pageSize) p.set("page_size", String(opts.pageSize));
+    if (opts?.page) p.set("page", String(opts.page));
+    if (opts?.q) p.set("q", opts.q);
+    const qs = p.toString();
+    return request<PatternIndex>(
+      `/api/agent/patterns${qs ? `?${qs}` : ""}`,
+    );
+  },
   getPattern: (id: string) => request<Pattern>(`/api/agent/patterns/${id}`),
   updatePattern: (id: string, body: { verdict?: string; tags?: string[] }) =>
     request<Pattern>(`/api/agent/patterns/${id}`, {
@@ -1567,6 +1614,27 @@ export const api = {
     request<{ services: Record<string, ServiceInfo> }>(
       "/api/agent/services",
     ).then((r) => r.services ?? {}),
+  // listServicesIndex is the Services-page variant: it returns one bounded page
+  // of services (the back-compat name→facts MAP) PLUS the whole-set total in a
+  // single request. Pass `offset` to load the next chunk; `next_offset` is
+  // where to resume (null at the end). `pageSize` overrides the server default;
+  // `q` filters by service name.
+  listServicesIndex: (opts?: {
+    offset?: number;
+    pageSize?: number;
+    page?: number;
+    q?: string;
+  }) => {
+    const p = new URLSearchParams();
+    if (opts?.offset) p.set("offset", String(opts.offset));
+    if (opts?.pageSize) p.set("page_size", String(opts.pageSize));
+    if (opts?.page) p.set("page", String(opts.page));
+    if (opts?.q) p.set("q", opts.q);
+    const qs = p.toString();
+    return request<ServiceIndex>(
+      `/api/agent/services${qs ? `?${qs}` : ""}`,
+    );
+  },
   // getServiceDetail reads the OSS service-detail aggregate (meta + grace +
   // patterns + bounded incident summary). 404 means the service is unknown.
   getServiceDetail: (name: string) =>

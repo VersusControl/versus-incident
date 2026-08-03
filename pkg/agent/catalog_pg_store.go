@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -162,6 +163,81 @@ const (
 		    LIMIT 1
 		) lo ON TRUE
 		WHERE p.org_id = $1 AND p.kind = 'log' AND p.deleted = FALSE`
+
+	// Page: one bounded slice of the SAME fleet read view Snapshot returns —
+	// identical org scope (p.org_id = $1, kind='log', deleted=FALSE, and the
+	// logs-present filter the agg join enforces) so a page can never cross a
+	// tenant boundary or surface a pattern Snapshot would hide. The optional
+	// case-insensitive search ($2) matches template / id / service; an empty
+	// $2 expands to '%%' and matches every row. Ordered by fleet count
+	// descending with id as a stable tie-break — the SAME order Catalog.All /
+	// pagePatterns sort by — so pages never drift between requests.
+	sqlCatalogPageLogs = `
+		SELECT p.id, COALESCE(p.service, ''), COALESCE(p.verdict, ''), p.tags,
+		       agg.total_count, agg.first_seen, agg.last_seen, agg.total_baseline,
+		       lo.template, COALESCE(lo.source, ''), COALESCE(lo.rule_name, ''),
+		       lo.baseline_variance, lo.baseline_avg,
+		       COALESCE(lo.spike_baseline_mode, ''), lo.seasonal, lo.samples
+		FROM vs_patterns p
+		JOIN LATERAL (
+		    SELECT SUM(count) AS total_count, MIN(first_seen) AS first_seen,
+		           MAX(last_seen) AS last_seen, SUM(baseline_frequency) AS total_baseline
+		    FROM vs_logs
+		    WHERE org_id = p.org_id AND pattern_id = p.id
+		) agg ON agg.total_count IS NOT NULL
+		JOIN LATERAL (
+		    SELECT template, source, rule_name,
+		           baseline_variance, baseline_avg, spike_baseline_mode, seasonal, samples
+		    FROM vs_logs
+		    WHERE org_id = p.org_id AND pattern_id = p.id
+		    ORDER BY instance_index ASC
+		    LIMIT 1
+		) lo ON TRUE
+		WHERE p.org_id = $1 AND p.kind = 'log' AND p.deleted = FALSE
+		  AND (lo.template ILIKE '%' || $2 || '%'
+		       OR p.id ILIKE '%' || $2 || '%'
+		       OR COALESCE(p.service, '') ILIKE '%' || $2 || '%')
+		ORDER BY agg.total_count DESC, p.id ASC
+		LIMIT $3 OFFSET $4`
+
+	// Count: the whole-(filtered-)set pattern total the page reports, computed
+	// without materializing rows. It shares the page's FROM/WHERE verbatim (the
+	// same org scope and logs-present filter) so the total always matches the
+	// page's population.
+	sqlCatalogCountLogs = `
+		SELECT COUNT(*)
+		FROM vs_patterns p
+		JOIN LATERAL (
+		    SELECT SUM(count) AS total_count
+		    FROM vs_logs
+		    WHERE org_id = p.org_id AND pattern_id = p.id
+		) agg ON agg.total_count IS NOT NULL
+		JOIN LATERAL (
+		    SELECT template FROM vs_logs
+		    WHERE org_id = p.org_id AND pattern_id = p.id
+		    ORDER BY instance_index ASC
+		    LIMIT 1
+		) lo ON TRUE
+		WHERE p.org_id = $1 AND p.kind = 'log' AND p.deleted = FALSE
+		  AND (lo.template ILIKE '%' || $2 || '%'
+		       OR p.id ILIKE '%' || $2 || '%'
+		       OR COALESCE(p.service, '') ILIKE '%' || $2 || '%')`
+
+	// Page / Count services: the SAME org scope Snapshot's service read uses
+	// (org_id = $1, deleted = FALSE) plus an optional name search ($2) and a
+	// deterministic first_seen-then-name order so service pages never drift.
+	sqlCatalogPageServices = `
+		SELECT name, manual, first_seen
+		FROM vs_services
+		WHERE org_id = $1 AND deleted = FALSE
+		  AND name ILIKE '%' || $2 || '%'
+		ORDER BY first_seen ASC, name ASC
+		LIMIT $3 OFFSET $4`
+	sqlCatalogCountServices = `
+		SELECT COUNT(*)
+		FROM vs_services
+		WHERE org_id = $1 AND deleted = FALSE
+		  AND name ILIKE '%' || $2 || '%'`
 
 	// Curate — one statement per operator mutation (all values bound).
 	sqlCurateVerdict = `UPDATE vs_patterns SET verdict = $3, updated_at = NOW() WHERE org_id = $1 AND id = $2 AND kind = 'log'`
@@ -453,6 +529,121 @@ func (s *pgCatalogStore) Snapshot() ([]*Pattern, map[string]ServiceInfo, error) 
 		services[name] = *svc
 	}
 	return out, services, nil
+}
+
+// ListPatternsPage implements the optional CatalogPager capability: one bounded
+// page of the fleet read view plus the whole-(filtered-)set total, both pushed
+// into SQL so an unbounded catalog is never loaded whole to render one list
+// page. It applies the EXACT org scope Snapshot uses (org_id, kind='log',
+// deleted=FALSE, logs-present), ordered by fleet count descending with id as a
+// stable tie-break so pages never drift between requests.
+func (s *pgCatalogStore) ListPatternsPage(opts CatalogPageOptions) ([]*Pattern, int, error) {
+	search := strings.TrimSpace(opts.Search)
+	var total int
+	if err := s.db.QueryRow(sqlCatalogCountLogs, s.orgID, search).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("agent: pg catalog count logs: %w", err)
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = DefaultCatalogPageSize
+	}
+	offset := opts.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.Query(sqlCatalogPageLogs, s.orgID, search, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("agent: pg catalog page logs: %w", err)
+	}
+	defer rows.Close()
+	var out []*Pattern
+	for rows.Next() {
+		var (
+			id, service, verdict       string
+			tagsRaw, samplesRaw        []byte
+			seasonalRaw                []byte
+			totalCount                 int64
+			firstSeen, lastSeen        time.Time
+			totalBaseline              float64
+			baselineVar                float64
+			baselineAvg                float64
+			spikeBaselineMode          string
+			template, source, ruleName string
+		)
+		if err := rows.Scan(&id, &service, &verdict, &tagsRaw,
+			&totalCount, &firstSeen, &lastSeen, &totalBaseline,
+			&template, &source, &ruleName, &baselineVar, &baselineAvg,
+			&spikeBaselineMode, &seasonalRaw, &samplesRaw); err != nil {
+			return nil, 0, fmt.Errorf("agent: pg catalog page logs scan: %w", err)
+		}
+		out = append(out, &Pattern{
+			ID:                id,
+			OrgID:             s.orgID,
+			Template:          template,
+			FirstSeen:         firstSeen,
+			LastSeen:          lastSeen,
+			Count:             int(totalCount),
+			BaselineFrequency: totalBaseline,
+			BaselineVariance:  baselineVar,
+			BaselineAvg:       baselineAvg,
+			SpikeBaselineMode: spikeBaselineMode,
+			Seasonal:          decodeSeasonal(seasonalRaw),
+			Verdict:           verdict,
+			RuleName:          ruleName,
+			Source:            source,
+			Service:           service,
+			Tags:              decodeStringSlice(tagsRaw),
+			Samples:           decodeStringSlice(samplesRaw),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("agent: pg catalog page logs rows: %w", err)
+	}
+	return out, total, nil
+}
+
+// ListServicesPage implements the optional CatalogPager capability for
+// services: one bounded page plus the whole-(filtered-)set total, both in SQL.
+// It applies the EXACT org scope Snapshot's service read uses (org_id,
+// deleted=FALSE), ordered by first_seen then name so pages never drift.
+func (s *pgCatalogStore) ListServicesPage(opts CatalogPageOptions) ([]ServiceRow, int, error) {
+	search := strings.TrimSpace(opts.Search)
+	var total int
+	if err := s.db.QueryRow(sqlCatalogCountServices, s.orgID, search).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("agent: pg catalog count services: %w", err)
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = DefaultCatalogPageSize
+	}
+	offset := opts.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.Query(sqlCatalogPageServices, s.orgID, search, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("agent: pg catalog page services: %w", err)
+	}
+	defer rows.Close()
+	out := make([]ServiceRow, 0, limit)
+	for rows.Next() {
+		var (
+			name      string
+			manual    bool
+			firstSeen time.Time
+		)
+		if err := rows.Scan(&name, &manual, &firstSeen); err != nil {
+			return nil, 0, fmt.Errorf("agent: pg catalog page services scan: %w", err)
+		}
+		out = append(out, ServiceRow{
+			Name: name,
+			Info: ServiceInfo{OrgID: s.orgID, FirstSeen: firstSeen, Manual: manual},
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("agent: pg catalog page services rows: %w", err)
+	}
+	return out, total, nil
 }
 
 // Curate applies one operator mutation to the curated root columns or the

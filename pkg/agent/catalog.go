@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -343,6 +344,151 @@ func (c *Catalog) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.patterns)
+}
+
+// PatternsPage returns one bounded page of patterns plus the whole-set total,
+// mirroring the incidents/analyses pager: on a backend that pushes paging into
+// SQL (a store implementing CatalogPager, e.g. the Postgres catalog store) the
+// page and count are served without loading the whole catalog; otherwise the
+// bounded working set is read once (a store's Snapshot, or the default
+// in-memory map) and sliced. The page is ordered by Count descending with id
+// as a stable tie-break — the same order All() sorts by — filtered to
+// opts.Search when set. total is the count AFTER the search filter, so the UI
+// drives load-more off the true match count.
+func (c *Catalog) PatternsPage(opts CatalogPageOptions) ([]*Pattern, int, error) {
+	if s := catalogStore(); s != nil {
+		if pager, ok := s.(CatalogPager); ok {
+			return pager.ListPatternsPage(opts)
+		}
+		// A store without the paged capability: read its unified snapshot once
+		// and page it in Go. On a snapshot error fall through to the local
+		// in-memory view, exactly as All() does.
+		if all, _, err := s.Snapshot(); err != nil {
+			log.Printf("agent: catalog snapshot failed, serving local view: %v", err)
+		} else {
+			page, total := pagePatterns(all, opts)
+			return page, total, nil
+		}
+	}
+	c.mu.RLock()
+	all := make([]*Pattern, 0, len(c.patterns))
+	for _, p := range c.patterns {
+		cp := *p
+		if p.Tags != nil {
+			cp.Tags = append([]string(nil), p.Tags...)
+		}
+		all = append(all, &cp)
+	}
+	c.mu.RUnlock()
+	page, total := pagePatterns(all, opts)
+	return page, total, nil
+}
+
+// pagePatterns filters (by case-insensitive substring on template/id/service),
+// sorts (Count desc, id asc) and slices a materialized pattern set into one
+// page, returning the page and the post-filter total. It is the in-memory twin
+// of the paged SQL: same order, same search columns, so the file/in-memory
+// backend and the Snapshot fallback page identically to the Postgres store.
+func pagePatterns(all []*Pattern, opts CatalogPageOptions) ([]*Pattern, int) {
+	if q := strings.ToLower(strings.TrimSpace(opts.Search)); q != "" {
+		kept := make([]*Pattern, 0, len(all))
+		for _, p := range all {
+			if strings.Contains(strings.ToLower(p.Template), q) ||
+				strings.Contains(strings.ToLower(p.ID), q) ||
+				strings.Contains(strings.ToLower(p.Service), q) {
+				kept = append(kept, p)
+			}
+		}
+		all = kept
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].Count != all[j].Count {
+			return all[i].Count > all[j].Count
+		}
+		return all[i].ID < all[j].ID
+	})
+	total := len(all)
+	page := all[sliceBounds(total, opts):sliceEnd(total, opts)]
+	return page, total
+}
+
+// ServicesPage returns one bounded page of services plus the whole-set total.
+// It is the service twin of PatternsPage: a CatalogPager store pushes the page
+// and count into SQL, otherwise the bounded service working set is read once
+// and sliced. The page is ordered by FirstSeen ascending with name as a stable
+// tie-break, filtered to opts.Search (a case-insensitive substring on the
+// service name) when set.
+func (c *Catalog) ServicesPage(opts CatalogPageOptions) ([]ServiceRow, int, error) {
+	if s := catalogStore(); s != nil {
+		if pager, ok := s.(CatalogPager); ok {
+			return pager.ListServicesPage(opts)
+		}
+		if _, services, err := s.Snapshot(); err != nil {
+			log.Printf("agent: catalog snapshot failed, serving local services view: %v", err)
+		} else {
+			page, total := pageServices(services, opts)
+			return page, total, nil
+		}
+	}
+	c.mu.RLock()
+	services := make(map[string]ServiceInfo, len(c.services))
+	for name, info := range c.services {
+		services[name] = *info
+	}
+	c.mu.RUnlock()
+	page, total := pageServices(services, opts)
+	return page, total, nil
+}
+
+// pageServices filters (by case-insensitive substring on the name), sorts
+// (FirstSeen asc, name asc) and slices a service map into one ordered page,
+// returning the page and the post-filter total — the in-memory twin of the
+// paged service SQL.
+func pageServices(all map[string]ServiceInfo, opts CatalogPageOptions) ([]ServiceRow, int) {
+	q := strings.ToLower(strings.TrimSpace(opts.Search))
+	rows := make([]ServiceRow, 0, len(all))
+	for name, info := range all {
+		if q != "" && !strings.Contains(strings.ToLower(name), q) {
+			continue
+		}
+		rows = append(rows, ServiceRow{Name: name, Info: info})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if !rows[i].Info.FirstSeen.Equal(rows[j].Info.FirstSeen) {
+			return rows[i].Info.FirstSeen.Before(rows[j].Info.FirstSeen)
+		}
+		return rows[i].Name < rows[j].Name
+	})
+	total := len(rows)
+	page := rows[sliceBounds(total, opts):sliceEnd(total, opts)]
+	return page, total
+}
+
+// sliceBounds / sliceEnd resolve the [offset, offset+limit) window against a
+// materialized total, clamping a non-positive limit to DefaultCatalogPageSize,
+// a negative offset to 0, and an out-of-range window to the empty tail — the
+// same bounds the paged SQL applies via LIMIT/OFFSET.
+func sliceBounds(total int, opts CatalogPageOptions) int {
+	offset := opts.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
+	}
+	return offset
+}
+
+func sliceEnd(total int, opts CatalogPageOptions) int {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = DefaultCatalogPageSize
+	}
+	end := sliceBounds(total, opts) + limit
+	if end > total {
+		end = total
+	}
+	return end
 }
 
 // Upsert records an observation against patternID. If the pattern is new it

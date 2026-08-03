@@ -33,6 +33,7 @@ vi.mock("@/lib/api", async (importActual) => {
     api: {
       ...actual.api,
       listPatterns: vi.fn(),
+      listPatternsIndex: vi.fn(),
       getPattern: vi.fn(),
       listBaselines: vi
         .fn()
@@ -110,7 +111,11 @@ async function openPeek(): Promise<HTMLElement> {
 describe("PatternsPage peek — fetches the pattern DETAIL", () => {
   beforeEach(() => {
     vi.mocked(api.listServiceOverrides).mockResolvedValue([]);
-    vi.mocked(api.listPatterns).mockResolvedValue([listRow()]);
+    vi.mocked(api.listPatternsIndex).mockResolvedValue({
+      patterns: [listRow()],
+      total: 1,
+      next_offset: null,
+    });
     vi.mocked(api.getPattern).mockResolvedValue(detail());
   });
 
@@ -163,11 +168,15 @@ describe("PatternsPage — Verdict cell learning hint", () => {
   });
 
   it("shows the seen/needed progress meter when a count target exists", async () => {
-    vi.mocked(api.listPatterns).mockResolvedValue([
-      listRow({
-        readiness: { ready: false, seen: 40, needed: 100, rate_per_min: 2 },
-      }),
-    ]);
+    vi.mocked(api.listPatternsIndex).mockResolvedValue({
+      patterns: [
+        listRow({
+          readiness: { ready: false, seen: 40, needed: 100, rate_per_min: 2 },
+        }),
+      ],
+      total: 1,
+      next_offset: null,
+    });
     renderPage();
     const row = await screen.findByText("payment <*> failed");
     const cell = row.closest("tr")!;
@@ -175,6 +184,52 @@ describe("PatternsPage — Verdict cell learning hint", () => {
     expect(cell.textContent).toContain("40");
     expect(cell.textContent).toContain("100");
     expect(within(cell).queryByText(/auto-promotion off/)).toBeNull();
+  });
+});
+
+// The Patterns list is served as bounded pages (a cheap total + one page), not
+// the whole catalog. These pin the paged wiring: the whole-set total drives the
+// header, and a server-advertised next page surfaces a "Load more" control that
+// pulls the following page on demand.
+describe("PatternsPage — server-side paging", () => {
+  beforeEach(() => {
+    vi.mocked(api.listServiceOverrides).mockResolvedValue([]);
+    vi.mocked(api.getPattern).mockResolvedValue(detail());
+  });
+
+  it("renders the whole-set total in the header, not the loaded page size", async () => {
+    vi.mocked(api.listPatternsIndex).mockResolvedValue({
+      patterns: [listRow()],
+      total: 4200,
+      next_offset: null,
+    });
+    renderPage();
+    // The subtitle reflects the server total (4,200), not the one loaded row.
+    expect(await screen.findByText(/4,200 log templates learned/)).toBeTruthy();
+  });
+
+  it("loads the next page when Load more is clicked", async () => {
+    vi.mocked(api.listPatternsIndex)
+      .mockResolvedValueOnce({
+        patterns: [listRow({ id: "p-1", template: "first page <*>" })],
+        total: 2,
+        next_offset: 1,
+      })
+      .mockResolvedValueOnce({
+        patterns: [listRow({ id: "p-2", template: "second page <*>" })],
+        total: 2,
+        next_offset: null,
+      });
+    renderPage();
+
+    // First page rendered; the load-more control advertises more rows.
+    expect(await screen.findByText("first page <*>")).toBeTruthy();
+    const more = await screen.findByTestId("pattern-load-more");
+    fireEvent.click(within(more).getByRole("button"));
+
+    // The second page is fetched and appended.
+    expect(await screen.findByText("second page <*>")).toBeTruthy();
+    expect(api.listPatternsIndex).toHaveBeenCalledWith({ offset: 1 });
   });
 });
 
