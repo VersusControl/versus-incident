@@ -99,7 +99,10 @@ function renderPage() {
   return render(
     <QueryClientProvider client={qc}>
       <ToastProvider>
-        <MemoryRouter initialEntries={["/incidents"]}>
+        <MemoryRouter
+          initialEntries={["/incidents"]}
+          future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+        >
           <LocationProbe />
           <Routes>
             <Route path="/incidents" element={<IncidentsPage />} />
@@ -123,7 +126,10 @@ function renderPageAt(entry: string) {
   return render(
     <QueryClientProvider client={qc}>
       <ToastProvider>
-        <MemoryRouter initialEntries={[entry]}>
+        <MemoryRouter
+          initialEntries={[entry]}
+          future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+        >
           <LocationProbe />
           <Routes>
             <Route path="/incidents" element={<IncidentsPage />} />

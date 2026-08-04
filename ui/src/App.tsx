@@ -56,6 +56,10 @@ const SLORecommendationsPage = lazyPage(
   () => import("./pages/SLORecommendationsPage"),
   "SLORecommendationsPage",
 );
+const AlertFatiguePage = lazyPage(
+  () => import("./pages/AlertFatiguePage"),
+  "AlertFatiguePage",
+);
 const PeoplePage = lazyPage(() => import("./pages/PeoplePage"), "PeoplePage");
 const SettingsPage = lazyPage(() => import("./pages/SettingsPage"), "SettingsPage");
 const AdminPage = lazyPage(() => import("./pages/AdminPage"), "AdminPage");
@@ -113,6 +117,10 @@ export default function App() {
           <Route path="/agent/metrics" element={<MetricsPage />} />
           <Route path="/agent/traces" element={<TracesPage />} />
           <Route path="/agent/slo" element={<SLORecommendationsPage />} />
+          <Route
+            path="/agent/alert-fatigue"
+            element={<AlertFatiguePage />}
+          />
           <Route path="/agent/decisions" element={<DecisionsPage />} />
           <Route
             path={SYSTEM_PROMPT_PATH}

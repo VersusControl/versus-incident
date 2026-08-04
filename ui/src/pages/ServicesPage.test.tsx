@@ -67,7 +67,10 @@ function renderPage() {
   return render(
     <QueryClientProvider client={qc}>
       <ToastProvider>
-        <MemoryRouter initialEntries={["/agent/services"]}>
+        <MemoryRouter
+          initialEntries={["/agent/services"]}
+          future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+        >
           <LocationProbe />
           <Routes>
             <Route path="/agent/services" element={<ServicesPage />} />
@@ -195,7 +198,10 @@ describe("ServicesPage Active/Ignored scope", () => {
     return render(
       <QueryClientProvider client={qc}>
         <ToastProvider>
-          <MemoryRouter initialEntries={[initialEntry]}>
+          <MemoryRouter
+            initialEntries={[initialEntry]}
+            future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+          >
             <LocationProbe />
             <Routes>
               <Route path="/agent/services" element={<ServicesPage />} />

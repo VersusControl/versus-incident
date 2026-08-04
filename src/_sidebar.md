@@ -54,6 +54,7 @@
     - [CloudWatch Metrics](/enterprise/metrics/cloudwatch-metrics)
   - [Traces](/enterprise/traces)
   - [SLI/SLO auto-define](/enterprise/slo)
+  - [Alert fatigue](/enterprise/alert-fatigue)
 
 - Configuration
   - [Overview](/configuration/admin-ui)

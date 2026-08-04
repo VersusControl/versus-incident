@@ -16,11 +16,6 @@
 -- against these tables (the Postgres catalog store) binds every value as a
 -- parameter and names the tables as Go constants.
 
--- Drop the old whole-blob catalog table (name, data, updated_at). Its
--- learned/curated content is regenerable and self-heals within one learning
--- window; there is no lossy blob->columns copy.
-DROP TABLE IF EXISTS vs_patterns;
-
 -- Catalog ROOT: one partition-neutral row per learned signal identity, shared
 -- by log/metric/trace so a single query lists every learned signal for a
 -- service across kinds. Holds identity + the fleet-wide operator-curated

@@ -59,7 +59,10 @@ function renderPage() {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/analyses"]}>
+      <MemoryRouter
+        initialEntries={["/analyses"]}
+        future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+      >
         <LocationProbe />
         <Routes>
           <Route path="/analyses" element={<AnalysesListPage />} />

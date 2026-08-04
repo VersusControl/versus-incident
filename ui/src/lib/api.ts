@@ -1300,6 +1300,194 @@ export interface ReportSendResult {
   bytes: number;
 }
 
+// ---------- Alert fatigue (Enterprise, RBAC runtime:manage) ----------
+
+// AlertFatigueConfig is the per-org alert-fatigue configuration exchanged with
+// GET/PUT /enterprise/api/alert-fatigue/config. `enabled` is the master on/off
+// (default OFF); `pending_review` holds newly-fatigued fingerprints for an
+// operator OK instead of auto-diverting (default OFF = auto-fatigue);
+// `fatigue_channel` is the notification channel diverted ("spam") alerts land
+// on. The PUT is write-through — it takes effect immediately.
+export interface AlertFatigueConfig {
+  enabled: boolean;
+  pending_review: boolean;
+  fatigue_channel: string;
+  // fatigue_channel_valid is a DERIVED read-only flag on the GET/PUT echo: false
+  // when the selected fatigue channel is no longer an enabled channel for the
+  // org (so the UI can warn that a diverted channel was later disabled). Absent
+  // on the write body — the server ignores it — and absent when no channel
+  // lister is wired (never a false warning).
+  fatigue_channel_valid?: boolean;
+}
+
+// AlertFatigueChannel is one notification channel eligible to be the fatigue
+// channel, with its effective enabled flag (the runtime channel config the
+// alert path resolves). From GET /enterprise/api/alert-fatigue/channels.
+export interface AlertFatigueChannel {
+  name: string;
+  enabled: boolean;
+}
+
+// AlertFatigueAnalytics is the per-org noise read-model over a bounded window
+// (7d default / 30d) from GET /enterprise/api/alert-fatigue/analytics. Every
+// number reconciles to the raw fingerprint rows in the same window. There is no
+// MTTA field on this endpoint — the read-model is fingerprint-derived only.
+export interface AlertFatigueAnalytics {
+  window: string;
+  total: number;
+  by_status: Record<string, number>;
+  noise_ratio: number;
+  diverted: number;
+  reclaim_count: number;
+  reclaim_rate: number;
+  top_noisy: Array<{ service: string; repeat_total: number; findings: number }>;
+  trend: Array<{ day: string; total: number; fatigued: number }>;
+}
+
+// AlertFatigueCorrelationConfig is the same-service grouping config from
+// GET/PUT /enterprise/api/alert-fatigue/correlation. `effective_window_seconds`
+// is the window the interceptor actually applies (default when unset, clamped
+// otherwise) so the UI shows the real behaviour.
+export interface AlertFatigueCorrelationConfig {
+  correlation_enabled: boolean;
+  correlation_window_seconds: number;
+  effective_window_seconds: number;
+}
+
+// AlertFatigueCorrelationGroup is one open parent group (the first finding for a
+// service pages; later same-service findings in the window fold in as members).
+export interface AlertFatigueCorrelationGroup {
+  id: number;
+  group_key: string;
+  service: string;
+  parent_fingerprint: string;
+  parent_severity: string;
+  window_start: string;
+  window_end: string;
+  member_count: number;
+  reason: string;
+  created_at: string;
+}
+
+export interface AlertFatigueCorrelationGroupsResponse {
+  groups: AlertFatigueCorrelationGroup[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+// AlertFatigueCorrelationMember is one folded child of a group.
+export interface AlertFatigueCorrelationMember {
+  id: number;
+  child_fingerprint: string;
+  child_severity: string;
+  reason: string;
+  created_at: string;
+}
+
+export interface AlertFatigueCorrelationMembersResponse {
+  group_id: number;
+  members: AlertFatigueCorrelationMember[];
+}
+
+// AlertFatigueDependencyConfig is the dependency-aware suppression config from
+// GET/PUT /enterprise/api/alert-fatigue/dependencies. `effective_lookback_seconds`
+// is the open-incident lookback the interceptor actually applies.
+export interface AlertFatigueDependencyConfig {
+  dependency_suppress_enabled: boolean;
+  dependency_lookback_seconds: number;
+  effective_lookback_seconds: number;
+}
+
+// AlertFatigueDependencyEdge is one operator-declared edge: `downstream`
+// depends on `upstream` (a symptom page for downstream is held while upstream
+// has an open incident in the lookback window).
+export interface AlertFatigueDependencyEdge {
+  id: number;
+  downstream: string;
+  upstream: string;
+  created_by?: string;
+  created_at: string;
+}
+
+export interface AlertFatigueDependencyEdgesResponse {
+  edges: AlertFatigueDependencyEdge[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+// AlertFatigueDependencyHold is one held downstream symptom (diverted while its
+// upstream cause was firing). `alert_content` is already redacted.
+export interface AlertFatigueDependencyHold {
+  id: number;
+  fingerprint: string;
+  downstream: string;
+  upstream: string;
+  incident_id: string;
+  alert_content: Record<string, unknown> | null;
+  source: string;
+  service: string;
+  severity: string;
+  routed_channel?: string;
+  hold_count: number;
+  reason: string;
+  first_seen: string;
+  last_seen: string;
+}
+
+export interface AlertFatigueDependencyHoldsResponse {
+  holds: AlertFatigueDependencyHold[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+// AlertFatigueStatus is the listable review state of a fingerprint row. The
+// server's internal `tracking` (first-occurrence counting) state is NOT
+// listable and is rejected 400 if requested — it is deliberately absent here.
+export type AlertFatigueStatus = "fatigued" | "reclaimed" | "pending_review";
+
+// AlertFatigueFinding is one reviewable fingerprint row. `alert_content` is the
+// ALREADY-REDACTED captured alert map (never a raw secret); the peek renders it
+// verbatim. `status` is one of AlertFatigueStatus on the wire (the server never
+// lists `tracking` rows).
+export interface AlertFatigueFinding {
+  id: string;
+  fingerprint: string;
+  alert_content: Record<string, unknown> | null;
+  source: string;
+  service: string;
+  severity: string;
+  repeat_count: number;
+  first_seen: string;
+  last_seen: string;
+  status: string;
+  decision_by?: string;
+  decision_at?: string;
+  routed_channel: string;
+  // priority_score / priority_reason are the deterministic (no-LLM) priority
+  // scorecard persisted on the row. Optional — absent until the scorer runs or
+  // when no priority signal was present. Score is in [0,1]; reason is a legible
+  // explanation of the terms that contributed.
+  priority_score?: number;
+  priority_reason?: string;
+}
+
+export interface AlertFatigueFindingsResponse {
+  fingerprints: AlertFatigueFinding[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+// AlertFatigueSort is the server-accepted sort column for the fingerprint
+// review list. `last_seen` is the default; any other value is rejected 400.
+export type AlertFatigueSort = "last_seen" | "repeat_count" | "priority";
+
+// AlertFatigueSortDir is the sort direction; `desc` is the default.
+export type AlertFatigueSortDir = "asc" | "desc";
+
 export const api = {
   status: () => request<Status>("/api/agent/status"),
   listPatterns: () =>
@@ -1390,6 +1578,174 @@ export const api = {
     sessionRequest<SLOAutodefineConfig>(
       "/enterprise/api/agent/slo-autodefine/config",
       { method: "PUT", body: JSON.stringify({ enabled }) },
+    ),
+
+  // Alert fatigue config + fingerprint review (Enterprise, RBAC
+  // runtime:manage). These ride the SSO session cookie via sessionRequest; the
+  // org and role are derived server-side. Community / unlicensed → 403 (the
+  // page gates upfront on the effective role and never issues these). The PUT
+  // is write-through (the interceptor picks up the change immediately); the
+  // full config body is sent every write so a partial edit never clears a
+  // sibling field.
+  getAlertFatigueConfig: () =>
+    sessionRequest<AlertFatigueConfig>("/enterprise/api/alert-fatigue/config"),
+  setAlertFatigueConfig: (cfg: AlertFatigueConfig) =>
+    sessionRequest<AlertFatigueConfig>("/enterprise/api/alert-fatigue/config", {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
+  // listAlertFatigueFingerprints reads one page of the review table. `status`
+  // filters by review state (omit for all listable rows); the internal
+  // `tracking` state is rejected 400 by the server, so never request it. `sort`
+  // (last_seen default / repeat_count / priority) and `dir` (asc / desc,
+  // default desc) drive the server-side ordering; an unknown sort is 400.
+  // Paged with page/page_size; the response carries the whole-set `total`.
+  listAlertFatigueFingerprints: (opts?: {
+    status?: string;
+    sort?: AlertFatigueSort;
+    dir?: AlertFatigueSortDir;
+    page?: number;
+    pageSize?: number;
+  }) => {
+    const p = new URLSearchParams();
+    if (opts?.status) p.set("status", opts.status);
+    if (opts?.sort) p.set("sort", opts.sort);
+    if (opts?.dir) p.set("dir", opts.dir);
+    if (opts?.page) p.set("page", String(opts.page));
+    if (opts?.pageSize) p.set("page_size", String(opts.pageSize));
+    const qs = p.toString();
+    return sessionRequest<AlertFatigueFindingsResponse>(
+      `/enterprise/api/alert-fatigue/fingerprints${qs ? `?${qs}` : ""}`,
+    );
+  },
+  // confirmAlertFatigueFingerprint marks a fingerprint as spam (status →
+  // fatigued); reclaimAlertFatigueFingerprint marks it NOT spam (status →
+  // reclaimed, pages forever). Both 404 when the id is not this org's.
+  confirmAlertFatigueFingerprint: (id: string) =>
+    sessionRequest<AlertFatigueFinding>(
+      `/enterprise/api/alert-fatigue/fingerprints/${encodeURIComponent(id)}/confirm`,
+      { method: "POST" },
+    ),
+  reclaimAlertFatigueFingerprint: (id: string) =>
+    sessionRequest<AlertFatigueFinding>(
+      `/enterprise/api/alert-fatigue/fingerprints/${encodeURIComponent(id)}/reclaim`,
+      { method: "POST" },
+    ),
+
+  // listAlertFatigueChannels reads the org's notification channels eligible to
+  // be the fatigue channel, each with its EFFECTIVE enabled flag (the same
+  // runtime channel config the alert path resolves). Preferred over the generic
+  // channel-settings map for the fatigue picker because it also reports whether
+  // each channel is currently enabled — so the UI can warn when a diverted
+  // channel was later disabled. 503 in community mode.
+  listAlertFatigueChannels: () =>
+    sessionRequest<{ channels: AlertFatigueChannel[] }>(
+      "/enterprise/api/alert-fatigue/channels",
+    ).then((r) => r.channels ?? []),
+
+  // getAlertFatigueAnalytics reads the per-org noise read-model over the given
+  // window (7d default, 30d optional). Read-only; every figure is org-scoped.
+  getAlertFatigueAnalytics: (window?: "7d" | "30d") =>
+    sessionRequest<AlertFatigueAnalytics>(
+      `/enterprise/api/alert-fatigue/analytics${window ? `?window=${window}` : ""}`,
+    ),
+
+  // Correlation (same-service grouping). GET/PUT the config; the PUT is
+  // write-through and takes effect on the next emit. The full config is sent so
+  // a partial edit never clears a sibling. Groups + members are read-only.
+  getAlertFatigueCorrelation: () =>
+    sessionRequest<AlertFatigueCorrelationConfig>(
+      "/enterprise/api/alert-fatigue/correlation",
+    ),
+  setAlertFatigueCorrelation: (body: {
+    correlation_enabled: boolean;
+    correlation_window_seconds: number;
+  }) =>
+    sessionRequest<AlertFatigueCorrelationConfig>(
+      "/enterprise/api/alert-fatigue/correlation",
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
+  listAlertFatigueCorrelationGroups: (opts?: {
+    page?: number;
+    pageSize?: number;
+  }) => {
+    const p = new URLSearchParams();
+    if (opts?.page) p.set("page", String(opts.page));
+    if (opts?.pageSize) p.set("page_size", String(opts.pageSize));
+    const qs = p.toString();
+    return sessionRequest<AlertFatigueCorrelationGroupsResponse>(
+      `/enterprise/api/alert-fatigue/correlation/groups${qs ? `?${qs}` : ""}`,
+    );
+  },
+  listAlertFatigueCorrelationMembers: (groupId: number) =>
+    sessionRequest<AlertFatigueCorrelationMembersResponse>(
+      `/enterprise/api/alert-fatigue/correlation/groups/${encodeURIComponent(
+        String(groupId),
+      )}/members`,
+    ),
+
+  // Dependency-aware suppression. GET/PUT the config (write-through); the edge
+  // map is CRUD (add/remove); holds are the read-only reviewable held symptoms.
+  getAlertFatigueDependency: () =>
+    sessionRequest<AlertFatigueDependencyConfig>(
+      "/enterprise/api/alert-fatigue/dependencies",
+    ),
+  setAlertFatigueDependency: (body: {
+    dependency_suppress_enabled: boolean;
+    dependency_lookback_seconds: number;
+  }) =>
+    sessionRequest<AlertFatigueDependencyConfig>(
+      "/enterprise/api/alert-fatigue/dependencies",
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
+  listAlertFatigueDependencyEdges: (opts?: {
+    page?: number;
+    pageSize?: number;
+  }) => {
+    const p = new URLSearchParams();
+    if (opts?.page) p.set("page", String(opts.page));
+    if (opts?.pageSize) p.set("page_size", String(opts.pageSize));
+    const qs = p.toString();
+    return sessionRequest<AlertFatigueDependencyEdgesResponse>(
+      `/enterprise/api/alert-fatigue/dependencies/edges${qs ? `?${qs}` : ""}`,
+    );
+  },
+  addAlertFatigueDependencyEdge: (body: {
+    downstream: string;
+    upstream: string;
+  }) =>
+    sessionRequest<{ id: number; downstream: string; upstream: string }>(
+      "/enterprise/api/alert-fatigue/dependencies/edges",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  removeAlertFatigueDependencyEdge: (id: number) =>
+    sessionRequest<{ id: number }>(
+      `/enterprise/api/alert-fatigue/dependencies/edges/${encodeURIComponent(
+        String(id),
+      )}`,
+      { method: "DELETE" },
+    ),
+  listAlertFatigueDependencyHolds: (opts?: {
+    page?: number;
+    pageSize?: number;
+  }) => {
+    const p = new URLSearchParams();
+    if (opts?.page) p.set("page", String(opts.page));
+    if (opts?.pageSize) p.set("page_size", String(opts.pageSize));
+    const qs = p.toString();
+    return sessionRequest<AlertFatigueDependencyHoldsResponse>(
+      `/enterprise/api/alert-fatigue/dependencies/holds${qs ? `?${qs}` : ""}`,
+    );
+  },
+  // reclaimAlertFatigueDependencyHold marks a held downstream symptom NOT
+  // suppressed ("should page") so it is released to the on-call channel. 404
+  // when the id is not this org's.
+  reclaimAlertFatigueDependencyHold: (id: number) =>
+    sessionRequest<{ id: number; reclaimed: boolean }>(
+      `/enterprise/api/alert-fatigue/dependencies/holds/${encodeURIComponent(
+        String(id),
+      )}/reclaim`,
+      { method: "POST" },
     ),
 
   // Runtime mode override (Enterprise, RBAC runtime:manage). These ride the
