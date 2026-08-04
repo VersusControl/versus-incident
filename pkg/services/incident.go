@@ -17,6 +17,20 @@ import (
 )
 
 func CreateIncident(teamID string, content *map[string]interface{}, params ...*map[string]string) error {
+	// Emit interception — the alert-fatigue choke point. It runs FIRST so a
+	// held-back finding never touches config or provider building. A nil
+	// interceptor (community mode) or a panic fails open to EmitProceed, so an
+	// untouched OSS binary pages exactly as before. EmitSuppress/Group/Delay
+	// mean "do not page the primary channels" — the wrapper has already
+	// recorded the finding in its own store; OSS records nothing extra and
+	// returns without error. EmitDivert restricts the fan-out to the named
+	// channels below.
+	decision := resolveEmitDecision(*content, teamID)
+	switch decision.Action {
+	case EmitSuppress, EmitGroup, EmitDelay:
+		return nil
+	}
+
 	var cfg *config.Config
 
 	// Resolve the effective config for THIS incident with runtime-override →
@@ -40,6 +54,12 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	if err != nil {
 		return fmt.Errorf("failed to create providers: %v", err)
 	}
+
+	// EmitDivert restricts the fan-out to the interceptor's channels; every
+	// other verdict keeps the full built set (fail-open). The incident is still
+	// persisted and still gets its AckURL / on-call per the normal rules — only
+	// the delivery channel set changes.
+	providers = applyEmitRouting(decision, providers)
 
 	alert := core.NewAlert(providers...)
 

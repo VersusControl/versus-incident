@@ -170,8 +170,16 @@ export function SidebarContent({
         ? "Enterprise feature — requires an intelligence license"
         : undefined,
     },
+    {
+      to: "/agent/alert-fatigue",
+      label: "Alert fatigue",
+      locked: enterpriseLocked,
+      dim: enterpriseLocked,
+      dimTitle: enterpriseLocked
+        ? "Enterprise feature — requires an intelligence license"
+        : undefined,
+    },
     // inDev
-    { label: "Alert fatigue", inDev: true },
     { label: "Secret scanning", inDev: true },
     { label: "Fraud detection", inDev: true },
   ];

@@ -84,7 +84,11 @@ function renderPage(page: ReactElement) {
   return render(
     <QueryClientProvider client={qc}>
       <ToastProvider>
-        <MemoryRouter>{page}</MemoryRouter>
+        <MemoryRouter
+          future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+        >
+          {page}
+        </MemoryRouter>
       </ToastProvider>
     </QueryClientProvider>,
   );

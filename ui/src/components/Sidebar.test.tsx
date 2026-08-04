@@ -83,7 +83,9 @@ function renderSidebar() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>
+      <MemoryRouter
+        future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+      >
         <SidebarContent />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -127,6 +129,7 @@ describe("Sidebar — the AI nav section groups the agent's reasoning surfaces",
       "/agent/decisions",
       "/analyses",
       "/agent/slo",
+      "/agent/alert-fatigue",
     ]);
   });
 
@@ -149,6 +152,12 @@ describe("Sidebar — the AI nav section groups the agent's reasoning surfaces",
     const decisions = screen.getByRole("link", { name: /Decisions/ });
     expect(within(decisions).queryByLabelText("Enterprise")).toBeNull();
   });
+
+  it("keeps Alert fatigue enterprise-locked alongside SLIs/SLOs", async () => {
+    await renderSettled();
+    const af = screen.getByRole("link", { name: /Alert fatigue/ });
+    expect(within(af).getByLabelText("Enterprise")).toBeTruthy();
+  });
 });
 
 // The AI section also carries greenlit-but-unbuilt capabilities (secret
@@ -161,7 +170,6 @@ describe("Sidebar — in-development AI placeholders", () => {
   const PLACEHOLDERS: Array<{ label: string; testid: string }> = [
     { label: "Secret scanning", testid: "nav-indev-secret-scanning" },
     { label: "Fraud detection", testid: "nav-indev-fraud-detection" },
-    { label: "Alert fatigue", testid: "nav-indev-alert-fatigue" },
   ];
 
   it("renders all placeholders as non-clickable, aria-disabled rows with a Dev badge and stable testid", async () => {
@@ -191,6 +199,7 @@ describe("Sidebar — in-development AI placeholders", () => {
       "/agent/decisions",
       "/analyses",
       "/agent/slo",
+      "/agent/alert-fatigue",
     ]);
     // No section holds an empty ("") href from a placeholder rendered as a link.
     for (const hrefs of Object.values(navSections())) {
@@ -267,7 +276,9 @@ describe("Sidebar desktop rail — collapse / expand toggle", () => {
     });
     return render(
       <QueryClientProvider client={qc}>
-        <MemoryRouter>
+        <MemoryRouter
+          future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+        >
           <Sidebar />
         </MemoryRouter>
       </QueryClientProvider>,
