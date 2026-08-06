@@ -179,9 +179,6 @@ export function SidebarContent({
         ? "Enterprise feature — requires an intelligence license"
         : undefined,
     },
-    // inDev
-    { label: "Secret scanning", inDev: true },
-    { label: "Fraud detection", inDev: true },
   ];
 
   const tools: SideItem[] = [
@@ -193,7 +190,7 @@ export function SidebarContent({
       dim: !runbooksAvailable,
       dimTitle: runbooksAvailable
         ? undefined
-        : "Requires the AI subsystem (agent.ai.enable) and a storage backend — open for details",
+        : "Requires the AI subsystem and a storage backend — open for details",
     },
   ];
   const manage: SideItem[] = [

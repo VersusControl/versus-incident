@@ -148,7 +148,7 @@ export function RunbooksPage() {
         <main className="flex-1 overflow-auto p-6">
           <EmptyState
             title="Runbooks not available"
-            hint="Requires the AI subsystem (agent.ai.enable) and a storage backend — configure both to use the runbook corpus."
+            hint="Requires the AI subsystem and a storage backend — configure both to use the runbook corpus."
           />
         </main>
       </>

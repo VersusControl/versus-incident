@@ -113,17 +113,38 @@ type header struct {
 // validation error so the caller can log/refuse, never silently granting
 // enterprise on a bad token.
 func Load() (*License, error) {
-	pub := embeddedPublicKey()
-	if path := strings.TrimSpace(os.Getenv(CacheEnvVar)); path != "" {
-		if data, err := os.ReadFile(path); err == nil {
-			if lic, err := loadFrom(string(data), pub); err == nil {
+	return loadPreferringCache(
+		strings.TrimSpace(os.Getenv(CacheEnvVar)),
+		os.Getenv(EnvVar),
+		embeddedPublicKey(),
+	)
+}
+
+// loadPreferringCache is the testable core of Load: it prefers a
+// signature-valid cache token — valid OR merely expired — over the env
+// seed, and only falls through to the seed when the cache is absent,
+// unreadable, malformed, or bad-signature.
+func loadPreferringCache(cachePath, envToken string, pub ed25519.PublicKey) (*License, error) {
+	if cachePath != "" {
+		if data, err := os.ReadFile(cachePath); err == nil {
+			lic, lerr := loadFrom(string(data), pub)
+			switch {
+			case lerr == nil:
+				// Fresh, unexpired cache lease — the freshest known token.
 				return lic, nil
+			case errors.Is(lerr, ErrExpired):
+				// Cache holds a signature-valid but expired lease. It is still
+				// the freshest token we have (newer than the env seed), so
+				// prefer it: features stay OFF but its raw token lets the
+				// renewer present the latest lease. Only a malformed/
+				// bad-signature cache falls through to the env seed below.
+				return lic, lerr
 			}
-			// A stale/invalid cache falls through to the env seed below;
-			// the renewer overwrites it on the next successful renewal.
+			// A malformed/bad-signature cache falls through to the env seed
+			// below; the renewer overwrites it on the next successful renewal.
 		}
 	}
-	return loadFrom(os.Getenv(EnvVar), pub)
+	return loadFrom(envToken, pub)
 }
 
 // Parse validates an explicit token string against the embedded public
@@ -141,6 +162,15 @@ func loadFrom(token string, pub ed25519.PublicKey) (*License, error) {
 	}
 	claims, err := verify(token, pub)
 	if err != nil {
+		// A signature-valid token that has merely expired is still a genuine
+		// lease the org owns: retain it (features OFF) so the enterprise
+		// renewer can present it as the renewal credential and lift the org
+		// back to a fresh lease. enterprise stays false, so every gate method
+		// reads community until Reload swaps in an unexpired token. A
+		// bad-signature/malformed token is NEVER retained.
+		if errors.Is(err, ErrExpired) {
+			return &License{enterprise: false, claims: claims, raw: token}, ErrExpired
+		}
 		return &License{}, err
 	}
 	return &License{enterprise: true, claims: claims, raw: token}, nil
@@ -185,7 +215,10 @@ func verify(token string, pub ed25519.PublicKey) (Claims, error) {
 		return Claims{}, ErrMalformed
 	}
 	if claims.ExpiresAt != 0 && time.Now().Unix() >= claims.ExpiresAt {
-		return Claims{}, ErrExpired
+		// Return the decoded claims alongside ErrExpired: the signature is
+		// valid, so the caller can retain the token as a renewable lease even
+		// though it grants no features until renewed.
+		return claims, ErrExpired
 	}
 	return claims, nil
 }

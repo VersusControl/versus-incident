@@ -50,6 +50,7 @@ import { SeverityBadge } from "@/components/SeverityBadge";
 import { SkLine, SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { ReportsButton } from "@/components/ReportsDialog";
+import { RunAnalysisButton } from "@/components/RunAnalysisButton";
 import { useToast } from "@/components/toastContext";
 
 type StatusFilter = IncidentStatusFilter;
@@ -317,8 +318,21 @@ export function IncidentsPage() {
   // until a status/text filter finds matches or the history is exhausted —
   // always a bounded page at a time, never the whole table up front.
   const { fetchNextPage, hasNextPage, isFetchingNextPage } = listQuery;
+  // Server-known count of rows matching the active (origin, status). When the
+  // counts come straight from the server's by_status breakdown (not a
+  // client-side text tally), this is authoritative — so a status with ZERO
+  // matches (e.g. webhook + open, all auto-resolved) stops the walk instead of
+  // paging through the whole history into a blank list. undefined while we're
+  // filtering client-side (no authoritative server count) → keep old behavior.
+  const knownMatchCount =
+    byStatus && !clientFiltering ? counts[status] : undefined;
   useEffect(() => {
-    if (pg.page >= pg.pageCount && hasNextPage && !isFetchingNextPage) {
+    if (
+      pg.page >= pg.pageCount &&
+      hasNextPage &&
+      !isFetchingNextPage &&
+      (knownMatchCount === undefined || filtered.length < knownMatchCount)
+    ) {
       fetchNextPage();
     }
   }, [
@@ -327,6 +341,8 @@ export function IncidentsPage() {
     hasNextPage,
     isFetchingNextPage,
     fetchNextPage,
+    knownMatchCount,
+    filtered.length,
   ]);
 
   // ----- selection + action bar -------------------------------------------
@@ -862,6 +878,9 @@ function IncidentPeekBody({
           <UserPlus size={12} aria-hidden />{" "}
           {hasAssignment ? "Change assignment" : "Assign"}
         </button>
+        {/* Run analysis mirrors the detail page's action so an operator can
+            trigger it from the list without opening the incident. */}
+        <RunAnalysisButton incidentID={i.id} />
         <button
           className="btn"
           aria-label="Mark incident resolved"

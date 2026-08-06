@@ -333,3 +333,119 @@ func TestLoadPrefersValidCacheOverEnvSeed(t *testing.T) {
 		t.Fatal("invalid cache must not enable enterprise")
 	}
 }
+
+// A signature-valid but expired token must degrade to community (features
+// OFF) yet RETAIN the token so the enterprise renewer can present it.
+func TestExpiredTokenRetainedAsRenewable(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	tok := mintToken(t, priv, Claims{
+		Org:         "acme",
+		FeatureList: []string{"sso"},
+		ExpiresAt:   time.Now().Add(-time.Hour).Unix(),
+	})
+
+	lic, err := loadFrom(tok, pub)
+	if err != ErrExpired {
+		t.Fatalf("err = %v, want ErrExpired", err)
+	}
+	if lic.IsEnterpriseEnabled() {
+		t.Fatal("expired lease must not enable enterprise")
+	}
+	if lic.Features() != nil {
+		t.Fatalf("expired Features() = %v, want nil", lic.Features())
+	}
+	if lic.HasFeature("sso") {
+		t.Fatal("expired lease must not grant features")
+	}
+	if lic.Claims().Org != "" {
+		t.Fatalf("expired Claims() = %+v, want zero", lic.Claims())
+	}
+	if lic.Raw() != tok {
+		t.Fatal("expired lease must retain its token as renewable credential")
+	}
+}
+
+// A bad-signature or malformed token must NEVER be retained — a forged lease
+// is not a renewable credential.
+func TestForgedOrMalformedTokenNotRetained(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	otherPub, _, _ := ed25519.GenerateKey(rand.Reader)
+
+	// Foreign-signed (bad signature), and past expiry to prove the expiry
+	// branch is only reached AFTER the signature verifies.
+	forged := mintToken(t, priv, Claims{
+		Org:       "evil",
+		ExpiresAt: time.Now().Add(-time.Hour).Unix(),
+	})
+	lic, err := loadFrom(forged, otherPub)
+	if err != ErrBadSignature {
+		t.Fatalf("err = %v, want ErrBadSignature", err)
+	}
+	if lic.Raw() != "" {
+		t.Fatal("forged token must not be retained")
+	}
+
+	for _, tok := range []string{"not-a-jwt", "a.b", "a.b.c.d"} {
+		lic, err := loadFrom(tok, otherPub)
+		if err != ErrMalformed {
+			t.Fatalf("loadFrom(%q) err = %v, want ErrMalformed", tok, err)
+		}
+		if lic.Raw() != "" {
+			t.Fatalf("malformed token %q must not be retained", tok)
+		}
+	}
+
+	// Absent token → community, nothing retained.
+	if lic, _ := loadFrom("", otherPub); lic.Raw() != "" {
+		t.Fatal("absent token must not be retained")
+	}
+}
+
+// Load() must prefer a freshest expired cache token (retaining it as
+// renewable) over an older env seed, and only fall through to the env seed
+// when the cache is malformed/bad-signature.
+func TestLoadPrefersFreshestExpiredCacheOverEnvSeed(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	dir := t.TempDir()
+
+	// Freshest lease we hold is an EXPIRED cache token.
+	expiredCache := mintToken(t, priv, Claims{
+		Org:       "acme",
+		ExpiresAt: time.Now().Add(-time.Hour).Unix(),
+	})
+	// Older env seed (also expired here) that must be ignored in favour of
+	// the cache.
+	envSeed := mintToken(t, priv, Claims{
+		Org:       "stale",
+		ExpiresAt: time.Now().Add(-48 * time.Hour).Unix(),
+	})
+
+	cachePath := filepath.Join(dir, "lease")
+	if err := os.WriteFile(cachePath, []byte(expiredCache), 0o600); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+
+	lic, err := loadPreferringCache(cachePath, envSeed, pub)
+	if err != ErrExpired {
+		t.Fatalf("err = %v, want ErrExpired", err)
+	}
+	if lic.Raw() != expiredCache {
+		t.Fatal("Load must prefer the freshest expired cache token over the env seed")
+	}
+	if lic.IsEnterpriseEnabled() {
+		t.Fatal("expired cache lease must not enable enterprise")
+	}
+
+	// Malformed cache → fall through to the env seed (also expired here, but
+	// its raw token is retained from the seed).
+	if err := os.WriteFile(cachePath, []byte("not-a-jwt"), 0o600); err != nil {
+		t.Fatalf("seed malformed cache: %v", err)
+	}
+	lic, err = loadPreferringCache(cachePath, envSeed, pub)
+	if err != ErrExpired {
+		t.Fatalf("malformed cache fall-through err = %v, want ErrExpired", err)
+	}
+	if lic.Raw() != envSeed {
+		t.Fatal("malformed cache must fall through to the env seed token")
+	}
+}

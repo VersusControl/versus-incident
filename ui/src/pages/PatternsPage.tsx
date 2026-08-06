@@ -379,10 +379,6 @@ export function PatternsPage() {
       />
 
       <main className="flex-1 overflow-auto p-4 lg:p-6">
-        <p className="mb-4 max-w-4xl text-xs text-ink-400">
-          The recurring log messages the agent has learned for each service —
-          and how often each normally shows up.
-        </p>
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <SegmentedControl
             param={VERDICT_PARAM}
@@ -455,7 +451,7 @@ export function PatternsPage() {
             >
               <table className="ddt">
                 <thead>
-                  <tr>
+                  <tr>18
                     {bulkEnabled && (
                       <th className="w-8">
                         <SelectAllCheckbox

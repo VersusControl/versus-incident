@@ -55,6 +55,10 @@
   - [Traces](/enterprise/traces)
   - [SLI/SLO auto-define](/enterprise/slo)
   - [Alert fatigue](/enterprise/alert-fatigue)
+  - [Versus Security](/enterprise/security)
+    - [Overview](/enterprise/security/overview)
+    - [Secret scanning](/enterprise/security/secret-scanning)
+    - [Fraud & abuse detection](/enterprise/security/fraud-detection)
 
 - Configuration
   - [Overview](/configuration/admin-ui)
