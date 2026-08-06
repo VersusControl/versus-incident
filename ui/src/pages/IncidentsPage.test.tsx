@@ -36,6 +36,10 @@ vi.mock("@/lib/api", async (importActual) => {
       listMembers: vi.fn().mockResolvedValue([]),
       getIntakeSettings: vi.fn(),
       updateIntakeSettings: vi.fn(),
+      // Analysis is enabled by default so the peek's Run analysis button is
+      // active; runAnalysis is a spy the row-action test asserts against.
+      getAgentConfig: vi.fn().mockResolvedValue({ ai: { enable: true } }),
+      runAnalysis: vi.fn().mockResolvedValue({}),
     },
   };
 });
@@ -256,3 +260,156 @@ describe("IncidentsPage — tab counts come from server by_status", () => {
     expect(screen.getAllByText("284").length).toBeGreaterThanOrEqual(2);
   });
 });
+
+// The auto load-more effect must be BOUNDED by the server-authoritative match
+// count for the active (origin, status). Before the fix, a status the loaded
+// page can't satisfy (webhook + open, everything auto-resolved) walked the
+// whole history one page at a time and rendered a blank list. The guard stops
+// paging once the server says there are no (more) matching rows.
+describe("IncidentsPage — bounded auto load-more", () => {
+  // Call counts accumulate across tests (no global mock reset), so clear the
+  // list-client spy before each case to count only this test's own fetches.
+  beforeEach(() => {
+    vi.mocked(api.listIncidentsIndex).mockReset();
+  });
+
+  it("does NOT page past the first server chunk when the active status has zero server matches (webhook + open)", async () => {
+    // The server sees ZERO webhook+open rows (all auto-resolved); the loaded
+    // first page holds only resolved rows, and there is MORE history to fetch
+    // (next_offset present). The default status filter is `open`.
+    const byStatus: IncidentStatusCounts = {
+      open: oc(0, 0),
+      acked: oc(0, 0),
+      resolved: oc(0, 200),
+      all: oc(0, 200),
+    };
+    vi.mocked(api.listIncidentsIndex).mockImplementation((opts) =>
+      Promise.resolve({
+        ...index(
+          [
+            incident({
+              id: "wh-resolved-1",
+              origin: "webhook",
+              source: "webhook",
+              resolved: true,
+            }),
+          ],
+          byStatus,
+        ),
+        // More rows exist on the server — without the guard the effect would
+        // keep fetching offset 100, 200, … chasing matches that never come.
+        next_offset: opts?.offset ? null : 100,
+      }),
+    );
+
+    renderPageAt("/incidents?origin=webhook");
+
+    // The empty state renders after the FIRST page — no history walk.
+    expect(await screen.findByText("No open incidents")).toBeTruthy();
+    // The list client was called exactly once (offset 0). A settle window makes
+    // a runaway second/third fetch observable if the guard regressed.
+    await waitFor(() =>
+      expect(api.listIncidentsIndex).toHaveBeenCalledTimes(1),
+    );
+    // Belt-and-suspenders: still one call after the microtask queue drains.
+    await new Promise((r) => setTimeout(r, 30));
+    expect(api.listIncidentsIndex).toHaveBeenCalledTimes(1);
+  });
+
+  it("STILL loads later chunks when the active status has matches deeper in the history", async () => {
+    // The server reports 2 webhook+open rows, but they live on the SECOND
+    // chunk; the first chunk holds only a resolved row. The guard uses `<`, so
+    // it keeps fetching until filtered.length reaches the known match count.
+    const byStatus: IncidentStatusCounts = {
+      open: oc(0, 2),
+      acked: oc(0, 0),
+      resolved: oc(0, 1),
+      all: oc(0, 3),
+    };
+    vi.mocked(api.listIncidentsIndex).mockImplementation((opts) => {
+      if (!opts?.offset) {
+        return Promise.resolve({
+          ...index(
+            [
+              incident({
+                id: "wh-resolved-1",
+                origin: "webhook",
+                source: "webhook",
+                resolved: true,
+              }),
+            ],
+            byStatus,
+          ),
+          next_offset: 100,
+        });
+      }
+      return Promise.resolve({
+        ...index(
+          [
+            incident({
+              id: "wh-open-1",
+              title: "Deep open A",
+              origin: "webhook",
+              source: "webhook",
+              resolved: false,
+            }),
+            incident({
+              id: "wh-open-2",
+              title: "Deep open B",
+              origin: "webhook",
+              source: "webhook",
+              resolved: false,
+            }),
+          ],
+          byStatus,
+        ),
+        next_offset: null,
+      });
+    });
+
+    renderPageAt("/incidents?origin=webhook");
+
+    // The deep open rows are found and rendered…
+    expect(await screen.findByText("Deep open A")).toBeTruthy();
+    expect(screen.getByText("Deep open B")).toBeTruthy();
+    // …which required exactly TWO chunks (offset 0 then 100) — and no more,
+    // because filtered.length (2) then equals the known match count (2).
+    await waitFor(() =>
+      expect(api.listIncidentsIndex).toHaveBeenCalledTimes(2),
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    expect(api.listIncidentsIndex).toHaveBeenCalledTimes(2);
+  });
+});
+
+// The incidents LIST exposes the same Run analysis action as the detail page,
+// via the per-row peek slide-out (where Assign / Resolve also live), so an
+// operator can trigger analysis without leaving the list.
+describe("IncidentsPage — per-row Run analysis", () => {
+  beforeEach(() => {
+    vi.mocked(api.runAnalysis).mockClear();
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue(
+      index([incident({ id: "row-analyze-1" })]),
+    );
+  });
+
+  it("triggers api.runAnalysis with the row id from the peek", async () => {
+    renderPage();
+
+    // Open the row's action surface (the peek) — the same place Assign /
+    // Resolve are exposed per row.
+    const eye = await screen.findByLabelText(/View incident/);
+    fireEvent.click(eye);
+    const panel = screen.getByRole("dialog", { name: "Details panel" });
+
+    const runBtn = await within(panel).findByRole("button", {
+      name: "Run AI analysis",
+    });
+    fireEvent.click(runBtn);
+
+    await waitFor(() =>
+      expect(api.runAnalysis).toHaveBeenCalledWith("row-analyze-1"),
+    );
+  });
+});
+

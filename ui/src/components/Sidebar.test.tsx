@@ -160,57 +160,6 @@ describe("Sidebar — the AI nav section groups the agent's reasoning surfaces",
   });
 });
 
-// The AI section also carries greenlit-but-unbuilt capabilities (secret
-// scanning, fraud detection, alert fatigue). They render as in-development
-// placeholders: non-navigable rows (not router links), aria-disabled, with a
-// "Dev" badge and an "In development" tooltip. They must never become
-// clickable — even though the AI zone is wrapped in applyAgentOff, SideLink
-// short-circuits on inDev before any dim/lock logic runs.
-describe("Sidebar — in-development AI placeholders", () => {
-  const PLACEHOLDERS: Array<{ label: string; testid: string }> = [
-    { label: "Secret scanning", testid: "nav-indev-secret-scanning" },
-    { label: "Fraud detection", testid: "nav-indev-fraud-detection" },
-  ];
-
-  it("renders all placeholders as non-clickable, aria-disabled rows with a Dev badge and stable testid", async () => {
-    renderSidebar();
-    for (const { label, testid } of PLACEHOLDERS) {
-      const text = await screen.findByText(label);
-      // Not a router link — no link role for these placeholders.
-      expect(screen.queryByRole("link", { name: label })).toBeNull();
-      // The row is a disabled, non-navigable element (a div, not an <a>).
-      const row = text.closest("[aria-disabled='true']");
-      expect(row).not.toBeNull();
-      expect(row?.tagName).toBe("DIV");
-      // Carries its stable nav-indev-* testid.
-      expect(row?.getAttribute("data-testid")).toBe(testid);
-      // Carries the in-development tooltip and a visible "Dev" indicator.
-      expect(row?.getAttribute("title")).toBe("In development — coming soon");
-      expect(within(row as HTMLElement).getByText("Dev")).toBeTruthy();
-    }
-  });
-
-  it("groups the placeholders under the 'AI' nav section and contributes no navigable href", async () => {
-    renderSidebar();
-    await screen.findByText("Secret scanning");
-    // The AI section's navigable hrefs are only the real routes — the in-dev
-    // placeholders add no <a>, so the AI href list is unchanged.
-    expect(navSections()["AI"]).toEqual([
-      "/agent/decisions",
-      "/analyses",
-      "/agent/slo",
-      "/agent/alert-fatigue",
-    ]);
-    // No section holds an empty ("") href from a placeholder rendered as a link.
-    for (const hrefs of Object.values(navSections())) {
-      expect(hrefs).not.toContain("");
-    }
-    // The removed Security section no longer renders.
-    const nav = screen.getByRole("navigation", { name: "Primary" });
-    expect(within(nav).queryByText("Security")).toBeNull();
-  });
-});
-
 // Icons live on the GROUP headers, not on individual items. Each zone header
 // (Respond / Agent / AI / Tools / Manage) carries a representative Lucide icon
 // beside its title, while individual nav rows are text-only — the leading
@@ -243,16 +192,6 @@ describe("Sidebar — icons on group headers, not on items", () => {
     const metrics = screen.getByRole("link", { name: /Metrics/ });
     expect(metrics.querySelectorAll("svg")).toHaveLength(1);
     within(metrics).getByLabelText("Enterprise");
-  });
-
-  it("keeps the in-dev 'Dev' chip on placeholder rows and no leading icon", async () => {
-    renderSidebar();
-    const label = await screen.findByText("Secret scanning");
-    const row = label.closest("[aria-disabled='true']") as HTMLElement;
-    // The Dev chip is still there…
-    within(row).getByText("Dev");
-    // …and the row has no leading nav icon (the accent bar span is not an svg).
-    expect(row.querySelector("svg")).toBeNull();
   });
 });
 
