@@ -60,6 +60,7 @@ var chatModelBuilders = map[string]chatModelBuilder{
 	"ollama":   buildOllamaChatModel,
 	"claude":   buildClaudeChatModel,
 	"gemini":   buildGeminiChatModel,
+	"litellm":  buildLiteLLMChatModel,
 }
 
 // resolveProvider normalises the configured provider: empty/whitespace becomes
@@ -175,6 +176,54 @@ func buildOpenAIChatModel(ctx context.Context, req chatModelRequest) (model.Tool
 		Timeout:             req.timeout,
 		HTTPClient:          req.httpClient,
 		BaseURL:             req.baseURL,
+		Model:               req.model,
+		MaxCompletionTokens: &maxCompletionTokens,
+		Temperature:         temperature,
+	}
+	if req.jsonMode {
+		conf.ResponseFormat = &einoopenai.ChatCompletionResponseFormat{
+			Type: einoopenai.ChatCompletionResponseFormatTypeJSONObject,
+		}
+	}
+	return einoopenai.NewChatModel(ctx, conf)
+}
+
+// buildLiteLLMChatModel wires a LiteLLM proxy (https://docs.litellm.ai/docs/simple_proxy):
+// an OpenAI-compatible gateway that fans a single endpoint out to 100+ upstream
+// providers (OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, Ollama, ...). Because
+// the proxy speaks the OpenAI chat-completions wire format we reuse the OpenAI SDK, so
+// JSON-mode and tool-calling ride the same paths as buildOpenAIChatModel and the Bearer
+// virtual key rides the AuthKeyFunc transport on req.httpClient for free.
+//
+// One deliberate difference from buildOpenAIChatModel: BaseURL defaults to the
+// local proxy (http://localhost:4000/v1) when unset, the same way
+// buildQwenChatModel/buildOllamaChatModel default their endpoints — a LiteLLM
+// proxy is typically a sidecar. The test-only Options.BaseURL still wins.
+//
+// req.model is a LiteLLM *model alias* (a key from the proxy config, e.g. "gpt-5"
+// or "claude-sonnet"). Because this path shares the OpenAI SDK, the SDK applies
+// the SAME client-side beta-limitation guard as buildOpenAIChatModel: an explicit
+// temperature is rejected up front for reasoning families (gpt-5.*, o-series). So
+// we reuse isFixedSamplingModel to omit temperature when the alias names such a
+// family — otherwise an operator aliasing e.g. "gpt-5" through the proxy would have
+// to set temperature: -1 by hand. Non-matching aliases (claude-sonnet, ...) forward
+// the configured temperature unchanged; the proxy drops any remaining
+// per-provider-unsupported sampling params server-side (drop_params).
+func buildLiteLLMChatModel(ctx context.Context, req chatModelRequest) (model.ToolCallingChatModel, error) {
+	baseURL := req.baseURL
+	if baseURL == "" {
+		baseURL = "http://localhost:4000/v1"
+	}
+	maxCompletionTokens := req.maxTokens
+	temperature := req.temperature
+	if isFixedSamplingModel(req.model) {
+		temperature = nil
+	}
+	conf := &einoopenai.ChatModelConfig{
+		APIKey:              req.apiKey,
+		Timeout:             req.timeout,
+		HTTPClient:          req.httpClient,
+		BaseURL:             baseURL,
 		Model:               req.model,
 		MaxCompletionTokens: &maxCompletionTokens,
 		Temperature:         temperature,
