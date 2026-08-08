@@ -13,7 +13,6 @@ import {
   ChevronUp,
   Eye,
   Loader2,
-  Search,
   UserPlus,
 } from "lucide-react";
 import { api, type IncidentIndex, type IncidentSummary, type IntakeSettings, type OriginCounts } from "@/lib/api";
@@ -46,6 +45,8 @@ import {
   SelectAllCheckbox,
 } from "@/components/BulkActionBar";
 import { SegmentedControl } from "@/components/SegmentedControl";
+import { FilterBar } from "@/components/FilterBar";
+import { SearchInput } from "@/components/SearchInput";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SkLine, SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
@@ -490,73 +491,73 @@ export function IncidentsPage() {
       />
 
       <main className="flex-1 overflow-auto p-4 lg:p-6">
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          {/* Origin is the primary split: AI-detected (default) vs the
-              inbound webhook/alert firehose, each with its whole-set
-              count so neither buries the other. */}
-          <SegmentedControl
-            param="origin"
-            defaultValue="ai_detect"
-            aria-label="Filter incidents by origin"
-            options={[
-              {
-                value: "ai_detect",
-                label: originLabel("ai_detect"),
-                badge: originCounts?.ai_detect,
-              },
-              {
-                value: "webhook",
-                label: originLabel("webhook"),
-                badge: originCounts?.webhook,
-              },
-            ]}
-          />
-          <div className="relative max-w-md flex-1">
-            <Search
-              size={12}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
-            />
-            <input
-              data-page-search
-              className="input pl-7"
+        <FilterBar
+          tabs={
+            <>
+              {/* Origin is the primary split: AI-detected (default) vs the
+                  inbound webhook/alert firehose, each with its whole-set
+                  count so neither buries the other. Grouped with status so
+                  every tab sits together, before the search. */}
+              <SegmentedControl
+                param="origin"
+                defaultValue="ai_detect"
+                aria-label="Filter incidents by origin"
+                options={[
+                  {
+                    value: "ai_detect",
+                    label: originLabel("ai_detect"),
+                    badge: originCounts?.ai_detect,
+                  },
+                  {
+                    value: "webhook",
+                    label: originLabel("webhook"),
+                    badge: originCounts?.webhook,
+                  },
+                ]}
+              />
+              <SegmentedControl
+                param="status"
+                defaultValue="open"
+                aria-label="Filter incidents by status"
+                options={[
+                  // Badges stay undefined until the query settles — counts
+                  // computed from [] mid-load would render a false "0 = all
+                  // quiet" row of badges next to skeleton rows.
+                  { value: "open", label: "Open", badge: data ? counts.open : undefined },
+                  { value: "acked", label: "Acked", badge: data ? counts.acked : undefined },
+                  {
+                    value: "resolved",
+                    label: "Resolved",
+                    badge: data ? counts.resolved : undefined,
+                  },
+                  { value: "all", label: "All", badge: data ? counts.all : undefined },
+                ]}
+              />
+            </>
+          }
+          search={
+            <SearchInput
+              value={q}
+              onChange={setQ}
+              ariaLabel="Search incidents"
               placeholder={
                 searchSupported
                   ? "Search incidents (title, service, payload)…"
                   : "Filter loaded incidents by id, title or service…"
               }
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
             />
-          </div>
-          <SegmentedControl
-            param="status"
-            defaultValue="open"
-            aria-label="Filter incidents by status"
-            options={[
-              // Badges stay undefined until the query settles — counts
-              // computed from [] mid-load would render a false "0 = all
-              // quiet" row of badges next to skeleton rows.
-              { value: "open", label: "Open", badge: data ? counts.open : undefined },
-              { value: "acked", label: "Acked", badge: data ? counts.acked : undefined },
-              {
-                value: "resolved",
-                label: "Resolved",
-                badge: data ? counts.resolved : undefined,
-              },
-              { value: "all", label: "All", badge: data ? counts.all : undefined },
-            ]}
-          />
-          {/* Window-scoped incidents-analytics report — spans both origins, so
-              it lives in the toolbar, not on any one incident/tab. Hidden when
-              the runtime report setting is disabled (via capabilities). */}
-          <div className="ml-auto flex items-center gap-3">
-            {/* Auto-resolve is a webhook-origin concept only — it controls
-                whether inbound webhook incidents land resolved. Mounted only on
-                the webhook tab, so no intake request fires on the AI tab. */}
-            {origin === "webhook" && <WebhookAutoResolveToggle />}
-            <ReportsButton />
-          </div>
-        </div>
+          }
+          actions={
+            <>
+              {/* Window-scoped incidents-analytics report — spans both origins,
+                  so it lives in the toolbar, not on any one incident/tab.
+                  Auto-resolve is a webhook-origin concept only, mounted only on
+                  the webhook tab so no intake request fires on the AI tab. */}
+              {origin === "webhook" && <WebhookAutoResolveToggle />}
+              <ReportsButton />
+            </>
+          }
+        />
 
         {isError ? (
           <RetryableError

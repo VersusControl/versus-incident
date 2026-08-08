@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { Eye, Loader2, Search, X } from "lucide-react";
+import { Eye, Loader2, X } from "lucide-react";
 import { api, type AnalysisRecord } from "@/lib/api";
 import { fmtAbs, fmtRel, formatDuration, incidentTitle } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
@@ -13,6 +13,8 @@ import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SegmentedControl } from "@/components/SegmentedControl";
+import { FilterBar } from "@/components/FilterBar";
+import { SearchInput } from "@/components/SearchInput";
 import { Pagination } from "@/components/Pagination";
 import { PeekPanel, PeekField } from "@/components/PeekPanel";
 import {
@@ -168,52 +170,49 @@ export function AnalysesListPage() {
           </div>
         ) : (
           <>
-            <div className="mb-3 flex flex-wrap items-center gap-2">
-              <div className="relative max-w-md flex-1">
-                <Search
-                  size={12}
-                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
-                  aria-hidden
+            <FilterBar
+              tabs={
+                <SegmentedControl
+                  param="status"
+                  defaultValue="all"
+                  aria-label="Call status filter"
+                  options={[
+                    { value: "all", label: "All" },
+                    { value: "ok", label: "OK" },
+                    { value: "error", label: "Error" },
+                  ]}
                 />
-                <input
-                  data-page-search
-                  className="input pl-7"
-                  placeholder="Search by incident, finding or model…"
-                  aria-label="Search analyses"
+              }
+              search={
+                <SearchInput
                   value={q}
-                  onChange={(e) => setParam("q", e.target.value || null)}
+                  onChange={(v) => setParam("q", v || null)}
+                  placeholder="Search by incident, finding or model…"
+                  ariaLabel="Search analyses"
                 />
-              </div>
-              <SegmentedControl
-                param="status"
-                defaultValue="all"
-                aria-label="Call status filter"
-                options={[
-                  { value: "all", label: "All" },
-                  { value: "ok", label: "OK" },
-                  { value: "error", label: "Error" },
-                ]}
-              />
-              {incidentFilter && (
-                <span className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-2xs text-ink-100">
-                  <span className="text-ink-300">incident:</span>
-                  <span
-                    className="max-w-48 truncate font-medium"
-                    title={incidentFilter}
-                  >
-                    {titleByID.get(incidentFilter) ||
-                      incidentTitle({ id: incidentFilter })}
+              }
+              actions={
+                incidentFilter ? (
+                  <span className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-2xs text-ink-100">
+                    <span className="text-ink-300">incident:</span>
+                    <span
+                      className="max-w-48 truncate font-medium"
+                      title={incidentFilter}
+                    >
+                      {titleByID.get(incidentFilter) ||
+                        incidentTitle({ id: incidentFilter })}
+                    </span>
+                    <button
+                      aria-label="Clear incident filter"
+                      className="rounded p-0.5 text-ink-300 hover:text-ink-50"
+                      onClick={() => setParam("incident", null)}
+                    >
+                      <X size={11} aria-hidden />
+                    </button>
                   </span>
-                  <button
-                    aria-label="Clear incident filter"
-                    className="rounded p-0.5 text-ink-300 hover:text-ink-50"
-                    onClick={() => setParam("incident", null)}
-                  >
-                    <X size={11} aria-hidden />
-                  </button>
-                </span>
-              )}
-            </div>
+                ) : undefined
+              }
+            />
 
             {isError && (
               <div className="mb-3">

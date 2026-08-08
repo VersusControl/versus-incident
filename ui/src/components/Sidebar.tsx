@@ -162,8 +162,8 @@ export function SidebarContent({
     { to: "/agent/decisions", label: "Decisions" },
     { to: "/analyses", label: "Analyses" },
     {
-      to: "/agent/slo",
-      label: "SLIs/SLOs",
+      to: "/agent/alert-fatigue",
+      label: "Alert fatigue",
       locked: enterpriseLocked,
       dim: enterpriseLocked,
       dimTitle: enterpriseLocked
@@ -171,8 +171,8 @@ export function SidebarContent({
         : undefined,
     },
     {
-      to: "/agent/alert-fatigue",
-      label: "Alert fatigue",
+      to: "/agent/slo",
+      label: "SLIs/SLOs",
       locked: enterpriseLocked,
       dim: enterpriseLocked,
       dimTitle: enterpriseLocked

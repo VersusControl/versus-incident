@@ -128,8 +128,8 @@ describe("Sidebar — the AI nav section groups the agent's reasoning surfaces",
     expect(navSections()["AI"]).toEqual([
       "/agent/decisions",
       "/analyses",
-      "/agent/slo",
       "/agent/alert-fatigue",
+      "/agent/slo",
     ]);
   });
 

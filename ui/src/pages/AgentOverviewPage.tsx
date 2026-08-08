@@ -176,7 +176,6 @@ export function AgentOverviewPage() {
     <>
       <TopBar
         title="Agent"
-        subtitle="Runtime, learning and decision activity at a glance."
       />
 
       <main className="flex-1 overflow-auto p-6">

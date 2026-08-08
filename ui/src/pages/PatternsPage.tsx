@@ -7,7 +7,7 @@ import {
   useQueryClient,
   type InfiniteData,
 } from "@tanstack/react-query";
-import { Check, Eye, Loader2, Search, Trash2 } from "lucide-react";
+import { Check, Eye, Loader2, Trash2 } from "lucide-react";
 import { api, type Pattern, type PatternIndex } from "@/lib/api";
 import { displayService, fmtAbs, fmtRel } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
@@ -19,6 +19,8 @@ import { AutoRefreshControl } from "@/components/AutoRefreshControl";
 import { useAutoRefresh } from "@/lib/useAutoRefresh";
 import { EmptyState } from "@/components/feedback";
 import { SegmentedControl } from "@/components/SegmentedControl";
+import { FilterBar } from "@/components/FilterBar";
+import { SearchInput } from "@/components/SearchInput";
 import { PeekPanel } from "@/components/PeekPanel";
 import { PatternBaselines } from "@/components/PatternBaselines";
 import { SkRows } from "@/components/Skeleton";
@@ -379,52 +381,50 @@ export function PatternsPage() {
       />
 
       <main className="flex-1 overflow-auto p-4 lg:p-6">
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <SegmentedControl
-            param={VERDICT_PARAM}
-            defaultValue="all"
-            aria-label="Verdict filter"
-            options={[
-              { value: "all", label: "All", badge: counts?.all },
-              {
-                value: "uncurated",
-                label: "Still learning",
-                badge: counts?.uncurated,
-              },
-              { value: "known", label: "Known", badge: counts?.known },
-            ]}
-          />
-          {excl.visible && (
-            <SegmentedControl
-              param={SCOPE_PARAM}
-              defaultValue="active"
-              aria-label="Learning scope"
-              options={[
-                { value: "active", label: "Active", badge: scopeCounts.active },
-                {
-                  value: "ignored",
-                  label: "Ignored",
-                  badge: scopeCounts.ignored,
-                },
-              ]}
-            />
-          )}
-          <div className="relative w-full max-w-md sm:w-auto sm:flex-1">
-            <Search
-              size={12}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
-            />
-            <input
-              data-page-search
-              className="input pl-7"
-              placeholder="Search template, service, id, or rule…  ( / )"
+        <FilterBar
+          tabs={
+            <>
+              <SegmentedControl
+                param={VERDICT_PARAM}
+                defaultValue="all"
+                aria-label="Verdict filter"
+                options={[
+                  { value: "all", label: "All", badge: counts?.all },
+                  {
+                    value: "uncurated",
+                    label: "Still learning",
+                    badge: counts?.uncurated,
+                  },
+                  { value: "known", label: "Known", badge: counts?.known },
+                ]}
+              />
+              {excl.visible && (
+                <SegmentedControl
+                  param={SCOPE_PARAM}
+                  defaultValue="active"
+                  aria-label="Learning scope"
+                  options={[
+                    { value: "active", label: "Active", badge: scopeCounts.active },
+                    {
+                      value: "ignored",
+                      label: "Ignored",
+                      badge: scopeCounts.ignored,
+                    },
+                  ]}
+                />
+              )}
+            </>
+          }
+          search={
+            <SearchInput
               value={q}
-              onChange={(e) => setQ(e.target.value)}
+              onChange={setQ}
+              className="w-full max-w-md sm:w-auto sm:flex-1"
+              placeholder="Search template, service, id, or rule…"
             />
-          </div>
-
-          <AutoRefreshControl state={refresh} />
-        </div>
+          }
+          actions={<AutoRefreshControl state={refresh} />}
+        />
 
         {isError ? (
           <RetryableError
@@ -447,11 +447,11 @@ export function PatternsPage() {
             <div
               tabIndex={0}
               onKeyDown={onTableKeyDown}
-              className="max-h-[calc(100vh-230px)] overflow-auto"
+              className="max-h-[calc(100vh-180px)] overflow-auto"
             >
               <table className="ddt">
                 <thead>
-                  <tr>18
+                  <tr>
                     {bulkEnabled && (
                       <th className="w-8">
                         <SelectAllCheckbox

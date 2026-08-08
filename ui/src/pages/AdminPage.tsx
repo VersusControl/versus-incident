@@ -2,6 +2,7 @@ import { TopBar } from "@/components/TopBar";
 import { AgentModeControl } from "@/components/AgentModeControl";
 import { AgentAISettingsControl } from "@/components/AgentAISettingsControl";
 import { AgentChannelsSettingsControl } from "@/components/AgentChannelsSettingsControl";
+import { AlertFatigueSettingsControl } from "@/components/AlertFatigueSettingsControl";
 import { AgentSSOConnectionsControl } from "@/components/AgentSSOConnectionsControl";
 import { AdminMembersControl } from "@/components/AdminMembersControl";
 
@@ -36,6 +37,14 @@ export function AdminPage() {
             write-only secrets, save takes effect without restart. Locked upsell
             on OSS / community. */}
         <AgentChannelsSettingsControl />
+
+        {/* Alert-fatigue configuration (Enterprise; RBAC runtime:manage). The
+            fatigue-channel default picker, the custom fatigue-channel override
+            form, and the correlation + dependency-aware suppression config. The
+            AlertFatigue page keeps only the Enable / Require-review toggles, the
+            review table, and the analytics strip. Locked upsell on OSS /
+            community. */}
+        <AlertFatigueSettingsControl />
 
         {/* SSO / identity providers (Enterprise; RBAC sso:manage, per-org). The
             single canonical SSO panel: a Keycloak-style list of Google /

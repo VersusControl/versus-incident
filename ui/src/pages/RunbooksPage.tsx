@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   Eye,
   FileText,
-  Search,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -22,6 +21,8 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Pagination } from "@/components/Pagination";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
+import { FilterBar } from "@/components/FilterBar";
+import { SearchInput } from "@/components/SearchInput";
 import { useToast } from "@/components/toastContext";
 import { usePagination } from "@/lib/pagination";
 
@@ -195,22 +196,16 @@ export function RunbooksPage() {
           </div>
         )}
 
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <div className="relative max-w-md flex-1">
-            <Search
-              size={12}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
-            />
-            <input
-              data-page-search
-              aria-label="Search runbooks"
-              className="input pl-7"
-              placeholder="Search by name, title, service, or tag…"
+        <FilterBar
+          search={
+            <SearchInput
               value={q}
-              onChange={(e) => setQ(e.target.value)}
+              onChange={setQ}
+              ariaLabel="Search runbooks"
+              placeholder="Search by name, title, service, or tag…"
             />
-          </div>
-        </div>
+          }
+        />
 
         {listQ.isError && (
           <div className="mb-3">

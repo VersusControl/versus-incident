@@ -1305,27 +1305,41 @@ export interface ReportSendResult {
 // AlertFatigueConfig is the per-org alert-fatigue configuration exchanged with
 // GET/PUT /enterprise/api/alert-fatigue/config. `enabled` is the master on/off
 // (default OFF); `pending_review` holds newly-fatigued fingerprints for an
-// operator OK instead of auto-diverting (default OFF = auto-fatigue);
-// `fatigue_channel` is the notification channel diverted ("spam") alerts land
-// on. The PUT is write-through — it takes effect immediately.
+// operator OK instead of auto-suppressing (default OFF = auto-fatigue). The PUT
+// is write-through — it takes effect immediately.
 export interface AlertFatigueConfig {
   enabled: boolean;
   pending_review: boolean;
-  fatigue_channel: string;
-  // fatigue_channel_valid is a DERIVED read-only flag on the GET/PUT echo: false
-  // when the selected fatigue channel is no longer an enabled channel for the
-  // org (so the UI can warn that a diverted channel was later disabled). Absent
-  // on the write body — the server ignores it — and absent when no channel
-  // lister is wired (never a false warning).
-  fatigue_channel_valid?: boolean;
 }
 
-// AlertFatigueChannel is one notification channel eligible to be the fatigue
-// channel, with its effective enabled flag (the runtime channel config the
-// alert path resolves). From GET /enterprise/api/alert-fatigue/channels.
-export interface AlertFatigueChannel {
-  name: string;
+// AlertFatigueCustomChannelField is the non-secret masked view of one custom
+// fatigue-channel field: whether a value is set, plus a masked hint. It NEVER
+// carries a raw secret — the server masks it before it reaches the UI.
+export interface AlertFatigueCustomChannelField {
+  set: boolean;
+  hint: string;
+}
+
+// AlertFatigueCustomChannel is the MASKED fatigue-channel view from
+// GET /enterprise/api/alert-fatigue/custom-channel. `configured` is false when
+// the org has no fatigue channel (fatigued alerts are then suppressed);
+// otherwise it carries the channel type, the enable flag, and a per-field
+// set/hint. It NEVER carries a raw secret.
+export interface AlertFatigueCustomChannel {
+  configured: boolean;
+  channel_type?: string;
+  enabled?: boolean;
+  fields?: Record<string, AlertFatigueCustomChannelField>;
+}
+
+// AlertFatigueCustomChannelPut is the set-body for the custom fatigue channel.
+// `config` is the field map: secret values are included on WRITE only, and a
+// blank/omitted secret preserves the stored one server-side (so an operator can
+// toggle enable or edit a routing field without resubmitting the token).
+export interface AlertFatigueCustomChannelPut {
+  channel_type: string;
   enabled: boolean;
+  config: Record<string, string>;
 }
 
 // AlertFatigueAnalytics is the per-org noise read-model over a bounded window
@@ -1338,6 +1352,12 @@ export interface AlertFatigueAnalytics {
   by_status: Record<string, number>;
   noise_ratio: number;
   diverted: number;
+  // routed / suppressed split the fatigued count into alerts ROUTED to a custom
+  // fatigue channel vs SILENTLY SUPPRESSED (dropped). They are optional: older
+  // read-models only expose the (misleading) `diverted` aggregate, so the UI
+  // falls back gracefully when either field is absent.
+  routed?: number;
+  suppressed?: number;
   reclaim_count: number;
   reclaim_rate: number;
   top_noisy: Array<{ service: string; repeat_total: number; findings: number }>;
@@ -1472,6 +1492,10 @@ export interface AlertFatigueFinding {
   // explanation of the terms that contributed.
   priority_score?: number;
   priority_reason?: string;
+  // floor is the interceptor's authoritative page-now flag: when true the
+  // fingerprint always pages (high/critical or a severity-only floor) and can
+  // never be suppressed, so "Mark as spam" would silently lie for the row.
+  floor?: boolean;
 }
 
 export interface AlertFatigueFindingsResponse {
@@ -1595,13 +1619,16 @@ export const api = {
       body: JSON.stringify(cfg),
     }),
   // listAlertFatigueFingerprints reads one page of the review table. `status`
-  // filters by review state (omit for all listable rows); the internal
-  // `tracking` state is rejected 400 by the server, so never request it. `sort`
-  // (last_seen default / repeat_count / priority) and `dir` (asc / desc,
-  // default desc) drive the server-side ordering; an unknown sort is 400.
-  // Paged with page/page_size; the response carries the whole-set `total`.
+  // filters by review state (omit for all listable rows); passing `tracking`
+  // lists the still-paging rows the operator can suppress from the Tracking tab.
+  // `service` is an optional exact-match filter applied WITHIN the active status
+  // (used by the top-noisy drill-down). `sort` (last_seen default /
+  // repeat_count / priority) and `dir` (asc / desc, default desc) drive the
+  // server-side ordering; an unknown sort is 400. Paged with page/page_size; the
+  // response carries the whole-set `total`.
   listAlertFatigueFingerprints: (opts?: {
     status?: string;
+    service?: string;
     sort?: AlertFatigueSort;
     dir?: AlertFatigueSortDir;
     page?: number;
@@ -1609,6 +1636,7 @@ export const api = {
   }) => {
     const p = new URLSearchParams();
     if (opts?.status) p.set("status", opts.status);
+    if (opts?.service) p.set("service", opts.service);
     if (opts?.sort) p.set("sort", opts.sort);
     if (opts?.dir) p.set("dir", opts.dir);
     if (opts?.page) p.set("page", String(opts.page));
@@ -1632,16 +1660,27 @@ export const api = {
       { method: "POST" },
     ),
 
-  // listAlertFatigueChannels reads the org's notification channels eligible to
-  // be the fatigue channel, each with its EFFECTIVE enabled flag (the same
-  // runtime channel config the alert path resolves). Preferred over the generic
-  // channel-settings map for the fatigue picker because it also reports whether
-  // each channel is currently enabled — so the UI can warn when a diverted
-  // channel was later disabled. 503 in community mode.
-  listAlertFatigueChannels: () =>
-    sessionRequest<{ channels: AlertFatigueChannel[] }>(
-      "/enterprise/api/alert-fatigue/channels",
-    ).then((r) => r.channels ?? []),
+  // Fatigue channel (Enterprise, RBAC runtime:manage). The GET returns a MASKED
+  // view (channel type, enable flag, per-field set/hint) — NEVER a raw secret.
+  // The PUT sets the channel fatigued alerts are sent to: a blank/omitted secret
+  // preserves the stored one (write-only), so an operator can toggle enable or
+  // edit a routing field without resubmitting the token. DELETE clears the
+  // channel, so fatigued alerts are suppressed again. All three 503 on a
+  // non-Postgres backend.
+  getAlertFatigueCustomChannel: () =>
+    sessionRequest<AlertFatigueCustomChannel>(
+      "/enterprise/api/alert-fatigue/custom-channel",
+    ),
+  setAlertFatigueCustomChannel: (body: AlertFatigueCustomChannelPut) =>
+    sessionRequest<AlertFatigueCustomChannel>(
+      "/enterprise/api/alert-fatigue/custom-channel",
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
+  deleteAlertFatigueCustomChannel: () =>
+    sessionRequest<{ cleared: boolean }>(
+      "/enterprise/api/alert-fatigue/custom-channel",
+      { method: "DELETE" },
+    ),
 
   // getAlertFatigueAnalytics reads the per-org noise read-model over the given
   // window (7d default, 30d optional). Read-only; every figure is org-scoped.

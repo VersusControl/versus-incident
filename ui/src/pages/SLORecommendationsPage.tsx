@@ -36,8 +36,6 @@ import { usePagination } from "@/lib/pagination";
 // objective is a human action; the page mutates nothing but the cadence.
 
 const PAGE_TITLE = "SLI/SLO auto-define";
-const SUBTITLE =
-  "On a schedule the agent reviews each service's signals and proposes the SLIs and SLOs a team should adopt.";
 
 const LOCKED_TITLE = "SLI/SLO auto-define is an Enterprise capability";
 const LOCKED_BODY =
@@ -98,8 +96,6 @@ export function SLORecommendationsPage() {
         subtitle={recs.data ? `${recs.data.count} services` : undefined}
       />
       <main className="flex-1 overflow-auto p-4 lg:p-6">
-        <p className="mb-3 max-w-3xl text-xs text-ink-300">{SUBTITLE}</p>
-
         {status && !status.enabled && (
           <div
             className="mb-4 flex items-start gap-2 rounded-md border border-sev-warn/30 bg-sev-warn/15 p-3 text-xs text-ink-100"
@@ -250,7 +246,7 @@ function CadenceControl() {
             {tgl.disabled ? (
               <span data-testid="slo-enable-offreason">{tgl.reason}</span>
             ) : (
-              "Turn the agent's scheduled SLI/SLO review on or off for this org."
+              "When enabled, the agent reviews each service and recommends the SLIs and SLOs to adopt."
             )}
           </div>
         </div>
