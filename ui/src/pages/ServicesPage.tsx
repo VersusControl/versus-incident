@@ -6,7 +6,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
-import { Loader2, Plus, Search, Trash2, Eye } from "lucide-react";
+import { Loader2, Plus, Trash2, Eye } from "lucide-react";
 import { api, type ServiceInfo } from "@/lib/api";
 import { fmtAbs, fmtRel } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
@@ -15,6 +15,8 @@ import { InfoHint } from "@/components/InfoHint";
 import { SortHeader } from "@/components/SortHeader";
 import { tsValue, useSortableRows } from "@/lib/sortRows";
 import { SegmentedControl } from "@/components/SegmentedControl";
+import { FilterBar } from "@/components/FilterBar";
+import { SearchInput } from "@/components/SearchInput";
 import { AutoRefreshControl } from "@/components/AutoRefreshControl";
 import { useAutoRefresh } from "@/lib/useAutoRefresh";
 import { EmptyState } from "@/components/feedback";
@@ -399,38 +401,34 @@ export function ServicesPage() {
       />
 
       <main className="flex-1 overflow-auto p-6">
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          {ignore.visible && (
-            <SegmentedControl
-              param={SCOPE_PARAM}
-              defaultValue="active"
-              aria-label="Learning scope"
-              options={[
-                { value: "active", label: "Active", badge: scopeCounts.active },
-                {
-                  value: "ignored",
-                  label: "Ignored",
-                  badge: scopeCounts.ignored,
-                },
-              ]}
-            />
-          )}
-          <div className="relative w-full max-w-md sm:w-auto sm:flex-1">
-            <Search
-              size={12}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
-            />
-            <input
-              data-page-search
-              className="input pl-7"
-              placeholder="Search service…  ( / )"
+        <FilterBar
+          tabs={
+            ignore.visible ? (
+              <SegmentedControl
+                param={SCOPE_PARAM}
+                defaultValue="active"
+                aria-label="Learning scope"
+                options={[
+                  { value: "active", label: "Active", badge: scopeCounts.active },
+                  {
+                    value: "ignored",
+                    label: "Ignored",
+                    badge: scopeCounts.ignored,
+                  },
+                ]}
+              />
+            ) : undefined
+          }
+          search={
+            <SearchInput
               value={q}
-              onChange={(e) => setQ(e.target.value)}
+              onChange={setQ}
+              className="w-full max-w-md sm:w-auto sm:flex-1"
+              placeholder="Search service…"
             />
-          </div>
-
-          <AutoRefreshControl state={refresh} />
-        </div>
+          }
+          actions={<AutoRefreshControl state={refresh} />}
+        />
 
         {isError && (
           <div className="mb-3">

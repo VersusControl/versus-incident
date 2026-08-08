@@ -6,6 +6,7 @@ import {
   cleanup,
   fireEvent,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -43,9 +44,7 @@ vi.mock("@/lib/api", async (importActual) => {
       listAlertFatigueFingerprints: vi.fn(),
       confirmAlertFatigueFingerprint: vi.fn(),
       reclaimAlertFatigueFingerprint: vi.fn(),
-      // Dedicated fatigue-channels endpoint (name + effective enabled).
-      listAlertFatigueChannels: vi.fn().mockResolvedValue([]),
-      // Read-only sections default to empty/inert so an enabled config renders
+      // The analytics strip defaults to empty/inert so an enabled config renders
       // without a network call; tests override per-case.
       getAlertFatigueAnalytics: vi.fn().mockResolvedValue({
         window: "7d",
@@ -58,34 +57,6 @@ vi.mock("@/lib/api", async (importActual) => {
         top_noisy: [],
         trend: [],
       }),
-      getAlertFatigueCorrelation: vi.fn().mockResolvedValue({
-        correlation_enabled: false,
-        correlation_window_seconds: 0,
-        effective_window_seconds: 300,
-      }),
-      setAlertFatigueCorrelation: vi.fn(),
-      listAlertFatigueCorrelationGroups: vi
-        .fn()
-        .mockResolvedValue({ groups: [], total: 0, page: 1, page_size: 50 }),
-      listAlertFatigueCorrelationMembers: vi
-        .fn()
-        .mockResolvedValue({ group_id: 0, members: [] }),
-      getAlertFatigueDependency: vi.fn().mockResolvedValue({
-        dependency_suppress_enabled: false,
-        dependency_lookback_seconds: 0,
-        effective_lookback_seconds: 3600,
-      }),
-      setAlertFatigueDependency: vi.fn(),
-      listAlertFatigueDependencyEdges: vi
-        .fn()
-        .mockResolvedValue({ edges: [], total: 0, page: 1, page_size: 50 }),
-      addAlertFatigueDependencyEdge: vi.fn(),
-      removeAlertFatigueDependencyEdge: vi.fn(),
-      listAlertFatigueDependencyHolds: vi
-        .fn()
-        .mockResolvedValue({ holds: [], total: 0, page: 1, page_size: 50 }),
-      reclaimAlertFatigueDependencyHold: vi.fn(),
-      getChannelSettings: vi.fn().mockResolvedValue({}),
     },
   };
 });
@@ -98,7 +69,7 @@ afterEach(() => {
 const NOW = new Date().toISOString();
 
 function cfg(over: Partial<AlertFatigueConfig> = {}): AlertFatigueConfig {
-  return { enabled: false, pending_review: false, fatigue_channel: "", ...over };
+  return { enabled: false, pending_review: false, ...over };
 }
 
 function finding(over: Partial<AlertFatigueFinding> = {}): AlertFatigueFinding {
@@ -179,7 +150,7 @@ describe("AlertFatiguePage — license/role gating (fail closed)", () => {
   });
 });
 
-describe("AlertFatiguePage — enable + config controls", () => {
+describe("AlertFatiguePage — enable + require-review toggles (read-modify-write)", () => {
   beforeEach(() => {
     signInAs("admin");
     vi.mocked(api.setAlertFatigueConfig).mockImplementation((c) =>
@@ -203,15 +174,32 @@ describe("AlertFatiguePage — enable + config controls", () => {
     );
   });
 
+  it("read-modify-writes: toggling enabled preserves the sibling pending_review field", async () => {
+    // A pending_review already set must NOT be clobbered when this page flips the
+    // master enable — the whole merged object is PUT.
+    vi.mocked(api.getAlertFatigueConfig).mockResolvedValue(
+      cfg({ pending_review: true }),
+    );
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId("alert-fatigue-enable-toggle"));
+    await waitFor(() =>
+      expect(api.setAlertFatigueConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          enabled: true,
+          pending_review: true,
+        }),
+      ),
+    );
+  });
+
   it("hides the pending-review switch and note until the feature is enabled", async () => {
     vi.mocked(api.getAlertFatigueConfig).mockResolvedValue(cfg());
     renderPage();
 
     await screen.findByTestId("alert-fatigue-enable-toggle");
-    // Disabled: no pending switch, no note, no channel picker.
     expect(screen.queryByTestId("alert-fatigue-pending-toggle")).toBeNull();
     expect(screen.queryByTestId("alert-fatigue-pending-note")).toBeNull();
-    expect(screen.queryByTestId("alert-fatigue-channel-select")).toBeNull();
   });
 
   it("shows the pending-review switch with the exact auto-spam note when enabled, and PUTs pending_review", async () => {
@@ -232,46 +220,27 @@ describe("AlertFatiguePage — enable + config controls", () => {
       ),
     );
   });
+});
 
-  it("populates the channel picker from the dedicated channels endpoint and PUTs the pick", async () => {
-    vi.mocked(api.getAlertFatigueConfig).mockResolvedValue(cfg({ enabled: true }));
-    vi.mocked(api.listAlertFatigueChannels).mockResolvedValue([
-      { name: "slack", enabled: true },
-      { name: "telegram", enabled: true },
-    ]);
-    renderPage();
-
-    const select = (await screen.findByTestId(
-      "alert-fatigue-channel-select",
-    )) as HTMLSelectElement;
-    // The real configured channels are offered as options.
-    await waitFor(() =>
-      expect(
-        Array.from(select.options).map((o) => o.value),
-      ).toContain("telegram"),
-    );
-
-    fireEvent.change(select, { target: { value: "telegram" } });
-    await waitFor(() =>
-      expect(api.setAlertFatigueConfig).toHaveBeenCalledWith(
-        expect.objectContaining({ fatigue_channel: "telegram", enabled: true }),
-      ),
-    );
+describe("AlertFatiguePage — config surfaces moved to Admin", () => {
+  beforeEach(() => {
+    signInAs("admin");
+    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(page([]));
   });
 
-  it("warns inline when the selected fatigue channel was later disabled", async () => {
-    vi.mocked(api.getAlertFatigueConfig).mockResolvedValue(
-      cfg({ enabled: true, fatigue_channel: "slack", fatigue_channel_valid: false }),
-    );
-    vi.mocked(api.listAlertFatigueChannels).mockResolvedValue([
-      { name: "slack", enabled: false },
-      { name: "telegram", enabled: true },
-    ]);
+  it("no longer renders the channel picker, custom-channel form, correlation, or dependency config", async () => {
+    vi.mocked(api.getAlertFatigueConfig).mockResolvedValue(cfg({ enabled: true }));
     renderPage();
 
-    const warn = await screen.findByTestId("alert-fatigue-channel-warning");
-    expect(warn.textContent).toContain("slack");
-    expect(warn.textContent?.toLowerCase()).toContain("no longer");
+    // The Enable toggle proves the admin surface mounted.
+    await screen.findByTestId("alert-fatigue-enable-toggle");
+    // …but none of the moved CONFIG surfaces are present on this page.
+    expect(screen.queryByTestId("alert-fatigue-channel-select")).toBeNull();
+    expect(screen.queryByTestId("alert-fatigue-custom-channel")).toBeNull();
+    expect(screen.queryByTestId("alert-fatigue-correlation")).toBeNull();
+    expect(screen.queryByTestId("alert-fatigue-dependency")).toBeNull();
+    // The analytics strip (kept) still renders.
+    expect(screen.getByTestId("alert-fatigue-analytics")).toBeTruthy();
   });
 });
 
@@ -376,19 +345,28 @@ describe("AlertFatiguePage — fingerprint review table", () => {
     expect(api.listAlertFatigueFingerprints).not.toHaveBeenCalled();
   });
 
-  it("filters by status without ever requesting the internal tracking state", async () => {
+  it("filters by status via segmented tabs, including the Tracking state", async () => {
     vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(page([finding()]));
     renderPage();
 
-    const filter = (await screen.findByTestId(
-      "alert-fatigue-status-filter",
-    )) as HTMLSelectElement;
-    // The filter never offers "tracking".
-    expect(Array.from(filter.options).map((o) => o.value)).not.toContain(
-      "tracking",
-    );
+    const tablist = await screen.findByRole("tablist", { name: "Status filter" });
+    const tabNames = within(tablist)
+      .getAllByRole("tab")
+      .map((t) => t.textContent);
+    // The segmented filter offers the public statuses plus the Tracking tab
+    // (still-paging rows the operator can suppress). Each reviewable tab now
+    // carries its per-status count as a badge (0 when empty); "All" has none.
+    expect(tabNames).toEqual([
+      "All",
+      "Tracking0",
+      "Fatigued0",
+      "Pending review0",
+      "Reclaimed0",
+    ]);
 
-    fireEvent.change(filter, { target: { value: "pending_review" } });
+    fireEvent.click(
+      within(tablist).getByRole("tab", { name: /^Pending review/ }),
+    );
     await waitFor(() =>
       expect(api.listAlertFatigueFingerprints).toHaveBeenCalledWith(
         expect.objectContaining({ status: "pending_review" }),
@@ -504,18 +482,99 @@ describe("AlertFatiguePage — priority column (AF-5)", () => {
   });
 });
 
-describe("AlertFatiguePage — new sections gated off for viewers", () => {
-  it("renders no analytics/correlation/dependency section for a signed-in viewer", async () => {
+describe("AlertFatiguePage — floored (high/critical) rows can't be suppressed", () => {
+  beforeEach(() => {
+    signInAs("admin");
+    vi.mocked(api.getAlertFatigueConfig).mockResolvedValue(cfg({ enabled: true }));
+  });
+
+  it("disables Mark as spam and explains why on a floored tracking row", async () => {
+    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(
+      page([
+        finding({
+          id: "hi",
+          status: "tracking",
+          severity: "critical",
+          // A severity-only floor: score is BELOW the old 0.8 proxy but the
+          // backend authoritatively marks it floored.
+          priority_score: 0.7549,
+          priority_reason: "severity=critical",
+          floor: true,
+        }),
+      ]),
+    );
+    renderPage();
+
+    const btn = await screen.findByTestId("alert-fatigue-mark-spam-floored");
+    // The button reads as unavailable to assistive tech without leaving the
+    // page (aria-disabled keeps it focusable so the reason is reachable).
+    expect(btn.getAttribute("aria-disabled")).toBe("true");
+
+    // Clicking it must NOT fire the suppression mutation — it would never take.
+    fireEvent.click(btn);
+    expect(api.confirmAlertFatigueFingerprint).not.toHaveBeenCalled();
+
+    // The explanation is programmatically associated for assistive tech.
+    const describedBy = btn.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    expect(document.getElementById(describedBy!)?.textContent).toMatch(
+      /always page/i,
+    );
+  });
+
+  it("annotates a floored fatigued row so it doesn't read as silenced", async () => {
+    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(
+      page([
+        finding({
+          id: "f",
+          status: "fatigued",
+          severity: "critical",
+          priority_score: 0.7549,
+          floor: true,
+        }),
+      ]),
+    );
+    renderPage();
+
+    const note = await screen.findByTestId("alert-fatigue-still-pages");
+    expect(note.textContent).toMatch(/still pages/i);
+  });
+
+  it("keeps Mark as spam actionable on a non-floored tracking row", async () => {
+    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(
+      page([
+        // High score but NOT floored → still actionable; the button keys off
+        // `floor`, never the score.
+        finding({
+          id: "lo",
+          status: "tracking",
+          priority_score: 0.95,
+          floor: false,
+        }),
+      ]),
+    );
+    vi.mocked(api.confirmAlertFatigueFingerprint).mockResolvedValue(
+      finding({ id: "lo", status: "fatigued" }),
+    );
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Mark as spam" }));
+    await waitFor(() =>
+      expect(api.confirmAlertFatigueFingerprint).toHaveBeenCalledWith("lo"),
+    );
+    // A non-floored row never renders the disabled floored variant.
+    expect(screen.queryByTestId("alert-fatigue-mark-spam-floored")).toBeNull();
+  });
+});
+
+describe("AlertFatiguePage — sections gated off for viewers", () => {
+  it("renders no analytics/review section for a signed-in viewer", async () => {
     signInAs("viewer");
     renderPage();
     await screen.findByTestId("admin-access-notice");
     expect(screen.queryByTestId("alert-fatigue-analytics")).toBeNull();
-    expect(screen.queryByTestId("alert-fatigue-correlation")).toBeNull();
-    expect(screen.queryByTestId("alert-fatigue-dependency")).toBeNull();
     // No section data is ever fetched.
     expect(api.getAlertFatigueAnalytics).not.toHaveBeenCalled();
-    expect(api.getAlertFatigueCorrelation).not.toHaveBeenCalled();
-    expect(api.getAlertFatigueDependency).not.toHaveBeenCalled();
   });
 });
 
@@ -527,268 +586,280 @@ describe("AlertFatiguePage — analytics strip", () => {
   });
 
   it("renders the noise read-model and top-noisy services", async () => {
+    // The task scenario: total 11 across all statuses, but only 1 reviewable
+    // (fatigued) — the other 10 are still tracking. The per-status decomposition
+    // now annotates the Fingerprints tabs, not this strip.
     vi.mocked(api.getAlertFatigueAnalytics).mockResolvedValue({
       window: "7d",
-      total: 1234,
-      by_status: { fatigued: 400 },
+      total: 11,
+      by_status: { tracking: 10, fatigued: 1, pending_review: 0, reclaimed: 0 },
       noise_ratio: 0.32,
-      diverted: 400,
-      reclaim_count: 12,
-      reclaim_rate: 0.03,
+      diverted: 1,
+      reclaim_count: 0,
+      reclaim_rate: 0,
       top_noisy: [{ service: "checkout", repeat_total: 88, findings: 9 }],
       trend: [],
     });
     renderPage();
 
     const strip = await screen.findByTestId("alert-fatigue-analytics");
-    expect(await screen.findByText("1,234")).toBeTruthy();
+    // The total stat is relabelled + hinted so it no longer implies a
+    // row-per-alert table.
+    expect(await screen.findByText("Alerts tracked")).toBeTruthy();
+    expect(strip.textContent).toContain("across all statuses");
     expect(strip.textContent).toContain("32%");
+
+    // The per-status breakdown pill row no longer lives in the analytics strip.
+    expect(
+      screen.queryByTestId("alert-fatigue-status-breakdown"),
+    ).toBeNull();
+
+    // The stat cards sit on a single row (grid-flow-col), not a wrapping grid.
+    const statsRow =
+      screen.getByTestId("alert-fatigue-stat-total").parentElement;
+    expect(statsRow?.className).toContain("grid-flow-col");
+    expect(statsRow?.className).not.toContain("grid-cols-5");
+
     expect(
       (await screen.findByTestId("alert-fatigue-top-noisy")).textContent,
     ).toContain("checkout");
   });
+
+  it("switches the analytics window via tabs (7d default → 30d)", async () => {
+    vi.mocked(api.getAlertFatigueAnalytics).mockResolvedValue({
+      window: "7d",
+      total: 0,
+      by_status: {},
+      noise_ratio: 0,
+      diverted: 0,
+      reclaim_count: 0,
+      reclaim_rate: 0,
+      top_noisy: [],
+      trend: [],
+    });
+    renderPage();
+
+    const tablist = await screen.findByRole("tablist", {
+      name: "Analytics window",
+    });
+    // The window control keeps its stable test id (now a tablist, not a select).
+    expect(tablist.getAttribute("data-testid")).toBe(
+      "alert-fatigue-analytics-window",
+    );
+    const tabs = within(tablist).getAllByRole("tab");
+    expect(tabs.map((t) => t.textContent)).toEqual(["7 days", "30 days"]);
+
+    // The default window (7d) issues the first read.
+    await waitFor(() =>
+      expect(api.getAlertFatigueAnalytics).toHaveBeenCalledWith("7d"),
+    );
+
+    fireEvent.click(within(tablist).getByRole("tab", { name: "30 days" }));
+    await waitFor(() =>
+      expect(api.getAlertFatigueAnalytics).toHaveBeenCalledWith("30d"),
+    );
+  });
+
+  it("annotates the Fingerprints status tabs with per-status counts", async () => {
+    // The counts come from the SAME by_status analytics read-model (default 7d
+    // window) the noise strip reads — shared react-query cache, one fetch, no
+    // backend change. Missing statuses render as 0.
+    vi.mocked(api.getAlertFatigueAnalytics).mockResolvedValue({
+      window: "7d",
+      total: 15,
+      by_status: { tracking: 10, fatigued: 3, pending_review: 2 },
+      noise_ratio: 0.2,
+      diverted: 3,
+      reclaim_count: 0,
+      reclaim_rate: 0,
+      top_noisy: [],
+      trend: [],
+    });
+    renderPage();
+
+    // The counts now ride on the status tabs as badges, not a separate chip row.
+    expect(screen.queryByTestId("alert-fatigue-status-counts")).toBeNull();
+
+    const tablist = await screen.findByRole("tablist", {
+      name: "Status filter",
+    });
+    const tab = (name: string) =>
+      within(tablist).getByRole("tab", { name: new RegExp(`^${name}`) });
+
+    // Badges fill in once the shared analytics query resolves.
+    await waitFor(() => expect(tab("Tracking").textContent).toContain("10"));
+    expect(tab("Fatigued").textContent).toContain("3");
+    expect(tab("Pending review").textContent).toContain("2");
+    // Missing status → 0.
+    expect(tab("Reclaimed").textContent).toContain("0");
+    // The "All" tab carries no count badge.
+    expect(tab("All").textContent).toBe("All");
+
+    // The status-aware caption is gone from the Fingerprints header.
+    expect(screen.queryByTestId("alert-fatigue-caption")).toBeNull();
+  });
+
+  it("renders honest routed/suppressed stats when the read-model exposes them", async () => {
+    // The split read-model reports how many fatigued alerts were ROUTED to a
+    // custom channel vs SILENTLY SUPPRESSED — replacing the old "Diverted" stat
+    // that implied every fatigued alert was sent somewhere.
+    vi.mocked(api.getAlertFatigueAnalytics).mockResolvedValue({
+      window: "7d",
+      total: 20,
+      by_status: { tracking: 12, fatigued: 8 },
+      noise_ratio: 0.4,
+      diverted: 8,
+      routed: 5,
+      suppressed: 3,
+      reclaim_count: 0,
+      reclaim_rate: 0,
+      top_noisy: [],
+      trend: [],
+    });
+    renderPage();
+
+    const strip = await screen.findByTestId("alert-fatigue-analytics");
+    const routed = await screen.findByTestId("alert-fatigue-stat-routed");
+    expect(routed.textContent).toContain("Routed to channel");
+    expect(routed.textContent).toContain("5");
+    const suppressed = screen.getByTestId("alert-fatigue-stat-suppressed");
+    expect(suppressed.textContent).toContain("Suppressed");
+    expect(suppressed.textContent).toContain("3");
+
+    // The misleading "Diverted" label is gone, and the single-stat fallback is
+    // not rendered when the split fields are present.
+    expect(strip.textContent).not.toContain("Diverted");
+    expect(screen.queryByTestId("alert-fatigue-stat-fatigued")).toBeNull();
+  });
+
+  it("falls back to one honest Fatigued stat when routed/suppressed are absent", async () => {
+    // Older read-model: only the `diverted` aggregate. The UI must not resurrect
+    // the misleading "Diverted" wording — it shows a plain "Fatigued" count.
+    vi.mocked(api.getAlertFatigueAnalytics).mockResolvedValue({
+      window: "7d",
+      total: 20,
+      by_status: { tracking: 12, fatigued: 8 },
+      noise_ratio: 0.4,
+      diverted: 8,
+      reclaim_count: 0,
+      reclaim_rate: 0,
+      top_noisy: [],
+      trend: [],
+    });
+    renderPage();
+
+    const strip = await screen.findByTestId("alert-fatigue-analytics");
+    const fallback = await screen.findByTestId("alert-fatigue-stat-fatigued");
+    expect(fallback.textContent).toContain("Fatigued");
+    expect(fallback.textContent).toContain("8");
+    expect(strip.textContent).not.toContain("Diverted");
+    expect(screen.queryByTestId("alert-fatigue-stat-routed")).toBeNull();
+    expect(screen.queryByTestId("alert-fatigue-stat-suppressed")).toBeNull();
+  });
+
+  it("labels the Fingerprints count by the active filter so it reads as a subset", async () => {
+    // The analytics `total` counts all statuses (incl. tracking); the "All" tab
+    // lists only reviewable rows. Labelling the header count "reviewable" keeps
+    // the two on-screen numbers from reading as a contradiction.
+    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(
+      page([finding()], { total: 3 }),
+    );
+    renderPage();
+
+    await screen.findByText("checkout");
+    expect(screen.getByText(/reviewable/)).toBeTruthy();
+  });
 });
 
-describe("AlertFatiguePage — correlation section", () => {
+describe("AlertFatiguePage — Tracking tab + top-noisy drill-down", () => {
   beforeEach(() => {
     signInAs("admin");
     vi.mocked(api.getAlertFatigueConfig).mockResolvedValue(cfg({ enabled: true }));
-    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(page([]));
-    vi.mocked(api.setAlertFatigueCorrelation).mockImplementation((b) =>
-      Promise.resolve({ ...b, effective_window_seconds: b.correlation_window_seconds || 300 }),
-    );
   });
 
-  it("PUTs correlation_enabled=true when the toggle is turned on", async () => {
+  it("lists tracking rows and offers Mark as spam wired to confirm", async () => {
+    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(
+      page([finding({ id: "f-track", status: "tracking", service: "account" })]),
+    );
+    vi.mocked(api.confirmAlertFatigueFingerprint).mockResolvedValue(
+      finding({ id: "f-track", status: "fatigued" }),
+    );
     renderPage();
-    const toggle = await screen.findByTestId("alert-fatigue-correlation-toggle");
-    expect(toggle.getAttribute("aria-checked")).toBe("false");
-    fireEvent.click(toggle);
+
+    // Switch to the Tracking tab; the query is issued with status=tracking.
+    const tablist = await screen.findByRole("tablist", { name: "Status filter" });
+    fireEvent.click(within(tablist).getByRole("tab", { name: /^Tracking/ }));
     await waitFor(() =>
-      expect(api.setAlertFatigueCorrelation).toHaveBeenCalledWith(
-        expect.objectContaining({ correlation_enabled: true }),
+      expect(api.listAlertFatigueFingerprints).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "tracking" }),
       ),
     );
-  });
 
-  it("lists correlation groups and expands a group's members", async () => {
-    vi.mocked(api.getAlertFatigueCorrelation).mockResolvedValue({
-      correlation_enabled: true,
-      correlation_window_seconds: 300,
-      effective_window_seconds: 300,
-    });
-    vi.mocked(api.listAlertFatigueCorrelationGroups).mockResolvedValue({
-      groups: [
-        {
-          id: 7,
-          group_key: "checkout",
-          service: "checkout",
-          parent_fingerprint: "pfp",
-          parent_severity: "warn",
-          window_start: NOW,
-          window_end: NOW,
-          member_count: 3,
-          reason: "same-service",
-          created_at: NOW,
-        },
-      ],
-      total: 1,
-      page: 1,
-      page_size: 50,
-    });
-    vi.mocked(api.listAlertFatigueCorrelationMembers).mockResolvedValue({
-      group_id: 7,
-      members: [
-        {
-          id: 71,
-          child_fingerprint: "childfp",
-          child_severity: "warn",
-          reason: "folded",
-          created_at: NOW,
-        },
-      ],
-    });
-    renderPage();
-
-    // The group row renders (only the groups-scoped one; ignore other "checkout").
-    await screen.findByTestId("alert-fatigue-correlation-groups");
-    const expand = await screen.findByTestId("alert-fatigue-group-expand-7");
-    fireEvent.click(expand);
-
+    // The tracking row is actionable via "Mark as spam" → confirm(id).
+    await screen.findByText("account");
+    fireEvent.click(screen.getByRole("button", { name: "Mark as spam" }));
     await waitFor(() =>
-      expect(api.listAlertFatigueCorrelationMembers).toHaveBeenCalledWith(7),
+      expect(api.confirmAlertFatigueFingerprint).toHaveBeenCalledWith("f-track"),
     );
-    expect(
-      (await screen.findByTestId("alert-fatigue-group-members-7")).textContent,
-    ).toContain("childfp");
-  });
-});
-
-describe("AlertFatiguePage — dependency section", () => {
-  beforeEach(() => {
-    signInAs("admin");
-    vi.mocked(api.getAlertFatigueConfig).mockResolvedValue(cfg({ enabled: true }));
-    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(page([]));
-    vi.mocked(api.setAlertFatigueDependency).mockImplementation((b) =>
-      Promise.resolve({
-        ...b,
-        effective_lookback_seconds: b.dependency_lookback_seconds || 3600,
-      }),
-    );
-  });
-
-  it("PUTs dependency_suppress_enabled=true when the toggle is turned on", async () => {
-    renderPage();
-    const toggle = await screen.findByTestId("alert-fatigue-dependency-toggle");
-    expect(toggle.getAttribute("aria-checked")).toBe("false");
-    fireEvent.click(toggle);
-    await waitFor(() =>
-      expect(api.setAlertFatigueDependency).toHaveBeenCalledWith(
-        expect.objectContaining({ dependency_suppress_enabled: true }),
-      ),
-    );
-  });
-
-  it("adds and removes a dependency edge", async () => {
-    vi.mocked(api.getAlertFatigueDependency).mockResolvedValue({
-      dependency_suppress_enabled: true,
-      dependency_lookback_seconds: 3600,
-      effective_lookback_seconds: 3600,
-    });
-    vi.mocked(api.listAlertFatigueDependencyEdges).mockResolvedValue({
-      edges: [
-        { id: 5, downstream: "checkout", upstream: "postgres", created_at: NOW },
-      ],
-      total: 1,
-      page: 1,
-      page_size: 50,
-    });
-    vi.mocked(api.addAlertFatigueDependencyEdge).mockResolvedValue({
-      id: 6,
-      downstream: "web",
-      upstream: "redis",
-    });
-    vi.mocked(api.removeAlertFatigueDependencyEdge).mockResolvedValue({ id: 5 });
-    renderPage();
-
-    // Add an edge.
-    const down = await screen.findByTestId("alert-fatigue-edge-downstream");
-    const up = screen.getByTestId("alert-fatigue-edge-upstream");
-    fireEvent.change(down, { target: { value: "web" } });
-    fireEvent.change(up, { target: { value: "redis" } });
-    fireEvent.click(screen.getByTestId("alert-fatigue-edge-add"));
-    await waitFor(() =>
-      expect(api.addAlertFatigueDependencyEdge).toHaveBeenCalledWith({
-        downstream: "web",
-        upstream: "redis",
-      }),
-    );
-
-    // Remove the existing edge.
-    fireEvent.click(screen.getByTestId("alert-fatigue-edge-remove-5"));
-    await waitFor(() =>
-      expect(api.removeAlertFatigueDependencyEdge).toHaveBeenCalledWith(5),
-    );
-  });
-
-  it("lists held symptoms and peeks the redacted content", async () => {
-    vi.mocked(api.getAlertFatigueDependency).mockResolvedValue({
-      dependency_suppress_enabled: true,
-      dependency_lookback_seconds: 3600,
-      effective_lookback_seconds: 3600,
-    });
-    vi.mocked(api.listAlertFatigueDependencyHolds).mockResolvedValue({
-      holds: [
-        {
-          id: 3,
-          fingerprint: "holdfp",
-          downstream: "checkout",
-          upstream: "postgres",
-          incident_id: "inc-1",
-          alert_content: { title: "db down" },
-          source: "agent",
-          service: "checkout",
-          severity: "warn",
-          hold_count: 4,
-          reason: "dep-suppress",
-          first_seen: NOW,
-          last_seen: NOW,
-        },
-      ],
-      total: 1,
-      page: 1,
-      page_size: 50,
-    });
-    renderPage();
-
-    await screen.findByTestId("alert-fatigue-holds");
-    expect(await screen.findByText("postgres")).toBeTruthy();
-
-    // Peek opens the redacted content.
-    fireEvent.click(screen.getByRole("button", { name: "checkout" }));
-    await waitFor(() =>
-      expect(screen.getByText(/db down/)).toBeTruthy(),
-    );
-  });
-
-  it("reclaims a held symptom and refreshes the holds list", async () => {
-    vi.mocked(api.getAlertFatigueDependency).mockResolvedValue({
-      dependency_suppress_enabled: true,
-      dependency_lookback_seconds: 3600,
-      effective_lookback_seconds: 3600,
-    });
-    vi.mocked(api.listAlertFatigueDependencyHolds).mockResolvedValue({
-      holds: [
-        {
-          id: 9,
-          fingerprint: "holdfp",
-          downstream: "checkout",
-          upstream: "postgres",
-          incident_id: "inc-1",
-          alert_content: { title: "db down" },
-          source: "agent",
-          service: "checkout",
-          severity: "warn",
-          hold_count: 4,
-          reason: "dep-suppress",
-          first_seen: NOW,
-          last_seen: NOW,
-        },
-      ],
-      total: 1,
-      page: 1,
-      page_size: 50,
-    });
-    vi.mocked(api.reclaimAlertFatigueDependencyHold).mockResolvedValue({
-      id: 9,
-      reclaimed: true,
-    });
-    renderPage();
-
-    const btn = await screen.findByTestId("alert-fatigue-hold-reclaim-9");
-    fireEvent.click(btn);
-
-    await waitFor(() =>
-      expect(api.reclaimAlertFatigueDependencyHold).toHaveBeenCalledWith(9),
-    );
-    // The holds list is re-read after the reclaim (invalidate → refetch).
+    // The list is re-read after the mutation (invalidate → refetch).
     await waitFor(() =>
       expect(
-        vi.mocked(api.listAlertFatigueDependencyHolds).mock.calls.length,
+        vi.mocked(api.listAlertFatigueFingerprints).mock.calls.length,
       ).toBeGreaterThan(1),
     );
   });
 
-  it("never renders the reclaim-from-hold action for a signed-in viewer", async () => {
-    vi.mocked(getSsoSession).mockReset();
-    signInAs("viewer");
+  it("clicking a top-noisy service filters the table to that service in the Tracking tab", async () => {
+    vi.mocked(api.getAlertFatigueAnalytics).mockResolvedValue({
+      window: "7d",
+      total: 2048,
+      by_status: { tracking: 2048, fatigued: 0, pending_review: 0, reclaimed: 0 },
+      noise_ratio: 0.9,
+      diverted: 0,
+      reclaim_count: 0,
+      reclaim_rate: 0,
+      top_noisy: [{ service: "account", repeat_total: 2048, findings: 12 }],
+      trend: [],
+    });
+    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(
+      page([finding({ id: "f-acc", status: "tracking", service: "account" })]),
+    );
     renderPage();
 
-    // A viewer gets the read-only notice; the dependency section (and its
-    // reclaim action) is never mounted, so nothing privileged is offered.
-    await screen.findByTestId("admin-access-notice");
-    expect(screen.queryByTestId("alert-fatigue-holds")).toBeNull();
-    expect(screen.queryByTestId("alert-fatigue-hold-reclaim-9")).toBeNull();
-    expect(api.reclaimAlertFatigueDependencyHold).not.toHaveBeenCalled();
+    // The top-noisy service renders as a button; clicking it drills in.
+    const noisyBtn = await screen.findByTestId("alert-fatigue-top-noisy-account");
+    fireEvent.click(noisyBtn);
+
+    // The query is re-issued scoped to the service AND the Tracking status.
+    await waitFor(() =>
+      expect(api.listAlertFatigueFingerprints).toHaveBeenCalledWith(
+        expect.objectContaining({ service: "account", status: "tracking" }),
+      ),
+    );
+
+    // The status tab reflects Tracking as selected.
+    const tablist = screen.getByRole("tablist", { name: "Status filter" });
+    expect(
+      within(tablist)
+        .getByRole("tab", { name: /^Tracking/ })
+        .getAttribute("aria-selected"),
+    ).toBe("true");
+
+    // A dismissable filter chip shows the active service and clears it.
+    const chip = await screen.findByTestId("alert-fatigue-service-chip");
+    expect(chip.textContent).toContain("account");
+    fireEvent.click(chip);
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("alert-fatigue-service-chip"),
+      ).toBeNull(),
+    );
+    // After clearing, the query no longer carries a service filter.
+    await waitFor(() =>
+      expect(api.listAlertFatigueFingerprints).toHaveBeenCalledWith(
+        expect.objectContaining({ service: undefined, status: "tracking" }),
+      ),
+    );
   });
 });
+

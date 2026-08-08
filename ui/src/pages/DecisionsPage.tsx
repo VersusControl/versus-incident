@@ -21,6 +21,7 @@ import { TopBar } from "@/components/TopBar";
 import { Pill, VerdictPill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SegmentedControl } from "@/components/SegmentedControl";
+import { FilterBar } from "@/components/FilterBar";
 import { ClickableRow } from "@/components/DataTable";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
@@ -95,36 +96,38 @@ export function DecisionsPage() {
       />
 
       <main className="flex-1 overflow-auto p-6">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <SegmentedControl
-            param="tab"
-            defaultValue="detect"
-            aria-label="Decision log"
-            options={[
-              {
-                value: "detect",
-                label: "Detect",
-                badge: detectStats.data?.events,
-              },
-              {
-                value: "shadow",
-                label: "Shadow",
-                badge: shadowStats.data?.events,
-              },
-              {
-                value: "spike",
-                label: "Spike",
-                badge: spikeReady ? spikeCount : undefined,
-              },
-            ]}
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            {/* key={tab} resets confirm/mutation state when the tab flips so a
-                pending Clear dialog can never target the other log. Spike is a
-                read-only view of shadow data — no clear there. */}
-            {tab !== "spike" && <LogActions key={tab} tab={tab} />}
-          </div>
-        </div>
+        <FilterBar
+          tabs={
+            <SegmentedControl
+              param="tab"
+              defaultValue="detect"
+              aria-label="Decision log"
+              options={[
+                {
+                  value: "detect",
+                  label: "Detect",
+                  badge: detectStats.data?.events,
+                },
+                {
+                  value: "shadow",
+                  label: "Shadow",
+                  badge: shadowStats.data?.events,
+                },
+                {
+                  value: "spike",
+                  label: "Spike",
+                  badge: spikeReady ? spikeCount : undefined,
+                },
+              ]}
+            />
+          }
+          actions={
+            // key={tab} resets confirm/mutation state when the tab flips so a
+            // pending Clear dialog can never target the other log. Spike is a
+            // read-only view of shadow data — no clear there.
+            tab !== "spike" ? <LogActions key={tab} tab={tab} /> : undefined
+          }
+        />
 
         {tab === "detect" ? (
           <DetectTab />

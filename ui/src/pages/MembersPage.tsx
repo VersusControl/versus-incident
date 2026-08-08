@@ -1,6 +1,6 @@
 import { useId, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 import clsx from "clsx";
 import {
   ApiError,
@@ -28,6 +28,8 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Pagination } from "@/components/Pagination";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
+import { FilterBar } from "@/components/FilterBar";
+import { SearchInput } from "@/components/SearchInput";
 import { useToast } from "@/components/toastContext";
 
 // RbacBinding is what the enterprise RBAC members surface contributes to one
@@ -152,32 +154,27 @@ export function MembersPanel() {
 
   return (
     <>
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <div className="relative max-w-md flex-1">
-          <Search
-            size={12}
-            aria-hidden
-            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
-          />
-          <input
-            className="input pl-7"
-            data-page-search
-            aria-label="Search members"
-            placeholder="Search by name, alias, or channel id…"
+      <FilterBar
+        search={
+          <SearchInput
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={setQ}
+            ariaLabel="Search members"
+            placeholder="Search by name, alias, or channel id…"
           />
-        </div>
-        {showAdd && (
-          <button
-            className="btn"
-            data-testid="members-add"
-            onClick={() => setEditing("new")}
-          >
-            <Plus size={12} /> Add member
-          </button>
-        )}
-      </div>
+        }
+        actions={
+          showAdd ? (
+            <button
+              className="btn"
+              data-testid="members-add"
+              onClick={() => setEditing("new")}
+            >
+              <Plus size={12} /> Add member
+            </button>
+          ) : undefined
+        }
+      />
 
       {isError && (
         <div className="mb-3">

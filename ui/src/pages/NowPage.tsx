@@ -39,6 +39,7 @@ import { KpiTile } from "@/components/KpiTile";
 import { ChannelIcon } from "@/components/ChannelIcon";
 import { ClickableRow } from "@/components/DataTable";
 import { SegmentedControl } from "@/components/SegmentedControl";
+import { FilterBar } from "@/components/FilterBar";
 import { useNowTick, useTableKeys } from "@/lib/hooks";
 import {
   formatOriginCounts,
@@ -252,22 +253,26 @@ export function NowPage() {
             (default) vs the inbound webhook/alert firehose, each with its
             whole-set count so neither buries the other. Scopes the banner,
             KPI counts and feed below to the active tab. */}
-        <SegmentedControl
-          param="origin"
-          defaultValue="ai_detect"
-          aria-label="Filter the Now view by origin"
-          options={[
-            {
-              value: "ai_detect",
-              label: originLabel("ai_detect"),
-              badge: originCounts?.ai_detect,
-            },
-            {
-              value: "webhook",
-              label: originLabel("webhook"),
-              badge: originCounts?.webhook,
-            },
-          ]}
+        <FilterBar
+          tabs={
+            <SegmentedControl
+              param="origin"
+              defaultValue="ai_detect"
+              aria-label="Filter the Now view by origin"
+              options={[
+                {
+                  value: "ai_detect",
+                  label: originLabel("ai_detect"),
+                  badge: originCounts?.ai_detect,
+                },
+                {
+                  value: "webhook",
+                  label: originLabel("webhook"),
+                  badge: originCounts?.webhook,
+                },
+              ]}
+            />
+          }
         />
 
         {/* (1) Open-incident banner — the OPEN count is the server number;

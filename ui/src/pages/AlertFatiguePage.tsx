@@ -1,20 +1,12 @@
 import { useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import {
-  AlertTriangle,
-  BellOff,
-  ChevronDown,
-  ChevronRight,
-  Info,
-  Loader2,
-  Plus,
-  Trash2,
-} from "lucide-react";
+import { BellOff, Info, Loader2, X } from "lucide-react";
 
 import {
   ApiError,
@@ -23,9 +15,6 @@ import {
   type AlertFatigueFinding,
   type AlertFatigueSort,
   type AlertFatigueSortDir,
-  type AlertFatigueCorrelationGroup,
-  type AlertFatigueDependencyEdge,
-  type AlertFatigueDependencyHold,
 } from "@/lib/api";
 import { displayService, fmtAbs, fmtRel } from "@/lib/format";
 import { adminGateState } from "@/lib/role";
@@ -37,13 +26,17 @@ import { EmptyState } from "@/components/feedback";
 import { EnterpriseLockedBody } from "@/components/EnterpriseLocked";
 import { AdminAccessNotice } from "@/components/AdminAccessNotice";
 import { PeekPanel, PeekField } from "@/components/PeekPanel";
+import { SegmentedControl } from "@/components/SegmentedControl";
 import { SkRows } from "@/components/Skeleton";
 
 // AlertFatiguePage — the operator surface for the Enterprise alert-fatigue
 // feature. Modeled on the SLI/SLO auto-define page: a default-OFF master enable
-// switch, and everything below it (the fatigue-channel picker, the "require
-// review before spam" switch, and the fingerprint review table) is hidden until
-// the feature is enabled.
+// switch, and everything below it (the "require review before spam" switch, the
+// noise-analytics strip, and the fingerprint review table) is hidden until the
+// feature is enabled. All alert-fatigue CONFIGURATION — the fatigue channel,
+// correlation, and dependency-aware suppression — lives in the Admin page's
+// AlertFatigueSettings control; this page keeps only the operator's day-to-day
+// review + monitoring surfaces.
 //
 // Gated exactly like the AI-settings / channel-settings controls on the
 // caller's effective RBAC role (useEffectiveRole → adminGateState): a community
@@ -54,12 +47,13 @@ import { SkRows } from "@/components/Skeleton";
 // issues a privileged request.
 
 const PAGE_TITLE = "Alert fatigue";
-const SUBTITLE =
-  "Deterministically divert repeat, low-signal alerts to a fatigue channel so the on-call channel stays clean — every suppression stays visible and reversible.";
 
 const LOCKED_TITLE = "Alert fatigue is an Enterprise capability";
 const LOCKED_BODY =
-  "Alert fatigue deduplicates repeat alerts and diverts the noise to a channel you choose, with a reviewable record of every fingerprint so you can reclaim anything that was not actually noise.";
+  "Alert fatigue deduplicates repeat alerts and suppresses the noise so your " +
+  "on-call channel stays clean — with a reviewable record of every fingerprint " +
+  "so you can reclaim anything that was not actually noise. Optionally, send " +
+  "the suppressed alerts to a channel of your choice from Admin settings.";
 
 // PENDING_REVIEW_NOTE is the exact operator guidance shown beside the
 // "Require review before spam" switch (per the implementation plan §4.1).
@@ -68,24 +62,23 @@ const PENDING_REVIEW_NOTE =
   "sent. If you notice alerts missing and want to approve them before " +
   "they're marked as spam, enable pending review.";
 
-// KNOWN_CHANNELS is the static fallback list of notification channels used when
-// the runtime channel-settings map is unavailable. The picker prefers the real
-// configured channels (api.getChannelSettings) and only falls back to these.
-const KNOWN_CHANNELS = [
-  "slack",
-  "telegram",
-  "viber",
-  "email",
-  "msteams",
-  "lark",
-];
-
 const PAGE_SIZE = 50;
 
-// STATUS_FILTERS are the review-table filter options. The server's internal
-// `tracking` state is intentionally absent — requesting it is a 400.
+// FLOORED_SUPPRESS_HINT is the short explanation shown wherever a floored row's
+// suppression action is blocked or its "fatigued" status could read as silenced.
+const FLOORED_SUPPRESS_HINT =
+  "High and critical alerts always page and can't be suppressed.";
+
+// FINGERPRINTS_ANCHOR_ID lets the top-noisy drill-down scroll the Fingerprints
+// table into view after it flips the status tab + service filter.
+const FINGERPRINTS_ANCHOR_ID = "alert-fatigue-fingerprints";
+
+// STATUS_FILTERS are the review-table filter options. `tracking` lists the
+// still-paging rows (recorded, never fatigued) so the operator can find and
+// suppress a noisy service; the other tabs list reviewable (non-tracking) rows.
 const STATUS_FILTERS: Array<{ value: string; label: string }> = [
   { value: "", label: "All" },
+  { value: "tracking", label: "Tracking" },
   { value: "fatigued", label: "Fatigued" },
   { value: "pending_review", label: "Pending review" },
   { value: "reclaimed", label: "Reclaimed" },
@@ -151,7 +144,6 @@ export function AlertFatiguePage() {
 
   return (
     <AlertFatigueShell>
-      <p className="mb-3 max-w-3xl text-xs text-ink-300">{SUBTITLE}</p>
       <AdminBody />
     </AlertFatigueShell>
   );
@@ -177,22 +169,13 @@ function AdminBody() {
     },
   });
 
-  // The configured notification channels for the fatigue-channel picker. Reads
-  // the dedicated alert-fatigue channels endpoint (name + effective enabled),
-  // so the picker knows which channels are still live and can warn when the
-  // diverted channel was later disabled. Falls back to the static known names
-  // when it is unavailable.
-  const channels = useQuery({
-    queryKey: ["alert-fatigue-channels"],
-    queryFn: api.listAlertFatigueChannels,
-    retry: false,
-    staleTime: 60_000,
-  });
-
   const save = useMutation({
     mutationFn: (next: AlertFatigueConfig) => api.setAlertFatigueConfig(next),
     onSuccess: (data) => {
+      // Share the config key + invalidate so the Admin control reflects an
+      // Enable / Require-review change without a reload.
       qc.setQueryData(["alert-fatigue-config"], data);
+      qc.invalidateQueries({ queryKey: ["alert-fatigue-config"] });
     },
     onError: (err: unknown) => {
       setMsg({
@@ -238,30 +221,16 @@ function AdminBody() {
   }
 
   const config = cfg.data;
+  // Read-modify-write: read the FRESHEST cached config (not the render-time
+  // closure), merge only the fields this surface edits, then PUT the whole
+  // object so a sibling field is never clobbered. The shared config key is
+  // invalidated on success so any other reader stays in sync.
   const patch = (partial: Partial<AlertFatigueConfig>) => {
     setMsg(null);
-    save.mutate({ ...config, ...partial });
+    const current =
+      qc.getQueryData<AlertFatigueConfig>(["alert-fatigue-config"]) ?? config;
+    save.mutate({ ...current, ...partial });
   };
-
-  const channelList = channels.data ?? [];
-  const channelNames = ((): string[] => {
-    const names = channelList.map((c) => c.name);
-    const base = names.length ? names : KNOWN_CHANNELS;
-    // Keep the currently-selected channel selectable even if it is not (or no
-    // longer) in the configured set, so the picker never silently drops it.
-    if (config.fatigue_channel && !base.includes(config.fatigue_channel)) {
-      return [config.fatigue_channel, ...base];
-    }
-    return base;
-  })();
-  // The diverted channel is broken when the server's derived echo says so, or
-  // when the channels list explicitly reports the selected channel disabled.
-  const selectedDisabled = channelList.some(
-    (c) => c.name === config.fatigue_channel && !c.enabled,
-  );
-  const channelInvalid =
-    Boolean(config.fatigue_channel) &&
-    (config.fatigue_channel_valid === false || selectedDisabled);
 
   return (
     <div className="grid gap-4">
@@ -292,69 +261,13 @@ function AdminBody() {
               Enable alert fatigue
             </div>
             <div className="text-2xs text-ink-400">
-              Turn the deterministic dedup/divert interceptor on or off for this
-              org. Off by default — nothing is suppressed until it is on.
+              When enabled, repeat alerts are auto-marked as spam using agent algorithms.
             </div>
           </div>
         </div>
 
         {config.enabled && (
           <div className="mt-4 grid gap-4 border-t border-ink-700 pt-4">
-            {/* Fatigue channel picker */}
-            <div className="flex flex-wrap items-end gap-3">
-              <div>
-                <label
-                  className="field-label"
-                  htmlFor="alert-fatigue-channel"
-                >
-                  Fatigue channel
-                </label>
-                <div className="text-2xs text-ink-400">
-                  Where fatigued (&ldquo;spam&rdquo;) alerts are diverted so the
-                  on-call channel stays clean.
-                </div>
-              </div>
-              <select
-                id="alert-fatigue-channel"
-                data-testid="alert-fatigue-channel-select"
-                className="input h-9 max-w-xs text-sm"
-                value={config.fatigue_channel}
-                disabled={save.isPending}
-                onChange={(e) => patch({ fatigue_channel: e.target.value })}
-              >
-                <option value="">Select a channel…</option>
-                {channelNames.map((c) => {
-                  const disabled = channelList.some(
-                    (ch) => ch.name === c && !ch.enabled,
-                  );
-                  return (
-                    <option key={c} value={c}>
-                      {c}
-                      {disabled ? " (disabled)" : ""}
-                    </option>
-                  );
-                })}
-              </select>
-            </div>
-
-            {channelInvalid && (
-              <div
-                className="flex items-start gap-1.5 text-2xs text-sev-warn"
-                role="alert"
-                data-testid="alert-fatigue-channel-warning"
-              >
-                <AlertTriangle size={12} className="mt-0.5 shrink-0" aria-hidden />
-                <span>
-                  The fatigue channel{" "}
-                  <span className="font-medium">
-                    &ldquo;{config.fatigue_channel}&rdquo;
-                  </span>{" "}
-                  is no longer an enabled channel. Diverted alerts may not be
-                  delivered — pick an active channel below.
-                </span>
-              </div>
-            )}
-
             {/* Require review before spam */}
             <div
               className="flex flex-wrap items-start gap-3"
@@ -413,13 +326,13 @@ function AdminBody() {
       </div>
 
       {/* Everything below the master switch is scoped to the feature being on,
-          matching the pending-review gating. */}
+          matching the pending-review gating. The fatigue channel, correlation,
+          and dependency CONFIG live on the Admin page's AlertFatigueSettings
+          control; this page keeps the operator's review + monitoring surfaces. */}
       {config.enabled && (
         <>
           <AnalyticsStrip />
           <ReviewTable />
-          <CorrelationSection saving={save.isPending} />
-          <DependencySection saving={save.isPending} />
         </>
       )}
     </div>
@@ -433,16 +346,41 @@ function AdminBody() {
 // state.
 function ReviewTable() {
   const qc = useQueryClient();
-  const [statusFilter, setStatusFilter] = useState("");
+  const [params, setParams] = useSearchParams();
+  const statusFilter = params.get("status") ?? "";
+  const serviceFilter = params.get("service") ?? "";
   const [sort, setSort] = useState<AlertFatigueSort>("last_seen");
   const [dir, setDir] = useState<AlertFatigueSortDir>("desc");
   const [peekId, setPeekId] = useState<string | null>(null);
 
+  // Per-status counts annotate the status tabs as badges; sourced from the SAME
+  // analytics read-model (default 7d window) the noise strip reads, so the
+  // shared react-query cache serves both with a single fetch. Missing status → 0.
+  const analytics = useAlertFatigueAnalytics(DEFAULT_ANALYTICS_WINDOW);
+  const byStatus = analytics.data?.by_status;
+
+  // statusOptions carries each reviewable status's count as a badge on its tab
+  // (the "All" tab stays badge-less), matching the other list pages' pattern.
+  const statusOptions = useMemo(
+    () =>
+      STATUS_FILTERS.map((f) =>
+        f.value === "" ? f : { ...f, badge: byStatus?.[f.value] ?? 0 },
+      ),
+    [byStatus],
+  );
+
   const q = useInfiniteQuery({
-    queryKey: ["alert-fatigue-fingerprints", statusFilter, sort, dir],
+    queryKey: [
+      "alert-fatigue-fingerprints",
+      statusFilter,
+      serviceFilter,
+      sort,
+      dir,
+    ],
     queryFn: ({ pageParam }) =>
       api.listAlertFatigueFingerprints({
         status: statusFilter || undefined,
+        service: serviceFilter || undefined,
         sort,
         dir,
         page: pageParam,
@@ -452,6 +390,14 @@ function ReviewTable() {
     getNextPageParam: (last) =>
       last.page * last.page_size < last.total ? last.page + 1 : undefined,
   });
+
+  // clearService drops the service drill-down param (the top-noisy filter chip)
+  // while leaving the active status tab in place.
+  const clearService = () => {
+    const next = new URLSearchParams(params);
+    next.delete("service");
+    setParams(next, { replace: true });
+  };
 
   // toggleSort drives the SERVER sort param: clicking a new column selects it
   // (defaulting to descending — biggest/most-recent first); clicking the active
@@ -487,32 +433,57 @@ function ReviewTable() {
 
   const peek = peekId ? items.find((r) => r.id === peekId) : undefined;
 
+  // totalNoun labels the Fingerprints header count by the active filter so it
+  // never reads as a grand total that contradicts the analytics "Alerts
+  // tracked" number. The "All" tab lists REVIEWABLE (non-tracking) rows, so its
+  // count is a subset of the analytics total; the per-status pills below spell
+  // out the full composition via the per-status tab badges.
+  const totalNoun =
+    statusFilter === ""
+      ? "reviewable"
+      : (
+          STATUS_FILTERS.find((f) => f.value === statusFilter)?.label ??
+          "matching"
+        ).toLowerCase();
+
   return (
-    <div className="card overflow-hidden">
+    <div id={FINGERPRINTS_ANCHOR_ID} className="card overflow-hidden">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-ink-700 px-4 py-3">
-        <h2 className="text-sm font-semibold text-ink-50">
-          Fingerprints
-          {total !== undefined && (
-            <span className="ml-2 text-2xs font-normal text-ink-400">
-              {total.toLocaleString()} total
-            </span>
+        <div>
+          <h2 className="text-sm font-semibold text-ink-50">
+            Fingerprints
+            {total !== undefined && (
+              <span className="ml-2 text-2xs font-normal text-ink-400">
+                {total.toLocaleString()} {totalNoun}
+              </span>
+            )}
+          </h2>
+          {serviceFilter && (
+            <button
+              type="button"
+              data-testid="alert-fatigue-service-chip"
+              aria-label={`Clear service filter: ${displayService(serviceFilter)}`}
+              onClick={clearService}
+              className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-ink-600 bg-ink-950/40 px-2.5 py-1 text-2xs text-ink-200 hover:border-ink-500 hover:text-ink-50"
+            >
+              <span>
+                Service:{" "}
+                <span className="font-semibold">
+                  {displayService(serviceFilter)}
+                </span>
+              </span>
+              <X size={12} aria-hidden />
+            </button>
           )}
-        </h2>
-        <label className="flex items-center gap-2 text-2xs text-ink-400">
-          <span>Status</span>
-          <select
-            className="input h-8 text-xs"
-            data-testid="alert-fatigue-status-filter"
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-          >
-            {STATUS_FILTERS.map((f) => (
-              <option key={f.value || "all"} value={f.value}>
-                {f.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        </div>
+        <div className="flex items-center gap-2 text-2xs text-ink-400">
+          <SegmentedControl
+            param="status"
+            defaultValue=""
+            aria-label="Status filter"
+            options={statusOptions}
+          />
+        </div>
       </div>
 
       {q.isError ? (
@@ -529,23 +500,27 @@ function ReviewTable() {
       ) : q.isPending ? (
         <table className="ddt">
           <tbody>
-            <SkRows rows={4} cols={1} />
+            <SkRows rows={4} cols={9} />
           </tbody>
         </table>
       ) : items.length === 0 ? (
         <EmptyState
           title="No fingerprints yet"
-          hint="Fatigued and pending-review fingerprints appear here as the interceptor records repeat, low-signal alerts."
+          hint={
+            statusFilter === "tracking"
+              ? "Tracking alerts appear here as the interceptor counts repeat alerts that are still being sent. Suppress a noisy one with “Mark as spam”."
+              : "Fatigued and pending-review fingerprints appear here as the interceptor records repeat, low-signal alerts."
+          }
         />
       ) : (
         <>
-          <table className="ddt">
+          <table className="ddt w-full table-fixed">
             <thead>
               <tr>
-                <th>Service</th>
-                <th>Source</th>
-                <th className="w-24">Severity</th>
-                <th className="w-24">
+                <th className="w-[16%]">Service</th>
+                <th className="w-[10%]">Source</th>
+                <th className="w-[9%]">Severity</th>
+                <th className="w-[8%]">
                   <SortHeader
                     label="Priority"
                     col="priority"
@@ -554,7 +529,7 @@ function ReviewTable() {
                     onSort={toggleSort}
                   />
                 </th>
-                <th className="w-20 text-right">
+                <th className="w-[7%] text-right">
                   <SortHeader
                     label="Repeats"
                     col="repeat_count"
@@ -564,7 +539,7 @@ function ReviewTable() {
                     align="right"
                   />
                 </th>
-                <th className="w-32">
+                <th className="w-[11%]">
                   <SortHeader
                     label="Last seen"
                     col="last_seen"
@@ -573,9 +548,9 @@ function ReviewTable() {
                     onSort={toggleSort}
                   />
                 </th>
-                <th className="w-32">Status</th>
-                <th>Routed channel</th>
-                <th className="w-48 text-right">Actions</th>
+                <th className="w-[11%]">Status</th>
+                <th className="w-[12%]">Routed channel</th>
+                <th className="w-[16%] text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -591,17 +566,23 @@ function ReviewTable() {
               ))}
             </tbody>
           </table>
-          {q.hasNextPage && (
-            <div className="border-t border-ink-700 px-4 py-3 text-center">
-              <button
-                type="button"
-                className="btn"
-                data-testid="alert-fatigue-load-more"
-                disabled={q.isFetchingNextPage}
-                onClick={() => q.fetchNextPage()}
-              >
-                {q.isFetchingNextPage ? "Loading…" : "Load more"}
-              </button>
+          {(q.isFetchingNextPage || q.hasNextPage) && (
+            <div className="flex items-center justify-center gap-1.5 border-t border-ink-600 px-3 py-2 text-2xs text-ink-400">
+              {q.isFetchingNextPage ? (
+                <>
+                  <Loader2 size={12} className="animate-spin" />
+                  Loading more…
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="text-brand-300 hover:underline"
+                  data-testid="alert-fatigue-load-more"
+                  onClick={() => q.fetchNextPage()}
+                >
+                  Load more ({total?.toLocaleString() ?? ""} total)
+                </button>
+              )}
             </div>
           )}
         </>
@@ -708,6 +689,7 @@ function StatusPill({ status }: { status: string }) {
   if (s === "fatigued") return <Pill tone="bad">Fatigued</Pill>;
   if (s === "pending_review") return <Pill tone="warn">Pending review</Pill>;
   if (s === "reclaimed") return <Pill tone="good">Reclaimed</Pill>;
+  if (s === "tracking") return <Pill>Tracking</Pill>;
   return <Pill>{status || "—"}</Pill>;
 }
 
@@ -748,19 +730,54 @@ function FingerprintRow({
   onReclaim: () => void;
 }) {
   const s = row.status.toLowerCase();
+  // A floored row is one the interceptor always pages (high/critical or a
+  // severity-only floor), so it can never actually be suppressed. The backend
+  // reports this authoritatively via `floor`. Its "Mark as spam" action is
+  // disabled and, if it somehow already reads "fatigued", the status is
+  // annotated so it doesn't look silenced.
+  const floored = row.floor === true;
+
+  // MarkAsSpam is the "Mark as spam" (confirm) action, shared by tracking and
+  // reclaimed rows. On a floored row it renders disabled with an explanation
+  // instead of firing a suppression that would never take effect.
+  const markAsSpam = floored ? (
+    <span
+      data-testid="alert-fatigue-mark-spam-floored"
+      title={FLOORED_SUPPRESS_HINT}
+      aria-label={`Cannot be suppressed: ${FLOORED_SUPPRESS_HINT}`}
+      className="inline-flex max-w-full items-center gap-1 truncate text-2xs text-ink-500"
+    >
+      <Info size={11} aria-hidden />
+      <span className="truncate">Always pages</span>
+    </span>
+  ) : (
+    <button
+      type="button"
+      className="btn px-2 py-1 text-2xs"
+      disabled={acting}
+      onClick={onConfirm}
+    >
+      Mark as spam
+    </button>
+  );
+
   return (
     <tr>
-      <td className="font-medium text-ink-100">
+      <td className="font-mono text-2xs text-ink-200">
         <button
           type="button"
-          className="text-left hover:text-link hover:underline"
+          className="block w-full truncate text-left hover:text-link hover:underline"
           onClick={onPeek}
-          title="View fingerprint detail"
+          title={displayService(row.service)}
         >
           {displayService(row.service)}
         </button>
       </td>
-      <td className="text-2xs text-ink-300">{row.source || "—"}</td>
+      <td className="text-2xs text-ink-300">
+        <span className="block truncate" title={row.source || undefined}>
+          {row.source || "—"}
+        </span>
+      </td>
       <td>
         <SeverityBadge severity={row.severity} />
       </td>
@@ -774,11 +791,28 @@ function FingerprintRow({
         {fmtRel(row.last_seen)}
       </td>
       <td>
-        <StatusPill status={row.status} />
+        <div className="flex min-w-0 flex-col items-start gap-0.5">
+          <StatusPill status={row.status} />
+          {floored && s === "fatigued" && (
+            <span
+              data-testid="alert-fatigue-still-pages"
+              title={FLOORED_SUPPRESS_HINT}
+              className="inline-flex max-w-full items-center gap-1 truncate text-2xs text-sev-warn"
+            >
+              <Info size={11} aria-hidden />
+              still pages (high priority)
+            </span>
+          )}
+        </div>
       </td>
-      <td className="text-2xs text-ink-300">{row.routed_channel || "—"}</td>
+      <td className="text-2xs text-ink-300">
+        <span className="block truncate" title={row.routed_channel || undefined}>
+          {row.routed_channel || "—"}
+        </span>
+      </td>
       <td className="text-right">
-        <div className="flex justify-end gap-1.5">
+        <div className="flex flex-wrap justify-end gap-1.5">
+          {s === "tracking" && markAsSpam}
           {s === "pending_review" && (
             <button
               type="button"
@@ -799,16 +833,7 @@ function FingerprintRow({
               Not spam
             </button>
           )}
-          {s === "reclaimed" && (
-            <button
-              type="button"
-              className="btn px-2 py-1 text-2xs"
-              disabled={acting}
-              onClick={onConfirm}
-            >
-              Mark as spam
-            </button>
-          )}
+          {s === "reclaimed" && markAsSpam}
         </div>
       </td>
     </tr>
@@ -819,127 +844,31 @@ function FingerprintRow({
 // Shared section building blocks
 // ---------------------------------------------------------------------------
 
-// SwitchToggle is the role="switch" control reused by the correlation and
-// dependency sections (same look/behaviour as the master enable switch).
-function SwitchToggle({
-  checked,
-  onToggle,
-  disabled,
-  label,
-  testId,
-}: {
-  checked: boolean;
-  onToggle: () => void;
-  disabled?: boolean;
-  label: string;
-  testId?: string;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      data-testid={testId}
-      onClick={onToggle}
-      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition ${
-        checked ? "bg-link" : "bg-ink-600"
-      } ${disabled ? "opacity-70" : ""}`}
-    >
-      <span
-        className={`inline-block h-4 w-4 transform rounded-full bg-white transition ${
-          checked ? "translate-x-4" : "translate-x-0.5"
-        }`}
-      />
-    </button>
-  );
-}
-
-// SecondsSetting is a labelled number input (seconds) with an Apply button and
-// a read-only "effective" echo of the value the interceptor actually applies
-// after its default/clamp. Apply is disabled while saving, when the value is
-// unchanged, or when it is not a positive integer.
-function SecondsSetting({
-  label,
-  help,
-  stored,
-  effective,
-  onApply,
-  saving,
-  inputTestId,
-  applyTestId,
-}: {
-  label: string;
-  help: string;
-  stored: number;
-  effective: number;
-  onApply: (seconds: number) => void;
-  saving: boolean;
-  inputTestId?: string;
-  applyTestId?: string;
-}) {
-  const [raw, setRaw] = useState(stored ? String(stored) : "");
-  const parsed = Number(raw);
-  const valid = raw.trim() !== "" && Number.isInteger(parsed) && parsed > 0;
-  const changed = valid && parsed !== stored;
-
-  return (
-    <div className="flex flex-wrap items-end gap-3">
-      <div>
-        <label className="field-label" htmlFor={inputTestId}>
-          {label}
-        </label>
-        <div className="max-w-md text-2xs text-ink-400">{help}</div>
-      </div>
-      <input
-        id={inputTestId}
-        data-testid={inputTestId}
-        type="number"
-        min={1}
-        className="input h-9 w-32 text-sm"
-        value={raw}
-        disabled={saving}
-        placeholder={String(effective)}
-        onChange={(e) => setRaw(e.target.value)}
-      />
-      <button
-        type="button"
-        className="btn"
-        data-testid={applyTestId}
-        disabled={saving || !changed}
-        onClick={() => valid && onApply(parsed)}
-      >
-        Apply
-      </button>
-      <span className="text-2xs text-ink-400">
-        Effective:{" "}
-        <span className="tabular-nums text-ink-200">{effective}s</span>
-      </span>
-    </div>
-  );
-}
-
-// SectionShell is the card + heading wrapper the analytics / correlation /
-// dependency sections share so the page reads as labelled sections, not a wall
-// of controls.
+// SectionShell is the card + heading wrapper the analytics section uses so the
+// page reads as labelled sections, not a wall of controls. `action` is an
+// optional right-aligned slot on the heading row (used for the window tabs).
 function SectionShell({
   title,
   icon,
   children,
   testId,
+  action,
 }: {
   title: string;
   icon?: React.ReactNode;
   children: React.ReactNode;
   testId?: string;
+  action?: React.ReactNode;
 }) {
   return (
     <div className="card p-4" data-testid={testId}>
-      <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-ink-50">
-        {icon}
-        {title}
-      </h2>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-ink-50">
+          {icon}
+          {title}
+        </h2>
+        {action}
+      </div>
       {children}
     </div>
   );
@@ -959,38 +888,83 @@ const ANALYTICS_WINDOWS: Array<{ value: "7d" | "30d"; label: string }> = [
   { value: "30d", label: "30 days" },
 ];
 
-function AnalyticsStrip() {
-  const [window, setWindow] = useState<"7d" | "30d">("7d");
-  const q = useQuery({
+// DEFAULT_ANALYTICS_WINDOW is the window both the analytics strip and the
+// Fingerprints per-status counts read by default, so they share one react-query
+// cache entry (["alert-fatigue-analytics", "7d"]) and issue a single fetch.
+const DEFAULT_ANALYTICS_WINDOW: "7d" | "30d" = "7d";
+
+// useAlertFatigueAnalytics reads the per-org noise read-model over one window.
+// Keyed by window so the analytics strip and the Fingerprints per-status counts
+// (both default to 7d) reuse the SAME cache entry — one fetch, no backend change.
+function useAlertFatigueAnalytics(window: "7d" | "30d") {
+  return useQuery({
     queryKey: ["alert-fatigue-analytics", window],
     queryFn: () => api.getAlertFatigueAnalytics(window),
     retry: false,
     staleTime: 30_000,
   });
+}
+
+function AnalyticsStrip() {
+  const [window, setWindow] = useState<"7d" | "30d">(DEFAULT_ANALYTICS_WINDOW);
+  const [params, setParams] = useSearchParams();
+  const q = useAlertFatigueAnalytics(window);
+
+  // filterByService drills the Fingerprints table into one noisy service. The
+  // high-repeat rows live in `tracking` (still paging, never fatigued), so it
+  // switches the status tab there, sets the URL-synced `service` param, and
+  // scrolls the table into view.
+  const filterByService = (service: string) => {
+    const next = new URLSearchParams(params);
+    next.set("service", service);
+    next.set("status", "tracking");
+    setParams(next, { replace: true });
+    if (typeof document !== "undefined") {
+      requestAnimationFrame(() => {
+        const el = document.getElementById(FINGERPRINTS_ANCHOR_ID);
+        if (el && typeof el.scrollIntoView === "function") {
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      });
+    }
+  };
+
+  const windowTabs = (
+    <div
+      role="tablist"
+      aria-label="Analytics window"
+      data-testid="alert-fatigue-analytics-window"
+      className="inline-flex rounded-control border border-ink-500 bg-surface-raised p-0.5"
+    >
+      {ANALYTICS_WINDOWS.map((w) => {
+        const active = window === w.value;
+        return (
+          <button
+            key={w.value}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            aria-label={w.label}
+            onClick={() => setWindow(w.value)}
+            className={`inline-flex min-h-7 items-center rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+              active
+                ? "bg-accent-subtle text-ink-50"
+                : "text-ink-300 hover:text-ink-100"
+            }`}
+          >
+            {w.label}
+          </button>
+        );
+      })}
+    </div>
+  );
 
   return (
-    <SectionShell title="Noise analytics" testId="alert-fatigue-analytics">
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <span className="text-2xs text-ink-400">
-          Deterministic, org-scoped counts over the selected window.
-        </span>
-        <label className="flex items-center gap-2 text-2xs text-ink-400">
-          <span>Window</span>
-          <select
-            className="input h-8 text-xs"
-            data-testid="alert-fatigue-analytics-window"
-            value={window}
-            onChange={(e) => setWindow(e.target.value as "7d" | "30d")}
-          >
-            {ANALYTICS_WINDOWS.map((w) => (
-              <option key={w.value} value={w.value}>
-                {w.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-
+    <SectionShell
+      title="Noise analytics"
+      testId="alert-fatigue-analytics"
+      action={windowTabs}
+    >
       {q.isError ? (
         <div className="flex items-center justify-between gap-3 text-xs">
           <span className="text-sev-critical">
@@ -1009,10 +983,44 @@ function AnalyticsStrip() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-            <Stat label="Total alerts" value={q.data.total.toLocaleString()} />
+          <div className="grid grid-flow-col auto-cols-fr gap-3 overflow-x-auto">
+            <Stat
+              label="Alerts tracked"
+              value={q.data.total.toLocaleString()}
+              hint="across all statuses"
+              testId="alert-fatigue-stat-total"
+            />
             <Stat label="Noise ratio" value={pct(q.data.noise_ratio)} />
-            <Stat label="Diverted" value={q.data.diverted.toLocaleString()} />
+            {/* Honest split of the fatigued count: alerts ROUTED to a custom
+                fatigue channel vs SILENTLY SUPPRESSED (dropped). Each renders
+                only when the read-model exposes it; when neither is present the
+                UI falls back to one plainly-labelled "Fatigued" stat rather than
+                the old "Diverted" wording that implied every fatigued alert was
+                sent somewhere. */}
+            {q.data.routed !== undefined && (
+              <Stat
+                label="Routed to channel"
+                value={q.data.routed.toLocaleString()}
+                hint="sent to your fatigue channel"
+                testId="alert-fatigue-stat-routed"
+              />
+            )}
+            {q.data.suppressed !== undefined && (
+              <Stat
+                label="Suppressed"
+                value={q.data.suppressed.toLocaleString()}
+                hint="dropped, not sent anywhere"
+                testId="alert-fatigue-stat-suppressed"
+              />
+            )}
+            {q.data.routed === undefined && q.data.suppressed === undefined && (
+              <Stat
+                label="Fatigued"
+                value={q.data.diverted.toLocaleString()}
+                hint="kept off on-call"
+                testId="alert-fatigue-stat-fatigued"
+              />
+            )}
             <Stat
               label="Reclaimed"
               value={q.data.reclaim_count.toLocaleString()}
@@ -1029,20 +1037,29 @@ function AnalyticsStrip() {
                 data-testid="alert-fatigue-top-noisy"
               >
                 {q.data.top_noisy.map((s) => (
-                  <li
-                    key={s.service}
-                    className="flex items-center justify-between gap-3 text-2xs"
-                  >
-                    <span className="truncate text-ink-200">
-                      {displayService(s.service)}
-                    </span>
-                    <span className="shrink-0 tabular-nums text-ink-400">
-                      {s.repeat_total.toLocaleString()} repeats ·{" "}
-                      {s.findings.toLocaleString()} fingerprints
-                    </span>
+                  <li key={s.service}>
+                    <button
+                      type="button"
+                      data-testid={`alert-fatigue-top-noisy-${s.service}`}
+                      aria-label={`Filter fingerprints by service ${displayService(s.service)}`}
+                      onClick={() => filterByService(s.service)}
+                      className="flex w-full items-center justify-between gap-3 rounded px-1.5 py-1 text-left text-2xs hover:bg-ink-800/60 focus-visible:outline focus-visible:outline-1 focus-visible:outline-link"
+                    >
+                      <span className="truncate text-ink-200">
+                        {displayService(s.service)}
+                      </span>
+                      <span className="shrink-0 tabular-nums text-ink-400">
+                        {s.repeat_total.toLocaleString()} repeats ·{" "}
+                        {s.findings.toLocaleString()} fingerprints
+                      </span>
+                    </button>
                   </li>
                 ))}
               </ul>
+              <p className="mt-1.5 text-2xs text-ink-500">
+                Click a service to see its still-tracking alerts and mark noise
+                as spam.
+              </p>
             </div>
           )}
         </>
@@ -1051,849 +1068,29 @@ function AnalyticsStrip() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({
+  label,
+  value,
+  hint,
+  testId,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  testId?: string;
+}) {
   return (
-    <div className="rounded-md border border-ink-700 bg-ink-950/30 p-3">
+    <div
+      className="rounded-md border border-ink-700 bg-ink-950/30 p-3"
+      data-testid={testId}
+    >
       <div className="text-2xs uppercase tracking-wide text-ink-400">
         {label}
       </div>
       <div className="mt-1 text-lg font-semibold tabular-nums text-ink-50">
         {value}
       </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Correlation section (same-service grouping)
-// ---------------------------------------------------------------------------
-
-function CorrelationSection({ saving }: { saving: boolean }) {
-  const qc = useQueryClient();
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-
-  const corr = useQuery({
-    queryKey: ["alert-fatigue-correlation"],
-    queryFn: api.getAlertFatigueCorrelation,
-    retry: false,
-  });
-
-  const save = useMutation({
-    mutationFn: (body: {
-      correlation_enabled: boolean;
-      correlation_window_seconds: number;
-    }) => api.setAlertFatigueCorrelation(body),
-    onSuccess: (data) => {
-      qc.setQueryData(["alert-fatigue-correlation"], data);
-      setMsg(null);
-    },
-    onError: (err: unknown) => {
-      setMsg({
-        ok: false,
-        text:
-          err instanceof ApiError ? err.message : "Could not update correlation",
-      });
-    },
-  });
-
-  if (corr.isPending) {
-    return (
-      <SectionShell
-        title="Correlation (same-service grouping)"
-        testId="alert-fatigue-correlation"
-      >
-        <div className="flex items-center gap-2 text-xs text-ink-400">
-          <Loader2 size={14} className="animate-spin" />
-          Reading correlation settings…
-        </div>
-      </SectionShell>
-    );
-  }
-  if (corr.isError || !corr.data) {
-    return (
-      <SectionShell
-        title="Correlation (same-service grouping)"
-        testId="alert-fatigue-correlation"
-      >
-        <div className="flex items-center justify-between gap-3 text-xs">
-          <span className="text-sev-critical">
-            {corr.error instanceof Error
-              ? corr.error.message
-              : "Couldn't read correlation settings."}
-          </span>
-          <button className="btn" onClick={() => corr.refetch()}>
-            Retry
-          </button>
-        </div>
-      </SectionShell>
-    );
-  }
-
-  const c = corr.data;
-  const busy = saving || save.isPending;
-
-  return (
-    <SectionShell
-      title="Correlation (same-service grouping)"
-      testId="alert-fatigue-correlation"
-    >
-      <div className="flex flex-wrap items-start gap-3">
-        <SwitchToggle
-          checked={c.correlation_enabled}
-          disabled={busy}
-          label="Enable same-service correlation"
-          testId="alert-fatigue-correlation-toggle"
-          onToggle={() =>
-            save.mutate({
-              correlation_enabled: !c.correlation_enabled,
-              correlation_window_seconds: c.correlation_window_seconds,
-            })
-          }
-        />
-        <div className="min-w-0 max-w-2xl">
-          <div className="text-xs font-semibold text-ink-100">
-            Fold a storm of same-service alerts into one parent
-          </div>
-          <div className="text-2xs text-ink-400">
-            Off by default. The first alert for a service still pages; later
-            same-service alerts inside the window fold in as members and do not
-            page. Critical/high-priority alerts are never grouped.
-          </div>
-        </div>
-      </div>
-
-      {c.correlation_enabled && (
-        <div className="mt-4 grid gap-4 border-t border-ink-700 pt-4">
-          <SecondsSetting
-            label="Correlation window"
-            help="How long after the first same-service alert later alerts fold into the parent group."
-            stored={c.correlation_window_seconds}
-            effective={c.effective_window_seconds}
-            saving={busy}
-            inputTestId="alert-fatigue-correlation-window"
-            applyTestId="alert-fatigue-correlation-window-apply"
-            onApply={(seconds) =>
-              save.mutate({
-                correlation_enabled: true,
-                correlation_window_seconds: seconds,
-              })
-            }
-          />
-          <CorrelationGroupsList />
-        </div>
-      )}
-
-      {msg && (
-        <div
-          className={`mt-3 text-2xs ${
-            msg.ok ? "text-sev-ok" : "text-sev-critical"
-          }`}
-          role="status"
-        >
-          {msg.text}
-        </div>
-      )}
-    </SectionShell>
-  );
-}
-
-function CorrelationGroupsList() {
-  const q = useInfiniteQuery({
-    queryKey: ["alert-fatigue-correlation-groups"],
-    queryFn: ({ pageParam }) =>
-      api.listAlertFatigueCorrelationGroups({
-        page: pageParam,
-        pageSize: PAGE_SIZE,
-      }),
-    initialPageParam: 1,
-    getNextPageParam: (last) =>
-      last.page * last.page_size < last.total ? last.page + 1 : undefined,
-  });
-
-  const groups = useMemo<AlertFatigueCorrelationGroup[]>(
-    () => q.data?.pages.flatMap((p) => p.groups) ?? [],
-    [q.data],
-  );
-  const total = q.data?.pages[0]?.total;
-
-  return (
-    <div
-      className="overflow-hidden rounded-md border border-ink-700"
-      data-testid="alert-fatigue-correlation-groups"
-    >
-      <div className="border-b border-ink-700 px-3 py-2 text-2xs font-semibold uppercase tracking-wide text-ink-400">
-        Correlation groups
-        {total !== undefined && (
-          <span className="ml-2 font-normal normal-case text-ink-500">
-            {total.toLocaleString()} total
-          </span>
-        )}
-      </div>
-      {q.isError ? (
-        <div className="flex items-center justify-between gap-3 p-3 text-xs">
-          <span className="text-sev-critical">
-            {q.error instanceof Error
-              ? q.error.message
-              : "Couldn't load groups."}
-          </span>
-          <button className="btn" onClick={() => q.refetch()}>
-            Retry
-          </button>
-        </div>
-      ) : q.isPending ? (
-        <table className="ddt">
-          <tbody>
-            <SkRows rows={3} cols={1} />
-          </tbody>
-        </table>
-      ) : groups.length === 0 ? (
-        <EmptyState
-          title="No correlation groups yet"
-          hint="Same-service storms appear here as the interceptor folds them into a parent."
-        />
-      ) : (
-        <>
-          <table className="ddt">
-            <thead>
-              <tr>
-                <th className="w-8" />
-                <th>Service</th>
-                <th className="w-24">Severity</th>
-                <th className="w-20 text-right">Members</th>
-                <th className="w-40">Window</th>
-              </tr>
-            </thead>
-            <tbody>
-              {groups.map((g) => (
-                <CorrelationGroupRow key={g.id} group={g} />
-              ))}
-            </tbody>
-          </table>
-          {q.hasNextPage && (
-            <div className="border-t border-ink-700 px-3 py-2 text-center">
-              <button
-                type="button"
-                className="btn"
-                data-testid="alert-fatigue-correlation-groups-more"
-                disabled={q.isFetchingNextPage}
-                onClick={() => q.fetchNextPage()}
-              >
-                {q.isFetchingNextPage ? "Loading…" : "Load more"}
-              </button>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-function CorrelationGroupRow({
-  group,
-}: {
-  group: AlertFatigueCorrelationGroup;
-}) {
-  const [open, setOpen] = useState(false);
-  const members = useQuery({
-    queryKey: ["alert-fatigue-correlation-members", group.id],
-    queryFn: () => api.listAlertFatigueCorrelationMembers(group.id),
-    enabled: open,
-    retry: false,
-  });
-
-  return (
-    <>
-      <tr>
-        <td>
-          <button
-            type="button"
-            className="text-ink-400 hover:text-link"
-            aria-expanded={open}
-            aria-label={open ? "Collapse members" : "Expand members"}
-            data-testid={`alert-fatigue-group-expand-${group.id}`}
-            onClick={() => setOpen((v) => !v)}
-          >
-            {open ? (
-              <ChevronDown size={14} aria-hidden />
-            ) : (
-              <ChevronRight size={14} aria-hidden />
-            )}
-          </button>
-        </td>
-        <td className="font-medium text-ink-100">
-          {displayService(group.service)}
-        </td>
-        <td>
-          <SeverityBadge severity={group.parent_severity} />
-        </td>
-        <td className="text-right tabular-nums text-ink-200">
-          {group.member_count}
-        </td>
-        <td className="text-2xs text-ink-300" title={fmtAbs(group.window_start)}>
-          {fmtRel(group.window_start)} → {fmtRel(group.window_end)}
-        </td>
-      </tr>
-      {open && (
-        <tr>
-          <td colSpan={5} className="bg-ink-950/30">
-            {members.isPending ? (
-              <div className="flex items-center gap-2 px-3 py-2 text-2xs text-ink-400">
-                <Loader2 size={12} className="animate-spin" />
-                Loading members…
-              </div>
-            ) : members.isError ? (
-              <div className="px-3 py-2 text-2xs text-sev-critical">
-                {members.error instanceof Error
-                  ? members.error.message
-                  : "Couldn't load members."}
-              </div>
-            ) : members.data.members.length === 0 ? (
-              <div className="px-3 py-2 text-2xs text-ink-400">
-                No folded members.
-              </div>
-            ) : (
-              <ul
-                className="grid gap-1 px-3 py-2"
-                data-testid={`alert-fatigue-group-members-${group.id}`}
-              >
-                {members.data.members.map((m) => (
-                  <li
-                    key={m.id}
-                    className="flex items-center gap-2 text-2xs text-ink-300"
-                  >
-                    <SeverityBadge severity={m.child_severity} />
-                    <span className="break-all font-mono text-ink-400">
-                      {m.child_fingerprint}
-                    </span>
-                    <span
-                      className="ml-auto shrink-0 text-ink-500"
-                      title={fmtAbs(m.created_at)}
-                    >
-                      {fmtRel(m.created_at)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </td>
-        </tr>
-      )}
-    </>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Dependency-suppression section
-// ---------------------------------------------------------------------------
-
-function DependencySection({ saving }: { saving: boolean }) {
-  const qc = useQueryClient();
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-
-  const dep = useQuery({
-    queryKey: ["alert-fatigue-dependency"],
-    queryFn: api.getAlertFatigueDependency,
-    retry: false,
-  });
-
-  const save = useMutation({
-    mutationFn: (body: {
-      dependency_suppress_enabled: boolean;
-      dependency_lookback_seconds: number;
-    }) => api.setAlertFatigueDependency(body),
-    onSuccess: (data) => {
-      qc.setQueryData(["alert-fatigue-dependency"], data);
-      setMsg(null);
-    },
-    onError: (err: unknown) => {
-      setMsg({
-        ok: false,
-        text:
-          err instanceof ApiError ? err.message : "Could not update dependency",
-      });
-    },
-  });
-
-  if (dep.isPending) {
-    return (
-      <SectionShell
-        title="Dependency-aware suppression"
-        testId="alert-fatigue-dependency"
-      >
-        <div className="flex items-center gap-2 text-xs text-ink-400">
-          <Loader2 size={14} className="animate-spin" />
-          Reading dependency settings…
-        </div>
-      </SectionShell>
-    );
-  }
-  if (dep.isError || !dep.data) {
-    return (
-      <SectionShell
-        title="Dependency-aware suppression"
-        testId="alert-fatigue-dependency"
-      >
-        <div className="flex items-center justify-between gap-3 text-xs">
-          <span className="text-sev-critical">
-            {dep.error instanceof Error
-              ? dep.error.message
-              : "Couldn't read dependency settings."}
-          </span>
-          <button className="btn" onClick={() => dep.refetch()}>
-            Retry
-          </button>
-        </div>
-      </SectionShell>
-    );
-  }
-
-  const d = dep.data;
-  const busy = saving || save.isPending;
-
-  return (
-    <SectionShell
-      title="Dependency-aware suppression"
-      testId="alert-fatigue-dependency"
-    >
-      <div className="flex flex-wrap items-start gap-3">
-        <SwitchToggle
-          checked={d.dependency_suppress_enabled}
-          disabled={busy}
-          label="Enable dependency-aware suppression"
-          testId="alert-fatigue-dependency-toggle"
-          onToggle={() =>
-            save.mutate({
-              dependency_suppress_enabled: !d.dependency_suppress_enabled,
-              dependency_lookback_seconds: d.dependency_lookback_seconds,
-            })
-          }
-        />
-        <div className="min-w-0 max-w-2xl">
-          <div className="text-xs font-semibold text-ink-100">
-            Hold downstream symptoms while an upstream cause is firing
-          </div>
-          <div className="text-2xs text-ink-400">
-            Off by default. When a declared downstream service pages while its
-            upstream has an open incident in the lookback window, the symptom is
-            held (diverted) and released automatically when the cause clears. A
-            cause and any escalation always page.
-          </div>
-        </div>
-      </div>
-
-      {d.dependency_suppress_enabled && (
-        <div className="mt-4 grid gap-4 border-t border-ink-700 pt-4">
-          <SecondsSetting
-            label="Open-incident lookback"
-            help="How far back an open upstream incident counts as an active cause for holding downstream symptoms."
-            stored={d.dependency_lookback_seconds}
-            effective={d.effective_lookback_seconds}
-            saving={busy}
-            inputTestId="alert-fatigue-dependency-lookback"
-            applyTestId="alert-fatigue-dependency-lookback-apply"
-            onApply={(seconds) =>
-              save.mutate({
-                dependency_suppress_enabled: true,
-                dependency_lookback_seconds: seconds,
-              })
-            }
-          />
-          <DependencyEdgeEditor />
-          <HoldsList />
-        </div>
-      )}
-
-      {msg && (
-        <div
-          className={`mt-3 text-2xs ${
-            msg.ok ? "text-sev-ok" : "text-sev-critical"
-          }`}
-          role="status"
-        >
-          {msg.text}
-        </div>
-      )}
-    </SectionShell>
-  );
-}
-
-function DependencyEdgeEditor() {
-  const qc = useQueryClient();
-  const [downstream, setDownstream] = useState("");
-  const [upstream, setUpstream] = useState("");
-  const [msg, setMsg] = useState<string | null>(null);
-
-  const q = useInfiniteQuery({
-    queryKey: ["alert-fatigue-dependency-edges"],
-    queryFn: ({ pageParam }) =>
-      api.listAlertFatigueDependencyEdges({
-        page: pageParam,
-        pageSize: PAGE_SIZE,
-      }),
-    initialPageParam: 1,
-    getNextPageParam: (last) =>
-      last.page * last.page_size < last.total ? last.page + 1 : undefined,
-  });
-
-  const edges = useMemo<AlertFatigueDependencyEdge[]>(
-    () => q.data?.pages.flatMap((p) => p.edges) ?? [],
-    [q.data],
-  );
-  const total = q.data?.pages[0]?.total;
-  const invalidate = () =>
-    qc.invalidateQueries({ queryKey: ["alert-fatigue-dependency-edges"] });
-
-  const add = useMutation({
-    mutationFn: (body: { downstream: string; upstream: string }) =>
-      api.addAlertFatigueDependencyEdge(body),
-    onSuccess: () => {
-      setDownstream("");
-      setUpstream("");
-      setMsg(null);
-      invalidate();
-    },
-    onError: (err: unknown) =>
-      setMsg(err instanceof ApiError ? err.message : "Could not add edge"),
-  });
-  const remove = useMutation({
-    mutationFn: (id: number) => api.removeAlertFatigueDependencyEdge(id),
-    onSuccess: invalidate,
-    onError: (err: unknown) =>
-      setMsg(err instanceof ApiError ? err.message : "Could not remove edge"),
-  });
-
-  const canAdd =
-    downstream.trim() !== "" &&
-    upstream.trim() !== "" &&
-    downstream.trim().toLowerCase() !== upstream.trim().toLowerCase() &&
-    !add.isPending;
-
-  const submit = () => {
-    if (!canAdd) return;
-    add.mutate({ downstream: downstream.trim(), upstream: upstream.trim() });
-  };
-
-  return (
-    <div
-      className="overflow-hidden rounded-md border border-ink-700"
-      data-testid="alert-fatigue-dependency-edges"
-    >
-      <div className="border-b border-ink-700 px-3 py-2 text-2xs font-semibold uppercase tracking-wide text-ink-400">
-        Dependency map
-        {total !== undefined && (
-          <span className="ml-2 font-normal normal-case text-ink-500">
-            {total.toLocaleString()} edge{total === 1 ? "" : "s"}
-          </span>
-        )}
-      </div>
-
-      <div className="flex flex-wrap items-end gap-2 border-b border-ink-700 px-3 py-3">
-        <div>
-          <label className="field-label" htmlFor="alert-fatigue-edge-downstream">
-            Downstream
-          </label>
-          <input
-            id="alert-fatigue-edge-downstream"
-            data-testid="alert-fatigue-edge-downstream"
-            className="input h-8 w-40 text-sm"
-            placeholder="e.g. checkout"
-            value={downstream}
-            disabled={add.isPending}
-            onChange={(e) => setDownstream(e.target.value)}
-          />
-        </div>
-        <span className="pb-1.5 text-2xs text-ink-400">depends on</span>
-        <div>
-          <label className="field-label" htmlFor="alert-fatigue-edge-upstream">
-            Upstream
-          </label>
-          <input
-            id="alert-fatigue-edge-upstream"
-            data-testid="alert-fatigue-edge-upstream"
-            className="input h-8 w-40 text-sm"
-            placeholder="e.g. postgres"
-            value={upstream}
-            disabled={add.isPending}
-            onChange={(e) => setUpstream(e.target.value)}
-          />
-        </div>
-        <button
-          type="button"
-          className="btn inline-flex items-center gap-1"
-          data-testid="alert-fatigue-edge-add"
-          disabled={!canAdd}
-          onClick={submit}
-        >
-          <Plus size={12} aria-hidden />
-          Add edge
-        </button>
-      </div>
-
-      {msg && (
-        <div className="px-3 py-2 text-2xs text-sev-critical" role="alert">
-          {msg}
-        </div>
-      )}
-
-      {q.isError ? (
-        <div className="flex items-center justify-between gap-3 p-3 text-xs">
-          <span className="text-sev-critical">
-            {q.error instanceof Error ? q.error.message : "Couldn't load edges."}
-          </span>
-          <button className="btn" onClick={() => q.refetch()}>
-            Retry
-          </button>
-        </div>
-      ) : q.isPending ? (
-        <table className="ddt">
-          <tbody>
-            <SkRows rows={2} cols={1} />
-          </tbody>
-        </table>
-      ) : edges.length === 0 ? (
-        <EmptyState
-          title="No dependency edges yet"
-          hint="Declare which services depend on which so their symptom pages are held behind the real cause."
-        />
-      ) : (
-        <>
-          <table className="ddt">
-            <thead>
-              <tr>
-                <th>Downstream</th>
-                <th className="w-8" />
-                <th>Upstream</th>
-                <th className="w-32">Added</th>
-                <th className="w-16 text-right" />
-              </tr>
-            </thead>
-            <tbody>
-              {edges.map((e) => (
-                <tr key={e.id}>
-                  <td className="font-medium text-ink-100">
-                    {displayService(e.downstream)}
-                  </td>
-                  <td className="text-2xs text-ink-500">→</td>
-                  <td className="text-ink-200">{displayService(e.upstream)}</td>
-                  <td className="text-2xs text-ink-300" title={fmtAbs(e.created_at)}>
-                    {fmtRel(e.created_at)}
-                  </td>
-                  <td className="text-right">
-                    <button
-                      type="button"
-                      className="btn px-2 py-1 text-2xs"
-                      data-testid={`alert-fatigue-edge-remove-${e.id}`}
-                      aria-label={`Remove edge ${e.downstream} depends on ${e.upstream}`}
-                      disabled={remove.isPending}
-                      onClick={() => remove.mutate(e.id)}
-                    >
-                      <Trash2 size={12} aria-hidden />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {q.hasNextPage && (
-            <div className="border-t border-ink-700 px-3 py-2 text-center">
-              <button
-                type="button"
-                className="btn"
-                data-testid="alert-fatigue-edges-more"
-                disabled={q.isFetchingNextPage}
-                onClick={() => q.fetchNextPage()}
-              >
-                {q.isFetchingNextPage ? "Loading…" : "Load more"}
-              </button>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-function HoldsList() {
-  const qc = useQueryClient();
-  const [peekId, setPeekId] = useState<number | null>(null);
-
-  const q = useInfiniteQuery({
-    queryKey: ["alert-fatigue-dependency-holds"],
-    queryFn: ({ pageParam }) =>
-      api.listAlertFatigueDependencyHolds({
-        page: pageParam,
-        pageSize: PAGE_SIZE,
-      }),
-    initialPageParam: 1,
-    getNextPageParam: (last) =>
-      last.page * last.page_size < last.total ? last.page + 1 : undefined,
-  });
-
-  // reclaim marks a held symptom "should page" and releases it; on success the
-  // holds list is invalidated so the reclaimed row drops out on refetch.
-  const reclaim = useMutation({
-    mutationFn: (id: number) => api.reclaimAlertFatigueDependencyHold(id),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ["alert-fatigue-dependency-holds"] }),
-  });
-
-  const holds = useMemo<AlertFatigueDependencyHold[]>(
-    () => q.data?.pages.flatMap((p) => p.holds) ?? [],
-    [q.data],
-  );
-  const total = q.data?.pages[0]?.total;
-  const peek = peekId !== null ? holds.find((h) => h.id === peekId) : undefined;
-
-  return (
-    <div
-      className="overflow-hidden rounded-md border border-ink-700"
-      data-testid="alert-fatigue-holds"
-    >
-      <div className="border-b border-ink-700 px-3 py-2 text-2xs font-semibold uppercase tracking-wide text-ink-400">
-        Held symptoms
-        {total !== undefined && (
-          <span className="ml-2 font-normal normal-case text-ink-500">
-            {total.toLocaleString()} total
-          </span>
-        )}
-      </div>
-      {q.isError ? (
-        <div className="flex items-center justify-between gap-3 p-3 text-xs">
-          <span className="text-sev-critical">
-            {q.error instanceof Error ? q.error.message : "Couldn't load holds."}
-          </span>
-          <button className="btn" onClick={() => q.refetch()}>
-            Retry
-          </button>
-        </div>
-      ) : q.isPending ? (
-        <table className="ddt">
-          <tbody>
-            <SkRows rows={2} cols={1} />
-          </tbody>
-        </table>
-      ) : holds.length === 0 ? (
-        <EmptyState
-          title="No held symptoms yet"
-          hint="Downstream symptom pages held behind a firing upstream cause appear here, reviewable and reversible."
-        />
-      ) : (
-        <>
-          <table className="ddt">
-            <thead>
-              <tr>
-                <th>Downstream</th>
-                <th>Upstream</th>
-                <th className="w-24">Severity</th>
-                <th className="w-16 text-right">Holds</th>
-                <th className="w-32">Last seen</th>
-                <th className="w-28 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {holds.map((h) => (
-                <tr key={h.id}>
-                  <td className="font-medium text-ink-100">
-                    <button
-                      type="button"
-                      className="text-left hover:text-link hover:underline"
-                      onClick={() => setPeekId(h.id)}
-                      title="View held symptom detail"
-                    >
-                      {displayService(h.downstream)}
-                    </button>
-                  </td>
-                  <td className="text-ink-200">{displayService(h.upstream)}</td>
-                  <td>
-                    <SeverityBadge severity={h.severity} />
-                  </td>
-                  <td className="text-right tabular-nums text-ink-200">
-                    {h.hold_count}
-                  </td>
-                  <td className="text-2xs text-ink-300" title={fmtAbs(h.last_seen)}>
-                    {fmtRel(h.last_seen)}
-                  </td>
-                  <td className="text-right">
-                    <button
-                      type="button"
-                      className="btn px-2 py-1 text-2xs"
-                      data-testid={`alert-fatigue-hold-reclaim-${h.id}`}
-                      disabled={reclaim.isPending}
-                      onClick={() => reclaim.mutate(h.id)}
-                      title="Release this symptom to the on-call channel — it should page"
-                    >
-                      Reclaim
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {q.hasNextPage && (
-            <div className="border-t border-ink-700 px-3 py-2 text-center">
-              <button
-                type="button"
-                className="btn"
-                data-testid="alert-fatigue-holds-more"
-                disabled={q.isFetchingNextPage}
-                onClick={() => q.fetchNextPage()}
-              >
-                {q.isFetchingNextPage ? "Loading…" : "Load more"}
-              </button>
-            </div>
-          )}
-        </>
-      )}
-
-      <PeekPanel
-        open={Boolean(peek)}
-        onClose={() => setPeekId(null)}
-        title="Held symptom detail"
-      >
-        {peek && (
-          <dl className="grid gap-3">
-            <PeekField label="Downstream">
-              {displayService(peek.downstream)}
-            </PeekField>
-            <PeekField label="Upstream (cause)">
-              {displayService(peek.upstream)}
-            </PeekField>
-            <PeekField label="Upstream incident">
-              {peek.incident_id || "—"}
-            </PeekField>
-            <PeekField label="Severity">
-              <SeverityBadge severity={peek.severity} />
-            </PeekField>
-            <PeekField label="Source">{peek.source || "—"}</PeekField>
-            <PeekField label="Fingerprint">
-              <span className="break-all font-mono text-2xs">
-                {peek.fingerprint}
-              </span>
-            </PeekField>
-            <PeekField label="Hold count">{peek.hold_count}</PeekField>
-            <PeekField label="Routed channel">
-              {peek.routed_channel || "—"}
-            </PeekField>
-            <PeekField label="First seen">
-              <span title={fmtAbs(peek.first_seen)}>
-                {fmtRel(peek.first_seen)}
-              </span>
-            </PeekField>
-            <PeekField label="Last seen">
-              <span title={fmtAbs(peek.last_seen)}>
-                {fmtRel(peek.last_seen)}
-              </span>
-            </PeekField>
-            <PeekField label="Alert content (redacted)">
-              <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-md border border-ink-600 bg-ink-950/40 p-2 font-mono text-2xs text-ink-200">
-                {peek.alert_content
-                  ? JSON.stringify(peek.alert_content, null, 2)
-                  : "—"}
-              </pre>
-            </PeekField>
-          </dl>
-        )}
-      </PeekPanel>
+      {hint && <div className="mt-0.5 text-2xs text-ink-500">{hint}</div>}
     </div>
   );
 }

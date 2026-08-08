@@ -5,7 +5,6 @@ import {
   Eye,
   LineChart,
   Lock,
-  Search,
   Waypoints,
   type LucideIcon,
 } from "lucide-react";
@@ -25,6 +24,8 @@ import { AutoRefreshControl } from "@/components/AutoRefreshControl";
 import { useAutoRefresh } from "@/lib/useAutoRefresh";
 import { EmptyState } from "@/components/feedback";
 import { SegmentedControl } from "@/components/SegmentedControl";
+import { FilterBar } from "@/components/FilterBar";
+import { SearchInput } from "@/components/SearchInput";
 import { PeekPanel } from "@/components/PeekPanel";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
@@ -109,7 +110,6 @@ function unitLabel(unit: string): string {
 type Variant = {
   kind: "metric" | "trace";
   icon: LucideIcon;
-  subtitle: string;
   hasOperation: boolean;
   searchPlaceholder: string;
   lockedTitle: string;
@@ -122,10 +122,8 @@ type Variant = {
 const METRIC: Variant = {
   kind: "metric",
   icon: LineChart,
-  subtitle:
-    "The agent is learning what's normal for each service's numbers — request rate, errors, latency — so it can catch a value that suddenly looks wrong.",
   hasOperation: false,
-  searchPlaceholder: "Search service or signal…  ( / )",
+  searchPlaceholder: "Search service or signal…",
   lockedTitle: "Metrics learning is an Enterprise capability",
   lockedBody:
     "Metrics learning is an Enterprise capability — the agent learns what's normal for each service's request rate, errors and latency so it can catch problems automatically.",
@@ -135,10 +133,8 @@ const METRIC: Variant = {
 const TRACE: Variant = {
   kind: "trace",
   icon: Waypoints,
-  subtitle:
-    "The agent is learning the normal speed and error rate of each service operation, so it can catch requests that suddenly get slow or start failing.",
   hasOperation: true,
-  searchPlaceholder: "Search service, operation or signal…  ( / )",
+  searchPlaceholder: "Search service, operation or signal…",
   lockedTitle: "Traces learning is an Enterprise capability",
   lockedBody:
     "Traces learning is an Enterprise capability — the agent learns the normal speed and error rate of each operation so it can catch slow or failing requests automatically.",
@@ -356,52 +352,46 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
       />
 
       <main className="flex-1 overflow-auto p-4 lg:p-6">
-        <p className="mb-3 max-w-3xl text-xs text-ink-300">{variant.subtitle}</p>
-
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <SegmentedControl
-            param={STATUS_PARAM}
-            defaultValue="all"
-            aria-label="Status filter"
-            options={[
-              { value: "all", label: "All" },
-              { value: "ready", label: "Ready" },
-              { value: "learning", label: "Still learning" },
-            ]}
-          />
-
-          {excl.visible && (
-            <SegmentedControl
-              param={SCOPE_PARAM}
-              defaultValue="active"
-              aria-label="Learning scope"
-              options={[
-                { value: "active", label: "Active", badge: scopeCounts.active },
-                {
-                  value: "ignored",
-                  label: "Ignored",
-                  badge: scopeCounts.ignored,
-                },
-              ]}
-            />
-          )}
-
-          <div className="relative w-full max-w-md sm:w-auto sm:flex-1">
-            <Search
-              size={12}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
-            />
-            <input
-              data-page-search
-              className="input pl-7"
-              placeholder={variant.searchPlaceholder}
+        <FilterBar
+          tabs={
+            <>
+              <SegmentedControl
+                param={STATUS_PARAM}
+                defaultValue="all"
+                aria-label="Status filter"
+                options={[
+                  { value: "all", label: "All" },
+                  { value: "ready", label: "Ready" },
+                  { value: "learning", label: "Still learning" },
+                ]}
+              />
+              {excl.visible && (
+                <SegmentedControl
+                  param={SCOPE_PARAM}
+                  defaultValue="active"
+                  aria-label="Learning scope"
+                  options={[
+                    { value: "active", label: "Active", badge: scopeCounts.active },
+                    {
+                      value: "ignored",
+                      label: "Ignored",
+                      badge: scopeCounts.ignored,
+                    },
+                  ]}
+                />
+              )}
+            </>
+          }
+          search={
+            <SearchInput
               value={q}
-              onChange={(e) => setQ(e.target.value)}
+              onChange={setQ}
+              className="w-full max-w-md sm:w-auto sm:flex-1"
+              placeholder={variant.searchPlaceholder}
             />
-          </div>
-
-          <AutoRefreshControl state={refresh} />
-        </div>
+          }
+          actions={<AutoRefreshControl state={refresh} />}
+        />
 
         {isError && !locked ? (
           <RetryableError
@@ -421,7 +411,7 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                 busy={excl.busy}
               />
             )}
-            <div className="max-h-[calc(100vh-260px)] overflow-auto">
+            <div className="max-h-[calc(100vh-210px)] overflow-auto">
               <table className="ddt">
                 <thead>
                   <tr>
