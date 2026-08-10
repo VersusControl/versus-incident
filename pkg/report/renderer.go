@@ -64,7 +64,11 @@ var (
 	colText      = color.RGBA{0xe2, 0xe8, 0xf0, 0xff} // slate-200
 	colTextMuted = color.RGBA{0x94, 0xa3, 0xb8, 0xff} // slate-400
 	colTextFaint = color.RGBA{0x64, 0x74, 0x8b, 0xff} // slate-500
-	colAccent    = color.RGBA{0x38, 0xbd, 0xf8, 0xff} // sky-400 (ai-detect series)
+
+	// Trend-series colors — two distinct, vibrant hues so the stacked
+	// AI-detect / Webhook bars are easy to tell apart on the slate-800 panel.
+	colSeriesAI      = color.RGBA{0x81, 0x8c, 0xf8, 0xff} // violet-400 (AI-detect series)
+	colSeriesWebhook = color.RGBA{0x34, 0xd3, 0x99, 0xff} // emerald-400 (Webhook series)
 )
 
 // severityColor maps a severity label (any case) to its accent color. The
@@ -178,7 +182,11 @@ func (r *Renderer) Render(ctx context.Context, m core.ReportModel) (*core.Report
 
 	// ---- Header ------------------------------------------------------
 	y := padding + 30
-	drawString(img, fc.title, colText, padding, y, "Incident report")
+	title := strings.TrimSpace(m.Title)
+	if title == "" {
+		title = "Incident report"
+	}
+	drawString(img, fc.title, colText, padding, y, title)
 	y += 30
 	sub := fmt.Sprintf("%s → %s %s", fmtTime(m.WindowStart), fmtTime(m.WindowEnd), tzLabelOf(m))
 	drawString(img, fc.body, colTextMuted, padding, y, sub)
@@ -194,15 +202,18 @@ func (r *Renderer) Render(ctx context.Context, m core.ReportModel) (*core.Report
 	tileW := (usable - 3*gap) / 4
 	ai := m.ByOrigin[reportOriginAIDetect]
 	wh := m.ByOrigin[reportOriginWebhook]
-	tiles := []struct{ label, value string }{
-		{"TOTAL", strconv.Itoa(m.Total)},
-		{"AI-DETECT / WEBHOOK", fmt.Sprintf("%d / %d", ai, wh)},
-		{"OPEN / RESOLVED", fmt.Sprintf("%d / %d", m.Open, m.Resolved)},
-		{"CRITICAL / HIGH", strconv.Itoa(m.CriticalHigh)},
+	tiles := []struct {
+		label, value string
+		valueCol     color.RGBA
+	}{
+		{"TOTAL", strconv.Itoa(m.Total), colText},
+		{"AI-DETECT / WEBHOOK", fmt.Sprintf("%d / %d", ai, wh), colText},
+		{"OPEN / RESOLVED", fmt.Sprintf("%d / %d", m.Open, m.Resolved), colText},
+		{"CRITICAL / HIGH", strconv.Itoa(m.CriticalHigh), accent},
 	}
 	for i, t := range tiles {
 		tx := padding + i*(tileW+gap)
-		drawStatTile(img, fc, tx, tileTop, tileW, tileH, t.label, t.value)
+		drawStatTile(img, fc, tx, tileTop, tileW, tileH, t.label, t.value, t.valueCol)
 	}
 	y = tileTop + tileH + 28
 
@@ -262,10 +273,11 @@ func (r *Renderer) Render(ctx context.Context, m core.ReportModel) (*core.Report
 }
 
 // drawStatTile draws one headline stat: a panel with a big value and a small
-// muted label beneath it.
-func drawStatTile(img *image.RGBA, fc *faces, x, y, w, h int, label, value string) {
+// muted label beneath it. valueCol colors the headline number so a key tile
+// (e.g. CRITICAL / HIGH) can pop in its severity accent.
+func drawStatTile(img *image.RGBA, fc *faces, x, y, w, h int, label, value string, valueCol color.RGBA) {
 	fillRect(img, x, y, x+w, y+h, colPanel)
-	drawString(img, fc.stat, colText, x+16, y+50, truncateToWidth(fc.stat, value, w-32))
+	drawString(img, fc.stat, valueCol, x+16, y+50, truncateToWidth(fc.stat, value, w-32))
 	drawString(img, fc.small, colTextMuted, x+16, y+h-16, truncateToWidth(fc.small, label, w-32))
 }
 
@@ -279,6 +291,7 @@ func drawTrendPanel(img *image.RGBA, fc *faces, x, y, w, h int, m core.ReportMod
 		unit = "per day"
 	}
 	drawString(img, fc.h2, colTextMuted, x, y+4, "TREND ("+unit+")")
+	drawTrendLegend(img, fc, x, y+4, x+w)
 	fillRect(img, x, y+16, x+w, y+h, colPanel)
 
 	plotTop := y + 30
@@ -325,21 +338,47 @@ func drawTrendPanel(img *image.RGBA, fc *faces, x, y, w, h int, m core.ReportMod
 		if total > 0 && bh < 2 {
 			bh = 2
 		}
-		// Stacked: webhook (neutral) at the base, ai-detect (accent) on top.
+		// Stacked: webhook (emerald) at the base, ai-detect (violet) on top.
 		whH := 0
 		if total > 0 {
 			whH = b.Webhook * bh / total
 		}
 		aiH := bh - whH
 		if whH > 0 {
-			fillRect(img, bx, plotBottom-whH, bx+barW, plotBottom, colTextFaint)
+			fillRect(img, bx, plotBottom-whH, bx+barW, plotBottom, colSeriesWebhook)
 		}
 		if aiH > 0 {
-			fillRect(img, bx, plotBottom-whH-aiH, bx+barW, plotBottom-whH, colAccent)
+			fillRect(img, bx, plotBottom-whH-aiH, bx+barW, plotBottom-whH, colSeriesAI)
 		}
 		if i%labelEvery == 0 {
 			drawString(img, fc.tiny, colTextFaint, bx, plotBottom+16, b.Label)
 		}
+	}
+}
+
+// drawTrendLegend draws a compact two-entry legend (AI-detect / Webhook)
+// right-aligned to the panel's right edge on the header row, each a small
+// filled square in the series color followed by the label in that same color.
+// Kept in fc.tiny and inside [x, right] so it never overlaps the title or bars.
+func drawTrendLegend(img *image.RGBA, fc *faces, _, baseline, right int) {
+	entries := []struct {
+		label string
+		col   color.RGBA
+	}{
+		{"AI-detect", colSeriesAI},
+		{"Webhook", colSeriesWebhook},
+	}
+	lx := right
+	// Lay out right-to-left so the pair hugs the panel's right edge.
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		lw := textWidth(fc.tiny, e.label)
+		lx -= lw
+		drawString(img, fc.tiny, e.col, lx, baseline, e.label)
+		lx -= 6 // gap between swatch and label
+		lx -= 8 // swatch width
+		fillRect(img, lx, baseline-8, lx+8, baseline, e.col)
+		lx -= 14 // gap before the previous entry
 	}
 }
 
@@ -376,7 +415,7 @@ func drawSeverityPanel(img *image.RGBA, fc *faces, x, y, w, h int, m core.Report
 	}
 	for i, b := range rows {
 		ry := rowTop + i*rowGap
-		drawString(img, fc.small, colTextMuted, x+14, ry+4, b.Label)
+		drawString(img, fc.small, severityColor(b.Label), x+14, ry+4, b.Label)
 		bw := b.Count * barMax / maxCount
 		if b.Count > 0 && bw < 2 {
 			bw = 2

@@ -36,6 +36,7 @@ afterEach(() => {
 function settings(over: Partial<ReportSettings> = {}): ReportSettings {
   return {
     enable: true,
+    title: "Incident report",
     default_channel: "",
     include_chart: true,
     rate_per_minute: 0,
@@ -149,5 +150,42 @@ describe("ReportSettingsControl — scheduled delivery", () => {
     expect(
       await screen.findByText(/inactive until the incidents report is enabled/),
     ).toBeTruthy();
+  });
+});
+
+describe("ReportSettingsControl — report title", () => {
+  beforeEach(() => {
+    vi.mocked(api.capabilities).mockResolvedValue(caps);
+    vi.mocked(api.updateReportSettings).mockImplementation((s) =>
+      Promise.resolve(s),
+    );
+  });
+
+  it("renders the title input with the loaded value", async () => {
+    vi.mocked(api.getReportSettings).mockResolvedValue(
+      settings({ title: "Weekly ops report" }),
+    );
+    renderControl();
+
+    const title = (await screen.findByTestId(
+      "report-title",
+    )) as HTMLInputElement;
+    expect(title.value).toBe("Weekly ops report");
+  });
+
+  it("saves an edited title, trimmed", async () => {
+    vi.mocked(api.getReportSettings).mockResolvedValue(settings());
+    renderControl();
+
+    const title = (await screen.findByTestId(
+      "report-title",
+    )) as HTMLInputElement;
+    fireEvent.change(title, { target: { value: "  Prod incidents  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(api.updateReportSettings).toHaveBeenCalled());
+    expect(vi.mocked(api.updateReportSettings).mock.calls[0][0]).toMatchObject({
+      title: "Prod incidents",
+    });
   });
 });

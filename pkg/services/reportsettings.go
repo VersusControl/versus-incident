@@ -45,6 +45,14 @@ const (
 	defaultTimezone = "UTC"
 )
 
+// defaultReportTitle is the header/caption title applied when the store holds
+// no value. maxReportTitleRunes bounds an operator-supplied title so a runaway
+// value can't break the rendered header.
+const (
+	defaultReportTitle  = "Incident report"
+	maxReportTitleRunes = 80
+)
+
 // sendTimeRe matches a 24-hour "HH:MM" wall-clock time (00:00–23:59). It is
 // the single source of truth for the scheduler send-time format, shared by the
 // admin PUT validator (ValidSendTime) and the due-check parser (parseSendTime).
@@ -59,6 +67,10 @@ type ReportSettings struct {
 	IncludeChart   bool   `json:"include_chart"`
 	RatePerMinute  int    `json:"rate_per_minute"`
 	DefaultWindow  string `json:"default_window"`
+	// Title is the operator-configurable heading drawn in the report image
+	// header and used in the channel caption. Default "Incident report";
+	// trimmed, defaulted when blank, and length-bounded server-side.
+	Title string `json:"title"`
 	// ScheduleEnabled turns on the recurring daily digest: when Enable AND
 	// ScheduleEnabled are both true, the report is sent once per local day at
 	// SendTime in Timezone, over DefaultWindow to DefaultChannel. Default
@@ -87,6 +99,7 @@ func DefaultReportSettings() ReportSettings {
 		IncludeChart:    true,
 		RatePerMinute:   6,
 		DefaultWindow:   reportWindowToday,
+		Title:           defaultReportTitle,
 		ScheduleEnabled: false,
 		SendTime:        defaultSendTime,
 		Timezone:        defaultTimezone,
@@ -116,6 +129,13 @@ func (s ReportSettings) sanitize() ReportSettings {
 	s.DefaultWindow = normalizeReportWindow(s.DefaultWindow)
 	if s.RatePerMinute < 0 {
 		s.RatePerMinute = 0
+	}
+	s.Title = strings.TrimSpace(s.Title)
+	if s.Title == "" {
+		s.Title = defaultReportTitle
+	}
+	if r := []rune(s.Title); len(r) > maxReportTitleRunes {
+		s.Title = string(r[:maxReportTitleRunes])
 	}
 	s.SendTime = strings.TrimSpace(s.SendTime)
 	if s.SendTime == "" {

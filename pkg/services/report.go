@@ -156,17 +156,19 @@ func reportAllow(key string, perMinute int) bool {
 var severityBands = []string{"critical", "high", "medium", "low", "unknown"}
 
 // severityBand maps a free-form severity/verdict label to one of the fixed
-// bands. The unknown band catches webhook incidents with no severity so a
-// row is never dropped.
+// bands. The synonym set mirrors the UI's normalizeSeverity (severity.ts) so a
+// severity the UI shows colored never lands in the gray unknown band here. The
+// unknown band still catches webhook incidents with no severity so a row is
+// never dropped.
 func severityBand(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "critical", "fatal", "emergency":
+	case "critical", "fatal", "emergency", "crit", "p1", "sev1":
 		return "critical"
-	case "high", "error", "err":
+	case "high", "error", "err", "major", "p2", "sev2":
 		return "high"
-	case "medium", "warning", "warn":
+	case "medium", "warning", "warn", "med", "p3", "sev3":
 		return "medium"
-	case "low", "info", "notice":
+	case "low", "info", "notice", "informational", "minor", "p4", "p5":
 		return "low"
 	default:
 		return "unknown"
@@ -405,13 +407,19 @@ func buildTrend(recs []*storage.IncidentRecord, start, end time.Time, unit strin
 }
 
 // reportSeverity extracts a best-effort severity for one record from its
-// content (Severity, then Verdict). Raw — the caller bands it.
+// content. It reads the SAME key set as the UI's severityFromContent
+// (severity.ts): the top-level Severity/severity/level/priority keys, then the
+// nested Alertmanager/Prometheus shape (content.labels.severity /
+// content.commonLabels.severity), before falling back to Verdict. Raw — the
+// caller bands it.
 func reportSeverity(rec *storage.IncidentRecord) string {
-	s := contentString(rec.Content, "Severity", "severity")
-	if s == "" {
-		s = contentString(rec.Content, "Verdict", "verdict")
+	if s := contentString(rec.Content, "Severity", "severity", "level", "priority"); s != "" {
+		return s
 	}
-	return s
+	if s := nestedContentString(rec.Content, "severity", "labels", "commonLabels"); s != "" {
+		return s
+	}
+	return contentString(rec.Content, "Verdict", "verdict")
 }
 
 // ServiceLabel resolves a record's display service: the durable Service
@@ -492,7 +500,9 @@ func buildWindowModel(st storage.Provider, scrubber core.Scrubber, settings Repo
 	if err != nil {
 		return core.ReportModel{}, err
 	}
-	return BuildAggregateReportModel(recs, window, start, end, unit, scrubber, settings.IncludeChart, loc), nil
+	model := BuildAggregateReportModel(recs, window, start, end, unit, scrubber, settings.IncludeChart, loc)
+	model.Title = settings.Title
+	return model, nil
 }
 
 func renderReport(ctx context.Context, cfg *config.Config, st storage.Provider, renderer core.ReportRenderer, scrubber core.Scrubber, window string) (*core.ReportImage, error) {
@@ -543,7 +553,14 @@ func sendReport(ctx context.Context, cfg *config.Config, st storage.Provider, re
 	// senders (Teams/Viber/Lark) cannot leak unredacted fields; the
 	// already-redacted caption is the only text that travels.
 	carrier := &m.Incident{ID: "report-" + window}
-	att := core.Attachment{Filename: img.Filename, MIME: img.MIME, Data: img.Data, Caption: caption}
+	// When charts are included the report is a visual dashboard: image-capable
+	// channels get the image with NO caption. With charts off, keep the image +
+	// redacted caption. The caption stays redacted either way (DLP unchanged).
+	attCaption := caption
+	if model.IncludeCharts {
+		attCaption = ""
+	}
+	att := core.Attachment{Filename: img.Filename, MIME: img.MIME, Data: img.Data, Caption: attCaption}
 
 	out := &ReportOutcome{Window: window, Failed: map[string]string{}, Bytes: len(img.Data)}
 	for _, p := range targets {
@@ -556,6 +573,9 @@ func sendReport(ctx context.Context, cfg *config.Config, st storage.Provider, re
 			continue
 		}
 		if ts, ok := p.(core.TextSender); ok {
+			// Text-only channels (Teams/Viber/Lark) cannot render an image, so
+			// they still get the redacted fallback text even when charts are on
+			// — otherwise they'd receive nothing.
 			if err := ts.SendText(carrier, fallbackText); err != nil {
 				out.Failed[p.Name()] = err.Error()
 			} else {
@@ -623,7 +643,12 @@ func resolveReportChannels(explicit, defaultChannel string) []string {
 // redacted aggregate ReportModel — never from raw content.
 func reportCaption(model core.ReportModel) string {
 	var b strings.Builder
-	b.WriteString("Incident report — ")
+	title := strings.TrimSpace(model.Title)
+	if title == "" {
+		title = defaultReportTitle
+	}
+	b.WriteString(title)
+	b.WriteString(" — ")
 	b.WriteString(windowLabel(model.Window))
 	b.WriteString(": ")
 	b.WriteString(fmt.Sprintf("%d incident", model.Total))
@@ -725,6 +750,37 @@ func contentString(content map[string]interface{}, keys ...string) string {
 	for _, k := range keys {
 		if v, ok := lower[strings.ToLower(k)]; ok {
 			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// nestedContentString digs one level into a nested map under any of the given
+// parent keys (case-insensitive) and returns the first non-empty string at
+// key. It matches the UI's severityFromContent handling of the
+// Alertmanager/Prometheus shape, where severity lives at
+// content.labels.severity / content.commonLabels.severity.
+func nestedContentString(content map[string]interface{}, key string, parents ...string) string {
+	if content == nil {
+		return ""
+	}
+	for _, p := range parents {
+		v, ok := content[p]
+		if !ok {
+			for ck, cv := range content {
+				if strings.EqualFold(ck, p) {
+					v, ok = cv, true
+					break
+				}
+			}
+		}
+		if !ok {
+			continue
+		}
+		if nested, ok := v.(map[string]interface{}); ok {
+			if s := contentString(nested, key); s != "" {
 				return s
 			}
 		}

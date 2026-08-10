@@ -125,7 +125,7 @@ export function Dropdown({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={ariaLabel}
-        className="input flex w-full items-center justify-between gap-2 text-left disabled:cursor-not-allowed disabled:opacity-60"
+        className="input flex w-full items-center justify-between gap-2 pr-2.5 text-left disabled:cursor-not-allowed disabled:opacity-60"
         onClick={() => !disabled && setOpen((o) => !o)}
         onKeyDown={onButtonKeyDown}
       >

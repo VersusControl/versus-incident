@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { BarChart3 } from "lucide-react";
+import { BarChart3, Info } from "lucide-react";
 import clsx from "clsx";
 import { api, type Capabilities } from "@/lib/api";
 import {
   canReport,
+  configuredDisabledHint,
   defaultReportChannel,
   defaultReportWindow,
   hasReportChannel,
@@ -58,6 +59,7 @@ function ReportsDialog({
   const toast = useToast();
   const channels = reportChannels(cap);
   const hasChannel = hasReportChannel(cap);
+  const disabledHint = configuredDisabledHint(cap);
   const [channel, setChannel] = useState(() => defaultReportChannel(cap));
   const [window, setWindow] = useState<ReportWindow>(() =>
     defaultReportWindow(cap),
@@ -198,6 +200,16 @@ function ReportsDialog({
             No notification channel is enabled. Configure a channel (Slack,
             Telegram, Email, …) to send this report. The preview above is still
             downloadable.
+          </p>
+        )}
+
+        {disabledHint && (
+          <p
+            data-testid="report-configured-disabled-hint"
+            className="flex items-start gap-1.5 text-2xs text-ink-400"
+          >
+            <Info size={12} className="mt-0.5 shrink-0" aria-hidden />
+            {disabledHint}
           </p>
         )}
       </div>

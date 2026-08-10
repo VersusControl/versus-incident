@@ -200,4 +200,14 @@ describe("AgentChannelsSettingsControl: gating + write-only secrets", () => {
     expect(cmp.includes("buildChannelPut")).toBe(true);
     expect(cmp.includes("localStorage")).toBe(false);
   });
+
+  it("save and clear invalidate BOTH agent-channel-settings AND capabilities (so the report channel picker refreshes)", () => {
+    // A single invalidate helper backs both mutations; enabling/disabling a
+    // channel must refresh capabilities.report.channels which drives the
+    // incident-report channel picker — otherwise it keeps serving "(none)".
+    expect(/queryKey:\s*\["agent-channel-settings"\]/.test(cmp)).toBe(true);
+    expect(/queryKey:\s*\["capabilities"\]/.test(cmp)).toBe(true);
+    // Both the save and clear onSuccess run the same invalidate().
+    expect((cmp.match(/invalidate\(\);/g) || []).length).toBeGreaterThanOrEqual(2);
+  });
 });

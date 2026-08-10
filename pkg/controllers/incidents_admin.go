@@ -138,10 +138,46 @@ func (i *IncidentAdminController) capabilities(c *fiber.Ctx) error {
 			"default_channel": settings.DefaultChannel,
 			"default_window":  settings.DefaultWindow,
 			"include_chart":   settings.IncludeChart,
-			"channels":        enabledAlertChannels(cfg),
-			"public_host_set": strings.TrimSpace(cfg.PublicHost) != "",
+			"channels":        i.reportChannels(c),
+			// configured_disabled lists channels that are set up (a runtime
+			// override exists) but currently turned OFF, so absent from
+			// channels — lets the report UI hint "configured but disabled"
+			// instead of silently dropping them. Always a non-null [].
+			"configured_disabled": i.reportConfiguredDisabledChannels(c),
+			"public_host_set":     strings.TrimSpace(cfg.PublicHost) != "",
 		},
 	})
+}
+
+// reportChannels returns the notification channels to offer in the report
+// channel picker. When a ReportChannelLister is registered (enterprise) it lists
+// the effective (hot-configured) enabled channels for the REQUEST org from the
+// masked runtime-channel view — the SAME source the alert-fatigue picker uses —
+// so the two pickers stay consistent. OSS registers none, so it falls back to
+// the static enabled channels from the global config (single-tenant behaviour
+// byte-for-byte unchanged).
+func (i *IncidentAdminController) reportChannels(c *fiber.Ctx) []string {
+	if l := reportChannelLister(); l != nil {
+		if channels := l.EnabledAlertChannels(c.UserContext(), middleware.OrgFromContext(c)); channels != nil {
+			return channels
+		}
+	}
+	return enabledAlertChannels(config.GetConfig())
+}
+
+// reportConfiguredDisabledChannels returns the channels that are configured (a
+// runtime override exists) but currently disabled for the REQUEST org, so they
+// are absent from reportChannels. When a ReportChannelLister is registered
+// (enterprise) it sources them from the masked runtime-channel view. OSS
+// registers none — community mode has no runtime-override concept — so this is
+// always an empty (non-nil) slice, serialized as [] not null.
+func (i *IncidentAdminController) reportConfiguredDisabledChannels(c *fiber.Ctx) []string {
+	if l := reportChannelLister(); l != nil {
+		if names := l.ConfiguredDisabledChannels(c.UserContext(), middleware.OrgFromContext(c)); names != nil {
+			return names
+		}
+	}
+	return []string{}
 }
 
 // enabledAlertChannels lists the notification channels currently enabled in

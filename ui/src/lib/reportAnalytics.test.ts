@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import type { Capabilities, ReportSendResult } from "@/lib/api";
 import {
   canReport,
+  configuredDisabledChannels,
+  configuredDisabledHint,
   defaultReportChannel,
   defaultReportWindow,
   hasReportChannel,
@@ -16,6 +18,7 @@ const report = (over?: Partial<NonNullable<Capabilities["report"]>>) => ({
   default_window: "today",
   include_chart: true,
   channels: [] as string[],
+  configured_disabled: [] as string[],
   public_host_set: false,
   ...over,
 });
@@ -78,6 +81,43 @@ describe("no-channel degrade", () => {
     );
     expect(hasReportChannel(c)).toBe(true);
     expect(reportChannels(c)).toEqual(["slack", "telegram"]);
+  });
+});
+
+describe("configuredDisabledChannels", () => {
+  it("is empty when the field is absent (older server)", () => {
+    expect(configuredDisabledChannels(undefined)).toEqual([]);
+    expect(configuredDisabledChannels(cap(report()))).toEqual([]);
+  });
+  it("returns the configured-but-disabled channels", () => {
+    expect(
+      configuredDisabledChannels(
+        cap(report({ configured_disabled: ["slack", "email"] })),
+      ),
+    ).toEqual(["slack", "email"]);
+  });
+});
+
+describe("configuredDisabledHint", () => {
+  it("is empty when nothing is configured-but-disabled", () => {
+    expect(configuredDisabledHint(undefined)).toBe("");
+    expect(configuredDisabledHint(cap(report()))).toBe("");
+  });
+  it("names a single channel with singular grammar", () => {
+    expect(
+      configuredDisabledHint(cap(report({ configured_disabled: ["slack"] }))),
+    ).toBe(
+      "slack is configured but disabled — enable it in Alert channels to use it here.",
+    );
+  });
+  it("joins multiple channels with plural grammar", () => {
+    expect(
+      configuredDisabledHint(
+        cap(report({ configured_disabled: ["slack", "email"] })),
+      ),
+    ).toBe(
+      "slack, email are configured but disabled — enable them in Alert channels to use them here.",
+    );
   });
 });
 
