@@ -21,6 +21,32 @@ var ansiEscapeRe = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]")
 // service name and falls through to the next pattern.
 var logLevelRe = regexp.MustCompile(`^(?i:TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL)$`)
 
+// httpMethodRe matches a capture that is exactly an HTTP method. Request-log
+// layouts ("POST /api/orders 200") put the method right where a positional
+// pattern looks for a service, and because it is all letters the numeric guard
+// does not reject it. Extract skips such a capture so a signal is never filed
+// under "POST" or "GET". TRACE is intentionally omitted here — it is already
+// covered by logLevelRe.
+var httpMethodRe = regexp.MustCompile(`^(?i:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|CONNECT)$`)
+
+// abbrevLoggerRe matches an SLF4J / Logback abbreviated logger class name —
+// two or more leading single-letter dotted segments followed by a final token,
+// e.g. "o.s.boot.SpringApplication", "c.e.demo.Foo". Console layouts print the
+// abbreviated logger where a dotted-name pattern looks for a service, so
+// Extract skips this shape. It requires AT LEAST TWO single-letter segments so
+// a legitimate dotted service or host with multi-letter labels ("api.prod",
+// "auth.internal") is never rejected.
+var abbrevLoggerRe = regexp.MustCompile(`^(?:[A-Za-z]\.){2,}`)
+
+// reservedContextRe matches a small, conservative set of framework / thread
+// context words that leak through positional patterns as a bogus "service" —
+// the NestJS logger context ("Nest") and the bare JVM main thread ("main").
+// Extract skips these so a signal is never filed under a framework banner. The
+// set is deliberately tiny; broader denylisting risks rejecting a real service
+// that happens to share the name and is left to per-pattern tuning or the
+// operator's Service-cell reassign / ServiceOverride.
+var reservedContextRe = regexp.MustCompile(`^(?i:Nest|main)$`)
+
 // hasLetterRe matches a capture that contains at least one ASCII letter. The
 // bracket/syslog patterns capture with the class [A-Za-z0-9._-]+, which also
 // matches a purely-numeric token — a thread id / PID / port / address (e.g.
@@ -43,14 +69,14 @@ var hasLetterRe = regexp.MustCompile(`[A-Za-z]`)
 // It is anchored (^…$, case-insensitive) and deliberately tight so it rejects
 // ONLY clear thread-name shapes and never a legitimate service that merely
 // contains digits/dashes ("api2", "auth-service", "order-service-2",
-// "nio-gateway" — the "nio-<port>-exec-<n>" shape is specific enough not to
-// catch that). Each alternative below targets one common thread family.
+// "nio-gateway" — the connector-exec shape below is specific enough not to
+// catch those). Each alternative below targets one common thread family.
 var threadNameRe = regexp.MustCompile(`(?i)^(?:` +
-	// Tomcat / servlet-container connector exec threads:
-	//   nio-8080-exec-8, http-nio-8080-exec-3, https-jsse-nio-8443-exec-1
-	`(?:https?-)?(?:jsse-)?nio-\d+-exec-\d+` + `|` +
-	//   ajp-nio-8009-exec-2 (AJP connector)
-	`ajp-nio-\d+-exec-\d+` + `|` +
+	// Servlet-container connector exec threads, with or without the leading
+	// protocol label(s): nio-8080-exec-8, http-nio-8080-exec-3,
+	// https-jsse-nio-8443-exec-1, ajp-nio-8009-exec-2, the prefix-less
+	// io-8080-exec-10, and the bare <port>-exec-<n> form 8080-exec-10.
+	`(?:[a-z]+-)*\d+-exec-\d+` + `|` +
 	//   bare exec worker: exec-4
 	`exec-\d+` + `|` +
 	// Standard java.util.concurrent / JVM threads:
@@ -121,7 +147,7 @@ func NewServiceMatcher(patterns []string) (*ServiceMatcher, []error) {
 // Extract returns the first capture group of the first matching pattern, or
 // "" when nothing matches.
 //
-// Four generic correctness guards run here so they benefit every configured
+// Several generic correctness guards run here so they benefit every configured
 // pattern at once:
 //   - ANSI escape sequences are stripped from the message before matching, so
 //     a colour-wrapped token (e.g. Spring Boot's "\x1b[34mlead-service\x1b[m")
@@ -130,6 +156,10 @@ func NewServiceMatcher(patterns []string) (*ServiceMatcher, []error) {
 //     never returned as a service. If a pattern's first group captures exactly
 //     a level token, we skip it and continue to the next pattern, so a greedy
 //     positional pattern cannot misattribute a signal to "DEBUG".
+//   - A bare HTTP method (GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS/CONNECT) is
+//     never returned as a service, so a request-log layout ("POST /api 200")
+//     cannot file a signal under "POST". TRACE is already covered by the
+//     log-level guard.
 //   - A purely-numeric/separator token (no ASCII letter — e.g. "1210", "8080",
 //     "10.0.0.1") is never returned as a service. The bracket/syslog patterns
 //     capture with [A-Za-z0-9._-]+, so a bracketed thread id / PID / port like
@@ -137,11 +167,17 @@ func NewServiceMatcher(patterns []string) (*ServiceMatcher, []error) {
 //     it and continues to the next pattern. A name that merely CONTAINS digits
 //     (has a letter) — "s3", "api-v2" — is kept.
 //   - A JVM / servlet-container / reactor THREAD name (e.g. "nio-8080-exec-8",
-//     "pool-2-thread-1", "reactor-http-nio-4") is never returned as a service.
-//     Those names contain letters, so the number guard does not catch them; a
-//     bracket rule would otherwise file a signal under the Tomcat worker thread
-//     instead of the service. The thread-name guard skips such a capture and
-//     continues to the next pattern (the logger / real service).
+//     "io-8080-exec-10", "pool-2-thread-1", "reactor-http-nio-4") is never
+//     returned as a service. Those names contain letters, so the number guard
+//     does not catch them; a bracket rule would otherwise file a signal under
+//     the Tomcat worker thread instead of the service. The thread-name guard
+//     skips such a capture and continues to the next pattern.
+//   - An SLF4J / Logback abbreviated logger class name (single-letter dotted
+//     segments, e.g. "o.s.boot.SpringApplication", "c.e.demo.Foo") is never
+//     returned as a service, while a legitimate dotted service/host with
+//     multi-letter labels ("api.prod", "auth.internal") is kept.
+//   - A small reserved framework/thread context word ("Nest", "main") is
+//     skipped so a signal is never filed under a framework banner.
 func (m *ServiceMatcher) Extract(message string) string {
 	if m == nil || message == "" {
 		return ""
@@ -153,10 +189,19 @@ func (m *ServiceMatcher) Extract(message string) string {
 			if logLevelRe.MatchString(sub[1]) {
 				continue
 			}
+			if httpMethodRe.MatchString(sub[1]) {
+				continue
+			}
 			if !hasLetterRe.MatchString(sub[1]) {
 				continue
 			}
 			if threadNameRe.MatchString(sub[1]) {
+				continue
+			}
+			if abbrevLoggerRe.MatchString(sub[1]) {
+				continue
+			}
+			if reservedContextRe.MatchString(sub[1]) {
 				continue
 			}
 			return sub[1]

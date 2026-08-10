@@ -263,7 +263,7 @@ func summarize(r *storage.IncidentRecord) fiber.Map {
 		"title":               r.Title,
 		"source":              r.Source,
 		"origin":              r.EffectiveOrigin(),
-		"service":             r.Service,
+		"service":             services.ServiceLabel(r),
 		"resolved":            r.Resolved,
 		"channels_notified":   r.ChannelsNotified,
 		"oncall_triggered":    r.OnCallTriggered,

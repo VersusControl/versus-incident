@@ -271,7 +271,7 @@ func BuildAggregateReportModel(recs []*storage.IncidentRecord, window string, st
 		}
 
 		// Service tally (redacted label).
-		svcLabel := scrub(reportServiceName(rec))
+		svcLabel := scrub(ServiceLabel(rec))
 		if svcLabel == "" {
 			svcLabel = "unknown"
 		}
@@ -414,13 +414,19 @@ func reportSeverity(rec *storage.IncidentRecord) string {
 	return s
 }
 
-// reportServiceName resolves the service label for one record: the durable
-// Service field, else a best-effort pull from content.
-func reportServiceName(rec *storage.IncidentRecord) string {
+// ServiceLabel resolves a record's display service: the durable Service
+// column, else a best-effort pull from content using the shared key set. The
+// incidents list and the report both route through here so a legacy row whose
+// stored column predates the aligned key set still shows the same service the
+// detail derives from content.
+func ServiceLabel(rec *storage.IncidentRecord) string {
+	if rec == nil {
+		return ""
+	}
 	if rec.Service != "" {
 		return rec.Service
 	}
-	return contentString(rec.Content, "ServiceName", "Service", "service")
+	return extractService(rec.Content)
 }
 
 // reportTitle resolves a display title for one record when the durable Title
