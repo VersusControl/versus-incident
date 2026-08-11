@@ -365,3 +365,138 @@ func TestThreadNameGuard(t *testing.T) {
 		}
 	}
 }
+
+// TestServiceMatcher_ReportedGarbageRejected drives the exact garbage service
+// names customers saw leaking through operator-configured patterns and proves
+// the tightened guards reject every one while the legitimate names still pass.
+// Each bad line pairs the garbage token with a real service later on the line
+// so the guard's fall-through is observable end to end.
+func TestServiceMatcher_ReportedGarbageRejected(t *testing.T) {
+	// A permissive operator pattern: "first token, then anything". It happily
+	// captures a logger, an HTTP method, a thread name, or the bare "main" —
+	// exactly the misconfiguration the generic guards exist to backstop. A
+	// second key=value rule carries the REAL service later on the line.
+	m, errs := NewServiceMatcher([]string{
+		`(?m)^([A-Za-z][A-Za-z0-9._-]*)\b`,
+		`(?i)\b(?:service|svc|app|component)\s*=\s*"?([A-Za-z0-9._-]+)`,
+	})
+	if len(errs) != 0 {
+		t.Fatalf("patterns must compile cleanly, got %v", errs)
+	}
+
+	rejected := []struct{ name, line string }{
+		{"abbreviated logger", "o.s.boot.SpringApplication started service=order-service"},
+		{"abbreviated logger short", "c.e.demo.Foo booting service=order-service"},
+		{"http method POST", "POST /api/orders 200 service=order-service"},
+		{"http method GET", "GET /health 200 service=order-service"},
+		{"connector exec no nio prefix", "io-8080-exec-10 handling service=order-service"},
+		{"bare port exec", "8080-exec-10 handling service=order-service"},
+		{"nestjs context", "Nest starting up service=order-service"},
+		{"jvm main thread", "main bootstrapping service=order-service"},
+	}
+	for _, tc := range rejected {
+		got := m.Extract(tc.line)
+		if got != "order-service" {
+			t.Errorf("%s: Extract(%q) = %q — garbage token must be rejected and fall through to %q",
+				tc.name, tc.line, got, "order-service")
+		}
+	}
+
+	// The same permissive first-token pattern must STILL return a legitimate
+	// leading service name (no over-rejection).
+	kept := []struct{ line, want string }{
+		{"order-service-2 is up", "order-service-2"},
+		{"api.prod healthy", "api.prod"},
+		{"auth.internal ready", "auth.internal"},
+		{"nio-gateway routing traffic", "nio-gateway"},
+		{"s3 uploader connected", "s3"},
+	}
+	for _, tc := range kept {
+		if got := m.Extract(tc.line); got != tc.want {
+			t.Errorf("legit leading service: Extract(%q) = %q, want %q", tc.line, got, tc.want)
+		}
+	}
+}
+
+// TestHTTPMethodGuard exercises the HTTP-method guard directly: an exact method
+// token is rejected; TRACE is intentionally left to the log-level guard; a real
+// service that merely starts with a method word is kept.
+func TestHTTPMethodGuard(t *testing.T) {
+	methods := []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "get", "Post"}
+	for _, s := range methods {
+		if !httpMethodRe.MatchString(s) {
+			t.Errorf("httpMethodRe should match method %q", s)
+		}
+	}
+	// TRACE is a log level, covered elsewhere — not by the method guard.
+	if httpMethodRe.MatchString("TRACE") {
+		t.Errorf("httpMethodRe must NOT match TRACE (owned by logLevelRe)")
+	}
+	// A real service that only CONTAINS a method word is not a bare method.
+	for _, s := range []string{"get-service", "post-office", "options-api", "postgres"} {
+		if httpMethodRe.MatchString(s) {
+			t.Errorf("httpMethodRe must only match a BARE method, not %q", s)
+		}
+	}
+}
+
+// TestAbbrevLoggerGuard exercises the abbreviated-logger guard directly: an
+// SLF4J/Logback abbreviated class name (two+ single-letter dotted segments) is
+// rejected, while a legitimate dotted service/host with multi-letter labels —
+// and a logger whose FIRST segment alone is single-letter ("c.example.Foo") —
+// is kept.
+func TestAbbrevLoggerGuard(t *testing.T) {
+	abbrev := []string{
+		"o.s.boot.SpringApplication", "c.e.demo.Foo", "o.a.c.h.Http11Processor",
+		"a.b.C", "x.y.z.Service",
+	}
+	for _, s := range abbrev {
+		if !abbrevLoggerRe.MatchString(s) {
+			t.Errorf("abbrevLoggerRe should match abbreviated logger %q", s)
+		}
+	}
+	kept := []string{
+		"api.prod", "auth.internal", "order-service", "s3",
+		"c.example.OrderController", // only ONE single-letter segment → kept
+		"payments.gateway.internal",
+	}
+	for _, s := range kept {
+		if abbrevLoggerRe.MatchString(s) {
+			t.Errorf("abbrevLoggerRe must NOT match legitimate name %q", s)
+		}
+	}
+}
+
+// TestReservedContextGuard exercises the reserved framework/thread context
+// guard: "Nest" (NestJS logger context) and "main" (bare JVM thread) are
+// rejected; everything that merely contains them is kept. See the report note
+// on the "Nest" trade-off.
+func TestReservedContextGuard(t *testing.T) {
+	for _, s := range []string{"Nest", "nest", "main", "MAIN"} {
+		if !reservedContextRe.MatchString(s) {
+			t.Errorf("reservedContextRe should match reserved word %q", s)
+		}
+	}
+	for _, s := range []string{"nest-service", "mainframe", "main-api", "nestjs-app", "domain"} {
+		if reservedContextRe.MatchString(s) {
+			t.Errorf("reservedContextRe must only match a BARE reserved word, not %q", s)
+		}
+	}
+}
+
+// TestThreadNameGuard_ConnectorExec covers the broadened connector-exec shapes:
+// the prefix-less "io-8080-exec-10" and the bare "<port>-exec-<n>" form are now
+// recognised as threads, while real services with digits/dashes are not.
+func TestThreadNameGuard_ConnectorExec(t *testing.T) {
+	threads := []string{"io-8080-exec-10", "8080-exec-10", "ajp-8009-exec-2", "http-nio-8080-exec-1"}
+	for _, s := range threads {
+		if !threadNameRe.MatchString(s) {
+			t.Errorf("threadNameRe should match connector-exec thread %q", s)
+		}
+	}
+	for _, s := range []string{"order-service-2", "nio-gateway", "exec-worker", "api2-service"} {
+		if threadNameRe.MatchString(s) {
+			t.Errorf("threadNameRe must NOT match service name %q", s)
+		}
+	}
+}

@@ -488,7 +488,7 @@ describe("AlertFatiguePage — floored (high/critical) rows can't be suppressed"
     vi.mocked(api.getAlertFatigueConfig).mockResolvedValue(cfg({ enabled: true }));
   });
 
-  it("disables Mark as spam and explains why on a floored tracking row", async () => {
+  it("replaces Mark as spam with a non-interactive hint on a floored tracking row", async () => {
     vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(
       page([
         finding({
@@ -505,21 +505,21 @@ describe("AlertFatiguePage — floored (high/critical) rows can't be suppressed"
     );
     renderPage();
 
-    const btn = await screen.findByTestId("alert-fatigue-mark-spam-floored");
-    // The button reads as unavailable to assistive tech without leaving the
-    // page (aria-disabled keeps it focusable so the reason is reachable).
-    expect(btn.getAttribute("aria-disabled")).toBe("true");
+    const hint = await screen.findByTestId("alert-fatigue-mark-spam-floored");
+    // The affordance is a compact, non-interactive hint (a span), not an
+    // enabled button — there's nothing to click and nothing to suppress.
+    expect(hint.tagName).toBe("SPAN");
+    expect(screen.queryByRole("button", { name: "Mark as spam" })).toBeNull();
 
-    // Clicking it must NOT fire the suppression mutation — it would never take.
-    fireEvent.click(btn);
+    // Interacting with it must NOT fire the suppression mutation.
+    fireEvent.click(hint);
     expect(api.confirmAlertFatigueFingerprint).not.toHaveBeenCalled();
 
-    // The explanation is programmatically associated for assistive tech.
-    const describedBy = btn.getAttribute("aria-describedby");
-    expect(describedBy).toBeTruthy();
-    expect(document.getElementById(describedBy!)?.textContent).toMatch(
-      /always page/i,
-    );
+    // It conveys the "always pages / can't be suppressed" reason via its
+    // visible text plus the full explanation in title/aria-label.
+    expect(hint.textContent).toMatch(/always pages/i);
+    expect(hint.getAttribute("title")).toMatch(/always page.*can't be suppressed/i);
+    expect(hint.getAttribute("aria-label")).toMatch(/cannot be suppressed/i);
   });
 
   it("annotates a floored fatigued row so it doesn't read as silenced", async () => {

@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"context"
+
+	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/services"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 
@@ -77,9 +80,9 @@ func (s searcherStorage) SearchAnalyses(string, int) ([]*storage.AnalysisRecord,
 // memory backend (the same path file storage takes).
 func TestCapabilitiesReflectsSearcher(t *testing.T) {
 	t.Cleanup(func() { services.SetStorage(nil) })
-	// capabilities now reads config.GetConfig() for the report block, so the
-	// global config must exist (sync.Once-guarded; safe if a sibling test
-	// already loaded it).
+	// capabilities reads the global config for the report block, so the global
+	// config must exist (sync.Once-guarded; safe if a sibling test already
+	// loaded it).
 	loadGatewayConfig(t, "test-gateway-secret")
 
 	ctrl := NewIncidentAdminController()
@@ -111,6 +114,182 @@ func TestCapabilitiesReflectsSearcher(t *testing.T) {
 			}
 			if got.Search != tc.want {
 				t.Fatalf("search = %v, want %v", got.Search, tc.want)
+			}
+		})
+	}
+}
+
+// fakeReportChannelLister is a controllers.ReportChannelLister that returns a
+// fixed per-org channel list, standing in for the enterprise lister backed by
+// the runtime channel resolver's masked EffectiveEnabled view.
+type fakeReportChannelLister struct {
+	byOrg         map[string][]string
+	disabledByOrg map[string][]string
+}
+
+func (f fakeReportChannelLister) EnabledAlertChannels(_ context.Context, org string) []string {
+	return f.byOrg[org]
+}
+
+func (f fakeReportChannelLister) ConfiguredDisabledChannels(_ context.Context, org string) []string {
+	return f.disabledByOrg[org]
+}
+
+// TestCapabilitiesReportChannelsFallsBackToStatic proves that with NO lister
+// registered (community/OSS), report.channels is the static enabled-channel
+// list from the global config — single-tenant behaviour unchanged.
+func TestCapabilitiesReportChannelsFallsBackToStatic(t *testing.T) {
+	t.Cleanup(func() { services.SetStorage(nil) })
+	loadGatewayConfig(t, "test-gateway-secret")
+
+	// No lister registered: the handler must use enabledAlertChannels(GetConfig()).
+	SetReportChannelLister(nil)
+	services.SetStorage(storage.NewMemory())
+
+	ctrl := NewIncidentAdminController()
+	app := fiber.New()
+	app.Get("/cap", ctrl.capabilities)
+
+	resp, err := app.Test(httptest.NewRequest("GET", "/cap", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var got struct {
+		Report struct {
+			Channels           []string `json:"channels"`
+			ConfiguredDisabled []string `json:"configured_disabled"`
+		} `json:"report"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal %q: %v", body, err)
+	}
+	want := enabledAlertChannels(config.GetConfig())
+	if len(got.Report.Channels) != len(want) {
+		t.Fatalf("report.channels = %v, want static %v", got.Report.Channels, want)
+	}
+	for idx := range want {
+		if got.Report.Channels[idx] != want[idx] {
+			t.Fatalf("report.channels = %v, want static %v", got.Report.Channels, want)
+		}
+	}
+	// No lister → community has no runtime-override concept, so
+	// configured_disabled is an empty, non-null slice.
+	if got.Report.ConfiguredDisabled == nil {
+		t.Fatalf("report.configured_disabled = null, want [] (non-nil)")
+	}
+	if len(got.Report.ConfiguredDisabled) != 0 {
+		t.Fatalf("report.configured_disabled = %v, want []", got.Report.ConfiguredDisabled)
+	}
+}
+
+// TestCapabilitiesReflectsRuntimeChannels proves the report channel picker is
+// built from the registered ReportChannelLister — the masked runtime-channel
+// view (the SAME source the alert-fatigue picker uses) — not the static YAML
+// config. With Slack disabled in the static floor but the lister reporting a
+// hot-configured Slack for the request org, report.channels must include
+// "slack", exactly as the alert-fatigue picker shows it.
+func TestCapabilitiesReflectsRuntimeChannels(t *testing.T) {
+	t.Cleanup(func() { services.SetStorage(nil) })
+	loadGatewayConfig(t, "test-gateway-secret")
+
+	// Static YAML floor: Slack disabled. Confirm the pre-condition so the test
+	// proves the lister — not a stale global — is what surfaces.
+	if config.GetConfig().Alert.Slack.Enable {
+		t.Skip("static config unexpectedly has Slack enabled; cannot prove override")
+	}
+
+	// The request org is the default org (no OrgInjector mounted on this app).
+	SetReportChannelLister(fakeReportChannelLister{
+		byOrg:         map[string][]string{storage.DefaultOrgID: {"slack", "email"}},
+		disabledByOrg: map[string][]string{storage.DefaultOrgID: {"telegram"}},
+	})
+	t.Cleanup(func() { SetReportChannelLister(nil) })
+
+	services.SetStorage(storage.NewMemory())
+
+	ctrl := NewIncidentAdminController()
+	app := fiber.New()
+	app.Get("/cap", ctrl.capabilities)
+
+	resp, err := app.Test(httptest.NewRequest("GET", "/cap", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var got struct {
+		Report struct {
+			Channels           []string `json:"channels"`
+			ConfiguredDisabled []string `json:"configured_disabled"`
+		} `json:"report"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal %q: %v", body, err)
+	}
+	found := false
+	for _, ch := range got.Report.Channels {
+		if ch == "slack" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("report.channels = %v, want it to include the hot-configured \"slack\"", got.Report.Channels)
+	}
+	// The lister's configured-but-disabled list is echoed verbatim into
+	// report.configured_disabled.
+	if len(got.Report.ConfiguredDisabled) != 1 || got.Report.ConfiguredDisabled[0] != "telegram" {
+		t.Fatalf("report.configured_disabled = %v, want [telegram]", got.Report.ConfiguredDisabled)
+	}
+}
+
+// TestEnabledAlertChannelsFromResolvedConfig is a table test proving
+// enabledAlertChannels reflects whatever effective config it is handed —
+// including a runtime-resolved one — in a stable order.
+func TestEnabledAlertChannelsFromResolvedConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  *config.Config
+		want []string
+	}{
+		{
+			name: "none enabled",
+			cfg:  &config.Config{},
+			want: []string{},
+		},
+		{
+			name: "runtime-enabled slack surfaces",
+			cfg: func() *config.Config {
+				c := &config.Config{}
+				c.Alert.Slack.Enable = true
+				return c
+			}(),
+			want: []string{"slack"},
+		},
+		{
+			name: "multiple channels in stable order",
+			cfg: func() *config.Config {
+				c := &config.Config{}
+				c.Alert.Slack.Enable = true
+				c.Alert.Email.Enable = true
+				c.Alert.Lark.Enable = true
+				return c
+			}(),
+			want: []string{"slack", "email", "lark"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := enabledAlertChannels(tc.cfg)
+			if len(got) != len(tc.want) {
+				t.Fatalf("channels = %v, want %v", got, tc.want)
+			}
+			for idx := range tc.want {
+				if got[idx] != tc.want[idx] {
+					t.Fatalf("channels = %v, want %v", got, tc.want)
+				}
 			}
 		})
 	}

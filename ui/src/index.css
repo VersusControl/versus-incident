@@ -319,6 +319,17 @@ body {
   textarea.input {
     @apply h-auto py-2;
   }
+  select.input {
+    /* Native selects: drop the browser arrow (which pins to the right edge and
+       ignores padding) and paint our own slate-400 chevron with real right
+       spacing. pr-8 reserves room so the longest option never runs under it.
+       Text <input>s keep the tighter px-2. */
+    @apply appearance-none pr-8;
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%2394a3b8' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 8l4 4 4-4'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.55rem center;
+    background-size: 1rem;
+  }
   .field-label {
     @apply mb-1 block text-2xs uppercase tracking-wider text-ink-300;
   }

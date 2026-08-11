@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2 } from "lucide-react";
+import { Info, Loader2 } from "lucide-react";
 import { api, type ReportSettings } from "@/lib/api";
-import { REPORT_WINDOWS } from "@/lib/reportAnalytics";
+import { configuredDisabledHint, REPORT_WINDOWS } from "@/lib/reportAnalytics";
 import {
   detectLocalZone,
   resolveTimezone,
@@ -83,6 +83,7 @@ export function ReportSettingsControl() {
   }
 
   const channels = cap.data?.report?.channels ?? [];
+  const disabledHint = configuredDisabledHint(cap.data);
   const set = <K extends keyof ReportSettings>(key: K, value: ReportSettings[K]) =>
     setForm((f) => (f ? { ...f, [key]: value } : f));
 
@@ -118,6 +119,25 @@ export function ReportSettingsControl() {
       </label>
 
       <div>
+        <label className="field-label" htmlFor="rs-title">
+          Report title
+        </label>
+        <input
+          id="rs-title"
+          type="text"
+          data-testid="report-title"
+          className="input"
+          maxLength={80}
+          placeholder="Incident report"
+          value={form.title}
+          onChange={(e) => set("title", e.target.value)}
+        />
+        <p className="mt-1 text-2xs text-ink-400">
+          The title shown on the report image, e.g. "Incident report".
+        </p>
+      </div>
+
+      <div>
         <label className="field-label" htmlFor="rs-default-channel">
           Default channel
         </label>
@@ -142,6 +162,15 @@ export function ReportSettingsControl() {
               </option>
             )}
         </select>
+        {disabledHint && (
+          <p
+            data-testid="report-configured-disabled-hint"
+            className="mt-1 flex items-start gap-1.5 text-2xs text-ink-400"
+          >
+            <Info size={12} className="mt-0.5 shrink-0" aria-hidden />
+            {disabledHint}
+          </p>
+        )}
       </div>
 
       <div>
@@ -274,7 +303,7 @@ export function ReportSettingsControl() {
         <button
           className="btn btn-primary"
           data-testid="report-settings-save"
-          onClick={() => form && save.mutate(form)}
+          onClick={() => form && save.mutate({ ...form, title: form.title.trim() })}
           disabled={save.isPending}
         >
           {save.isPending ? (

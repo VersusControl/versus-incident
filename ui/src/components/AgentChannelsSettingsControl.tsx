@@ -143,6 +143,10 @@ export function AgentChannelsSettingsControl() {
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["agent-channel-settings"] });
+    // Enabling/disabling a channel changes capabilities.report.channels, which
+    // drives the incident-report channel picker (and report-action gating).
+    // Invalidate it so the picker refreshes without a hard reload.
+    qc.invalidateQueries({ queryKey: ["capabilities"] });
   };
 
   return (
@@ -296,7 +300,52 @@ function ChannelCard({
 
   return (
     <div className="rounded-control border border-ink-600/60 bg-ink-700/30 p-3">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+      <div
+        className="mb-3 flex flex-wrap items-start gap-3 rounded-control border border-ink-600/60 bg-ink-700/50 p-2.5"
+        data-testid={`channel-enable-control-${channel}`}
+      >
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          aria-label={`Enable ${channelLabel(channel)} channel`}
+          disabled={busy}
+          data-testid={`channel-enable-toggle-${channel}`}
+          onClick={() => setEnabled((v) => !v)}
+          className={clsx(
+            "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition",
+            enabled ? "bg-link" : "bg-ink-600",
+            busy && "opacity-70",
+          )}
+        >
+          <span
+            className={clsx(
+              "inline-block h-4 w-4 transform rounded-full bg-white transition",
+              enabled ? "translate-x-4" : "translate-x-0.5",
+            )}
+          />
+        </button>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-xs font-semibold text-ink-100">
+            Enable this channel
+            <span
+              data-testid={`channel-enable-state-${channel}`}
+              className={clsx(
+                "rounded-full px-1.5 py-0.5 text-2xs font-medium",
+                enabled ? "bg-link/20 text-link" : "bg-ink-600 text-ink-300",
+              )}
+            >
+              {enabled ? "Enabled" : "Disabled"}
+            </span>
+          </div>
+          <div className="text-2xs text-ink-400">
+            Off = configured but not used; the channel won't receive alerts or
+            reports.
+          </div>
+        </div>
+      </div>
+
+      <div className="mb-2 flex flex-wrap items-center gap-2">
         <div className="flex items-center gap-2">
           <ChannelIcon id={channel} size={14} />
           <span className="text-sm font-medium text-ink-100">
@@ -304,16 +353,6 @@ function ChannelCard({
           </span>
           <ProvenanceChip source={view?.source ?? "yaml"} />
         </div>
-        <label className="flex cursor-pointer items-center gap-2 text-xs text-ink-200">
-          <input
-            type="checkbox"
-            checked={enabled}
-            disabled={busy}
-            onChange={(e) => setEnabled(e.target.checked)}
-            className="h-4 w-4 accent-link"
-          />
-          Enable
-        </label>
       </div>
 
       <div className="grid gap-2 sm:grid-cols-2">

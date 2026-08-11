@@ -1246,6 +1246,11 @@ export interface ReportCapabilities {
   default_window: string;
   include_chart: boolean;
   channels: string[];
+  // configured_disabled are channels that ARE configured but currently
+  // disabled, so they are NOT in `channels` (the picker's enabled options).
+  // The picker names them so the operator knows to enable them in Alert
+  // channels. Always an array (never null); empty on older servers.
+  configured_disabled: string[];
   public_host_set: boolean;
 }
 
@@ -1266,6 +1271,7 @@ export interface Capabilities {
 // a 400.
 export interface ReportSettings {
   enable: boolean;
+  title: string;
   default_channel: string;
   include_chart: boolean;
   rate_per_minute: number;

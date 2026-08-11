@@ -232,7 +232,7 @@ func buildIncidentRecord(incident *m.Incident, cfg *config.Config, content map[s
 		OrgID:           storage.DefaultOrgID,
 		TeamID:          incident.TeamID,
 		Title:           firstString(content, "title", "alertname", "summary", "subject", "name"),
-		Service:         firstString(content, "service", "service_name", "app", "component"),
+		Service:         extractService(content),
 		Source:          resolveSource(content, hint),
 		Origin:          origin,
 		Resolved:        resolved,
@@ -341,6 +341,16 @@ func firstString(content map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// extractService resolves the service label from a free-form content map.
+// It is the single shared key set for service attribution: the persisted
+// IncidentRecord.Service column, the report, and the emit fingerprint all
+// derive the service through here so they agree with what the incident detail
+// shows. firstString matches keys case-insensitively, so the one-word
+// ServiceName/servicename and the underscored service_name are all honoured.
+func extractService(content map[string]interface{}) string {
+	return firstString(content, "ServiceName", "Service", "service", "service_name", "servicename", "app", "component")
 }
 
 // isResolved checks if the alert is resolved by checking common status fields

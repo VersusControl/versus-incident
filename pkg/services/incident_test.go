@@ -184,3 +184,81 @@ func TestBuildIncidentRecord_Origin(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildIncidentRecord_Service asserts the persisted Service column is
+// derived through the shared key set that the incident detail and report read,
+// so the incidents LIST (which renders the column) agrees with the DETAIL. The
+// regression was the one-word "ServiceName" key being omitted, leaving the
+// column blank while the detail showed a service.
+func TestBuildIncidentRecord_Service(t *testing.T) {
+	cfg := &config.Config{}
+
+	tests := []struct {
+		name    string
+		content map[string]interface{}
+		want    string
+	}{
+		{"one-word ServiceName only (the reported bug)", map[string]interface{}{"ServiceName": "checkout"}, "checkout"},
+		{"lowercased servicename", map[string]interface{}{"servicename": "billing"}, "billing"},
+		{"agent sets ServiceName and Service", map[string]interface{}{"ServiceName": "payments", "Service": "payments"}, "payments"},
+		{"underscored service_name", map[string]interface{}{"service_name": "orders"}, "orders"},
+		{"exact Service", map[string]interface{}{"Service": "web"}, "web"},
+		{"lower service", map[string]interface{}{"service": "api"}, "api"},
+		{"app fallback", map[string]interface{}{"app": "worker"}, "worker"},
+		{"component fallback", map[string]interface{}{"component": "scheduler"}, "scheduler"},
+		{"no service keys stays blank", map[string]interface{}{"title": "disk full"}, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inc := m.NewIncident("", &tc.content, false)
+			rec := buildIncidentRecord(inc, cfg, tc.content, false, "")
+			if rec.Service != tc.want {
+				t.Fatalf("Service = %q, want %q", rec.Service, tc.want)
+			}
+		})
+	}
+}
+
+// TestServiceLabel_ListEqualsDetail proves the list value (ServiceLabel) and
+// the detail value agree. The detail derives its service from content via
+// pickString(ServiceName, Service, service); ServiceLabel returns the durable
+// column when present and otherwise falls back to the same content, so a fresh
+// record and a LEGACY row (blank column, service only in content) both display
+// what the detail shows.
+func TestServiceLabel_ListEqualsDetail(t *testing.T) {
+	// detailService mirrors ui IncidentDetailPage's
+	// pickString(content, "ServiceName", "Service", "service").
+	detailService := func(content map[string]interface{}) string {
+		return firstString(content, "ServiceName", "Service", "service")
+	}
+
+	cfg := &config.Config{}
+	contents := []map[string]interface{}{
+		{"ServiceName": "checkout"}, // agent / detail key
+		{"ServiceName": "payments", "Service": "payments"},
+		{"Service": "web"},
+		{"service": "api"},
+	}
+	for _, content := range contents {
+		inc := m.NewIncident("", &content, false)
+		rec := buildIncidentRecord(inc, cfg, content, false, "")
+		if ServiceLabel(rec) != detailService(content) {
+			t.Fatalf("fresh record: list %q != detail %q (content %v)", ServiceLabel(rec), detailService(content), content)
+		}
+
+		// Legacy row: same content, but the column was persisted blank before
+		// the fix. ServiceLabel must fall back to content and match the detail.
+		legacy := &storage.IncidentRecord{Content: content}
+		if ServiceLabel(legacy) != detailService(content) {
+			t.Fatalf("legacy row: list %q != detail %q (content %v)", ServiceLabel(legacy), detailService(content), content)
+		}
+	}
+
+	// A durable column always wins over content for the list, so sorting /
+	// filtering that keys on the stored column is never regressed.
+	pinned := &storage.IncidentRecord{Service: "stored-svc", Content: map[string]interface{}{"ServiceName": "content-svc"}}
+	if got := ServiceLabel(pinned); got != "stored-svc" {
+		t.Fatalf("stored column must win: ServiceLabel = %q, want %q", got, "stored-svc")
+	}
+}

@@ -124,7 +124,7 @@ func filterProvidersByChannel(providers []core.AlertProvider, names []string) []
 // enterprise wrapper can reuse the exact same key as its own store key.
 func EmitFingerprint(content map[string]interface{}) string {
 	source := firstString(content, "source")
-	service := firstString(content, "servicename", "service", "service_name", "app", "component")
+	service := extractService(content)
 	pattern := firstString(content, "patternid", "pattern_id", "key")
 	severity := firstString(content, "severity")
 

@@ -87,6 +87,80 @@ func rec(id, service, severity, origin, source string, resolved bool, created ti
 	}
 }
 
+// --- severity extraction + banding -----------------------------------------
+
+// TestReportSeverity_MatchesUIKeys proves the report reads the SAME rich key
+// set the UI's severityFromContent/normalizeSeverity (ui/src/lib/severity.ts)
+// reads, so a severity the UI shows colored never bands to gray "unknown" in
+// the report. A couple of the UI's own cases are mirrored here to keep the two
+// in sync.
+func TestReportSeverity_MatchesUIKeys(t *testing.T) {
+	cases := []struct {
+		name    string
+		content map[string]interface{}
+		want    string // banded
+	}{
+		// Alertmanager/Prometheus shape: severity only in nested labels.
+		{"nested labels.severity critical", map[string]interface{}{"labels": map[string]interface{}{"severity": "critical"}}, "critical"},
+		{"nested commonLabels.severity warning", map[string]interface{}{"commonLabels": map[string]interface{}{"severity": "warning"}}, "medium"},
+		// Extra top-level keys the UI reads.
+		{"priority P1", map[string]interface{}{"priority": "P1"}, "critical"},
+		{"level error", map[string]interface{}{"level": "error"}, "high"},
+		// Synonyms mirrored from normalizeSeverity.
+		{"sev2 -> high", map[string]interface{}{"Severity": "sev2"}, "high"},
+		{"crit -> critical", map[string]interface{}{"severity": "crit"}, "critical"},
+		{"minor -> low", map[string]interface{}{"severity": "minor"}, "low"},
+		{"p3 -> medium", map[string]interface{}{"priority": "p3"}, "medium"},
+		// Precedence: an explicit top-level key wins over nested labels.
+		{"top-level wins over nested", map[string]interface{}{"Severity": "info", "labels": map[string]interface{}{"severity": "critical"}}, "low"},
+		// Verdict remains the last-resort fallback.
+		{"verdict fallback", map[string]interface{}{"Verdict": "critical"}, "critical"},
+		// Truly-absent severity still bands to unknown (row is never dropped).
+		{"absent -> unknown", map[string]interface{}{"foo": "bar"}, "unknown"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &storage.IncidentRecord{Content: tc.content}
+			if got := severityBand(reportSeverity(r)); got != tc.want {
+				t.Fatalf("band = %q, want %q (raw severity %q)", got, tc.want, reportSeverity(r))
+			}
+		})
+	}
+}
+
+// TestBuildAggregateReportModel_NestedAndSynonymSeverities proves the assembled
+// model colors correctly: incidents whose severity lives ONLY in nested
+// labels, or under priority/level with a synonym value, land in their real
+// band instead of "unknown" — so BySeverity and the derived worst-severity
+// accent go red/orange, not slate.
+func TestBuildAggregateReportModel_NestedAndSynonymSeverities(t *testing.T) {
+	start := time.Date(2026, 8, 9, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	withContent := func(id string, content map[string]interface{}, created time.Time) *storage.IncidentRecord {
+		return &storage.IncidentRecord{
+			ID: id, Title: id + " title", Service: "payments",
+			Origin: storage.OriginWebhook, Source: "webhook", CreatedAt: created, Content: content,
+		}
+	}
+	recs := []*storage.IncidentRecord{
+		withContent("n1", map[string]interface{}{"labels": map[string]interface{}{"severity": "critical"}}, end.Add(-1*time.Hour)),
+		withContent("p1", map[string]interface{}{"priority": "P1"}, end.Add(-2*time.Hour)),
+		withContent("l1", map[string]interface{}{"level": "error"}, end.Add(-3*time.Hour)),
+	}
+
+	m := BuildAggregateReportModel(recs, "today", start, end, "hour", testScrubber(t), true, time.UTC)
+
+	want := map[string]int{"critical": 2, "high": 1, "medium": 0, "low": 0, "unknown": 0}
+	for _, b := range m.BySeverity {
+		if b.Count != want[b.Label] {
+			t.Fatalf("severity %q = %d, want %d (nested/synonym severities must not band to unknown)", b.Label, b.Count, want[b.Label])
+		}
+	}
+	if m.CriticalHigh != 3 {
+		t.Fatalf("criticalHigh = %d, want 3", m.CriticalHigh)
+	}
+}
+
 // --- window resolution -----------------------------------------------------
 
 func TestWindowBounds(t *testing.T) {
@@ -148,6 +222,47 @@ func TestWindowBoundsIn_TimezoneShiftsTodayStart(t *testing.T) {
 	}
 }
 
+// TestWindowBoundsIn_24hVsToday reproduces the customer's report at
+// 2026-08-10 15:00 in Asia/Ho_Chi_Minh: "24h" must be the rolling
+// now-24h → now range (2026-08-09 15:00 → 2026-08-10 15:00), while "today" is
+// local-midnight → now (2026-08-10 00:00 → 2026-08-10 15:00). Proving both in
+// a non-UTC location confirms the 24h computation is correct end-to-end, so a
+// "today"-looking render can only come from a "today" window being passed.
+func TestWindowBoundsIn_24hVsToday(t *testing.T) {
+	ict, err := time.LoadLocation("Asia/Ho_Chi_Minh")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	// 15:00 local on 2026-08-10 == 08:00 UTC (ICT is UTC+7).
+	now := time.Date(2026, 8, 10, 8, 0, 0, 0, time.UTC)
+
+	// 24h: rolling window, exactly 24h back from now.
+	start, end, unit := WindowBoundsIn("24h", now, ict)
+	wantStart := time.Date(2026, 8, 9, 15, 0, 0, 0, ict)
+	wantEnd := time.Date(2026, 8, 10, 15, 0, 0, 0, ict)
+	if !start.In(ict).Equal(wantStart) {
+		t.Fatalf("24h start = %v, want %v (now-24h)", start.In(ict), wantStart)
+	}
+	if !end.In(ict).Equal(wantEnd) || unit != "hour" {
+		t.Fatalf("24h end=%v unit=%q, want %v hour", end.In(ict), unit, wantEnd)
+	}
+
+	// today: local midnight → now, which is where the customer's observed
+	// range comes from.
+	tStart, tEnd, _ := WindowBoundsIn("today", now, ict)
+	if !tStart.In(ict).Equal(time.Date(2026, 8, 10, 0, 0, 0, 0, ict)) {
+		t.Fatalf("today start = %v, want local midnight 2026-08-10 00:00", tStart.In(ict))
+	}
+	if !tEnd.In(ict).Equal(wantEnd) {
+		t.Fatalf("today end = %v, want %v (now)", tEnd.In(ict), wantEnd)
+	}
+	// The two windows must be genuinely different: only "today" starts at
+	// midnight, so a midnight-start render means window=today was used.
+	if start.Equal(tStart) {
+		t.Fatal("24h and today must have different starts; 24h must not start at local midnight")
+	}
+}
+
 // TestBuildAggregateReportModel_TimezoneRendering asserts the SAME window
 // renders its timestamps + caption in the configured timezone: UTC keeps the
 // "… UTC" label byte-for-byte, while a non-UTC location shifts the printed
@@ -186,6 +301,35 @@ func TestBuildAggregateReportModel_TimezoneRendering(t *testing.T) {
 	// Both models describe the same instant — only the printed zone differs.
 	if !utcModel.WindowEnd.Equal(ictModel.WindowEnd) {
 		t.Fatal("UTC and ICT models must describe the same window-end instant")
+	}
+}
+
+// TestReportCaption_UsesConfiguredTitle: the caption leads with the model's
+// configured title, and falls back to "Incident report" when it is blank so a
+// directly-constructed model still reads sensibly.
+func TestReportCaption_UsesConfiguredTitle(t *testing.T) {
+	m := core.ReportModel{Window: "today", Title: "Weekly Ops Digest",
+		ByOrigin: map[string]int{"ai_detect": 0, "webhook": 0}}
+	if cap := reportCaption(m); !strings.HasPrefix(cap, "Weekly Ops Digest — ") {
+		t.Fatalf("caption did not lead with configured title: %q", cap)
+	}
+	m.Title = ""
+	if cap := reportCaption(m); !strings.HasPrefix(cap, "Incident report — ") {
+		t.Fatalf("blank title did not fall back to default: %q", cap)
+	}
+}
+
+// TestBuildWindowModel_CarriesConfiguredTitle: the settings Title flows onto
+// the built model so the renderer and caption draw it.
+func TestBuildWindowModel_CarriesConfiguredTitle(t *testing.T) {
+	st := windowStore(t)
+	model, err := buildWindowModel(st, testScrubber(t),
+		ReportSettings{Enable: true, IncludeChart: true, Title: "Weekly Ops Digest"}, "24h")
+	if err != nil {
+		t.Fatalf("buildWindowModel: %v", err)
+	}
+	if model.Title != "Weekly Ops Digest" {
+		t.Fatalf("model.Title = %q, want \"Weekly Ops Digest\"", model.Title)
 	}
 }
 
@@ -413,7 +557,8 @@ func windowStore(t *testing.T) storage.Provider {
 
 func TestSendReport_ImageChannelUploadsPNGWithCaption(t *testing.T) {
 	st := windowStore(t)
-	enableReport(t, st, ReportSettings{Enable: true, IncludeChart: true, DefaultWindow: "24h"})
+	// Charts OFF → the image travels WITH the redacted caption.
+	enableReport(t, st, ReportSettings{Enable: true, IncludeChart: false, DefaultWindow: "24h"})
 	slack := &fakeImageProvider{name: "slack"}
 
 	out, err := sendReport(context.Background(), &config.Config{}, st, fakeRenderer{}, testScrubber(t),
@@ -435,6 +580,42 @@ func TestSendReport_ImageChannelUploadsPNGWithCaption(t *testing.T) {
 	}
 	if !strings.Contains(slack.gotAtt.Caption, "2 incidents") {
 		t.Fatalf("caption missing count: %q", slack.gotAtt.Caption)
+	}
+}
+
+// TestSendReport_ChartsOn_ImageOnlyNoCaption: when charts are included the
+// report is a visual dashboard, so image-capable channels get the PNG with an
+// EMPTY caption. Text-only channels cannot render an image, so they still get
+// the redacted fallback text.
+func TestSendReport_ChartsOn_ImageOnlyNoCaption(t *testing.T) {
+	st := windowStore(t)
+	enableReport(t, st, ReportSettings{Enable: true, IncludeChart: true, DefaultWindow: "24h"})
+
+	// Image-capable channel: PNG with an EMPTY caption.
+	slack := &fakeImageProvider{name: "slack"}
+	if _, err := sendReport(context.Background(), &config.Config{}, st, fakeRenderer{}, testScrubber(t),
+		[]core.AlertProvider{slack}, ReportSendOptions{Window: "24h", Channel: "slack"}); err != nil {
+		t.Fatalf("sendReport (image): %v", err)
+	}
+	if !slack.called || string(slack.gotAtt.Data) != "PNGDATA" {
+		t.Fatalf("slack did not receive the PNG: %+v", slack)
+	}
+	if slack.gotAtt.Caption != "" {
+		t.Fatalf("charts-on caption must be empty (image only), got %q", slack.gotAtt.Caption)
+	}
+
+	// Text-only channel still gets the fallback (never silently dropped).
+	teams := &fakeTextProvider{name: "msteams"}
+	out, err := sendReport(context.Background(), &config.Config{}, st, fakeRenderer{}, testScrubber(t),
+		[]core.AlertProvider{teams}, ReportSendOptions{Window: "24h", Channel: "msteams"})
+	if err != nil {
+		t.Fatalf("sendReport (text): %v", err)
+	}
+	if !teams.called || teams.gotText == "" {
+		t.Fatalf("text-only channel must still receive the fallback: %+v", teams)
+	}
+	if len(out.Fallback) != 1 || out.Fallback[0] != "msteams" {
+		t.Fatalf("fallback = %v, want [msteams]", out.Fallback)
 	}
 }
 
