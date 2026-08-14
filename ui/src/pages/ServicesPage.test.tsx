@@ -39,6 +39,12 @@ vi.mock("@/lib/api", async (importActual) => {
       setServiceLearnExclusion: vi
         .fn()
         .mockResolvedValue({ services: [], metrics: [], patterns: [] }),
+      setServiceLearnExclusions: vi
+        .fn()
+        .mockResolvedValue({ services: [], metrics: [], patterns: [] }),
+      setLearnExclusions: vi
+        .fn()
+        .mockResolvedValue({ services: [], metrics: [], patterns: [] }),
     },
   };
 });
@@ -264,6 +270,175 @@ describe("ServicesPage Active/Ignored scope", () => {
     renderPage();
     await screen.findByLabelText("View service checkout");
     expect(screen.queryByRole("tablist", { name: "Learning scope" })).toBeNull();
+  });
+});
+
+// A bulk Ignore/Resume over N selected services must send INTENT — ONE call to
+// the batch route carrying only the names + the direction. Sending the WHOLE
+// resulting policy instead let a stale page revert a concurrent change, and
+// because that body also carries the metric + log-pattern grains, a services
+// bulk action could wipe a colleague's metric/log-pattern exclusions.
+describe("ServicesPage bulk Ignore/Resume learning", () => {
+  // Restore the module mock's community defaults so the licensed-admin surface
+  // this block opts into doesn't leak into later describes.
+  afterEach(async () => {
+    const { ApiError } = await import("@/lib/api");
+    vi.mocked(api.listBaselines).mockRejectedValue(
+      new ApiError(403, "community"),
+    );
+    vi.mocked(api.getSSODeployment).mockRejectedValue(
+      new ApiError(403, "community"),
+    );
+    vi.mocked(getSsoSession).mockRejectedValue(new ApiError(401, "no session"));
+    vi.mocked(api.getLearnExclusions).mockResolvedValue({
+      services: [],
+      metrics: [],
+      patterns: [],
+    });
+  });
+
+  function renderBulk(
+    excluded: string[],
+    otherGrains: { metrics: string[]; patterns: string[] } = {
+      metrics: [],
+      patterns: [],
+    },
+  ) {
+    vi.mocked(api.listServicesIndex).mockResolvedValue({
+      services: { checkout: svc(), payments: svc(), search: svc() },
+      total: 3,
+      next_offset: null,
+    });
+    vi.mocked(api.listBaselines).mockResolvedValue({
+      type: "metric",
+      count: 0,
+      baselines: [],
+    });
+    vi.mocked(api.getSSODeployment).mockResolvedValue({ org: "acme" });
+    vi.mocked(getSsoSession).mockResolvedValue({
+      org: "acme",
+      email: "admin@acme.test",
+      subject: "admin",
+      mfa: false,
+      role: "admin",
+      issued_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    vi.mocked(api.getLearnExclusions).mockResolvedValue({
+      services: excluded,
+      ...otherGrains,
+    });
+    vi.mocked(api.setLearnExclusions).mockClear();
+    vi.mocked(api.setServiceLearnExclusions).mockClear();
+    vi.mocked(api.setServiceLearnExclusions).mockResolvedValue({
+      services: excluded,
+      ...otherGrains,
+    });
+    vi.mocked(api.setServiceLearnExclusion).mockClear();
+    return renderPage();
+  }
+
+  async function selectAllThree(scopeTab: RegExp) {
+    fireEvent.click(await screen.findByRole("tab", { name: scopeTab }));
+    for (const name of ["checkout", "payments", "search"]) {
+      fireEvent.click(await screen.findByLabelText(`Select service ${name}`));
+    }
+  }
+
+  it("ignores every selected service in exactly ONE batch call", async () => {
+    renderBulk([]);
+    await selectAllThree(/Active/);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Ignore learning" }),
+    );
+    await waitFor(() =>
+      expect(vi.mocked(api.setServiceLearnExclusions)).toHaveBeenCalledTimes(1),
+    );
+    expect(vi.mocked(api.setServiceLearnExclusions).mock.calls[0]).toEqual([
+      ["checkout", "payments", "search"],
+      true,
+    ]);
+    // The whole-list PUT and the racing per-service route are both out of the
+    // bulk path — the client never sends a resulting policy for this action.
+    expect(vi.mocked(api.setLearnExclusions)).not.toHaveBeenCalled();
+    expect(vi.mocked(api.setServiceLearnExclusion)).not.toHaveBeenCalled();
+  });
+
+  it("resumes every selected service in exactly ONE batch call", async () => {
+    renderBulk(["checkout", "payments", "search"]);
+    await selectAllThree(/Ignored/);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Resume learning" }),
+    );
+    await waitFor(() =>
+      expect(vi.mocked(api.setServiceLearnExclusions)).toHaveBeenCalledTimes(1),
+    );
+    expect(vi.mocked(api.setServiceLearnExclusions).mock.calls[0]).toEqual([
+      ["checkout", "payments", "search"],
+      false,
+    ]);
+    expect(vi.mocked(api.setLearnExclusions)).not.toHaveBeenCalled();
+    expect(vi.mocked(api.setServiceLearnExclusion)).not.toHaveBeenCalled();
+  });
+
+  // The metric + log-pattern grains are simply not in the request — the client
+  // sends the service names and the direction, nothing else. Carrying them (as
+  // the old whole-list PUT did) is how a services bulk action could revert a
+  // colleague's metric / log-pattern exclusions.
+  it("sends ONLY the service names and the exclude flag — no other grain", async () => {
+    renderBulk([], {
+      metrics: ["go_*", "up"],
+      patterns: ["log:checkout:abc123"],
+    });
+    await selectAllThree(/Active/);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Ignore learning" }),
+    );
+    await waitFor(() =>
+      expect(vi.mocked(api.setServiceLearnExclusions)).toHaveBeenCalledTimes(1),
+    );
+    const [services, exclude] = vi.mocked(api.setServiceLearnExclusions).mock
+      .calls[0];
+    expect(services).toEqual(["checkout", "payments", "search"]);
+    expect(exclude).toBe(true);
+    expect(vi.mocked(api.setServiceLearnExclusions).mock.calls[0]).toHaveLength(
+      2,
+    );
+    expect(vi.mocked(api.setLearnExclusions)).not.toHaveBeenCalled();
+  });
+
+  // The policy the write returns is adopted into the shared cache, so the scope
+  // counts and the partitioned table follow a bulk action with no reload.
+  it("moves every bulk-ignored service into the Ignored scope with no reload", async () => {
+    renderBulk([]);
+    await selectAllThree(/Active/);
+    // From the click on, both the write's answer and the post-write refetch
+    // report the server's new policy.
+    const after = {
+      services: ["checkout", "payments", "search"],
+      metrics: [],
+      patterns: [],
+    };
+    vi.mocked(api.setServiceLearnExclusions).mockResolvedValue(after);
+    vi.mocked(api.getLearnExclusions).mockResolvedValue(after);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Ignore learning" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("tab", { name: /Ignored/ }).textContent,
+      ).toContain("3"),
+    );
+    expect(screen.getByRole("tab", { name: /Active/ }).textContent).toContain(
+      "0",
+    );
+    expect(screen.queryByText("payments")).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: /Ignored/ }));
+    for (const name of ["checkout", "payments", "search"]) {
+      expect(await screen.findByText(name)).toBeTruthy();
+    }
   });
 });
 

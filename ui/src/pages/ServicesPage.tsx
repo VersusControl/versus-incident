@@ -344,18 +344,24 @@ export function ServicesPage() {
         bulk.clear();
         break;
       }
-      case "ignore":
-        bulk.selectedKeys
-          .filter((name) => !ignore.isServiceExcluded(name))
-          .forEach((name) => ignore.toggleService(name, true));
+      case "ignore": {
+        // Sends only intent; the server merges it under a per-org lock, so
+        // concurrent writers compose instead of clobbering each other.
+        const toIgnore = bulk.selectedKeys.filter(
+          (name) => !ignore.isServiceExcluded(name),
+        );
+        if (toIgnore.length > 0) ignore.toggleServices(toIgnore, true);
         bulk.clear();
         break;
-      case "resume":
-        bulk.selectedKeys
-          .filter((name) => ignore.isServiceExcluded(name))
-          .forEach((name) => ignore.toggleService(name, false));
+      }
+      case "resume": {
+        const toResume = bulk.selectedKeys.filter((name) =>
+          ignore.isServiceExcluded(name),
+        );
+        if (toResume.length > 0) ignore.toggleServices(toResume, false);
         bulk.clear();
         break;
+      }
       case "rename":
         if (selectedManual.length === 1) setRenameTarget(selectedManual[0]);
         break;

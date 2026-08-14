@@ -17,6 +17,16 @@ interface LearnExclusionsWire {
   log_patterns?: string[];
 }
 
+// fromLearnExclusionsWire is the ONE place the `log_patterns` ⇄ `patterns` seam
+// is crossed, so every read/write of the policy returns the same UI shape.
+function fromLearnExclusionsWire(r: LearnExclusionsWire): LearnExclusions {
+  return {
+    services: r.services ?? [],
+    metrics: r.metrics ?? [],
+    patterns: r.log_patterns ?? [],
+  };
+}
+
 const SECRET_KEY = "versus.gatewaySecret";
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ""; // empty → uses Vite proxy
 
@@ -1865,7 +1875,9 @@ export const api = {
   // cookie, never a static token; the org and role are derived server-side. The
   // GET is the single state source the toggle + per-metric checkboxes read;
   // setServiceLearnExclusion toggles ONE service (POST add / DELETE remove);
-  // setLearnExclusions PUTs the whole list (read-modify-write off the GET),
+  // setServiceLearnExclusions posts an intent for MANY services at once, merged
+  // server-side under a per-org lock; setLearnExclusions PUTs the whole list
+  // (read-modify-write off the GET),
   // which is ALSO how a per-log-pattern exclusion is toggled (the server has no
   // per-pattern POST/DELETE convenience route — the whole-list PUT is the sole
   // write path for the `patterns` grain, same as metric/trace signals). All
@@ -1882,11 +1894,7 @@ export const api = {
   getLearnExclusions: () =>
     sessionRequest<LearnExclusionsWire>(
       "/enterprise/api/agent/learn-exclusions",
-    ).then((r) => ({
-      services: r.services ?? [],
-      metrics: r.metrics ?? [],
-      patterns: r.log_patterns ?? [],
-    })),
+    ).then(fromLearnExclusionsWire),
   setLearnExclusions: (input: LearnExclusions) =>
     sessionRequest<LearnExclusionsWire>("/enterprise/api/agent/learn-exclusions", {
       method: "PUT",
@@ -1895,20 +1903,22 @@ export const api = {
         metrics: input.metrics,
         log_patterns: input.patterns,
       }),
-    }).then((r) => ({
-      services: r.services ?? [],
-      metrics: r.metrics ?? [],
-      patterns: r.log_patterns ?? [],
-    })),
+    }).then(fromLearnExclusionsWire),
   setServiceLearnExclusion: (name: string, excluded: boolean) =>
     sessionRequest<LearnExclusionsWire>(
       `/enterprise/api/agent/learn-exclusions/services/${encodeURIComponent(name)}`,
       { method: excluded ? "POST" : "DELETE" },
-    ).then((r) => ({
-      services: r.services ?? [],
-      metrics: r.metrics ?? [],
-      patterns: r.log_patterns ?? [],
-    })),
+    ).then(fromLearnExclusionsWire),
+  // setServiceLearnExclusions is the BULK service write. It sends INTENT — the
+  // selected names + the direction — and NOT a resulting list, so a stale page
+  // can never revert a concurrent change or clobber another grain: the server
+  // merges against the current stored policy under a per-org lock and keeps
+  // metrics / includes / log patterns, which are never taken from the client.
+  setServiceLearnExclusions: (services: string[], exclude: boolean) =>
+    sessionRequest<LearnExclusionsWire>(
+      "/enterprise/api/agent/learn-exclusions/services/batch",
+      { method: "POST", body: JSON.stringify({ services, exclude }) },
+    ).then(fromLearnExclusionsWire),
 
   // getSSODeployment reads the license-issued single-tenant deployment org so
   // the admin controls drive SSO/connections/policy under it (not "default").
