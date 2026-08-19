@@ -31,7 +31,7 @@ type AISettingsResolver interface {
 
 // AIProviderResolver is an OPTIONAL extension of AISettingsResolver: a
 // registered resolver that ALSO implements it can override the model PROVIDER
-// (openai | deepseek | qwen | ollama | claude | gemini) at runtime, so an
+// (openai | deepseek | qwen | ollama | claude | gemini | litellm) at runtime, so an
 // operator's provider change rebuilds the agent's model on its next run
 // without a process restart. ok=false ⇒ no opinion (use the configured
 // provider). A resolver that does not implement this interface simply has no
