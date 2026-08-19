@@ -22,7 +22,7 @@ require (
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/slack-go/slack v0.27.0
 	github.com/spf13/viper v1.21.0
-	golang.org/x/image v0.44.0
+	golang.org/x/image v0.45.0
 	golang.org/x/time v0.15.0
 	google.golang.org/genai v1.63.0
 )
@@ -164,6 +164,6 @@ require (
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.51.0 // indirect
 	github.com/valyala/tcplisten v1.0.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.40.0
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.41.0
 )
