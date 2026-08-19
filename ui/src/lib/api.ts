@@ -241,14 +241,98 @@ export interface BaselinesResponse {
 // reason when AI is disabled. Advisory only — adopting an objective is a human
 // action; the page never mutates cluster state.
 
+// SLOErrorBudget is the failure allowance implied by the objective over the
+// window: `ratio` of bad events and `minutes` of downtime, plus how much of it
+// is already spent.
+export interface SLOErrorBudget {
+  ratio: number;
+  minutes: number;
+  consumed_ratio?: number;
+}
+
+// SLOBurnAlert is one multiwindow burn-rate alert the platform would raise for
+// the objective. Windows are Go duration strings ("1h0m0s", "5m0s") — render
+// them through formatGoDuration, never raw.
+export interface SLOBurnAlert {
+  name: string;
+  long_window: string;
+  short_window: string;
+  burn_rate: number;
+  bad_ratio_threshold: number; // ratio in (0,1)
+  budget_pct_per_window: number; // percent of the window's budget
+  // enforced states whether the platform itself raises this alert. Absent on a
+  // server that doesn't mark them; the UI then falls back to adoption state.
+  enforced?: boolean;
+}
+
+// SLOEvidence is the deterministic backing for an SLI: how much signal the
+// platform actually observed, and the derived 0–1 score used as the
+// confidence (preferred over the model's own `confidence`).
+export interface SLOEvidence {
+  observations: number;
+  confident: boolean;
+  incident_count: number;
+  window_days: number;
+  score: number; // 0..1
+}
+
+// SLORecommendationSLI is one recommended indicator. Everything past
+// `confidence` is OPTIONAL platform enrichment — an older server omits it and
+// the page degrades to the name/target/rationale it has always shown.
 export interface SLORecommendationSLI {
   name: string;
   type: string; // availability | latency | error_rate | throughput | saturation
   signal: string;
-  objective: number; // ratio in (0,1), or a latency target in ms
+  objective: number; // ratio in (0,1); an older server sent latency ms here
   window_days: number;
   rationale: string;
   confidence: number; // 0..1
+  query?: string; // the measurable expression (PromQL) when discovered
+  // threshold_ms is the latency ceiling a latency objective's compliance ratio
+  // is measured against — a histogram bucket boundary the platform can
+  // actually query. Absent for every other indicator family.
+  threshold_ms?: number;
+  // objective_ratio is the compliance ratio a LATENCY objective is enforced as:
+  // the fraction of requests that must complete under threshold_ms. The error
+  // budget and burn rungs are derived from it, never from the milliseconds.
+  objective_ratio?: number;
+  good_events?: string; // plain-language numerator
+  valid_events?: string; // plain-language denominator
+  observed?: number; // current attainment as a ratio — for latency, compliance
+  // observed_p99_ms is the measured p99 in milliseconds, supporting evidence
+  // for a latency indicator whose attainment is a ratio.
+  observed_p99_ms?: number;
+  headroom_pp?: number; // observed vs objective, in percentage points
+  breaching?: boolean;
+  error_budget?: SLOErrorBudget;
+  burn_alerts?: SLOBurnAlert[];
+  evidence?: SLOEvidence;
+  adoptable?: boolean;
+  // not_adoptable_reason is the server's plain-language explanation, present
+  // when adoptable === false.
+  not_adoptable_reason?: string;
+  adopted?: boolean;
+}
+
+// SLOAdoptedSLO is the objective an operator adopted for the service — what the
+// burn evaluator enforces right now. Omitted when nothing is adopted.
+export interface SLOAdoptedSLO {
+  sli?: string;
+  sli_type: string;
+  objective: number;
+  window_days: number;
+  threshold_ms?: number; // the enforced latency ceiling; absent for availability
+  // threshold_resync records the last time the platform MOVED this adopted
+  // latency threshold on its own (the objective is re-pinned to the histogram
+  // bucket its query actually measures). to_ms equals threshold_ms. Omitted
+  // when the objective was never re-synced; cleared on adopt and revert.
+  threshold_resync?: {
+    from_ms: number;
+    to_ms: number;
+    at: string;
+  };
+  adopted_at?: string;
+  by?: string;
 }
 
 export interface SLORecommendation {
@@ -260,6 +344,37 @@ export interface SLORecommendation {
   prompt_hash?: string;
   summary: string;
   slis: SLORecommendationSLI[];
+  priority?: number; // 0..1 rank; HIGHER = adopt first
+  // adopted is the AVAILABILITY objective currently enforced; latency_adopted
+  // is the LATENCY one. They are independent slots — adopting one never clears
+  // the other, so a service can carry both.
+  adopted?: SLOAdoptedSLO;
+  latency_adopted?: SLOAdoptedSLO;
+}
+
+// SLOAdoptAdjustment is one number the adopt boundary moved from what the
+// recommendation proposed, with the server's plain-language reason.
+export interface SLOAdoptAdjustment {
+  from?: number;
+  to?: number;
+  reason?: string;
+}
+
+// SLOAdoptResponse is the ack for adopting one objective. Every field is
+// optional so a thin `{}`/`{"ok":true}` server ack still resolves.
+export interface SLOAdoptResponse {
+  ok?: boolean;
+  service?: string;
+  sli?: string;
+  adopted_at?: string;
+  // adjusted is present only when adopting changed something the model
+  // proposed — notably the latency threshold, which is snapped to the
+  // histogram bucket boundary the compliance ratio can be measured against.
+  adjusted?: {
+    objective?: SLOAdoptAdjustment;
+    threshold_ms?: SLOAdoptAdjustment;
+    window_days?: SLOAdoptAdjustment;
+  };
 }
 
 export interface SLOGateStatus {
@@ -1618,6 +1733,30 @@ export const api = {
     sessionRequest<SLOAutodefineConfig>(
       "/enterprise/api/agent/slo-autodefine/config",
       { method: "PUT", body: JSON.stringify({ enabled }) },
+    ),
+
+  // adoptSLORecommendation adopts one recommended objective for a service: the
+  // platform starts tracking it and raises a burn-rate alert when the error
+  // budget is at risk. Enterprise + RBAC-gated like the cadence config, so it
+  // rides the SSO session cookie.
+  adoptSLORecommendation: (service: string, sli: string) =>
+    sessionRequest<SLOAdoptResponse>(
+      `/enterprise/api/agent/slo/recommendations/${encodeURIComponent(service)}/adopt`,
+      { method: "POST", body: JSON.stringify({ sli }) },
+    ),
+
+  // unadoptSLORecommendation reverts the service to the platform's
+  // auto-derived objective. `type` names which of the two independent
+  // objectives to revert; omitted means availability, matching the server's
+  // default. 409 not_adopted (nothing was adopted) and 422 cannot_revert (no
+  // observed attainment to re-derive from) both arrive as an ApiError carrying
+  // the server's plain-language message.
+  unadoptSLORecommendation: (service: string, type?: "latency") =>
+    sessionRequest<SLOAdoptResponse>(
+      `/enterprise/api/agent/slo/recommendations/${encodeURIComponent(service)}/adopt${
+        type ? `?type=${encodeURIComponent(type)}` : ""
+      }`,
+      { method: "DELETE" },
     ),
 
   // Alert fatigue config + fingerprint review (Enterprise, RBAC

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
 import { X } from "lucide-react";
 import { Sidebar, SidebarContent } from "./Sidebar";
 import { ToastProvider } from "./Toast";
 import { ShortcutOverlay } from "./ShortcutOverlay";
+import { QueryErrorBoundary } from "./ErrorBoundary";
 import { ShellContext } from "./shellContext";
 import { ReauthModal } from "@/lib/auth";
 import { useShortcuts } from "@/lib/hooks";
@@ -14,6 +15,7 @@ export function AppShell() {
   const [drawer, setDrawer] = useState(false);
   const [help, setHelp] = useState(false);
   const mainRef = useRef<HTMLDivElement>(null);
+  const { pathname } = useLocation();
 
   useShortcuts({ onHelp: useCallback(() => setHelp((h) => !h), []) });
 
@@ -54,7 +56,12 @@ export function AppShell() {
             tabIndex={-1}
             className="flex min-w-0 flex-1 flex-col overflow-hidden outline-none"
           >
-            <Outlet />
+            {/* Keyed by pathname: a page crash keeps the shell navigable and
+                navigating away remounts a clean boundary — and drops the cached
+                payload the crashed page rendered from. */}
+            <QueryErrorBoundary key={pathname} context="Couldn't render this page">
+              <Outlet />
+            </QueryErrorBoundary>
           </div>
         </div>
 
