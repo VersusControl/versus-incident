@@ -1,0 +1,12 @@
+# SNS must render into the server's queue block (the binary reads queue.sns,
+# not alert.sns) with the topic ARN pinned, plus the static credential env.
+^    queue:
+^        topic_arn: \$\{SNS_TOPIC_ARN\}
+^        https_endpoint_subscription: \$\{SNS_HTTPS_ENDPOINT_SUBSCRIPTION\}
+^        https_endpoint_subscription_path: /sns
+- name: SNS_TOPIC_ARN
+- name: AWS_ACCESS_KEY_ID
+- name: AWS_SECRET_ACCESS_KEY
+- name: AWS_REGION
+sns_topic_arn:
+aws_access_key_id:

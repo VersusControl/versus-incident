@@ -12,6 +12,12 @@ This guide walks you from a fresh start to a live Enterprise SRE Agent. You'll s
 | **Postgres** (plus the usual infra the agent already uses, e.g. Redis) | The agent persists what it learns — baselines, settings, audit trail — to Postgres so it survives restarts. |
 | The **built-in default admin password** printed once in the boot log | The privileged controls are gated on your RBAC role. The built-in default admin is a root account (owner) you log into directly to configure SSO — no env, no token. See [Single Sign-On](./sso/overview.md). |
 
+> **Coming from OSS?** If you're coming from OSS and use PostgreSQL storage and
+> want to keep your existing data, read
+> [Migrating OSS data to Enterprise](../migration/migration-oss-to-enterprise.md)
+> — Enterprise reads under your license org, so your incidents, analyses and
+> learned state stay invisible under `default` until you migrate them.
+
 ## Get your license key from the management platform
 
 _Enterprise_

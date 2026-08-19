@@ -50,6 +50,16 @@ func secretSet(s string) string {
 	return "set"
 }
 
+// secretSetFlag renders an already-resolved set/unset fact in the same marker
+// shape as secretSet, for a secret whose presence is resolved through a runtime
+// seam and whose value therefore never reaches this package.
+func secretSetFlag(set bool) string {
+	if !set {
+		return ""
+	}
+	return "set"
+}
+
 // keysOf returns the sorted-ish set of keys from a map[string]string,
 // dropping the values entirely (they are typically secret URLs / ARNs).
 func keysOf(m map[string]string) []string {
@@ -66,7 +76,13 @@ func keysOf(m map[string]string) []string {
 func (c *ConfigAdminController) incidents(ctx *fiber.Ctx) error {
 	cfg := config.GetConfig()
 
-	alert := cfg.Alert
+	// Report the runtime-EFFECTIVE channel config (an enterprise per-org
+	// override when set, else the YAML floor), so an operator who hot-configured
+	// a channel sees the enable flag and credential markers the emission path
+	// will actually use. Reading the static alert.* here went stale exactly like
+	// the agent AI toggle and the report channel picker did. Community OSS has no
+	// resolver, so this is cfg.Alert unchanged. Secrets stay set/unset markers.
+	alert := config.EffectiveAlertConfig(ctx.UserContext())
 	channels := []fiber.Map{
 		{
 			"id":     "slack",
@@ -281,7 +297,21 @@ func (c *ConfigAdminController) agent(ctx *fiber.Ctx) error {
 	// set, else the YAML floor) so the dashboard top bar and config views match
 	// what the worker is actually running. Community OSS has no resolver, so
 	// this is a.Mode unchanged.
-	effectiveMode := agent.EffectiveModeForOrg(middleware.OrgFromContext(ctx), a.Mode)
+	org := middleware.OrgFromContext(ctx)
+	effectiveMode := agent.EffectiveModeForOrg(org, a.Mode)
+
+	// Same story for the AI block: the admin AI toggle writes a runtime
+	// override, so reporting the static YAML flag here would show AI off after
+	// an operator switched it on. Community OSS has no resolver, so these are
+	// a.AI.Enable / a.AI.Provider unchanged.
+	effectiveAIEnable, effectiveAIProvider := agent.EffectiveAISettingsForOrg(org, a.AI.Enable, a.AI.Provider)
+
+	// And the credential: an org whose key lives only in the runtime override
+	// reported api_key:"" from the YAML floor, so the UI claimed no key was
+	// configured while the worker was calling the model with it. The effective
+	// state is reported as a set/unset MARKER only — never the key, never a
+	// masked prefix — resolved through the same seam as the enable flag.
+	effectiveAIKeySet := agent.EffectiveAIKeySetForOrg(org, a.AI.APIKey)
 
 	return ctx.JSON(fiber.Map{
 		"enable":            a.Enable,
@@ -315,13 +345,14 @@ func (c *ConfigAdminController) agent(ctx *fiber.Ctx) error {
 			"rules":           rules,
 		},
 		"ai": fiber.Map{
-			"enable":             a.AI.Enable,
+			"enable":             effectiveAIEnable,
+			"provider":           effectiveAIProvider,
 			"model":              a.AI.Model,
 			"temperature":        a.AI.Temperature,
 			"max_tokens":         a.AI.MaxTokens,
 			"max_calls_per_hour": a.AI.MaxCallsPerHour,
 			"cache_ttl":          a.AI.CacheTTL,
-			"api_key":            secretSet(a.AI.APIKey),
+			"api_key":            secretSetFlag(effectiveAIKeySet),
 			"analyze": fiber.Map{
 				"model": a.AI.Analyze.Model,
 			},

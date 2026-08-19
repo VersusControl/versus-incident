@@ -226,12 +226,82 @@ func TestEmitFingerprint(t *testing.T) {
 		}
 	})
 
+	t.Run("distinct cloudwatch alarms on one service do not collide", func(t *testing.T) {
+		// Both alarms share source, service and severity; only the alarm name
+		// differs. Before AlarmName joined the title key set both hashed to the
+		// same degenerate key and deduped each other.
+		alarm := func(name string) map[string]interface{} {
+			return map[string]interface{}{
+				"Source":        "sns",
+				"AlarmName":     name,
+				"NewStateValue": "ALARM",
+				"severity":      "warning",
+				"Trigger": map[string]interface{}{"Dimensions": []interface{}{
+					map[string]interface{}{"name": "ServiceName", "value": "checkout"},
+				}},
+			}
+		}
+		five := alarm("checkout-5xx")
+		latency := alarm("checkout-latency")
+		if EmitFingerprint(five) == EmitFingerprint(latency) {
+			t.Fatalf("distinct CloudWatch alarms shared fingerprint %q", EmitFingerprint(five))
+		}
+		// The same alarm firing again must still fold onto one key.
+		if EmitFingerprint(five) != EmitFingerprint(alarm("checkout-5xx")) {
+			t.Fatal("the same CloudWatch alarm produced different fingerprints")
+		}
+	})
+
+	t.Run("duplicate spellings of a title key keep one dedup bucket", func(t *testing.T) {
+		// A payload carrying two spellings of the same title key used to be
+		// titled by whichever spelling map iteration yielded, so the same alert
+		// landed in two dedup buckets and lost its suppression state.
+		seen := map[string]int{}
+		for i := 0; i < 2000; i++ {
+			seen[EmitFingerprint(map[string]interface{}{
+				"Source":    "sns",
+				"service":   "checkout",
+				"severity":  "warning",
+				"AlarmName": "alpha",
+				"alarmname": "beta",
+			})]++
+		}
+		if len(seen) != 1 {
+			t.Fatalf("duplicate title spellings produced %d dedup buckets: %v", len(seen), seen)
+		}
+	})
+
 	t.Run("ignores raw payload fields", func(t *testing.T) {
 		withRaw := cloneContent(agent)
 		withRaw["Raw"] = "SECRET-TOKEN-abc123"
 		withRaw["raw"] = "another secret"
 		if EmitFingerprint(agent) != EmitFingerprint(withRaw) {
 			t.Fatal("fingerprint changed with an unrelated raw field; it must read only the composite keys")
+		}
+	})
+
+	t.Run("a pattern verdict does not move the severity slot", func(t *testing.T) {
+		// An agent finding carries no real severity; the pattern later acquires
+		// an operator-set verdict. That must not re-key the finding into a new
+		// dedup bucket, and it must not put operator free text in the slot the
+		// priority floor reads.
+		finding := map[string]interface{}{
+			"Source":      "agent:elasticsearch:prod-app",
+			"ServiceName": "checkout",
+			"PatternID":   "p-123",
+		}
+		labelled := cloneContent(finding)
+		labelled["Verdict"] = "known"
+		if EmitFingerprint(finding) != EmitFingerprint(labelled) {
+			t.Fatalf("verdict changed the fingerprint: %q vs %q", EmitFingerprint(finding), EmitFingerprint(labelled))
+		}
+		if got := ExtractSeverity(labelled); got != "" {
+			t.Fatalf("ExtractSeverity of a verdict-only finding = %q, want empty", got)
+		}
+		critical := cloneContent(finding)
+		critical["verdict"] = "critical"
+		if got := ExtractSeverity(critical); got != "" {
+			t.Fatalf("operator-typed verdict surfaced as severity %q; the priority floor must not be steerable this way", got)
 		}
 	})
 }

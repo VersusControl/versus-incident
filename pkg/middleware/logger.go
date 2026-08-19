@@ -36,9 +36,11 @@ func Logger() fiber.Handler {
 		clientIP := c.IP()
 		userAgent := c.Get("User-Agent")
 
+		// The path, User-Agent and response body are caller-controlled, so they
+		// are quoted: an embedded newline would otherwise forge a whole log line.
 		if status >= 400 {
 			log.Printf(
-				"%s %s %d %v %s %s",
+				"%s %q %d %v %q %q",
 				method,
 				path,
 				status,
@@ -48,7 +50,7 @@ func Logger() fiber.Handler {
 			)
 		} else {
 			log.Printf(
-				"%s %s %d %v %s",
+				"%s %q %d %v %q",
 				method,
 				path,
 				status,

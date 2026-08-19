@@ -80,6 +80,10 @@ type DescribeDependencies struct {
 	// Store is optional. When nil, neighbours are returned without the
 	// has_recent_incident annotation.
 	Store storage.Provider
+	// OrgID scopes the incident annotation to one organization. Blank means
+	// storage.DefaultOrgID, so an unset field reads the default tenant rather
+	// than every tenant in the store.
+	OrgID string
 }
 
 // Name implements core.AnalyzeTool.
@@ -167,7 +171,7 @@ func (d DescribeDependencies) servicesWithRecentIncident(windowMinutes int) map[
 	if d.Store == nil {
 		return nil
 	}
-	all, err := d.Store.ListIncidents(0)
+	all, err := incidentsForOrg(d.Store, d.OrgID)
 	if err != nil {
 		// Annotation is best-effort; a store error degrades to no flags
 		// rather than failing the whole lookup.
@@ -176,10 +180,11 @@ func (d DescribeDependencies) servicesWithRecentIncident(windowMinutes int) map[
 	cutoff := time.Now().UTC().Add(-time.Duration(windowMinutes) * time.Minute)
 	set := make(map[string]bool)
 	for _, rec := range all {
-		if rec.Service == "" || rec.CreatedAt.Before(cutoff) {
+		service := rec.ServiceLabel()
+		if service == "" || rec.CreatedAt.Before(cutoff) {
 			continue
 		}
-		set[strings.ToLower(rec.Service)] = true
+		set[strings.ToLower(service)] = true
 	}
 	return set
 }

@@ -15,13 +15,14 @@
 package services
 
 import (
-	"fmt"
-	"hash/fnv"
+	"crypto/sha256"
+	"encoding/hex"
 	"log"
 	"strings"
 	"sync/atomic"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
 // EmitAction is the interceptor's verdict for one finding.
@@ -119,30 +120,103 @@ func filterProvidersByChannel(providers []core.AlertProvider, names []string) []
 // EmitFingerprint builds a stable, redaction-safe dedup key from an
 // already-redacted content map: Source + ServiceName/Service + PatternID +
 // Severity. When PatternID is absent (e.g. a webhook incident) it falls back to
-// a normalized-title hash so distinct titles still separate. It reads only
-// values already present in the content map — never a raw payload — so the
-// enterprise wrapper can reuse the exact same key as its own store key.
+// a normalized-title hash so distinct titles still separate. All four
+// components are read through the shared extraction, so a payload is grouped on
+// the same values it is displayed under, and all four come off ONE folded view
+// of the payload, so a wide payload is scanned once rather than once per
+// component. That shared accessor also resolves a payload that carries two
+// spellings of a key the same way on every read, so one payload can never split
+// into two dedup buckets. It reads only values already present in the content
+// map — never a raw payload — so the enterprise wrapper can reuse the exact same
+// key as its own store key.
+//
+// Every component is escaped before it is joined, so a separator inside a
+// component can never be read as a component boundary. Without that, an alert
+// whose service label legitimately carries the separator ("checkout|eu") could
+// be landed on by a crafted PatternID ("eu|P42"), which shifts the boundary and
+// silences the victim through its own dedup bucket.
+//
+// Operator note: escaping the components, moving the title hash to SHA-256, and
+// resolving source/pattern through the shared accessor (which trims and folds
+// duplicate spellings) re-key existing fingerprints once. They ship together
+// with the AlarmName title change so operators absorb ONE combined re-key:
+// fatigue rows written under the old keys stop matching, new rows are created,
+// and the stale rows age out on their normal retention.
+//
+// A caller that already holds a utils.FoldedPayload should call
+// EmitFingerprintFrom instead, so the emit folds once rather than twice.
 func EmitFingerprint(content map[string]interface{}) string {
-	source := firstString(content, "source")
-	service := extractService(content)
-	pattern := firstString(content, "patternid", "pattern_id", "key")
-	severity := firstString(content, "severity")
+	return EmitFingerprintFrom(utils.NewFoldedPayload(content))
+}
+
+// EmitFingerprintFrom is EmitFingerprint for a caller that already holds a
+// folded view of the payload. Building the fold is the expensive half of an
+// emit, so an interceptor that reads service/severity/source off its own
+// utils.FoldedPayload passes that payload here and the whole emit path folds
+// exactly once instead of twice. Both entry points compose the identical key
+// for the same content — EmitFingerprint is a thin wrapper that builds a
+// payload and delegates — so a store can mix keys from either without
+// splitting a dedup bucket. A nil payload yields the all-empty key, matching
+// EmitFingerprint(nil).
+func EmitFingerprintFrom(payload *utils.FoldedPayload) string {
+	if payload == nil {
+		payload = utils.NewFoldedPayload(nil)
+	}
+
+	source := payload.Source()
+	service := payload.Service()
+	pattern := payload.PatternID()
+	severity := payload.Severity()
 
 	if pattern == "" {
-		if title := firstString(content, "title", "alertname", "summary", "subject", "name"); title != "" {
+		if title := payload.Title(); title != "" {
 			pattern = "t:" + hashNormalized(title)
 		}
 	}
 
-	return strings.Join([]string{source, service, pattern, severity}, "|")
+	parts := []string{source, service, pattern, severity}
+	for i, p := range parts {
+		parts[i] = escapeFingerprintComponent(p)
+	}
+	return strings.Join(parts, string(fingerprintSeparator))
+}
+
+const (
+	// fingerprintSeparator joins the fingerprint's escaped components.
+	fingerprintSeparator = '|'
+	// fingerprintEscape prefixes a separator, or itself, inside a component.
+	fingerprintEscape = '\\'
+	// titleHashHexLen is the hex width of the title hash: 32 chars, the leading
+	// 128 bits of the SHA-256 digest. Fixed-width hex keeps the component the
+	// same shape for any store or index keyed on it.
+	titleHashHexLen = 32
+)
+
+// escapeFingerprintComponent leaves a component free of unescaped separators.
+// The encoding is injective, so two payloads share a fingerprint only when
+// their components are equal one for one.
+func escapeFingerprintComponent(s string) string {
+	if !strings.ContainsRune(s, fingerprintSeparator) && !strings.ContainsRune(s, fingerprintEscape) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for _, r := range s {
+		if r == fingerprintSeparator || r == fingerprintEscape {
+			b.WriteRune(fingerprintEscape)
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // hashNormalized lowercases, trims, and collapses internal whitespace before
 // hashing, so cosmetically different renderings of the same title fold to one
-// key.
+// key. The digest is SHA-256 truncated to titleHashHexLen: this hash names a
+// dedup bucket, so an attacker must not be able to construct a title that lands
+// in someone else's — a promise a non-cryptographic hash cannot make.
 func hashNormalized(s string) string {
 	norm := strings.ToLower(strings.Join(strings.Fields(s), " "))
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(norm))
-	return fmt.Sprintf("%016x", h.Sum64())
+	sum := sha256.Sum256([]byte(norm))
+	return hex.EncodeToString(sum[:titleHashHexLen/2])
 }

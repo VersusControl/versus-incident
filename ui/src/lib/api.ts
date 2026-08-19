@@ -1599,6 +1599,17 @@ export interface AlertFatigueDependencyHoldsResponse {
 // listable and is rejected 400 if requested — it is deliberately absent here.
 export type AlertFatigueStatus = "fatigued" | "reclaimed" | "pending_review";
 
+// AlertFatigueListFilter is what the fingerprint list accepts as `?status=`.
+// It is wider than AlertFatigueStatus: `tracking` lists still-paging rows, and
+// `unreachable` is a PSEUDO-status (no row is ever stored with it) that is the
+// only view returning rows whose fingerprint can no longer match a live alert.
+// Every other view excludes them. An older server rejects `unreachable` with
+// 400 — callers must tolerate that rather than assume the view exists.
+export type AlertFatigueListFilter =
+  | AlertFatigueStatus
+  | "tracking"
+  | "unreachable";
+
 // AlertFatigueFinding is one reviewable fingerprint row. `alert_content` is the
 // ALREADY-REDACTED captured alert map (never a raw secret); the peek renders it
 // verbatim. `status` is one of AlertFatigueStatus on the wire (the server never
@@ -1627,6 +1638,12 @@ export interface AlertFatigueFinding {
   // fingerprint always pages (high/critical or a severity-only floor) and can
   // never be suppressed, so "Mark as spam" would silently lie for the row.
   floor?: boolean;
+  // unreachable marks a stale key from an older fingerprint format that no
+  // future alert can ever match, so confirm/reclaim on it is a no-op the server
+  // refuses with 409. The server always sends it (false everywhere except the
+  // explicit `?status=unreachable` view); it stays optional here so an older
+  // server that omits the field reads as reachable rather than crashing.
+  unreachable?: boolean;
 }
 
 export interface AlertFatigueFindingsResponse {
@@ -1774,8 +1791,10 @@ export const api = {
       body: JSON.stringify(cfg),
     }),
   // listAlertFatigueFingerprints reads one page of the review table. `status`
-  // filters by review state (omit for all listable rows); passing `tracking`
-  // lists the still-paging rows the operator can suppress from the Tracking tab.
+  // filters by review state (omit for all listable rows, see
+  // AlertFatigueListFilter); passing `tracking` lists the still-paging rows the
+  // operator can suppress from the Tracking tab, and `unreachable` is the only
+  // view that returns dead keys (400 on an older server).
   // `service` is an optional exact-match filter applied WITHIN the active status
   // (used by the top-noisy drill-down). `sort` (last_seen default /
   // repeat_count / priority) and `dir` (asc / desc, default desc) drive the
@@ -1803,7 +1822,9 @@ export const api = {
   },
   // confirmAlertFatigueFingerprint marks a fingerprint as spam (status →
   // fatigued); reclaimAlertFatigueFingerprint marks it NOT spam (status →
-  // reclaimed, pages forever). Both 404 when the id is not this org's.
+  // reclaimed, pages forever). Both 404 when the id is not this org's, and 409
+  // with `{ error, unreachable: true }` when the row is a dead key — the write
+  // is refused rather than silently applied to something nothing can match.
   confirmAlertFatigueFingerprint: (id: string) =>
     sessionRequest<AlertFatigueFinding>(
       `/enterprise/api/alert-fatigue/fingerprints/${encodeURIComponent(id)}/confirm`,
@@ -2664,6 +2685,7 @@ export interface AgentConfigView {
   };
   ai: {
     enable: boolean;
+    provider?: string;
     model: string;
     temperature: number;
     max_tokens: number;

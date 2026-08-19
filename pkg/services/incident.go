@@ -231,8 +231,8 @@ func buildIncidentRecord(incident *m.Incident, cfg *config.Config, content map[s
 		ID:              incident.ID,
 		OrgID:           storage.DefaultOrgID,
 		TeamID:          incident.TeamID,
-		Title:           firstString(content, "title", "alertname", "summary", "subject", "name"),
-		Service:         extractService(content),
+		Title:           ExtractTitle(content),
+		Service:         ExtractService(content),
 		Source:          resolveSource(content, hint),
 		Origin:          origin,
 		Resolved:        resolved,
@@ -271,10 +271,14 @@ const webhookSource = "webhook"
 // like "agent:elasticsearch:prod-app" in their content, so that value
 // wins. Otherwise the ingress hint ("sns"/"sqs") is used, falling back
 // to "webhook" for the standard webhook path.
+//
+// The content lookup goes through the shared extraction — the same accessor the
+// dedup fingerprint's source component reads — so the durable column and the
+// fingerprint can never resolve one payload's source two different ways.
 func resolveSource(content map[string]interface{}, hint string) string {
 	if utils.IsAgentIncident(content) {
-		if s, ok := content["Source"].(string); ok && strings.TrimSpace(s) != "" {
-			return strings.TrimSpace(s)
+		if s := utils.ExtractSource(content); s != "" {
+			return s
 		}
 		return "agent"
 	}
@@ -323,34 +327,6 @@ func enabledChannels(cfg *config.Config) []string {
 		out = append(out, "lark")
 	}
 	return out
-}
-
-// firstString returns the first non-empty string value found at any of
-// the given keys (case-insensitive on the key match). Used to derive a
-// human-friendly title from a free-form alert payload.
-func firstString(content map[string]interface{}, keys ...string) string {
-	lower := make(map[string]interface{}, len(content))
-	for k, v := range content {
-		lower[strings.ToLower(k)] = v
-	}
-	for _, k := range keys {
-		if v, ok := lower[strings.ToLower(k)]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
-		}
-	}
-	return ""
-}
-
-// extractService resolves the service label from a free-form content map.
-// It is the single shared key set for service attribution: the persisted
-// IncidentRecord.Service column, the report, and the emit fingerprint all
-// derive the service through here so they agree with what the incident detail
-// shows. firstString matches keys case-insensitively, so the one-word
-// ServiceName/servicename and the underscored service_name are all honoured.
-func extractService(content map[string]interface{}) string {
-	return firstString(content, "ServiceName", "Service", "service", "service_name", "servicename", "app", "component")
 }
 
 // isResolved checks if the alert is resolved by checking common status fields

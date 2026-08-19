@@ -1,0 +1,9 @@
+      enable: true
+      debug_body: false
+      queue_url: \$\{SQS_QUEUE_URL\}
+- name: SQS_ENABLE
+- name: SQS_QUEUE_URL
+- name: AWS_REGION
+sqs_queue_url:
+# The queue URL must not be rendered into the ConfigMap as a literal.
+!queue_url: https://sqs

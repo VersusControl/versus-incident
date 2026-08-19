@@ -34,9 +34,11 @@ export function originLabel(o: IncidentOrigin): string {
 }
 
 // formatOriginCounts renders the separated top-bar summary so the two
-// feeds are never lumped into one total. Returns undefined while the
-// counts are still loading so the subtitle stays blank rather than
-// flashing "AI: 0 · Webhook: 0".
+// feeds are never lumped into one total. It formats whatever bucket the
+// caller passes (open on the Now page and the header badge, whole-set on
+// Incidents), so callers must label the bucket where it isn't obvious.
+// Returns undefined while the counts are still loading so the subtitle
+// stays blank rather than flashing "AI: 0 · Webhook: 0".
 export function formatOriginCounts(
   counts: OriginCounts | undefined,
 ): string | undefined {

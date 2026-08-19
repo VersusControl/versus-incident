@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
@@ -68,6 +69,80 @@ func aiSettingsResolver() AISettingsResolver {
 	aiSettingsMu.Lock()
 	defer aiSettingsMu.Unlock()
 	return aiSettingsResolverSlot
+}
+
+// orgAISettingsGetter is the optional capability a registered
+// AISettingsResolver may also implement to answer a synchronous, org-scoped
+// lookup of the current AI override — the shape read-only HTTP surfaces need
+// (they have no worker ctx carrying the org). ok=false means "no opinion".
+// Community OSS registers no resolver at all, so EffectiveAISettingsForOrg
+// returns the YAML floor unchanged.
+type orgAISettingsGetter interface {
+	EffectiveAISettingsForOrg(org string) (enabled bool, provider string, ok bool)
+}
+
+// EffectiveAISettingsForOrg returns the runtime-effective AI enable flag and
+// model provider for org, for read-only display surfaces such as the admin
+// config endpoint. It consults the registered AISettingsResolver's optional
+// org-scoped getter and falls back to the YAML floor when there is no
+// resolver, no override, or an unsupported provider value — so a resolver that
+// cannot answer degrades to the configured values instead of reporting a false
+// "on". Community OSS registers no resolver, so it returns the floor
+// byte-for-byte unchanged.
+func EffectiveAISettingsForOrg(org string, yamlEnabled bool, yamlProvider string) (enabled bool, provider string) {
+	enabled, provider = yamlEnabled, yamlProvider
+	r := aiSettingsResolver()
+	if r == nil {
+		return enabled, provider
+	}
+	g, ok := r.(orgAISettingsGetter)
+	if !ok {
+		return enabled, provider
+	}
+	en, p, ok := g.EffectiveAISettingsForOrg(org)
+	if !ok {
+		return enabled, provider
+	}
+	enabled = en
+	if p = strings.TrimSpace(p); p != "" && einowrap.IsSupportedProvider(p) {
+		provider = p
+	}
+	return enabled, provider
+}
+
+// orgAIKeyGetter is the optional capability a registered AISettingsResolver may
+// also implement to answer, for a read-only display surface, whether an AI
+// credential is configured for org. It reports a BOOLEAN, never the key and
+// never a masked prefix, so the seam that tells the UI "a key is set" cannot
+// become a key-disclosure path. ok=false means "no opinion". Community OSS
+// registers no resolver at all, so EffectiveAIKeySetForOrg reports the YAML
+// floor unchanged.
+type orgAIKeyGetter interface {
+	EffectiveAIKeySetForOrg(org string) (keySet bool, ok bool)
+}
+
+// EffectiveAIKeySetForOrg reports whether an AI credential is configured for
+// org at RUNTIME — the enterprise per-org override when it has an opinion, else
+// the YAML floor. The admin config endpoint used to report the YAML floor only,
+// so an org whose key lives solely in the runtime override rendered as "no key
+// configured" while the worker was happily calling the model with it.
+//
+// It resolves through the same registered AISettingsResolver as the AI enable
+// flag, so the two cannot disagree, and it returns only the set/unset fact.
+func EffectiveAIKeySetForOrg(org, yamlKey string) bool {
+	keySet := strings.TrimSpace(yamlKey) != ""
+	r := aiSettingsResolver()
+	if r == nil {
+		return keySet
+	}
+	g, ok := r.(orgAIKeyGetter)
+	if !ok {
+		return keySet
+	}
+	if set, ok := g.EffectiveAIKeySetForOrg(org); ok {
+		return set
+	}
+	return keySet
 }
 
 // aiSettingsKeyFunc returns a per-request key override function backed by

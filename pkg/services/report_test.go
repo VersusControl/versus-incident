@@ -113,15 +113,19 @@ func TestReportSeverity_MatchesUIKeys(t *testing.T) {
 		{"p3 -> medium", map[string]interface{}{"priority": "p3"}, "medium"},
 		// Precedence: an explicit top-level key wins over nested labels.
 		{"top-level wins over nested", map[string]interface{}{"Severity": "info", "labels": map[string]interface{}{"severity": "critical"}}, "low"},
-		// Verdict remains the last-resort fallback.
+		// A verdict still bands the chart when the payload names no real
+		// severity — the report keeps this fallback locally, on top of the
+		// shared extraction, which itself ignores verdicts.
 		{"verdict fallback", map[string]interface{}{"Verdict": "critical"}, "critical"},
+		{"lowercase verdict fallback", map[string]interface{}{"verdict": "warning"}, "medium"},
+		{"real severity wins over verdict", map[string]interface{}{"severity": "info", "verdict": "critical"}, "low"},
 		// Truly-absent severity still bands to unknown (row is never dropped).
 		{"absent -> unknown", map[string]interface{}{"foo": "bar"}, "unknown"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &storage.IncidentRecord{Content: tc.content}
-			if got := severityBand(reportSeverity(r)); got != tc.want {
+			if got := SeverityBand(reportSeverity(r)); got != tc.want {
 				t.Fatalf("band = %q, want %q (raw severity %q)", got, tc.want, reportSeverity(r))
 			}
 		})

@@ -12,6 +12,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { AlertFatiguePage } from "./AlertFatiguePage";
 import {
+  ApiError,
   api,
   getSsoSession,
   type AlertFatigueConfig,
@@ -354,14 +355,18 @@ describe("AlertFatiguePage — fingerprint review table", () => {
       .getAllByRole("tab")
       .map((t) => t.textContent);
     // The segmented filter offers the public statuses plus the Tracking tab
-    // (still-paging rows the operator can suppress). Each reviewable tab now
-    // carries its per-status count as a badge (0 when empty); "All" has none.
+    // (still-paging rows the operator can suppress) and the Unreachable tab
+    // (dead keys every other view hides). Each reviewable tab carries its
+    // per-status count as a badge (0 when empty); "All" has none, and
+    // "Unreachable" has none until its own list answers (by_status can't
+    // count a pseudo-status).
     expect(tabNames).toEqual([
       "All",
       "Tracking0",
       "Fatigued0",
       "Pending review0",
       "Reclaimed0",
+      "Unreachable",
     ]);
 
     fireEvent.click(
@@ -694,6 +699,10 @@ describe("AlertFatiguePage — analytics strip", () => {
     expect(tab("Reclaimed").textContent).toContain("0");
     // The "All" tab carries no count badge.
     expect(tab("All").textContent).toBe("All");
+    // by_status groups by the STORED status column, so it can never carry the
+    // `unreachable` pseudo-status. The tab degrades to no badge rather than
+    // printing a wrong 0.
+    expect(tab("Unreachable").textContent).toBe("Unreachable");
 
     // The status-aware caption is gone from the Fingerprints header.
     expect(screen.queryByTestId("alert-fatigue-caption")).toBeNull();
@@ -860,6 +869,184 @@ describe("AlertFatiguePage — Tracking tab + top-noisy drill-down", () => {
         expect.objectContaining({ service: undefined, status: "tracking" }),
       ),
     );
+  });
+});
+
+// Unreachable rows are stale keys from an older fingerprint format: no future
+// alert can match them, so the server hides them from every view except
+// ?status=unreachable and refuses confirm/reclaim on them with 409. The UI must
+// never offer an action that provably does nothing — and must stay usable
+// against a server that has neither the field nor the filter.
+describe("AlertFatiguePage — unreachable fingerprints", () => {
+  beforeEach(() => {
+    signInAs("admin");
+    vi.mocked(api.getAlertFatigueConfig).mockResolvedValue(
+      cfg({ enabled: true }),
+    );
+  });
+
+  const unreachableTab = async () => {
+    const tablist = await screen.findByRole("tablist", {
+      name: "Status filter",
+    });
+    fireEvent.click(within(tablist).getByRole("tab", { name: /^Unreachable/ }));
+  };
+
+  it("renders an unreachable row as non-actionable with an explanation and fires no mutation", async () => {
+    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(
+      page([
+        finding({ id: "dead", status: "fatigued", unreachable: true }),
+      ]),
+    );
+    renderPage();
+
+    const hint = await screen.findByTestId("alert-fatigue-unreachable-action");
+    // Non-interactive: a span, not a disabled-looking button.
+    expect(hint.tagName).toBe("SPAN");
+    expect(screen.queryByRole("button", { name: "Not spam" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Confirm spam" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Mark as spam" })).toBeNull();
+
+    // Clicking the hint does nothing — no write is attempted.
+    fireEvent.click(hint);
+    expect(api.confirmAlertFatigueFingerprint).not.toHaveBeenCalled();
+    expect(api.reclaimAlertFatigueFingerprint).not.toHaveBeenCalled();
+
+    // The reason travels with the row for assistive tech.
+    expect(hint.getAttribute("title")).toMatch(
+      /older fingerprint format.*age out on retention/is,
+    );
+    expect(hint.getAttribute("aria-label")).toMatch(/no action available/i);
+  });
+
+  it("requests status=unreachable and explains the tab above the rows", async () => {
+    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(
+      page([finding({ id: "dead", unreachable: true })]),
+    );
+    renderPage();
+    await screen.findByText("checkout");
+
+    await unreachableTab();
+    await waitFor(() =>
+      expect(api.listAlertFatigueFingerprints).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "unreachable" }),
+      ),
+    );
+
+    const note = await screen.findByTestId("alert-fatigue-unreachable-note");
+    expect(note.textContent).toMatch(/stale records from an older fingerprint/i);
+    expect(note.textContent).toMatch(/can't be confirmed or reclaimed/i);
+    expect(note.textContent).toMatch(/age out on retention/i);
+  });
+
+  it("badges the Unreachable tab from its own list total, never from by_status", async () => {
+    vi.mocked(api.getAlertFatigueAnalytics).mockResolvedValue({
+      window: "7d",
+      total: 4,
+      by_status: { fatigued: 4 },
+      noise_ratio: 1,
+      diverted: 0,
+      reclaim_count: 0,
+      reclaim_rate: 0,
+      top_noisy: [],
+      trend: [],
+    });
+    vi.mocked(api.listAlertFatigueFingerprints).mockImplementation((params) =>
+      Promise.resolve(
+        params?.status === "unreachable"
+          ? page([finding({ id: "dead", unreachable: true })], { total: 7 })
+          : page([finding()], { total: 4 }),
+      ),
+    );
+    renderPage();
+
+    const tablist = await screen.findByRole("tablist", {
+      name: "Status filter",
+    });
+    const tab = () =>
+      within(tablist).getByRole("tab", { name: /^Unreachable/ });
+    // by_status has no `unreachable` key, so the tab shows no badge at all
+    // rather than a wrong 0.
+    expect(tab().textContent).toBe("Unreachable");
+
+    await unreachableTab();
+    // Once the view's own list answers, the whole-set total is the true count.
+    await waitFor(() => expect(tab().textContent).toBe("Unreachable7"));
+  });
+
+  it("surfaces the server's 409 message and refreshes when a row turns out unreachable", async () => {
+    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(
+      page([finding({ id: "f-fat", status: "fatigued" })]),
+    );
+    vi.mocked(api.reclaimAlertFatigueFingerprint).mockRejectedValue(
+      new ApiError(
+        409,
+        "fingerprint is unreachable: no future alert can match this key, so the decision would have no effect",
+        { error: "…", unreachable: true },
+      ),
+    );
+    renderPage();
+
+    const listCalls = () =>
+      vi.mocked(api.listAlertFatigueFingerprints).mock.calls.length;
+    await screen.findByRole("button", { name: "Not spam" });
+    const before = listCalls();
+
+    fireEvent.click(screen.getByRole("button", { name: "Not spam" }));
+
+    // The SERVER's explanation, not a generic "could not update".
+    const err = await screen.findByTestId("alert-fatigue-action-error");
+    expect(err.textContent).toMatch(/no future alert can match this key/i);
+
+    // …and the list is re-read so the refused row leaves the view.
+    await waitFor(() => expect(listCalls()).toBeGreaterThan(before));
+  });
+
+  it("keeps the default tabs free of unreachable rows and fully actionable", async () => {
+    // The default view only ever returns reachable rows (unreachable: false).
+    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(
+      page([
+        finding({ id: "f-fat", status: "fatigued", unreachable: false }),
+        finding({ id: "f-track", status: "tracking", unreachable: false }),
+      ]),
+    );
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: "Not spam" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Mark as spam" })).toBeTruthy();
+    expect(screen.queryByTestId("alert-fatigue-unreachable-action")).toBeNull();
+    expect(screen.queryByTestId("alert-fatigue-unreachable-note")).toBeNull();
+    // The default list never asks for the pseudo-status.
+    expect(api.listAlertFatigueFingerprints).toHaveBeenCalledWith(
+      expect.objectContaining({ status: undefined }),
+    );
+  });
+
+  it("degrades against an older server that sends neither the field nor the filter", async () => {
+    // No `unreachable` key on the row → it reads as reachable and stays
+    // actionable, exactly as before the contract shipped.
+    vi.mocked(api.listAlertFatigueFingerprints).mockImplementation((params) =>
+      params?.status === "unreachable"
+        ? Promise.reject(new ApiError(400, "invalid status filter"))
+        : Promise.resolve(page([finding({ id: "old", status: "fatigued" })])),
+    );
+    renderPage();
+    expect(await screen.findByRole("button", { name: "Not spam" })).toBeTruthy();
+    expect(screen.queryByTestId("alert-fatigue-unreachable-action")).toBeNull();
+
+    // The rejected filter resolves to a plain capability note, not a red error
+    // wall with a Retry that can only fail again.
+    await unreachableTab();
+    expect(
+      await screen.findByText(/doesn't offer the unreachable view yet/i),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    // No stray tab note or badge on a view the server can't serve.
+    expect(screen.queryByTestId("alert-fatigue-unreachable-note")).toBeNull();
+    const tablist = screen.getByRole("tablist", { name: "Status filter" });
+    expect(
+      within(tablist).getByRole("tab", { name: /^Unreachable/ }).textContent,
+    ).toBe("Unreachable");
   });
 });
 

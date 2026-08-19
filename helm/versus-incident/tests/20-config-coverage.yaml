@@ -1,0 +1,153 @@
+# Maximal coverage scenario: every chart-expressible config key turned on.
+#
+# This file is the input to the chart<->app drift test
+# (pkg/config/helm_chart_drift_test.go), which renders it, collects the key
+# set of the resulting config.yaml, and compares it against the binary's
+# embedded baseline pkg/config/default_config.yaml. Keeping the map entries
+# (qc / dev / prod / infra / app / db) identical to the baseline makes the
+# comparison exact.
+#
+# Do not trim this file down — a key that disappears here becomes a key the
+# drift test can no longer prove the chart can express.
+replicaCount: 1
+gatewaySecret: "test-secret-do-not-use-in-prod"
+
+config:
+  name: versus-incident
+  host: 0.0.0.0
+  port: 3000
+  publicHost: "https://versus.example.com"
+
+proxy:
+  url: "http://proxy.example.com:8080"
+  username: "proxy-user"
+  password: "proxy-pass"
+
+storage:
+  type: file
+  file:
+    maxIncidents: 1000
+
+alert:
+  debugBody: true
+  slack:
+    enable: true
+    token: "xoxb-test"
+    channelId: "C123"
+    messageProperties:
+      buttonText: "Acknowledge Alert"
+      buttonStyle: "primary"
+      disableButton: true
+  telegram:
+    enable: true
+    botToken: "tg-test"
+    chatId: "-100123"
+    useProxy: true
+  viber:
+    enable: true
+    botToken: "viber-test"
+    userId: "viber-user"
+    channelId: "viber-channel"
+    apiType: "channel"
+    useProxy: true
+  email:
+    enable: true
+    smtpHost: "smtp.example.com"
+    smtpPort: 587
+    username: "smtp-user"
+    password: "smtp-pass"
+    to: "oncall@example.com"
+    subject: "Incident Alert"
+  msteams:
+    enable: true
+    powerAutomateUrl: "https://example.logic.azure.com/workflows/default"
+    otherPowerUrls:
+      qc: "https://example.logic.azure.com/workflows/qc"
+  lark:
+    enable: true
+    webhookUrl: "https://open.larksuite.com/open-apis/bot/v2/hook/default"
+    useProxy: true
+    otherWebhookUrls:
+      dev: "https://open.larksuite.com/open-apis/bot/v2/hook/dev"
+      prod: "https://open.larksuite.com/open-apis/bot/v2/hook/prod"
+  sns:
+    enable: true
+    httpsEndpointSubscriptionPath: "/sns"
+    httpsEndpointSubscription: "https://versus.example.com/sns"
+    topicArn: "arn:aws:sns:us-east-1:111122223333:versus-alerts"
+  sqs:
+    enable: true
+    queueUrl: "https://sqs.us-east-1.amazonaws.com/111122223333/versus"
+
+queue:
+  debugBody: true
+
+oncall:
+  enable: true
+  initializedOnly: false
+  waitMinutes: 3
+  provider: "aws_incident_manager"
+  awsIncidentManager:
+    responsePlanArn: "arn:aws:ssm-incidents::111122223333:response-plan/default"
+    otherResponsePlanArns:
+      infra: "arn:aws:ssm-incidents::111122223333:response-plan/infra"
+      app: "arn:aws:ssm-incidents::111122223333:response-plan/app"
+      db: "arn:aws:ssm-incidents::111122223333:response-plan/db"
+  pagerduty:
+    routingKey: "pd-default"
+    otherRoutingKeys:
+      infra: "pd-infra"
+      app: "pd-app"
+      db: "pd-db"
+  servicenow:
+    instanceUrl: "https://example.service-now.com"
+    username: "snow-user"
+    password: "snow-pass"
+    table: "incident"
+    otherInstanceUrls:
+      infra: "https://infra.service-now.com"
+      app: "https://app.service-now.com"
+      db: "https://db.service-now.com"
+  incidentIo:
+    apiKey: "inc-key"
+    alertSourceConfigId: "inc-source"
+    otherAlertSourceConfigIds:
+      infra: "inc-infra"
+      app: "inc-app"
+      db: "inc-db"
+
+redis:
+  enabled: false
+externalRedis:
+  host: "redis.example.svc.cluster.local"
+  port: 6379
+  password: "redis-pass"
+  db: 0
+  insecureSkipVerify: false
+
+agent:
+  enable: true
+  mode: detect
+  pollInterval: 30s
+  lookback: 5m
+  newServiceGrace: 24h
+  batchMax: 5000
+  signalMaxBytes: 65536
+  ai:
+    enable: true
+    provider: openai
+    apiKey: "sk-test-key"
+    model: "gpt-4o-mini"
+    temperature: 0.2
+    maxTokens: 4096
+    maxCallsPerHour: 60
+    cacheTtl: "1h"
+    analyze:
+      model: "gpt-4o"
+  sources:
+    - name: app-logs
+      type: file
+      enable: true
+      file:
+        path: /var/log/app.log
+        from_beginning: false

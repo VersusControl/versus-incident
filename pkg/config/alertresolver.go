@@ -135,6 +135,34 @@ func alertConfigResolver() AlertConfigResolver {
 	return alertResolverSlot
 }
 
+// EffectiveAlertConfig returns the runtime-effective notification-channel
+// config for READ-ONLY display surfaces (the admin config endpoint), applying
+// the same runtime-override → YAML precedence the emission path applies.
+//
+// Reporting the static `alert.*` config here would go stale the moment an
+// operator hot-configured a channel: the endpoint would show a channel disabled
+// (or its credential unset) while the very next incident was delivered through
+// it. Callers still render secrets as set/unset markers — this returns the
+// effective config, never a disclosure path.
+//
+// It is fail-safe in the same way as the emission path: a resolver that panics
+// or has no opinion yields the YAML floor. OSS registers no resolver, so it
+// returns the global Alert config with no clone and no allocation.
+func EffectiveAlertConfig(ctx context.Context) AlertConfig {
+	if cfg == nil {
+		return AlertConfig{}
+	}
+	r := alertConfigResolver()
+	if r == nil {
+		return cfg.Alert
+	}
+	candidate := cloneAlertConfig(cfg.Alert)
+	if safeResolveAlert(ctx, r, &candidate) {
+		return candidate
+	}
+	return cfg.Alert
+}
+
 // applyAlertResolver overlays the registered runtime channel override onto the
 // cloned config's Alert section. It is a no-op when no resolver is registered
 // (community). It is FAIL-SAFE: the resolver is run against a scratch copy of

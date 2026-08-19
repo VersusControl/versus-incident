@@ -143,6 +143,8 @@ spec:
             {{- if .Values.agent.ai.enable }}
             - name: AGENT_AI_ENABLE
               value: "true"
+            - name: AGENT_AI_PROVIDER
+              value: {{ .Values.agent.ai.provider | default "openai" | quote }}
             - name: AGENT_AI_MODEL
               value: {{ .Values.agent.ai.model | default "gpt-4o-mini" | quote }}
             - name: AGENT_AI_API_KEY
@@ -151,6 +153,44 @@ spec:
                   name: {{ include "versus-incident.fullname" . }}-secrets
                   key: agent_ai_api_key
             {{- end }}
+            {{- /* Analyze-tool credentials — injected from the Secret and
+                   expanded into tools.yaml via ${VAR}, never rendered into
+                   the ConfigMap. */}}
+            {{- $git := ((( .Values.agent.tools | default dict).recentChanges | default dict).git | default dict) }}
+            - name: GIT_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: git_auth_token
+            {{- range $i, $repo := ($git.repos | default list) }}
+            {{- if $repo.auth }}
+            - name: GIT_AUTH_TOKEN_{{ $i }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" $ }}-secrets
+                  key: git_auth_token_{{ $i }}
+            {{- end }}
+            {{- end }}
+            - name: QUERY_METRICS_PROMETHEUS_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: query_metrics_prometheus_bearer_token
+            - name: QUERY_METRICS_PROMETHEUS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: query_metrics_prometheus_password
+            - name: QUERY_TRACES_TEMPO_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: query_traces_tempo_bearer_token
+            - name: QUERY_TRACES_TEMPO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: query_traces_tempo_password
             {{- end }}
 
             {{- if .Values.alert.slack.enable }}
@@ -286,7 +326,7 @@ spec:
             - name: MSTEAMS_OTHER_POWER_URL_{{ $key | upper }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  name: {{ include "versus-incident.fullname" $ }}-secrets
                   key: msteams_other_power_url_{{ $key }}
             {{- end }}
             {{- end }}
@@ -303,7 +343,7 @@ spec:
             - name: LARK_OTHER_WEBHOOK_URL_{{ $key | upper }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  name: {{ include "versus-incident.fullname" $ }}-secrets
                   key: lark_other_webhook_url_{{ $key }}
             {{- end }}
             {{- if .Values.alert.lark.useProxy }}
@@ -361,7 +401,7 @@ spec:
             - name: AWS_INCIDENT_MANAGER_OTHER_RESPONSE_PLAN_ARN_{{ $key | upper }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  name: {{ include "versus-incident.fullname" $ }}-secrets
                   key: aws_incident_manager_other_response_plan_arn_{{ $key }}
             {{- end }}
             {{- end }}
@@ -376,7 +416,7 @@ spec:
             - name: PAGERDUTY_OTHER_ROUTING_KEY_{{ $key | upper }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  name: {{ include "versus-incident.fullname" $ }}-secrets
                   key: pagerduty_other_routing_key_{{ $key }}
             {{- end }}
             {{- end }}
@@ -401,7 +441,7 @@ spec:
             - name: SERVICENOW_OTHER_INSTANCE_URL_{{ $key | upper }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  name: {{ include "versus-incident.fullname" $ }}-secrets
                   key: servicenow_other_instance_url_{{ $key }}
             {{- end }}
             {{- end }}
@@ -421,7 +461,7 @@ spec:
             - name: INCIDENTIO_OTHER_ALERT_SOURCE_CONFIG_ID_{{ $key | upper }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  name: {{ include "versus-incident.fullname" $ }}-secrets
                   key: incidentio_other_alert_source_config_id_{{ $key }}
             {{- end }}
             {{- end }}
@@ -508,6 +548,8 @@ spec:
             {{- end }}
             
             {{- if or .Values.alert.sns.enable .Values.alert.sqs.enable }}
+            {{- $aws := .Values.aws | default dict }}
+            {{- if and $aws.accessKeyId $aws.secretAccessKey }}
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
@@ -518,11 +560,25 @@ spec:
                 secretKeyRef:
                   name: {{ include "versus-incident.fullname" . }}-secrets
                   key: aws_secret_access_key
-            {{- if .Values.aws.region }}
+            {{- end }}
+            {{- if $aws.region }}
             - name: AWS_REGION
-              value: "{{ .Values.aws.region }}"
+              value: "{{ $aws.region }}"
             {{- end }}
             {{- end }}
+
+            {{- /* Operator-supplied env. The agent_sources.yaml block is
+                   rendered verbatim from values, so credentials there must be
+                   written as ${VAR} and supplied here (or via extraEnvFrom)
+                   rather than as literals in the ConfigMap. */}}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
             
           volumeMounts:
             - name: config-volume

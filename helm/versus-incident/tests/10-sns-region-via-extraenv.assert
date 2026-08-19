@@ -1,0 +1,7 @@
+^        topic_arn: \$\{SNS_TOPIC_ARN\}
+- name: SNS_TOPIC_ARN
+!AWS_ACCESS_KEY_ID
+!AWS_SECRET_ACCESS_KEY
+!AWS_REGION
+!aws_access_key_id
+!aws_secret_access_key

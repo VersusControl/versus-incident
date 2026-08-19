@@ -142,6 +142,13 @@ func main() {
 		}
 
 		if cfg.Queue.SNS.Enable {
+			// The endpoint is reachable by anyone, and a valid signature only
+			// proves the message came from some SNS topic. The topic ARN is
+			// what binds it to this deployment, so refuse to expose the route
+			// without one rather than accept another account's traffic.
+			if cfg.Queue.SNS.TopicARN == "" {
+				log.Fatalf("queue.sns.enable is set but queue.sns.topic_arn is empty: set SNS_TOPIC_ARN to the topic this endpoint serves")
+			}
 			app.Post(cfg.Queue.SNS.EndpointPath, controllers.SNS)
 		}
 
