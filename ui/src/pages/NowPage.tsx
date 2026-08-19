@@ -114,10 +114,12 @@ export function NowPage() {
     return list;
   }, [incidents.data]);
 
-  // Whole-set per-origin totals (all statuses) from the server drive the
-  // origin-tab badges and the top-bar summary, so both feeds stay visible
-  // regardless of the active tab — the webhook count never lumps into AI.
-  const originCounts = byStatus?.all;
+  // OPEN per-origin counts from the server drive the origin-tab badges and
+  // the top-bar summary. Now is the live "what needs attention" view, so a
+  // lifetime total beside the open banner and the Open KPI tile read as noise
+  // and contradicted them. Both feeds still show their own number, so the
+  // webhook count never lumps into AI regardless of the active tab.
+  const openOriginCounts = byStatus?.open;
 
   // The active tab scopes the live view (banner PREVIEW rows, feed, trends) to
   // one origin. Rows are split client-side (they share the list cache); the
@@ -231,7 +233,9 @@ export function NowPage() {
       <TopBar
         title="Now"
         subtitle={
-          originCounts ? formatOriginCounts(originCounts) : "auto-refresh 15s"
+          openOriginCounts
+            ? `Open — ${formatOriginCounts(openOriginCounts)}`
+            : "auto-refresh 15s"
         }
         actions={
           <button
@@ -250,25 +254,26 @@ export function NowPage() {
 
       <main className="flex-1 space-y-4 overflow-auto p-4 lg:p-6">
         {/* Origin split — the primary filter for the live view. AI-detected
-            (default) vs the inbound webhook/alert firehose, each with its
-            whole-set count so neither buries the other. Scopes the banner,
-            KPI counts and feed below to the active tab. */}
+            (default) vs the inbound webhook/alert firehose, each badged with
+            its OPEN count so the tabs agree with the banner and the Open KPI
+            tile, and neither feed buries the other. Scopes the banner, KPI
+            counts and feed below to the active tab. */}
         <FilterBar
           tabs={
             <SegmentedControl
               param="origin"
               defaultValue="ai_detect"
-              aria-label="Filter the Now view by origin"
+              aria-label="Filter the Now view by origin — badges show open incidents"
               options={[
                 {
                   value: "ai_detect",
                   label: originLabel("ai_detect"),
-                  badge: originCounts?.ai_detect,
+                  badge: openOriginCounts?.ai_detect,
                 },
                 {
                   value: "webhook",
                   label: originLabel("webhook"),
-                  badge: originCounts?.webhook,
+                  badge: openOriginCounts?.webhook,
                 },
               ]}
             />

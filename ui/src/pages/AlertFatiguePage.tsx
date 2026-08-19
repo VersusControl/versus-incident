@@ -69,6 +69,21 @@ const PAGE_SIZE = 50;
 const FLOORED_SUPPRESS_HINT =
   "High and critical alerts always page and can't be suppressed.";
 
+// UNREACHABLE_HINT explains why an unreachable row offers no action. Same tone
+// as FLOORED_SUPPRESS_HINT: state the fact, then why the button is gone, so it
+// doesn't read as a broken table.
+const UNREACHABLE_HINT =
+  "These are stale records from an older fingerprint format. No new alert can " +
+  "ever match them, so they can't be confirmed or reclaimed — they age out on " +
+  "retention.";
+
+// UNREACHABLE_UNSUPPORTED_HINT covers an older server that has neither the
+// field nor the filter: it answers 400 for this tab, which is a missing
+// capability, not a failure worth a red error + Retry.
+const UNREACHABLE_UNSUPPORTED_HINT =
+  "This server doesn't offer the unreachable view yet. Upgrade to review stale " +
+  "records left by the older fingerprint format.";
+
 // FINGERPRINTS_ANCHOR_ID lets the top-noisy drill-down scroll the Fingerprints
 // table into view after it flips the status tab + service filter.
 const FINGERPRINTS_ANCHOR_ID = "alert-fatigue-fingerprints";
@@ -76,12 +91,17 @@ const FINGERPRINTS_ANCHOR_ID = "alert-fatigue-fingerprints";
 // STATUS_FILTERS are the review-table filter options. `tracking` lists the
 // still-paging rows (recorded, never fatigued) so the operator can find and
 // suppress a noisy service; the other tabs list reviewable (non-tracking) rows.
+// `unreachable` is a pseudo-status, not a stored state: it is the ONLY view
+// that returns dead keys, which every other tab hides.
+const UNREACHABLE_FILTER = "unreachable";
+
 const STATUS_FILTERS: Array<{ value: string; label: string }> = [
   { value: "", label: "All" },
   { value: "tracking", label: "Tracking" },
   { value: "fatigued", label: "Fatigued" },
   { value: "pending_review", label: "Pending review" },
   { value: "reclaimed", label: "Reclaimed" },
+  { value: UNREACHABLE_FILTER, label: "Unreachable" },
 ];
 
 function AlertFatigueShell({ children }: { children: React.ReactNode }) {
@@ -352,22 +372,13 @@ function ReviewTable() {
   const [sort, setSort] = useState<AlertFatigueSort>("last_seen");
   const [dir, setDir] = useState<AlertFatigueSortDir>("desc");
   const [peekId, setPeekId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Per-status counts annotate the status tabs as badges; sourced from the SAME
   // analytics read-model (default 7d window) the noise strip reads, so the
   // shared react-query cache serves both with a single fetch. Missing status → 0.
   const analytics = useAlertFatigueAnalytics(DEFAULT_ANALYTICS_WINDOW);
   const byStatus = analytics.data?.by_status;
-
-  // statusOptions carries each reviewable status's count as a badge on its tab
-  // (the "All" tab stays badge-less), matching the other list pages' pattern.
-  const statusOptions = useMemo(
-    () =>
-      STATUS_FILTERS.map((f) =>
-        f.value === "" ? f : { ...f, badge: byStatus?.[f.value] ?? 0 },
-      ),
-    [byStatus],
-  );
 
   const q = useInfiniteQuery({
     queryKey: [
@@ -389,6 +400,11 @@ function ReviewTable() {
     initialPageParam: 1,
     getNextPageParam: (last) =>
       last.page * last.page_size < last.total ? last.page + 1 : undefined,
+    // A 400 means the server rejected the filter itself (an older build has no
+    // `unreachable` view) — retrying can only fail again, so resolve straight
+    // to the explanation.
+    retry: (count, err) =>
+      !(err instanceof ApiError && err.status === 400) && count < 1,
   });
 
   // clearService drops the service drill-down param (the top-noisy filter chip)
@@ -418,16 +434,54 @@ function ReviewTable() {
   );
   const total = q.data?.pages[0]?.total;
 
+  // statusOptions carries each reviewable status's count as a badge on its tab
+  // (the "All" tab stays badge-less), matching the other list pages' pattern.
+  // The analytics by_status breakdown is a GROUP BY over the STORED status
+  // column, so it can never carry the `unreachable` pseudo-status: badging that
+  // tab from it would always print 0, which is a wrong number, not an empty
+  // one. It therefore stays badge-less until its own list answers, then shows
+  // that whole-set total — the one count that is actually true.
+  const statusOptions = useMemo(
+    () =>
+      STATUS_FILTERS.map((f) => {
+        if (f.value === "") return f;
+        if (f.value === UNREACHABLE_FILTER) {
+          return statusFilter === UNREACHABLE_FILTER && total !== undefined
+            ? { ...f, badge: total }
+            : f;
+        }
+        return { ...f, badge: byStatus?.[f.value] ?? 0 };
+      }),
+    [byStatus, statusFilter, total],
+  );
+
   const invalidate = () =>
     qc.invalidateQueries({ queryKey: ["alert-fatigue-fingerprints"] });
 
+  // onActionError surfaces what the SERVER said instead of a generic failure.
+  // The case that matters is 409 `{ unreachable: true }`: the row is a dead key
+  // the server refuses to transition, so the list is refreshed too and the row
+  // leaves the view it was acted on from.
+  const onActionError = (err: unknown) => {
+    setActionError(
+      err instanceof ApiError ? err.message : "Could not update fingerprint",
+    );
+    if (err instanceof ApiError && err.status === 409) invalidate();
+  };
+  const onActionSuccess = () => {
+    setActionError(null);
+    invalidate();
+  };
+
   const confirm = useMutation({
     mutationFn: (id: string) => api.confirmAlertFatigueFingerprint(id),
-    onSuccess: invalidate,
+    onSuccess: onActionSuccess,
+    onError: onActionError,
   });
   const reclaim = useMutation({
     mutationFn: (id: string) => api.reclaimAlertFatigueFingerprint(id),
-    onSuccess: invalidate,
+    onSuccess: onActionSuccess,
+    onError: onActionError,
   });
   const acting = confirm.isPending || reclaim.isPending;
 
@@ -445,6 +499,14 @@ function ReviewTable() {
           STATUS_FILTERS.find((f) => f.value === statusFilter)?.label ??
           "matching"
         ).toLowerCase();
+
+  // An older server rejects ?status=unreachable with 400 ("invalid status
+  // filter"). That is a missing capability, not a load failure, so it resolves
+  // to a plain explanation instead of a red error the operator can only retry.
+  const unsupportedFilter =
+    statusFilter === UNREACHABLE_FILTER &&
+    q.error instanceof ApiError &&
+    q.error.status === 400;
 
   return (
     <div id={FINGERPRINTS_ANCHOR_ID} className="card overflow-hidden">
@@ -486,7 +548,34 @@ function ReviewTable() {
         </div>
       </div>
 
-      {q.isError ? (
+      {/* The Unreachable tab is a read-only archive: say so once, above the
+          rows, so an operator who finds no buttons there knows why. */}
+      {statusFilter === UNREACHABLE_FILTER && !unsupportedFilter && (
+        <div
+          className="flex items-start gap-1.5 border-b border-ink-700 bg-ink-950/40 px-4 py-2 text-2xs text-ink-400"
+          data-testid="alert-fatigue-unreachable-note"
+        >
+          <Info size={12} className="mt-0.5 shrink-0 text-ink-500" aria-hidden />
+          <span>{UNREACHABLE_HINT}</span>
+        </div>
+      )}
+
+      {actionError && (
+        <div
+          className="border-b border-ink-700 px-4 py-2 text-2xs text-sev-critical"
+          role="status"
+          data-testid="alert-fatigue-action-error"
+        >
+          {actionError}
+        </div>
+      )}
+
+      {unsupportedFilter ? (
+        <EmptyState
+          title="Unreachable view not available"
+          hint={UNREACHABLE_UNSUPPORTED_HINT}
+        />
+      ) : q.isError ? (
         <div className="flex items-center justify-between gap-3 p-4 text-xs">
           <span className="text-sev-critical">
             {q.error instanceof Error
@@ -505,11 +594,17 @@ function ReviewTable() {
         </table>
       ) : items.length === 0 ? (
         <EmptyState
-          title="No fingerprints yet"
+          title={
+            statusFilter === UNREACHABLE_FILTER
+              ? "No unreachable fingerprints"
+              : "No fingerprints yet"
+          }
           hint={
-            statusFilter === "tracking"
-              ? "Tracking alerts appear here as the interceptor counts repeat alerts that are still being sent. Suppress a noisy one with “Mark as spam”."
-              : "Fatigued and pending-review fingerprints appear here as the interceptor records repeat, low-signal alerts."
+            statusFilter === UNREACHABLE_FILTER
+              ? UNREACHABLE_HINT
+              : statusFilter === "tracking"
+                ? "Tracking alerts appear here as the interceptor counts repeat alerts that are still being sent. Suppress a noisy one with “Mark as spam”."
+                : "Fatigued and pending-review fingerprints appear here as the interceptor records repeat, low-signal alerts."
           }
         />
       ) : (
@@ -737,6 +832,12 @@ function FingerprintRow({
   // annotated so it doesn't look silenced.
   const floored = row.floor === true;
 
+  // An unreachable row is a stale key from an older fingerprint format: no
+  // future alert can match it, so the server refuses confirm/reclaim (409).
+  // Only the explicit Unreachable tab returns these, and the flag is absent on
+  // an older server — both resolve to "reachable", the actionable default.
+  const unreachable = row.unreachable === true;
+
   // MarkAsSpam is the "Mark as spam" (confirm) action, shared by tracking and
   // reclaimed rows. On a floored row it renders disabled with an explanation
   // instead of firing a suppression that would never take effect.
@@ -811,30 +912,42 @@ function FingerprintRow({
         </span>
       </td>
       <td className="text-right">
-        <div className="flex flex-wrap justify-end gap-1.5">
-          {s === "tracking" && markAsSpam}
-          {s === "pending_review" && (
-            <button
-              type="button"
-              className="btn px-2 py-1 text-2xs"
-              disabled={acting}
-              onClick={onConfirm}
-            >
-              Confirm spam
-            </button>
-          )}
-          {(s === "fatigued" || s === "pending_review") && (
-            <button
-              type="button"
-              className="btn px-2 py-1 text-2xs"
-              disabled={acting}
-              onClick={onReclaim}
-            >
-              Not spam
-            </button>
-          )}
-          {s === "reclaimed" && markAsSpam}
-        </div>
+        {unreachable ? (
+          <span
+            data-testid="alert-fatigue-unreachable-action"
+            title={UNREACHABLE_HINT}
+            aria-label={`No action available: ${UNREACHABLE_HINT}`}
+            className="inline-flex max-w-full items-center gap-1 truncate text-2xs text-ink-500"
+          >
+            <Info size={11} aria-hidden />
+            <span className="truncate">Stale key — no action</span>
+          </span>
+        ) : (
+          <div className="flex flex-wrap justify-end gap-1.5">
+            {s === "tracking" && markAsSpam}
+            {s === "pending_review" && (
+              <button
+                type="button"
+                className="btn px-2 py-1 text-2xs"
+                disabled={acting}
+                onClick={onConfirm}
+              >
+                Confirm spam
+              </button>
+            )}
+            {(s === "fatigued" || s === "pending_review") && (
+              <button
+                type="button"
+                className="btn px-2 py-1 text-2xs"
+                disabled={acting}
+                onClick={onReclaim}
+              >
+                Not spam
+              </button>
+            )}
+            {s === "reclaimed" && markAsSpam}
+          </div>
+        )}
       </td>
     </tr>
   );

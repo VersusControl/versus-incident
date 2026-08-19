@@ -16,6 +16,10 @@ import (
 // recurring incidents on the same service.
 type RecentIncidents struct {
 	Store storage.Provider
+	// OrgID scopes the listing to one organization. Blank means
+	// storage.DefaultOrgID, so an unset field reads the default tenant rather
+	// than every tenant in the store.
+	OrgID string
 }
 
 // Name implements core.AnalyzeTool.
@@ -86,7 +90,7 @@ func (r RecentIncidents) Invoke(_ context.Context, args json.RawMessage) (*core.
 		a.Limit = 100
 	}
 
-	all, err := r.Store.ListIncidents(0)
+	all, err := incidentsForOrg(r.Store, r.OrgID)
 	if err != nil {
 		return nil, fmt.Errorf("recent_incidents: list: %w", err)
 	}
@@ -96,13 +100,14 @@ func (r RecentIncidents) Invoke(_ context.Context, args json.RawMessage) (*core.
 		if rec.CreatedAt.Before(cutoff) {
 			continue
 		}
-		if a.Service != "" && !strings.EqualFold(rec.Service, a.Service) {
+		service := rec.ServiceLabel()
+		if a.Service != "" && !strings.EqualFold(service, a.Service) {
 			continue
 		}
 		out = append(out, recentIncidentItem{
 			ID:        rec.ID,
 			Title:     rec.Title,
-			Service:   rec.Service,
+			Service:   service,
 			Resolved:  rec.Resolved,
 			CreatedAt: rec.CreatedAt,
 		})

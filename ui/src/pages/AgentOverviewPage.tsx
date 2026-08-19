@@ -597,7 +597,7 @@ function RuntimeBanner({ cfg }: { cfg: AgentConfigView }) {
           </div>
         )}
         <div className="flex items-center gap-2">
-          <span className="text-ink-300">AI SRE</span>
+          <span className="text-ink-300">AI</span>
           <Pill tone={aiEnabled ? "accent" : undefined}>
             {aiEnabled ? cfg.ai.model || "on" : "off"}
           </Pill>

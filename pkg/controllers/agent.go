@@ -742,7 +742,7 @@ func (a *AgentController) serviceIncidentSummary(name, org string) fiber.Map {
 	recent := make([]fiber.Map, 0, serviceRecentIncidentMax)
 	count := 0
 	for _, rec := range recs {
-		if rec.Service != name || storage.NormalizeOrgID(rec.OrgID) != org {
+		if services.ServiceLabel(rec) != name || storage.NormalizeOrgID(rec.OrgID) != org {
 			continue
 		}
 		if rec.CreatedAt.Before(cutoff) {
@@ -772,16 +772,16 @@ func (a *AgentController) serviceIncidentSummary(name, org string) fiber.Map {
 }
 
 // incidentSeverity reads the best-effort severity carried in the alert
-// payload, falling back to "unknown" (mirrors snapshotFromIncident's lookup).
+// payload through the shared extraction and collapses it to one of the fixed
+// report bands. Banding keeps the histogram to that closed set: the raw label
+// is payload-supplied, so keying the response on it would both fragment the
+// counts the report shows and let a stream of distinct labels inflate the
+// response with unbounded keys.
 func incidentSeverity(rec *storage.IncidentRecord) string {
-	if rec.Content != nil {
-		if v, ok := rec.Content["severity"]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
-		}
+	if rec == nil {
+		return "unknown"
 	}
-	return "unknown"
+	return services.SeverityBand(services.ExtractSeverity(rec.Content))
 }
 
 type serviceGraceRequest struct {

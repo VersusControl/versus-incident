@@ -42,6 +42,6 @@ func (p *AwsIncidentManagerProvider) TriggerOnCall(ctx context.Context, incident
 		return fmt.Errorf("failed to start AWS incident: %v", err)
 	}
 
-	log.Printf("AWS Incident escalated: %s", title)
+	log.Printf("AWS Incident escalated: %q", title)
 	return nil
 }

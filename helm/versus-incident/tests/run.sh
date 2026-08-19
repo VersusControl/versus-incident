@@ -119,4 +119,20 @@ if [ "$fail" -ne 0 ]; then
   printf '   failed: %s\n' "${failed_scenarios[@]}"
   exit 1
 fi
+
+# Chart <-> application config drift. Renders the chart, parses the resulting
+# config back through the real loader, and compares its key set against
+# pkg/config/default_config.yaml. Lives as a Go test because it needs the
+# config structs and the embedded baseline.
+if command -v go >/dev/null 2>&1; then
+  echo
+  echo "==> chart/app config drift (go test)"
+  if ! (cd "$CHART_DIR/../.." && go test ./pkg/config/ -run 'TestHelmChart' -count=1); then
+    exit 1
+  fi
+else
+  echo
+  echo "SKIP chart/app config drift — go not found"
+fi
+
 exit 0

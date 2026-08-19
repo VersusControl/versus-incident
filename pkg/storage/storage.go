@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
 // ErrNotFound is returned by Get* methods when the key/id is missing.
@@ -546,6 +547,21 @@ func (r *IncidentRecord) EffectiveOrigin() string {
 		return r.Origin
 	}
 	return OriginFromSource(r.Source)
+}
+
+// ServiceLabel returns the record's display service: the durable Service
+// column, else a best-effort pull from the payload. Callers that list, filter
+// or aggregate by service MUST use it rather than reading Service directly, so
+// a row whose service lives only in content — a legacy row, or a payload shape
+// the column never captured — is attributed identically everywhere.
+func (r *IncidentRecord) ServiceLabel() string {
+	if r == nil {
+		return ""
+	}
+	if r.Service != "" {
+		return r.Service
+	}
+	return utils.ExtractService(r.Content)
 }
 
 // AnalysisRecord is the durable shape of one analyze-mode run. The

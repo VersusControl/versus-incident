@@ -106,7 +106,7 @@ queue:
     https_endpoint_subscription_path: /sns # URI to receive SNS messages, e.g. ${host}:${port}/sns or ${https_endpoint_subscription}/sns
     # Options If you want to automatically create an sns subscription
     https_endpoint_subscription: ${SNS_HTTPS_ENDPOINT_SUBSCRIPTION} # If the user configures an HTTPS endpoint, then an SNS subscription will be automatically created, e.g. https://your-domain.com
-    topic_arn: ${SNS_TOPIC_ARN}
+    topic_arn: ${SNS_TOPIC_ARN} # Required when sns.enable is true
 
   # AWS SQS
   sqs:
@@ -428,7 +428,7 @@ This automatic detection provides backward compatibility while supporting newer 
 |-----------------------------|-------------|
 | `SNS_ENABLE`             | Set to `true` to enable receive Alert Messages from SNS. |
 | `SNS_HTTPS_ENDPOINT_SUBSCRIPTION`             | This specifies the HTTPS endpoint to which SNS sends messages. When an HTTPS endpoint is configured, an SNS subscription is automatically created. If no endpoint is configured, you must create the SNS subscription manually using the CLI or AWS Console. E.g. `https://your-domain.com`. |
-| `SNS_TOPIC_ARN`             | AWS ARN of the SNS topic to subscribe to. |
+| `SNS_TOPIC_ARN`             | **Required when `SNS_ENABLE` is `true`** — Versus will not start without it. AWS ARN of the SNS topic to subscribe to. The `/sns` endpoint is unauthenticated and reachable by anyone, and a valid AWS signature only proves a message came from *some* SNS topic; the ARN is what binds the endpoint to yours. Messages from any other topic are refused. |
 | `SQS_ENABLE`             | Set to `true` to enable receive Alert Messages from AWS SQS. |
 | `SQS_QUEUE_URL`             | URL of the AWS SQS queue to receive messages from. |
 

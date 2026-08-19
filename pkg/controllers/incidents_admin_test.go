@@ -165,7 +165,7 @@ func TestCapabilitiesReportChannelsFallsBackToStatic(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("unmarshal %q: %v", body, err)
 	}
-	want := enabledAlertChannels(config.GetConfig())
+	want := enabledAlertChannels(config.GetConfig().Alert)
 	if len(got.Report.Channels) != len(want) {
 		t.Fatalf("report.channels = %v, want static %v", got.Report.Channels, want)
 	}
@@ -282,7 +282,7 @@ func TestEnabledAlertChannelsFromResolvedConfig(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := enabledAlertChannels(tc.cfg)
+			got := enabledAlertChannels(tc.cfg.Alert)
 			if len(got) != len(tc.want) {
 				t.Fatalf("channels = %v, want %v", got, tc.want)
 			}

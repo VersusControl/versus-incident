@@ -162,7 +162,7 @@ func (i *IncidentAdminController) reportChannels(c *fiber.Ctx) []string {
 			return channels
 		}
 	}
-	return enabledAlertChannels(config.GetConfig())
+	return enabledAlertChannels(config.EffectiveAlertConfig(c.UserContext()))
 }
 
 // reportConfiguredDisabledChannels returns the channels that are configured (a
@@ -180,27 +180,30 @@ func (i *IncidentAdminController) reportConfiguredDisabledChannels(c *fiber.Ctx)
 	return []string{}
 }
 
-// enabledAlertChannels lists the notification channels currently enabled in
-// config, in a stable order, for the report channel picker. Returns an empty
+// enabledAlertChannels lists the notification channels currently enabled in the
+// EFFECTIVE channel config, in a stable order, for the report channel picker.
+// It is handed the resolved config rather than the global one so the fallback
+// path — a runtime channel resolver registered but no channel lister — still
+// offers the channels the emission path will actually use. Returns an empty
 // (non-nil) slice so it serializes as [] not null.
-func enabledAlertChannels(cfg *config.Config) []string {
+func enabledAlertChannels(alert config.AlertConfig) []string {
 	out := []string{}
-	if cfg.Alert.Slack.Enable {
+	if alert.Slack.Enable {
 		out = append(out, "slack")
 	}
-	if cfg.Alert.Telegram.Enable {
+	if alert.Telegram.Enable {
 		out = append(out, "telegram")
 	}
-	if cfg.Alert.Viber.Enable {
+	if alert.Viber.Enable {
 		out = append(out, "viber")
 	}
-	if cfg.Alert.Email.Enable {
+	if alert.Email.Enable {
 		out = append(out, "email")
 	}
-	if cfg.Alert.MSTeams.Enable {
+	if alert.MSTeams.Enable {
 		out = append(out, "msteams")
 	}
-	if cfg.Alert.Lark.Enable {
+	if alert.Lark.Enable {
 		out = append(out, "lark")
 	}
 	return out
@@ -844,23 +847,15 @@ func (i *IncidentAdminController) deleteAnalysis(c *fiber.Ctx) error {
 }
 
 // snapshotFromIncident flattens a stored IncidentRecord into the
-// analyze agent's input contract. Severity is best-effort: pulled from
-// the alert payload when present.
+// analyze agent's input contract. Service and severity go through the shared
+// extraction so the snapshot matches what the list and the detail show.
 func snapshotFromIncident(rec *storage.IncidentRecord, requestedBy string) core.AnalyzeIncidentSnapshot {
-	severity := ""
-	if rec.Content != nil {
-		if v, ok := rec.Content["severity"]; ok {
-			if s, ok := v.(string); ok {
-				severity = s
-			}
-		}
-	}
 	return core.AnalyzeIncidentSnapshot{
 		IncidentID:  rec.ID,
 		Title:       rec.Title,
-		Service:     rec.Service,
+		Service:     services.ServiceLabel(rec),
 		Source:      rec.Source,
-		Severity:    severity,
+		Severity:    services.ExtractSeverity(rec.Content),
 		Resolved:    rec.Resolved,
 		CreatedAt:   rec.CreatedAt,
 		AckedAt:     rec.AckedAt,

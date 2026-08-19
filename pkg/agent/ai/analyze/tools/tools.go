@@ -52,6 +52,30 @@ type ServiceInfo struct {
 	FirstSeen time.Time
 }
 
+// incidentsForOrg lists incidents from the store and keeps only the rows that
+// belong to org. storage.Provider.ListIncidents takes no org parameter, so the
+// scoping is applied here rather than left implicit: under the single-org pivot
+// every row carries storage.DefaultOrgID and this filter is inert, but the
+// moment a build persists rows for a second org an unscoped tool would read
+// them into another tenant's analysis. A blank org resolves to the default org,
+// so a tool constructed without one reads the default tenant only instead of
+// everything.
+func incidentsForOrg(store storage.Provider, org string) ([]*storage.IncidentRecord, error) {
+	all, err := store.ListIncidents(0)
+	if err != nil {
+		return nil, err
+	}
+	want := storage.NormalizeOrgID(org)
+	out := make([]*storage.IncidentRecord, 0, len(all))
+	for _, rec := range all {
+		if storage.NormalizeOrgID(rec.OrgID) != want {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out, nil
+}
+
 // latestSamples returns up to n most-recent entries from a redacted sample ring
 // (ordered oldest→newest), preserving order (newest last). It bounds the
 // examples fed into analyze tool results so the token budget stays sane

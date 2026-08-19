@@ -214,14 +214,91 @@ agent:
   pollInterval: 30s
   lookback: 5m
   newServiceGrace: 30m
+  # Max signals pulled into one tick, and the per-signal byte cap above which
+  # a message is truncated. Defaults mirror the binary's embedded baseline
+  # (pkg/config/default_config.yaml).
+  batchMax: 5000
+  signalMaxBytes: 65536
+
+  # Ordered regexes applied to each (post-redaction) message to discover the
+  # service name; the first pattern that matches wins and its first capture
+  # group is the service. Rendered verbatim into config.yaml — add your own
+  # log format at the top of the list. Defaults mirror the binary's baseline.
+  servicePatterns:
+    - '(?i)\bservice[._-]?name["\s:=]+"?([A-Za-z0-9._-]+)'
+    - '(?i)\b(?:service|svc|app|component)\s*=\s*"?([A-Za-z0-9._-]+)'
+    - '(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"'
+    - '^\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?\s+([A-Za-z][A-Za-z0-9._-]*)\s+\['
+    - '\[\s*([A-Za-z][A-Za-z0-9._-]*)\s*,\s*(?i:request[_-]?id|trace[_-]?id|span[_-]?id)\b'
+    - '\[[^\]]+\]\s+\[([A-Za-z0-9._-]+)\]'
+    - '---\s+\[[^\]]*\]\s+\[([A-Za-z0-9._-]+)\]'
+    - '---\s+\[[^\]]*\]\s+([A-Za-z][A-Za-z0-9._-]*)\s*:'
+    - '([A-Za-z0-9._-]+)\[\d+\]:'
+    - '\[([A-Za-z0-9._-]+)\]'
+
+  # Redaction scrubs each message BEFORE it is mined, catalogued, stored or
+  # sent to an LLM — the privacy/DLP control on the way out of the box.
+  # Built-in detectors (emails, tokens, keys, card/account numbers) always
+  # run when enable=true; the knobs below tune the rest.
+  redaction:
+    enable: true
+    # IP addresses are frequently the useful part of a log line, so they are
+    # kept by default. Set true to mask them too.
+    redactIps: false
+    # Extra operator-supplied regexes; every match is replaced with a
+    # redaction marker. Rendered verbatim into config.yaml.
+    extraPatterns:
+      - "(?i)password=\\S+"
+      - "Authorization:\\s*Bearer\\s+\\S+"
+
+  # Pattern catalog: persistence cadence, when a learned pattern becomes
+  # "known", and the spike-detection thresholds for known patterns.
+  catalog:
+    persistInterval: 30s
+    # Sightings before a learned pattern is auto-promoted to "known".
+    # Values <= 0 are normalised back up to 100 by the binary.
+    autoPromoteAfter: 100
+    # Spike z-score: a known pattern re-fires when its per-second rate sits
+    # this many standard deviations above its learned baseline.
+    spikeZ: 3.0
+    # Deterministic safety net — a tick with at least this many matches
+    # always surfaces regardless of z-score or warmup. 0 disables it.
+    spikeAbsCeiling: 0
+    # Consecutive spiking ticks required before firing (debounce). 1 = none.
+    spikeSustainTicks: 1
+    # Absolute noise floor: minimum tick count before a spike can fire.
+    spikeMinFrequency: 5
+    # Warmup gate: total sightings required before the z-score is trusted.
+    spikeMinBaselineCount: 20
+
+  # Drain-style log-template miner that turns raw messages into patterns.
+  miner:
+    similarityThreshold: 0.4
+    treeDepth: 4
+    maxChildren: 100
+
+  # Regex prefilter applied before mining. defaultPattern is the catch-all
+  # for logs; rules are named patterns that always qualify a message.
+  regex:
+    defaultPattern: "(?i).*error.*"
+    rules:
+      - name: oom-killer
+        pattern: "Out of memory: Killed process"
+      - name: panic
+        pattern: "(?i)panic:"
+      - name: 5xx-burst
+        pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
 
   ai:
     # AI analyzer toggle. Required for detect mode to actually call an LLM.
     # When false, detect mode classifies patterns but never calls the model
     # (dry-run; no API key needed).
     enable: false
-    # OpenAI API key. Stored in the chart Secret and exposed as
-    # AGENT_AI_API_KEY env var.
+    # Model backend: openai | deepseek | qwen | ollama | claude | gemini.
+    # apiKey below must be the credential for the provider selected here.
+    provider: openai
+    # API key for the selected provider. Stored in the chart Secret and
+    # exposed as the AGENT_AI_API_KEY env var.
     apiKey: ""
     model: "gpt-4o-mini"
     # Randomness control. Set -1 to omit temperature entirely for
@@ -319,6 +396,11 @@ agent:
   # into agent_sources.yaml — use snake_case keys matching the Go config
   # (`from_beginning`, `message_field`, etc.). Leave empty to disable
   # the agent loop.
+  #
+  # agent_sources.yaml lands in the ConfigMap, which is NOT a secret store.
+  # Write source credentials as ${VAR} and supply the value through
+  # `extraEnv` / `extraEnvFrom` below; the loader expands ${VAR} across the
+  # whole file at boot.
   # Example:
   #   sources:
   #     - name: app-logs
@@ -328,6 +410,22 @@ agent:
   #         path: /var/log/app.log
   #         from_beginning: false
   sources: []
+
+# Extra environment variables for the container, appended after everything the
+# chart wires itself. Use these to supply values referenced as ${VAR} from
+# agent_sources.yaml, which is rendered verbatim into the ConfigMap.
+#   extraEnv:
+#     - name: ELASTIC_PASSWORD
+#       valueFrom:
+#         secretKeyRef:
+#           name: my-elastic-secret
+#           key: password
+extraEnv: []
+# Bulk-import env from existing Secrets/ConfigMaps.
+#   extraEnvFrom:
+#     - secretRef:
+#         name: my-agent-source-credentials
+extraEnvFrom: []
 
 
 # Proxy configuration (global settings)
@@ -401,6 +499,15 @@ alert:
   sqs:
     enable: false
     queueUrl: ""
+
+# Inbound queue sources. The binary reads these from the top-level `queue`
+# block; `alert` is outbound channels only. The SNS/SQS toggles themselves
+# stay under `alert.sns` / `alert.sqs` above for backward compatibility —
+# the chart maps them into `queue` when it renders config.yaml.
+queue:
+  # Log the raw body of every message pulled off the queue. Useful while
+  # wiring up a new producer; noisy in production.
+  debugBody: true
 
 oncall:
   initializedOnly: false

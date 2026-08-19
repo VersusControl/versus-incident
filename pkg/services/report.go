@@ -14,6 +14,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 
 	m "github.com/VersusControl/versus-incident/pkg/models"
 
@@ -155,12 +156,15 @@ func reportAllow(key string, perMinute int) bool {
 // stable, sorted breakdown.
 var severityBands = []string{"critical", "high", "medium", "low", "unknown"}
 
-// severityBand maps a free-form severity/verdict label to one of the fixed
+// SeverityBand maps a free-form severity/verdict label to one of the fixed
 // bands. The synonym set mirrors the UI's normalizeSeverity (severity.ts) so a
 // severity the UI shows colored never lands in the gray unknown band here. The
 // unknown band still catches webhook incidents with no severity so a row is
-// never dropped.
-func severityBand(s string) string {
+// never dropped. It is exported so every surface that buckets a severity — the
+// report and the service-detail histogram — collapses the same free-form label
+// to the same fixed band, and neither can be fragmented by an arbitrary label
+// arriving in a payload.
+func SeverityBand(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "critical", "fatal", "emergency", "crit", "p1", "sev1":
 		return "critical"
@@ -259,7 +263,7 @@ func BuildAggregateReportModel(recs []*storage.IncidentRecord, window string, st
 			model.Open++
 		}
 
-		band := severityBand(reportSeverity(rec))
+		band := SeverityBand(reportSeverity(rec))
 		sevCounts[band]++
 		so := sevOriginCounts[band]
 		if origin == storage.OriginAIDetect {
@@ -407,40 +411,38 @@ func buildTrend(recs []*storage.IncidentRecord, start, end time.Time, unit strin
 }
 
 // reportSeverity extracts a best-effort severity for one record from its
-// content. It reads the SAME key set as the UI's severityFromContent
-// (severity.ts): the top-level Severity/severity/level/priority keys, then the
-// nested Alertmanager/Prometheus shape (content.labels.severity /
-// content.commonLabels.severity), before falling back to Verdict. Raw — the
-// caller bands it.
+// content through the shared extraction, which reads the SAME key set as the
+// UI's severityFromContent (severity.ts). Raw — the caller bands it.
+//
+// When the payload names no real severity, the record's agent verdict is used
+// purely to tint the chart. That fallback is report-local on purpose: a verdict
+// is operator-set free text, so it may colour a bar but must never reach the
+// shared severity that drives suppression floors and dedup fingerprints.
 func reportSeverity(rec *storage.IncidentRecord) string {
-	if s := contentString(rec.Content, "Severity", "severity", "level", "priority"); s != "" {
-		return s
-	}
-	if s := nestedContentString(rec.Content, "severity", "labels", "commonLabels"); s != "" {
-		return s
-	}
-	return contentString(rec.Content, "Verdict", "verdict")
-}
-
-// ServiceLabel resolves a record's display service: the durable Service
-// column, else a best-effort pull from content using the shared key set. The
-// incidents list and the report both route through here so a legacy row whose
-// stored column predates the aligned key set still shows the same service the
-// detail derives from content.
-func ServiceLabel(rec *storage.IncidentRecord) string {
 	if rec == nil {
 		return ""
 	}
-	if rec.Service != "" {
-		return rec.Service
+	if s := ExtractSeverity(rec.Content); s != "" {
+		return s
 	}
-	return extractService(rec.Content)
+	return utils.PayloadString(rec.Content, "Verdict", "verdict")
+}
+
+// ServiceLabel resolves a record's display service through the shared record
+// helper: the durable Service column, else a best-effort pull from content.
+// The incidents list and the report both route through here so a legacy row
+// whose stored column predates the aligned key set still shows the same
+// service the detail derives from content.
+func ServiceLabel(rec *storage.IncidentRecord) string {
+	return rec.ServiceLabel()
 }
 
 // reportTitle resolves a display title for one record when the durable Title
-// is empty.
+// is empty, through the same shared extraction that fills the column, so a
+// legacy row whose column predates the aligned key set still reads the title
+// out of its content.
 func reportTitle(rec *storage.IncidentRecord) string {
-	return contentString(rec.Content, "AlertName", "Summary", "title", "alertname")
+	return ExtractTitle(rec.Content)
 }
 
 // ---------------------------------------------------------------------------
@@ -728,62 +730,4 @@ func truncateRunes(s string, n int) string {
 		return string(r)
 	}
 	return string(r[:n]) + "…"
-}
-
-// contentString returns the first non-empty string value found at any of
-// the given keys (exact, then case-insensitive).
-func contentString(content map[string]interface{}, keys ...string) string {
-	if content == nil {
-		return ""
-	}
-	for _, k := range keys {
-		if v, ok := content[k]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
-		}
-	}
-	lower := map[string]interface{}{}
-	for k, v := range content {
-		lower[strings.ToLower(k)] = v
-	}
-	for _, k := range keys {
-		if v, ok := lower[strings.ToLower(k)]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
-		}
-	}
-	return ""
-}
-
-// nestedContentString digs one level into a nested map under any of the given
-// parent keys (case-insensitive) and returns the first non-empty string at
-// key. It matches the UI's severityFromContent handling of the
-// Alertmanager/Prometheus shape, where severity lives at
-// content.labels.severity / content.commonLabels.severity.
-func nestedContentString(content map[string]interface{}, key string, parents ...string) string {
-	if content == nil {
-		return ""
-	}
-	for _, p := range parents {
-		v, ok := content[p]
-		if !ok {
-			for ck, cv := range content {
-				if strings.EqualFold(ck, p) {
-					v, ok = cv, true
-					break
-				}
-			}
-		}
-		if !ok {
-			continue
-		}
-		if nested, ok := v.(map[string]interface{}); ok {
-			if s := contentString(nested, key); s != "" {
-				return s
-			}
-		}
-	}
-	return ""
 }

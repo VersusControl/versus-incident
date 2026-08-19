@@ -6,6 +6,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 	m "github.com/VersusControl/versus-incident/pkg/models"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
 // TestResolveSource covers the Source-label decision for every ingress
@@ -220,6 +221,44 @@ func TestBuildIncidentRecord_Service(t *testing.T) {
 	}
 }
 
+// TestBuildIncidentRecord_Title asserts the persisted Title is derived through
+// the shared title key set. The regression was a CloudWatch alarm, whose title
+// key is AlarmName, persisting a blank or unrelated title.
+func TestBuildIncidentRecord_Title(t *testing.T) {
+	cfg := &config.Config{}
+
+	tests := []struct {
+		name    string
+		content map[string]interface{}
+		want    string
+	}{
+		{"cloudwatch AlarmName (the reported bug)", map[string]interface{}{
+			"AlarmName":      "checkout-5xx",
+			"NewStateValue":  "ALARM",
+			"NewStateReason": "threshold crossed",
+		}, "checkout-5xx"},
+		{"title", map[string]interface{}{"title": "disk full"}, "disk full"},
+		{"alertname", map[string]interface{}{"alertname": "HighErrorRate"}, "HighErrorRate"},
+		{"summary", map[string]interface{}{"summary": "cpu saturated"}, "cpu saturated"},
+		{"subject", map[string]interface{}{"subject": "nightly job failed"}, "nightly job failed"},
+		{"name", map[string]interface{}{"name": "checkout-latency"}, "checkout-latency"},
+		{"nested alertmanager labels", map[string]interface{}{
+			"labels": map[string]interface{}{"alertname": "PostgresqlDown"},
+		}, "PostgresqlDown"},
+		{"no title keys stays blank", map[string]interface{}{"ServiceName": "checkout"}, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inc := m.NewIncident("", &tc.content, false)
+			rec := buildIncidentRecord(inc, cfg, tc.content, false, "")
+			if rec.Title != tc.want {
+				t.Fatalf("Title = %q, want %q", rec.Title, tc.want)
+			}
+		})
+	}
+}
+
 // TestServiceLabel_ListEqualsDetail proves the list value (ServiceLabel) and
 // the detail value agree. The detail derives its service from content via
 // pickString(ServiceName, Service, service); ServiceLabel returns the durable
@@ -230,7 +269,7 @@ func TestServiceLabel_ListEqualsDetail(t *testing.T) {
 	// detailService mirrors ui IncidentDetailPage's
 	// pickString(content, "ServiceName", "Service", "service").
 	detailService := func(content map[string]interface{}) string {
-		return firstString(content, "ServiceName", "Service", "service")
+		return utils.PayloadString(content, "ServiceName", "Service", "service")
 	}
 
 	cfg := &config.Config{}

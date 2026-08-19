@@ -98,4 +98,6 @@
   - [vs Alertmanager](/compare/alertmanager)
 
 - Migration
+  - [v1.4.22](/migration/migration-v1.4.22.md)
   - [v1.4.13](/migration/migration-v1.4.13.md)
+  - [OSS to Enterprise](/migration/migration-oss-to-enterprise.md)

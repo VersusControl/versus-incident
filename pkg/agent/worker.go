@@ -481,7 +481,7 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		// Track the service so the grace window starts even in training mode.
 		if o.Service != "" && o.Service != "_unknown" {
 			if w.catalog.RegisterService(o.Service) {
-				log.Printf("agent: new service discovered: %s", o.Service)
+				log.Printf("agent: new service discovered: %q", o.Service)
 			}
 		}
 
@@ -491,7 +491,7 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		// before we ever classify it). Then fold the tick into the model.
 		mean, std, confident := learner.Expected(ctx, o.Key, o.Timestamp)
 		if err := learner.Learn(ctx, []core.Observation{o}); err != nil {
-			log.Printf("agent: learning key=%s from %s failed: %v", o.Key, src.Name(), err)
+			log.Printf("agent: learning key=%q from %s failed: %v", o.Key, src.Name(), err)
 			continue
 		}
 
@@ -541,7 +541,7 @@ func (w *Worker) handleObservation(
 		// Pure observation. No verdict, no incident.
 		verdicts["learned"]++
 		if o.IsNew {
-			log.Printf("%sagent: new pattern %s (source=%s tag=%s) → %s%s",
+			log.Printf("%sagent: new pattern %q (source=%s tag=%q) → %q%s",
 				colorGreen, o.Key, src.Name(), w.shadowTag(o), truncateString(o.Signal, 120), colorReset)
 		}
 
@@ -554,7 +554,7 @@ func (w *Worker) handleObservation(
 			w.catalog.IsServiceInGrace(o.Service, w.newServiceGrace) {
 			verdicts["grace"]++
 			if o.IsNew {
-				log.Printf("%sagent[%s]: new pattern %s (service=%s in grace, learning only) → %s%s",
+				log.Printf("%sagent[%s]: new pattern %q (service=%q in grace, learning only) → %q%s",
 					colorGreen, mode, o.Key, o.Service, truncateString(o.Signal, 120), colorReset)
 			}
 			return
@@ -586,7 +586,7 @@ func (w *Worker) handleObservation(
 				w.shadow.Record(src.Name(), o.Key, o.Service, o.Signal, sample,
 					w.shadowTag(o), v.Class.String(), o.Frequency)
 			}
-			log.Printf("%sagent[shadow]: would alert pattern=%s service=%s tag=%s verdict=%s freq=%d%s",
+			log.Printf("%sagent[shadow]: would alert pattern=%q service=%q tag=%q verdict=%s freq=%d%s",
 				colorGreen, o.Key, o.Service, w.shadowTag(o), v.Class, o.Frequency, colorReset)
 		} else {
 			outcome := w.emitDetect(ctx, src.Name(), o.Key, o.Signal, o.Service, o.Samples, v.Class, v.Baseline, v.Score, std, v.Reason)
@@ -683,7 +683,7 @@ func (w *Worker) emitDetect(
 	// restart; OSS registers no resolver so this collapses to the original
 	// `w.ai.Detect == nil` check.
 	if w.ai.Detect == nil || !w.effectiveAIEnabled(ctx) {
-		log.Printf("%sagent[detect:basic]: templated alert pattern=%s service=%s verdict=%s freq=%d %s",
+		log.Printf("%sagent[detect:basic]: templated alert pattern=%q service=%q verdict=%s freq=%d %s",
 			colorGreen, patternID, service, verdict, len(signals), colorReset)
 		finding := deterministicFinding(result, verdict, service, score, baselineStd, explanation)
 		evt.Finding = finding
@@ -699,7 +699,7 @@ func (w *Worker) emitDetect(
 
 	// 2. Cache hit — reuse the prior finding.
 	if cached, ok := w.ai.Cache.Get(patternID); ok {
-		log.Printf("%sagent[detect]: cache hit pattern=%s verdict=%s freq=%d%s",
+		log.Printf("%sagent[detect]: cache hit pattern=%q verdict=%s freq=%d%s",
 			colorGreen, patternID, verdict, len(signals), colorReset)
 		evt.Finding = cached
 		outcome := w.send(cached, result, source, service, "cached")
@@ -715,7 +715,7 @@ func (w *Worker) emitDetect(
 	// deterministic finding so a transient budget exhaustion never drops a
 	// page.
 	if !w.ai.Rate.Allow() {
-		log.Printf("agent[detect]: AI quota exceeded; templated alert pattern=%s freq=%d", patternID, len(signals))
+		log.Printf("agent[detect]: AI quota exceeded; templated alert pattern=%q freq=%d", patternID, len(signals))
 		finding := deterministicFinding(result, verdict, service, score, baselineStd, explanation)
 		evt.Finding = finding
 		evt.Model = "heuristic"
@@ -732,7 +732,7 @@ func (w *Worker) emitDetect(
 	// transient AI outage never drops a page.
 	call, err := w.ai.Detect.Run(ctx, core.DetectTask{Result: result})
 	if err != nil {
-		log.Printf("agent[detect]: AI analyze failed pattern=%s: %v; sending templated alert", patternID, err)
+		log.Printf("agent[detect]: AI analyze failed pattern=%q: %v; sending templated alert", patternID, err)
 		finding := deterministicFinding(result, verdict, service, score, baselineStd, explanation)
 		evt.Finding = finding
 		evt.Model = "heuristic"
@@ -767,16 +767,16 @@ func (w *Worker) send(finding *core.AIFinding, result core.AgentResult, source, 
 	// but must not silently demote below the rule-declared severity.
 	clampSeverityFloor(finding, result.RuleSeverity)
 	if w.emitter == nil {
-		log.Printf("%sagent[detect]: pattern=%s service=%s severity=%s confidence=%.2f title=%q (no emitter wired)%s",
+		log.Printf("%sagent[detect]: pattern=%q service=%q severity=%q confidence=%.2f title=%q (no emitter wired)%s",
 			colorGreen, result.PatternID, service, finding.Severity, finding.Confidence,
 			truncateString(finding.Title, 80), colorReset)
 		return okLabel
 	}
 	if err := w.emitter(finding, result, source, service); err != nil {
-		log.Printf("agent[detect]: emit failed pattern=%s: %v", result.PatternID, err)
+		log.Printf("agent[detect]: emit failed pattern=%q: %v", result.PatternID, err)
 		return "send_error"
 	}
-	log.Printf("%sagent[detect]: emitted pattern=%s service=%s severity=%s confidence=%.2f title=%q%s",
+	log.Printf("%sagent[detect]: emitted pattern=%q service=%q severity=%q confidence=%.2f title=%q%s",
 		colorGreen, result.PatternID, service, finding.Severity, finding.Confidence,
 		truncateString(finding.Title, 80), colorReset)
 	return okLabel
