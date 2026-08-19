@@ -127,12 +127,14 @@ fi
 if command -v go >/dev/null 2>&1; then
   echo
   echo "==> chart/app config drift (go test)"
-  if ! (cd "$CHART_DIR/../.." && go test ./pkg/config/ -run 'TestHelmChart' -count=1); then
+  # Deps are vendored above, so the test must run here rather than skip.
+  if ! (cd "$CHART_DIR/../.." && VERSUS_HELM_CHART_TESTS=1 go test ./pkg/config/ -run 'TestHelmChart' -count=1); then
     exit 1
   fi
 else
   echo
-  echo "SKIP chart/app config drift — go not found"
+  echo "chart/app config drift needs Go; install it so drift is actually checked" >&2
+  exit 2
 fi
 
 exit 0

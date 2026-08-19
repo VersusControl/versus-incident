@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -145,7 +146,7 @@ func renderChartConfig(t *testing.T, sc chartScenario) string {
 // to config.yaml exactly as the Deployment mounts them, so the loader picks
 // them up and validates their shapes too.
 func TestHelmChartRendersLoadableConfig(t *testing.T) {
-	requireHelm(t)
+	requireRenderableChart(t)
 
 	for _, sc := range chartScenarios {
 		t.Run(sc.name, func(t *testing.T) {
@@ -174,7 +175,7 @@ func TestHelmChartRendersLoadableConfig(t *testing.T) {
 // the application supports (a shipped feature unreachable for Helm users), and
 // when the chart renders a key the application does not know about.
 func TestHelmChartCoversDefaultConfig(t *testing.T) {
-	requireHelm(t)
+	requireRenderableChart(t)
 
 	appKeys := map[string]struct{}{}
 	for _, k := range parseRawYAML(t, defaultConfigYAML).AllKeys() {
@@ -210,11 +211,57 @@ func TestHelmChartCoversDefaultConfig(t *testing.T) {
 	}
 }
 
-func requireHelm(t *testing.T) {
+// chartTestsEnv makes an unrenderable chart a failure instead of a skip.
+// helm/versus-incident/tests/run.sh sets it after `helm dependency build`, so
+// the chart CI job can never silently stop checking for drift.
+const chartTestsEnv = "VERSUS_HELM_CHART_TESTS"
+
+// requireRenderableChart skips unless `helm template` can actually run. The
+// plain `go test ./...` job has Helm on PATH but has not vendored the
+// subcharts, and a missing subchart is a broken environment rather than drift.
+func requireRenderableChart(t *testing.T) {
 	t.Helper()
+
+	var unmet error
 	if _, err := exec.LookPath("helm"); err != nil {
-		t.Skip("helm not on PATH — install Helm 3.x to run the chart drift tests")
+		unmet = fmt.Errorf("helm is not on PATH; install Helm 3.x")
+	} else {
+		unmet = chartDependenciesVendored()
 	}
+	if unmet == nil {
+		return
+	}
+	if os.Getenv(chartTestsEnv) == "1" {
+		t.Fatalf("%s=1 but the chart cannot be rendered: %v", chartTestsEnv, unmet)
+	}
+	t.Skipf("chart drift tests need a renderable chart: %v — run helm/versus-incident/tests/run.sh", unmet)
+}
+
+// chartDependenciesVendored reports whether every subchart Chart.yaml declares
+// is present in charts/. `helm template` refuses to render without them.
+func chartDependenciesVendored() error {
+	raw, err := os.ReadFile(filepath.Join(chartDir, "Chart.yaml"))
+	if err != nil {
+		return fmt.Errorf("read Chart.yaml: %w", err)
+	}
+	var meta struct {
+		Dependencies []struct {
+			Name string `yaml:"name"`
+		} `yaml:"dependencies"`
+	}
+	if err := yaml.Unmarshal(raw, &meta); err != nil {
+		return fmt.Errorf("parse Chart.yaml: %w", err)
+	}
+	for _, dep := range meta.Dependencies {
+		if tgz, _ := filepath.Glob(filepath.Join(chartDir, "charts", dep.Name+"-*.tgz")); len(tgz) > 0 {
+			continue
+		}
+		if fi, err := os.Stat(filepath.Join(chartDir, "charts", dep.Name)); err == nil && fi.IsDir() {
+			continue
+		}
+		return fmt.Errorf("subchart %q is not vendored in charts/; run `helm dependency build %s`", dep.Name, chartDir)
+	}
+	return nil
 }
 
 // coveredBy reports whether the chart expresses key k. A chart is allowed to
