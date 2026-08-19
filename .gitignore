@@ -21,3 +21,4 @@ tests
 testdata
 runbook-ingest
 _drafts
+!helm/versus-incident/tests

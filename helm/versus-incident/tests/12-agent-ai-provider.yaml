@@ -1,0 +1,16 @@
+# Non-openai model backend — multi-provider support must be reachable from
+# the chart, in both config.yaml and the AGENT_AI_PROVIDER env var.
+replicaCount: 1
+gatewaySecret: "test-secret-do-not-use-in-prod"
+
+agent:
+  enable: true
+  mode: detect
+  ai:
+    enable: true
+    provider: ollama
+    apiKey: "not-used-by-ollama-but-required-by-the-chart"
+    model: "llama3.1"
+    maxTokens: 4096
+    analyze:
+      model: "llama3.1:70b"

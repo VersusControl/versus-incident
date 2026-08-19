@@ -1,0 +1,35 @@
+# Agent detection tuning: redaction, catalog spike thresholds, miner, regex
+# prefilter and service-name patterns all overridden away from the defaults.
+replicaCount: 1
+gatewaySecret: "test-secret-do-not-use-in-prod"
+
+agent:
+  enable: true
+  mode: shadow
+  batchMax: 2500
+  signalMaxBytes: 32768
+  servicePatterns:
+    - '(?i)\bsvc=([A-Za-z0-9._-]+)'
+    - '\[([A-Za-z0-9._-]+)\]'
+  redaction:
+    enable: true
+    redactIps: true
+    extraPatterns:
+      - "(?i)ssn=\\d{3}-\\d{2}-\\d{4}"
+  catalog:
+    persistInterval: 60s
+    autoPromoteAfter: 250
+    spikeZ: 4.5
+    spikeAbsCeiling: 500
+    spikeSustainTicks: 3
+    spikeMinFrequency: 10
+    spikeMinBaselineCount: 50
+  miner:
+    similarityThreshold: 0.6
+    treeDepth: 6
+    maxChildren: 200
+  regex:
+    defaultPattern: "(?i)(error|fatal)"
+    rules:
+      - name: disk-full
+        pattern: "No space left on device"

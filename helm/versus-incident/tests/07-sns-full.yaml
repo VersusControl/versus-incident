@@ -1,0 +1,10 @@
+# SNS inbound fully configured, with static AWS credentials.
+alert:
+  sns:
+    enable: true
+    topicArn: "arn:aws:sns:us-east-1:111122223333:versus-alerts"
+    httpsEndpointSubscription: "https://versus.example.com/sns"
+aws:
+  region: "us-east-1"
+  accessKeyId: "AKIAEXAMPLE"
+  secretAccessKey: "wJalrXUtnFEMI"
