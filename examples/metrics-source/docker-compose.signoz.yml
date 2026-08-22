@@ -1,0 +1,235 @@
+# OPTIONAL SigNoz overlay. Run alongside the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.signoz.yml up -d
+#
+# It adds a self-hosted SigNoz stack and swaps in the `*.signoz.yaml` source
+# variant, so the enterprise walkthrough runs against SigNoz instead of
+# Prometheus + Tempo: `signoz_metrics` replaces `prometheus`, `signoz_traces`
+# replaces `traces`. Both are license-gated on the `intelligence` entitlement.
+#
+# Do NOT combine this with docker-compose.traces.yml — both publish OTLP/HTTP
+# on 4318, and the two source variants would fight over agent_sources.yaml.
+#
+# HEAVY: budget at least 4 GB of Docker memory on top of the base stack.
+# ClickHouse alone wants ~2 GB. See README.md → "Optional: SigNoz".
+#
+# THE IMAGE PINS BELOW ARE OURS. SigNoz deprecated its bundled Compose files at
+# v0.130.0 in favour of the `foundryctl` generator; we pin our own images so
+# this example is deterministic and needs no third-party binary at test time.
+#
+# Fake data comes from the SAME host-run generator as the Prometheus path, with
+# `--backend signoz`: it pushes OTLP/HTTP metrics AND spans to the collector on
+# :4318. There is no in-compose generator.
+services:
+  init-clickhouse:
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_TAG:-25.5.6}
+    container_name: versus-ent-signoz-init-clickhouse
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        if [ -x /var/lib/clickhouse/user_scripts/histogramQuantile ]; then
+          echo "histogramQuantile already present; skipping."
+          exit 0
+        fi
+        node_os=$$(uname -s | tr '[:upper:]' '[:lower:]')
+        node_arch=$$(uname -m | sed s/aarch64/arm64/ | sed s/x86_64/amd64/)
+        cd /tmp
+        wget -O hq.tar.gz "https://github.com/SigNoz/signoz/releases/download/histogram-quantile%2F${HISTOGRAM_QUANTILE_VERSION:-v0.0.1}/histogram-quantile_$${node_os}_$${node_arch}.tar.gz"
+        tar -xzf hq.tar.gz
+        mv histogram-quantile /var/lib/clickhouse/user_scripts/histogramQuantile
+        chmod +x /var/lib/clickhouse/user_scripts/histogramQuantile
+    restart: on-failure
+    volumes:
+      - clickhouse-user-scripts:/var/lib/clickhouse/user_scripts
+
+  zookeeper:
+    image: signoz/zookeeper:${ZOOKEEPER_TAG:-3.7.1}
+    container_name: versus-ent-signoz-zookeeper
+    user: root
+    environment:
+      ZOO_SERVER_ID: "1"
+      ALLOW_ANONYMOUS_LOGIN: "yes"
+      ZOO_AUTOPURGE_INTERVAL: "1"
+    volumes:
+      - zookeeper-data:/bitnami/zookeeper
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -m 2 http://localhost:8080/commands/ruok | grep error | grep null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_TAG:-25.5.6}
+    container_name: versus-ent-signoz-clickhouse
+    depends_on:
+      init-clickhouse:
+        condition: service_completed_successfully
+      zookeeper:
+        condition: service_healthy
+    tty: true
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - ./signoz/clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./signoz/clickhouse/histogram_quantile_function.xml:/etc/clickhouse-server/histogram_quantile_function.xml:ro
+      - clickhouse-user-scripts:/var/lib/clickhouse/user_scripts
+      - clickhouse-data:/var/lib/clickhouse
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "0.0.0.0:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  schema-migrator:
+    image: signoz/signoz-otel-collector:${SIGNOZ_OTELCOL_TAG:-v0.144.5}
+    container_name: versus-ent-signoz-schema-migrator
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN: tcp://clickhouse:9000
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER: cluster
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION: "true"
+      SIGNOZ_OTEL_COLLECTOR_TIMEOUT: 10m
+    entrypoint: ["/bin/sh"]
+    command:
+      - -c
+      - |
+        /signoz-otel-collector migrate bootstrap &&
+        /signoz-otel-collector migrate sync up &&
+        /signoz-otel-collector migrate async up
+    restart: on-failure
+
+  signoz:
+    image: signoz/signoz:${SIGNOZ_TAG:-v0.129.0}
+    container_name: versus-ent-signoz
+    depends_on:
+      schema-migrator:
+        condition: service_completed_successfully
+    ports:
+      - "${SIGNOZ_UI_PORT:-8080}:8080"
+    environment:
+      SIGNOZ_ALERTMANAGER_PROVIDER: signoz
+      SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN: tcp://clickhouse:9000
+      SIGNOZ_SQLSTORE_SQLITE_PATH: /var/lib/signoz/signoz.db
+      SIGNOZ_TOKENIZER_JWT_SECRET: ${SIGNOZ_JWT_SECRET:-versus-signoz-dev-secret}
+    volumes:
+      - signoz-data:/var/lib/signoz
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8080/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+
+  otel-collector:
+    image: signoz/signoz-otel-collector:${SIGNOZ_OTELCOL_TAG:-v0.144.5}
+    container_name: versus-ent-signoz-otel-collector
+    depends_on:
+      schema-migrator:
+        condition: service_completed_successfully
+      signoz:
+        condition: service_healthy
+    entrypoint: ["/bin/sh"]
+    # Run the pinned static config only. SigNoz's own compose also passes
+    # --manager-config, which makes the collector pull config from SigNoz over
+    # OpAMP and RESTART its inner service twice during the first minute —
+    # dropping every OTLP connection in that window. This overlay's config is
+    # fixed, so OpAMP buys nothing and costs a flaky first push.
+    command:
+      - -c
+      - |
+        /signoz-otel-collector migrate sync check &&
+        /signoz-otel-collector --config=/etc/otel-collector-config.yaml
+    environment:
+      OTEL_RESOURCE_ATTRIBUTES: host.name=versus-ent-signoz-host,os.type=linux
+      LOW_CARDINAL_EXCEPTION_GROUPING: "false"
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN: tcp://clickhouse:9000
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER: cluster
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION: "true"
+      SIGNOZ_OTEL_COLLECTOR_TIMEOUT: 10m
+    volumes:
+      - ./signoz/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "${OTLP_GRPC_PORT:-4317}:4317"
+      - "${OTLP_HTTP_PORT:-4318}:4318"
+    restart: unless-stopped
+    # The image carries no wget/curl, so probe the health_check extension with
+    # bash's /dev/tcp. Without this, `up -d` returns before the OTLP receiver
+    # accepts connections and the first generator run is refused.
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - exec 3<>/dev/tcp/localhost/13133 && printf 'GET / HTTP/1.0\r\n\r\n' >&3 && head -1 <&3 | grep -q 200
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  # One-shot: create SigNoz's first admin account and mint the query API key.
+  # SigNoz generates the key value, so it cannot be a compose default — it is
+  # written to a shared volume and read by the versus entrypoint below.
+  signoz-bootstrap:
+    image: python:${PYTHON_TAG:-3.12-alpine}
+    container_name: versus-ent-signoz-bootstrap
+    depends_on:
+      signoz:
+        condition: service_healthy
+    environment:
+      SIGNOZ_ADDRESS: http://signoz:8080
+      SIGNOZ_ADMIN_EMAIL: ${SIGNOZ_ADMIN_EMAIL:-admin@versus.local}
+      SIGNOZ_ADMIN_PASSWORD: ${SIGNOZ_ADMIN_PASSWORD:-Versus-Dev-12345}
+      SIGNOZ_ORG_NAME: ${SIGNOZ_ORG_NAME:-versus-demo}
+      SIGNOZ_API_KEY: ${SIGNOZ_API_KEY:-}
+      SIGNOZ_API_KEY_FILE: /bootstrap/signoz-api-key
+    command: ["python3", "/bootstrap.py"]
+    volumes:
+      - ./signoz/bootstrap.py:/bootstrap.py:ro
+      - signoz-bootstrap:/bootstrap
+    restart: on-failure
+
+  versus:
+    depends_on:
+      redis:
+        condition: service_healthy
+      signoz:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+      signoz-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      SIGNOZ_ADDRESS: ${SIGNOZ_ADDRESS:-http://signoz:8080}
+      SIGNOZ_API_KEY: ${SIGNOZ_API_KEY:-}
+    # Fall back to the bootstrapped key when the operator did not supply one.
+    # The override replaces the image CMD, so the enterprise binary path is
+    # named here explicitly.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$${SIGNOZ_API_KEY}" ] && [ -f /bootstrap/signoz-api-key ]; then
+          SIGNOZ_API_KEY="$$(cat /bootstrap/signoz-api-key)"
+          export SIGNOZ_API_KEY
+        fi
+        exec /app/enterprise
+    volumes:
+      - ./config:/app/config:ro
+      - ./config/agent_sources.signoz.yaml:/app/config/agent_sources.yaml:ro
+      - signoz-bootstrap:/bootstrap:ro
+      - versus-data:/app/data
+
+volumes:
+  clickhouse-data:
+  clickhouse-user-scripts:
+  zookeeper-data:
+  signoz-data:
+  signoz-bootstrap:

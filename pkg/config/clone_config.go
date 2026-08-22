@@ -403,6 +403,7 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 					LogStreamPrefix: s.CloudWatchLogs.LogStreamPrefix,
 					FilterPattern:   s.CloudWatchLogs.FilterPattern,
 					PageSize:        s.CloudWatchLogs.PageSize,
+					ReorderWindow:   s.CloudWatchLogs.ReorderWindow,
 				},
 				Graylog: AgentGraylogSourceConfig{
 					Address:            s.Graylog.Address,
@@ -428,6 +429,16 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 					SeverityField:      s.Splunk.SeverityField,
 					PageSize:           s.Splunk.PageSize,
 				},
+				Signoz: AgentSignozSourceConfig{
+					Address:            s.Signoz.Address,
+					APIKey:             s.Signoz.APIKey,
+					InsecureSkipVerify: s.Signoz.InsecureSkipVerify,
+					Query:              s.Signoz.Query,
+					MessageField:       s.Signoz.MessageField,
+					SeverityField:      s.Signoz.SeverityField,
+					PageSize:           s.Signoz.PageSize,
+					ReorderWindow:      s.Signoz.ReorderWindow,
+				},
 			}
 			if s.Elasticsearch.Addresses != nil {
 				c.Elasticsearch.Addresses = append([]string(nil), s.Elasticsearch.Addresses...)
@@ -446,6 +457,9 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 			}
 			if s.Splunk.ExtraFields != nil {
 				c.Splunk.ExtraFields = append([]string(nil), s.Splunk.ExtraFields...)
+			}
+			if s.Signoz.ExtraFields != nil {
+				c.Signoz.ExtraFields = append([]string(nil), s.Signoz.ExtraFields...)
 			}
 			if s.Options != nil {
 				c.Options = cloneAnyMap(s.Options)

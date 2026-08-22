@@ -58,13 +58,17 @@ func TestRegistry_RegisterAndLookup(t *testing.T) {
 }
 
 func TestRegistry_RequiresEnterprise(t *testing.T) {
-	for _, tn := range []string{"prometheus", "traces"} {
+	for _, tn := range []string{"prometheus", "traces", "cloudwatch_metrics", "signoz_metrics", "signoz_traces"} {
 		if !RequiresEnterprise(tn) {
 			t.Errorf("RequiresEnterprise(%q) = false, want true", tn)
 		}
 	}
 	if RequiresEnterprise("file") {
 		t.Error("RequiresEnterprise(\"file\") = true, want false")
+	}
+	// The OSS logs source stays constructible on a community build.
+	if RequiresEnterprise("signoz") {
+		t.Error("RequiresEnterprise(\"signoz\") = true, want false")
 	}
 
 	err := ErrRequiresEnterprise("prometheus")

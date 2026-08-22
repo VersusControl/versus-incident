@@ -154,6 +154,16 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 	w.ewmaAlpha = 0.2 // configurable once spike detection lands
 	w.newServiceGrace = parseDurationOr(opt.Cfg.NewServiceGrace, 0)
 
+	// A tail's re-read span is also the span a replacement process replays
+	// after an abrupt kill, and what it has to cover is every row learned since
+	// the last catalog flush. This is the one place that knows both numbers, so
+	// widen every tail here by one persist interval rather than trusting two
+	// settings in two files to be tuned against each other.
+	if widened := signalsources.ApplyTailReplaySpan(w.sources, w.persistEvery); len(widened) > 0 {
+		log.Printf("agent: tail re-read span widened by the %s catalog persist_interval so an abrupt restart cannot lose unflushed rows: %s",
+			w.persistEvery, signalsources.FormatTailWindows(widened))
+	}
+
 	// Wire the baseline fold from the poll interval + spike settings so
 	// Catalog.Upsert folds a poll-independent per-second rate through the
 	// outlier-resistant EWMA (and seasonal buckets when enabled), sharing the
@@ -283,8 +293,12 @@ func (w *Worker) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			log.Printf("agent: worker stopping; flushing catalog…")
+			flushed := true
 			if err := w.catalog.Persist(); err != nil {
 				log.Printf("agent: final catalog flush failed: %v", err)
+				flushed = false
+			} else {
+				log.Printf("agent: catalog flushed on shutdown (%d patterns)", w.catalog.Len())
 			}
 			if w.shadow != nil {
 				if err := w.shadow.Persist(); err != nil {
@@ -296,13 +310,23 @@ func (w *Worker) Run(ctx context.Context) {
 					log.Printf("agent: final detect flush failed: %v", err)
 				}
 			}
+			if flushed {
+				// This worker's ctx is already canceled, so the commit needs a
+				// live one of its own or every backend call fails instantly and
+				// the restart replays the last window for nothing.
+				commitCtx, cancel := context.WithTimeout(context.Background(), shutdownCommitTimeout)
+				w.commitSources(commitCtx)
+				cancel()
+			}
 			return
 		case <-tick.C:
 			w.tick(ctx)
 		case <-persist.C:
+			flushed := true
 			if w.catalog.Dirty() {
 				if err := w.catalog.Persist(); err != nil {
 					log.Printf("agent: catalog flush failed: %v", err)
+					flushed = false
 				} else {
 					log.Printf("agent: catalog flushed (%d patterns)", w.catalog.Len())
 				}
@@ -321,7 +345,69 @@ func (w *Worker) Run(ctx context.Context) {
 					log.Printf("agent: detect log flushed (%d events)", w.detect.Len())
 				}
 			}
+			// The rows this cycle learned are now in storage, so the ids that
+			// suppress re-reading them may become durable too — in that order,
+			// never the other way round.
+			if flushed {
+				w.commitSources(ctx)
+			}
 		}
+	}
+}
+
+// shutdownCommitTimeout bounds the post-flush commit on the shutdown path. A
+// container stop gives the process a limited grace period; overrunning it turns
+// a graceful stop into a kill, so the commit gets a short, explicit budget.
+const shutdownCommitTimeout = 5 * time.Second
+
+// commitSources lets every source that stages delivery state make it durable.
+// It runs ONLY after the catalog flush that put this cycle's rows in storage,
+// which is what keeps the two writes from inverting: a source's record of "I
+// already delivered this row" can never outlive the row itself.
+//
+// A source with no staged state does not implement core.SourceCommitter and is
+// skipped, so it behaves exactly as it did before the seam existed. A failing
+// commit is logged and the loop continues — the pending ids stay pending and
+// the next commit retries them, so the cost is a possible replay, never a hole.
+func (w *Worker) commitSources(ctx context.Context) {
+	for _, src := range w.sources {
+		committer, ok := src.(core.SourceCommitter)
+		if !ok {
+			continue
+		}
+		if err := committer.Commit(ctx); err != nil {
+			log.Printf("agent: %s: persisting the delivered-row set failed: %v (a restart before the next commit may re-emit up to one reorder window; no row is lost)", src.Name(), err)
+		}
+	}
+}
+
+// StartWorker runs the worker in its own goroutine and returns a channel that
+// closes when Run has returned — that is, when the shutdown flush AND the
+// commit that follows it have finished. A process that exits without waiting on
+// this races its own final flush and drops everything learned since the last
+// periodic one.
+func StartWorker(ctx context.Context, w *Worker) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Run(ctx)
+	}()
+	return done
+}
+
+// WaitForShutdownFlush blocks until the worker signalled by done has finished
+// its shutdown flush, or until timeout elapses. It reports whether the flush
+// completed, so the caller can say so rather than exiting silently mid-write.
+// A nil channel (agent disabled) returns immediately.
+func WaitForShutdownFlush(done <-chan struct{}, timeout time.Duration) bool {
+	if done == nil {
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
 	}
 }
 

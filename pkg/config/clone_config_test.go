@@ -136,3 +136,46 @@ func TestCloneConfigCarriesElasticsearchReorderWindow(t *testing.T) {
 		t.Error("clone shares the ExtraFields slice with the source")
 	}
 }
+
+// TestCloneConfigCarriesSignozSource asserts the SigNoz typed block survives a
+// full cloneConfig round-trip. Per-request configs are built by cloning the
+// base, so a field missing from the clone is silently dropped on every request —
+// the source would then be constructed with an empty address and API key.
+func TestCloneConfigCarriesSignozSource(t *testing.T) {
+	src := &Config{}
+	src.Agent.Sources = []AgentSourceConfig{
+		{
+			Name: "signoz-prod",
+			Type: "signoz",
+			Signoz: AgentSignozSourceConfig{
+				Address:            "https://eu.signoz.cloud",
+				APIKey:             "signoz-key",
+				InsecureSkipVerify: true,
+				Query:              "severity_text = 'ERROR'",
+				MessageField:       "body",
+				SeverityField:      "severity_text",
+				ExtraFields:        []string{"service.name"},
+				PageSize:           250,
+				ReorderWindow:      "90s",
+			},
+		},
+	}
+	dst := cloneConfig(src)
+	if !reflect.DeepEqual(dst.Agent.Sources[0].Signoz, src.Agent.Sources[0].Signoz) {
+		t.Fatalf("cloned SigNoz source = %+v, want %+v", dst.Agent.Sources[0].Signoz, src.Agent.Sources[0].Signoz)
+	}
+
+	// Mutating the clone must not touch the source (deep copy, no shared slices).
+	dst.Agent.Sources[0].Signoz.Address = "mutated"
+	dst.Agent.Sources[0].Signoz.ReorderWindow = "mutated"
+	dst.Agent.Sources[0].Signoz.ExtraFields[0] = "mutated"
+	if src.Agent.Sources[0].Signoz.Address != "https://eu.signoz.cloud" {
+		t.Error("clone shares address with the source")
+	}
+	if src.Agent.Sources[0].Signoz.ReorderWindow != "90s" {
+		t.Error("clone shares reorder_window with the source")
+	}
+	if src.Agent.Sources[0].Signoz.ExtraFields[0] != "service.name" {
+		t.Error("clone shares the ExtraFields slice with the source")
+	}
+}

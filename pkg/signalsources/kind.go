@@ -68,7 +68,7 @@ func KindOf(sourceType string) Kind {
 	return KindLogs
 }
 
-// init registers the six built-in OSS log source types. The type strings match
+// init registers the built-in OSS log source types. The type strings match
 // exactly the ones the agent factory builds (pkg/agent.BuildSources) and the
 // config schema documents (config.AgentSourceConfig.Type).
 func init() {
@@ -79,6 +79,7 @@ func init() {
 		"cloudwatchlogs",
 		"graylog",
 		"splunk",
+		"signoz",
 	} {
 		RegisterKind(t, KindLogs)
 	}

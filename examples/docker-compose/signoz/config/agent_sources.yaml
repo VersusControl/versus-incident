@@ -1,0 +1,32 @@
+# SigNoz logs source. `type: signoz` is an OSS log source — it reads SigNoz's
+# v5 query API (`POST /api/v5/query_range`, signal `logs`) with the
+# `SIGNOZ-API-KEY` header, which is identical on self-hosted and on Cloud.
+#
+# The API key is minted by the signoz-bootstrap one-shot and injected as
+# SIGNOZ_API_KEY; export your own to override. Never commit a real key here.
+sources:
+  - name: demo-signoz
+    type: signoz
+    enable: true
+    signoz:
+      address: ${SIGNOZ_ADDRESS}
+      api_key: ${SIGNOZ_API_KEY}
+      # A v5 filter EXPRESSION (the Logs Explorer filter-bar syntax), not
+      # LogQL and not PromQL. Empty matches every log in the window; narrow it
+      # with e.g. `severity_text = 'ERROR'` or `service.name = 'checkout'`.
+      query: ${SIGNOZ_QUERY}
+      message_field: body
+      severity_field: severity_text
+      # SigNoz keeps OTLP resource and log attributes in nested maps whose KEYS
+      # contain the dots (`resources_string: {"service.name": "checkout"}`).
+      # Address one attribute by its container-qualified name, or bare — a bare
+      # name is searched across the containers, resource attributes first.
+      # Either way it lands in Signal.Fields under the bare attribute name.
+      extra_fields:
+        - resources_string.service.name
+        - resources_string.deployment.environment
+        - attributes_string.http.status_code
+      page_size: 500
+      # How far back each tick re-scans below the cursor to catch rows that
+      # became queryable late (collector batching + ClickHouse insert lag).
+      reorder_window: 2m

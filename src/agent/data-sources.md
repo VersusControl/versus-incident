@@ -12,6 +12,7 @@ the next cursor — so they can be mixed freely in one deployment.
 | [CloudWatch Logs](./data-sources/cloudwatch-logs.md) | `cloudwatchlogs` | AWS Lambda, ECS, EKS, EC2 |
 | [Graylog](./data-sources/graylog.md) | `graylog` | Graylog server, GELF-centralized logs |
 | [Splunk](./data-sources/splunk.md) | `splunk` | Splunk Enterprise, Splunk Cloud |
+| [SigNoz](./data-sources/signoz.md) | `signoz` | SigNoz Cloud, SigNoz self-hosted (v0.87.0+) |
 
 ## How sources are configured
 
@@ -23,7 +24,7 @@ REPLACES any inline `agent.sources` from the main config.
 # agent_sources.yaml
 sources:
   - name: my-source        # unique, used in cursor keys & admin views
-    type: file             # one of: file | elasticsearch | loki | cloudwatchlogs | graylog | splunk
+    type: file             # one of: file | elasticsearch | loki | cloudwatchlogs | graylog | splunk | signoz
     enable: true
     file:                  # block name MUST match `type`
       path: /var/log/app.log

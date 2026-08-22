@@ -1,0 +1,59 @@
+# Detect-path sources for the OPTIONAL SigNoz overlay: `signoz_metrics` and
+# `signoz_traces` REPLACE the Prometheus/Tempo pair from agent_sources.yaml.
+# Mounted over agent_sources.yaml only when you run with
+# `-f docker-compose.signoz.yml`.
+#
+# Both are ENTERPRISE DATA SOURCES, license-gated on the `intelligence`
+# entitlement, and both use the generic `options:` schema.
+#
+# Note the shape difference from the Prometheus source: there are NO
+# operator-authored queries. SigNoz's v5 API speaks filter expressions, not
+# PromQL/TraceQL, so these sources DISCOVER their own watch-set — services from
+# a bounded sample of recent spans, metrics by probing the catalog below — and
+# learn a baseline per (service, signal). Connection details are the whole
+# required config.
+#
+# ALSO DIFFERENT FROM THE PROMETHEUS PATH: the analyze tools are NOT auto-wired
+# for SigNoz in v1. `query_metrics` / `query_traces` still build Prometheus and
+# Tempo clients, so configuring these sources lights up the DETECT path only.
+# Point the analyze tools at a Prometheus/Tempo by hand if you need them.
+#
+# The API key is minted by the signoz-bootstrap one-shot and injected as
+# SIGNOZ_API_KEY; export your own to override. Never commit a real key here.
+sources:
+  - name: demo-signoz-metrics
+    type: signoz_metrics
+    enable: true
+    options:
+      address: ${SIGNOZ_ADDRESS}
+      api_key: ${SIGNOZ_API_KEY}
+      step: 60s
+      # `metrics:` ADDS to the built-in catalog (SigNoz's own span metrics,
+      # `signoz_calls_total` and `signoz_latency.bucket`), it does not replace
+      # it — so naming a custom metric here cannot switch the built-ins off.
+      # `demo_http_requests_total` is what `generate_fake_metrics.py
+      # --backend signoz` pushes over OTLP.
+      #
+      # Both naming conventions are recognised: SigNoz spells histogram and
+      # counter components with a DOT (`signoz_latency.bucket`,
+      # `demo_http_request_duration_seconds.sum`) while a Prometheus-shaped
+      # scrape arrives underscored. The source reads either with the right
+      # reducer.
+      metrics:
+        - demo_http_requests_total
+      # Narrow the whole source with a SigNoz v5 filter expression. Attribute
+      # names are DOTTED — this is not PromQL. It is ANDed into every probe and
+      # every sample.
+      # filter: "deployment.environment = 'prod'"
+      #
+      # To stop a metric being LEARNED, use the org Disable-Learn policy
+      # (PUT /enterprise/api/agent/learn-exclusions, `metrics` accepts exact
+      # names and globs) — it applies to every source, not just this one.
+
+  - name: demo-signoz-traces
+    type: signoz_traces
+    enable: true
+    options:
+      address: ${SIGNOZ_ADDRESS}
+      api_key: ${SIGNOZ_API_KEY}
+      page_size: 100

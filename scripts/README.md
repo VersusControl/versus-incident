@@ -7,8 +7,8 @@ The main generator is
 [`run_noisy_logs.sh`](run_noisy_logs.sh) for live-tail and one-shot
 spike / scenario modes. It can write to a **local file** or push the
 same generated lines directly into **Loki**, **Elasticsearch**,
-**CloudWatch Logs**, **Graylog** (GELF UDP), or **Splunk** (HEC) —
-selected via `--target` (or `TARGET=`).
+**CloudWatch Logs**, **Graylog** (GELF UDP), **Splunk** (HEC), or
+**SigNoz** (OTLP/HTTP) — selected via `--target` (or `TARGET=`).
 
 | Target | Flag / env | Default endpoint |
 |---|---|---|
@@ -18,6 +18,7 @@ selected via `--target` (or `TARGET=`).
 | `cloudwatch` | `--cw-log-group` / `CW_LOG_GROUP_NAME=` (+ `--cw-region`) | — (requires `boto3` + AWS creds) |
 | `graylog` | `--graylog-host` / `GRAYLOG_HOST=` (+ `--graylog-port`) | `localhost:12201` (GELF UDP) |
 | `splunk` | `--splunk-token` / `SPLUNK_HEC_TOKEN=` (+ `--splunk-url`) | `https://localhost:8088` (HEC) |
+| `signoz` | `--signoz-url` / `SIGNOZ_OTLP_URL=` (+ `--signoz-service`) | `http://localhost:4318` (OTLP/HTTP `/v1/logs`) |
 
 The `elasticsearch`-via-`makelogs` flavour is also kept around (see
 [§2](#2-elasticsearch-source--makelogs)) — useful when you want
@@ -60,6 +61,7 @@ python3 scripts/generate_noisy_logs.py --target cloudwatch \
 python3 scripts/generate_noisy_logs.py --target graylog --lines 500
 python3 scripts/generate_noisy_logs.py --target splunk \
   --splunk-token "$SPLUNK_HEC_TOKEN" --lines 500
+python3 scripts/generate_noisy_logs.py --target signoz --lines 500
 ```
 
 Useful flags: `--lines/-n`, `--output/-o`, `--start-time` (`now` or RFC3339),
@@ -152,6 +154,7 @@ INTERVAL=2 BATCH=50 ./scripts/run_noisy_logs.sh
 TARGET=cloudwatch CW_LOG_GROUP_NAME=/aws/lambda/foo ./scripts/run_noisy_logs.sh
 ./scripts/run_noisy_logs.sh --target graylog
 SPLUNK_HEC_TOKEN=... ./scripts/run_noisy_logs.sh --target splunk
+./scripts/run_noisy_logs.sh --target signoz
 ```
 
 Stop with Ctrl+C. The script prints a summary count on exit.
@@ -365,7 +368,36 @@ python3 scripts/generate_fake_metrics.py --clear
 | `--spike` | off | Engage the 5xx + latency anomaly. |
 | `--spike-duration S` | `0` | Stay anomalous for S seconds then auto-revert (0 = whole run). |
 | `--clear` | — | DELETE the pushed group from the pushgateway and exit. |
-| `--otlp URL` | — | Also POST best-effort OTLP spans to a Tempo backend (traces overlay). |
+| `--otlp URL` | — | Also POST best-effort OTLP spans to a trace backend (Tempo overlay; always on with `--backend signoz`). |
+| `--backend` | `pushgateway` | `pushgateway` or `signoz` — see below. |
+
+### SigNoz backend (`--backend signoz`)
+
+SigNoz has no pushgateway: it takes **OTLP**. `--backend signoz` sends the SAME
+simulated series to a SigNoz collector as OTLP/HTTP JSON on `/v1/metrics`, and
+always pushes spans alongside them (SigNoz derives its own `signoz_calls_total`
+span metric from those). Every other flag — `--spike`, `--spike-duration`,
+`--rate`, `--service` — behaves identically:
+
+```bash
+python3 scripts/generate_fake_metrics.py --backend signoz --spike --duration 240
+```
+
+Used by the enterprise example's
+[SigNoz overlay](../examples/metrics-source/README.md#optional-signoz-metrics--traces).
+
+**Why `--backend` and not `--target`?** In the *log* generator `--target` selects
+the backend; here `--target` already means "the pushgateway URL", so the backend
+selector had to be a separate flag rather than a breaking rename. The OTLP
+endpoint comes from `--otlp` (default `http://localhost:4318` in this mode).
+
+Two things to know when reading the results back out of SigNoz:
+
+- `--clear` is a pushgateway concept and is refused on this backend — OTLP is
+  fire-and-forget, so there is no pushed group to delete.
+- SigNoz names histogram components with a **dot**
+  (`demo_http_request_duration_seconds.bucket`, `.sum`, `.count`), not the
+  Prometheus underscore. Counters keep their `_total` suffix.
 
 ### Optional: traces (Tempo)
 

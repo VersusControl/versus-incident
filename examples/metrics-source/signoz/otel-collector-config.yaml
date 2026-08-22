@@ -1,0 +1,103 @@
+# SigNoz collector config for the Versus example. Receives OTLP on 4317/4318
+# (gRPC and HTTP; the HTTP receiver takes protobuf AND JSON bodies, which is
+# what the stdlib-only fake-data generators push) and writes logs, traces and
+# metrics into ClickHouse.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+connectors:
+  signozmeter:
+    metrics_flush_interval: 1h
+    dimensions:
+      - name: service.name
+      - name: deployment.environment
+      - name: host.name
+
+processors:
+  batch:
+    send_batch_size: 10000
+    send_batch_max_size: 11000
+    # Kept short so a pushed log line becomes queryable within one Versus
+    # poll interval instead of sitting in the collector's batcher.
+    timeout: 5s
+  batch/meter:
+    send_batch_max_size: 25000
+    send_batch_size: 20000
+    timeout: 1s
+  resourcedetection:
+    detectors: [env, system]
+    timeout: 2s
+  # Derives SigNoz's own span metrics (signoz_calls_total, signoz_latency_*)
+  # from ingested traces. The enterprise signoz_metrics source probes exactly
+  # these by default, so pushing traces is enough to give it something to see.
+  signozspanmetrics/delta:
+    metrics_exporter: signozclickhousemetrics
+    metrics_flush_interval: 60s
+    latency_histogram_buckets: [100us, 1ms, 2ms, 6ms, 10ms, 50ms, 100ms, 250ms, 500ms, 1000ms, 1400ms, 2000ms, 5s, 10s, 20s, 40s, 60s]
+    dimensions_cache_size: 100000
+    aggregation_temporality: AGGREGATION_TEMPORALITY_DELTA
+    enable_exp_histogram: true
+    dimensions:
+      - name: service.namespace
+        default: default
+      - name: deployment.environment
+        default: default
+      - name: signoz.collector.id
+      - name: service.version
+      - name: host.name
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+exporters:
+  clickhousetraces:
+    datasource: tcp://clickhouse:9000/signoz_traces
+    low_cardinal_exception_grouping: ${env:LOW_CARDINAL_EXCEPTION_GROUPING}
+    use_new_schema: true
+  signozclickhousemetrics:
+    dsn: tcp://clickhouse:9000/signoz_metrics
+  clickhouselogsexporter:
+    dsn: tcp://clickhouse:9000/signoz_logs
+    timeout: 10s
+    use_new_schema: true
+  signozclickhousemeter:
+    dsn: tcp://clickhouse:9000/signoz_meter
+    timeout: 45s
+    sending_queue:
+      enabled: false
+  metadataexporter:
+    cache:
+      provider: in_memory
+    dsn: tcp://clickhouse:9000/signoz_metadata
+    enabled: true
+    timeout: 45s
+
+service:
+  telemetry:
+    logs:
+      encoding: json
+  extensions:
+    - health_check
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [signozspanmetrics/delta, batch]
+      exporters: [clickhousetraces, metadataexporter, signozmeter]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [signozclickhousemetrics, metadataexporter, signozmeter]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [clickhouselogsexporter, metadataexporter, signozmeter]
+    metrics/meter:
+      receivers: [signozmeter]
+      processors: [batch/meter]
+      exporters: [signozclickhousemeter]

@@ -51,6 +51,20 @@ depends on it.
     python3 scripts/generate_fake_metrics.py --spike \
         --otlp http://localhost:4318 --duration 90
 
+SigNoz backend — `--backend signoz` sends the SAME simulated series over
+OTLP/HTTP JSON to a SigNoz collector (`/v1/metrics`) instead of a
+pushgateway, and always pushes spans alongside them (SigNoz derives its own
+`signoz_calls_total` / `signoz_latency_*` span metrics from those). Every
+other flag — --spike, --spike-duration, --rate, --service — behaves
+identically:
+
+    python3 scripts/generate_fake_metrics.py --backend signoz --spike \
+        --otlp http://localhost:4318 --duration 90
+
+Note the name: the log generator selects its backend with `--target`, but
+here `--target` already means "the pushgateway URL", so the selector is
+`--backend`.
+
 No external packages required — the exposition body is rendered by hand and
 pushed with urllib.
 """
@@ -58,6 +72,7 @@ pushed with urllib.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import random
@@ -195,11 +210,12 @@ def clear(base: str, job: str) -> None:
 
 
 def push_trace(otlp: str, service: str, spiking: bool) -> None:
-    """Best-effort: POST one OTLP/HTTP span to Tempo (optional traces path).
+    """Best-effort: POST one OTLP/HTTP span to the trace backend.
 
-    During a spike, ~half the spans are errors with fat latency so
-    `query_traces` has anomalies to surface. Wrapped by the caller so a
-    missing/slow Tempo never breaks the metrics path.
+    Used by the Tempo traces overlay and by the SigNoz backend. During a spike,
+    ~half the spans are errors with fat latency so `query_traces` has anomalies
+    to surface. Wrapped by the caller so a missing/slow backend never breaks
+    the metrics path.
     """
     is_error = spiking and random.random() < 0.5
     duration_ms = random.uniform(800, 3000) if spiking else random.uniform(20, 150)
@@ -236,6 +252,131 @@ def push_trace(otlp: str, service: str, spiking: bool) -> None:
     urllib.request.urlopen(req, timeout=2).read()
 
 
+OTLP_CUMULATIVE = 2  # AGGREGATION_TEMPORALITY_CUMULATIVE
+
+
+def render_otlp_metrics(series: Series, service: str, start_ns: int) -> dict:
+    """Render the same cumulative state as an OTLP metrics payload.
+
+    The Prometheus path carries `service` as a metric LABEL; OTLP carries it as
+    a RESOURCE attribute (`service.name`), which is what SigNoz indexes and
+    what the enterprise SigNoz metric source discovers on. Buckets also differ:
+    Prometheus `le` buckets are cumulative, OTLP `bucketCounts` are per-bucket,
+    so the cumulative counts are differenced here.
+    """
+    now_ns = time.time_ns()
+    per_bucket = []
+    prev = 0
+    for count in series.bucket_counts:
+        per_bucket.append(count - prev)
+        prev = count
+    per_bucket.append(series.inf_count - prev)  # the +Inf overflow bucket
+
+    counter_points = [
+        {
+            "attributes": [{"key": "code", "value": {"stringValue": code}}],
+            "startTimeUnixNano": str(start_ns),
+            "timeUnixNano": str(now_ns),
+            "asDouble": float(count),
+        }
+        for code, count in sorted(series.requests.items())
+    ] or [
+        {
+            "attributes": [{"key": "code", "value": {"stringValue": "200"}}],
+            "startTimeUnixNano": str(start_ns),
+            "timeUnixNano": str(now_ns),
+            "asDouble": 0.0,
+        }
+    ]
+
+    return {
+        "resourceMetrics": [
+            {
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": service}}
+                    ]
+                },
+                "scopeMetrics": [
+                    {
+                        "scope": {"name": "generate_fake_metrics.py"},
+                        "metrics": [
+                            {
+                                "name": COUNTER_NAME,
+                                "unit": "1",
+                                "sum": {
+                                    "aggregationTemporality": OTLP_CUMULATIVE,
+                                    "isMonotonic": True,
+                                    "dataPoints": counter_points,
+                                },
+                            },
+                            {
+                                "name": HISTOGRAM_NAME,
+                                "unit": "s",
+                                "histogram": {
+                                    "aggregationTemporality": OTLP_CUMULATIVE,
+                                    "dataPoints": [
+                                        {
+                                            "attributes": [],
+                                            "startTimeUnixNano": str(start_ns),
+                                            "timeUnixNano": str(now_ns),
+                                            "count": str(series.duration_count),
+                                            "sum": series.duration_sum,
+                                            "bucketCounts": [str(c) for c in per_bucket],
+                                            "explicitBounds": list(BUCKETS),
+                                        }
+                                    ],
+                                },
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def push_otlp_metrics(otlp: str, series: Series, service: str, start_ns: int) -> None:
+    """POST the cumulative state to an OTLP/HTTP collector (`/v1/metrics`).
+
+    JSON-encoded, because this generator is stdlib-only by design and stdlib
+    cannot produce protobuf. The OTLP/HTTP receiver in SigNoz's collector
+    accepts a JSON body, which is what makes the no-dependency path possible.
+
+    Transport failures are retried a few times: SigNoz's collector restarts
+    itself once shortly after boot, when its OpAMP client pulls config from the
+    SigNoz server, and drops in-flight connections in that window.
+    """
+    body = json.dumps(render_otlp_metrics(series, service, start_ns)).encode("utf-8")
+    last_err = None
+    for attempt in range(4):
+        req = urllib.request.Request(
+            otlp.rstrip("/") + "/v1/metrics",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status >= 300:
+                    raise RuntimeError("OTLP /v1/metrics returned %d" % resp.status)
+                payload = resp.read().decode("utf-8", "replace")
+            break
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+            last_err = e
+            time.sleep(0.5 * (attempt + 1))
+    else:
+        raise RuntimeError("OTLP /v1/metrics unreachable after 4 attempts: %s"
+                           % last_err)
+    if payload.strip() and payload.strip() != "{}":
+        try:
+            partial = json.loads(payload).get("partialSuccess") or {}
+        except ValueError:
+            partial = {}
+        if partial.get("rejectedDataPoints"):
+            raise RuntimeError("OTLP /v1/metrics rejected data points: %s" % partial)
+
+
 def print_list(service: str) -> None:
     """Print the exact series/labels emitted plus sample PromQL."""
     print("Series emitted (service=%s):" % service)
@@ -259,6 +400,15 @@ def print_list(service: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--backend", "-b", default=os.getenv("METRICS_BACKEND", "pushgateway"),
+        choices=["pushgateway", "signoz"],
+        help="where to send the series: `pushgateway` (Prometheus scrapes it) "
+             "or `signoz` (OTLP/HTTP JSON straight at the collector). The log "
+             "generator spells this `--target`; here `--target` is already the "
+             "pushgateway URL, so the backend selector is `--backend` "
+             "(default: pushgateway; env: METRICS_BACKEND)",
     )
     ap.add_argument(
         "--target", "-t",
@@ -306,8 +456,10 @@ def main() -> int:
     )
     ap.add_argument(
         "--otlp", default=os.getenv("OTLP_ENDPOINT", ""),
-        help="optional Tempo OTLP/HTTP base URL; when set, also POST one "
-             "best-effort span per push (env: OTLP_ENDPOINT)",
+        help="OTLP/HTTP base URL. With --backend pushgateway this is the "
+             "optional Tempo endpoint for one best-effort span per push; with "
+             "--backend signoz it is the collector metrics AND traces are sent "
+             "to, defaulting to http://localhost:4318 (env: OTLP_ENDPOINT)",
     )
     ap.add_argument(
         "--list", action="store_true",
@@ -326,6 +478,14 @@ def main() -> int:
         return 0
 
     if args.clear:
+        if args.backend == "signoz":
+            print(
+                "--clear is a pushgateway concept: OTLP is fire-and-forget, so "
+                "there is no pushed group to delete. Stop the generator and the "
+                "series simply stop advancing.",
+                file=sys.stderr,
+            )
+            return 2
         try:
             clear(args.target, args.job)
         except (urllib.error.URLError, RuntimeError) as e:
@@ -340,15 +500,22 @@ def main() -> int:
     if args.seed is not None:
         random.seed(args.seed)
 
+    otlp = args.otlp
+    if args.backend == "signoz" and not otlp:
+        otlp = "http://localhost:4318"
+    destination = otlp if args.backend == "signoz" else args.target
+
     series = Series()
     start = time.time()
+    start_ns = time.time_ns()
     pushes = 0
 
     print(
-        "pushing %s metrics to %s (service=%s, job=%s, %s)"
+        "pushing %s metrics to %s (backend=%s, service=%s, job=%s, %s)"
         % (
             "SPIKING" if args.spike else "normal",
-            args.target,
+            destination,
+            args.backend,
             args.service,
             args.job,
             ("%.0fs" % args.duration) if args.duration > 0 else "until Ctrl+C",
@@ -368,20 +535,31 @@ def main() -> int:
 
             simulate_tick(series, spiking, args.rate)
             try:
-                push(args.target, args.job, render_exposition(series, args.service))
+                if args.backend == "signoz":
+                    push_otlp_metrics(otlp, series, args.service, start_ns)
+                else:
+                    push(args.target, args.job, render_exposition(series, args.service))
             except (urllib.error.URLError, RuntimeError) as e:
+                hint = (
+                    "  Is the SigNoz collector up? Start the signoz overlay "
+                    "(docker compose -f docker-compose.yml -f "
+                    "docker-compose.signoz.yml up -d) or pass --otlp."
+                    if args.backend == "signoz"
+                    else "  Is the pushgateway up? Start the metrics example "
+                         "(docker compose up -d) or pass --target."
+                )
                 print(
-                    "push to %s failed: %s\n"
-                    "  Is the pushgateway up? Start the metrics example "
-                    "(docker compose up -d) or pass --target." % (args.target, e),
+                    "push to %s failed: %s\n%s" % (destination, e, hint),
                     file=sys.stderr,
                 )
                 return 1
-            if args.otlp:
+            if otlp:
                 # Best-effort: the metrics path must never break because a
-                # trace backend is missing or slow.
+                # trace backend is missing or slow. On the SigNoz backend the
+                # spans matter twice over — the collector derives SigNoz's own
+                # span metrics from them.
                 try:
-                    push_trace(args.otlp, args.service, spiking)
+                    push_trace(otlp, args.service, spiking)
                 except Exception:
                     pass
             pushes += 1
@@ -391,9 +569,14 @@ def main() -> int:
 
     total = series.duration_count
     err = series.requests.get("500", 0)
+    where = (
+        otlp.rstrip("/") + "/v1/metrics"
+        if args.backend == "signoz"
+        else pushgateway_url(args.target, args.job)
+    )
     print(
         "done — %d pushes, %d requests (%d 5xx) over %.0fs to %s"
-        % (pushes, total, err, time.time() - start, pushgateway_url(args.target, args.job))
+        % (pushes, total, err, time.time() - start, where)
     )
     return 0
 

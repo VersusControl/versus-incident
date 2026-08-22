@@ -8,12 +8,13 @@
 #   INTERVAL=10 BATCH=50 ./scripts/run_noisy_logs.sh
 #   ./scripts/run_noisy_logs.sh --output local/resource/noisy-app.log
 #
-#   # target a Loki / Elasticsearch / CloudWatch / Graylog / Splunk backend:
+#   # target a Loki / Elasticsearch / CloudWatch / Graylog / Splunk / SigNoz backend:
 #   ./scripts/run_noisy_logs.sh --target loki
 #   ./scripts/run_noisy_logs.sh --target elasticsearch
 #   TARGET=cloudwatch CW_LOG_GROUP_NAME=/aws/lambda/foo ./scripts/run_noisy_logs.sh
 #   ./scripts/run_noisy_logs.sh --target graylog
 #   SPLUNK_HEC_TOKEN=... ./scripts/run_noisy_logs.sh --target splunk
+#   ./scripts/run_noisy_logs.sh --target signoz
 #
 #   # inject a single spike burst, then exit:
 #   ./scripts/run_noisy_logs.sh --spike db-conn-refused
@@ -22,7 +23,7 @@
 # Env vars / flags (live tail):
 #   INTERVAL       seconds between batches             (default 5)
 #   BATCH          lines per batch                     (default 20)
-#   TARGET         file|loki|elasticsearch|cloudwatch|graylog|splunk  (default file)
+#   TARGET         file|loki|elasticsearch|cloudwatch|graylog|splunk|signoz  (default file)
 #   OUTPUT         log file (file target only)         (default local/resource/noisy-app.log)
 #   ITER           max iterations, 0 = infinite        (default 0)
 #
@@ -51,6 +52,11 @@
 #   SPLUNK_HEC_TOKEN    (required)
 #   SPLUNK_INDEX        (default main)
 #   SPLUNK_SOURCETYPE   (default _json)
+#
+# SigNoz target (OTLP/HTTP JSON straight at the collector — the real ingest path):
+#   SIGNOZ_OTLP_URL      (default http://localhost:4318)
+#   SIGNOZ_SERVICE       (default noisy)   ## fallback OTLP service.name
+#   SIGNOZ_INGESTION_KEY (optional)        ## SigNoz Cloud only; NOT the query API key
 #
 # Spike-mode (disables live tail when set):
 #   SPIKE          template name to burst              (e.g. db-conn-refused)
@@ -96,7 +102,7 @@ while [[ $# -gt 0 ]]; do
     --list-templates) LIST_TEMPLATES=1;  shift ;;
     --list-scenarios) LIST_SCENARIOS=1;  shift ;;
     -h|--help)
-      sed -n '2,67p' "$0"; exit 0 ;;
+      sed -n '2,73p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -167,6 +173,13 @@ case "$TARGET" in
                    --splunk-index "${SPLUNK_INDEX:-main}" \
                    --splunk-sourcetype "${SPLUNK_SOURCETYPE:-_json}" )
     summary_target="splunk:${SPLUNK_URL:-https://localhost:8088} index=${SPLUNK_INDEX:-main}"
+    ;;
+  signoz)
+    target_args+=( --signoz-url "${SIGNOZ_OTLP_URL:-http://localhost:4318}" \
+                   --signoz-service "${SIGNOZ_SERVICE:-noisy}" )
+    [[ -n "${SIGNOZ_INGESTION_KEY:-}" ]] && \
+      target_args+=( --signoz-ingestion-key "$SIGNOZ_INGESTION_KEY" )
+    summary_target="signoz:${SIGNOZ_OTLP_URL:-http://localhost:4318}/v1/logs"
     ;;
   *)
     echo "unknown TARGET: $TARGET" >&2; exit 2 ;;

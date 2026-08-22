@@ -7,10 +7,10 @@
 #
 # Each entry must have:
 #   name:    unique identifier (used in cursor keys and admin views)
-#   type:    "file" | "elasticsearch" | "loki" | "cloudwatchlogs" | "graylog" | "splunk"
+#   type:    "file" | "elasticsearch" | "loki" | "cloudwatchlogs" | "graylog" | "splunk" | "signoz"
 #   enable:  true | false
 # Plus the matching block (`file:` / `elasticsearch:` / `loki:` /
-# `cloudwatchlogs:` / `graylog:` / `splunk:`) for the chosen type.
+# `cloudwatchlogs:` / `graylog:` / `splunk:` / `signoz:`) for the chosen type.
 # -----------------------------------------------------------------------------
 sources:
   # File source — easiest way to test the agent end-to-end. Drop a log file
@@ -156,4 +156,35 @@ sources:
   #       - source
   #       - sourcetype
   #     page_size: 500
+
+  # SigNoz logs source.
+  # Uses the v5 query API (`POST /api/v5/query_range`, requestType raw,
+  # signal logs) — the same endpoint and the same `SIGNOZ-API-KEY` header on
+  # SigNoz Cloud and self-hosted. Requires SigNoz v0.87.0 or newer, which is
+  # where /api/v5/query_range first appears.
+  # `api_key` is the QUERY key from Settings -> API Keys, NOT the ingestion key.
+  # - name: signoz-prod
+  #   type: signoz
+  #   enable: false
+  #   signoz:
+  #     address: http://signoz:8080              # self-hosted UI/API port
+  #     # address: https://<region>.signoz.cloud # SigNoz Cloud
+  #     api_key: ${SIGNOZ_API_KEY}
+  #     # insecure_skip_verify: false   # DEV ONLY - disables TLS verification
+  #     query: "severity_text = 'ERROR' AND service.name = 'api'"   # v5 filter expression
+  #     message_field: body
+  #     severity_field: severity_text
+  #     # SigNoz nests OTLP attributes in per-type maps whose KEYS carry the dots
+  #     # (resources_string: {"service.name": "checkout"}). A bare name is searched
+  #     # across those containers, resource attributes first; qualify it with the
+  #     # container to pin exactly which one you mean. Either spelling lands in
+  #     # Signal.Fields under the bare attribute name.
+  #     extra_fields:
+  #       - resources_string.service.name
+  #       - k8s.namespace.name
+  #       - attributes_string.http.status_code
+  #     page_size: 500                  # per-request limit, capped at 1000
+  #     reorder_window: 2m              # lateness tolerance; the agent scans this
+  #                                     # PLUS agent.catalog.persist_interval below
+  #                                     # the cursor, and logs the total at boot
 
