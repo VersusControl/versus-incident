@@ -22,3 +22,8 @@ testdata
 runbook-ingest
 _drafts
 !helm/versus-incident/tests
+
+# Env / secrets — never commit
+.env
+.env.*
+!.env.example

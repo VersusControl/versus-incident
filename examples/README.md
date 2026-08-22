@@ -15,6 +15,7 @@ runs only the services required for that source.
 | [docker-compose/metrics/](./docker-compose/metrics/) | Prometheus + loadgen (Tempo optional) |
 | [docker-compose/elasticsearch/](./docker-compose/elasticsearch/) | Elasticsearch + Kibana |
 | [docker-compose/cloudwatch/](./docker-compose/cloudwatch/) | (your AWS account) |
+| [docker-compose/signoz/](./docker-compose/signoz/) | SigNoz + ClickHouse + ZooKeeper + OTel collector (**≥4 GB Docker memory**) |
 
 See [docker-compose/README.md](./docker-compose/README.md) for the
 shared workflow.

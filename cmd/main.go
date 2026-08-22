@@ -21,6 +21,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/report"
 	"github.com/VersusControl/versus-incident/pkg/routes"
 	"github.com/VersusControl/versus-incident/pkg/services"
+	"github.com/VersusControl/versus-incident/pkg/signalsources"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/teams"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -195,6 +196,12 @@ func main() {
 	// default install starts a single idle ticker and sends nothing.
 	services.StartReportScheduler(rootCtx, store)
 
+	// agentDone closes once the worker has finished its shutdown flush. The
+	// process must not exit before then: the catalog only reaches storage on its
+	// flush interval, so racing it away drops everything learned since the last
+	// one.
+	var agentDone <-chan struct{}
+
 	if cfg.Agent.Enable {
 		// Try to attach to the existing Redis client; if on-call wasn't
 		// enabled but agent is, open one now (best effort — fall back to
@@ -208,10 +215,11 @@ func main() {
 			}
 		}
 
-		cat, err := startAgent(rootCtx, app, cfg.Agent, cfg.GatewaySecret, store, rdb)
+		cat, done, err := startAgent(rootCtx, app, cfg.Agent, cfg.GatewaySecret, store, rdb)
 		if err != nil {
 			log.Fatalf("agent: failed to start: %v", err)
 		}
+		agentDone = done
 		_ = cat // catalog handle held by goroutine + admin controller
 	}
 
@@ -242,12 +250,21 @@ func main() {
 	}
 
 	rootCancel()
+	if !agent.WaitForShutdownFlush(agentDone, agentFlushGrace) {
+		log.Printf("agent: shutdown flush did not finish within %s; learned state may be incomplete", agentFlushGrace)
+	}
 }
+
+// agentFlushGrace bounds how long the process waits for the agent worker to
+// finish its shutdown flush. Long enough for a catalog write plus the commit
+// that follows it, short enough to stay inside a container stop's grace period.
+const agentFlushGrace = 15 * time.Second
 
 // startAgent constructs the worker, starts it in a goroutine, and registers
 // admin routes on the fiber app. It returns the catalog so the caller can
-// hold a reference (and so future hot-reload code has a handle to it).
-func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewaySecret string, store storage.Provider, rdb redis.UniversalClient) (*agent.Catalog, error) {
+// hold a reference (and so future hot-reload code has a handle to it), plus a
+// channel that closes when the worker has finished its shutdown flush.
+func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewaySecret string, store storage.Provider, rdb redis.UniversalClient) (*agent.Catalog, <-chan struct{}, error) {
 	// On the Postgres backend, install the typed signal-table
 	// catalog store so the log catalog reads/writes the explicit
 	// vs_patterns/vs_logs/vs_services tables (searchable, indexed) instead of
@@ -339,6 +356,15 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 
 	cursors := agent.NewCursorStore(rdb)
 
+	// The poll cursor is only half of a tailing source's position; the other
+	// half is the set of ids it has already delivered inside the window it
+	// re-reads. Persist both against the same backend, or a restart replays
+	// that window. Without Redis the sets stay in-process, exactly as the
+	// cursors do.
+	if n := signalsources.AttachTailDedupBackend(sources, signalsources.NewRedisTailDedupBackend(rdb)); n > 0 {
+		log.Printf("agent: tailing dedup sets persisted through Redis for %d source(s)", n)
+	}
+
 	aiBundle := agent.BuildAIs(cfg, catalog, store, nil)
 	if aiBundle.Detect != nil {
 		log.Printf("agent: AI SRE enabled provider=%s model=%s rate_limit=%d/hr",
@@ -363,14 +389,14 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		Emitter:  services.CreateIncidentFromFinding,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	go worker.Run(ctx)
+	agentDone := agent.StartWorker(ctx, worker)
 
 	// Admin endpoints (require GATEWAY_SECRET).
 	if gatewaySecret == "" {
-		return nil, fmt.Errorf("agent: gateway_secret is not configured — /api/agent/* admin endpoints require a secret")
+		return nil, nil, fmt.Errorf("agent: gateway_secret is not configured — /api/agent/* admin endpoints require a secret")
 	}
 	api := app.Group("/api")
 	// The worker parses PollInterval with a 30s default (agent.parseDurationOr);
@@ -386,7 +412,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		Register(api)
 	controllers.NewRunbookAdminController(aiBundle.Runbooks).Register(api)
 
-	return catalog, nil
+	return catalog, agentDone, nil
 }
 
 func printCustomBanner() {

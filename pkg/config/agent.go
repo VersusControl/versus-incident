@@ -139,7 +139,7 @@ type AgentRegexConfig struct {
 
 type AgentSourceConfig struct {
 	Name           string                          `mapstructure:"name"`
-	Type           string                          `mapstructure:"type"` // "elasticsearch" | "file" | "loki" | "cloudwatchlogs" | "graylog" | "splunk" | <registered type, e.g. "prometheus"/"traces" via Versus Enterprise>
+	Type           string                          `mapstructure:"type"` // "elasticsearch" | "file" | "loki" | "cloudwatchlogs" | "graylog" | "splunk" | "signoz" | <registered type, e.g. "prometheus"/"traces" via Versus Enterprise>
 	Enable         bool                            `mapstructure:"enable"`
 	Elasticsearch  AgentElasticsearchSourceConfig  `mapstructure:"elasticsearch"`
 	File           AgentFileSourceConfig           `mapstructure:"file"`
@@ -147,6 +147,7 @@ type AgentSourceConfig struct {
 	CloudWatchLogs AgentCloudWatchLogsSourceConfig `mapstructure:"cloudwatchlogs"`
 	Graylog        AgentGraylogSourceConfig        `mapstructure:"graylog"`
 	Splunk         AgentSplunkSourceConfig         `mapstructure:"splunk"`
+	Signoz         AgentSignozSourceConfig         `mapstructure:"signoz"`
 	// Options is a generic per-source settings block consumed by source
 	// types resolved through the runtime registration hook
 	// (signalsources.Register) rather than built into OSS — e.g. the
@@ -275,6 +276,18 @@ type AgentCloudWatchLogsSourceConfig struct {
 	FilterPattern string `mapstructure:"filter_pattern"`
 	// PageSize is the per-call limit (max 10000). Default 500.
 	PageSize int `mapstructure:"page_size"`
+	// ReorderWindow opts this source into the shared tailing convention: each
+	// tick re-reads an INCLUSIVE window this far below the poll cursor and
+	// suppresses what it already delivered with a persisted event-id set.
+	//
+	// Unset (the default) keeps the strict `startTime = cursor + 1ms` scan,
+	// which never re-reads anything and so never duplicates, but drops an event
+	// that shares the cursor's millisecond — CloudWatch timestamps are
+	// millisecond-precision and bursty, so that is a real, if rare, loss. Set a
+	// window (e.g. "1m") to trade the re-read for exactly-once delivery at the
+	// boundary. Events arriving more than ReorderWindow late are still not
+	// recovered.
+	ReorderWindow string `mapstructure:"reorder_window"`
 }
 
 // AgentGraylogSourceConfig drives the Graylog SignalSource.
@@ -347,6 +360,79 @@ type AgentSplunkSourceConfig struct {
 	ExtraFields []string `mapstructure:"extra_fields"`
 	// PageSize caps results per tick. Default 500.
 	PageSize int `mapstructure:"page_size"`
+}
+
+// AgentSignozSourceConfig drives the SigNoz logs SignalSource.
+//
+// The source reads SigNoz's v5 query API — `POST /api/v5/query_range` with
+// `requestType: raw` and `signal: logs` — which is the same endpoint and the
+// same `SIGNOZ-API-KEY` header on SigNoz Cloud and on self-hosted. The endpoint
+// first ships in SigNoz v0.87.0 (verified against the tagged sources: absent in
+// v0.86.0, registered in v0.87.0), so that is the compatibility floor.
+//
+// SigNoz paginates with offset+limit rather than a server cursor, and its
+// request bounds are MILLISECOND precision, so a bare-timestamp cursor would
+// drop rows that share the boundary millisecond. This source therefore uses the
+// Elasticsearch tailing model instead: each tick re-scans a bounded
+// ReorderWindow below the poll cursor with `order: [timestamp asc, id asc]` and
+// de-duplicates on the log row `id`.
+type AgentSignozSourceConfig struct {
+	// Address is the SigNoz base URL, e.g. "http://signoz:8080" (self-hosted,
+	// the UI/API port) or "https://<region>.signoz.cloud" (Cloud). Required.
+	Address string `mapstructure:"address"`
+	// APIKey is sent as the `SIGNOZ-API-KEY` header. Required. This is the
+	// QUERY api key issued from Settings → API Keys — not the
+	// `signoz-ingestion-key` that shippers use to write telemetry.
+	//
+	// It is delivered as a header, never as a query parameter, so a SigNoz URL
+	// appearing in a log line or an error string cannot leak it.
+	APIKey string `mapstructure:"api_key"`
+	// InsecureSkipVerify disables TLS certificate verification. DEVELOPMENT
+	// ONLY — it makes the connection trivially interceptable. Leave false
+	// against Cloud and against any self-hosted instance reachable off-host.
+	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"`
+	// Query is a SigNoz v5 filter EXPRESSION (the same syntax the Logs
+	// Explorer filter bar takes), e.g.
+	// `severity_text = 'ERROR' AND service.name = 'api'`.
+	// Empty matches every log in the window.
+	Query string `mapstructure:"query"`
+	// MessageField is the row attribute copied into Signal.Message.
+	// Default "body".
+	MessageField string `mapstructure:"message_field"`
+	// SeverityField is the row attribute copied into Signal.Severity.
+	// Default "severity_text".
+	SeverityField string `mapstructure:"severity_field"`
+	// ExtraFields are additional row attributes copied into Signal.Fields.
+	//
+	// SigNoz nests OTLP attributes in per-type maps whose KEYS carry the dots
+	// (`resources_string: {"service.name": "checkout"}`), so a name is resolved
+	// against a top-level column first ("body", "severity_text"), then as a
+	// container-qualified path ("resources_string.service.name"), then as a
+	// bare attribute searched across the attribute containers in a fixed order
+	// — resource attributes first, then log-record, then scope — and finally as
+	// a nested JSON path.
+	//
+	// "service.name" and "resources_string.service.name" therefore both work
+	// and both land in Signal.Fields under "service.name": the container names
+	// SigNoz's storage column, not the attribute, so it is stripped from the
+	// emitted key.
+	ExtraFields []string `mapstructure:"extra_fields"`
+	// PageSize is the per-request `limit`; the source walks `offset` within a
+	// tick until a short page arrives. Default 500, clamped to 1000 so one
+	// misconfigured source cannot ask SigNoz for an unbounded result set.
+	PageSize int `mapstructure:"page_size"`
+	// ReorderWindow is how far back (a Go duration, e.g. "2m") each tick
+	// re-scans below the cursor to catch rows that became queryable after the
+	// cursor passed their timestamp — collector batching, ClickHouse insert
+	// lag, clock skew. Rows arriving more than ReorderWindow late are NOT
+	// recovered; that bound is what keeps the per-tick dedup set small.
+	// Empty/invalid → 2m default.
+	//
+	// The 2m default is an INFERENCE from the collector-plus-ClickHouse ingest
+	// path, not a measured ingest-to-queryable delay — SigNoz documents no
+	// ordering or visibility guarantee. Lower it if you have measured your own
+	// pipeline.
+	ReorderWindow string `mapstructure:"reorder_window"`
 }
 
 // The struct and env overrides are wired today; the concrete HTTP client

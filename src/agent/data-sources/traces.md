@@ -1,14 +1,22 @@
-# Traces / Tempo
+# Traces
 
 _Enterprise_
 
-Point Versus at your Tempo and it does the rest. It finds your services and their
+Point Versus at your tracing backend and it does the rest. It finds your services and their
 operations, learns how each one normally behaves — how fast it is and how often it errors
 — and pages you only when one clearly slows down or starts failing and stays that way. You
 don't write a single query or set a single threshold.
 
 Think of it as a teammate who knows how long each endpoint usually takes: they only call
 you when something is clearly off, not at every blip.
+
+Two backends are supported, and they share one brain — the same targets, the same learned
+p99/error-rate baselines, the same **learn → double-check → page** lifecycle:
+
+| Backend | Source type | Section |
+|---|---|---|
+| **Grafana Tempo** | `traces` | everything below |
+| **SigNoz** | `signoz_traces` | [SigNoz backend](#signoz-backend) |
 
 > **Same idea as the logs agent, tuned for traces.** Every data source follows the same
 > three steps: **learn what's normal (`training`) → double-check quietly (`shadow`) →
@@ -99,7 +107,7 @@ against each operation's own normal — no thresholds, no TraceQL.
 > readings that are way off — so the very outage it's paging you about doesn't get
 > mistaken for the new "normal."
 
-## Quickstart
+## Quickstart (Tempo)
 
 Add the source to **`agent_sources.yaml`**. Discovery enumerates the targets and the brain learns each one's baseline.
 
@@ -157,7 +165,7 @@ and reports **thin** coverage rather than inventing targets.
 
 ## License gate
 
-The source and its learned baselines require a Versus Enterprise license, supplied via the `LICENSE_KEY` environment variable. On an **OSS build**, a source with `type: traces` returns **"requires Versus Enterprise"** and refuses to build.
+The source and its learned baselines require a Versus Enterprise license, supplied via the `LICENSE_KEY` environment variable. On an **OSS build**, a source with `type: traces` or `type: signoz_traces` returns **"requires Versus Enterprise"** and refuses to build.
 
 ## OSS vs Enterprise
 
@@ -170,7 +178,7 @@ The source and its learned baselines require a Versus Enterprise license, suppli
 
 The **standing, auto-learned** source on this page is the Enterprise wedge.
 
-## Advanced: custom signal
+## Advanced: custom signal (Tempo)
 
 If you have a specific trace condition to watch that the agent won't find on its own, you
 can add your own TraceQL alongside the auto-discovered targets. **A custom query is
@@ -192,8 +200,93 @@ sources:
 |---|---|
 | `query` | TraceQL search — each matching trace becomes an additional signal. |
 
+## SigNoz backend
+
+If your traces live in [SigNoz](https://signoz.io/) — Cloud or self-hosted — use the
+`signoz_traces` source type instead. Everything downstream is identical: the same
+(service, operation) targets, the same learned p99-latency and error-rate baselines, the
+same three modes. Only discovery and the query dialect differ.
+
+Requires **SigNoz v0.87.0 or later**: the source reads `POST /api/v5/query_range`, which
+first appears in `v0.87.0` (verified at source level against the tagged releases).
+
+```yaml
+sources:
+  - name: prod-signoz-traces
+    type: signoz_traces
+    enable: true
+    options:
+      address: http://signoz:8080          # self-hosted UI/API port
+      # address: https://<region>.signoz.cloud
+      api_key: ${SIGNOZ_API_KEY}
+```
+
+That is the whole operator surface for the auto flow. **No `query:`, no TraceQL.**
+
+> **Use a query API key, not an ingestion key.** The source authenticates with the
+> **`SIGNOZ-API-KEY`** header, identical on Cloud and self-hosted. The Cloud-only
+> `signoz-ingestion-key` that shippers use to *write* telemetry will **not** work for
+> queries. Create the query key under **Settings → API Keys** (needs the **Admin** role);
+> it is available on Cloud **and** self-hosted community.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `address` | — (required) | SigNoz base URL — the UI/API port self-hosted, or `https://<region>.signoz.cloud`. |
+| `api_key` | — (required) | Sent as the `SIGNOZ-API-KEY` header. The **query** key, not the ingestion key. |
+| `insecure_skip_verify` | `false` | Skip TLS verification — **local dev only**, never production. |
+| `query` | unset | A v5 filter expression, **appended** as an extra pinned target (it never turns off auto-learning). |
+| `page_size` | `100` | Spans searched per target per tick. |
+| `max_services` | `50` | Service-enumeration cap. |
+| `max_operations` | `10` | Per-service operation cap. |
+| `max_targets` | `200` | Per-tenant (service, operation) target cap. |
+| `discovery_interval` | `1h` | How often the watch-set is rebuilt (cadence ceiling). |
+| `discovery_lookback` | `1h` | Window discovery samples spans over. Floored at `5m`. |
+| `discovery_samples` | `200` | Span rows per discovery bucket (6 buckets). Capped at `1000`. |
+| `org` | unset | Tenant scope for learned baselines. |
+
+### What it watches (SigNoz)
+
+SigNoz has no Tempo-style tag/tag-values surface, so the watch-set is derived from a
+**bounded sample of raw spans**: the discovery lookback is split into 6 equal buckets and
+one small span query is issued per bucket, so the sample is spread across the window
+instead of pinned to the last few seconds of the busiest service.
+
+It reads the service from the first attribute it finds of `service.name`,
+`resource.service.name`, `serviceName`, `service`, and the operation from `name`,
+`span_name`, `spanName`, `operation`. Every service + operation pair becomes a watch
+target, and the source writes the v5 filter expression for it. A service with no observed
+operation degrades to a per-service target; if **no** service attribute is observed at all,
+it watches all spans under one global `_all_` target rather than going dark.
+
+Discovered attribute values carrying a quote, backslash or control character are **refused**
+rather than escaped into a generated filter expression, and reported in the discovery notes.
+
+### Advanced: custom target (SigNoz)
+
+As with Tempo, a custom query is **appended** — it does not turn off auto-learning. The
+dialect is a **v5 filter expression**, not TraceQL:
+
+```yaml
+options:
+  address: http://signoz:8080
+  api_key: ${SIGNOZ_API_KEY}
+  query: "service.name = 'checkout'"     # added alongside auto-discovered targets
+```
+
+### Limitations
+
+- **No analyze auto-wire.** A configured `signoz_traces` source does **not** populate the
+  `query_traces` [analyze tool](../analyze-tools/tools.md) — unlike the `traces` (Tempo)
+  source, which does. Configure `tools.query_traces` by hand, or keep pointing it at Tempo.
+  Planned, not shipped.
+- **Discovery is sample-based.** A service that emitted no spans inside the discovery
+  lookback is not discovered until the next pass. Widen `discovery_lookback` or raise
+  `discovery_samples` on a quiet backend.
+
 ## See also
 
 - OSS on-demand correlation tools: [Analyze Tools](../analyze-tools/tools.md)
 - The metrics twin of this flow: [Prometheus / Metrics (Enterprise)](./prometheus.md)
+- SigNoz metrics (Enterprise): [SigNoz Metrics](../../enterprise/metrics/signoz.md)
+- SigNoz logs (OSS): [SigNoz source](./signoz.md)
 - The logs lifecycle this mirrors: [Shadow Mode](../shadow-mode.md) · [AI Detect Mode](../ai-detect-mode.md) · [AI Analyze Mode](../ai-analyze-mode.md)

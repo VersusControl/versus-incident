@@ -914,7 +914,11 @@ func (c *Catalog) AllServices() map[string]ServiceInfo {
 // FirstSeen to the zero time. Returns false when the service doesn't exist.
 func (c *Catalog) EndServiceGrace(name string) bool {
 	if s := catalogStore(); s != nil {
-		return s.Curate(CatalogEdit{Kind: CatalogEditEndServiceGrace, Service: name}) == nil
+		if s.Curate(CatalogEdit{Kind: CatalogEditEndServiceGrace, Service: name}) != nil {
+			return false
+		}
+		c.setServiceFirstSeen(name, time.Time{})
+		return true
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -931,7 +935,11 @@ func (c *Catalog) EndServiceGrace(name string) bool {
 // grace window. Returns false when the service doesn't exist.
 func (c *Catalog) RestartServiceGrace(name string) bool {
 	if s := catalogStore(); s != nil {
-		return s.Curate(CatalogEdit{Kind: CatalogEditRestartServiceGrace, Service: name}) == nil
+		if s.Curate(CatalogEdit{Kind: CatalogEditRestartServiceGrace, Service: name}) != nil {
+			return false
+		}
+		c.setServiceFirstSeen(name, time.Now().UTC())
+		return true
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -942,6 +950,19 @@ func (c *Catalog) RestartServiceGrace(name string) bool {
 	svc.FirstSeen = time.Now().UTC()
 	c.dirty = true
 	return true
+}
+
+// setServiceFirstSeen mirrors a committed store edit into the hot-path copy.
+// IsServiceInGrace reads the in-memory map on every signal and nothing reloads
+// it from the store, so without this a store-backed grace edit would not take
+// effect until the next process start. The store is committed first: if it
+// fails the caller returns false and memory is never moved out of step with it.
+func (c *Catalog) setServiceFirstSeen(name string, firstSeen time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if svc, ok := c.services[name]; ok {
+		svc.FirstSeen = firstSeen
+	}
 }
 
 // ---------------------------------------------------------------------------

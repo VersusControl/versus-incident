@@ -41,14 +41,20 @@ var (
 	registry   = map[string]Factory{}
 )
 
-// enterpriseSourceTypes lists the source types that used to ship in OSS but now
-// live in Versus Enterprise. When one of these is configured on a build where
-// the enterprise module is absent (so nothing called Register), the factory
-// emits a clear "requires Versus Enterprise" error instead of a generic
-// unknown-type error.
+// enterpriseSourceTypes lists the source types that live in Versus Enterprise
+// rather than OSS — both the ones that used to ship here and the ones that were
+// only ever enterprise. When one of these is configured on a build where the
+// enterprise module is absent (so nothing called Register), the factory emits a
+// clear "requires Versus Enterprise" error instead of a generic unknown-type
+// error. Every new enterprise source type belongs here: without an entry, an
+// operator following an enterprise doc on a community image is told their
+// config is malformed rather than that they need a licence.
 var enterpriseSourceTypes = map[string]bool{
-	"prometheus": true,
-	"traces":     true,
+	"prometheus":         true,
+	"traces":             true,
+	"cloudwatch_metrics": true,
+	"signoz_metrics":     true,
+	"signoz_traces":      true,
 }
 
 // Register makes a source type constructible by the agent factory. It is

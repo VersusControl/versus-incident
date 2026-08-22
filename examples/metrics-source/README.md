@@ -70,6 +70,7 @@ The **standing data source** that fires incidents on its own, plus the
 | pushgateway | `9091` | the host generator PUSHes synthetic series here |
 | prometheus | `9090` | scrapes the pushgateway (`honor_labels`); queried by Versus |
 | tempo | `3200` / `4318` | trace backend (traces overlay only) |
+| signoz | `8080` / `4317` / `4318` | metrics + trace backend (SigNoz overlay only) |
 | redis | (internal) | state |
 
 All fake data is produced by the **host-run** `scripts/generate_fake_metrics.py`
@@ -380,6 +381,83 @@ signal per matching trace; `query_traces` (also auto-wired, no tools.yaml) lets
 the AI pull redacted span summaries during investigation. Tempo's API is on
 `:3200`, OTLP on `:4318`.
 
+## Optional: SigNoz (metrics + traces)
+
+> ### 🏢 Enterprise feature
+>
+> `signoz_metrics` and `signoz_traces` are **Versus Enterprise** standing data
+> sources, gated on the same **`intelligence`** entitlement as the
+> `prometheus` / `traces` pair. On the OSS image they return
+> *"requires Versus Enterprise"*.
+
+To run the same walkthrough against **SigNoz** instead of Prometheus + Tempo,
+bring up the SigNoz overlay. It adds a self-hosted SigNoz stack and swaps in the
+source variant that replaces both backends:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.signoz.yml up -d
+```
+
+> **Heavy.** SigNoz is ClickHouse + ZooKeeper + a schema migrator + an OTel
+> collector + the SigNoz server. Budget **at least 4 GB of Docker memory** on
+> top of the base stack. Do **not** combine this with
+> `docker-compose.traces.yml` — both publish OTLP/HTTP on `:4318`, and the two
+> source variants would fight over `agent_sources.yaml`. The base Prometheus and
+> Pushgateway keep running but sit idle in this mode.
+
+Point the **same** generator at the collector with `--backend signoz`. It pushes
+OTLP/HTTP metrics *and* spans, so SigNoz also derives its own
+`signoz_calls_total` span metric from the traffic:
+
+```bash
+python3 scripts/generate_fake_metrics.py --backend signoz --spike --duration 240
+```
+
+Within a couple of discovery passes:
+
+```
+agent: source demo-signoz-metrics using "metrics" brain
+agent: source demo-signoz-traces using "traces" brain
+enterprise: agent started (mode=detect, sources=2)
+agent: standing metric source "demo-signoz-metrics" discovered 1 signal(s) across 1 service(s) (label="service.name" generic=false metrics=2 notes=[])
+agent: tick demo-signoz-traces signals=2 matched=2 patterns=2 verdicts=map[known:2]
+```
+
+**The API key is minted for you.** SigNoz generates its key value server-side,
+so it cannot be a compose default. A `signoz-bootstrap` one-shot registers the
+first admin, creates a viewer-role service account, mints a key and hands it to
+the agent through a private volume. Dev defaults: `SIGNOZ_ADMIN_EMAIL`
+(`admin@versus.local`) and `SIGNOZ_ADMIN_PASSWORD` (`Versus-Dev-12345`); export
+`SIGNOZ_API_KEY` to bring your own. The SigNoz UI is on <http://localhost:8080>.
+
+**We pin the SigNoz images ourselves.** SigNoz deprecated its bundled Compose
+files at v0.130.0 in favour of the `foundryctl` generator, so this overlay pins
+`signoz/signoz:v0.129.0` + `signoz/signoz-otel-collector:v0.144.5` for
+determinism. SigNoz does not support this shape; bump the tags here if it drifts.
+The compatibility floor for the source is **SigNoz v0.87.0**, where
+`/api/v5/query_range` first appears.
+
+### Two honest differences from the Prometheus path
+
+**No auto-wire.** Configuring the SigNoz sources lights up the **detect** path
+only. `query_metrics` / `query_traces` still build Prometheus and Tempo clients,
+so they are *not* auto-wired from a SigNoz source in v1 — point them at a
+Prometheus/Tempo by hand if you need the analyze path.
+
+**No operator-authored queries.** SigNoz's v5 API speaks filter expressions, not
+PromQL/TraceQL, so these sources discover their own watch-set instead of
+range-querying rules you wrote: services from a bounded sample of recent spans,
+metrics by probing the `metrics:` catalog. Connection details are the whole
+required config — see
+[config/agent_sources.signoz.yaml](config/agent_sources.signoz.yaml), which also
+explains why only `_total`-suffixed metrics are in that catalog.
+
+Tear down:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.signoz.yml down -v
+```
+
 ## Optional: CloudWatch Metrics (AWS)
 
 To watch a **real AWS account** instead of the local Prometheus stack, use the
@@ -411,18 +489,25 @@ docker compose -f docker-compose.cloudwatch.yml down -v
 metrics-source/
 ├── docker-compose.yml              # enterprise versus + redis + prometheus + pushgateway
 ├── docker-compose.traces.yml       # optional overlay: + tempo
+├── docker-compose.signoz.yml      # optional overlay: + signoz (replaces prometheus/tempo as the source)
 ├── docker-compose.cloudwatch.yml   # standalone: CloudWatch (AWS) — redis + versus, no local stack
 ├── .env.example                    # copy to .env; holds LICENSE_KEY (gitignored)
 ├── config/
 │   ├── config.yaml                 # mode=detect, new_service_grace=0
 │   ├── agent_sources.yaml          # enterprise prometheus source (options: schema)
 │   ├── agent_sources.traces.yaml   # + traces source (traces overlay only)
+│   ├── agent_sources.signoz.yaml   # signoz_metrics + signoz_traces (signoz overlay only)
 │   └── agent_sources.cloudwatch.yaml # CloudWatch metrics source (cloudwatch compose only)
 │   #  NOTE: no tools.yaml — query_metrics/query_traces are auto-wired
+│   #  (Prometheus/Tempo only; the SigNoz sources are detect-path only)
 ├── prometheus/
 │   └── prometheus.yml              # scrapes the pushgateway (honor_labels: true)
 ├── tempo/
 │   └── tempo.yaml                  # single-binary Tempo (overlay only)
+├── signoz/                         # signoz overlay support files
+│   ├── bootstrap.py                # mints the SigNoz query API key on first boot
+│   ├── otel-collector-config.yaml
+│   └── clickhouse/
 └── scripts/
     └── generate_fake_metrics.py    # host-run fake-data generator (copy of the OSS one)
 ```
@@ -434,6 +519,8 @@ python3 scripts/generate_fake_metrics.py --clear   # drop the pushed series
 docker compose down -v
 # or, if you ran the traces overlay:
 docker compose -f docker-compose.yml -f docker-compose.traces.yml down -v
+# or, if you ran the SigNoz overlay:
+docker compose -f docker-compose.yml -f docker-compose.signoz.yml down -v
 # or, if you ran the CloudWatch variant:
 docker compose -f docker-compose.cloudwatch.yml down -v
 ```

@@ -2,14 +2,14 @@ package signalsources
 
 import "testing"
 
-// TestKindOf_DefaultsAndRegistered verifies the taxonomy lookup: the six
-// built-in OSS log types resolve to KindLogs, an unknown type defaults to
+// TestKindOf_DefaultsAndRegistered verifies the taxonomy lookup: the built-in
+// OSS log types resolve to KindLogs, an unknown type defaults to
 // KindLogs, and types registered through the seam (as the enterprise module
 // does for prometheus/traces) resolve to their declared kind. The enterprise
 // types are registered here in-test to keep this OSS test OSS-only.
 func TestKindOf_DefaultsAndRegistered(t *testing.T) {
 	// Built-in OSS log types (registered by this package's init()).
-	for _, typ := range []string{"elasticsearch", "file", "loki", "cloudwatchlogs", "graylog", "splunk"} {
+	for _, typ := range []string{"elasticsearch", "file", "loki", "cloudwatchlogs", "graylog", "splunk", "signoz"} {
 		if got := KindOf(typ); got != KindLogs {
 			t.Errorf("KindOf(%q) = %q, want %q", typ, got, KindLogs)
 		}

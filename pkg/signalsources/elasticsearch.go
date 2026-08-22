@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -43,9 +44,10 @@ import (
 // ingestion) are still seen instead of being stranded forever behind a strict
 // `gt`. To avoid folding those re-scanned documents into the model twice, the
 // source tracks the `_id`s it has already emitted whose timestamp falls inside
-// the current reorder window and skips them on the next tick. That dedup set is
-// pruned to one window each tick, so it stays bounded to (window × ingest rate)
-// rather than growing with all-time history.
+// the span the next query re-reads and skips them on the next tick. That dedup
+// set is the shared TailDedup: bounded by time and by size, and durable through
+// its backend so a restart resumes on both halves of the position rather than
+// replaying the window.
 type ElasticsearchSource struct {
 	name   string
 	cfg    config.AgentElasticsearchSourceConfig
@@ -57,18 +59,24 @@ type ElasticsearchSource struct {
 	// bounded trade-off that keeps the dedup set memory-bounded.
 	reorderWindow time.Duration
 
+	// replaySpan is added to reorderWindow to size what a tick actually
+	// re-scans. The agent wiring sets it to the catalog persist interval so a
+	// replacement process re-reads everything a killed one learned but never
+	// flushed. See ApplyTailReplaySpan.
+	replaySpan time.Duration
+
 	// nowFn is the wall clock the tail reads to upper-bound the scan (`lte`)
 	// and clamp the cursor (ClampCursor). Overridable in tests; nil ⇒ time.Now.
 	nowFn func() time.Time
 
-	// mu guards emitted. Pull holds it for the whole tick and Rewind takes it to
-	// clear the set, so a catalog clear can never interleave with a tick and
-	// leave stale dedup state that would suppress a legitimate relearn.
+	// mu guards the dedup set. Pull holds it for the whole tick and Rewind
+	// takes it to clear the set, so a catalog clear can never interleave with a
+	// tick and leave stale dedup state that would suppress a legitimate relearn.
 	mu sync.Mutex
-	// emitted is the set of document `_id`s already delivered whose timestamp is
-	// within reorderWindow of the last cursor. They are skipped on the next
-	// tick's overlapping re-fetch so each document is learned exactly once.
-	emitted map[string]struct{}
+	// dedup is the set of document `_id`s already delivered whose timestamp is
+	// still inside the span the next query re-reads. They are skipped on the
+	// next tick's overlapping re-fetch so each document is learned exactly once.
+	dedup *TailDedup
 }
 
 // defaultESReorderWindow is used when reorder_window is unset/invalid. One
@@ -105,16 +113,43 @@ func NewElasticsearchSource(name string, cfg config.AgentElasticsearchSourceConf
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify},
 	}
-	return &ElasticsearchSource{
+	src := &ElasticsearchSource{
 		name:          name,
 		cfg:           cfg,
 		client:        &http.Client{Transport: tr, Timeout: 30 * time.Second},
 		reorderWindow: reorderWindow,
-		emitted:       make(map[string]struct{}),
-	}, nil
+	}
+	src.dedup = NewTailDedup(src.Name())
+	return src, nil
 }
 
 func (s *ElasticsearchSource) Name() string { return "elasticsearch:" + s.name }
+
+// SetTailReplaySpan widens what each tick re-scans so it also covers the docs a
+// killed process learned but never flushed. It implements TailReplaySpanSetter.
+func (s *ElasticsearchSource) SetTailReplaySpan(span time.Duration) (time.Duration, time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if span > 0 {
+		s.replaySpan = span
+	}
+	return s.reorderWindow, s.scanWindow()
+}
+
+// scanWindow is how far below the cursor a tick re-scans: the operator's
+// lateness budget plus the crash-replay span. Callers hold s.mu.
+func (s *ElasticsearchSource) scanWindow() time.Duration { return s.reorderWindow + s.replaySpan }
+
+// SetTailDedupBackend makes this source's boundary dedup set durable. It
+// implements TailDedupBinder.
+func (s *ElasticsearchSource) SetTailDedupBackend(b TailDedupBackend) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dedup == nil {
+		s.dedup = NewTailDedup(s.Name())
+	}
+	s.dedup.SetBackend(b)
+}
 
 // now returns the source's wall clock. Tests override nowFn to freeze it; the
 // nil-guard keeps struct-literal construction working.
@@ -162,20 +197,23 @@ func (s *ElasticsearchSource) Pull(ctx context.Context, since time.Time) ([]core
 	// tests / a first tick with no lookback) is left untouched so the query
 	// still matches from the beginning of time rather than a negative year.
 	lower := since
-	if !since.IsZero() && s.reorderWindow > 0 {
-		lower = since.Add(-s.reorderWindow)
+	if !since.IsZero() && s.scanWindow() > 0 {
+		lower = since.Add(-s.scanWindow())
+	}
+
+	// Hydrate the persisted dedup set before the first query of the process. A
+	// failure here costs duplicates, never documents, so it is logged and the
+	// tick continues.
+	if err := s.dedup.Load(ctx); err != nil {
+		log.Printf("agent: %s: loading the persisted dedup set failed: %v (this tick may re-emit up to one reorder window)", s.Name(), err)
 	}
 
 	cursor := since // never rewind the cursor below where we already were
 	var signals []core.Signal
 
-	// seenHit is the minimal state needed to rebuild the dedup set after the
-	// tick — id + timestamp for every document the query returned.
-	type seenHit struct {
-		id string
-		ts time.Time
-	}
-	var seen []seenHit
+	// seen is the minimal state the dedup set needs — id + timestamp for every
+	// document the query returned.
+	var seen []DedupRow
 	var searchAfter []interface{}
 
 	// Cap total iterations so a misconfigured query can't loop forever.
@@ -201,8 +239,8 @@ func (s *ElasticsearchSource) Pull(ctx context.Context, since time.Time) ([]core
 			if sig.Timestamp.After(cursor) {
 				cursor = sig.Timestamp
 			}
-			seen = append(seen, seenHit{id: h.ID, ts: sig.Timestamp})
-			if _, dup := s.emitted[h.ID]; dup {
+			seen = append(seen, DedupRow{ID: h.ID, TS: sig.Timestamp})
+			if s.dedup.Has(h.ID) {
 				// Already delivered on a previous tick — the inclusive
 				// re-scan pulled it back; skip so it isn't learned twice.
 				continue
@@ -222,42 +260,41 @@ func (s *ElasticsearchSource) Pull(ctx context.Context, since time.Time) ([]core
 	// the tail even if a doc slips through at the boundary.
 	cursor = ClampCursor(cursor, since, now)
 
-	// Rebuild the dedup set for the next tick: keep only the `_id`s whose
-	// timestamp is within reorderWindow of the NEW cursor — exactly the docs the
-	// next inclusive re-scan can pull back. Rebuilding from the hits actually
-	// returned (emitted + re-scanned) self-prunes anything the advancing window
-	// has moved past, so the set stays bounded to one window's worth of ids.
-	windowStart := cursor.Add(-s.reorderWindow)
-	next := make(map[string]struct{}, len(seen))
-	for _, h := range seen {
-		if h.id == "" {
-			continue
-		}
-		if !h.ts.Before(windowStart) { // ts >= windowStart
-			next[h.id] = struct{}{}
-		}
-	}
-	s.emitted = next
+	// Stage the ids IN MEMORY before returning, so the next tick of this process
+	// does not re-deliver them, and leave them uncommitted until the worker has
+	// flushed the docs they describe. The retention floor is this tick's query
+	// lower bound — one reorder window below the cursor the tick started from —
+	// so the set covers whichever cursor turns out to be the durable one.
+	s.dedup.Stage(seen, lower)
 
 	return signals, cursor, nil
 }
 
-// Rewind clears the boundary dedup set so a catalog clear (which rewinds the
-// worker poll cursor to the lookback window) makes this source re-emit — and
-// therefore relearn — its whole window from scratch, exactly like a fresh
-// process start. Without it the pre-clear `_id`s would suppress the very docs
-// the operator asked to relearn.
+// Commit makes the `_id`s this source has delivered durable. The worker calls
+// it only after flushing the docs they describe, so a process that dies can
+// re-deliver docs but can never suppress docs it failed to store. It implements
+// core.SourceCommitter.
+func (s *ElasticsearchSource) Commit(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dedup.Commit(ctx)
+}
+
+// Rewind clears the boundary dedup set — in memory and in its backend — so a
+// catalog clear (which rewinds the worker poll cursor to the lookback window)
+// makes this source re-emit, and therefore relearn, its whole window from
+// scratch, exactly like a fresh process start. Without it the pre-clear `_id`s
+// would suppress the very docs the operator asked to relearn.
 //
 // It implements core.SourceRewinder. The poll cursor is the source's primary
 // position, but the dedup set is a second, source-owned piece of state the
 // cursor reset cannot reach; Rewind reconciles it. Safe to call concurrently
 // with Pull (both take mu) and leaves the source in the state a freshly
 // constructed instance would have.
-func (s *ElasticsearchSource) Rewind(_ context.Context) error {
+func (s *ElasticsearchSource) Rewind(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.emitted = make(map[string]struct{})
-	return nil
+	return s.dedup.Clear(ctx)
 }
 
 // -----------------------------------------------------------------------------
@@ -403,6 +440,11 @@ func stringField(src map[string]interface{}, path string) string {
 	if !ok {
 		return ""
 	}
+	return fieldString(v)
+}
+
+// fieldString renders one looked-up field value as text.
+func fieldString(v interface{}) string {
 	switch t := v.(type) {
 	case string:
 		return t

@@ -81,6 +81,35 @@ type SourceRewinder interface {
 	Rewind(ctx context.Context) error
 }
 
+// SourceCommitter is the OPTIONAL capability a SignalSource implements when a
+// Pull leaves behind DELIVERY STATE — its own record of which rows it has
+// already handed over — that must not become durable before the signals it
+// describes are durable.
+//
+// A tailing source dedupes the rows its inclusive re-read window returns twice
+// using a set of the ids it already delivered. Persisting that set at the end
+// of Pull is one write too early: the worker has not folded those rows into the
+// catalog yet, and the catalog reaches storage only on its own flush interval.
+// A process that dies in between comes back with the ids recorded as delivered
+// and the rows themselves absent — silent, permanent loss.
+//
+// So Pull only STAGES the delivery state in memory (enough to suppress the next
+// tick's re-read inside the same process) and the worker calls Commit once the
+// rows are durable: after a successful catalog flush, and again after the
+// shutdown flush. The failure direction is deliberate and asymmetric — a crash
+// between the flush and Commit re-delivers rows (bounded duplicates), a crash
+// before the flush leaves the ids uncommitted so the next scan re-reads them
+// (no loss). Duplicates are recoverable; dropped rows are not.
+//
+// The ctx passed to Commit is always live, including on the shutdown path where
+// the worker's own context has already been canceled. Sources with no staged
+// state do not implement this and are skipped, so they behave exactly as they
+// did before the seam existed. Implementations must be safe to call
+// concurrently with Pull.
+type SourceCommitter interface {
+	Commit(ctx context.Context) error
+}
+
 // AgentVerdict is the classification a Detector pipeline assigns to a batch
 // of signals that share a fingerprint.
 type AgentVerdict int

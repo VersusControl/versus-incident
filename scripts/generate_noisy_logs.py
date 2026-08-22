@@ -34,11 +34,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import os
 import random
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -1380,6 +1382,139 @@ class SplunkSink(Sink):
         return f"splunk:{self._url} index={self._index}"
 
 
+# OTLP severity numbers (logs data model). SigNoz stores both the number and
+# the text; the agent's `severity_field: severity_text` reads the text.
+_OTLP_SEVERITY = {
+    "trace": 1,
+    "debug": 5,
+    "info": 9,
+    "notice": 10,
+    "warn": 13, "warning": 13,
+    "error": 17, "err": 17,
+    "fatal": 21, "panic": 21, "critical": 21,
+}
+
+
+class SigNozSink(Sink):
+    """Push lines into SigNoz over OTLP/HTTP JSON (`POST /v1/logs`).
+
+    SigNoz's collector is an OpenTelemetry Collector, whose OTLP/HTTP receiver
+    accepts a JSON-encoded body as well as protobuf — verified against
+    signoz/signoz-otel-collector. That matters here: this generator is
+    stdlib-only by design (it must run on any machine with python3 and no pip
+    install), and stdlib cannot encode protobuf.
+
+    Records are grouped by `service.name` because that is a RESOURCE attribute
+    in OTLP — one resourceLogs entry per service, not per record. The service
+    is parsed out of the line when the template carries one, otherwise it falls
+    back to the configured default.
+    """
+
+    name = "signoz"
+    _SERVICE_RE = re.compile(
+        r'(?i)(?:\bservice|\bsvc|\bapp|\bcomponent)\s*[:=]\s*"?([A-Za-z0-9._-]+)'
+    )
+
+    def __init__(self, base_url: str, service: str = "noisy",
+                 ingestion_key: str | None = None, batch_size: int = 500):
+        self._url = base_url.rstrip("/") + "/v1/logs"
+        self._service = service
+        self._key = ingestion_key
+        self._batch_size = batch_size
+        # service -> list of OTLP log records
+        self._buf: dict[str, list[dict]] = {}
+        self._count = 0
+
+    def write(self, ts, level, msg):
+        lvl = level.strip()
+        ns = str(int(ts.timestamp() * 1_000_000_000))
+        record = {
+            "timeUnixNano": ns,
+            "observedTimeUnixNano": ns,
+            "severityText": lvl.upper(),
+            "severityNumber": _OTLP_SEVERITY.get(lvl.lower(), 9),
+            "body": {"stringValue": msg},
+            "attributes": [
+                {"key": "level", "value": {"stringValue": lvl}},
+            ],
+        }
+        m = self._SERVICE_RE.search(msg)
+        svc = m.group(1) if m else self._service
+        self._buf.setdefault(svc, []).append(record)
+        self._count += 1
+        if self._count >= self._batch_size:
+            self.flush()
+
+    def flush(self):
+        if not self._buf:
+            return
+        resource_logs = []
+        for svc, records in self._buf.items():
+            resource_logs.append({
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": svc}},
+                    ]
+                },
+                "scopeLogs": [{
+                    "scope": {"name": "generate_noisy_logs.py"},
+                    "logRecords": records,
+                }],
+            })
+        body = json.dumps({"resourceLogs": resource_logs}).encode("utf-8")
+        # SigNoz's collector restarts itself once shortly after boot, when its
+        # OpAMP client pulls config from the SigNoz server — an in-flight POST
+        # is dropped mid-connection. Retry transport failures a few times so a
+        # push issued right after `docker compose up -d` survives that window.
+        # An HTTP error status is NOT retried: that is a real rejection.
+        last_err = None
+        for attempt in range(4):
+            try:
+                self._post(body)
+                break
+            except urllib.error.HTTPError as e:  # pragma: no cover
+                raise RuntimeError(
+                    f"OTLP /v1/logs failed: {e.code} {e.reason}: "
+                    f"{e.read().decode('utf-8', 'replace')[:300]}"
+                ) from e
+            except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+                last_err = e
+                time.sleep(0.5 * (attempt + 1))
+        else:
+            raise RuntimeError(
+                f"OTLP /v1/logs unreachable after 4 attempts: {last_err}. "
+                f"Is the SigNoz collector up on {self._url}?"
+            )
+        self._buf.clear()
+        self._count = 0
+
+    def _post(self, body: bytes) -> None:
+        req = urllib.request.Request(
+            self._url, data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        if self._key:
+            # SigNoz Cloud gates ingest on this header. Self-hosted ignores it.
+            req.add_header("signoz-ingestion-key", self._key)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status >= 300:
+                raise RuntimeError(f"OTLP /v1/logs returned {resp.status}")
+            # The receiver answers 200 with a partialSuccess block when it
+            # DROPPED records; a silent partial loss would make the example
+            # look like an agent bug, so surface it.
+            payload = resp.read().decode("utf-8", "replace")
+        if payload.strip() and payload.strip() != "{}":
+            try:
+                partial = json.loads(payload).get("partialSuccess") or {}
+            except ValueError:
+                partial = {}
+            if partial.get("rejectedLogRecords"):
+                raise RuntimeError(f"OTLP /v1/logs rejected records: {partial}")
+
+    def summary(self):
+        return f"signoz:{self._url}"
+
+
 def make_sink(args) -> Sink:
     target = args.target
     if target == "file":
@@ -1423,6 +1558,13 @@ def make_sink(args) -> Sink:
             index=args.splunk_index,
             sourcetype=args.splunk_sourcetype,
             insecure=not args.splunk_verify,
+            batch_size=args.batch_size,
+        )
+    if target == "signoz":
+        return SigNozSink(
+            base_url=args.signoz_url,
+            service=args.signoz_service,
+            ingestion_key=args.signoz_ingestion_key,
             batch_size=args.batch_size,
         )
     raise SystemExit(f"unknown --target: {target!r}")
@@ -1515,7 +1657,7 @@ def main() -> int:
     # loki / elasticsearch / cloudwatch docker-compose examples can be
     # exercised with identical training / spike / scenario flags.
     ap.add_argument("--target", default=os.getenv("TARGET", "file"),
-                    choices=["file", "loki", "elasticsearch", "cloudwatch", "graylog", "splunk"],
+                    choices=["file", "loki", "elasticsearch", "cloudwatch", "graylog", "splunk", "signoz"],
                     help="where to send generated logs (default: file; "
                          "env: TARGET)")
     ap.add_argument("--batch-size", type=int, default=500,
@@ -1567,6 +1709,18 @@ def main() -> int:
     ap.add_argument("--splunk-verify", action="store_true",
                     help="verify the Splunk TLS cert (off by default — the "
                          "example ships a self-signed cert)")
+    # SigNoz (OTLP/HTTP JSON to the collector — the real ingest path)
+    ap.add_argument("--signoz-url", default=os.getenv("SIGNOZ_OTLP_URL", "http://localhost:4318"),
+                    help="SigNoz collector OTLP/HTTP base URL (default: "
+                         "http://localhost:4318; env: SIGNOZ_OTLP_URL)")
+    ap.add_argument("--signoz-service", default=os.getenv("SIGNOZ_SERVICE", "noisy"),
+                    help='fallback OTLP `service.name` for lines that carry no '
+                         'service of their own (default: noisy; env: SIGNOZ_SERVICE)')
+    ap.add_argument("--signoz-ingestion-key",
+                    default=os.getenv("SIGNOZ_INGESTION_KEY"),
+                    help="SigNoz Cloud `signoz-ingestion-key` header. NOT the "
+                         "query API key the agent uses, and not needed "
+                         "self-hosted (env: SIGNOZ_INGESTION_KEY)")
 
     args = ap.parse_args()
 
