@@ -32,10 +32,6 @@
     - [Recent Changes Tool](/agent/analyze-tools/recent-changes)
     - [Find Runbook Tool](/agent/analyze-tools/find-runbook)
   - [Incidents Report](/agent/incident-report)
-  - [Redaction](/agent/redaction)
-  - [Catalog](/agent/catalog)
-  - [Miner](/agent/miner)
-  - [Regex](/agent/regex)
 
 - Enterprise SRE Agent
   - [Getting Started](/enterprise/getting-started)
@@ -76,7 +72,7 @@
 
 - On Call
   - [Introduction](/oncall/on-call-introduction)
-  - [Upstream of On-Call](/oncall/upstream-of-on-call)
+  - [On-Call](/oncall/upstream-of-on-call)
   - [AWS Incident Manager](/oncall/aws-incident-manager)
   - [Integration: Incident Manager](/oncall/how-to-integration-aws-icm)
   - [Integration: Incident Manager (Adv)](/oncall/how-to-integration-aws-icm-adv)
@@ -87,17 +83,19 @@
   - [incident.io](/oncall/incident-io)
   - [Integration: incident.io](/oncall/how-to-integration-incident-io)
 
-- Webhook Examples
+- Examples
+  - [SigNoz Logs](/examples/signoz-logs)
   - [Alertmanager](/examples/alertmanager)
   - [FluentBit](/examples/fluent-bit)
   - [CloudWatch Alarm](/examples/cloudwatch-alarm-sns)
   - [Sentry](/examples/sentry)
   - [Kibana](/examples/kibana)
 
-- Compare
-  - [vs Datadog Watchdog](/compare/datadog-watchdog)
-  - [vs Keep](/compare/keep)
-  - [vs Alertmanager](/compare/alertmanager)
+- Core Concept
+  - [Redaction](/agent/redaction)
+  - [Catalog](/agent/catalog)
+  - [Miner](/agent/miner)
+  - [Regex](/agent/regex)
 
 - Migration
   - [v1.4.22](/migration/migration-v1.4.22.md)
