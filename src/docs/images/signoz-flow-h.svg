@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="ClickHouse holds your log data and feeds the SigNoz query service. The Versus agent, configured by the source file on the left, queries SigNoz and reads log rows back. When a pattern spikes it raises an incident, which is routed to Slack and Telegram.">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <style>
+      .c    { font-family:"SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace; font-weight:400; fill:#12222F; }
+      .k    { font-family:"SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace; font-weight:700; fill:#12222F; }
+      .name { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:700; fill:#12222F; }
+      .t    { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#000000; }
+      .cap  { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#5B6B78; }
+      .file { font-family:"SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace; font-weight:400; fill:#5B6B78; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="630" fill="#FFFFFF"/>
+
+  <text x="60" y="180" class="file" font-size="17">config/agent_sources.yaml</text>
+  <rect x="60" y="200" width="540" height="290" rx="14" fill="#F7F9FB" stroke="#D8E0E8" stroke-width="2"/>
+
+  <rect x="78" y="386" width="504" height="34" rx="6" fill="#BACFE3" opacity="0.45"/>
+  <rect x="78" y="426" width="504" height="34" rx="6" fill="#BACFE3" opacity="0.45"/>
+
+  <text x="90" y="250" class="c" font-size="17">sources:</text>
+  <text x="90" y="290" class="c" font-size="17">  - name: prod-logs</text>
+  <text x="90" y="330" class="c" font-size="17">    type: signoz</text>
+  <text x="90" y="370" class="c" font-size="17">    signoz:</text>
+  <text x="90" y="410" class="k" font-size="17">      address: http://signoz:8080</text>
+  <text x="90" y="450" class="k" font-size="17">      api_key: ${SIGNOZ_API_KEY}</text>
+
+  <text x="60" y="528" class="cap" font-size="16">api_key is the viewer-role key</text>
+
+  <path d="M606,403 H660 V192 H741" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <text x="658" y="488" text-anchor="middle" class="cap" font-size="16">loaded at boot</text>
+  <path d="M606,466 H715 V338 H741" stroke="#000000" stroke-width="3" fill="none" marker-end="url(#a)"/>
+
+  <rect x="745" y="40" width="260" height="76" rx="14" fill="#FFFFFF" stroke="#000000" stroke-width="2.5"/>
+  <text x="875" y="76" text-anchor="middle" class="name" font-size="22">ClickHouse</text>
+  <text x="875" y="100" text-anchor="middle" class="t" font-size="16">where your logs live</text>
+
+  <path d="M875,116 V152" stroke="#000000" stroke-width="3" fill="none" marker-end="url(#a)"/>
+  <text x="890" y="140" text-anchor="start" class="t" font-size="16">log data</text>
+
+  <rect x="745" y="156" width="260" height="76" rx="14" fill="#BACFE3" stroke="#000000" stroke-width="2.5"/>
+  <text x="875" y="192" text-anchor="middle" class="name" font-size="22">SigNoz</text>
+  <text x="875" y="216" text-anchor="middle" class="t" font-size="16">query service + UI</text>
+
+  <path d="M830,296 V240" stroke="#000000" stroke-width="3" fill="none" marker-end="url(#a)"/>
+  <text x="818" y="272" text-anchor="end" class="t" font-size="16">queries</text>
+  <path d="M920,240 V296" stroke="#000000" stroke-width="3" fill="none" marker-end="url(#a)"/>
+  <text x="932" y="272" text-anchor="start" class="t" font-size="16">log rows</text>
+
+  <rect x="745" y="300" width="260" height="76" rx="14" fill="#BACFE3" stroke="#000000" stroke-width="2.5"/>
+  <text x="875" y="336" text-anchor="middle" class="name" font-size="22">Versus agent</text>
+  <text x="875" y="360" text-anchor="middle" class="t" font-size="16">learns, then detects</text>
+
+  <path d="M875,376 V416" stroke="#000000" stroke-width="3" fill="none" marker-end="url(#a)"/>
+  <text x="890" y="402" text-anchor="start" class="t" font-size="16">spike</text>
+
+  <rect x="745" y="420" width="260" height="76" rx="14" fill="#FFFFFF" stroke="#000000" stroke-width="2.5"/>
+  <text x="875" y="456" text-anchor="middle" class="name" font-size="22">Incident</text>
+  <text x="875" y="480" text-anchor="middle" class="t" font-size="16">raised on its own</text>
+
+  <path d="M875,496 V520" stroke="#000000" stroke-width="3" fill="none"/>
+  <path d="M875,520 H775 V544" stroke="#000000" stroke-width="3" fill="none" marker-end="url(#a)"/>
+  <path d="M875,520 H975 V544" stroke="#000000" stroke-width="3" fill="none" marker-end="url(#a)"/>
+
+  <rect x="685" y="548" width="180" height="64" rx="14" fill="#FFFFFF" stroke="#000000" stroke-width="2.5"/>
+  <text x="775" y="588" text-anchor="middle" class="name" font-size="22">Slack</text>
+
+  <rect x="885" y="548" width="180" height="64" rx="14" fill="#FFFFFF" stroke="#000000" stroke-width="2.5"/>
+  <text x="975" y="588" text-anchor="middle" class="name" font-size="22">Telegram</text>
+</svg>
