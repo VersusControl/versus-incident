@@ -5,6 +5,7 @@ import {
   screen,
   cleanup,
   fireEvent,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -254,6 +255,31 @@ describe("Sidebar desktop rail — collapse / expand toggle", () => {
     ).toBeTruthy();
     expect(screen.queryByRole("link", { name: "Now" })).toBeNull();
     expect(screen.getByRole("link", { name: "Respond" })).toBeTruthy();
+  });
+
+  // Without this, a collapsed rail can only reach each zone's FIRST item —
+  // every other item in the group is unreachable until the rail is expanded.
+  it("reveals a zone's other items on hover while collapsed", async () => {
+    window.localStorage.setItem("versus.sidebar.collapsed", "1");
+    renderRail();
+
+    const respondGroup = await screen.findByRole("link", { name: "Respond" });
+    // Closed by default: only the group icon is reachable.
+    expect(screen.queryByRole("link", { name: "Incidents" })).toBeNull();
+
+    fireEvent.mouseEnter(respondGroup.parentElement as HTMLElement);
+
+    // The flyout lists the whole zone, not just its primary route.
+    const flyout = screen.getByTestId("nav-flyout-respond");
+    expect(within(flyout).getByRole("link", { name: "Now" })).toBeTruthy();
+    expect(within(flyout).getByRole("link", { name: "Incidents" })).toBeTruthy();
+
+    // Closing is deferred so a pointer crossing to the panel does not dismiss
+    // it mid-travel, so this settles rather than flipping synchronously.
+    fireEvent.mouseLeave(respondGroup.parentElement as HTMLElement);
+    await waitFor(() =>
+      expect(screen.queryByTestId("nav-flyout-respond")).toBeNull(),
+    );
   });
 });
 

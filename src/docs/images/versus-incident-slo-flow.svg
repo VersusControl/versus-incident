@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="428" viewBox="0 0 760 428" role="img" aria-label="From learned signals to an adopted objective. Versus reads the metrics, traces and logs it has already learned and proposes an SLI, the number you measure, such as the share of requests that succeed. It then sets an SLO, the target for that number, such as 99.9 percent over 30 days. You decide whether to adopt it. The advisor is advisory only and Versus never fires on an SLO.">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <style>
+      .name { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:700; fill:#12222F; }
+      .t    { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#5B6B78; }
+      .lab  { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#000000; }
+    </style>
+  </defs>
+
+  <rect width="760" height="428" fill="#FFFFFF"/>
+
+  <rect x="26" y="160" width="150" height="130" rx="14" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="101" y="216" text-anchor="middle" class="name" font-size="15">Learned signals</text>
+  <text x="101" y="242" text-anchor="middle" class="t" font-size="12">metrics, traces, logs</text>
+
+  <text x="194" y="145" text-anchor="middle" class="lab" font-size="12">proposes</text>
+  <path d="M180,225 H208" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="212" y="160" width="150" height="130" rx="14" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <text x="287" y="208" text-anchor="middle" class="name" font-size="22">SLI</text>
+  <text x="287" y="236" text-anchor="middle" class="t" font-size="12">what you measure</text>
+  <text x="287" y="256" text-anchor="middle" class="t" font-size="12">requests that succeed</text>
+
+  <text x="380" y="145" text-anchor="middle" class="lab" font-size="12">sets a target</text>
+  <path d="M366,225 H394" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="398" y="160" width="150" height="130" rx="14" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <text x="473" y="208" text-anchor="middle" class="name" font-size="22">SLO</text>
+  <text x="473" y="236" text-anchor="middle" class="t" font-size="12">the target for it</text>
+  <text x="473" y="256" text-anchor="middle" class="t" font-size="12">99.9% over 30 days</text>
+
+  <text x="566" y="145" text-anchor="middle" class="lab" font-size="12">you decide</text>
+  <path d="M552,225 H580" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="584" y="160" width="150" height="130" rx="14" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="659" y="216" text-anchor="middle" class="name" font-size="15">You adopt</text>
+  <text x="659" y="242" text-anchor="middle" class="t" font-size="12">or you ignore it</text>
+
+  <text x="380" y="344" text-anchor="middle" class="t" font-size="12">Avisory only, Versus never fires on an SLO</text>
+</svg>

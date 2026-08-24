@@ -11,6 +11,8 @@ recorded and still reachable — it just stops interrupting the people on call.
 It is **Enterprise** and **off by default**. Nothing is quietened until you
 turn it on, and turning it on is a deliberate choice you make from the admin UI.
 
+![Versus Fatigue](../docs/images/versus-fatigue.svg)
+
 > **First time running Enterprise?** Start with
 > [Getting Started — Running the Enterprise Agent](./getting-started.md). It
 > covers signing in as the default admin — the same admin role that unlocks the

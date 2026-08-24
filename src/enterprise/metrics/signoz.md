@@ -8,7 +8,7 @@ A hands-on walkthrough: point the `signoz_metrics` data source at
 against each one, **learn each signal's baseline**, and open a real
 incident when one clearly deviates and stays deviated.
 
-Unlike the [Prometheus guide](./prometheus.md), SigNoz exposes no way to
+Unlike the [Prometheus](./prometheus.md), SigNoz exposes no way to
 *enumerate* metric names over its query API, so discovery works
 differently here — read [What it discovers](#3-what-it-discovers) before
 you decide this source sees everything you expect.

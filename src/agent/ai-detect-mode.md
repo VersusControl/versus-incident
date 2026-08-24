@@ -20,7 +20,7 @@ Detect mode is ideal for production environments where real-time alerts for new 
 
 The pipeline is the same as shadow mode for the first few steps:
 
-![AI Agent](../docs/images/detect-mode.png)
+![Detect mode: the shared pipeline reads logs, hides secrets, clusters them and updates the catalog. Three gates then run in order, known and calm, cache hit, and rate limit; any gate that trips drops the line. Only a line passing every gate reaches the AI SRE, which analyses it and emits an incident to Slack, Teams and on call, visible in the web UI](../docs/images/detect-mode.svg)
 
 When a new or anomalous pattern reaches the detect step, the
 agent does the following:

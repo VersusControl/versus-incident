@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="428" viewBox="0 0 760 428" role="img" aria-label="Shadow mode. Read the logs: a log source is read and secrets such as tokens, emails and IPs are hidden. Find patterns: each line is checked against the rules, uninteresting lines are skipped, the rest are grouped into shapes and remembered in the pattern catalog. Then the agent asks whether it has seen this before: old news stays quiet and is only counted, anything new is written to shadow.log as a would have alerted entry. Practice run: that log is printed to the console for humans to review. No real alert is ever sent.">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <style>
+      .name { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:700; fill:#12222F; }
+      .t    { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#5B6B78; }
+      .lab  { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#000000; }
+      .zone { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:700; fill:#5B6B78; letter-spacing:1.5px; }
+    </style>
+  </defs>
+
+  <rect width="760" height="428" fill="#FFFFFF"/>
+
+  <text x="193" y="32" text-anchor="middle" class="zone" font-size="12">READ THE LOGS</text>
+  <text x="569" y="32" text-anchor="middle" class="zone" font-size="12">FIND PATTERNS</text>
+
+  <rect x="20" y="52" width="158" height="60" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="99" y="78" text-anchor="middle" class="name" font-size="13">Log source</text>
+  <text x="99" y="98" text-anchor="middle" class="t" font-size="11.5">search tool or file</text>
+
+  <path d="M180,82 H204" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="208" y="52" width="158" height="60" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="287" y="78" text-anchor="middle" class="name" font-size="13">Hide secrets</text>
+  <text x="287" y="98" text-anchor="middle" class="t" font-size="11.5">tokens, emails, IPs</text>
+
+  <path d="M368,82 H411" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <polygon points="475,48 535,82 475,116 415,82" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="475" y="78" text-anchor="middle" class="name" font-size="12">Looks</text>
+  <text x="475" y="92" text-anchor="middle" class="name" font-size="12">interesting?</text>
+
+  <text x="560" y="70" text-anchor="middle" class="lab" font-size="12">yes</text>
+  <path d="M539,82 H580" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="584" y="52" width="158" height="60" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="663" y="78" text-anchor="middle" class="name" font-size="13">Find the shape</text>
+  <text x="663" y="98" text-anchor="middle" class="t" font-size="11.5">group similar lines</text>
+
+  <text x="486" y="142" text-anchor="start" class="lab" font-size="12">no</text>
+  <path d="M475,120 V156" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="396" y="160" width="158" height="60" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="475" y="194" text-anchor="middle" class="name" font-size="13">Skip it</text>
+  <text x="475" y="212" text-anchor="middle" class="t" font-size="11.5">boring, ignore</text>
+
+  <text x="674" y="142" text-anchor="start" class="lab" font-size="12">remember</text>
+  <path d="M663,116 V156" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <path d="M584,168 a79,8 0 0 1 158,0 v44 a79,8 0 0 1 -158,0 z" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <path d="M584,168 a79,8 0 0 0 158,0" fill="none" stroke="#000000" stroke-width="2"/>
+  <text x="663" y="194" text-anchor="middle" class="name" font-size="13">Pattern catalog</text>
+  <text x="663" y="212" text-anchor="middle" class="t" font-size="11.5">remember the patterns</text>
+
+  <path d="M663,224 V244" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <polygon points="663,248 725,282 663,316 601,282" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="663" y="278" text-anchor="middle" class="name" font-size="12">Have I seen</text>
+  <text x="663" y="292" text-anchor="middle" class="name" font-size="12">this before?</text>
+
+  <text x="340" y="272" text-anchor="middle" class="lab" font-size="12">new</text>
+  <path d="M597,282 H99 V356" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <text x="569" y="330" text-anchor="middle" class="lab" font-size="12">old news</text>
+  <path d="M663,320 V336 H475 V356" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="20" y="360" width="158" height="56" rx="12" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <text x="99" y="384" text-anchor="middle" class="name" font-size="13">shadow.log</text>
+  <text x="99" y="402" text-anchor="middle" class="t" font-size="11.5">would have alerted</text>
+
+  <text x="193" y="350" text-anchor="middle" class="lab" font-size="12">log it</text>
+  <path d="M180,388 H204" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="208" y="360" width="158" height="56" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="287" y="384" text-anchor="middle" class="name" font-size="13">Console</text>
+  <text x="287" y="402" text-anchor="middle" class="t" font-size="11.5">for humans to review</text>
+
+  <rect x="396" y="360" width="158" height="56" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="475" y="384" text-anchor="middle" class="name" font-size="13">Stay quiet</text>
+  <text x="475" y="402" text-anchor="middle" class="t" font-size="11.5">already known</text>
+</svg>

@@ -28,7 +28,7 @@ admins — a control to turn the feature on and set how often it re-reviews.
 
 ## How it works
 
-![Versus Incident SLO Flow](../docs/images/versus-incident-slo-flow.png)
+![From learned signals to an adopted objective: Versus proposes an SLI, the number you measure such as the share of requests that succeed, then sets an SLO, the target for that number such as 99.9% over 30 days, and you decide whether to adopt it. Advisory only, Versus never fires on an SLO](../docs/images/versus-incident-slo-flow.svg)
 
 On its cadence, for every service the agent has seen, it gathers a **redacted,
 derived** bundle of that service's signals — no raw logs, no raw metric series,

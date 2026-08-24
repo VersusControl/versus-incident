@@ -37,7 +37,7 @@ filter → group → save) and adds **one extra step at the end**:
 look at the result and, if it isn't already known, record it in
 the shadow log.
 
-![AI Agent](../docs/images/shadow-mode.png)
+![Shadow mode: the agent reads a log source, hides secrets, skips uninteresting lines, groups the rest into shapes and remembers them, then asks whether it has seen the pattern before. Old news stays quiet; anything new is written to shadow.log as a would have alerted entry and printed to the console for review. No real alert is sent](../docs/images/shadow-mode.svg)
 
 Three things to remember:
 

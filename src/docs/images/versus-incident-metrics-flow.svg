@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="428" viewBox="0 0 760 428" role="img" aria-label="Four stages. The generator pushes fake metrics with a spike to the Pushgateway, Prometheus scrapes it, and Versus range queries Prometheus each tick, learns each signal and then detects. The incident it opens appears in the admin UI.">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <style>
+      .name { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:700; fill:#12222F; }
+      .t    { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#5B6B78; }
+      .lab  { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#000000; }
+    </style>
+  </defs>
+
+  <rect width="760" height="428" fill="#FFFFFF"/>
+
+  <rect x="26" y="170" width="150" height="110" rx="14" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="101" y="216" text-anchor="middle" class="name" font-size="15">Generator</text>
+  <text x="101" y="242" text-anchor="middle" class="t" font-size="12">fake metrics, a spike</text>
+
+  <text x="194" y="155" text-anchor="middle" class="lab" font-size="12">push</text>
+  <path d="M180,225 H208" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="212" y="170" width="150" height="110" rx="14" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="287" y="216" text-anchor="middle" class="name" font-size="15">Pushgateway</text>
+  <text x="287" y="242" text-anchor="middle" class="t" font-size="12">holds the series</text>
+
+  <text x="380" y="155" text-anchor="middle" class="lab" font-size="12">scrape</text>
+  <path d="M366,225 H394" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="398" y="170" width="150" height="110" rx="14" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="473" y="216" text-anchor="middle" class="name" font-size="15">Prometheus</text>
+  <text x="473" y="242" text-anchor="middle" class="t" font-size="12">stores time series</text>
+
+  <text x="566" y="155" text-anchor="middle" class="lab" font-size="12">range query</text>
+  <path d="M552,225 H580" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="584" y="170" width="150" height="110" rx="14" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <text x="659" y="216" text-anchor="middle" class="name" font-size="15">Versus</text>
+  <text x="659" y="242" text-anchor="middle" class="t" font-size="12">learns, then detects</text>
+
+  <text x="380" y="330" text-anchor="middle" class="t" font-size="12">The incident it opens appears in the admin UI</text>
+</svg>

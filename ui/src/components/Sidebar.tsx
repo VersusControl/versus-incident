@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
 import {
   Activity,
@@ -327,11 +327,12 @@ function Zone({
   );
 }
 
-// CollapsedZone renders one zone as a single group-icon link in the narrow
-// rail: it points at the zone's primary (first navigable) item and exposes the
-// zone name via the tooltip, so the collapsed rail stays usable with icons
-// alone. Zones with no navigable item (nothing but in-dev placeholders) render
-// a non-interactive icon marker instead of a dead link.
+// CollapsedZone renders one zone in the narrow rail. The icon links to the
+// zone's primary (first navigable) item, and hovering or focusing it opens a
+// flyout listing every item in the zone — without it the other items are
+// unreachable until the rail is expanded. Zones with no navigable item
+// (nothing but in-dev placeholders) render a non-interactive icon marker
+// instead of a dead link, but still list their contents on hover.
 function CollapsedZone({
   title,
   icon: Icon,
@@ -340,38 +341,120 @@ function CollapsedZone({
 }: SideZone & {
   onNavigate?: () => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const closeTimer = useRef<number | null>(null);
   const primary = items.find((it) => it.to && !it.inDev);
 
-  if (!primary?.to) {
-    return (
-      <div
-        title={title}
-        aria-label={title}
-        className="mx-auto my-0.5 flex h-9 w-9 items-center justify-center rounded-control text-ink-500"
-      >
-        <Icon size={18} aria-hidden />
-      </div>
-    );
-  }
+  // The rail's <nav> is overflow-y-auto, which clips an absolutely positioned
+  // panel, so the flyout is fixed and placed from the icon's measured rect.
+  // It starts flush against the rail: the visible gap is transparent padding
+  // INSIDE the flyout, so crossing it never leaves the hover target.
+  const place = () => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const estHeight = 34 + items.length * 36;
+    const top = Math.max(8, Math.min(r.top, window.innerHeight - 8 - estHeight));
+    setPos({ top, left: r.right });
+  };
+
+  const cancelClose = () => {
+    if (closeTimer.current !== null) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  };
+
+  const show = () => {
+    cancelClose();
+    place();
+    setOpen(true);
+  };
+
+  // Closing is deferred so a pointer that clips a corner on its way to the
+  // panel does not dismiss it mid-travel.
+  const hide = () => {
+    cancelClose();
+    closeTimer.current = window.setTimeout(() => setOpen(false), 200);
+  };
+
+  const hideNow = () => {
+    cancelClose();
+    setOpen(false);
+  };
+
+  useEffect(() => cancelClose, []);
 
   return (
-    <NavLink
-      to={primary.to}
-      end={primary.end}
-      title={title}
-      aria-label={title}
-      onClick={onNavigate}
-      className={({ isActive }) =>
-        clsx(
-          "mx-auto my-0.5 flex h-9 w-9 items-center justify-center rounded-control transition-colors",
-          isActive
-            ? "bg-accent-subtle text-ink-50"
-            : "text-ink-200 hover:bg-ink-800 hover:text-ink-50",
-        )
-      }
+    <div
+      ref={wrapRef}
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onFocus={show}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) hideNow();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") hideNow();
+      }}
     >
-      <Icon size={18} aria-hidden />
-    </NavLink>
+      {primary?.to ? (
+        <NavLink
+          to={primary.to}
+          end={primary.end}
+          aria-label={title}
+          onClick={onNavigate}
+          className={({ isActive }) =>
+            clsx(
+              "mx-auto my-0.5 flex h-9 w-9 items-center justify-center rounded-control transition-colors",
+              isActive
+                ? "bg-accent-subtle text-ink-50"
+                : "text-ink-200 hover:bg-ink-800 hover:text-ink-50",
+            )
+          }
+        >
+          <Icon size={18} aria-hidden />
+        </NavLink>
+      ) : (
+        <div
+          aria-label={title}
+          className="mx-auto my-0.5 flex h-9 w-9 items-center justify-center rounded-control text-ink-500"
+        >
+          <Icon size={18} aria-hidden />
+        </div>
+      )}
+
+      {open && (
+        <div
+          style={{ top: pos.top, left: pos.left }}
+          className="fixed z-50 pl-2"
+        >
+          <div
+            role="group"
+            aria-label={title}
+            data-testid={`nav-flyout-${title.toLowerCase()}`}
+            className="w-52 rounded-control border border-ink-800 bg-ink-950 p-1 shadow-xl"
+          >
+            <div className="flex items-center gap-2 px-3 py-1.5 text-2xs uppercase tracking-wider text-ink-300">
+              <Icon size={13} aria-hidden />
+              <span>{title}</span>
+            </div>
+            {items.map((item) => (
+              <SideLink
+                key={item.to ?? item.label}
+                {...item}
+                onNavigate={() => {
+                  hideNow();
+                  onNavigate?.();
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
