@@ -11,7 +11,7 @@ This walkthrough is the **baseline-first** demo path: run steady, healthy traffi
 
 ## What you'll build
 
-![Versus Incident Metrics](../../docs/images/versus-incident-metrics-flow.png)
+![Prometheus metrics flow: the generator pushes an exposition to the Pushgateway, Prometheus scrapes it, and the Versus Enterprise build range queries it each tick. The prometheus source auto discovers golden signals and the detect worker classifies them with AI, writing the files the admin UI reads](../docs/images/versus-incident-metrics-flow.svg)
 
 A host-run generator **pushes** synthetic series to a Pushgateway; Prometheus scrapes
 them; the enterprise `prometheus` source **auto-discovers the golden signals** for each

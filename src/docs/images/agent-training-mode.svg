@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="428" viewBox="0 0 760 428" role="img" aria-label="Training mode. Ingest: the agent reads a log file and keeps a Redis cursor so it remembers where it stopped. Filter: secrets such as tokens and emails are hidden. Learn: each line is checked for whether it is interesting, uninteresting lines are skipped, interesting ones have their shape found by clustering similar lines and are written to the pattern catalog. Review: the catalog is read by the web UI, where you inspect what the agent learned.">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <style>
+      .name { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:700; fill:#12222F; }
+      .t    { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#5B6B78; }
+      .lab  { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#000000; }
+      .zone { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:700; fill:#5B6B78; letter-spacing:1.5px; }
+    </style>
+  </defs>
+
+  <rect width="760" height="428" fill="#FFFFFF"/>
+
+  <text x="99"  y="36" text-anchor="middle" class="zone" font-size="12">INGEST</text>
+  <text x="287" y="36" text-anchor="middle" class="zone" font-size="12">FILTER</text>
+  <text x="475" y="36" text-anchor="middle" class="zone" font-size="12">LEARN</text>
+  <text x="663" y="36" text-anchor="middle" class="zone" font-size="12">REVIEW</text>
+
+  <rect x="20" y="64" width="158" height="64" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="99" y="92" text-anchor="middle" class="name" font-size="13">Log file</text>
+  <text x="99" y="112" text-anchor="middle" class="t" font-size="11.5">my-app.log on disk</text>
+
+  <path d="M182,96 H202" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="208" y="64" width="158" height="64" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="287" y="92" text-anchor="middle" class="name" font-size="13">Hide secrets</text>
+  <text x="287" y="112" text-anchor="middle" class="t" font-size="11.5">tokens, emails</text>
+
+  <path d="M370,96 H390" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <polygon points="475,62 535,96 475,130 415,96" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="475" y="100" text-anchor="middle" class="name" font-size="12">Interesting?</text>
+
+  <text x="562" y="84" text-anchor="middle" class="lab" font-size="12">yes</text>
+  <path d="M539,96 H580" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="584" y="64" width="158" height="64" rx="12" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <text x="663" y="92" text-anchor="middle" class="name" font-size="13">Find the shape</text>
+  <text x="663" y="112" text-anchor="middle" class="t" font-size="11.5">cluster similar lines</text>
+
+  <text x="110" y="162" text-anchor="start" class="lab" font-size="12">cursor</text>
+  <path d="M99,132 V186" stroke="#000000" stroke-width="2" stroke-dasharray="6 5" fill="none" marker-end="url(#a)"/>
+
+  <path d="M20,198 a79,8 0 0 1 158,0 v48 a79,8 0 0 1 -158,0 z" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <path d="M20,198 a79,8 0 0 0 158,0" fill="none" stroke="#000000" stroke-width="2"/>
+  <text x="99" y="226" text-anchor="middle" class="name" font-size="13">Redis cursor</text>
+  <text x="99" y="244" text-anchor="middle" class="t" font-size="11.5">where it stopped</text>
+
+  <text x="486" y="162" text-anchor="start" class="lab" font-size="12">no</text>
+  <path d="M475,134 V186" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="396" y="190" width="158" height="64" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="475" y="218" text-anchor="middle" class="name" font-size="13">Skip it</text>
+  <text x="475" y="238" text-anchor="middle" class="t" font-size="11.5">not interesting</text>
+
+  <text x="674" y="162" text-anchor="start" class="lab" font-size="12">learn</text>
+  <path d="M663,132 V186" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <path d="M584,198 a79,8 0 0 1 158,0 v48 a79,8 0 0 1 -158,0 z" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <path d="M584,198 a79,8 0 0 0 158,0" fill="none" stroke="#000000" stroke-width="2"/>
+  <text x="663" y="222" text-anchor="middle" class="name" font-size="13">Pattern catalog</text>
+  <text x="663" y="240" text-anchor="middle" class="t" font-size="11.5">what it has learned</text>
+
+  <text x="674" y="288" text-anchor="start" class="lab" font-size="12">read</text>
+  <path d="M663,308 V258" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="584" y="312" width="158" height="64" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="663" y="340" text-anchor="middle" class="name" font-size="13">Web UI</text>
+  <text x="663" y="360" text-anchor="middle" class="t" font-size="11.5">view patterns</text>
+
+  <rect x="396" y="312" width="158" height="64" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="475" y="340" text-anchor="middle" class="name" font-size="13">You</text>
+  <text x="475" y="360" text-anchor="middle" class="t" font-size="11.5">review what it learned</text>
+
+  <text x="568" y="302" text-anchor="middle" class="lab" font-size="12">inspect</text>
+  <path d="M558,344 H580" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+</svg>

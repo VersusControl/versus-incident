@@ -12,7 +12,7 @@ baseline, and moving through the three modes.
 
 ## What you'll build
 
-![Versus Incident Metrics](../../docs/images/cloudwatch-metrics-guide.png)
+![CloudWatch metrics flow: Versus reads AWS CloudWatch namespaces over a read only connection. Inside Versus Enterprise the cloudwatch_metrics source calls ListMetrics and GetMetricData, standing intelligence learns each baseline, and the detect worker classifies deviations with AI before raising an incident to the admin UI and on call channels](../../docs/images/cloudwatch-metrics-guide.svg)
 
 You give the source a **region**. It scans CloudWatch on a cadence, picks a
 bounded set of metrics to watch, learns what each

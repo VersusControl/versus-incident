@@ -9,7 +9,7 @@ sightings, or by you through the API), the agent stops writing it to
 the shadow log. Spike detection brings it back when the volume
 suddenly jumps well above the pattern's normal rate.
 
-![AI Agent](../docs/images/spike-detection.png)
+![Spike detection: each tick's count is compared against a running EWMA average built from patterns already in the catalog. If the count is not way above normal it only updates the average; if it is, safety guards check a minimum count and minimum history, and only when all pass is a spike reported to the shadow log or as an AI alert](../docs/images/spike-detection.svg)
 
 ## How it works
 

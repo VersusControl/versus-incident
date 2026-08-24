@@ -3,7 +3,7 @@
 This guide takes you from nothing to a running agent in **training
 mode**, reading from a local file and saving what it learns to disk.
 
-![Training Mode](../docs/images/agent-training-mode.png)
+![Training mode end to end: the agent reads a log file and keeps a Redis cursor of where it stopped, hides secrets, checks whether each line is interesting, skips the ones that are not, clusters the rest into shapes, writes them to the pattern catalog, and you review the result in the web UI](../docs/images/agent-training-mode.svg)
 
 By the end you'll have:
 

@@ -18,7 +18,7 @@
   Free with MIT license · <a href="/#/compare/datadog-watchdog">Compare</a>
 </p>
 
-![Versus](docs/images/versus-dashboard-01.png)
+![Versus](docs/images/versus-dashboard.svg)
 
 ## How Versus Creates Incidents
 

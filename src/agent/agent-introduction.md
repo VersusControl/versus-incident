@@ -33,7 +33,7 @@ Each time the agent checks for new logs, every line goes through a
 short series of steps. If a step throws the line out, the next steps
 are skipped.
 
-![AI Agent](../docs/images/ai-agent-pipeline.png)
+![How one log line is processed: read it, hide sensitive bits, decide whether it is worth learning from (if not, ignore it), group it with similar lines, remember the group in the catalog, then act on the agent mode: training just learns it, shadow pretends to alert, detect sends a real incident. The catalog keeps learning as traffic changes](../docs/images/ai-agent-pipeline-flow.svg)
 
 In plain words:
 

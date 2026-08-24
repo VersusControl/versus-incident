@@ -862,6 +862,53 @@
             return svg;
           }
 
+          // routePath normalizes a hash or a sidebar href to one comparable
+          // form: no leading '#', no '?id=' fragment, no trailing slash, no
+          // '.md'. The empty route is the homepage, which the sidebar links
+          // by its real name.
+          function routePath(raw) {
+            var p = (raw || "").replace(/^#/, "").split("?")[0].replace(/\.md$/, "");
+            if (p.length > 1) p = p.replace(/\/$/, "");
+            if (p === "" || p === "/") {
+              p = "/" + (window.$docsify.homepage || "").replace(/\.md$/, "");
+            }
+            return p;
+          }
+
+          // Docsify marks the active sidebar link itself, but that matching
+          // does not survive relativePath combined with root-absolute sidebar
+          // hrefs, so the current page never highlights. Decide it here after
+          // docsify has rendered, and before setupSidebar() reads a.active to
+          // work out which sections to expand.
+          function markActive() {
+            var here = routePath(location.hash);
+            document.querySelectorAll(".sidebar-nav a").forEach(function (a) {
+              a.classList.toggle("active", routePath(a.getAttribute("href")) === here);
+            });
+          }
+
+          // hashId reads docsify's ?id=<heading> off the current route.
+          function hashId() {
+            var m = /[?&]id=([^&]+)/.exec(location.hash || "");
+            return m ? decodeURIComponent(m[1]) : "";
+          }
+
+          // scrollToId moves the heading into view. .content is the scroll
+          // container here (position:fixed + overflow-y:auto), not the window,
+          // which is why docsify's own scroll-to-anchor never moves anything.
+          function scrollToId(id, smooth) {
+            if (!id) return false;
+            // Docsify's slugify prefixes a leading digit with '_', so
+            // "## 3. What it discovers" gets id "_3-what-it-discovers".
+            // GitHub's slugify does not, and this markdown is read in both
+            // places, so accept the un-prefixed spelling too rather than
+            // making authors write a docsify-only anchor that breaks on GitHub.
+            var el = document.getElementById(id) || document.getElementById("_" + id);
+            if (!el) return false;
+            el.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
+            return true;
+          }
+
           function setupSidebar() {
             // Top-level sections: default EXPANDED
             document.querySelectorAll(".sidebar-nav > ul > li").forEach(function (li) {
@@ -974,9 +1021,18 @@
           }
 
           hook.doneEach(function () {
-            var c = document.querySelector(".content"); if (c) c.scrollTop = 0;
             buildToc();
+            markActive();
             setupSidebar();
+            // Position AFTER the content is in the DOM and buildToc has filled
+            // in any missing heading ids. Resetting scrollTop unconditionally
+            // here is what used to cancel every ?id= jump.
+            requestAnimationFrame(function () {
+              if (!scrollToId(hashId(), false)) {
+                var c = document.querySelector(".content");
+                if (c) c.scrollTop = 0;
+              }
+            });
             if (typeof mermaid !== "undefined") {
               mermaid.run({ querySelector: ".mermaid" });
             }
@@ -990,6 +1046,33 @@
             var tog = document.getElementById("menuToggle");
             var sb = document.querySelector(".sidebar");
             var bd = document.getElementById("backdrop");
+
+            // In-page section links. Markdown writes these as [text](#anchor),
+            // but docsify's compiler rewrites them to #/<current-page>?id=anchor,
+            // so both forms reach here. When the target heading is on the page
+            // already, scroll to it directly rather than letting the router
+            // re-render — a re-render lands back at the top of .content.
+            document.addEventListener("click", function (ev) {
+              if (!ev.target || !ev.target.closest) return;
+              var a = ev.target.closest(".markdown-section a[href^='#']");
+              if (!a) return;
+              var href = a.getAttribute("href") || "";
+              var id = "";
+              var q = href.indexOf("?id=");
+              if (q !== -1) {
+                // Only claim it when the link points at the page we are on;
+                // a ?id= on another page is a real navigation.
+                if (routePath(href) !== routePath(location.hash)) return;
+                id = decodeURIComponent(href.slice(q + 4).split("&")[0]);
+              } else if (href.indexOf("#/") !== 0) {
+                id = decodeURIComponent(href.slice(1));
+              } else {
+                return; // a route to another page
+              }
+              if (!id || !scrollToId(id, true)) return; // unknown anchor: leave default behaviour
+              ev.preventDefault();
+              history.replaceState(null, "", location.hash.split("?")[0] + "?id=" + encodeURIComponent(id));
+            });
 
             // Relocate docsify's search box into the topbar.
             function moveSearch() {
