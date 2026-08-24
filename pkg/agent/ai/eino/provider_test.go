@@ -331,6 +331,50 @@ func TestChatModel_LiteLLM_EgressBearerAndJSONMode(t *testing.T) {
 	}
 }
 
+// TestChatModel_LiteLLM_ConfigBaseURLRoutesEgress proves B1: the operator-facing
+// cfg.BaseURL (agent.ai.base_url / AGENT_AI_BASE_URL) actually points the LiteLLM
+// provider at a remote gateway. Here opts.BaseURL (the test seam) is left empty
+// and the endpoint is supplied ONLY through cfg.BaseURL, so a request that lands
+// on the httptest server proves the config knob is wired end-to-end rather than
+// being locked to the localhost:4000 default.
+func TestChatModel_LiteLLM_ConfigBaseURLRoutesEgress(t *testing.T) {
+	expected := core.AIFinding{
+		Title:    "Disk pressure",
+		Summary:  "node approaching disk capacity.",
+		Severity: "medium",
+		Category: "infrastructure",
+	}
+	var (
+		mu       sync.Mutex
+		seenAuth string
+		seenBody map[string]any
+	)
+	srv := newOpenAICompatServer(t, expected, &seenAuth, &seenBody, &mu)
+	defer srv.Close()
+
+	cfg := config.AgentAIConfig{
+		Provider:  "litellm",
+		APIKey:    "sk-litellm-virtual-key",
+		BaseURL:   srv.URL, // operator knob; NOT the test-only Options.BaseURL
+		Model:     "gpt-4o-mini",
+		MaxTokens: 256,
+	}
+	ctx := context.Background()
+	cm, err := einowrap.NewChatModel(ctx, cfg, einowrap.Options{}) // no test seam
+	if err != nil {
+		t.Fatalf("NewChatModel(litellm, cfg.BaseURL): %v", err)
+	}
+	if _, err := cm.Generate(ctx, []*schema.Message{schema.SystemMessage("system"), schema.UserMessage("user")}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if seenAuth != "Bearer sk-litellm-virtual-key" {
+		t.Errorf("Authorization = %q, want Bearer sk-litellm-virtual-key (request must reach the cfg.BaseURL endpoint)", seenAuth)
+	}
+}
+
 // TestChatModel_Ollama_KeylessAndNativeFormat proves the Ollama path: Ollama is
 // keyless, so NO Authorization header is sent (the AuthKeyFunc transport is a
 // harmless no-op with no resolver), and JSON-mode is requested via the native

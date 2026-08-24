@@ -76,6 +76,62 @@ func TestEmbedder_EmbedsViaOpenAICompatibleEndpoint(t *testing.T) {
 	}
 }
 
+// TestEmbedder_LiteLLMSupported proves S2: an operator who standardises on the
+// "litellm" provider can build an embedder (RAG no longer fails fast with
+// "unsupported ai provider"). LiteLLM proxies the OpenAI-compatible /embeddings
+// API, and the request reaches the gateway configured via cfg.BaseURL.
+func TestEmbedder_LiteLLMSupported(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		seenPath string
+		seenAuth string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seenPath = r.URL.Path
+		seenAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		resp := map[string]any{
+			"object": "list",
+			"data": []map[string]any{
+				{"object": "embedding", "index": 0, "embedding": []float64{0.1, 0.2, 0.3}},
+			},
+			"model": "text-embedding-3-small",
+			"usage": map[string]any{"prompt_tokens": 1, "total_tokens": 1},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	emb, err := einowrap.NewEmbedder(ctx, config.AgentAIConfig{
+		Provider: "litellm",
+		APIKey:   "sk-litellm-virtual-key",
+		BaseURL:  srv.URL, // operator knob, not the test-only Options.BaseURL
+		Model:    "text-embedding-3-small",
+	}, einowrap.Options{})
+	if err != nil {
+		t.Fatalf("NewEmbedder(litellm): %v", err)
+	}
+	vecs, err := emb.Embed(ctx, []string{"hello"})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(vecs) != 1 || len(vecs[0]) != 3 {
+		t.Fatalf("unexpected vectors: %v", vecs)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.HasSuffix(seenPath, "/embeddings") {
+		t.Errorf("request path = %q, want it to hit /embeddings", seenPath)
+	}
+	if seenAuth != "Bearer sk-litellm-virtual-key" {
+		t.Errorf("Authorization = %q, want Bearer sk-litellm-virtual-key", seenAuth)
+	}
+}
+
 func TestEmbedder_EmptyInput(t *testing.T) {
 	emb, err := einowrap.NewEmbedder(context.Background(), config.AgentAIConfig{Model: "m"}, einowrap.Options{})
 	if err != nil {

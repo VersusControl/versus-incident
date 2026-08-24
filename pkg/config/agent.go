@@ -366,6 +366,13 @@ type AgentAIConfig struct {
 	Provider string `mapstructure:"provider"`
 	// APIKey is the bearer token sent in the Authorization header.
 	APIKey string `mapstructure:"api_key"`
+	// BaseURL overrides the provider endpoint. It is the operator knob for
+	// pointing an OpenAI-compatible provider ("litellm", "openai", vLLM /
+	// LocalAI, ...) at a shared/remote gateway (e.g.
+	// "https://litellm.internal.corp/v1") instead of the provider default.
+	// Empty keeps the provider's built-in default (for "litellm" that is the
+	// local proxy at http://localhost:4000/v1). Env: AGENT_AI_BASE_URL.
+	BaseURL string `mapstructure:"base_url"`
 	// Model is the model identifier, e.g. "gpt-4o-mini".
 	Model string `mapstructure:"model"`
 	// Temperature controls randomness (0.0–2.0). Default 0.2.

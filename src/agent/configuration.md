@@ -273,7 +273,7 @@ agent:
     model: gpt-4o-mini          # shared default for detect + analyze
     temperature: 0.2
     max_tokens: 1024
-    base_url: ""                # optional OpenAI-compatible endpoint
+    base_url: ""                # optional OpenAI-compatible endpoint override
 
     analyze:
       model: gpt-4o             # stronger model for deep dives
@@ -292,6 +292,7 @@ temperature at `1` and reject any explicit value.
 | `enable` | bool | `false` | Turns on the AI SRE (detect triage + analyze). Env: `AGENT_AI_ENABLE`. |
 | `provider` | string | `openai` | Model backend: `openai`, `deepseek`, `qwen`, `ollama`, `claude`, `gemini`, or `litellm`. An unknown value fails fast (no silent fallback). Env: `AGENT_AI_PROVIDER`. |
 | `api_key` | string | — | API key for the model provider. Env: `AGENT_AI_API_KEY`. |
+| `base_url` | string | provider default | Overrides the provider endpoint for OpenAI-compatible backends (`litellm`, `openai`, self-hosted vLLM / LocalAI). Point it at a shared/remote gateway, e.g. `https://litellm.internal.corp/v1`. Empty keeps the provider default (for `litellm`, the local proxy `http://localhost:4000/v1`). Env: `AGENT_AI_BASE_URL`. |
 | `model` | string | — | Shared default model for both tasks. Env: `AGENT_AI_MODEL`. |
 | `temperature` | float | `0.2` | Randomness control. Set `-1` to omit the field for beta-limited / reasoning models that reject explicit temperature values. |
 | `analyze.model` | string | inherits `model` | Optional stronger model just for analyze. |
@@ -320,9 +321,24 @@ The backend speaks the OpenAI chat-completions wire format, so JSON-mode
 (detect) and tool-calling (analyze) work unchanged. `model` is the
 **model alias** defined in your LiteLLM proxy config, not a raw provider
 id; the proxy maps it to the upstream deployment and drops any
-per-provider-unsupported sampling params server-side. The endpoint
-defaults to a local proxy at `http://localhost:4000/v1` (the common
-sidecar deployment).
+per-provider-unsupported sampling params server-side.
+
+The endpoint defaults to a local proxy at `http://localhost:4000/v1` (the
+common sidecar deployment). To target a shared or remote gateway, set
+`base_url` (or `AGENT_AI_BASE_URL`), e.g. `https://litellm.internal.corp/v1`:
+
+```yaml
+agent:
+  ai:
+    provider: litellm
+    base_url: https://litellm.internal.corp/v1
+    api_key: ${LITELLM_VIRTUAL_KEY}
+    model: gpt-5
+```
+
+The same `base_url` knob also serves RAG embeddings (the `litellm`
+provider proxies the OpenAI-compatible `/v1/embeddings` API) and any other
+self-hosted OpenAI-compatible backend (vLLM, LocalAI).
 
 > The tool-loop knobs `tool_timeout` and `parallel_tools` moved to the
 > root of `tools.yaml` (see below) — they apply to every analyze tool

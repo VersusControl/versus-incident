@@ -120,7 +120,7 @@ func NewChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (
 	return newProviderChatModel(ctx, cfg.Provider, chatModelRequest{
 		apiKey:      cfg.APIKey,
 		model:       cfg.Model,
-		baseURL:     opts.BaseURL,
+		baseURL:     resolveBaseURL(opts.BaseURL, cfg.BaseURL),
 		httpClient:  withAuthRoundTripper(opts.HTTPClient, timeout, opts.AuthKeyFunc),
 		timeout:     timeout,
 		maxTokens:   maxCompletionTokens,
@@ -159,7 +159,7 @@ func NewToolCallingChatModel(ctx context.Context, cfg config.AgentAIConfig, opts
 	return newProviderChatModel(ctx, cfg.Provider, chatModelRequest{
 		apiKey:      cfg.APIKey,
 		model:       cfg.Model,
-		baseURL:     opts.BaseURL,
+		baseURL:     resolveBaseURL(opts.BaseURL, cfg.BaseURL),
 		httpClient:  withAuthRoundTripper(opts.HTTPClient, timeout, opts.AuthKeyFunc),
 		timeout:     timeout,
 		maxTokens:   maxCompletionTokens,
@@ -176,6 +176,18 @@ func NewToolCallingChatModel(ctx context.Context, cfg config.AgentAIConfig, opts
 // to set -1 per reasoning deployment; the sentinel remains as a manual override
 // for any model the family list does not yet cover. A zero value inherits the
 // supplied default; any other value is sent verbatim.
+// resolveBaseURL picks the effective endpoint override. The test-only
+// opts.BaseURL seam wins when set (httptest servers in unit tests); otherwise
+// the operator-configured cfg.BaseURL (AGENT_AI_BASE_URL / agent.ai.base_url)
+// is used. When both are empty the provider builder applies its own default
+// (e.g. the local LiteLLM proxy).
+func resolveBaseURL(optsBaseURL, cfgBaseURL string) string {
+	if optsBaseURL != "" {
+		return optsBaseURL
+	}
+	return cfgBaseURL
+}
+
 func resolveTemperature(configured, def float64) *float32 {
 	if configured < 0 {
 		return nil
