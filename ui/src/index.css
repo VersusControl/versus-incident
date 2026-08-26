@@ -2,6 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Product width scale: list previews, analysis dialogs, and wide dialogs. */
+.max-w-lg {
+  max-width: 720px;
+}
+.max-w-xl {
+  max-width: 960px;
+}
+.max-w-2xl {
+  max-width: 1200px;
+}
+
 /* ---------- Theme variables ----------
    Dark is the default (the 3am ops context); [data-theme="light"] swaps
    the map. `.force-dark` re-pins the dark values on a subtree — the
@@ -206,6 +217,27 @@ body {
   }
   .card-body {
     @apply p-4;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .card-body > * {
+    min-width: 0;
+  }
+  .overlay-body {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: hidden;
+    overflow-wrap: anywhere;
+  }
+  .overlay-body > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .overlay-body pre {
+    max-width: 100%;
+    overflow-x: hidden;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   /* Pill / tag — dark tinted bg + 400-level text ⇒ ≥4.5:1 on surface. */

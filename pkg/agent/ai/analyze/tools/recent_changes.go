@@ -56,7 +56,8 @@ const (
 )
 
 // Name implements core.AnalyzeTool.
-func (RecentChanges) Name() string { return "recent_changes" }
+func (RecentChanges) Name() string        { return "recent_changes" }
+func (RecentChanges) DisplayName() string { return "Reviewing recent changes" }
 
 // Description implements core.AnalyzeTool.
 func (RecentChanges) Description() string {

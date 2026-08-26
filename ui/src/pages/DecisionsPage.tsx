@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -7,7 +7,6 @@ import {
   Eraser,
   Eye,
   EyeOff,
-  ScrollText,
   Send,
   Timer,
 } from "lucide-react";
@@ -22,7 +21,6 @@ import { Pill, VerdictPill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { FilterBar } from "@/components/FilterBar";
-import { ClickableRow } from "@/components/DataTable";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -38,7 +36,6 @@ import {
 import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
 import { EmptyState, EmptyValue } from "@/components/feedback";
-import { SYSTEM_PROMPT_PATH } from "@/lib/systemPromptNav";
 
 type Tab = "detect" | "shadow" | "spike";
 
@@ -88,11 +85,6 @@ export function DecisionsPage() {
       <TopBar
         title="Decisions"
         subtitle={subtitle}
-        actions={
-          <Link to={SYSTEM_PROMPT_PATH} className="btn">
-            <ScrollText size={12} aria-hidden /> System prompt
-          </Link>
-        }
       />
 
       <main className="flex-1 overflow-auto p-6">
@@ -244,7 +236,6 @@ const OUTCOME_LABELS: Record<OutcomeFilter, string> = {
 const DETECT_COLS = 11;
 
 function DetectTab() {
-  const navigate = useNavigate();
   const events = useQuery({ queryKey: ["detect"], queryFn: api.listDetect });
   const stats = useQuery({
     queryKey: ["detect-stats"],
@@ -283,7 +274,7 @@ function DetectTab() {
     size: pg.pageItems.length,
     onOpen: (i) => {
       const e = pg.pageItems[i];
-      if (e) navigate(`/agent/decisions/detect/${encodeURIComponent(e.id)}`);
+      if (e) setPeekId(e.id);
     },
   });
 
@@ -355,7 +346,7 @@ function DetectTab() {
         )}
         <div
           className="max-h-[calc(100vh-260px)] overflow-auto"
-          aria-label="Detect decisions table — j/k to move, Enter to open"
+          aria-label="Detect decisions table — j/k to move, Enter to preview"
           {...keys.containerProps}
         >
           <table className="ddt">
@@ -493,11 +484,11 @@ function DetectTab() {
               </PeekField>
             </dl>
             {peek.explanation && (
-              <div>
+              <div className="min-w-0">
                 <div className="mb-1 text-2xs uppercase tracking-wide text-ink-400">
                   Why it tripped
                 </div>
-                <p className="font-mono text-2xs text-ink-100">
+                <p className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-2xs text-ink-100">
                   {peek.explanation}
                 </p>
               </div>
@@ -506,7 +497,7 @@ function DetectTab() {
               <div className="mb-1 text-2xs uppercase tracking-wide text-ink-400">
                 Sample
               </div>
-              <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
+              <pre className="max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
                 {peek.samples?.[0] || peek.template || "—"}
               </pre>
             </div>
@@ -543,7 +534,7 @@ function DetectRow({
     "—";
   const href = `/agent/decisions/detect/${encodeURIComponent(e.id)}`;
   return (
-    <ClickableRow to={href} {...rowProps}>
+    <tr {...rowProps}>
       <td className="w-8">
         <RowSelectCheckbox
           checked={selected}
@@ -597,7 +588,7 @@ function DetectRow({
       <td className="text-right tabular-nums text-ink-400">
         {e.duration_ms ?? <EmptyValue />}
       </td>
-    </ClickableRow>
+    </tr>
   );
 }
 
@@ -683,8 +674,6 @@ function ShadowEventsTable({
   resetKey: string;
   empty: React.ReactNode;
 }) {
-  const navigate = useNavigate();
-
   // Click-to-sort on Last seen (by the real last_seen timestamp). Default:
   // most-recently-seen first, matching the incoming order.
   const sorted = useSortableRows(
@@ -711,10 +700,7 @@ function ShadowEventsTable({
     size: pg.pageItems.length,
     onOpen: (i) => {
       const e = pg.pageItems[i];
-      if (e)
-        navigate(
-          `/agent/decisions/shadow/${encodeURIComponent(e.pattern_id)}`,
-        );
+      if (e) setPeekKey(shadowKey(e));
     },
   });
 
@@ -732,7 +718,7 @@ function ShadowEventsTable({
       )}
       <div
         className="max-h-[calc(100vh-260px)] overflow-auto"
-        aria-label="Shadow decisions table — j/k to move, Enter to open"
+        aria-label="Shadow decisions table — j/k to move, Enter to preview"
         {...keys.containerProps}
       >
         <table className="ddt">
@@ -773,7 +759,7 @@ function ShadowEventsTable({
               const href = `/agent/decisions/shadow/${encodeURIComponent(e.pattern_id)}`;
               const key = shadowKey(e);
               return (
-                <ClickableRow key={key} to={href} {...keys.rowProps(i)}>
+                <tr key={key} {...keys.rowProps(i)}>
                   <td className="w-8">
                     <RowSelectCheckbox
                       checked={bulk.isSelected(key)}
@@ -833,7 +819,7 @@ function ShadowEventsTable({
                   >
                     {fmtRel(e.last_seen)}
                   </td>
-                </ClickableRow>
+                </tr>
               );
             })}
           </tbody>
@@ -893,7 +879,7 @@ function ShadowEventsTable({
               <div className="mb-1 text-2xs uppercase tracking-wide text-ink-400">
                 Sample
               </div>
-              <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
+              <pre className="max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
                 {peek.sample_message || peek.template || "—"}
               </pre>
             </div>
@@ -1047,8 +1033,6 @@ function SpikeTable({
   rows: SpikeRow[];
   isLoading: boolean;
 }) {
-  const navigate = useNavigate();
-
   // Click-to-sort on When (by the real spike timestamp). Default: newest first,
   // matching the merged newest-first order.
   const sorted = useSortableRows(
@@ -1071,7 +1055,7 @@ function SpikeTable({
     size: pg.pageItems.length,
     onOpen: (i) => {
       const r = pg.pageItems[i];
-      if (r) navigate(r.href);
+      if (r) setPeekKey(r.key);
     },
   });
 
@@ -1089,7 +1073,7 @@ function SpikeTable({
       )}
       <div
         className="max-h-[calc(100vh-260px)] overflow-auto"
-        aria-label="Spike signals table — j/k to move, Enter to open"
+        aria-label="Spike signals table — j/k to move, Enter to preview"
         {...keys.containerProps}
       >
         <table className="ddt">
@@ -1130,7 +1114,7 @@ function SpikeTable({
               </tr>
             )}
             {pg.pageItems.map((r, i) => (
-              <ClickableRow key={r.key} to={r.href} {...keys.rowProps(i)}>
+              <tr key={r.key} {...keys.rowProps(i)}>
                 <td className="w-8">
                   <RowSelectCheckbox
                     checked={bulk.isSelected(r.key)}
@@ -1180,7 +1164,7 @@ function SpikeTable({
                 <td className="text-2xs text-ink-300" title={fmtAbs(r.when)}>
                   {fmtRel(r.when)}
                 </td>
-              </ClickableRow>
+              </tr>
             ))}
           </tbody>
         </table>
@@ -1226,7 +1210,7 @@ function SpikeTable({
               <div className="mb-1 text-2xs uppercase tracking-wide text-ink-400">
                 Sample
               </div>
-              <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
+              <pre className="max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
                 {peek.sample || "—"}
               </pre>
             </div>

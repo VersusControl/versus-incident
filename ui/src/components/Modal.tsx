@@ -32,7 +32,7 @@ export function Modal({
   onClose: () => void;
   children: React.ReactNode;
   footer?: React.ReactNode;
-  size?: "sm" | "md" | "lg";
+  size?: "sm" | "md" | "lg" | "xl" | "2xl";
   /** Guard close while a mutation is pending (kept from ConfirmDialog). */
   closeDisabled?: boolean;
 }) {
@@ -70,9 +70,21 @@ export function Modal({
 
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
+    // Mark that a modal owns Escape. PeekPanel also listens on document in the
+    // capture phase, and stopPropagation does not stop a sibling listener on
+    // the SAME element — so without this, Escape over a peek-launched modal
+    // would close both at once. Counted so nested modals unwind correctly.
+    const depth = Number(document.body.dataset.modalDepth ?? "0") + 1;
+    document.body.dataset.modalDepth = String(depth);
     return () => {
       document.removeEventListener("keydown", onKey, true);
       document.body.style.overflow = prevOverflow;
+      const left = Number(document.body.dataset.modalDepth ?? "1") - 1;
+      if (left > 0) {
+        document.body.dataset.modalDepth = String(left);
+      } else {
+        delete document.body.dataset.modalDepth;
+      }
       prev?.focus();
     };
   }, [onClose, closeDisabled]);
@@ -90,13 +102,18 @@ export function Modal({
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         className={clsx(
-          "motion-safe:animate-[modal-in_180ms_ease-out] w-full rounded-card border border-ink-600 bg-surface-raised shadow-modal",
+          // Capped to the viewport and laid out as a column so a tall body
+          // scrolls INSIDE the panel. Without this the panel grows past the
+          // screen and takes the header and footer buttons with it.
+          "motion-safe:animate-[modal-in_180ms_ease-out] flex max-h-[calc(100vh-2rem)] w-full flex-col rounded-card border border-ink-600 bg-surface-raised shadow-modal",
           size === "sm" && "max-w-sm",
           size === "md" && "max-w-md",
           size === "lg" && "max-w-lg",
+          size === "xl" && "max-w-xl",
+          size === "2xl" && "max-w-2xl",
         )}
       >
-        <div className="flex items-center justify-between border-b border-ink-600 px-4 py-3">
+        <div className="flex shrink-0 items-center justify-between border-b border-ink-600 px-4 py-3">
           <h2 id={titleId} className="text-sm font-semibold text-ink-50">
             {title}
           </h2>
@@ -109,9 +126,11 @@ export function Modal({
             <X size={14} />
           </button>
         </div>
-        <div className="p-4">{children}</div>
+        <div className="overlay-body min-h-0 flex-1 overflow-y-auto p-4">
+          {children}
+        </div>
         {footer && (
-          <div className="flex justify-end gap-2 border-t border-ink-600 px-4 py-3">
+          <div className="flex min-w-0 shrink-0 flex-wrap justify-end gap-2 border-t border-ink-600 px-4 py-3">
             {footer}
           </div>
         )}

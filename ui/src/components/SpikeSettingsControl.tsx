@@ -72,18 +72,20 @@ export function SpikeSettingsControl() {
     },
   });
 
+  // Error first: on a failed load `form` is still null, so a `!form` check
+  // ahead of this one would spin on "Loading…" forever.
+  if (settings.isError) {
+    return (
+      <div className="card p-4">
+        <ErrorBox error={settings.error} />
+      </div>
+    );
+  }
   if (settings.isLoading || !form) {
     return (
       <div className="card p-4 text-sm text-ink-300">
         <Loader2 size={14} className="mr-2 inline animate-spin" />
         Loading spike settings…
-      </div>
-    );
-  }
-  if (settings.isError) {
-    return (
-      <div className="card p-4">
-        <ErrorBox error={settings.error} />
       </div>
     );
   }

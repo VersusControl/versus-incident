@@ -802,11 +802,13 @@ function PeekFact({
   children: React.ReactNode;
 }) {
   return (
-    <div>
+    <div className="min-w-0">
       <dt className="text-2xs uppercase tracking-wider text-ink-400">
         {label}
       </dt>
-      <dd className="mt-0.5 font-mono text-xs text-ink-100">{children}</dd>
+      <dd className="mt-0.5 min-w-0 [overflow-wrap:anywhere] font-mono text-xs text-ink-100">
+        {children}
+      </dd>
     </div>
   );
 }

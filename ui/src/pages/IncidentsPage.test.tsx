@@ -20,6 +20,77 @@ import {
   type OriginCounts,
 } from "@/lib/api";
 
+// A queryKey predicate in TanStack Query is a PREFIX match, so the optimistic
+// resolve's ["incidents"] updater also selects ["incidents","counts"] — which
+// holds a counts OBJECT, not a list. Mapping over it threw inside onMutate,
+// before the request was sent, and the operator saw
+// "Resolve failed: <x>.map is not a function".
+describe("IncidentsPage — optimistic resolve across mixed cache shapes", () => {
+  beforeEach(() => {
+    vi.mocked(api.resolveIncident).mockClear();
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue(
+      index([incident({ id: "res-1", resolved: false })]),
+    );
+  });
+
+  it("resolves when a non-array cache shares the incidents key prefix", async () => {
+    vi.mocked(api.incidentCounts).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    // The shape the header badge and the Now page cache. Its presence is what
+    // triggered the bug, so the seed IS the regression.
+    qc.setQueryData(["incidents", "counts"], {
+      by_status: { open: { total: 3 } },
+    });
+    qc.setQueryData(["incidents", "list"], [incident({ id: "res-1" })]);
+
+    render(
+      <QueryClientProvider client={qc}>
+        <ToastProvider>
+          <MemoryRouter
+            initialEntries={["/incidents"]}
+            future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+          >
+            <Routes>
+              <Route path="/incidents" element={<IncidentsPage />} />
+            </Routes>
+          </MemoryRouter>
+        </ToastProvider>
+      </QueryClientProvider>,
+    );
+
+    const eye = await screen.findByLabelText(/View incident/);
+    fireEvent.click(eye);
+    const panel = screen.getByRole("dialog", { name: "Details panel" });
+    fireEvent.click(
+      within(panel).getByRole("button", { name: "Mark incident resolved" }),
+    );
+
+    // Confirm the write.
+    const confirm = await screen.findByRole("button", { name: "Resolve" });
+    fireEvent.click(confirm);
+
+    // onMutate ran to completion, so the request actually went out…
+    await waitFor(() =>
+      expect(api.resolveIncident).toHaveBeenCalledWith("res-1"),
+    );
+    // …and no failure toast was raised.
+    expect(screen.queryByText("Resolve failed")).toBeNull();
+
+    // The counts cache is untouched — only the list shapes are flipped.
+    expect(qc.getQueryData(["incidents", "counts"])).toEqual({
+      by_status: { open: { total: 3 } },
+    });
+    const list = qc.getQueryData(["incidents", "list"]) as Array<{
+      resolved: boolean;
+    }>;
+    expect(list[0].resolved).toBe(true);
+  });
+});
+
 // The Incidents table row exposes ONLY the eye (Assign / Resolve moved to the
 // bulk-action bar), and the row itself is no longer a navigation control —
 // clicking a row must NOT navigate; only the eye opens the peek. These pin both.
@@ -31,15 +102,35 @@ vi.mock("@/lib/api", async (importActual) => {
       ...actual.api,
       listIncidentsIndex: vi.fn(),
       searchIncidentsIndex: vi.fn(),
+      incidentCounts: vi.fn().mockResolvedValue({
+        count_window: "7d",
+        ai_detect: 0,
+        webhook: 0,
+        total: 0,
+        by_status: {
+          open: { ai_detect: 0, webhook: 0, total: 0 },
+          acked: { ai_detect: 0, webhook: 0, total: 0 },
+          resolved: { ai_detect: 0, webhook: 0, total: 0 },
+          all: { ai_detect: 0, webhook: 0, total: 0 },
+        },
+      }),
       capabilities: vi.fn().mockResolvedValue({ search: false }),
       listTeams: vi.fn().mockResolvedValue([]),
       listMembers: vi.fn().mockResolvedValue([]),
-      getIntakeSettings: vi.fn(),
+      getCountSettings: vi.fn(),
+      getIntakeSettings: vi.fn().mockResolvedValue({
+        auto_resolve_webhook: true,
+      }),
       updateIntakeSettings: vi.fn(),
       // Analysis is enabled by default so the peek's Run analysis button is
-      // active; runAnalysis is a spy the row-action test asserts against.
+      // active. Analysis runs over the streaming endpoint; runAnalysis stays
+      // mocked as the no-SSE fallback so neither path reaches the network.
       getAgentConfig: vi.fn().mockResolvedValue({ ai: { enable: true } }),
       runAnalysis: vi.fn().mockResolvedValue({}),
+      streamAnalysis: vi.fn().mockResolvedValue({ kind: "run_finished" }),
+      resolveIncident: vi
+        .fn()
+        .mockResolvedValue({ id: "x", resolved: true, resolved_at: null }),
     },
   };
 });
@@ -79,6 +170,7 @@ function index(
     };
   return {
     incidents: rows,
+    count_window: "30d",
     counts: {
       ai_detect: bs.open.ai_detect + bs.acked.ai_detect,
       webhook: bs.open.webhook + bs.acked.webhook,
@@ -231,6 +323,27 @@ describe("IncidentsPage — webhook auto-resolve toggle", () => {
 // server sees 277 resolved, so the Resolved tab must read 277 (server), not 0
 // (loaded page), and origin All must read the whole-set 278.
 describe("IncidentsPage — tab counts come from server by_status", () => {
+  it("keeps the count window in the badge tooltip without duplicating it visibly", async () => {
+    vi.mocked(api.incidentCounts).mockResolvedValue({
+      count_window: "24h",
+      ...oc(3, 4),
+      by_status: {
+        open: oc(3, 4),
+        acked: oc(0, 0),
+        resolved: oc(0, 0),
+        all: oc(3, 4),
+      },
+    });
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue(index([incident()]));
+
+    renderPage();
+
+    const badge = await screen.findByTitle(/7 open in the last 24h window/);
+    expect(within(badge).getByText("AI: 3 · Webhook: 4")).toBeTruthy();
+    expect(within(badge).queryByText("last 24h")).toBeNull();
+    expect(api.getCountSettings).not.toHaveBeenCalled();
+  });
+
   it("shows server per-status totals, not the loaded page", async () => {
     const loaded = incident({
       id: "wh-open-1",
@@ -255,9 +368,11 @@ describe("IncidentsPage — tab counts come from server by_status", () => {
     expect(await screen.findByText("277")).toBeTruthy();
     // The Acked tab shows the server's 5 (also absent from the loaded page).
     expect(screen.getByText("5")).toBeTruthy();
-    // The webhook feed total (284) reconciles across the origin tab and the
-    // "All" status tab — the SAME server number in both places.
-    expect(screen.getAllByText("284").length).toBeGreaterThanOrEqual(2);
+    // The All status tab carries the server's all-status total. The origin tab
+    // intentionally carries the open count, so 284 appears exactly once.
+    expect(screen.getAllByText("284")).toHaveLength(1);
+    expect(screen.getByText("counts over last 30d")).toBeTruthy();
+    expect(api.getCountSettings).not.toHaveBeenCalled();
   });
 });
 
@@ -388,12 +503,13 @@ describe("IncidentsPage — bounded auto load-more", () => {
 describe("IncidentsPage — per-row Run analysis", () => {
   beforeEach(() => {
     vi.mocked(api.runAnalysis).mockClear();
+    vi.mocked(api.streamAnalysis).mockClear();
     vi.mocked(api.listIncidentsIndex).mockResolvedValue(
       index([incident({ id: "row-analyze-1" })]),
     );
   });
 
-  it("triggers api.runAnalysis with the row id from the peek", async () => {
+  it("streams an analysis for the row id from the peek", async () => {
     renderPage();
 
     // Open the row's action surface (the peek) — the same place Assign /
@@ -408,8 +524,14 @@ describe("IncidentsPage — per-row Run analysis", () => {
     fireEvent.click(runBtn);
 
     await waitFor(() =>
-      expect(api.runAnalysis).toHaveBeenCalledWith("row-analyze-1"),
+      expect(api.streamAnalysis).toHaveBeenCalledWith(
+        "row-analyze-1",
+        expect.any(Function),
+        expect.anything(),
+      ),
     );
+    // The streaming path succeeded, so the non-streaming fallback stays unused.
+    expect(api.runAnalysis).not.toHaveBeenCalled();
   });
 });
 

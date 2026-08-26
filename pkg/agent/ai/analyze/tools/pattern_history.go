@@ -15,7 +15,8 @@ type PatternHistory struct {
 }
 
 // Name implements core.AnalyzeTool.
-func (PatternHistory) Name() string { return "pattern_history" }
+func (PatternHistory) Name() string        { return "pattern_history" }
+func (PatternHistory) DisplayName() string { return "Reviewing pattern history" }
 
 // Description implements core.AnalyzeTool.
 func (PatternHistory) Description() string {

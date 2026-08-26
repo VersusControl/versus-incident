@@ -27,7 +27,7 @@ export function AnalysisCard({
   const statusTone =
     status === "ok" ? "good" : status === "error" ? "bad" : "warn";
   return (
-    <div className="card">
+    <div className="card min-w-0 max-w-full">
       <div className="card-header gap-2">
         <span className="card-title flex min-w-0 items-center gap-1.5">
           <Brain size={12} className="shrink-0 text-link" />
@@ -158,7 +158,7 @@ export function AnalysisCard({
             <summary className="cursor-pointer text-2xs uppercase tracking-wider text-ink-400">
               Raw model response
             </summary>
-            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-surface-sunken p-2 font-mono text-2xs leading-snug text-ink-100">
+            <pre className="mt-2 max-h-64 max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md bg-surface-sunken p-2 font-mono text-2xs leading-snug text-ink-100">
               {rec.raw_response}
             </pre>
           </details>
@@ -175,10 +175,12 @@ export function AnalysisCard({
                   key={i}
                   className="rounded-md border border-ink-600 bg-surface-raised p-2 text-2xs"
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-ink-50">{tc.name}</span>
+                  <div className="flex min-w-0 items-start justify-between gap-2">
+                    <span className="min-w-0 [overflow-wrap:anywhere] font-mono text-ink-50">
+                      {tc.name}
+                    </span>
                     {tc.duration_ms !== undefined && (
-                      <span className="text-ink-300">
+                      <span className="shrink-0 text-ink-300">
                         {formatDuration(tc.duration_ms)}
                       </span>
                     )}
@@ -187,12 +189,12 @@ export function AnalysisCard({
                     <p className="mt-1 text-sev-critical">error: {tc.error}</p>
                   )}
                   {tc.args !== undefined && tc.args !== null && (
-                    <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words font-mono text-ink-200">
+                    <pre className="mt-1 max-h-32 max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-ink-200">
                       args: {jsonString(tc.args)}
                     </pre>
                   )}
                   {tc.output !== undefined && tc.output !== null && (
-                    <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words font-mono text-ink-200">
+                    <pre className="mt-1 max-h-32 max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-ink-200">
                       output: {jsonString(tc.output)}
                     </pre>
                   )}
@@ -259,7 +261,7 @@ function EvidenceList({ items }: { items: NonNullable<AIFindingEvidence> }) {
                     <span className="text-ink-100">{e.summary}</span>
                   </div>
                   {expanded && e.detail && (
-                    <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-2xs leading-snug text-ink-200">
+                    <pre className="mt-2 max-h-48 max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-2xs leading-snug text-ink-200">
                       {e.detail}
                     </pre>
                   )}

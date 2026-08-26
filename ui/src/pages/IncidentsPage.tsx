@@ -16,12 +16,12 @@ import {
   UserPlus,
 } from "lucide-react";
 import { api, type IncidentIndex, type IncidentSummary, type IntakeSettings, type OriginCounts } from "@/lib/api";
+import { countWindowLabel } from "@/lib/countWindow";
 import { fmtAbs, fmtRel, incidentTitle, truncate } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
 import {
   INCIDENT_STATUS_VALUES,
   filterIncidentsByText,
-  formatOriginCounts,
   incidentResetKey,
   matchesStatus,
   normalizeOrigin,
@@ -106,6 +106,7 @@ function useIncidentIndex(
     return {
       incidents: pages.flatMap((p) => p.incidents),
       counts: first.counts,
+      count_window: first.count_window,
       total: first.total,
     };
   }, [listQuery.data]);
@@ -232,12 +233,18 @@ export function IncidentsPage() {
 
   const { data, isLoading, isError, error, refetch, isRefetching, listQuery } =
     useIncidentIndex(useServerSearch, trimmed, origin);
-  // Whole-set per-origin totals (all statuses) from the server drive the
-  // origin-tab badges and the top-bar summary, so both feeds stay visible
-  // regardless of the active tab. by_status is the authoritative per-origin ×
-  // per-status breakdown the status-tab counts read.
+  // Per-origin OPEN counts drive the origin-tab badges and the top-bar
+  // summary: the useful number on this page is how much work is waiting, not
+  // how much has ever arrived. It also matches the Now page and the header
+  // badge, which already read the open bucket, so no two surfaces disagree.
+  // by_status is the authoritative per-origin × per-status breakdown the
+  // status-tab counts read.
   const byStatus = data?.counts?.by_status;
-  const originCounts = byStatus?.all;
+  const originCounts = byStatus?.open;
+
+  const windowLabel = data
+    ? countWindowLabel(data.count_window, "short")
+    : undefined;
 
   // Roster lookups are shared by every row — resolve them once here.
   const teamsQ = useQuery({ queryKey: ["teams"], queryFn: api.listTeams });
@@ -384,8 +391,14 @@ export function IncidentsPage() {
         x.id === i.id
           ? { ...x, resolved: true, resolved_at: new Date().toISOString() }
           : x;
+      // NOTE: a queryKey predicate is a PREFIX match, so ["incidents"] also
+      // selects ["incidents","counts"], which holds a counts OBJECT, and
+      // ["incidents","list"]. Only the array-shaped caches can be mapped —
+      // calling .map on the counts object threw inside onMutate and surfaced
+      // as "Resolve failed: <x>.map is not a function" before the request was
+      // ever sent.
       qc.setQueriesData<IncidentSummary[]>({ queryKey: ["incidents"] }, (old) =>
-        old?.map(flip),
+        Array.isArray(old) ? old.map(flip) : old,
       );
       qc.setQueriesData<InfiniteData<IncidentIndex>>(
         { queryKey: ["incident-index"] },
@@ -487,7 +500,8 @@ export function IncidentsPage() {
     <>
       <TopBar
         title="Incidents"
-        subtitle={formatOriginCounts(originCounts)}
+        subtitle={windowLabel ? `counts over ${windowLabel}` : undefined}
+        showCountWindow={false}
       />
 
       <main className="flex-1 overflow-auto p-4 lg:p-6">
@@ -668,7 +682,7 @@ export function IncidentsPage() {
                     className="text-brand-300 hover:underline"
                     onClick={() => fetchNextPage()}
                   >
-                    Load more ({data?.total?.toLocaleString() ?? ""} total)
+                    Load more ({data?.total?.toLocaleString() ?? ""} in {windowLabel})
                   </button>
                 )}
               </div>

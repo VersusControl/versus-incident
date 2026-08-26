@@ -52,7 +52,8 @@ const (
 )
 
 // Name implements core.AnalyzeTool.
-func (QueryMetrics) Name() string { return "query_metrics" }
+func (QueryMetrics) Name() string        { return "query_metrics" }
+func (QueryMetrics) DisplayName() string { return "Checking metrics" }
 
 // Description implements core.AnalyzeTool.
 func (QueryMetrics) Description() string {

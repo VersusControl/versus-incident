@@ -162,7 +162,12 @@ export function useOpenIncidentCount() {
     staleTime: 15_000,
   });
   const open = q.data?.by_status?.open;
-  return { open: open?.total ?? 0, originCounts: open, query: q };
+  return {
+    open: open?.total ?? 0,
+    originCounts: open,
+    countWindow: q.data?.count_window,
+    query: q,
+  };
 }
 
 // ---------------------------------------------------------------------------

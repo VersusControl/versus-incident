@@ -77,6 +77,7 @@ function renderPageAt(entry = "/now") {
 function setup(rows: IncidentSummary[] = []) {
   vi.mocked(api.listIncidents).mockResolvedValue(rows);
   vi.mocked(api.incidentCounts).mockResolvedValue({
+    count_window: "30d",
     ...oc(byStatus.open.ai_detect + byStatus.acked.ai_detect,
       byStatus.open.webhook + byStatus.acked.webhook),
     by_status: byStatus,
@@ -114,14 +115,6 @@ describe("NowPage origin badges", () => {
     // KPI tiles still read their own status buckets for the active origin.
     expect(screen.getByText("4")).toBeTruthy();
     expect(screen.getByText("35")).toBeTruthy();
-  });
-
-  it("labels the top-bar summary as the open split", async () => {
-    setup([incident({ id: "ai-open", origin: "ai_detect" })]);
-    renderPageAt();
-
-    expect(
-      await screen.findByText("Open — AI: 1 · Webhook: 2"),
-    ).toBeTruthy();
+    expect(screen.getByText(/counts over last 30d/)).toBeTruthy();
   });
 });

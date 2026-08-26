@@ -15,6 +15,33 @@ func hasTool(tools []core.AnalyzeTool, name string) bool {
 	return false
 }
 
+func TestBuiltInToolsHaveDisplayNames(t *testing.T) {
+	tests := []struct {
+		tool core.AnalyzeTool
+		want string
+	}{
+		{tool: DescribeDependencies{}, want: "Checking dependencies"},
+		{tool: DescribeService{}, want: "Inspecting service"},
+		{tool: FindRunbook{}, want: "Looking for a runbook"},
+		{tool: PatternHistory{}, want: "Reviewing pattern history"},
+		{tool: QueryMetrics{}, want: "Checking metrics"},
+		{tool: QueryTraces{}, want: "Checking traces"},
+		{tool: RecentChanges{}, want: "Reviewing recent changes"},
+		{tool: RecentIncidents{}, want: "Reviewing recent incidents"},
+		{tool: RelatedLogs{}, want: "Checking related logs"},
+	}
+	for _, tt := range tests {
+		displayer, ok := tt.tool.(core.AnalyzeToolDisplayer)
+		if !ok {
+			t.Errorf("%s does not implement AnalyzeToolDisplayer", tt.tool.Name())
+			continue
+		}
+		if got := displayer.DisplayName(); got != tt.want {
+			t.Errorf("%s display = %q, want %q", tt.tool.Name(), got, tt.want)
+		}
+	}
+}
+
 // TestDefault_FindRunbookRegistration verifies find_runbook is wired
 // only when BOTH the embedder and the runbook searcher are present, so a
 // community install with no embeddings configured never registers it.

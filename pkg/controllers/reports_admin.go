@@ -4,8 +4,6 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/VersusControl/versus-incident/pkg/config"
-	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/services"
 
 	"github.com/gofiber/fiber/v2"
@@ -30,28 +28,13 @@ func NewReportsAdminController() *ReportsAdminController {
 //	GET  /api/admin/reports/settings             current runtime report settings
 //	PUT  /api/admin/reports/settings             update runtime report settings
 func (rc *ReportsAdminController) Register(router fiber.Router) {
-	g := router.Group("/admin/reports", rc.authMiddleware)
+	g := router.Group("/admin/reports", adminGatewayGuard)
 	// The literal /incidents/report.png MUST be registered before
 	// /incidents so the more specific path wins.
 	g.Get("/incidents/report.png", rc.reportPNG)
 	g.Post("/incidents", rc.send)
 	g.Get("/settings", rc.getSettings)
 	g.Put("/settings", rc.putSettings)
-}
-
-// authMiddleware reuses the agent gateway secret (constant-time compare),
-// mirroring the incident admin surface.
-func (rc *ReportsAdminController) authMiddleware(c *fiber.Ctx) error {
-	if middleware.RequestAuthorized(c) {
-		return c.Next()
-	}
-	cfg := config.GetConfig()
-	expected := cfg.GatewaySecret
-	got := c.Get("X-Gateway-Secret")
-	if expected == "" || !secureEqual(got, expected) {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
-	}
-	return c.Next()
 }
 
 // reportSendRequest is the optional body for POST /incidents. Channel is

@@ -7,6 +7,7 @@ import {
 } from "./lib/systemPromptNav";
 import { AppShell } from "./components/AppShell";
 import { SkCard } from "./components/Skeleton";
+import { loadLazyModule } from "./lib/lazyModule";
 // Hot paths (the 3am set) stay in the main chunk:
 import { NowPage } from "./pages/NowPage";
 import { IncidentsPage } from "./pages/IncidentsPage";
@@ -71,7 +72,7 @@ function lazyPage(
   name: string,
 ) {
   const L = lazy(async () => {
-    const m = await loader();
+    const m = await loadLazyModule(loader, name);
     return { default: m[name] as React.ComponentType };
   });
   return function LazyRoute() {

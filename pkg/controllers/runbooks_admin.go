@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/VersusControl/versus-incident/pkg/config"
-	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/runbook"
 
 	"github.com/gofiber/fiber/v2"
@@ -45,24 +43,11 @@ func NewRunbookAdminController(mgr *runbook.Manager) *RunbookAdminController {
 // The wildcard `*` carries the runbook ID, which may itself contain `/`
 // (corpus-relative paths), so a `:id` param would not match nested IDs.
 func (c *RunbookAdminController) Register(router fiber.Router) {
-	g := router.Group("/agent/runbooks", c.authMiddleware, c.requireManager)
+	g := router.Group("/agent/runbooks", adminGatewayGuard, c.requireManager)
 	g.Get("/", c.list)
 	g.Post("/", c.upload)
 	g.Get("/*", c.get)
 	g.Delete("/*", c.delete)
-}
-
-func (c *RunbookAdminController) authMiddleware(ctx *fiber.Ctx) error {
-	if middleware.RequestAuthorized(ctx) {
-		return ctx.Next()
-	}
-	cfg := config.GetConfig()
-	expected := cfg.GatewaySecret
-	got := ctx.Get("X-Gateway-Secret")
-	if expected == "" || !secureEqual(got, expected) {
-		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
-	}
-	return ctx.Next()
 }
 
 func (c *RunbookAdminController) requireManager(ctx *fiber.Ctx) error {

@@ -47,6 +47,9 @@ describe("Item 2 — top-bar AI/webhook split + no sidebar count", () => {
     expect(topbar.includes("originCounts")).toBe(true);
     // The single lumped count is replaced by the formatted split in the Link.
     expect(topbar.includes("{formatOriginCounts(originCounts)}")).toBe(true);
+    // Pages that already name the window in their subtitle can hide the
+    // duplicate right-side label; every other page keeps it by default.
+    expect(topbar.includes("showCountWindow = true")).toBe(true);
   });
 
   it("the sidebar shows NO incident count (badge removed entirely)", () => {
