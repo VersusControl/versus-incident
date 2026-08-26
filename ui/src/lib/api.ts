@@ -606,11 +606,17 @@ export interface IncidentStatusCounts {
   all: OriginCounts;
 }
 
-// IncidentCounts is the counts object the list / search / counts endpoints
-// return: the back-compat top-level unresolved (open-work) per-origin tally,
-// plus the authoritative per-origin × per-status breakdown under by_status.
-export interface IncidentCounts extends OriginCounts {
+// IncidentCountBreakdown is the numeric counts object nested in list/search
+// responses: the back-compat top-level unresolved per-origin tally plus the
+// authoritative per-origin × per-status breakdown.
+export interface IncidentCountBreakdown extends OriginCounts {
   by_status?: IncidentStatusCounts;
+}
+
+// IncidentCounts is the standalone /counts response. Its count_window is the
+// effective setting used to compute the numeric breakdown in this response.
+export interface IncidentCounts extends IncidentCountBreakdown {
+  count_window: CountWindow;
 }
 
 // IncidentIndex is the full list/search response: one bounded, most-recent
@@ -622,7 +628,8 @@ export interface IncidentCounts extends OriginCounts {
 // when this page reached the end).
 export interface IncidentIndex {
   incidents: IncidentSummary[];
-  counts: IncidentCounts;
+  counts: IncidentCountBreakdown;
+  count_window: CountWindow;
   total: number;
   offset?: number;
   next_offset?: number | null;
@@ -684,6 +691,34 @@ export interface AnalysisRecord {
   raw_response?: string;
   status: "ok" | "error" | "rate_limited" | string;
   error?: string;
+}
+
+// AnalyzeEvent mirrors pkg/core.AnalyzeEvent — one observable step of a live
+// analyze run. The terminal event (run_finished / run_failed) carries the
+// persisted analysis id.
+export type AnalyzeEventKind =
+  | "run_started"
+  | "model_started"
+  | "model_delta"
+  | "model_finished"
+  | "tool_started"
+  | "tool_finished"
+  | "tool_error"
+  | "run_finished"
+  | "run_failed";
+
+export interface AnalyzeEvent {
+  seq: number;
+  at: string;
+  kind: AnalyzeEventKind;
+  tool?: string;
+  tool_display?: string;
+  args?: string;
+  output?: string;
+  duration_ms?: number;
+  error?: string;
+  turn?: number;
+  analysis_id?: string;
 }
 
 // AnalysisIndex is the paged analyses list response: one bounded, most-recent
@@ -1419,7 +1454,19 @@ export interface IntakeSettings {
 // "default" | "average" | "time_of_day".
 export interface SpikeSettings {
   baseline_mode: string;
-}// ReportSendResult is the per-channel outcome of POST /reports/incidents.
+}
+
+// CountWindow is how far back every incident-count surface looks. "all" keeps
+// the historical whole-set behaviour.
+export type CountWindow = "24h" | "7d" | "30d" | "90d" | "all";
+
+// CountSettings is the non-secret runtime configuration for the incident-count
+// lookback, exchanged with GET/PUT /api/admin/agent/count-settings.
+export interface CountSettings {
+  window: CountWindow;
+}
+
+// ReportSendResult is the per-channel outcome of POST /reports/incidents.
 // `sent` = image delivered; `fallback` = text summary + note delivered
 // (image-incapable channel); `failed` = channel returned an error (the PNG is
 // still downloadable via GET report.png). `window` echoes the rendered window.
@@ -2373,6 +2420,72 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ requested_by: requestedBy ?? "" }),
     }),
+
+  // streamAnalysis runs an analysis and reports each step as it happens.
+  //
+  // It uses fetch + a stream reader rather than EventSource, because
+  // EventSource is GET-only and cannot carry the gateway-secret header. The
+  // returned promise resolves with the terminal event; callers that want the
+  // full record fetch it by `analysis_id`.
+  //
+  // Aborting only stops the STREAM — the server finishes and persists the run
+  // regardless, so a closed tab never discards an expensive analysis.
+  streamAnalysis: async (
+    incidentID: string,
+    onEvent: (ev: AnalyzeEvent) => void,
+    opts: { requestedBy?: string; signal?: AbortSignal } = {},
+  ): Promise<AnalyzeEvent | null> => {
+    const secret = getSecret() ?? "";
+    const headers = new Headers({ "Content-Type": "application/json" });
+    if (secret) headers.set("X-Gateway-Secret", secret);
+
+    const res = await fetch(
+      `${API_BASE}/api/admin/incidents/${incidentID}/analyze/stream`,
+      {
+        method: "POST",
+        headers,
+        credentials: "same-origin",
+        cache: "no-store",
+        body: JSON.stringify({ requested_by: opts.requestedBy ?? "" }),
+        signal: opts.signal,
+      },
+    );
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => "");
+      throw new ApiError(res.status, text || `stream failed (${res.status})`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let last: AnalyzeEvent | null = null;
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE frames are separated by a blank line; anything after the last
+      // separator is a partial frame and stays in the buffer.
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        const line = frame
+          .split("\n")
+          .find((l) => l.startsWith("data:"));
+        if (!line) continue;
+        try {
+          const ev = JSON.parse(line.slice(5).trim()) as AnalyzeEvent;
+          last = ev;
+          onEvent(ev);
+        } catch {
+          // A frame we cannot parse is not worth failing the run over; the
+          // persisted record remains the source of truth.
+        }
+      }
+    }
+    return last;
+  },
   listAnalyses: (incidentID: string, limit?: number) => {
     const qs = limit ? `?limit=${limit}` : "";
     return request<{ analyses: AnalysisRecord[] }>(
@@ -2558,6 +2671,19 @@ export const api = {
   // getSpikeSettings reads the global spike-detector baseline mode setting.
   getSpikeSettings: () =>
     request<SpikeSettings>("/api/admin/agent/spike-settings"),
+
+  // getCountSettings reads the incident-count window — how far back every
+  // count surface (header badge, Now tiles, Incidents tabs) looks.
+  getCountSettings: () =>
+    request<CountSettings>("/api/admin/agent/count-settings"),
+
+  // updateCountSettings replaces the count window and returns the effective
+  // value. An unknown window is rejected with a 400.
+  updateCountSettings: (s: CountSettings) =>
+    request<CountSettings>("/api/admin/agent/count-settings", {
+      method: "PUT",
+      body: JSON.stringify(s),
+    }),
 
   // updateSpikeSettings replaces the global spike baseline mode and returns the
   // effective value. An unknown mode is rejected with a 400.

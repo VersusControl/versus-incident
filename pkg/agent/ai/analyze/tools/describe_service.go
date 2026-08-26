@@ -17,7 +17,8 @@ type DescribeService struct {
 }
 
 // Name implements core.AnalyzeTool.
-func (DescribeService) Name() string { return "describe_service" }
+func (DescribeService) Name() string        { return "describe_service" }
+func (DescribeService) DisplayName() string { return "Inspecting service" }
 
 // Description implements core.AnalyzeTool.
 func (DescribeService) Description() string {

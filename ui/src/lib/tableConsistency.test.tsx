@@ -78,6 +78,18 @@ describe("Decisions Detect table — Service column is FIRST", () => {
   });
 });
 
+describe("Decisions tables — rows are inert and explicit actions open details", () => {
+  const src = read("../pages/DecisionsPage.tsx");
+  it("matches the other list tables: no clickable rows, Enter opens the peek", () => {
+    expect(src.includes("ClickableRow")).toBe(false);
+    expect(src.includes("useNavigate")).toBe(false);
+    expect(src.match(/Enter to preview/g)?.length).toBe(3);
+    expect(src.includes("setPeekId(e.id)")).toBe(true);
+    expect(src.includes("setPeekKey(shadowKey(e))")).toBe(true);
+    expect(src.includes("setPeekKey(r.key)")).toBe(true);
+  });
+});
+
 describe("Decisions Shadow + Spike — a Service column was ADDED (Service first)", () => {
   const src = read("../pages/DecisionsPage.tsx");
   it("the shared shadow table leads with a Service header", () => {

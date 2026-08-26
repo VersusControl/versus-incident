@@ -56,7 +56,8 @@ const (
 )
 
 // Name implements core.AnalyzeTool.
-func (FindRunbook) Name() string { return "find_runbook" }
+func (FindRunbook) Name() string        { return "find_runbook" }
+func (FindRunbook) DisplayName() string { return "Looking for a runbook" }
 
 // Description implements core.AnalyzeTool.
 func (FindRunbook) Description() string {

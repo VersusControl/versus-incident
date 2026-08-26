@@ -3,7 +3,10 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"reflect"
+	"strings"
 	"time"
+	"unicode"
 )
 
 // AnalyzeIncidentSnapshot is the input payload handed to the
@@ -61,6 +64,30 @@ type AnalyzeTool interface {
 	// model as the tool message. Errors are surfaced to the model as
 	// a tool error so it can adapt.
 	Invoke(ctx context.Context, args json.RawMessage) (*ToolResult, error)
+}
+
+// AnalyzeToolDisplayer optionally gives a tool a human-readable activity name.
+type AnalyzeToolDisplayer interface {
+	DisplayName() string
+}
+
+// ToolDisplayName returns an explicit display name or title-cases the stable name.
+func ToolDisplayName(tool AnalyzeTool) string {
+	if tool == nil || (reflect.ValueOf(tool).Kind() == reflect.Ptr && reflect.ValueOf(tool).IsNil()) {
+		return ""
+	}
+	if displayer, ok := tool.(AnalyzeToolDisplayer); ok {
+		if display := strings.TrimSpace(displayer.DisplayName()); display != "" {
+			return display
+		}
+	}
+	parts := strings.Fields(strings.NewReplacer("_", " ", "-", " ").Replace(tool.Name()))
+	for i, part := range parts {
+		runes := []rune(part)
+		runes[0] = unicode.ToUpper(runes[0])
+		parts[i] = string(runes)
+	}
+	return strings.Join(parts, " ")
 }
 
 // ToolResult is the uniform envelope every AnalyzeTool returns. The

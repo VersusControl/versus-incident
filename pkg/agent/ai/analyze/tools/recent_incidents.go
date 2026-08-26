@@ -23,7 +23,8 @@ type RecentIncidents struct {
 }
 
 // Name implements core.AnalyzeTool.
-func (RecentIncidents) Name() string { return "recent_incidents" }
+func (RecentIncidents) Name() string        { return "recent_incidents" }
+func (RecentIncidents) DisplayName() string { return "Reviewing recent incidents" }
 
 // Description implements core.AnalyzeTool.
 func (RecentIncidents) Description() string {

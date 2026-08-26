@@ -164,7 +164,7 @@ func (a *AgentController) SetCatalogConfig(cat config.AgentCatalogConfig, poll t
 //	POST   /detect/flush     force-flush the detect log to disk
 //	GET    /ai/system-prompt the assembled system prompt sent on every AI call
 func (a *AgentController) Register(router fiber.Router) {
-	g := router.Group("/agent", a.authMiddleware)
+	g := router.Group("/agent", adminGatewayGuard)
 	g.Get("/status", a.getStatus)
 	g.Get("/patterns", a.listPatterns)
 	g.Get("/patterns/:id", a.getPattern)
@@ -191,28 +191,6 @@ func (a *AgentController) Register(router fiber.Router) {
 	g.Delete("/detect", a.clearDetect)
 	g.Post("/detect/flush", a.flushDetect)
 	g.Get("/ai/system-prompt", a.getSystemPrompt)
-}
-
-// authMiddleware enforces a shared gateway secret. Clients send the
-// configured value verbatim in the `X-Gateway-Secret` header — there is no
-// Bearer prefix or other framing. Comparison is constant-time to deny
-// header-length / prefix-match timing oracles.
-func (a *AgentController) authMiddleware(c *fiber.Ctx) error {
-	// An enterprise auth handler may have already authenticated this request
-	// with an alternative credential (e.g. an SSO session); honour that so a
-	// single enterprise credential unlocks both the data plane and the admin
-	// surfaces. Community OSS never sets this, so the gateway check is unchanged.
-	if middleware.RequestAuthorized(c) {
-		return c.Next()
-	}
-	cfg := config.GetConfig()
-	expected := cfg.GatewaySecret
-	got := c.Get("X-Gateway-Secret")
-	if expected == "" || !secureEqual(got, expected) {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
-	}
-
-	return c.Next()
 }
 
 func (a *AgentController) getStatus(c *fiber.Ctx) error {

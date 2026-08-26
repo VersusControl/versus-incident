@@ -662,9 +662,9 @@ export function IncidentDetailPage() {
 
 function Fact({ k, v }: { k: string; v: React.ReactNode }) {
   return (
-    <div>
+    <div className="min-w-0">
       <div className="text-2xs uppercase tracking-wider text-ink-400">{k}</div>
-      <div className="text-ink-100">{v}</div>
+      <div className="min-w-0 [overflow-wrap:anywhere] text-ink-100">{v}</div>
     </div>
   );
 }
@@ -678,9 +678,11 @@ function StateRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3">
+    <div className="flex min-w-0 items-center justify-between gap-3">
       <dt className="text-2xs uppercase tracking-wider text-ink-400">{label}</dt>
-      <dd className="text-right text-ink-100">{children}</dd>
+      <dd className="min-w-0 [overflow-wrap:anywhere] text-right text-ink-100">
+        {children}
+      </dd>
     </div>
   );
 }

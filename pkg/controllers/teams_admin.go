@@ -4,8 +4,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/VersusControl/versus-incident/pkg/config"
-	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/services"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/teams"
@@ -43,14 +41,14 @@ func NewTeamsAdminController(s *teams.Store) *TeamsAdminController {
 //
 //	POST   /api/admin/incidents/:id/assign assign team + members
 func (c *TeamsAdminController) Register(router fiber.Router) {
-	m := router.Group("/admin/members", c.authMiddleware, c.requireStore)
+	m := router.Group("/admin/members", adminGatewayGuard, c.requireStore)
 	m.Get("/", c.listMembers)
 	m.Post("/", c.createMember)
 	m.Get("/:id", c.getMember)
 	m.Patch("/:id", c.updateMember)
 	m.Delete("/:id", c.deleteMember)
 
-	t := router.Group("/admin/teams", c.authMiddleware, c.requireStore)
+	t := router.Group("/admin/teams", adminGatewayGuard, c.requireStore)
 	t.Get("/", c.listTeams)
 	t.Post("/", c.createTeam)
 	t.Get("/:id", c.getTeam)
@@ -59,20 +57,7 @@ func (c *TeamsAdminController) Register(router fiber.Router) {
 
 	// Mounted as a sibling of /admin/incidents so the incidents admin
 	// controller can stay focused on read-only history.
-	router.Post("/admin/incidents/:id/assign", c.authMiddleware, c.requireStore, c.assignIncident)
-}
-
-func (c *TeamsAdminController) authMiddleware(ctx *fiber.Ctx) error {
-	if middleware.RequestAuthorized(ctx) {
-		return ctx.Next()
-	}
-	cfg := config.GetConfig()
-	expected := cfg.GatewaySecret
-	got := ctx.Get("X-Gateway-Secret")
-	if expected == "" || !secureEqual(got, expected) {
-		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
-	}
-	return ctx.Next()
+	router.Post("/admin/incidents/:id/assign", adminGatewayGuard, c.requireStore, c.assignIncident)
 }
 
 func (c *TeamsAdminController) requireStore(ctx *fiber.Ctx) error {

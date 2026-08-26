@@ -47,6 +47,18 @@ describe("Modal overlay (Item 4: portal to body, not clipped)", () => {
     expect(backdrop.className).toContain("justify-center");
   });
 
+  it("gives xl dialogs enough width for analysis content", () => {
+    render(
+      <Modal title="Analyse incident" size="xl" onClose={() => {}}>
+        <p>body</p>
+      </Modal>,
+    );
+    expect(screen.getByRole("dialog").className).toContain("max-w-xl");
+    expect(screen.getByText("body").parentElement?.className).toContain(
+      "overlay-body",
+    );
+  });
+
   it("is dismissible: Escape and backdrop click both close", () => {
     const onClose = vi.fn();
     render(

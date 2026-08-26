@@ -28,20 +28,87 @@ type fakeChat struct {
 	tools []*schema.ToolInfo
 
 	lastMessages []*schema.Message
+
+	// chunks splits an assistant message's content across that many stream
+	// chunks in Stream. Zero or one sends the whole content at once.
+	chunks int
+	// leadEmpty sends a content-free chunk before the content ones, the way
+	// real providers open a stream.
+	leadEmpty bool
+	// streamErr, when non-nil, is delivered instead of the chunk at index
+	// streamErrAt so a test can inject a mid-stream failure.
+	streamErr   error
+	streamErrAt int
+	// streamCalls counts Stream dispatches, so a test can prove which of
+	// the two model entry points the agent took.
+	streamCalls int32
 }
 
-func (f *fakeChat) Generate(_ context.Context, in []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+func (f *fakeChat) next(in []*schema.Message) *schema.Message {
 	f.lastMessages = append(f.lastMessages, in[len(in)-1])
 	if f.idx >= len(f.turns) {
-		return f.turns[len(f.turns)-1], nil
+		return f.turns[len(f.turns)-1]
 	}
 	m := f.turns[f.idx]
 	f.idx++
-	return m, nil
+	return m
 }
 
-func (f *fakeChat) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	return nil, nil
+func (f *fakeChat) Generate(_ context.Context, in []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	return f.next(in), nil
+}
+
+// Stream replays the same script as Generate, but sliced into content
+// chunks the way a real provider delivers a token stream. A turn carrying
+// tool calls is sent whole: the ReAct branch inspects the first chunk for
+// tool calls, so splitting one would change routing rather than timing.
+func (f *fakeChat) Stream(_ context.Context, in []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	atomic.AddInt32(&f.streamCalls, 1)
+	m := f.next(in)
+	sr, sw := schema.Pipe[*schema.Message](1)
+	go func() {
+		defer sw.Close()
+		if len(m.ToolCalls) > 0 || f.chunks <= 1 {
+			sw.Send(m, nil)
+			return
+		}
+		if f.leadEmpty && sw.Send(&schema.Message{Role: m.Role}, nil) {
+			return
+		}
+		for i, part := range splitContent(m.Content, f.chunks) {
+			if f.streamErr != nil && i == f.streamErrAt {
+				sw.Send(nil, f.streamErr)
+				return
+			}
+			if sw.Send(&schema.Message{Role: m.Role, Content: part}, nil) {
+				return
+			}
+		}
+		if f.streamErr != nil && f.streamErrAt >= f.chunks {
+			sw.Send(nil, f.streamErr)
+		}
+	}()
+	return sr, nil
+}
+
+// splitContent cuts s into n roughly equal pieces that concatenate back to s.
+func splitContent(s string, n int) []string {
+	if n <= 1 || len(s) == 0 {
+		return []string{s}
+	}
+	if n > len(s) {
+		n = len(s)
+	}
+	size := (len(s) + n - 1) / n
+	out := make([]string, 0, n)
+	for i := 0; i < len(s); i += size {
+		end := i + size
+		if end > len(s) {
+			end = len(s)
+		}
+		out = append(out, s[i:end])
+	}
+	return out
 }
 
 func (f *fakeChat) WithTools(t []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
@@ -52,11 +119,13 @@ func (f *fakeChat) WithTools(t []*schema.ToolInfo) (model.ToolCallingChatModel, 
 // stubTool is a read-only AnalyzeTool used to validate dispatch.
 type stubTool struct {
 	name    string
+	display string
 	invoked int
 	last    json.RawMessage
 }
 
 func (s *stubTool) Name() string        { return s.name }
+func (s *stubTool) DisplayName() string { return s.display }
 func (s *stubTool) Description() string { return "stub" }
 func (s *stubTool) ArgsSchema() map[string]any {
 	return map[string]any{
@@ -92,6 +161,24 @@ func (e *errTool) Invoke(_ context.Context, _ json.RawMessage) (*core.ToolResult
 }
 
 var errBoom = fmt.Errorf("boom from tool")
+
+// sleepTool takes a measurable amount of wall-clock time, so a test can tell
+// a real elapsed-time measurement from a hardcoded zero.
+type sleepTool struct {
+	name string
+	nap  time.Duration
+}
+
+func (s *sleepTool) Name() string               { return s.name }
+func (s *sleepTool) Description() string        { return "sleeps" }
+func (s *sleepTool) ArgsSchema() map[string]any { return map[string]any{"type": "object"} }
+func (s *sleepTool) Invoke(ctx context.Context, _ json.RawMessage) (*core.ToolResult, error) {
+	select {
+	case <-time.After(s.nap):
+	case <-ctx.Done():
+	}
+	return &core.ToolResult{Tool: s.name, Found: true}, nil
+}
 
 func newAgentWithFake(t *testing.T, fake *fakeChat, tools []core.AnalyzeTool, maxIter int) *Agent {
 	t.Helper()

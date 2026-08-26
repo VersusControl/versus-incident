@@ -275,6 +275,22 @@ func StatusCountsOf(recs []*IncidentRecord) IncidentStatusCounts {
 	return out
 }
 
+// StatusCountsSince is StatusCountsOf bounded to records created at or after
+// since. A zero since is unbounded, so the two agree exactly — the contract
+// IncidentWindowCounter promises.
+func StatusCountsSince(recs []*IncidentRecord, since time.Time) IncidentStatusCounts {
+	if since.IsZero() {
+		return StatusCountsOf(recs)
+	}
+	kept := make([]*IncidentRecord, 0, len(recs))
+	for _, rec := range recs {
+		if rec != nil && !rec.CreatedAt.Before(since) {
+			kept = append(kept, rec)
+		}
+	}
+	return StatusCountsOf(kept)
+}
+
 // AssembleStatusCounts builds the per-origin × per-status result from the
 // whole-set totals and the ai_detect slice, deriving webhook as the complement
 // (total − ai_detect) so AIDetect + Webhook == Total for every status
@@ -325,6 +341,19 @@ type IncidentPager interface {
 	// returns all origins. limit <= 0 uses DefaultIncidentPageSize; a
 	// negative offset is treated as 0.
 	ListIncidentsPage(origin string, offset, limit int) ([]*IncidentRecord, error)
+}
+
+// IncidentWindowCounter is an optional capability on top of IncidentPager: the
+// same per-origin × per-status tally, bounded to incidents created at or after
+// `since`. It backs the operator-configurable count window, so the numbers
+// describe current load rather than an all-time total that only grows.
+//
+// A zero `since` means unbounded and MUST return exactly what
+// CountIncidentsByStatus returns. Backends that cannot express the bound do not
+// implement it; callers type-assert and fall back to the unbounded count,
+// exactly like Searcher / Lifecycle / IncidentPager.
+type IncidentWindowCounter interface {
+	CountIncidentsByStatusSince(since time.Time) (IncidentStatusCounts, error)
 }
 
 // AnalysisPager is an optional capability a backend may implement on top of

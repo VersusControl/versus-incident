@@ -23,22 +23,9 @@ func NewConfigAdminController() *ConfigAdminController {
 //	GET /api/admin/config/incidents   alert channels + queue + on-call
 //	GET /api/admin/config/agent       agent runtime config
 func (c *ConfigAdminController) Register(router fiber.Router) {
-	g := router.Group("/admin/config", c.authMiddleware)
+	g := router.Group("/admin/config", adminGatewayGuard)
 	g.Get("/incidents", c.incidents)
 	g.Get("/agent", c.agent)
-}
-
-func (c *ConfigAdminController) authMiddleware(ctx *fiber.Ctx) error {
-	if middleware.RequestAuthorized(ctx) {
-		return ctx.Next()
-	}
-	cfg := config.GetConfig()
-	expected := cfg.GatewaySecret
-	got := ctx.Get("X-Gateway-Secret")
-	if expected == "" || !secureEqual(got, expected) {
-		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
-	}
-	return ctx.Next()
 }
 
 // secretSet returns "set" or "" depending on whether the secret value is

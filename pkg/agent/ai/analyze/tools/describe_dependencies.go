@@ -87,7 +87,8 @@ type DescribeDependencies struct {
 }
 
 // Name implements core.AnalyzeTool.
-func (DescribeDependencies) Name() string { return "describe_dependencies" }
+func (DescribeDependencies) Name() string        { return "describe_dependencies" }
+func (DescribeDependencies) DisplayName() string { return "Checking dependencies" }
 
 // Description implements core.AnalyzeTool.
 func (DescribeDependencies) Description() string {

@@ -16,16 +16,15 @@ import path from "node:path";
 const here = path.dirname(fileURLToPath(import.meta.url)); // src/lib
 const read = (rel: string) => readFileSync(path.resolve(here, rel), "utf8");
 
-describe("Settings — three tabs: Alerting, Agent, Detection & reports", () => {
+describe("Settings — three tabs: Alerting, Agent, System", () => {
   const src = read("../pages/SettingsPage.tsx");
 
   it("defaults to Alerting and offers all three tabs", () => {
     expect(src.includes('defaultValue="alerting"')).toBe(true);
     expect(src.includes('{ value: "alerting", label: "Alerting" }')).toBe(true);
     expect(src.includes('{ value: "agent", label: "Agent" }')).toBe(true);
-    expect(
-      src.includes('{ value: "tuning", label: "Detection & reports" }'),
-    ).toBe(true);
+    // The tab param value stays "tuning" so existing deep links keep working.
+    expect(src.includes('{ value: "tuning", label: "System" }')).toBe(true);
   });
 
   it("Alerting tab shows the incident-delivery config only (spike moved out)", () => {
@@ -46,8 +45,9 @@ describe("Settings — three tabs: Alerting, Agent, Detection & reports", () => 
     expect(agent.includes("<ReportSettingsControl />")).toBe(false);
   });
 
-  it("Detection & reports tab groups the spike baseline + incident report", () => {
+  it("System tab groups the count window + spike baseline + incident report", () => {
     const tuning = src.slice(src.indexOf(") : ("));
+    expect(tuning.includes("<CountSettingsControl />")).toBe(true);
     expect(tuning.includes("<SpikeSettingsControl />")).toBe(true);
     expect(tuning.includes("<ReportSettingsControl />")).toBe(true);
   });

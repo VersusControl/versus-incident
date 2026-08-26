@@ -42,7 +42,6 @@ import { SegmentedControl } from "@/components/SegmentedControl";
 import { FilterBar } from "@/components/FilterBar";
 import { useNowTick, useTableKeys } from "@/lib/hooks";
 import {
-  formatOriginCounts,
   matchesOrigin,
   normalizeOrigin,
   originLabel,
@@ -50,6 +49,7 @@ import {
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { EmptyState } from "@/components/feedback";
+import { countWindowLabel } from "@/lib/countWindow";
 
 // NowPage — the primary "what's on fire / how bad" surface (UX_REDESIGN
 // §2.3a). Top→bottom: open-incident banner (or a quiet "Nothing open"
@@ -88,6 +88,9 @@ export function NowPage() {
     staleTime: 15_000,
   });
   const byStatus = countsQ.data?.by_status;
+  const countWindow = countsQ.data
+    ? countWindowLabel(countsQ.data.count_window, "short")
+    : undefined;
   // Same keys as TopBar's chip queries — one cache entry, zero extra load.
   const config = useQuery({
     queryKey: ["agent-config"],
@@ -232,11 +235,8 @@ export function NowPage() {
     <>
       <TopBar
         title="Now"
-        subtitle={
-          openOriginCounts
-            ? `Open — ${formatOriginCounts(openOriginCounts)}`
-            : "auto-refresh 15s"
-        }
+        subtitle={`auto-refresh 15s${countWindow ? ` · counts over ${countWindow}` : ""}`}
+        showCountWindow={false}
         actions={
           <button
             aria-label="Refresh now"

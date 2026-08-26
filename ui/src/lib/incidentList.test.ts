@@ -208,7 +208,7 @@ describe("countByOrigin (client-split whole-set tally)", () => {
     });
   });
 
-  it("feeds formatOriginCounts so the Now top-bar shows both feeds", () => {
+  it("feeds formatOriginCounts so the header badge shows both feeds", () => {
     const counts = countByOrigin([
       inc({ origin: "ai_detect" }),
       inc({ origin: "webhook" }),

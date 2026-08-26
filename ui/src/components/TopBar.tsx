@@ -13,6 +13,7 @@ import {
 import { isLocalAdminSession } from "@/lib/localAdmin";
 import { useOpenIncidentCount } from "@/lib/hooks";
 import { formatOriginCounts } from "@/lib/incidentList";
+import { countWindowLabel } from "@/lib/countWindow";
 import { useTheme } from "@/lib/theme";
 import { roleLabel, isAdminRole } from "@/lib/role";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
@@ -31,11 +32,17 @@ interface Props {
   title: string;
   subtitle?: string;
   actions?: React.ReactNode;
+  showCountWindow?: boolean;
 }
 
-export function TopBar({ title, subtitle, actions }: Props) {
+export function TopBar({
+  title,
+  subtitle,
+  actions,
+  showCountWindow = true,
+}: Props) {
   const shell = useContext(ShellContext);
-  const { open, originCounts } = useOpenIncidentCount();
+  const { open, originCounts, countWindow } = useOpenIncidentCount();
   const { theme, toggle } = useTheme();
 
   const config = useQuery({
@@ -44,6 +51,7 @@ export function TopBar({ title, subtitle, actions }: Props) {
     staleTime: 60_000,
     retry: 1,
   });
+  const windowLabel = countWindowLabel(countWindow, "short");
   // Only poll the agent liveness endpoint when the agent is actually enabled.
   // /api/agent/status does not exist when agent.enable=false, so polling it
   // would 404 forever and the chip would show "reconnecting…" for a deployment
@@ -99,10 +107,15 @@ export function TopBar({ title, subtitle, actions }: Props) {
         {open > 0 && (
           <Link
             to="/incidents?status=open"
-            title={`${open} open — AI-detected vs webhook/alerts`}
-            className="rounded-full bg-sev-critical/15 px-2 py-0.5 text-2xs font-semibold tabular-nums text-sev-critical hover:bg-sev-critical/25"
+            title={`${open} open in the ${windowLabel} window — AI-detected vs webhook/alerts`}
+            className="flex items-center gap-1.5 rounded-full bg-sev-critical/15 px-2 py-0.5 text-2xs font-semibold tabular-nums text-sev-critical hover:bg-sev-critical/25"
           >
             {formatOriginCounts(originCounts)}
+            {showCountWindow && (
+              <span className="font-normal text-sev-critical/70">
+                {windowLabel}
+              </span>
+            )}
           </Link>
         )}
         <AgentChip

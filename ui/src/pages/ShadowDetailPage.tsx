@@ -290,11 +290,11 @@ export function ShadowDetailPage() {
 
 function Fact({ k, v }: { k: string; v: React.ReactNode }) {
   return (
-    <div>
+    <div className="min-w-0">
       <div className="text-2xs uppercase tracking-wider text-ink-400">
         {k}
       </div>
-      <div className="text-ink-100">{v}</div>
+      <div className="min-w-0 [overflow-wrap:anywhere] text-ink-100">{v}</div>
     </div>
   );
 }

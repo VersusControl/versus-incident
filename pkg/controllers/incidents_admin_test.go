@@ -9,6 +9,7 @@ import (
 
 	"context"
 
+	"github.com/VersusControl/versus-incident/pkg/agent"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/services"
 	"github.com/VersusControl/versus-incident/pkg/storage"
@@ -64,6 +65,12 @@ func TestResolveRouteRegistered(t *testing.T) {
 type searcherStorage struct {
 	storage.Provider
 	incidents []*storage.IncidentRecord
+}
+
+// providerOnly deliberately exposes no optional paging capabilities so list
+// requests exercise the materialized fallback path.
+type providerOnly struct {
+	storage.Provider
 }
 
 func (s searcherStorage) SearchIncidents(query string, limit int) ([]*storage.IncidentRecord, error) {
@@ -339,7 +346,8 @@ func TestSearchSupportedReturnsResults(t *testing.T) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	var got struct {
-		Incidents []struct {
+		CountWindow string `json:"count_window"`
+		Incidents   []struct {
 			ID string `json:"id"`
 		} `json:"incidents"`
 	}
@@ -348,6 +356,9 @@ func TestSearchSupportedReturnsResults(t *testing.T) {
 	}
 	if len(got.Incidents) != 2 || got.Incidents[0].ID != "inc-1" {
 		t.Fatalf("incidents = %+v, want 2 (inc-1 first)", got.Incidents)
+	}
+	if got.CountWindow != "all" {
+		t.Fatalf("count_window = %q, want all for unbounded search", got.CountWindow)
 	}
 }
 
@@ -380,9 +391,10 @@ type incidentListResp struct {
 		Total    int          `json:"total"`
 		ByStatus byStatusJSON `json:"by_status"`
 	} `json:"counts"`
-	Total    int `json:"total"`
-	Page     int `json:"page"`
-	PageSize int `json:"page_size"`
+	CountWindow string `json:"count_window"`
+	Total       int    `json:"total"`
+	Page        int    `json:"page"`
+	PageSize    int    `json:"page_size"`
 }
 
 // seedOriginStore returns a memory store with a mix of ai_detect, webhook,
@@ -391,6 +403,9 @@ type incidentListResp struct {
 func seedOriginStore(t *testing.T) storage.Provider {
 	t.Helper()
 	mem := storage.NewMemory()
+	// Stamped like the ingest path does, so the rows sit inside the default
+	// count window and the counts describe them.
+	now := time.Now().UTC()
 	recs := []*storage.IncidentRecord{
 		{ID: "ai-1", Origin: storage.OriginAIDetect, Source: "agent:elasticsearch:app"},
 		{ID: "ai-2", Origin: storage.OriginAIDetect, Source: "agent:loki:web"},
@@ -401,6 +416,7 @@ func seedOriginStore(t *testing.T) storage.Provider {
 		{ID: "legacy-webhook", Source: "sqs"},          // no Origin → derives webhook
 	}
 	for _, r := range recs {
+		r.CreatedAt = now
 		if err := mem.SaveIncident(r); err != nil {
 			t.Fatalf("SaveIncident: %v", err)
 		}
@@ -437,6 +453,9 @@ func TestListPerOriginCounts(t *testing.T) {
 	ctrl := NewIncidentAdminController()
 
 	got := doList(t, ctrl, "")
+	if got.CountWindow != "7d" {
+		t.Fatalf("count_window = %q, want default 7d", got.CountWindow)
+	}
 	if got.Counts.AIDetect != 4 || got.Counts.Webhook != 3 || got.Counts.Total != 7 {
 		t.Fatalf("counts = %+v, want ai_detect=4 webhook=3 total=7", got.Counts)
 	}
@@ -545,6 +564,9 @@ func seedStatusStore(t *testing.T) storage.Provider {
 	t.Helper()
 	mem := storage.NewMemory()
 	acked := time.Unix(1_700_000_000, 0).UTC()
+	// Stamped like the ingest path does, so the rows sit inside the default
+	// count window and the counts describe them.
+	now := time.Now().UTC()
 	recs := []*storage.IncidentRecord{
 		{ID: "ai-open-1", Origin: storage.OriginAIDetect, Source: "agent"},
 		{ID: "ai-open-2", Origin: storage.OriginAIDetect, Source: "agent"},
@@ -556,6 +578,7 @@ func seedStatusStore(t *testing.T) storage.Provider {
 		{ID: "legacy-resolved", Source: "sqs", Resolved: true}, // derives webhook
 	}
 	for _, r := range recs {
+		r.CreatedAt = now
 		if err := mem.SaveIncident(r); err != nil {
 			t.Fatalf("SaveIncident: %v", err)
 		}
@@ -630,6 +653,9 @@ func TestListCarriesByStatus(t *testing.T) {
 	if got.Counts.ByStatus != wantByStatus() {
 		t.Fatalf("list by_status = %+v, want %+v", got.Counts.ByStatus, wantByStatus())
 	}
+	if got.CountWindow != "7d" {
+		t.Fatalf("list count_window = %q, want default 7d", got.CountWindow)
+	}
 	// Reconciliation invariants: statuses sum to origin total, origins sum to
 	// the status total — the same guarantee every UI surface now relies on.
 	bs := got.Counts.ByStatus
@@ -638,5 +664,50 @@ func TestListCarriesByStatus(t *testing.T) {
 	}
 	if bs.Open.AIDetect+bs.Open.Webhook != bs.Open.Total {
 		t.Errorf("open origins do not sum to open total: %+v", bs.Open)
+	}
+}
+
+func TestListConfiguredWindowCouplesMetadataAndCounts(t *testing.T) {
+	t.Cleanup(func() { services.SetStorage(nil) })
+	store := storage.NewMemory()
+	now := time.Now().UTC()
+	for _, rec := range []*storage.IncidentRecord{
+		{ID: "recent", Origin: storage.OriginWebhook, Source: "webhook", CreatedAt: now.Add(-time.Hour)},
+		{ID: "older", Origin: storage.OriginWebhook, Source: "webhook", CreatedAt: now.Add(-10 * 24 * time.Hour)},
+	} {
+		if err := store.SaveIncident(rec); err != nil {
+			t.Fatalf("SaveIncident: %v", err)
+		}
+	}
+	if err := agent.SaveCountSettings(store, agent.CountSettings{Window: agent.CountWindow30d}); err != nil {
+		t.Fatalf("SaveCountSettings: %v", err)
+	}
+	services.SetStorage(store)
+
+	got := doList(t, NewIncidentAdminController(), "?page_size=1")
+	if len(got.Incidents) != 1 {
+		t.Fatalf("page rows = %d, want 1", len(got.Incidents))
+	}
+	if got.CountWindow != agent.CountWindow30d || got.Counts.ByStatus.Open.Total != 2 {
+		t.Fatalf("count_window = %q open = %d, want 30d and 2", got.CountWindow, got.Counts.ByStatus.Open.Total)
+	}
+}
+
+func TestListFallbackCarriesEffectiveWindow(t *testing.T) {
+	t.Cleanup(func() { services.SetStorage(nil) })
+	store := storage.NewMemory()
+	if err := store.SaveIncident(&storage.IncidentRecord{
+		ID: "recent", Origin: storage.OriginAIDetect, Source: "agent", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveIncident: %v", err)
+	}
+	if err := agent.SaveCountSettings(store, agent.CountSettings{Window: agent.CountWindow24h}); err != nil {
+		t.Fatalf("SaveCountSettings: %v", err)
+	}
+	services.SetStorage(providerOnly{Provider: store})
+
+	got := doList(t, NewIncidentAdminController(), "")
+	if got.CountWindow != agent.CountWindow24h || got.Counts.ByStatus.Open.Total != 1 {
+		t.Fatalf("count_window = %q open = %d, want 24h and 1", got.CountWindow, got.Counts.ByStatus.Open.Total)
 	}
 }

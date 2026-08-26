@@ -797,6 +797,35 @@ func (p *postgresProvider) CountIncidentsByStatus() (IncidentStatusCounts, error
 	return AssembleStatusCounts(total, ai), nil
 }
 
+// CountIncidentsByStatusSince implements storage.IncidentWindowCounter: the
+// same single COUNT/FILTER pass bounded to a recent window. A zero since is
+// unbounded and delegates, so the two can never disagree.
+func (p *postgresProvider) CountIncidentsByStatusSince(since time.Time) (IncidentStatusCounts, error) {
+	if since.IsZero() {
+		return p.CountIncidentsByStatus()
+	}
+	const q = `
+		SELECT
+			COUNT(*) FILTER (WHERE resolved = false AND acked_at IS NULL)     AS open_total,
+			COUNT(*) FILTER (WHERE resolved = false AND acked_at IS NOT NULL) AS acked_total,
+			COUNT(*) FILTER (WHERE resolved = true)                           AS resolved_total,
+			COUNT(*)                                                          AS all_total,
+			COUNT(*) FILTER (WHERE origin = 'ai_detect' AND resolved = false AND acked_at IS NULL)     AS open_ai,
+			COUNT(*) FILTER (WHERE origin = 'ai_detect' AND resolved = false AND acked_at IS NOT NULL) AS acked_ai,
+			COUNT(*) FILTER (WHERE origin = 'ai_detect' AND resolved = true)                           AS resolved_ai,
+			COUNT(*) FILTER (WHERE origin = 'ai_detect')                                               AS all_ai
+		FROM vs_incidents
+		WHERE created_at >= $1`
+	var total, ai StatusCounts
+	if err := p.db.QueryRow(q, since.UTC()).Scan(
+		&total.Open, &total.Acked, &total.Resolved, &total.Total,
+		&ai.Open, &ai.Acked, &ai.Resolved, &ai.Total,
+	); err != nil {
+		return IncidentStatusCounts{}, fmt.Errorf("storage: count incidents by status since: %w", err)
+	}
+	return AssembleStatusCounts(total, ai), nil
+}
+
 // ListIncidentsPage implements the optional storage.IncidentPager
 // capability: one bounded, newest-first page pushed entirely into SQL
 // (ORDER BY created_at DESC LIMIT/OFFSET). When origin is one of the known

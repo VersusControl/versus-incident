@@ -52,7 +52,8 @@ const (
 )
 
 // Name implements core.AnalyzeTool.
-func (QueryTraces) Name() string { return "query_traces" }
+func (QueryTraces) Name() string        { return "query_traces" }
+func (QueryTraces) DisplayName() string { return "Checking traces" }
 
 // Description implements core.AnalyzeTool.
 func (QueryTraces) Description() string {

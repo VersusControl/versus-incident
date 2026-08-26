@@ -26,6 +26,9 @@ export function PeekPanel({
     const prev = document.activeElement as HTMLElement | null;
     closeRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
+      // A modal stacked above this panel owns Escape; without the guard the
+      // one keypress would dismiss both overlays.
+      if (document.body.dataset.modalDepth) return;
       if (e.key === "Escape") {
         e.stopPropagation();
         onClose();
@@ -45,7 +48,7 @@ export function PeekPanel({
       <div className="absolute inset-0 bg-black/30" onClick={onClose} />
       <aside
         className={clsx(
-          "absolute bottom-0 right-0 top-0 flex w-full max-w-md flex-col",
+          "absolute bottom-0 right-0 top-0 flex w-full max-w-lg flex-col",
           "border-l border-ink-600 bg-surface-raised shadow-overlay",
           "motion-safe:animate-[peek-in_200ms_ease-out]",
         )}
@@ -63,9 +66,11 @@ export function PeekPanel({
             <X size={14} />
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">{children}</div>
+        <div className="overlay-body min-h-0 flex-1 overflow-y-auto p-4">
+          {children}
+        </div>
         {footer && (
-          <div className="flex items-center justify-end gap-2 border-t border-ink-600 px-4 py-3">
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 border-t border-ink-600 px-4 py-3">
             {footer}
           </div>
         )}
@@ -85,9 +90,11 @@ export function PeekField({
   children: React.ReactNode;
 }) {
   return (
-    <div>
+    <div className="min-w-0">
       <dt className="text-2xs uppercase tracking-wide text-ink-400">{label}</dt>
-      <dd className="mt-0.5 text-ink-100">{children}</dd>
+      <dd className="mt-0.5 min-w-0 [overflow-wrap:anywhere] text-ink-100">
+        {children}
+      </dd>
     </div>
   );
 }

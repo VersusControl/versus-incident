@@ -366,6 +366,14 @@ func (p *fileProvider) CountIncidentsByStatus() (IncidentStatusCounts, error) {
 	return StatusCountsOf(p.incidents), nil
 }
 
+// CountIncidentsByStatusSince implements storage.IncidentWindowCounter over the
+// same single pass, dropping rows older than the window.
+func (p *fileProvider) CountIncidentsByStatusSince(since time.Time) (IncidentStatusCounts, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return StatusCountsSince(p.incidents, since), nil
+}
+
 // ListIncidentsPage implements the optional storage.IncidentPager
 // capability: one bounded, newest-first page over the in-memory slice,
 // skipping offset matches and returning at most limit rows. The origin

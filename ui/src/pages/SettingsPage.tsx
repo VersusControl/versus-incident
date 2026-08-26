@@ -3,6 +3,7 @@ import { TopBar } from "@/components/TopBar";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { ReportSettingsControl } from "@/components/ReportSettingsControl";
 import { SpikeSettingsControl } from "@/components/SpikeSettingsControl";
+import { CountSettingsControl } from "@/components/CountSettingsControl";
 import { IncidentsConfigPanel } from "./IncidentsConfigPage";
 import { AgentConfigPanel } from "./AgentConfigPage";
 
@@ -11,8 +12,9 @@ import { AgentConfigPanel } from "./AgentConfigPage";
 // deep-linkable:
 //   • Alerting  — how the agent alerts: the incident delivery / on-call config.
 //   • Agent     — the AI runtime configuration.
-//   • Detection & reports — the two editable runtime knobs: the spike-detector
-//     baseline mode and the periodic incident report.
+//   • System — the editable runtime knobs: the incident-count window, the
+//     spike-detector baseline mode and the periodic incident report.
+// The ?tab=tuning param value is unchanged so existing deep links keep working.
 // The legacy /config/incidents route redirects to the default (Alerting) tab
 // and /config/agent to ?tab=agent. Every panel keeps its SecretBanner: secrets
 // never reach the browser, only their presence is shown.
@@ -37,7 +39,7 @@ export function SettingsPage() {
             options={[
               { value: "alerting", label: "Alerting" },
               { value: "agent", label: "Agent" },
-              { value: "tuning", label: "Detection & reports" },
+              { value: "tuning", label: "System" },
             ]}
           />
         </div>
@@ -51,6 +53,7 @@ export function SettingsPage() {
           </div>
         ) : (
           <div className="space-y-4">
+            <CountSettingsControl />
             <SpikeSettingsControl />
             <ReportSettingsControl />
           </div>

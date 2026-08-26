@@ -29,7 +29,8 @@ const (
 )
 
 // Name implements core.AnalyzeTool.
-func (RelatedLogs) Name() string { return "get_related_logs" }
+func (RelatedLogs) Name() string        { return "get_related_logs" }
+func (RelatedLogs) DisplayName() string { return "Checking related logs" }
 
 // Description implements core.AnalyzeTool.
 func (RelatedLogs) Description() string {
