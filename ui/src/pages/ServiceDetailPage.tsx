@@ -4,6 +4,7 @@ import { useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
+  Activity,
   Clock,
   Eye,
   LineChart,
@@ -21,12 +22,13 @@ import {
   type LearnExclusions,
 } from "@/lib/learnExclude";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
+import { useServiceIntelQuery } from "@/lib/useServiceIntelQuery";
 import { useToast } from "@/components/toastContext";
 import { TopBar } from "@/components/TopBar";
 import { Pill, VerdictPill } from "@/components/Pill";
 import { EmptyState, Spinner } from "@/components/feedback";
 import { RetryableError } from "@/components/RetryableError";
-import { SkCard, SkRows } from "@/components/Skeleton";
+import { SkCard } from "@/components/Skeleton";
 import { PeekPanel, PeekField } from "@/components/PeekPanel";
 import { PatternBaselines } from "@/components/PatternBaselines";
 import { SortHeader } from "@/components/SortHeader";
@@ -54,26 +56,6 @@ import { SortHeader } from "@/components/SortHeader";
 // read, so the toggle and the per-metric checkboxes share ONE GET of the policy
 // and one cache entry — a mutation in either refetches both.
 const LEARN_EXCLUSIONS_KEY = ["learn-exclusions"] as const;
-
-// useServiceIntelQuery is the shared /intel probe. It is run by BOTH the
-// Metrics section and the Disable-Learn toggle; react-query dedupes them by key
-// so there is exactly one network call. A 403 (unlicensed) / 404 (OSS — route
-// absent) is terminal, never retried — it is how both surfaces learn to degrade.
-function useServiceIntelQuery(name: string) {
-  return useQuery({
-    queryKey: ["service-intel", name],
-    queryFn: () => api.getServiceIntel(name),
-    enabled: !!name,
-    retry: (count, err) => {
-      if (
-        err instanceof ApiError &&
-        (err.status === 403 || err.status === 404)
-      )
-        return false;
-      return count < 1;
-    },
-  });
-}
 
 // useLearnExclusionsQuery reads the org's Disable-Learn policy — the state
 // source for the toggle + checkboxes. It is enabled ONLY once the surface is
@@ -108,6 +90,8 @@ function sevTone(sev: string): "bad" | "warn" | "good" | "default" {
       return "default";
   }
 }
+
+const severityOrder = ["critical", "high", "medium", "low", "unknown"];
 
 function RecentIncidentRow({ inc }: { inc: ServiceIncidentRecent }) {
   return (
@@ -241,151 +225,136 @@ function MetricsTracesSection({ name }: { name: string }) {
   const excludeDisabled =
     gate !== "editable" || ex.isPending || putEx.isPending || !ex.data;
 
-  return (
-    <section className="card p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <LineChart size={14} className="text-ink-300" />
-        <h2 className="text-sm font-semibold text-ink-50">Metrics & Traces</h2>
+  const lockedState = (kind: "Metrics" | "Traces") => (
+    <div className="mx-auto flex max-w-md flex-col items-center gap-3 py-6 text-center">
+      <div className="rounded-full bg-accent-subtle p-3 text-link">
+        <Lock size={20} />
       </div>
+      <h3 className="text-sm font-semibold text-ink-50">
+        {kind} learning is an Enterprise capability
+      </h3>
+      <p className="text-xs text-ink-300">
+        The agent learns normal {kind.toLowerCase()} behavior for this service
+        so it can catch problems automatically in Versus Enterprise.
+      </p>
+      <a
+        className="btn btn-primary mt-1"
+        href="https://versusincident.com/enterprise"
+        target="_blank"
+        rel="noreferrer"
+      >
+        Learn about Enterprise
+      </a>
+    </div>
+  );
 
-      {isLoading && <SkRows rows={2} cols={1} />}
-
-      {locked && (
-        <div className="mx-auto flex max-w-md flex-col items-center gap-3 py-6 text-center">
-          <div className="rounded-full bg-accent-subtle p-3 text-link">
-            <Lock size={20} />
-          </div>
-          <h3 className="text-sm font-semibold text-ink-50">
-            Metrics & Traces learning is an Enterprise capability
-          </h3>
-          <p className="text-xs text-ink-300">
-            The agent learns what's normal for this service's request rate,
-            errors, latency and trace operations so it can catch problems
-            automatically — available in Versus Enterprise.
-          </p>
-          <a
-            className="btn btn-primary mt-1"
-            href="https://versusincident.com/enterprise"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Learn about Enterprise
-          </a>
+  return (
+    <>
+      <section className="card p-4">
+        <div className="mb-3 flex items-center gap-2">
+          <LineChart size={14} className="text-ink-300" />
+          <h2 className="text-sm font-semibold text-ink-50">Metrics</h2>
+          {data && <Pill className="ml-1">{data.metrics?.length ?? 0}</Pill>}
         </div>
-      )}
-
-      {isError && !locked && (
-        <RetryableError
-          error={error}
-          onRetry={() => refetch()}
-          retrying={isRefetching}
-          context="Couldn't load metrics & traces"
-        />
-      )}
-
-      {data && !locked && (
-        <div className="flex flex-col gap-3 text-xs text-ink-200">
-          <div className="flex gap-4">
-            <span>
-              <span className="text-ink-50">{data.metrics?.length ?? 0}</span>{" "}
-              learned metric signals
-            </span>
-            <span>
-              <span className="text-ink-50">{data.traces?.length ?? 0}</span>{" "}
-              learned trace signals
-            </span>
-          </div>
-
-          {data.metrics && data.metrics.length > 0 && (
-            <table className="ddt">
-              <thead>
-                <tr>
-                  <th>Metric signal</th>
-                  <th className="w-24">Kind</th>
-                  <th className="w-44">Ignore</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.metrics.map((m) => {
-                  const checked = metricExcluded(m.signal, ex.data?.metrics);
-                  return (
-                    <tr key={`${m.signal}:${m.kind}`}>
-                      <td
-                        className="font-mono text-2xs text-ink-100"
-                        title={m.signal}
-                      >
-                        {m.signal}
-                      </td>
-                      <td className="text-2xs text-ink-300">{m.kind}</td>
-                      <td>
-                        <label className="inline-flex items-center gap-2 text-2xs text-ink-300">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            disabled={excludeDisabled}
-                            aria-label={`Ignore ${m.signal}`}
-                            onChange={(e) =>
-                              putEx.mutate({
-                                services: ex.data?.services ?? [],
-                                metrics: toggleMetricExclusion(
-                                  ex.data?.metrics ?? [],
-                                  m.signal,
-                                  e.target.checked,
-                                ),
-                                patterns: ex.data?.patterns ?? [],
-                              })
-                            }
-                          />
-                          {checked ? "Ignored" : "Active"}
-                        </label>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-
-          {data.traces && data.traces.length > 0 && (
-            <table className="ddt">
-              <thead>
-                <tr>
-                  <th>Trace signal</th>
-                  <th className="w-24">Kind</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.traces.map((t) => (
-                  <tr key={`${t.signal}:${t.kind}`}>
-                    <td
-                      className="font-mono text-2xs text-ink-100"
-                      title={t.signal}
-                    >
-                      {t.signal}
-                    </td>
-                    <td className="text-2xs text-ink-300">{t.kind}</td>
+        {isLoading && <div className="flex items-center gap-2 text-2xs text-ink-400"><Spinner /> Loading metrics…</div>}
+        {locked && lockedState("Metrics")}
+        {isError && !locked && (
+          <RetryableError error={error} onRetry={() => refetch()} retrying={isRefetching} context="Couldn't load metrics" />
+        )}
+        {data && !locked && (
+          <div className="flex flex-col gap-3 text-xs text-ink-200">
+            {data.metrics && data.metrics.length > 0 ? (
+              <table className="ddt">
+                <thead>
+                  <tr>
+                    <th>Metric signal</th>
+                    <th className="w-24">Kind</th>
+                    <th className="w-44">Ignore</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+                </thead>
+                <tbody>
+                  {data.metrics.map((metric) => {
+                    const checked = metricExcluded(metric.signal, ex.data?.metrics);
+                    return (
+                      <tr key={`${metric.signal}:${metric.kind}`}>
+                        <td className="font-mono text-2xs text-ink-100" title={metric.signal}>{metric.signal}</td>
+                        <td className="text-2xs text-ink-300">{metric.kind}</td>
+                        <td>
+                          <label className="inline-flex items-center gap-2 text-2xs text-ink-300">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              disabled={excludeDisabled}
+                              aria-label={`Ignore ${metric.signal}`}
+                              onChange={(event) => putEx.mutate({
+                                services: ex.data?.services ?? [],
+                                metrics: toggleMetricExclusion(ex.data?.metrics ?? [], metric.signal, event.target.checked),
+                                patterns: ex.data?.patterns ?? [],
+                              })}
+                            />
+                            {checked ? "Ignored" : "Active"}
+                          </label>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            ) : (
+              <EmptyState title="No learned metrics for this service yet." />
+            )}
+            {gate === "readonly" && (
+              <p className="text-2xs text-ink-400">
+                Ignore rules are read-only — the admin role (runtime:manage) is required to change them.
+              </p>
+            )}
+            <Link className="link inline-flex items-center gap-1" to="/agent/metrics">
+              Open metrics <ArrowRight size={12} />
+            </Link>
+          </div>
+        )}
+      </section>
 
-          {gate === "readonly" && (
-            <p className="text-2xs text-ink-400">
-              Ignore rules are read-only — the admin role (runtime:manage) is
-              required to change them.
-            </p>
-          )}
-
-          <Link
-            className="link inline-flex items-center gap-1"
-            to="/agent/metrics"
-          >
-            Open the learned-signals view <ArrowRight size={12} />
-          </Link>
+      <section className="card p-4">
+        <div className="mb-3 flex items-center gap-2">
+          <Activity size={14} className="text-ink-300" />
+          <h2 className="text-sm font-semibold text-ink-50">Traces</h2>
+          {data && <Pill className="ml-1">{data.traces?.length ?? 0}</Pill>}
         </div>
-      )}
-    </section>
+        {isLoading && <div className="flex items-center gap-2 text-2xs text-ink-400"><Spinner /> Loading traces…</div>}
+        {locked && lockedState("Traces")}
+        {isError && !locked && (
+          <RetryableError error={error} onRetry={() => refetch()} retrying={isRefetching} context="Couldn't load traces" />
+        )}
+        {data && !locked && (
+          <div className="flex flex-col gap-3 text-xs text-ink-200">
+            {data.traces && data.traces.length > 0 ? (
+              <table className="ddt">
+                <thead>
+                  <tr>
+                    <th>Trace signal</th>
+                    <th className="w-24">Kind</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.traces.map((trace) => (
+                    <tr key={`${trace.signal}:${trace.kind}`}>
+                      <td className="font-mono text-2xs text-ink-100" title={trace.signal}>{trace.signal}</td>
+                      <td className="text-2xs text-ink-300">{trace.kind}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <EmptyState title="No learned traces for this service yet." />
+            )}
+            <Link className="link inline-flex items-center gap-1" to="/agent/traces">
+              Open traces <ArrowRight size={12} />
+            </Link>
+          </div>
+        )}
+      </section>
+    </>
   );
 }
 
@@ -594,8 +563,16 @@ export function ServiceDetailPage() {
                 <span className="text-2xs text-ink-400">
                   last {data.incidents.window_days} days
                 </span>
+                {data.incidents.count > data.incidents.recent.length && (
+                  <span className="text-2xs text-ink-400">
+                    showing latest {data.incidents.recent.length}
+                  </span>
+                )}
                 <div className="ml-auto flex flex-wrap gap-1">
-                  {Object.entries(data.incidents.severities).map(
+                  {Object.entries(data.incidents.severities).sort(
+                    ([left], [right]) =>
+                      severityOrder.indexOf(left) - severityOrder.indexOf(right),
+                  ).map(
                     ([sev, n]) => (
                       <Pill key={sev} tone={sevTone(sev)}>
                         {sev} {n}

@@ -28,6 +28,7 @@ import { Pagination } from "@/components/Pagination";
 import { PeekPanel, PeekField } from "@/components/PeekPanel";
 import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
+import { useServiceIntelQuery } from "@/lib/useServiceIntelQuery";
 import {
   BulkActionBar,
   RowSelectCheckbox,
@@ -112,6 +113,7 @@ export function ServicesPage() {
     queryFn: () => api.getServiceDetail(peekName as string),
     enabled: !!peekName,
   });
+  const peekIntel = useServiceIntelQuery(peekName ?? "");
 
   // Enterprise Disable-Learn ("ignore") controls — gated to a licensed admin,
   // hidden on community / viewer. Drives the Ignore/Resume bulk actions and the
@@ -745,6 +747,20 @@ export function ServicesPage() {
                   </span>
                 )}
               </PeekField>
+              {peekIntel.isSuccess && (
+                <>
+                  <PeekField label="Metrics">
+                    <span className="tabular-nums">
+                      {peekIntel.data.metrics?.length ?? 0}
+                    </span>
+                  </PeekField>
+                  <PeekField label="Traces">
+                    <span className="tabular-nums">
+                      {peekIntel.data.traces?.length ?? 0}
+                    </span>
+                  </PeekField>
+                </>
+              )}
             </dl>
 
             {peekDetail.isError && (

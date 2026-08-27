@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
 // MaxIncidentsDefault is the default rolling cap for the file backend.
@@ -372,6 +374,39 @@ func (p *fileProvider) CountIncidentsByStatusSince(since time.Time) (IncidentSta
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return StatusCountsSince(p.incidents, since), nil
+}
+
+func (p *fileProvider) CountIncidentsByServiceSince(orgID, service string, since time.Time) (int, map[string]int, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	count := 0
+	severities := make(map[string]int)
+	for _, rec := range p.incidents {
+		if NormalizeOrgID(rec.OrgID) != NormalizeOrgID(orgID) || rec.ServiceLabel() != service || rec.CreatedAt.Before(since) {
+			continue
+		}
+		count++
+		severities[utils.ExtractSeverity(rec.Content)]++
+	}
+	return count, severities, nil
+}
+
+func (p *fileProvider) ListIncidentsByServiceSince(orgID, service string, since time.Time, limit int) ([]*IncidentRecord, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]*IncidentRecord, 0)
+	for _, rec := range p.incidents {
+		if NormalizeOrgID(rec.OrgID) != NormalizeOrgID(orgID) || rec.ServiceLabel() != service || rec.CreatedAt.Before(since) {
+			continue
+		}
+		cp := *rec
+		out = append(out, &cp)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 // ListIncidentsPage implements the optional storage.IncidentPager

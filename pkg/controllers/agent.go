@@ -694,11 +694,9 @@ func graceStatus(firstSeen time.Time, grace time.Duration) (bool, int) {
 	return false, 0
 }
 
-// serviceIncidentSummary builds the bounded, org-scoped incident summary for
-// one service: count, a severity histogram, and the most-recent incidents
-// (newest first). It scans at most serviceIncidentScanLimit records and keeps
-// only those inside the serviceIncidentWindowDays window. A nil store or read
-// error degrades to an empty summary rather than failing the whole detail call.
+// serviceIncidentSummary builds an org-scoped count, severity histogram, and
+// newest-first incident list. It prefers a service-scoped storage query and
+// retains the bounded whole-table scan for backends without that capability.
 func (a *AgentController) serviceIncidentSummary(name, org string) fiber.Map {
 	summary := fiber.Map{
 		"window_days": serviceIncidentWindowDays,
@@ -710,12 +708,44 @@ func (a *AgentController) serviceIncidentSummary(name, org string) fiber.Map {
 	if store == nil {
 		return summary
 	}
+	cutoff := time.Now().UTC().Add(-serviceIncidentWindowDays * 24 * time.Hour)
+	if counter, ok := store.(storage.IncidentServiceCounter); ok {
+		count, rawSeverities, err := counter.CountIncidentsByServiceSince(org, name, cutoff)
+		if err != nil {
+			return summary
+		}
+		recs, err := counter.ListIncidentsByServiceSince(org, name, cutoff, serviceRecentIncidentMax)
+		if err != nil {
+			return summary
+		}
+		severities := fiber.Map{}
+		for raw, n := range rawSeverities {
+			band := services.SeverityBand(raw)
+			if current, exists := severities[band].(int); exists {
+				severities[band] = current + n
+			} else {
+				severities[band] = n
+			}
+		}
+		recent := make([]fiber.Map, 0, len(recs))
+		for _, rec := range recs {
+			recent = append(recent, fiber.Map{
+				"id":         rec.ID,
+				"title":      rec.Title,
+				"severity":   incidentSeverity(rec),
+				"created_at": rec.CreatedAt,
+			})
+		}
+		summary["count"] = count
+		summary["severities"] = severities
+		summary["recent"] = recent
+		return summary
+	}
 	recs, err := store.ListIncidents(serviceIncidentScanLimit)
 	if err != nil {
 		return summary
 	}
 
-	cutoff := time.Now().UTC().Add(-serviceIncidentWindowDays * 24 * time.Hour)
 	severities := fiber.Map{}
 	recent := make([]fiber.Map, 0, serviceRecentIncidentMax)
 	count := 0

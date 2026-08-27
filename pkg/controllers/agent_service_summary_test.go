@@ -89,6 +89,37 @@ func TestServiceIncidentSummary_MatchesIncidentsList(t *testing.T) {
 	}
 }
 
+func TestServiceIncidentSummary_ServiceCapabilityAvoidsWholeTableStarvation(t *testing.T) {
+	loadServiceDetailConfig(t, "30m")
+	store := storage.NewMemory()
+	now := time.Now().UTC()
+	if err := store.SaveIncident(&storage.IncidentRecord{
+		ID: "target", OrgID: "org-a", Service: "checkout", Title: "target",
+		CreatedAt: now.Add(-2 * time.Hour), Content: map[string]any{"severity": "high"},
+	}); err != nil {
+		t.Fatalf("SaveIncident(target): %v", err)
+	}
+	for i := 0; i < serviceIncidentScanLimit+1; i++ {
+		if err := store.SaveIncident(&storage.IncidentRecord{
+			ID: "unrelated-" + string(rune(i)), OrgID: "org-a", Service: "billing",
+			CreatedAt: now.Add(-time.Hour).Add(time.Duration(i) * time.Millisecond),
+		}); err != nil {
+			t.Fatalf("SaveIncident(unrelated %d): %v", i, err)
+		}
+	}
+	services.SetStorage(store)
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	summary := (&AgentController{}).serviceIncidentSummary("checkout", "org-a")
+	if got, _ := summary["count"].(int); got != 1 {
+		t.Fatalf("count = %d, want 1 beyond newest-%d unrelated rows", got, serviceIncidentScanLimit)
+	}
+	recent, _ := summary["recent"].([]fiber.Map)
+	if len(recent) != 1 || recent[0]["id"] != "target" {
+		t.Fatalf("recent = %#v, want target incident", recent)
+	}
+}
+
 // TestServiceIncidentSummary_SeverityHistogramReadsNestedShapes guards the
 // second half of the same bug: the histogram read only the top-level severity
 // key, so Alertmanager and CloudWatch incidents landed in "unknown". The

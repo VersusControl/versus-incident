@@ -356,6 +356,14 @@ type IncidentWindowCounter interface {
 	CountIncidentsByStatusSince(since time.Time) (IncidentStatusCounts, error)
 }
 
+// IncidentServiceCounter is an optional capability for service-scoped incident
+// summaries. Backends can push org, service, and time predicates into storage
+// instead of filtering a bounded whole-table page in the controller.
+type IncidentServiceCounter interface {
+	CountIncidentsByServiceSince(orgID, service string, since time.Time) (int, map[string]int, error)
+	ListIncidentsByServiceSince(orgID, service string, since time.Time, limit int) ([]*IncidentRecord, error)
+}
+
 // AnalysisPager is an optional capability a backend may implement on top of
 // Provider to serve the analyses list without ever loading the whole table.
 // It is the analyses twin of IncidentPager: it splits the two things the list

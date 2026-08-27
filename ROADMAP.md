@@ -61,17 +61,17 @@ This file is the human-readable mirror.
 - [x] YAML configuration with environment expansion
 - [x] Docker images and a published Helm chart
 
+### Agent stream analysis
+- [x] Watch the agent investigate live, step by step, instead of waiting on a
+      spinner
+- [x] A Tools page showing every tool the agent can use, whether it is active,
+      and what to configure to switch it on
+
 ---
 
 ## Next
 
 In the order we intend to build.
-
-### Agent transparency
-- [ ] Watch the agent investigate live, step by step, instead of waiting on a
-      spinner
-- [ ] A Tools page showing every tool the agent can use, whether it is active,
-      and what to configure to switch it on
 
 ### Service readiness
 - [ ] Tools reporting a service's signal coverage, objectives, alert coverage

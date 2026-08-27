@@ -1,9 +1,12 @@
 package storage
 
 import (
+	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
 // memoryProvider is an in-memory backend used by tests. It is concurrency-safe
@@ -179,6 +182,39 @@ func (m *memoryProvider) CountIncidentsByStatusSince(since time.Time) (IncidentS
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return StatusCountsSince(m.incidents, since), nil
+}
+
+func (m *memoryProvider) CountIncidentsByServiceSince(orgID, service string, since time.Time) (int, map[string]int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	count := 0
+	severities := make(map[string]int)
+	for _, rec := range m.incidents {
+		if NormalizeOrgID(rec.OrgID) != NormalizeOrgID(orgID) || rec.ServiceLabel() != service || rec.CreatedAt.Before(since) {
+			continue
+		}
+		count++
+		severities[utils.ExtractSeverity(rec.Content)]++
+	}
+	return count, severities, nil
+}
+
+func (m *memoryProvider) ListIncidentsByServiceSince(orgID, service string, since time.Time, limit int) ([]*IncidentRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*IncidentRecord, 0)
+	for _, rec := range m.incidents {
+		if NormalizeOrgID(rec.OrgID) != NormalizeOrgID(orgID) || rec.ServiceLabel() != service || rec.CreatedAt.Before(since) {
+			continue
+		}
+		cp := *rec
+		out = append(out, &cp)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 // ListIncidentsPage implements the optional storage.IncidentPager
