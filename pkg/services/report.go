@@ -452,8 +452,7 @@ func reportTitle(rec *storage.IncidentRecord) string {
 // RenderIncidentsReport renders the aggregate report PNG for a window
 // (preview / download). It is read-only over stored state.
 func RenderIncidentsReport(ctx context.Context, window string) (*core.ReportImage, error) {
-	cfg := config.GetConfig()
-	return renderReport(ctx, cfg, store, reportRenderer, reportScrubber(), window)
+	return renderReport(ctx, store, reportRenderer, reportScrubber(), window)
 }
 
 // SendIncidentsReport renders the aggregate report and delivers it to the
@@ -507,7 +506,7 @@ func buildWindowModel(st storage.Provider, scrubber core.Scrubber, settings Repo
 	return model, nil
 }
 
-func renderReport(ctx context.Context, cfg *config.Config, st storage.Provider, renderer core.ReportRenderer, scrubber core.Scrubber, window string) (*core.ReportImage, error) {
+func renderReport(ctx context.Context, st storage.Provider, renderer core.ReportRenderer, scrubber core.Scrubber, window string) (*core.ReportImage, error) {
 	settings := LoadReportSettings(st)
 	if renderer == nil {
 		return nil, ErrReportNoRenderer

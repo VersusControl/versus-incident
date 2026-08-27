@@ -9,15 +9,12 @@ import {
   EyeOff,
   GraduationCap,
   Layers,
-  LineChart,
   Lock,
   Power,
   PowerOff,
   Radar,
-  ScrollText,
   Server,
   Sparkles,
-  Waypoints,
   Zap,
   type LucideIcon,
 } from "lucide-react";
@@ -30,6 +27,7 @@ import { KpiTile } from "@/components/KpiTile";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { EmptyState } from "@/components/feedback";
+import { ProportionalBarList } from "@/components/ProportionalBarList";
 
 // Agent Overview (/agent) — StatusPage merged with the old Dashboard's
 // agent cards. The runtime banner implements the runtime truth table:
@@ -143,7 +141,6 @@ export function AgentOverviewPage() {
       .map(([k, v]) => [k.slice(prefix.length), v] as [string, number])
       .sort((a, b) => b[1] - a[1]);
   };
-  const outcomes = detectGroup("outcome_");
   const detectVerdicts = detectGroup("verdict_");
   const severities = detectGroup("severity_");
 
@@ -203,10 +200,14 @@ export function AgentOverviewPage() {
         )}
 
         {/* 2 — Lifetime stat tiles (no 24h windowed stats yet — §3.5 ask #6) */}
-        <div className="mb-2 text-2xs font-semibold uppercase tracking-wide text-ink-400">
-          Lifetime totals
-        </div>
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <section aria-labelledby="lifetime-totals-heading">
+          <h2
+            id="lifetime-totals-heading"
+            className="mb-2 text-2xs font-semibold uppercase tracking-wide text-ink-400"
+          >
+            Lifetime totals
+          </h2>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           {/* Service first (Service · Shadow · Detect), then Logs (OSS only)
               and the rest. Shadow/Detect are enterprise-fed once a license is
               present, but they render from the same status query in BOTH the
@@ -313,34 +314,52 @@ export function AgentOverviewPage() {
             icon={Activity}
             foot="Across every shadow tick"
           />
-        </div>
-
-        {failedStats.length > 0 && (
-          <div className="mt-3">
-            {agentDisabled ? (
-              <p className="text-xs text-ink-400">
-                Agent statistics are unavailable while the agent is disabled.
-              </p>
-            ) : (
-              <RetryableError
-                error={failedStats[0].q.error}
-                context={`Couldn't load ${failedStats
-                  .map((s) => s.what)
-                  .join(", ")}`}
-                onRetry={() => failedStats.forEach((s) => s.q.refetch())}
-                retrying={failedStats.some((s) => s.q.isRefetching)}
-              />
-            )}
           </div>
-        )}
+
+          {failedStats.length > 0 && (
+            <div className="mt-3">
+              {agentDisabled ? (
+                <p className="text-xs text-ink-400">
+                  Agent statistics are unavailable while the agent is disabled.
+                </p>
+              ) : (
+                <RetryableError
+                  error={failedStats[0].q.error}
+                  context={`Couldn't load ${failedStats
+                    .map((s) => s.what)
+                    .join(", ")}`}
+                  onRetry={() => failedStats.forEach((s) => s.q.refetch())}
+                  retrying={failedStats.some((s) => s.q.isRefetching)}
+                />
+              )}
+            </div>
+          )}
+        </section>
 
         {/* 3 — Logs, Metrics & Traces learning (Logs always; Metrics/Traces Enterprise-only) */}
-        <EnterpriseLearningSummary
-          baselines={baselines.data}
-          loading={baselines.isPending}
-          locked={baselines.data === null}
-          logPatterns={status.data?.patterns}
-        />
+        <section className="mt-6" aria-labelledby="signal-learning-heading">
+          <h2
+            id="signal-learning-heading"
+            className="mb-2 text-2xs font-semibold uppercase tracking-wide text-ink-400"
+          >
+            Logs, Metrics &amp; Traces
+          </h2>
+          <div className="grid grid-cols-1 items-stretch gap-3 lg:grid-cols-2">
+            <EnterpriseLearningSummary
+              baselines={baselines.data}
+              loading={baselines.isPending}
+              locked={baselines.data === null}
+              logPatterns={status.data?.patterns}
+            />
+            <DetectBreakdownCard
+              isPending={detectStats.isPending}
+              isError={detectStats.isError}
+              agentDisabled={agentDisabled}
+              verdicts={detectVerdicts}
+              severities={severities}
+            />
+          </div>
+        </section>
 
         {/* 4 — The old Dashboard agent cards */}
         <section className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -508,43 +527,6 @@ export function AgentOverviewPage() {
           </div>
         </section>
 
-        {/* Breakdown cards (from StatusPage) */}
-        <section className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <BreakdownCard
-            title="Verdict breakdown (shadow)"
-            isPending={shadowStats.isPending}
-            isError={shadowStats.isError}
-            agentDisabled={agentDisabled}
-            rows={Object.entries(shadowStats.data?.verdicts || {}).sort(
-              (a, b) => b[1] - a[1],
-            )}
-            emptyText="No verdicts recorded yet"
-          />
-          <BreakdownCard
-            title="Detect outcomes"
-            isPending={detectStats.isPending}
-            isError={detectStats.isError}
-            agentDisabled={agentDisabled}
-            rows={outcomes}
-            emptyText="No detect-mode calls yet"
-          />
-          <BreakdownCard
-            title="Detect verdicts"
-            isPending={detectStats.isPending}
-            isError={detectStats.isError}
-            agentDisabled={agentDisabled}
-            rows={detectVerdicts}
-            emptyText="No detect-mode calls yet"
-          />
-          <BreakdownCard
-            title="AI severity"
-            isPending={detectStats.isPending}
-            isError={detectStats.isError}
-            agentDisabled={agentDisabled}
-            rows={severities}
-            emptyText="No findings parsed yet"
-          />
-        </section>
       </main>
     </>
   );
@@ -638,72 +620,77 @@ function ModeChip({ mode }: { mode: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// Breakdown card — key/count table for the flat stats maps. Errors point at
-// the consolidated RetryableError above the cards (same queries) instead of
-// stacking four identical red boxes.
+// Errors point at the consolidated RetryableError above the cards.
 // ---------------------------------------------------------------------------
-function BreakdownCard({
-  title,
-  rows,
+function DetectBreakdownCard({
+  verdicts,
+  severities,
   isPending,
   isError,
   agentDisabled,
-  emptyText,
 }: {
-  title: string;
-  rows: Array<[string, number]>;
+  verdicts: Array<[string, number]>;
+  severities: Array<[string, number]>;
   isPending: boolean;
   isError: boolean;
   agentDisabled: boolean;
-  emptyText: string;
 }) {
+  const groups = [
+    ["AI Detect", verdicts],
+    ["AI severity", severities],
+  ] as const;
+  const empty = groups.every(([, rows]) => rows.length === 0);
   return (
     <div className="card">
       <div className="card-header">
-        <h2 className="card-title">{title}</h2>
+        <h2 className="card-title">Detect breakdown</h2>
+        <Link
+          to="/agent/decisions?tab=detect"
+          className="text-2xs text-link hover:underline"
+        >
+          View detect →
+        </Link>
       </div>
       <div className="card-body">
         {isPending ? (
-          <table className="ddt">
-            <thead>
-              <tr>
-                <th>Key</th>
-                <th className="w-24 text-right">Count</th>
-              </tr>
-            </thead>
-            <tbody>
-              <SkRows rows={4} cols={2} />
-            </tbody>
-          </table>
+          <div aria-hidden className="grid gap-5 md:grid-cols-2">
+            {Array.from({ length: 2 }).map((_, group) => (
+              <div key={group} className="space-y-3">
+                <div className="sk h-3 w-20" />
+                {Array.from({ length: 3 }).map((__, row) => (
+                  <div key={row} className="space-y-1">
+                    <div className="sk h-3 w-full" />
+                    <div className="sk h-2 w-full rounded-full" />
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
         ) : isError ? (
           agentDisabled ? (
             <DisabledNote />
           ) : (
             <p className="py-2 text-xs text-ink-300">
-              Couldn't load — use Retry in the error above the cards.
+              Couldn't load — use Retry in the error above.
             </p>
           )
-        ) : rows.length === 0 ? (
-          <EmptyState title={emptyText} />
+        ) : empty ? (
+          <EmptyState title="No detect-mode calls yet" />
         ) : (
-          <table className="ddt">
-            <thead>
-              <tr>
-                <th>Key</th>
-                <th className="w-24 text-right">Count</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map(([k, n]) => (
-                <tr key={k}>
-                  <td className="font-mono">{k}</td>
-                  <td className="text-right tabular-nums">
-                    {n.toLocaleString()}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="grid gap-5 md:grid-cols-2">
+            {groups.map(([title, rows]) => (
+              <div key={title} className="min-w-0">
+                <h3 className="mb-3 text-2xs font-semibold uppercase tracking-wide text-ink-400 text-center">
+                  {title}
+                </h3>
+                {rows.length > 0 ? (
+                  <ProportionalBarList rows={rows} label={`Detect ${title}`} />
+                ) : (
+                  <p className="text-xs text-ink-400">No data</p>
+                )}
+              </div>
+            ))}
+          </div>
         )}
       </div>
     </div>
@@ -729,26 +716,22 @@ function EnterpriseLearningSummary({
 }) {
   if (loading) {
     return (
-      <div className="mt-6">
-        <div className="mb-2 text-2xs font-semibold uppercase tracking-wide text-ink-400">
-          Logs, Metrics &amp; Traces
-        </div>
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
-          <div className="sk h-24 rounded-card" />
-          <div className="sk h-24 rounded-card" />
-          <div className="sk h-24 rounded-card" />
-        </div>
-      </div>
+      <div className="sk h-52 rounded-card" />
     );
   }
 
   if (locked) {
     return (
-      <div className="mt-6">
-        <div className="mb-2 text-2xs font-semibold uppercase tracking-wide text-ink-400">
-          Metrics &amp; Traces
+      <div className="card min-w-0">
+        <div className="card-header">
+          <h3 className="card-title">Signals learned</h3>
         </div>
-        <div className="flex items-center gap-2 rounded-card border border-ink-700 bg-surface-raised px-4 py-3 text-xs text-ink-400">
+        <div className="card-body space-y-4">
+          <ProportionalBarList
+            rows={[["Logs", logPatterns ?? 0]]}
+            label="Signals learned"
+          />
+          <div className="flex items-center gap-2 rounded-control border border-ink-700 bg-surface-raised px-3 py-2 text-xs text-ink-400">
           <Lock size={14} className="shrink-0" />
           <span>
             Metrics and Traces learning is an Enterprise feature.{" "}
@@ -756,6 +739,7 @@ function EnterpriseLearningSummary({
               Learn more →
             </Link>
           </span>
+          </div>
         </div>
       </div>
     );
@@ -766,78 +750,27 @@ function EnterpriseLearningSummary({
   const rows = baselines.baselines ?? [];
   const metrics = rows.filter((r) => r.type === "metric");
   const traces = rows.filter((r) => r.type === "trace");
-  const metricsReady = metrics.filter((r) => r.confident).length;
-  const tracesReady = traces.filter((r) => r.confident).length;
   const logCount = logPatterns ?? 0;
 
   return (
-    <div className="mt-6">
-      <div className="mb-2 text-2xs font-semibold uppercase tracking-wide text-ink-400">
-        Logs, Metrics &amp; Traces
+    <div className="card min-w-0">
+      <div className="card-header gap-2">
+        <h3 className="card-title">Signals learned</h3>
+        <div className="flex items-center gap-3 text-2xs">
+          <Link to="/agent/logs" className="text-link hover:underline">Logs</Link>
+          <Link to="/agent/metrics" className="text-link hover:underline">Metrics</Link>
+          <Link to="/agent/traces" className="text-link hover:underline">Traces</Link>
+        </div>
       </div>
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
-        <Link
-          to="/agent/logs"
-          className="card transition-colors hover:border-ink-500"
-        >
-          <div className="card-body flex items-center gap-4">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent-subtle">
-              <ScrollText size={18} className="text-accent" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-semibold text-ink-50">
-                {logCount} log pattern{logCount !== 1 ? "s" : ""}
-              </div>
-              <div className="text-2xs text-ink-300">
-                Learned from your logs
-              </div>
-            </div>
-          </div>
-        </Link>
-
-        <Link
-          to="/agent/metrics"
-          className="card transition-colors hover:border-ink-500"
-        >
-          <div className="card-body flex items-center gap-4">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent-subtle">
-              <LineChart size={18} className="text-accent" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-semibold text-ink-50">
-                {metrics.length} metric signal{metrics.length !== 1 ? "s" : ""}
-              </div>
-              <div className="text-2xs text-ink-300">
-                {metricsReady} ready to detect
-                {metrics.length > 0 && metricsReady < metrics.length && (
-                  <> · {metrics.length - metricsReady} still learning</>
-                )}
-              </div>
-            </div>
-          </div>
-        </Link>
-
-        <Link
-          to="/agent/traces"
-          className="card transition-colors hover:border-ink-500"
-        >
-          <div className="card-body flex items-center gap-4">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent-subtle">
-              <Waypoints size={18} className="text-accent" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-semibold text-ink-50">
-                {traces.length} trace signal{traces.length !== 1 ? "s" : ""}
-              </div>
-              <div className="text-2xs text-ink-300">
-                {tracesReady} ready to detect
-                {traces.length > 0 && tracesReady < traces.length && (
-                  <> · {traces.length - tracesReady} still learning</>
-                )}
-              </div>
-            </div>
-          </div>
-        </Link>
+      <div className="card-body">
+        <ProportionalBarList
+          rows={[
+            ["Logs", logCount],
+            ["Metrics", metrics.length],
+            ["Traces", traces.length],
+          ]}
+          label="Signals learned"
+        />
       </div>
     </div>
   );

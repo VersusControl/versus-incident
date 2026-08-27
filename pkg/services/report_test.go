@@ -737,7 +737,7 @@ func TestRenderReport_GuardsAndPNG(t *testing.T) {
 	st := windowStore(t)
 	enableReport(t, st, ReportSettings{Enable: true, IncludeChart: true})
 
-	r, err := renderReport(context.Background(), &config.Config{}, st, fakeRenderer{}, testScrubber(t), "today")
+	r, err := renderReport(context.Background(), st, fakeRenderer{}, testScrubber(t), "today")
 	if err != nil {
 		t.Fatalf("renderReport: %v", err)
 	}
@@ -746,12 +746,12 @@ func TestRenderReport_GuardsAndPNG(t *testing.T) {
 	}
 
 	// no renderer → ErrReportNoRenderer
-	if _, err := renderReport(context.Background(), &config.Config{}, st, nil, testScrubber(t), "today"); !errors.Is(err, ErrReportNoRenderer) {
+	if _, err := renderReport(context.Background(), st, nil, testScrubber(t), "today"); !errors.Is(err, ErrReportNoRenderer) {
 		t.Fatalf("no-renderer err = %v", err)
 	}
 
 	// fresh install → disabled
-	if _, err := renderReport(context.Background(), &config.Config{}, storage.NewMemory(), fakeRenderer{}, testScrubber(t), "today"); !errors.Is(err, ErrReportDisabled) {
+	if _, err := renderReport(context.Background(), storage.NewMemory(), fakeRenderer{}, testScrubber(t), "today"); !errors.Is(err, ErrReportDisabled) {
 		t.Fatalf("disabled err = %v", err)
 	}
 }

@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { ToastProvider } from "@/components/Toast";
 import { ServicesPage } from "./ServicesPage";
-import { api, getSsoSession, type ServiceInfo } from "@/lib/api";
+import { api, ApiError, getSsoSession, type ServiceInfo } from "@/lib/api";
 
 // The Services table row has a per-row eye that opens a PEEK slide-out (rows
 // never navigate, and the service NAME is not a link). The peek fetches the
@@ -27,6 +27,7 @@ vi.mock("@/lib/api", async (importActual) => {
       listServices: vi.fn(),
       listServicesIndex: vi.fn(),
       getServiceDetail: vi.fn(),
+      getServiceIntel: vi.fn(),
       listBaselines: vi
         .fn()
         .mockRejectedValue(new actual.ApiError(403, "community")),
@@ -105,13 +106,16 @@ describe("ServicesPage row actions", () => {
       grace_seconds_remaining: 0,
       patterns: [],
       incidents: {
-        window_days: 30,
+        count_window: "7d",
         count: 0,
         severities: {},
         recent: [],
       },
       counts: { patterns: 3, incidents: 1 },
     });
+    vi.mocked(api.getServiceIntel).mockRejectedValue(
+      new ApiError(403, "community"),
+    );
   });
 
   it("opens a peek from the per-row eye without navigating", async () => {
@@ -121,10 +125,34 @@ describe("ServicesPage row actions", () => {
     // The peek opens in place — no navigation happens.
     expect(screen.getByTestId("path").textContent).toBe("/agent/services");
     expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(await screen.findByText("Incidents (last 7d)")).toBeTruthy();
     // Footer button links to the full service detail page.
     expect(
       screen.getByRole("link", { name: /Open full page/ }),
     ).toBeTruthy();
+  });
+
+  it("shows metric and trace counts from the shared intel probe", async () => {
+    vi.mocked(api.getServiceIntel).mockResolvedValue({
+      service: "checkout",
+      metrics: [{ signal: "requests" } as never],
+      traces: [{ signal: "GET /checkout" } as never, { signal: "POST /checkout" } as never],
+    });
+    renderPage();
+    fireEvent.click(await screen.findByLabelText("View service checkout"));
+    const peek = within(screen.getByRole("dialog"));
+    expect((await peek.findByText("Metrics")).parentElement?.textContent).toContain("1");
+    expect(peek.getByText("Traces").parentElement?.textContent).toContain("2");
+  });
+
+  it.each([403, 404])("omits intel fields when the endpoint returns %s", async (status) => {
+    vi.mocked(api.getServiceIntel).mockRejectedValue(new ApiError(status, "locked"));
+    renderPage();
+    fireEvent.click(await screen.findByLabelText("View service checkout"));
+    await waitFor(() => expect(api.getServiceIntel).toHaveBeenCalled());
+    const peek = within(screen.getByRole("dialog"));
+    expect(peek.queryByText("Metrics")).toBeNull();
+    expect(peek.queryByText("Traces")).toBeNull();
   });
 
   it("navigates to the detail page from the peek footer button", async () => {
@@ -173,7 +201,7 @@ describe("ServicesPage Active/Ignored scope", () => {
       in_grace: false,
       grace_seconds_remaining: 0,
       patterns: [],
-      incidents: { window_days: 30, count: 0, severities: {}, recent: [] },
+      incidents: { count_window: "7d", count: 0, severities: {}, recent: [] },
       counts: { patterns: 0, incidents: 0 },
     });
     vi.mocked(api.listBaselines).mockResolvedValue({
@@ -454,7 +482,7 @@ describe("ServicesPage — server-side paging", () => {
       in_grace: false,
       grace_seconds_remaining: 0,
       patterns: [],
-      incidents: { window_days: 30, count: 0, severities: {}, recent: [] },
+      incidents: { count_window: "7d", count: 0, severities: {}, recent: [] },
       counts: { patterns: 0, incidents: 0 },
     });
   });

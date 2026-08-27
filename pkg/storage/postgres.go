@@ -826,6 +826,61 @@ func (p *postgresProvider) CountIncidentsByStatusSince(since time.Time) (Inciden
 	return AssembleStatusCounts(total, ai), nil
 }
 
+func (p *postgresProvider) CountIncidentsByServiceSince(orgID, service string, since time.Time) (int, map[string]int, error) {
+	const q = `
+		SELECT COALESCE(severity, ''), COUNT(*)
+		FROM (
+			SELECT COALESCE(
+				jsonb_path_query_first(content, '$.keyvalue() ? (@.key like_regex "^(Severity|severity|level|priority)$" flag "i").value') #>> '{}',
+				jsonb_path_query_first(content, '$.keyvalue() ? (@.key like_regex "^(labels|commonLabels)$" flag "i").value.keyvalue() ? (@.key like_regex "^(Severity|severity|level|priority)$" flag "i").value') #>> '{}',
+				jsonb_path_query_first(content, '$.keyvalue() ? (@.key like_regex "^Trigger$" flag "i").value.keyvalue() ? (@.key like_regex "^Dimensions$" flag "i").value[*] ? (@.keyvalue() ? (@.key like_regex "^Name$" flag "i").value like_regex "^(Severity|severity|level|priority)$" flag "i").keyvalue() ? (@.key like_regex "^Value$" flag "i").value') #>> '{}'
+			) AS severity
+			FROM vs_incidents
+			WHERE org_id = $1 AND service = $2 AND created_at >= $3
+		) scoped
+		GROUP BY severity`
+	rows, err := p.db.Query(q, NormalizeOrgID(orgID), service, since.UTC())
+	if err != nil {
+		return 0, nil, fmt.Errorf("storage: count incidents by service since: %w", err)
+	}
+	defer rows.Close()
+	count := 0
+	severities := make(map[string]int)
+	for rows.Next() {
+		var severity string
+		var n int
+		if err := rows.Scan(&severity, &n); err != nil {
+			return 0, nil, fmt.Errorf("storage: scan service severity count: %w", err)
+		}
+		severities[severity] += n
+		count += n
+	}
+	if err := rows.Err(); err != nil {
+		return 0, nil, fmt.Errorf("storage: count incidents by service since rows: %w", err)
+	}
+	return count, severities, nil
+}
+
+func (p *postgresProvider) ListIncidentsByServiceSince(orgID, service string, since time.Time, limit int) ([]*IncidentRecord, error) {
+	if limit <= 0 {
+		limit = DefaultIncidentPageSize
+	}
+	rows, err := p.db.Query(`
+		SELECT `+incidentColumns+` FROM vs_incidents
+		WHERE org_id = $1 AND service = $2 AND created_at >= $3
+		ORDER BY created_at DESC
+		LIMIT $4`, NormalizeOrgID(orgID), service, since.UTC(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list incidents by service since: %w", err)
+	}
+	defer rows.Close()
+	recs, err := scanIncidentRows(rows)
+	if err != nil {
+		return nil, err
+	}
+	return recs, nil
+}
+
 // ListIncidentsPage implements the optional storage.IncidentPager
 // capability: one bounded, newest-first page pushed entirely into SQL
 // (ORDER BY created_at DESC LIMIT/OFFSET). When origin is one of the known

@@ -89,6 +89,71 @@ func TestServiceIncidentSummary_MatchesIncidentsList(t *testing.T) {
 	}
 }
 
+func TestServiceIncidentSummary_ServiceCapabilityAvoidsWholeTableStarvation(t *testing.T) {
+	loadServiceDetailConfig(t, "30m")
+	store := storage.NewMemory()
+	now := time.Now().UTC()
+	if err := store.SaveIncident(&storage.IncidentRecord{
+		ID: "target", OrgID: "org-a", Service: "checkout", Title: "target",
+		CreatedAt: now.Add(-2 * time.Hour), Content: map[string]any{"severity": "high"},
+	}); err != nil {
+		t.Fatalf("SaveIncident(target): %v", err)
+	}
+	for i := 0; i < serviceIncidentScanLimit+1; i++ {
+		if err := store.SaveIncident(&storage.IncidentRecord{
+			ID: "unrelated-" + string(rune(i)), OrgID: "org-a", Service: "billing",
+			CreatedAt: now.Add(-time.Hour).Add(time.Duration(i) * time.Millisecond),
+		}); err != nil {
+			t.Fatalf("SaveIncident(unrelated %d): %v", i, err)
+		}
+	}
+	services.SetStorage(store)
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	summary := (&AgentController{}).serviceIncidentSummary("checkout", "org-a")
+	if got, _ := summary["count"].(int); got != 1 {
+		t.Fatalf("count = %d, want 1 beyond newest-%d unrelated rows", got, serviceIncidentScanLimit)
+	}
+	recent, _ := summary["recent"].([]fiber.Map)
+	if len(recent) != 1 || recent[0]["id"] != "target" {
+		t.Fatalf("recent = %#v, want target incident", recent)
+	}
+}
+
+func TestServiceIncidentSummary_UsesConfiguredCountWindow(t *testing.T) {
+	store := storage.NewMemory()
+	now := time.Now().UTC()
+	for _, rec := range []*storage.IncidentRecord{
+		{ID: "recent", Service: "checkout", CreatedAt: now.Add(-time.Hour)},
+		{ID: "older", Service: "checkout", CreatedAt: now.Add(-48 * time.Hour)},
+	} {
+		if err := store.SaveIncident(rec); err != nil {
+			t.Fatalf("SaveIncident(%s): %v", rec.ID, err)
+		}
+	}
+	services.SetStorage(store)
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	for _, tc := range []struct {
+		window string
+		want   int
+	}{
+		{window: agent.CountWindow24h, want: 1},
+		{window: agent.CountWindowAll, want: 2},
+	} {
+		if err := agent.SaveCountSettings(store, agent.CountSettings{Window: tc.window}); err != nil {
+			t.Fatalf("SaveCountSettings(%s): %v", tc.window, err)
+		}
+		summary := (&AgentController{}).serviceIncidentSummary("checkout", storage.DefaultOrgID)
+		if got := summary["count_window"]; got != tc.window {
+			t.Errorf("window %s: count_window = %v", tc.window, got)
+		}
+		if got, _ := summary["count"].(int); got != tc.want {
+			t.Errorf("window %s: count = %d, want %d", tc.window, got, tc.want)
+		}
+	}
+}
+
 // TestServiceIncidentSummary_SeverityHistogramReadsNestedShapes guards the
 // second half of the same bug: the histogram read only the top-level severity
 // key, so Alertmanager and CloudWatch incidents landed in "unknown". The
