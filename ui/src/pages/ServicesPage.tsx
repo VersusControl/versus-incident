@@ -29,6 +29,7 @@ import { PeekPanel, PeekField } from "@/components/PeekPanel";
 import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
 import { useServiceIntelQuery } from "@/lib/useServiceIntelQuery";
+import { countWindowLabel } from "@/lib/countWindow";
 import {
   BulkActionBar,
   RowSelectCheckbox,
@@ -738,7 +739,9 @@ export function ServicesPage() {
                   </span>
                 )}
               </PeekField>
-              <PeekField label="Incidents">
+              <PeekField
+                label={`Incidents (${countWindowLabel(peekDetail.data?.incidents.count_window, "short")})`}
+              >
                 {peekDetail.isLoading ? (
                   <span className="text-ink-400">…</span>
                 ) : (

@@ -75,7 +75,7 @@ describe("ServiceDetailPage intel cards", () => {
       in_grace: false,
       grace_seconds_remaining: 0,
       patterns: [],
-      incidents: { window_days: 30, count: 0, severities: {}, recent: [] },
+      incidents: { count_window: "7d", count: 0, severities: {}, recent: [] },
       counts: { patterns: 0, incidents: 0 },
     });
     vi.mocked(api.getLearnExclusions).mockResolvedValue({ services: [], metrics: [], patterns: [] });
@@ -114,7 +114,7 @@ describe("ServiceDetailPage intel cards", () => {
       grace_seconds_remaining: 0,
       patterns: [],
       incidents: {
-        window_days: 30,
+        count_window: "30d",
         count: 12,
         severities: { low: 3, critical: 2, high: 4, unknown: 1, medium: 2 },
         recent: Array.from({ length: 10 }, (_, index) => ({
@@ -129,11 +129,29 @@ describe("ServiceDetailPage intel cards", () => {
     vi.mocked(api.getServiceIntel).mockResolvedValue({ service: "checkout", metrics: [], traces: [] });
     renderPage();
     expect(await screen.findByText("showing latest 10")).toBeTruthy();
+    expect(screen.getByText("last 30d")).toBeTruthy();
     const labels = ["critical 2", "high 4", "medium 2", "low 3", "unknown 1"];
     for (let index = 0; index < labels.length - 1; index++) {
       const position = screen.getByText(labels[index]).compareDocumentPosition(screen.getByText(labels[index + 1]));
       expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     }
+  });
+
+  it("labels an unbounded service incident count as all time", async () => {
+    vi.mocked(api.getServiceDetail).mockResolvedValue({
+      service: "checkout",
+      first_seen: new Date().toISOString(),
+      in_grace: false,
+      grace_seconds_remaining: 0,
+      patterns: [],
+      incidents: { count_window: "all", count: 0, severities: {}, recent: [] },
+      counts: { patterns: 0, incidents: 0 },
+    });
+    vi.mocked(api.getServiceIntel).mockResolvedValue({ service: "checkout", metrics: [], traces: [] });
+    renderPage();
+
+    expect(await screen.findByText("all time")).toBeTruthy();
+    expect(screen.getByText("Window: All time.")).toBeTruthy();
   });
 
   it("renders an independent error state in each card", async () => {

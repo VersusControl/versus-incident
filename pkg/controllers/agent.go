@@ -567,10 +567,6 @@ func (a *AgentController) listServices(c *fiber.Ctx) error {
 // large histories.
 const serviceIncidentScanLimit = 500
 
-// serviceIncidentWindowDays is the rolling window the per-service incident
-// summary covers.
-const serviceIncidentWindowDays = 30
-
 // serviceRecentIncidentMax caps the recent-incident list in the detail
 // response.
 const serviceRecentIncidentMax = 10
@@ -698,17 +694,18 @@ func graceStatus(firstSeen time.Time, grace time.Duration) (bool, int) {
 // newest-first incident list. It prefers a service-scoped storage query and
 // retains the bounded whole-table scan for backends without that capability.
 func (a *AgentController) serviceIncidentSummary(name, org string) fiber.Map {
-	summary := fiber.Map{
-		"window_days": serviceIncidentWindowDays,
-		"count":       0,
-		"severities":  fiber.Map{},
-		"recent":      []fiber.Map{},
-	}
 	store := services.Storage()
+	settings := agent.LoadCountSettings(store)
+	summary := fiber.Map{
+		"count_window": settings.Window,
+		"count":        0,
+		"severities":   fiber.Map{},
+		"recent":       []fiber.Map{},
+	}
 	if store == nil {
 		return summary
 	}
-	cutoff := time.Now().UTC().Add(-serviceIncidentWindowDays * 24 * time.Hour)
+	cutoff := settings.Since(time.Now().UTC())
 	if counter, ok := store.(storage.IncidentServiceCounter); ok {
 		count, rawSeverities, err := counter.CountIncidentsByServiceSince(org, name, cutoff)
 		if err != nil {

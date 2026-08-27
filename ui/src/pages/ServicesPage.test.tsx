@@ -106,7 +106,7 @@ describe("ServicesPage row actions", () => {
       grace_seconds_remaining: 0,
       patterns: [],
       incidents: {
-        window_days: 30,
+        count_window: "7d",
         count: 0,
         severities: {},
         recent: [],
@@ -125,6 +125,7 @@ describe("ServicesPage row actions", () => {
     // The peek opens in place — no navigation happens.
     expect(screen.getByTestId("path").textContent).toBe("/agent/services");
     expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(await screen.findByText("Incidents (last 7d)")).toBeTruthy();
     // Footer button links to the full service detail page.
     expect(
       screen.getByRole("link", { name: /Open full page/ }),
@@ -200,7 +201,7 @@ describe("ServicesPage Active/Ignored scope", () => {
       in_grace: false,
       grace_seconds_remaining: 0,
       patterns: [],
-      incidents: { window_days: 30, count: 0, severities: {}, recent: [] },
+      incidents: { count_window: "7d", count: 0, severities: {}, recent: [] },
       counts: { patterns: 0, incidents: 0 },
     });
     vi.mocked(api.listBaselines).mockResolvedValue({
@@ -481,7 +482,7 @@ describe("ServicesPage — server-side paging", () => {
       in_grace: false,
       grace_seconds_remaining: 0,
       patterns: [],
-      incidents: { window_days: 30, count: 0, severities: {}, recent: [] },
+      incidents: { count_window: "7d", count: 0, severities: {}, recent: [] },
       counts: { patterns: 0, incidents: 0 },
     });
   });

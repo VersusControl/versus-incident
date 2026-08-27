@@ -23,6 +23,7 @@ import {
 } from "@/lib/learnExclude";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { useServiceIntelQuery } from "@/lib/useServiceIntelQuery";
+import { countWindowLabel } from "@/lib/countWindow";
 import { useToast } from "@/components/toastContext";
 import { TopBar } from "@/components/TopBar";
 import { Pill, VerdictPill } from "@/components/Pill";
@@ -561,7 +562,7 @@ export function ServiceDetailPage() {
                 <h2 className="text-sm font-semibold text-ink-50">Incidents</h2>
                 <Pill className="ml-1">{data.incidents.count}</Pill>
                 <span className="text-2xs text-ink-400">
-                  last {data.incidents.window_days} days
+                  {countWindowLabel(data.incidents.count_window, "short")}
                 </span>
                 {data.incidents.count > data.incidents.recent.length && (
                   <span className="text-2xs text-ink-400">
@@ -599,7 +600,7 @@ export function ServiceDetailPage() {
                       <td colSpan={3}>
                         <EmptyState
                           title="No recent incidents for this service."
-                          hint={`Window: last ${data.incidents.window_days} days.`}
+                          hint={`Window: ${countWindowLabel(data.incidents.count_window, "long")}.`}
                         />
                       </td>
                     </tr>

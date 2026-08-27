@@ -489,7 +489,7 @@ export interface ServiceIncidentRecent {
 }
 
 export interface ServiceIncidentSummary {
-  window_days: number;
+  count_window: CountWindow;
   count: number;
   severities: Record<string, number>;
   recent: ServiceIncidentRecent[];
