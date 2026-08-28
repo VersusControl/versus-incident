@@ -27,7 +27,7 @@ type UploadFile struct {
 // immediately without a server restart.
 //
 // The Manager lives in pkg/runbook (the write path), NOT in
-// pkg/agent/ai/analyze/tools — the tool only ever sees the read-only
+// pkg/agent/ai/tools/common — the tool only ever sees the read-only
 // vectorindex.Index returned by Index(), keeping the analyze read-only
 // import-graph guard green.
 type Manager struct {

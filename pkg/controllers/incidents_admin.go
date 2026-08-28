@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,13 @@ type IncidentAdminController struct{}
 // the storage provider is read lazily via services.Storage().
 func NewIncidentAdminController() *IncidentAdminController {
 	return &IncidentAdminController{}
+}
+
+const internalServerErrorMessage = "internal server error"
+
+func incidentStorageError(c *fiber.Ctx, operation string, err error) error {
+	log.Printf("incident admin storage failure: operation=%q error=%v", operation, err)
+	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": internalServerErrorMessage})
 }
 
 // Register attaches the admin endpoints under /api/admin/incidents.
@@ -85,13 +93,13 @@ func (i *IncidentAdminController) list(c *fiber.Ctx) error {
 	if pager, ok := store.(storage.IncidentPager); ok {
 		counts, err := windowedStatusCounts(store, countWindow)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			return incidentStorageError(c, "list incident counts", err)
 		}
 		size := parsePageSize(c.Query("page_size"))
 		offset, page := pageOffset(c.Query("page"), c.Query("offset"), size)
 		recs, err := pager.ListIncidentsPage(origin, offset, size)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			return incidentStorageError(c, "list incidents page", err)
 		}
 		return c.JSON(pagedIncidentResponse(recs, counts, origin, offset, size, page, countWindow.window))
 	}
@@ -100,7 +108,7 @@ func (i *IncidentAdminController) list(c *fiber.Ctx) error {
 	// unbounded — only reached by a backend that has no bounded read.
 	recs, err := store.ListIncidents(0)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "list incidents", err)
 	}
 	return c.JSON(incidentListResponse(recs, origin, c.Query("page"), c.Query("page_size"), parseLimit(c.Query("limit")), countWindow))
 }
@@ -222,13 +230,13 @@ func (i *IncidentAdminController) search(c *fiber.Ctx) error {
 	if sp, ok := store.(storage.IncidentSearchPager); ok {
 		counts, err := sp.CountIncidentsMatchingByStatus(query)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			return incidentStorageError(c, "count incident search results", err)
 		}
 		size := parsePageSize(c.Query("page_size"))
 		offset, page := pageOffset(c.Query("page"), c.Query("offset"), size)
 		recs, err := sp.SearchIncidentsPage(query, origin, offset, size)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			return incidentStorageError(c, "search incidents page", err)
 		}
 		return c.JSON(pagedIncidentResponse(recs, counts, origin, offset, size, page, agent.CountWindowAll))
 	}
@@ -237,7 +245,7 @@ func (i *IncidentAdminController) search(c *fiber.Ctx) error {
 	// over that bounded page.
 	recs, err := searcher.SearchIncidents(query, storage.DefaultIncidentPageSize)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "search incidents", err)
 	}
 	// Search is an explicit unbounded lookup — a row found by id must be
 	// counted even when it predates the count window, and the pager search
@@ -290,7 +298,7 @@ func (i *IncidentAdminController) counts(c *fiber.Ctx) error {
 	}
 	sc, err := windowedStatusCounts(store, countWindow)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "count incidents", err)
 	}
 	return c.JSON(countsResponse(sc, countWindow.window))
 }
@@ -305,7 +313,7 @@ func (i *IncidentAdminController) get(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 	}
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "get incident", err)
 	}
 	return c.JSON(rec)
 }
@@ -670,14 +678,26 @@ func (i *IncidentAdminController) resolve(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 	}
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "get incident for resolve", err)
+	}
+	if checker, ok := store.(storage.IncidentMutationChecker); ok {
+		if err := checker.CheckIncidentMutable(rec.ID); errors.Is(err, storage.ErrNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
+		} else if errors.Is(err, storage.ErrReadOnlyIncident) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+		} else if err != nil {
+			return incidentStorageError(c, "check incident mutable for resolve", err)
+		}
 	}
 	if !rec.Resolved {
 		now := time.Now().UTC()
 		rec.Resolved = true
 		rec.ResolvedAt = &now
 		if err := store.SaveIncident(rec); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			if errors.Is(err, storage.ErrReadOnlyIncident) {
+				return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+			}
+			return incidentStorageError(c, "save resolved incident", err)
 		}
 	}
 	return c.JSON(fiber.Map{
@@ -707,7 +727,7 @@ func (i *IncidentAdminController) putIntakeSettings(c *fiber.Ctx) error {
 		if errors.Is(err, services.ErrIntakeNoStorage) {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "storage not configured"})
 		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "save intake settings", err)
 	}
 	// Return the effective settings after the write.
 	return c.JSON(services.LoadIntakeSettings(services.Storage()))
@@ -741,7 +761,7 @@ func (i *IncidentAdminController) analyze(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 	}
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "get incident for analysis", err)
 	}
 
 	var body analyzeRequest
@@ -755,7 +775,7 @@ func (i *IncidentAdminController) analyze(c *fiber.Ctx) error {
 
 	analysis, runErr, saveErr := runAndPersistAnalysis(ctx, rec, body.RequestedBy)
 	if saveErr != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("save: %v", saveErr)})
+		return incidentStorageError(c, "save analysis", saveErr)
 	}
 
 	status := fiber.StatusOK
@@ -858,7 +878,7 @@ func (i *IncidentAdminController) analyzeStream(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 	}
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "get incident for analysis stream", err)
 	}
 
 	var body analyzeRequest
@@ -882,8 +902,9 @@ func (i *IncidentAdminController) analyzeStream(c *fiber.Ctx) error {
 		}
 		switch {
 		case saveErr != nil:
+			log.Printf("incident admin storage failure: operation=%q error=%v", "save streamed analysis", saveErr)
 			term.Kind = core.AnalyzeEventRunFailed
-			term.Error = "save: " + saveErr.Error()
+			term.Error = internalServerErrorMessage
 		case runErr != nil:
 			term.Kind = core.AnalyzeEventRunFailed
 			term.Error = runErr.Error()
@@ -932,7 +953,7 @@ func (i *IncidentAdminController) listAnalyses(c *fiber.Ctx) error {
 	}
 	recs, err := store.ListAnalysesByIncident(c.Params("id"), limit)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "list incident analyses", err)
 	}
 	return c.JSON(fiber.Map{"analyses": recs})
 }
@@ -949,13 +970,13 @@ func (i *IncidentAdminController) listAllAnalyses(c *fiber.Ctx) error {
 	if pager, ok := store.(storage.AnalysisPager); ok {
 		total, err := pager.CountAnalyses()
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			return incidentStorageError(c, "count analyses", err)
 		}
 		size := parseAnalysisPageSize(c.Query("page_size"))
 		offset, page := pageOffset(c.Query("page"), c.Query("offset"), size)
 		recs, err := pager.ListAnalysesPage(offset, size)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			return incidentStorageError(c, "list analyses page", err)
 		}
 		return c.JSON(pagedAnalysisResponse(recs, total, offset, size, page))
 	}
@@ -968,7 +989,7 @@ func (i *IncidentAdminController) listAllAnalyses(c *fiber.Ctx) error {
 	}
 	recs, err := store.ListAnalyses(limit)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "list analyses", err)
 	}
 	return c.JSON(fiber.Map{"analyses": recs, "total": len(recs)})
 }
@@ -983,7 +1004,7 @@ func (i *IncidentAdminController) getAnalysis(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 	}
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "get analysis", err)
 	}
 	return c.JSON(rec)
 }
@@ -997,7 +1018,10 @@ func (i *IncidentAdminController) deleteAnalysis(c *fiber.Ctx) error {
 		if errors.Is(err, storage.ErrNotFound) {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		if errors.Is(err, storage.ErrReadOnlyAnalysis) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+		}
+		return incidentStorageError(c, "delete analysis", err)
 	}
 	return c.SendStatus(fiber.StatusNoContent)
 }

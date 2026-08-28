@@ -108,6 +108,15 @@ type CatalogPager interface {
 	ListServicesPage(opts CatalogPageOptions) (services []ServiceRow, total int, err error)
 }
 
+// CatalogEntityLookup is the OPTIONAL exact-read capability for consumers
+// that need one logical catalog entity without materializing Snapshot. The
+// returned entity follows the same organization precedence and tombstone
+// rules as Snapshot; a missing or tombstoned entity returns nil, nil.
+type CatalogEntityLookup interface {
+	LookupPattern(id string) (*Pattern, error)
+	LookupService(name string) (*ServiceInfo, error)
+}
+
 // CatalogEditKind discriminates which operator mutation a CatalogEdit carries.
 // The set mirrors the Catalog curation method set one-for-one.
 type CatalogEditKind string

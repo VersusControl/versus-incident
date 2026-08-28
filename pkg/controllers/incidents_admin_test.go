@@ -2,8 +2,10 @@ package controllers
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,6 +73,126 @@ type searcherStorage struct {
 // requests exercise the materialized fallback path.
 type providerOnly struct {
 	storage.Provider
+}
+
+type resolveStorage struct {
+	storage.Provider
+	checkErr error
+	saveErr  error
+	saves    int
+}
+
+type analysisDeleteStorage struct {
+	storage.Provider
+	err error
+}
+
+func (s *analysisDeleteStorage) DeleteAnalysis(string) error {
+	return s.err
+}
+
+func (s *resolveStorage) GetIncident(string) (*storage.IncidentRecord, error) {
+	return &storage.IncidentRecord{ID: "inc-1"}, nil
+}
+
+func (s *resolveStorage) CheckIncidentMutable(string) error {
+	return s.checkErr
+}
+
+func (s *resolveStorage) SaveIncident(*storage.IncidentRecord) error {
+	s.saves++
+	return s.saveErr
+}
+
+func TestResolve_CheckerNotFoundReturns404(t *testing.T) {
+	store := &resolveStorage{Provider: storage.NewMemory(), checkErr: storage.ErrNotFound}
+	services.SetStorage(store)
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	app := fiber.New()
+	app.Post("/incidents/:id/resolve", NewIncidentAdminController().resolve)
+	resp, err := app.Test(httptest.NewRequest("POST", "/incidents/inc-1/resolve", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusNotFound)
+	}
+	if store.saves != 0 {
+		t.Fatalf("save calls = %d, want 0", store.saves)
+	}
+}
+
+func TestResolve_BackendErrorIsNotDisclosed(t *testing.T) {
+	secret := "postgres failed at /private/db with password=hunter2"
+	store := &resolveStorage{Provider: storage.NewMemory(), checkErr: errors.New(secret)}
+	services.SetStorage(store)
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	app := fiber.New()
+	app.Post("/incidents/:id/resolve", NewIncidentAdminController().resolve)
+	resp, err := app.Test(httptest.NewRequest("POST", "/incidents/inc-1/resolve", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	if resp.StatusCode != fiber.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusInternalServerError)
+	}
+	if strings.Contains(string(body), secret) || !strings.Contains(string(body), internalServerErrorMessage) {
+		t.Fatalf("body = %q, want generic error without backend detail", body)
+	}
+}
+
+func TestDeleteAnalysis_StorageErrorResponses(t *testing.T) {
+	backendDetail := "postgres failed at /private/db with password=hunter2"
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantBody   string
+		hidden     string
+	}{
+		{"read-only archive", storage.ErrReadOnlyAnalysis, fiber.StatusConflict, storage.ErrReadOnlyAnalysis.Error(), ""},
+		{"not found", storage.ErrNotFound, fiber.StatusNotFound, "not found", ""},
+		{"backend error", errors.New(backendDetail), fiber.StatusInternalServerError, internalServerErrorMessage, backendDetail},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			services.SetStorage(&analysisDeleteStorage{Provider: storage.NewMemory(), err: tt.err})
+			t.Cleanup(func() { services.SetStorage(nil) })
+
+			app := fiber.New()
+			app.Delete("/analyses/:analysis_id", NewIncidentAdminController().deleteAnalysis)
+			resp, err := app.Test(httptest.NewRequest("DELETE", "/analyses/a-1", nil))
+			if err != nil {
+				t.Fatalf("app.Test: %v", err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+
+			if resp.StatusCode != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
+			}
+			if !strings.Contains(string(body), tt.wantBody) {
+				t.Fatalf("body = %q, want it to contain %q", body, tt.wantBody)
+			}
+			if tt.hidden != "" && strings.Contains(string(body), tt.hidden) {
+				t.Fatalf("body disclosed backend detail: %q", body)
+			}
+		})
+	}
 }
 
 func (s searcherStorage) SearchIncidents(query string, limit int) ([]*storage.IncidentRecord, error) {

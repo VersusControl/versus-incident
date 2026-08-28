@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	analyzetools "github.com/VersusControl/versus-incident/pkg/agent/ai/analyze/tools"
+	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
+	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/runbook/vectorindex"
@@ -13,7 +14,7 @@ import (
 )
 
 // signalReaderAdapter wraps a set of core.SignalSource instances so they
-// satisfy analyzetools.SignalReader without leaking pkg/agent (or the
+// satisfy commontools.SignalReader without leaking pkg/agent (or the
 // concrete source types) into the tools package. The wrapped sources are
 // an independent set built solely for the read-only get_related_logs
 // tool, so calling Pull here never advances the worker's cursors.
@@ -22,7 +23,7 @@ type signalReaderAdapter struct {
 	order   []string
 }
 
-func newSignalReaderAdapter(sources []core.SignalSource) analyzetools.SignalReader {
+func newSignalReaderAdapter(sources []core.SignalSource) commontools.SignalReader {
 	if len(sources) == 0 {
 		return nil
 	}
@@ -65,19 +66,19 @@ func (a *signalReaderAdapter) Pull(ctx context.Context, source string, since tim
 }
 
 // catalogAdapter wraps *Catalog so it satisfies the
-// analyzetools.PatternCatalog interface without leaking the agent
+// versustools.PatternCatalog interface without leaking the agent
 // package into the tools package. This keeps the import graph
 // one-way: pkg/agent -> tools.
 type catalogAdapter struct{ c *Catalog }
 
-func newCatalogAdapter(c *Catalog) analyzetools.PatternCatalog {
+func newCatalogAdapter(c *Catalog) versustools.PatternCatalog {
 	if c == nil {
 		return nil
 	}
 	return &catalogAdapter{c: c}
 }
 
-func (a *catalogAdapter) Get(id string) *analyzetools.PatternView {
+func (a *catalogAdapter) Get(id string) *versustools.PatternView {
 	if a == nil || a.c == nil {
 		return nil
 	}
@@ -89,12 +90,12 @@ func (a *catalogAdapter) Get(id string) *analyzetools.PatternView {
 	return &v
 }
 
-func (a *catalogAdapter) All() []*analyzetools.PatternView {
+func (a *catalogAdapter) All() []*versustools.PatternView {
 	if a == nil || a.c == nil {
 		return nil
 	}
 	all := a.c.All()
-	out := make([]*analyzetools.PatternView, 0, len(all))
+	out := make([]*versustools.PatternView, 0, len(all))
 	for _, p := range all {
 		v := toView(p)
 		out = append(out, &v)
@@ -102,21 +103,21 @@ func (a *catalogAdapter) All() []*analyzetools.PatternView {
 	return out
 }
 
-func (a *catalogAdapter) AllServices() map[string]analyzetools.ServiceInfo {
+func (a *catalogAdapter) AllServices() map[string]versustools.ServiceInfo {
 	if a == nil || a.c == nil {
 		return nil
 	}
 	src := a.c.AllServices()
-	out := make(map[string]analyzetools.ServiceInfo, len(src))
+	out := make(map[string]versustools.ServiceInfo, len(src))
 	for k, v := range src {
-		out[k] = analyzetools.ServiceInfo{FirstSeen: v.FirstSeen}
+		out[k] = versustools.ServiceInfo{FirstSeen: v.FirstSeen}
 	}
 	return out
 }
 
-func toView(p *Pattern) analyzetools.PatternView {
+func toView(p *Pattern) versustools.PatternView {
 	tags := append([]string(nil), p.Tags...)
-	return analyzetools.PatternView{
+	return versustools.PatternView{
 		ID:        p.ID,
 		Template:  p.Template,
 		Source:    p.Source,
@@ -135,8 +136,8 @@ func toView(p *Pattern) analyzetools.PatternView {
 // buildDependencyGraph converts the operator-authored config service
 // graph into the tools-package DependencyGraph used by the
 // describe_dependencies tool. A nil/empty input yields a nil graph so
-// the tool is omitted by analyzetools.Default.
-func buildDependencyGraph(nodes []config.ServiceDependency) *analyzetools.DependencyGraph {
+// the tool is omitted by buildAnalyzeTools.
+func buildDependencyGraph(nodes []config.ServiceDependency) *commontools.DependencyGraph {
 	if len(nodes) == 0 {
 		return nil
 	}
@@ -150,17 +151,17 @@ func buildDependencyGraph(nodes []config.ServiceDependency) *analyzetools.Depend
 	if len(dependsOn) == 0 {
 		return nil
 	}
-	return analyzetools.NewDependencyGraph(dependsOn)
+	return commontools.NewDependencyGraph(dependsOn)
 }
 
 // runbookSearcherAdapter wraps a read-only vector index
-// (vectorindex.Index) so it satisfies analyzetools.RunbookSearcher
+// (vectorindex.Index) so it satisfies commontools.RunbookSearcher
 // without leaking pkg/runbook (the ingestion/write path) into the tools
 // package. This keeps the import graph one-way (pkg/agent -> tools) and
 // the analyze read-only guard green: the tool only ever sees a search
 // seam, never the write path. A nil index yields a nil searcher so
-// analyzetools.Default omits the find_runbook tool.
-func newRunbookSearcherAdapter(idx vectorindex.Index) analyzetools.RunbookSearcher {
+// buildAnalyzeTools omits the find_runbook tool.
+func newRunbookSearcherAdapter(idx vectorindex.Index) commontools.RunbookSearcher {
 	if idx == nil {
 		return nil
 	}
@@ -169,18 +170,18 @@ func newRunbookSearcherAdapter(idx vectorindex.Index) analyzetools.RunbookSearch
 
 type runbookSearcherAdapter struct{ idx vectorindex.Index }
 
-// Search implements analyzetools.RunbookSearcher by delegating to the
+// Search implements commontools.RunbookSearcher by delegating to the
 // vector index and converting its results into the tools-package match
 // shape. The context is accepted for interface symmetry; the in-memory
 // index does not block on it.
-func (a *runbookSearcherAdapter) Search(_ context.Context, query []float32, service string, limit int) ([]analyzetools.RunbookMatch, error) {
+func (a *runbookSearcherAdapter) Search(_ context.Context, query []float32, service string, limit int) ([]commontools.RunbookMatch, error) {
 	if a == nil || a.idx == nil {
 		return nil, nil
 	}
 	hits := a.idx.Search(query, service, limit)
-	out := make([]analyzetools.RunbookMatch, 0, len(hits))
+	out := make([]commontools.RunbookMatch, 0, len(hits))
 	for _, h := range hits {
-		out = append(out, analyzetools.RunbookMatch{
+		out = append(out, commontools.RunbookMatch{
 			ID:      h.ID,
 			Title:   h.Title,
 			Service: h.Service,
@@ -196,11 +197,11 @@ func (a *runbookSearcherAdapter) Search(_ context.Context, query []float32, serv
 // tools-package GitRepo slice used by the recent_changes change feed.
 // Each repo's auth falls back to the global default (git.auth) when its
 // own auth fields are empty.
-func buildGitRepos(git config.RecentChangesGitConfig) []analyzetools.GitRepo {
+func buildGitRepos(git config.RecentChangesGitConfig) []commontools.GitRepo {
 	if len(git.Repos) == 0 {
 		return nil
 	}
-	out := make([]analyzetools.GitRepo, 0, len(git.Repos))
+	out := make([]commontools.GitRepo, 0, len(git.Repos))
 	for _, r := range git.Repos {
 		token := r.Auth.Token
 		if token == "" {
@@ -210,7 +211,7 @@ func buildGitRepos(git config.RecentChangesGitConfig) []analyzetools.GitRepo {
 		if sshKey == "" {
 			sshKey = git.Auth.SSHKeyPath
 		}
-		out = append(out, analyzetools.GitRepo{
+		out = append(out, commontools.GitRepo{
 			URL:        r.URL,
 			Branch:     r.Branch,
 			Service:    r.Service,
@@ -222,7 +223,7 @@ func buildGitRepos(git config.RecentChangesGitConfig) []analyzetools.GitRepo {
 }
 
 // metricReaderAdapter wraps a *signalsources.PrometheusQuerier so it
-// satisfies analyzetools.MetricReader without leaking pkg/signalsources
+// satisfies commontools.MetricReader without leaking pkg/signalsources
 // into the tools package. The querier is built from the tools.yaml
 // query_metrics config, independent of any detect-path prometheus
 // SignalSource, so an on-demand analyze query never advances a worker
@@ -232,9 +233,9 @@ type metricReaderAdapter struct {
 }
 
 // newMetricReaderAdapter builds the query_metrics reader from config. A
-// blank address yields a nil reader so analyzetools.Default omits the
+// blank address yields a nil reader so buildAnalyzeTools omits the
 // tool (community installs without a metric backend are unaffected).
-func newMetricReaderAdapter(cfg config.QueryMetricsPrometheusConfig) analyzetools.MetricReader {
+func newMetricReaderAdapter(cfg config.QueryMetricsPrometheusConfig) commontools.MetricReader {
 	if cfg.Address == "" {
 		return nil
 	}
@@ -256,28 +257,26 @@ func newMetricReaderAdapter(cfg config.QueryMetricsPrometheusConfig) analyzetool
 // adapter:
 //
 //	q, _ := signalsources.NewPrometheusQuerier(addr, auth, insecure)
-//	tool := analyzetools.QueryMetrics{Reader: agent.NewMetricReader(q)}
+//	tool := commontools.QueryMetrics{Reader: agent.NewMetricReader(q)}
 //
 // A nil querier yields a nil reader so the caller can pass it straight to
-// analyzetools.Default (which omits the tool when the reader is nil).
-func NewMetricReader(q *signalsources.PrometheusQuerier) analyzetools.MetricReader {
+// buildAnalyzeTools (which omits the tool when the reader is nil).
+func NewMetricReader(q *signalsources.PrometheusQuerier) commontools.MetricReader {
 	if q == nil {
 		return nil
 	}
 	return &metricReaderAdapter{querier: q}
 }
 
-// QueryRange implements analyzetools.MetricReader by running a PromQL
+// QueryRange implements commontools.MetricReader by running a PromQL
 // range query over the last windowMinutes and converting the concrete
 // signalsources series into the tools-package shape.
-func (a *metricReaderAdapter) QueryRange(ctx context.Context, query string, windowMinutes int) ([]analyzetools.MetricSeries, error) {
+func (a *metricReaderAdapter) QueryRange(ctx context.Context, query string, start, end time.Time) ([]commontools.MetricSeries, error) {
 	if a == nil || a.querier == nil {
 		return nil, fmt.Errorf("metric reader not configured")
 	}
-	end := time.Now().UTC()
-	start := end.Add(-time.Duration(windowMinutes) * time.Minute)
 	// Pick a step that keeps the point count bounded (~120 points max).
-	step := time.Duration(windowMinutes) * time.Minute / 120
+	step := end.Sub(start) / 120
 	if step < time.Minute {
 		step = time.Minute
 	}
@@ -285,19 +284,19 @@ func (a *metricReaderAdapter) QueryRange(ctx context.Context, query string, wind
 	if err != nil {
 		return nil, err
 	}
-	out := make([]analyzetools.MetricSeries, 0, len(series))
+	out := make([]commontools.MetricSeries, 0, len(series))
 	for _, s := range series {
-		samples := make([]analyzetools.MetricSample, 0, len(s.Samples))
+		samples := make([]commontools.MetricSample, 0, len(s.Samples))
 		for _, sm := range s.Samples {
-			samples = append(samples, analyzetools.MetricSample{Timestamp: sm.Timestamp, Value: sm.Value})
+			samples = append(samples, commontools.MetricSample{Timestamp: sm.Timestamp, Value: sm.Value})
 		}
-		out = append(out, analyzetools.MetricSeries{Labels: s.Metric, Samples: samples})
+		out = append(out, commontools.MetricSeries{Labels: s.Metric, Samples: samples})
 	}
 	return out, nil
 }
 
 // traceReaderAdapter wraps a *signalsources.TempoQuerier so it satisfies
-// analyzetools.TraceReader without leaking pkg/signalsources into the
+// commontools.TraceReader without leaking pkg/signalsources into the
 // tools package. Built from the tools.yaml query_traces config,
 // independent of any detect-path traces SignalSource.
 type traceReaderAdapter struct {
@@ -305,9 +304,9 @@ type traceReaderAdapter struct {
 }
 
 // newTraceReaderAdapter builds the query_traces reader from config. A
-// blank address yields a nil reader so analyzetools.Default omits the
+// blank address yields a nil reader so buildAnalyzeTools omits the
 // tool.
-func newTraceReaderAdapter(cfg config.QueryTracesTempoConfig) analyzetools.TraceReader {
+func newTraceReaderAdapter(cfg config.QueryTracesTempoConfig) commontools.TraceReader {
 	if cfg.Address == "" {
 		return nil
 	}
@@ -328,36 +327,33 @@ func newTraceReaderAdapter(cfg config.QueryTracesTempoConfig) analyzetools.Trace
 // query_traces tool at its own backend client:
 //
 //	q, _ := signalsources.NewTempoQuerier(addr, auth, insecure)
-//	tool := analyzetools.QueryTraces{Reader: agent.NewTraceReader(q), Redactor: red}
+//	tool := commontools.QueryTraces{Reader: agent.NewTraceReader(q), Redactor: red}
 //
 // A nil querier yields a nil reader so the caller can pass it straight to
-// analyzetools.Default (which omits the tool when the reader is nil).
-func NewTraceReader(q *signalsources.TempoQuerier) analyzetools.TraceReader {
+// buildAnalyzeTools (which omits the tool when the reader is nil).
+func NewTraceReader(q *signalsources.TempoQuerier) commontools.TraceReader {
 	if q == nil {
 		return nil
 	}
 	return &traceReaderAdapter{querier: q}
 }
 
-// QueryTraces implements analyzetools.TraceReader by building a TraceQL
+// QueryTraces implements commontools.TraceReader by building a TraceQL
 // query from the optional service / trace_id filters, searching the last
 // windowMinutes, and converting the concrete signalsources summaries into
 // the tools-package shape.
-func (a *traceReaderAdapter) QueryTraces(ctx context.Context, service, traceID string, windowMinutes, limit int) ([]analyzetools.TraceSummary, error) {
+func (a *traceReaderAdapter) QueryTraces(ctx context.Context, service, traceID string, start, end time.Time, limit int) ([]commontools.TraceSummary, error) {
 	if a == nil || a.querier == nil {
 		return nil, fmt.Errorf("trace reader not configured")
 	}
-	end := time.Now().UTC()
-	start := end.Add(-time.Duration(windowMinutes) * time.Minute)
-
 	query := buildTraceQL(service, traceID)
 	summaries, err := a.querier.Search(ctx, query, start, end, limit)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]analyzetools.TraceSummary, 0, len(summaries))
+	out := make([]commontools.TraceSummary, 0, len(summaries))
 	for _, s := range summaries {
-		out = append(out, analyzetools.TraceSummary{
+		out = append(out, commontools.TraceSummary{
 			TraceID:    s.TraceID,
 			Service:    s.Service,
 			Operation:  s.Operation,

@@ -9,14 +9,16 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/agent/ai"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/analyze"
-	analyzetools "github.com/VersusControl/versus-incident/pkg/agent/ai/analyze/tools"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/detect"
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/router"
+	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
+	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/runbook"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 // AIBundle bundles every AI-side dependency. All fields are nil-safe:
@@ -52,6 +54,18 @@ type AIBundle struct {
 // model. store may be nil — caches degrade to in-memory only; the
 // analyze agent's tool registry will also be smaller.
 func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, httpClient *http.Client) AIBundle {
+	return buildAIs(cfg, catalog, store, tenancy.DefaultOrgScope(), httpClient)
+}
+
+// BuildAIsForScope constructs every AI dependency with an ordered organization
+// read scope. Writes remain owned by the supplied storage provider; the scope
+// applies only to read-only analyze tools. BuildAIs supplies the default-only
+// scope used by single-tenant OSS deployments.
+func BuildAIsForScope(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client) AIBundle {
+	return buildAIs(cfg, catalog, store, scope.Normalized(), httpClient)
+}
+
+func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client) AIBundle {
 	// Resolve the detect-task config up front so the construction gate can
 	// see whether a model is actually configured.
 	detectCfg := cfg.AI.Resolve(cfg.AI.Detect)
@@ -131,7 +145,7 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		// (tools.recent_changes.git.repos). An empty repos list leaves the
 		// feed nil so the tool is omitted; the `git` binary must be on PATH
 		// when configured.
-		changes := analyzetools.NewGitChangeFeed(buildGitRepos(cfg.Tools.RecentChanges.Git))
+		changes := commontools.NewGitChangeFeed(buildGitRepos(cfg.Tools.RecentChanges.Git))
 
 		// Optional runbook-RAG seam for the find_runbook tool. When an
 		// embedding model is configured (tools.yaml
@@ -139,7 +153,7 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		// ingest the runbook source dir (incremental — only new/changed
 		// runbooks are embedded), load the persisted corpus from storage,
 		// and snapshot it into an in-memory vector index. Any failure
-		// leaves embedder/searcher nil so analyzetools.Default omits the
+		// leaves embedder/searcher nil so buildAnalyzeTools omits the
 		// tool — community installs without embeddings are unaffected.
 		// Runbook-RAG corpus manager. Created whenever storage is available
 		// so the admin runbooks UI can upload/list/delete runbooks even
@@ -151,7 +165,7 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		// runbooks are searchable without a restart.
 		runbookMgr = buildRunbookManager(cfg, store, httpClient)
 		var embedder core.Embedder
-		var runbookSearcher analyzetools.RunbookSearcher
+		var runbookSearcher commontools.RunbookSearcher
 		if runbookMgr != nil && runbookMgr.HasEmbedder() {
 			embedder = runbookMgr.Embedder()
 			runbookSearcher = newRunbookSearcherAdapter(runbookMgr.Index())
@@ -161,13 +175,13 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		// tools. Each is configured independently in tools.yaml
 		// (tools.query_metrics.prometheus / tools.query_traces.tempo) so an
 		// on-demand analyze query never touches a detect-path source cursor.
-		// A blank endpoint yields a nil reader so analyzetools.Default omits
+		// A blank endpoint yields a nil reader so buildAnalyzeTools omits
 		// the tool — community installs without a metric/trace backend are
 		// unaffected.
 		metrics := newMetricReaderAdapter(cfg.Tools.QueryMetrics.Prometheus)
 		traces := newTraceReaderAdapter(cfg.Tools.QueryTraces.Tempo)
 
-		tools := analyzetools.Default(store, newCatalogAdapter(catalog), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher, metrics, traces)
+		tools := buildAnalyzeTools(store, scope, newCatalogAdapter(catalog), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher, metrics, traces)
 		a, aErr := analyze.New(context.Background(), analyzeBaseCfg, tools, analyze.Options{
 			HTTPClient:    httpClient,
 			AuthKeyFunc:   authKeyFn,
@@ -207,6 +221,39 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		AnalyzeRate: analyzeRate,
 		Runbooks:    runbookMgr,
 	}
+}
+
+func buildAnalyzeTools(store storage.Provider, scope tenancy.OrgScope, catalog versustools.PatternCatalog, reader commontools.SignalReader, redactor commontools.LineRedactor, services commontools.ServiceExtractor, graph *commontools.DependencyGraph, changes commontools.ChangeFeed, embedder core.Embedder, runbooks commontools.RunbookSearcher, metrics commontools.MetricReader, traces commontools.TraceReader) []core.Tool {
+	scope = scope.Normalized()
+	tools := make([]core.Tool, 0, 9)
+	if store != nil {
+		tools = append(tools, versustools.RecentIncidents{Store: store, Scope: scope})
+	}
+	if catalog != nil {
+		tools = append(tools,
+			versustools.PatternHistory{Catalog: catalog},
+			versustools.DescribeService{Catalog: catalog},
+		)
+	}
+	if reader != nil {
+		tools = append(tools, commontools.RelatedLogs{Reader: reader, Redactor: redactor, Services: services})
+	}
+	if graph != nil && graph.Len() > 0 {
+		tools = append(tools, commontools.DescribeDependencies{Graph: graph, Store: store, Scope: scope})
+	}
+	if changes != nil {
+		tools = append(tools, commontools.RecentChanges{Feed: changes})
+	}
+	if embedder != nil && runbooks != nil {
+		tools = append(tools, commontools.FindRunbook{Embedder: embedder, Index: runbooks, Redactor: redactor})
+	}
+	if metrics != nil {
+		tools = append(tools, commontools.QueryMetrics{Reader: metrics})
+	}
+	if traces != nil {
+		tools = append(tools, commontools.QueryTraces{Reader: traces, Redactor: redactor})
+	}
+	return tools
 }
 
 // buildRunbookManager builds the runbook corpus manager shared by the

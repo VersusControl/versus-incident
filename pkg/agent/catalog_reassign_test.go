@@ -209,7 +209,9 @@ func TestCatalog_RepointService_InMemory(t *testing.T) {
 // carrying the pattern id + new target, so the enterprise partition store
 // re-points its fleet-wide read view.
 func TestCatalog_RepointService_RoutesThroughStore(t *testing.T) {
-	fake := &fakeCatalogStore{}
+	fake := &fakeCatalogStore{patterns: map[string]*Pattern{
+		"p-ec7767235887": {ID: "p-ec7767235887", Service: "api"},
+	}}
 	SetCatalogStore(fake)
 	t.Cleanup(func() { SetCatalogStore(nil) })
 
@@ -240,5 +242,33 @@ func TestCatalog_RepointService_RoutesThroughStore(t *testing.T) {
 	}
 	if _, _, _, n := fake.counts(); n != 1 {
 		t.Fatalf("store curate calls after guarded re-points = %d, want still 1", n)
+	}
+}
+
+func TestCatalog_RepointServiceSurvivesUnrelatedPersistAndReload(t *testing.T) {
+	fake := &fakeCatalogStore{patterns: map[string]*Pattern{
+		"p-1": {ID: "p-1", Template: "request <*> failed", Service: "api"},
+	}}
+	SetCatalogStore(fake)
+	t.Cleanup(func() { SetCatalogStore(nil) })
+
+	cat, err := LoadCatalog(nil)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	if !cat.RepointService("p-1", "payments") {
+		t.Fatal("RepointService returned false")
+	}
+	cat.Upsert("p-2", "unrelated <*>", "src", 1, 0.2, "", "worker")
+	if err := cat.Persist(); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+
+	reloaded, err := LoadCatalog(nil)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := reloaded.Get("p-1"); got == nil || got.Service != "payments" {
+		t.Fatalf("reloaded pattern = %+v, want service payments", got)
 	}
 }

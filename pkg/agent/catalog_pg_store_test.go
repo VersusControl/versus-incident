@@ -20,16 +20,20 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/stats"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // allCatalogQueries is every SQL string the Postgres catalog store issues.
 var allCatalogQueries = []string{
-	sqlCatalogLoadLogs, sqlCatalogSelectServices, sqlCatalogUpsertRoot,
+	sqlCatalogLoadLogs, sqlCatalogUpsertRoot,
 	sqlCatalogUpsertLog, sqlCatalogInsertServiceIfAbsent, sqlCatalogSnapshotLogs,
-	sqlCatalogPageLogs, sqlCatalogCountLogs, sqlCatalogPageServices, sqlCatalogCountServices,
+	sqlCatalogPageLogs, sqlCatalogCountLogs, sqlCatalogSnapshotServices,
+	sqlCatalogPageServices, sqlCatalogCountServices, sqlCatalogLookupPattern,
+	sqlCatalogLookupService,
 	sqlCurateVerdict, sqlCurateTags, sqlCurateMarkKnown, sqlCurateRepointService,
-	sqlCurateDelete, sqlCurateResetPatterns, sqlCurateResetServices,
+	sqlCurateDelete, sqlCurateDeleteWritePatterns, sqlCurateResetPatterns,
+	sqlCurateDeleteWriteServices, sqlCurateResetServices,
 	sqlCurateEndGrace, sqlCurateRestartGrace, sqlCurateCreateService,
 	sqlCurateDeleteService, sqlRenameSelectService, sqlRenameTombstoneOld,
 	sqlRenameUpsertNewSvc,
@@ -81,6 +85,554 @@ func TestNewPostgresCatalogStore_OrgNormalized(t *testing.T) {
 	s := NewPostgresCatalogStore(nil, "", 0).(*pgCatalogStore)
 	if s.orgID != storage.DefaultOrgID {
 		t.Fatalf("orgID = %q, want %q", s.orgID, storage.DefaultOrgID)
+	}
+}
+
+func TestNewPostgresCatalogStoreForScope_WriteFirst(t *testing.T) {
+	s := NewPostgresCatalogStoreForScope(nil, tenancy.NewOrgScope("licensed", "default"), 0).(*pgCatalogStore)
+	if s.orgID != "licensed" {
+		t.Fatalf("orgID = %q, want licensed", s.orgID)
+	}
+	if got := s.orgScope.OrgIDs(); len(got) != 2 || got[0] != "licensed" || got[1] != "default" {
+		t.Fatalf("org scope = %v, want [licensed default]", got)
+	}
+}
+
+func TestCatalogLoadQuery_UsesRankedScopeAndInstancePartition(t *testing.T) {
+	for _, fragment := range []string{
+		"p.org_id = ANY($1)",
+		"PARTITION BY p.id",
+		"array_position($1::text[], p.org_id)",
+		"PARTITION BY l.pattern_id, l.instance_index",
+		"l.org_id = ANY($1)",
+		"ON p.id = l.pattern_id",
+		"reset_shadow = FALSE",
+	} {
+		if !strings.Contains(sqlCatalogLoadLogs, fragment) {
+			t.Errorf("load query missing %q: %s", fragment, sqlCatalogLoadLogs)
+		}
+	}
+	if strings.Contains(sqlCatalogLoadLogs, "l.org_id = $1") {
+		t.Fatalf("load query still pins logs to the write org: %s", sqlCatalogLoadLogs)
+	}
+	if strings.Contains(sqlCatalogLoadLogs, "p.org_id = l.org_id") {
+		t.Fatalf("load query still binds a learned partition to the curated root org: %s", sqlCatalogLoadLogs)
+	}
+}
+
+func TestCatalogFleetQueries_RankEachInstancePartitionAcrossScope(t *testing.T) {
+	for name, query := range map[string]string{
+		"snapshot": sqlCatalogSnapshotLogs,
+		"page":     sqlCatalogPageLogs,
+		"count":    sqlCatalogCountLogs,
+		"lookup":   sqlCatalogLookupPattern,
+	} {
+		for _, fragment := range []string{
+			"PARTITION BY l.pattern_id, l.instance_index",
+			"l.org_id = ANY($1)",
+			"FROM chosen_logs",
+			"p.reset_at IS NULL OR l.persisted_at > p.reset_at",
+		} {
+			if !strings.Contains(query, fragment) {
+				t.Errorf("%s query missing %q: %s", name, fragment, query)
+			}
+		}
+		if strings.Contains(query, "ON p.id = l.pattern_id AND p.org_id = l.org_id") {
+			t.Errorf("%s query still unconditionally binds learned rows to the curated root org: %s", name, query)
+		}
+	}
+}
+
+func TestCatalogLoadQuery_ExcludesLowerScopePartitionsPredatingReset(t *testing.T) {
+	for _, fragment := range []string{
+		"l.org_id = p.org_id",
+		"p.reset_at IS NULL",
+		"l.persisted_at > p.reset_at",
+	} {
+		if !strings.Contains(sqlCatalogLoadLogs, fragment) {
+			t.Errorf("load query missing reset cutoff %q: %s", fragment, sqlCatalogLoadLogs)
+		}
+	}
+	if !strings.Contains(sqlCatalogUpsertLog, "persisted_at        = NOW()") {
+		t.Fatalf("learned-row upsert does not refresh reset cutoff timestamp: %s", sqlCatalogUpsertLog)
+	}
+}
+
+func TestCatalogResetQueries_ShadowLowerScopeWithWriteOrgTombstones(t *testing.T) {
+	for name, queries := range map[string][2]string{
+		"patterns": {sqlCurateDeleteWritePatterns, sqlCurateResetPatterns},
+		"services": {sqlCurateDeleteWriteServices, sqlCurateResetServices},
+	} {
+		for _, fragment := range []string{"DELETE", "org_id = $1"} {
+			if !strings.Contains(queries[0], fragment) {
+				t.Errorf("%s reset delete missing %q: %s", name, fragment, queries[0])
+			}
+		}
+		for _, fragment := range []string{"org_id = ANY($2)", "org_id <> $1", "deleted", "TRUE", "ON CONFLICT", "DO UPDATE"} {
+			if !strings.Contains(queries[1], fragment) {
+				t.Errorf("%s reset tombstone missing %q: %s", name, fragment, queries[1])
+			}
+		}
+	}
+	if !strings.Contains(sqlCurateResetServices, "first_seen") {
+		t.Fatalf("service reset tombstone does not satisfy first_seen: %s", sqlCurateResetServices)
+	}
+}
+
+func TestPGCatalog_ScopeDeduplicatesBeforeCountAndPage(t *testing.T) {
+	_, db := newPGCatalog(t)
+	now := time.Now().UTC()
+	legacy := NewPostgresCatalogStore(db, storage.DefaultOrgID, 0)
+	licensed := NewPostgresCatalogStore(db, "licensed", 0)
+
+	if err := legacy.Persist(map[string]*Pattern{
+		"shared": {ID: "shared", Template: "legacy shared", Count: 100, FirstSeen: now.Add(-2 * time.Hour), LastSeen: now},
+		"legacy": {ID: "legacy", Template: "legacy only", Count: 7, FirstSeen: now.Add(-time.Hour), LastSeen: now},
+	}, map[string]*ServiceInfo{
+		"checkout": {FirstSeen: now.Add(-2 * time.Hour)},
+		"legacy":   {FirstSeen: now.Add(-time.Hour)},
+	}); err != nil {
+		t.Fatalf("persist legacy catalog: %v", err)
+	}
+	if err := licensed.Persist(map[string]*Pattern{
+		"shared": {ID: "shared", Template: "licensed shared", Count: 3, FirstSeen: now, LastSeen: now},
+	}, map[string]*ServiceInfo{
+		"checkout": {FirstSeen: now, Manual: true},
+	}); err != nil {
+		t.Fatalf("persist licensed catalog: %v", err)
+	}
+
+	scoped := NewPostgresCatalogStoreForScope(
+		db, tenancy.NewOrgScope("licensed", storage.DefaultOrgID), 0,
+	).(*pgCatalogStore)
+	patterns, services, err := scoped.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(patterns) != 2 {
+		t.Fatalf("Snapshot patterns = %d, want 2 after dedup", len(patterns))
+	}
+	shared := patternByID(patterns, "shared")
+	if shared == nil || shared.OrgID != "licensed" || shared.Template != "licensed shared" || shared.Count != 3 {
+		t.Fatalf("shared pattern = %#v, want licensed row", shared)
+	}
+	if legacyOnly := patternByID(patterns, "legacy"); legacyOnly == nil || legacyOnly.OrgID != storage.DefaultOrgID {
+		t.Fatalf("legacy pattern = %#v, want visible default row", legacyOnly)
+	}
+	if len(services) != 2 || !services["checkout"].Manual || services["checkout"].OrgID != "licensed" {
+		t.Fatalf("services = %#v, want two logical services with licensed checkout", services)
+	}
+
+	page, total, err := scoped.ListPatternsPage(CatalogPageOptions{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListPatternsPage: %v", err)
+	}
+	if total != 2 || len(page) != 1 || page[0].ID != "legacy" {
+		t.Fatalf("pattern page = %v total=%d, want [legacy] total=2", ids(page), total)
+	}
+	next, nextTotal, err := scoped.ListPatternsPage(CatalogPageOptions{Offset: 1, Limit: 1, Search: "shared"})
+	if err != nil {
+		t.Fatalf("ListPatternsPage search: %v", err)
+	}
+	if nextTotal != 1 || len(next) != 0 {
+		t.Fatalf("searched offset page = %v total=%d, want empty total=1", ids(next), nextTotal)
+	}
+	servicePage, serviceTotal, err := scoped.ListServicesPage(CatalogPageOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListServicesPage: %v", err)
+	}
+	if serviceTotal != 2 || len(servicePage) != 2 {
+		t.Fatalf("service page = %v total=%d, want two deduplicated services", svcNames(servicePage), serviceTotal)
+	}
+
+	loadedPatterns, loadedServices, err := scoped.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := loadedPatterns["shared"]; got == nil || got.OrgID != "licensed" || got.Template != "licensed shared" {
+		t.Fatalf("loaded shared pattern = %#v, want licensed row", got)
+	}
+	if got := loadedPatterns["legacy"]; got == nil || got.OrgID != storage.DefaultOrgID || got.Template != "legacy only" {
+		t.Fatalf("loaded legacy pattern = %#v, want default row", got)
+	}
+	if len(loadedServices) != 2 || loadedServices["legacy"].OrgID != storage.DefaultOrgID {
+		t.Fatalf("loaded services = %#v, want scoped union", loadedServices)
+	}
+	lookup := any(scoped).(CatalogEntityLookup)
+	if got, err := lookup.LookupPattern("shared"); err != nil || got == nil || got.OrgID != "licensed" {
+		t.Fatalf("LookupPattern(shared) = %#v, %v", got, err)
+	}
+	if got, err := lookup.LookupService("legacy"); err != nil || got == nil || got.OrgID != storage.DefaultOrgID {
+		t.Fatalf("LookupService(legacy) = %#v, %v", got, err)
+	}
+}
+
+func TestPGCatalog_UpgradePersistPreservesLegacyCuration(t *testing.T) {
+	_, db := newPGCatalog(t)
+	now := time.Now().UTC()
+	legacy := NewPostgresCatalogStore(db, storage.DefaultOrgID, 0).(*pgCatalogStore)
+	if err := legacy.Persist(map[string]*Pattern{
+		"known":   {ID: "known", Template: "known template", Count: 4, FirstSeen: now, LastSeen: now},
+		"deleted": {ID: "deleted", Template: "deleted template", Count: 2, FirstSeen: now, LastSeen: now},
+	}, nil); err != nil {
+		t.Fatalf("seed legacy patterns: %v", err)
+	}
+	known := pgVerdictKnown
+	if err := legacy.Curate(CatalogEdit{Kind: CatalogEditLabel, PatternID: "known", Verdict: &known, Tags: []string{"noise"}}); err != nil {
+		t.Fatalf("curate legacy known pattern: %v", err)
+	}
+	if err := legacy.Curate(CatalogEdit{Kind: CatalogEditDelete, PatternID: "deleted"}); err != nil {
+		t.Fatalf("delete legacy pattern: %v", err)
+	}
+
+	scoped := NewPostgresCatalogStoreForScope(
+		db, tenancy.NewOrgScope("licensed", storage.DefaultOrgID), 0,
+	).(*pgCatalogStore)
+	patterns, services, err := scoped.Load()
+	if err != nil {
+		t.Fatalf("Load upgrade view: %v", err)
+	}
+	if err := scoped.Persist(patterns, services); err != nil {
+		t.Fatalf("Persist upgrade view: %v", err)
+	}
+
+	var verdict string
+	var tags []byte
+	var deleted bool
+	if err := db.QueryRow(`SELECT COALESCE(verdict, ''), tags, deleted FROM vs_patterns WHERE org_id = 'licensed' AND id = 'known'`).Scan(&verdict, &tags, &deleted); err != nil {
+		t.Fatalf("read copied known curation: %v", err)
+	}
+	if verdict != pgVerdictKnown || string(tags) != `["noise"]` || deleted {
+		t.Fatalf("copied known curation = verdict %q tags %s deleted %v", verdict, tags, deleted)
+	}
+	if err := db.QueryRow(`SELECT deleted FROM vs_patterns WHERE org_id = 'licensed' AND id = 'deleted'`).Scan(&deleted); err != nil {
+		t.Fatalf("read copied deleted curation: %v", err)
+	}
+	if !deleted {
+		t.Fatal("copied deleted pattern was revived during upgrade persist")
+	}
+}
+
+func TestPGCatalog_UpgradePersistPreservesLegacyServiceCuration(t *testing.T) {
+	_, db := newPGCatalog(t)
+	legacyFirstSeen := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Microsecond)
+	legacy := NewPostgresCatalogStore(db, storage.DefaultOrgID, 0).(*pgCatalogStore)
+	if err := legacy.Persist(nil, map[string]*ServiceInfo{
+		"deleted-api": {Manual: true, FirstSeen: legacyFirstSeen},
+	}); err != nil {
+		t.Fatalf("seed legacy service: %v", err)
+	}
+	if err := legacy.Curate(CatalogEdit{Kind: CatalogEditDeleteService, Service: "deleted-api"}); err != nil {
+		t.Fatalf("delete legacy service: %v", err)
+	}
+
+	scoped := NewPostgresCatalogStoreForScope(
+		db, tenancy.NewOrgScope("licensed", storage.DefaultOrgID), 0,
+	).(*pgCatalogStore)
+	if err := scoped.Persist(nil, map[string]*ServiceInfo{
+		"deleted-api": {FirstSeen: time.Now().UTC()},
+	}); err != nil {
+		t.Fatalf("persist discovered service during upgrade: %v", err)
+	}
+
+	var (
+		manual      bool
+		firstSeen   time.Time
+		deleted     bool
+		resetShadow bool
+	)
+	if err := db.QueryRow(`
+		SELECT manual, first_seen, deleted, reset_shadow
+		FROM vs_services WHERE org_id = 'licensed' AND name = 'deleted-api'`,
+	).Scan(&manual, &firstSeen, &deleted, &resetShadow); err != nil {
+		t.Fatalf("read copied service curation: %v", err)
+	}
+	if !manual || !firstSeen.Equal(legacyFirstSeen) || !deleted || resetShadow {
+		t.Fatalf("copied service curation = manual %v first_seen %v deleted %v reset_shadow %v, want true %v true false",
+			manual, firstSeen, deleted, resetShadow, legacyFirstSeen)
+	}
+	_, services, err := scoped.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if _, ok := services["deleted-api"]; ok {
+		t.Fatalf("legacy explicitly deleted service resurfaced after upgrade: %#v", services)
+	}
+}
+
+func TestPGCatalog_RollingUpgradeKeepsEachScopedLearnedPartition(t *testing.T) {
+	_, db := newPGCatalog(t)
+	now := time.Now().UTC()
+	legacyZero := NewPostgresCatalogStore(db, storage.DefaultOrgID, 0)
+	if err := legacyZero.Persist(map[string]*Pattern{
+		"p-ha": {
+			ID: "p-ha", Template: "instance zero", Count: 100,
+			BaselineFrequency: 10, FirstSeen: now.Add(-2 * time.Hour), LastSeen: now,
+		},
+	}, nil); err != nil {
+		t.Fatalf("seed legacy instance zero: %v", err)
+	}
+	legacyOne := NewPostgresCatalogStore(db, storage.DefaultOrgID, 1)
+	if err := legacyOne.Persist(map[string]*Pattern{
+		"p-ha": {
+			ID: "p-ha", Template: "instance one", Count: 250,
+			BaselineFrequency: 25, FirstSeen: now.Add(-time.Hour), LastSeen: now,
+		},
+	}, nil); err != nil {
+		t.Fatalf("seed legacy instance one: %v", err)
+	}
+
+	scope := tenancy.NewOrgScope("licensed", storage.DefaultOrgID)
+	upgradedZero := NewPostgresCatalogStoreForScope(db, scope, 0)
+	zeroPatterns, _, err := upgradedZero.Load()
+	if err != nil {
+		t.Fatalf("load instance zero during upgrade: %v", err)
+	}
+	if got := zeroPatterns["p-ha"]; got == nil || got.Count != 100 || got.Template != "instance zero" {
+		t.Fatalf("instance zero Load = %#v, want only its legacy partition", got)
+	}
+	if err := upgradedZero.Persist(zeroPatterns, nil); err != nil {
+		t.Fatalf("persist upgraded instance zero: %v", err)
+	}
+
+	upgradedOne := NewPostgresCatalogStoreForScope(db, scope, 1).(*pgCatalogStore)
+	onePatterns, _, err := upgradedOne.Load()
+	if err != nil {
+		t.Fatalf("load instance one after write-org root exists: %v", err)
+	}
+	if got := onePatterns["p-ha"]; got == nil || got.OrgID != "licensed" || got.Count != 250 || got.Template != "instance one" {
+		t.Fatalf("instance one Load = %#v, want licensed curation with only its legacy partition", got)
+	}
+
+	snapshot, _, err := upgradedOne.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	got := patternByID(snapshot, "p-ha")
+	if got == nil || got.Count != 350 || got.BaselineFrequency != 35 || got.Template != "instance zero" {
+		t.Fatalf("fleet Snapshot = %#v, want count=350 baseline=35 and lowest-index template", got)
+	}
+	page, total, err := upgradedOne.ListPatternsPage(CatalogPageOptions{Search: "p-ha", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListPatternsPage: %v", err)
+	}
+	if total != 1 || len(page) != 1 || page[0].Count != 350 {
+		t.Fatalf("fleet page = %#v total=%d, want one deduplicated count-350 row", page, total)
+	}
+	lookup, err := upgradedOne.LookupPattern("p-ha")
+	if err != nil {
+		t.Fatalf("LookupPattern: %v", err)
+	}
+	if lookup == nil || lookup.Count != 350 {
+		t.Fatalf("LookupPattern = %#v, want fleet count 350", lookup)
+	}
+}
+
+func TestPGCatalog_UnionResetsShadowLegacyRows(t *testing.T) {
+	_, db := newPGCatalog(t)
+	now := time.Now().UTC()
+	legacy := NewPostgresCatalogStore(db, storage.DefaultOrgID, 0)
+	if err := legacy.Persist(map[string]*Pattern{
+		"legacy": {ID: "legacy", Template: "legacy history", Count: 9, FirstSeen: now, LastSeen: now},
+	}, map[string]*ServiceInfo{
+		"legacy-service": {FirstSeen: now},
+	}); err != nil {
+		t.Fatalf("seed legacy catalog: %v", err)
+	}
+	licensed := NewPostgresCatalogStore(db, "licensed", 0)
+	if err := licensed.Persist(map[string]*Pattern{
+		"legacy": {ID: "legacy", Template: "licensed history", Count: 3, FirstSeen: now, LastSeen: now},
+	}, map[string]*ServiceInfo{
+		"legacy-service": {FirstSeen: now},
+	}); err != nil {
+		t.Fatalf("seed overlapping licensed catalog: %v", err)
+	}
+	scoped := NewPostgresCatalogStoreForScope(db, tenancy.NewOrgScope("licensed", storage.DefaultOrgID), 0)
+	SetCatalogStore(scoped)
+	cat, err := LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	if len(cat.All()) != 1 || len(cat.AllServices()) != 1 {
+		t.Fatalf("upgrade view patterns=%d services=%d, want legacy rows visible", len(cat.All()), len(cat.AllServices()))
+	}
+	if _, err := cat.ResetPatterns(); err != nil {
+		t.Fatalf("ResetPatterns: %v", err)
+	}
+	if len(cat.All()) != 0 {
+		t.Fatalf("patterns resurfaced after reset: %#v", cat.All())
+	}
+	if _, err := cat.ResetServices(); err != nil {
+		t.Fatalf("ResetServices: %v", err)
+	}
+	if len(cat.AllServices()) != 0 {
+		t.Fatalf("services resurfaced after reset: %#v", cat.AllServices())
+	}
+
+	reloaded := NewPostgresCatalogStoreForScope(db, tenancy.NewOrgScope("licensed", storage.DefaultOrgID), 0)
+	patterns, services, err := reloaded.Load()
+	if err != nil {
+		t.Fatalf("restart Load: %v", err)
+	}
+	if len(patterns) != 0 || len(services) != 0 {
+		t.Fatalf("restart Load patterns=%#v services=%#v, want reset shadows", patterns, services)
+	}
+	snapshot, snapshotServices, err := reloaded.Snapshot()
+	if err != nil {
+		t.Fatalf("restart Snapshot: %v", err)
+	}
+	if len(snapshot) != 0 || len(snapshotServices) != 0 {
+		t.Fatalf("restart Snapshot patterns=%#v services=%#v, want reset shadows", snapshot, snapshotServices)
+	}
+	pager := reloaded.(CatalogPager)
+	if page, total, err := pager.ListPatternsPage(CatalogPageOptions{Limit: 10}); err != nil || total != 0 || len(page) != 0 {
+		t.Fatalf("pattern page after reset = %#v total=%d err=%v", page, total, err)
+	}
+	if page, total, err := pager.ListServicesPage(CatalogPageOptions{Limit: 10}); err != nil || total != 0 || len(page) != 0 {
+		t.Fatalf("service page after reset = %#v total=%d err=%v", page, total, err)
+	}
+	lookup := reloaded.(CatalogEntityLookup)
+	if got, err := lookup.LookupPattern("legacy"); err != nil || got != nil {
+		t.Fatalf("LookupPattern after reset = %#v, %v", got, err)
+	}
+	if got, err := lookup.LookupService("legacy-service"); err != nil || got != nil {
+		t.Fatalf("LookupService after reset = %#v, %v", got, err)
+	}
+}
+
+func TestPGCatalog_ResetShadowsReviveWhenRelearnedAfterRestart(t *testing.T) {
+	_, db := newPGCatalog(t)
+	now := time.Now().UTC()
+	legacy := NewPostgresCatalogStore(db, storage.DefaultOrgID, 0)
+	if err := legacy.Persist(map[string]*Pattern{
+		"legacy": {ID: "legacy", Template: "legacy history", Count: 9, FirstSeen: now, LastSeen: now},
+	}, map[string]*ServiceInfo{
+		"legacy-service": {FirstSeen: now},
+	}); err != nil {
+		t.Fatalf("seed legacy catalog: %v", err)
+	}
+	scope := tenancy.NewOrgScope("licensed", storage.DefaultOrgID)
+	beforeRestart := NewPostgresCatalogStoreForScope(db, scope, 0)
+	if err := beforeRestart.Curate(CatalogEdit{Kind: CatalogEditResetPatterns}); err != nil {
+		t.Fatalf("reset patterns: %v", err)
+	}
+	if err := beforeRestart.Curate(CatalogEdit{Kind: CatalogEditResetServices}); err != nil {
+		t.Fatalf("reset services: %v", err)
+	}
+
+	afterRestart := NewPostgresCatalogStoreForScope(db, scope, 0).(*pgCatalogStore)
+	if err := afterRestart.Persist(map[string]*Pattern{
+		"legacy": {ID: "legacy", Template: "relearned history", Count: 1, FirstSeen: now, LastSeen: now},
+	}, map[string]*ServiceInfo{
+		"legacy-service": {FirstSeen: now},
+	}); err != nil {
+		t.Fatalf("persist relearned catalog: %v", err)
+	}
+	patterns, services, err := afterRestart.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if got := patternByID(patterns, "legacy"); got == nil || got.OrgID != "licensed" || got.Template != "relearned history" {
+		t.Fatalf("relearned pattern = %#v, want visible licensed row", got)
+	}
+	if got, ok := services["legacy-service"]; !ok || got.OrgID != "licensed" {
+		t.Fatalf("relearned services = %#v, want visible licensed service", services)
+	}
+
+	if err := afterRestart.Curate(CatalogEdit{Kind: CatalogEditDelete, PatternID: "legacy"}); err != nil {
+		t.Fatalf("delete relearned pattern: %v", err)
+	}
+	if err := afterRestart.Curate(CatalogEdit{Kind: CatalogEditDeleteService, Service: "legacy-service"}); err != nil {
+		t.Fatalf("delete relearned service: %v", err)
+	}
+	if err := afterRestart.Persist(map[string]*Pattern{
+		"legacy": {ID: "legacy", Template: "observed after delete", Count: 2, FirstSeen: now, LastSeen: now},
+	}, map[string]*ServiceInfo{
+		"legacy-service": {FirstSeen: now},
+	}); err != nil {
+		t.Fatalf("persist after explicit deletes: %v", err)
+	}
+	patterns, services, err = afterRestart.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot after explicit deletes: %v", err)
+	}
+	if patternByID(patterns, "legacy") != nil {
+		t.Fatalf("explicitly deleted pattern revived: %#v", patterns)
+	}
+	if _, ok := services["legacy-service"]; ok {
+		t.Fatalf("explicitly deleted service revived: %#v", services)
+	}
+}
+
+func TestPGCatalog_ResetExcludesStaleLowerScopeHAPartitions(t *testing.T) {
+	_, db := newPGCatalog(t)
+	now := time.Now().UTC()
+	legacyZero := NewPostgresCatalogStore(db, storage.DefaultOrgID, 0)
+	legacyOne := NewPostgresCatalogStore(db, storage.DefaultOrgID, 1)
+	if err := legacyZero.Persist(map[string]*Pattern{
+		"p-ha": {ID: "p-ha", Template: "legacy zero", Count: 100, FirstSeen: now, LastSeen: now},
+	}, nil); err != nil {
+		t.Fatalf("seed legacy instance zero: %v", err)
+	}
+	if err := legacyOne.Persist(map[string]*Pattern{
+		"p-ha": {ID: "p-ha", Template: "legacy one", Count: 250, FirstSeen: now, LastSeen: now},
+	}, nil); err != nil {
+		t.Fatalf("seed legacy instance one: %v", err)
+	}
+
+	scope := tenancy.NewOrgScope("licensed", storage.DefaultOrgID)
+	licensedZero := NewPostgresCatalogStoreForScope(db, scope, 0)
+	if err := licensedZero.Curate(CatalogEdit{Kind: CatalogEditResetPatterns}); err != nil {
+		t.Fatalf("reset patterns: %v", err)
+	}
+	if err := licensedZero.Persist(map[string]*Pattern{
+		"p-ha": {ID: "p-ha", Template: "relearned zero", Count: 4, FirstSeen: now, LastSeen: now},
+	}, nil); err != nil {
+		t.Fatalf("relearn instance zero: %v", err)
+	}
+
+	snapshot, _, err := licensedZero.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot after instance zero relearns: %v", err)
+	}
+	if got := patternByID(snapshot, "p-ha"); got == nil || got.Count != 4 || got.Template != "relearned zero" {
+		t.Fatalf("snapshot after reset = %#v, want only relearned instance-zero count 4", got)
+	}
+	page, total, err := licensedZero.(CatalogPager).ListPatternsPage(CatalogPageOptions{Search: "p-ha", Limit: 10})
+	if err != nil {
+		t.Fatalf("page after instance zero relearns: %v", err)
+	}
+	if total != 1 || len(page) != 1 || page[0].Count != 4 {
+		t.Fatalf("page after reset = %#v total=%d, want one count-4 row", page, total)
+	}
+	lookup, err := licensedZero.(CatalogEntityLookup).LookupPattern("p-ha")
+	if err != nil {
+		t.Fatalf("lookup after instance zero relearns: %v", err)
+	}
+	if lookup == nil || lookup.Count != 4 {
+		t.Fatalf("lookup after reset = %#v, want count 4", lookup)
+	}
+
+	licensedOne := NewPostgresCatalogStoreForScope(db, scope, 1)
+	patterns, _, err := licensedOne.Load()
+	if err != nil {
+		t.Fatalf("instance one Load after reset: %v", err)
+	}
+	if got := patterns["p-ha"]; got != nil {
+		t.Fatalf("instance one reloaded stale lower-scope partition: %#v", got)
+	}
+
+	if err := licensedOne.Persist(map[string]*Pattern{
+		"p-ha": {ID: "p-ha", Template: "relearned one", Count: 7, FirstSeen: now, LastSeen: now},
+	}, nil); err != nil {
+		t.Fatalf("relearn instance one: %v", err)
+	}
+	snapshot, _, err = licensedOne.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot after instance one relearns: %v", err)
+	}
+	if got := patternByID(snapshot, "p-ha"); got == nil || got.Count != 11 {
+		t.Fatalf("snapshot after both instances relearn = %#v, want fleet count 11", got)
 	}
 }
 

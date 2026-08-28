@@ -1,6 +1,8 @@
 package controllers
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"testing"
@@ -8,8 +10,10 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/services"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/redis/go-redis/v9"
 )
 
 // ackTestKey is the signing key installed for the ack handler tests so they can
@@ -39,6 +43,101 @@ func signedAckPath(id string, ttl time.Duration) string {
 	exp := time.Now().Add(ttl).Unix()
 	sig := services.SignAckToken(ackTestKey, id, exp)
 	return fmt.Sprintf("/api/ack/%s?exp=%d&sig=%s", id, exp, sig)
+}
+
+type ackStorage struct {
+	storage.Provider
+	checkErr  error
+	updateErr error
+}
+
+func (s *ackStorage) CheckIncidentMutable(string) error {
+	return s.checkErr
+}
+
+func (s *ackStorage) UpdateIncidentAck(string, time.Time) error {
+	return s.updateErr
+}
+
+type ackRedis struct {
+	redis.UniversalClient
+	delCalls *int
+}
+
+func (ackRedis) Exists(ctx context.Context, _ ...string) *redis.IntCmd {
+	cmd := redis.NewIntCmd(ctx)
+	cmd.SetVal(1)
+	return cmd
+}
+
+func (r ackRedis) Del(ctx context.Context, _ ...string) *redis.IntCmd {
+	if r.delCalls != nil {
+		*r.delCalls++
+	}
+	cmd := redis.NewIntCmd(ctx)
+	cmd.SetVal(1)
+	return cmd
+}
+
+func TestHandleAck_StorageSentinelResponses(t *testing.T) {
+	installAckKey(t)
+	t.Cleanup(func() {
+		core.SetOnCallWorkflow(nil)
+		services.SetStorage(nil)
+	})
+
+	tests := []struct {
+		name       string
+		checkErr   error
+		updateErr  error
+		wantStatus int
+		wantError  string
+		wantAcked  bool
+	}{
+		{"pre-check not found", storage.ErrNotFound, nil, fiber.StatusNotFound, "incident not found", false},
+		{"pre-check read only", storage.ErrReadOnlyIncident, nil, fiber.StatusConflict, storage.ErrReadOnlyIncident.Error(), false},
+		{"update not found", nil, storage.ErrNotFound, fiber.StatusCreated, "", true},
+		{"update read only", nil, storage.ErrReadOnlyIncident, fiber.StatusCreated, "", true},
+		{"update backend failure", nil, fmt.Errorf("disk path /secret/store"), fiber.StatusCreated, "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ackCalls := 0
+			core.SetOnCallWorkflow(core.NewOnCallWorkflow(ackRedis{delCalls: &ackCalls}, nil))
+			services.SetStorage(&ackStorage{
+				Provider:  storage.NewMemory(),
+				checkErr:  tc.checkErr,
+				updateErr: tc.updateErr,
+			})
+
+			resp, err := ackTestApp().Test(httptest.NewRequest("GET", signedAckPath("i-123", time.Hour), nil))
+			if err != nil {
+				t.Fatalf("app.Test: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
+			}
+			var body struct {
+				Error  string `json:"error"`
+				Status string `json:"status"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if body.Error != tc.wantError {
+				t.Fatalf("error = %q, want %q", body.Error, tc.wantError)
+			}
+			if tc.wantAcked {
+				if ackCalls != 1 || body.Status != "success" {
+					t.Fatalf("ack calls = %d, status = %q; want one call and success", ackCalls, body.Status)
+				}
+			} else if ackCalls != 0 {
+				t.Fatalf("ack calls = %d, want 0", ackCalls)
+			}
+		})
+	}
 }
 
 // TestHandleAck_UninitializedReturns503 proves the DoS fix: an ack request with
