@@ -1,0 +1,35 @@
+# Sample VersusIncident. The referenced Secret (versus-operator-secrets in
+# the SAME namespace) must hold: gateway_secret, telegram_bot_token,
+# telegram_chat_id, agent_ai_api_key. See operator/README.md for the
+# `kubectl create secret` command.
+apiVersion: ops.versuscontrol.io/v1alpha1
+kind: VersusIncident
+metadata:
+  name: demo
+  namespace: versus
+spec:
+  image:
+    repository: versus-incident
+    tag: local
+    pullPolicy: IfNotPresent
+  replicas: 1
+  gatewaySecretName: versus-operator-secrets
+  telegram:
+    enabled: true
+    secretName: versus-operator-secrets
+  agent:
+    enable: true
+    mode: detect
+    pollInterval: 15s
+    ai:
+      enable: true
+      provider: gemini          # openai | gemini
+      model: gemini-2.5-flash-lite
+      apiKeySecretName: versus-operator-secrets
+    sources:
+      - name: demo-app
+        type: file
+        enable: true
+        file:
+          path: /app/data/app.log
+          fromBeginning: true
