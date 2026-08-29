@@ -419,7 +419,7 @@ agent:
 ```
 
 With `parallel_tools: true`, an analyze turn that calls
-`recent_incidents`, `describe_service`, and `describe_dependencies`
+`get_system_overview`, `search_incidents`, `get_service`, and `describe_dependencies`
 together runs all three at once; each is still individually capped at
 `10s` by `tool_timeout`.
 

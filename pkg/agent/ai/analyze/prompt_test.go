@@ -17,6 +17,20 @@ func TestSystemPrompt_AssemblesAllFragments(t *testing.T) {
 	}
 }
 
+func TestSystemPromptRequiresKnowledgeToolsAndHonestUnknowns(t *testing.T) {
+	prompt := SystemPrompt()
+	for _, required := range []string{"get_incident", "get_service", "get_pattern", "get_alert_decision", "get_detection_health", "Never infer evidence"} {
+		if !strings.Contains(prompt, required) {
+			t.Errorf("system prompt missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"describe_incident", "describe_service", "pattern_history", "explain_known_status", "explain_spam", "service_objectives", "capability_status"} {
+		if strings.Contains(prompt, forbidden) {
+			t.Errorf("system prompt retains old tool name %q", forbidden)
+		}
+	}
+}
+
 func TestPromptOrder_StableCopy(t *testing.T) {
 	a := PromptOrder()
 	b := PromptOrder()

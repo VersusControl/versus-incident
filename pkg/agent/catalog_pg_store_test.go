@@ -267,6 +267,12 @@ func TestPGCatalog_ScopeDeduplicatesBeforeCountAndPage(t *testing.T) {
 	}
 }
 
+func TestEscapeCatalogLikePatternTreatsMetacharactersLiterally(t *testing.T) {
+	if got, want := escapeCatalogLikePattern(`cpu_%\host`), `cpu\_\%\\host`; got != want {
+		t.Fatalf("escapeCatalogLikePattern = %q, want %q", got, want)
+	}
+}
+
 func TestPGCatalog_UpgradePersistPreservesLegacyCuration(t *testing.T) {
 	_, db := newPGCatalog(t)
 	now := time.Now().UTC()

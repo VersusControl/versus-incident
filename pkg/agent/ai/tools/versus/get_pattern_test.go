@@ -24,10 +24,10 @@ func (f *fakeCatalog) AllServices() map[string]ServiceInfo {
 	return f.services
 }
 
-func TestPatternHistory_Metadata(t *testing.T) {
-	tool := PatternHistory{}
-	if got := tool.Name(); got != "pattern_history" {
-		t.Errorf("Name() = %q, want pattern_history", got)
+func TestGetPatternMetadata(t *testing.T) {
+	tool := GetPattern{}
+	if got := tool.Name(); got != "get_pattern" {
+		t.Errorf("Name() = %q, want get_pattern", got)
 	}
 	if tool.Description() == "" {
 		t.Error("Description() is empty")
@@ -39,28 +39,28 @@ func TestPatternHistory_Metadata(t *testing.T) {
 	}
 }
 
-func TestPatternHistory_NilCatalog(t *testing.T) {
-	tool := PatternHistory{}
+func TestGetPatternNilCatalog(t *testing.T) {
+	tool := GetPattern{}
 	result, err := tool.Invoke(context.Background(), mustArgs(t, patternHistoryArgs{PatternID: "p1"}))
 	assertUnavailable(t, result, err)
 }
 
-func TestPatternHistory_BadArgs(t *testing.T) {
-	tool := PatternHistory{Catalog: &fakeCatalog{}}
+func TestGetPatternBadArgs(t *testing.T) {
+	tool := GetPattern{Catalog: &fakeCatalog{}}
 	if _, err := tool.Invoke(context.Background(), []byte("{bad")); err == nil {
 		t.Fatal("expected error on malformed args")
 	}
 }
 
-func TestPatternHistory_MissingPatternID(t *testing.T) {
-	tool := PatternHistory{Catalog: &fakeCatalog{}}
+func TestGetPatternMissingPatternID(t *testing.T) {
+	tool := GetPattern{Catalog: &fakeCatalog{}}
 	if _, err := tool.Invoke(context.Background(), mustArgs(t, patternHistoryArgs{})); err == nil {
 		t.Fatal("expected error when pattern_id is empty")
 	}
 }
 
-func TestPatternHistory_NotFound(t *testing.T) {
-	tool := PatternHistory{Catalog: &fakeCatalog{byID: map[string]*PatternView{}}}
+func TestGetPatternNotFound(t *testing.T) {
+	tool := GetPattern{Catalog: &fakeCatalog{byID: map[string]*PatternView{}}}
 	res, err := tool.Invoke(context.Background(), mustArgs(t, patternHistoryArgs{PatternID: "missing"}))
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
@@ -73,23 +73,24 @@ func TestPatternHistory_NotFound(t *testing.T) {
 	}
 }
 
-func TestPatternHistory_Found(t *testing.T) {
+func TestGetPatternReadyThresholdDoesNotInferProvenance(t *testing.T) {
 	now := time.Now().UTC()
 	pat := &PatternView{
-		ID:        "p1",
-		Template:  "connection refused <*>",
-		Source:    "file:app",
-		Service:   "api",
-		RuleName:  "errors",
-		Verdict:   "known",
-		Tags:      []string{"net"},
-		Count:     42,
-		Baseline:  3.14,
-		FirstSeen: now.Add(-time.Hour),
-		LastSeen:  now,
+		ID:               "p1",
+		Template:         "connection refused <*>",
+		Source:           "file:app",
+		Service:          "api",
+		RuleName:         "errors",
+		Verdict:          "known",
+		Tags:             []string{"net"},
+		Count:            42,
+		Baseline:         3.14,
+		AutoPromoteAfter: 40,
+		FirstSeen:        now.Add(-time.Hour),
+		LastSeen:         now,
 	}
 	cat := &fakeCatalog{byID: map[string]*PatternView{"p1": pat}}
-	tool := PatternHistory{Catalog: cat}
+	tool := GetPattern{Catalog: cat, Redactor: secretRedactor{}}
 
 	res, err := tool.Invoke(context.Background(), mustArgs(t, patternHistoryArgs{PatternID: "p1"}))
 	if err != nil {
@@ -99,13 +100,17 @@ func TestPatternHistory_Found(t *testing.T) {
 		t.Fatal("Found = false, want true")
 	}
 	checks := map[string]any{
-		"pattern_id": "p1",
-		"template":   "connection refused <*>",
-		"service":    "api",
-		"rule_name":  "errors",
-		"verdict":    "known",
-		"count":      42,
-		"baseline":   3.14,
+		"pattern_id":                   "p1",
+		"template":                     "connection refused <*>",
+		"service":                      "api",
+		"rule_name":                    "errors",
+		"verdict":                      "known",
+		"count":                        42,
+		"baseline":                     3.14,
+		"ready":                        true,
+		"effective_auto_promote_after": 40,
+		"reason_known":                 false,
+		"provenance":                   "unknown",
 	}
 	for k, want := range checks {
 		if got := res.Data[k]; got != want {
@@ -114,7 +119,31 @@ func TestPatternHistory_Found(t *testing.T) {
 	}
 }
 
-func TestPatternHistory_SamplesLatestThree(t *testing.T) {
+func TestGetPatternKnownBelowThresholdHasUnknownProvenance(t *testing.T) {
+	pattern := &PatternView{ID: "operator-or-legacy", Verdict: "known", Count: 3, AutoPromoteAfter: 40}
+	result, err := (GetPattern{Catalog: &fakeCatalog{byID: map[string]*PatternView{pattern.ID: pattern}}}).Invoke(
+		context.Background(), mustArgs(t, patternHistoryArgs{PatternID: pattern.ID}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Data["reason_known"] != false || result.Data["provenance"] != "unknown" {
+		t.Fatalf("reason provenance = known:%v provenance:%v", result.Data["reason_known"], result.Data["provenance"])
+	}
+}
+
+func TestGetPatternOmitsSamplesWithoutRedactor(t *testing.T) {
+	cat := &fakeCatalog{byID: map[string]*PatternView{"p1": {ID: "p1", Samples: []string{"secret"}}}}
+	res, err := (GetPattern{Catalog: cat}).Invoke(context.Background(), mustArgs(t, patternHistoryArgs{PatternID: "p1"}))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if _, ok := res.Data["samples"]; ok {
+		t.Fatalf("samples = %v, want omitted", res.Data["samples"])
+	}
+}
+
+func TestGetPatternSamplesLatestThree(t *testing.T) {
 	pat := &PatternView{
 		ID:      "p1",
 		Service: "api",
@@ -122,7 +151,7 @@ func TestPatternHistory_SamplesLatestThree(t *testing.T) {
 		Samples: []string{"s1", "s2", "s3", "s4", "s5"},
 	}
 	cat := &fakeCatalog{byID: map[string]*PatternView{"p1": pat}}
-	tool := PatternHistory{Catalog: cat}
+	tool := GetPattern{Catalog: cat, Redactor: secretRedactor{}}
 
 	res, err := tool.Invoke(context.Background(), mustArgs(t, patternHistoryArgs{PatternID: "p1"}))
 	if err != nil {
@@ -146,10 +175,10 @@ func TestPatternHistory_SamplesLatestThree(t *testing.T) {
 	}
 }
 
-func TestPatternHistory_NoSamplesOmitsKey(t *testing.T) {
+func TestGetPatternNoSamplesOmitsKey(t *testing.T) {
 	pat := &PatternView{ID: "p1", Service: "api"}
 	cat := &fakeCatalog{byID: map[string]*PatternView{"p1": pat}}
-	tool := PatternHistory{Catalog: cat}
+	tool := GetPattern{Catalog: cat}
 
 	res, err := tool.Invoke(context.Background(), mustArgs(t, patternHistoryArgs{PatternID: "p1"}))
 	if err != nil {

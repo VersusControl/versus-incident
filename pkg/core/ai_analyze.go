@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"time"
@@ -69,6 +70,62 @@ type Tool interface {
 // Deprecated: use Tool.
 type AnalyzeTool = Tool
 
+// ToolErrorCode classifies a tool failure without exposing its underlying cause.
+type ToolErrorCode string
+
+const (
+	ToolErrorInvalidArguments ToolErrorCode = "invalid_arguments"
+	ToolErrorTimeout          ToolErrorCode = "timeout"
+	ToolErrorCancelled        ToolErrorCode = "cancelled"
+	ToolErrorBackend          ToolErrorCode = "backend_error"
+	ToolErrorInternal         ToolErrorCode = "internal_error"
+)
+
+// ToolError carries a model-safe message while retaining the underlying cause
+// for trusted server-side handling. Cause is never part of the model envelope.
+type ToolError struct {
+	Code    ToolErrorCode
+	Message string
+	Cause   error
+}
+
+// Error implements error without exposing the underlying cause.
+func (err *ToolError) Error() string {
+	if err == nil {
+		return ""
+	}
+	return err.Message
+}
+
+// Unwrap retains errors.Is/errors.As support for trusted server-side callers.
+func (err *ToolError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.Cause
+}
+
+// NewToolError constructs a classified tool error with a model-safe message.
+func NewToolError(code ToolErrorCode, message string, cause error) error {
+	return &ToolError{Code: code, Message: message, Cause: cause}
+}
+
+// ClassifyToolError returns only model-safe fields. Unknown errors are treated
+// as backend failures and their text is deliberately discarded.
+func ClassifyToolError(err error) (ToolErrorCode, string) {
+	var classified *ToolError
+	if errors.As(err, &classified) {
+		return classified.Code, classified.Message
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ToolErrorTimeout, "tool timed out"
+	}
+	if errors.Is(err, context.Canceled) {
+		return ToolErrorCancelled, "tool run was cancelled"
+	}
+	return ToolErrorBackend, "tool backend failed"
+}
+
 // ToolDisplayer optionally gives a tool a human-readable activity name.
 type ToolDisplayer interface {
 	DisplayName() string
@@ -105,8 +162,8 @@ func ToolDisplayName(tool Tool) string {
 // multiple tool responses can disambiguate without relying on call
 // ordering.
 //
-// Found — optional flag for lookup-style tools (pattern_history,
-// describe_service) to signal "no such entity" without an error.
+// Found — optional flag for lookup-style tools (get_pattern,
+// get_service) to signal "no such entity" without an error.
 // Defaults to true; lookups that miss should set it to false and
 // leave Data empty (or populated with just the query echo).
 //
@@ -126,6 +183,8 @@ func (result ToolResult) IsAvailable() bool {
 }
 
 // UnavailableToolResult returns an expected missing-capability result.
+// UnavailableToolResult reports missing capability as a successful result so
+// the model can adapt without treating expected configuration as a tool error.
 func UnavailableToolResult(tool, reason string) *ToolResult {
 	available := false
 	return &ToolResult{Tool: tool, Found: false, Available: &available, Reason: reason}

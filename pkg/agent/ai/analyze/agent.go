@@ -112,6 +112,9 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 		if t == nil || t.Name() == "" {
 			continue
 		}
+		if _, exists := reg[t.Name()]; exists {
+			return nil, fmt.Errorf("duplicate tool name %q", t.Name())
+		}
 		reg[t.Name()] = t
 		displays[t.Name()] = core.ToolDisplayName(t)
 		et, err := einowrap.NewTool(t, toolTimeout, maxToolOutputBytes)
@@ -563,7 +566,8 @@ func (c *traceCollector) toolHandler() *utilcb.ToolCallbackHandler {
 			}
 			it.trace.DurationMs = time.Since(it.start).Milliseconds()
 			if err != nil {
-				it.trace.Error = err.Error()
+				code, message := core.ClassifyToolError(err)
+				it.trace.Error = string(code) + ": " + message
 			}
 			c.emit(core.AnalyzeEvent{
 				Seq:         it.seq,

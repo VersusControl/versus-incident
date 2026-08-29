@@ -78,6 +78,15 @@ func TestPostgresScopedCapabilitiesUnionAndExclude(t *testing.T) {
 	if serviceCount != 2 {
 		t.Fatalf("scoped service count = %d, want 2", serviceCount)
 	}
+	serviceCounts, err := provider.(storage.ScopedIncidentServiceSummaryReader).CountIncidentsByServicesSinceForScope(
+		scope, []string{"checkout", "missing"}, now.Add(-time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("CountIncidentsByServicesSinceForScope: %v", err)
+	}
+	if serviceCounts["checkout"] != 2 || serviceCounts["missing"] != 0 {
+		t.Fatalf("scoped batched service counts = %#v, want checkout=2 missing=0", serviceCounts)
+	}
 
 	rangeLister := provider.(storage.ScopedRangeLister)
 	rangeRows, err := rangeLister.ListIncidentsInRangeForScope(
@@ -118,5 +127,73 @@ func TestPostgresScopedCapabilitiesUnionAndExclude(t *testing.T) {
 	}
 	if len(analysisHits) != 2 {
 		t.Fatalf("scoped analysis search returned %d rows, want 2", len(analysisHits))
+	}
+	analysisPage, analysisTotal, err := provider.(storage.ScopedAnalysisSearchPager).SearchAnalysesPageForScope(
+		scope,
+		storage.AnalysisSearchOptions{Service: "checkout", Query: "shared finding", Limit: 1},
+	)
+	if err != nil {
+		t.Fatalf("SearchAnalysesPageForScope: %v", err)
+	}
+	if analysisTotal != 2 || len(analysisPage) != 1 || analysisPage[0].ID != "licensed-analysis" {
+		t.Fatalf("scoped analysis page = %#v total=%d, want licensed-analysis and total 2", analysisPage, analysisTotal)
+	}
+}
+
+func TestPostgresDiscoveryRangeServiceAndLiteralSearchParity(t *testing.T) {
+	provider := newTestPostgres(t)
+	scope := tenancy.NewOrgScope("licensed")
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	end := now.Add(-time.Minute)
+	for _, rec := range []*storage.IncidentRecord{
+		{ID: "metric-literal", OrgID: "licensed", Title: "cpu_90%", Content: map[string]interface{}{"service": "content-api"}, CreatedAt: end.Add(-time.Minute)},
+		{ID: "metric-wildcard", OrgID: "licensed", Title: "cpuX900", Service: "other", CreatedAt: end.Add(-time.Minute)},
+		{ID: "after-end", OrgID: "licensed", Content: map[string]interface{}{"labels": map[string]interface{}{"service": "content-api"}}, CreatedAt: end},
+	} {
+		if err := provider.SaveIncident(rec); err != nil {
+			t.Fatalf("SaveIncident %q: %v", rec.ID, err)
+		}
+	}
+	for _, rec := range []*storage.AnalysisRecord{
+		{ID: "literal-analysis", OrgID: "licensed", IncidentID: "metric-literal", RequestedAt: now, RawResponse: "finding_90%"},
+		{ID: "wildcard-analysis", OrgID: "licensed", IncidentID: "metric-wildcard", RequestedAt: now.Add(-time.Second), RawResponse: "findingX900"},
+	} {
+		if err := provider.SaveAnalysis(rec); err != nil {
+			t.Fatalf("SaveAnalysis %q: %v", rec.ID, err)
+		}
+	}
+
+	rangeCounts, err := provider.(storage.ScopedIncidentServiceRangeSummaryReader).CountIncidentsByServicesInRangeForScope(
+		scope, []string{"content-api"}, end.Add(-time.Hour), end,
+	)
+	if err != nil {
+		t.Fatalf("CountIncidentsByServicesInRangeForScope: %v", err)
+	}
+	if rangeCounts["content-api"] != 1 {
+		t.Fatalf("content-only ranged count = %d, want 1", rangeCounts["content-api"])
+	}
+
+	incidentHits, err := provider.(storage.ScopedIncidentSearchPager).SearchIncidentsPageForScope(scope, "cpu_90%", "", 0, 10)
+	if err != nil {
+		t.Fatalf("SearchIncidentsPageForScope: %v", err)
+	}
+	if len(incidentHits) != 1 || incidentHits[0].ID != "metric-literal" {
+		t.Fatalf("literal incident hits = %#v, want metric-literal", incidentHits)
+	}
+
+	analysisPager := provider.(storage.ScopedAnalysisSearchPager)
+	analysisHits, total, err := analysisPager.SearchAnalysesPageForScope(scope, storage.AnalysisSearchOptions{Service: "content-api", Query: "finding_90%", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchAnalysesPageForScope: %v", err)
+	}
+	if total != 1 || len(analysisHits) != 1 || analysisHits[0].ID != "literal-analysis" {
+		t.Fatalf("literal analysis hits = %#v total=%d, want literal-analysis", analysisHits, total)
+	}
+	caseMiss, caseTotal, err := analysisPager.SearchAnalysesPageForScope(scope, storage.AnalysisSearchOptions{IncidentID: "METRIC-LITERAL", Limit: 10})
+	if err != nil {
+		t.Fatalf("case-sensitive SearchAnalysesPageForScope: %v", err)
+	}
+	if caseTotal != 0 || len(caseMiss) != 0 {
+		t.Fatalf("case-mismatched incident id returned %#v total=%d", caseMiss, caseTotal)
 	}
 }

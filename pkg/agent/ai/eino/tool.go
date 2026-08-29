@@ -3,6 +3,7 @@ package eino
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -44,13 +45,30 @@ func (adapter *invokableTool) Info(context.Context) (*schema.ToolInfo, error) {
 func (adapter *invokableTool) InvokableRun(ctx context.Context, arguments string, _ ...tool.Option) (string, error) {
 	result, err := adapter.invoke(ctx, json.RawMessage(arguments))
 	if err != nil {
-		return fmt.Sprintf(`{"error":%q}`, err.Error()), nil
+		// Only classified fields cross the model boundary; raw causes are intentionally discarded.
+		code, message := core.ClassifyToolError(err)
+		return marshalToolError(code, message), nil
 	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
-		return fmt.Sprintf(`{"error":%q}`, "marshal tool output: "+err.Error()), nil
+		return marshalToolError(core.ToolErrorInternal, "tool result could not be encoded"), nil
 	}
 	return capToolOutput(string(encoded), adapter.maxOutputBytes), nil
+}
+
+type toolErrorEnvelope struct {
+	Error struct {
+		Code    core.ToolErrorCode `json:"code"`
+		Message string             `json:"message"`
+	} `json:"error"`
+}
+
+func marshalToolError(code core.ToolErrorCode, message string) string {
+	var envelope toolErrorEnvelope
+	envelope.Error.Code = code
+	envelope.Error.Message = message
+	encoded, _ := json.Marshal(envelope)
+	return string(encoded)
 }
 
 func (adapter *invokableTool) invoke(ctx context.Context, args json.RawMessage) (*core.ToolResult, error) {
@@ -73,7 +91,11 @@ func (adapter *invokableTool) invoke(ctx context.Context, args json.RawMessage) 
 
 	select {
 	case <-timedCtx.Done():
-		return nil, fmt.Errorf("tool %q timed out after %s", adapter.impl.Name(), adapter.timeout)
+		if errors.Is(timedCtx.Err(), context.Canceled) {
+			return nil, core.NewToolError(core.ToolErrorCancelled, "tool run was cancelled", timedCtx.Err())
+		}
+		message := fmt.Sprintf("tool %q timed out after %s", adapter.impl.Name(), adapter.timeout)
+		return nil, core.NewToolError(core.ToolErrorTimeout, message, timedCtx.Err())
 	case result := <-done:
 		return result.result, result.err
 	}

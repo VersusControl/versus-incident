@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
@@ -21,6 +22,58 @@ import (
 type signalReaderAdapter struct {
 	sources map[string]core.SignalSource
 	order   []string
+}
+
+type detectionHealthAdapter struct {
+	snapshot versustools.DetectionHealthSnapshot
+}
+
+func newDetectionHealthAdapter(configured []config.AgentSourceConfig, built []core.SignalSource, buildErrs []error) versustools.DetectionHealthReader {
+	builtSources := make(map[string]struct{}, len(built))
+	for _, source := range built {
+		if source != nil {
+			builtSources[source.Name()] = struct{}{}
+		}
+	}
+	failed := make(map[string]bool)
+	for _, buildErr := range buildErrs {
+		message := buildErr.Error()
+		for _, source := range configured {
+			if strings.HasPrefix(message, "source "+source.Name+":") {
+				failed[source.Name] = true
+			}
+		}
+	}
+	sources := make([]versustools.SourceHealth, 0, len(configured))
+	configuredKinds := map[string]bool{}
+	for _, source := range configured {
+		kind := string(signalsources.KindOf(source.Type))
+		_, isConfigured := builtSources[source.Name]
+		health := versustools.SourceHealth{Name: source.Name, Kind: kind, Configured: isConfigured, Observation: "unknown"}
+		switch {
+		case !source.Enable:
+			health.ErrorClass = "disabled"
+		case failed[source.Name]:
+			health.ErrorClass = "configuration"
+		case isConfigured:
+			configuredKinds[kind] = true
+		default:
+			health.Observation = "unknown"
+		}
+		sources = append(sources, health)
+	}
+	categories := make([]versustools.CategoryHealth, 0, 3)
+	for _, kind := range []string{string(signalsources.KindLogs), string(signalsources.KindMetrics), string(signalsources.KindTraces)} {
+		categories = append(categories, versustools.CategoryHealth{Kind: kind, Configured: configuredKinds[kind], Dark: !configuredKinds[kind]})
+	}
+	return &detectionHealthAdapter{snapshot: versustools.DetectionHealthSnapshot{Sources: sources, Categories: categories, Observation: "unknown"}}
+}
+
+func (adapter *detectionHealthAdapter) DetectionHealth() versustools.DetectionHealthSnapshot {
+	if adapter == nil {
+		return versustools.DetectionHealthSnapshot{}
+	}
+	return adapter.snapshot
 }
 
 func newSignalReaderAdapter(sources []core.SignalSource) commontools.SignalReader {
@@ -69,13 +122,25 @@ func (a *signalReaderAdapter) Pull(ctx context.Context, source string, since tim
 // versustools.PatternCatalog interface without leaking the agent
 // package into the tools package. This keeps the import graph
 // one-way: pkg/agent -> tools.
-type catalogAdapter struct{ c *Catalog }
+type catalogAdapter struct {
+	c                *Catalog
+	autoPromoteAfter int
+}
 
 func newCatalogAdapter(c *Catalog) versustools.PatternCatalog {
 	if c == nil {
 		return nil
 	}
 	return &catalogAdapter{c: c}
+}
+
+func newCatalogAdapterWithThreshold(c *Catalog, autoPromoteAfter int) versustools.PatternCatalog {
+	if c == nil {
+		return nil
+	}
+	adapter, _ := newCatalogAdapter(c).(*catalogAdapter)
+	adapter.autoPromoteAfter = effectiveAutoPromote(autoPromoteAfter)
+	return adapter
 }
 
 func (a *catalogAdapter) Get(id string) *versustools.PatternView {
@@ -86,7 +151,7 @@ func (a *catalogAdapter) Get(id string) *versustools.PatternView {
 	if p == nil {
 		return nil
 	}
-	v := toView(p)
+	v := a.toView(p)
 	return &v
 }
 
@@ -97,7 +162,7 @@ func (a *catalogAdapter) All() []*versustools.PatternView {
 	all := a.c.All()
 	out := make([]*versustools.PatternView, 0, len(all))
 	for _, p := range all {
-		v := toView(p)
+		v := a.toView(p)
 		out = append(out, &v)
 	}
 	return out
@@ -113,6 +178,49 @@ func (a *catalogAdapter) AllServices() map[string]versustools.ServiceInfo {
 		out[k] = versustools.ServiceInfo{FirstSeen: v.FirstSeen}
 	}
 	return out
+}
+
+func (a *catalogAdapter) PatternsPage(opts versustools.CatalogPageOptions) ([]*versustools.PatternView, int, error) {
+	if a == nil || a.c == nil {
+		return nil, 0, nil
+	}
+	patterns, total, err := a.c.PatternsPage(CatalogPageOptions{
+		Offset:  opts.Offset,
+		Limit:   opts.Limit,
+		Search:  opts.Search,
+		Service: opts.Service,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]*versustools.PatternView, 0, len(patterns))
+	for _, pattern := range patterns {
+		view := a.toView(pattern)
+		out = append(out, &view)
+	}
+	return out, total, nil
+}
+
+func (a *catalogAdapter) ServicesPage(opts versustools.CatalogPageOptions) ([]versustools.ServiceRow, int, error) {
+	if a == nil || a.c == nil {
+		return nil, 0, nil
+	}
+	services, total, err := a.c.ServicesPage(CatalogPageOptions{
+		Offset: opts.Offset,
+		Limit:  opts.Limit,
+		Search: opts.Search,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]versustools.ServiceRow, 0, len(services))
+	for _, service := range services {
+		out = append(out, versustools.ServiceRow{
+			Name: service.Name,
+			Info: versustools.ServiceInfo{FirstSeen: service.Info.FirstSeen},
+		})
+	}
+	return out, total, nil
 }
 
 func toView(p *Pattern) versustools.PatternView {
@@ -131,6 +239,15 @@ func toView(p *Pattern) versustools.PatternView {
 		LastSeen:  p.LastSeen,
 		Samples:   append([]string(nil), p.Samples...),
 	}
+}
+
+func (a *catalogAdapter) toView(p *Pattern) versustools.PatternView {
+	view := toView(p)
+	view.AutoPromoteAfter = a.autoPromoteAfter
+	if view.AutoPromoteAfter <= 0 {
+		view.AutoPromoteAfter = effectiveAutoPromote(0)
+	}
+	return view
 }
 
 // buildDependencyGraph converts the operator-authored config service

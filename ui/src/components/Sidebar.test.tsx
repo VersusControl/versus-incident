@@ -120,13 +120,14 @@ function navSections(): Record<string, string[]> {
 }
 
 describe("Sidebar — the AI nav section groups the agent's reasoning surfaces", () => {
-  it("renders an 'AI' section holding Decisions, Analyses and SLIs/SLOs in order", async () => {
+  it("renders an 'AI' section with Chat first and the reasoning surfaces in order", async () => {
     await renderSettled();
     // The SLIs/SLOs entry carries the enterprise lock (probe answered 403).
     const slo = screen.getByRole("link", { name: /SLIs\/SLOs/ });
     within(slo).getByLabelText("Enterprise");
 
     expect(navSections()["AI"]).toEqual([
+      "/agent/chat",
       "/agent/decisions",
       "/analyses",
       "/agent/alert-fatigue",

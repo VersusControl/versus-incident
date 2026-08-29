@@ -67,10 +67,10 @@ export function TopBar({
 
   return (
     <header
-      className="z-sticky flex h-14 shrink-0 items-center justify-between gap-3
-                 border-b border-ink-600 bg-surface-sunken px-4 lg:px-6"
+      className="z-sticky flex h-14 shrink-0 items-center justify-between gap-1.5
+             border-b border-ink-600 bg-surface-sunken px-2 sm:gap-3 sm:px-4 lg:px-6"
     >
-      <div className="flex min-w-0 items-center gap-3">
+      <div className="flex min-w-0 items-center gap-1.5 sm:gap-3">
         <button
           aria-label="Open navigation"
           className="rounded-control p-1.5 text-ink-300 hover:bg-ink-700 hover:text-ink-100 lg:hidden"
@@ -79,7 +79,7 @@ export function TopBar({
           <Menu size={18} />
         </button>
         <div className="flex min-w-0 items-baseline gap-3">
-          <h1 className="truncate text-base font-semibold text-ink-50">{title}</h1>
+          <h1 className="shrink-0 whitespace-nowrap text-base font-semibold text-ink-50">{title}</h1>
           {subtitle && (
             <span className="hidden truncate text-xs text-ink-300 sm:inline">
               {subtitle}
@@ -88,7 +88,7 @@ export function TopBar({
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-3">
+      <div className="flex shrink-0 items-center gap-1.5 sm:gap-3">
         {actions}
         <TopBarIdentity />
         <SignOutButton />
@@ -186,7 +186,7 @@ function AgentChip({
     <Link
       to="/agent"
       className={clsx(
-        "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-2xs font-medium",
+        "hidden items-center gap-1.5 rounded-full border px-2 py-0.5 text-2xs font-medium sm:inline-flex",
         cls,
       )}
     >

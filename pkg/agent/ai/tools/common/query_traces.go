@@ -106,12 +106,12 @@ func (qt QueryTraces) Invoke(ctx context.Context, args json.RawMessage) (*core.T
 	var a queryTracesArgs
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &a); err != nil {
-			return nil, fmt.Errorf("query_traces: parse args: %w", err)
+			return nil, core.NewToolError(core.ToolErrorInvalidArguments, "arguments must be valid JSON", err)
 		}
 	}
 	timeRange, err := aitools.ResolveTimeRange(a.TimeRangeArgs, time.Now(), queryTracesDefaultWindow, queryTracesMaxWindow)
 	if err != nil {
-		return nil, fmt.Errorf("query_traces: %w", err)
+		return nil, core.NewToolError(core.ToolErrorInvalidArguments, "time range is invalid", err)
 	}
 	if a.Limit <= 0 {
 		a.Limit = queryTracesDefaultLimit

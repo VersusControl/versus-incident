@@ -101,18 +101,18 @@ func (qm QueryMetrics) Invoke(ctx context.Context, args json.RawMessage) (*core.
 	var a queryMetricsArgs
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &a); err != nil {
-			return nil, fmt.Errorf("query_metrics: parse args: %w", err)
+			return nil, core.NewToolError(core.ToolErrorInvalidArguments, "arguments must be valid JSON", err)
 		}
 	}
 	timeRange, err := aitools.ResolveTimeRange(a.TimeRangeArgs, time.Now(), queryMetricsDefaultWindow, queryMetricsMaxWindow)
 	if err != nil {
-		return nil, fmt.Errorf("query_metrics: %w", err)
+		return nil, core.NewToolError(core.ToolErrorInvalidArguments, "time range is invalid", err)
 	}
 
 	query := a.Query
 	if query == "" {
 		if a.Service == "" {
-			return nil, fmt.Errorf("query_metrics: either 'query' or 'service' is required")
+			return nil, core.NewToolError(core.ToolErrorInvalidArguments, "either query or service is required", nil)
 		}
 		query = fmt.Sprintf("sum(rate(http_requests_total{service=%q}[5m]))", a.Service)
 	}

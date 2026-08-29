@@ -81,12 +81,12 @@ func (rl RelatedLogs) Invoke(ctx context.Context, args json.RawMessage) (*core.T
 	var a relatedLogsArgs
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &a); err != nil {
-			return nil, fmt.Errorf("get_related_logs: parse args: %w", err)
+			return nil, core.NewToolError(core.ToolErrorInvalidArguments, "arguments must be valid JSON", err)
 		}
 	}
 	timeRange, err := aitools.ResolveTimeRange(a.TimeRangeArgs, time.Now(), relatedLogsDefaultWindow, relatedLogsMaxWindow)
 	if err != nil {
-		return nil, fmt.Errorf("get_related_logs: %w", err)
+		return nil, core.NewToolError(core.ToolErrorInvalidArguments, "time range is invalid", err)
 	}
 	if a.Limit <= 0 {
 		a.Limit = relatedLogsDefaultLimit

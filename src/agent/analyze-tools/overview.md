@@ -30,9 +30,9 @@ every build:
 
 | Tool | What it answers |
 |---|---|
-| `recent_incidents` | Are other services failing at the same time, or is this isolated? |
-| `pattern_history` | Is this pattern brand-new, or a known one spiking above its baseline? |
-| `describe_service` | What does normal look like for this service, and which patterns dominate? |
+| `get_system_overview` + `search_incidents` | Are other services failing at the same time, or is this isolated? |
+| `get_pattern` | Learned pattern identity, baseline, verdict, threshold readiness, provenance, and samples |
+| `get_service` | Service catalog facts, dominant patterns, and optional reliability state |
 | `get_related_logs` | What were the surrounding (redacted) log lines saying when this fired? |
 
 ### External — need a `tools.yaml` block

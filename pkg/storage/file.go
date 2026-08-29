@@ -1,9 +1,11 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -40,6 +42,16 @@ type fileProvider struct {
 	analysesMu     sync.RWMutex
 	analyses       []*AnalysisRecord // newest last
 	analysesLoaded bool
+}
+
+const fileBlobLockShardCount = 256
+
+var fileBlobLocks [fileBlobLockShardCount]sync.Mutex
+
+func fileBlobLock(path string) *sync.Mutex {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(path))
+	return &fileBlobLocks[hash.Sum32()%fileBlobLockShardCount]
 }
 
 // NewFile returns a Provider backed by the local filesystem.
@@ -131,6 +143,46 @@ func (p *fileProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error
 	if err := f.Close(); err != nil {
 		_ = os.Remove(target)
 		return false, fmt.Errorf("storage: create blob %s: %w", name, err)
+	}
+	return true, nil
+}
+
+// CompareAndSwapBlob serializes updates by canonical blob path. File storage
+// is restricted to one process in HA configurations, so this coordinates all
+// provider instances that can address the same directory.
+func (p *fileProvider) CompareAndSwapBlob(name string, expected, replacement []byte) (bool, error) {
+	target := p.blobPath(name)
+	lock := fileBlobLock(target)
+	lock.Lock()
+	defer lock.Unlock()
+	current, err := os.ReadFile(target)
+	if errors.Is(err, os.ErrNotExist) {
+		if expected != nil {
+			return false, nil
+		}
+		current = nil
+	} else if err != nil {
+		return false, fmt.Errorf("storage: read blob %s for compare-and-swap: %w", name, err)
+	} else if expected == nil {
+		return false, nil
+	}
+	if expected != nil && !bytes.Equal(current, expected) {
+		return false, nil
+	}
+	if replacement == nil {
+		if expected == nil {
+			return false, nil
+		}
+		if err := os.Remove(target); err != nil {
+			return false, fmt.Errorf("storage: remove blob %s: %w", name, err)
+		}
+		return true, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return false, fmt.Errorf("storage: mkdir blob dir: %w", err)
+	}
+	if err := writeFileAtomicSync(target, replacement, 0o644); err != nil {
+		return false, fmt.Errorf("storage: compare-and-swap blob %s: %w", name, err)
 	}
 	return true, nil
 }

@@ -72,9 +72,10 @@ const DefaultCatalogPageSize = 1000
 // pattern template/id/service (patterns) or the service name (services); an
 // empty Search returns the unfiltered ordering.
 type CatalogPageOptions struct {
-	Offset int
-	Limit  int
-	Search string
+	Offset  int
+	Limit   int
+	Search  string
+	Service string
 }
 
 // ServiceRow is one ordered service list row: the service name plus its

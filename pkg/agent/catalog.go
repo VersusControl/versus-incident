@@ -412,6 +412,15 @@ func pagePatterns(all []*Pattern, opts CatalogPageOptions) ([]*Pattern, int) {
 		}
 		all = kept
 	}
+	if service := strings.TrimSpace(opts.Service); service != "" {
+		kept := make([]*Pattern, 0, len(all))
+		for _, pattern := range all {
+			if pattern.Service == service {
+				kept = append(kept, pattern)
+			}
+		}
+		all = kept
+	}
 	sort.Slice(all, func(i, j int) bool {
 		if all[i].Count != all[j].Count {
 			return all[i].Count > all[j].Count

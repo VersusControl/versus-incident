@@ -1,10 +1,13 @@
 package agent
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 func newBuildCatalog(t *testing.T) (*Catalog, storage.Provider) {
@@ -90,5 +93,30 @@ func TestBuildAIs_EnabledConstructs(t *testing.T) {
 	bundle := BuildAIs(cfg, cat, store, nil)
 	if bundle.Detect == nil {
 		t.Fatal("Detect = nil; want a detect agent when AI is enabled at boot")
+	}
+}
+
+func TestBuildAIsForScopeWithChatLocationUsesProvider(t *testing.T) {
+	SetAISettingsResolver(nil)
+	t.Cleanup(func() { SetAISettingsResolver(nil) })
+	cat, store := newBuildCatalog(t)
+	cfg := config.AgentConfig{AI: config.AgentAIConfig{Enable: true, Model: "gpt-4o-mini"}}
+	calls := 0
+	bundle := BuildAIsForScopeWithChatLocation(cfg, cat, store, tenancy.DefaultOrgScope(), nil, func() *time.Location {
+		calls++
+		return time.UTC
+	})
+	if bundle.ChatService == nil {
+		t.Fatal("ChatService = nil")
+	}
+	service := bundle.ChatService(tenancy.DefaultOrgScope())
+	if service == nil {
+		t.Fatal("scoped chat service = nil")
+	}
+	if _, err := service.Send(context.Background(), "missing", "what happened today?", nil); err == nil {
+		t.Fatal("missing session send succeeded")
+	}
+	if calls != 1 {
+		t.Fatalf("location provider calls = %d, want 1", calls)
 	}
 }
