@@ -295,7 +295,18 @@ func (c *Catalog) RepointService(patternID, service string) bool {
 		return false
 	}
 	if s := catalogStore(); s != nil {
-		return s.Curate(CatalogEdit{Kind: CatalogEditRepointService, PatternID: patternID, Service: service}) == nil
+		if err := s.Curate(CatalogEdit{Kind: CatalogEditRepointService, PatternID: patternID, Service: service}); err != nil {
+			return false
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		p, ok := c.patterns[patternID]
+		if !ok || p.Service == service {
+			return ok
+		}
+		p.Service = service
+		c.dirty = true
+		return true
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

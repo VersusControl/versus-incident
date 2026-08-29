@@ -3,12 +3,12 @@ package agent
 import (
 	"testing"
 
-	analyzetools "github.com/VersusControl/versus-incident/pkg/agent/ai/analyze/tools"
+	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	"github.com/VersusControl/versus-incident/pkg/config"
 )
 
 // TestBuildGitRepos_EmptyNil asserts an empty repo list yields a nil
-// slice so analyzetools.Default omits the recent_changes tool.
+// slice so buildAnalyzeTools omits the recent_changes tool.
 func TestBuildGitRepos_EmptyNil(t *testing.T) {
 	if got := buildGitRepos(config.RecentChangesGitConfig{}); got != nil {
 		t.Fatalf("empty config should yield nil, got %v", got)
@@ -55,7 +55,7 @@ func TestBuildGitRepos_NoGlobalAuth(t *testing.T) {
 	got := buildGitRepos(config.RecentChangesGitConfig{
 		Repos: []config.RecentChangesGitRepo{{URL: "https://example.com/x.git"}},
 	})
-	want := analyzetools.GitRepo{URL: "https://example.com/x.git"}
+	want := commontools.GitRepo{URL: "https://example.com/x.git"}
 	if len(got) != 1 || got[0] != want {
 		t.Fatalf("got %+v, want single %+v", got, want)
 	}

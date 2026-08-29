@@ -288,8 +288,7 @@ func TestAnalyzeStream_RunFailureIsTerminalFailure(t *testing.T) {
 }
 
 // TestAnalyzeStream_SaveFailureIsDistinguishable asserts a lost record reports
-// run_failed prefixed with "save:", so the operator can tell "the analysis
-// failed" from "the analysis succeeded but we could not keep it".
+// run_failed without exposing backend details to the client.
 func TestAnalyzeStream_SaveFailureIsDistinguishable(t *testing.T) {
 	store := failSaveStore{Provider: storage.NewMemory(), err: errors.New("disk gone")}
 	seedStreamIncident(t, store)
@@ -303,8 +302,39 @@ func TestAnalyzeStream_SaveFailureIsDistinguishable(t *testing.T) {
 	if term.event != core.AnalyzeEventRunFailed {
 		t.Fatalf("terminal event = %q, want run_failed:\n%s", term.event, raw)
 	}
-	if term.data.Error != "save: disk gone" {
-		t.Fatalf("terminal error = %q, want the save error tagged as such", term.data.Error)
+	if term.data.Error != internalServerErrorMessage || strings.Contains(raw, "disk gone") {
+		t.Fatalf("terminal error = %q, want generic error without backend detail", term.data.Error)
+	}
+}
+
+func TestAnalyze_SaveFailureIsNotDisclosed(t *testing.T) {
+	backendDetail := "write /private/analyses.json: credential=secret"
+	store := failSaveStore{Provider: storage.NewMemory(), err: errors.New(backendDetail)}
+	seedStreamIncident(t, store)
+	t.Cleanup(func() {
+		services.SetStorage(nil)
+		services.SetAnalyzeAgent(nil)
+	})
+	services.SetStorage(store)
+	services.SetAnalyzeAgent(&scriptedAgent{result: okResult()})
+
+	app := fiber.New()
+	app.Post("/incidents/:id/analyze", NewIncidentAdminController().analyze)
+	resp, err := app.Test(httptest.NewRequest("POST", "/incidents/inc-1/analyze", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	if resp.StatusCode != fiber.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusInternalServerError)
+	}
+	if strings.Contains(string(body), backendDetail) || !strings.Contains(string(body), internalServerErrorMessage) {
+		t.Fatalf("body = %q, want generic error without backend detail", body)
 	}
 }
 
@@ -318,10 +348,10 @@ func TestAnalyzeStream_SaveFailureOutranksRunFailure(t *testing.T) {
 		err:    errors.New("model refused"),
 	})
 
-	res, _ := callStream(t, app)
+	res, raw := callStream(t, app)
 	term := res.terminal(t)
-	if term.data.Error != "save: disk gone" {
-		t.Fatalf("terminal error = %q, want the save failure to win", term.data.Error)
+	if term.data.Error != internalServerErrorMessage || strings.Contains(raw, "disk gone") {
+		t.Fatalf("terminal error = %q, want generic save failure without backend detail", term.data.Error)
 	}
 }
 

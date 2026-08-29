@@ -2,7 +2,6 @@ package analyze
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,7 +20,6 @@ import (
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 	utilcb "github.com/cloudwego/eino/utils/callbacks"
-	"github.com/eino-contrib/jsonschema"
 
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 	"github.com/VersusControl/versus-incident/pkg/config"
@@ -62,7 +60,7 @@ type Agent struct {
 	// picked up on the next Run without a restart. Nil when a fixed
 	// ChatModel override was supplied.
 	holder       *einowrap.Holder[*react.Agent]
-	tools        map[string]core.AnalyzeTool
+	tools        map[string]core.Tool
 	toolDisplays map[string]string
 	maxIter      int
 }
@@ -101,13 +99,13 @@ type Options struct {
 // New constructs an analyze Agent. cfg must already be resolved for
 // the analyze task (see config.AgentAIConfig.Resolve). Every tool in
 // the supplied list is registered with the agent.
-func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.AnalyzeTool, opts Options) (*Agent, error) {
+func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts Options) (*Agent, error) {
 	toolTimeout := opts.ToolTimeout
 	if toolTimeout == 0 {
 		toolTimeout = defaultToolTimeout
 	}
 
-	reg := map[string]core.AnalyzeTool{}
+	reg := map[string]core.Tool{}
 	displays := map[string]string{}
 	einoTools := make([]tool.BaseTool, 0, len(tools))
 	for _, t := range tools {
@@ -116,7 +114,7 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.AnalyzeTool
 		}
 		reg[t.Name()] = t
 		displays[t.Name()] = core.ToolDisplayName(t)
-		et, err := newEinoTool(t, toolTimeout)
+		et, err := einowrap.NewTool(t, toolTimeout, maxToolOutputBytes)
 		if err != nil {
 			return nil, err
 		}
@@ -596,87 +594,4 @@ func capOutput(s string) string {
 		return s[:maxToolOutputBytes] + `..."truncated"`
 	}
 	return s
-}
-
-// einoTool adapts a read-only core.AnalyzeTool onto Eino's
-// tool.InvokableTool so the ReAct agent's ToolsNode can dispatch it.
-// The single core.ToolResult envelope is preserved: Invoke still
-// returns core.ToolResult, which this adapter JSON-marshals (capped at
-// maxToolOutputBytes) into the string the model consumes.
-type einoTool struct {
-	impl    core.AnalyzeTool
-	info    *schema.ToolInfo
-	timeout time.Duration
-}
-
-func newEinoTool(t core.AnalyzeTool, timeout time.Duration) (*einoTool, error) {
-	info := &schema.ToolInfo{
-		Name: t.Name(),
-		Desc: t.Description(),
-	}
-	argsSchema := t.ArgsSchema()
-	if len(argsSchema) > 0 {
-		raw, err := json.Marshal(argsSchema)
-		if err != nil {
-			return nil, fmt.Errorf("analyze: marshal schema for tool %q: %w", t.Name(), err)
-		}
-		js := &jsonschema.Schema{}
-		if err := json.Unmarshal(raw, js); err != nil {
-			return nil, fmt.Errorf("analyze: parse schema for tool %q: %w", t.Name(), err)
-		}
-		info.ParamsOneOf = schema.NewParamsOneOfByJSONSchema(js)
-	}
-	return &einoTool{impl: t, info: info, timeout: timeout}, nil
-}
-
-// Info implements tool.BaseTool.
-func (e *einoTool) Info(_ context.Context) (*schema.ToolInfo, error) { return e.info, nil }
-
-// InvokableRun implements tool.InvokableTool. Tool errors (including a
-// per-tool timeout) are surfaced to the model as a structured error
-// message instead of aborting the ReAct graph, mirroring the prior
-// loop's resilience (the model can recover or pick another tool on the
-// next turn).
-func (e *einoTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
-	result, err := e.invoke(ctx, json.RawMessage(argumentsInJSON))
-	if err != nil {
-		return fmt.Sprintf(`{"error":%q}`, err.Error()), nil
-	}
-	b, mErr := json.Marshal(result)
-	if mErr != nil {
-		return fmt.Sprintf(`{"error":%q}`, "marshal tool output: "+mErr.Error()), nil
-	}
-	return capOutput(string(b)), nil
-}
-
-// invoke runs the wrapped tool under the per-tool timeout. A
-// non-positive timeout disables the cap and the tool runs directly.
-// Otherwise the tool runs against a derived deadline context; if it
-// outruns the deadline (even when the tool ignores cancellation) the
-// dispatch returns a timeout error promptly while the goroutine drains
-// into a buffered channel, so no goroutine is leaked indefinitely.
-func (e *einoTool) invoke(ctx context.Context, args json.RawMessage) (*core.ToolResult, error) {
-	if e.timeout <= 0 {
-		return e.impl.Invoke(ctx, args)
-	}
-
-	tctx, cancel := context.WithTimeout(ctx, e.timeout)
-	defer cancel()
-
-	type result struct {
-		out *core.ToolResult
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		out, err := e.impl.Invoke(tctx, args)
-		done <- result{out: out, err: err}
-	}()
-
-	select {
-	case <-tctx.Done():
-		return nil, fmt.Errorf("tool %q timed out after %s", e.impl.Name(), e.timeout)
-	case r := <-done:
-		return r.out, r.err
-	}
 }

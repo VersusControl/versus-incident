@@ -39,8 +39,7 @@ type AnalyzeIncidentSnapshot struct {
 	RequestedBy string `json:"requested_by,omitempty"`
 }
 
-// AnalyzeTool is the contract every analyze-side read-only tool
-// satisfies. Tools are registered with the analyze agent at
+// Tool is the contract every read-only AI tool satisfies. Tools are registered with an agent at
 // construction time; the agent surfaces them to the model as Eino
 // ToolInfo and dispatches model-requested calls back to this
 // interface.
@@ -48,7 +47,7 @@ type AnalyzeIncidentSnapshot struct {
 // Implementations MUST be read-only. The compile-time guard in
 // pkg/agent/ai/analyze rejects any import of services.CreateIncident
 // transitively.
-type AnalyzeTool interface {
+type Tool interface {
 	// Name is the model-visible tool name. Must be a stable identifier
 	// (snake_case is the convention).
 	Name() string
@@ -66,17 +65,25 @@ type AnalyzeTool interface {
 	Invoke(ctx context.Context, args json.RawMessage) (*ToolResult, error)
 }
 
-// AnalyzeToolDisplayer optionally gives a tool a human-readable activity name.
-type AnalyzeToolDisplayer interface {
+// AnalyzeTool is retained for source compatibility.
+// Deprecated: use Tool.
+type AnalyzeTool = Tool
+
+// ToolDisplayer optionally gives a tool a human-readable activity name.
+type ToolDisplayer interface {
 	DisplayName() string
 }
 
+// AnalyzeToolDisplayer is retained for source compatibility.
+// Deprecated: use ToolDisplayer.
+type AnalyzeToolDisplayer = ToolDisplayer
+
 // ToolDisplayName returns an explicit display name or title-cases the stable name.
-func ToolDisplayName(tool AnalyzeTool) string {
+func ToolDisplayName(tool Tool) string {
 	if tool == nil || (reflect.ValueOf(tool).Kind() == reflect.Ptr && reflect.ValueOf(tool).IsNil()) {
 		return ""
 	}
-	if displayer, ok := tool.(AnalyzeToolDisplayer); ok {
+	if displayer, ok := tool.(ToolDisplayer); ok {
 		if display := strings.TrimSpace(displayer.DisplayName()); display != "" {
 			return display
 		}
@@ -106,7 +113,56 @@ func ToolDisplayName(tool AnalyzeTool) string {
 // Data — the typed payload. Keys are tool-specific; values must be
 // JSON-marshalable (no channels, funcs, or unexported structs).
 type ToolResult struct {
-	Tool  string         `json:"tool"`
-	Found bool           `json:"found"`
-	Data  map[string]any `json:"data,omitempty"`
+	Tool      string         `json:"tool"`
+	Found     bool           `json:"found"`
+	Available *bool          `json:"-"`
+	Reason    string         `json:"reason,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
+}
+
+// IsAvailable reports availability, defaulting existing results to true.
+func (result ToolResult) IsAvailable() bool {
+	return result.Available == nil || *result.Available
+}
+
+// UnavailableToolResult returns an expected missing-capability result.
+func UnavailableToolResult(tool, reason string) *ToolResult {
+	available := false
+	return &ToolResult{Tool: tool, Found: false, Available: &available, Reason: reason}
+}
+
+// MarshalJSON keeps availability explicit on the wire while preserving old constructors.
+func (result ToolResult) MarshalJSON() ([]byte, error) {
+	type wireResult struct {
+		Tool      string         `json:"tool"`
+		Found     bool           `json:"found"`
+		Available bool           `json:"available"`
+		Reason    string         `json:"reason,omitempty"`
+		Data      map[string]any `json:"data,omitempty"`
+	}
+	return json.Marshal(wireResult{
+		Tool: result.Tool, Found: result.Found, Available: result.IsAvailable(),
+		Reason: result.Reason, Data: result.Data,
+	})
+}
+
+// UnmarshalJSON preserves explicit availability when reading stored results.
+func (result *ToolResult) UnmarshalJSON(data []byte) error {
+	type wireResult struct {
+		Tool      string         `json:"tool"`
+		Found     bool           `json:"found"`
+		Available *bool          `json:"available"`
+		Reason    string         `json:"reason,omitempty"`
+		Data      map[string]any `json:"data,omitempty"`
+	}
+	var wire wireResult
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	result.Tool = wire.Tool
+	result.Found = wire.Found
+	result.Available = wire.Available
+	result.Reason = wire.Reason
+	result.Data = wire.Data
+	return nil
 }

@@ -509,16 +509,17 @@ func (p *fileProvider) SaveAnalysis(rec *AnalysisRecord) error {
 	if rec == nil || rec.ID == "" {
 		return fmt.Errorf("storage: SaveAnalysis: missing id")
 	}
-	rec.OrgID = NormalizeOrgID(rec.OrgID)
+	stored := CloneAnalysisRecord(rec)
+	stored.OrgID = NormalizeOrgID(stored.OrgID)
 	p.analysesMu.Lock()
 	defer p.analysesMu.Unlock()
 	for i, existing := range p.analyses {
 		if existing.ID == rec.ID {
-			p.analyses[i] = rec
+			p.analyses[i] = stored
 			return p.persistAnalysesLocked()
 		}
 	}
-	p.analyses = append(p.analyses, rec)
+	p.analyses = append(p.analyses, stored)
 	if over := len(p.analyses) - maxAnalysesDefault; over > 0 {
 		p.analyses = append([]*AnalysisRecord(nil), p.analyses[over:]...)
 	}
@@ -530,8 +531,7 @@ func (p *fileProvider) GetAnalysis(id string) (*AnalysisRecord, error) {
 	defer p.analysesMu.RUnlock()
 	for _, rec := range p.analyses {
 		if rec.ID == id {
-			cp := *rec
-			return &cp, nil
+			return CloneAnalysisRecord(rec), nil
 		}
 	}
 	return nil, ErrNotFound
@@ -549,8 +549,7 @@ func (p *fileProvider) ListAnalysesByIncident(incidentID string, limit int) ([]*
 		if p.analyses[i].IncidentID != incidentID {
 			continue
 		}
-		cp := *p.analyses[i]
-		out = append(out, &cp)
+		out = append(out, CloneAnalysisRecord(p.analyses[i]))
 		if limit > 0 && len(out) >= limit {
 			break
 		}
@@ -567,8 +566,7 @@ func (p *fileProvider) ListAnalyses(limit int) ([]*AnalysisRecord, error) {
 	}
 	out := make([]*AnalysisRecord, 0, n)
 	for i := n - 1; i >= 0; i-- {
-		cp := *p.analyses[i]
-		out = append(out, &cp)
+		out = append(out, CloneAnalysisRecord(p.analyses[i]))
 		if limit > 0 && len(out) >= limit {
 			break
 		}
@@ -603,8 +601,7 @@ func (p *fileProvider) ListAnalysesPage(offset, limit int) ([]*AnalysisRecord, e
 			skipped++
 			continue
 		}
-		cp := *p.analyses[i]
-		out = append(out, &cp)
+		out = append(out, CloneAnalysisRecord(p.analyses[i]))
 		if len(out) >= limit {
 			break
 		}

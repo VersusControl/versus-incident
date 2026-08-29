@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
+
 	// pgx stdlib driver — registers "pgx" with database/sql.
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -31,6 +33,16 @@ type PostgresOptions struct {
 type postgresProvider struct {
 	db *sql.DB
 }
+
+var (
+	_ ScopedIncidentPager          = (*postgresProvider)(nil)
+	_ ScopedIncidentWindowCounter  = (*postgresProvider)(nil)
+	_ ScopedIncidentServiceCounter = (*postgresProvider)(nil)
+	_ ScopedAnalysisPager          = (*postgresProvider)(nil)
+	_ ScopedIncidentSearchPager    = (*postgresProvider)(nil)
+	_ ScopedSearcher               = (*postgresProvider)(nil)
+	_ ScopedRangeLister            = (*postgresProvider)(nil)
+)
 
 // DB implements the optional storage.SQLAccessor capability: it
 // exposes the pooled *sql.DB so the enterprise module and the OSS Postgres
@@ -664,6 +676,49 @@ func (p *postgresProvider) ListIncidents(limit int) ([]*IncidentRecord, error) {
 	return scanIncidentRows(rows)
 }
 
+func (p *postgresProvider) listIncidentsForScope(scope tenancy.OrgScope, limit int) ([]*IncidentRecord, error) {
+	base := `SELECT ` + incidentColumns + ` FROM vs_incidents
+		WHERE org_id = ANY($1) ORDER BY created_at DESC`
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if limit > 0 {
+		rows, err = p.db.Query(base+` LIMIT $2`, scope.OrgIDs(), limit)
+	} else {
+		rows, err = p.db.Query(base, scope.OrgIDs())
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: list scoped incidents: %w", err)
+	}
+	defer rows.Close()
+	return scanIncidentRows(rows)
+}
+
+// ListIncidentsInRange returns the default organization window.
+func (p *postgresProvider) ListIncidentsInRange(start, end time.Time, limit int) ([]*IncidentRecord, error) {
+	return p.ListIncidentsInRangeForScope(tenancy.DefaultOrgScope(), start, end, limit)
+}
+
+// ListIncidentsInRangeForScope pushes the organization and [start,end) bounds
+// into Postgres. A zero end leaves the upper bound open.
+func (p *postgresProvider) ListIncidentsInRangeForScope(scope tenancy.OrgScope, start, end time.Time, limit int) ([]*IncidentRecord, error) {
+	var upperBound any
+	if !end.IsZero() {
+		upperBound = end.UTC()
+	}
+	rows, err := p.db.Query(`SELECT `+incidentColumns+` FROM vs_incidents
+		WHERE org_id = ANY($1) AND created_at >= $2
+		  AND ($3::timestamptz IS NULL OR created_at < $3)
+		ORDER BY created_at DESC
+		LIMIT NULLIF($4, 0)`, scope.OrgIDs(), start.UTC(), upperBound, max(limit, 0))
+	if err != nil {
+		return nil, fmt.Errorf("storage: list incidents in scoped range: %w", err)
+	}
+	defer rows.Close()
+	return scanIncidentRows(rows)
+}
+
 // scanIncidentRow reads one row selected via incidentColumns into an
 // IncidentRecord. Nullable columns scan through sql.Null* / []byte holders so
 // a NULL becomes the field's zero value (empty string, nil slice, nil map).
@@ -752,15 +807,20 @@ func scanIncidentRows(rows *sql.Rows) ([]*IncidentRecord, error) {
 // origin column, and the unresolved predicate is served by the partial
 // unresolved index so the count stays index-backed on a large history.
 func (p *postgresProvider) CountIncidents() (IncidentCounts, error) {
+	return p.CountIncidentsForScope(tenancy.DefaultOrgScope())
+}
+
+// CountIncidentsForScope counts unresolved incidents in the ordered read scope.
+func (p *postgresProvider) CountIncidentsForScope(scope tenancy.OrgScope) (IncidentCounts, error) {
 	const q = `
 		SELECT
 			COUNT(*) FILTER (WHERE origin = 'ai_detect') AS ai,
 			COUNT(*) FILTER (WHERE origin = 'webhook')   AS webhook,
 			COUNT(*)                                      AS total
 		FROM vs_incidents
-		WHERE resolved = false`
+		WHERE org_id = ANY($1) AND resolved = false`
 	var c IncidentCounts
-	if err := p.db.QueryRow(q).Scan(&c.AIDetect, &c.Webhook, &c.Total); err != nil {
+	if err := p.db.QueryRow(q, scope.OrgIDs()).Scan(&c.AIDetect, &c.Webhook, &c.Total); err != nil {
 		return IncidentCounts{}, fmt.Errorf("storage: count incidents: %w", err)
 	}
 	return c, nil
@@ -776,6 +836,11 @@ func (p *postgresProvider) CountIncidents() (IncidentCounts, error) {
 // an empty origin — which classifies as webhook via EffectiveOrigin — is
 // counted as webhook here too, keeping AIDetect + Webhook == Total.
 func (p *postgresProvider) CountIncidentsByStatus() (IncidentStatusCounts, error) {
+	return p.CountIncidentsByStatusForScope(tenancy.DefaultOrgScope())
+}
+
+// CountIncidentsByStatusForScope counts each status across the read scope.
+func (p *postgresProvider) CountIncidentsByStatusForScope(scope tenancy.OrgScope) (IncidentStatusCounts, error) {
 	const q = `
 		SELECT
 			COUNT(*) FILTER (WHERE resolved = false AND acked_at IS NULL)     AS open_total,
@@ -786,9 +851,10 @@ func (p *postgresProvider) CountIncidentsByStatus() (IncidentStatusCounts, error
 			COUNT(*) FILTER (WHERE origin = 'ai_detect' AND resolved = false AND acked_at IS NOT NULL) AS acked_ai,
 			COUNT(*) FILTER (WHERE origin = 'ai_detect' AND resolved = true)                           AS resolved_ai,
 			COUNT(*) FILTER (WHERE origin = 'ai_detect')                                               AS all_ai
-		FROM vs_incidents`
+		FROM vs_incidents
+		WHERE org_id = ANY($1)`
 	var total, ai StatusCounts
-	if err := p.db.QueryRow(q).Scan(
+	if err := p.db.QueryRow(q, scope.OrgIDs()).Scan(
 		&total.Open, &total.Acked, &total.Resolved, &total.Total,
 		&ai.Open, &ai.Acked, &ai.Resolved, &ai.Total,
 	); err != nil {
@@ -801,8 +867,13 @@ func (p *postgresProvider) CountIncidentsByStatus() (IncidentStatusCounts, error
 // same single COUNT/FILTER pass bounded to a recent window. A zero since is
 // unbounded and delegates, so the two can never disagree.
 func (p *postgresProvider) CountIncidentsByStatusSince(since time.Time) (IncidentStatusCounts, error) {
+	return p.CountIncidentsByStatusSinceForScope(tenancy.DefaultOrgScope(), since)
+}
+
+// CountIncidentsByStatusSinceForScope applies the same scope to a recent window.
+func (p *postgresProvider) CountIncidentsByStatusSinceForScope(scope tenancy.OrgScope, since time.Time) (IncidentStatusCounts, error) {
 	if since.IsZero() {
-		return p.CountIncidentsByStatus()
+		return p.CountIncidentsByStatusForScope(scope)
 	}
 	const q = `
 		SELECT
@@ -815,9 +886,9 @@ func (p *postgresProvider) CountIncidentsByStatusSince(since time.Time) (Inciden
 			COUNT(*) FILTER (WHERE origin = 'ai_detect' AND resolved = true)                           AS resolved_ai,
 			COUNT(*) FILTER (WHERE origin = 'ai_detect')                                               AS all_ai
 		FROM vs_incidents
-		WHERE created_at >= $1`
+		WHERE org_id = ANY($1) AND created_at >= $2`
 	var total, ai StatusCounts
-	if err := p.db.QueryRow(q, since.UTC()).Scan(
+	if err := p.db.QueryRow(q, scope.OrgIDs(), since.UTC()).Scan(
 		&total.Open, &total.Acked, &total.Resolved, &total.Total,
 		&ai.Open, &ai.Acked, &ai.Resolved, &ai.Total,
 	); err != nil {
@@ -827,6 +898,11 @@ func (p *postgresProvider) CountIncidentsByStatusSince(since time.Time) (Inciden
 }
 
 func (p *postgresProvider) CountIncidentsByServiceSince(orgID, service string, since time.Time) (int, map[string]int, error) {
+	return p.CountIncidentsByServiceSinceForScope(tenancy.NewOrgScope(orgID), service, since)
+}
+
+// CountIncidentsByServiceSinceForScope counts a logical service across the scope.
+func (p *postgresProvider) CountIncidentsByServiceSinceForScope(scope tenancy.OrgScope, service string, since time.Time) (int, map[string]int, error) {
 	const q = `
 		SELECT COALESCE(severity, ''), COUNT(*)
 		FROM (
@@ -836,10 +912,10 @@ func (p *postgresProvider) CountIncidentsByServiceSince(orgID, service string, s
 				jsonb_path_query_first(content, '$.keyvalue() ? (@.key like_regex "^Trigger$" flag "i").value.keyvalue() ? (@.key like_regex "^Dimensions$" flag "i").value[*] ? (@.keyvalue() ? (@.key like_regex "^Name$" flag "i").value like_regex "^(Severity|severity|level|priority)$" flag "i").keyvalue() ? (@.key like_regex "^Value$" flag "i").value') #>> '{}'
 			) AS severity
 			FROM vs_incidents
-			WHERE org_id = $1 AND service = $2 AND created_at >= $3
+			WHERE org_id = ANY($1) AND service = $2 AND created_at >= $3
 		) scoped
 		GROUP BY severity`
-	rows, err := p.db.Query(q, NormalizeOrgID(orgID), service, since.UTC())
+	rows, err := p.db.Query(q, scope.OrgIDs(), service, since.UTC())
 	if err != nil {
 		return 0, nil, fmt.Errorf("storage: count incidents by service since: %w", err)
 	}
@@ -862,14 +938,19 @@ func (p *postgresProvider) CountIncidentsByServiceSince(orgID, service string, s
 }
 
 func (p *postgresProvider) ListIncidentsByServiceSince(orgID, service string, since time.Time, limit int) ([]*IncidentRecord, error) {
+	return p.ListIncidentsByServiceSinceForScope(tenancy.NewOrgScope(orgID), service, since, limit)
+}
+
+// ListIncidentsByServiceSinceForScope returns a bounded scoped service history.
+func (p *postgresProvider) ListIncidentsByServiceSinceForScope(scope tenancy.OrgScope, service string, since time.Time, limit int) ([]*IncidentRecord, error) {
 	if limit <= 0 {
 		limit = DefaultIncidentPageSize
 	}
 	rows, err := p.db.Query(`
 		SELECT `+incidentColumns+` FROM vs_incidents
-		WHERE org_id = $1 AND service = $2 AND created_at >= $3
+		WHERE org_id = ANY($1) AND service = $2 AND created_at >= $3
 		ORDER BY created_at DESC
-		LIMIT $4`, NormalizeOrgID(orgID), service, since.UTC(), limit)
+		LIMIT $4`, scope.OrgIDs(), service, since.UTC(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list incidents by service since: %w", err)
 	}
@@ -889,6 +970,11 @@ func (p *postgresProvider) ListIncidentsByServiceSince(orgID, service string, si
 // page lists ALL incidents (resolved and open alike) so resolved incidents
 // remain reachable; only the counts are unresolved-only.
 func (p *postgresProvider) ListIncidentsPage(origin string, offset, limit int) ([]*IncidentRecord, error) {
+	return p.ListIncidentsPageForScope(tenancy.DefaultOrgScope(), origin, offset, limit)
+}
+
+// ListIncidentsPageForScope returns one globally ordered page from the scope.
+func (p *postgresProvider) ListIncidentsPageForScope(scope tenancy.OrgScope, origin string, offset, limit int) ([]*IncidentRecord, error) {
 	if limit <= 0 {
 		limit = DefaultIncidentPageSize
 	}
@@ -902,13 +988,13 @@ func (p *postgresProvider) ListIncidentsPage(origin string, offset, limit int) (
 	if origin == OriginAIDetect || origin == OriginWebhook {
 		rows, err = p.db.Query(`
 			SELECT `+incidentColumns+` FROM vs_incidents
-			WHERE origin = $1
+			WHERE org_id = ANY($1) AND origin = $2
 			ORDER BY created_at DESC
-			LIMIT $2 OFFSET $3`, origin, limit, offset)
+			LIMIT $3 OFFSET $4`, scope.OrgIDs(), origin, limit, offset)
 	} else {
 		rows, err = p.db.Query(
-			`SELECT `+incidentColumns+` FROM vs_incidents ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
-			limit, offset,
+			`SELECT `+incidentColumns+` FROM vs_incidents WHERE org_id = ANY($1) ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+			scope.OrgIDs(), limit, offset,
 		)
 	}
 	if err != nil {
@@ -1012,12 +1098,38 @@ func (p *postgresProvider) ListAnalyses(limit int) ([]*AnalysisRecord, error) {
 	return scanAnalysisRows(rows)
 }
 
+func (p *postgresProvider) listAnalysesForScope(scope tenancy.OrgScope, limit int) ([]*AnalysisRecord, error) {
+	base := `SELECT data FROM vs_analyses
+		WHERE COALESCE(NULLIF(data->>'org_id', ''), 'default') = ANY($1)
+		ORDER BY requested_at DESC`
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if limit > 0 {
+		rows, err = p.db.Query(base+` LIMIT $2`, scope.OrgIDs(), limit)
+	} else {
+		rows, err = p.db.Query(base, scope.OrgIDs())
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: list scoped analyses: %w", err)
+	}
+	defer rows.Close()
+	return scanAnalysisRows(rows)
+}
+
 // CountAnalyses implements the optional storage.AnalysisPager capability: the
 // total number of stored analyses in one COUNT query, without shipping a row
 // to Go so a large vs_analyses never has to be loaded to render a count.
 func (p *postgresProvider) CountAnalyses() (int, error) {
+	return p.CountAnalysesForScope(tenancy.DefaultOrgScope())
+}
+
+// CountAnalysesForScope counts analysis records whose embedded org belongs to scope.
+func (p *postgresProvider) CountAnalysesForScope(scope tenancy.OrgScope) (int, error) {
 	var n int
-	if err := p.db.QueryRow(`SELECT COUNT(*) FROM vs_analyses`).Scan(&n); err != nil {
+	if err := p.db.QueryRow(`SELECT COUNT(*) FROM vs_analyses
+		WHERE COALESCE(NULLIF(data->>'org_id', ''), 'default') = ANY($1)`, scope.OrgIDs()).Scan(&n); err != nil {
 		return 0, fmt.Errorf("storage: count analyses: %w", err)
 	}
 	return n, nil
@@ -1028,6 +1140,11 @@ func (p *postgresProvider) CountAnalyses() (int, error) {
 // requested_at DESC LIMIT/OFFSET), so a large vs_analyses is never fetched
 // whole to render one page.
 func (p *postgresProvider) ListAnalysesPage(offset, limit int) ([]*AnalysisRecord, error) {
+	return p.ListAnalysesPageForScope(tenancy.DefaultOrgScope(), offset, limit)
+}
+
+// ListAnalysesPageForScope returns one bounded, globally ordered scoped page.
+func (p *postgresProvider) ListAnalysesPageForScope(scope tenancy.OrgScope, offset, limit int) ([]*AnalysisRecord, error) {
 	if limit <= 0 {
 		limit = DefaultAnalysisPageSize
 	}
@@ -1035,8 +1152,10 @@ func (p *postgresProvider) ListAnalysesPage(offset, limit int) ([]*AnalysisRecor
 		offset = 0
 	}
 	rows, err := p.db.Query(
-		`SELECT data FROM vs_analyses ORDER BY requested_at DESC LIMIT $1 OFFSET $2`,
-		limit, offset,
+		`SELECT data FROM vs_analyses
+		 WHERE COALESCE(NULLIF(data->>'org_id', ''), 'default') = ANY($1)
+		 ORDER BY requested_at DESC LIMIT $2 OFFSET $3`,
+		scope.OrgIDs(), limit, offset,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list analyses page: %w", err)
@@ -1081,22 +1200,27 @@ func (p *postgresProvider) DeleteAnalysis(id string) error {
 // title/service/source columns and, as a fallback, the content JSON body.
 // An empty query degrades to ListIncidents. Results are newest first.
 func (p *postgresProvider) SearchIncidents(query string, limit int) ([]*IncidentRecord, error) {
+	return p.SearchIncidentsForScope(tenancy.DefaultOrgScope(), query, limit)
+}
+
+// SearchIncidentsForScope searches only incidents in the ordered read scope.
+func (p *postgresProvider) SearchIncidentsForScope(scope tenancy.OrgScope, query string, limit int) ([]*IncidentRecord, error) {
 	if query == "" {
-		return p.ListIncidents(limit)
+		return p.listIncidentsForScope(scope, limit)
 	}
 	pattern := "%" + query + "%"
 	base := `
 		SELECT ` + incidentColumns + ` FROM vs_incidents
-		WHERE ` + searchIncidentsWhereSQL + `
+		WHERE org_id = ANY($1) AND (` + scopedSearchIncidentsWhereSQL + `)
 		ORDER BY created_at DESC`
 	var (
 		rows *sql.Rows
 		err  error
 	)
 	if limit > 0 {
-		rows, err = p.db.Query(base+` LIMIT $2`, pattern, limit)
+		rows, err = p.db.Query(base+` LIMIT $3`, scope.OrgIDs(), pattern, limit)
 	} else {
-		rows, err = p.db.Query(base, pattern)
+		rows, err = p.db.Query(base, scope.OrgIDs(), pattern)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("storage: search incidents: %w", err)
@@ -1115,6 +1239,11 @@ const searchIncidentsWhereSQL = `title      ILIKE $1
 		   OR source     ILIKE $1
 		   OR content::text ILIKE $1`
 
+const scopedSearchIncidentsWhereSQL = `title      ILIKE $2
+		   OR service    ILIKE $2
+		   OR source     ILIKE $2
+		   OR content::text ILIKE $2`
+
 // CountIncidentsMatching implements the optional storage.IncidentSearchPager
 // capability: the per-origin tally and total of UNRESOLVED (open) search
 // matches in one COUNT query, without materializing rows. Counts are
@@ -1122,8 +1251,13 @@ const searchIncidentsWhereSQL = `title      ILIKE $1
 // badge over a filtered feed still reflects open work. An empty query degrades
 // to counting every unresolved incident, matching CountIncidents.
 func (p *postgresProvider) CountIncidentsMatching(query string) (IncidentCounts, error) {
+	return p.CountIncidentsMatchingForScope(tenancy.DefaultOrgScope(), query)
+}
+
+// CountIncidentsMatchingForScope counts unresolved scoped search matches.
+func (p *postgresProvider) CountIncidentsMatchingForScope(scope tenancy.OrgScope, query string) (IncidentCounts, error) {
 	if query == "" {
-		return p.CountIncidents()
+		return p.CountIncidentsForScope(scope)
 	}
 	pattern := "%" + query + "%"
 	q := fmt.Sprintf(`
@@ -1132,10 +1266,11 @@ func (p *postgresProvider) CountIncidentsMatching(query string) (IncidentCounts,
 			COUNT(*) FILTER (WHERE origin = 'webhook')   AS webhook,
 			COUNT(*)                                      AS total
 		FROM vs_incidents
-		WHERE (%[1]s)
-		  AND resolved = false`, searchIncidentsWhereSQL)
+		WHERE org_id = ANY($1)
+		  AND (%[1]s)
+		  AND resolved = false`, scopedSearchIncidentsWhereSQL)
 	var c IncidentCounts
-	if err := p.db.QueryRow(q, pattern).Scan(&c.AIDetect, &c.Webhook, &c.Total); err != nil {
+	if err := p.db.QueryRow(q, scope.OrgIDs(), pattern).Scan(&c.AIDetect, &c.Webhook, &c.Total); err != nil {
 		return IncidentCounts{}, fmt.Errorf("storage: count matching incidents: %w", err)
 	}
 	return c, nil
@@ -1149,8 +1284,13 @@ func (p *postgresProvider) CountIncidentsMatching(query string) (IncidentCounts,
 // totals and the ai_detect slice are counted; webhook is the complement so
 // AIDetect + Webhook == Total holds over the match set too.
 func (p *postgresProvider) CountIncidentsMatchingByStatus(query string) (IncidentStatusCounts, error) {
+	return p.CountIncidentsMatchingByStatusForScope(tenancy.DefaultOrgScope(), query)
+}
+
+// CountIncidentsMatchingByStatusForScope counts scoped matches by status.
+func (p *postgresProvider) CountIncidentsMatchingByStatusForScope(scope tenancy.OrgScope, query string) (IncidentStatusCounts, error) {
 	if query == "" {
-		return p.CountIncidentsByStatus()
+		return p.CountIncidentsByStatusForScope(scope)
 	}
 	pattern := "%" + query + "%"
 	q := fmt.Sprintf(`
@@ -1164,9 +1304,9 @@ func (p *postgresProvider) CountIncidentsMatchingByStatus(query string) (Inciden
 			COUNT(*) FILTER (WHERE origin = 'ai_detect' AND resolved = true)                           AS resolved_ai,
 			COUNT(*) FILTER (WHERE origin = 'ai_detect')                                               AS all_ai
 		FROM vs_incidents
-		WHERE (%[1]s)`, searchIncidentsWhereSQL)
+		WHERE org_id = ANY($1) AND (%[1]s)`, scopedSearchIncidentsWhereSQL)
 	var total, ai StatusCounts
-	if err := p.db.QueryRow(q, pattern).Scan(
+	if err := p.db.QueryRow(q, scope.OrgIDs(), pattern).Scan(
 		&total.Open, &total.Acked, &total.Resolved, &total.Total,
 		&ai.Open, &ai.Acked, &ai.Resolved, &ai.Total,
 	); err != nil {
@@ -1182,8 +1322,13 @@ func (p *postgresProvider) CountIncidentsMatchingByStatus(query string) (Inciden
 // set. The page lists ALL matching incidents (resolved and open alike); only
 // the counts are unresolved-only. An empty query degrades to ListIncidentsPage.
 func (p *postgresProvider) SearchIncidentsPage(query, origin string, offset, limit int) ([]*IncidentRecord, error) {
+	return p.SearchIncidentsPageForScope(tenancy.DefaultOrgScope(), query, origin, offset, limit)
+}
+
+// SearchIncidentsPageForScope returns one bounded scoped search page.
+func (p *postgresProvider) SearchIncidentsPageForScope(scope tenancy.OrgScope, query, origin string, offset, limit int) ([]*IncidentRecord, error) {
 	if query == "" {
-		return p.ListIncidentsPage(origin, offset, limit)
+		return p.ListIncidentsPageForScope(scope, origin, offset, limit)
 	}
 	if limit <= 0 {
 		limit = DefaultIncidentPageSize
@@ -1195,11 +1340,12 @@ func (p *postgresProvider) SearchIncidentsPage(query, origin string, offset, lim
 	if origin == OriginAIDetect || origin == OriginWebhook {
 		q := fmt.Sprintf(`
 			SELECT %[2]s FROM vs_incidents
-			WHERE (%[1]s)
-			  AND origin = $2
+			WHERE org_id = ANY($1)
+			  AND (%[1]s)
+			  AND origin = $3
 			ORDER BY created_at DESC
-			LIMIT $3 OFFSET $4`, searchIncidentsWhereSQL, incidentColumns)
-		rows, err := p.db.Query(q, pattern, origin, limit, offset)
+			LIMIT $4 OFFSET $5`, scopedSearchIncidentsWhereSQL, incidentColumns)
+		rows, err := p.db.Query(q, scope.OrgIDs(), pattern, origin, limit, offset)
 		if err != nil {
 			return nil, fmt.Errorf("storage: search incidents page: %w", err)
 		}
@@ -1208,10 +1354,10 @@ func (p *postgresProvider) SearchIncidentsPage(query, origin string, offset, lim
 	}
 	q := fmt.Sprintf(`
 		SELECT %[2]s FROM vs_incidents
-		WHERE %[1]s
+		WHERE org_id = ANY($1) AND (%[1]s)
 		ORDER BY created_at DESC
-		LIMIT $2 OFFSET $3`, searchIncidentsWhereSQL, incidentColumns)
-	rows, err := p.db.Query(q, pattern, limit, offset)
+		LIMIT $3 OFFSET $4`, scopedSearchIncidentsWhereSQL, incidentColumns)
+	rows, err := p.db.Query(q, scope.OrgIDs(), pattern, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("storage: search incidents page: %w", err)
 	}
@@ -1222,22 +1368,28 @@ func (p *postgresProvider) SearchIncidentsPage(query, origin string, offset, lim
 // SearchAnalyses matches the query (case-insensitive) against the whole
 // analysis JSON body, newest first.
 func (p *postgresProvider) SearchAnalyses(query string, limit int) ([]*AnalysisRecord, error) {
+	return p.SearchAnalysesForScope(tenancy.DefaultOrgScope(), query, limit)
+}
+
+// SearchAnalysesForScope searches analysis JSON only within scope.
+func (p *postgresProvider) SearchAnalysesForScope(scope tenancy.OrgScope, query string, limit int) ([]*AnalysisRecord, error) {
 	if query == "" {
-		return p.ListAnalyses(limit)
+		return p.listAnalysesForScope(scope, limit)
 	}
 	pattern := "%" + query + "%"
 	base := `
 		SELECT data FROM vs_analyses
-		WHERE data::text ILIKE $1
+		WHERE COALESCE(NULLIF(data->>'org_id', ''), 'default') = ANY($1)
+		  AND data::text ILIKE $2
 		ORDER BY requested_at DESC`
 	var (
 		rows *sql.Rows
 		err  error
 	)
 	if limit > 0 {
-		rows, err = p.db.Query(base+` LIMIT $2`, pattern, limit)
+		rows, err = p.db.Query(base+` LIMIT $3`, scope.OrgIDs(), pattern, limit)
 	} else {
-		rows, err = p.db.Query(base, pattern)
+		rows, err = p.db.Query(base, scope.OrgIDs(), pattern)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("storage: search analyses: %w", err)

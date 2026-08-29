@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/stats"
 )
 
 // catalog_store_test.go — proves the CatalogStore seam: nil-default is the
@@ -31,13 +32,15 @@ func (f *fakeCatalogStore) Load() (map[string]*Pattern, map[string]*ServiceInfo,
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.loads++
-	return f.patterns, f.services, nil
+	return cloneFakePatterns(f.patterns), cloneFakeServices(f.services), nil
 }
 
 func (f *fakeCatalogStore) Persist(patterns map[string]*Pattern, services map[string]*ServiceInfo) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.persists++
+	f.patterns = cloneFakePatterns(patterns)
+	f.services = cloneFakeServices(services)
 	return nil
 }
 
@@ -61,7 +64,33 @@ func (f *fakeCatalogStore) Curate(edit CatalogEdit) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.curates = append(f.curates, edit)
+	if edit.Kind == CatalogEditRepointService {
+		if p := f.patterns[edit.PatternID]; p != nil {
+			p.Service = edit.Service
+		}
+	}
 	return nil
+}
+
+func cloneFakePatterns(patterns map[string]*Pattern) map[string]*Pattern {
+	out := make(map[string]*Pattern, len(patterns))
+	for id, pattern := range patterns {
+		copy := *pattern
+		copy.Tags = append([]string(nil), pattern.Tags...)
+		copy.Samples = append([]string(nil), pattern.Samples...)
+		copy.Seasonal = append([]stats.EWMA(nil), pattern.Seasonal...)
+		out[id] = &copy
+	}
+	return out
+}
+
+func cloneFakeServices(services map[string]*ServiceInfo) map[string]*ServiceInfo {
+	out := make(map[string]*ServiceInfo, len(services))
+	for name, service := range services {
+		copy := *service
+		out[name] = &copy
+	}
+	return out
 }
 
 func (f *fakeCatalogStore) counts() (loads, persists, snaps, curates int) {

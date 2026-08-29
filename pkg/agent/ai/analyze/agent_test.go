@@ -503,18 +503,3 @@ func TestAgent_ParallelTools(t *testing.T) {
 		t.Fatalf("sequential: maxActive = %d, want 1", got)
 	}
 }
-
-// TestAgent_DefaultToolTimeout asserts newEinoTool carries the built-in
-// default timeout that New applies when Options.ToolTimeout is zero, so
-// production always has a per-tool cap even when analyze.tool_timeout is
-// unset.
-func TestAgent_DefaultToolTimeout(t *testing.T) {
-	stub := &stubTool{name: "echo"}
-	tool, err := newEinoTool(stub, defaultToolTimeout)
-	if err != nil {
-		t.Fatalf("newEinoTool: %v", err)
-	}
-	if tool.timeout != defaultToolTimeout {
-		t.Fatalf("default tool timeout = %s, want %s", tool.timeout, defaultToolTimeout)
-	}
-}

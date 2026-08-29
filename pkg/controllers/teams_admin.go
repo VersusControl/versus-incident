@@ -249,6 +249,9 @@ func (c *TeamsAdminController) assignIncident(ctx *fiber.Ctx) error {
 	}
 
 	if err := store.SaveIncident(rec); err != nil {
+		if errors.Is(err, storage.ErrReadOnlyIncident) {
+			return ctx.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+		}
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	return ctx.JSON(fiber.Map{

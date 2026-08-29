@@ -257,16 +257,17 @@ func (m *memoryProvider) SaveAnalysis(rec *AnalysisRecord) error {
 	if rec == nil || rec.ID == "" {
 		return ErrNotFound
 	}
-	rec.OrgID = NormalizeOrgID(rec.OrgID)
+	stored := CloneAnalysisRecord(rec)
+	stored.OrgID = NormalizeOrgID(stored.OrgID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, existing := range m.analyses {
 		if existing.ID == rec.ID {
-			m.analyses[i] = rec
+			m.analyses[i] = stored
 			return nil
 		}
 	}
-	m.analyses = append(m.analyses, rec)
+	m.analyses = append(m.analyses, stored)
 	return nil
 }
 
@@ -275,8 +276,7 @@ func (m *memoryProvider) GetAnalysis(id string) (*AnalysisRecord, error) {
 	defer m.mu.RUnlock()
 	for _, rec := range m.analyses {
 		if rec.ID == id {
-			cp := *rec
-			return &cp, nil
+			return CloneAnalysisRecord(rec), nil
 		}
 	}
 	return nil, ErrNotFound
@@ -294,8 +294,7 @@ func (m *memoryProvider) ListAnalysesByIncident(incidentID string, limit int) ([
 		if m.analyses[i].IncidentID != incidentID {
 			continue
 		}
-		cp := *m.analyses[i]
-		out = append(out, &cp)
+		out = append(out, CloneAnalysisRecord(m.analyses[i]))
 		if limit > 0 && len(out) >= limit {
 			break
 		}
@@ -312,8 +311,7 @@ func (m *memoryProvider) ListAnalyses(limit int) ([]*AnalysisRecord, error) {
 	}
 	out := make([]*AnalysisRecord, 0, n)
 	for i := n - 1; i >= 0; i-- {
-		cp := *m.analyses[i]
-		out = append(out, &cp)
+		out = append(out, CloneAnalysisRecord(m.analyses[i]))
 		if limit > 0 && len(out) >= limit {
 			break
 		}
@@ -348,8 +346,7 @@ func (m *memoryProvider) ListAnalysesPage(offset, limit int) ([]*AnalysisRecord,
 			skipped++
 			continue
 		}
-		cp := *m.analyses[i]
-		out = append(out, &cp)
+		out = append(out, CloneAnalysisRecord(m.analyses[i]))
 		if len(out) >= limit {
 			break
 		}

@@ -1,6 +1,6 @@
 // Package runbook is the runbook-RAG corpus store and ingestion (write)
 // path for the SRE agent's read-only find_runbook tool. It is
-// deliberately SEPARATE from pkg/agent/ai/analyze/tools: the tool reads
+// deliberately SEPARATE from pkg/agent/ai/tools/common: the tool reads
 // a vector index through a narrow local interface, while this package
 // owns the write path (ingest + persist). Keeping the write path out of
 // the tools package is what keeps the analyze import-graph guard green

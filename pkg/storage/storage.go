@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
@@ -44,6 +45,14 @@ var ErrUnsupported = errors.New("storage: backend not implemented")
 // ErrUnknownDomain is returned by Lifecycle methods when domain is not
 // one of the fixed {DomainIncidents, DomainAnalyses, DomainBlobs} set.
 var ErrUnknownDomain = errors.New("storage: unknown lifecycle domain")
+
+// ErrReadOnlyIncident is returned when a mutation targets an incident that is
+// visible through a read scope but does not belong to its write org.
+var ErrReadOnlyIncident = errors.New("storage: incident belongs to read-only archive")
+
+// ErrReadOnlyAnalysis is returned when a mutation targets an analysis that is
+// visible through a read scope but does not belong to its write org.
+var ErrReadOnlyAnalysis = errors.New("storage: analysis belongs to read-only archive")
 
 // Lifecycle domains. A small fixed set so a backend can map each to its
 // physical table(s) without ever trusting caller-supplied input.
@@ -74,16 +83,13 @@ const DefaultDataDir = "data"
 // org, so every persisted record transparently belongs to "default" and
 // no behaviour changes. Multi-tenant scoping (enterprise) overrides this
 // per request via the org-injection seam (pkg/middleware).
-const DefaultOrgID = "default"
+const DefaultOrgID = tenancy.DefaultOrgID
 
 // NormalizeOrgID returns a non-empty org id, falling back to
 // DefaultOrgID when s is blank. Backends call this on the persistence
 // path so a record is never stored with an empty OrgID.
 func NormalizeOrgID(s string) string {
-	if s == "" {
-		return DefaultOrgID
-	}
-	return s
+	return tenancy.NormalizeOrgID(s)
 }
 
 // Origin is the coarse, tier-neutral classifier for HOW an incident
@@ -171,6 +177,12 @@ type Provider interface {
 	// connections, db pools). Calling Close on a closed provider is a
 	// no-op.
 	Close() error
+}
+
+// IncidentMutationChecker is an optional capability for scoped providers that
+// can expose whether a visible incident belongs to an immutable read archive.
+type IncidentMutationChecker interface {
+	CheckIncidentMutable(id string) error
 }
 
 // Blob is one entry returned by Provider.ListBlobs: a stored blob's
@@ -343,6 +355,15 @@ type IncidentPager interface {
 	ListIncidentsPage(origin string, offset, limit int) ([]*IncidentRecord, error)
 }
 
+// ScopedIncidentPager is the organization-aware form of IncidentPager. A
+// multi-organization wrapper uses it to keep count and pagination in the
+// backend; callers fall back to IncidentPager when the capability is absent.
+type ScopedIncidentPager interface {
+	CountIncidentsForScope(scope tenancy.OrgScope) (IncidentCounts, error)
+	CountIncidentsByStatusForScope(scope tenancy.OrgScope) (IncidentStatusCounts, error)
+	ListIncidentsPageForScope(scope tenancy.OrgScope, origin string, offset, limit int) ([]*IncidentRecord, error)
+}
+
 // IncidentWindowCounter is an optional capability on top of IncidentPager: the
 // same per-origin × per-status tally, bounded to incidents created at or after
 // `since`. It backs the operator-configurable count window, so the numbers
@@ -356,12 +377,24 @@ type IncidentWindowCounter interface {
 	CountIncidentsByStatusSince(since time.Time) (IncidentStatusCounts, error)
 }
 
+// ScopedIncidentWindowCounter is the organization-aware recent-window count.
+type ScopedIncidentWindowCounter interface {
+	CountIncidentsByStatusSinceForScope(scope tenancy.OrgScope, since time.Time) (IncidentStatusCounts, error)
+}
+
 // IncidentServiceCounter is an optional capability for service-scoped incident
 // summaries. Backends can push org, service, and time predicates into storage
 // instead of filtering a bounded whole-table page in the controller.
 type IncidentServiceCounter interface {
 	CountIncidentsByServiceSince(orgID, service string, since time.Time) (int, map[string]int, error)
 	ListIncidentsByServiceSince(orgID, service string, since time.Time, limit int) ([]*IncidentRecord, error)
+}
+
+// ScopedIncidentServiceCounter queries one logical service across an ordered
+// organization scope.
+type ScopedIncidentServiceCounter interface {
+	CountIncidentsByServiceSinceForScope(scope tenancy.OrgScope, service string, since time.Time) (int, map[string]int, error)
+	ListIncidentsByServiceSinceForScope(scope tenancy.OrgScope, service string, since time.Time, limit int) ([]*IncidentRecord, error)
 }
 
 // AnalysisPager is an optional capability a backend may implement on top of
@@ -383,6 +416,12 @@ type AnalysisPager interface {
 	// rows. limit <= 0 uses DefaultAnalysisPageSize; a negative offset is
 	// treated as 0.
 	ListAnalysesPage(offset, limit int) ([]*AnalysisRecord, error)
+}
+
+// ScopedAnalysisPager is the organization-aware form of AnalysisPager.
+type ScopedAnalysisPager interface {
+	CountAnalysesForScope(scope tenancy.OrgScope) (int, error)
+	ListAnalysesPageForScope(scope tenancy.OrgScope, offset, limit int) ([]*AnalysisRecord, error)
 }
 
 // IncidentSearchPager is an optional capability a backend may implement on
@@ -415,6 +454,13 @@ type IncidentSearchPager interface {
 	SearchIncidentsPage(query, origin string, offset, limit int) ([]*IncidentRecord, error)
 }
 
+// ScopedIncidentSearchPager keeps scoped search counts and pages in storage.
+type ScopedIncidentSearchPager interface {
+	CountIncidentsMatchingForScope(scope tenancy.OrgScope, query string) (IncidentCounts, error)
+	CountIncidentsMatchingByStatusForScope(scope tenancy.OrgScope, query string) (IncidentStatusCounts, error)
+	SearchIncidentsPageForScope(scope tenancy.OrgScope, query, origin string, offset, limit int) ([]*IncidentRecord, error)
+}
+
 // Searcher is an optional capability a backend may implement on top of
 // Provider. It exposes full-text-style search over incidents and
 // analyses. Backends that cannot search efficiently (memory, file) do
@@ -432,6 +478,12 @@ type Searcher interface {
 	SearchAnalyses(query string, limit int) ([]*AnalysisRecord, error)
 }
 
+// ScopedSearcher is the organization-aware form of Searcher.
+type ScopedSearcher interface {
+	SearchIncidentsForScope(scope tenancy.OrgScope, query string, limit int) ([]*IncidentRecord, error)
+	SearchAnalysesForScope(scope tenancy.OrgScope, query string, limit int) ([]*AnalysisRecord, error)
+}
+
 // RangeLister is an optional capability a backend may implement on top of
 // Provider: return only the incidents whose CreatedAt falls in a
 // [start, end) window, newest first. It exists so a large backend
@@ -446,6 +498,13 @@ type RangeLister interface {
 	// newest first. limit <= 0 returns the full window. A zero end is
 	// treated as an open upper bound (all incidents at or after start).
 	ListIncidentsInRange(start, end time.Time, limit int) ([]*IncidentRecord, error)
+}
+
+// ScopedRangeLister is the organization-aware form of RangeLister. A
+// multi-organization wrapper uses it to push both the organization membership
+// and time window into the backend without scanning foreign records.
+type ScopedRangeLister interface {
+	ListIncidentsInRangeForScope(scope tenancy.OrgScope, start, end time.Time, limit int) ([]*IncidentRecord, error)
 }
 
 // Lifecycle is an optional capability a backend may implement on top of
@@ -639,4 +698,32 @@ type AnalysisToolCall struct {
 	Output     json.RawMessage `json:"output,omitempty"`
 	DurationMs int64           `json:"duration_ms,omitempty"`
 	Error      string          `json:"error,omitempty"`
+}
+
+// CloneAnalysisRecord returns a detached copy safe to pass across storage and
+// tenancy boundaries.
+func CloneAnalysisRecord(rec *AnalysisRecord) *AnalysisRecord {
+	if rec == nil {
+		return nil
+	}
+	clone := *rec
+	if rec.ToolCalls != nil {
+		clone.ToolCalls = make([]AnalysisToolCall, len(rec.ToolCalls))
+		copy(clone.ToolCalls, rec.ToolCalls)
+		for index := range clone.ToolCalls {
+			clone.ToolCalls[index].Args = append(json.RawMessage(nil), rec.ToolCalls[index].Args...)
+			clone.ToolCalls[index].Output = append(json.RawMessage(nil), rec.ToolCalls[index].Output...)
+		}
+	}
+	if rec.Finding != nil {
+		finding := *rec.Finding
+		finding.Suggestions = append([]string(nil), rec.Finding.Suggestions...)
+		finding.SampleIDs = append([]string(nil), rec.Finding.SampleIDs...)
+		finding.RootCauseHypotheses = append([]core.RootCauseHypothesis(nil), rec.Finding.RootCauseHypotheses...)
+		finding.Evidence = append([]core.EvidenceItem(nil), rec.Finding.Evidence...)
+		finding.RelatedPatternIDs = append([]string(nil), rec.Finding.RelatedPatternIDs...)
+		finding.NextSteps = append([]string(nil), rec.Finding.NextSteps...)
+		clone.Finding = &finding
+	}
+	return &clone
 }

@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -52,5 +53,34 @@ func TestToolDisplayName(t *testing.T) {
 				t.Fatalf("ToolDisplayName() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestToolResultAvailability(t *testing.T) {
+	availableJSON, err := json.Marshal(ToolResult{Tool: "probe", Found: true})
+	if err != nil {
+		t.Fatalf("marshal available: %v", err)
+	}
+	if !strings.Contains(string(availableJSON), `"available":true`) {
+		t.Fatalf("available result = %s", availableJSON)
+	}
+
+	unavailable := UnavailableToolResult("probe", "source not configured")
+	if unavailable.IsAvailable() {
+		t.Fatal("unavailable result reported available")
+	}
+	unavailableJSON, err := json.Marshal(unavailable)
+	if err != nil {
+		t.Fatalf("marshal unavailable: %v", err)
+	}
+	if !strings.Contains(string(unavailableJSON), `"available":false`) || !strings.Contains(string(unavailableJSON), `"reason":"source not configured"`) {
+		t.Fatalf("unavailable result = %s", unavailableJSON)
+	}
+	var roundTrip ToolResult
+	if err := json.Unmarshal(unavailableJSON, &roundTrip); err != nil {
+		t.Fatalf("unmarshal unavailable: %v", err)
+	}
+	if roundTrip.IsAvailable() || roundTrip.Reason != "source not configured" {
+		t.Fatalf("round-trip = %+v", roundTrip)
 	}
 }

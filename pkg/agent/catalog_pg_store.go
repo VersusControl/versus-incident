@@ -11,7 +11,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/stats"
-	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 // catalog_pg_store.go — the Postgres-explicit
@@ -70,35 +70,69 @@ const (
 // ---------------------------------------------------------------------------
 
 const (
-	// Load: this instance's partition rows joined to the curated root.
+	// Load: this instance's highest-precedence learned partition joined to the
+	// independently highest-precedence curated root. A write-org root must not
+	// hide a lower-scope partition that has not been copied during a rolling
+	// upgrade.
 	sqlCatalogLoadLogs = `
-		SELECT p.id, COALESCE(p.service, ''), COALESCE(p.verdict, ''), p.tags, p.deleted,
+		WITH ranked_patterns AS (
+		    SELECT p.*, ROW_NUMBER() OVER (
+		        PARTITION BY p.id ORDER BY array_position($1::text[], p.org_id)
+		    ) AS precedence
+		    FROM vs_patterns p
+		    WHERE p.org_id = ANY($1) AND p.kind = 'log'
+		), chosen_patterns AS (
+		    SELECT * FROM ranked_patterns WHERE precedence = 1 AND reset_shadow = FALSE
+		), ranked_logs AS (
+		    SELECT l.*, ROW_NUMBER() OVER (
+		        PARTITION BY l.pattern_id, l.instance_index
+		        ORDER BY array_position($1::text[], l.org_id)
+		    ) AS precedence
+		    FROM vs_logs l
+		    WHERE l.org_id = ANY($1) AND l.instance_index = $2
+		), chosen_logs AS (
+		    SELECT l.* FROM ranked_logs l
+		    JOIN chosen_patterns p ON p.id = l.pattern_id
+		    WHERE l.precedence = 1
+		      AND (l.org_id = p.org_id OR p.reset_at IS NULL OR l.persisted_at > p.reset_at)
+		)
+		SELECT p.org_id, p.id, COALESCE(p.service, ''), COALESCE(p.verdict, ''), p.tags, p.deleted,
 		       l.template, COALESCE(l.source, ''), COALESCE(l.rule_name, ''),
 		       l.count, l.baseline_frequency, l.baseline_variance, l.baseline_avg,
 		       COALESCE(l.spike_baseline_mode, ''), l.seasonal,
 		       l.samples, l.first_seen, l.last_seen
-		FROM vs_logs l
-		JOIN vs_patterns p
-		  ON p.org_id = l.org_id AND p.id = l.pattern_id AND p.kind = 'log'
-		WHERE l.org_id = $1 AND l.instance_index = $2`
+		FROM chosen_logs l
+		JOIN chosen_patterns p
+		  ON p.id = l.pattern_id AND p.kind = 'log'`
 
-	// Load / Snapshot: every non-deleted service for the org.
-	sqlCatalogSelectServices = `
-		SELECT name, manual, first_seen
-		FROM vs_services
-		WHERE org_id = $1 AND deleted = FALSE`
-
-	// Persist: upsert the identity root, updating ONLY service (real-wins) —
-	// verdict/tags/deleted are curated columns Persist must never touch.
+	// Persist: copy the highest-precedence curated root into the write org when
+	// promoting a lower-scope learned row. On conflict, update ONLY service
+	// (real-wins) and revive reset shadows. Deliberate operator tombstones are
+	// curated state and remain untouched.
 	sqlCatalogUpsertRoot = `
-		INSERT INTO vs_patterns (org_id, id, kind, service)
-		VALUES ($1, $2, 'log', $3)
+		INSERT INTO vs_patterns (org_id, id, kind, service, verdict, tags, deleted, reset_shadow)
+		SELECT $1, $2, 'log', $3,
+		       COALESCE(curated.verdict, ''), COALESCE(curated.tags, '[]'::jsonb),
+		       COALESCE(curated.deleted, FALSE), FALSE
+		FROM (SELECT 1) seed
+		LEFT JOIN LATERAL (
+		    SELECT verdict, tags, deleted
+		    FROM vs_patterns
+		    WHERE org_id = ANY($4) AND id = $2 AND kind = 'log'
+		    ORDER BY array_position($4::text[], org_id)
+		    LIMIT 1
+		) curated ON TRUE
 		ON CONFLICT (org_id, id) DO UPDATE
 		SET service = CASE
 		        WHEN EXCLUDED.service <> '' AND EXCLUDED.service <> '_unknown'
 		            THEN EXCLUDED.service
 		        ELSE vs_patterns.service
 		    END,
+		    deleted = CASE
+		        WHEN vs_patterns.reset_shadow THEN FALSE
+		        ELSE vs_patterns.deleted
+		    END,
+		    reset_shadow = FALSE,
 		    updated_at = NOW()`
 
 	// Persist: upsert THIS instance's learned log row (single-writer per
@@ -120,14 +154,32 @@ const (
 		    spike_baseline_mode = EXCLUDED.spike_baseline_mode,
 		    seasonal            = EXCLUDED.seasonal,
 		    samples             = EXCLUDED.samples,
-		    last_seen           = EXCLUDED.last_seen`
+		    last_seen           = EXCLUDED.last_seen,
+		    persisted_at        = NOW()`
 
-	// Persist: convergent service discovery — insert only if absent so an
-	// operator's curated grace/manual/delete state is never clobbered.
+	// Persist: convergent service discovery. A first write-org row inherits the
+	// highest-precedence scoped grace/manual/delete state. Only reset shadows
+	// are revived on conflict, using the newly learned values; deliberate
+	// operator tombstones remain untouched.
 	sqlCatalogInsertServiceIfAbsent = `
-		INSERT INTO vs_services (org_id, name, manual, first_seen)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (org_id, name) DO NOTHING`
+		INSERT INTO vs_services (org_id, name, manual, first_seen, deleted, reset_shadow)
+		SELECT $1, $2, COALESCE(curated.manual, $3), COALESCE(curated.first_seen, $4),
+		       COALESCE(curated.deleted, FALSE), FALSE
+		FROM (SELECT 1) seed
+		LEFT JOIN LATERAL (
+		    SELECT manual, first_seen, deleted
+		    FROM vs_services
+		    WHERE org_id = ANY($5) AND name = $2
+		    ORDER BY array_position($5::text[], org_id)
+		    LIMIT 1
+		) curated ON TRUE
+		ON CONFLICT (org_id, name) DO UPDATE
+		SET manual = $3,
+		    first_seen = $4,
+		    deleted = FALSE,
+		    reset_shadow = FALSE,
+		    updated_at = NOW()
+		WHERE vs_services.reset_shadow`
 
 	// Snapshot: fleet-wide read view. Fleet-additive counters (count and the
 	// per-second-rate baseline_frequency) are SUMmed across every instance's
@@ -142,27 +194,48 @@ const (
 	// (instance_index = 0, one row per pattern) this makes Snapshot return the
 	// exact same baseline columns as the per-partition Load.
 	sqlCatalogSnapshotLogs = `
-		SELECT p.id, COALESCE(p.service, ''), COALESCE(p.verdict, ''), p.tags,
+		WITH ranked_patterns AS (
+		    SELECT p.*, ROW_NUMBER() OVER (
+		        PARTITION BY p.id ORDER BY array_position($1::text[], p.org_id)
+		    ) AS precedence
+		    FROM vs_patterns p
+		    WHERE p.org_id = ANY($1) AND p.kind = 'log'
+		), chosen_patterns AS (
+		    SELECT * FROM ranked_patterns WHERE precedence = 1 AND deleted = FALSE
+		), ranked_logs AS (
+		    SELECT l.*, ROW_NUMBER() OVER (
+		        PARTITION BY l.pattern_id, l.instance_index
+		        ORDER BY array_position($1::text[], l.org_id)
+		    ) AS precedence
+		    FROM vs_logs l
+		    WHERE l.org_id = ANY($1)
+		), chosen_logs AS (
+		    SELECT l.* FROM ranked_logs l
+		    JOIN chosen_patterns p ON p.id = l.pattern_id
+		    WHERE l.precedence = 1
+		      AND (l.org_id = p.org_id OR p.reset_at IS NULL OR l.persisted_at > p.reset_at)
+		)
+		SELECT p.org_id, p.id, COALESCE(p.service, ''), COALESCE(p.verdict, ''), p.tags,
 		       agg.total_count, agg.first_seen, agg.last_seen, agg.total_baseline,
 		       lo.template, COALESCE(lo.source, ''), COALESCE(lo.rule_name, ''),
 		       lo.baseline_variance, lo.baseline_avg,
 		       COALESCE(lo.spike_baseline_mode, ''), lo.seasonal, lo.samples
-		FROM vs_patterns p
+		FROM chosen_patterns p
 		JOIN LATERAL (
 		    SELECT SUM(count) AS total_count, MIN(first_seen) AS first_seen,
 		           MAX(last_seen) AS last_seen, SUM(baseline_frequency) AS total_baseline
-		    FROM vs_logs
-		    WHERE org_id = p.org_id AND pattern_id = p.id
+		    FROM chosen_logs
+		    WHERE pattern_id = p.id
 		) agg ON agg.total_count IS NOT NULL
 		JOIN LATERAL (
 		    SELECT template, source, rule_name,
 		           baseline_variance, baseline_avg, spike_baseline_mode, seasonal, samples
-		    FROM vs_logs
-		    WHERE org_id = p.org_id AND pattern_id = p.id
+		    FROM chosen_logs
+		    WHERE pattern_id = p.id
 		    ORDER BY instance_index ASC
 		    LIMIT 1
 		) lo ON TRUE
-		WHERE p.org_id = $1 AND p.kind = 'log' AND p.deleted = FALSE`
+		WHERE TRUE`
 
 	// Page: one bounded slice of the SAME fleet read view Snapshot returns —
 	// identical org scope (p.org_id = $1, kind='log', deleted=FALSE, and the
@@ -173,30 +246,50 @@ const (
 	// descending with id as a stable tie-break — the SAME order Catalog.All /
 	// pagePatterns sort by — so pages never drift between requests.
 	sqlCatalogPageLogs = `
-		SELECT p.id, COALESCE(p.service, ''), COALESCE(p.verdict, ''), p.tags,
+		WITH ranked_patterns AS (
+		    SELECT p.*, ROW_NUMBER() OVER (
+		        PARTITION BY p.id ORDER BY array_position($1::text[], p.org_id)
+		    ) AS precedence
+		    FROM vs_patterns p
+		    WHERE p.org_id = ANY($1) AND p.kind = 'log'
+		), chosen_patterns AS (
+		    SELECT * FROM ranked_patterns WHERE precedence = 1 AND deleted = FALSE
+		), ranked_logs AS (
+		    SELECT l.*, ROW_NUMBER() OVER (
+		        PARTITION BY l.pattern_id, l.instance_index
+		        ORDER BY array_position($1::text[], l.org_id)
+		    ) AS precedence
+		    FROM vs_logs l
+		    WHERE l.org_id = ANY($1)
+		), chosen_logs AS (
+		    SELECT l.* FROM ranked_logs l
+		    JOIN chosen_patterns p ON p.id = l.pattern_id
+		    WHERE l.precedence = 1
+		      AND (l.org_id = p.org_id OR p.reset_at IS NULL OR l.persisted_at > p.reset_at)
+		)
+		SELECT p.org_id, p.id, COALESCE(p.service, ''), COALESCE(p.verdict, ''), p.tags,
 		       agg.total_count, agg.first_seen, agg.last_seen, agg.total_baseline,
 		       lo.template, COALESCE(lo.source, ''), COALESCE(lo.rule_name, ''),
 		       lo.baseline_variance, lo.baseline_avg,
 		       COALESCE(lo.spike_baseline_mode, ''), lo.seasonal, lo.samples
-		FROM vs_patterns p
+		FROM chosen_patterns p
 		JOIN LATERAL (
 		    SELECT SUM(count) AS total_count, MIN(first_seen) AS first_seen,
 		           MAX(last_seen) AS last_seen, SUM(baseline_frequency) AS total_baseline
-		    FROM vs_logs
-		    WHERE org_id = p.org_id AND pattern_id = p.id
+		    FROM chosen_logs
+		    WHERE pattern_id = p.id
 		) agg ON agg.total_count IS NOT NULL
 		JOIN LATERAL (
 		    SELECT template, source, rule_name,
 		           baseline_variance, baseline_avg, spike_baseline_mode, seasonal, samples
-		    FROM vs_logs
-		    WHERE org_id = p.org_id AND pattern_id = p.id
+		    FROM chosen_logs
+		    WHERE pattern_id = p.id
 		    ORDER BY instance_index ASC
 		    LIMIT 1
 		) lo ON TRUE
-		WHERE p.org_id = $1 AND p.kind = 'log' AND p.deleted = FALSE
-		  AND (lo.template ILIKE '%' || $2 || '%'
+		WHERE lo.template ILIKE '%' || $2 || '%'
 		       OR p.id ILIKE '%' || $2 || '%'
-		       OR COALESCE(p.service, '') ILIKE '%' || $2 || '%')
+		       OR COALESCE(p.service, '') ILIKE '%' || $2 || '%'
 		ORDER BY agg.total_count DESC, p.id ASC
 		LIMIT $3 OFFSET $4`
 
@@ -205,39 +298,139 @@ const (
 	// same org scope and logs-present filter) so the total always matches the
 	// page's population.
 	sqlCatalogCountLogs = `
+		WITH ranked_patterns AS (
+		    SELECT p.*, ROW_NUMBER() OVER (
+		        PARTITION BY p.id ORDER BY array_position($1::text[], p.org_id)
+		    ) AS precedence
+		    FROM vs_patterns p
+		    WHERE p.org_id = ANY($1) AND p.kind = 'log'
+		), chosen_patterns AS (
+		    SELECT * FROM ranked_patterns WHERE precedence = 1 AND deleted = FALSE
+		), ranked_logs AS (
+		    SELECT l.*, ROW_NUMBER() OVER (
+		        PARTITION BY l.pattern_id, l.instance_index
+		        ORDER BY array_position($1::text[], l.org_id)
+		    ) AS precedence
+		    FROM vs_logs l
+		    WHERE l.org_id = ANY($1)
+		), chosen_logs AS (
+		    SELECT l.* FROM ranked_logs l
+		    JOIN chosen_patterns p ON p.id = l.pattern_id
+		    WHERE l.precedence = 1
+		      AND (l.org_id = p.org_id OR p.reset_at IS NULL OR l.persisted_at > p.reset_at)
+		)
 		SELECT COUNT(*)
-		FROM vs_patterns p
+		FROM chosen_patterns p
 		JOIN LATERAL (
 		    SELECT SUM(count) AS total_count
-		    FROM vs_logs
-		    WHERE org_id = p.org_id AND pattern_id = p.id
+		    FROM chosen_logs
+		    WHERE pattern_id = p.id
 		) agg ON agg.total_count IS NOT NULL
 		JOIN LATERAL (
-		    SELECT template FROM vs_logs
-		    WHERE org_id = p.org_id AND pattern_id = p.id
+		    SELECT template FROM chosen_logs
+		    WHERE pattern_id = p.id
 		    ORDER BY instance_index ASC
 		    LIMIT 1
 		) lo ON TRUE
-		WHERE p.org_id = $1 AND p.kind = 'log' AND p.deleted = FALSE
-		  AND (lo.template ILIKE '%' || $2 || '%'
+		WHERE lo.template ILIKE '%' || $2 || '%'
 		       OR p.id ILIKE '%' || $2 || '%'
-		       OR COALESCE(p.service, '') ILIKE '%' || $2 || '%')`
+		       OR COALESCE(p.service, '') ILIKE '%' || $2 || '%'`
+
+	sqlCatalogLookupPattern = `
+		WITH ranked_patterns AS (
+		    SELECT p.*, ROW_NUMBER() OVER (
+		        PARTITION BY p.id ORDER BY array_position($1::text[], p.org_id)
+		    ) AS precedence
+		    FROM vs_patterns p
+		    WHERE p.org_id = ANY($1) AND p.kind = 'log' AND p.id = $2
+		), chosen_patterns AS (
+		    SELECT * FROM ranked_patterns WHERE precedence = 1 AND deleted = FALSE
+		), ranked_logs AS (
+		    SELECT l.*, ROW_NUMBER() OVER (
+		        PARTITION BY l.pattern_id, l.instance_index
+		        ORDER BY array_position($1::text[], l.org_id)
+		    ) AS precedence
+		    FROM vs_logs l
+		    WHERE l.org_id = ANY($1) AND l.pattern_id = $2
+		), chosen_logs AS (
+		    SELECT l.* FROM ranked_logs l
+		    JOIN chosen_patterns p ON p.id = l.pattern_id
+		    WHERE l.precedence = 1
+		      AND (l.org_id = p.org_id OR p.reset_at IS NULL OR l.persisted_at > p.reset_at)
+		)
+		SELECT p.org_id, p.id, COALESCE(p.service, ''), COALESCE(p.verdict, ''), p.tags,
+		       agg.total_count, agg.first_seen, agg.last_seen, agg.total_baseline,
+		       lo.template, COALESCE(lo.source, ''), COALESCE(lo.rule_name, ''),
+		       lo.baseline_variance, lo.baseline_avg,
+		       COALESCE(lo.spike_baseline_mode, ''), lo.seasonal, lo.samples
+		FROM chosen_patterns p
+		JOIN LATERAL (
+		    SELECT SUM(count) AS total_count, MIN(first_seen) AS first_seen,
+		           MAX(last_seen) AS last_seen, SUM(baseline_frequency) AS total_baseline
+		    FROM chosen_logs WHERE pattern_id = p.id
+		) agg ON agg.total_count IS NOT NULL
+		JOIN LATERAL (
+		    SELECT template, source, rule_name, baseline_variance, baseline_avg,
+		           spike_baseline_mode, seasonal, samples
+		    FROM chosen_logs WHERE pattern_id = p.id
+		    ORDER BY instance_index ASC LIMIT 1
+		) lo ON TRUE`
+
+	sqlCatalogSnapshotServices = `
+		WITH ranked_services AS (
+		    SELECT s.*, ROW_NUMBER() OVER (
+		        PARTITION BY s.name ORDER BY array_position($1::text[], s.org_id)
+		    ) AS precedence
+		    FROM vs_services s
+		    WHERE s.org_id = ANY($1)
+		)
+		SELECT org_id, name, manual, first_seen
+		FROM ranked_services
+		WHERE precedence = 1 AND deleted = FALSE`
+
+	sqlCatalogLookupService = `
+		WITH ranked_services AS (
+		    SELECT s.*, ROW_NUMBER() OVER (
+		        PARTITION BY s.name ORDER BY array_position($1::text[], s.org_id)
+		    ) AS precedence
+		    FROM vs_services s
+		    WHERE s.org_id = ANY($1) AND s.name = $2
+		)
+		SELECT org_id, name, manual, first_seen
+		FROM ranked_services
+		WHERE precedence = 1 AND deleted = FALSE`
 
 	// Page / Count services: the SAME org scope Snapshot's service read uses
 	// (org_id = $1, deleted = FALSE) plus an optional name search ($2) and a
 	// deterministic first_seen-then-name order so service pages never drift.
 	sqlCatalogPageServices = `
-		SELECT name, manual, first_seen
-		FROM vs_services
-		WHERE org_id = $1 AND deleted = FALSE
-		  AND name ILIKE '%' || $2 || '%'
+		WITH ranked_services AS (
+		    SELECT s.*, ROW_NUMBER() OVER (
+		        PARTITION BY s.name ORDER BY array_position($1::text[], s.org_id)
+		    ) AS precedence
+		    FROM vs_services s
+		    WHERE s.org_id = ANY($1)
+		), chosen_services AS (
+		    SELECT * FROM ranked_services WHERE precedence = 1 AND deleted = FALSE
+		)
+		SELECT org_id, name, manual, first_seen
+		FROM chosen_services
+		WHERE name ILIKE '%' || $2 || '%'
 		ORDER BY first_seen ASC, name ASC
 		LIMIT $3 OFFSET $4`
 	sqlCatalogCountServices = `
+		WITH ranked_services AS (
+		    SELECT s.*, ROW_NUMBER() OVER (
+		        PARTITION BY s.name ORDER BY array_position($1::text[], s.org_id)
+		    ) AS precedence
+		    FROM vs_services s
+		    WHERE s.org_id = ANY($1)
+		), chosen_services AS (
+		    SELECT * FROM ranked_services WHERE precedence = 1 AND deleted = FALSE
+		)
 		SELECT COUNT(*)
-		FROM vs_services
-		WHERE org_id = $1 AND deleted = FALSE
-		  AND name ILIKE '%' || $2 || '%'`
+		FROM chosen_services
+		WHERE name ILIKE '%' || $2 || '%'`
 
 	// Curate — one statement per operator mutation (all values bound).
 	sqlCurateVerdict = `UPDATE vs_patterns SET verdict = $3, updated_at = NOW() WHERE org_id = $1 AND id = $2 AND kind = 'log'`
@@ -254,23 +447,42 @@ const (
 		VALUES ($1, $2, 'log', 'known')
 		ON CONFLICT (org_id, id) DO UPDATE SET verdict = 'known', updated_at = NOW()
 		WHERE COALESCE(vs_patterns.verdict, '') <> 'known'`
-	sqlCurateRepointService = `UPDATE vs_patterns SET service = $3, updated_at = NOW() WHERE org_id = $1 AND id = $2 AND kind = 'log'`
-	sqlCurateDelete         = `UPDATE vs_patterns SET deleted = TRUE, updated_at = NOW() WHERE org_id = $1 AND id = $2 AND kind = 'log'`
-	sqlCurateResetPatterns  = `DELETE FROM vs_patterns WHERE org_id = $1 AND kind = 'log'`
-	sqlCurateResetServices  = `DELETE FROM vs_services WHERE org_id = $1`
-	sqlCurateEndGrace       = `UPDATE vs_services SET first_seen = $3, updated_at = NOW() WHERE org_id = $1 AND name = $2`
-	sqlCurateRestartGrace   = `UPDATE vs_services SET first_seen = NOW(), updated_at = NOW() WHERE org_id = $1 AND name = $2`
-	sqlCurateCreateService  = `INSERT INTO vs_services (org_id, name, manual, first_seen) VALUES ($1, $2, TRUE, NOW()) ON CONFLICT (org_id, name) DO UPDATE SET manual = TRUE, deleted = FALSE, first_seen = EXCLUDED.first_seen, updated_at = NOW()`
-	sqlCurateDeleteService  = `UPDATE vs_services SET deleted = TRUE, updated_at = NOW() WHERE org_id = $1 AND name = $2`
-	sqlRenameSelectService  = `SELECT first_seen, manual FROM vs_services WHERE org_id = $1 AND name = $2 AND deleted = FALSE`
-	sqlRenameTombstoneOld   = `UPDATE vs_services SET deleted = TRUE, updated_at = NOW() WHERE org_id = $1 AND name = $2`
-	sqlRenameUpsertNewSvc   = `INSERT INTO vs_services (org_id, name, manual, first_seen) VALUES ($1, $2, $3, $4) ON CONFLICT (org_id, name) DO UPDATE SET manual = EXCLUDED.manual, deleted = FALSE, first_seen = EXCLUDED.first_seen, updated_at = NOW()`
+	sqlCurateRepointService      = `UPDATE vs_patterns SET service = $3, updated_at = NOW() WHERE org_id = $1 AND id = $2 AND kind = 'log'`
+	sqlCurateDelete              = `UPDATE vs_patterns SET deleted = TRUE, reset_shadow = FALSE, updated_at = NOW() WHERE org_id = $1 AND id = $2 AND kind = 'log'`
+	sqlCurateDeleteWritePatterns = `DELETE FROM vs_patterns WHERE org_id = $1 AND kind = 'log'`
+	sqlCurateResetPatterns       = `
+		WITH legacy AS (
+		    SELECT DISTINCT id FROM vs_patterns
+		    WHERE org_id = ANY($2) AND org_id <> $1 AND kind = 'log'
+		)
+		INSERT INTO vs_patterns (org_id, id, kind, deleted, reset_shadow, reset_at)
+		SELECT $1, id, 'log', TRUE, TRUE, NOW() FROM legacy
+		ON CONFLICT (org_id, id) DO UPDATE
+		SET deleted = TRUE, reset_shadow = TRUE, reset_at = NOW(), updated_at = NOW()`
+	sqlCurateDeleteWriteServices = `DELETE FROM vs_services WHERE org_id = $1`
+	sqlCurateResetServices       = `
+		WITH legacy AS (
+		    SELECT DISTINCT name FROM vs_services
+		    WHERE org_id = ANY($2) AND org_id <> $1
+		)
+		INSERT INTO vs_services (org_id, name, first_seen, deleted, reset_shadow)
+		SELECT $1, name, NOW(), TRUE, TRUE FROM legacy
+		ON CONFLICT (org_id, name) DO UPDATE
+		SET deleted = TRUE, reset_shadow = TRUE, updated_at = NOW()`
+	sqlCurateEndGrace      = `UPDATE vs_services SET first_seen = $3, updated_at = NOW() WHERE org_id = $1 AND name = $2`
+	sqlCurateRestartGrace  = `UPDATE vs_services SET first_seen = NOW(), updated_at = NOW() WHERE org_id = $1 AND name = $2`
+	sqlCurateCreateService = `INSERT INTO vs_services (org_id, name, manual, first_seen) VALUES ($1, $2, TRUE, NOW()) ON CONFLICT (org_id, name) DO UPDATE SET manual = TRUE, deleted = FALSE, reset_shadow = FALSE, first_seen = EXCLUDED.first_seen, updated_at = NOW()`
+	sqlCurateDeleteService = `UPDATE vs_services SET deleted = TRUE, reset_shadow = FALSE, updated_at = NOW() WHERE org_id = $1 AND name = $2`
+	sqlRenameSelectService = `SELECT first_seen, manual FROM vs_services WHERE org_id = $1 AND name = $2 AND deleted = FALSE`
+	sqlRenameTombstoneOld  = `UPDATE vs_services SET deleted = TRUE, updated_at = NOW() WHERE org_id = $1 AND name = $2`
+	sqlRenameUpsertNewSvc  = `INSERT INTO vs_services (org_id, name, manual, first_seen) VALUES ($1, $2, $3, $4) ON CONFLICT (org_id, name) DO UPDATE SET manual = EXCLUDED.manual, deleted = FALSE, reset_shadow = FALSE, first_seen = EXCLUDED.first_seen, updated_at = NOW()`
 )
 
 // pgCatalogStore implements agent.CatalogStore over the typed signal tables.
 type pgCatalogStore struct {
 	db            *sql.DB
 	orgID         string
+	orgScope      tenancy.OrgScope
 	instanceIndex int
 
 	// scrub re-scrubs each learned sample at the STORAGE boundary on Persist
@@ -285,7 +497,8 @@ type pgCatalogStore struct {
 	// unchanged; it is threaded on the write path only via SetSampleScrubber.
 	scrub core.Scrubber
 
-	// mu guards markedKnown only (the *sql.DB is concurrency-safe on its own).
+	// mu guards the process-local curation state below (the *sql.DB is
+	// concurrency-safe on its own).
 	mu sync.Mutex
 	// markedKnown caps the auto-promotion churn: the brain re-issues MarkKnown
 	// every tick a known pattern is observed (its in-memory verdict is not
@@ -306,9 +519,17 @@ type pgCatalogStore struct {
 // enterprise intel store adds vs_metrics/vs_traces on the SAME vs_patterns
 // root, and the enterprise HA install constructs THIS store with the ordinal.
 func NewPostgresCatalogStore(db *sql.DB, orgID string, instanceIndex int) CatalogStore {
+	return NewPostgresCatalogStoreForScope(db, tenancy.NewOrgScope(orgID), instanceIndex)
+}
+
+// NewPostgresCatalogStoreForScope builds a store that writes only to
+// scope.Write and reads catalog entities from scope.Read in precedence order.
+func NewPostgresCatalogStoreForScope(db *sql.DB, scope tenancy.OrgScope, instanceIndex int) CatalogStore {
+	scope = scope.Normalized()
 	return &pgCatalogStore{
 		db:            db,
-		orgID:         storage.NormalizeOrgID(orgID),
+		orgID:         scope.Write,
+		orgScope:      scope,
 		instanceIndex: instanceIndex,
 		markedKnown:   make(map[string]struct{}),
 	}
@@ -331,25 +552,25 @@ func (s *pgCatalogStore) Load() (map[string]*Pattern, map[string]*ServiceInfo, e
 	patterns := make(map[string]*Pattern)
 	services := make(map[string]*ServiceInfo)
 
-	rows, err := s.db.Query(sqlCatalogLoadLogs, s.orgID, s.instanceIndex)
+	rows, err := s.db.Query(sqlCatalogLoadLogs, s.orgScope.OrgIDs(), s.instanceIndex)
 	if err != nil {
 		return patterns, services, fmt.Errorf("agent: pg catalog load logs: %w", err)
 	}
 	for rows.Next() {
 		var (
-			id, service, verdict       string
-			tagsRaw, samplesRaw        []byte
-			seasonalRaw                []byte
-			deleted                    bool
-			template, source, ruleName string
-			count                      int64
-			baselineFreq               float64
-			baselineVar                float64
-			baselineAvg                float64
-			spikeBaselineMode          string
-			firstSeen, lastSeen        time.Time
+			orgID, id, service, verdict string
+			tagsRaw, samplesRaw         []byte
+			seasonalRaw                 []byte
+			deleted                     bool
+			template, source, ruleName  string
+			count                       int64
+			baselineFreq                float64
+			baselineVar                 float64
+			baselineAvg                 float64
+			spikeBaselineMode           string
+			firstSeen, lastSeen         time.Time
 		)
-		if err := rows.Scan(&id, &service, &verdict, &tagsRaw, &deleted,
+		if err := rows.Scan(&orgID, &id, &service, &verdict, &tagsRaw, &deleted,
 			&template, &source, &ruleName, &count, &baselineFreq, &baselineVar,
 			&baselineAvg, &spikeBaselineMode, &seasonalRaw, &samplesRaw,
 			&firstSeen, &lastSeen); err != nil {
@@ -358,7 +579,7 @@ func (s *pgCatalogStore) Load() (map[string]*Pattern, map[string]*ServiceInfo, e
 		}
 		p := &Pattern{
 			ID:                id,
-			OrgID:             s.orgID,
+			OrgID:             orgID,
 			Template:          template,
 			FirstSeen:         firstSeen,
 			LastSeen:          lastSeen,
@@ -388,32 +609,32 @@ func (s *pgCatalogStore) Load() (map[string]*Pattern, map[string]*ServiceInfo, e
 	}
 	rows.Close()
 
-	if err := s.scanServices(services); err != nil {
+	if err := s.scanServicesForScope(services); err != nil {
 		return patterns, services, err
 	}
 	return patterns, services, nil
 }
 
-// scanServices loads every non-deleted service into dst.
-func (s *pgCatalogStore) scanServices(dst map[string]*ServiceInfo) error {
-	rows, err := s.db.Query(sqlCatalogSelectServices, s.orgID)
+func (s *pgCatalogStore) scanServicesForScope(dst map[string]*ServiceInfo) error {
+	rows, err := s.db.Query(sqlCatalogSnapshotServices, s.orgScope.OrgIDs())
 	if err != nil {
-		return fmt.Errorf("agent: pg catalog load services: %w", err)
+		return fmt.Errorf("agent: pg catalog snapshot services: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var (
+			orgID     string
 			name      string
 			manual    bool
 			firstSeen time.Time
 		)
-		if err := rows.Scan(&name, &manual, &firstSeen); err != nil {
-			return fmt.Errorf("agent: pg catalog scan service: %w", err)
+		if err := rows.Scan(&orgID, &name, &manual, &firstSeen); err != nil {
+			return fmt.Errorf("agent: pg catalog scan scoped service: %w", err)
 		}
-		dst[name] = &ServiceInfo{OrgID: s.orgID, FirstSeen: firstSeen, Manual: manual}
+		dst[name] = &ServiceInfo{OrgID: orgID, FirstSeen: firstSeen, Manual: manual}
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("agent: pg catalog load services rows: %w", err)
+		return fmt.Errorf("agent: pg catalog snapshot services rows: %w", err)
 	}
 	return nil
 }
@@ -433,7 +654,7 @@ func (s *pgCatalogStore) Persist(patterns map[string]*Pattern, services map[stri
 		if p == nil {
 			continue
 		}
-		if _, err := tx.Exec(sqlCatalogUpsertRoot, s.orgID, id, p.Service); err != nil {
+		if _, err := tx.Exec(sqlCatalogUpsertRoot, s.orgID, id, p.Service, s.orgScope.OrgIDs()); err != nil {
 			return fmt.Errorf("agent: pg catalog persist root %q: %w", id, err)
 		}
 		if _, err := tx.Exec(sqlCatalogUpsertLog,
@@ -451,7 +672,7 @@ func (s *pgCatalogStore) Persist(patterns map[string]*Pattern, services map[stri
 			continue
 		}
 		if _, err := tx.Exec(sqlCatalogInsertServiceIfAbsent,
-			s.orgID, name, svc.Manual, utcOrNow(svc.FirstSeen),
+			s.orgID, name, svc.Manual, utcOrNow(svc.FirstSeen), s.orgScope.OrgIDs(),
 		); err != nil {
 			return fmt.Errorf("agent: pg catalog persist service %q: %w", name, err)
 		}
@@ -469,25 +690,25 @@ func (s *pgCatalogStore) Persist(patterns map[string]*Pattern, services map[stri
 // root columns applied, tombstoned patterns/services excluded. For the common
 // single-instance case this returns the exact same baseline columns as Load.
 func (s *pgCatalogStore) Snapshot() ([]*Pattern, map[string]ServiceInfo, error) {
-	rows, err := s.db.Query(sqlCatalogSnapshotLogs, s.orgID)
+	rows, err := s.db.Query(sqlCatalogSnapshotLogs, s.orgScope.OrgIDs())
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent: pg catalog snapshot: %w", err)
 	}
 	var out []*Pattern
 	for rows.Next() {
 		var (
-			id, service, verdict       string
-			tagsRaw, samplesRaw        []byte
-			seasonalRaw                []byte
-			totalCount                 int64
-			firstSeen, lastSeen        time.Time
-			totalBaseline              float64
-			baselineVar                float64
-			baselineAvg                float64
-			spikeBaselineMode          string
-			template, source, ruleName string
+			orgID, id, service, verdict string
+			tagsRaw, samplesRaw         []byte
+			seasonalRaw                 []byte
+			totalCount                  int64
+			firstSeen, lastSeen         time.Time
+			totalBaseline               float64
+			baselineVar                 float64
+			baselineAvg                 float64
+			spikeBaselineMode           string
+			template, source, ruleName  string
 		)
-		if err := rows.Scan(&id, &service, &verdict, &tagsRaw,
+		if err := rows.Scan(&orgID, &id, &service, &verdict, &tagsRaw,
 			&totalCount, &firstSeen, &lastSeen, &totalBaseline,
 			&template, &source, &ruleName, &baselineVar, &baselineAvg,
 			&spikeBaselineMode, &seasonalRaw, &samplesRaw); err != nil {
@@ -496,7 +717,7 @@ func (s *pgCatalogStore) Snapshot() ([]*Pattern, map[string]ServiceInfo, error) 
 		}
 		out = append(out, &Pattern{
 			ID:                id,
-			OrgID:             s.orgID,
+			OrgID:             orgID,
 			Template:          template,
 			FirstSeen:         firstSeen,
 			LastSeen:          lastSeen,
@@ -522,13 +743,78 @@ func (s *pgCatalogStore) Snapshot() ([]*Pattern, map[string]ServiceInfo, error) 
 
 	services := make(map[string]ServiceInfo)
 	svcPtrs := make(map[string]*ServiceInfo)
-	if err := s.scanServices(svcPtrs); err != nil {
+	if err := s.scanServicesForScope(svcPtrs); err != nil {
 		return nil, nil, err
 	}
 	for name, svc := range svcPtrs {
 		services[name] = *svc
 	}
 	return out, services, nil
+}
+
+// LookupPattern returns one exact logical pattern using Snapshot precedence.
+func (s *pgCatalogStore) LookupPattern(id string) (*Pattern, error) {
+	rows, err := s.db.Query(sqlCatalogLookupPattern, s.orgScope.OrgIDs(), id)
+	if err != nil {
+		return nil, fmt.Errorf("agent: pg catalog lookup pattern: %w", err)
+	}
+	defer rows.Close()
+	patterns, err := scanCatalogPatternRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("agent: pg catalog lookup pattern: %w", err)
+	}
+	if len(patterns) == 0 {
+		return nil, nil
+	}
+	return patterns[0], nil
+}
+
+// LookupService returns one exact logical service using Snapshot precedence.
+func (s *pgCatalogStore) LookupService(name string) (*ServiceInfo, error) {
+	var orgID, gotName string
+	var manual bool
+	var firstSeen time.Time
+	err := s.db.QueryRow(sqlCatalogLookupService, s.orgScope.OrgIDs(), name).
+		Scan(&orgID, &gotName, &manual, &firstSeen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("agent: pg catalog lookup service: %w", err)
+	}
+	return &ServiceInfo{OrgID: orgID, FirstSeen: firstSeen, Manual: manual}, nil
+}
+
+func scanCatalogPatternRows(rows *sql.Rows) ([]*Pattern, error) {
+	var out []*Pattern
+	for rows.Next() {
+		var (
+			orgID, id, service, verdict string
+			tagsRaw, samplesRaw         []byte
+			seasonalRaw                 []byte
+			totalCount                  int64
+			firstSeen, lastSeen         time.Time
+			totalBaseline               float64
+			baselineVar, baselineAvg    float64
+			spikeBaselineMode           string
+			template, source, ruleName  string
+		)
+		if err := rows.Scan(&orgID, &id, &service, &verdict, &tagsRaw,
+			&totalCount, &firstSeen, &lastSeen, &totalBaseline,
+			&template, &source, &ruleName, &baselineVar, &baselineAvg,
+			&spikeBaselineMode, &seasonalRaw, &samplesRaw); err != nil {
+			return nil, err
+		}
+		out = append(out, &Pattern{
+			ID: id, OrgID: orgID, Template: template, FirstSeen: firstSeen,
+			LastSeen: lastSeen, Count: int(totalCount), BaselineFrequency: totalBaseline,
+			BaselineVariance: baselineVar, BaselineAvg: baselineAvg,
+			SpikeBaselineMode: spikeBaselineMode, Seasonal: decodeSeasonal(seasonalRaw),
+			Verdict: verdict, RuleName: ruleName, Source: source, Service: service,
+			Tags: decodeStringSlice(tagsRaw), Samples: decodeStringSlice(samplesRaw),
+		})
+	}
+	return out, rows.Err()
 }
 
 // ListPatternsPage implements the optional CatalogPager capability: one bounded
@@ -540,7 +826,7 @@ func (s *pgCatalogStore) Snapshot() ([]*Pattern, map[string]ServiceInfo, error) 
 func (s *pgCatalogStore) ListPatternsPage(opts CatalogPageOptions) ([]*Pattern, int, error) {
 	search := strings.TrimSpace(opts.Search)
 	var total int
-	if err := s.db.QueryRow(sqlCatalogCountLogs, s.orgID, search).Scan(&total); err != nil {
+	if err := s.db.QueryRow(sqlCatalogCountLogs, s.orgScope.OrgIDs(), search).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("agent: pg catalog count logs: %w", err)
 	}
 	limit := opts.Limit
@@ -551,7 +837,7 @@ func (s *pgCatalogStore) ListPatternsPage(opts CatalogPageOptions) ([]*Pattern, 
 	if offset < 0 {
 		offset = 0
 	}
-	rows, err := s.db.Query(sqlCatalogPageLogs, s.orgID, search, limit, offset)
+	rows, err := s.db.Query(sqlCatalogPageLogs, s.orgScope.OrgIDs(), search, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("agent: pg catalog page logs: %w", err)
 	}
@@ -559,18 +845,18 @@ func (s *pgCatalogStore) ListPatternsPage(opts CatalogPageOptions) ([]*Pattern, 
 	var out []*Pattern
 	for rows.Next() {
 		var (
-			id, service, verdict       string
-			tagsRaw, samplesRaw        []byte
-			seasonalRaw                []byte
-			totalCount                 int64
-			firstSeen, lastSeen        time.Time
-			totalBaseline              float64
-			baselineVar                float64
-			baselineAvg                float64
-			spikeBaselineMode          string
-			template, source, ruleName string
+			orgID, id, service, verdict string
+			tagsRaw, samplesRaw         []byte
+			seasonalRaw                 []byte
+			totalCount                  int64
+			firstSeen, lastSeen         time.Time
+			totalBaseline               float64
+			baselineVar                 float64
+			baselineAvg                 float64
+			spikeBaselineMode           string
+			template, source, ruleName  string
 		)
-		if err := rows.Scan(&id, &service, &verdict, &tagsRaw,
+		if err := rows.Scan(&orgID, &id, &service, &verdict, &tagsRaw,
 			&totalCount, &firstSeen, &lastSeen, &totalBaseline,
 			&template, &source, &ruleName, &baselineVar, &baselineAvg,
 			&spikeBaselineMode, &seasonalRaw, &samplesRaw); err != nil {
@@ -578,7 +864,7 @@ func (s *pgCatalogStore) ListPatternsPage(opts CatalogPageOptions) ([]*Pattern, 
 		}
 		out = append(out, &Pattern{
 			ID:                id,
-			OrgID:             s.orgID,
+			OrgID:             orgID,
 			Template:          template,
 			FirstSeen:         firstSeen,
 			LastSeen:          lastSeen,
@@ -609,7 +895,7 @@ func (s *pgCatalogStore) ListPatternsPage(opts CatalogPageOptions) ([]*Pattern, 
 func (s *pgCatalogStore) ListServicesPage(opts CatalogPageOptions) ([]ServiceRow, int, error) {
 	search := strings.TrimSpace(opts.Search)
 	var total int
-	if err := s.db.QueryRow(sqlCatalogCountServices, s.orgID, search).Scan(&total); err != nil {
+	if err := s.db.QueryRow(sqlCatalogCountServices, s.orgScope.OrgIDs(), search).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("agent: pg catalog count services: %w", err)
 	}
 	limit := opts.Limit
@@ -620,7 +906,7 @@ func (s *pgCatalogStore) ListServicesPage(opts CatalogPageOptions) ([]ServiceRow
 	if offset < 0 {
 		offset = 0
 	}
-	rows, err := s.db.Query(sqlCatalogPageServices, s.orgID, search, limit, offset)
+	rows, err := s.db.Query(sqlCatalogPageServices, s.orgScope.OrgIDs(), search, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("agent: pg catalog page services: %w", err)
 	}
@@ -628,16 +914,17 @@ func (s *pgCatalogStore) ListServicesPage(opts CatalogPageOptions) ([]ServiceRow
 	out := make([]ServiceRow, 0, limit)
 	for rows.Next() {
 		var (
+			orgID     string
 			name      string
 			manual    bool
 			firstSeen time.Time
 		)
-		if err := rows.Scan(&name, &manual, &firstSeen); err != nil {
+		if err := rows.Scan(&orgID, &name, &manual, &firstSeen); err != nil {
 			return nil, 0, fmt.Errorf("agent: pg catalog page services scan: %w", err)
 		}
 		out = append(out, ServiceRow{
 			Name: name,
-			Info: ServiceInfo{OrgID: s.orgID, FirstSeen: firstSeen, Manual: manual},
+			Info: ServiceInfo{OrgID: orgID, FirstSeen: firstSeen, Manual: manual},
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -726,8 +1013,7 @@ func (s *pgCatalogStore) Curate(edit CatalogEdit) error {
 		return nil
 
 	case CatalogEditResetPatterns:
-		// FK ON DELETE CASCADE drops the vs_logs child rows with the roots.
-		if _, err := s.db.Exec(sqlCurateResetPatterns, s.orgID); err != nil {
+		if err := s.resetPatternsInScope(); err != nil {
 			return fmt.Errorf("agent: pg catalog reset patterns: %w", err)
 		}
 		s.mu.Lock()
@@ -736,7 +1022,7 @@ func (s *pgCatalogStore) Curate(edit CatalogEdit) error {
 		return nil
 
 	case CatalogEditResetServices:
-		if _, err := s.db.Exec(sqlCurateResetServices, s.orgID); err != nil {
+		if err := s.resetServicesInScope(); err != nil {
 			return fmt.Errorf("agent: pg catalog reset services: %w", err)
 		}
 		return nil
@@ -744,6 +1030,42 @@ func (s *pgCatalogStore) Curate(edit CatalogEdit) error {
 	default:
 		return fmt.Errorf("agent: pg catalog unknown edit kind %q", edit.Kind)
 	}
+}
+
+func (s *pgCatalogStore) resetPatternsInScope() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(sqlCurateDeleteWritePatterns, s.orgID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(sqlCurateResetPatterns, s.orgID, s.orgScope.OrgIDs()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *pgCatalogStore) resetServicesInScope() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(sqlCurateDeleteWriteServices, s.orgID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(sqlCurateResetServices, s.orgID, s.orgScope.OrgIDs()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // renameService moves a manual service old→new: tombstone the old name and
