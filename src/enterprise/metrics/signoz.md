@@ -266,7 +266,7 @@ These are real gaps in the first release, not configuration mistakes.
 
 - **No analyze auto-wire.** A configured `signoz_metrics` source does
   **not** populate the `query_metrics`
-  [analyze tool](../../agent/analyze-tools/tools.md) — unlike the
+  [analyze tool](../../agent/tools/tools.md) — unlike the
   `prometheus` source, which does. Configure `tools.query_metrics` by
   hand, or keep pointing it at Prometheus. Planned, not shipped.
 - **Metric discovery is catalog-based.** Metrics outside the default

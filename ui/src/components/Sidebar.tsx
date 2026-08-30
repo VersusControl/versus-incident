@@ -3,7 +3,6 @@ import { NavLink } from "react-router-dom";
 import {
   Activity,
   BellOff,
-  BookOpen,
   Boxes,
   ChartNoAxesCombined,
   ChevronLeft,
@@ -129,14 +128,6 @@ export function SidebarContent({
   });
   const agentOff = configQ.data?.enable === false;
 
-  const statusQ = useQuery({
-    queryKey: ["status"],
-    queryFn: api.status,
-    staleTime: 60_000,
-    retry: 1,
-  });
-  const runbooksUnavailable = statusQ.data?.runbooks_available === false;
-
   const deploymentOrg = useDeploymentOrg();
   const isOSS =
     deploymentOrg.error instanceof ApiError &&
@@ -167,6 +158,7 @@ export function SidebarContent({
   const respond: SideItem[] = [
     { to: "/now", label: "Now", icon: CircleGauge },
     { to: "/incidents", label: "Incidents", icon: Siren },
+    { to: "/agent/chat", label: "Chat", icon: MessageSquare, requiresAgent: true },
   ];
   const agent: AgentSideItem[] = [
     { to: "/agent", label: "Overview", icon: LayoutDashboard, end: true, zone: "Agent", requiresAgent: true },
@@ -199,23 +191,10 @@ export function SidebarContent({
         : undefined,
     },
   ];
-  // AI groups the agent's chat, tools, and reasoning surfaces. Enterprise and
+  // AI groups the agent's tools and reasoning surfaces. Enterprise and
   // runtime availability gates stay attached to their existing destinations.
   const ai: AgentSideItem[] = [
-    { to: "/agent/chat", label: "Chat", icon: MessageSquare, zone: "AI", requiresAgent: true },
     { to: "/agent/tools", label: "Tool catalog", icon: Wrench, zone: "AI" },
-    {
-      to: "/agent/runbooks",
-      label: "Runbooks",
-      icon: BookOpen,
-      zone: "AI",
-      requiresAgent: true,
-      locked: runbooksUnavailable,
-      dim: runbooksUnavailable,
-      dimTitle: runbooksUnavailable
-        ? "Runbooks are unavailable — configure an embedding model"
-        : undefined,
-    },
     { to: "/agent/decisions", label: "Decisions", icon: GitBranch, zone: "AI", requiresAgent: true },
     { to: "/analyses", label: "Analyses", icon: Search, zone: "AI", requiresAgent: true },
     {
@@ -272,7 +251,7 @@ export function SidebarContent({
 
   const partitioned = partitionAgentItems([...agent, ...ai], isOSS);
   const zones: SideZone[] = [
-    { title: "Respond", icon: Flame, items: respond },
+    { title: "Respond", icon: Flame, items: applyAgentOff(respond) },
     {
       title: "Agent",
       icon: Activity,

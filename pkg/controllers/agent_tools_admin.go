@@ -19,6 +19,8 @@ type ToolAvailability struct {
 	Name        string              `json:"name"`
 	DisplayName string              `json:"display_name"`
 	Description string              `json:"description"`
+	DocsURL     string              `json:"docs_url,omitempty"`
+	UIPath      string              `json:"ui_path,omitempty"`
 	State       aitools.State       `json:"state"`
 	Reason      string              `json:"reason"`
 	Action      string              `json:"action"`
@@ -69,7 +71,8 @@ func (controller *AgentToolsAdminController) list(ctx *fiber.Ctx) error {
 		resolution := aitools.Resolve(metadata.Requirement, snapshot, enabled)
 		result = append(result, ToolAvailability{
 			Group: metadata.Group, Name: metadata.Name, DisplayName: metadata.DisplayName,
-			Description: metadata.Description, State: resolution.State, Reason: resolution.Reason,
+			Description: metadata.Description, DocsURL: metadata.DocsURL, UIPath: metadata.UIPath,
+			State: resolution.State, Reason: resolution.Reason,
 			Action: resolution.Action, ActionLabel: resolution.ActionLabel, Enabled: enabled, Requirement: metadata.Requirement, Health: resolution.Health,
 		})
 	}

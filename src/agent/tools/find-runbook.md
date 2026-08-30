@@ -240,4 +240,4 @@ uploaded runbooks become searchable without a restart.
 
 ---
 
-Back to the [Analyze Tools overview](./tools.md).
+Back to the [Tool Reference](./tools.md).

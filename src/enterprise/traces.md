@@ -289,4 +289,4 @@ docker compose -f docker-compose.yml -f docker-compose.traces.yml down -v
 - Reference: [Traces / Tempo (Enterprise)](../agent/data-sources/traces.md)
 - The metric twin of this demo: [Metrics demo, end to end](./metrics.md)
 - The logs lifecycle this mirrors: [Shadow Mode](../agent/shadow-mode.md) · [AI Detect Mode](../agent/ai-detect-mode.md) · [AI Analyze Mode](../agent/ai-analyze-mode.md)
-- On-demand correlation tools: [Analyze Tools](../agent/analyze-tools/tools.md)
+- On-demand correlation tools: [Tool Reference](../agent/tools/tools.md)

@@ -276,7 +276,7 @@ options:
 ### Limitations
 
 - **No analyze auto-wire.** A configured `signoz_traces` source does **not** populate the
-  `query_traces` [analyze tool](../analyze-tools/tools.md) — unlike the `traces` (Tempo)
+  `query_traces` [analyze tool](../tools/tools.md) — unlike the `traces` (Tempo)
   source, which does. Configure `tools.query_traces` by hand, or keep pointing it at Tempo.
   Planned, not shipped.
 - **Discovery is sample-based.** A service that emitted no spans inside the discovery
@@ -285,7 +285,7 @@ options:
 
 ## See also
 
-- OSS on-demand correlation tools: [Analyze Tools](../analyze-tools/tools.md)
+- OSS on-demand correlation tools: [Tool Reference](../tools/tools.md)
 - The metrics twin of this flow: [Prometheus / Metrics (Enterprise)](./prometheus.md)
 - SigNoz metrics (Enterprise): [SigNoz Metrics](../../enterprise/metrics/signoz.md)
 - SigNoz logs (OSS): [SigNoz source](./signoz.md)

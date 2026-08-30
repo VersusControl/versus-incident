@@ -229,4 +229,4 @@ docker compose -f docker-compose.yml -f docker-compose.traces.yml down -v
 
 ## Reference
 
-[AI Agent — Analyze Tools (`query_metrics` / `query_traces`)](https://docs.versusincident.com/#/agent/analyze-tools/tools)
+[AI Agent — Analyze Tools (`query_metrics` / `query_traces`)](https://docs.versusincident.com/#/agent/tools/tools)

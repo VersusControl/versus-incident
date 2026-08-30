@@ -46,6 +46,9 @@ func TestAgentToolsListIncludesAllGroupsAndUnavailableKubernetes(t *testing.T) {
 	groups := map[aitools.Group]int{}
 	for _, row := range rows {
 		groups[row.Group]++
+		if row.DocsURL == "" {
+			t.Errorf("tool %s has no documentation destination", row.Name)
+		}
 		if row.Group == aitools.GroupK8s && row.State != aitools.StateNeedsIntegration {
 			t.Errorf("k8s tool %s state = %s", row.Name, row.State)
 		}
@@ -55,6 +58,32 @@ func TestAgentToolsListIncludesAllGroupsAndUnavailableKubernetes(t *testing.T) {
 			t.Errorf("group %q missing", group)
 		}
 	}
+}
+
+func TestAgentToolsListEmitsMappedDestinationsSeparatelyFromAction(t *testing.T) {
+	app, _ := toolAdminApp(t, aitools.Snapshot{})
+	response, err := app.Test(httptest.NewRequest("GET", "/api/admin/agent/tools?agent=analyze", nil), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var rows []ToolAvailability
+	if err := json.NewDecoder(response.Body).Decode(&rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Name != "find_runbook" {
+			continue
+		}
+		if row.DocsURL != "https://docs.versusincident.com/#/agent/tools/find-runbook" || row.UIPath != "/agent/runbooks" {
+			t.Fatalf("find_runbook destinations = docs %q ui %q", row.DocsURL, row.UIPath)
+		}
+		if row.Action != "/admin#agent-ai-settings" || row.ActionLabel != "AI settings" {
+			t.Fatalf("find_runbook availability action = %q %q", row.Action, row.ActionLabel)
+		}
+		return
+	}
+	t.Fatal("find_runbook missing from response")
 }
 
 func TestAgentToolsPutSuccessAndUnsatisfiedDenialAuditExactlyOnce(t *testing.T) {

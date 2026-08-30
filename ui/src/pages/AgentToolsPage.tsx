@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { AlertCircle, ExternalLink, Loader2, RefreshCw, Wrench } from "lucide-react";
 import { api, type AgentToolAvailability, type AgentToolKind } from "@/lib/api";
 import { TopBar } from "@/components/TopBar";
@@ -8,6 +9,10 @@ import { SkCard } from "@/components/Skeleton";
 
 const GROUPS = ["versus", "common", "k8s"] as const;
 const GROUP_LABELS = { versus: "Versus", common: "Common", k8s: "Kubernetes" };
+
+function isVisibleTool(tool: AgentToolAvailability) {
+  return !(tool.group === "versus" && tool.state === "available" && tool.enabled);
+}
 
 export function AgentToolsPage() {
   const [agent, setAgent] = useState<AgentToolKind>("chat");
@@ -22,6 +27,9 @@ export function AgentToolsPage() {
       api.setAgentToolEnabled(agent, input.tool.name, input.enabled),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent-tools", agent] }),
   });
+  // Common and Kubernetes metadata are complete, so filtering healthy default
+  // Versus tools alone cannot produce the empty state.
+  const visibleTools = tools.data?.filter(isVisibleTool);
 
   return (
     <main className="min-w-0 flex-1 overflow-auto">
@@ -50,7 +58,7 @@ export function AgentToolsPage() {
 
         {tools.isPending && <div className="space-y-4" aria-label="Loading tools"><SkCard lines={3} /><SkCard lines={3} /></div>}
         {tools.isError && <RetryableError error={tools.error} onRetry={() => tools.refetch()} retrying={tools.isRefetching} context="Couldn't load agent tools" />}
-        {tools.data?.length === 0 && (
+        {visibleTools?.length === 0 && (
           <div className="card p-8 text-center text-sm text-ink-300">
             <Wrench className="mx-auto mb-3" aria-hidden="true" />
             No tools are known to this build.
@@ -64,7 +72,7 @@ export function AgentToolsPage() {
         )}
 
         {GROUPS.map((group) => {
-          const rows = tools.data?.filter((tool) => tool.group === group) ?? [];
+          const rows = visibleTools?.filter((tool) => tool.group === group) ?? [];
           if (rows.length === 0) return null;
           return (
             <section key={group} aria-labelledby={`tools-${group}`}>
@@ -85,6 +93,8 @@ export function AgentToolsPage() {
 
 function ToolCard({ tool, agent, pending, onToggle }: { tool: AgentToolAvailability; agent: AgentToolKind; pending: boolean; onToggle: (enabled: boolean) => void }) {
   const satisfied = tool.state === "available" || tool.state === "disabled_by_operator";
+  const toggleDisabled = !satisfied || pending;
+  const unavailableExplanation = !satisfied ? `${tool.display_name} is unavailable: ${tool.reason}` : undefined;
   return (
     <article className="card flex min-h-52 flex-col p-4">
       <div className="flex items-start justify-between gap-3">
@@ -95,15 +105,27 @@ function ToolCard({ tool, agent, pending, onToggle }: { tool: AgentToolAvailabil
         <label className="relative inline-flex shrink-0 items-center gap-2 text-xs text-ink-300">
           <span className="sr-only">Enable {tool.display_name} for {agent}</span>
           {pending && <Loader2 size={14} className="animate-spin" aria-hidden="true" />}
-          <input type="checkbox" className="h-4 w-4 accent-good" checked={tool.enabled && satisfied} disabled={!satisfied || pending} onChange={(event) => onToggle(event.target.checked)} />
+          <input
+            type="checkbox"
+            className="h-4 w-4 accent-good"
+            checked={tool.enabled && satisfied}
+            disabled={toggleDisabled}
+            aria-disabled={toggleDisabled}
+            aria-describedby={!satisfied ? `${tool.name}-unavailable` : undefined}
+            onChange={(event) => onToggle(event.target.checked)}
+          />
         </label>
       </div>
       <p className="mt-3 text-xs leading-5 text-ink-300">{tool.description}</p>
       <div className="mt-auto pt-4">
         <div className="text-2xs font-semibold uppercase text-ink-400">{tool.state.replaceAll("_", " ")}</div>
-        <p className="mt-1 text-xs leading-5 text-ink-200">{tool.reason}</p>
+        <p id={!satisfied ? `${tool.name}-unavailable` : undefined} className="mt-1 text-xs leading-5 text-ink-200">{unavailableExplanation ?? tool.reason}</p>
         {tool.health && <p className="mt-1 text-2xs text-ink-400">Health: {tool.health}</p>}
-        {tool.action && <a className="mt-2 inline-flex items-center gap-1 text-xs text-accent-300 hover:underline" href={tool.action} target={tool.action.startsWith("http") ? "_blank" : undefined} rel={tool.action.startsWith("http") ? "noopener noreferrer" : undefined}>{tool.action_label} <ExternalLink size={12} aria-hidden="true" /></a>}
+        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-xs">
+          {tool.ui_path && tool.state !== "needs_license" && <Link className="inline-flex items-center gap-1 text-accent-300 hover:underline" to={tool.ui_path}>Open tool</Link>}
+          {tool.docs_url && <a className="inline-flex items-center gap-1 text-accent-300 hover:underline" href={tool.docs_url} target="_blank" rel="noopener noreferrer">Documentation <ExternalLink size={12} aria-hidden="true" /></a>}
+          {tool.action && <a className="inline-flex items-center gap-1 text-accent-300 hover:underline" href={tool.action} target={tool.action.startsWith("http") ? "_blank" : undefined} rel={tool.action.startsWith("http") ? "noopener noreferrer" : undefined}>{tool.action_label} <ExternalLink size={12} aria-hidden="true" /></a>}
+        </div>
       </div>
     </article>
   );

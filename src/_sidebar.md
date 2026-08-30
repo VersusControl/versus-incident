@@ -27,25 +27,25 @@
     - [Email](/agent/channels/email)
     - [Lark](/agent/channels/lark)
   - [AI Analyze](/agent/ai-analyze-mode)
-    - [Overview](/agent/analyze-tools/overview)
-    - [Analyze Tools](/agent/analyze-tools/tools)
-    - [Recent Changes Tool](/agent/analyze-tools/recent-changes)
-    - [Find Runbook Tool](/agent/analyze-tools/find-runbook)
+  - Tools
+    - [Tool Reference](/agent/tools/tools)
+    - [Recent Changes](/agent/tools/recent-changes)
+    - [Find Runbook](/agent/tools/find-runbook)
   - [Incidents Report](/agent/incident-report)
 
 - Enterprise SRE Agent
   - [Getting Started](/enterprise/getting-started)
-  - [Single Sign-On (SSO)](/enterprise/sso)
+  - Single Sign-On (SSO)
     - [Overview](/enterprise/sso/overview)
     - [Google Workspace](/enterprise/sso/google)
     - [Microsoft Entra ID](/enterprise/sso/azure)
     - [Generic OIDC](/enterprise/sso/oidc)
-  - [High Availability](/enterprise/ha)
+  - High Availability
     - [Overview](/enterprise/ha/overview)
     - [Docker Compose](/enterprise/ha/docker)
     - [Kubernetes](/enterprise/ha/kubernetes)
     - [Helm](/enterprise/ha/helm)
-  - [Metrics](/enterprise/metrics)
+  - Metrics
     - [Overview](/enterprise/metrics/overview)
     - [Prometheus](/enterprise/metrics/prometheus)
     - [CloudWatch Metrics](/enterprise/metrics/cloudwatch-metrics)
@@ -53,7 +53,7 @@
   - [Traces](/enterprise/traces)
   - [SLI/SLO auto-define](/enterprise/slo)
   - [Alert fatigue](/enterprise/alert-fatigue)
-  - [Versus Security](/enterprise/security)
+  - Versus Security
     - [Overview](/enterprise/security/overview)
     - [Secret scanning](/enterprise/security/secret-scanning)
     - [Fraud & abuse detection](/enterprise/security/fraud-detection)
@@ -98,6 +98,6 @@
   - [Regex](/agent/regex)
 
 - Migration
+  - [OSS to Enterprise](/migration/migration-oss-to-enterprise.md)
   - [v1.4.22](/migration/migration-v1.4.22.md)
   - [v1.4.13](/migration/migration-v1.4.13.md)
-  - [OSS to Enterprise](/migration/migration-oss-to-enterprise.md)

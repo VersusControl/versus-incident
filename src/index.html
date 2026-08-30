@@ -387,6 +387,24 @@
       text-align: left;
     }
 
+    .nav-sub-header {
+      display: flex;
+      align-items: center;
+      width: 100%;
+    }
+
+    .nav-sub-header .nav-sub-toggle {
+      width: 25px;
+      flex: 0 0 25px;
+      padding: 4px 0 4px 10px;
+    }
+
+    .sidebar-nav .nav-sub-header > a {
+      flex: 1;
+      min-width: 0;
+      padding-left: 5px !important;
+    }
+
     .nav-sub-list[hidden] {
       display: none;
     }
@@ -909,21 +927,26 @@
             return true;
           }
 
+          function directSidebarLabel(li, selector) {
+            var label = li.querySelector(selector);
+            if (label) return label;
+            var textNode = Array.prototype.find.call(li.childNodes, function (node) {
+              return node.nodeType === 3 && node.textContent.trim();
+            });
+            if (!textNode) return null;
+            var wrapper = document.createElement("span");
+            wrapper.textContent = textNode.textContent.trim();
+            textNode.replaceWith(wrapper);
+            return wrapper;
+          }
+
           function setupSidebar() {
             // Top-level sections: default EXPANDED
             document.querySelectorAll(".sidebar-nav > ul > li").forEach(function (li) {
               var sub = li.querySelector(":scope > ul");
               if (!sub) return;
-              var titleEl = li.querySelector(":scope > p") || li.querySelector(":scope > strong");
-              if (!titleEl) {
-                var firstChild = li.firstChild;
-                if (firstChild && firstChild.nodeType === 3 && firstChild.textContent.trim()) {
-                  var wrapper = document.createElement("span");
-                  wrapper.textContent = firstChild.textContent.trim();
-                  firstChild.replaceWith(wrapper);
-                  titleEl = wrapper;
-                } else return;
-              }
+              var titleEl = directSidebarLabel(li, ":scope > p, :scope > strong");
+              if (!titleEl) return;
               if (li.dataset.init) {
                 if (sub.querySelector("a.active")) {
                   var b = li.querySelector(".nav-section-toggle");
@@ -952,24 +975,24 @@
             });
 
             // Nested sub-menus (e.g. Data Sources > File, Elasticsearch...): default COLLAPSED
-            document.querySelectorAll(".sidebar-nav ul ul li").forEach(function (li) {
+            document.querySelectorAll(".sidebar-nav ul ul li").forEach(function (li, index) {
               var subUl = li.querySelector(":scope > ul");
               if (!subUl) return;
               if (li.dataset.subInit) return;
+              var titleEl = directSidebarLabel(li, ":scope > a, :scope > p, :scope > strong");
+              if (!titleEl) return;
               li.dataset.subInit = "1";
-              var link = li.querySelector(":scope > a");
-              if (!link) return;
-              var text = link.textContent;
-              var href = link.getAttribute("href");
+              var link = titleEl.matches("a") ? titleEl : null;
+              var text = titleEl.textContent.trim();
               var btn = document.createElement("button");
               btn.className = "nav-sub-toggle";
               btn.type = "button";
-              var hasActive = subUl.querySelector("a.active") || link.classList.contains("active");
+              var hasActive = subUl.querySelector("a.active") || (link && link.classList.contains("active"));
+              var subId = subUl.id || "sidebar-submenu-" + index;
+              subUl.id = subId;
               btn.setAttribute("aria-expanded", hasActive ? "true" : "false");
+              btn.setAttribute("aria-controls", subId);
               btn.appendChild(makeChevron());
-              var subLabel = document.createElement("span");
-              subLabel.textContent = text;
-              btn.appendChild(subLabel);
               subUl.classList.add("nav-sub-list");
               subUl.hidden = !hasActive;
               btn.addEventListener("click", function () {
@@ -977,7 +1000,19 @@
                 btn.setAttribute("aria-expanded", String(!open));
                 subUl.hidden = open;
               });
-              link.replaceWith(btn);
+              if (link) {
+                btn.setAttribute("aria-label", "Toggle " + text);
+                var header = document.createElement("div");
+                header.className = "nav-sub-header";
+                link.replaceWith(header);
+                header.appendChild(btn);
+                header.appendChild(link);
+              } else {
+                var subLabel = document.createElement("span");
+                subLabel.textContent = text;
+                btn.appendChild(subLabel);
+                titleEl.replaceWith(btn);
+              }
             });
           }
 

@@ -1846,6 +1846,8 @@ export interface AgentToolAvailability {
   name: string;
   display_name: string;
   description: string;
+  docs_url?: string;
+  ui_path?: string;
   state: AgentToolState;
   reason: string;
   action: string;
