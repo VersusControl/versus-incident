@@ -146,7 +146,7 @@ alert:
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `replicaCount` | Number of replicas for the deployment | `2` |
-| `config.publicHost` | Public URL for acknowledgment links | `""` |
+| `config.publicHost` | Canonical external HTTP(S) origin for links, secure cookies, and exact-origin CSRF behind rewriting or TLS-terminating proxies | `""` |
 | `gatewaySecret` | Shared secret for `/api/admin/*` and `/api/agent/*`. Empty value leaves admin routes unregistered. | `""` |
 | `storage.type` | Storage backend (`file` or `postgres`). HA derives `postgres`. | `"file"` |
 | `storage.postgres.dsn` | Postgres DSN (stored in chart Secret) when `storage.type=postgres` | `""` |
@@ -504,7 +504,9 @@ ingress:
         - versus-incident.example.com
 ```
 
-When enabling Ingress, make sure to also set the `config.publicHost` value to match your host for proper acknowledgement URL creation:
+When enabling Ingress, set `config.publicHost` to the exact browser-visible
+HTTP(S) origin. It owns external links, secure-cookie derivation, and exact-origin
+CSRF checks; forwarded host and protocol headers are not trusted:
 
 ```yaml
 config:

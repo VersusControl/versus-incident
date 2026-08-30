@@ -144,7 +144,7 @@ func (tool GetSystemOverview) Invoke(_ context.Context, args json.RawMessage) (*
 	}
 	healthFound := false
 	if tool.Health != nil {
-		snapshot := tool.Health.DetectionHealth()
+		snapshot := tool.Health.DetectionHealth(tool.Scope)
 		data["detection_health"] = snapshot
 		healthFound = len(snapshot.Sources) > 0 || len(snapshot.Categories) > 0 || snapshot.Observation != ""
 	} else {

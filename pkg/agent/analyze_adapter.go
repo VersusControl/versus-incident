@@ -2,8 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"strings"
+	"sync"
 	"time"
 
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
@@ -12,6 +15,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/runbook/vectorindex"
 	"github.com/VersusControl/versus-incident/pkg/signalsources"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 // signalReaderAdapter wraps a set of core.SignalSource instances so they
@@ -25,10 +29,12 @@ type signalReaderAdapter struct {
 }
 
 type detectionHealthAdapter struct {
+	mu       sync.RWMutex
+	scope    tenancy.OrgScope
 	snapshot versustools.DetectionHealthSnapshot
 }
 
-func newDetectionHealthAdapter(configured []config.AgentSourceConfig, built []core.SignalSource, buildErrs []error) versustools.DetectionHealthReader {
+func newDetectionHealthAdapter(scope tenancy.OrgScope, configured []config.AgentSourceConfig, built []core.SignalSource, buildErrs []error) *detectionHealthAdapter {
 	builtSources := make(map[string]struct{}, len(built))
 	for _, source := range built {
 		if source != nil {
@@ -66,14 +72,63 @@ func newDetectionHealthAdapter(configured []config.AgentSourceConfig, built []co
 	for _, kind := range []string{string(signalsources.KindLogs), string(signalsources.KindMetrics), string(signalsources.KindTraces)} {
 		categories = append(categories, versustools.CategoryHealth{Kind: kind, Configured: configuredKinds[kind], Dark: !configuredKinds[kind]})
 	}
-	return &detectionHealthAdapter{snapshot: versustools.DetectionHealthSnapshot{Sources: sources, Categories: categories, Observation: "unknown"}}
+	return &detectionHealthAdapter{scope: scope.Normalized(), snapshot: versustools.DetectionHealthSnapshot{Sources: sources, Categories: categories, Observation: "unknown"}}
 }
 
-func (adapter *detectionHealthAdapter) DetectionHealth() versustools.DetectionHealthSnapshot {
+func (adapter *detectionHealthAdapter) DetectionHealth(scope tenancy.OrgScope) versustools.DetectionHealthSnapshot {
 	if adapter == nil {
 		return versustools.DetectionHealthSnapshot{}
 	}
-	return adapter.snapshot
+	if scope.Normalized().Write != adapter.scope.Write {
+		return versustools.DetectionHealthSnapshot{Categories: []versustools.CategoryHealth{{Kind: "logs", Dark: true}, {Kind: "metrics", Dark: true}, {Kind: "traces", Dark: true}}, Observation: "unknown"}
+	}
+	adapter.mu.RLock()
+	defer adapter.mu.RUnlock()
+	snapshot := adapter.snapshot
+	snapshot.Sources = append([]versustools.SourceHealth(nil), snapshot.Sources...)
+	snapshot.Categories = append([]versustools.CategoryHealth(nil), snapshot.Categories...)
+	return snapshot
+}
+
+func (adapter *detectionHealthAdapter) Observe(source string, err error, at time.Time) {
+	if adapter == nil {
+		return
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	for index := range adapter.snapshot.Sources {
+		if adapter.snapshot.Sources[index].Name != source || !adapter.snapshot.Sources[index].Configured {
+			continue
+		}
+		if err == nil {
+			observedAt := at.UTC()
+			adapter.snapshot.Sources[index].Observation = "healthy"
+			adapter.snapshot.Sources[index].ErrorClass = ""
+			adapter.snapshot.Sources[index].LastSuccessfulPull = &observedAt
+		} else {
+			adapter.snapshot.Sources[index].Observation = "unhealthy"
+			adapter.snapshot.Sources[index].ErrorClass = sourceErrorClass(err)
+		}
+		return
+	}
+}
+
+func sourceErrorClass(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return "timeout"
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "401") || strings.Contains(message, "unauthenticated") || strings.Contains(message, "authentication") {
+		return "authentication"
+	}
+	if strings.Contains(message, "403") || strings.Contains(message, "unauthorized") || strings.Contains(message, "forbidden") {
+		return "authorization"
+	}
+	return "connection"
 }
 
 func newSignalReaderAdapter(sources []core.SignalSource) commontools.SignalReader {

@@ -260,7 +260,9 @@ func (store *discoveryStore) SearchAnalysesPageForScope(scope tenancy.OrgScope, 
 
 type staticHealth struct{ snapshot DetectionHealthSnapshot }
 
-func (health staticHealth) DetectionHealth() DetectionHealthSnapshot { return health.snapshot }
+func (health staticHealth) DetectionHealth(tenancy.OrgScope) DetectionHealthSnapshot {
+	return health.snapshot
+}
 
 type secretRedactor struct{}
 

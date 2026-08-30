@@ -17,7 +17,7 @@ plans
 PROJECT_STRUCTURE.md
 EINO_PATTERNS.md
 runbook-
-tests
+/tests/
 testdata
 runbook-ingest
 _drafts

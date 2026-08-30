@@ -6,6 +6,7 @@ import clsx from "clsx";
 import {
   api,
   clearSecret,
+  gatewaySessionLogout,
   getSsoSession,
   localLogout,
   ssoLogout,
@@ -232,6 +233,7 @@ function SignOutButton() {
         } catch {
           // No enterprise / no SSO session — nothing to revoke.
         }
+        await gatewaySessionLogout();
         clearSecret();
         window.location.reload();
       }}

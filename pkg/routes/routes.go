@@ -14,6 +14,7 @@ func SetupRoutes(app *fiber.App, teamsStore *teams.Store) {
 
 	// API routes
 	api := app.Group("/api")
+	controllers.RegisterGatewaySessionRoutes(api)
 
 	// Enterprise auth slot. No-op pass-through in community mode;
 	// an external module registers SSO/JWT enforcement via

@@ -124,7 +124,8 @@ port: 3000
 # ... existing alert configurations ...
 
 # Shared secret required for ALL admin endpoints (`/api/admin/*` and
-# `/api/agent/*`). Sent by clients in the `X-Gateway-Secret` header.
+# `/api/agent/*`). API clients send it in `X-Gateway-Secret`; the dashboard
+# exchanges it once for an opaque HttpOnly session cookie.
 gateway_secret: ${GATEWAY_SECRET}
 
 # Storage backend for the pattern catalog, shadow log, and incident
@@ -195,9 +196,21 @@ The `agent` section includes:
 > **Admin secret.** All admin endpoints (`/api/admin/*` and
 > `/api/agent/*`) are protected by the **root-level** `gateway_secret`
 > (env `GATEWAY_SECRET`). Set it to any value you choose; clients send
-> the same value in the `X-Gateway-Secret` header. When no secret is
+> the same value in the `X-Gateway-Secret` header. The dashboard sends it
+> only to `POST /api/auth/gateway-session`, then uses an HttpOnly,
+> SameSite=Strict cookie with an eight-hour absolute lifetime. Reloads reuse
+> the cookie; sign-out, expiry, cookie clearing, or secret rotation requires
+> signing in again. When no secret is
 > configured the admin endpoints are not registered and the agent
 > refuses to start.
+>
+> Set the root-level `public_host` to the exact browser-visible HTTP(S) origin,
+> for example `https://versus.example.com`. Versus validates and normalizes it
+> at startup and uses it for external links, cookie `Secure`, and exact-origin
+> checks behind TLS-terminating or Host-rewriting proxies. Forwarded
+> protocol/host headers are not trusted implicitly. Leave it empty for a direct
+> deployment, where the request's actual protocol and Host are used for browser
+> security checks.
 
 > **Storage.** The agent's catalog and the incident history shown in the
 > UI are persisted via the **root-level** `storage:` block (default:

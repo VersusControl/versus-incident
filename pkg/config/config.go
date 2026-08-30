@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/VersusControl/versus-incident/pkg/weborigin"
 	"github.com/spf13/viper"
 )
 
@@ -456,6 +457,14 @@ func loadConfigFromPath(path string) (*Config, error) {
 			return nil, fmt.Errorf("failed to load tools file %s: %w", toolsPath, lerr)
 		}
 		loaded.Agent.Tools = tools
+	}
+
+	if strings.TrimSpace(loaded.PublicHost) != "" {
+		normalized, err := weborigin.Normalize(loaded.PublicHost)
+		if err != nil {
+			return nil, fmt.Errorf("public_host: %w", err)
+		}
+		loaded.PublicHost = normalized
 	}
 
 	return loaded, nil

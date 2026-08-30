@@ -152,7 +152,9 @@ config:
   name: versus-incident
   host: 0.0.0.0
   port: 3000
-  publicHost: ""  # Set to your public host for acknowledgement URLs
+  # Canonical external HTTP(S) origin for links, secure cookies, and exact-origin
+  # CSRF checks behind rewriting or TLS-terminating proxies.
+  publicHost: ""
 
 # Shared secret required by all admin endpoints (`/api/admin/*` and
 # `/api/agent/*`). Clients send the same value in the `X-Gateway-Secret`

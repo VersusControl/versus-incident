@@ -2,10 +2,15 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/agent/ai"
@@ -14,11 +19,13 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/detect"
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/router"
+	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/runbook"
+	"github.com/VersusControl/versus-incident/pkg/signalsources"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
@@ -46,7 +53,10 @@ type AIBundle struct {
 	// read path and the admin runbooks UI (upload/list/delete). Nil when
 	// storage is unavailable. Present even without embeddings so operators
 	// can manage the corpus before configuring an embedding model.
-	Runbooks *runbook.Manager
+	Runbooks            *runbook.Manager
+	ToolSettings        *aitools.Manager
+	ToolSnapshot        func(tenancy.OrgScope) aitools.Snapshot
+	ObserveSourceHealth func(string, error, time.Time)
 }
 
 // BuildAIs constructs every AI dependency (router, detect agent,
@@ -79,6 +89,9 @@ func BuildAIsForScopeWithChatLocation(cfg config.AgentConfig, catalog *Catalog, 
 }
 
 func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location) AIBundle {
+	toolSettings := aitools.NewManager(store)
+	configuredToolSnapshot := configuredToolAvailabilitySnapshot(cfg, store)
+	toolSnapshot := func(tenancy.OrgScope) aitools.Snapshot { return configuredToolSnapshot }
 	// Resolve the detect-task config up front so the construction gate can
 	// see whether a model is actually configured.
 	detectCfg := cfg.AI.Resolve(cfg.AI.Detect)
@@ -91,7 +104,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	// registers no resolver, so this collapses to the original
 	// `!cfg.AI.Enable` gate and is byte-for-byte unchanged.
 	if !cfg.AI.Enable && (aiSettingsResolver() == nil || detectCfg.Model == "") {
-		return AIBundle{}
+		return AIBundle{ToolSettings: toolSettings, ToolSnapshot: toolSnapshot}
 	}
 
 	// Per-request Authorization override backed by the runtime resolver.
@@ -125,7 +138,10 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	var analyzeAgent core.AIAgent
 	var analyzeRate *ai.RateLimiter
 	var analyzeTools []core.Tool
+	var chatTools []core.Tool
+	var runtimeTools []core.Tool
 	var runbookMgr *runbook.Manager
+	var detectionHealth *detectionHealthAdapter
 	{
 		analyzeBaseCfg := cfg.AI.Resolve(config.AgentAITaskConfig{Model: cfg.AI.Analyze.Model})
 
@@ -138,7 +154,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 			log.Printf("agent: analyze reader source warning: %v", e)
 		}
 		reader := newSignalReaderAdapter(readerSources)
-		detectionHealth := newDetectionHealthAdapter(cfg.Sources, readerSources, srcErrs)
+		detectionHealth = newDetectionHealthAdapter(scope, cfg.Sources, readerSources, srcErrs)
 		redactor, redactErrs := NewRedactor(cfg.Redaction.Enable && cfg.Redaction.RedactIPs, cfg.Redaction.ExtraPatterns)
 		for _, e := range redactErrs {
 			log.Printf("agent: analyze reader redactor warning: %v", e)
@@ -196,11 +212,36 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		metrics := newMetricReaderAdapter(cfg.Tools.QueryMetrics.Prometheus)
 		traces := newTraceReaderAdapter(cfg.Tools.QueryTraces.Tempo)
 
-		analyzeTools = buildAnalyzeTools(store, scope, newCatalogAdapterWithThreshold(catalog, cfg.Catalog.AutoPromoteAfter), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher, metrics, traces, detectionHealth)
-		a, aErr := analyze.New(context.Background(), analyzeBaseCfg, analyzeTools, analyze.Options{
-			HTTPClient:    httpClient,
-			AuthKeyFunc:   authKeyFn,
-			Runtime:       aiRT,
+		runtimeTools = buildAnalyzeTools(store, scope, newCatalogAdapterWithThreshold(catalog, cfg.Catalog.AutoPromoteAfter), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher, metrics, traces, detectionHealth)
+		toolSnapshot = func(requestScope tenancy.OrgScope) aitools.Snapshot {
+			return buildToolAvailabilitySnapshot(configuredToolSnapshot, reader, graph, changes, embedder, runbookSearcher, metrics, traces, detectionHealth.DetectionHealth(requestScope))
+		}
+		initialView, loadErr := toolSettings.Load(scope)
+		if loadErr != nil {
+			log.Printf("agent: tool settings unavailable: %v", loadErr)
+			return AIBundle{ToolSettings: toolSettings, ToolSnapshot: toolSnapshot, ObserveSourceHealth: detectionHealth.Observe}
+		}
+		initialSnapshot := toolSnapshot(scope)
+		analyzeTools, err = initialView.Filter(aitools.AgentAnalyze, runtimeTools, initialSnapshot)
+		if err != nil {
+			log.Printf("agent: analyze tool settings unavailable: %v", err)
+			return AIBundle{ToolSettings: toolSettings, ToolSnapshot: toolSnapshot, ObserveSourceHealth: detectionHealth.Observe}
+		}
+		chatTools, err = initialView.Filter(aitools.AgentChat, runtimeTools, initialSnapshot)
+		if err != nil {
+			log.Printf("agent: chat tool settings unavailable: %v", err)
+			return AIBundle{ToolSettings: toolSettings, ToolSnapshot: toolSnapshot, ObserveSourceHealth: detectionHealth.Observe}
+		}
+		analyzeGeneration := newToolGeneration(toolSettings, scope, toolSnapshot)
+		analyzeRuntime := aiRT
+		analyzeRuntime.Revision = analyzeGeneration.Revision
+		a, aErr := analyze.New(context.Background(), analyzeBaseCfg, runtimeTools, analyze.Options{
+			HTTPClient:  httpClient,
+			AuthKeyFunc: authKeyFn,
+			Runtime:     analyzeRuntime,
+			ToolProvider: func() ([]core.Tool, error) {
+				return analyzeGeneration.Filter(aitools.AgentAnalyze, runtimeTools)
+			},
 			ToolTimeout:   parseDurationOr(cfg.Tools.ToolTimeout, 20*time.Second),
 			ParallelTools: cfg.Tools.ParallelTools,
 		})
@@ -221,8 +262,17 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	var concreteChat *chatagent.Agent
 	var chatRate *ai.RateLimiter
 	chatCfg := cfg.AI.Resolve(cfg.AI.Chat)
-	if built, chatErr := chatagent.New(context.Background(), chatCfg, analyzeTools, chatagent.Options{
-		HTTPClient: httpClient, AuthKeyFunc: authKeyFn, Runtime: aiRT,
+	chatGeneration := newToolGeneration(toolSettings, scope, toolSnapshot)
+	chatRuntime := aiRT
+	chatRuntime.Revision = chatGeneration.Revision
+	if built, chatErr := chatagent.New(context.Background(), chatCfg, runtimeTools, chatagent.Options{
+		HTTPClient: httpClient, AuthKeyFunc: authKeyFn, Runtime: chatRuntime,
+		ToolProvider: func() ([]core.Tool, error) {
+			return chatGeneration.Filter(aitools.AgentChat, runtimeTools)
+		},
+		SeedProvider: func() ([]core.Tool, error) {
+			return loadCurrentTools(toolSettings, scope, toolSnapshot, aitools.AgentChat, runtimeTools)
+		},
 		ToolTimeout: parseDurationOr(cfg.Tools.ToolTimeout, chatagent.DefaultToolTimeout),
 	}); chatErr != nil {
 		log.Printf("agent: chat agent disabled: %v", chatErr)
@@ -230,7 +280,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		concreteChat = built
 		chatAgent = built
 		chatRate = ai.NewDistributedRateLimiter(chatCfg.MaxCallsPerHour, store, scope.Normalized().Write, time.Now)
-		log.Printf("agent: chat agent enabled model=%s tools=%d", chatCfg.Model, len(analyzeTools))
+		log.Printf("agent: chat agent enabled model=%s tools=%d", chatCfg.Model, len(chatTools))
 	}
 
 	// Router wiring ----------------------------------------------------------
@@ -265,17 +315,177 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	}
 
 	return AIBundle{
-		Router:      r,
-		Detect:      detectAgent,
-		Analyze:     analyzeAgent,
-		Chat:        chatAgent,
-		Cache:       detectCache,
-		Rate:        detectRate,
-		AnalyzeRate: analyzeRate,
-		ChatRate:    chatRate,
-		ChatService: chatServiceFactory,
-		Runbooks:    runbookMgr,
+		Router:              r,
+		Detect:              detectAgent,
+		Analyze:             analyzeAgent,
+		Chat:                chatAgent,
+		Cache:               detectCache,
+		Rate:                detectRate,
+		AnalyzeRate:         analyzeRate,
+		ChatRate:            chatRate,
+		ChatService:         chatServiceFactory,
+		Runbooks:            runbookMgr,
+		ToolSettings:        toolSettings,
+		ToolSnapshot:        toolSnapshot,
+		ObserveSourceHealth: detectionHealth.Observe,
 	}
+}
+
+func loadCurrentTools(manager *aitools.Manager, scope tenancy.OrgScope, snapshot func(tenancy.OrgScope) aitools.Snapshot, agent aitools.AgentKind, runtime []core.Tool) ([]core.Tool, error) {
+	view, err := manager.Load(scope)
+	if err != nil {
+		return nil, err
+	}
+	return view.Filter(agent, runtime, snapshot(scope))
+}
+
+type toolGeneration struct {
+	mu       sync.Mutex
+	manager  *aitools.Manager
+	scope    tenancy.OrgScope
+	snapshot func(tenancy.OrgScope) aitools.Snapshot
+	view     aitools.SettingsView
+	current  aitools.Snapshot
+	err      error
+}
+
+func newToolGeneration(manager *aitools.Manager, scope tenancy.OrgScope, snapshot func(tenancy.OrgScope) aitools.Snapshot) *toolGeneration {
+	return &toolGeneration{manager: manager, scope: scope, snapshot: snapshot}
+}
+
+func (generation *toolGeneration) Revision(context.Context) (string, bool) {
+	generation.mu.Lock()
+	defer generation.mu.Unlock()
+	generation.view, generation.err = generation.manager.Load(generation.scope)
+	if generation.err != nil {
+		return "", false
+	}
+	generation.current = generation.snapshot(generation.scope)
+	encoded, err := json.Marshal(generation.current)
+	if err != nil {
+		generation.err = err
+		return "", false
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%s:%x", generation.view.Revision(), sum[:]), true
+}
+
+func (generation *toolGeneration) Filter(agent aitools.AgentKind, runtime []core.Tool) ([]core.Tool, error) {
+	generation.mu.Lock()
+	defer generation.mu.Unlock()
+	if generation.err != nil {
+		return nil, generation.err
+	}
+	return generation.view.Filter(agent, runtime, generation.current)
+}
+
+func configuredToolAvailabilitySnapshot(cfg config.AgentConfig, store storage.Provider) aitools.Snapshot {
+	configuredSignals := make(map[signalsources.Kind]bool)
+	for _, source := range cfg.Sources {
+		if source.Enable {
+			configuredSignals[signalsources.KindOf(source.Type)] = true
+		}
+	}
+	hasGit := len(cfg.Tools.RecentChanges.Git.Repos) > 0
+	hasGraph := len(cfg.Tools.DescribeDependencies.Services) > 0
+	hasEmbedder := strings.TrimSpace(cfg.Tools.FindRunbook.EmbeddingModel) != ""
+	configured := func(ok bool, name string) aitools.DependencyStatus {
+		return aitools.DependencyStatus{Configured: ok, Healthy: ok, Name: name}
+	}
+	metrics := configured(configuredSignals[signalsources.KindMetrics] || strings.TrimSpace(cfg.Tools.QueryMetrics.Prometheus.Address) != "", "Metric data source")
+	metrics.Constructed = newMetricReaderAdapter(cfg.Tools.QueryMetrics.Prometheus) != nil
+	if metrics.Configured && !metrics.Constructed {
+		metrics.Healthy = false
+		metrics.Health = "configuration"
+	}
+	traces := configured(configuredSignals[signalsources.KindTraces] || strings.TrimSpace(cfg.Tools.QueryTraces.Tempo.Address) != "", "Trace data source")
+	traces.Constructed = newTraceReaderAdapter(cfg.Tools.QueryTraces.Tempo) != nil
+	if traces.Configured && !traces.Constructed {
+		traces.Healthy = false
+		traces.Health = "configuration"
+	}
+	return aitools.Snapshot{
+		DataSources: map[string]aitools.DependencyStatus{
+			"logs":    configured(configuredSignals[signalsources.KindLogs], "Log data source"),
+			"metrics": metrics,
+			"traces":  traces,
+		},
+		Integrations: map[string]aitools.DependencyStatus{"github": configured(hasGit, "GitHub"), "kubernetes": configured(false, "Kubernetes cluster")},
+		Capabilities: map[string]aitools.DependencyStatus{
+			"ai_embedder": configured(hasEmbedder, "AI embedder"), "runbook_index": configured(hasEmbedder && store != nil, "Runbook index"), "dependency_graph": configured(hasGraph, "Dependency graph"),
+		},
+	}
+}
+
+func buildToolAvailabilitySnapshot(configured aitools.Snapshot, reader commontools.SignalReader, graph *commontools.DependencyGraph, changes commontools.ChangeFeed, embedder core.Embedder, runbooks commontools.RunbookSearcher, metrics commontools.MetricReader, traces commontools.TraceReader, health versustools.DetectionHealthSnapshot) aitools.Snapshot {
+	resolved := func(status aitools.DependencyStatus, healthy bool) aitools.DependencyStatus {
+		status.Healthy = status.Configured && healthy
+		if status.Configured && !status.Healthy {
+			status.Health = "configuration"
+		}
+		return status
+	}
+	dataSource := func(kind string, status aitools.DependencyStatus, constructed bool) aitools.DependencyStatus {
+		healthy, observed, name, class := sourceKindHealth(health, kind)
+		status.Constructed = constructed
+		status.Healthy = status.Configured && constructed && (!observed || healthy)
+		if status.Configured && !constructed {
+			status.Health = "configuration"
+		} else if status.Configured && observed {
+			if name != "" {
+				status.Name = name
+			}
+			status.Health = class
+		}
+		return status
+	}
+	return aitools.Snapshot{
+		DataSources: map[string]aitools.DependencyStatus{
+			"logs": dataSource("logs", configured.DataSources["logs"], reader != nil), "metrics": dataSource("metrics", configured.DataSources["metrics"], metrics != nil), "traces": dataSource("traces", configured.DataSources["traces"], traces != nil),
+		},
+		Integrations: map[string]aitools.DependencyStatus{
+			"github": resolved(configured.Integrations["github"], changes != nil), "kubernetes": resolved(configured.Integrations["kubernetes"], false),
+		},
+		Capabilities: map[string]aitools.DependencyStatus{
+			"ai_embedder": resolved(configured.Capabilities["ai_embedder"], embedder != nil), "runbook_index": resolved(configured.Capabilities["runbook_index"], runbooks != nil), "dependency_graph": resolved(configured.Capabilities["dependency_graph"], graph != nil && graph.Len() > 0),
+		},
+	}
+}
+
+func sourceKindHealth(snapshot versustools.DetectionHealthSnapshot, kind string) (bool, bool, string, string) {
+	configured := 0
+	failed := make([]versustools.SourceHealth, 0)
+	for _, source := range snapshot.Sources {
+		if source.Kind != kind || !source.Configured {
+			continue
+		}
+		configured++
+		if source.Observation == "unhealthy" {
+			failed = append(failed, source)
+			continue
+		}
+		if source.Observation == "healthy" || source.Observation == "unknown" || source.Observation == "" {
+			return true, source.Observation == "healthy", "", ""
+		}
+	}
+	if configured == 0 || len(failed) != configured {
+		return false, false, "", ""
+	}
+	slices.SortFunc(failed, func(left, right versustools.SourceHealth) int {
+		if result := strings.Compare(left.Name, right.Name); result != 0 {
+			return result
+		}
+		return strings.Compare(left.ErrorClass, right.ErrorClass)
+	})
+	return false, true, boundAvailabilityText(failed[0].Name, 80), boundAvailabilityText(failed[0].ErrorClass, 40)
+}
+
+func boundAvailabilityText(value string, limit int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) > limit {
+		runes = runes[:limit]
+	}
+	return string(runes)
 }
 
 func buildAnalyzeTools(store storage.Provider, scope tenancy.OrgScope, catalog versustools.PatternCatalog, reader commontools.SignalReader, redactor commontools.LineRedactor, services commontools.ServiceExtractor, graph *commontools.DependencyGraph, changes commontools.ChangeFeed, embedder core.Embedder, runbooks commontools.RunbookSearcher, metrics commontools.MetricReader, traces commontools.TraceReader, health versustools.DetectionHealthReader) []core.Tool {
@@ -302,7 +512,7 @@ func buildAnalyzeTools(store storage.Provider, scope tenancy.OrgScope, catalog v
 		}
 	}
 	if health != nil {
-		tools = append(tools, versustools.GetDetectionHealth{Reader: health})
+		tools = append(tools, versustools.GetDetectionHealth{Reader: health, Scope: scope})
 	}
 	tools = append(tools,
 		versustools.ListCapabilities{Capabilities: knowledgeCapabilities(scope, store, catalog, reader, graph, changes, embedder, runbooks, metrics, traces, health, providers)},

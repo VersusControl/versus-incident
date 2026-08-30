@@ -78,7 +78,7 @@ alert:
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `replicaCount` | Number of replicas for the deployment (set to `1` when `agent.enable=true` or persistence is enabled) | `2` |
-| `config.publicHost` | Public URL for acknowledgment links | `""` |
+| `config.publicHost` | Canonical external HTTP(S) origin for links, secure cookies, and exact-origin CSRF behind rewriting or TLS-terminating proxies | `""` |
 | `gatewaySecret` | Shared secret for `/api/admin/*` and `/api/agent/*`. Empty value leaves admin routes unregistered. | `""` |
 | `storage.type` | Storage backend (only `file` is implemented today) | `"file"` |
 | `storage.persistence.enabled` | Mount a PVC at the fixed `/app/data` path | `false` |

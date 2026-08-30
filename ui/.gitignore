@@ -13,3 +13,4 @@ test-results/
 playwright-report/
 playwright/.cache/
 tests/e2e/.env
+tests/e2e/screenshots/

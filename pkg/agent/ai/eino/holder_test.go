@@ -2,6 +2,7 @@ package eino_test
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -179,6 +180,27 @@ func TestHolder_KeyStateRebuild(t *testing.T) {
 	}
 	if m0 == m1 {
 		t.Fatalf("key-state transition did not rebuild the model")
+	}
+}
+
+func TestHolder_RuntimeRevisionRebuilds(t *testing.T) {
+	var revision atomic.Int64
+	runtime := einowrap.RuntimeAI{Revision: func(context.Context) (string, bool) {
+		return strconv.FormatInt(revision.Load(), 10), true
+	}}
+	holder := einowrap.NewChatModelHolder(baseOpenAICfg(), einowrap.Options{}, runtime)
+	first, err := holder.Get(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	same, err := holder.Get(context.Background())
+	if err != nil || same != first {
+		t.Fatalf("unchanged revision rebuilt: same=%v err=%v", same == first, err)
+	}
+	revision.Add(1)
+	changed, err := holder.Get(context.Background())
+	if err != nil || changed == first {
+		t.Fatalf("changed revision did not rebuild: changed=%v err=%v", changed != first, err)
 	}
 }
 

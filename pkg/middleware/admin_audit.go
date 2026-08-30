@@ -25,6 +25,9 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+// AuditActionAgentToolChanged records one per-agent tool setting mutation.
+const AuditActionAgentToolChanged = "agent.tool.changed"
+
 // Admin-audit outcome strings. A destructive admin action records exactly one
 // of these; they mirror the wrapper's audit-result vocabulary without the OSS
 // tree depending on it.
