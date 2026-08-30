@@ -35,13 +35,15 @@ type postgresProvider struct {
 }
 
 var (
-	_ ScopedIncidentPager          = (*postgresProvider)(nil)
-	_ ScopedIncidentWindowCounter  = (*postgresProvider)(nil)
-	_ ScopedIncidentServiceCounter = (*postgresProvider)(nil)
-	_ ScopedAnalysisPager          = (*postgresProvider)(nil)
-	_ ScopedIncidentSearchPager    = (*postgresProvider)(nil)
-	_ ScopedSearcher               = (*postgresProvider)(nil)
-	_ ScopedRangeLister            = (*postgresProvider)(nil)
+	_ ScopedIncidentPager                = (*postgresProvider)(nil)
+	_ ScopedIncidentWindowCounter        = (*postgresProvider)(nil)
+	_ ScopedIncidentServiceCounter       = (*postgresProvider)(nil)
+	_ ScopedIncidentServiceSummaryReader = (*postgresProvider)(nil)
+	_ ScopedAnalysisPager                = (*postgresProvider)(nil)
+	_ ScopedAnalysisSearchPager          = (*postgresProvider)(nil)
+	_ ScopedIncidentSearchPager          = (*postgresProvider)(nil)
+	_ ScopedSearcher                     = (*postgresProvider)(nil)
+	_ ScopedRangeLister                  = (*postgresProvider)(nil)
 )
 
 // DB implements the optional storage.SQLAccessor capability: it
@@ -435,6 +437,51 @@ func (p *postgresProvider) CreateBlobIfAbsent(name string, data []byte) (bool, e
 	return written, nil
 }
 
+func (p *postgresProvider) CompareAndSwapBlob(name string, expected, replacement []byte) (bool, error) {
+	table := blobTable(name)
+	if expected == nil {
+		if replacement == nil {
+			return false, nil
+		}
+		query := fmt.Sprintf(`
+			INSERT INTO %s (name, data, updated_at)
+			VALUES ($1, $2, NOW())
+			ON CONFLICT (name) DO NOTHING
+		`, table)
+		result, err := p.db.Exec(query, name, replacement)
+		if err != nil {
+			return false, fmt.Errorf("storage: compare-and-swap blob %q: %w", name, err)
+		}
+		rows, err := result.RowsAffected()
+		return rows == 1, err
+	}
+	if replacement == nil {
+		query := fmt.Sprintf(`DELETE FROM %s WHERE name = $1 AND data = $2`, table)
+		result, err := p.db.Exec(query, name, expected)
+		if err != nil {
+			return false, fmt.Errorf("storage: compare-and-swap blob %q: %w", name, err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return false, fmt.Errorf("storage: compare-and-swap blob %q rows: %w", name, err)
+		}
+		return rows == 1, nil
+	}
+	query := fmt.Sprintf(`
+		UPDATE %s SET data = $3, updated_at = NOW()
+		WHERE name = $1 AND data = $2
+	`, table)
+	result, err := p.db.Exec(query, name, expected, replacement)
+	if err != nil {
+		return false, fmt.Errorf("storage: compare-and-swap blob %q: %w", name, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("storage: compare-and-swap blob %q rows: %w", name, err)
+	}
+	return rows == 1, nil
+}
+
 // ListBlobs returns every blob whose name begins with prefix. A model-state
 // namespace (models/<org>/<agent>/…) falls back to vs_blobs, but the scan
 // spans every physical blob table so the enumeration is correct for any
@@ -569,6 +616,7 @@ func (p *postgresProvider) SaveIncident(rec *IncidentRecord) error {
 		return fmt.Errorf("storage: SaveIncident: missing id")
 	}
 	rec.OrgID = NormalizeOrgID(rec.OrgID)
+	rec.Service = rec.ServiceLabel()
 	content, err := marshalIncidentContent(rec.Content)
 	if err != nil {
 		return fmt.Errorf("storage: marshal incident content: %w", err)
@@ -937,6 +985,50 @@ func (p *postgresProvider) CountIncidentsByServiceSinceForScope(scope tenancy.Or
 	return count, severities, nil
 }
 
+// CountIncidentsByServicesSinceForScope returns all requested service counts
+// in one grouped query, avoiding one database round-trip per catalog row.
+func (p *postgresProvider) CountIncidentsByServicesSinceForScope(scope tenancy.OrgScope, services []string, since time.Time) (map[string]int, error) {
+	return p.CountIncidentsByServicesInRangeForScope(scope, services, since, time.Time{})
+}
+
+// CountIncidentsByServicesInRangeForScope returns all requested service counts
+// in one grouped query over the half-open [start,end) window.
+func (p *postgresProvider) CountIncidentsByServicesInRangeForScope(scope tenancy.OrgScope, services []string, start, end time.Time) (map[string]int, error) {
+	out := make(map[string]int, len(services))
+	if len(services) == 0 {
+		return out, nil
+	}
+	for _, service := range services {
+		out[service] = 0
+	}
+	var upperBound any
+	if !end.IsZero() {
+		upperBound = end.UTC()
+	}
+	rows, err := p.db.Query(`
+		SELECT service, COUNT(*)
+		FROM vs_incidents
+		WHERE org_id = ANY($1) AND service = ANY($2) AND created_at >= $3
+		  AND ($4::timestamptz IS NULL OR created_at < $4)
+		GROUP BY service`, scope.Normalized().OrgIDs(), services, start.UTC(), upperBound)
+	if err != nil {
+		return nil, fmt.Errorf("storage: count incidents by services in range: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var service string
+		var count int
+		if err := rows.Scan(&service, &count); err != nil {
+			return nil, fmt.Errorf("storage: scan ranged service incident count: %w", err)
+		}
+		out[service] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: count incidents by services in range rows: %w", err)
+	}
+	return out, nil
+}
+
 func (p *postgresProvider) ListIncidentsByServiceSince(orgID, service string, since time.Time, limit int) ([]*IncidentRecord, error) {
 	return p.ListIncidentsByServiceSinceForScope(tenancy.NewOrgScope(orgID), service, since, limit)
 }
@@ -1164,6 +1256,49 @@ func (p *postgresProvider) ListAnalysesPageForScope(scope tenancy.OrgScope, offs
 	return scanAnalysisRows(rows)
 }
 
+// SearchAnalysesPageForScope returns an exact filtered total and one bounded,
+// newest-first page. Service filtering joins only incidents in the same scope.
+func (p *postgresProvider) SearchAnalysesPageForScope(scope tenancy.OrgScope, opts AnalysisSearchOptions) ([]*AnalysisRecord, int, error) {
+	if opts.Limit <= 0 {
+		opts.Limit = DefaultAnalysisPageSize
+	}
+	if opts.Offset < 0 {
+		opts.Offset = 0
+	}
+	orgIDs := scope.Normalized().OrgIDs()
+	incidentID := strings.TrimSpace(opts.IncidentID)
+	service := strings.TrimSpace(opts.Service)
+	query := escapeLikePattern(strings.TrimSpace(opts.Query))
+	filtered := analysisSearchFilteredSQL()
+	var total int
+	if err := p.db.QueryRow(`SELECT COUNT(*) `+filtered, orgIDs, incidentID, service, query).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("storage: count matching analyses: %w", err)
+	}
+	rows, err := p.db.Query(`SELECT a.data `+filtered+`
+		ORDER BY a.requested_at DESC LIMIT $5 OFFSET $6`, orgIDs, incidentID, service, query, opts.Limit, opts.Offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("storage: search analyses page: %w", err)
+	}
+	defer rows.Close()
+	records, err := scanAnalysisRows(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return records, total, nil
+}
+
+func analysisSearchFilteredSQL() string {
+	return `
+		FROM vs_analyses a
+		LEFT JOIN vs_incidents i
+		  ON i.id = a.incident_id
+		 AND i.org_id = ANY($1)
+		WHERE COALESCE(NULLIF(a.data->>'org_id', ''), 'default') = ANY($1)
+		  AND ($2 = '' OR a.incident_id = $2)
+		  AND ($3 = '' OR i.service = $3)
+		  AND ($4 = '' OR a.data::text ILIKE '%' || $4 || '%' ESCAPE '\')`
+}
+
 func scanAnalysisRows(rows *sql.Rows) ([]*AnalysisRecord, error) {
 	var out []*AnalysisRecord
 	for rows.Next() {
@@ -1208,7 +1343,7 @@ func (p *postgresProvider) SearchIncidentsForScope(scope tenancy.OrgScope, query
 	if query == "" {
 		return p.listIncidentsForScope(scope, limit)
 	}
-	pattern := "%" + query + "%"
+	pattern := "%" + escapeLikePattern(query) + "%"
 	base := `
 		SELECT ` + incidentColumns + ` FROM vs_incidents
 		WHERE org_id = ANY($1) AND (` + scopedSearchIncidentsWhereSQL + `)
@@ -1234,15 +1369,19 @@ func (p *postgresProvider) SearchIncidentsForScope(scope tenancy.OrgScope, query
 // fallback, the content JSON body. The pattern binds as $1. Kept as one
 // constant so the count and page queries search the exact same columns as
 // SearchIncidents.
-const searchIncidentsWhereSQL = `title      ILIKE $1
-		   OR service    ILIKE $1
-		   OR source     ILIKE $1
-		   OR content::text ILIKE $1`
+const searchIncidentsWhereSQL = `title      ILIKE $1 ESCAPE '\'
+		   OR service    ILIKE $1 ESCAPE '\'
+		   OR source     ILIKE $1 ESCAPE '\'
+		   OR content::text ILIKE $1 ESCAPE '\'`
 
-const scopedSearchIncidentsWhereSQL = `title      ILIKE $2
-		   OR service    ILIKE $2
-		   OR source     ILIKE $2
-		   OR content::text ILIKE $2`
+const scopedSearchIncidentsWhereSQL = `title      ILIKE $2 ESCAPE '\'
+		   OR service    ILIKE $2 ESCAPE '\'
+		   OR source     ILIKE $2 ESCAPE '\'
+		   OR content::text ILIKE $2 ESCAPE '\'`
+
+func escapeLikePattern(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
+}
 
 // CountIncidentsMatching implements the optional storage.IncidentSearchPager
 // capability: the per-origin tally and total of UNRESOLVED (open) search
@@ -1259,7 +1398,7 @@ func (p *postgresProvider) CountIncidentsMatchingForScope(scope tenancy.OrgScope
 	if query == "" {
 		return p.CountIncidentsForScope(scope)
 	}
-	pattern := "%" + query + "%"
+	pattern := "%" + escapeLikePattern(query) + "%"
 	q := fmt.Sprintf(`
 		SELECT
 			COUNT(*) FILTER (WHERE origin = 'ai_detect') AS ai,
@@ -1292,7 +1431,7 @@ func (p *postgresProvider) CountIncidentsMatchingByStatusForScope(scope tenancy.
 	if query == "" {
 		return p.CountIncidentsByStatusForScope(scope)
 	}
-	pattern := "%" + query + "%"
+	pattern := "%" + escapeLikePattern(query) + "%"
 	q := fmt.Sprintf(`
 		SELECT
 			COUNT(*) FILTER (WHERE resolved = false AND acked_at IS NULL)     AS open_total,
@@ -1336,7 +1475,7 @@ func (p *postgresProvider) SearchIncidentsPageForScope(scope tenancy.OrgScope, q
 	if offset < 0 {
 		offset = 0
 	}
-	pattern := "%" + query + "%"
+	pattern := "%" + escapeLikePattern(query) + "%"
 	if origin == OriginAIDetect || origin == OriginWebhook {
 		q := fmt.Sprintf(`
 			SELECT %[2]s FROM vs_incidents
@@ -1376,11 +1515,11 @@ func (p *postgresProvider) SearchAnalysesForScope(scope tenancy.OrgScope, query 
 	if query == "" {
 		return p.listAnalysesForScope(scope, limit)
 	}
-	pattern := "%" + query + "%"
+	pattern := "%" + escapeLikePattern(query) + "%"
 	base := `
 		SELECT data FROM vs_analyses
 		WHERE COALESCE(NULLIF(data->>'org_id', ''), 'default') = ANY($1)
-		  AND data::text ILIKE $2
+		  AND data::text ILIKE $2 ESCAPE '\'
 		ORDER BY requested_at DESC`
 	var (
 		rows *sql.Rows

@@ -287,11 +287,12 @@ const (
 		    ORDER BY instance_index ASC
 		    LIMIT 1
 		) lo ON TRUE
-		WHERE lo.template ILIKE '%' || $2 || '%'
-		       OR p.id ILIKE '%' || $2 || '%'
-		       OR COALESCE(p.service, '') ILIKE '%' || $2 || '%'
+		WHERE (lo.template ILIKE '%' || $2 || '%' ESCAPE '\'
+		       OR p.id ILIKE '%' || $2 || '%' ESCAPE '\'
+		       OR COALESCE(p.service, '') ILIKE '%' || $2 || '%' ESCAPE '\')
+		  AND ($3 = '' OR COALESCE(p.service, '') = $3)
 		ORDER BY agg.total_count DESC, p.id ASC
-		LIMIT $3 OFFSET $4`
+		LIMIT $4 OFFSET $5`
 
 	// Count: the whole-(filtered-)set pattern total the page reports, computed
 	// without materializing rows. It shares the page's FROM/WHERE verbatim (the
@@ -332,9 +333,10 @@ const (
 		    ORDER BY instance_index ASC
 		    LIMIT 1
 		) lo ON TRUE
-		WHERE lo.template ILIKE '%' || $2 || '%'
-		       OR p.id ILIKE '%' || $2 || '%'
-		       OR COALESCE(p.service, '') ILIKE '%' || $2 || '%'`
+		WHERE (lo.template ILIKE '%' || $2 || '%' ESCAPE '\'
+		       OR p.id ILIKE '%' || $2 || '%' ESCAPE '\'
+		       OR COALESCE(p.service, '') ILIKE '%' || $2 || '%' ESCAPE '\')
+		  AND ($3 = '' OR COALESCE(p.service, '') = $3)`
 
 	sqlCatalogLookupPattern = `
 		WITH ranked_patterns AS (
@@ -415,7 +417,7 @@ const (
 		)
 		SELECT org_id, name, manual, first_seen
 		FROM chosen_services
-		WHERE name ILIKE '%' || $2 || '%'
+		WHERE name ILIKE '%' || $2 || '%' ESCAPE '\'
 		ORDER BY first_seen ASC, name ASC
 		LIMIT $3 OFFSET $4`
 	sqlCatalogCountServices = `
@@ -430,7 +432,7 @@ const (
 		)
 		SELECT COUNT(*)
 		FROM chosen_services
-		WHERE name ILIKE '%' || $2 || '%'`
+		WHERE name ILIKE '%' || $2 || '%' ESCAPE '\'`
 
 	// Curate — one statement per operator mutation (all values bound).
 	sqlCurateVerdict = `UPDATE vs_patterns SET verdict = $3, updated_at = NOW() WHERE org_id = $1 AND id = $2 AND kind = 'log'`
@@ -824,9 +826,10 @@ func scanCatalogPatternRows(rows *sql.Rows) ([]*Pattern, error) {
 // deleted=FALSE, logs-present), ordered by fleet count descending with id as a
 // stable tie-break so pages never drift between requests.
 func (s *pgCatalogStore) ListPatternsPage(opts CatalogPageOptions) ([]*Pattern, int, error) {
-	search := strings.TrimSpace(opts.Search)
+	search := escapeCatalogLikePattern(strings.TrimSpace(opts.Search))
+	service := strings.TrimSpace(opts.Service)
 	var total int
-	if err := s.db.QueryRow(sqlCatalogCountLogs, s.orgScope.OrgIDs(), search).Scan(&total); err != nil {
+	if err := s.db.QueryRow(sqlCatalogCountLogs, s.orgScope.OrgIDs(), search, service).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("agent: pg catalog count logs: %w", err)
 	}
 	limit := opts.Limit
@@ -837,7 +840,7 @@ func (s *pgCatalogStore) ListPatternsPage(opts CatalogPageOptions) ([]*Pattern, 
 	if offset < 0 {
 		offset = 0
 	}
-	rows, err := s.db.Query(sqlCatalogPageLogs, s.orgScope.OrgIDs(), search, limit, offset)
+	rows, err := s.db.Query(sqlCatalogPageLogs, s.orgScope.OrgIDs(), search, service, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("agent: pg catalog page logs: %w", err)
 	}
@@ -893,7 +896,7 @@ func (s *pgCatalogStore) ListPatternsPage(opts CatalogPageOptions) ([]*Pattern, 
 // It applies the EXACT org scope Snapshot's service read uses (org_id,
 // deleted=FALSE), ordered by first_seen then name so pages never drift.
 func (s *pgCatalogStore) ListServicesPage(opts CatalogPageOptions) ([]ServiceRow, int, error) {
-	search := strings.TrimSpace(opts.Search)
+	search := escapeCatalogLikePattern(strings.TrimSpace(opts.Search))
 	var total int
 	if err := s.db.QueryRow(sqlCatalogCountServices, s.orgScope.OrgIDs(), search).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("agent: pg catalog count services: %w", err)
@@ -931,6 +934,10 @@ func (s *pgCatalogStore) ListServicesPage(opts CatalogPageOptions) ([]ServiceRow
 		return nil, 0, fmt.Errorf("agent: pg catalog page services rows: %w", err)
 	}
 	return out, total, nil
+}
+
+func escapeCatalogLikePattern(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
 }
 
 // Curate applies one operator mutation to the curated root columns or the

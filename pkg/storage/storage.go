@@ -397,6 +397,20 @@ type ScopedIncidentServiceCounter interface {
 	ListIncidentsByServiceSinceForScope(scope tenancy.OrgScope, service string, since time.Time, limit int) ([]*IncidentRecord, error)
 }
 
+// ScopedIncidentServiceSummaryReader returns service counts in one bounded
+// storage query. Counts include every scoped incident at or after Since and
+// are keyed by the incident's durable service label.
+type ScopedIncidentServiceSummaryReader interface {
+	CountIncidentsByServicesSinceForScope(scope tenancy.OrgScope, services []string, since time.Time) (map[string]int, error)
+}
+
+// ScopedIncidentServiceRangeSummaryReader returns exact service counts for a
+// half-open [start,end) window in one storage query. A zero end leaves the
+// upper bound open.
+type ScopedIncidentServiceRangeSummaryReader interface {
+	CountIncidentsByServicesInRangeForScope(scope tenancy.OrgScope, services []string, start, end time.Time) (map[string]int, error)
+}
+
 // AnalysisPager is an optional capability a backend may implement on top of
 // Provider to serve the analyses list without ever loading the whole table.
 // It is the analyses twin of IncidentPager: it splits the two things the list
@@ -422,6 +436,23 @@ type AnalysisPager interface {
 type ScopedAnalysisPager interface {
 	CountAnalysesForScope(scope tenancy.OrgScope) (int, error)
 	ListAnalysesPageForScope(scope tenancy.OrgScope, offset, limit int) ([]*AnalysisRecord, error)
+}
+
+// AnalysisSearchOptions is a bounded analysis-history query. IncidentID and
+// Service are exact, case-sensitive filters; Query is a case-insensitive
+// full-record search. Offset and Limit page newest-first results.
+type AnalysisSearchOptions struct {
+	IncidentID string
+	Service    string
+	Query      string
+	Offset     int
+	Limit      int
+}
+
+// ScopedAnalysisSearchPager pushes analysis-history filters, exact counting,
+// and paging into storage.
+type ScopedAnalysisSearchPager interface {
+	SearchAnalysesPageForScope(scope tenancy.OrgScope, opts AnalysisSearchOptions) ([]*AnalysisRecord, int, error)
 }
 
 // IncidentSearchPager is an optional capability a backend may implement on
@@ -557,6 +588,14 @@ type BlobCreator interface {
 	// so ReadBlob(key) observes the one surviving set of bytes regardless of
 	// which caller won.
 	CreateBlobIfAbsent(key string, data []byte) (written bool, err error)
+}
+
+// BlobCAS is an optional capability for optimistic updates to shared blobs.
+// expected nil means the key must be absent; otherwise the stored bytes must
+// exactly match expected. A nil replacement atomically removes a matching
+// existing key; otherwise a successful swap durably stores replacement.
+type BlobCAS interface {
+	CompareAndSwapBlob(key string, expected, replacement []byte) (swapped bool, err error)
 }
 
 // SQLAccessor is an optional capability a backend may implement on top of

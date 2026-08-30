@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"sort"
 	"strings"
 	"sync"
@@ -65,6 +66,31 @@ func (m *memoryProvider) CreateBlobIfAbsent(name string, data []byte) (bool, err
 	cp := make([]byte, len(data))
 	copy(cp, data)
 	m.blobs[name] = cp
+	m.blobAt[name] = time.Now().UTC()
+	return true, nil
+}
+
+func (m *memoryProvider) CompareAndSwapBlob(name string, expected, replacement []byte) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, exists := m.blobs[name]
+	if expected == nil {
+		if exists {
+			return false, nil
+		}
+	} else if !exists || !bytes.Equal(current, expected) {
+		return false, nil
+	}
+	if replacement == nil {
+		if !exists {
+			return false, nil
+		}
+		delete(m.blobs, name)
+		delete(m.blobAt, name)
+		return true, nil
+	}
+	stored := append([]byte(nil), replacement...)
+	m.blobs[name] = stored
 	m.blobAt[name] = time.Now().UTC()
 	return true, nil
 }

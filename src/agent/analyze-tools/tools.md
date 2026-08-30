@@ -9,20 +9,22 @@ of the box.
 
 ## Available tools
 
-### `recent_incidents`
+### `get_system_overview`
 
-Lists incidents recorded in a recent time window so the AI can spot
-correlated failures, repeat offenders, or a broader outage in progress.
+Summarizes scoped incident counts, known and active services, learned pattern
+totals, and passive detection health for an explicit time range.
 
-- **Time window** — defaults to the last 60 minutes, up to a maximum of
-  1440 minutes (24 hours).
-- **Service filter** — optionally narrows the list to a single service.
-- **Limit** — returns up to 20 incidents by default, capped at 100.
+### `search_incidents`
 
-Use case: *"Are other services failing at the same time, or is this
-incident isolated?"*
+Searches scoped incident history with bounded pagination. Exact totals are
+included when the configured storage backend supports them.
 
-### `pattern_history`
+### `get_incident`
+
+Returns scoped lifecycle and assignment metadata plus up to three linked,
+redacted analysis summaries. Raw incident payloads are never returned.
+
+### `get_pattern`
 
 Looks up a learned pattern by its id and returns everything the agent
 knows about it: the log template, the EWMA frequency baseline, the
@@ -32,10 +34,11 @@ service.
 Use case: *"Is this a brand-new pattern, or a known issue that has
 spiked above its normal baseline?"*
 
-### `describe_service`
+### `get_service`
 
-Summarises a single service: when it was first seen by the agent and
-its top learned patterns ranked by frequency.
+Returns a single service entity: when it was first seen by the agent,
+its top learned patterns ranked by frequency, and optional provider-neutral
+SLI/SLO reliability state.
 
 Use case: *"What does normal look like for this service, and which
 patterns dominate its logs?"*

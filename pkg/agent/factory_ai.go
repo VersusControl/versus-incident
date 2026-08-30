@@ -5,10 +5,12 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/agent/ai"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/analyze"
+	chatagent "github.com/VersusControl/versus-incident/pkg/agent/ai/chat"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/detect"
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/router"
@@ -33,9 +35,13 @@ type AIBundle struct {
 	Router      *router.Router
 	Detect      core.AIAgent // kind=AITaskDetect
 	Analyze     core.AIAgent // kind=AITaskAnalyze, built when AI.Enable is true
+	Chat        core.ChatTurnAgent
 	Cache       *ai.ResultCache
 	Rate        *ai.RateLimiter
 	AnalyzeRate *ai.RateLimiter // separate hourly cap for analyze
+	ChatRate    *ai.RateLimiter
+	// ChatService returns an org-scoped durable service. Nil when chat is unavailable.
+	ChatService func(scope tenancy.OrgScope) *chatagent.Service
 	// Runbooks is the runbook corpus manager shared by the find_runbook
 	// read path and the admin runbooks UI (upload/list/delete). Nil when
 	// storage is unavailable. Present even without embeddings so operators
@@ -54,7 +60,7 @@ type AIBundle struct {
 // model. store may be nil — caches degrade to in-memory only; the
 // analyze agent's tool registry will also be smaller.
 func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, httpClient *http.Client) AIBundle {
-	return buildAIs(cfg, catalog, store, tenancy.DefaultOrgScope(), httpClient)
+	return buildAIs(cfg, catalog, store, tenancy.DefaultOrgScope(), httpClient, nil)
 }
 
 // BuildAIsForScope constructs every AI dependency with an ordered organization
@@ -62,10 +68,17 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 // applies only to read-only analyze tools. BuildAIs supplies the default-only
 // scope used by single-tenant OSS deployments.
 func BuildAIsForScope(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client) AIBundle {
-	return buildAIs(cfg, catalog, store, scope.Normalized(), httpClient)
+	return buildAIs(cfg, catalog, store, scope.Normalized(), httpClient, nil)
 }
 
-func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client) AIBundle {
+// BuildAIsForScopeWithChatLocation constructs scoped AI dependencies and uses
+// locationProvider to resolve chat date phrases. A nil provider preserves the
+// OSS behavior of loading report settings from store.
+func BuildAIsForScopeWithChatLocation(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location) AIBundle {
+	return buildAIs(cfg, catalog, store, scope.Normalized(), httpClient, locationProvider)
+}
+
+func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location) AIBundle {
 	// Resolve the detect-task config up front so the construction gate can
 	// see whether a model is actually configured.
 	detectCfg := cfg.AI.Resolve(cfg.AI.Detect)
@@ -111,6 +124,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	// but it shares the AI.Enable master switch — no separate opt-in.
 	var analyzeAgent core.AIAgent
 	var analyzeRate *ai.RateLimiter
+	var analyzeTools []core.Tool
 	var runbookMgr *runbook.Manager
 	{
 		analyzeBaseCfg := cfg.AI.Resolve(config.AgentAITaskConfig{Model: cfg.AI.Analyze.Model})
@@ -124,6 +138,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 			log.Printf("agent: analyze reader source warning: %v", e)
 		}
 		reader := newSignalReaderAdapter(readerSources)
+		detectionHealth := newDetectionHealthAdapter(cfg.Sources, readerSources, srcErrs)
 		redactor, redactErrs := NewRedactor(cfg.Redaction.Enable && cfg.Redaction.RedactIPs, cfg.Redaction.ExtraPatterns)
 		for _, e := range redactErrs {
 			log.Printf("agent: analyze reader redactor warning: %v", e)
@@ -181,8 +196,8 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		metrics := newMetricReaderAdapter(cfg.Tools.QueryMetrics.Prometheus)
 		traces := newTraceReaderAdapter(cfg.Tools.QueryTraces.Tempo)
 
-		tools := buildAnalyzeTools(store, scope, newCatalogAdapter(catalog), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher, metrics, traces)
-		a, aErr := analyze.New(context.Background(), analyzeBaseCfg, tools, analyze.Options{
+		analyzeTools = buildAnalyzeTools(store, scope, newCatalogAdapterWithThreshold(catalog, cfg.Catalog.AutoPromoteAfter), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher, metrics, traces, detectionHealth)
+		a, aErr := analyze.New(context.Background(), analyzeBaseCfg, analyzeTools, analyze.Options{
 			HTTPClient:    httpClient,
 			AuthKeyFunc:   authKeyFn,
 			Runtime:       aiRT,
@@ -195,8 +210,27 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 			analyzeAgent = a
 			analyzeRate = ai.NewRateLimiter(analyzeBaseCfg.MaxCallsPerHour)
 			log.Printf("agent: analyze agent enabled model=%s tools=%d",
-				analyzeBaseCfg.Model, len(tools))
+				analyzeBaseCfg.Model, len(analyzeTools))
 		}
+	}
+
+	// Chat-task wiring -------------------------------------------------------
+	// Chat reuses the read-only tool catalog but owns an independent ADK agent,
+	// prompt, result contract, and rate limiter.
+	var chatAgent core.ChatTurnAgent
+	var concreteChat *chatagent.Agent
+	var chatRate *ai.RateLimiter
+	chatCfg := cfg.AI.Resolve(cfg.AI.Chat)
+	if built, chatErr := chatagent.New(context.Background(), chatCfg, analyzeTools, chatagent.Options{
+		HTTPClient: httpClient, AuthKeyFunc: authKeyFn, Runtime: aiRT,
+		ToolTimeout: parseDurationOr(cfg.Tools.ToolTimeout, chatagent.DefaultToolTimeout),
+	}); chatErr != nil {
+		log.Printf("agent: chat agent disabled: %v", chatErr)
+	} else {
+		concreteChat = built
+		chatAgent = built
+		chatRate = ai.NewDistributedRateLimiter(chatCfg.MaxCallsPerHour, store, scope.Normalized().Write, time.Now)
+		log.Printf("agent: chat agent enabled model=%s tools=%d", chatCfg.Model, len(analyzeTools))
 	}
 
 	// Router wiring ----------------------------------------------------------
@@ -210,30 +244,80 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		// router skips lookups when the task's CacheKey is empty.
 		entries[core.AITaskAnalyze] = router.Entry{Agent: analyzeAgent, Cache: nil, Rate: analyzeRate}
 	}
-	r := router.New(entries)
+	r := router.NewWithChat(entries, router.ChatEntry{Agent: chatAgent, Rate: chatRate})
+	var chatServiceFactory func(tenancy.OrgScope) *chatagent.Service
+	if concreteChat != nil && store != nil {
+		bootScope := scope.Normalized()
+		if locationProvider == nil {
+			locationProvider = func() *time.Location { return chatagent.LocationFromReportSettings(store) }
+		}
+		chatServiceFactory = func(serviceScope tenancy.OrgScope) *chatagent.Service {
+			// The read-only tool catalog is boot-scoped. Reject a mismatched
+			// request scope until tools are constructed per request as well.
+			if serviceScope.Normalized().Write != bootScope.Write {
+				return nil
+			}
+			return chatagent.NewServiceWithLocationProvider(
+				chatagent.NewSessionStore(store, serviceScope, time.Now), r, concreteChat, time.Now,
+				locationProvider,
+			)
+		}
+	}
 
 	return AIBundle{
 		Router:      r,
 		Detect:      detectAgent,
 		Analyze:     analyzeAgent,
+		Chat:        chatAgent,
 		Cache:       detectCache,
 		Rate:        detectRate,
 		AnalyzeRate: analyzeRate,
+		ChatRate:    chatRate,
+		ChatService: chatServiceFactory,
 		Runbooks:    runbookMgr,
 	}
 }
 
-func buildAnalyzeTools(store storage.Provider, scope tenancy.OrgScope, catalog versustools.PatternCatalog, reader commontools.SignalReader, redactor commontools.LineRedactor, services commontools.ServiceExtractor, graph *commontools.DependencyGraph, changes commontools.ChangeFeed, embedder core.Embedder, runbooks commontools.RunbookSearcher, metrics commontools.MetricReader, traces commontools.TraceReader) []core.Tool {
+func buildAnalyzeTools(store storage.Provider, scope tenancy.OrgScope, catalog versustools.PatternCatalog, reader commontools.SignalReader, redactor commontools.LineRedactor, services commontools.ServiceExtractor, graph *commontools.DependencyGraph, changes commontools.ChangeFeed, embedder core.Embedder, runbooks commontools.RunbookSearcher, metrics commontools.MetricReader, traces commontools.TraceReader, health versustools.DetectionHealthReader) []core.Tool {
 	scope = scope.Normalized()
-	tools := make([]core.Tool, 0, 9)
+	providers := chatKnowledgeProviders()
+	tools := make([]core.Tool, 0, 18)
 	if store != nil {
-		tools = append(tools, versustools.RecentIncidents{Store: store, Scope: scope})
+		tools = append(tools,
+			versustools.GetIncident{Store: store, Scope: scope, Redactor: redactor},
+		)
 	}
 	if catalog != nil {
 		tools = append(tools,
-			versustools.PatternHistory{Catalog: catalog},
-			versustools.DescribeService{Catalog: catalog},
+			versustools.GetPattern{Catalog: catalog, Redactor: redactor},
+			versustools.GetService{Catalog: catalog, Redactor: redactor, Reliability: providers.ServiceReliability, Scope: scope},
 		)
+	}
+	if store != nil && catalog != nil {
+		if paged, ok := catalog.(versustools.PagedPatternCatalog); ok {
+			tools = append(tools,
+				versustools.GetSystemOverview{Store: store, Scope: scope, Catalog: paged, Health: health},
+				versustools.ListServices{Store: store, Scope: scope, Catalog: paged},
+			)
+		}
+	}
+	if health != nil {
+		tools = append(tools, versustools.GetDetectionHealth{Reader: health})
+	}
+	tools = append(tools,
+		versustools.ListCapabilities{Capabilities: knowledgeCapabilities(scope, store, catalog, reader, graph, changes, embedder, runbooks, metrics, traces, health, providers)},
+		versustools.GetAlertDecision{Provider: providers.AlertDecision, Scope: scope, Redactor: redactor},
+	)
+	if store != nil {
+		tools = append(tools, versustools.SearchIncidents{Store: store, Scope: scope, Redactor: redactor})
+	}
+	if catalog != nil {
+		if paged, ok := catalog.(versustools.PagedPatternCatalog); ok {
+			tools = append(tools, versustools.ListPatterns{Catalog: paged, Redactor: redactor})
+		}
+	}
+	if store != nil {
+		tools = append(tools, versustools.ListAnalyses{Store: store, Scope: scope, Redactor: redactor})
 	}
 	if reader != nil {
 		tools = append(tools, commontools.RelatedLogs{Reader: reader, Redactor: redactor, Services: services})
@@ -254,6 +338,83 @@ func buildAnalyzeTools(store storage.Provider, scope tenancy.OrgScope, catalog v
 		tools = append(tools, commontools.QueryTraces{Reader: traces, Redactor: redactor})
 	}
 	return tools
+}
+
+func knowledgeCapabilities(scope tenancy.OrgScope, store storage.Provider, catalog versustools.PatternCatalog, reader commontools.SignalReader, graph *commontools.DependencyGraph, changes commontools.ChangeFeed, embedder core.Embedder, runbooks commontools.RunbookSearcher, metrics commontools.MetricReader, traces commontools.TraceReader, health versustools.DetectionHealthReader, providers ChatKnowledgeProviders) []versustools.CapabilityStatus {
+	status := func(name string, configured bool, setup string) versustools.CapabilityStatus {
+		available := versustools.CapabilityStatusFalse
+		reason := "not configured"
+		if configured {
+			available = versustools.CapabilityStatusTrue
+			reason = "configured"
+			setup = ""
+		}
+		return versustools.CapabilityStatus{Name: name, Configured: configured, Licensed: versustools.CapabilityStatusTrue, Available: available, Reason: reason, SetupAction: setup}
+	}
+	capabilities := []versustools.CapabilityStatus{
+		status("incidents", store != nil, "Configure an incident storage provider."),
+		status("catalog", catalog != nil, "Configure a pattern catalog."),
+		status("source_health", health != nil, "Configure detection source health reporting."),
+		status("logs", reader != nil, "Configure at least one log signal source."),
+		status("metrics", metrics != nil, "Configure a metrics query source."),
+		status("traces", traces != nil, "Configure a trace query source."),
+		{Name: "service_reliability", Group: "reliability", Licensed: versustools.CapabilityStatusUnknown, Available: versustools.CapabilityStatusUnknown, Reason: "status not reported", SetupAction: "Enable and configure a service reliability provider."},
+		{Name: "alert_decisions", Group: "decisions", Licensed: versustools.CapabilityStatusUnknown, Available: versustools.CapabilityStatusUnknown, Reason: "status not reported", SetupAction: "Enable and configure an alert decision provider."},
+		status("kubernetes", false, "Configure Kubernetes discovery for this deployment."),
+		status("git_changes", changes != nil, "Configure a Git change feed and repositories."),
+		status("runbooks", embedder != nil && runbooks != nil, "Configure runbook storage and an embedding model."),
+		status("dependencies", graph != nil && graph.Len() > 0, "Configure the service dependency graph."),
+	}
+	if providers.CapabilityStatus != nil {
+		capabilities = mergeCapabilityStatuses(capabilities, providers.CapabilityStatus.CapabilityStatuses(scope.Normalized()))
+	}
+	return capabilities
+}
+
+func mergeCapabilityStatuses(base, reported []versustools.CapabilityStatus) []versustools.CapabilityStatus {
+	indexes := make(map[string]int, len(base))
+	for index := range base {
+		indexes[base[index].Name] = index
+	}
+	for _, capability := range reported {
+		index, ok := indexes[capability.Name]
+		if !ok {
+			continue
+		}
+		switch capability.Name {
+		case "incidents", "catalog", "source_health":
+			continue
+		}
+		capability.Name = base[index].Name
+		capability.Licensed = normalizeCapabilityState(capability.Licensed)
+		capability.Available = normalizeCapabilityState(capability.Available)
+		capability.Reason = boundCapabilityText(capability.Reason)
+		capability.Observation = boundCapabilityText(capability.Observation)
+		capability.SetupAction = boundCapabilityText(capability.SetupAction)
+		base[index] = capability
+	}
+	return base
+}
+
+func normalizeCapabilityState(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case versustools.CapabilityStatusTrue:
+		return versustools.CapabilityStatusTrue
+	case versustools.CapabilityStatusFalse:
+		return versustools.CapabilityStatusFalse
+	default:
+		return versustools.CapabilityStatusUnknown
+	}
+}
+
+func boundCapabilityText(value string) string {
+	const maxCapabilityText = 240
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if len(runes) > maxCapabilityText {
+		value = string(runes[:maxCapabilityText])
+	}
+	return value
 }
 
 // buildRunbookManager builds the runbook corpus manager shared by the

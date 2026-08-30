@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -82,5 +83,47 @@ func TestToolResultAvailability(t *testing.T) {
 	}
 	if roundTrip.IsAvailable() || roundTrip.Reason != "source not configured" {
 		t.Fatalf("round-trip = %+v", roundTrip)
+	}
+}
+
+func TestToolErrorClassificationHidesCause(t *testing.T) {
+	cause := errors.New("postgres://user:secret@db/private")
+	err := NewToolError(ToolErrorInvalidArguments, "service is required", cause)
+	code, message := ClassifyToolError(err)
+	if code != ToolErrorInvalidArguments || message != "service is required" {
+		t.Fatalf("classification = %q, %q", code, message)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatal("classified error did not retain its cause")
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Fatalf("Error exposed cause: %q", err)
+	}
+}
+
+func TestClassifyToolErrorDefaultsToSafeBackendFailure(t *testing.T) {
+	code, message := ClassifyToolError(errors.New("dsn=/private password=secret"))
+	if code != ToolErrorBackend || message != "tool backend failed" {
+		t.Fatalf("classification = %q, %q", code, message)
+	}
+}
+
+func TestClassifyToolErrorDistinguishesCancellationFromDeadline(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		code    ToolErrorCode
+		message string
+	}{
+		{name: "cancelled", err: context.Canceled, code: ToolErrorCancelled, message: "tool run was cancelled"},
+		{name: "deadline", err: context.DeadlineExceeded, code: ToolErrorTimeout, message: "tool timed out"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			code, message := ClassifyToolError(test.err)
+			if code != test.code || message != test.message {
+				t.Fatalf("classification = %q, %q, want %q, %q", code, message, test.code, test.message)
+			}
+		})
 	}
 }

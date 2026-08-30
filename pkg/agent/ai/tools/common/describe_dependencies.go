@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -125,15 +124,15 @@ func (d DescribeDependencies) Invoke(_ context.Context, args json.RawMessage) (*
 	var a describeDependenciesArgs
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &a); err != nil {
-			return nil, fmt.Errorf("describe_dependencies: parse args: %w", err)
+			return nil, core.NewToolError(core.ToolErrorInvalidArguments, "arguments must be valid JSON", err)
 		}
 	}
 	if a.Service == "" {
-		return nil, fmt.Errorf("describe_dependencies: service is required")
+		return nil, core.NewToolError(core.ToolErrorInvalidArguments, "service is required", nil)
 	}
 	timeRange, err := aitools.ResolveTimeRange(a.TimeRangeArgs, time.Now(), 60, 1440)
 	if err != nil {
-		return nil, fmt.Errorf("describe_dependencies: %w", err)
+		return nil, core.NewToolError(core.ToolErrorInvalidArguments, "time range is invalid", err)
 	}
 	if d.Graph == nil {
 		return core.UnavailableToolResult(DescribeDependencies{}.Name(), "dependency graph not configured"), nil

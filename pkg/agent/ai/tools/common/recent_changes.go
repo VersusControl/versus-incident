@@ -88,12 +88,12 @@ func (rc RecentChanges) Invoke(ctx context.Context, args json.RawMessage) (*core
 	var a recentChangesArgs
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &a); err != nil {
-			return nil, fmt.Errorf("recent_changes: parse args: %w", err)
+			return nil, core.NewToolError(core.ToolErrorInvalidArguments, "arguments must be valid JSON", err)
 		}
 	}
 	timeRange, err := aitools.ResolveTimeRange(a.TimeRangeArgs, time.Now(), recentChangesDefaultWindow, recentChangesMaxWindow)
 	if err != nil {
-		return nil, fmt.Errorf("recent_changes: %w", err)
+		return nil, core.NewToolError(core.ToolErrorInvalidArguments, "time range is invalid", err)
 	}
 
 	// An unconfigured feed is a clean miss, never an error: the model

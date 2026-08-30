@@ -143,6 +143,13 @@ func (s *stubTool) Invoke(_ context.Context, args json.RawMessage) (*core.ToolRe
 	}, nil
 }
 
+func TestNewRejectsDuplicateToolNames(t *testing.T) {
+	_, err := New(context.Background(), config.AgentAIConfig{}, []core.Tool{&stubTool{name: "duplicate"}, &stubTool{name: "duplicate"}}, Options{})
+	if err == nil || !strings.Contains(err.Error(), "duplicate tool name") {
+		t.Fatalf("New error = %v, want duplicate tool name", err)
+	}
+}
+
 // errTool is a read-only AnalyzeTool that always fails, used to assert
 // the ReAct loop surfaces tool errors to the model rather than aborting.
 type errTool struct {
@@ -160,7 +167,7 @@ func (e *errTool) Invoke(_ context.Context, _ json.RawMessage) (*core.ToolResult
 	return nil, errBoom
 }
 
-var errBoom = fmt.Errorf("boom from tool")
+var errBoom = fmt.Errorf("catalog failed: postgres://admin:hunter2@db.internal/private")
 
 // sleepTool takes a measurable amount of wall-clock time, so a test can tell
 // a real elapsed-time measurement from a hardcoded zero.
@@ -351,6 +358,17 @@ func TestAgent_ToolErrorDoesNotAbort(t *testing.T) {
 	}
 	if len(res.ToolCalls) != 1 || !strings.Contains(res.ToolCalls[0].Output, "error") {
 		t.Fatalf("expected tool error surfaced in trace output: %+v", res.ToolCalls)
+	}
+	if strings.Contains(res.ToolCalls[0].Output, "hunter2") || strings.Contains(res.ToolCalls[0].Output, "db.internal") {
+		t.Fatalf("persisted trace leaked tool error: %+v", res.ToolCalls)
+	}
+	if res.ToolCalls[0].Output != `{"error":{"code":"backend_error","message":"tool backend failed"}}` {
+		t.Fatalf("trace output = %q", res.ToolCalls[0].Output)
+	}
+	for _, message := range fake.lastMessages {
+		if strings.Contains(message.Content, "hunter2") || strings.Contains(message.Content, "db.internal") {
+			t.Fatalf("model input leaked tool error: %+v", message)
+		}
 	}
 }
 

@@ -14,10 +14,11 @@ func testIncidentServiceCounter(t *testing.T, provider storage.Provider) {
 		{ID: "old", OrgID: "org-a", Service: "checkout", CreatedAt: now.Add(-48 * time.Hour)},
 		// Insert newest before older so insertion order cannot masquerade as time order.
 		{ID: "a-newer", OrgID: "org-a", Service: "checkout", CreatedAt: now.Add(-time.Minute), Content: map[string]any{"labels": map[string]any{"severity": "critical"}}},
-		{ID: "a-older", OrgID: "org-a", Service: "checkout", CreatedAt: now.Add(-2 * time.Hour), Content: map[string]any{"severity": "warning"}},
+		{ID: "a-older", OrgID: "org-a", CreatedAt: now.Add(-2 * time.Hour), Content: map[string]any{"service": "checkout", "severity": "warning"}},
 		{ID: "a-middle", OrgID: "org-a", Service: "checkout", CreatedAt: now.Add(-time.Hour), Content: map[string]any{"Trigger": map[string]any{"Dimensions": []any{map[string]any{"Name": "Severity", "Value": "medium"}}}}},
 		{ID: "other-org", OrgID: "org-b", Service: "checkout", CreatedAt: now.Add(-time.Hour)},
 		{ID: "other-service", OrgID: "org-a", Service: "billing", CreatedAt: now.Add(-30 * time.Minute)},
+		{ID: "different-case", OrgID: "org-a", Service: "Checkout", CreatedAt: now.Add(-20 * time.Minute)},
 	} {
 		if err := provider.SaveIncident(rec); err != nil {
 			t.Fatalf("SaveIncident(%s): %v", rec.ID, err)
@@ -36,12 +37,19 @@ func testIncidentServiceCounter(t *testing.T, provider storage.Provider) {
 		t.Fatalf("count/severities = %d/%v, want 3 with warning+critical+medium", count, severities)
 	}
 
-	recent, err := counter.ListIncidentsByServiceSince("org-a", "checkout", now.Add(-24*time.Hour), 2)
+	recent, err := counter.ListIncidentsByServiceSince("org-a", "checkout", now.Add(-24*time.Hour), 3)
 	if err != nil {
 		t.Fatalf("ListIncidentsByServiceSince: %v", err)
 	}
-	if len(recent) != 2 || recent[0].ID != "a-newer" || recent[1].ID != "a-middle" {
+	if len(recent) != 3 || recent[0].ID != "a-newer" || recent[1].ID != "a-middle" || recent[2].ID != "a-older" {
 		t.Fatalf("recent = %#v, want newest org-a checkout incidents by CreatedAt", recent)
+	}
+	caseCount, _, err := counter.CountIncidentsByServiceSince("org-a", "Checkout", now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("CountIncidentsByServiceSince mixed case: %v", err)
+	}
+	if caseCount != 1 {
+		t.Fatalf("Checkout count = %d, want 1 exact-case match", caseCount)
 	}
 }
 

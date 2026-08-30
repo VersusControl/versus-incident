@@ -87,8 +87,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   prompt assembly stays uniform.
 - **AnalyzeAgent** (`pkg/agent/ai/analyze/`) — on-demand triage agent
   triggered via `POST /api/admin/incidents/:id/analyze`. Tool-calling
-  with read-only tools: `recent_incidents`, `pattern_history`,
-  `describe_service`. Own `prompts/` set (triage analyst identity,
+  with generic read-only discovery and entity tools such as
+  `get_system_overview`, `search_incidents`, `get_incident`, `get_pattern`, and `get_service`. Own `prompts/`
+  set (triage analyst identity,
   never re-notifies). Max 3 tool iterations (configurable via
   `agent.ai.analyze.max_tool_iterations`). Compile-time Emitter-free
   guard.

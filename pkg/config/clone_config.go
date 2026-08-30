@@ -345,6 +345,7 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 			CacheTTL:        src.AI.CacheTTL,
 			Detect:          cloneAgentAITaskConfig(src.AI.Detect),
 			Analyze:         cloneAgentAIAnalyzeConfig(src.AI.Analyze),
+			Chat:            cloneAgentAITaskConfig(src.AI.Chat),
 		},
 	}
 

@@ -264,7 +264,7 @@ func TestStream_ToolTurnStamping(t *testing.T) {
 
 // TestStream_ToolErrorEvent drives the collector's tool callbacks directly.
 // A framework-level tool failure (one the einoTool adapter does not convert
-// into a structured result) must surface as tool_error carrying the message.
+// into a structured result) must surface as a classified, model-safe error.
 func TestStream_ToolErrorEvent(t *testing.T) {
 	rec := &recorder{}
 	c := &traceCollector{
@@ -275,14 +275,14 @@ func TestStream_ToolErrorEvent(t *testing.T) {
 
 	info := &callbacks.RunInfo{Name: "echo_tool"}
 	ctx := h.OnStart(context.Background(), info, &tool.CallbackInput{ArgumentsInJSON: `{"q":"a"}`})
-	h.OnError(ctx, info, errors.New("dispatch exploded"))
+	h.OnError(ctx, info, errors.New("dispatch exploded: password=hunter2"))
 
 	errs := rec.ofKind(core.AnalyzeEventToolError)
 	if len(errs) != 1 {
 		t.Fatalf("got %d tool_error events, want 1", len(errs))
 	}
-	if errs[0].Error != "dispatch exploded" {
-		t.Fatalf("tool_error message = %q, want the failure text", errs[0].Error)
+	if errs[0].Error != "backend_error: tool backend failed" {
+		t.Fatalf("tool_error message = %q", errs[0].Error)
 	}
 	if errs[0].Tool != "echo_tool" {
 		t.Fatalf("tool_error tool = %q, want echo_tool", errs[0].Tool)
@@ -295,8 +295,11 @@ func TestStream_ToolErrorEvent(t *testing.T) {
 		t.Fatalf("tool_error is not correlated with its start: %+v vs %+v", started, errs)
 	}
 	traces := c.ordered()
-	if len(traces) != 1 || traces[0].Name != "echo_tool" || traces[0].Error != "dispatch exploded" {
+	if len(traces) != 1 || traces[0].Name != "echo_tool" || traces[0].Error != "backend_error: tool backend failed" {
 		t.Fatalf("persisted trace lost the error: %+v", traces)
+	}
+	if strings.Contains(errs[0].Error, "hunter2") || strings.Contains(traces[0].Error, "hunter2") {
+		t.Fatalf("tool error leaked into stream or trace: %+v / %+v", errs[0], traces[0])
 	}
 }
 
@@ -318,8 +321,11 @@ func TestStream_FailingToolStaysStructured(t *testing.T) {
 	if len(finished) != 1 {
 		t.Fatalf("got %d tool_finished, want 1", len(finished))
 	}
-	if !strings.Contains(finished[0].Output, errBoom.Error()) {
-		t.Fatalf("tool failure not visible in the stream: %q", finished[0].Output)
+	if finished[0].Output != `{"error":{"code":"backend_error","message":"tool backend failed"}}` {
+		t.Fatalf("tool failure envelope = %q", finished[0].Output)
+	}
+	if strings.Contains(finished[0].Output, "hunter2") || strings.Contains(finished[0].Output, "db.internal") {
+		t.Fatalf("tool failure leaked into stream: %q", finished[0].Output)
 	}
 	if len(res.ToolCalls) != 1 || finished[0].Output != res.ToolCalls[0].Output {
 		t.Fatalf("stream and record disagree about the failure: %+v vs %+v", finished[0], res.ToolCalls)

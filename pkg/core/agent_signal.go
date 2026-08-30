@@ -227,6 +227,7 @@ type AICallResult struct {
 
 // ToolCallTrace is one model-issued tool round-trip captured for audit.
 type ToolCallTrace struct {
+	CallID     string `json:"call_id,omitempty"`
 	Name       string
 	Args       string
 	Output     string

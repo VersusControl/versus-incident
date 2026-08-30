@@ -32,9 +32,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         still renders a panel instead of a blank document. */}
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
-        <BrowserRouter
-          future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
-        >
+        <BrowserRouter>
           <App />
         </BrowserRouter>
       </QueryClientProvider>

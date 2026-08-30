@@ -1,9 +1,10 @@
 // Centralized API client for the agent admin endpoints.
 //
-// All requests are authenticated with the X-Gateway-Secret header. The secret
-// is read from localStorage; AuthGate prompts for it on first visit.
+// OSS requests may carry X-Gateway-Secret. The secret lives for one browser tab;
+// AuthGate prompts for it on first visit.
 
 import type { LearnExclusions } from "@/lib/learnExclude";
+import { ANALYSIS_SSE_LIMITS, readEventStream } from "@/lib/sse";
 
 // LearnExclusionsWire is the raw enterprise learn-exclusion policy shape ON THE
 // WIRE. It differs from the UI's LearnExclusions in ONE field name: the
@@ -29,6 +30,7 @@ function fromLearnExclusionsWire(r: LearnExclusionsWire): LearnExclusions {
 
 const SECRET_KEY = "versus.gatewaySecret";
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ""; // empty → uses Vite proxy
+let secretCache: string | null | undefined;
 
 export class ApiError extends Error {
   status: number;
@@ -41,15 +43,37 @@ export class ApiError extends Error {
 }
 
 export function getSecret(): string | null {
-  return localStorage.getItem(SECRET_KEY);
+  if (secretCache) return secretCache;
+  try {
+    const current = sessionStorage.getItem(SECRET_KEY);
+    const legacy = localStorage.getItem(SECRET_KEY);
+    if (!current && legacy) sessionStorage.setItem(SECRET_KEY, legacy);
+    if (legacy) localStorage.removeItem(SECRET_KEY);
+    secretCache = current || legacy;
+  } catch {
+    secretCache = null;
+  }
+  return secretCache;
 }
 
 export function setSecret(value: string) {
-  localStorage.setItem(SECRET_KEY, value);
+  secretCache = value;
+  try {
+    sessionStorage.setItem(SECRET_KEY, value);
+    localStorage.removeItem(SECRET_KEY);
+  } catch {
+    // The in-memory value still supports this tab when storage is unavailable.
+  }
 }
 
 export function clearSecret() {
-  localStorage.removeItem(SECRET_KEY);
+  secretCache = null;
+  try {
+    sessionStorage.removeItem(SECRET_KEY);
+    localStorage.removeItem(SECRET_KEY);
+  } catch {
+    // Storage may be unavailable in a restricted browser context.
+  }
 }
 
 // signIn verifies the gateway secret against the data plane and persists it.
@@ -69,10 +93,8 @@ export async function signIn(value: string): Promise<void> {
   await api.getAgentConfig();
 }
 
-// AUTH_EXPIRED_EVENT fires when a request that carried a secret comes back
-// 401 — i.e. the secret was rotated server-side mid-session. AppShell's
-// ReauthModal listens and re-prompts over the current page instead of
-// letting every view collapse into bare "HTTP 401" walls (audit finding).
+// AUTH_EXPIRED_EVENT fires when an authenticated request returns 401. The
+// listener distinguishes OSS secret rotation from enterprise session expiry.
 export const AUTH_EXPIRED_EVENT = "versus:auth-expired";
 
 function notifyAuthExpired() {
@@ -119,7 +141,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
   }
   if (!res.ok) {
-    if (res.status === 401 && secret) notifyAuthExpired();
+    if (res.status === 401) notifyAuthExpired();
     const msg =
       (body && typeof body === "object" && "error" in body
         ? String((body as { error: unknown }).error)
@@ -721,6 +743,94 @@ export interface AnalyzeEvent {
   analysis_id?: string;
 }
 
+export type ChatSessionStatus = "idle" | "running" | "failed";
+export type ChatTurnRole = "user" | "assistant" | "compaction";
+export type ChatEventKind =
+  | "run_started"
+  | "model_delta"
+  | "tool_started"
+  | "tool_finished"
+  | "compacted"
+  | "run_finished"
+  | "run_failed"
+  | "run_cancelled"
+  | "run_throttled"
+  | "events_elided"
+  | "trace_compacted";
+
+export interface ChatIncidentContext {
+  id: string;
+  title?: string;
+  service?: string;
+  severity?: string;
+  status?: string;
+  created?: string;
+}
+
+export interface ChatTimeRange {
+  start?: string;
+  end?: string;
+}
+
+export interface ChatAttachment {
+  incident?: ChatIncidentContext;
+  service?: string;
+  time_range?: ChatTimeRange;
+}
+
+export interface ChatCitation {
+  tool: string;
+  label?: string;
+  locator?: string;
+}
+
+export interface ChatToolCall {
+  call_id?: string;
+  Name: string;
+  Args: string;
+  Output: string;
+  DurationMs: number;
+  Error: string;
+}
+
+export interface ChatEvent {
+  seq: number;
+  at: string;
+  kind: ChatEventKind;
+  delta?: string;
+  tool?: string;
+  call_id?: string;
+  tool_display?: string;
+  args?: string;
+  output?: string;
+  duration_ms?: number;
+  error?: string;
+  citations?: ChatCitation[];
+}
+
+export interface ChatTurn {
+  id: string;
+  role: ChatTurnRole;
+  content: string;
+  created_at: string;
+  attachment?: ChatAttachment;
+  tool_calls?: ChatToolCall[];
+  citations?: ChatCitation[];
+  events?: ChatEvent[];
+}
+
+export interface ChatSessionSummary {
+  id: string;
+  status: ChatSessionStatus;
+  seeded: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatSession extends ChatSessionSummary {
+  turns: ChatTurn[];
+}
+
 // AnalysisIndex is the paged analyses list response: one bounded, most-recent
 // page of analyses plus the whole-set `total` computed cheaply on the server
 // (never by loading every row). `offset` is where this page began and
@@ -862,7 +972,7 @@ async function uploadMultipart<T>(path: string, form: FormData): Promise<T> {
     }
   }
   if (!res.ok) {
-    if (res.status === 401 && secret) notifyAuthExpired();
+    if (res.status === 401) notifyAuthExpired();
     const msg =
       (body && typeof body === "object" && "error" in body
         ? String((body as { error: unknown }).error)
@@ -2452,39 +2562,102 @@ export const api = {
     );
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => "");
+      if (res.status === 401) notifyAuthExpired();
       throw new ApiError(res.status, text || `stream failed (${res.status})`);
     }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let last: AnalyzeEvent | null = null;
-
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      // SSE frames are separated by a blank line; anything after the last
-      // separator is a partial frame and stays in the buffer.
-      const frames = buffer.split("\n\n");
-      buffer = frames.pop() ?? "";
-      for (const frame of frames) {
-        const line = frame
-          .split("\n")
-          .find((l) => l.startsWith("data:"));
-        if (!line) continue;
-        try {
-          const ev = JSON.parse(line.slice(5).trim()) as AnalyzeEvent;
-          last = ev;
-          onEvent(ev);
-        } catch {
-          // A frame we cannot parse is not worth failing the run over; the
-          // persisted record remains the source of truth.
-        }
-      }
+    if (!res.headers.get("Content-Type")?.toLowerCase().startsWith("text/event-stream")) {
+      await res.body.cancel();
+      throw new ApiError(502, "stream returned an invalid content type");
     }
+
+    let last: AnalyzeEvent | null = null;
+    await readEventStream(res.body, ({ data }) => {
+      try {
+        const event = JSON.parse(data) as AnalyzeEvent;
+        last = event;
+        onEvent(event);
+      } catch {
+        // The persisted analysis remains the source of truth.
+      }
+    }, ANALYSIS_SSE_LIMITS);
     return last;
+  },
+
+  createChatSession: () =>
+    request<ChatSession>("/api/admin/chat/sessions", { method: "POST" }),
+  listChatSessions: () =>
+    request<{ sessions: ChatSessionSummary[] }>("/api/admin/chat/sessions").then(
+      (response) => response.sessions ?? [],
+    ),
+  getChatSession: (id: string) =>
+    request<ChatSession>(`/api/admin/chat/sessions/${encodeURIComponent(id)}`),
+  deleteChatSession: (id: string) =>
+    request<void>(`/api/admin/chat/sessions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  cancelChatRun: (id: string) =>
+    request<void>(`/api/admin/chat/sessions/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+    }),
+  streamChatMessage: async (
+    id: string,
+    message: string,
+    attachment: ChatAttachment | undefined,
+    onEvent: (event: ChatEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<ChatEvent | null> => {
+    const secret = getSecret() ?? "";
+    const headers = new Headers({ "Content-Type": "application/json" });
+    if (secret) headers.set("X-Gateway-Secret", secret);
+    const response = await fetch(
+      `${API_BASE}/api/admin/chat/sessions/${encodeURIComponent(id)}/messages`,
+      {
+        method: "POST",
+        headers,
+        credentials: "same-origin",
+        cache: "no-store",
+        body: JSON.stringify({ message, attachment }),
+        signal,
+      },
+    );
+    if (!response.ok || !response.body) {
+      const text = await response.text().catch(() => "");
+      let body: unknown = text;
+      try {
+        body = text ? JSON.parse(text) : null;
+      } catch {
+        // Keep the safe plain-text response.
+      }
+      if (response.status === 401) notifyAuthExpired();
+      const errorMessage =
+        body && typeof body === "object" && "error" in body
+          ? String((body as { error: unknown }).error)
+          : `stream failed (${response.status})`;
+      throw new ApiError(response.status, errorMessage, body);
+    }
+    if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("text/event-stream")) {
+      await response.body.cancel();
+      throw new ApiError(502, "stream returned an invalid content type");
+    }
+
+    let last: ChatEvent | null = null;
+    await readEventStream(response.body, ({ event: eventType, data }) => {
+      try {
+        const chatEvent = JSON.parse(data) as ChatEvent;
+        if (!chatEvent.kind && eventType !== "message") {
+          chatEvent.kind = eventType as ChatEventKind;
+        }
+        last = chatEvent;
+        onEvent(chatEvent);
+      } catch {
+        // A malformed frame cannot invalidate the durable session transcript.
+      }
+    });
+    const terminal = last as ChatEvent | null;
+    if (!terminal || !["run_finished", "run_failed", "run_cancelled", "run_throttled"].includes(terminal.kind)) {
+      throw new ApiError(502, "Live stream was interrupted before completion. Refresh the conversation to resync.");
+    }
+    return terminal;
   },
   listAnalyses: (incidentID: string, limit?: number) => {
     const qs = limit ? `?limit=${limit}` : "";
@@ -2627,7 +2800,7 @@ export const api = {
       { headers, credentials: "same-origin", cache: "no-store" },
     );
     if (!res.ok) {
-      if (res.status === 401 && secret) notifyAuthExpired();
+      if (res.status === 401) notifyAuthExpired();
       let msg = `HTTP ${res.status}`;
       try {
         const b = await res.json();

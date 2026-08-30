@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-func TestDescribeService_Metadata(t *testing.T) {
-	tool := DescribeService{}
-	if got := tool.Name(); got != "describe_service" {
-		t.Errorf("Name() = %q, want describe_service", got)
+func TestGetServiceMetadata(t *testing.T) {
+	tool := GetService{}
+	if got := tool.Name(); got != "get_service" {
+		t.Errorf("Name() = %q, want get_service", got)
 	}
 	if tool.Description() == "" {
 		t.Error("Description() is empty")
@@ -21,28 +21,28 @@ func TestDescribeService_Metadata(t *testing.T) {
 	}
 }
 
-func TestDescribeService_NilCatalog(t *testing.T) {
-	tool := DescribeService{}
+func TestGetServiceNilCatalog(t *testing.T) {
+	tool := GetService{}
 	result, err := tool.Invoke(context.Background(), mustArgs(t, describeServiceArgs{Service: "api"}))
 	assertUnavailable(t, result, err)
 }
 
-func TestDescribeService_BadArgs(t *testing.T) {
-	tool := DescribeService{Catalog: &fakeCatalog{}}
+func TestGetServiceBadArgs(t *testing.T) {
+	tool := GetService{Catalog: &fakeCatalog{}}
 	if _, err := tool.Invoke(context.Background(), []byte("{bad")); err == nil {
 		t.Fatal("expected error on malformed args")
 	}
 }
 
-func TestDescribeService_MissingService(t *testing.T) {
-	tool := DescribeService{Catalog: &fakeCatalog{}}
+func TestGetServiceMissingService(t *testing.T) {
+	tool := GetService{Catalog: &fakeCatalog{}}
 	if _, err := tool.Invoke(context.Background(), mustArgs(t, describeServiceArgs{})); err == nil {
 		t.Fatal("expected error when service is empty")
 	}
 }
 
-func TestDescribeService_UnknownService(t *testing.T) {
-	tool := DescribeService{Catalog: &fakeCatalog{}}
+func TestGetServiceUnknownService(t *testing.T) {
+	tool := GetService{Catalog: &fakeCatalog{}}
 	res, err := tool.Invoke(context.Background(), mustArgs(t, describeServiceArgs{Service: "ghost"}))
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
@@ -58,7 +58,7 @@ func TestDescribeService_UnknownService(t *testing.T) {
 	}
 }
 
-func TestDescribeService_FoundWithTopPatternsSorted(t *testing.T) {
+func TestGetServiceFoundWithTopPatternsSorted(t *testing.T) {
 	now := time.Now().UTC()
 	cat := &fakeCatalog{
 		services: map[string]ServiceInfo{"api": {FirstSeen: now.Add(-2 * time.Hour)}},
@@ -69,7 +69,7 @@ func TestDescribeService_FoundWithTopPatternsSorted(t *testing.T) {
 			{ID: "x1", Service: "other", Template: "skip", Count: 999},
 		},
 	}
-	tool := DescribeService{Catalog: cat}
+	tool := GetService{Catalog: cat, Redactor: secretRedactor{}}
 
 	res, err := tool.Invoke(context.Background(), mustArgs(t, describeServiceArgs{Service: "api", TopPatterns: 2}))
 	if err != nil {
@@ -95,9 +95,38 @@ func TestDescribeService_FoundWithTopPatternsSorted(t *testing.T) {
 	}
 }
 
-func TestDescribeService_TopPatternsClamp(t *testing.T) {
+func TestGetServicePatternIdentityIsCaseSensitive(t *testing.T) {
+	cat := &fakeCatalog{
+		services: map[string]ServiceInfo{"Checkout": {}, "checkout": {}},
+		all: []*PatternView{
+			{ID: "upper", Service: "Checkout", Count: 10},
+			{ID: "lower", Service: "checkout", Count: 20},
+		},
+	}
+	res, err := (GetService{Catalog: cat}).Invoke(context.Background(), mustArgs(t, describeServiceArgs{Service: "checkout"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	patterns := res.Data["top_patterns"].([]describePatternEntry)
+	if res.Data["patterns_total"] != 1 || len(patterns) != 1 || patterns[0].ID != "lower" {
+		t.Fatalf("patterns = %+v total=%v, want only lowercase service", patterns, res.Data["patterns_total"])
+	}
+}
+
+func TestGetServiceOmitsSamplesWithoutRedactor(t *testing.T) {
+	cat := &fakeCatalog{all: []*PatternView{{ID: "p1", Service: "api", Samples: []string{"secret"}}}}
+	res, err := (GetService{Catalog: cat}).Invoke(context.Background(), mustArgs(t, describeServiceArgs{Service: "api"}))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if sample := res.Data["top_patterns"].([]describePatternEntry)[0].Sample; sample != "" {
+		t.Fatalf("sample = %q, want omitted", sample)
+	}
+}
+
+func TestGetServiceTopPatternsClamp(t *testing.T) {
 	cat := &fakeCatalog{all: []*PatternView{{ID: "p1", Service: "api", Count: 1}}}
-	tool := DescribeService{Catalog: cat}
+	tool := GetService{Catalog: cat}
 
 	// top_patterns over cap (20) should not error and still return.
 	res, err := tool.Invoke(context.Background(), mustArgs(t, describeServiceArgs{Service: "api", TopPatterns: 9999}))
@@ -109,7 +138,7 @@ func TestDescribeService_TopPatternsClamp(t *testing.T) {
 	}
 }
 
-func TestDescribeService_IncludesLatestSample(t *testing.T) {
+func TestGetServiceIncludesLatestSample(t *testing.T) {
 	cat := &fakeCatalog{
 		all: []*PatternView{
 			// Ring oldest→newest; the listing should carry only the latest one.
@@ -117,7 +146,7 @@ func TestDescribeService_IncludesLatestSample(t *testing.T) {
 			{ID: "p2", Service: "api", Count: 3}, // no samples → omitted
 		},
 	}
-	tool := DescribeService{Catalog: cat}
+	tool := GetService{Catalog: cat, Redactor: secretRedactor{}}
 
 	res, err := tool.Invoke(context.Background(), mustArgs(t, describeServiceArgs{Service: "api"}))
 	if err != nil {

@@ -159,6 +159,7 @@ export function SidebarContent({
   // above. SLIs/SLOs stays enterprise-gated; Decisions is ungated. Both keep
   // their existing routes; this is purely a nav regrouping.
   const ai: SideItem[] = [
+    { to: "/agent/chat", label: "Chat" },
     { to: "/agent/decisions", label: "Decisions" },
     { to: "/analyses", label: "Analyses" },
     {

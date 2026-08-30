@@ -103,12 +103,12 @@ func (fr FindRunbook) Invoke(ctx context.Context, args json.RawMessage) (*core.T
 	var a findRunbookArgs
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &a); err != nil {
-			return nil, fmt.Errorf("find_runbook: parse args: %w", err)
+			return nil, core.NewToolError(core.ToolErrorInvalidArguments, "arguments must be valid JSON", err)
 		}
 	}
 	a.Query = strings.TrimSpace(a.Query)
 	if a.Query == "" {
-		return nil, fmt.Errorf("find_runbook: query is required")
+		return nil, core.NewToolError(core.ToolErrorInvalidArguments, "query is required", nil)
 	}
 	if a.Limit <= 0 {
 		a.Limit = findRunbookDefaultLimit

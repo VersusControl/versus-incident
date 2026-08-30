@@ -343,6 +343,11 @@ func (c *ConfigAdminController) agent(ctx *fiber.Ctx) error {
 			"analyze": fiber.Map{
 				"model": a.AI.Analyze.Model,
 			},
+			"chat": fiber.Map{
+				"model":              a.AI.Chat.Model,
+				"max_tokens":         a.AI.Chat.MaxTokens,
+				"max_calls_per_hour": a.AI.Chat.MaxCallsPerHour,
+			},
 		},
 	})
 }

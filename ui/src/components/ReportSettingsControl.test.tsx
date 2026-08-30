@@ -31,6 +31,7 @@ vi.mock("@/lib/api", async (importActual) => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.clearAllMocks();
 });
 
 function settings(over: Partial<ReportSettings> = {}): ReportSettings {

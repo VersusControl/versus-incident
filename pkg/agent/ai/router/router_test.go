@@ -165,3 +165,35 @@ func TestRouter_DropsNilAgentsAtConstruction(t *testing.T) {
 		t.Fatalf("analyze kind missing")
 	}
 }
+
+type fakeChatAgent struct {
+	calls int
+}
+
+func (agent *fakeChatAgent) Name() string          { return "chat" }
+func (agent *fakeChatAgent) Kind() core.AITaskKind { return core.AITaskChat }
+func (agent *fakeChatAgent) RunChatTurn(_ context.Context, _ core.ChatTask) (*core.ChatTurnResult, error) {
+	agent.calls++
+	return &core.ChatTurnResult{Markdown: "answer"}, nil
+}
+
+func TestRouter_RunChatNeverCaches(t *testing.T) {
+	agent := &fakeChatAgent{}
+	r := NewWithChat(nil, ChatEntry{Agent: agent, Rate: ai.NewRateLimiter(100)})
+	task := core.ChatTask{SessionID: "session", Message: "hello"}
+	for range 2 {
+		result, err := r.RunChat(context.Background(), task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Markdown != "answer" {
+			t.Fatalf("markdown = %q", result.Markdown)
+		}
+	}
+	if agent.calls != 2 {
+		t.Fatalf("calls = %d, want 2", agent.calls)
+	}
+	if !r.Has(core.AITaskChat) {
+		t.Fatal("chat route not reported")
+	}
+}

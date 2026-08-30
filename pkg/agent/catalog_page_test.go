@@ -113,6 +113,84 @@ func TestServicesPage_InMemory(t *testing.T) {
 	}
 }
 
+func TestCatalogPageSearchMetacharactersAreLiteralInMemoryAndFile(t *testing.T) {
+	backends := map[string]func(*testing.T) storage.Provider{
+		"memory": func(*testing.T) storage.Provider { return storage.NewMemory() },
+		"file": func(t *testing.T) storage.Provider {
+			provider, err := storage.NewFile(storage.FileOptions{DataDir: t.TempDir()})
+			if err != nil {
+				t.Fatalf("NewFile: %v", err)
+			}
+			return provider
+		},
+	}
+	for name, makeProvider := range backends {
+		t.Run(name, func(t *testing.T) {
+			SetCatalogStore(nil)
+			t.Cleanup(func() { SetCatalogStore(nil) })
+			catalog, err := LoadCatalog(makeProvider(t))
+			if err != nil {
+				t.Fatalf("LoadCatalog: %v", err)
+			}
+			catalog.Upsert("cpu_90%\\host", "literal cpu_90%\\host", "src", 2, 0.2, "default", "api_1%\\host")
+			catalog.Upsert("cpuX900host", "wildcard lookalike", "src", 1, 0.2, "default", "apiX10host")
+			catalog.RegisterService("api_1%\\host")
+			catalog.RegisterService("apiX10host")
+			if err := catalog.Persist(); err != nil {
+				t.Fatalf("Persist: %v", err)
+			}
+
+			patterns, patternTotal, err := catalog.PatternsPage(CatalogPageOptions{Search: `cpu_90%\host`, Limit: 10})
+			if err != nil {
+				t.Fatalf("PatternsPage: %v", err)
+			}
+			if patternTotal != 1 || len(patterns) != 1 || patterns[0].ID != `cpu_90%\host` {
+				t.Fatalf("literal pattern page = %v total=%d", ids(patterns), patternTotal)
+			}
+			services, serviceTotal, err := catalog.ServicesPage(CatalogPageOptions{Search: `api_1%\host`, Limit: 10})
+			if err != nil {
+				t.Fatalf("ServicesPage: %v", err)
+			}
+			if serviceTotal != 1 || len(services) != 1 || services[0].Name != `api_1%\host` {
+				t.Fatalf("literal service page = %v total=%d", svcNames(services), serviceTotal)
+			}
+		})
+	}
+}
+
+func TestCatalogPatternServiceIdentityIsCaseSensitiveInMemoryAndFile(t *testing.T) {
+	backends := map[string]func(*testing.T) storage.Provider{
+		"memory": func(*testing.T) storage.Provider { return storage.NewMemory() },
+		"file": func(t *testing.T) storage.Provider {
+			provider, err := storage.NewFile(storage.FileOptions{DataDir: t.TempDir()})
+			if err != nil {
+				t.Fatalf("NewFile: %v", err)
+			}
+			return provider
+		},
+	}
+	for name, makeProvider := range backends {
+		t.Run(name, func(t *testing.T) {
+			SetCatalogStore(nil)
+			t.Cleanup(func() { SetCatalogStore(nil) })
+			catalog, err := LoadCatalog(makeProvider(t))
+			if err != nil {
+				t.Fatalf("LoadCatalog: %v", err)
+			}
+			catalog.Upsert("upper", "upper", "src", 1, 0.2, "default", "Checkout")
+			catalog.Upsert("lower", "lower", "src", 1, 0.2, "default", "checkout")
+
+			patterns, total, err := catalog.PatternsPage(CatalogPageOptions{Service: "Checkout", Limit: 10})
+			if err != nil {
+				t.Fatalf("PatternsPage: %v", err)
+			}
+			if total != 1 || len(patterns) != 1 || patterns[0].ID != "upper" || patterns[0].Service != "Checkout" {
+				t.Fatalf("exact service page = %v total=%d, want upper/Checkout", ids(patterns), total)
+			}
+		})
+	}
+}
+
 // TestPatternsPage_SnapshotFallback proves a base CatalogStore (Snapshot only,
 // no CatalogPager) is paged by folding Snapshot in Go, with the SAME Count-desc
 // order and true total the pager path returns.
@@ -266,6 +344,49 @@ func TestPGCatalog_ListServicesPage_OrgScopedAndOrdered(t *testing.T) {
 		if row.Info.OrgID != storage.DefaultOrgID {
 			t.Fatalf("service OrgID = %q, want %q", row.Info.OrgID, storage.DefaultOrgID)
 		}
+	}
+}
+
+func TestPGCatalog_PageSearchMetacharactersAreLiteral(t *testing.T) {
+	catalog, _ := newPGCatalog(t)
+	catalog.Upsert("cpu_90%\\host", "literal cpu_90%\\host", "src", 2, 0.2, "default", "api_1%\\host")
+	catalog.Upsert("cpuX900host", "wildcard lookalike", "src", 1, 0.2, "default", "apiX10host")
+	catalog.RegisterService("api_1%\\host")
+	catalog.RegisterService("apiX10host")
+	if err := catalog.Persist(); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+	pager := catalogStore().(CatalogPager)
+	patterns, patternTotal, err := pager.ListPatternsPage(CatalogPageOptions{Search: `cpu_90%\host`, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListPatternsPage: %v", err)
+	}
+	if patternTotal != 1 || len(patterns) != 1 || patterns[0].ID != `cpu_90%\host` {
+		t.Fatalf("literal pattern page = %v total=%d", ids(patterns), patternTotal)
+	}
+	services, serviceTotal, err := pager.ListServicesPage(CatalogPageOptions{Search: `api_1%\host`, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListServicesPage: %v", err)
+	}
+	if serviceTotal != 1 || len(services) != 1 || services[0].Name != `api_1%\host` {
+		t.Fatalf("literal service page = %v total=%d", svcNames(services), serviceTotal)
+	}
+}
+
+func TestPGCatalogPatternServiceIdentityIsCaseSensitive(t *testing.T) {
+	catalog, _ := newPGCatalog(t)
+	catalog.Upsert("upper", "upper", "src", 1, 0.2, "default", "Checkout")
+	catalog.Upsert("lower", "lower", "src", 1, 0.2, "default", "checkout")
+	if err := catalog.Persist(); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+
+	patterns, total, err := catalog.PatternsPage(CatalogPageOptions{Service: "Checkout", Limit: 10})
+	if err != nil {
+		t.Fatalf("PatternsPage: %v", err)
+	}
+	if total != 1 || len(patterns) != 1 || patterns[0].ID != "upper" || patterns[0].Service != "Checkout" {
+		t.Fatalf("exact service page = %v total=%d, want upper/Checkout", ids(patterns), total)
 	}
 }
 

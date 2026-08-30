@@ -260,6 +260,13 @@ agent:
     analyze:
       # model: "gpt-4o"             # override the shared `ai.model` for analyze deep dives
 
+    # ChatAgent — powers the read-only DevOps/SRE conversation API under
+    # /api/admin/chat. Empty fields inherit the shared ai.* values.
+    chat:
+      # model: "gpt-4o"             # optional chat-specific model
+      # max_tokens: 4096
+      # max_calls_per_hour: 60
+
   # New-service grace: when a previously unseen service starts emitting logs
   # in detect mode, it enters an implicit training window so the catalog can
   # build up before AI analysis kicks in. Set to "0" to disable.

@@ -123,6 +123,7 @@ func main() {
 	// Defense-in-depth: a panic in any handler is recovered and turned into a
 	// 500 instead of crashing the process.
 	app.Use(recover.New())
+	app.Use(middleware.SecurityHeaders())
 
 	app.Use(middleware.Logger())
 
@@ -411,6 +412,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		SetCatalogConfig(cfg.Catalog, pollInterval).
 		Register(api)
 	controllers.NewRunbookAdminController(aiBundle.Runbooks).Register(api)
+	controllers.SetChatServiceFactory(aiBundle.ChatService)
 
 	return catalog, agentDone, nil
 }
@@ -440,12 +442,8 @@ V       V   EEEEE   RRRRR   SSSSS   U       U   SSSSS
 
 Dashboard UI   -> %s/
 Health check   -> %s/healthz
-Create alert   -> POST %s/api/incidents
-Acknowledge    -> GET  %s/api/ack/:id
-Admin incidents-> GET  %s/api/admin/incidents
-Agent status   -> GET  %s/api/agent/status
 `, cfg.Host, cfg.Port,
-		base, base, base, base, base, base)
+		base, base)
 }
 
 func handleQueueMessage(content *map[string]interface{}) error {

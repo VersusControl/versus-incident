@@ -33,6 +33,15 @@ func TestCloneConfigCarriesAnalyzeKnobs(t *testing.T) {
 	}
 }
 
+func TestCloneConfigCarriesChatKnobs(t *testing.T) {
+	src := &Config{}
+	src.Agent.AI.Chat = AgentAITaskConfig{Model: "chat-model", MaxTokens: 2048, MaxCallsPerHour: 17}
+	dst := cloneConfig(src)
+	if dst.Agent.AI.Chat != src.Agent.AI.Chat {
+		t.Fatalf("chat block = %+v, want %+v", dst.Agent.AI.Chat, src.Agent.AI.Chat)
+	}
+}
+
 // TestCloneToolsConfig asserts the per-tool config (tools.yaml) is
 // carried into the clone — including the root-level tool-loop knobs, the
 // recent_changes git repos, and the describe_dependencies graph — so

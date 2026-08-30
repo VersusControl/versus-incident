@@ -463,7 +463,7 @@ type AgentAIConfig struct {
 	// avoid re-asking about the same pattern. Default "1h".
 	CacheTTL string `mapstructure:"cache_ttl"`
 
-	// Detect and Analyze are per-task overrides. Empty fields fall back
+	// Detect, Analyze, and Chat are per-task overrides. Empty fields fall back
 	// to the top-level defaults above, so a single shared block keeps
 	// working unchanged. Detect is used by the worker for unknown /
 	// spiking pattern classification; Analyze is used by the on-demand
@@ -472,6 +472,7 @@ type AgentAIConfig struct {
 	// There is no `framework` knob: Eino is the only LLM path.
 	Detect  AgentAITaskConfig    `mapstructure:"detect"`
 	Analyze AgentAIAnalyzeConfig `mapstructure:"analyze"`
+	Chat    AgentAITaskConfig    `mapstructure:"chat"`
 }
 
 // AgentAIAnalyzeConfig is the analyze-agent override block. The model
@@ -512,6 +513,7 @@ func (c AgentAIConfig) Resolve(task AgentAITaskConfig) AgentAIConfig {
 	// receive a flat AgentAIConfig.
 	out.Detect = AgentAITaskConfig{}
 	out.Analyze = AgentAIAnalyzeConfig{}
+	out.Chat = AgentAITaskConfig{}
 
 	if task.Model != "" {
 		out.Model = task.Model

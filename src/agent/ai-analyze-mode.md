@@ -70,7 +70,7 @@ authentication options, and Docker examples.
 ## Key Features
 
 - **Non-intrusive**: Analyze mode never sends notifications or modifies systems.
-- **Read-only tools**: The AI uses tools like `recent_incidents`, `pattern_history`, `describe_service`, `get_related_logs`, `describe_dependencies`, and `recent_changes` to gather context.
+- **Read-only tools**: The AI uses tools like `get_system_overview`, `search_incidents`, `get_incident`, `get_pattern`, `get_service`, `get_related_logs`, `describe_dependencies`, and `recent_changes` to gather context.
 - **Customizable**: Fine-tune the AI's behavior with optional settings.
 
 Analyze mode empowers you to make informed decisions by providing structured insights when you need them most.

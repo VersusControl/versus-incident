@@ -1,6 +1,9 @@
 package core
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // AITaskKind identifies what an AIAgent is being asked to do.
 //
@@ -20,6 +23,10 @@ const (
 	// analyses storage blob. Analyze NEVER fans out to notification
 	// channels.
 	AITaskAnalyze AITaskKind = "analyze"
+
+	// AITaskChat is an operator-triggered conversational DevOps/SRE turn.
+	// Its markdown result is persisted in a chat session and is never cached.
+	AITaskChat AITaskKind = "chat"
 )
 
 // AITask is the input to an AIAgent.Run call. Each concrete task type
@@ -59,6 +66,63 @@ func (AnalyzeTask) Kind() AITaskKind { return AITaskAnalyze }
 // expect a fresh tool walk on every analyze request.
 func (t AnalyzeTask) CacheKey() string { return "" }
 
+// ChatTimeRange is an absolute half-open interval attached to a chat turn.
+// Natural-language date arithmetic is resolved before the model is called.
+type ChatTimeRange struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+}
+
+// ChatIncidentContext is the bounded, redacted incident context that may be
+// attached to a turn. Raw incident payloads are deliberately absent.
+type ChatIncidentContext struct {
+	ID       string    `json:"id"`
+	Title    string    `json:"title,omitempty"`
+	Service  string    `json:"service,omitempty"`
+	Severity string    `json:"severity,omitempty"`
+	Status   string    `json:"status,omitempty"`
+	Created  time.Time `json:"created,omitempty"`
+}
+
+// ChatAttachment grounds a turn without restricting the conversation to that
+// context. Each field is optional and validated by the chat service.
+type ChatAttachment struct {
+	Incident *ChatIncidentContext `json:"incident,omitempty"`
+	Service  string               `json:"service,omitempty"`
+	Time     *ChatTimeRange       `json:"time_range,omitempty"`
+}
+
+// ChatTask is one user turn in a durable chat session.
+type ChatTask struct {
+	SessionID  string          `json:"session_id"`
+	Message    string          `json:"message"`
+	Attachment *ChatAttachment `json:"attachment,omitempty"`
+}
+
+// Kind implements AITask.
+func (ChatTask) Kind() AITaskKind { return AITaskChat }
+
+// CacheKey implements AITask. Conversational turns are never replayable.
+func (ChatTask) CacheKey() string { return "" }
+
+// ChatCitation identifies evidence used by a conversational answer.
+type ChatCitation struct {
+	Tool    string `json:"tool"`
+	Label   string `json:"label,omitempty"`
+	Locator string `json:"locator,omitempty"`
+}
+
+// ChatTurnResult is the markdown-native result of one chat turn. It is
+// intentionally separate from AICallResult so chat is never coerced into an
+// incident finding.
+type ChatTurnResult struct {
+	Markdown   string          `json:"markdown"`
+	Citations  []ChatCitation  `json:"citations,omitempty"`
+	ToolCalls  []ToolCallTrace `json:"tool_calls,omitempty"`
+	DurationMs int64           `json:"duration_ms,omitempty"`
+	Model      string          `json:"model,omitempty"`
+}
+
 // AIAgent is one concrete model + prompt + (optional) tool wiring,
 // dedicated to a single AITaskKind. Implementations live under
 // pkg/agent/ai (e.g. detect, analyze).
@@ -69,4 +133,12 @@ type AIAgent interface {
 	Name() string
 	Kind() AITaskKind
 	Run(ctx context.Context, task AITask) (*AICallResult, error)
+}
+
+// ChatTurnAgent is the narrow execution contract implemented by the ADK chat
+// agent. Its streaming, markdown-native result does not fit AIAgent.Run.
+type ChatTurnAgent interface {
+	Name() string
+	Kind() AITaskKind
+	RunChatTurn(ctx context.Context, task ChatTask) (*ChatTurnResult, error)
 }
