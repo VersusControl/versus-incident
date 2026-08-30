@@ -42,6 +42,10 @@ const SystemPromptPage = lazyPage(
 );
 const RunbooksPage = lazyPage(() => import("./pages/RunbooksPage"), "RunbooksPage");
 const ChatPage = lazyPage(() => import("./pages/ChatPage"), "ChatPage");
+const AgentToolsPage = lazyPage(
+  () => import("./pages/AgentToolsPage"),
+  "AgentToolsPage",
+);
 const ServiceDetailPage = lazyPage(
   () => import("./pages/ServiceDetailPage"),
   "ServiceDetailPage",
@@ -114,6 +118,7 @@ export default function App() {
           {/* Agent */}
           <Route path="/agent" element={<AgentOverviewPage />} />
           <Route path="/agent/chat" element={<ChatPage />} />
+          <Route path="/agent/tools" element={<AgentToolsPage />} />
           <Route path="/agent/logs" element={<PatternsPage />} />
           <Route path="/agent/logs/:id" element={<PatternDetailPage />} />
           <Route path="/agent/patterns/:id" element={<PatternDetailPage />} />

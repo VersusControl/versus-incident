@@ -96,6 +96,37 @@ func TestAgentSeedBoundsEachTool(t *testing.T) {
 	}
 }
 
+func TestAgentSeedUsesCurrentToolProvider(t *testing.T) {
+	tool := &blockingSeedTool{}
+	agent := &Agent{
+		tools:        []core.Tool{tool},
+		toolTimeout:  time.Second,
+		toolProvider: func() ([]core.Tool, error) { return nil, nil },
+	}
+	if traces := agent.Seed(context.Background()); len(traces) != 0 {
+		t.Fatalf("seed traces = %+v, want none", traces)
+	}
+	if tool.calls != 0 {
+		t.Fatalf("disabled seed tool calls = %d, want 0", tool.calls)
+	}
+}
+
+func TestAgentSeedPrefersFreshSeedProvider(t *testing.T) {
+	tool := &blockingSeedTool{}
+	agent := &Agent{
+		tools:        []core.Tool{tool},
+		toolTimeout:  time.Second,
+		toolProvider: func() ([]core.Tool, error) { return []core.Tool{tool}, nil },
+		seedProvider: func() ([]core.Tool, error) { return nil, nil },
+	}
+	if traces := agent.Seed(context.Background()); len(traces) != 0 {
+		t.Fatalf("seed traces = %+v, want none", traces)
+	}
+	if tool.calls != 0 {
+		t.Fatalf("stale holder tool calls = %d, want 0", tool.calls)
+	}
+}
+
 func TestConsumeMessageDeltasConcatenateToFinalMarkdown(t *testing.T) {
 	reader, writer := schema.Pipe[*schema.Message](1)
 	chunks := []string{"Hello", " world", "\n\n", "next line"}

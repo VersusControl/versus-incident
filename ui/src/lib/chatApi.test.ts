@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, AUTH_EXPIRED_EVENT, clearSecret, getSecret, setSecret } from "./api";
+import { api, AUTH_EXPIRED_EVENT, clearSecret, setSecret } from "./api";
 
 class MemoryStorage {
   private values = new Map<string, string>();
@@ -40,13 +40,50 @@ function streamResponse(frames: string[], status = 200) {
 }
 
 describe("chat API", () => {
-  it("migrates a legacy gateway secret to tab-scoped storage", () => {
-    clearSecret();
+  it("removes legacy gateway secrets without loading or persisting them", async () => {
     local.setItem("versus.gatewaySecret", "legacy");
-    expect(getSecret()).toBe("legacy");
-    expect(session.getItem("versus.gatewaySecret")).toBe("legacy");
+    session.setItem("versus.gatewaySecret", "current");
+    vi.resetModules();
+    const freshApi = await import("./api");
+
+    expect(freshApi.getSecret()).toBeNull();
+    expect(session.getItem("versus.gatewaySecret")).toBeNull();
+    expect(local.getItem("versus.gatewaySecret")).toBeNull();
+
+    freshApi.setSecret("memory-only");
+    expect(freshApi.getSecret()).toBe("memory-only");
+    expect(session.getItem("versus.gatewaySecret")).toBeNull();
     expect(local.getItem("versus.gatewaySecret")).toBeNull();
   });
+
+  it("cleans local storage when session storage cleanup throws", async () => {
+    local.setItem("versus.gatewaySecret", "legacy");
+    session.setItem("versus.gatewaySecret", "legacy");
+    vi.spyOn(session, "removeItem").mockImplementation(() => {
+      throw new Error("session storage unavailable");
+    });
+    vi.resetModules();
+    const freshApi = await import("./api");
+
+    expect(freshApi.getSecret()).toBeNull();
+    expect(local.getItem("versus.gatewaySecret")).toBeNull();
+    expect(session.getItem("versus.gatewaySecret")).toBe("legacy");
+  });
+
+  it("cleans session storage when local storage cleanup throws", async () => {
+    local.setItem("versus.gatewaySecret", "legacy");
+    session.setItem("versus.gatewaySecret", "legacy");
+    vi.spyOn(local, "removeItem").mockImplementation(() => {
+      throw new Error("local storage unavailable");
+    });
+    vi.resetModules();
+    const freshApi = await import("./api");
+
+    expect(freshApi.getSecret()).toBeNull();
+    expect(session.getItem("versus.gatewaySecret")).toBeNull();
+    expect(local.getItem("versus.gatewaySecret")).toBe("legacy");
+  });
+
   it("sends auth/cookie/no-store policy and parses named multiline SSE", async () => {
     setSecret("gateway-secret");
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(

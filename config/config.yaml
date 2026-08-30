@@ -1,6 +1,9 @@
 name: versus
 host: 0.0.0.0
 port: 3000
+
+# HTTP(S) origin for links, secure cookies, and exact-origin
+# CSRF checks behind rewriting or TLS-terminating proxies.
 public_host: ''
 
 # Shared secret required by all admin endpoints (`/api/admin/*` and

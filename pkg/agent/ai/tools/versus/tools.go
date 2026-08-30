@@ -164,7 +164,7 @@ type LineRedactor interface {
 // DetectionHealthReader exposes passive source wiring/runtime observations.
 // Implementations must never pull a source to answer this read.
 type DetectionHealthReader interface {
-	DetectionHealth() DetectionHealthSnapshot
+	DetectionHealth(tenancy.OrgScope) DetectionHealthSnapshot
 }
 
 // DetectionHealthSnapshot is the configured source and signal-category view.

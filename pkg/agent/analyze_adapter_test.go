@@ -9,6 +9,7 @@ import (
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 type panicPullSource struct{ name string }
@@ -20,6 +21,7 @@ func (panicPullSource) Pull(context.Context, time.Time) ([]core.Signal, time.Tim
 
 func TestDetectionHealthAdapterIsPassiveAndRedactsBuildErrors(t *testing.T) {
 	reader := newDetectionHealthAdapter(
+		tenancy.DefaultOrgScope(),
 		[]config.AgentSourceConfig{
 			{Name: "connected", Type: "file", Enable: true},
 			{Name: "broken", Type: "loki", Enable: true},
@@ -28,7 +30,7 @@ func TestDetectionHealthAdapterIsPassiveAndRedactsBuildErrors(t *testing.T) {
 		[]core.SignalSource{panicPullSource{name: "connected"}},
 		[]error{errors.New("source broken: https://user:secret@example.invalid failed")},
 	)
-	snapshot := reader.DetectionHealth()
+	snapshot := reader.DetectionHealth(tenancy.DefaultOrgScope())
 	if len(snapshot.Sources) != 3 {
 		t.Fatalf("sources = %d, want 3", len(snapshot.Sources))
 	}

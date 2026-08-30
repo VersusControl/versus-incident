@@ -34,13 +34,15 @@ const (
 )
 
 type Options struct {
-	HTTPClient  *http.Client
-	BaseURL     string
-	Timeout     time.Duration
-	AuthKeyFunc func(context.Context) (string, bool)
-	Runtime     einowrap.RuntimeAI
-	ChatModel   model.ToolCallingChatModel
-	ToolTimeout time.Duration
+	HTTPClient   *http.Client
+	BaseURL      string
+	Timeout      time.Duration
+	AuthKeyFunc  func(context.Context) (string, bool)
+	Runtime      einowrap.RuntimeAI
+	ChatModel    model.ToolCallingChatModel
+	ToolTimeout  time.Duration
+	ToolProvider func() ([]core.Tool, error)
+	SeedProvider func() ([]core.Tool, error)
 }
 
 type Agent struct {
@@ -50,6 +52,8 @@ type Agent struct {
 	tools        []core.Tool
 	toolDisplays map[string]string
 	toolTimeout  time.Duration
+	toolProvider func() ([]core.Tool, error)
+	seedProvider func() ([]core.Tool, error)
 }
 
 type historyContextKey struct{}
@@ -77,7 +81,7 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 		filtered = append(filtered, value)
 		displays[value.Name()] = core.ToolDisplayName(value)
 	}
-	agent := &Agent{cfg: cfg, tools: filtered, toolDisplays: displays, toolTimeout: toolTimeout}
+	agent := &Agent{cfg: cfg, tools: filtered, toolDisplays: displays, toolTimeout: toolTimeout, toolProvider: opts.ToolProvider, seedProvider: opts.SeedProvider}
 	build := func(ctx context.Context, chatModel model.ToolCallingChatModel) (*adk.Runner, error) {
 		return agent.buildRunner(ctx, chatModel)
 	}
@@ -105,8 +109,16 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 }
 
 func (agent *Agent) buildRunner(ctx context.Context, chatModel model.ToolCallingChatModel) (*adk.Runner, error) {
-	einoTools := make([]tool.BaseTool, 0, len(agent.tools))
-	for _, value := range agent.tools {
+	tools := agent.tools
+	if agent.toolProvider != nil {
+		var err error
+		tools, err = agent.toolProvider()
+		if err != nil {
+			return nil, fmt.Errorf("chat: load tools: %w", err)
+		}
+	}
+	einoTools := make([]tool.BaseTool, 0, len(tools))
+	for _, value := range tools {
 		adapted, err := einowrap.NewTool(guardedTool{Tool: value}, agent.toolTimeout, MaxToolPayloadBytes)
 		if err != nil {
 			return nil, err
@@ -258,7 +270,19 @@ func takePendingCall(pending map[string][]schema.ToolCall, name, callID string) 
 func (agent *Agent) Seed(ctx context.Context) []core.ToolCallTrace {
 	wanted := map[string]bool{"get_system_overview": true, "list_services": true}
 	traces := make([]core.ToolCallTrace, 0, 2)
-	for _, value := range agent.tools {
+	tools := agent.tools
+	provider := agent.seedProvider
+	if provider == nil {
+		provider = agent.toolProvider
+	}
+	if provider != nil {
+		var err error
+		tools, err = provider()
+		if err != nil {
+			return []core.ToolCallTrace{{Error: "unavailable: tool settings unavailable"}}
+		}
+	}
+	for _, value := range tools {
 		if !wanted[value.Name()] {
 			continue
 		}

@@ -403,7 +403,7 @@ function Composer({ value, onChange, onSubmit, running, stopping, onStop, attach
         onChange={(event) => onChange(capChatMessage(event.target.value))}
         onKeyDown={keyDown}
         rows={2}
-        placeholder="Ask about incidents, services, changes, logs, or metrics…"
+        placeholder="Ask about your system"
         aria-label="Message"
         aria-describedby="chat-message-budget"
         className="max-h-40 min-h-[72px] w-full resize-none bg-transparent px-4 py-3 text-base leading-6 text-ink-50 outline-none placeholder:text-ink-400 lg:text-sm"
@@ -676,7 +676,7 @@ export function ChatPage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-surface-sunken">
-      <TopBar title="DevOps Chat" subtitle={sessionQ.data?.status === "running" ? "Running" : "Ask the Versus agent"} actions={<><button ref={historyTriggerRef} type="button" onClick={() => setMobileHistory(true)} aria-label="Open chat history" title="Open chat history" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700 lg:hidden"><History size={16} /></button><button type="button" onClick={newThread} aria-label="New thread" title="New thread" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><Plus size={16} /></button></>} />
+      <TopBar title="DevOps Agent" subtitle={sessionQ.data?.status === "running" ? "Running" : ""} actions={<><button ref={historyTriggerRef} type="button" onClick={() => setMobileHistory(true)} aria-label="Open chat history" title="Open chat history" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700 lg:hidden"><History size={16} /></button><button type="button" onClick={newThread} aria-label="New thread" title="New thread" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><Plus size={16} /></button></>} />
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
         <div className={clsx("hidden shrink-0 overflow-hidden transition-[width] duration-300 lg:block", historyOpen ? "w-[300px]" : "w-0")}>{rail}</div>
         {!historyOpen && <button type="button" onClick={() => setHistoryOpen(true)} aria-label="Open chat history" title="Open chat history" className="absolute left-3 top-3 z-sticky hidden rounded-control border border-ink-500/50 bg-surface p-2 text-ink-300 shadow-card hover:bg-ink-700 lg:block"><PanelLeftOpen size={16} /></button>}

@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
-type GetDetectionHealth struct{ Reader DetectionHealthReader }
+type GetDetectionHealth struct {
+	Reader DetectionHealthReader
+	Scope  tenancy.OrgScope
+}
 
 func (GetDetectionHealth) Name() string        { return "get_detection_health" }
 func (GetDetectionHealth) DisplayName() string { return "Inspecting detection health" }
@@ -29,7 +33,7 @@ func (tool GetDetectionHealth) Invoke(_ context.Context, args json.RawMessage) (
 		result.Data = map[string]any{"sources": []SourceHealth{}, "source_count": 0, "categories": unknownCategoryHealth(), "observation": "unknown"}
 		return result, nil
 	}
-	snapshot := tool.Reader.DetectionHealth()
+	snapshot := tool.Reader.DetectionHealth(tool.Scope)
 	return &core.ToolResult{Tool: tool.Name(), Found: len(snapshot.Sources) > 0, Data: map[string]any{
 		"sources": snapshot.Sources, "source_count": len(snapshot.Sources), "categories": snapshot.Categories, "observation": snapshot.Observation,
 	}}, nil

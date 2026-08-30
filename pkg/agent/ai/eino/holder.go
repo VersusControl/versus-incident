@@ -56,6 +56,11 @@ type RuntimeAI struct {
 	// folded. The key VALUE is never part of the signature (it hot-reloads
 	// through the transport). Optional.
 	KeySet func(ctx context.Context) (set bool, ok bool)
+
+	// Revision folds an opaque runtime configuration revision into the
+	// signature. Tool catalogs use a hash of durable per-agent settings so all
+	// replicas rebuild their bound graph on the next turn after a change.
+	Revision func(ctx context.Context) (revision string, ok bool)
 }
 
 // triState captures a folded boolean signal that may also be "unknown" so the
@@ -89,6 +94,7 @@ type modelSignature struct {
 	model    string
 	enabled  triState
 	keySet   triState
+	revision string
 }
 
 // Holder lazily builds and caches a model artifact of type T (a chat model, a
@@ -211,7 +217,19 @@ func (h *Holder[T]) resolveSignature(ctx context.Context) modelSignature {
 		model:    h.base.Model,
 		enabled:  foldBool(h.rt.Enabled, ctx),
 		keySet:   foldBool(h.rt.KeySet, ctx),
+		revision: foldRevision(h.rt.Revision, ctx),
 	}
+}
+
+func foldRevision(fn func(context.Context) (string, bool), ctx context.Context) string {
+	if fn == nil {
+		return ""
+	}
+	revision, ok := fn(ctx)
+	if !ok {
+		return ""
+	}
+	return revision
 }
 
 // isChatProvider reports whether name is a registered chat provider.

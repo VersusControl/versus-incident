@@ -433,6 +433,9 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 	since := w.loadCursor(ctx, src.Name())
 
 	signals, newCursor, err := src.Pull(ctx, since)
+	if w.ai.ObserveSourceHealth != nil {
+		w.ai.ObserveSourceHealth(src.Name(), err, time.Now())
+	}
 	if err != nil {
 		log.Printf("agent: pull from %s failed: %v", src.Name(), err)
 		return

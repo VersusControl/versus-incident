@@ -94,6 +94,10 @@ type Options struct {
 	// ParallelTools runs multiple tool calls emitted in one model turn
 	// concurrently. False (the default) dispatches them sequentially.
 	ParallelTools bool
+
+	// ToolProvider returns the currently enabled tool list when the model graph
+	// rebuilds. Nil pins the constructor list.
+	ToolProvider func() ([]core.Tool, error)
 }
 
 // New constructs an analyze Agent. cfg must already be resolved for
@@ -105,23 +109,9 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 		toolTimeout = defaultToolTimeout
 	}
 
-	reg := map[string]core.Tool{}
-	displays := map[string]string{}
-	einoTools := make([]tool.BaseTool, 0, len(tools))
-	for _, t := range tools {
-		if t == nil || t.Name() == "" {
-			continue
-		}
-		if _, exists := reg[t.Name()]; exists {
-			return nil, fmt.Errorf("duplicate tool name %q", t.Name())
-		}
-		reg[t.Name()] = t
-		displays[t.Name()] = core.ToolDisplayName(t)
-		et, err := einowrap.NewTool(t, toolTimeout, maxToolOutputBytes)
-		if err != nil {
-			return nil, err
-		}
-		einoTools = append(einoTools, et)
+	reg, displays, _, err := prepareTools(tools, toolTimeout)
+	if err != nil {
+		return nil, err
 	}
 
 	chat := opts.ChatModel
@@ -132,6 +122,18 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 	// the bound tool node. It is the per-(re)build unit: the holder calls it
 	// each time the effective model signature changes.
 	buildReactAgent := func(ctx context.Context, chat model.ToolCallingChatModel) (*react.Agent, error) {
+		current := tools
+		if opts.ToolProvider != nil {
+			var err error
+			current, err = opts.ToolProvider()
+			if err != nil {
+				return nil, fmt.Errorf("analyze: load tools: %w", err)
+			}
+		}
+		_, _, einoTools, err := prepareTools(current, toolTimeout)
+		if err != nil {
+			return nil, err
+		}
 		// MaxStep bounds the ReAct graph's pregel super-steps. The graph
 		// alternates chat -> tools -> chat ...; N chat calls interleaved
 		// with N-1 tool rounds take 2N-1 steps. Allowing maxIter tool
@@ -200,6 +202,28 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 		return nil, err
 	}
 	return a, nil
+}
+
+func prepareTools(tools []core.Tool, timeout time.Duration) (map[string]core.Tool, map[string]string, []tool.BaseTool, error) {
+	registry := make(map[string]core.Tool, len(tools))
+	displays := make(map[string]string, len(tools))
+	adapted := make([]tool.BaseTool, 0, len(tools))
+	for _, value := range tools {
+		if value == nil || value.Name() == "" {
+			continue
+		}
+		if _, exists := registry[value.Name()]; exists {
+			return nil, nil, nil, fmt.Errorf("duplicate tool name %q", value.Name())
+		}
+		registry[value.Name()] = value
+		displays[value.Name()] = core.ToolDisplayName(value)
+		einotool, err := einowrap.NewTool(value, timeout, maxToolOutputBytes)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		adapted = append(adapted, einotool)
+	}
+	return registry, displays, adapted, nil
 }
 
 // Name implements core.AIAgent.

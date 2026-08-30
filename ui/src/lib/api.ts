@@ -1,7 +1,7 @@
 // Centralized API client for the agent admin endpoints.
 //
-// OSS requests may carry X-Gateway-Secret. The secret lives for one browser tab;
-// AuthGate prompts for it on first visit.
+// OSS sign-in exchanges X-Gateway-Secret once for an HttpOnly same-origin
+// session cookie. The secret is never retained after the exchange.
 
 import type { LearnExclusions } from "@/lib/learnExclude";
 import { ANALYSIS_SSE_LIMITS, readEventStream } from "@/lib/sse";
@@ -32,6 +32,19 @@ const SECRET_KEY = "versus.gatewaySecret";
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ""; // empty → uses Vite proxy
 let secretCache: string | null | undefined;
 
+function removeLegacySecret() {
+  try {
+    sessionStorage.removeItem(SECRET_KEY);
+  } catch {
+    // Storage may be unavailable in a restricted browser context.
+  }
+  try {
+    localStorage.removeItem(SECRET_KEY);
+  } catch {
+    // Storage may be unavailable in a restricted browser context.
+  }
+}
+
 export class ApiError extends Error {
   status: number;
   body?: unknown;
@@ -43,54 +56,45 @@ export class ApiError extends Error {
 }
 
 export function getSecret(): string | null {
-  if (secretCache) return secretCache;
-  try {
-    const current = sessionStorage.getItem(SECRET_KEY);
-    const legacy = localStorage.getItem(SECRET_KEY);
-    if (!current && legacy) sessionStorage.setItem(SECRET_KEY, legacy);
-    if (legacy) localStorage.removeItem(SECRET_KEY);
-    secretCache = current || legacy;
-  } catch {
+  if (secretCache === undefined) {
     secretCache = null;
+    removeLegacySecret();
   }
   return secretCache;
 }
 
 export function setSecret(value: string) {
   secretCache = value;
-  try {
-    sessionStorage.setItem(SECRET_KEY, value);
-    localStorage.removeItem(SECRET_KEY);
-  } catch {
-    // The in-memory value still supports this tab when storage is unavailable.
-  }
 }
 
 export function clearSecret() {
   secretCache = null;
-  try {
-    sessionStorage.removeItem(SECRET_KEY);
-    localStorage.removeItem(SECRET_KEY);
-  } catch {
-    // Storage may be unavailable in a restricted browser context.
+  removeLegacySecret();
+}
+
+export async function signIn(value: string): Promise<void> {
+  clearSecret();
+  const res = await fetch(`${API_BASE}/api/auth/gateway-session`, {
+    method: "POST",
+    headers: { "X-Gateway-Secret": value.trim() },
+    credentials: "same-origin",
+  });
+  if (!res.ok) {
+    throw new ApiError(res.status, res.status === 401 ? "unauthorized" : `HTTP ${res.status}`);
   }
 }
 
-// signIn verifies the gateway secret against the data plane and persists it.
-// The gateway secret is the read-only machine/data-plane credential (the OSS
-// path and the enterprise read path). Privileged enterprise management is no
-// longer unlocked by a static token here — it rides the SSO session (the RBAC
-// admin user). Throws ApiError(401) when the secret is rejected; other errors
-// propagate unchanged.
-//
-// We verify against /api/admin/config/agent (getAgentConfig), NOT
-// /api/agent/status: the config endpoint is always mounted and gateway-secret
-// gated, whereas the agent status route only exists when agent.enable=true.
-// Verifying against status coupled sign-in to the agent being on, so an
-// alert-router deployment with a gateway secret but no agent could not log in.
-export async function signIn(value: string): Promise<void> {
-  setSecret(value.trim());
-  await api.getAgentConfig();
+// gatewaySessionLogout clears the OSS HttpOnly session cookie. It is always
+// best-effort so local sign-out still completes if the server is unavailable.
+export async function gatewaySessionLogout(): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/api/auth/gateway-session`, {
+      method: "DELETE",
+      credentials: "same-origin",
+    });
+  } catch {
+    // ignore — logout is best-effort
+  }
 }
 
 // AUTH_EXPIRED_EVENT fires when an authenticated request returns 401. The
@@ -1454,14 +1458,12 @@ export interface BootstrapAdminStatus {
 }
 
 // AuthProbe is the set of side-effecting checks resolveInitialAuth depends on,
-// injected so the decision logic is unit-testable without localStorage, fetch,
+// injected so the decision logic is unit-testable without browser storage, fetch,
 // or a DOM. AuthGate wires the real implementations.
 export interface AuthProbe {
-  // hasSecret reports whether a gateway secret is already held.
-  hasSecret: () => boolean;
-  // checkSecret verifies the held secret against the data plane (api.status).
-  // Resolves on success; rejects with ApiError(401) when the secret is bad.
-  checkSecret: () => Promise<unknown>;
+  // probeGatewaySession verifies the ambient OSS or upstream session cookie
+  // against an always-mounted protected endpoint.
+  probeGatewaySession: () => Promise<unknown>;
   // deploymentOrg resolves the SSO deployment org (rejects on a non-enterprise
   // / community binary).
   deploymentOrg: () => Promise<string>;
@@ -1470,38 +1472,50 @@ export interface AuthProbe {
   probeSession: (org: string) => Promise<unknown>;
 }
 
-// resolveInitialAuth is the pure decision the AuthGate runs on mount. It
-// returns "ok" when the console should open and "needs-secret" when the
-// gateway-secret screen should show.
+export type InitialAuthState =
+  | "ok"
+  | "needs-gateway-secret"
+  | "needs-enterprise-login"
+  | "retry";
+
+export function isCommunityDeploymentError(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 403 || error.status === 404);
+}
+
+// resolveInitialAuth is the pure decision the AuthGate runs on mount.
 //
 // Order of resolution:
-//   1. A held gateway secret is verified against the data plane.
-//      A 401 means the secret is stale -> needs-secret. A transient/non-401
-//      error deliberately does NOT trap the user -> ok (kept behavior).
-//   2. With no held secret, probe for an established SSO session: resolve the
-//      deployment org, then the session whoami. A live session opens the
-//      console (the cookie now authenticates the data plane). Any failure
-//      (community binary, 401 no-session, network) falls back to needs-secret.
+//   1. Probe the protected config endpoint using ambient cookies. A live OSS or
+//      Enterprise session opens the console without retaining a secret.
+//   2. Resolve deployment mode. An authoritative community response offers
+//      gateway login; transient or ambiguous failures offer retry instead.
+//   3. On Enterprise, a missing session offers only local-admin/SSO login.
 export async function resolveInitialAuth(
   p: AuthProbe,
-): Promise<"ok" | "needs-secret"> {
-  if (p.hasSecret()) {
-    try {
-      await p.checkSecret();
-      return "ok";
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) return "needs-secret";
-      // Transient/network error: don't trap the user behind the secret screen.
-      return "ok";
-    }
-  }
-  // No gateway secret: an established SSO session is a valid console entry.
+): Promise<InitialAuthState> {
   try {
-    const org = await p.deploymentOrg();
-    await p.probeSession(org);
+    await p.probeGatewaySession();
     return "ok";
   } catch {
-    return "needs-secret";
+    // No usable ambient credential; continue to enterprise discovery.
+  }
+  let org: string;
+  try {
+    org = await p.deploymentOrg();
+  } catch (error) {
+    if (isCommunityDeploymentError(error)) {
+      return "needs-gateway-secret";
+    }
+    return "retry";
+  }
+  try {
+    await p.probeSession(org);
+    return "ok";
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+      return "needs-enterprise-login";
+    }
+    return "retry";
   }
 }
 
@@ -1817,7 +1831,43 @@ export type AlertFatigueSort = "last_seen" | "repeat_count" | "priority";
 // AlertFatigueSortDir is the sort direction; `desc` is the default.
 export type AlertFatigueSortDir = "asc" | "desc";
 
+export type AgentToolKind = "chat" | "analyze";
+export type AgentToolState =
+  | "needs_license"
+  | "needs_datasource"
+  | "needs_integration"
+  | "needs_capability"
+  | "unhealthy"
+  | "disabled_by_operator"
+  | "available";
+
+export interface AgentToolAvailability {
+  group: "versus" | "common" | "k8s";
+  name: string;
+  display_name: string;
+  description: string;
+  state: AgentToolState;
+  reason: string;
+  action: string;
+  action_label: string;
+  enabled: boolean;
+  requirement: {
+    kind: "none" | "datasource" | "integration" | "capability";
+    signal_kind?: string;
+    integration?: string;
+    capabilities?: string[];
+  };
+  health?: string;
+}
+
 export const api = {
+  listAgentTools: (agent: AgentToolKind) =>
+    request<AgentToolAvailability[]>(`/api/admin/agent/tools?agent=${agent}`),
+  setAgentToolEnabled: (agent: AgentToolKind, name: string, enabled: boolean) =>
+    request<{ agent: AgentToolKind; name: string; enabled: boolean; changed: boolean }>(
+      `/api/admin/agent/tools/${agent}/${encodeURIComponent(name)}`,
+      { method: "PUT", body: JSON.stringify({ enabled }) },
+    ),
   status: () => request<Status>("/api/agent/status"),
   listPatterns: () =>
     request<{ patterns: Pattern[] }>("/api/agent/patterns").then(

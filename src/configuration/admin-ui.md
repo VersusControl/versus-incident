@@ -29,9 +29,20 @@ Then open <http://localhost:3000/> in your browser.
 
 
 > **OSS vs Enterprise auth.** The `X-Gateway-Secret` credential is the
-> **OSS/community** admin auth. The **Enterprise** binary retires the
+> **OSS/community** admin auth. The browser presents it once to
+> `POST /api/auth/gateway-session` and receives an opaque HttpOnly,
+> SameSite=Strict cookie with a fixed eight-hour absolute expiry. The cookie
+> contains no gateway secret, and rotating the configured secret invalidates
+> all existing OSS sessions. Direct API clients may continue sending the
+> header on each request. The **Enterprise** binary retires the
 > gateway secret and instead authenticates the **signed-in admin
 > session** (SSO or the default-admin login).
+>
+> If a TLS-terminating or Host-rewriting proxy fronts the console, configure
+> `public_host` with the exact browser-visible HTTP(S) origin. It controls
+> external links, secure cookies, and exact-origin checks. Versus does not
+> implicitly trust forwarded host/protocol headers; direct deployments may
+> leave it empty.
 
 ## What you can do
 
@@ -53,6 +64,7 @@ curating the agent's pattern catalog.
 | Shadow | `/shadow` | NDJSON log of "would-have-alerted" events recorded in shadow mode. |
 | Shadow detail | `/shadow/:patternId` | Drill into one shadow event with the matching catalog entry side-by-side. |
 | Services | `/services` | Every service the agent has discovered, with first-seen timestamps and grace controls. |
+| Tool catalog | `/agent/tools` | The complete tool catalog, grouped by domain, with availability reasons and separate Chat/Analyze enablement toggles. Remains readable when the agent is disabled. |
 | Runbooks | `/runbooks` | The runbook corpus that backs the `find_runbook` tool. Upload `.md` files, view a runbook's contents, or delete one. |
 
 ### Incident lifecycle
@@ -94,6 +106,59 @@ surface without you needing `curl`:
   an embedding model is configured (`tools.find_runbook.embedding_model`)
   uploads are embedded and searchable immediately; otherwise they are
   stored but flagged as not yet searchable.
+
+#### Agent Tool Catalog
+
+The Tool catalog at `/agent/tools` is an availability and policy view for the
+Chat and Analyze agents. It remains readable when `agent.enable` is false so
+operators can inspect requirements and prepare tool policy before enabling the
+runtime.
+
+`GET /api/admin/agent/tools?agent=chat|analyze` returns an ordered JSON array.
+Each item contains `group`, `name`, `display_name`, `description`, `state`,
+`reason`, `action`, `action_label`, `enabled`, `requirement`, and optional
+`health`. Requirement details identify the requirement `kind` and, where
+applicable, `signal_kind`, `integration`, or `capabilities`. Reasons, actions,
+and health values are bounded server-owned summaries; connection details,
+credentials, and raw backend errors are never returned.
+
+Tool state is one of:
+
+- `available` — every runtime requirement is satisfied and the tool is enabled
+  for the selected agent.
+- `disabled_by_operator` — requirements are satisfied, but an operator disabled
+  the tool for the selected agent.
+- `needs_license` — the configured capability requires an Enterprise
+  entitlement that is not active.
+- `needs_datasource` — no configured data source provides the required signal.
+- `needs_integration` — the required integration is not configured.
+- `needs_capability` — the active provider does not expose every required
+  capability.
+- `unhealthy` — a configured dependency is unavailable or failed its bounded
+  health assessment.
+
+`PUT /api/admin/agent/tools/:agent/:name` accepts exactly an enablement body:
+
+```json
+{ "enabled": true }
+```
+
+Use `false` to disable the named tool. Chat and Analyze settings are independent:
+changing one agent never changes the other. A disabled tool is absent from that
+agent's model tool list, not merely hidden in the UI. Enabling a tool whose
+requirements are not currently satisfied returns HTTP `409` with the bounded
+availability reason. A concurrent settings update also returns `409` and asks
+the caller to retry. A successful response contains `agent`, `name`, `enabled`,
+and `changed`.
+
+In Enterprise, PUT requires the `runtime:manage` permission and emits the
+`agent.tool.changed` admin audit action for allowed and denied attempts. Audit
+targets and outcomes are bounded and contain no secrets. GET remains the
+read-only inspection surface.
+
+This catalog does not create, edit, test, or bind data sources. Its actions link
+to existing setup screens or documentation; source binding remains a separate
+future workflow.
 
 ## Where the data lives
 

@@ -3,16 +3,24 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
+	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
+	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/signalsources"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 type registrationHealth struct{}
 
-func (registrationHealth) DetectionHealth() versustools.DetectionHealthSnapshot {
+func (registrationHealth) DetectionHealth(tenancy.OrgScope) versustools.DetectionHealthSnapshot {
 	return versustools.DetectionHealthSnapshot{Observation: "unknown"}
 }
 
@@ -48,6 +56,345 @@ func TestBuildAnalyzeToolsRegistersAllDiscoveryTools(t *testing.T) {
 		if !registered[name] {
 			t.Fatalf("discovery tool %q is not registered", name)
 		}
+	}
+}
+
+func TestBuildAnalyzeToolsRuntimeCatalogContract(t *testing.T) {
+	catalog, store := newBuildCatalog(t)
+	for _, tool := range buildAnalyzeTools(store, tenancy.DefaultOrgScope(), newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, nil, nil, registrationHealth{}) {
+		if _, ok := aitools.Lookup(tool.Name()); !ok {
+			t.Errorf("runtime tool %q is absent from availability catalog", tool.Name())
+		}
+	}
+}
+
+func TestToolRegistrationFiltersChatAndAnalyzeIndependently(t *testing.T) {
+	catalog, store := newBuildCatalog(t)
+	scope := tenancy.DefaultOrgScope()
+	runtime := buildAnalyzeTools(store, scope, newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	manager := aitools.NewManager(store)
+	if _, err := manager.SetEnabled(scope, aitools.AgentChat, "get_incident", false); err != nil {
+		t.Fatal(err)
+	}
+	chat, err := manager.Filter(scope, aitools.AgentChat, runtime, aitools.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	analyze, err := manager.Filter(scope, aitools.AgentAnalyze, runtime, aitools.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := func(tools []core.Tool, name string) bool {
+		for _, tool := range tools {
+			if tool.Name() == name {
+				return true
+			}
+		}
+		return false
+	}
+	if registered(chat, "get_incident") || !registered(analyze, "get_incident") {
+		t.Fatalf("independent filtering failed: chat=%v analyze=%v", registered(chat, "get_incident"), registered(analyze, "get_incident"))
+	}
+}
+
+func TestBuildAIsExposesToolCatalogWhenAIDisabled(t *testing.T) {
+	bundle := BuildAIs(config.AgentConfig{}, nil, storage.NewMemory(), nil)
+	if bundle.ToolSettings == nil || bundle.ToolSnapshot == nil {
+		t.Fatal("AI-disabled bundle did not expose tool availability")
+	}
+	resolved := aitools.Resolve(aitools.Requirement{Kind: aitools.RequirementIntegration, Integration: "kubernetes"}, bundle.ToolSnapshot(tenancy.DefaultOrgScope()), true)
+	if resolved.State != aitools.StateNeedsIntegration {
+		t.Fatalf("kubernetes state = %q", resolved.State)
+	}
+}
+
+func TestConfiguredToolAvailabilityUsesSourceKinds(t *testing.T) {
+	const metricsType = "availability-test-metrics"
+	const tracesType = "availability-test-traces"
+	signalsources.RegisterKind(metricsType, signalsources.KindMetrics)
+	signalsources.RegisterKind(tracesType, signalsources.KindTraces)
+
+	tests := []struct {
+		name    string
+		sources []config.AgentSourceConfig
+		want    map[string]bool
+	}{
+		{name: "metrics only", sources: []config.AgentSourceConfig{{Enable: true, Type: metricsType}}, want: map[string]bool{"metrics": true}},
+		{name: "traces only", sources: []config.AgentSourceConfig{{Enable: true, Type: tracesType}}, want: map[string]bool{"traces": true}},
+		{name: "logs only", sources: []config.AgentSourceConfig{{Enable: true, Type: "file"}}, want: map[string]bool{"logs": true}},
+		{name: "mixed", sources: []config.AgentSourceConfig{{Enable: true, Type: "file"}, {Enable: true, Type: metricsType}, {Enable: true, Type: tracesType}}, want: map[string]bool{"logs": true, "metrics": true, "traces": true}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := configuredToolAvailabilitySnapshot(config.AgentConfig{Sources: test.sources}, nil)
+			for _, kind := range []string{"logs", "metrics", "traces"} {
+				if got := snapshot.DataSources[kind].Configured; got != test.want[kind] {
+					t.Errorf("%s configured = %t, want %t", kind, got, test.want[kind])
+				}
+				if snapshot.DataSources[kind].Constructed {
+					t.Errorf("operator source label constructed %s capability", kind)
+				}
+			}
+		})
+	}
+}
+
+func TestRuntimeSnapshotDistinguishesConfiguredFailureFromMissing(t *testing.T) {
+	configured := aitools.Snapshot{DataSources: map[string]aitools.DependencyStatus{
+		"logs":    {Configured: true, Name: "Log data source"},
+		"metrics": {Configured: false, Name: "Metric data source"},
+		"traces":  {Configured: false, Name: "Trace data source"},
+	}, Integrations: map[string]aitools.DependencyStatus{}, Capabilities: map[string]aitools.DependencyStatus{}}
+	snapshot := buildToolAvailabilitySnapshot(configured, nil, nil, nil, nil, nil, nil, nil, versustools.DetectionHealthSnapshot{})
+	logs := aitools.Resolve(aitools.Requirement{Kind: aitools.RequirementDataSource, SignalKind: "logs"}, snapshot, true)
+	metrics := aitools.Resolve(aitools.Requirement{Kind: aitools.RequirementDataSource, SignalKind: "metrics"}, snapshot, true)
+	if logs.State != aitools.StateUnhealthy || logs.Health != "configuration" {
+		t.Fatalf("configured failure = %+v", logs)
+	}
+	if metrics.State != aitools.StateNeedsDataSource {
+		t.Fatalf("missing source = %+v", metrics)
+	}
+}
+
+func TestRuntimeSnapshotUsesConstructedReadersBeforeFirstObservation(t *testing.T) {
+	configured := aitools.Snapshot{DataSources: map[string]aitools.DependencyStatus{
+		"logs":    {Configured: true, Name: "Log data source"},
+		"metrics": {Configured: true, Name: "Metric data source"},
+		"traces":  {Configured: true, Name: "Trace data source"},
+	}, Integrations: map[string]aitools.DependencyStatus{}, Capabilities: map[string]aitools.DependencyStatus{}}
+	snapshot := buildToolAvailabilitySnapshot(configured, &signalReaderAdapter{}, nil, nil, nil, nil, registrationMetricReader{}, registrationTraceReader{}, versustools.DetectionHealthSnapshot{})
+	for _, kind := range []string{"logs", "metrics", "traces"} {
+		if got := snapshot.DataSources[kind]; !got.Constructed || !got.Healthy || got.Health != "" {
+			t.Errorf("unobserved %s health = %+v", kind, got)
+		}
+	}
+}
+
+func TestSourceKindHealthAggregatesAllUsableSources(t *testing.T) {
+	configured := aitools.Snapshot{DataSources: map[string]aitools.DependencyStatus{
+		"logs": {Configured: true, Name: "Log data source"},
+	}, Integrations: map[string]aitools.DependencyStatus{}, Capabilities: map[string]aitools.DependencyStatus{}}
+	healthy := versustools.SourceHealth{Name: "healthy", Kind: "logs", Configured: true, Observation: "healthy"}
+	unobserved := versustools.SourceHealth{Name: "unobserved", Kind: "logs", Configured: true, Observation: "unknown"}
+	failedA := versustools.SourceHealth{Name: "alpha", Kind: "logs", Configured: true, Observation: "unhealthy", ErrorClass: "authentication"}
+	failedZ := versustools.SourceHealth{Name: "zeta", Kind: "logs", Configured: true, Observation: "unhealthy", ErrorClass: "connection"}
+
+	tests := []struct {
+		name        string
+		sources     []versustools.SourceHealth
+		wantHealthy bool
+		wantName    string
+		wantClass   string
+	}{
+		{name: "healthy and failed", sources: []versustools.SourceHealth{failedZ, healthy}, wantHealthy: true},
+		{name: "unobserved and failed", sources: []versustools.SourceHealth{failedZ, unobserved}, wantHealthy: true},
+		{name: "all failed", sources: []versustools.SourceHealth{failedZ, failedA}, wantName: "alpha", wantClass: "authentication"},
+		{name: "one source recovers", sources: []versustools.SourceHealth{failedZ, healthy}, wantHealthy: true},
+		{name: "all failed reverse order", sources: []versustools.SourceHealth{failedA, failedZ}, wantName: "alpha", wantClass: "authentication"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := buildToolAvailabilitySnapshot(configured, &signalReaderAdapter{}, nil, nil, nil, nil, nil, nil, versustools.DetectionHealthSnapshot{Sources: test.sources})
+			got := snapshot.DataSources["logs"]
+			wantName := test.wantName
+			if wantName == "" {
+				wantName = "Log data source"
+			}
+			if got.Healthy != test.wantHealthy || got.Name != wantName || got.Health != test.wantClass {
+				t.Fatalf("status = %+v", got)
+			}
+		})
+	}
+}
+
+func TestConfiguredReadersResolveAndRegisterWithoutWorkerObservations(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     config.AgentConfig
+		kind    string
+		tool    string
+		reader  commontools.SignalReader
+		metrics commontools.MetricReader
+		traces  commontools.TraceReader
+	}{
+		{
+			name: "OSS Prometheus reader without metric signal source", kind: "metrics", tool: "query_metrics",
+			cfg:     config.AgentConfig{Tools: config.ToolsConfig{QueryMetrics: config.QueryMetricsToolConfig{Prometheus: config.QueryMetricsPrometheusConfig{Address: "http://prometheus"}}}},
+			metrics: registrationMetricReader{},
+		},
+		{
+			name: "OSS Tempo reader without trace signal source", kind: "traces", tool: "query_traces",
+			cfg:    config.AgentConfig{Tools: config.ToolsConfig{QueryTraces: config.QueryTracesToolConfig{Tempo: config.QueryTracesTempoConfig{Address: "http://tempo"}}}},
+			traces: registrationTraceReader{},
+		},
+		{
+			name: "configured log source before first pull", kind: "logs", tool: "get_related_logs",
+			cfg:    config.AgentConfig{Sources: []config.AgentSourceConfig{{Name: "logs", Type: "file", Enable: true}}},
+			reader: &signalReaderAdapter{},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			configured := configuredToolAvailabilitySnapshot(test.cfg, nil)
+			snapshot := buildToolAvailabilitySnapshot(configured, test.reader, nil, nil, nil, nil, test.metrics, test.traces, versustools.DetectionHealthSnapshot{})
+			requirement := aitools.Requirement{Kind: aitools.RequirementDataSource, SignalKind: test.kind}
+			if got := aitools.Resolve(requirement, snapshot, true); got.State != aitools.StateAvailable {
+				t.Fatalf("resolution = %+v", got)
+			}
+			filtered, err := aitools.NewManager(storage.NewMemory()).Filter(tenancy.DefaultOrgScope(), aitools.AgentAnalyze, []core.Tool{settingsCompatibleTool{name: test.tool}}, snapshot)
+			if err != nil || len(filtered) != 1 || filtered[0].Name() != test.tool {
+				t.Fatalf("filtered = %+v, err = %v", filtered, err)
+			}
+		})
+	}
+}
+
+type registrationMetricReader struct{}
+
+func (registrationMetricReader) QueryRange(context.Context, string, time.Time, time.Time) ([]commontools.MetricSeries, error) {
+	return nil, nil
+}
+
+type registrationTraceReader struct{}
+
+func (registrationTraceReader) QueryTraces(context.Context, string, string, time.Time, time.Time, int) ([]commontools.TraceSummary, error) {
+	return nil, nil
+}
+
+func TestMetricsObservationNeverUnlocksLogs(t *testing.T) {
+	configured := aitools.Snapshot{DataSources: map[string]aitools.DependencyStatus{
+		"logs":    {Configured: true, Name: "Log data source"},
+		"metrics": {Configured: true, Name: "Metric data source"},
+	}, Integrations: map[string]aitools.DependencyStatus{}, Capabilities: map[string]aitools.DependencyStatus{}}
+	health := versustools.DetectionHealthSnapshot{Sources: []versustools.SourceHealth{{Kind: "metrics", Configured: true, Observation: "healthy"}}}
+	snapshot := buildToolAvailabilitySnapshot(configured, nil, nil, nil, nil, nil, registrationMetricReader{}, nil, health)
+	if got := snapshot.DataSources["metrics"]; !got.Healthy {
+		t.Fatalf("metrics health = %+v", got)
+	}
+	if got := snapshot.DataSources["logs"]; got.Healthy || got.Health != "configuration" {
+		t.Fatalf("logs health = %+v", got)
+	}
+}
+
+func TestLiveSourceHealthFiltersAndRestoresLogTools(t *testing.T) {
+	scope := tenancy.DefaultOrgScope()
+	health := newDetectionHealthAdapter(scope,
+		[]config.AgentSourceConfig{{Name: "logs", Type: "file", Enable: true}},
+		[]core.SignalSource{panicPullSource{name: "logs"}}, nil,
+	)
+	configured := aitools.Snapshot{DataSources: map[string]aitools.DependencyStatus{
+		"logs": {Configured: true, Name: "Log data source"},
+	}, Integrations: map[string]aitools.DependencyStatus{}, Capabilities: map[string]aitools.DependencyStatus{}}
+	runtime := []core.Tool{settingsCompatibleTool{name: "get_related_logs"}}
+	manager := aitools.NewManager(storage.NewMemory())
+	states := []struct {
+		err       error
+		wantClass string
+		wantTools int
+	}{
+		{nil, "", 1},
+		{errors.New("401 unauthorized"), "authentication", 0},
+		{errors.New("connection refused"), "connection", 0},
+		{context.DeadlineExceeded, "timeout", 0},
+		{nil, "", 1},
+	}
+	for _, state := range states {
+		health.Observe("logs", state.err, time.Now())
+		snapshot := buildToolAvailabilitySnapshot(configured, &signalReaderAdapter{}, nil, nil, nil, nil, nil, nil, health.DetectionHealth(scope))
+		filtered, err := manager.Filter(scope, aitools.AgentChat, runtime, snapshot)
+		if err != nil || len(filtered) != state.wantTools || snapshot.DataSources["logs"].Health != state.wantClass {
+			t.Fatalf("error=%v class=%q tools=%d filterErr=%v", state.err, snapshot.DataSources["logs"].Health, len(filtered), err)
+		}
+	}
+}
+
+type settingsCompatibleTool struct{ name string }
+
+func (tool settingsCompatibleTool) Name() string          { return tool.name }
+func (settingsCompatibleTool) Description() string        { return "test" }
+func (settingsCompatibleTool) ArgsSchema() map[string]any { return map[string]any{"type": "object"} }
+func (tool settingsCompatibleTool) Invoke(context.Context, json.RawMessage) (*core.ToolResult, error) {
+	return &core.ToolResult{Tool: tool.name, Found: true}, nil
+}
+
+type generationProvider struct {
+	storage.Provider
+	err error
+}
+
+func (provider *generationProvider) ReadBlob(name string) ([]byte, error) {
+	if provider.err != nil {
+		return nil, provider.err
+	}
+	return provider.Provider.ReadBlob(name)
+}
+
+func (provider *generationProvider) CompareAndSwapBlob(name string, expected, replacement []byte) (bool, error) {
+	return provider.Provider.(storage.BlobCAS).CompareAndSwapBlob(name, expected, replacement)
+}
+
+func TestToolGenerationIsAtomicAndRecoversWithoutFailingOpen(t *testing.T) {
+	provider := &generationProvider{Provider: storage.NewMemory()}
+	manager := aitools.NewManager(provider)
+	scope := tenancy.DefaultOrgScope()
+	snapshotCalls := 0
+	generation := newToolGeneration(manager, scope, func(tenancy.OrgScope) aitools.Snapshot {
+		snapshotCalls++
+		return aitools.Snapshot{}
+	})
+	runtime := []core.Tool{settingsCompatibleTool{name: "get_incident"}}
+
+	if _, ok := generation.Revision(context.Background()); !ok {
+		t.Fatal("initial revision unavailable")
+	}
+	filtered, err := generation.Filter(aitools.AgentChat, runtime)
+	if err != nil || len(filtered) != 1 || snapshotCalls != 1 {
+		t.Fatalf("initial generation tools=%d err=%v snapshots=%d", len(filtered), err, snapshotCalls)
+	}
+	if _, err := manager.SetEnabled(scope, aitools.AgentChat, "get_incident", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := generation.Revision(context.Background()); !ok {
+		t.Fatal("disabled revision unavailable")
+	}
+	filtered, err = generation.Filter(aitools.AgentChat, runtime)
+	if err != nil || len(filtered) != 0 {
+		t.Fatalf("disabled generation tools=%d err=%v", len(filtered), err)
+	}
+
+	provider.err = errors.New("transient read failure")
+	if _, ok := generation.Revision(context.Background()); ok {
+		t.Fatal("failed revision reported available")
+	}
+	if _, err := generation.Filter(aitools.AgentChat, runtime); err == nil {
+		t.Fatal("failed generation returned a tool graph")
+	}
+	provider.err = nil
+	if _, ok := generation.Revision(context.Background()); !ok {
+		t.Fatal("recovered revision unavailable")
+	}
+	filtered, err = generation.Filter(aitools.AgentChat, runtime)
+	if err != nil || len(filtered) != 0 {
+		t.Fatalf("recovered generation failed open: tools=%d err=%v", len(filtered), err)
+	}
+}
+
+func TestSeedLoadsDurableSettingsWithoutHolderRevision(t *testing.T) {
+	provider := storage.NewMemory()
+	manager := aitools.NewManager(provider)
+	scope := tenancy.DefaultOrgScope()
+	runtime := []core.Tool{settingsCompatibleTool{name: "get_system_overview"}}
+	snapshot := func(tenancy.OrgScope) aitools.Snapshot { return aitools.Snapshot{} }
+
+	if _, err := manager.SetEnabled(scope, aitools.AgentChat, "get_system_overview", false); err != nil {
+		t.Fatal(err)
+	}
+	filtered, err := loadCurrentTools(manager, scope, snapshot, aitools.AgentChat, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 0 {
+		t.Fatalf("new session seed tools = %d, want 0 before any holder revision", len(filtered))
 	}
 }
 

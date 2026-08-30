@@ -253,10 +253,11 @@ kubectl apply -f versus-deployment.yaml
 
 ## Exposing the dashboard
 
-Set `public_host` in the config to the external URL clients (and the
-admin dashboard's banner) should use. Then expose the Service via your
-preferred path — Ingress, LoadBalancer, or `kubectl port-forward` for
-local testing:
+Set `public_host` in the config to the exact browser-visible HTTP(S) origin. It
+controls external links, secure cookies, and exact-origin CSRF checks when an
+Ingress rewrites the Host or terminates TLS. Forwarded host and protocol headers
+are not trusted. Then expose the Service via your preferred path — Ingress,
+LoadBalancer, or `kubectl port-forward` for local testing:
 
 ```bash
 kubectl port-forward svc/versus-service 3000:3000

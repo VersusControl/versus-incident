@@ -1,6 +1,8 @@
 package controllers
 
 import (
+	"time"
+
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 
@@ -20,11 +22,20 @@ func adminGatewayGuard(c *fiber.Ctx) error {
 	if middleware.RequestAuthorized(c) {
 		return c.Next()
 	}
+	if !middleware.GatewayAuthEnabled() {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+	}
 	cfg := config.GetConfig()
 	expected := cfg.GatewaySecret
 	got := c.Get("X-Gateway-Secret")
-	if expected == "" || !secureEqual(got, expected) {
+	if expected != "" && secureEqual(got, expected) {
+		return c.Next()
+	}
+	if !validGatewaySession(c.Cookies(gatewaySessionCookieName), expected, time.Now()) {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+	}
+	if !requestIsSafe(c.Method()) && !requestHasSameOrigin(c) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "invalid request origin"})
 	}
 	return c.Next()
 }
