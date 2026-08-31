@@ -13,8 +13,8 @@ import (
 
 // holder.go — the runtime model-construction lifecycle.
 //
-// The model PROVIDER (openai | deepseek | qwen | ollama | claude | gemini) is
-// chosen at CONSTRUCTION time: each provider picks a different SDK/builder
+// The model PROVIDER (openai | deepseek | qwen | ollama | claude | gemini |
+// litellm) is chosen at CONSTRUCTION time: each provider picks a different SDK/builder
 // (provider.go), so a provider change cannot hot-reload through a request
 // header the way the per-request key override (AuthKeyFunc) does — the model
 // object must be REBUILT. A Holder is the rebuild lifecycle: it caches a built

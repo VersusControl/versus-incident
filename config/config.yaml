@@ -242,7 +242,10 @@ agent:
   ai:
     enable: false                   # master switch (env: AGENT_AI_ENABLE)
     # provider selects the model backend (openai | deepseek | qwen | ollama |
-    # claude | gemini). Default openai. The api_key below must match the chosen provider.
+    # claude | gemini | litellm). Default openai. The api_key below must match the
+    # chosen provider. For "litellm" the backend targets a LiteLLM proxy
+    # (default http://localhost:4000/v1), api_key is the proxy virtual key, and
+    # model is the LiteLLM model alias (e.g. "gpt-5" or "claude-sonnet").
     provider: openai                # model backend (env: AGENT_AI_PROVIDER)
     api_key: ${AGENT_AI_API_KEY}
     model: "gpt-5.4-mini"
