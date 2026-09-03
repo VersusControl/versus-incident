@@ -92,6 +92,19 @@ func RequestAuthorized(c *fiber.Ctx) bool {
 	return v
 }
 
+const requestPermissionPrefix = "versus.permission."
+
+// SetRequestPermission records one request-scoped, role-neutral permission decision.
+func SetRequestPermission(c *fiber.Ctx, permission string, allowed bool) {
+	c.Locals(requestPermissionPrefix+permission, allowed)
+}
+
+// RequestPermission returns an explicit request decision when an adapter supplied one.
+func RequestPermission(c *fiber.Ctx, permission string) (allowed, explicit bool) {
+	allowed, explicit = c.Locals(requestPermissionPrefix + permission).(bool)
+	return allowed, explicit
+}
+
 // SetOrgResolver registers the function used to resolve an org id from a
 // request. OSS ships none, so every request resolves to the default org.
 // Passing nil clears it. Call at boot.

@@ -191,6 +191,31 @@ spec:
                 secretKeyRef:
                   name: {{ include "versus-incident.fullname" . }}-secrets
                   key: query_traces_tempo_password
+            - name: KUBERNETES_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: kubernetes_token
+            - name: KUBERNETES_CA_DATA
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: kubernetes_ca_data
+            - name: KUBERNETES_CLIENT_CERTIFICATE_DATA
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: kubernetes_client_certificate_data
+            - name: KUBERNETES_CLIENT_KEY_DATA
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: kubernetes_client_key_data
+            - name: KUBERNETES_AKS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" . }}-secrets
+                  key: kubernetes_aks_client_secret
             {{- end }}
 
             {{- if .Values.alert.slack.enable }}

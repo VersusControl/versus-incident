@@ -35,3 +35,28 @@ func TestToolGroupsStayReadOnly(t *testing.T) {
 		})
 	}
 }
+
+func TestKubernetesNativeAuthDependencyClosure(t *testing.T) {
+	output, err := exec.Command("go", "list", "-deps", "../../../kubernetes").Output()
+	if err != nil {
+		t.Fatalf("go list -deps Kubernetes: %v", err)
+	}
+	forbidden := []string{
+		"os/exec",
+		"github.com/aws/aws-sdk-go-v2/config",
+		"github.com/aws/aws-sdk-go-v2/credentials/processcreds",
+		"github.com/aws/aws-sdk-go-v2/credentials/ssocreds",
+		"golang.org/x/oauth2/google",
+		"golang.org/x/oauth2/authhandler",
+		"cloud.google.com/go/auth/credentials/internal/externalaccount/executable",
+		"k8s.io/client-go",
+	}
+	for _, dependency := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		dependency = strings.TrimSpace(dependency)
+		for _, prefix := range forbidden {
+			if dependency == prefix || strings.HasPrefix(dependency, prefix+"/") {
+				t.Errorf("Kubernetes imports forbidden authentication dependency %q", dependency)
+			}
+		}
+	}
+}

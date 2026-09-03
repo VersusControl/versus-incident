@@ -21,9 +21,11 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/router"
 	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
+	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
 	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	"github.com/VersusControl/versus-incident/pkg/runbook"
 	"github.com/VersusControl/versus-incident/pkg/signalsources"
 	"github.com/VersusControl/versus-incident/pkg/storage"
@@ -70,7 +72,12 @@ type AIBundle struct {
 // model. store may be nil — caches degrade to in-memory only; the
 // analyze agent's tool registry will also be smaller.
 func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, httpClient *http.Client) AIBundle {
-	return buildAIs(cfg, catalog, store, tenancy.DefaultOrgScope(), httpClient, nil)
+	return buildAIs(cfg, catalog, store, tenancy.DefaultOrgScope(), httpClient, nil, nil)
+}
+
+// BuildAIsWithKubernetes reuses the connector service already registered for HTTP.
+func BuildAIsWithKubernetes(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, httpClient *http.Client, kubernetesService *kubernetes.Service) AIBundle {
+	return buildAIs(cfg, catalog, store, tenancy.DefaultOrgScope(), httpClient, nil, kubernetesService)
 }
 
 // BuildAIsForScope constructs every AI dependency with an ordered organization
@@ -78,19 +85,42 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 // applies only to read-only analyze tools. BuildAIs supplies the default-only
 // scope used by single-tenant OSS deployments.
 func BuildAIsForScope(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client) AIBundle {
-	return buildAIs(cfg, catalog, store, scope.Normalized(), httpClient, nil)
+	return buildAIs(cfg, catalog, store, scope.Normalized(), httpClient, nil, nil)
 }
 
 // BuildAIsForScopeWithChatLocation constructs scoped AI dependencies and uses
 // locationProvider to resolve chat date phrases. A nil provider preserves the
 // OSS behavior of loading report settings from store.
 func BuildAIsForScopeWithChatLocation(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location) AIBundle {
-	return buildAIs(cfg, catalog, store, scope.Normalized(), httpClient, locationProvider)
+	return buildAIs(cfg, catalog, store, scope.Normalized(), httpClient, locationProvider, nil)
 }
 
-func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location) AIBundle {
+// BuildAIsForScopeWithChatLocationAndKubernetes reuses the connector service
+// already registered for HTTP while preserving scoped reads and chat time.
+func BuildAIsForScopeWithChatLocationAndKubernetes(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location, kubernetesService *kubernetes.Service) AIBundle {
+	return buildAIs(cfg, catalog, store, scope.Normalized(), httpClient, locationProvider, kubernetesService)
+}
+
+func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location, kubernetesService *kubernetes.Service) AIBundle {
 	toolSettings := aitools.NewManager(store)
 	configuredToolSnapshot := configuredToolAvailabilitySnapshot(cfg, store)
+	var kubernetesErr error
+	if kubernetesService == nil {
+		kubernetesService, kubernetesErr = NewKubernetesService(cfg.Tools.Kubernetes, scope)
+	}
+	if kubernetesErr != nil {
+		status := configuredToolSnapshot.Integrations["kubernetes"]
+		status.Constructed = false
+		status.Healthy = false
+		status.Health = "configuration"
+		configuredToolSnapshot.Integrations["kubernetes"] = status
+	} else if kubernetesService != nil {
+		status := configuredToolSnapshot.Integrations["kubernetes"]
+		status.Configured = true
+		status.Constructed = true
+		status.Healthy = true
+		configuredToolSnapshot.Integrations["kubernetes"] = status
+	}
 	toolSnapshot := func(tenancy.OrgScope) aitools.Snapshot { return configuredToolSnapshot }
 	// Resolve the detect-task config up front so the construction gate can
 	// see whether a model is actually configured.
@@ -159,6 +189,9 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		for _, e := range redactErrs {
 			log.Printf("agent: analyze reader redactor warning: %v", e)
 		}
+		if kubernetesService != nil {
+			kubernetesService.SetScrubber(redactor)
+		}
 		serviceMatcher, svcErrs := NewServiceMatcher(cfg.ServicePatterns)
 		for _, e := range svcErrs {
 			log.Printf("agent: analyze reader service_patterns warning: %v", e)
@@ -213,10 +246,11 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		traces := newTraceReaderAdapter(cfg.Tools.QueryTraces.Tempo)
 
 		runtimeTools = buildAnalyzeTools(store, scope, newCatalogAdapterWithThreshold(catalog, cfg.Catalog.AutoPromoteAfter), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher, metrics, traces, detectionHealth)
+		runtimeTools = append(runtimeTools, k8stools.New(kubernetesService)...)
 		toolSnapshot = func(requestScope tenancy.OrgScope) aitools.Snapshot {
 			return buildToolAvailabilitySnapshot(configuredToolSnapshot, reader, graph, changes, embedder, runbookSearcher, metrics, traces, detectionHealth.DetectionHealth(requestScope))
 		}
-		initialView, loadErr := toolSettings.Load(scope)
+		initialView, loadErr := toolSettings.LoadToolsets(scope)
 		if loadErr != nil {
 			log.Printf("agent: tool settings unavailable: %v", loadErr)
 			return AIBundle{ToolSettings: toolSettings, ToolSnapshot: toolSnapshot, ObserveSourceHealth: detectionHealth.Observe}
@@ -332,11 +366,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 }
 
 func loadCurrentTools(manager *aitools.Manager, scope tenancy.OrgScope, snapshot func(tenancy.OrgScope) aitools.Snapshot, agent aitools.AgentKind, runtime []core.Tool) ([]core.Tool, error) {
-	view, err := manager.Load(scope)
-	if err != nil {
-		return nil, err
-	}
-	return view.Filter(agent, runtime, snapshot(scope))
+	return manager.Filter(scope, agent, runtime, snapshot(scope))
 }
 
 type toolGeneration struct {
@@ -344,7 +374,7 @@ type toolGeneration struct {
 	manager  *aitools.Manager
 	scope    tenancy.OrgScope
 	snapshot func(tenancy.OrgScope) aitools.Snapshot
-	view     aitools.SettingsView
+	view     aitools.ToolsetSettingsView
 	current  aitools.Snapshot
 	err      error
 }
@@ -356,7 +386,7 @@ func newToolGeneration(manager *aitools.Manager, scope tenancy.OrgScope, snapsho
 func (generation *toolGeneration) Revision(context.Context) (string, bool) {
 	generation.mu.Lock()
 	defer generation.mu.Unlock()
-	generation.view, generation.err = generation.manager.Load(generation.scope)
+	generation.view, generation.err = generation.manager.LoadToolsets(generation.scope)
 	if generation.err != nil {
 		return "", false
 	}
@@ -410,7 +440,7 @@ func configuredToolAvailabilitySnapshot(cfg config.AgentConfig, store storage.Pr
 			"metrics": metrics,
 			"traces":  traces,
 		},
-		Integrations: map[string]aitools.DependencyStatus{"github": configured(hasGit, "GitHub"), "kubernetes": configured(false, "Kubernetes cluster")},
+		Integrations: map[string]aitools.DependencyStatus{"github": configured(hasGit, "GitHub"), "kubernetes": configured(strings.TrimSpace(cfg.Tools.Kubernetes.Endpoint) != "" || strings.TrimSpace(cfg.Tools.Kubernetes.Auth.Mode) != "", "Kubernetes cluster")},
 		Capabilities: map[string]aitools.DependencyStatus{
 			"ai_embedder": configured(hasEmbedder, "AI embedder"), "runbook_index": configured(hasEmbedder && store != nil, "Runbook index"), "dependency_graph": configured(hasGraph, "Dependency graph"),
 		},
@@ -444,7 +474,7 @@ func buildToolAvailabilitySnapshot(configured aitools.Snapshot, reader commontoo
 			"logs": dataSource("logs", configured.DataSources["logs"], reader != nil), "metrics": dataSource("metrics", configured.DataSources["metrics"], metrics != nil), "traces": dataSource("traces", configured.DataSources["traces"], traces != nil),
 		},
 		Integrations: map[string]aitools.DependencyStatus{
-			"github": resolved(configured.Integrations["github"], changes != nil), "kubernetes": resolved(configured.Integrations["kubernetes"], false),
+			"github": resolved(configured.Integrations["github"], changes != nil), "kubernetes": resolved(configured.Integrations["kubernetes"], configured.Integrations["kubernetes"].Configured && configured.Integrations["kubernetes"].Healthy),
 		},
 		Capabilities: map[string]aitools.DependencyStatus{
 			"ai_embedder": resolved(configured.Capabilities["ai_embedder"], embedder != nil), "runbook_index": resolved(configured.Capabilities["runbook_index"], runbooks != nil), "dependency_graph": resolved(configured.Capabilities["dependency_graph"], graph != nil && graph.Len() > 0),

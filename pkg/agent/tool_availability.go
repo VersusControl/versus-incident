@@ -44,3 +44,25 @@ func (service *ToolAvailabilityService) BindLiveSnapshot(snapshot func(tenancy.O
 	service.snapshot = snapshot
 	service.mu.Unlock()
 }
+
+// BindIntegrationConstruction records whether a configured integration was
+// constructed successfully before a worker-side live snapshot is available.
+func (service *ToolAvailabilityService) BindIntegrationConstruction(name string, constructed bool) {
+	snapshot := service.Snapshot(tenancy.DefaultOrgScope())
+	status, ok := snapshot.Integrations[name]
+	if !ok {
+		return
+	}
+	integrations := make(map[string]aitools.DependencyStatus, len(snapshot.Integrations))
+	for key, value := range snapshot.Integrations {
+		integrations[key] = value
+	}
+	status.Constructed = constructed
+	status.Healthy = status.Configured && constructed
+	if status.Configured && !constructed {
+		status.Health = "configuration"
+	}
+	integrations[name] = status
+	snapshot.Integrations = integrations
+	service.BindLiveSnapshot(func(tenancy.OrgScope) aitools.Snapshot { return snapshot })
+}

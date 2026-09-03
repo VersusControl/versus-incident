@@ -83,3 +83,45 @@ func TestLoadAgentSourcesFile_ReadError(t *testing.T) {
 		t.Fatal("expected error reading a missing agent_sources.yaml")
 	}
 }
+
+func TestLoadAgentSourcesFileExpandsScalarsAfterParsing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent_sources.yaml")
+	if err := os.WriteFile(path, []byte("sources:\n  - name: ${SOURCE_NAME}\n    type: file\n    options:\n      value: ${SCALAR}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SOURCE_NAME", "prod: # still one scalar")
+	t.Setenv("SCALAR", "line one\nunknown_key: injected")
+	sources, err := loadAgentSourcesFile(path)
+	if err != nil || len(sources) != 1 || sources[0].Name != "prod: # still one scalar" || sources[0].Options["value"] != "line one\nunknown_key: injected" {
+		t.Fatalf("parse-first sources = %#v, %v", sources, err)
+	}
+}
+
+func TestAgentSourcesRejectUnknownKey(t *testing.T) {
+	for name, content := range map[string]string{
+		"top-level": "sources: []\nunknown: true\n",
+		"source":    "sources:\n  - name: logs\n    type: file\n    unknown: true\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "agent_sources.yaml")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadAgentSourcesFile(path); err == nil {
+				t.Fatal("unknown key accepted")
+			}
+		})
+	}
+}
+
+func TestAgentSourcesAcceptCommaStringSlice(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent_sources.yaml")
+	content := "sources:\n  - name: search\n    type: elasticsearch\n    elasticsearch:\n      addresses: https://one.example,https://two.example\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sources, err := loadAgentSourcesFile(path)
+	if err != nil || len(sources) != 1 || len(sources[0].Elasticsearch.Addresses) != 2 || sources[0].Elasticsearch.Addresses[1] != "https://two.example" {
+		t.Fatalf("comma addresses = %#v, %v", sources, err)
+	}
+}

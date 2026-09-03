@@ -1,35 +1,38 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { AlertCircle, ExternalLink, Loader2, RefreshCw, Wrench } from "lucide-react";
-import { api, type AgentToolAvailability, type AgentToolKind } from "@/lib/api";
+import { AlertCircle, BarChart3, BookOpenText, ExternalLink, GitBranch, Loader2, Network, RefreshCw, Route, ScrollText, ShipWheel, Wrench, type LucideIcon } from "lucide-react";
+import { api, type AgentToolsetAvailability, type AgentToolKind } from "@/lib/api";
 import { TopBar } from "@/components/TopBar";
 import { RetryableError } from "@/components/RetryableError";
 import { SkCard } from "@/components/Skeleton";
 
-const GROUPS = ["versus", "common", "k8s"] as const;
-const GROUP_LABELS = { versus: "Versus", common: "Common", k8s: "Kubernetes" };
-
-function isVisibleTool(tool: AgentToolAvailability) {
-  return !(tool.group === "versus" && tool.state === "available" && tool.enabled);
-}
+const SECTIONS = ["connector", "datasource", "common"] as const;
+const SECTION_LABELS = { connector: "Connectors", datasource: "Data Source Tools", common: "Common" };
+const ICONS: Record<string, LucideIcon> = {
+  kubernetes: ShipWheel,
+  git: GitBranch,
+  logs: ScrollText,
+  metrics: BarChart3,
+  traces: Route,
+  runbook: BookOpenText,
+  dependencies: Network,
+  common: Wrench,
+};
 
 export function AgentToolsPage() {
   const [agent, setAgent] = useState<AgentToolKind>("chat");
   const queryClient = useQueryClient();
-  const tools = useQuery({
-    queryKey: ["agent-tools", agent],
-    queryFn: () => api.listAgentTools(agent),
+  const toolsets = useQuery({
+    queryKey: ["agent-toolsets", agent],
+    queryFn: () => api.listAgentToolsets(agent),
     retry: false,
   });
   const toggle = useMutation({
-    mutationFn: (input: { tool: AgentToolAvailability; enabled: boolean }) =>
-      api.setAgentToolEnabled(agent, input.tool.name, input.enabled),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent-tools", agent] }),
+    mutationFn: (input: { toolset: AgentToolsetAvailability; enabled: boolean }) =>
+      api.setAgentToolsetEnabled(agent, input.toolset.id, input.enabled),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent-toolsets", agent] }),
   });
-  // Common and Kubernetes metadata are complete, so filtering healthy default
-  // Versus tools alone cannot produce the empty state.
-  const visibleTools = tools.data?.filter(isVisibleTool);
 
   return (
     <main className="min-w-0 flex-1 overflow-auto">
@@ -56,9 +59,9 @@ export function AgentToolsPage() {
           </div>
         </div>
 
-        {tools.isPending && <div className="space-y-4" aria-label="Loading tools"><SkCard lines={3} /><SkCard lines={3} /></div>}
-        {tools.isError && <RetryableError error={tools.error} onRetry={() => tools.refetch()} retrying={tools.isRefetching} context="Couldn't load agent tools" />}
-        {visibleTools?.length === 0 && (
+        {toolsets.isPending && <div className="space-y-4" aria-label="Loading tools"><SkCard lines={3} /><SkCard lines={3} /></div>}
+        {toolsets.isError && <RetryableError error={toolsets.error} onRetry={() => toolsets.refetch()} retrying={toolsets.isRefetching} context="Couldn't load agent tools" />}
+        {toolsets.data?.length === 0 && (
           <div className="card p-8 text-center text-sm text-ink-300">
             <Wrench className="mx-auto mb-3" aria-hidden="true" />
             No tools are known to this build.
@@ -71,17 +74,17 @@ export function AgentToolsPage() {
           </div>
         )}
 
-        {GROUPS.map((group) => {
-          const rows = visibleTools?.filter((tool) => tool.group === group) ?? [];
+        {SECTIONS.map((section) => {
+          const rows = toolsets.data?.filter((toolset) => toolset.section === section) ?? [];
           if (rows.length === 0) return null;
           return (
-            <section key={group} aria-labelledby={`tools-${group}`}>
+            <section key={section} aria-labelledby={`tools-${section}`}>
               <div className="mb-3 flex items-baseline justify-between border-b border-ink-700 pb-2">
-                <h2 id={`tools-${group}`} className="text-sm font-semibold text-ink-100">{GROUP_LABELS[group]}</h2>
-                <span className="text-xs text-ink-400">{rows.length} tools</span>
+                <h2 id={`tools-${section}`} className="text-sm font-semibold text-ink-100">{SECTION_LABELS[section]}</h2>
+                <span className="text-xs text-ink-400">{rows.length} {rows.length === 1 ? "toolset" : "toolsets"}</span>
               </div>
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {rows.map((tool) => <ToolCard key={tool.name} tool={tool} agent={agent} pending={toggle.isPending && toggle.variables?.tool.name === tool.name} onToggle={(enabled) => toggle.mutate({ tool, enabled })} />)}
+                {rows.map((toolset) => <ToolsetCard key={toolset.id} toolset={toolset} agent={agent} pending={toggle.isPending && toggle.variables?.toolset.id === toolset.id} onToggle={(enabled) => toggle.mutate({ toolset, enabled })} />)}
               </div>
             </section>
           );
@@ -91,40 +94,45 @@ export function AgentToolsPage() {
   );
 }
 
-function ToolCard({ tool, agent, pending, onToggle }: { tool: AgentToolAvailability; agent: AgentToolKind; pending: boolean; onToggle: (enabled: boolean) => void }) {
-  const satisfied = tool.state === "available" || tool.state === "disabled_by_operator";
+function ToolsetCard({ toolset, agent, pending, onToggle }: { toolset: AgentToolsetAvailability; agent: AgentToolKind; pending: boolean; onToggle: (enabled: boolean) => void }) {
+  const satisfied = toolset.state === "available" || toolset.state === "disabled_by_operator";
   const toggleDisabled = !satisfied || pending;
-  const unavailableExplanation = !satisfied ? `${tool.display_name} is unavailable: ${tool.reason}` : undefined;
+  const unavailableExplanation = !satisfied ? `${toolset.display_name} is unavailable: ${toolset.reason}` : undefined;
+  const showAvailabilityAction = toolset.action && !(toolset.section === "common" && toolset.action.startsWith("/"));
+  const Icon = ICONS[toolset.icon_key] ?? Wrench;
   return (
     <article className="card flex min-h-52 flex-col p-4">
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-ink-50">{tool.display_name}</h3>
-          <code className="text-2xs text-ink-400">{tool.name}</code>
+        <div className="flex min-w-0 gap-3">
+          <Icon size={18} className="mt-0.5 shrink-0 text-accent-300" aria-hidden="true" />
+          <div>
+            <h3 className="text-sm font-semibold text-ink-50">{toolset.display_name}</h3>
+            <span className="text-2xs text-ink-400">{toolset.child_count} {toolset.child_count === 1 ? "tool" : "tools"}</span>
+          </div>
         </div>
         <label className="relative inline-flex shrink-0 items-center gap-2 text-xs text-ink-300">
-          <span className="sr-only">Enable {tool.display_name} for {agent}</span>
+          <span className="sr-only">Enable {toolset.display_name} for {agent}</span>
           {pending && <Loader2 size={14} className="animate-spin" aria-hidden="true" />}
           <input
             type="checkbox"
             className="h-4 w-4 accent-good"
-            checked={tool.enabled && satisfied}
+            checked={toolset.enabled && satisfied}
             disabled={toggleDisabled}
             aria-disabled={toggleDisabled}
-            aria-describedby={!satisfied ? `${tool.name}-unavailable` : undefined}
+            aria-describedby={!satisfied ? `${toolset.id}-unavailable` : undefined}
             onChange={(event) => onToggle(event.target.checked)}
           />
         </label>
       </div>
-      <p className="mt-3 text-xs leading-5 text-ink-300">{tool.description}</p>
+      <p className="mt-3 text-xs leading-5 text-ink-300">{toolset.description}</p>
       <div className="mt-auto pt-4">
-        <div className="text-2xs font-semibold uppercase text-ink-400">{tool.state.replaceAll("_", " ")}</div>
-        <p id={!satisfied ? `${tool.name}-unavailable` : undefined} className="mt-1 text-xs leading-5 text-ink-200">{unavailableExplanation ?? tool.reason}</p>
-        {tool.health && <p className="mt-1 text-2xs text-ink-400">Health: {tool.health}</p>}
+        <div className="text-2xs font-semibold uppercase text-ink-400">{toolset.state.replaceAll("_", " ")}</div>
+        <p id={!satisfied ? `${toolset.id}-unavailable` : undefined} className="mt-1 text-xs leading-5 text-ink-200">{unavailableExplanation ?? toolset.reason}</p>
+        {toolset.health && <p className="mt-1 text-2xs text-ink-400">Health: {toolset.health}</p>}
         <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-xs">
-          {tool.ui_path && tool.state !== "needs_license" && <Link className="inline-flex items-center gap-1 text-accent-300 hover:underline" to={tool.ui_path}>Open tool</Link>}
-          {tool.docs_url && <a className="inline-flex items-center gap-1 text-accent-300 hover:underline" href={tool.docs_url} target="_blank" rel="noopener noreferrer">Documentation <ExternalLink size={12} aria-hidden="true" /></a>}
-          {tool.action && <a className="inline-flex items-center gap-1 text-accent-300 hover:underline" href={tool.action} target={tool.action.startsWith("http") ? "_blank" : undefined} rel={tool.action.startsWith("http") ? "noopener noreferrer" : undefined}>{tool.action_label} <ExternalLink size={12} aria-hidden="true" /></a>}
+          {toolset.ui_path && !["needs_license", "needs_permission"].includes(toolset.state) && <Link className="inline-flex items-center gap-1 text-accent-300 hover:underline" to={toolset.ui_path}>Open tool</Link>}
+          {toolset.docs_url && <a className="inline-flex items-center gap-1 text-accent-300 hover:underline" href={toolset.docs_url} target="_blank" rel="noopener noreferrer">Documentation <ExternalLink size={12} aria-hidden="true" /></a>}
+          {showAvailabilityAction && <a className="inline-flex items-center gap-1 text-accent-300 hover:underline" href={toolset.action} target={toolset.action.startsWith("http") ? "_blank" : undefined} rel={toolset.action.startsWith("http") ? "noopener noreferrer" : undefined}>{toolset.action_label} <ExternalLink size={12} aria-hidden="true" /></a>}
         </div>
       </div>
     </article>

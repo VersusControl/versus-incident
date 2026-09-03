@@ -29,6 +29,7 @@
   - [AI Analyze](/agent/ai-analyze-mode)
   - Tools
     - [Tool Reference](/agent/tools/tools)
+    - [Kubernetes Connector](/agent/tools/kubernetes)
     - [Recent Changes](/agent/tools/recent-changes)
     - [Find Runbook](/agent/tools/find-runbook)
   - [Incidents Report](/agent/incident-report)
@@ -84,6 +85,7 @@
   - [Integration: incident.io](/oncall/how-to-integration-incident-io)
 
 - Examples
+  - [EKS with IRSA](/examples/eks-irsa-kubernetes-reader)
   - [SigNoz Logs](/examples/signoz-logs)
   - [Alertmanager](/examples/alertmanager)
   - [FluentBit](/examples/fluent-bit)
@@ -98,6 +100,6 @@
   - [Regex](/agent/regex)
 
 - Migration
-  - [OSS to Enterprise](/migration/migration-oss-to-enterprise.md)
+  - [v1.4.25](/migration/migration-v1.4.25.md)
   - [v1.4.22](/migration/migration-v1.4.22.md)
   - [v1.4.13](/migration/migration-v1.4.13.md)

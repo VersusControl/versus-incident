@@ -1837,6 +1837,7 @@ export type AgentToolState =
   | "needs_datasource"
   | "needs_integration"
   | "needs_capability"
+  | "needs_permission"
   | "unhealthy"
   | "disabled_by_operator"
   | "available";
@@ -1862,6 +1863,126 @@ export interface AgentToolAvailability {
   health?: string;
 }
 
+export interface AgentToolsetAvailability {
+  id: string;
+  section: "connector" | "datasource" | "common";
+  display_name: string;
+  description: string;
+  icon_key: string;
+  docs_url?: string;
+  ui_path?: string;
+  visibility: "always" | "non_default";
+  state: AgentToolState;
+  reason: string;
+  action: string;
+  action_label: string;
+  enabled: boolean;
+  child_count: number;
+  requirement: AgentToolAvailability["requirement"];
+  health?: string;
+}
+
+export interface KubernetesOverview {
+  connector: string;
+  cluster_id: string;
+  observed_at: string;
+  nodes: number;
+  ready_nodes: number;
+  pods: number;
+  running_pods: number;
+  namespaces: number;
+  active_namespaces: number;
+  workloads: number;
+  warnings: number;
+  requested_cpu?: string;
+  limited_cpu?: string;
+  allocatable_cpu?: string;
+  requested_memory?: string;
+  limited_memory?: string;
+  allocatable_memory?: string;
+  usage_cpu?: string;
+  usage_memory?: string;
+  usage_source?: "node_metrics" | "pod_metrics" | "unavailable" | null;
+  metrics_status?: "available" | "stale" | "unavailable" | null;
+  metrics_observed_at?: string;
+  metrics_fresh: boolean;
+  truncated: boolean;
+  omitted_categories?: string[] | null;
+  partial_failures?: { resource_id?: string; scope?: string; group_version?: string; class: string }[] | null;
+}
+
+export interface KubernetesResource {
+  resource_id: string;
+  api_version?: string;
+  kind: string;
+  namespace?: string;
+  name: string;
+  uid?: string;
+  labels?: Record<string, string>;
+  summary?: Record<string, unknown> | null;
+  conditions?: Array<{ type: string; status: string; reason?: string }> | null;
+  projection_truncated?: string[] | null;
+}
+
+export interface KubernetesTopology {
+  nodes: { id: string; kind: string; namespace?: string; name: string; status?: string }[] | null;
+  edges: { from: string; to: string; type: string; intent?: boolean }[] | null;
+  node_cap: number;
+  edge_cap: number;
+  truncated: boolean;
+  omitted_categories?: string[] | null;
+  partial_failures?: { resource_id?: string; class: string }[] | null;
+}
+
+export interface KubernetesMetricsSourceStatus {
+  availability: "available" | "stale" | "unavailable";
+  fresh: boolean;
+  total: number;
+  cpu?: string;
+  memory?: string;
+  observed_at?: string;
+}
+
+export interface KubernetesUsage {
+  observed_at: string;
+  availability: "available" | "stale" | "unavailable";
+  fresh: boolean;
+  pod_metrics: KubernetesMetricsSourceStatus;
+  node_metrics: KubernetesMetricsSourceStatus;
+  pods?: Array<{ kind: "Pod"; namespace?: string; name: string; timestamp?: string; window?: string; cpu?: string; memory?: string }> | null;
+  nodes?: Array<{ kind: "Node"; name: string; timestamp?: string; window?: string; cpu?: string; memory?: string }> | null;
+  truncated: boolean;
+  omitted_categories?: string[];
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+}
+
+export interface KubernetesWorkload {
+  resource_id: string;
+  kind: string;
+  namespace?: string;
+  name: string;
+  desired?: number;
+  current?: number;
+  ready?: number;
+  available?: number;
+  unavailable?: number;
+  succeeded?: number;
+  failed?: number;
+  active?: number;
+  generation?: number;
+  observed_generation?: number;
+  update_strategy?: string;
+  conditions?: Array<{ type: string; status: string; reason?: string }>;
+  containers?: Array<{ name: string; image?: string; probes?: string[]; requests?: Record<string, string>; limits?: Record<string, string> }>;
+  pods?: Array<{ name: string; phase?: string; node?: string; restart_count: number }>;
+  nodes?: string[];
+  affinity?: string[];
+  topology_spread?: string[];
+  truncated: boolean;
+  omitted_categories?: string[];
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+}
+
 export const api = {
   listAgentTools: (agent: AgentToolKind) =>
     request<AgentToolAvailability[]>(`/api/admin/agent/tools?agent=${agent}`),
@@ -1869,6 +1990,32 @@ export const api = {
     request<{ agent: AgentToolKind; name: string; enabled: boolean; changed: boolean }>(
       `/api/admin/agent/tools/${agent}/${encodeURIComponent(name)}`,
       { method: "PUT", body: JSON.stringify({ enabled }) },
+    ),
+  listAgentToolsets: (agent: AgentToolKind) =>
+    request<AgentToolsetAvailability[]>(`/api/admin/agent/toolsets?agent=${agent}`),
+  setAgentToolsetEnabled: (agent: AgentToolKind, id: string, enabled: boolean) =>
+    request<{ agent: AgentToolKind; id: string; enabled: boolean; changed: boolean }>(
+      `/api/admin/agent/toolsets/${agent}/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify({ enabled }) },
+    ),
+  kubernetesOverview: () => request<KubernetesOverview>("/api/admin/kubernetes/overview"),
+  kubernetesTopology: (namespace = "") => request<KubernetesTopology>(`/api/admin/kubernetes/topology?namespace=${encodeURIComponent(namespace)}`),
+  kubernetesUsage: (namespace = "") => request<KubernetesUsage>(`/api/admin/kubernetes/usage?namespace=${encodeURIComponent(namespace)}`),
+  kubernetesWorkloads: (namespace = "") =>
+    request<{ items: KubernetesResource[] | null; truncated: boolean; omitted_categories?: string[] | null; partial_failures?: Array<{ resource_id?: string; class: string }> | null }>(`/api/admin/kubernetes/workloads?namespace=${encodeURIComponent(namespace)}&limit=100`),
+  kubernetesWorkload: (kind: string, namespace: string, name: string) =>
+    request<KubernetesWorkload>(`/api/admin/kubernetes/workloads/${encodeURIComponent(kind)}/${encodeURIComponent(name)}?namespace=${encodeURIComponent(namespace)}`),
+  kubernetesSearch: (namespace: string, query: string) =>
+    request<{ items: KubernetesResource[] | null; truncated: boolean; omitted_categories?: string[] | null; partial_failures?: Array<{ resource_id?: string; class: string }> | null }>(
+      `/api/admin/kubernetes/resources/search?namespace=${encodeURIComponent(namespace)}&q=${encodeURIComponent(query)}`,
+    ),
+  kubernetesEvents: (namespace = "") =>
+    request<{ items: KubernetesResource[] | null; truncated: boolean; partial_failures?: Array<{ resource_id?: string; class: string }> | null }>(
+      `/api/admin/kubernetes/events?namespace=${encodeURIComponent(namespace)}&type=Warning&limit=20`,
+    ),
+  kubernetesDescribe: (resourceId: string, namespace: string, name: string) =>
+    request<{ resource: KubernetesResource; related_resources?: Array<{ kind: string; namespace?: string; name: string }>; events?: KubernetesResource[]; partial_failures?: Array<{ resource_id?: string; class: string }> }>(
+      `/api/admin/kubernetes/resources/${encodeURIComponent(resourceId)}/${encodeURIComponent(name)}/describe?namespace=${encodeURIComponent(namespace)}`,
     ),
   status: () => request<Status>("/api/agent/status"),
   listPatterns: () =>

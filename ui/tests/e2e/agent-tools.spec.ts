@@ -67,15 +67,18 @@ async function restoreVersusSettings(
   throw new Error(message);
 }
 
-async function overrideToolState(page: import("@playwright/test").Page, agent: AgentKind, name: string, state: string) {
-  await page.route(`**/api/admin/agent/tools?agent=${agent}`, async (route) => {
+async function overrideToolStates(page: import("@playwright/test").Page, agent: AgentKind, overrides: Record<string, { state: string; reason?: string }>) {
+  await page.route(`**/api/admin/agent/toolsets?agent=${agent}`, async (route) => {
     const response = await route.fetch();
     if (!response.ok()) {
       await route.fulfill({ response });
       return;
     }
-    const rows = await response.json() as Array<ToolSetting & Record<string, unknown>>;
-    await route.fulfill({ response, json: rows.map((row) => row.name === name ? { ...row, state } : row) });
+    const rows = await response.json() as Array<Record<string, unknown>>;
+    await route.fulfill({ response, json: rows.map((row) => {
+      const override = overrides[String(row.id)];
+      return override ? { ...row, ...override } : row;
+    }) });
   });
 }
 
@@ -87,35 +90,43 @@ test.describe("Agent tool catalog", () => {
     let primaryError: unknown;
 
     try {
-      await overrideToolState(page, "chat", "query_metrics", "needs_license");
+      await overrideToolStates(page, "chat", {
+        metrics: { state: "needs_license" },
+        kubernetes: { state: "needs_permission", reason: "infrastructure:view permission is required" },
+      });
       await enableVersusDefaults(page, chatSettings);
       await enableVersusDefaults(page, analyzeSettings);
       await page.reload();
       await expect(page.getByRole("heading", { name: "Agent tools" })).toBeVisible();
       const groups = page.locator("main section > div:first-child h2");
-      await expect(groups).toHaveText(["Common", "Kubernetes"]);
-      await expect(page.locator("main article")).toHaveCount(11);
+      await expect(groups).toHaveText(["Connectors", "Data Source Tools", "Common"]);
+      await expect(page.locator("main article")).toHaveCount(7);
       await expect(page.getByText("get_incident", { exact: true })).toHaveCount(0);
-      await expect(page.getByText("get_cluster_overview", { exact: true })).toBeVisible();
-      await expect(page.getByText("needs integration", { exact: true }).first()).toBeVisible();
-      await expect(page.getByRole("link", { name: "Connect Kubernetes" }).first()).toBeVisible();
+      await expect(page.getByText("get_cluster_overview", { exact: true })).toHaveCount(0);
+      await expect(page.getByRole("heading", { name: "Kubernetes" })).toBeVisible();
+      await expect(page.getByText("9 tools", { exact: true })).toBeVisible();
+      await expect(page.getByText("needs permission", { exact: true })).toBeVisible();
+      await expect(page.getByText("Kubernetes is unavailable: infrastructure:view permission is required", { exact: true })).toBeVisible();
 
-      const unavailableToggle = page.getByLabel("Enable Cluster overview for chat");
+      const unavailableToggle = page.getByLabel("Enable Kubernetes for chat");
       await expect(unavailableToggle).toBeVisible();
       await expect(unavailableToggle).not.toBeChecked();
       await expect(unavailableToggle).toBeDisabled();
 
       const cards = page.locator("main article");
-      await expect(page.getByRole("link", { name: "Documentation" })).toHaveCount(11);
+      await expect(page.getByRole("link", { name: "Documentation" })).toHaveCount(7);
       const docs = page.getByRole("link", { name: "Documentation" });
       for (let index = 0; index < await docs.count(); index++) {
         await expect(docs.nth(index)).toHaveAttribute("target", "_blank");
         await expect(docs.nth(index)).toHaveAttribute("rel", "noopener noreferrer");
       }
-      const runbookCard = cards.filter({ hasText: "find_runbook" });
+      const runbookCard = cards.filter({ hasText: "Find runbook" });
       await expect(runbookCard.getByRole("link", { name: "Open tool" })).toHaveAttribute("href", "/agent/runbooks");
-      const licensedCard = cards.filter({ hasText: "query_metrics" });
+      const licensedCard = cards.filter({ hasText: "Metrics" });
       await expect(licensedCard.getByRole("link", { name: "Open tool" })).toHaveCount(0);
+      const permissionCard = cards.filter({ hasText: "Kubernetes" });
+      await expect(permissionCard.getByRole("link", { name: "Open tool" })).toHaveCount(0);
+      await expect(permissionCard.getByRole("link", { name: "Documentation" })).toBeVisible();
 
       const nav = primaryNav(page);
       await expect(nav.getByRole("link", { name: "Runbooks", exact: true })).toHaveCount(0);
@@ -155,9 +166,9 @@ test.describe("Agent tool catalog", () => {
       const disable = await setToolEnabled(page, "chat", "get_incident", false);
       expect(disable, `${disable.status} ${disable.body}`).toMatchObject({ ok: true });
       await page.reload();
-      await expect(page.getByText("get_incident", { exact: true })).toBeVisible();
-      await expect(page.getByRole("heading", { name: "Versus" })).toBeVisible();
-      await expect(page.getByLabel("Enable Incident details for chat")).toBeEnabled();
+      await expect(page.getByText("get_incident", { exact: true })).toHaveCount(0);
+      await expect(page.getByRole("heading", { name: "Versus core" })).toBeVisible();
+      await expect(page.getByLabel("Enable Versus core for chat")).toBeEnabled();
     } catch (error) {
       primaryError = error;
       throw error;
@@ -179,7 +190,7 @@ test.describe("Agent tool catalog", () => {
       await page.reload();
       await expect(page.getByRole("heading", { name: "Agent tools" })).toBeVisible();
       const cards = page.locator("main article");
-      await expect(cards).toHaveCount(11);
+      await expect(cards).toHaveCount(7);
       const first = await cards.first().boundingBox();
       const second = await cards.nth(1).boundingBox();
       expect(first).not.toBeNull();

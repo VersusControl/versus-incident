@@ -16,6 +16,7 @@ const (
 	StateNeedsDataSource    State = "needs_datasource"
 	StateNeedsIntegration   State = "needs_integration"
 	StateNeedsCapability    State = "needs_capability"
+	StateNeedsPermission    State = "needs_permission"
 	StateUnhealthy          State = "unhealthy"
 	StateDisabledByOperator State = "disabled_by_operator"
 	StateAvailable          State = "available"

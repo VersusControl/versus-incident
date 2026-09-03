@@ -39,6 +39,71 @@ type ToolsConfig struct {
 	QueryMetrics QueryMetricsToolConfig `mapstructure:"query_metrics"`
 	// QueryTraces configures the `query_traces` tool's trace-backend reader.
 	QueryTraces QueryTracesToolConfig `mapstructure:"query_traces"`
+	// Kubernetes configures the shared read-only Kubernetes connector.
+	Kubernetes KubernetesToolConfig `mapstructure:"kubernetes"`
+}
+
+// KubernetesToolConfig configures one read-only Kubernetes API connection.
+type KubernetesToolConfig struct {
+	Endpoint             string               `mapstructure:"endpoint"`
+	TokenFile            string               `mapstructure:"token_file"`
+	CAFile               string               `mapstructure:"ca_file"`
+	CAData               string               `mapstructure:"ca_data"`
+	ServerName           string               `mapstructure:"server_name"`
+	Auth                 KubernetesAuthConfig `mapstructure:"auth"`
+	ClusterID            string               `mapstructure:"cluster_id"`
+	CredentialID         string               `mapstructure:"credential_id"`
+	Timeout              string               `mapstructure:"timeout"`
+	DiscoveryTTL         string               `mapstructure:"discovery_ttl"`
+	AllowLoopback        bool                 `mapstructure:"allow_loopback"`
+	AllowPrivateNetworks bool                 `mapstructure:"allow_private_networks"`
+	EndpointCIDRs        []string             `mapstructure:"endpoint_cidrs"`
+}
+
+// KubernetesAuthConfig selects exactly one Kubernetes authentication source.
+// Empty Mode preserves the legacy endpoint plus top-level token_file behavior.
+type KubernetesAuthConfig struct {
+	Mode              string                            `mapstructure:"mode"`
+	Token             string                            `mapstructure:"token"`
+	TokenFile         string                            `mapstructure:"token_file"`
+	ClientCertificate KubernetesClientCertificateConfig `mapstructure:"client_certificate"`
+	Kubeconfig        KubernetesKubeconfigConfig        `mapstructure:"kubeconfig"`
+	EKS               KubernetesEKSConfig               `mapstructure:"eks"`
+	AKS               KubernetesAKSConfig               `mapstructure:"aks"`
+	GKE               KubernetesGKEConfig               `mapstructure:"gke"`
+}
+
+type KubernetesClientCertificateConfig struct {
+	CertificateFile string `mapstructure:"certificate_file"`
+	KeyFile         string `mapstructure:"key_file"`
+	CertificateData string `mapstructure:"certificate_data"`
+	KeyData         string `mapstructure:"key_data"`
+}
+
+type KubernetesKubeconfigConfig struct {
+	Path    string `mapstructure:"path"`
+	Context string `mapstructure:"context"`
+}
+
+type KubernetesEKSConfig struct {
+	ClusterName string `mapstructure:"cluster_name"`
+	Region      string `mapstructure:"region"`
+	RoleARN     string `mapstructure:"role_arn"`
+	Profile     string `mapstructure:"profile"`
+}
+
+type KubernetesAKSConfig struct {
+	CredentialMode     string `mapstructure:"credential_mode"`
+	ServerID           string `mapstructure:"server_id"`
+	TenantID           string `mapstructure:"tenant_id"`
+	ClientID           string `mapstructure:"client_id"`
+	ClientSecret       string `mapstructure:"client_secret"`
+	FederatedTokenFile string `mapstructure:"federated_token_file"`
+	Environment        string `mapstructure:"environment"`
+}
+
+type KubernetesGKEConfig struct {
+	CredentialsFile string `mapstructure:"credentials_file"`
 }
 
 // FindRunbookToolConfig configures the read-only `find_runbook`

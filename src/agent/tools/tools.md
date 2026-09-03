@@ -1,9 +1,18 @@
 # Tool Reference
 
 The AI SRE Agent uses read-only tools to gather evidence before it answers.
-Tools are organized into the same three groups in Chat, Analyze, and the Tool
-catalog: `versus`, `common`, and `k8s`. Chat and Analyze have independent tool
-policies, so enabling a tool for one does not enable it for the other.
+The operator catalog is organized as Connectors, Data Source Tools, and Common.
+Connector and data-source cards control their hidden model tools atomically;
+Common tools remain individual cards. Chat and Analyze have independent
+policies. Versus self-knowledge is internal and appears only as one recovery
+card when a legacy child policy disabled it.
+
+During the one-release grouped-policy compatibility window, deployments must
+retain legacy child-deny fields until every old replica has been retired. A
+group change uses a legacy transition marker and child denies around the grouped
+policy CAS; the two blobs are not atomically committed together. Interrupted or
+conflicting transitions therefore remain disabled for both old and new replicas
+and must be retried by the same requested operation before another group change.
 
 Every tool call, including its arguments and result, is recorded with the AI
 response for audit. A tool reads and ranks data; it never mutates cluster state,
@@ -82,18 +91,55 @@ about upstream causes and downstream impact. Configure the graph in
 
 ## Kubernetes tools
 
-The `k8s` group is planned but not yet implemented. The catalog can show the
-group as unavailable, but Chat and Analyze cannot call its tools:
-`get_cluster_overview`, `list_workloads`, `get_workload`,
-`get_k8s_topology`, and `list_k8s_events`.
+See the [Kubernetes Connector](kubernetes.md) guide for authentication modes,
+RBAC, private endpoint policy, refresh behavior, and troubleshooting.
 
-Use this section as the documentation target for the planned group until the
-Kubernetes guides are published.
+The Kubernetes connector provides one operator card and read-only
+model tools: `get_cluster_overview`, `discover_k8s_resources`,
+`query_k8s_resources`, `get_k8s_resource`, `list_workloads`, `get_workload`,
+`get_k8s_topology`, `list_k8s_events`, and `get_pod_logs`.
+
+Discovery assigns a canonical `resource_id` to each readable group, version,
+resource, and scope. API and model callers use that identifier rather than
+constructing Kubernetes paths or relying on ambiguous Kind names. Missing
+optional APIs and RBAC denials are reported as unavailable or partial evidence,
+not as healthy empty results.
+
+Search is cross-kind: the service searches names across the bounded discovered
+readable registry, applies per-kind and total result budgets, ranks exact names
+first, and declares partial or truncated results. Workload listing covers
+Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, and Pods. Overview reads
+all pages up to its declared collection cap and reports all workload counts,
+warning events, and exact CPU/memory request, limit, and allocatable quantities.
+Cluster utilization uses complete Node Metrics totals when available and falls
+back to Pod Metrics only when node samples are absent or unavailable. The
+`usage_source` field and partial/truncated metadata identify which evidence was
+used and whether the selected collection was incomplete.
+
+Resource output is projected before it reaches the API or model. Secret and
+ConfigMap values, literal environment values, command payloads, managed fields,
+last-applied configuration, credentials, and arbitrary custom-resource payloads
+are not returned. Pod logs are limited to one pod/container request and bounded
+by time, lines, and bytes. Projection collection caps, aggregate response-size
+caps, and log truncation are explicit in their responses; Search and Describe
+attribute omitted evidence with `encoded_result_size` and partial metadata.
+
+The connector exposes read APIs under `/api/admin/kubernetes` for overview,
+discovery, resource search/list/get/describe, topology, events, pod logs, and
+optional usage. The UI is at `/agent/kubernetes`. Both require
+`infrastructure:view`. There are no apply, patch, delete, exec, terminal, proxy,
+rollout, or Helm paths.
+
+The agent tool catalog intentionally owns connector navigation. Its Kubernetes
+card's **Open** action routes to `/agent/kubernetes`; the global sidebar does not
+duplicate connector-specific destinations. The page provides cluster freshness,
+namespace scope, health and capacity, warning events, cross-kind search,
+resource describe, and bounded typed topology.
 
 ## Tool configuration
 
 Configuration for `describe_dependencies`, `recent_changes`, `find_runbook`,
-`query_metrics`, and `query_traces` lives in an optional **`tools.yaml`** file
+`query_metrics`, `query_traces`, and Kubernetes lives in an optional **`tools.yaml`** file
 placed next to `config.yaml`. `tools.yaml` provides data and credentials; it is
 not a tool allow-list.
 
@@ -133,6 +179,10 @@ tools:
 ```
 
 See [Traces](../data-sources/traces.md) for authentication, TLS, and tiering.
+
+### Configure Kubernetes
+
+See [Kubernetes Connector](kubernetes.md) for complete configuration examples.
 
 ### Configure `describe_dependencies`
 
@@ -261,6 +311,13 @@ tools:
   query_traces:
     tempo:
       address: http://tempo:3200
+
+  kubernetes:
+    auth:
+      mode: kubeconfig
+      kubeconfig:
+        path: /run/kube/config
+        context: production
 ```
 
 ## Running with Docker

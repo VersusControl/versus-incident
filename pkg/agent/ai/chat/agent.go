@@ -21,6 +21,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
+	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
@@ -47,8 +48,8 @@ type Options struct {
 
 type Agent struct {
 	cfg          config.AgentAIConfig
-	runner       *adk.Runner
-	holder       *einowrap.Holder[*adk.Runner]
+	chatModel    model.ToolCallingChatModel
+	holder       *einowrap.Holder[model.ToolCallingChatModel]
 	tools        []core.Tool
 	toolDisplays map[string]string
 	toolTimeout  time.Duration
@@ -82,40 +83,30 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 		displays[value.Name()] = core.ToolDisplayName(value)
 	}
 	agent := &Agent{cfg: cfg, tools: filtered, toolDisplays: displays, toolTimeout: toolTimeout, toolProvider: opts.ToolProvider, seedProvider: opts.SeedProvider}
-	build := func(ctx context.Context, chatModel model.ToolCallingChatModel) (*adk.Runner, error) {
-		return agent.buildRunner(ctx, chatModel)
-	}
 	if opts.ChatModel != nil {
-		runner, err := build(ctx, opts.ChatModel)
-		if err != nil {
+		if _, err := agent.buildRunner(ctx, opts.ChatModel); err != nil {
 			return nil, err
 		}
-		agent.runner = runner
+		agent.chatModel = opts.ChatModel
 		return agent, nil
 	}
-	agent.holder = einowrap.NewModelHolder(cfg, einowrap.Options{
+	agent.holder = einowrap.NewToolCallingChatModelHolder(cfg, einowrap.Options{
 		HTTPClient: opts.HTTPClient, BaseURL: opts.BaseURL, Timeout: opts.Timeout, AuthKeyFunc: opts.AuthKeyFunc,
-	}, opts.Runtime, func(ctx context.Context, resolved config.AgentAIConfig, modelOptions einowrap.Options) (*adk.Runner, error) {
-		chatModel, err := einowrap.NewToolCallingChatModel(ctx, resolved, modelOptions)
-		if err != nil {
-			return nil, err
-		}
-		return build(ctx, chatModel)
-	})
-	if _, err := agent.holder.Get(ctx); err != nil {
+	}, opts.Runtime)
+	chatModel, err := agent.holder.Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := agent.buildRunner(ctx, chatModel); err != nil {
 		return nil, err
 	}
 	return agent, nil
 }
 
 func (agent *Agent) buildRunner(ctx context.Context, chatModel model.ToolCallingChatModel) (*adk.Runner, error) {
-	tools := agent.tools
-	if agent.toolProvider != nil {
-		var err error
-		tools, err = agent.toolProvider()
-		if err != nil {
-			return nil, fmt.Errorf("chat: load tools: %w", err)
-		}
+	tools, err := agent.availableTools(ctx)
+	if err != nil {
+		return nil, err
 	}
 	einoTools := make([]tool.BaseTool, 0, len(tools))
 	for _, value := range tools {
@@ -146,12 +137,24 @@ func (agent *Agent) buildRunner(ctx context.Context, chatModel model.ToolCalling
 	return adk.NewRunner(ctx, adk.RunnerConfig{Agent: chatAgent, EnableStreaming: true}), nil
 }
 
+func (agent *Agent) availableTools(ctx context.Context) ([]core.Tool, error) {
+	tools := agent.tools
+	if agent.toolProvider != nil {
+		var err error
+		tools, err = agent.toolProvider()
+		if err != nil {
+			return nil, fmt.Errorf("chat: load tools: %w", err)
+		}
+	}
+	return k8stools.FilterAuthorized(ctx, tools), nil
+}
+
 func (agent *Agent) Name() string          { return "chat" }
 func (agent *Agent) Kind() core.AITaskKind { return core.AITaskChat }
 
-func (agent *Agent) currentRunner(ctx context.Context) (*adk.Runner, error) {
-	if agent.runner != nil {
-		return agent.runner, nil
+func (agent *Agent) currentModel(ctx context.Context) (model.ToolCallingChatModel, error) {
+	if agent.chatModel != nil {
+		return agent.chatModel, nil
 	}
 	return agent.holder.Get(ctx)
 }
@@ -163,9 +166,13 @@ func (agent *Agent) RunChatTurn(ctx context.Context, task core.ChatTask) (*core.
 	if task.Kind() != core.AITaskChat || strings.TrimSpace(task.Message) == "" {
 		return nil, fmt.Errorf("chat: invalid task")
 	}
-	runner, err := agent.currentRunner(ctx)
+	chatModel, err := agent.currentModel(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("chat: model unavailable")
+	}
+	runner, err := agent.buildRunner(ctx, chatModel)
+	if err != nil {
+		return nil, fmt.Errorf("chat: tools unavailable")
 	}
 	runCtx := context.WithValue(ctx, turnGuardContextKey{}, newTurnGuard())
 	var sequence int64

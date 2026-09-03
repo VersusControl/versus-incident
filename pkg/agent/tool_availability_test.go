@@ -35,3 +35,14 @@ func TestToolAvailabilityServiceBindsLiveSnapshot(t *testing.T) {
 		t.Fatalf("live status = %+v", got)
 	}
 }
+
+func TestToolAvailabilityServiceBindsIntegrationConstruction(t *testing.T) {
+	service := NewToolAvailabilityService(config.AgentConfig{Tools: config.ToolsConfig{
+		Kubernetes: config.KubernetesToolConfig{Auth: config.KubernetesAuthConfig{Mode: "invalid"}},
+	}}, storage.NewMemory())
+	service.BindIntegrationConstruction("kubernetes", false)
+	got := service.Snapshot(tenancy.DefaultOrgScope()).Integrations["kubernetes"]
+	if !got.Configured || got.Constructed || got.Healthy || got.Health != "configuration" {
+		t.Fatalf("Kubernetes status = %+v", got)
+	}
+}

@@ -276,13 +276,13 @@ describe("ChatPage", () => {
     expect(screen.getByRole("alert").textContent).toContain("stream conflict");
   });
 
-  it("caps composer input by UTF-8 bytes", async () => {
+  it("caps composer input by UTF-8 letters", async () => {
     renderPage("/agent/chat?session=session-1");
     const input = await screen.findByLabelText("Message");
     fireEvent.change(input, { target: { value: "😀".repeat(3000) } });
     const value = (input as HTMLTextAreaElement).value;
     expect(new TextEncoder().encode(value).byteLength).toBe(8192);
-    expect(screen.getByText("0 bytes left")).toBeTruthy();
+    expect(screen.getByText("0 letters left")).toBeTruthy();
   });
 
   it("renders live output only in its session and restores it when switching back", async () => {

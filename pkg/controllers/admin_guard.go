@@ -1,9 +1,11 @@
 package controllers
 
 import (
+	"context"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 
 	"github.com/gofiber/fiber/v2"
@@ -29,6 +31,7 @@ func adminGatewayGuard(c *fiber.Ctx) error {
 	expected := cfg.GatewaySecret
 	got := c.Get("X-Gateway-Secret")
 	if expected != "" && secureEqual(got, expected) {
+		grantCommunityPermissions(c)
 		return c.Next()
 	}
 	if !validGatewaySession(c.Cookies(gatewaySessionCookieName), expected, time.Now()) {
@@ -37,5 +40,26 @@ func adminGatewayGuard(c *fiber.Ctx) error {
 	if !requestIsSafe(c.Method()) && !requestHasSameOrigin(c) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "invalid request origin"})
 	}
+	grantCommunityPermissions(c)
 	return c.Next()
+}
+
+func grantCommunityPermissions(c *fiber.Ctx) {
+	permission := string(core.PermissionInfrastructureView)
+	if _, explicit := middleware.RequestPermission(c, permission); !explicit {
+		middleware.SetRequestPermission(c, permission, true)
+	}
+}
+
+func callerAuthorization(c *fiber.Ctx) core.CallerAuthorization {
+	allowed, explicit := middleware.RequestPermission(c, string(core.PermissionInfrastructureView))
+	permissions := make(map[core.Permission]bool)
+	if explicit {
+		permissions[core.PermissionInfrastructureView] = allowed
+	}
+	return core.CallerAuthorization{Authenticated: true, Permissions: permissions}
+}
+
+func callerContext(c *fiber.Ctx, parent context.Context) context.Context {
+	return core.WithCallerAuthorization(parent, callerAuthorization(c))
 }

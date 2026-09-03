@@ -120,7 +120,10 @@ Each item contains `group`, `name`, `display_name`, `description`, `state`,
 `docs_url`, `ui_path`, and `health`. `docs_url` is an absolute HTTPS link to the
 public tool documentation. `ui_path` is a same-application route shown as
 **Open tool** only when the product has a useful matching view. Availability
-`action` remains a separate server-owned link that explains or fixes the tool's
+`action` remains separate from those destinations. Common cards omit internal
+Settings and Admin shortcuts because configuration is documented rather than
+managed from the catalog; external license guidance and Kubernetes setup actions
+remain visible. The server-owned action still explains or fixes the tool's
 current unavailable state. Requirement details identify the requirement `kind` and, where
 applicable, `signal_kind`, `integration`, or `capabilities`. Reasons, actions,
 and health values are bounded server-owned summaries; connection details,
@@ -134,6 +137,8 @@ Tool state is one of:
   the tool for the selected agent.
 - `needs_license` — the configured capability requires an Enterprise
   entitlement that is not active.
+- `needs_permission` — the caller lacks the permission required to use the
+  configured capability.
 - `needs_datasource` — no configured data source provides the required signal.
 - `needs_integration` — the required integration is not configured.
 - `needs_capability` — the active provider does not expose every required
@@ -142,7 +147,8 @@ Tool state is one of:
   health assessment.
 
 Every visible card links to **Documentation** and may also link to an existing
-product surface with **Open tool**. Default-enabled, available Versus cards are
+product surface with **Open tool**. License- and permission-blocked cards suppress
+**Open tool** while retaining their reason and documentation. Default-enabled, available Versus cards are
 hidden because they require no setup or recovery action. Operator-disabled or
 otherwise abnormal Versus cards reappear with their reason and recovery state.
 An operator-disabled card has an interactive checkbox so the tool can be

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	kubernetespkg "github.com/VersusControl/versus-incident/pkg/kubernetes"
 	"gopkg.in/yaml.v3"
 )
 
@@ -88,6 +89,16 @@ type chartScenario struct {
 // providers and the storage backends are each an either/or in one render.
 var chartScenarios = []chartScenario{
 	{name: "defaults"},
+	{name: "kubernetes-in-cluster", args: kubernetesModeArgs("in_cluster")},
+	{name: "kubernetes-token", args: kubernetesModeArgs("token")},
+	{name: "kubernetes-token-file", args: kubernetesModeArgs("token_file")},
+	{name: "kubernetes-client-certificate", args: kubernetesModeArgs("client_certificate")},
+	{name: "kubernetes-kubeconfig", args: kubernetesModeArgs("kubeconfig")},
+	{name: "kubernetes-eks", args: kubernetesModeArgs("eks")},
+	{name: "kubernetes-aks-workload-identity", args: kubernetesModeArgs("aks", "agent.tools.kubernetes.auth.aks.credentialMode=workload_identity")},
+	{name: "kubernetes-aks-client-secret", args: kubernetesModeArgs("aks", "agent.tools.kubernetes.auth.aks.credentialMode=client_secret")},
+	{name: "kubernetes-aks-managed-identity", args: kubernetesModeArgs("aks", "agent.tools.kubernetes.auth.aks.credentialMode=managed_identity")},
+	{name: "kubernetes-gke", args: kubernetesModeArgs("gke")},
 	{name: "coverage", args: []string{"-f", coverageValues}},
 	{name: "coverage-pagerduty", args: []string{"-f", coverageValues, "--set", "oncall.provider=pagerduty"}},
 	{name: "coverage-servicenow", args: []string{"-f", coverageValues, "--set", "oncall.provider=servicenow"}},
@@ -98,6 +109,39 @@ var chartScenarios = []chartScenario{
 	}},
 	{name: "ha", args: []string{"-f", chartDir + "/tests/05-ha.yaml"}},
 	{name: "tools-secrets", args: []string{"-f", chartDir + "/tests/14-tools-secrets.yaml"}},
+}
+
+func kubernetesModeArgs(mode string, overrides ...string) []string {
+	values := []string{
+		"agent.tools.kubernetes.auth.mode=" + mode,
+		"agent.tools.kubernetes.endpoint=https://cluster.example",
+		"agent.tools.kubernetes.caFile=/run/kubernetes/ca.crt",
+		"agent.tools.kubernetes.serverName=cluster.internal",
+		"agent.tools.kubernetes.auth.token=fixture-token",
+		"agent.tools.kubernetes.auth.tokenFile=/run/kubernetes/token",
+		"agent.tools.kubernetes.auth.clientCertificate.certificateFile=/run/kubernetes/client.crt",
+		"agent.tools.kubernetes.auth.clientCertificate.keyFile=/run/kubernetes/client.key",
+		"agent.tools.kubernetes.auth.kubeconfig.path=/run/kubernetes/config",
+		"agent.tools.kubernetes.auth.kubeconfig.context=production",
+		"agent.tools.kubernetes.auth.eks.clusterName=production",
+		"agent.tools.kubernetes.auth.eks.region=us-east-1",
+		"agent.tools.kubernetes.auth.eks.roleARN=arn:aws:iam::123456789012:role/reader",
+		"agent.tools.kubernetes.auth.eks.profile=production",
+		"agent.tools.kubernetes.auth.aks.credentialMode=client_secret",
+		"agent.tools.kubernetes.auth.aks.serverID=api://aks-server",
+		"agent.tools.kubernetes.auth.aks.tenantID=tenant",
+		"agent.tools.kubernetes.auth.aks.clientID=client",
+		"agent.tools.kubernetes.auth.aks.clientSecret=fixture-secret",
+		"agent.tools.kubernetes.auth.aks.federatedTokenFile=/run/azure/token",
+		"agent.tools.kubernetes.auth.aks.environment=government",
+		"agent.tools.kubernetes.auth.gke.credentialsFile=/run/google/credentials.json",
+	}
+	values = append(values, overrides...)
+	args := make([]string, 0, len(values)*2)
+	for _, value := range values {
+		args = append(args, "--set-string", value)
+	}
+	return args
 }
 
 // renderChartFiles runs `helm template` for one scenario and returns the config
@@ -165,6 +209,43 @@ func TestHelmChartRendersLoadableConfig(t *testing.T) {
 			path := filepath.Join(dir, "config.yaml")
 			if _, err := loadConfigFromPath(path); err != nil {
 				t.Errorf("chart shape drift: the config rendered by scenario %q does not unmarshal into the Go config structs: %v\n--- config.yaml ---\n%s", sc.name, err, files["config.yaml"])
+			}
+		})
+	}
+}
+
+func TestHelmChartKubernetesAuthenticationModesAreIsolated(t *testing.T) {
+	requireRenderableChart(t)
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.20.30.40")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "443")
+	for _, scenario := range chartScenarios[1:11] {
+		t.Run(scenario.name, func(t *testing.T) {
+			files := renderChartFiles(t, scenario)
+			directory := t.TempDir()
+			for name, body := range files {
+				if strings.HasSuffix(name, ".yaml") {
+					if err := os.WriteFile(filepath.Join(directory, name), []byte(body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			loaded, err := loadConfigFromPath(filepath.Join(directory, "config.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			configuration := loaded.Agent.Tools.Kubernetes
+			mode := configuration.Auth.Mode
+			if mode != "eks" && configuration.Auth.EKS != (KubernetesEKSConfig{}) || mode != "aks" && configuration.Auth.AKS != (KubernetesAKSConfig{}) || mode != "gke" && configuration.Auth.GKE != (KubernetesGKEConfig{}) {
+				t.Fatalf("mode %q retained inactive cloud auth: %+v", mode, configuration.Auth)
+			}
+			if (mode == "in_cluster" || mode == "kubeconfig") && (configuration.Endpoint != "" || configuration.CAFile != "" || configuration.CAData != "" || configuration.ServerName != "") {
+				t.Fatalf("mode %q retained top-level endpoint/TLS fields: %+v", mode, configuration)
+			}
+			if mode == "in_cluster" {
+				resolved, resolveErr := kubernetespkg.ResolveAuthentication(kubernetespkg.AuthOptions{Mode: mode})
+				if resolveErr != nil || resolved.Endpoint != "https://10.20.30.40:443" {
+					t.Fatalf("rendered in-cluster auth = %+v, %v", resolved, resolveErr)
+				}
 			}
 		})
 	}

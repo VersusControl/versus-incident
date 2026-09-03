@@ -16,7 +16,7 @@ func TestSecurityHeadersAppliesToAPIAndStaticResponses(t *testing.T) {
 	app.Get("/", func(c *fiber.Ctx) error { return c.Type("html").SendString("<!doctype html>") })
 
 	for _, path := range []string{"/api/check", "/"} {
-		request, err := http.NewRequest(http.MethodGet, path, nil)
+		request, err := http.NewRequest(http.MethodGet, "http://example.test"+path, nil)
 		if err != nil {
 			t.Fatalf("build GET %s: %v", path, err)
 		}

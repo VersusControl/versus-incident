@@ -23,9 +23,10 @@ import (
 // own the script: tool_call turns are mixed with a final assistant
 // message holding the AIFinding JSON.
 type fakeChat struct {
-	turns []*schema.Message
-	idx   int
-	tools []*schema.ToolInfo
+	turns        []*schema.Message
+	idx          int
+	tools        []*schema.ToolInfo
+	toolBindings [][]string
 
 	lastMessages []*schema.Message
 
@@ -113,6 +114,11 @@ func splitContent(s string, n int) []string {
 
 func (f *fakeChat) WithTools(t []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	f.tools = t
+	names := make([]string, 0, len(t))
+	for _, info := range t {
+		names = append(names, info.Name)
+	}
+	f.toolBindings = append(f.toolBindings, names)
 	return f, nil
 }
 
@@ -141,6 +147,36 @@ func (s *stubTool) Invoke(_ context.Context, args json.RawMessage) (*core.ToolRe
 		Found: true,
 		Data:  map[string]any{"echo": string(args)},
 	}, nil
+}
+
+func TestAgentResolvesKubernetesAuthorizationForEveryRun(t *testing.T) {
+	for _, permissions := range [][]bool{{true, false, true}, {false, true, false}} {
+		fake := &fakeChat{turns: []*schema.Message{schema.AssistantMessage(`{"title":"t","summary":"s","next_steps":["x"]}`, nil)}}
+		agent, err := New(context.Background(), config.AgentAIConfig{Model: "fake"}, []core.Tool{
+			&stubTool{name: "get_incident"}, &stubTool{name: "get_cluster_overview"},
+		}, Options{ChatModel: fake})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, allowed := range permissions {
+			ctx := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: allowed}})
+			if _, err := agent.Run(ctx, core.AnalyzeTask{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if len(fake.toolBindings) != len(permissions)+1 {
+			t.Fatalf("bindings=%v", fake.toolBindings)
+		}
+		for index, allowed := range permissions {
+			want := "get_incident"
+			if allowed {
+				want += ",get_cluster_overview"
+			}
+			if got := strings.Join(fake.toolBindings[index+1], ","); got != want {
+				t.Fatalf("permissions=%v turn=%d tools=%s want=%s", permissions, index, got, want)
+			}
+		}
+	}
 }
 
 func TestNewRejectsDuplicateToolNames(t *testing.T) {
