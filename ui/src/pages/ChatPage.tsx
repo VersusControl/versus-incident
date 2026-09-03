@@ -410,7 +410,7 @@ function Composer({ value, onChange, onSubmit, running, stopping, onStop, attach
       />
       <div className="flex min-h-12 items-center justify-between gap-2 px-2 pb-2">
         <button type="button" onClick={() => setContextOpen((open) => !open)} aria-expanded={contextOpen} aria-label="Attach context" title="Attach service, incident, or time context" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><Paperclip size={17} /></button>
-        <span id="chat-message-budget" className="ml-auto text-2xs tabular-nums text-ink-400">{MAX_CHAT_MESSAGE_BYTES - messageBytes} bytes left</span>
+        <span id="chat-message-budget" className="ml-auto text-2xs tabular-nums text-ink-400">{MAX_CHAT_MESSAGE_BYTES - messageBytes} letters left</span>
         {running ? (
           <button type="button" onClick={onStop} disabled={stopping} className="inline-flex min-h-11 items-center gap-2 rounded-control bg-ink-100 px-3 text-xs font-semibold text-ink-900 disabled:opacity-60"><CircleStop size={16} />{stopping ? "Stopping" : "Stop"}</button>
         ) : (

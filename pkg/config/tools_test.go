@@ -4,7 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+
+	kubernetespkg "github.com/VersusControl/versus-incident/pkg/kubernetes"
 )
 
 // TestLoadToolsFile asserts the tools.yaml loader parses the root-level
@@ -102,6 +105,141 @@ func TestLoadToolsFile_DescribeDependencies(t *testing.T) {
 	}
 	if svcs[1].Name != "api" || len(svcs[1].DependsOn) != 2 {
 		t.Fatalf("services[1] = %+v", svcs[1])
+	}
+}
+
+func TestLoadToolsFileKubernetesAuthentication(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tools.yaml")
+	content := "tools:\n" +
+		"  kubernetes:\n" +
+		"    endpoint: https://cluster.example\n" +
+		"    auth:\n" +
+		"      mode: token\n" +
+		"      token: ${KUBERNETES_TEST_TOKEN}\n" +
+		"      eks:\n" +
+		"        cluster_name: production\n" +
+		"        region: us-east-1\n" +
+		"      aks:\n" +
+		"        credential_mode: client_secret\n" +
+		"        server_id: api://aks-server\n" +
+		"        tenant_id: tenant\n" +
+		"        client_id: client\n" +
+		"        client_secret: ${AKS_TEST_SECRET}\n" +
+		"      gke:\n" +
+		"        credentials_file: /var/run/secrets/google/credentials.json\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	token := "quoted: #token\\value\nsecond line"
+	clientSecret := "client: #secret\\value\nsecond line"
+	t.Setenv("KUBERNETES_TEST_TOKEN", token)
+	t.Setenv("AKS_TEST_SECRET", clientSecret)
+	got, err := loadToolsFile(path)
+	if err != nil {
+		if strings.Contains(err.Error(), token) || strings.Contains(err.Error(), clientSecret) {
+			t.Fatal("configuration error exposed a secret")
+		}
+		t.Fatal(err)
+	}
+	if got.Kubernetes.Auth.Mode != "token" || got.Kubernetes.Auth.Token != token || got.Kubernetes.Auth.EKS.ClusterName != "production" {
+		t.Fatalf("Kubernetes auth = %+v", got.Kubernetes.Auth)
+	}
+	if got.Kubernetes.Auth.AKS.CredentialMode != "client_secret" || got.Kubernetes.Auth.AKS.ClientSecret != clientSecret || got.Kubernetes.Auth.GKE.CredentialsFile != "/var/run/secrets/google/credentials.json" {
+		t.Fatalf("native cloud auth = %+v", got.Kubernetes.Auth)
+	}
+}
+
+func TestToolsEnvironmentScalarExpansionSemantics(t *testing.T) {
+	t.Setenv("TOOLS_VALUE", "value: #literal\nnext")
+	input := map[string]any{
+		"braced":  "${TOOLS_VALUE}",
+		"plain":   "$TOOLS_VALUE",
+		"unset":   "${TOOLS_UNSET}",
+		"dollars": "$$",
+		"nested":  []any{map[string]any{"value": "prefix-${TOOLS_VALUE}-suffix"}},
+	}
+	got := expandEnvironmentScalars(input).(map[string]any)
+	if got["braced"] != "value: #literal\nnext" || got["plain"] != got["braced"] || got["unset"] != "" || got["dollars"] != "" {
+		t.Fatalf("expanded scalars = %#v", got)
+	}
+	nested := got["nested"].([]any)[0].(map[string]any)["value"]
+	if nested != "prefix-value: #literal\nnext-suffix" {
+		t.Fatalf("nested scalar = %#v", nested)
+	}
+}
+
+func TestLoadToolsFileRejectsUnknownKubernetesAuthenticationField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tools.yaml")
+	content := "tools:\n  kubernetes:\n    auth:\n      mode: aks\n      exec_timeout: 15s\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadToolsFile(path); err == nil {
+		t.Fatal("unknown Kubernetes authentication field accepted")
+	}
+}
+
+func TestLoadToolsFileAcceptsCommaStringSlice(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tools.yaml")
+	if err := os.WriteFile(path, []byte("tools:\n  kubernetes:\n    endpoint_cidrs: 10.0.0.0/8,192.168.0.0/16\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := loadToolsFile(path)
+	if err != nil || !reflect.DeepEqual(config.Kubernetes.EndpointCIDRs, []string{"10.0.0.0/8", "192.168.0.0/16"}) {
+		t.Fatalf("endpoint_cidrs = %#v, %v", config.Kubernetes.EndpointCIDRs, err)
+	}
+}
+
+func TestCopiedAKSExamplesStrictlyDecodeAndResolve(t *testing.T) {
+	t.Setenv("KUBERNETES_AKS_CLIENT_SECRET", "fixture-client-secret")
+	for name, body := range map[string]string{
+		"client secret": `tools:
+  kubernetes:
+    endpoint: https://production.example.azmk8s.io
+    ca_file: /run/secrets/kubernetes/ca.crt
+    auth:
+      mode: aks
+      aks:
+        credential_mode: client_secret
+        environment: public
+        server_id: api://AKS_SERVER_APP_ID
+        tenant_id: TENANT_ID
+        client_id: CLIENT_ID
+        client_secret: ${KUBERNETES_AKS_CLIENT_SECRET}
+`,
+		"managed identity": `tools:
+  kubernetes:
+    endpoint: https://production.example.azmk8s.io
+    ca_file: /run/secrets/kubernetes/ca.crt
+    auth:
+      mode: aks
+      aks:
+        credential_mode: managed_identity
+        environment: public
+        server_id: api://AKS_SERVER_APP_ID
+        client_id: OPTIONAL_USER_ASSIGNED_IDENTITY_CLIENT_ID
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "tools.yaml")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tools, err := loadToolsFile(path)
+			if err != nil {
+				t.Fatalf("strict decode: %v", err)
+			}
+			configuration := tools.Kubernetes
+			auth := configuration.Auth.AKS
+			resolved, err := kubernetespkg.ResolveAuthentication(kubernetespkg.AuthOptions{
+				Mode: configuration.Auth.Mode, Endpoint: configuration.Endpoint, CAFile: configuration.CAFile,
+				AKSCredentialMode: auth.CredentialMode, AKSServerID: auth.ServerID, AKSTenantID: auth.TenantID,
+				AKSClientID: auth.ClientID, AKSClientSecret: auth.ClientSecret, AKSFederatedTokenFile: auth.FederatedTokenFile, AKSEnvironment: auth.Environment,
+			})
+			if err != nil || resolved.Endpoint != configuration.Endpoint || resolved.CAFile != configuration.CAFile {
+				t.Fatalf("resolved = %+v, %v", resolved, err)
+			}
+		})
 	}
 }
 

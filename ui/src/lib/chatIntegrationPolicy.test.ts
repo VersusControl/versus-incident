@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -13,7 +13,6 @@ const appSource = readFileSync(resolve(process.cwd(), "src/App.tsx"), "utf8");
 
 const apiMocks = vi.hoisted(() => ({
   getAgentConfig: vi.fn(),
-  status: vi.fn(),
   getSSODeployment: vi.fn(),
   listBaselines: vi.fn(),
 }));
@@ -25,7 +24,6 @@ vi.mock("@/lib/api", async (importActual) => {
     api: {
       ...actual.api,
       getAgentConfig: apiMocks.getAgentConfig,
-      status: apiMocks.status,
       getSSODeployment: apiMocks.getSSODeployment,
       listBaselines: apiMocks.listBaselines,
     },
@@ -34,7 +32,6 @@ vi.mock("@/lib/api", async (importActual) => {
 
 beforeEach(() => {
   apiMocks.getAgentConfig.mockReset().mockResolvedValue({ enable: true });
-  apiMocks.status.mockReset().mockResolvedValue({ runbooks_available: true });
   apiMocks.getSSODeployment.mockReset().mockRejectedValue(new ApiError(403, "forbidden"));
   apiMocks.listBaselines.mockReset().mockRejectedValue(new ApiError(403, "forbidden"));
 });
@@ -74,15 +71,16 @@ describe("chat integration policy", () => {
     expect(appSource).toContain('<Route path="/agent/runbooks" element={<RunbooksPage />} />');
   });
 
-  it("renders Chat, Tool catalog, and Runbooks first without a generic Tools zone", async () => {
+  it("renders Chat in Respond and Tool catalog in AI without a Runbooks item", async () => {
     await renderSidebar();
 
-    expect(sectionLinks("AI").slice(0, 4)).toEqual([
-      "/agent/chat",
+    expect(sectionLinks("Respond")).toEqual(["/now", "/incidents", "/agent/chat"]);
+    expect(sectionLinks("AI").slice(0, 3)).toEqual([
       "/agent/tools",
-      "/agent/runbooks",
       "/agent/decisions",
+      "/analyses",
     ]);
+    expect(screen.queryByRole("link", { name: "Runbooks" })).toBeNull();
     expect(screen.queryByText("Tools", { selector: "div" })).toBeNull();
   });
 
@@ -100,15 +98,4 @@ describe("chat integration policy", () => {
     );
   });
 
-  it("renders the Runbooks setup hint when its capability is unavailable", async () => {
-    apiMocks.status.mockResolvedValue({ runbooks_available: false });
-    await renderSidebar();
-
-    const runbooks = screen.getByRole("link", { name: /Runbooks/ });
-    expect(runbooks.getAttribute("href")).toBe("/agent/runbooks");
-    await waitFor(() =>
-      expect(runbooks.getAttribute("title")).toContain("configure an embedding model"),
-    );
-    expect(within(runbooks).getByLabelText("Enterprise")).toBeTruthy();
-  });
 });

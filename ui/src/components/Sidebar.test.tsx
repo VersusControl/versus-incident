@@ -49,7 +49,6 @@ Object.defineProperty(globalThis, "localStorage", {
 
 const apiMocks = vi.hoisted(() => ({
   getAgentConfig: vi.fn().mockResolvedValue({ enable: true }),
-  status: vi.fn().mockResolvedValue({ runbooks_available: false }),
   getSSODeployment: vi.fn(),
   listBaselines: vi.fn(),
 }));
@@ -61,7 +60,6 @@ vi.mock("@/lib/api", async (importActual) => {
     api: {
       ...actual.api,
       getAgentConfig: apiMocks.getAgentConfig,
-      status: apiMocks.status,
       getSSODeployment: apiMocks.getSSODeployment,
       listBaselines: apiMocks.listBaselines,
     },
@@ -70,7 +68,6 @@ vi.mock("@/lib/api", async (importActual) => {
 
 beforeEach(() => {
   apiMocks.getAgentConfig.mockReset().mockResolvedValue({ enable: true });
-  apiMocks.status.mockReset().mockResolvedValue({ runbooks_available: false });
   apiMocks.getSSODeployment
     .mockReset()
     .mockRejectedValue(new ApiError(403, "forbidden"));
@@ -139,9 +136,7 @@ describe("Sidebar — deployment-aware navigation groups", () => {
       "/agent/logs",
     ]);
     expect(navSections()["AI"]).toEqual([
-      "/agent/chat",
       "/agent/tools",
-      "/agent/runbooks",
       "/agent/decisions",
       "/analyses",
     ]);
@@ -167,12 +162,11 @@ describe("Sidebar — deployment-aware navigation groups", () => {
     expect(routes).toEqual([
       "/now",
       "/incidents",
+      "/agent/chat",
       "/agent",
       "/agent/services",
       "/agent/logs",
-      "/agent/chat",
       "/agent/tools",
-      "/agent/runbooks",
       "/agent/decisions",
       "/analyses",
       "/agent/metrics",
@@ -194,7 +188,7 @@ describe("Sidebar — deployment-aware navigation groups", () => {
     await waitFor(() => expect(apiMocks.getSSODeployment).toHaveBeenCalledOnce());
 
     expect(navSections()).toEqual({
-      Respond: ["/now", "/incidents"],
+      Respond: ["/now", "/incidents", "/agent/chat"],
       Agent: [
         "/agent",
         "/agent/services",
@@ -203,9 +197,7 @@ describe("Sidebar — deployment-aware navigation groups", () => {
         "/agent/traces",
       ],
       AI: [
-        "/agent/chat",
         "/agent/tools",
-        "/agent/runbooks",
         "/agent/decisions",
         "/analyses",
         "/agent/alert-fatigue",
@@ -225,27 +217,28 @@ describe("Sidebar — deployment-aware navigation groups", () => {
     expect(navSections()["AI"]).toContain("/agent/alert-fatigue");
   });
 
-  it("keeps Chat, Tool catalog, and available Runbooks reachable when enabled", async () => {
-    apiMocks.status.mockResolvedValue({ runbooks_available: true });
+  it("keeps Chat in Respond and Tool catalog in AI while omitting Runbooks", async () => {
     await renderSettled();
 
     for (const [name, href] of [
       ["Chat", "/agent/chat"],
       ["Tool catalog", "/agent/tools"],
-      ["Runbooks", "/agent/runbooks"],
     ] as const) {
       const link = screen.getByRole("link", { name });
       expect(link.getAttribute("href")).toBe(href);
       expect(link.getAttribute("title")).toBeNull();
       expect(within(link).queryByLabelText("Enterprise")).toBeNull();
     }
+    expect(screen.queryByRole("link", { name: "Runbooks" })).toBeNull();
+    expect(navSections().Respond).toContain("/agent/chat");
+    expect(navSections().AI).not.toContain("/agent/chat");
   });
 
   it("locks execution pages but keeps Tool catalog readable when the agent is disabled", async () => {
     apiMocks.getAgentConfig.mockResolvedValue({ enable: false });
     await renderSettled();
 
-    for (const name of ["Chat", "Runbooks", "Decisions", "Analyses"]) {
+    for (const name of ["Chat", "Decisions", "Analyses"]) {
       const link = screen.getByRole("link", {
         name: `${name} Enterprise`,
       });
@@ -259,13 +252,6 @@ describe("Sidebar — deployment-aware navigation groups", () => {
     expect(within(tools).queryByLabelText("Enterprise")).toBeNull();
   });
 
-  it("keeps unavailable Runbooks reachable with its setup hint", async () => {
-    await renderSettled();
-    const runbooks = screen.getByRole("link", { name: /Runbooks/ });
-    expect(runbooks.getAttribute("href")).toBe("/agent/runbooks");
-    expect(runbooks.getAttribute("title")).toContain("configure an embedding model");
-    expect(within(runbooks).getByLabelText("Enterprise")).toBeTruthy();
-  });
 });
 
 describe("Sidebar — expanded row icons", () => {
@@ -280,7 +266,6 @@ describe("Sidebar — expanded row icons", () => {
     "Traces",
     "Chat",
     "Tool catalog",
-    "Runbooks",
     "Decisions",
     "Analyses",
     "Alert fatigue",

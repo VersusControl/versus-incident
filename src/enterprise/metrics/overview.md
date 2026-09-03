@@ -44,4 +44,4 @@ on-demand correlation tools, Enterprise adds the source that pages on its own.
 - [Prometheus / Metrics (Enterprise)](./prometheus.md)
 - [CloudWatch Metrics (Enterprise)](./cloudwatch-metrics.md)
 - [SigNoz Metrics (Enterprise)](./signoz.md)
-- OSS on-demand correlation tools: [Analyze Tools](../../agent/analyze-tools/tools.md)
+- OSS on-demand correlation tools: [Tool Reference](../../agent/tools/tools.md)

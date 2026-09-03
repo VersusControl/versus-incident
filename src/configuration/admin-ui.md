@@ -117,7 +117,14 @@ runtime.
 `GET /api/admin/agent/tools?agent=chat|analyze` returns an ordered JSON array.
 Each item contains `group`, `name`, `display_name`, `description`, `state`,
 `reason`, `action`, `action_label`, `enabled`, `requirement`, and optional
-`health`. Requirement details identify the requirement `kind` and, where
+`docs_url`, `ui_path`, and `health`. `docs_url` is an absolute HTTPS link to the
+public tool documentation. `ui_path` is a same-application route shown as
+**Open tool** only when the product has a useful matching view. Availability
+`action` remains separate from those destinations. Common cards omit internal
+Settings and Admin shortcuts because configuration is documented rather than
+managed from the catalog; external license guidance and Kubernetes setup actions
+remain visible. The server-owned action still explains or fixes the tool's
+current unavailable state. Requirement details identify the requirement `kind` and, where
 applicable, `signal_kind`, `integration`, or `capabilities`. Reasons, actions,
 and health values are bounded server-owned summaries; connection details,
 credentials, and raw backend errors are never returned.
@@ -130,6 +137,8 @@ Tool state is one of:
   the tool for the selected agent.
 - `needs_license` — the configured capability requires an Enterprise
   entitlement that is not active.
+- `needs_permission` — the caller lacks the permission required to use the
+  configured capability.
 - `needs_datasource` — no configured data source provides the required signal.
 - `needs_integration` — the required integration is not configured.
 - `needs_capability` — the active provider does not expose every required
@@ -137,19 +146,35 @@ Tool state is one of:
 - `unhealthy` — a configured dependency is unavailable or failed its bounded
   health assessment.
 
+Every visible card links to **Documentation** and may also link to an existing
+product surface with **Open tool**. License- and permission-blocked cards suppress
+**Open tool** while retaining their reason and documentation. Default-enabled, available Versus cards are
+hidden because they require no setup or recovery action. Operator-disabled or
+otherwise abnormal Versus cards reappear with their reason and recovery state.
+An operator-disabled card has an interactive checkbox so the tool can be
+enabled again. Unavailable cards retain a visible, unchecked, disabled
+checkbox. Group headings, counts, and the empty state use only cards visible
+under these rules.
+
+Runbooks is not a sidebar item. Open the `find_runbook` card's **Open tool** link
+to reach `/agent/runbooks`; the route and corpus-management page remain
+available.
+
 `PUT /api/admin/agent/tools/:agent/:name` accepts exactly an enablement body:
 
 ```json
 { "enabled": true }
 ```
 
-Use `false` to disable the named tool. Chat and Analyze settings are independent:
-changing one agent never changes the other. A disabled tool is absent from that
-agent's model tool list, not merely hidden in the UI. Enabling a tool whose
-requirements are not currently satisfied returns HTTP `409` with the bounded
-availability reason. A concurrent settings update also returns `409` and asks
-the caller to retry. A successful response contains `agent`, `name`, `enabled`,
-and `changed`.
+Use `false` to disable the named tool. This PUT API is also how an operator
+disables a default Versus tool whose available, enabled card is hidden from the
+catalog; the card reappears afterward for recovery. Chat and Analyze settings
+are independent: changing one agent never changes the other. A disabled tool is
+absent from that agent's model tool list, not merely hidden in the UI. Enabling
+a tool whose requirements are not currently satisfied returns HTTP `409` with
+the bounded availability reason. A concurrent settings update also returns
+`409` and asks the caller to retry. A successful response contains `agent`,
+`name`, `enabled`, and `changed`.
 
 In Enterprise, PUT requires the `runtime:manage` permission and emits the
 `agent.tool.changed` admin audit action for allowed and denied attempts. Audit

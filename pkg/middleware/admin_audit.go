@@ -28,6 +28,9 @@ import (
 // AuditActionAgentToolChanged records one per-agent tool setting mutation.
 const AuditActionAgentToolChanged = "agent.tool.changed"
 
+// AuditActionAgentToolsetChanged records one atomic per-agent toolset mutation.
+const AuditActionAgentToolsetChanged = "agent.toolset.changed"
+
 // Admin-audit outcome strings. A destructive admin action records exactly one
 // of these; they mirror the wrapper's audit-result vocabulary without the OSS
 // tree depending on it.

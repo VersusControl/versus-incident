@@ -325,6 +325,8 @@ data:
 
   {{- if .Values.agent.enable }}
   {{- $tools := .Values.agent.tools | default dict }}
+  {{- $kubernetes := $tools.kubernetes | default dict }}
+  {{- $kubernetesAuth := $kubernetes.auth | default dict }}
   {{- $recentChanges := $tools.recentChanges | default dict }}
   {{- $git := $recentChanges.git | default dict }}
   {{- $describeDeps := $tools.describeDependencies | default dict }}
@@ -338,6 +340,62 @@ data:
     tools:
       tool_timeout: {{ $tools.toolTimeout | default "20s" | quote }}
       parallel_tools: {{ dig "parallelTools" false $tools }}
+      kubernetes:
+        {{- $kubernetesAuthMode := $kubernetesAuth.mode | default "" }}
+        {{- if and (ne $kubernetesAuthMode "in_cluster") (ne $kubernetesAuthMode "kubeconfig") }}
+        endpoint: {{ $kubernetes.endpoint | default "" | quote }}
+        ca_file: {{ $kubernetes.caFile | default "" | quote }}
+        ca_data: "${KUBERNETES_CA_DATA}"
+        server_name: {{ $kubernetes.serverName | default "" | quote }}
+        {{- end }}
+        cluster_id: {{ $kubernetes.clusterID | default "default" | quote }}
+        credential_id: {{ $kubernetes.credentialID | default "" | quote }}
+        timeout: {{ $kubernetes.timeout | default "10s" | quote }}
+        discovery_ttl: {{ $kubernetes.discoveryTTL | default "5m" | quote }}
+        allow_private_networks: {{ dig "allowPrivateNetworks" false $kubernetes }}
+        endpoint_cidrs: {{ $kubernetes.endpointCIDRs | default list | toJson }}
+        auth:
+          mode: {{ $kubernetesAuthMode | quote }}
+          {{- if eq $kubernetesAuthMode "token" }}
+          token: "${KUBERNETES_TOKEN}"
+          {{- else if eq $kubernetesAuthMode "token_file" }}
+          token_file: {{ $kubernetesAuth.tokenFile | default "" | quote }}
+          {{- else if eq $kubernetesAuthMode "client_certificate" }}
+          client_certificate:
+            certificate_file: {{ ($kubernetesAuth.clientCertificate | default dict).certificateFile | default "" | quote }}
+            key_file: {{ ($kubernetesAuth.clientCertificate | default dict).keyFile | default "" | quote }}
+            certificate_data: "${KUBERNETES_CLIENT_CERTIFICATE_DATA}"
+            key_data: "${KUBERNETES_CLIENT_KEY_DATA}"
+          {{- else if eq $kubernetesAuthMode "kubeconfig" }}
+          kubeconfig:
+            path: {{ ($kubernetesAuth.kubeconfig | default dict).path | default "" | quote }}
+            context: {{ ($kubernetesAuth.kubeconfig | default dict).context | default "" | quote }}
+          {{- else if eq $kubernetesAuthMode "eks" }}
+          eks:
+            cluster_name: {{ ($kubernetesAuth.eks | default dict).clusterName | default "" | quote }}
+            region: {{ ($kubernetesAuth.eks | default dict).region | default "" | quote }}
+            role_arn: {{ ($kubernetesAuth.eks | default dict).roleARN | default "" | quote }}
+            profile: {{ ($kubernetesAuth.eks | default dict).profile | default "" | quote }}
+          {{- else if eq $kubernetesAuthMode "aks" }}
+          {{- $aksAuth := $kubernetesAuth.aks | default dict }}
+          {{- $aksCredentialMode := $aksAuth.credentialMode | default "" }}
+          aks:
+            credential_mode: {{ $aksCredentialMode | quote }}
+            server_id: {{ $aksAuth.serverID | default "" | quote }}
+            client_id: {{ $aksAuth.clientID | default "" | quote }}
+            {{- if or (eq $aksCredentialMode "workload_identity") (eq $aksCredentialMode "client_secret") }}
+            tenant_id: {{ $aksAuth.tenantID | default "" | quote }}
+            {{- end }}
+            {{- if eq $aksCredentialMode "client_secret" }}
+            client_secret: "${KUBERNETES_AKS_CLIENT_SECRET}"
+            {{- else if eq $aksCredentialMode "workload_identity" }}
+            federated_token_file: {{ $aksAuth.federatedTokenFile | default "" | quote }}
+            {{- end }}
+            environment: {{ $aksAuth.environment | default "" | quote }}
+          {{- else if eq $kubernetesAuthMode "gke" }}
+          gke:
+            credentials_file: {{ ($kubernetesAuth.gke | default dict).credentialsFile | default "" | quote }}
+          {{- end }}
       recent_changes:
         git:
           auth:

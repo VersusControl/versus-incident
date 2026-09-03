@@ -3,7 +3,6 @@ package controllers
 import (
 	"encoding/base64"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -50,13 +49,25 @@ func gatewaySessionTestApp(t *testing.T) *fiber.App {
 	return app
 }
 
+func newGatewayRequest(t *testing.T, method, target string) *http.Request {
+	t.Helper()
+	if strings.HasPrefix(target, "/") {
+		target = "http://console.example" + target
+	}
+	request, err := http.NewRequest(method, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return request
+}
+
 func exchangeGatewaySession(t *testing.T, app *fiber.App, secret string, secure bool) *http.Cookie {
 	t.Helper()
 	scheme := "http"
 	if secure {
 		scheme = "https"
 	}
-	req := httptest.NewRequest(http.MethodPost, scheme+"://console.example/api/auth/gateway-session", nil)
+	req := newGatewayRequest(t, http.MethodPost, scheme+"://console.example/api/auth/gateway-session")
 	if secure {
 		req.Header.Set("X-Forwarded-Proto", "https")
 	}
@@ -78,7 +89,10 @@ func exchangeGatewaySession(t *testing.T, app *fiber.App, secret string, secure 
 
 func TestRegisterGatewaySessionRoutes_IssuesOpaqueCookieWithoutTrustingForwardedProto(t *testing.T) {
 	app := gatewaySessionTestApp(t)
-	req := httptest.NewRequest(http.MethodPost, "http://console.example/api/auth/gateway-session", nil)
+	req, err := http.NewRequest(http.MethodPost, "http://console.example/api/auth/gateway-session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	req.Header.Set("X-Gateway-Secret", gatewaySessionTestSecret)
 	req.Header.Set("X-Forwarded-Proto", "https")
 	resp, err := app.Test(req, -1)
@@ -130,7 +144,7 @@ func TestGatewaySessionCookieSecureFromDirectOrConfiguredHTTPS(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			app := gatewaySessionTestApp(t)
 			config.GetConfig().PublicHost = tt.publicHost
-			req := httptest.NewRequest(http.MethodPost, tt.requestURL, nil)
+			req := newGatewayRequest(t, http.MethodPost, tt.requestURL)
 			req.Header.Set("X-Gateway-Secret", gatewaySessionTestSecret)
 			if tt.forwarded {
 				req.Header.Set("X-Forwarded-Proto", "https")
@@ -174,7 +188,7 @@ func TestGatewaySessionOriginUsesConfiguredOrDirectOrigin(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config.GetConfig().PublicHost = tt.publicHost
-			req := httptest.NewRequest(http.MethodPost, "http://console.example/api/protected", nil)
+			req := newGatewayRequest(t, http.MethodPost, "http://console.example/api/protected")
 			req.Header.Set("Origin", tt.origin)
 			if tt.origin == "" {
 				req.Header.Del("Origin")
@@ -235,7 +249,7 @@ func TestGatewaySessionTokenValidation(t *testing.T) {
 func TestGatewaySessionExchangeFailsClosed(t *testing.T) {
 	app := gatewaySessionTestApp(t)
 	for _, secret := range []string{"", "wrong-secret"} {
-		req := httptest.NewRequest(http.MethodPost, "/api/auth/gateway-session", nil)
+		req := newGatewayRequest(t, http.MethodPost, "/api/auth/gateway-session")
 		req.Header.Set("X-Gateway-Secret", secret)
 		resp, err := app.Test(req, -1)
 		if err != nil {
@@ -248,7 +262,7 @@ func TestGatewaySessionExchangeFailsClosed(t *testing.T) {
 	}
 
 	config.GetConfig().GatewaySecret = ""
-	req := httptest.NewRequest(http.MethodPost, "/api/auth/gateway-session", nil)
+	req := newGatewayRequest(t, http.MethodPost, "/api/auth/gateway-session")
 	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("empty-config exchange request: %v", err)
@@ -264,7 +278,7 @@ func TestAdminGatewayGuardAuthenticationAndOrigin(t *testing.T) {
 	cookie := exchangeGatewaySession(t, app, gatewaySessionTestSecret, false)
 
 	drive := func(method, origin string, withCookie, withHeader bool) int {
-		req := httptest.NewRequest(method, "http://console.example/api/protected", nil)
+		req := newGatewayRequest(t, method, "http://console.example/api/protected")
 		if origin != "" {
 			req.Header.Set("Origin", origin)
 		}
@@ -294,7 +308,7 @@ func TestAdminGatewayGuardAuthenticationAndOrigin(t *testing.T) {
 	if got := drive(http.MethodPost, "http://console.example", true, false); got != http.StatusNoContent {
 		t.Errorf("cookie POST same-origin status = %d, want 204", got)
 	}
-	refererReq := httptest.NewRequest(http.MethodPost, "http://console.example/api/protected", nil)
+	refererReq := newGatewayRequest(t, http.MethodPost, "http://console.example/api/protected")
 	refererReq.Header.Set("Referer", "http://console.example/agent")
 	refererReq.AddCookie(cookie)
 	refererResp, err := app.Test(refererReq, -1)
@@ -325,7 +339,7 @@ func TestAdminGatewayGuardRejectsInvalidCookies(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/api/protected", nil)
+			req := newGatewayRequest(t, http.MethodGet, "/api/protected")
 			req.AddCookie(&http.Cookie{Name: gatewaySessionCookieName, Value: tt.value})
 			resp, err := app.Test(req, -1)
 			if err != nil {
@@ -340,7 +354,7 @@ func TestAdminGatewayGuardRejectsInvalidCookies(t *testing.T) {
 
 	validBeforeRotation := issueGatewaySession(gatewaySessionTestSecret, now.Add(time.Hour))
 	config.GetConfig().GatewaySecret = "rotated-secret"
-	req := httptest.NewRequest(http.MethodGet, "/api/protected", nil)
+	req := newGatewayRequest(t, http.MethodGet, "/api/protected")
 	req.AddCookie(&http.Cookie{Name: gatewaySessionCookieName, Value: validBeforeRotation})
 	resp, err := app.Test(req, -1)
 	if err != nil {
@@ -362,7 +376,7 @@ func TestAdminGatewayGuardHonorsUpstreamAuthorization(t *testing.T) {
 	app.Post("/protected", adminGatewayGuard, func(c *fiber.Ctx) error {
 		return c.SendStatus(fiber.StatusNoContent)
 	})
-	req := httptest.NewRequest(http.MethodPost, "/protected", nil)
+	req := newGatewayRequest(t, http.MethodPost, "/protected")
 	resp, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("upstream-authorized request: %v", err)
@@ -393,7 +407,7 @@ func TestGatewayAuthDisabledAllowsOnlyUpstreamAuthorization(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "http://console.example"+tt.path, nil)
+			req := newGatewayRequest(t, http.MethodPost, "http://console.example"+tt.path)
 			if tt.header {
 				req.Header.Set("X-Gateway-Secret", gatewaySessionTestSecret)
 			}
@@ -418,7 +432,7 @@ func TestGatewayAuthDisabledAllowsOnlyUpstreamAuthorization(t *testing.T) {
 func TestGatewaySessionLogoutExpiresCookie(t *testing.T) {
 	app := gatewaySessionTestApp(t)
 	cookie := exchangeGatewaySession(t, app, gatewaySessionTestSecret, false)
-	req := httptest.NewRequest(http.MethodDelete, "http://console.example/api/auth/gateway-session", nil)
+	req := newGatewayRequest(t, http.MethodDelete, "http://console.example/api/auth/gateway-session")
 	req.Header.Set("Origin", "http://console.example")
 	req.AddCookie(cookie)
 	resp, err := app.Test(req, -1)

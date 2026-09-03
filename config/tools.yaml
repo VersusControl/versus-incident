@@ -15,6 +15,113 @@ tools:
   tool_timeout: 20s     # cap per tool dispatch; empty/"0"/invalid = 20s default
   parallel_tools: false # run tool calls in one model turn concurrently (off = sequential)
 
+  # Kubernetes is disabled by default. Select exactly one auth.mode. Every mode
+  # is implemented in Go; no cloud CLI or Kubernetes auth plugin is executed.
+  # Except for in_cluster, the endpoint and CA are operator-provided. Private
+  # endpoints also require allow_private_networks or endpoint_cidrs.
+  kubernetes:
+    auth:
+      mode: ""
+
+    # In-cluster ServiceAccount token and CA:
+    # auth:
+    #   mode: in_cluster
+
+    # Rotating token file:
+    # endpoint: https://api.example
+    # ca_file: /run/secrets/kubernetes/ca.crt
+    # auth:
+    #   mode: token_file
+    #   token_file: /run/secrets/kubernetes/token
+
+    # Static token, normally expanded from an environment-backed Secret:
+    # endpoint: https://api.example
+    # ca_file: /run/secrets/kubernetes/ca.crt
+    # auth:
+    #   mode: token
+    #   token: ${KUBERNETES_TOKEN}
+
+    # Client certificate files (certificate_data/key_data are also supported):
+    # endpoint: https://api.example
+    # ca_file: /run/secrets/kubernetes/ca.crt
+    # auth:
+    #   mode: client_certificate
+    #   client_certificate:
+    #     certificate_file: /run/secrets/kubernetes/client.crt
+    #     key_file: /run/secrets/kubernetes/client.key
+
+    # Safe kubeconfig. Only token, tokenFile, or client cert/key users are read:
+    # auth:
+    #   mode: kubeconfig
+    #   kubeconfig:
+    #     path: /run/secrets/kubernetes/config
+    #     context: production
+
+    # EKS IAM uses a closed native chain: environment credentials, IRSA,
+    # static credentials from the selected profile, constrained container
+    # credentials, then fixed IPv4 IMDSv2. Credential processes, SSO, profile
+    # role/source chains, web-identity directives, plugins, and endpoint/service
+    # overrides are rejected. Benign CLI output/pager/retry settings are ignored.
+    # Optional YAML role_arn uses native STS AssumeRole.
+    # endpoint: https://API_ID.eks.us-east-1.amazonaws.com
+    # ca_file: /run/secrets/kubernetes/ca.crt
+    # auth:
+    #   mode: eks
+    #   eks:
+    #     cluster_name: production
+    #     region: us-east-1
+    #     role_arn: arn:aws:iam::123456789012:role/versus-kubernetes-reader
+    #     profile: ""
+
+    # AKS workload identity:
+    # endpoint: https://production.example.azmk8s.io
+    # ca_file: /run/secrets/kubernetes/ca.crt
+    # auth:
+    #   mode: aks
+    #   aks:
+    #     credential_mode: workload_identity
+    #     environment: public
+    #     server_id: api://AKS_SERVER_APP_ID
+    #     tenant_id: TENANT_ID
+    #     client_id: CLIENT_ID
+    #     federated_token_file: /var/run/secrets/azure/tokens/azure-identity-token
+
+    # AKS client secret:
+    # endpoint: https://production.example.azmk8s.io
+    # ca_file: /run/secrets/kubernetes/ca.crt
+    # auth:
+    #   mode: aks
+    #   aks:
+    #     credential_mode: client_secret
+    #     environment: public
+    #     server_id: api://AKS_SERVER_APP_ID
+    #     tenant_id: TENANT_ID
+    #     client_id: CLIENT_ID
+    #     client_secret: ${KUBERNETES_AKS_CLIENT_SECRET}
+
+    # AKS managed identity:
+    # endpoint: https://production.example.azmk8s.io
+    # ca_file: /run/secrets/kubernetes/ca.crt
+    # auth:
+    #   mode: aks
+    #   aks:
+    #     credential_mode: managed_identity
+    #     environment: public
+    #     server_id: api://AKS_SERVER_APP_ID
+    #     client_id: OPTIONAL_USER_ASSIGNED_IDENTITY_CLIENT_ID
+
+    # GKE uses only the fixed metadata IP for Workload Identity when
+    # credentials_file is empty. Set credentials_file explicitly for supported
+    # service-account or file-backed external-account JSON. Ambient
+    # GOOGLE_APPLICATION_CREDENTIALS and GCE_METADATA_HOST are rejected in
+    # every mode, and well-known gcloud ADC files are never discovered.
+    # endpoint: https://GKE_CONTROL_PLANE_ENDPOINT
+    # ca_file: /run/secrets/kubernetes/ca.crt
+    # auth:
+    #   mode: gke
+    #   gke:
+    #     credentials_file: /run/secrets/google/credentials.json
+
   # ---------------------------------------------------------------------------
   # recent_changes — correlate an incident with recent deploys / config changes
   # ---------------------------------------------------------------------------

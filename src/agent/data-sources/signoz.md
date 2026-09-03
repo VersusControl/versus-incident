@@ -197,7 +197,7 @@ is what this field accepts, and whatever it rejects fails the tick.
 
 - **No analyze auto-wire.** Configuring a SigNoz source does **not**
   populate the `query_metrics` / `query_traces`
-  [analyze tools](../analyze-tools/tools.md) — those still point at
+  [analyze tools](../tools/tools.md) — those still point at
   Prometheus / Tempo and are configured by hand. Planned, not shipped.
 - **SigNoz alerts are not ingested.** This is a data source that tails
   logs, not an alert receiver.

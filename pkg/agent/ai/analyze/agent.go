@@ -22,6 +22,7 @@ import (
 	utilcb "github.com/cloudwego/eino/utils/callbacks"
 
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
+	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
@@ -49,17 +50,10 @@ const (
 // asserts this so future edits cannot silently turn analyze into a
 // notification path.
 type Agent struct {
-	cfg config.AgentAIConfig
-	// agent is the ReAct agent used when a fixed ChatModel override was
-	// supplied (tests). It is nil in production, where holder owns the
-	// (re)build instead.
-	agent *react.Agent
-	// holder lazily (re)builds the ReAct agent — tool-calling chat model
-	// plus the bound tool node — when the effective provider (or model id /
-	// runtime state) changes, so an operator's runtime provider switch is
-	// picked up on the next Run without a restart. Nil when a fixed
-	// ChatModel override was supplied.
-	holder       *einowrap.Holder[*react.Agent]
+	cfg          config.AgentAIConfig
+	chatModel    model.ToolCallingChatModel
+	holder       *einowrap.Holder[model.ToolCallingChatModel]
+	buildAgent   func(context.Context, model.ToolCallingChatModel) (*react.Agent, error)
 	tools        map[string]core.Tool
 	toolDisplays map[string]string
 	maxIter      int
@@ -130,6 +124,7 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 				return nil, fmt.Errorf("analyze: load tools: %w", err)
 			}
 		}
+		current = k8stools.FilterAuthorized(ctx, current)
 		_, _, einoTools, err := prepareTools(current, toolTimeout)
 		if err != nil {
 			return nil, err
@@ -169,6 +164,7 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 		tools:        reg,
 		toolDisplays: displays,
 		maxIter:      maxIter,
+		buildAgent:   buildReactAgent,
 	}
 
 	// A fixed ChatModel override (tests) is never rebuilt: build the ReAct
@@ -176,29 +172,26 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 	// a runtime provider change rebuilds the tool-calling model + ReAct graph
 	// on the next Run without a restart.
 	if chat != nil {
-		reactAgent, err := buildReactAgent(ctx, chat)
-		if err != nil {
+		if _, err := buildReactAgent(ctx, chat); err != nil {
 			return nil, err
 		}
-		a.agent = reactAgent
+		a.chatModel = chat
 		return a, nil
 	}
 
-	a.holder = einowrap.NewModelHolder(cfg, einowrap.Options{
+	a.holder = einowrap.NewToolCallingChatModelHolder(cfg, einowrap.Options{
 		HTTPClient:  opts.HTTPClient,
 		BaseURL:     opts.BaseURL,
 		Timeout:     opts.Timeout,
 		AuthKeyFunc: opts.AuthKeyFunc,
-	}, opts.Runtime, func(ctx context.Context, c config.AgentAIConfig, o einowrap.Options) (*react.Agent, error) {
-		base, err := einowrap.NewToolCallingChatModel(ctx, c, o)
-		if err != nil {
-			return nil, err
-		}
-		return buildReactAgent(ctx, base)
-	})
+	}, opts.Runtime)
 	// Build once up front so a bad config (empty model, explicitly-set
 	// unknown provider) still fails fast at construction.
-	if _, err := a.holder.Get(ctx); err != nil {
+	base, err := a.holder.Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := buildReactAgent(ctx, base); err != nil {
 		return nil, err
 	}
 	return a, nil
@@ -252,10 +245,15 @@ func (a *Agent) Run(ctx context.Context, task core.AITask) (*core.AICallResult, 
 // statically-built agent; otherwise it consults the holder, which rebuilds
 // the tool-calling model + graph only when the signature changed.
 func (a *Agent) reactAgent(ctx context.Context) (*react.Agent, error) {
-	if a.agent != nil {
-		return a.agent, nil
+	chatModel := a.chatModel
+	if chatModel == nil {
+		var err error
+		chatModel, err = a.holder.Get(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return a.holder.Get(ctx)
+	return a.buildAgent(ctx, chatModel)
 }
 
 func (a *Agent) run(ctx context.Context, snap core.AnalyzeIncidentSnapshot) (*core.AICallResult, error) {

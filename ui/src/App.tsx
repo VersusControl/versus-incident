@@ -46,6 +46,10 @@ const AgentToolsPage = lazyPage(
   () => import("./pages/AgentToolsPage"),
   "AgentToolsPage",
 );
+const KubernetesPage = lazyPage(
+  () => import("./pages/KubernetesPage"),
+  "KubernetesPage",
+);
 const ServiceDetailPage = lazyPage(
   () => import("./pages/ServiceDetailPage"),
   "ServiceDetailPage",
@@ -119,6 +123,7 @@ export default function App() {
           <Route path="/agent" element={<AgentOverviewPage />} />
           <Route path="/agent/chat" element={<ChatPage />} />
           <Route path="/agent/tools" element={<AgentToolsPage />} />
+          <Route path="/agent/kubernetes" element={<KubernetesPage />} />
           <Route path="/agent/logs" element={<PatternsPage />} />
           <Route path="/agent/logs/:id" element={<PatternDetailPage />} />
           <Route path="/agent/patterns/:id" element={<PatternDetailPage />} />

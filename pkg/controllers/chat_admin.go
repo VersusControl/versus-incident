@@ -193,6 +193,7 @@ func (controller *ChatAdminController) message(c *fiber.Ctx) error {
 	events := make(chan core.ChatEvent, chatEventBuffer)
 	observer := &chatStreamObserver{events: events}
 	runCtx := core.WithChatObserver(context.Background(), observer)
+	runCtx = core.WithCallerAuthorization(runCtx, callerAuthorization(c))
 	outcomes, err := service.Start(runCtx, id, message, attachment)
 	if errors.Is(err, chatagent.ErrRunActive) {
 		auditor(middleware.ChatAuditEvent{Action: chatAuditMessageSent, Target: target, Result: middleware.ChatAuditDenied})

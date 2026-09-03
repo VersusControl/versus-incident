@@ -17,6 +17,7 @@ import (
 	c "github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/controllers"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/report"
 	"github.com/VersusControl/versus-incident/pkg/routes"
@@ -24,6 +25,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/signalsources"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/teams"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssmincidents"
 	"github.com/redis/go-redis/v9"
@@ -203,7 +205,16 @@ func main() {
 	// one.
 	var agentDone <-chan struct{}
 	toolAvailability := agent.NewToolAvailabilityService(cfg.Agent, store)
-	registerToolAvailabilityController(app, toolAvailability)
+	kubernetesService, kubernetesErr := agent.NewKubernetesService(cfg.Agent.Tools.Kubernetes, tenancy.DefaultOrgScope())
+	if kubernetesErr != nil {
+		log.Printf("kubernetes: connector unavailable: %v", kubernetesErr)
+	}
+	toolAvailability.BindIntegrationConstruction("kubernetes", kubernetesService != nil)
+	if kubernetesService != nil {
+		redactor, _ := agent.NewRedactor(cfg.Agent.Redaction.Enable && cfg.Agent.Redaction.RedactIPs, cfg.Agent.Redaction.ExtraPatterns)
+		kubernetesService.SetScrubber(redactor)
+	}
+	registerToolAvailabilityController(app, toolAvailability, kubernetesService)
 	if cfg.Agent.Enable {
 		// Try to attach to the existing Redis client; if on-call wasn't
 		// enabled but agent is, open one now (best effort — fall back to
@@ -217,7 +228,7 @@ func main() {
 			}
 		}
 
-		cat, done, err := startAgent(rootCtx, app, cfg.Agent, cfg.GatewaySecret, store, rdb, toolAvailability)
+		cat, done, err := startAgent(rootCtx, app, cfg.Agent, cfg.GatewaySecret, store, rdb, toolAvailability, kubernetesService)
 		if err != nil {
 			log.Fatalf("agent: failed to start: %v", err)
 		}
@@ -262,15 +273,20 @@ func main() {
 // that follows it, short enough to stay inside a container stop's grace period.
 const agentFlushGrace = 15 * time.Second
 
-func registerToolAvailabilityController(app *fiber.App, availability *agent.ToolAvailabilityService) {
+func registerToolAvailabilityController(app *fiber.App, availability *agent.ToolAvailabilityService, services ...*kubernetes.Service) {
 	controllers.NewAgentToolsAdminController(availability.Manager, availability.Snapshot).Register(app.Group("/api"))
+	var kubernetesService *kubernetes.Service
+	if len(services) > 0 {
+		kubernetesService = services[0]
+	}
+	controllers.NewKubernetesAdminControllerWithRegistry(kubernetes.NewServiceRegistry(kubernetesService)).Register(app.Group("/api"))
 }
 
 // startAgent constructs the worker, starts it in a goroutine, and registers
 // admin routes on the fiber app. It returns the catalog so the caller can
 // hold a reference (and so future hot-reload code has a handle to it), plus a
 // channel that closes when the worker has finished its shutdown flush.
-func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewaySecret string, store storage.Provider, rdb redis.UniversalClient, toolAvailability *agent.ToolAvailabilityService) (*agent.Catalog, <-chan struct{}, error) {
+func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewaySecret string, store storage.Provider, rdb redis.UniversalClient, toolAvailability *agent.ToolAvailabilityService, kubernetesService *kubernetes.Service) (*agent.Catalog, <-chan struct{}, error) {
 	// On the Postgres backend, install the typed signal-table
 	// catalog store so the log catalog reads/writes the explicit
 	// vs_patterns/vs_logs/vs_services tables (searchable, indexed) instead of
@@ -371,7 +387,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		log.Printf("agent: tailing dedup sets persisted through Redis for %d source(s)", n)
 	}
 
-	aiBundle := agent.BuildAIs(cfg, catalog, store, nil)
+	aiBundle := agent.BuildAIsWithKubernetes(cfg, catalog, store, nil, kubernetesService)
 	toolAvailability.BindLiveSnapshot(aiBundle.ToolSnapshot)
 	if aiBundle.Detect != nil {
 		log.Printf("agent: AI SRE enabled provider=%s model=%s rate_limit=%d/hr",

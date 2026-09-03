@@ -17,6 +17,15 @@ serviceAccount:
   create: true
   name: ""
 
+# Optionally grant the chart ServiceAccount the cluster-wide read permissions
+# used by all nine Kubernetes tools. Leave disabled when bindings are managed
+# separately or when namespace-scoped Roles are preferred.
+kubernetesReaderRBAC:
+  enabled: false
+  # Gateway API CRDs are optional and may not be installed. Enable only when
+  # topology should read Gateway and HTTPRoute resources.
+  gatewayAPI: false
+
 service:
   type: ClusterIP
   port: 3000
@@ -327,6 +336,38 @@ agent:
     # Shared tool-loop knobs applied to every analyze tool dispatch.
     toolTimeout: "20s"   # cap per tool dispatch; empty/"0"/invalid = 20s default
     parallelTools: false # run tool calls in one model turn concurrently
+    kubernetes:
+      endpoint: ""
+      caFile: ""
+      caData: ""       # stored in the chart Secret, not the ConfigMap
+      serverName: ""
+      clusterID: "default"
+      credentialID: ""
+      timeout: "10s"
+      discoveryTTL: "5m"
+      allowPrivateNetworks: false
+      endpointCIDRs: []
+      auth:
+        mode: ""
+        token: ""      # stored in the chart Secret, not the ConfigMap
+        tokenFile: ""
+        clientCertificate:
+          certificateFile: ""
+          keyFile: ""
+          certificateData: "" # stored in the chart Secret
+          keyData: ""         # stored in the chart Secret
+        kubeconfig: {path: "", context: ""}
+        eks: {clusterName: "", region: "", roleARN: "", profile: ""}
+        aks:
+          credentialMode: "" # workload_identity, client_secret, or managed_identity
+          serverID: ""
+          tenantID: ""
+          clientID: ""
+          clientSecret: "" # stored in the chart Secret
+          federatedTokenFile: ""
+          environment: "" # empty defaults to public; or government/china
+        gke:
+          credentialsFile: "" # empty uses fixed-host metadata Workload Identity; no gcloud ADC file
     # recent_changes — correlate an incident with recent deploys / config
     # changes pulled from one or more REMOTE git repositories' commit
     # histories (pure-Go go-git; no git binary required). An empty repos

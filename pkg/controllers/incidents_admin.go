@@ -770,7 +770,7 @@ func (i *IncidentAdminController) analyze(c *fiber.Ctx) error {
 
 	// Hard ceiling so a stuck tool loop cannot pin a request open
 	// forever. The agent has its own iteration cap on top of this.
-	ctx, cancel := context.WithTimeout(c.UserContext(), analyzeRunTimeout)
+	ctx, cancel := context.WithTimeout(callerContext(c, c.UserContext()), analyzeRunTimeout)
 	defer cancel()
 
 	analysis, runErr, saveErr := runAndPersistAnalysis(ctx, rec, body.RequestedBy)
@@ -887,7 +887,7 @@ func (i *IncidentAdminController) analyzeStream(c *fiber.Ctx) error {
 
 	events := make(chan core.AnalyzeEvent, 256)
 
-	runCtx, cancel := context.WithTimeout(context.Background(), analyzeRunTimeout)
+	runCtx, cancel := context.WithTimeout(callerContext(c, context.Background()), analyzeRunTimeout)
 	go func() {
 		defer cancel()
 		defer close(events)

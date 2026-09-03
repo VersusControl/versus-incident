@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/VersusControl/versus-incident/pkg/weborigin"
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
 )
 
@@ -478,21 +479,27 @@ func loadAgentSourcesFile(path string) ([]AgentSourceConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read: %w", err)
 	}
-	// Expand ${VAR} references across the whole document so values inside
-	// list items (e.g. sources[].options.address) are expanded too, not
-	// just top-level scalars.
-	expanded := os.ExpandEnv(string(raw))
 
 	v := viper.New()
 	v.SetConfigType("yaml")
-	if err := v.ReadConfig(strings.NewReader(expanded)); err != nil {
+	if err := v.ReadConfig(bytes.NewReader(raw)); err != nil {
 		return nil, fmt.Errorf("read: %w", err)
 	}
 
 	var wrapper struct {
 		Sources []AgentSourceConfig `mapstructure:"sources"`
 	}
-	if err := v.Unmarshal(&wrapper); err != nil {
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		Result:           &wrapper,
+		TagName:          "mapstructure",
+		ErrorUnused:      true,
+		WeaklyTypedInput: true,
+		DecodeHook:       mapstructure.StringToSliceHookFunc(","),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal: %w", err)
+	}
+	if err := decoder.Decode(expandEnvironmentScalars(v.AllSettings())); err != nil {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
 	return wrapper.Sources, nil
@@ -507,24 +514,46 @@ func loadToolsFile(path string) (ToolsConfig, error) {
 	if err != nil {
 		return ToolsConfig{}, fmt.Errorf("read: %w", err)
 	}
-	// Expand ${VAR} references across the whole document so values inside
-	// list items (e.g. recent_changes.git.repos[].url) are expanded too,
-	// not just top-level scalars.
-	expanded := os.ExpandEnv(string(raw))
 
 	v := viper.New()
 	v.SetConfigType("yaml")
-	if err := v.ReadConfig(strings.NewReader(expanded)); err != nil {
+	if err := v.ReadConfig(bytes.NewReader(raw)); err != nil {
 		return ToolsConfig{}, fmt.Errorf("read: %w", err)
 	}
 
 	var wrapper struct {
 		Tools ToolsConfig `mapstructure:"tools"`
 	}
-	if err := v.Unmarshal(&wrapper); err != nil {
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		Result:           &wrapper,
+		TagName:          "mapstructure",
+		ErrorUnused:      true,
+		WeaklyTypedInput: true,
+		DecodeHook:       mapstructure.StringToSliceHookFunc(","),
+	})
+	if err != nil {
+		return ToolsConfig{}, fmt.Errorf("unmarshal: %w", err)
+	}
+	if err := decoder.Decode(expandEnvironmentScalars(v.AllSettings())); err != nil {
 		return ToolsConfig{}, fmt.Errorf("unmarshal: %w", err)
 	}
 	return wrapper.Tools, nil
+}
+
+func expandEnvironmentScalars(value any) any {
+	switch typed := value.(type) {
+	case string:
+		return os.ExpandEnv(typed)
+	case map[string]any:
+		for key, child := range typed {
+			typed[key] = expandEnvironmentScalars(child)
+		}
+	case []any:
+		for index, child := range typed {
+			typed[index] = expandEnvironmentScalars(child)
+		}
+	}
+	return value
 }
 
 func GetConfig() *Config {

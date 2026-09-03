@@ -16,6 +16,15 @@ import (
 
 type countingTool struct{ calls int }
 
+type namedTool struct{ name string }
+
+func (tool namedTool) Name() string               { return tool.name }
+func (tool namedTool) Description() string        { return tool.name }
+func (tool namedTool) ArgsSchema() map[string]any { return map[string]any{"type": "object"} }
+func (tool namedTool) Invoke(context.Context, json.RawMessage) (*core.ToolResult, error) {
+	return &core.ToolResult{Tool: tool.name, Found: true}, nil
+}
+
 type blockingSeedTool struct{ countingTool }
 
 func (tool *blockingSeedTool) Name() string { return "get_system_overview" }
@@ -42,6 +51,38 @@ func TestNewRejectsDuplicateToolNames(t *testing.T) {
 	_, err := New(context.Background(), config.AgentAIConfig{}, []core.Tool{&countingTool{}, &countingTool{}}, Options{})
 	if err == nil || !strings.Contains(err.Error(), "duplicate tool name") {
 		t.Fatalf("New error = %v, want duplicate tool name", err)
+	}
+}
+
+func TestAgentResolvesKubernetesAuthorizationForEveryTurn(t *testing.T) {
+	for _, permissions := range [][]bool{{true, false, true}, {false, true, false}} {
+		agent := &Agent{tools: []core.Tool{
+			namedTool{name: "counting"},
+			namedTool{name: "get_cluster_overview"},
+		}}
+		for index, allowed := range permissions {
+			ctx := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{
+				Authenticated: true,
+				Permissions: map[core.Permission]bool{
+					core.PermissionInfrastructureView: allowed,
+				},
+			})
+			available, err := agent.availableTools(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"counting"}
+			if allowed {
+				want = append(want, "get_cluster_overview")
+			}
+			got := make([]string, 0, len(available))
+			for _, tool := range available {
+				got = append(got, tool.Name())
+			}
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Fatalf("permissions=%v turn=%d tools=%v want=%v", permissions, index, got, want)
+			}
+		}
 	}
 }
 

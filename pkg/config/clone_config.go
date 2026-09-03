@@ -496,6 +496,8 @@ func cloneToolsConfig(src ToolsConfig) ToolsConfig {
 	out.FindRunbook = src.FindRunbook
 	out.QueryMetrics = src.QueryMetrics
 	out.QueryTraces = src.QueryTraces
+	out.Kubernetes = src.Kubernetes
+	out.Kubernetes.EndpointCIDRs = append([]string(nil), src.Kubernetes.EndpointCIDRs...)
 	return out
 }
 

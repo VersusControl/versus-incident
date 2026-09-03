@@ -16,6 +16,7 @@ const (
 	StateNeedsDataSource    State = "needs_datasource"
 	StateNeedsIntegration   State = "needs_integration"
 	StateNeedsCapability    State = "needs_capability"
+	StateNeedsPermission    State = "needs_permission"
 	StateUnhealthy          State = "unhealthy"
 	StateDisabledByOperator State = "disabled_by_operator"
 	StateAvailable          State = "available"
@@ -284,24 +285,62 @@ func safeHealth(value string) string {
 }
 
 func safeAction(value string) string {
+	if internal := safeInternalPath(value, true); internal != "" {
+		return internal
+	}
 	value = strings.TrimSpace(value)
-	if value == "" || strings.Contains(value, "\\") || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+	if value == "" || hasUnsafeURLText(value) {
 		return ""
 	}
 	parsed, err := url.Parse(value)
 	if err != nil {
 		return ""
 	}
-	if parsed.Scheme == "" {
-		if parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" || !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") || strings.Contains(parsed.Path, "\\") || strings.IndexFunc(parsed.Path, unicode.IsControl) >= 0 {
-			return ""
-		}
-		return boundText(value, 240)
-	}
 	if parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil {
 		return boundText(value, 240)
 	}
 	return ""
+}
+
+func safeDocsURL(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || hasUnsafeURLText(value) || !strings.HasPrefix(value, "https://docs.versusincident.com/#/") {
+		return ""
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "docs.versusincident.com" || parsed.User != nil || parsed.Path != "/" || parsed.RawQuery != "" || !strings.HasPrefix(parsed.Fragment, "/") || strings.HasPrefix(parsed.Fragment, "//") || hasUnsafeURLText(parsed.Fragment) {
+		return ""
+	}
+	return value
+}
+
+func safeUIPath(value string) string {
+	return safeInternalPath(value, false)
+}
+
+func safeInternalPath(value string, allowNavigationState bool) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if hasUnsafeURLText(value) {
+		return ""
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" {
+		return ""
+	}
+	if !allowNavigationState && (parsed.RawQuery != "" || parsed.Fragment != "" || parsed.ForceQuery) {
+		return ""
+	}
+	if !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") || hasUnsafeURLText(parsed.Path) {
+		return ""
+	}
+	return boundText(value, 240)
+}
+
+func hasUnsafeURLText(value string) bool {
+	return strings.Contains(value, "\\") || strings.IndexFunc(value, unicode.IsControl) >= 0
 }
 
 func boundText(value string, limit int) string {

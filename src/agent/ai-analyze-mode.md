@@ -45,13 +45,18 @@ The `analyze:` block only overrides the model. For beta-limited /
 reasoning models (`gpt-5.*`, o-series), set `temperature: -1` on the
 shared `ai` block to omit the parameter entirely.
 
-## Investigation Tools
+## Tool catalog
 
-During an analysis the AI doesn't just read the incident in isolation —
-it can call **read-only tools** to pull supporting context from your
-own data before forming a conclusion. Every tool is strictly
-observational: tools only *read* state, they never send notifications,
-mutate incidents, or touch external systems.
+During an analysis the AI can call read-only tools to pull supporting context
+from Versus and your connected data before forming a conclusion. Tools only
+read state; they never send notifications, mutate incidents, or run
+remediation.
+
+Chat and Analyze share the `versus`, `common`, and planned `k8s` tool groups,
+but each agent has an independent policy. Enabling a tool for Chat does not
+enable it for Analyze, and a tool is callable only when its data source,
+integration, or capability requirement is satisfied. Kubernetes tools are
+listed as planned and are not yet implemented.
 
 Each tool returns the same envelope so the AI can reason about results
 uniformly:
@@ -64,13 +69,14 @@ they returned) is recorded with every analysis and shown in the
 **Tool calls** section of the analysis result, so you can audit exactly
 what the AI looked at.
 
-See **[Analyze Tools](./analyze-tools/tools.md)** for the full YAML reference,
-authentication options, and Docker examples.
+See the [Tool Reference](./tools/tools.md) for the current catalog,
+availability requirements, `tools.yaml` configuration, authentication, and
+Docker examples.
 
 ## Key Features
 
 - **Non-intrusive**: Analyze mode never sends notifications or modifies systems.
-- **Read-only tools**: The AI uses tools like `get_system_overview`, `search_incidents`, `get_incident`, `get_pattern`, `get_service`, `get_related_logs`, `describe_dependencies`, and `recent_changes` to gather context.
+- **Read-only tools**: Analyze can use policy-enabled tools from the shared catalog to gather context.
 - **Customizable**: Fine-tune the AI's behavior with optional settings.
 
 Analyze mode empowers you to make informed decisions by providing structured insights when you need them most.
