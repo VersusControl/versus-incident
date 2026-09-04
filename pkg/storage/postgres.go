@@ -62,6 +62,11 @@ const defaultConnectBudget = 60 * time.Second
 // connect timeout — the probe fails fast and the retry loop logs and backs off.
 const perPingTimeout = 5 * time.Second
 
+const (
+	defaultPostgresMaxOpenConns = 20
+	defaultPostgresMaxIdleConns = 5
+)
+
 // connectBudget resolves the total connect budget from POSTGRES_CONNECT_TIMEOUT
 // (a Go duration string such as "90s"), falling back to defaultConnectBudget
 // when the var is unset, unparseable, or non-positive.
@@ -203,6 +208,7 @@ final grant (run while connected to %[1]s) is the usual fix for
 
 // NewPostgres opens a connection to Postgres, runs idempotent migrations,
 // and returns a ready Provider. Callers must call Close when done.
+// The shared pool is bounded to 20 open and 5 idle connections.
 //
 // The initial reachability check is bounded, retried, and logged so an
 // unreachable or slow-to-start database can never turn into a silent restart
@@ -218,6 +224,8 @@ func NewPostgres(opts PostgresOptions) (Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("storage: open postgres: %w", err)
 	}
+	db.SetMaxOpenConns(defaultPostgresMaxOpenConns)
+	db.SetMaxIdleConns(defaultPostgresMaxIdleConns)
 
 	redacted := redactDSN(opts.DSN)
 	dbName := dsnDBName(opts.DSN)
@@ -542,7 +550,10 @@ const incidentColumns = `id, created_at, acked_at, org_id, team_id, title,
 	to_jsonb(channels_notified)   AS channels_notified,
 	oncall_triggered, oncall_error, notify_status, notify_error,
 	resolved_at, content, assigned_team_id,
-	to_jsonb(assigned_member_ids) AS assigned_member_ids`
+	to_jsonb(assigned_member_ids) AS assigned_member_ids,
+	detection_fingerprint, detection_episode_id, occurrence_count,
+	detection_first_seen, detection_last_seen,
+	highest_observed_severity, highest_notified_severity`
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows, so scanIncidentRow
 // serves the single-row GetIncident path and the multi-row list/search paths
@@ -630,12 +641,16 @@ func (p *postgresProvider) SaveIncident(rec *IncidentRecord) error {
 			id, created_at, acked_at, org_id, team_id, title, source, service,
 			origin, resolved, channels_enabled, channels_notified,
 			oncall_triggered, oncall_error, notify_status, notify_error,
-			resolved_at, content, assigned_team_id, assigned_member_ids
+			resolved_at, content, assigned_team_id, assigned_member_ids,
+			detection_fingerprint, detection_episode_id, occurrence_count,
+			detection_first_seen, detection_last_seen,
+			highest_observed_severity, highest_notified_severity
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8,
 			$9, $10, $11, $12,
 			$13, $14, $15, $16,
-			$17, $18, $19, $20
+			$17, $18, $19, $20,
+			NULLIF($21, ''), NULLIF($22, ''), $23, $24, $25, $26, $27
 		)
 		ON CONFLICT (id) DO UPDATE SET
 			created_at          = EXCLUDED.created_at,
@@ -647,16 +662,48 @@ func (p *postgresProvider) SaveIncident(rec *IncidentRecord) error {
 			service             = EXCLUDED.service,
 			origin              = EXCLUDED.origin,
 			resolved            = EXCLUDED.resolved,
-			channels_enabled    = EXCLUDED.channels_enabled,
-			channels_notified   = EXCLUDED.channels_notified,
-			oncall_triggered    = EXCLUDED.oncall_triggered,
-			oncall_error        = EXCLUDED.oncall_error,
-			notify_status       = EXCLUDED.notify_status,
-			notify_error        = EXCLUDED.notify_error,
+			channels_enabled    = CASE WHEN vs_incidents.detection_episode_id = EXCLUDED.detection_episode_id
+				THEN vs_incidents.channels_enabled ELSE EXCLUDED.channels_enabled END,
+			channels_notified   = CASE WHEN vs_incidents.detection_episode_id = EXCLUDED.detection_episode_id
+				THEN vs_incidents.channels_notified ELSE EXCLUDED.channels_notified END,
+			oncall_triggered    = CASE WHEN vs_incidents.detection_episode_id = EXCLUDED.detection_episode_id
+				THEN vs_incidents.oncall_triggered ELSE EXCLUDED.oncall_triggered END,
+			oncall_error        = CASE WHEN vs_incidents.detection_episode_id = EXCLUDED.detection_episode_id
+				THEN vs_incidents.oncall_error ELSE EXCLUDED.oncall_error END,
+			notify_status       = CASE WHEN vs_incidents.detection_episode_id = EXCLUDED.detection_episode_id
+				THEN vs_incidents.notify_status ELSE EXCLUDED.notify_status END,
+			notify_error        = CASE WHEN vs_incidents.detection_episode_id = EXCLUDED.detection_episode_id
+				THEN vs_incidents.notify_error ELSE EXCLUDED.notify_error END,
 			resolved_at         = EXCLUDED.resolved_at,
-			content             = EXCLUDED.content,
+			content             = CASE
+				WHEN vs_incidents.detection_episode_id = EXCLUDED.detection_episode_id
+				THEN jsonb_set(COALESCE(vs_incidents.content, '{}'::jsonb), '{Frequency}',
+					to_jsonb(GREATEST(COALESCE(vs_incidents.occurrence_count, 0), COALESCE(EXCLUDED.occurrence_count, 0))), true)
+				ELSE EXCLUDED.content
+			END,
 			assigned_team_id    = EXCLUDED.assigned_team_id,
-			assigned_member_ids = EXCLUDED.assigned_member_ids
+			assigned_member_ids = EXCLUDED.assigned_member_ids,
+			detection_fingerprint = EXCLUDED.detection_fingerprint,
+			detection_episode_id = EXCLUDED.detection_episode_id,
+			occurrence_count = CASE WHEN vs_incidents.detection_episode_id = EXCLUDED.detection_episode_id
+				THEN GREATEST(COALESCE(vs_incidents.occurrence_count, 0), COALESCE(EXCLUDED.occurrence_count, 0))
+				ELSE EXCLUDED.occurrence_count END,
+			detection_first_seen = CASE WHEN vs_incidents.detection_episode_id = EXCLUDED.detection_episode_id
+				THEN LEAST(vs_incidents.detection_first_seen, EXCLUDED.detection_first_seen)
+				ELSE EXCLUDED.detection_first_seen END,
+			detection_last_seen = CASE WHEN vs_incidents.detection_episode_id = EXCLUDED.detection_episode_id
+				THEN GREATEST(vs_incidents.detection_last_seen, EXCLUDED.detection_last_seen)
+				ELSE EXCLUDED.detection_last_seen END,
+			highest_observed_severity = CASE
+				WHEN vs_incidents.detection_episode_id = EXCLUDED.detection_episode_id AND
+					(CASE vs_incidents.highest_observed_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) >
+					(CASE EXCLUDED.highest_observed_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END)
+				THEN vs_incidents.highest_observed_severity ELSE EXCLUDED.highest_observed_severity END,
+			highest_notified_severity = CASE
+				WHEN vs_incidents.detection_episode_id = EXCLUDED.detection_episode_id AND
+					(CASE vs_incidents.highest_notified_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) >
+					(CASE EXCLUDED.highest_notified_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END)
+				THEN vs_incidents.highest_notified_severity ELSE EXCLUDED.highest_notified_severity END
 	`,
 		rec.ID, rec.CreatedAt.UTC(), utcPtr(rec.AckedAt), rec.OrgID, rec.TeamID,
 		rec.Title, rec.Source, rec.Service, rec.EffectiveOrigin(), rec.Resolved,
@@ -664,6 +711,9 @@ func (p *postgresProvider) SaveIncident(rec *IncidentRecord) error {
 		rec.OnCallTriggered, rec.OnCallError, rec.NotifyStatus, rec.NotifyError,
 		utcPtr(rec.ResolvedAt), content, rec.AssignedTeamID,
 		textArrayParam(rec.AssignedMemberIDs),
+		rec.DetectionFingerprint, rec.DetectionEpisodeID, rec.OccurrenceCount,
+		utcPtr(rec.DetectionFirstSeen), utcPtr(rec.DetectionLastSeen),
+		rec.HighestObservedSeverity, rec.HighestNotifiedSeverity,
 	)
 	if err != nil {
 		return fmt.Errorf("storage: save incident: %w", err)
@@ -671,6 +721,82 @@ func (p *postgresProvider) SaveIncident(rec *IncidentRecord) error {
 	// The database keeps incident history unbounded; retention is a
 	// deliberate policy applied through the storage.Lifecycle purge
 	// primitive rather than an implicit drop on every save.
+	return nil
+}
+
+func (p *postgresProvider) SaveDetectionIncident(rec *IncidentRecord) error {
+	if rec == nil || rec.ID == "" {
+		return fmt.Errorf("storage: SaveDetectionIncident: missing id")
+	}
+	rec.OrgID = NormalizeOrgID(rec.OrgID)
+	rec.Service = rec.ServiceLabel()
+	content, err := marshalIncidentContent(rec.Content)
+	if err != nil {
+		return fmt.Errorf("storage: marshal detection incident content: %w", err)
+	}
+	_, err = p.db.Exec(`
+		INSERT INTO vs_incidents (
+			id, created_at, acked_at, org_id, team_id, title, source, service,
+			origin, resolved, channels_enabled, channels_notified,
+			oncall_triggered, oncall_error, notify_status, notify_error,
+			resolved_at, content, assigned_team_id, assigned_member_ids,
+			detection_fingerprint, detection_episode_id, occurrence_count,
+			detection_first_seen, detection_last_seen,
+			highest_observed_severity, highest_notified_severity
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13, $14, $15, $16,
+			$17, $18, $19, $20, NULLIF($21, ''), NULLIF($22, ''), $23,
+			$24, $25, $26, $27
+		)
+		ON CONFLICT (id) DO UPDATE SET
+			title = EXCLUDED.title,
+			source = EXCLUDED.source,
+			service = EXCLUDED.service,
+			origin = EXCLUDED.origin,
+			channels_enabled = CASE WHEN EXCLUDED.notify_status = '' THEN vs_incidents.channels_enabled ELSE EXCLUDED.channels_enabled END,
+			channels_notified = CASE WHEN EXCLUDED.notify_status = '' THEN vs_incidents.channels_notified ELSE EXCLUDED.channels_notified END,
+			oncall_triggered = CASE WHEN EXCLUDED.notify_status = '' THEN vs_incidents.oncall_triggered ELSE EXCLUDED.oncall_triggered END,
+			oncall_error = CASE WHEN EXCLUDED.notify_status = '' THEN vs_incidents.oncall_error ELSE EXCLUDED.oncall_error END,
+			notify_status = CASE WHEN EXCLUDED.notify_status = '' THEN vs_incidents.notify_status ELSE EXCLUDED.notify_status END,
+			notify_error = CASE WHEN EXCLUDED.notify_status = '' THEN vs_incidents.notify_error ELSE EXCLUDED.notify_error END,
+			content = COALESCE(vs_incidents.content, '{}'::jsonb) || COALESCE(EXCLUDED.content, '{}'::jsonb) ||
+				CASE GREATEST(
+					CASE vs_incidents.highest_observed_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END,
+					CASE vs_incidents.highest_notified_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END,
+					CASE EXCLUDED.highest_observed_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END,
+					CASE EXCLUDED.highest_notified_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END
+				)
+					WHEN 4 THEN jsonb_build_object('Severity', 'critical')
+					WHEN 3 THEN jsonb_build_object('Severity', 'high')
+					WHEN 2 THEN jsonb_build_object('Severity', 'medium')
+					WHEN 1 THEN jsonb_build_object('Severity', 'low')
+					ELSE '{}'::jsonb
+				END,
+			detection_fingerprint = EXCLUDED.detection_fingerprint,
+			detection_episode_id = EXCLUDED.detection_episode_id,
+			occurrence_count = GREATEST(COALESCE(vs_incidents.occurrence_count, 0), COALESCE(EXCLUDED.occurrence_count, 0)),
+			detection_first_seen = LEAST(vs_incidents.detection_first_seen, EXCLUDED.detection_first_seen),
+			detection_last_seen = GREATEST(vs_incidents.detection_last_seen, EXCLUDED.detection_last_seen),
+			highest_observed_severity = CASE
+				WHEN (CASE vs_incidents.highest_observed_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) >
+					(CASE EXCLUDED.highest_observed_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END)
+				THEN vs_incidents.highest_observed_severity ELSE EXCLUDED.highest_observed_severity END,
+			highest_notified_severity = CASE
+				WHEN (CASE vs_incidents.highest_notified_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) >
+					(CASE EXCLUDED.highest_notified_severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END)
+				THEN vs_incidents.highest_notified_severity ELSE EXCLUDED.highest_notified_severity END
+	`, rec.ID, rec.CreatedAt.UTC(), utcPtr(rec.AckedAt), rec.OrgID, rec.TeamID,
+		rec.Title, rec.Source, rec.Service, rec.EffectiveOrigin(), rec.Resolved,
+		textArrayParam(rec.ChannelsEnabled), textArrayParam(rec.ChannelsNotified),
+		rec.OnCallTriggered, rec.OnCallError, rec.NotifyStatus, rec.NotifyError,
+		utcPtr(rec.ResolvedAt), content, rec.AssignedTeamID, textArrayParam(rec.AssignedMemberIDs),
+		rec.DetectionFingerprint, rec.DetectionEpisodeID, rec.OccurrenceCount,
+		utcPtr(rec.DetectionFirstSeen), utcPtr(rec.DetectionLastSeen),
+		rec.HighestObservedSeverity, rec.HighestNotifiedSeverity)
+	if err != nil {
+		return fmt.Errorf("storage: save detection incident: %w", err)
+	}
 	return nil
 }
 
@@ -772,23 +898,30 @@ func (p *postgresProvider) ListIncidentsInRangeForScope(scope tenancy.OrgScope, 
 // a NULL becomes the field's zero value (empty string, nil slice, nil map).
 func scanIncidentRow(sc rowScanner) (*IncidentRecord, error) {
 	var (
-		rec         IncidentRecord
-		ackedAt     sql.NullTime
-		resolvedAt  sql.NullTime
-		teamID      sql.NullString
-		title       sql.NullString
-		source      sql.NullString
-		service     sql.NullString
-		origin      sql.NullString
-		oncallTrig  sql.NullBool
-		oncallErr   sql.NullString
-		notifyStat  sql.NullString
-		notifyErr   sql.NullString
-		assignTeam  sql.NullString
-		chEnabled   []byte
-		chNotified  []byte
-		assignedIDs []byte
-		content     []byte
+		rec                  IncidentRecord
+		ackedAt              sql.NullTime
+		resolvedAt           sql.NullTime
+		teamID               sql.NullString
+		title                sql.NullString
+		source               sql.NullString
+		service              sql.NullString
+		origin               sql.NullString
+		oncallTrig           sql.NullBool
+		oncallErr            sql.NullString
+		notifyStat           sql.NullString
+		notifyErr            sql.NullString
+		assignTeam           sql.NullString
+		chEnabled            []byte
+		chNotified           []byte
+		assignedIDs          []byte
+		content              []byte
+		detectionFingerprint sql.NullString
+		detectionEpisodeID   sql.NullString
+		occurrenceCount      sql.NullInt64
+		detectionFirstSeen   sql.NullTime
+		detectionLastSeen    sql.NullTime
+		highestObserved      sql.NullString
+		highestNotified      sql.NullString
 	)
 	if err := sc.Scan(
 		&rec.ID, &rec.CreatedAt, &ackedAt, &rec.OrgID, &teamID, &title,
@@ -796,6 +929,8 @@ func scanIncidentRow(sc rowScanner) (*IncidentRecord, error) {
 		&chEnabled, &chNotified,
 		&oncallTrig, &oncallErr, &notifyStat, &notifyErr,
 		&resolvedAt, &content, &assignTeam, &assignedIDs,
+		&detectionFingerprint, &detectionEpisodeID, &occurrenceCount,
+		&detectionFirstSeen, &detectionLastSeen, &highestObserved, &highestNotified,
 	); err != nil {
 		return nil, err
 	}
@@ -818,6 +953,19 @@ func scanIncidentRow(sc rowScanner) (*IncidentRecord, error) {
 	rec.NotifyStatus = notifyStat.String
 	rec.NotifyError = notifyErr.String
 	rec.AssignedTeamID = assignTeam.String
+	rec.DetectionFingerprint = detectionFingerprint.String
+	rec.DetectionEpisodeID = detectionEpisodeID.String
+	rec.OccurrenceCount = occurrenceCount.Int64
+	rec.HighestObservedSeverity = highestObserved.String
+	rec.HighestNotifiedSeverity = highestNotified.String
+	if detectionFirstSeen.Valid {
+		t := detectionFirstSeen.Time.UTC()
+		rec.DetectionFirstSeen = &t
+	}
+	if detectionLastSeen.Valid {
+		t := detectionLastSeen.Time.UTC()
+		rec.DetectionLastSeen = &t
+	}
 
 	var err error
 	if rec.ChannelsEnabled, err = jsonStringSlice(chEnabled); err != nil {

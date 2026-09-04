@@ -44,11 +44,18 @@ const (
 )
 
 // EmitDecision carries the verdict plus its auditable reason. DivertChannels is
-// set only for EmitDivert. ParentID / DelayUntil are reserved for later phases.
+// set only for an EmitDivert that OSS should deliver. For detection incidents,
+// DeliveryHandled marks an EmitDivert whose external interceptor already
+// attempted delivery, so OSS must not run the incident lifecycle a second time.
+// Non-detection callers ignore DeliveryHandled and fail open through the normal
+// webhook lifecycle. DeliveryError reports the external attempt's failure
+// without exposing provider details in the action or reason.
 type EmitDecision struct {
-	Action         EmitAction
-	Reason         string
-	DivertChannels []string
+	Action          EmitAction
+	Reason          string
+	DivertChannels  []string
+	DeliveryHandled bool
+	DeliveryError   error
 }
 
 // EmitInterceptor decides what happens to a finding before it becomes an

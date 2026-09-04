@@ -1,8 +1,6 @@
-// Single home for severity parsing + presentation. The incident LIST
-// endpoint does not carry severity today (backend ask #1 in
-// ui/UX_REDESIGN.md §3.5) — callers must degrade to "—" when normalize
-// returns null. The DETAIL page parses it out of the content blob; that
-// logic lives here so every surface ranks/labels severity identically.
+// Single home for severity parsing + presentation. Episode-backed incidents
+// expose typed cumulative severity; legacy and webhook details fall back to
+// the content blob.
 
 export type Severity = "critical" | "high" | "warn" | "info" | "ok";
 
@@ -53,6 +51,20 @@ export function severityFromContent(
 // severityRank sorts critical-first; unknown severities sink to the bottom.
 export function severityRank(sev: Severity | null): number {
   return sev === null ? 99 : ORDER[sev];
+}
+
+export function incidentSeverity(
+  content?: Record<string, unknown> | null,
+  highestObserved?: string | null,
+  highestNotified?: string | null,
+): Severity | null {
+  return [
+    normalizeSeverity(highestObserved),
+    normalizeSeverity(highestNotified),
+    severityFromContent(content),
+  ].reduce<Severity | null>((highest, candidate) =>
+    severityRank(candidate) < severityRank(highest) ? candidate : highest,
+    null);
 }
 
 export const severityLabel: Record<Severity, string> = {

@@ -31,6 +31,9 @@ func TestDetectLog_RecordAndPersistRoundTrip(t *testing.T) {
 		DurationMs:  42,
 		Finding:     &core.AIFinding{Title: "DB outage", Severity: "high", Confidence: 0.9},
 		Outcome:     "emitted",
+		EpisodeID:   "episode-1", IncidentID: "incident-1",
+		OccurrenceDelta: 3, OccurrenceCount: 7,
+		EpisodeAction: "coalesced", NotificationOutcome: "not_applicable",
 	})
 	if d.Len() != 1 {
 		t.Fatalf("len=%d, want 1", d.Len())
@@ -61,6 +64,11 @@ func TestDetectLog_RecordAndPersistRoundTrip(t *testing.T) {
 	}
 	if got.ID == "" {
 		t.Fatal("ID should be assigned on Record")
+	}
+	if got.EpisodeID != "episode-1" || got.IncidentID != "incident-1" ||
+		got.OccurrenceDelta != 3 || got.OccurrenceCount != 7 ||
+		got.EpisodeAction != "coalesced" || got.NotificationOutcome != "not_applicable" {
+		t.Fatalf("episode metadata lost on reload: %+v", got)
 	}
 }
 

@@ -134,14 +134,15 @@ func (b *logBrain) Group(ctx context.Context, batch []core.Signal) ([]core.Obser
 	for _, id := range order {
 		bk := buckets[id]
 		obs = append(obs, core.Observation{
-			Key:       id,
-			Service:   bk.service,
-			Signal:    bk.template,
-			Timestamp: now,
-			Value:     float64(len(bk.signals)),
-			Frequency: len(bk.signals),
-			Samples:   bk.signals,
-			IsNew:     bk.isNew,
+			Key:               id,
+			Service:           bk.service,
+			Signal:            bk.template,
+			Timestamp:         now,
+			Value:             float64(len(bk.signals)),
+			Frequency:         len(bk.signals),
+			Samples:           bk.signals,
+			StrongestSeverity: strongestSeverity(bk.signals),
+			IsNew:             bk.isNew,
 		})
 	}
 	return obs, nil
@@ -275,7 +276,7 @@ func (b *logBrain) Classify(obs core.Observation, mean, std float64, confident b
 	// default via the config layer. A pattern already promoted to "known" stays
 	// known regardless of threshold.
 	threshold := b.cat.AutoPromoteAfter
-	isKnown := isLogKnown(prevVerdict, postCount, threshold)
+	isKnown := isLogKnown(prevVerdict, prevCount, threshold)
 	if isKnown {
 		// Classify is a PURE scoring read: it does not persist the promotion.
 		// Persisting "known" is done on the LEARN path by Promote (called by

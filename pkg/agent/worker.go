@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/scheduler"
 	"github.com/VersusControl/versus-incident/pkg/signalsources"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
@@ -76,8 +78,9 @@ type Worker struct {
 	// Detect-mode dependencies. All three are nil-safe: when ai.Detect
 	// is nil the worker emits a deterministic templated alert instead of
 	// calling AI, so a detection is never dropped for lack of a key.
-	ai      AIBundle
-	emitter Emitter
+	ai                       AIBundle
+	emitter                  Emitter
+	continueDetectionEpisode DetectionEpisodeRecorder
 
 	pollInterval    time.Duration
 	persistEvery    time.Duration
@@ -101,6 +104,10 @@ type Worker struct {
 // and moves on).
 type Emitter func(f *core.AIFinding, r core.AgentResult, source, service string) error
 
+// DetectionEpisodeRecorder records an occurrence without deciding whether it
+// should be enriched or emitted.
+type DetectionEpisodeRecorder func(storage.DetectionOccurrence) (storage.DetectionEpisodeDecision, error)
+
 // WorkerOptions bundles the dependencies a Worker needs. Construction does
 // not connect to anything; the worker dials lazily inside Run.
 type WorkerOptions struct {
@@ -121,24 +128,26 @@ type WorkerOptions struct {
 	// Emitter is invoked for each finding in detect mode. nil disables
 	// emission (worker still calls AI and caches the result, but the
 	// finding does not flow through to channels).
-	Emitter Emitter
+	Emitter                  Emitter
+	ContinueDetectionEpisode DetectionEpisodeRecorder
 }
 
 // NewWorker validates options and applies defaults.
 func NewWorker(opt WorkerOptions) (*Worker, error) {
 	w := &Worker{
-		cfg:      opt.Cfg,
-		sources:  opt.Sources,
-		cursors:  opt.Cursors,
-		redactor: opt.Redactor,
-		matcher:  opt.Matcher,
-		miner:    opt.Miner,
-		catalog:  opt.Catalog,
-		shadow:   opt.Shadow,
-		detect:   opt.Detect,
-		services: opt.Services,
-		ai:       opt.AI,
-		emitter:  opt.Emitter,
+		cfg:                      opt.Cfg,
+		sources:                  opt.Sources,
+		cursors:                  opt.Cursors,
+		redactor:                 opt.Redactor,
+		matcher:                  opt.Matcher,
+		miner:                    opt.Miner,
+		catalog:                  opt.Catalog,
+		shadow:                   opt.Shadow,
+		detect:                   opt.Detect,
+		services:                 opt.Services,
+		ai:                       opt.AI,
+		emitter:                  opt.Emitter,
+		continueDetectionEpisode: opt.ContinueDetectionEpisode,
 	}
 
 	if w.miner == nil {
@@ -661,6 +670,9 @@ func (w *Worker) handleObservation(
 		}
 		// A known, non-spiking pattern is normal — nothing to surface.
 		if v.Class == core.VerdictKnownPattern {
+			if mode == "detect" {
+				w.recordKnownDetectionContinuation(src.Name(), detector.Kind(), o)
+			}
 			return
 		}
 
@@ -678,7 +690,7 @@ func (w *Worker) handleObservation(
 			log.Printf("%sagent[shadow]: would alert pattern=%q service=%q tag=%q verdict=%s freq=%d%s",
 				colorGreen, o.Key, o.Service, w.shadowTag(o), v.Class, o.Frequency, colorReset)
 		} else {
-			outcome := w.emitDetect(ctx, src.Name(), o.Key, o.Signal, o.Service, o.Samples, v.Class, v.Baseline, v.Score, std, v.Reason)
+			outcome := w.emitDetect(ctx, src.Name(), detector.Kind(), o.Key, o.Signal, o.Service, o.Frequency, o.Samples, v.Class, v.Baseline, v.Score, std, v.Reason, observationSeverity(o))
 			verdicts["emit_"+outcome]++
 		}
 
@@ -686,6 +698,50 @@ func (w *Worker) handleObservation(
 		log.Printf("agent: unknown mode=%q, treating as training", mode)
 		verdicts["learned"]++
 	}
+}
+
+func (w *Worker) recordKnownDetectionContinuation(source, signalKind string, observation core.Observation) {
+	if w.continueDetectionEpisode == nil || observation.Frequency <= 0 {
+		return
+	}
+	decision, err := w.continueDetectionEpisode(storage.DetectionOccurrence{
+		Identity: storage.DetectionIdentity{
+			AgentKind: "detect", Source: source, Service: observation.Service,
+			SignalKind: signalKind, ConditionKey: observation.Key,
+		},
+		Frequency: int64(observation.Frequency), Severity: observationSeverity(observation),
+		ReceivedAt: observation.Timestamp, ExistingOnly: true,
+	})
+	if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrUnsupported) {
+		return
+	}
+	event := &DetectEvent{
+		Source: source, PatternID: observation.Key, Service: observation.Service,
+		Verdict: core.VerdictKnownPattern.String(), Frequency: observation.Frequency,
+		Timestamp: observation.Timestamp,
+	}
+	emission := &core.DetectionEmissionResult{NotificationOutcome: "not_applicable"}
+	if err != nil {
+		message := err.Error()
+		if len(message) > 256 {
+			message = message[:256]
+		}
+		log.Printf("agent: episode_error operation=continue_known error=%q", message)
+		emission.EpisodeAction = "episode_error"
+		emission.EpisodeError = message
+	} else {
+		setDetectionEmissionFromDecision(emission, decision)
+	}
+	w.recordDetectEvent(event, emission)
+}
+
+func setDetectionEmissionFromDecision(emission *core.DetectionEmissionResult, decision storage.DetectionEpisodeDecision) {
+	emission.Fingerprint = decision.Fingerprint
+	emission.EpisodeID = decision.EpisodeID
+	emission.IncidentID = decision.IncidentID
+	emission.OccurrenceDelta = decision.OccurrenceDelta
+	emission.OccurrenceCount = decision.OccurrenceCount
+	emission.EpisodeAction = string(decision.Action)
 }
 
 // signalPromoter is an OPTIONAL capability a brain may implement to persist a
@@ -730,21 +786,30 @@ func promoteByCount(learner core.SignalLearner, key string) {
 //     would-be call and returns the ok label (shadow-of-detect).
 func (w *Worker) emitDetect(
 	ctx context.Context,
-	source, patternID, template, service string,
+	source, signalKind, patternID, template, service string,
+	frequency int,
 	signals []core.Signal,
 	verdict core.AgentVerdict,
 	prevBaseline float64,
 	score, baselineStd float64,
 	explanation string,
+	fullObservationSeverity ...string,
 ) string {
+	ruleSeverity := strongestSeverity(signals)
+	if len(fullObservationSeverity) > 0 && utils.SeverityRank(fullObservationSeverity[0]) > utils.SeverityRank(ruleSeverity) {
+		ruleSeverity = utils.NormalizeSeverity(fullObservationSeverity[0])
+	}
 	result := core.AgentResult{
-		Verdict:       verdict,
-		PatternID:     patternID,
-		Template:      template,
-		SampleSignals: signals,
-		Frequency:     len(signals),
-		Baseline:      prevBaseline,
-		RuleSeverity:  strongestSeverity(signals),
+		Verdict:           verdict,
+		PatternID:         patternID,
+		Template:          template,
+		SampleSignals:     signals,
+		Frequency:         frequency,
+		Baseline:          prevBaseline,
+		AgentKind:         "detect",
+		SignalKind:        signalKind,
+		DetectionEmission: &core.DetectionEmissionResult{},
+		RuleSeverity:      ruleSeverity,
 	}
 
 	// Build a partial DetectEvent up front so every outcome path can
@@ -755,7 +820,7 @@ func (w *Worker) emitDetect(
 		Template:     template,
 		Service:      service,
 		Verdict:      verdict.String(),
-		Frequency:    len(signals),
+		Frequency:    frequency,
 		Baseline:     prevBaseline,
 		BaselineStd:  baselineStd,
 		Score:        score,
@@ -782,7 +847,7 @@ func (w *Worker) emitDetect(
 		if outcome == "send_error" {
 			evt.Error = "emitter returned error"
 		}
-		w.detect.Record(evt)
+		w.recordDetectEvent(evt, result.DetectionEmission)
 		return outcome
 	}
 
@@ -796,7 +861,7 @@ func (w *Worker) emitDetect(
 		if outcome == "send_error" {
 			evt.Error = "emitter returned error (see logs)"
 		}
-		w.detect.Record(evt)
+		w.recordDetectEvent(evt, result.DetectionEmission)
 		return outcome
 	}
 
@@ -813,7 +878,7 @@ func (w *Worker) emitDetect(
 		if outcome == "send_error" {
 			evt.Error = "emitter returned error"
 		}
-		w.detect.Record(evt)
+		w.recordDetectEvent(evt, result.DetectionEmission)
 		return outcome
 	}
 
@@ -821,14 +886,14 @@ func (w *Worker) emitDetect(
 	// transient AI outage never drops a page.
 	call, err := w.ai.Detect.Run(ctx, core.DetectTask{Result: result})
 	if err != nil {
-		log.Printf("agent[detect]: AI analyze failed pattern=%q: %v; sending templated alert", patternID, err)
+		log.Printf("agent[detect]: AI failed pattern=%q: %v; sending templated alert", patternID, err)
 		finding := deterministicFinding(result, verdict, service, score, baselineStd, explanation)
 		evt.Finding = finding
 		evt.Model = "heuristic"
 		evt.Error = err.Error()
 		outcome := w.send(finding, result, source, service, "emitted_basic_error")
 		evt.Outcome = outcome
-		w.detect.Record(evt)
+		w.recordDetectEvent(evt, result.DetectionEmission)
 		return outcome
 	}
 	finding := call.Finding
@@ -845,8 +910,21 @@ func (w *Worker) emitDetect(
 	if outcome == "send_error" {
 		evt.Error = "emitter returned error (see logs)"
 	}
-	w.detect.Record(evt)
+	w.recordDetectEvent(evt, result.DetectionEmission)
 	return outcome
+}
+
+func (w *Worker) recordDetectEvent(event *DetectEvent, emission *core.DetectionEmissionResult) {
+	if emission != nil {
+		event.EpisodeID = emission.EpisodeID
+		event.IncidentID = emission.IncidentID
+		event.OccurrenceDelta = emission.OccurrenceDelta
+		event.OccurrenceCount = emission.OccurrenceCount
+		event.EpisodeAction = emission.EpisodeAction
+		event.NotificationOutcome = emission.NotificationOutcome
+		event.EpisodeError = emission.EpisodeError
+	}
+	w.detect.Record(event)
 }
 
 // send delegates to the configured emitter and translates errors into
@@ -1025,6 +1103,13 @@ func strongestSeverity(signals []core.Signal) string {
 		}
 	}
 	return best
+}
+
+func observationSeverity(observation core.Observation) string {
+	if utils.SeverityRank(observation.StrongestSeverity) > 0 {
+		return utils.NormalizeSeverity(observation.StrongestSeverity)
+	}
+	return strongestSeverity(observation.Samples)
 }
 
 // clampSeverityFloor raises finding.Severity up to floor when floor is a

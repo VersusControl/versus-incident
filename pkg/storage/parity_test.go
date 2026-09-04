@@ -8,7 +8,11 @@ package storage_test
 // the standard CI loop (no live Postgres) stays green.
 //
 //   TEST_POSTGRES_DSN="postgres://user:pass@localhost:5432/testdb?sslmode=disable" \
-//       go test ./pkg/storage/...
+//       go test -p 1 ./...
+//
+// Package serialism is required because Postgres tests share this schema and
+// package-local setup truncates its tables. In-package concurrency tests remain
+// parallel at the goroutine and provider level.
 
 import (
 	"database/sql"

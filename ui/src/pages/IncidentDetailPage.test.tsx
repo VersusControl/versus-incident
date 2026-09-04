@@ -78,4 +78,25 @@ describe("IncidentDetailPage — shared Run analysis button", () => {
     });
     expect(buttons.length).toBeGreaterThanOrEqual(1);
   });
+
+  it("shows cumulative episode count and last seen", async () => {
+    vi.mocked(api.getIncident).mockResolvedValue(detail({
+      detection_episode_id: "episode-1",
+      occurrence_count: 500,
+      detection_last_seen: new Date().toISOString(),
+    }));
+    renderDetail();
+    expect(await screen.findByText("500")).toBeTruthy();
+    expect(screen.getByText("Last seen")).toBeTruthy();
+  });
+
+  it("prefers cumulative typed severity over stale content", async () => {
+    vi.mocked(api.getIncident).mockResolvedValue(detail({
+      highest_observed_severity: "critical",
+      highest_notified_severity: "critical",
+      content: { Severity: "low" },
+    }));
+    renderDetail();
+    expect(await screen.findByText("CRITICAL")).toBeTruthy();
+  });
 });

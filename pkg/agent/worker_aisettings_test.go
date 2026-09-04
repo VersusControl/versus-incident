@@ -48,7 +48,7 @@ func TestEmitDetect_ResolverDisabled_EmitsTemplated(t *testing.T) {
 
 	outcome := w.emitDetect(
 		context.Background(),
-		"test", "pid-off", "boom", "svc-x",
+		"test", "logs", "pid-off", "boom", "svc-x", 1,
 		[]core.Signal{{Message: "boom"}},
 		core.VerdictUnknown, 0, 0, 0, "",
 	)
@@ -90,7 +90,7 @@ func TestEmitDetect_ResolverEnabled_RunsAI(t *testing.T) {
 
 			outcome := w.emitDetect(
 				context.Background(),
-				"test", "pid-on", "boom", "svc-x",
+				"test", "logs", "pid-on", "boom", "svc-x", 1,
 				[]core.Signal{{Message: "boom"}},
 				core.VerdictUnknown, 0, 0, 0, "",
 			)

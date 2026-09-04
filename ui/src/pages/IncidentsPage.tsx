@@ -18,6 +18,7 @@ import {
 import { api, type IncidentIndex, type IncidentSummary, type IntakeSettings, type OriginCounts } from "@/lib/api";
 import { countWindowLabel } from "@/lib/countWindow";
 import { fmtAbs, fmtRel, incidentTitle, truncate } from "@/lib/format";
+import { incidentSeverity } from "@/lib/severity";
 import { useTableKeys } from "@/lib/hooks";
 import {
   INCIDENT_STATUS_VALUES,
@@ -977,23 +978,34 @@ function IncidentRow({
           )}
         </td>
         <td>
-          {/* Severity stays empty until the backend ships a severity field on
-              list summaries (UX_REDESIGN §3.5 ask #1) — IncidentSummary
-              carries no content for the detail page's parser to read. */}
-          <SeverityBadge severity={null} />
+          <SeverityBadge
+            severity={incidentSeverity(
+              null,
+              i.highest_observed_severity,
+              i.highest_notified_severity,
+            )}
+          />
         </td>
         <td title={fmtAbs(i.created_at)}>{fmtRel(i.created_at)}</td>
         <td>
           {/* Origin is already split by the top tabs (AI-detected vs
               Webhook), so the per-row source chip is redundant here — the
               title stands alone. */}
-          <div className="flex min-w-0 items-center gap-2">
+          <div className="flex min-w-0 flex-col gap-0.5">
             <Link
               to={`/incidents/${i.id}`}
               className="truncate font-medium text-ink-50 hover:text-link hover:underline"
             >
               {truncate(incidentTitle(i), 80)}
             </Link>
+            {!!i.detection_episode_id && (
+              <span className="text-2xs text-ink-400">
+                {(i.occurrence_count ?? 1).toLocaleString()} occurrences
+                {i.detection_last_seen && (
+                  <> · last seen {fmtRel(i.detection_last_seen)}</>
+                )}
+              </span>
+            )}
           </div>
         </td>
         <td>

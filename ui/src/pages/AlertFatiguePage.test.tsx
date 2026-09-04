@@ -415,7 +415,13 @@ describe("AlertFatiguePage — fingerprint review table", () => {
     // guards the wire-key contract directly: the backend ships `fingerprints`,
     // not `items`. A regression to `items` renders an EMPTY table here.
     vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue({
-      fingerprints: [finding({ id: "wire", service: "billing" })],
+      fingerprints: [
+        finding({
+          id: "wire",
+          service: "billing",
+          detection_occurrence_count: 500,
+        }),
+      ],
       total: 1,
       page: 1,
       page_size: 50,
@@ -423,6 +429,7 @@ describe("AlertFatiguePage — fingerprint review table", () => {
     renderPage();
 
     expect(await screen.findByText("billing")).toBeTruthy();
+    expect(screen.getByText("500")).toBeTruthy();
     expect(screen.queryByText(/No fingerprints yet/)).toBeNull();
   });
 
