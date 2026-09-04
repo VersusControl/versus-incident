@@ -265,6 +265,180 @@ func writeFileAtomicSync(target string, data []byte, mode os.FileMode) error {
 
 const incidentsFile = "incidents.json"
 
+const detectionEpisodesFile = "detection_episodes.json"
+
+type detectionEpisodesFileSchema struct {
+	Version  int                       `json:"version"`
+	Episodes []*memoryDetectionEpisode `json:"episodes"`
+	Active   map[string]string         `json:"active"`
+}
+
+func (p *fileProvider) loadDetectionEpisodesLocked(path string) (*memoryProvider, error) {
+	state := &memoryProvider{
+		episodes:          make(map[string]*memoryDetectionEpisode),
+		activeEpisodes:    make(map[string]string),
+		maxClosedEpisodes: p.maxIncidents,
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return state, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: read detection episodes: %w", err)
+	}
+	var file detectionEpisodesFileSchema
+	if err := json.Unmarshal(data, &file); err != nil {
+		return nil, fmt.Errorf("storage: parse detection episodes: %w", err)
+	}
+	for _, episode := range file.Episodes {
+		if episode != nil && episode.EpisodeID != "" {
+			state.episodes[episode.EpisodeID] = episode
+		}
+	}
+	for fingerprint, episodeID := range file.Active {
+		state.activeEpisodes[fingerprint] = episodeID
+	}
+	return state, nil
+}
+
+func (p *fileProvider) persistDetectionEpisodesLocked(path string, state *memoryProvider) error {
+	episodes := make([]*memoryDetectionEpisode, 0, len(state.episodes))
+	for _, episode := range state.episodes {
+		episodes = append(episodes, episode)
+	}
+	file := detectionEpisodesFileSchema{Version: 1, Episodes: episodes, Active: state.activeEpisodes}
+	data, err := json.MarshalIndent(file, "", "  ")
+	if err != nil {
+		return fmt.Errorf("storage: marshal detection episodes: %w", err)
+	}
+	if err := writeFileAtomicSync(path, data, 0o644); err != nil {
+		return fmt.Errorf("storage: write detection episodes: %w", err)
+	}
+	return nil
+}
+
+func (p *fileProvider) RecordDetectionOccurrence(occurrence DetectionOccurrence) (DetectionEpisodeDecision, error) {
+	path := filepath.Join(p.dir, detectionEpisodesFile)
+	lock := fileBlobLock(path)
+	lock.Lock()
+	defer lock.Unlock()
+	state, err := p.loadDetectionEpisodesLocked(path)
+	if err != nil {
+		return DetectionEpisodeDecision{}, err
+	}
+	identity := normalizeDetectionIdentity(occurrence.Identity)
+	fingerprint, _ := DetectionIdentityFingerprint(identity)
+	if active := state.activeDetectionEpisode(fingerprint, identity); active != nil {
+		if incident, err := p.GetIncident(active.IncidentID); err == nil {
+			if incident.Resolved {
+				closed := occurrence.ReceivedAt.UTC()
+				if closed.IsZero() {
+					closed = time.Now().UTC()
+				}
+				active.ClosedAt = &closed
+				delete(state.activeEpisodes, active.Fingerprint)
+			} else {
+				state.incidents = append(state.incidents, incident)
+			}
+		} else if errors.Is(err, ErrNotFound) {
+			if active.PendingToken == "" && detectionNotificationDelivered(active.LastNotificationOutcome) {
+				closed := occurrence.ReceivedAt.UTC()
+				if closed.IsZero() {
+					closed = time.Now().UTC()
+				}
+				active.ClosedAt = &closed
+				delete(state.activeEpisodes, active.Fingerprint)
+			}
+		} else {
+			return DetectionEpisodeDecision{}, err
+		}
+	}
+	decision, err := state.RecordDetectionOccurrence(occurrence)
+	if err != nil {
+		if occurrence.ExistingOnly && errors.Is(err, ErrNotFound) {
+			if persistErr := p.persistDetectionEpisodesLocked(path, state); persistErr != nil {
+				return DetectionEpisodeDecision{}, persistErr
+			}
+		}
+		return DetectionEpisodeDecision{}, err
+	}
+	if err := p.persistDetectionEpisodesLocked(path, state); err != nil {
+		return DetectionEpisodeDecision{}, err
+	}
+	if occurrence.ExistingOnly {
+		incident, err := p.GetIncident(decision.IncidentID)
+		if err == nil {
+			applyDetectionEpisodeDecision(incident, decision)
+			if err := p.SaveDetectionIncident(incident); err != nil {
+				return decision, err
+			}
+		} else if !errors.Is(err, ErrNotFound) {
+			return decision, err
+		}
+	}
+	return decision, nil
+}
+
+func (p *fileProvider) CompleteDetectionNotification(completion DetectionNotificationCompletion) error {
+	path := filepath.Join(p.dir, detectionEpisodesFile)
+	lock := fileBlobLock(path)
+	lock.Lock()
+	defer lock.Unlock()
+	state, err := p.loadDetectionEpisodesLocked(path)
+	if err != nil {
+		return err
+	}
+	if err := state.CompleteDetectionNotification(completion); err != nil {
+		return err
+	}
+	if err := p.persistDetectionEpisodesLocked(path, state); err != nil {
+		return err
+	}
+	episode := state.episodes[completion.EpisodeID]
+	if episode == nil {
+		return nil
+	}
+	incident, err := p.GetIncident(episode.IncidentID)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	applyDetectionEpisodeDecision(incident, state.detectionEpisodeDecision(episode))
+	return p.SaveDetectionIncident(incident)
+}
+
+func (p *fileProvider) RenewDetectionNotificationClaim(renewal DetectionNotificationRenewal) error {
+	path := filepath.Join(p.dir, detectionEpisodesFile)
+	lock := fileBlobLock(path)
+	lock.Lock()
+	defer lock.Unlock()
+	state, err := p.loadDetectionEpisodesLocked(path)
+	if err != nil {
+		return err
+	}
+	if err := state.RenewDetectionNotificationClaim(renewal); err != nil {
+		return err
+	}
+	return p.persistDetectionEpisodesLocked(path, state)
+}
+
+func (p *fileProvider) CloseDetectionEpisodeByIncident(incidentID string, closedAt time.Time) error {
+	path := filepath.Join(p.dir, detectionEpisodesFile)
+	lock := fileBlobLock(path)
+	lock.Lock()
+	defer lock.Unlock()
+	state, err := p.loadDetectionEpisodesLocked(path)
+	if err != nil {
+		return err
+	}
+	if err := state.CloseDetectionEpisodeByIncident(incidentID, closedAt); err != nil {
+		return err
+	}
+	return p.persistDetectionEpisodesLocked(path, state)
+}
+
 type incidentsFileSchema struct {
 	Version   int               `json:"version"`
 	UpdatedAt time.Time         `json:"updated_at"`
@@ -323,19 +497,41 @@ func (p *fileProvider) SaveIncident(rec *IncidentRecord) error {
 		return fmt.Errorf("storage: SaveIncident: missing id")
 	}
 	rec.OrgID = NormalizeOrgID(rec.OrgID)
+	stored := CloneIncidentRecord(rec)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	// Update in place if the id already exists (e.g. ack flow).
 	for i, existing := range p.incidents {
 		if existing.ID == rec.ID {
-			p.incidents[i] = rec
+			mergeDetectionIncident(existing, stored)
+			p.incidents[i] = stored
 			return p.persistIncidentsLocked()
 		}
 	}
 
 	// Append + trim.
-	p.incidents = append(p.incidents, rec)
+	p.incidents = append(p.incidents, stored)
+	if over := len(p.incidents) - p.maxIncidents; over > 0 {
+		p.incidents = append([]*IncidentRecord(nil), p.incidents[over:]...)
+	}
+	return p.persistIncidentsLocked()
+}
+
+func (p *fileProvider) SaveDetectionIncident(rec *IncidentRecord) error {
+	if rec == nil || rec.ID == "" {
+		return fmt.Errorf("storage: SaveDetectionIncident: missing id")
+	}
+	rec.OrgID = NormalizeOrgID(rec.OrgID)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for index, existing := range p.incidents {
+		if existing.ID == rec.ID {
+			p.incidents[index] = detectionIncidentUpdate(existing, rec)
+			return p.persistIncidentsLocked()
+		}
+	}
+	p.incidents = append(p.incidents, CloneIncidentRecord(rec))
 	if over := len(p.incidents) - p.maxIncidents; over > 0 {
 		p.incidents = append([]*IncidentRecord(nil), p.incidents[over:]...)
 	}
@@ -360,8 +556,7 @@ func (p *fileProvider) GetIncident(id string) (*IncidentRecord, error) {
 	defer p.mu.RUnlock()
 	for _, rec := range p.incidents {
 		if rec.ID == id {
-			cp := *rec
-			return &cp, nil
+			return CloneIncidentRecord(rec), nil
 		}
 	}
 	return nil, ErrNotFound
@@ -377,8 +572,7 @@ func (p *fileProvider) ListIncidents(limit int) ([]*IncidentRecord, error) {
 	// Newest first.
 	out := make([]*IncidentRecord, 0, n)
 	for i := n - 1; i >= 0; i-- {
-		cp := *p.incidents[i]
-		out = append(out, &cp)
+		out = append(out, CloneIncidentRecord(p.incidents[i]))
 		if limit > 0 && len(out) >= limit {
 			break
 		}
@@ -451,8 +645,7 @@ func (p *fileProvider) ListIncidentsByServiceSince(orgID, service string, since 
 		if NormalizeOrgID(rec.OrgID) != NormalizeOrgID(orgID) || rec.ServiceLabel() != service || rec.CreatedAt.Before(since) {
 			continue
 		}
-		cp := *rec
-		out = append(out, &cp)
+		out = append(out, CloneIncidentRecord(rec))
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	if limit > 0 && len(out) > limit {
@@ -486,8 +679,7 @@ func (p *fileProvider) ListIncidentsPage(origin string, offset, limit int) ([]*I
 			skipped++
 			continue
 		}
-		cp := *rec
-		out = append(out, &cp)
+		out = append(out, CloneIncidentRecord(rec))
 		if len(out) >= limit {
 			break
 		}

@@ -657,12 +657,20 @@ type IncidentRecord struct {
 	// "sent"    — every enabled channel returned success
 	// "partial" — at least one channel succeeded, at least one failed
 	// "failed"  — no channel succeeded
-	NotifyStatus string                 `json:"notify_status,omitempty"`
-	NotifyError  string                 `json:"notify_error,omitempty"`
-	CreatedAt    time.Time              `json:"created_at"`
-	AckedAt      *time.Time             `json:"acked_at,omitempty"`
-	ResolvedAt   *time.Time             `json:"resolved_at,omitempty"`
-	Content      map[string]interface{} `json:"content,omitempty"`
+	// "diverted" — an external interceptor completed delivery
+	NotifyStatus            string                 `json:"notify_status,omitempty"`
+	NotifyError             string                 `json:"notify_error,omitempty"`
+	CreatedAt               time.Time              `json:"created_at"`
+	AckedAt                 *time.Time             `json:"acked_at,omitempty"`
+	ResolvedAt              *time.Time             `json:"resolved_at,omitempty"`
+	DetectionFingerprint    string                 `json:"detection_fingerprint,omitempty"`
+	DetectionEpisodeID      string                 `json:"detection_episode_id,omitempty"`
+	OccurrenceCount         int64                  `json:"occurrence_count,omitempty"`
+	DetectionFirstSeen      *time.Time             `json:"detection_first_seen,omitempty"`
+	DetectionLastSeen       *time.Time             `json:"detection_last_seen,omitempty"`
+	HighestObservedSeverity string                 `json:"highest_observed_severity,omitempty"`
+	HighestNotifiedSeverity string                 `json:"highest_notified_severity,omitempty"`
+	Content                 map[string]interface{} `json:"content,omitempty"`
 
 	// AssignedTeamID and AssignedMemberIDs record an operator's
 	// assignment for this incident. Routing logic will read
@@ -670,6 +678,50 @@ type IncidentRecord struct {
 	// holds the references. Empty means unassigned.
 	AssignedTeamID    string   `json:"assigned_team_id,omitempty"`
 	AssignedMemberIDs []string `json:"assigned_member_ids,omitempty"`
+}
+
+func CloneIncidentRecord(rec *IncidentRecord) *IncidentRecord {
+	if rec == nil {
+		return nil
+	}
+	clone := *rec
+	clone.ChannelsEnabled = append([]string(nil), rec.ChannelsEnabled...)
+	clone.ChannelsNotified = append([]string(nil), rec.ChannelsNotified...)
+	clone.AssignedMemberIDs = append([]string(nil), rec.AssignedMemberIDs...)
+	clone.AckedAt = utcPtrCopy(rec.AckedAt)
+	clone.ResolvedAt = utcPtrCopy(rec.ResolvedAt)
+	clone.DetectionFirstSeen = utcPtrCopy(rec.DetectionFirstSeen)
+	clone.DetectionLastSeen = utcPtrCopy(rec.DetectionLastSeen)
+	clone.Content = cloneIncidentContent(rec.Content)
+	return &clone
+}
+
+func cloneIncidentContent(content map[string]interface{}) map[string]interface{} {
+	if content == nil {
+		return nil
+	}
+	clone := make(map[string]interface{}, len(content))
+	for key, value := range content {
+		clone[key] = cloneIncidentValue(value)
+	}
+	return clone
+}
+
+func cloneIncidentValue(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return cloneIncidentContent(typed)
+	case []interface{}:
+		clone := make([]interface{}, len(typed))
+		for index, item := range typed {
+			clone[index] = cloneIncidentValue(item)
+		}
+		return clone
+	case []string:
+		return append([]string(nil), typed...)
+	default:
+		return value
+	}
 }
 
 // EffectiveOrigin returns the record's explicit Origin, or derives one
@@ -697,6 +749,101 @@ func (r *IncidentRecord) ServiceLabel() string {
 		return r.Service
 	}
 	return utils.ExtractService(r.Content)
+}
+
+func mergeDetectionIncident(existing, incoming *IncidentRecord) {
+	if existing == nil || incoming == nil || incoming.DetectionEpisodeID == "" ||
+		existing.DetectionEpisodeID != incoming.DetectionEpisodeID {
+		return
+	}
+	incoming.Title = existing.Title
+	incoming.Source = existing.Source
+	incoming.Service = existing.Service
+	incoming.Origin = existing.Origin
+	incoming.ChannelsEnabled = append([]string(nil), existing.ChannelsEnabled...)
+	incoming.ChannelsNotified = append([]string(nil), existing.ChannelsNotified...)
+	incoming.OnCallTriggered = existing.OnCallTriggered
+	incoming.OnCallError = existing.OnCallError
+	incoming.NotifyStatus = existing.NotifyStatus
+	incoming.NotifyError = existing.NotifyError
+	mergeDetectionProgress(existing, incoming)
+	incoming.Content = cloneIncidentContent(existing.Content)
+	if incoming.Content == nil {
+		incoming.Content = make(map[string]interface{})
+	}
+	incoming.Content["Frequency"] = incoming.OccurrenceCount
+}
+
+func mergeDetectionProgress(existing, incoming *IncidentRecord) {
+	if existing == nil || incoming == nil || incoming.DetectionEpisodeID == "" ||
+		existing.DetectionEpisodeID != incoming.DetectionEpisodeID {
+		return
+	}
+	if existing.OccurrenceCount > incoming.OccurrenceCount {
+		incoming.OccurrenceCount = existing.OccurrenceCount
+	}
+	if incoming.DetectionFirstSeen == nil || existing.DetectionFirstSeen != nil && existing.DetectionFirstSeen.Before(*incoming.DetectionFirstSeen) {
+		incoming.DetectionFirstSeen = utcPtrCopy(existing.DetectionFirstSeen)
+	}
+	if incoming.DetectionLastSeen == nil || existing.DetectionLastSeen != nil && existing.DetectionLastSeen.After(*incoming.DetectionLastSeen) {
+		incoming.DetectionLastSeen = utcPtrCopy(existing.DetectionLastSeen)
+	}
+	if utils.SeverityRank(existing.HighestObservedSeverity) > utils.SeverityRank(incoming.HighestObservedSeverity) {
+		incoming.HighestObservedSeverity = existing.HighestObservedSeverity
+	}
+	if utils.SeverityRank(existing.HighestNotifiedSeverity) > utils.SeverityRank(incoming.HighestNotifiedSeverity) {
+		incoming.HighestNotifiedSeverity = existing.HighestNotifiedSeverity
+	}
+	if incoming.Content == nil {
+		incoming.Content = make(map[string]interface{})
+	}
+	incoming.Content["Frequency"] = incoming.OccurrenceCount
+}
+
+func detectionIncidentUpdate(existing, incoming *IncidentRecord) *IncidentRecord {
+	if existing == nil {
+		return CloneIncidentRecord(incoming)
+	}
+	updated := CloneIncidentRecord(existing)
+	updated.Title = incoming.Title
+	updated.Source = incoming.Source
+	updated.Service = incoming.Service
+	updated.Origin = incoming.Origin
+	if incoming.NotifyStatus != "" {
+		updated.ChannelsEnabled = append([]string(nil), incoming.ChannelsEnabled...)
+		updated.ChannelsNotified = append([]string(nil), incoming.ChannelsNotified...)
+		updated.OnCallTriggered = incoming.OnCallTriggered
+		updated.OnCallError = incoming.OnCallError
+		updated.NotifyStatus = incoming.NotifyStatus
+		updated.NotifyError = incoming.NotifyError
+	}
+	updated.DetectionFingerprint = incoming.DetectionFingerprint
+	updated.DetectionEpisodeID = incoming.DetectionEpisodeID
+	updated.OccurrenceCount = incoming.OccurrenceCount
+	updated.DetectionFirstSeen = utcPtrCopy(incoming.DetectionFirstSeen)
+	updated.DetectionLastSeen = utcPtrCopy(incoming.DetectionLastSeen)
+	updated.HighestObservedSeverity = incoming.HighestObservedSeverity
+	updated.HighestNotifiedSeverity = incoming.HighestNotifiedSeverity
+	if updated.Content == nil {
+		updated.Content = make(map[string]interface{})
+	}
+	for key, value := range incoming.Content {
+		updated.Content[key] = cloneIncidentValue(value)
+	}
+	mergeDetectionProgress(existing, updated)
+	severity := canonicalDetectionIncidentSeverity(updated.HighestObservedSeverity, updated.HighestNotifiedSeverity)
+	if severity != "" {
+		updated.Content["Severity"] = severity
+	}
+	return updated
+}
+
+func utcPtrCopy(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := value.UTC()
+	return &copy
 }
 
 // AnalysisRecord is the durable shape of one analyze-mode run. The

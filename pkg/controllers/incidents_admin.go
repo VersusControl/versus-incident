@@ -321,22 +321,29 @@ func (i *IncidentAdminController) get(c *fiber.Ctx) error {
 // summarize drops the heavy Content map from a record for list views.
 func summarize(r *storage.IncidentRecord) fiber.Map {
 	return fiber.Map{
-		"id":                  r.ID,
-		"team_id":             r.TeamID,
-		"title":               r.Title,
-		"source":              r.Source,
-		"origin":              r.EffectiveOrigin(),
-		"service":             services.ServiceLabel(r),
-		"resolved":            r.Resolved,
-		"channels_notified":   r.ChannelsNotified,
-		"oncall_triggered":    r.OnCallTriggered,
-		"notify_status":       r.NotifyStatus,
-		"notify_error":        r.NotifyError,
-		"created_at":          r.CreatedAt,
-		"acked_at":            r.AckedAt,
-		"resolved_at":         r.ResolvedAt,
-		"assigned_team_id":    r.AssignedTeamID,
-		"assigned_member_ids": r.AssignedMemberIDs,
+		"id":                        r.ID,
+		"team_id":                   r.TeamID,
+		"title":                     r.Title,
+		"source":                    r.Source,
+		"origin":                    r.EffectiveOrigin(),
+		"service":                   services.ServiceLabel(r),
+		"resolved":                  r.Resolved,
+		"channels_notified":         r.ChannelsNotified,
+		"oncall_triggered":          r.OnCallTriggered,
+		"notify_status":             r.NotifyStatus,
+		"notify_error":              r.NotifyError,
+		"created_at":                r.CreatedAt,
+		"acked_at":                  r.AckedAt,
+		"resolved_at":               r.ResolvedAt,
+		"detection_fingerprint":     r.DetectionFingerprint,
+		"detection_episode_id":      r.DetectionEpisodeID,
+		"occurrence_count":          r.OccurrenceCount,
+		"detection_first_seen":      r.DetectionFirstSeen,
+		"detection_last_seen":       r.DetectionLastSeen,
+		"highest_observed_severity": r.HighestObservedSeverity,
+		"highest_notified_severity": r.HighestNotifiedSeverity,
+		"assigned_team_id":          r.AssignedTeamID,
+		"assigned_member_ids":       r.AssignedMemberIDs,
 	}
 }
 
@@ -666,8 +673,8 @@ func incidentListResponse(recs []*storage.IncidentRecord, origin, pageParam, pag
 	return resp
 }
 
-// resolve marks an incident as resolved. Idempotent: re-resolving an
-// already-resolved record is a no-op (no error, no timestamp drift).
+// resolve marks an incident as resolved. Re-resolving preserves the original
+// timestamp and retries idempotent detection-episode closure.
 func (i *IncidentAdminController) resolve(c *fiber.Ctx) error {
 	store := services.Storage()
 	if store == nil {
@@ -689,8 +696,8 @@ func (i *IncidentAdminController) resolve(c *fiber.Ctx) error {
 			return incidentStorageError(c, "check incident mutable for resolve", err)
 		}
 	}
+	now := time.Now().UTC()
 	if !rec.Resolved {
-		now := time.Now().UTC()
 		rec.Resolved = true
 		rec.ResolvedAt = &now
 		if err := store.SaveIncident(rec); err != nil {
@@ -698,6 +705,16 @@ func (i *IncidentAdminController) resolve(c *fiber.Ctx) error {
 				return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
 			}
 			return incidentStorageError(c, "save resolved incident", err)
+		}
+	}
+	closedAt := now
+	if rec.ResolvedAt != nil {
+		closedAt = rec.ResolvedAt.UTC()
+	}
+	if episodes, ok := store.(storage.DetectionEpisodeStore); ok {
+		if err := episodes.CloseDetectionEpisodeByIncident(rec.ID, closedAt); err != nil &&
+			!errors.Is(err, storage.ErrNotFound) && !errors.Is(err, storage.ErrUnsupported) {
+			return incidentStorageError(c, "close detection episode", err)
 		}
 	}
 	return c.JSON(fiber.Map{

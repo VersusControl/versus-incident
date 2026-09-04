@@ -143,17 +143,31 @@ func (v AgentVerdict) String() string {
 // AgentResult is the output of a Detector for one batch of signals that share
 // the same fingerprint.
 type AgentResult struct {
-	Verdict       AgentVerdict
-	PatternID     string   // empty when VerdictUnknown and pattern not yet stored
-	Template      string   // human-readable pattern template ("Failed to ... at <*>:<*>")
-	SampleSignals []Signal // representative signals (capped, post-redaction)
-	Frequency     int      // matches in the current tick / window
-	Baseline      float64  // EWMA baseline for the pattern (0 when unknown)
+	Verdict           AgentVerdict
+	PatternID         string   // empty when VerdictUnknown and pattern not yet stored
+	Template          string   // human-readable pattern template ("Failed to ... at <*>:<*>")
+	SampleSignals     []Signal // representative signals (capped, post-redaction)
+	Frequency         int      // matches in the current tick / window
+	Baseline          float64  // EWMA baseline for the pattern (0 when unknown)
+	AgentKind         string   // emitting agent kind; "detect" for the detect worker
+	SignalKind        string   // brain kind: logs | metrics | traces
+	DetectionEmission *DetectionEmissionResult
 	// RuleSeverity is the strongest operator-declared severity carried by the
 	// grouped signals (e.g. an anomaly rule's `severity: critical`). Empty for
 	// auto-discovered signals with no declared severity. It acts as a floor:
 	// the AI may escalate but must not silently demote below it.
 	RuleSeverity string
+}
+
+type DetectionEmissionResult struct {
+	Fingerprint         string
+	EpisodeID           string
+	IncidentID          string
+	OccurrenceDelta     int64
+	OccurrenceCount     int64
+	EpisodeAction       string
+	NotificationOutcome string
+	EpisodeError        string
 }
 
 // Detector consumes signals and emits AgentResults.

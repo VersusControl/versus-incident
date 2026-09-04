@@ -82,6 +82,52 @@ type resolveStorage struct {
 	saves    int
 }
 
+type retryCloseStorage struct {
+	storage.Provider
+	episodes   storage.DetectionEpisodeStore
+	closeCalls int
+}
+
+type unsupportedCloseStorage struct {
+	storage.Provider
+}
+
+func (s *unsupportedCloseStorage) RecordDetectionOccurrence(storage.DetectionOccurrence) (storage.DetectionEpisodeDecision, error) {
+	return storage.DetectionEpisodeDecision{}, storage.ErrUnsupported
+}
+
+func (s *unsupportedCloseStorage) RenewDetectionNotificationClaim(storage.DetectionNotificationRenewal) error {
+	return storage.ErrUnsupported
+}
+
+func (s *unsupportedCloseStorage) CompleteDetectionNotification(storage.DetectionNotificationCompletion) error {
+	return storage.ErrUnsupported
+}
+
+func (s *unsupportedCloseStorage) CloseDetectionEpisodeByIncident(string, time.Time) error {
+	return storage.ErrUnsupported
+}
+
+func (s *retryCloseStorage) RecordDetectionOccurrence(occurrence storage.DetectionOccurrence) (storage.DetectionEpisodeDecision, error) {
+	return s.episodes.RecordDetectionOccurrence(occurrence)
+}
+
+func (s *retryCloseStorage) RenewDetectionNotificationClaim(renewal storage.DetectionNotificationRenewal) error {
+	return s.episodes.RenewDetectionNotificationClaim(renewal)
+}
+
+func (s *retryCloseStorage) CompleteDetectionNotification(completion storage.DetectionNotificationCompletion) error {
+	return s.episodes.CompleteDetectionNotification(completion)
+}
+
+func (s *retryCloseStorage) CloseDetectionEpisodeByIncident(incidentID string, closedAt time.Time) error {
+	s.closeCalls++
+	if s.closeCalls == 1 {
+		return errors.New("temporary close failure")
+	}
+	return s.episodes.CloseDetectionEpisodeByIncident(incidentID, closedAt)
+}
+
 type analysisDeleteStorage struct {
 	storage.Provider
 	err error
@@ -148,6 +194,127 @@ func TestResolve_BackendErrorIsNotDisclosed(t *testing.T) {
 	}
 	if strings.Contains(string(body), secret) || !strings.Contains(string(body), internalServerErrorMessage) {
 		t.Fatalf("body = %q, want generic error without backend detail", body)
+	}
+}
+
+func TestResolveClosesDetectionEpisode(t *testing.T) {
+	provider := storage.NewMemory()
+	episodes := provider.(storage.DetectionEpisodeStore)
+	identity := storage.DetectionIdentity{
+		AgentKind: "detect", Source: "loki", Service: "checkout", SignalKind: "logs", ConditionKey: "timeout",
+	}
+	now := time.Date(2026, 9, 3, 18, 0, 0, 0, time.UTC)
+	opened, err := episodes.RecordDetectionOccurrence(storage.DetectionOccurrence{
+		Identity: identity, Frequency: 1, Severity: "medium", ReceivedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("RecordDetectionOccurrence: %v", err)
+	}
+	if err := episodes.CompleteDetectionNotification(storage.DetectionNotificationCompletion{
+		EpisodeID: opened.EpisodeID, ClaimToken: opened.ClaimToken, Outcome: "sent", CompletedAt: now,
+	}); err != nil {
+		t.Fatalf("CompleteDetectionNotification: %v", err)
+	}
+	if err := provider.SaveIncident(&storage.IncidentRecord{
+		ID: opened.IncidentID, DetectionEpisodeID: opened.EpisodeID, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveIncident: %v", err)
+	}
+	services.SetStorage(provider)
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	app := fiber.New()
+	app.Post("/incidents/:id/resolve", NewIncidentAdminController().resolve)
+	response, err := app.Test(httptest.NewRequest("POST", "/incidents/"+opened.IncidentID+"/resolve", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != fiber.StatusOK {
+		t.Fatalf("status=%d, want %d", response.StatusCode, fiber.StatusOK)
+	}
+
+	recurred, err := episodes.RecordDetectionOccurrence(storage.DetectionOccurrence{
+		Identity: identity, Frequency: 1, Severity: "medium", ReceivedAt: now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("RecordDetectionOccurrence(recurred): %v", err)
+	}
+	if recurred.Action != storage.DetectionEpisodeReopened || recurred.EpisodeID == opened.EpisodeID || recurred.IncidentID == opened.IncidentID {
+		t.Fatalf("recurred decision = %+v", recurred)
+	}
+}
+
+func TestResolveRetriesDetectionEpisodeClose(t *testing.T) {
+	provider := storage.NewMemory()
+	episodes := provider.(storage.DetectionEpisodeStore)
+	identity := storage.DetectionIdentity{
+		AgentKind: "detect", Source: "loki", Service: "checkout", SignalKind: "logs", ConditionKey: "retry-close",
+	}
+	now := time.Date(2026, 9, 4, 9, 0, 0, 0, time.UTC)
+	opened, err := episodes.RecordDetectionOccurrence(storage.DetectionOccurrence{
+		Identity: identity, Frequency: 1, Severity: "medium", ReceivedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("RecordDetectionOccurrence: %v", err)
+	}
+	if err := provider.SaveIncident(&storage.IncidentRecord{ID: opened.IncidentID, CreatedAt: now}); err != nil {
+		t.Fatalf("SaveIncident: %v", err)
+	}
+	wrapped := &retryCloseStorage{Provider: provider, episodes: episodes}
+	services.SetStorage(wrapped)
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	app := fiber.New()
+	app.Post("/incidents/:id/resolve", NewIncidentAdminController().resolve)
+	request := func() int {
+		t.Helper()
+		response, err := app.Test(httptest.NewRequest("POST", "/incidents/"+opened.IncidentID+"/resolve", nil))
+		if err != nil {
+			t.Fatalf("app.Test: %v", err)
+		}
+		defer response.Body.Close()
+		return response.StatusCode
+	}
+	if status := request(); status != fiber.StatusInternalServerError {
+		t.Fatalf("first resolve status=%d, want %d", status, fiber.StatusInternalServerError)
+	}
+	if status := request(); status != fiber.StatusOK {
+		t.Fatalf("retry resolve status=%d, want %d", status, fiber.StatusOK)
+	}
+	if wrapped.closeCalls != 2 {
+		t.Fatalf("close calls=%d, want 2", wrapped.closeCalls)
+	}
+	recurred, err := episodes.RecordDetectionOccurrence(storage.DetectionOccurrence{
+		Identity: identity, Frequency: 1, Severity: "medium", ReceivedAt: now.Add(time.Second),
+	})
+	if err != nil || recurred.EpisodeID == opened.EpisodeID {
+		t.Fatalf("recurrence after retry = %+v, %v", recurred, err)
+	}
+}
+
+func TestResolveIgnoresUnsupportedDetectionEpisodeClose(t *testing.T) {
+	base := storage.NewMemory()
+	now := time.Now().UTC()
+	if err := base.SaveIncident(&storage.IncidentRecord{ID: "webhook-incident", CreatedAt: now}); err != nil {
+		t.Fatalf("SaveIncident: %v", err)
+	}
+	services.SetStorage(&unsupportedCloseStorage{Provider: base})
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	app := fiber.New()
+	app.Post("/incidents/:id/resolve", NewIncidentAdminController().resolve)
+	response, err := app.Test(httptest.NewRequest("POST", "/incidents/webhook-incident/resolve", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != fiber.StatusOK {
+		t.Fatalf("status=%d, want %d", response.StatusCode, fiber.StatusOK)
+	}
+	resolved, err := base.GetIncident("webhook-incident")
+	if err != nil || !resolved.Resolved || resolved.ResolvedAt == nil {
+		t.Fatalf("resolved incident=%+v err=%v", resolved, err)
 	}
 }
 

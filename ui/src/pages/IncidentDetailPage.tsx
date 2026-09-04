@@ -14,7 +14,7 @@ import {
 import clsx from "clsx";
 import { api } from "@/lib/api";
 import { fmtAbs, fmtRel, incidentTitle } from "@/lib/format";
-import { severityFromContent } from "@/lib/severity";
+import { incidentSeverity } from "@/lib/severity";
 import { TopBar } from "@/components/TopBar";
 import { PageHeader } from "@/components/PageHeader";
 import { SeverityBadge } from "@/components/SeverityBadge";
@@ -83,7 +83,11 @@ export function IncidentDetailPage() {
 
   const alertName = pickString(content, "AlertName", "alertname", "alert_name");
   const summary = pickString(content, "Summary", "summary", "description");
-  const severity = severityFromContent(content);
+  const severity = incidentSeverity(
+    content,
+    data?.highest_observed_severity,
+    data?.highest_notified_severity,
+  );
   const category = pickString(content, "Category", "category");
   const confidence = pickNumber(content, "Confidence", "confidence");
   const suggestions = pickList(content, "Suggestions", "suggestions");
@@ -93,6 +97,7 @@ export function IncidentDetailPage() {
   const patternID = pickString(content, "PatternID", "pattern_id");
   const patternTemplate = pickString(content, "PatternTemplate", "pattern_template");
   const frequency = pickNumber(content, "Frequency", "frequency");
+  const occurrenceCount = data?.occurrence_count ?? frequency;
   const baseline = pickNumber(content, "Baseline", "baseline");
   const verdict = pickString(content, "Verdict", "verdict");
   const serviceName = pickString(content, "ServiceName", "Service", "service");
@@ -432,6 +437,13 @@ export function IncidentDetailPage() {
                           {fmtRel(data.created_at)}
                         </span>
                       </StateRow>
+                      {data.detection_last_seen && (
+                        <StateRow label="Last seen">
+                          <span title={fmtAbs(data.detection_last_seen)}>
+                            {fmtRel(data.detection_last_seen)}
+                          </span>
+                        </StateRow>
+                      )}
                       <StateRow label="Notified">
                         {data.notify_status === "sent" ? (
                           <span className="inline-flex items-center gap-1 text-sev-ok">
@@ -588,8 +600,8 @@ export function IncidentDetailPage() {
                     <Fact
                       k="Frequency"
                       v={
-                        frequency !== undefined ? (
-                          <span className="font-mono">{frequency}</span>
+                        occurrenceCount !== undefined ? (
+                          <span className="font-mono">{occurrenceCount}</span>
                         ) : (
                           "—"
                         )

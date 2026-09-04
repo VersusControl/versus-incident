@@ -1,10 +1,14 @@
 package services
 
 import (
+	"errors"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
 	m "github.com/VersusControl/versus-incident/pkg/models"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 // fakeProvider is a capturing core.AlertProvider: it reports a fixed channel
@@ -167,6 +171,238 @@ func TestCreateIncident_SuppressSkipsFanOut(t *testing.T) {
 	content := map[string]interface{}{"title": "disk full", "Status": "firing"}
 	if err := CreateIncident("team", &content); err != nil {
 		t.Fatalf("EmitSuppress CreateIncident returned error %v, want nil", err)
+	}
+}
+
+func TestCreateIncident_DeliveryHandledIgnoredForWebhook(t *testing.T) {
+	loadAgentTestConfig(t)
+	provider := storage.NewMemory()
+	previousStore := Storage()
+	SetStorage(provider)
+	t.Cleanup(func() {
+		SetEmitInterceptor(nil)
+		SetStorage(previousStore)
+	})
+	SetEmitInterceptor(func(map[string]interface{}, string) EmitDecision {
+		return EmitDecision{Action: EmitDivert, DeliveryHandled: true, DeliveryError: errors.New("external detection delivery failed")}
+	})
+
+	content := map[string]interface{}{"title": "disk full", "Status": "firing"}
+	if err := CreateIncident("team", &content); err != nil {
+		t.Fatalf("CreateIncident: %v", err)
+	}
+	incidents, err := provider.ListIncidents(0)
+	if err != nil || len(incidents) != 1 {
+		t.Fatalf("webhook incidents=%+v err=%v", incidents, err)
+	}
+	if incidents[0].Origin != storage.OriginWebhook || incidents[0].NotifyStatus != "sent" {
+		t.Fatalf("webhook lifecycle was silently dropped: %+v", incidents[0])
+	}
+}
+
+func TestCreateIncident_HandledDetectionDivertSkipsIncidentLifecycle(t *testing.T) {
+	loadAgentTestConfig(t)
+	provider := storage.NewMemory()
+	previousStore := Storage()
+	SetStorage(provider)
+	onCall := &countingOnCallProvider{}
+	core.SetOnCallWorkflow(core.NewOnCallWorkflow(nil, onCall))
+	t.Cleanup(func() {
+		SetEmitInterceptor(nil)
+		SetStorage(previousStore)
+		core.SetOnCallWorkflow(nil)
+	})
+
+	now := time.Now().UTC()
+	detection := storage.DetectionEpisodeDecision{
+		Fingerprint: "fingerprint", EpisodeID: "episode", IncidentID: "incident",
+		OccurrenceCount: 500, FirstSeen: now, LastSeen: now,
+		HighestObservedSeverity: "high",
+	}
+	content := map[string]interface{}{
+		"AlertName": "checkout failures", "Service": "checkout", "Source": "agent:loki",
+		"PatternID": "pattern", "Frequency": int64(500), "Severity": "high", "Status": "firing",
+	}
+
+	t.Run("success", func(t *testing.T) {
+		SetEmitInterceptor(func(map[string]interface{}, string) EmitDecision {
+			return EmitDecision{Action: EmitDivert, DeliveryHandled: true}
+		})
+		result := createIncident("", &content, incidentCreateOptions{IncidentID: detection.IncidentID, Detection: &detection})
+		if result.Err != nil || result.NotifyStatus != "diverted" || onCall.calls.Load() != 0 {
+			t.Fatalf("handled divert result=%+v on-call=%d", result, onCall.calls.Load())
+		}
+		record, err := provider.GetIncident(detection.IncidentID)
+		if err != nil || record.NotifyStatus != "diverted" || record.OnCallTriggered || len(record.ChannelsNotified) != 0 {
+			t.Fatalf("handled divert record=%+v err=%v", record, err)
+		}
+		if _, ok := record.Content["AckURL"]; ok {
+			t.Fatalf("handled divert injected AckURL: %+v", record.Content)
+		}
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		deliveryErr := errors.New("external delivery failed")
+		SetEmitInterceptor(func(map[string]interface{}, string) EmitDecision {
+			return EmitDecision{Action: EmitDivert, DeliveryHandled: true, DeliveryError: deliveryErr}
+		})
+		result := createIncident("", &content, incidentCreateOptions{IncidentID: detection.IncidentID, Detection: &detection})
+		if !errors.Is(result.Err, deliveryErr) || result.NotifyStatus != "failed" || onCall.calls.Load() != 0 {
+			t.Fatalf("failed handled divert result=%+v on-call=%d", result, onCall.calls.Load())
+		}
+		record, err := provider.GetIncident(detection.IncidentID)
+		if err != nil || record.NotifyStatus != "failed" || record.OnCallTriggered {
+			t.Fatalf("failed handled divert record=%+v err=%v", record, err)
+		}
+	})
+}
+
+func TestCreateIncident_HandledEscalationPreservesInitialDeliveryAndOperatorState(t *testing.T) {
+	loadAgentTestConfig(t)
+	provider := storage.NewMemory()
+	previousStore := Storage()
+	SetStorage(provider)
+	t.Cleanup(func() {
+		SetEmitInterceptor(nil)
+		SetStorage(previousStore)
+	})
+	now := time.Now().UTC()
+	ackedAt := now.Add(time.Minute)
+	initial := &storage.IncidentRecord{
+		ID: "incident", CreatedAt: now, AckedAt: &ackedAt,
+		AssignedTeamID: "sre", AssignedMemberIDs: []string{"operator"},
+		ChannelsEnabled: []string{"slack", "email"}, ChannelsNotified: []string{"slack"},
+		OnCallTriggered: true, OnCallError: "secondary provider unavailable",
+		NotifyStatus: "partial", NotifyError: "email failed",
+		DetectionFingerprint: "fingerprint", DetectionEpisodeID: "episode",
+		OccurrenceCount: 1, Content: map[string]interface{}{"Frequency": int64(1)},
+	}
+	if err := provider.(storage.DetectionIncidentStore).SaveDetectionIncident(initial); err != nil {
+		t.Fatalf("SaveDetectionIncident(initial): %v", err)
+	}
+	detection := storage.DetectionEpisodeDecision{
+		Fingerprint: "fingerprint", EpisodeID: "episode", IncidentID: "incident",
+		OccurrenceCount: 2, FirstSeen: now, LastSeen: now.Add(time.Minute),
+		HighestObservedSeverity: "high", NotificationKind: storage.DetectionNotificationEscalation,
+	}
+	SetEmitInterceptor(func(map[string]interface{}, string) EmitDecision {
+		return EmitDecision{Action: EmitDivert, DeliveryHandled: true}
+	})
+	content := map[string]interface{}{
+		"AlertName": "checkout failures", "Service": "checkout", "Source": "agent:loki",
+		"PatternID": "pattern", "Frequency": int64(2), "Severity": "high", "Status": "firing",
+	}
+	result := createIncident("", &content, incidentCreateOptions{IncidentID: detection.IncidentID, Detection: &detection})
+	if result.Err != nil || result.NotifyStatus != "diverted" {
+		t.Fatalf("handled escalation result=%+v", result)
+	}
+	record, err := provider.GetIncident("incident")
+	if err != nil {
+		t.Fatalf("GetIncident: %v", err)
+	}
+	if record.NotifyStatus != "diverted" || record.NotifyError != "" ||
+		!equalSet(record.ChannelsEnabled, initial.ChannelsEnabled) || !equalSet(record.ChannelsNotified, initial.ChannelsNotified) ||
+		!record.OnCallTriggered || record.OnCallError != initial.OnCallError || record.AckedAt == nil ||
+		record.AssignedTeamID != "sre" || !equalSet(record.AssignedMemberIDs, []string{"operator"}) {
+		t.Fatalf("handled escalation lost prior state: %+v", record)
+	}
+}
+
+func TestCreateIncidentFromFinding_SuppressedInitialVisibleOnPostgres(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("TEST_POSTGRES_DSN not set; skipping postgres tests")
+	}
+	provider, err := storage.NewPostgres(storage.PostgresOptions{DSN: dsn})
+	if err != nil {
+		t.Fatalf("NewPostgres: %v", err)
+	}
+	t.Cleanup(func() { _ = provider.Close() })
+	previousStore := Storage()
+	SetStorage(provider)
+	SetEmitInterceptor(func(map[string]interface{}, string) EmitDecision {
+		return EmitDecision{Action: EmitSuppress}
+	})
+	t.Cleanup(func() {
+		SetEmitInterceptor(nil)
+		SetStorage(previousStore)
+	})
+	emission := &core.DetectionEmissionResult{}
+	result := core.AgentResult{
+		PatternID: "postgres-suppressed-" + time.Now().UTC().Format("150405.000000000"),
+		Frequency: 4, AgentKind: "detect", SignalKind: "logs", DetectionEmission: emission,
+	}
+	finding := &core.AIFinding{Title: "Suppressed Postgres condition", Severity: "medium"}
+	if err := CreateIncidentFromFinding(finding, result, "loki", "checkout"); err != nil {
+		t.Fatalf("CreateIncidentFromFinding: %v", err)
+	}
+	record, err := provider.GetIncident(emission.IncidentID)
+	if err != nil {
+		t.Fatalf("GetIncident: %v", err)
+	}
+	if record.NotifyStatus != "suppressed" || record.OccurrenceCount != 4 ||
+		record.DetectionEpisodeID == "" || record.Content["Frequency"] != float64(4) ||
+		len(record.ChannelsNotified) != 0 || record.OnCallTriggered {
+		t.Fatalf("suppressed Postgres incident=%+v", record)
+	}
+}
+
+func TestCreateIncident_HandledEscalationPreservesInitialStateOnPostgres(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("TEST_POSTGRES_DSN not set; skipping postgres tests")
+	}
+	provider, err := storage.NewPostgres(storage.PostgresOptions{DSN: dsn})
+	if err != nil {
+		t.Fatalf("NewPostgres: %v", err)
+	}
+	t.Cleanup(func() { _ = provider.Close() })
+	previousStore := Storage()
+	SetStorage(provider)
+	t.Cleanup(func() {
+		SetEmitInterceptor(nil)
+		SetStorage(previousStore)
+	})
+	now := time.Now().UTC()
+	incidentID := "handled-escalation-" + now.Format("150405.000000000")
+	ackedAt := now.Add(time.Minute)
+	initial := &storage.IncidentRecord{
+		ID: incidentID, CreatedAt: now, AckedAt: &ackedAt,
+		AssignedTeamID: "sre", AssignedMemberIDs: []string{"operator"},
+		ChannelsEnabled: []string{"slack", "email"}, ChannelsNotified: []string{"slack"},
+		OnCallTriggered: true, OnCallError: "secondary provider unavailable",
+		NotifyStatus: "partial", NotifyError: "email failed",
+		DetectionFingerprint: "fingerprint", DetectionEpisodeID: "episode-" + incidentID,
+		OccurrenceCount: 1, Content: map[string]interface{}{"Frequency": int64(1)},
+	}
+	if err := provider.(storage.DetectionIncidentStore).SaveDetectionIncident(initial); err != nil {
+		t.Fatalf("SaveDetectionIncident(initial): %v", err)
+	}
+	detection := storage.DetectionEpisodeDecision{
+		Fingerprint: initial.DetectionFingerprint, EpisodeID: initial.DetectionEpisodeID, IncidentID: incidentID,
+		OccurrenceCount: 2, FirstSeen: now, LastSeen: now.Add(time.Minute),
+		HighestObservedSeverity: "high", NotificationKind: storage.DetectionNotificationEscalation,
+	}
+	SetEmitInterceptor(func(map[string]interface{}, string) EmitDecision {
+		return EmitDecision{Action: EmitDivert, DeliveryHandled: true}
+	})
+	content := map[string]interface{}{
+		"AlertName": "checkout failures", "Service": "checkout", "Source": "agent:loki",
+		"PatternID": "pattern", "Frequency": int64(2), "Severity": "high", "Status": "firing",
+	}
+	result := createIncident("", &content, incidentCreateOptions{IncidentID: incidentID, Detection: &detection})
+	if result.Err != nil || result.NotifyStatus != "diverted" {
+		t.Fatalf("handled escalation result=%+v", result)
+	}
+	record, err := provider.GetIncident(incidentID)
+	if err != nil {
+		t.Fatalf("GetIncident: %v", err)
+	}
+	if record.NotifyStatus != "diverted" || record.NotifyError != "" ||
+		!equalSet(record.ChannelsEnabled, initial.ChannelsEnabled) || !equalSet(record.ChannelsNotified, initial.ChannelsNotified) ||
+		!record.OnCallTriggered || record.OnCallError != initial.OnCallError || record.AckedAt == nil ||
+		record.AssignedTeamID != "sre" || !equalSet(record.AssignedMemberIDs, []string{"operator"}) {
+		t.Fatalf("handled Postgres escalation lost prior state: %+v", record)
 	}
 }
 

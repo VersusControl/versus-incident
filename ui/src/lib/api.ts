@@ -575,6 +575,13 @@ export interface DetectEvent {
   raw_response?: string;
   duration_ms?: number;
   finding?: AIFinding | null;
+  episode_id?: string;
+  incident_id?: string;
+  occurrence_delta?: number;
+  occurrence_count?: number;
+  episode_action?: "opened" | "coalesced" | "escalated" | "reopened" | "episode_error" | string;
+  notification_outcome?: "sent" | "partial" | "failed" | "suppressed" | "grouped" | "diverted" | "not_applicable" | string;
+  episode_error?: string;
   outcome: string; // emitted | cached | dry | quota | ai_error | send_error
   error?: string;
 }
@@ -604,6 +611,13 @@ export interface IncidentSummary {
   created_at: string;
   acked_at?: string | null;
   resolved_at?: string | null;
+  detection_fingerprint?: string;
+  detection_episode_id?: string;
+  occurrence_count?: number;
+  detection_first_seen?: string | null;
+  detection_last_seen?: string | null;
+  highest_observed_severity?: string;
+  highest_notified_severity?: string;
   assigned_team_id?: string;
   assigned_member_ids?: string[];
 }
@@ -1793,6 +1807,9 @@ export interface AlertFatigueFinding {
   service: string;
   severity: string;
   repeat_count: number;
+  // Cumulative raw signal volume for detection episodes. It is absent/zero for
+  // webhooks and never participates in repeat novelty scoring.
+  detection_occurrence_count?: number;
   first_seen: string;
   last_seen: string;
   status: string;

@@ -32,6 +32,7 @@ var expectedSchemaTables = []string{
 	"vs_blobs", "vs_incidents", "vs_analyses",
 	"vs_patterns", "vs_logs", "vs_services",
 	"vs_shadow", "vs_detect", "vs_members", "vs_teams",
+	"vs_detection_episodes",
 }
 
 // dropAllVersusTables drops every vs_* table so the next migrate runs against

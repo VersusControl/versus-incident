@@ -398,18 +398,19 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 	}
 
 	worker, err := agent.NewWorker(agent.WorkerOptions{
-		Cfg:      cfg,
-		Sources:  sources,
-		Cursors:  cursors,
-		Redactor: redactor,
-		Matcher:  matcher,
-		Miner:    miner,
-		Catalog:  catalog,
-		Shadow:   shadowLog,
-		Detect:   detectLog,
-		Services: serviceMatcher,
-		AI:       aiBundle,
-		Emitter:  services.CreateIncidentFromFinding,
+		Cfg:                      cfg,
+		Sources:                  sources,
+		Cursors:                  cursors,
+		Redactor:                 redactor,
+		Matcher:                  matcher,
+		Miner:                    miner,
+		Catalog:                  catalog,
+		Shadow:                   shadowLog,
+		Detect:                   detectLog,
+		Services:                 serviceMatcher,
+		AI:                       aiBundle,
+		Emitter:                  services.CreateIncidentFromFinding,
+		ContinueDetectionEpisode: services.ContinueDetectionEpisode,
 	})
 	if err != nil {
 		return nil, nil, err

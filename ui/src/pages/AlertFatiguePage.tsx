@@ -612,8 +612,8 @@ function ReviewTable() {
           <table className="ddt w-full table-fixed">
             <thead>
               <tr>
-                <th className="w-[16%]">Service</th>
-                <th className="w-[10%]">Source</th>
+                <th className="w-[14%]">Service</th>
+                <th className="w-[9%]">Source</th>
                 <th className="w-[9%]">Severity</th>
                 <th className="w-[8%]">
                   <SortHeader
@@ -634,7 +634,8 @@ function ReviewTable() {
                     align="right"
                   />
                 </th>
-                <th className="w-[11%]">
+                <th className="w-[9%] text-right">Occurrences</th>
+                <th className="w-[10%]">
                   <SortHeader
                     label="Last seen"
                     col="last_seen"
@@ -643,9 +644,9 @@ function ReviewTable() {
                     onSort={toggleSort}
                   />
                 </th>
-                <th className="w-[11%]">Status</th>
-                <th className="w-[12%]">Routed channel</th>
-                <th className="w-[16%] text-right">Actions</th>
+                <th className="w-[10%]">Status</th>
+                <th className="w-[10%]">Routed channel</th>
+                <th className="w-[14%] text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -698,6 +699,9 @@ function ReviewTable() {
               </span>
             </PeekField>
             <PeekField label="Repeat count">{peek.repeat_count}</PeekField>
+            <PeekField label="Detection occurrences">
+              {peek.detection_occurrence_count?.toLocaleString() || "—"}
+            </PeekField>
             <PeekField label="First seen">
               <span title={fmtAbs(peek.first_seen)}>
                 {fmtRel(peek.first_seen)}
@@ -887,6 +891,9 @@ function FingerprintRow({
       </td>
       <td className="text-right tabular-nums text-ink-200">
         {row.repeat_count}
+      </td>
+      <td className="text-right tabular-nums text-ink-300">
+        {row.detection_occurrence_count?.toLocaleString() || "—"}
       </td>
       <td className="text-2xs text-ink-300" title={fmtAbs(row.last_seen)}>
         {fmtRel(row.last_seen)}

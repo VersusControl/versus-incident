@@ -245,6 +245,26 @@ describe("IncidentsPage row actions", () => {
     vi.mocked(api.listIncidentsIndex).mockResolvedValue(index([incident()]));
   });
 
+  it("shows cumulative occurrences and last seen for detection episodes", async () => {
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue(index([incident({
+      detection_episode_id: "episode-1",
+      occurrence_count: 500,
+      detection_last_seen: new Date().toISOString(),
+    })]));
+    renderPage();
+    const metadata = await screen.findByText(/500 occurrences/);
+    expect(metadata.textContent).toContain("last seen");
+  });
+
+  it("renders cumulative typed severity", async () => {
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue(index([incident({
+      highest_observed_severity: "critical",
+      highest_notified_severity: "critical",
+    })]));
+    renderPage();
+    expect(await screen.findByText("CRITICAL")).toBeTruthy();
+  });
+
   it("shows only the eye action per row — no Assign / Resolve buttons", async () => {
     renderPage();
     // The single row's eye is present…

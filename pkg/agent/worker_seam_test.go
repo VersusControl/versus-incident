@@ -2,7 +2,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -130,11 +133,158 @@ func TestWorker_Seam_DetectSuppressesKnownPattern(t *testing.T) {
 	if w.catalog.Len() == 0 {
 		t.Fatal("no pattern learned during training")
 	}
+	detectLog, err := LoadDetectLog(storage.NewMemory(), 10)
+	if err != nil {
+		t.Fatalf("LoadDetectLog: %v", err)
+	}
+	w.detect = detectLog
+	recorderCalls := 0
+	w.continueDetectionEpisode = func(storage.DetectionOccurrence) (storage.DetectionEpisodeDecision, error) {
+		recorderCalls++
+		return storage.DetectionEpisodeDecision{}, storage.ErrNotFound
+	}
 
 	// A steady detect tick now: the pattern is known and not spiking → suppressed.
 	w.tickSource(context.Background(), src, "detect")
-	if emit != 0 {
-		t.Fatalf("known steady pattern emitted %d times, want 0", emit)
+	if recorderCalls != 1 || emit != 0 || atomic.LoadInt32(&agent.calls) != 0 || detectLog.Len() != 0 {
+		t.Fatalf("known no-episode recorder/model/emitter/audit = %d/%d/%d/%d, want 1/0/0/0", recorderCalls, agent.calls, emit, detectLog.Len())
+	}
+}
+
+func TestWorker_Seam_DetectKnownContinuationBypassesPipeline(t *testing.T) {
+	src := &batchSource{name: "es", signals: repeatSignals("service=api steady id=", 5)}
+	model := &fakeAgent{finding: &core.AIFinding{Title: "unused", Severity: "low"}}
+	emitCalls := 0
+	w := newSeamWorker(t, "detect", src, AIBundle{Detect: model}, func(*core.AIFinding, core.AgentResult, string, string) error {
+		emitCalls++
+		return nil
+	})
+	for index := 0; index < 21; index++ {
+		w.tickSource(context.Background(), src, "training")
+	}
+	detectLog, err := LoadDetectLog(storage.NewMemory(), 10)
+	if err != nil {
+		t.Fatalf("LoadDetectLog: %v", err)
+	}
+	w.detect = detectLog
+	var recorderCalls atomic.Int64
+	var recorded storage.DetectionOccurrence
+	w.continueDetectionEpisode = func(occurrence storage.DetectionOccurrence) (storage.DetectionEpisodeDecision, error) {
+		recorderCalls.Add(1)
+		recorded = occurrence
+		return storage.DetectionEpisodeDecision{
+			Fingerprint: "fingerprint", EpisodeID: "episode", IncidentID: "incident",
+			OccurrenceDelta: int64(occurrence.Frequency), OccurrenceCount: 110,
+			Action: storage.DetectionEpisodeCoalesced,
+		}, nil
+	}
+
+	w.tickSource(context.Background(), src, "detect")
+
+	if recorderCalls.Load() != 1 || emitCalls != 0 || atomic.LoadInt32(&model.calls) != 0 {
+		t.Fatalf("recorder/model/emitter calls = %d/%d/%d, want 1/0/0", recorderCalls.Load(), model.calls, emitCalls)
+	}
+	if !recorded.ExistingOnly || recorded.Identity.AgentKind != "detect" || recorded.Identity.Source != "es" ||
+		recorded.Identity.Service != "api" || recorded.Identity.SignalKind != "logs" ||
+		recorded.Identity.ConditionKey == "" || recorded.Frequency != 5 || recorded.ReceivedAt.IsZero() {
+		t.Fatalf("recorded occurrence = %+v", recorded)
+	}
+	events := detectLog.All()
+	if len(events) != 1 || events[0].EpisodeAction != string(storage.DetectionEpisodeCoalesced) ||
+		events[0].NotificationOutcome != "not_applicable" || events[0].OccurrenceDelta != 5 ||
+		len(events[0].Samples) != 0 || events[0].Template != "" || events[0].UserPrompt != "" || events[0].RawResponse != "" {
+		t.Fatalf("known continuation audit = %+v", events)
+	}
+}
+
+func TestWorker_Seam_DetectKnownContinuationErrorDoesNotEmit(t *testing.T) {
+	src := &batchSource{name: "es", signals: repeatSignals("service=api steady id=", 5)}
+	model := &fakeAgent{finding: &core.AIFinding{Title: "unused", Severity: "low"}}
+	emitCalls := 0
+	w := newSeamWorker(t, "detect", src, AIBundle{Detect: model}, func(*core.AIFinding, core.AgentResult, string, string) error {
+		emitCalls++
+		return nil
+	})
+	for index := 0; index < 21; index++ {
+		w.tickSource(context.Background(), src, "training")
+	}
+	detectLog, err := LoadDetectLog(storage.NewMemory(), 10)
+	if err != nil {
+		t.Fatalf("LoadDetectLog: %v", err)
+	}
+	w.detect = detectLog
+	w.continueDetectionEpisode = func(storage.DetectionOccurrence) (storage.DetectionEpisodeDecision, error) {
+		return storage.DetectionEpisodeDecision{}, errors.New(strings.Repeat("x", 400))
+	}
+
+	w.tickSource(context.Background(), src, "detect")
+
+	if emitCalls != 0 || atomic.LoadInt32(&model.calls) != 0 {
+		t.Fatalf("model/emitter calls = %d/%d, want 0/0", model.calls, emitCalls)
+	}
+	events := detectLog.All()
+	if len(events) != 1 || events[0].EpisodeAction != "episode_error" || len(events[0].EpisodeError) != 256 ||
+		events[0].NotificationOutcome != "not_applicable" {
+		t.Fatalf("known continuation error audit = %+v", events)
+	}
+}
+
+func TestWorker_Seam_DetectKnownContinuationUnsupportedIsSilent(t *testing.T) {
+	w := &Worker{}
+	detectLog, err := LoadDetectLog(storage.NewMemory(), 10)
+	if err != nil {
+		t.Fatalf("LoadDetectLog: %v", err)
+	}
+	w.detect = detectLog
+	w.continueDetectionEpisode = func(storage.DetectionOccurrence) (storage.DetectionEpisodeDecision, error) {
+		return storage.DetectionEpisodeDecision{}, storage.ErrUnsupported
+	}
+	w.recordKnownDetectionContinuation("source", "logs", core.Observation{
+		Key: "condition", Service: "checkout", Frequency: 1, Timestamp: time.Now().UTC(),
+	})
+	if detectLog.Len() != 0 {
+		t.Fatalf("unsupported continuation audit events=%d, want 0", detectLog.Len())
+	}
+}
+
+func TestWorker_Seam_DetectUsesFullObservationSeverity(t *testing.T) {
+	w := &Worker{}
+	var occurrence storage.DetectionOccurrence
+	w.continueDetectionEpisode = func(recorded storage.DetectionOccurrence) (storage.DetectionEpisodeDecision, error) {
+		occurrence = recorded
+		return storage.DetectionEpisodeDecision{}, storage.ErrNotFound
+	}
+	w.recordKnownDetectionContinuation("source", "logs", core.Observation{
+		Key: "condition", Service: "checkout", Frequency: 2, Timestamp: time.Now().UTC(),
+		Samples: []core.Signal{{Severity: "low"}}, StrongestSeverity: "critical",
+	})
+	if occurrence.Severity != "critical" {
+		t.Fatalf("continuation severity=%q, want critical", occurrence.Severity)
+	}
+}
+
+func TestWorker_Seam_KnownSpikeUsesNormalEmissionPath(t *testing.T) {
+	src := &batchSource{name: "es", signals: repeatSignals("service=api steady id=", 5)}
+	model := &fakeAgent{finding: &core.AIFinding{Title: "spike", Severity: "high", Confidence: 0.9}}
+	emitCalls := 0
+	w := newSeamWorker(t, "detect", src, AIBundle{Detect: model}, func(*core.AIFinding, core.AgentResult, string, string) error {
+		emitCalls++
+		return nil
+	})
+	for index := 0; index < 21; index++ {
+		w.tickSource(context.Background(), src, "training")
+	}
+	recorderCalls := 0
+	w.continueDetectionEpisode = func(storage.DetectionOccurrence) (storage.DetectionEpisodeDecision, error) {
+		recorderCalls++
+		return storage.DetectionEpisodeDecision{}, storage.ErrNotFound
+	}
+	src.signals = repeatSignals("service=api steady id=", 500)
+
+	w.tickSource(context.Background(), src, "detect")
+
+	if recorderCalls != 0 || emitCalls != 1 || atomic.LoadInt32(&model.calls) != 1 {
+		t.Fatalf("recorder/model/emitter calls = %d/%d/%d, want 0/1/1", recorderCalls, model.calls, emitCalls)
 	}
 }
 

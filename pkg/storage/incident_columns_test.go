@@ -24,27 +24,36 @@ func fullIncident() *storage.IncidentRecord {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	acked := now.Add(-time.Minute)
 	resolvedAt := now.Add(-30 * time.Second)
+	firstSeen := now.Add(-90 * time.Second)
+	lastSeen := now.Add(-10 * time.Second)
 	return &storage.IncidentRecord{
-		ID:                "inc-full",
-		OrgID:             "acme",
-		TeamID:            "team-sre",
-		Title:             "Checkout 500s",
-		Source:            "agent:detect",
-		Service:           "checkout",
-		Origin:            storage.OriginAIDetect,
-		Resolved:          true,
-		ChannelsEnabled:   []string{"slack", "email"},
-		ChannelsNotified:  []string{"slack"},
-		OnCallTriggered:   true,
-		OnCallError:       "pagerduty timeout",
-		NotifyStatus:      "partial",
-		NotifyError:       "email failed",
-		CreatedAt:         now.Add(-2 * time.Minute),
-		AckedAt:           &acked,
-		ResolvedAt:        &resolvedAt,
-		Content:           map[string]interface{}{"summary": "elevated 5xx", "count": float64(42)},
-		AssignedTeamID:    "team-payments",
-		AssignedMemberIDs: []string{"u1", "u2", "u3"},
+		ID:                      "inc-full",
+		OrgID:                   "acme",
+		TeamID:                  "team-sre",
+		Title:                   "Checkout 500s",
+		Source:                  "agent:detect",
+		Service:                 "checkout",
+		Origin:                  storage.OriginAIDetect,
+		Resolved:                true,
+		ChannelsEnabled:         []string{"slack", "email"},
+		ChannelsNotified:        []string{"slack"},
+		OnCallTriggered:         true,
+		OnCallError:             "pagerduty timeout",
+		NotifyStatus:            "partial",
+		NotifyError:             "email failed",
+		CreatedAt:               now.Add(-2 * time.Minute),
+		AckedAt:                 &acked,
+		ResolvedAt:              &resolvedAt,
+		DetectionFingerprint:    "fingerprint-1",
+		DetectionEpisodeID:      "episode-1",
+		OccurrenceCount:         42,
+		DetectionFirstSeen:      &firstSeen,
+		DetectionLastSeen:       &lastSeen,
+		HighestObservedSeverity: "critical",
+		HighestNotifiedSeverity: "high",
+		Content:                 map[string]interface{}{"summary": "elevated 5xx", "count": float64(42)},
+		AssignedTeamID:          "team-payments",
+		AssignedMemberIDs:       []string{"u1", "u2", "u3"},
 	}
 }
 
@@ -74,6 +83,11 @@ func runIncidentColumnRoundTrip(t *testing.T, p storage.Provider) {
 		got.OnCallError != want.OnCallError ||
 		got.NotifyStatus != want.NotifyStatus ||
 		got.NotifyError != want.NotifyError ||
+		got.DetectionFingerprint != want.DetectionFingerprint ||
+		got.DetectionEpisodeID != want.DetectionEpisodeID ||
+		got.OccurrenceCount != want.OccurrenceCount ||
+		got.HighestObservedSeverity != want.HighestObservedSeverity ||
+		got.HighestNotifiedSeverity != want.HighestNotifiedSeverity ||
 		got.AssignedTeamID != want.AssignedTeamID {
 		t.Fatalf("scalar mismatch:\n got=%+v\nwant=%+v", got, want)
 	}
@@ -85,6 +99,12 @@ func runIncidentColumnRoundTrip(t *testing.T, p storage.Provider) {
 	}
 	if got.ResolvedAt == nil || !got.ResolvedAt.Equal(*want.ResolvedAt) {
 		t.Fatalf("ResolvedAt = %v, want %v", got.ResolvedAt, want.ResolvedAt)
+	}
+	if got.DetectionFirstSeen == nil || !got.DetectionFirstSeen.Equal(*want.DetectionFirstSeen) {
+		t.Fatalf("DetectionFirstSeen = %v, want %v", got.DetectionFirstSeen, want.DetectionFirstSeen)
+	}
+	if got.DetectionLastSeen == nil || !got.DetectionLastSeen.Equal(*want.DetectionLastSeen) {
+		t.Fatalf("DetectionLastSeen = %v, want %v", got.DetectionLastSeen, want.DetectionLastSeen)
 	}
 	if !reflect.DeepEqual(got.ChannelsEnabled, want.ChannelsEnabled) {
 		t.Fatalf("ChannelsEnabled = %v, want %v", got.ChannelsEnabled, want.ChannelsEnabled)

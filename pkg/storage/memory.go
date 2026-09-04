@@ -8,24 +8,351 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/utils"
+	"github.com/google/uuid"
 )
 
 // memoryProvider is an in-memory backend used by tests. It is concurrency-safe
 // and never returns transport errors. Not exposed as a config option.
 type memoryProvider struct {
-	mu        sync.RWMutex
-	blobs     map[string][]byte
-	blobAt    map[string]time.Time // per-blob updated_at, for Lifecycle purge
-	incidents []*IncidentRecord
-	analyses  []*AnalysisRecord
+	mu                sync.RWMutex
+	blobs             map[string][]byte
+	blobAt            map[string]time.Time // per-blob updated_at, for Lifecycle purge
+	incidents         []*IncidentRecord
+	analyses          []*AnalysisRecord
+	episodes          map[string]*memoryDetectionEpisode
+	activeEpisodes    map[string]string
+	maxClosedEpisodes int
+}
+
+type memoryDetectionEpisode struct {
+	Identity                DetectionIdentity
+	Fingerprint             string
+	EpisodeID               string
+	IncidentID              string
+	OccurrenceCount         int64
+	FirstSeen               time.Time
+	LastSeen                time.Time
+	HighestObservedSeverity string
+	HighestHandledSeverity  string
+	HighestNotifiedSeverity string
+	ClosedAt                *time.Time
+	PendingKind             DetectionNotificationKind
+	PendingSeverity         string
+	PendingToken            string
+	PendingOwner            string
+	PendingExpiresAt        time.Time
+	LastCompletedToken      string
+	LastNotificationOutcome string
 }
 
 // NewMemory returns a Provider that keeps all state in memory. Intended
 // for tests; never select via the config factory.
 func NewMemory() Provider {
 	return &memoryProvider{
-		blobs:  make(map[string][]byte),
-		blobAt: make(map[string]time.Time),
+		blobs:             make(map[string][]byte),
+		blobAt:            make(map[string]time.Time),
+		episodes:          make(map[string]*memoryDetectionEpisode),
+		activeEpisodes:    make(map[string]string),
+		maxClosedEpisodes: MaxClosedDetectionEpisodesDefault,
+	}
+}
+
+func (m *memoryProvider) RecordDetectionOccurrence(occurrence DetectionOccurrence) (DetectionEpisodeDecision, error) {
+	fingerprint, err := DetectionIdentityFingerprint(occurrence.Identity)
+	if err != nil || occurrence.Frequency <= 0 {
+		return DetectionEpisodeDecision{}, ErrInvalidDetectionOccurrence
+	}
+	now := occurrence.ReceivedAt.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	quietPeriod := occurrence.QuietPeriod
+	if quietPeriod <= 0 {
+		quietPeriod = DefaultDetectionEpisodeQuietPeriod
+	}
+	lease := occurrence.ClaimLease
+	if lease <= 0 {
+		lease = DefaultDetectionNotificationLease
+	}
+	severity := canonicalDetectionSeverity(occurrence.Severity)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	defer m.pruneClosedDetectionEpisodesLocked()
+
+	episode := m.activeDetectionEpisode(fingerprint, normalizeDetectionIdentity(occurrence.Identity))
+	if occurrence.ExistingOnly && episode == nil {
+		return DetectionEpisodeDecision{}, ErrNotFound
+	}
+	reopened := episode != nil
+	if !reopened {
+		for _, previous := range m.episodes {
+			if previous.Fingerprint == fingerprint {
+				reopened = true
+				break
+			}
+		}
+	}
+	if episode != nil {
+		if exists, resolved := m.incidentStateLocked(episode.IncidentID); exists && resolved {
+			closed := now
+			episode.ClosedAt = &closed
+			delete(m.activeEpisodes, episode.Fingerprint)
+			episode = nil
+			reopened = true
+		}
+	}
+	if episode != nil && episode.PendingToken == "" && detectionNotificationDelivered(episode.LastNotificationOutcome) && !m.incidentExistsLocked(episode.IncidentID) {
+		closed := now
+		episode.ClosedAt = &closed
+		delete(m.activeEpisodes, fingerprint)
+		episode = nil
+		reopened = true
+	}
+	if episode != nil && (episode.ClosedAt != nil || !now.Before(episode.LastSeen.Add(quietPeriod))) {
+		closed := now
+		episode.ClosedAt = &closed
+		delete(m.activeEpisodes, fingerprint)
+		episode = nil
+	}
+	if episode == nil {
+		if occurrence.ExistingOnly {
+			return DetectionEpisodeDecision{}, ErrNotFound
+		}
+		episode = &memoryDetectionEpisode{
+			Identity:                normalizeDetectionIdentity(occurrence.Identity),
+			Fingerprint:             fingerprint,
+			EpisodeID:               uuid.NewString(),
+			IncidentID:              uuid.NewString(),
+			OccurrenceCount:         occurrence.Frequency,
+			FirstSeen:               now,
+			LastSeen:                now,
+			HighestObservedSeverity: severity,
+		}
+		m.episodes[episode.EpisodeID] = episode
+		m.activeEpisodes[fingerprint] = episode.EpisodeID
+		decision := m.claimDetectionNotification(episode, occurrence, now, lease, DetectionNotificationInitial)
+		if reopened {
+			decision.Action = DetectionEpisodeReopened
+		} else {
+			decision.Action = DetectionEpisodeOpened
+		}
+		decision.OccurrenceDelta = occurrence.Frequency
+		return decision, nil
+	}
+
+	episode.OccurrenceCount += occurrence.Frequency
+	episode.LastSeen = now
+	if detectionSeverityHigher(severity, episode.HighestObservedSeverity) {
+		episode.HighestObservedSeverity = severity
+	}
+	if occurrence.ExistingOnly {
+		m.updateIncidentFromEpisodeLocked(episode)
+		decision := m.detectionEpisodeDecision(episode)
+		decision.Action = DetectionEpisodeCoalesced
+		decision.OccurrenceDelta = occurrence.Frequency
+		return decision, nil
+	}
+	action := DetectionEpisodeCoalesced
+	claimKind := DetectionNotificationKind("")
+	if episode.PendingToken != "" && !now.Before(episode.PendingExpiresAt) {
+		claimKind = episode.PendingKind
+		if claimKind == DetectionNotificationEscalation {
+			action = DetectionEpisodeEscalated
+		}
+		episode.PendingToken = ""
+		episode.PendingOwner = ""
+		episode.PendingExpiresAt = time.Time{}
+	} else if episode.PendingToken == "" {
+		switch {
+		case episode.HighestHandledSeverity == "":
+			claimKind = DetectionNotificationInitial
+		case detectionSeverityHigher(episode.HighestObservedSeverity, episode.HighestHandledSeverity):
+			claimKind = DetectionNotificationEscalation
+			action = DetectionEpisodeEscalated
+		}
+	}
+
+	decision := m.detectionEpisodeDecision(episode)
+	decision.Action = action
+	decision.OccurrenceDelta = occurrence.Frequency
+	if claimKind != "" {
+		decision = m.claimDetectionNotification(episode, occurrence, now, lease, claimKind)
+		decision.Action = action
+		decision.OccurrenceDelta = occurrence.Frequency
+	}
+	return decision, nil
+}
+
+func (m *memoryProvider) activeDetectionEpisode(fingerprint string, identity DetectionIdentity) *memoryDetectionEpisode {
+	if episode := m.episodes[m.activeEpisodes[fingerprint]]; episode != nil {
+		return episode
+	}
+	for legacyFingerprint, episodeID := range m.activeEpisodes {
+		episode := m.episodes[episodeID]
+		if episode == nil || normalizeDetectionIdentity(episode.Identity) != identity {
+			continue
+		}
+		delete(m.activeEpisodes, legacyFingerprint)
+		m.activeEpisodes[fingerprint] = episodeID
+		episode.Identity = identity
+		episode.Fingerprint = fingerprint
+		return episode
+	}
+	return nil
+}
+
+func (m *memoryProvider) claimDetectionNotification(episode *memoryDetectionEpisode, occurrence DetectionOccurrence, now time.Time, lease time.Duration, kind DetectionNotificationKind) DetectionEpisodeDecision {
+	owner := strings.TrimSpace(occurrence.ClaimOwner)
+	if owner == "" {
+		owner = uuid.NewString()
+	}
+	episode.PendingKind = kind
+	episode.PendingSeverity = episode.HighestObservedSeverity
+	episode.PendingToken = uuid.NewString()
+	episode.PendingOwner = owner
+	episode.PendingExpiresAt = now.Add(lease)
+	decision := m.detectionEpisodeDecision(episode)
+	decision.NotificationClaimed = true
+	decision.NotificationKind = kind
+	decision.ClaimToken = episode.PendingToken
+	decision.ClaimExpiresAt = episode.PendingExpiresAt
+	return decision
+}
+
+func (m *memoryProvider) detectionEpisodeDecision(episode *memoryDetectionEpisode) DetectionEpisodeDecision {
+	return DetectionEpisodeDecision{
+		Fingerprint:             episode.Fingerprint,
+		EpisodeID:               episode.EpisodeID,
+		IncidentID:              episode.IncidentID,
+		OccurrenceCount:         episode.OccurrenceCount,
+		FirstSeen:               episode.FirstSeen,
+		LastSeen:                episode.LastSeen,
+		HighestObservedSeverity: episode.HighestObservedSeverity,
+		HighestNotifiedSeverity: episode.HighestNotifiedSeverity,
+	}
+}
+
+func (m *memoryProvider) RenewDetectionNotificationClaim(renewal DetectionNotificationRenewal) error {
+	now := renewal.RenewedAt.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	lease := renewal.ClaimLease
+	if lease <= 0 {
+		lease = DefaultDetectionNotificationLease
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	episode := m.episodes[renewal.EpisodeID]
+	if episode == nil {
+		return ErrNotFound
+	}
+	if renewal.ClaimToken == "" || renewal.ClaimToken != episode.PendingToken || !now.Before(episode.PendingExpiresAt) {
+		return ErrDetectionClaimLost
+	}
+	episode.PendingExpiresAt = now.Add(lease)
+	return nil
+}
+
+func (m *memoryProvider) CompleteDetectionNotification(completion DetectionNotificationCompletion) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	episode := m.episodes[completion.EpisodeID]
+	if episode == nil {
+		return ErrNotFound
+	}
+	if episode.LastCompletedToken == completion.ClaimToken && completion.ClaimToken != "" {
+		return nil
+	}
+	if completion.ClaimToken == "" || completion.ClaimToken != episode.PendingToken {
+		return ErrDetectionClaimLost
+	}
+	if detectionNotificationTerminal(completion.Outcome) {
+		episode.HighestHandledSeverity = episode.PendingSeverity
+		if detectionNotificationDelivered(completion.Outcome) {
+			episode.HighestNotifiedSeverity = episode.PendingSeverity
+		}
+	}
+	episode.LastCompletedToken = completion.ClaimToken
+	episode.LastNotificationOutcome = completion.Outcome
+	episode.PendingKind = ""
+	episode.PendingSeverity = ""
+	episode.PendingToken = ""
+	episode.PendingOwner = ""
+	episode.PendingExpiresAt = time.Time{}
+	for _, incident := range m.incidents {
+		if incident.ID != episode.IncidentID {
+			continue
+		}
+		applyDetectionEpisodeDecision(incident, m.detectionEpisodeDecision(episode))
+		break
+	}
+	return nil
+}
+
+func (m *memoryProvider) incidentExistsLocked(incidentID string) bool {
+	exists, _ := m.incidentStateLocked(incidentID)
+	return exists
+}
+
+func (m *memoryProvider) incidentStateLocked(incidentID string) (bool, bool) {
+	for _, incident := range m.incidents {
+		if incident.ID == incidentID {
+			return true, incident.Resolved
+		}
+	}
+	return false, false
+}
+
+func (m *memoryProvider) updateIncidentFromEpisodeLocked(episode *memoryDetectionEpisode) {
+	for _, incident := range m.incidents {
+		if incident.ID != episode.IncidentID {
+			continue
+		}
+		applyDetectionEpisodeDecision(incident, m.detectionEpisodeDecision(episode))
+		return
+	}
+}
+
+func (m *memoryProvider) CloseDetectionEpisodeByIncident(incidentID string, closedAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	defer m.pruneClosedDetectionEpisodesLocked()
+	for _, episode := range m.episodes {
+		if episode.IncidentID != incidentID || episode.ClosedAt != nil {
+			continue
+		}
+		closed := closedAt.UTC()
+		if closed.IsZero() {
+			closed = time.Now().UTC()
+		}
+		episode.ClosedAt = &closed
+		delete(m.activeEpisodes, episode.Fingerprint)
+		return nil
+	}
+	return ErrNotFound
+}
+
+func (m *memoryProvider) pruneClosedDetectionEpisodesLocked() {
+	limit := m.maxClosedEpisodes
+	if limit <= 0 {
+		limit = MaxClosedDetectionEpisodesDefault
+	}
+	closed := make([]*memoryDetectionEpisode, 0)
+	for _, episode := range m.episodes {
+		if episode.ClosedAt != nil {
+			closed = append(closed, episode)
+		}
+	}
+	if len(closed) <= limit {
+		return
+	}
+	sort.Slice(closed, func(left, right int) bool {
+		return closed[left].ClosedAt.Before(*closed[right].ClosedAt)
+	})
+	for _, episode := range closed[:len(closed)-limit] {
+		delete(m.episodes, episode.EpisodeID)
 	}
 }
 
@@ -113,15 +440,34 @@ func (m *memoryProvider) ListBlobs(prefix string) ([]Blob, error) {
 
 func (m *memoryProvider) SaveIncident(rec *IncidentRecord) error {
 	rec.OrgID = NormalizeOrgID(rec.OrgID)
+	stored := CloneIncidentRecord(rec)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, existing := range m.incidents {
 		if existing.ID == rec.ID {
-			m.incidents[i] = rec
+			mergeDetectionIncident(existing, stored)
+			m.incidents[i] = stored
 			return nil
 		}
 	}
-	m.incidents = append(m.incidents, rec)
+	m.incidents = append(m.incidents, stored)
+	return nil
+}
+
+func (m *memoryProvider) SaveDetectionIncident(rec *IncidentRecord) error {
+	if rec == nil || rec.ID == "" {
+		return ErrInvalidDetectionOccurrence
+	}
+	rec.OrgID = NormalizeOrgID(rec.OrgID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for index, existing := range m.incidents {
+		if existing.ID == rec.ID {
+			m.incidents[index] = detectionIncidentUpdate(existing, rec)
+			return nil
+		}
+	}
+	m.incidents = append(m.incidents, CloneIncidentRecord(rec))
 	return nil
 }
 
@@ -143,8 +489,7 @@ func (m *memoryProvider) GetIncident(id string) (*IncidentRecord, error) {
 	defer m.mu.RUnlock()
 	for _, rec := range m.incidents {
 		if rec.ID == id {
-			cp := *rec
-			return &cp, nil
+			return CloneIncidentRecord(rec), nil
 		}
 	}
 	return nil, ErrNotFound
@@ -159,8 +504,7 @@ func (m *memoryProvider) ListIncidents(limit int) ([]*IncidentRecord, error) {
 	}
 	out := make([]*IncidentRecord, 0, n)
 	for i := n - 1; i >= 0; i-- {
-		cp := *m.incidents[i]
-		out = append(out, &cp)
+		out = append(out, CloneIncidentRecord(m.incidents[i]))
 		if limit > 0 && len(out) >= limit {
 			break
 		}
@@ -233,8 +577,7 @@ func (m *memoryProvider) ListIncidentsByServiceSince(orgID, service string, sinc
 		if NormalizeOrgID(rec.OrgID) != NormalizeOrgID(orgID) || rec.ServiceLabel() != service || rec.CreatedAt.Before(since) {
 			continue
 		}
-		cp := *rec
-		out = append(out, &cp)
+		out = append(out, CloneIncidentRecord(rec))
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	if limit > 0 && len(out) > limit {
@@ -268,8 +611,7 @@ func (m *memoryProvider) ListIncidentsPage(origin string, offset, limit int) ([]
 			skipped++
 			continue
 		}
-		cp := *rec
-		out = append(out, &cp)
+		out = append(out, CloneIncidentRecord(rec))
 		if len(out) >= limit {
 			break
 		}

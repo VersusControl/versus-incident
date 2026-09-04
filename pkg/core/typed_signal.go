@@ -37,6 +37,9 @@ type Observation struct {
 	Value     float64   // the scalar the learner folds + the detector scores
 	Frequency int       // tick count (logs) / sample count (metrics/traces)
 	Samples   []Signal  // representative raw signals for the AI-analyze handoff
+	// StrongestSeverity is computed across the full grouped observation before
+	// Samples is bounded. It is evidence metadata, never part of identity.
+	StrongestSeverity string
 	// IsNew reports whether Group saw this Key for the first time during this
 	// tick (a freshly discovered template / metric / operation). It is used
 	// only for discovery logging and never affects classification. (Additive
