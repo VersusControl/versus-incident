@@ -351,7 +351,14 @@ func (service *Service) execute(runCtx context.Context, session *Session, id, me
 		} else if errors.Is(runErr, errModelResponseUnavailable) {
 			terminal.Error = "model response unavailable"
 			message = "The model could not produce a response. Verify the configured AI provider credentials, model access, and completion-token budget, then retry."
-			log.Printf("chat run failed: session_id=%q code=model_response_unavailable", id)
+			logDetail := message
+			var modelErr *modelResponseError
+			if errors.As(runErr, &modelErr) && modelErr.diagnostic != "" {
+				terminal.Error = modelErr.diagnostic
+				message = modelErr.diagnostic
+				logDetail = modelErr.diagnostic
+			}
+			log.Printf("chat run failed: session_id=%q code=model_response_unavailable detail=%q", id, logDetail)
 		}
 		if err := service.persistTerminal(runCtx, id, terminal, message, events); err != nil {
 			return nil, err

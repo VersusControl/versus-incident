@@ -75,6 +75,30 @@ afterEach(() => {
 });
 
 describe("ChatPage", () => {
+  it("hides scroll-to-bottom after starting a new empty thread", async () => {
+    const populated = {
+      ...baseSession,
+      turns: [{ id: "u1", role: "user" as const, content: "Investigate latency", created_at: baseSession.created_at }],
+    };
+    vi.mocked(api.listChatSessions).mockResolvedValue([populated]);
+    vi.mocked(api.getChatSession).mockResolvedValue(populated);
+    renderPage("/agent/chat?session=session-1");
+    await screen.findByText("Investigate latency");
+
+    const conversation = screen.getByRole("log", { name: "Conversation" });
+    Object.defineProperties(conversation, {
+      scrollHeight: { value: 1000, configurable: true },
+      clientHeight: { value: 300, configurable: true },
+      scrollTop: { value: 100, writable: true, configurable: true },
+    });
+    fireEvent.scroll(conversation);
+    expect(screen.getByRole("button", { name: "Scroll to bottom" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open chat history" }));
+    fireEvent.click(screen.getByRole("button", { name: "New thread" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Scroll to bottom" })).toBeNull());
+  });
+
   it("loads a deep-linked session and derives its history title", async () => {
     const full = {
       ...baseSession,
@@ -119,6 +143,20 @@ describe("ChatPage", () => {
     await waitFor(() => expect(api.createChatSession).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getAllByText("Deployment v42 changed checkout.")).toHaveLength(1));
     expect(api.streamChatMessage).toHaveBeenCalledWith("session-1", "What changed?", undefined, expect.any(Function), expect.any(AbortSignal));
+  });
+
+  it("shows safe model provider details when a chat run fails", async () => {
+    const detail = 'Claude model "claude-sonnet-5" was not found or is unavailable to this account';
+    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
+      const terminal = { seq: 2, at: "", kind: "run_failed" as const, error: detail };
+      onEvent(terminal);
+      return terminal;
+    });
+    renderPage("/agent/chat?session=session-1");
+    fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "What changed?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText(detail)).toBeTruthy();
   });
 
   it("uses a minimal icon-only composer without attachment or budget controls", async () => {

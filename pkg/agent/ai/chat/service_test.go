@@ -56,6 +56,18 @@ func (unavailableModelRunner) RunChat(context.Context, core.ChatTask) (*core.Cha
 	return nil, errModelResponseUnavailable
 }
 
+type detailedUnavailableModelRunner struct{}
+
+func (detailedUnavailableModelRunner) RunChat(context.Context, core.ChatTask) (*core.ChatTurnResult, error) {
+	return nil, newModelResponseError("claude", "claude-sonnet-5", errors.New("status 404: key=secret-value model_not_found"))
+}
+
+type deprecatedTemperatureRunner struct{}
+
+func (deprecatedTemperatureRunner) RunChat(context.Context, core.ChatTask) (*core.ChatTurnResult, error) {
+	return nil, newModelResponseError("claude", "claude-sonnet-5", errors.New("status 400: `temperature` is deprecated for this model"))
+}
+
 type captureTaskRunner struct{ task core.ChatTask }
 
 func (runner *captureTaskRunner) RunChat(_ context.Context, task core.ChatTask) (*core.ChatTurnResult, error) {
@@ -117,6 +129,42 @@ func TestServicePersistsActionableModelResponseFailure(t *testing.T) {
 	}
 	if len(last.Events) == 0 || last.Events[len(last.Events)-1].Error != "model response unavailable" {
 		t.Fatalf("failure events = %+v", last.Events)
+	}
+}
+
+func TestServicePersistsSafeModelResponseDetail(t *testing.T) {
+	service, id := newTestService(t, detailedUnavailableModelRunner{})
+	if _, err := service.Send(context.Background(), id, "what changed?", nil); !errors.Is(err, errModelResponseUnavailable) {
+		t.Fatalf("Send error = %v, want model response unavailable", err)
+	}
+	session, err := service.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := session.Turns[len(session.Turns)-1]
+	want := `Claude model "claude-sonnet-5" was not found or is unavailable to this account. Check the Versus server logs for the full provider error.`
+	if last.Content != want || len(last.Events) == 0 || last.Events[len(last.Events)-1].Error != want {
+		t.Fatalf("failure turn = %+v, want safe provider detail %q", last, want)
+	}
+	if strings.Contains(last.Content, "secret-value") {
+		t.Fatalf("failure detail leaked provider response: %q", last.Content)
+	}
+}
+
+func TestServicePersistsTemperatureOmissionGuidance(t *testing.T) {
+	service, id := newTestService(t, deprecatedTemperatureRunner{})
+	if _, err := service.Send(context.Background(), id, "what changed?", nil); !errors.Is(err, errModelResponseUnavailable) {
+		t.Fatalf("Send error = %v, want model response unavailable", err)
+	}
+	session, err := service.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := session.Turns[len(session.Turns)-1]
+	for _, required := range []string{"AGENT_AI_TEMPERATURE=-1", "restart Versus", "server logs"} {
+		if !strings.Contains(last.Content, required) || len(last.Events) == 0 || !strings.Contains(last.Events[len(last.Events)-1].Error, required) {
+			t.Fatalf("failure turn = %+v, want guidance containing %q", last, required)
+		}
 	}
 }
 
