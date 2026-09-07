@@ -632,7 +632,7 @@ export function ChatPage() {
                     <div className="sr-only" aria-live="polite">{active ? (selectedRun?.stopping ? "Stopping chat run" : "Chat run in progress") : stream.terminal ? "Chat run complete" : ""}</div>
                   </div>
                 </div>
-                {!scroll.following && <button type="button" onClick={scroll.scrollToBottom} className="absolute bottom-44 left-1/2 z-sticky flex -translate-x-1/2 items-center gap-2 rounded-full border border-ink-500/60 bg-surface px-3 py-2 text-xs text-ink-200 shadow-overlay"><ArrowDown size={14} />Scroll to bottom</button>}
+                {conversationStarted && !scroll.following && <button type="button" onClick={scroll.scrollToBottom} className="absolute bottom-44 left-1/2 z-sticky flex -translate-x-1/2 items-center gap-2 rounded-full border border-ink-500/60 bg-surface px-3 py-2 text-xs text-ink-200 shadow-overlay"><ArrowDown size={14} />Scroll to bottom</button>}
                 <div className={clsx("absolute left-0 right-0 z-sticky mx-auto max-w-3xl px-4 transition-[bottom,transform] duration-300", conversationStarted ? "bottom-4" : "bottom-[20vh]")}><Composer value={draft} onChange={setDraft} onSubmit={send} running={active} stopping={selectedRun?.stopping ?? false} onStop={stop} /></div>
               </>
             )}

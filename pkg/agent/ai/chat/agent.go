@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -50,6 +51,7 @@ type Options struct {
 
 type Agent struct {
 	cfg          config.AgentAIConfig
+	runtime      einowrap.RuntimeAI
 	chatModel    model.ToolCallingChatModel
 	holder       *einowrap.Holder[model.ToolCallingChatModel]
 	tools        []core.Tool
@@ -84,7 +86,7 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 		filtered = append(filtered, value)
 		displays[value.Name()] = core.ToolDisplayName(value)
 	}
-	agent := &Agent{cfg: cfg, tools: filtered, toolDisplays: displays, toolTimeout: toolTimeout, toolProvider: opts.ToolProvider, seedProvider: opts.SeedProvider}
+	agent := &Agent{cfg: cfg, runtime: opts.Runtime, tools: filtered, toolDisplays: displays, toolTimeout: toolTimeout, toolProvider: opts.ToolProvider, seedProvider: opts.SeedProvider}
 	if opts.ChatModel != nil {
 		if _, err := agent.buildRunner(ctx, opts.ChatModel); err != nil {
 			return nil, err
@@ -180,6 +182,7 @@ func (agent *Agent) RunChatTurn(ctx context.Context, task core.ChatTask) (*core.
 	var sequence int64
 	messages, compacted := historyMessages(runCtx)
 	messages = append(messages, schema.UserMessage(buildUserPrompt(task)))
+	messages = normalizeHistoryMessages(messages)
 
 	core.EmitChatEvent(ctx, core.ChatEvent{Seq: atomic.AddInt64(&sequence, 1), Kind: core.ChatEventRunStarted})
 	if compacted > 0 {
@@ -201,7 +204,7 @@ func (agent *Agent) RunChatTurn(ctx context.Context, task core.ChatTask) (*core.
 			if errors.Is(event.Err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				return result, fmt.Errorf("chat: run timed out: %w", context.DeadlineExceeded)
 			}
-			return result, errModelResponseUnavailable
+			return result, newModelResponseError(agent.effectiveProvider(runCtx), agent.cfg.Model, event.Err)
 		}
 		if event.Output == nil || event.Output.MessageOutput == nil {
 			continue
@@ -215,7 +218,7 @@ func (agent *Agent) RunChatTurn(ctx context.Context, task core.ChatTask) (*core.
 		}
 		message, messageErr := consumeMessage(ctx, variant, onDelta)
 		if messageErr != nil {
-			return result, safeRunError(ctx, messageErr)
+			return result, safeRunError(ctx, messageErr, agent.effectiveProvider(runCtx), agent.cfg.Model)
 		}
 		if message == nil {
 			continue
@@ -248,10 +251,10 @@ func (agent *Agent) RunChatTurn(ctx context.Context, task core.ChatTask) (*core.
 	}
 	result.DurationMs = time.Since(started).Milliseconds()
 	if ctx.Err() != nil {
-		return result, safeRunError(ctx, ctx.Err())
+		return result, safeRunError(ctx, ctx.Err(), agent.effectiveProvider(runCtx), agent.cfg.Model)
 	}
 	if result.Markdown == "" {
-		return result, errModelResponseUnavailable
+		return result, &modelResponseError{diagnostic: modelResponseDiagnostic(agent.effectiveProvider(runCtx), agent.cfg.Model, "empty_response")}
 	}
 	return result, nil
 }
@@ -341,14 +344,126 @@ func consumeMessage(ctx context.Context, variant *adk.MessageVariant, onDelta fu
 	return schema.ConcatMessages(chunks)
 }
 
-func safeRunError(ctx context.Context, err error) error {
+func safeRunError(ctx context.Context, err error, provider, model string) error {
 	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 		return context.Canceled
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("chat: run timed out: %w", context.DeadlineExceeded)
 	}
-	return errModelResponseUnavailable
+	return newModelResponseError(provider, model, err)
+}
+
+type modelResponseError struct {
+	diagnostic string
+}
+
+func (err *modelResponseError) Error() string { return errModelResponseUnavailable.Error() }
+func (err *modelResponseError) Unwrap() error { return errModelResponseUnavailable }
+
+func newModelResponseError(provider, model string, cause error) error {
+	return &modelResponseError{diagnostic: modelResponseDiagnostic(provider, model, cause.Error())}
+}
+
+func modelResponseDiagnostic(provider, model, failure string) string {
+	provider = safeModelIdentifier(provider, "openai")
+	model = safeModelIdentifier(model, "configured model")
+	label := strings.ToUpper(provider[:1]) + provider[1:]
+	normalizedFailure := strings.ToLower(failure)
+	checkLogs := " Check the Versus server logs for the full provider error."
+
+	log.Printf("chat model provider error: provider=%q model=%q error=%s", provider, model, failure)
+
+	if detail := safeProviderValidationDetail(failure); detail != "" {
+		return fmt.Sprintf("%s rejected the generated chat history for model %q: %s.%s", label, model, strings.TrimSuffix(detail, "."), checkLogs)
+	}
+	switch {
+	case normalizedFailure == "empty_response":
+		return fmt.Sprintf("%s model %q returned no assistant content; increase the completion-token budget or choose a compatible model.%s", label, model, checkLogs)
+	case strings.Contains(normalizedFailure, "temperature") && (strings.Contains(normalizedFailure, "deprecated") || strings.Contains(normalizedFailure, "unsupported") || strings.Contains(normalizedFailure, "not support")):
+		return fmt.Sprintf("%s model %q rejected the configured temperature; set AGENT_AI_TEMPERATURE=-1 to omit it, restart Versus, and retry.%s", label, model, checkLogs)
+	case strings.Contains(normalizedFailure, "401"), strings.Contains(normalizedFailure, "unauthorized"), strings.Contains(normalizedFailure, "authentication"), strings.Contains(normalizedFailure, "invalid_api_key"), strings.Contains(normalizedFailure, "invalid api key"):
+		return fmt.Sprintf("%s authentication failed for model %q; verify the configured API key.%s", label, model, checkLogs)
+	case strings.Contains(normalizedFailure, "403"), strings.Contains(normalizedFailure, "forbidden"), strings.Contains(normalizedFailure, "permission denied"):
+		return fmt.Sprintf("%s denied access to model %q; verify model permissions.%s", label, model, checkLogs)
+	case strings.Contains(normalizedFailure, "404"), strings.Contains(normalizedFailure, "model_not_found"), strings.Contains(normalizedFailure, "model not found"), strings.Contains(normalizedFailure, "not_found_error"):
+		return fmt.Sprintf("%s model %q was not found or is unavailable to this account.%s", label, model, checkLogs)
+	case strings.Contains(normalizedFailure, "429"), strings.Contains(normalizedFailure, "rate limit"), strings.Contains(normalizedFailure, "rate_limit"):
+		return fmt.Sprintf("%s rate limit or quota was reached for model %q; retry later or check provider limits.%s", label, model, checkLogs)
+	case strings.Contains(normalizedFailure, "400"), strings.Contains(normalizedFailure, "invalid_request"):
+		return fmt.Sprintf("%s rejected the request for model %q as invalid; verify model compatibility and token limits.%s", label, model, checkLogs)
+	case strings.Contains(normalizedFailure, "timeout"), strings.Contains(normalizedFailure, "deadline exceeded"):
+		return fmt.Sprintf("%s timed out while calling model %q.%s", label, model, checkLogs)
+	case strings.Contains(normalizedFailure, "connection refused"), strings.Contains(normalizedFailure, "no such host"), strings.Contains(normalizedFailure, "tls"):
+		return fmt.Sprintf("Could not connect securely to %s for model %q.%s", label, model, checkLogs)
+	default:
+		return fmt.Sprintf("%s could not produce a response with model %q; verify provider configuration and model access.%s", label, model, checkLogs)
+	}
+}
+
+func safeProviderValidationDetail(failure string) string {
+	type providerErrorEnvelope struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	var envelope providerErrorEnvelope
+	for offset := 0; offset < len(failure); {
+		start := strings.IndexByte(failure[offset:], '{')
+		if start < 0 {
+			return ""
+		}
+		start += offset
+		envelope = providerErrorEnvelope{}
+		if err := json.NewDecoder(strings.NewReader(failure[start:])).Decode(&envelope); err == nil && envelope.Error.Type == "invalid_request_error" {
+			break
+		}
+		offset = start + 1
+	}
+	if envelope.Error.Type != "invalid_request_error" {
+		return ""
+	}
+	detail := strings.Join(strings.Fields(envelope.Error.Message), " ")
+	lower := strings.ToLower(detail)
+	if len(detail) == 0 || len(detail) > 512 || !strings.HasPrefix(lower, "messages.") {
+		return ""
+	}
+	for _, sensitive := range []string{"sk-", "api key", "apikey", "authorization", "bearer", "password", "secret", "token="} {
+		if strings.Contains(lower, sensitive) {
+			return ""
+		}
+	}
+	return detail
+}
+
+func safeModelIdentifier(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	if len(value) > 128 {
+		return fallback
+	}
+	for _, character := range value {
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune("._:/-", character)) {
+			return fallback
+		}
+	}
+	return value
+}
+
+func (agent *Agent) effectiveProvider(ctx context.Context) string {
+	provider := strings.TrimSpace(agent.cfg.Provider)
+	if provider == "" {
+		provider = einowrap.DefaultProvider
+	}
+	if agent.runtime.Provider != nil {
+		if runtimeProvider, ok := agent.runtime.Provider(ctx); ok && einowrap.IsSupportedProvider(runtimeProvider) {
+			provider = runtimeProvider
+		}
+	}
+	return strings.ToLower(provider)
 }
 
 func historyMessages(ctx context.Context) ([]*schema.Message, int) {
@@ -366,10 +481,42 @@ func historyMessages(ctx context.Context) ([]*schema.Message, int) {
 		case TurnAssistant:
 			messages = append(messages, schema.AssistantMessage(capString(turn.Content, MaxOutputBytes), nil))
 		case TurnCompaction:
-			messages = append(messages, schema.SystemMessage(capString(turn.Content, 512)))
+			messages = append(messages, schema.UserMessage(capString(turn.Content, 512)))
 		}
 	}
 	return messages, compacted
+}
+
+func normalizeHistoryMessages(messages []*schema.Message) []*schema.Message {
+	firstUser := 0
+	for firstUser < len(messages) && messages[firstUser].Role != schema.User {
+		firstUser++
+	}
+	messages = messages[firstUser:]
+	normalized := make([]*schema.Message, 0, len(messages))
+	for _, message := range messages {
+		if message == nil || (message.Role != schema.User && message.Role != schema.Assistant) {
+			continue
+		}
+		if len(normalized) > 0 && normalized[len(normalized)-1].Role == message.Role {
+			previous := normalized[len(normalized)-1]
+			content := strings.TrimSpace(previous.Content)
+			if next := strings.TrimSpace(message.Content); next != "" {
+				if content != "" {
+					content += "\n\n"
+				}
+				content += next
+			}
+			if message.Role == schema.User {
+				normalized[len(normalized)-1] = schema.UserMessage(content)
+			} else {
+				normalized[len(normalized)-1] = schema.AssistantMessage(content, nil)
+			}
+			continue
+		}
+		normalized = append(normalized, message)
+	}
+	return normalized
 }
 
 type turnGuardContextKey struct{}

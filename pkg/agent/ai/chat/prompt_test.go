@@ -49,3 +49,17 @@ func TestSystemPromptRequiresKnowledgeToolsAndHonestUnknowns(t *testing.T) {
 		}
 	}
 }
+
+func TestSystemPromptRequiresHumanReadableEvidence(t *testing.T) {
+	prompt := SystemPrompt()
+	for _, required := range []string{
+		"Write for an operator, not for an API developer",
+		"Do not expose internal tool function names",
+		"Never copy internal tool names, snake_case response keys, JSON field paths, or tool arguments",
+		"Let the UI render source citations from tool-call metadata",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Errorf("system prompt missing human-readable output rule %q", required)
+		}
+	}
+}
