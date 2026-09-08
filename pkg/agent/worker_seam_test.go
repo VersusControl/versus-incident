@@ -95,6 +95,20 @@ func TestWorker_Seam_TrainingLearnsNoEmit(t *testing.T) {
 	}
 }
 
+func TestWorker_ProcessesFullSourceCapInBatchMaxChunks(t *testing.T) {
+	const sourcePullCap = 10000
+	src := &batchSource{name: "es", signals: repeatSignals("service=api capped id=", sourcePullCap)}
+	w := newSeamWorker(t, "training", src, AIBundle{}, nil)
+	w.cfg.BatchMax = 500
+
+	w.tickSource(context.Background(), src, "training")
+
+	patterns := w.catalog.All()
+	if len(patterns) != 1 || patterns[0].Count != sourcePullCap {
+		t.Fatalf("patterns = %#v, want one pattern with count %d", patterns, sourcePullCap)
+	}
+}
+
 // TestWorker_Seam_DetectEmitsUnknown proves a brand-new pattern in detect mode
 // flows Group → Expected → Learn → Classify(Unknown) → emitDetect → emitter.
 func TestWorker_Seam_DetectEmitsUnknown(t *testing.T) {

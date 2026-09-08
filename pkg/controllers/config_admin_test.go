@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/VersusControl/versus-incident/pkg/agent"
@@ -138,5 +139,51 @@ func TestAgentConfigAI_ResolverError_FallsBackToStatic(t *testing.T) {
 	}
 	if ai["api_key"] != "set" {
 		t.Errorf("api_key = %v, want %q", ai["api_key"], "set")
+	}
+}
+
+func TestAgentConfigElasticsearchSourceExposesTieBreakerWithoutCredentials(t *testing.T) {
+	app := configAdminApp(t)
+	cfg := config.GetConfig()
+	previousSources := cfg.Agent.Sources
+	cfg.Agent.Sources = []config.AgentSourceConfig{{
+		Name: "production-logs", Type: "elasticsearch", Enable: true,
+		Elasticsearch: config.AgentElasticsearchSourceConfig{
+			Addresses: []string{"https://search.internal.example:9200"},
+			Username:  "reader", Password: "secret-password", APIKey: "secret-api-key",
+			Index: "logs-*", TimeField: "@timestamp", TieBreakerField: "trace.id", MessageField: "message",
+		},
+	}, {
+		Name: "default-tie", Type: "elasticsearch", Enable: true,
+		Elasticsearch: config.AgentElasticsearchSourceConfig{Index: "audit-*"},
+	}}
+	t.Cleanup(func() { cfg.Agent.Sources = previousSources })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/config/agent", nil)
+	req.Header.Set("X-Gateway-Secret", configAdminSecret)
+	resp, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Sources []struct {
+			Details map[string]interface{} `json:"details"`
+		} `json:"sources"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(body.Sources) != 2 || body.Sources[0].Details["tie_breaker_field"] != "trace.id" || body.Sources[1].Details["tie_breaker_field"] != "event.id" {
+		t.Fatalf("sources = %#v, want configured and effective-default tie_breaker_field values", body.Sources)
+	}
+	encoded, err := json.Marshal(body.Sources[0].Details)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"secret-password", "secret-api-key", "reader", "search.internal.example"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("Elasticsearch admin details leaked credential or address %q: %s", secret, encoded)
+		}
 	}
 }

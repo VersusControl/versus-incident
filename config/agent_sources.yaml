@@ -47,6 +47,7 @@ sources:
     elasticsearch:
       addresses:
         - http://localhost:9200
+      allow_loopback: false
       index: "logstash-*"
       time_field: "@timestamp"
       query: '*'

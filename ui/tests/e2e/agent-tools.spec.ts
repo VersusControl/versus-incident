@@ -100,6 +100,7 @@ test.describe("Agent tool catalog", () => {
       await expect(page.getByRole("heading", { name: "Tool catalog" })).toBeVisible();
       await expect(page.getByRole("heading", { level: 2 })).toHaveText(["Connectors", "Data Source Tools", "Common"]);
       await expect(page.locator("main article")).toHaveCount(16);
+      await expect(page.getByRole("heading", { name: "Elasticsearch", exact: true })).toHaveCount(1);
       await expect(page.getByRole("textbox", { name: "Search tools" })).toHaveCount(0);
       await expect(page.getByRole("tablist")).toHaveCount(0);
       await expect(page.getByText("get_incident", { exact: true })).toHaveCount(0);

@@ -7,13 +7,15 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/VersusControl/versus-incident/pkg/core"
 )
 
 func TestCatalogIsCompleteOrderedAndUnique(t *testing.T) {
 	wantGroups := []Group{
 		GroupVersus, GroupVersus, GroupVersus, GroupVersus, GroupVersus, GroupVersus,
 		GroupVersus, GroupVersus, GroupVersus, GroupVersus, GroupVersus,
-		GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon,
+		GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon,
 		GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s,
 	}
 	got := Catalog()
@@ -42,6 +44,10 @@ func TestCatalogDestinationsAreExactAndSafe(t *testing.T) {
 		"get_pattern": {docsVersus, ""}, "list_analyses": {docsVersus, "/analyses"}, "get_alert_decision": {docsVersus, "/agent/decisions"},
 		"list_capabilities": {docsVersus, ""}, "get_detection_health": {docsVersus, ""},
 		"get_related_logs":      {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
+		"list_log_indices":      {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
+		"get_log_mappings":      {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
+		"search_logs":           {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
+		"get_log_shards":        {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
 		"query_metrics":         {"https://docs.versusincident.com/#/agent/data-sources/prometheus", "/agent/metrics"},
 		"query_traces":          {"https://docs.versusincident.com/#/agent/data-sources/traces", "/agent/traces"},
 		"find_runbook":          {"https://docs.versusincident.com/#/agent/tools/find-runbook", "/agent/runbooks"},
@@ -162,12 +168,18 @@ func TestCatalogDeclaresCompoundRunbookCapabilities(t *testing.T) {
 func TestCatalogCopyIsDetached(t *testing.T) {
 	got := Catalog()
 	got[0].Name = "changed"
-	got[14].Requirement.Capabilities[0] = "changed"
+	for index := range got {
+		if got[index].Name == "find_runbook" {
+			got[index].Requirement.Capabilities[0] = "changed"
+		}
+	}
 	if Catalog()[0].Name == "changed" {
 		t.Fatal("Catalog returned mutable backing storage")
 	}
-	if Catalog()[14].Requirement.Capabilities[0] == "changed" {
-		t.Fatal("Catalog returned mutable requirement capabilities")
+	for _, metadata := range Catalog() {
+		if metadata.Name == "find_runbook" && metadata.Requirement.Capabilities[0] == "changed" {
+			t.Fatal("Catalog returned mutable requirement capabilities")
+		}
 	}
 }
 
@@ -181,6 +193,7 @@ func TestToolsetsAreExactOrderedAndOwnEveryVisibleTool(t *testing.T) {
 		{"kubernetes", SectionConnector, "kubernetes", []string{"get_cluster_overview", "discover_k8s_resources", "query_k8s_resources", "get_k8s_resource", "list_workloads", "get_workload", "list_k8s_events", "get_pod_logs"}},
 		{"source-control", SectionConnector, "git", []string{"recent_changes"}},
 		{"logs", SectionDataSource, "logs", []string{"get_related_logs"}},
+		{"elasticsearch-logs", SectionDataSource, "elasticsearch", []string{"list_log_indices", "get_log_mappings", "search_logs", "get_log_shards"}},
 		{"metrics", SectionDataSource, "metrics", []string{"query_metrics"}},
 		{"traces", SectionDataSource, "traces", []string{"query_traces"}},
 		{"find_runbook", SectionCommon, "runbook", []string{"find_runbook"}},
@@ -194,6 +207,9 @@ func TestToolsetsAreExactOrderedAndOwnEveryVisibleTool(t *testing.T) {
 		if got[index].ID != want[index].id || got[index].Section != want[index].section || got[index].IconKey != want[index].icon || !reflect.DeepEqual(got[index].ToolNames, want[index].children) {
 			t.Errorf("Toolsets()[%d] = %#v, want id=%q section=%q icon=%q children=%v", index, got[index], want[index].id, want[index].section, want[index].icon, want[index].children)
 		}
+		if (got[index].ID == "kubernetes" || got[index].ID == "elasticsearch-logs") && got[index].Permission != core.PermissionInfrastructureView {
+			t.Errorf("Toolsets()[%d] permission = %q, want %q", index, got[index].Permission, core.PermissionInfrastructureView)
+		}
 	}
 	if err := validateToolsetCatalog(); err != nil {
 		t.Fatal(err)
@@ -203,8 +219,18 @@ func TestToolsetsAreExactOrderedAndOwnEveryVisibleTool(t *testing.T) {
 func TestToolsetsCopyIsDetached(t *testing.T) {
 	got := Toolsets()
 	got[0].ToolNames[0] = "changed"
-	got[5].Requirement.Capabilities[0] = "changed"
-	if Toolsets()[0].ToolNames[0] == "changed" || Toolsets()[5].Requirement.Capabilities[0] == "changed" {
+	for index := range got {
+		if got[index].ID == "find_runbook" {
+			got[index].Requirement.Capabilities[0] = "changed"
+		}
+	}
+	detached := Toolsets()[0].ToolNames[0] != "changed"
+	for _, toolset := range Toolsets() {
+		if toolset.ID == "find_runbook" && toolset.Requirement.Capabilities[0] == "changed" {
+			detached = false
+		}
+	}
+	if !detached {
 		t.Fatal("Toolsets returned mutable backing storage")
 	}
 }

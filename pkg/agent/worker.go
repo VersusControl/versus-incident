@@ -465,13 +465,20 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		return
 	}
 
-	// Cap batch size as a safety net.
-	if w.cfg.BatchMax > 0 && len(signals) > w.cfg.BatchMax {
-		log.Printf("agent: %s returned %d signals, truncating to batch_max=%d",
-			src.Name(), len(signals), w.cfg.BatchMax)
-		signals = signals[:w.cfg.BatchMax]
+	batchSize := len(signals)
+	if w.cfg.BatchMax > 0 && batchSize > w.cfg.BatchMax {
+		batchSize = w.cfg.BatchMax
 	}
+	for start := 0; start < len(signals); start += batchSize {
+		end := min(start+batchSize, len(signals))
+		if !w.processSourceBatch(ctx, src, mode, signals[start:end], newCursor) {
+			return
+		}
+	}
+	w.saveCursor(ctx, src.Name(), newCursor)
+}
 
+func (w *Worker) processSourceBatch(ctx context.Context, src core.SignalSource, mode string, signals []core.Signal, newCursor time.Time) bool {
 	// Redact every payload before doing anything else with it.
 	for i := range signals {
 		if w.redactor != nil {
@@ -541,7 +548,7 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 	observations, err := learner.Group(ctx, signals)
 	if err != nil {
 		log.Printf("agent: grouping signals from %s failed: %v", src.Name(), err)
-		return
+		return false
 	}
 
 	// Per-log-pattern learn-exclusion. The pre-Group chokepoint above can
@@ -610,10 +617,9 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		promoteByCount(learner, o.Key)
 	}
 
-	w.saveCursor(ctx, src.Name(), newCursor)
-
 	log.Printf("agent: tick %s signals=%d matched=%d patterns=%d skipped_no_match=%d skipped_excluded=%d verdicts=%v cursor=%s",
 		src.Name(), pulled, matched, len(observations), pulled-matched-excludedPatternFreq, excluded+excludedPatternFreq, verdicts, newCursor.Format(time.RFC3339))
+	return true
 }
 
 // handleObservation runs the mode-specific tail for one ALREADY-FOLDED

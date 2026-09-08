@@ -67,6 +67,7 @@ func TestElasticsearch_ReorderWindowBoundIsHonored(t *testing.T) {
 
 	src, err := NewElasticsearchSource("bound", config.AgentElasticsearchSourceConfig{
 		Addresses:     []string{ts.URL},
+		AllowLoopback: true,
 		Index:         "logs-*",
 		PageSize:      50,
 		ReorderWindow: "10s",

@@ -22,6 +22,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
+	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -150,7 +151,8 @@ func (agent *Agent) availableTools(ctx context.Context) ([]core.Tool, error) {
 			return nil, fmt.Errorf("chat: load tools: %w", err)
 		}
 	}
-	return k8stools.FilterAuthorized(ctx, tools), nil
+	tools = k8stools.FilterAuthorized(ctx, tools)
+	return elasticsearchtools.FilterAuthorized(ctx, tools), nil
 }
 
 func (agent *Agent) Name() string          { return "chat" }

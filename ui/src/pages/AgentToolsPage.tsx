@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { AlertCircle, ArrowUpRight, BookOpenText, Check, CircleOff, ExternalLink, FileText, GitBranch, Loader2, Network, RefreshCw, Settings, ShipWheel, Wrench } from "lucide-react";
 import { FaAws } from "react-icons/fa6";
-import { SiElastic, SiGrafana, SiGraylog, SiPrometheus, SiSplunk } from "react-icons/si";
+import { SiGrafana, SiGraylog, SiPrometheus, SiSplunk } from "react-icons/si";
 import { api, type AgentToolsetAvailability, type AgentToolKind, type AgentToolState } from "@/lib/api";
 import { Modal } from "@/components/Modal";
 import { TopBar } from "@/components/TopBar";
@@ -24,11 +24,15 @@ type CatalogToolset = Omit<AgentToolsetAvailability, "state"> & {
   shared_capability?: string;
 };
 
+function ElasticsearchIcon({ size = 24, className }: { size?: number; className?: string }) {
+  return <img src="/elasticsearch.svg" alt="" width={size} height={size} className={className} aria-hidden="true" />;
+}
+
 const ICONS: Record<string, ElementType> = {
   kubernetes: ShipWheel,
   git: GitBranch,
   file: FileText,
-  elasticsearch: SiElastic,
+  elasticsearch: ElasticsearchIcon,
   loki: SiGrafana,
   cloudwatch: FaAws,
   graylog: SiGraylog,
@@ -59,7 +63,6 @@ const ICON_COLORS: Record<string, string> = {
 
 const PROVIDERS = [
   { base_id: "logs", type: "file", name: "File", description: "Read logs from local files.", icon_key: "file", docs_url: "https://docs.versusincident.com/#/agent/data-sources/file" },
-  { base_id: "logs", type: "elasticsearch", name: "Elasticsearch", description: "Search logs stored in Elasticsearch.", icon_key: "elasticsearch", docs_url: "https://docs.versusincident.com/#/agent/data-sources/elasticsearch" },
   { base_id: "logs", type: "loki", name: "Loki", description: "Query logs stored in Grafana Loki.", icon_key: "loki", docs_url: "https://docs.versusincident.com/#/agent/data-sources/loki" },
   { base_id: "logs", type: "cloudwatchlogs", name: "CloudWatch Logs", description: "Query logs stored in Amazon CloudWatch.", icon_key: "cloudwatch", docs_url: "https://docs.versusincident.com/#/agent/data-sources/cloudwatch-logs" },
   { base_id: "logs", type: "graylog", name: "Graylog", description: "Search logs stored in Graylog.", icon_key: "graylog", docs_url: "https://docs.versusincident.com/#/agent/data-sources/graylog" },
@@ -124,7 +127,12 @@ function buildCatalog(toolsets: AgentToolsetAvailability[], sources: Awaited<Ret
       reason,
     }];
   });
-  return [...toolsets.filter((toolset) => toolset.section !== "datasource"), ...providers];
+  return [
+    ...toolsets
+      .filter((toolset) => toolset.section !== "datasource" || toolset.id === "elasticsearch-logs")
+      .map((toolset) => toolset.id === "elasticsearch-logs" ? { ...toolset, display_name: "Elasticsearch" } : toolset),
+    ...providers,
+  ];
 }
 
 export function AgentToolsPage() {
@@ -251,7 +259,7 @@ function ToolsetDetails({ toolset, agent, pending, onClose, onToggle }: { toolse
   const Icon = ICONS[toolset.icon_key] ?? Wrench;
   const iconColor = ICON_COLORS[toolset.icon_key] ?? ICON_COLORS.common;
   return <Modal title={toolset.display_name} onClose={onClose} size="lg" footer={<>{toolset.docs_url && <a className="btn" href={toolset.docs_url} target="_blank" rel="noopener noreferrer">Documentation <ExternalLink size={13} /></a>}{toolset.ui_path && !["needs_license", "needs_permission"].includes(toolset.state) && <Link className="btn btn-primary" to={toolset.ui_path} onClick={onClose}>Open tool <ArrowUpRight size={13} /></Link>}{showAvailabilityAction && (toolset.action.startsWith("/") ? <Link className="btn btn-primary" to={toolset.action}>{toolset.action_label}</Link> : <a className="btn btn-primary" href={toolset.action} target="_blank" rel="noopener noreferrer">{toolset.action_label} <ExternalLink size={13} /></a>)}</>}>
-    <div className="flex items-start gap-3"><div className="flex size-12 shrink-0 items-center justify-center rounded-control border border-ink-600 bg-ink-800"><Icon size={24} className={`tool-brand-icon ${iconColor}`} strokeWidth={2.2} /></div><div className="min-w-0"><p className="text-sm leading-6 text-ink-200">{toolset.description}</p><StateBadge state={toolset.state} /></div></div>
+    <div className="flex items-start gap-3"><div className="flex size-12 shrink-0 items-center justify-center rounded-control border border-ink-600 bg-ink-800"><Icon size={24} className={`tool-brand-icon ${iconColor}`} strokeWidth={2.2} aria-hidden="true" /></div><div className="min-w-0"><p className="text-sm leading-6 text-ink-200">{toolset.description}</p><StateBadge state={toolset.state} /></div></div>
     <dl className="mt-5 divide-y divide-ink-700 border-y border-ink-700 text-xs"><div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Availability</dt><dd className="text-ink-100">{toolset.reason}</dd></div>{toolset.shared_capability && <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Capability</dt><dd className="text-ink-100">Uses the shared {toolset.shared_capability} agent capability.</dd></div>}{toolset.configured_source_names && toolset.configured_source_names.length > 0 && <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Configured sources</dt><dd className="text-ink-100">{toolset.configured_source_names.join(", ")}</dd></div>}{toolset.health && <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Shared health</dt><dd className="text-ink-100">{toolset.health}</dd></div>}<div className="grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-3 py-3"><dt className="text-ink-400">{toolset.shared_capability ? `${toolset.shared_capability} tools` : agent === "chat" ? "Chat agent" : "Analyze agent"}</dt><dd><label className="inline-flex items-center gap-2 text-ink-100"><input type="checkbox" aria-label={`Enable ${toolset.shared_capability ?? toolset.display_name} for ${agent}`} aria-describedby={!satisfied ? `${toolset.id}-setup-required` : undefined} className="h-4 w-4 accent-good" checked={toolset.enabled && satisfied} disabled={!satisfied || pending} onChange={(event) => onToggle(event.target.checked)} /><span>{toolset.enabled && satisfied ? "Enabled" : "Disabled"}</span>{pending && <Loader2 size={13} className="animate-spin" />}</label>{toolset.shared_capability && <p className="mt-1 text-2xs text-sev-warning">This setting affects every configured {toolset.shared_capability.toLowerCase()} provider.</p>}</dd></div></dl>
     {!satisfied && <div id={`${toolset.id}-setup-required`} className="mt-4 rounded-control border border-sev-warning/30 bg-sev-warning/10 p-3 text-xs leading-5 text-ink-200"><span className="font-medium">Setup required.</span> {toolset.reason}</div>}
   </Modal>;

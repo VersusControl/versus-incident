@@ -57,6 +57,7 @@ func (f *fakeES) add(id, message string, ts time.Time) {
 		ts: ts,
 		src: map[string]interface{}{
 			f.timeField: ts.UTC().Format(time.RFC3339Nano),
+			"event.id":  id,
 			"message":   message,
 		},
 	})
@@ -120,9 +121,14 @@ func (f *fakeES) handler(t *testing.T) http.HandlerFunc {
 
 		var after string
 		hasAfter := false
-		if sa, ok := q["search_after"].([]interface{}); ok && len(sa) > 0 {
-			if s, ok := sa[0].(string); ok {
-				after, hasAfter = s, true
+		if sa, ok := q["search_after"].([]interface{}); ok && len(sa) == 2 {
+			if timestamp, timestampOK := sa[0].(string); timestampOK {
+				if id, idOK := sa[1].(string); idOK {
+					parsed, parseErr := time.Parse(time.RFC3339Nano, timestamp)
+					if parseErr == nil {
+						after, hasAfter = esSortKey(parsed, id), true
+					}
+				}
 			}
 		}
 
@@ -154,7 +160,7 @@ func (f *fakeES) handler(t *testing.T) http.HandlerFunc {
 			hits = append(hits, esHit{
 				ID:     d.id,
 				Source: d.src,
-				Sort:   []interface{}{esSortKey(d.ts, d.id)},
+				Sort:   []interface{}{d.ts.UTC().Format(time.RFC3339Nano), d.id},
 			})
 			if len(hits) >= size {
 				break
@@ -188,9 +194,10 @@ func TestElasticsearch_TailKeepsPullingWithoutClear(t *testing.T) {
 	fake.add("b2", "backlog two", base.Add(5*time.Second)) // C1 = base+5s
 
 	src, err := NewElasticsearchSource("tail", config.AgentElasticsearchSourceConfig{
-		Addresses: []string{ts.URL},
-		Index:     "logs-*",
-		PageSize:  50,
+		Addresses:     []string{ts.URL},
+		AllowLoopback: true,
+		Index:         "logs-*",
+		PageSize:      50,
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -275,9 +282,10 @@ func TestElasticsearch_BoundaryDocsDedupedButNewDelivered(t *testing.T) {
 	fake.add("d2", "second", base.Add(2*time.Second)) // cursor = base+2s
 
 	src, err := NewElasticsearchSource("dedup", config.AgentElasticsearchSourceConfig{
-		Addresses: []string{ts.URL},
-		Index:     "logs-*",
-		PageSize:  50,
+		Addresses:     []string{ts.URL},
+		AllowLoopback: true,
+		Index:         "logs-*",
+		PageSize:      50,
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -318,9 +326,10 @@ func TestElasticsearch_IdleSourceDoesNotRepull(t *testing.T) {
 	fake.add("i2", "idle two", base.Add(1*time.Second))
 
 	src, err := NewElasticsearchSource("idle", config.AgentElasticsearchSourceConfig{
-		Addresses: []string{ts.URL},
-		Index:     "logs-*",
-		PageSize:  50,
+		Addresses:     []string{ts.URL},
+		AllowLoopback: true,
+		Index:         "logs-*",
+		PageSize:      50,
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)

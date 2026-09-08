@@ -41,9 +41,10 @@ func TestElasticsearch_FutureTimestampDoesNotStrandCursor(t *testing.T) {
 	fake.add("future", "future dated garbage", future)
 
 	src, err := NewElasticsearchSource("tail", config.AgentElasticsearchSourceConfig{
-		Addresses: []string{ts.URL},
-		Index:     "logs-*",
-		PageSize:  50,
+		Addresses:     []string{ts.URL},
+		AllowLoopback: true,
+		Index:         "logs-*",
+		PageSize:      50,
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -124,9 +125,10 @@ func TestElasticsearch_HealsPoisonedFutureSince(t *testing.T) {
 	fake.add("r1", "recent one", base.Add(9*time.Minute+30*time.Second)) // 10:09:30, inside [now-window, now]
 
 	src, err := NewElasticsearchSource("heal", config.AgentElasticsearchSourceConfig{
-		Addresses: []string{ts.URL},
-		Index:     "logs-*",
-		PageSize:  50,
+		Addresses:     []string{ts.URL},
+		AllowLoopback: true,
+		Index:         "logs-*",
+		PageSize:      50,
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)

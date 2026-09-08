@@ -585,6 +585,7 @@ func TestElasticsearchSource_PersistedDedupSurvivesRestart(t *testing.T) {
 	newSrc := func() *ElasticsearchSource {
 		src, err := NewElasticsearchSource("tail", config.AgentElasticsearchSourceConfig{
 			Addresses:     []string{ts.URL},
+			AllowLoopback: true,
 			Index:         "logs-*",
 			PageSize:      50,
 			ReorderWindow: "2m",
@@ -637,6 +638,7 @@ func TestElasticsearchSource_RewindClearsPersistedDedup(t *testing.T) {
 	backend := newFakeDedupBackend()
 	src, err := NewElasticsearchSource("clear", config.AgentElasticsearchSourceConfig{
 		Addresses:     []string{ts.URL},
+		AllowLoopback: true,
 		Index:         "logs-*",
 		PageSize:      50,
 		ReorderWindow: "1m",
