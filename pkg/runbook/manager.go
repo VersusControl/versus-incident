@@ -8,6 +8,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/runbook/vectorindex"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 // UploadFile is one operator-uploaded runbook: the original filename and
@@ -31,19 +32,26 @@ type UploadFile struct {
 // vectorindex.Index returned by Index(), keeping the analyze read-only
 // import-graph guard green.
 type Manager struct {
-	mu       sync.Mutex // serializes mutations (upload/delete/ingest)
-	store    *Store
-	embedder core.Embedder // may be nil when embeddings are not configured
-	index    atomic.Pointer[vectorindex.Memory]
+	mu              sync.Mutex // serializes mutations (upload/delete/ingest)
+	store           *Store
+	embedder        core.Embedder // may be nil when embeddings are not configured
+	writeOrg        string
+	decorateContext func(context.Context) context.Context
+	index           atomic.Pointer[vectorindex.Memory]
 }
 
-// NewManager builds a manager over an existing corpus store and an
-// optional embedder. It snapshots the current corpus into the live
-// index so reads work immediately. A nil embedder is allowed: CRUD still
-// works, but uploaded runbooks are stored without vectors (not
-// searchable until embeddings are configured and the corpus re-ingested).
-func NewManager(store *Store, embedder core.Embedder) *Manager {
-	m := &Manager{store: store, embedder: embedder}
+// NewManager builds a manager over an existing corpus store and pins every
+// mutation to writeOrg. decorateContext, when non-nil, stamps the same boot
+// scope onto embedding calls; request-provided identity never selects a write
+// scope. A nil embedder is allowed: CRUD still works, but uploaded runbooks are
+// stored without vectors until embeddings are configured and re-ingested.
+func NewManager(store *Store, embedder core.Embedder, writeOrg string, decorateContext func(context.Context) context.Context) *Manager {
+	m := &Manager{
+		store:           store,
+		embedder:        embedder,
+		writeOrg:        storage.NormalizeOrgID(writeOrg),
+		decorateContext: decorateContext,
+	}
 	m.index.Store(store.BuildIndex(0))
 	return m
 }
@@ -117,7 +125,7 @@ func (m *Manager) Delete(id string) error {
 // is rebuilt so the new runbooks are immediately searchable. Re-uploading
 // a file with the same basename replaces the existing runbook. Returns
 // the number of runbooks written.
-func (m *Manager) Upload(ctx context.Context, files []UploadFile, orgID string) (int, error) {
+func (m *Manager) Upload(ctx context.Context, files []UploadFile) (int, error) {
 	if m == nil {
 		return 0, ErrNotFound
 	}
@@ -127,12 +135,12 @@ func (m *Manager) Upload(ctx context.Context, files []UploadFile, orgID string) 
 	items := make([]ingestItem, 0, len(files))
 	for _, f := range files {
 		rel := uploadName(f.Name)
-		rec := parseRunbook(f.Content, rel, orgID)
+		rec := parseRunbook(f.Content, rel, m.writeOrg)
 		rec.Source = rel
 		items = append(items, ingestItem{rec: rec, text: rec.Title + "\n\n" + rec.Body})
 	}
 
-	n, err := ingestItems(ctx, m.store, m.embedder, items)
+	n, err := ingestItems(m.writeContext(ctx), m.store, m.embedder, items)
 	if err != nil {
 		return 0, err
 	}
@@ -145,7 +153,7 @@ func (m *Manager) Upload(ctx context.Context, files []UploadFile, orgID string) 
 // auto-ingest entry point. With no embedder configured it is a no-op
 // (find_runbook is disabled, so there is nothing to embed). A missing
 // dir is treated as an empty corpus.
-func (m *Manager) IngestDir(ctx context.Context, dir, orgID string) (int, error) {
+func (m *Manager) IngestDir(ctx context.Context, dir string) (int, error) {
 	if m == nil {
 		return 0, ErrNotFound
 	}
@@ -154,9 +162,16 @@ func (m *Manager) IngestDir(ctx context.Context, dir, orgID string) (int, error)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	n, err := IngestDir(ctx, m.store, m.embedder, dir, orgID)
+	n, err := IngestDir(m.writeContext(ctx), m.store, m.embedder, dir, m.writeOrg)
 	m.rebuildIndexLocked()
 	return n, err
+}
+
+func (m *Manager) writeContext(ctx context.Context) context.Context {
+	if m.decorateContext == nil {
+		return ctx
+	}
+	return m.decorateContext(ctx)
 }
 
 // rebuildIndexLocked rebuilds the in-memory cosine index from the current

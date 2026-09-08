@@ -6,7 +6,6 @@ import {
   detectAiDisabledRemedy,
   extractCode,
   extractRemedy,
-  isHeaderAuthProvider,
   keySetLabel,
   noEncryptionKeyMessage,
   providerKeyNotice,
@@ -111,22 +110,7 @@ describe("keySetLabel", () => {
   });
 });
 
-describe("isHeaderAuthProvider", () => {
-  it("flags claude/gemini as header-auth (per-org key falls back to YAML)", () => {
-    expect(isHeaderAuthProvider("claude")).toBe(true);
-    expect(isHeaderAuthProvider("gemini")).toBe(true);
-    expect(isHeaderAuthProvider(" gemini ")).toBe(true);
-  });
-
-  it("treats the Bearer providers as NOT header-auth", () => {
-    expect(isHeaderAuthProvider("openai")).toBe(false);
-    expect(isHeaderAuthProvider("deepseek")).toBe(false);
-    expect(isHeaderAuthProvider("qwen")).toBe(false);
-    expect(isHeaderAuthProvider("")).toBe(false);
-  });
-});
-
-describe("providerKeyNotice (B35 — provider-switch key prompt)", () => {
+describe("providerKeyNotice", () => {
   it("is silent when the provider is unchanged", () => {
     const n = providerKeyNotice("openai", "openai", false);
     expect(n.show).toBe(false);
@@ -134,21 +118,20 @@ describe("providerKeyNotice (B35 — provider-switch key prompt)", () => {
     expect(n.message).toBe("");
   });
 
-  it("warns + requires a key when switching provider with NO new key (Bearer)", () => {
+  it("requires a new key when switching between keyed providers", () => {
     const n = providerKeyNotice("openai", "deepseek", false);
     expect(n.show).toBe(true);
     expect(n.requireKey).toBe(true);
     expect(n.tone).toBe("warn");
     expect(n.message).toMatch(/deepseek/);
-    expect(n.message).toMatch(/existing per-org key will be reused/);
+    expect(n.message).toMatch(/cannot be reused/);
   });
 
-  it("warns about the YAML fallback when switching to a header-auth provider with no key", () => {
+  it("requires a new key for every keyed provider authentication style", () => {
     const n = providerKeyNotice("openai", "claude", false);
     expect(n.requireKey).toBe(true);
     expect(n.tone).toBe("warn");
-    expect(n.message).toMatch(/authenticates by header/);
-    expect(n.message).toMatch(/YAML-configured key/);
+    expect(n.message).toMatch(/new API key/);
   });
 
   it("is informational (no key required) when a new key is entered with the switch", () => {
@@ -159,15 +142,37 @@ describe("providerKeyNotice (B35 — provider-switch key prompt)", () => {
     expect(n.message).toMatch(/key you entered/);
   });
 
-  it("treats picking 'config default' (blank) as a change off a saved provider", () => {
+  it("treats a blank provider as preserve", () => {
     const n = providerKeyNotice("openai", "", false);
-    expect(n.show).toBe(true);
-    expect(n.requireKey).toBe(true);
-    expect(n.message).toMatch(/config default/);
+    expect(n.show).toBe(false);
+    expect(n.requireKey).toBe(false);
   });
 
-  it("does not fire when both saved and selected are blank (config default)", () => {
-    const n = providerKeyNotice("", "", false);
+  it("directs an active override to the explicit YAML revert action", () => {
+    const n = providerKeyNotice("openai", "", false, true);
+    expect(n.show).toBe(true);
+    expect(n.requireKey).toBe(false);
+    expect(n.tone).toBe("info");
+    expect(n.message).toMatch(/Revert to YAML floor/);
+    expect(n.message).toMatch(/keep its current provider/);
+  });
+
+  it("keeps a blank saved override valid when the selection remains blank", () => {
+    const n = providerKeyNotice("", "", false, true);
     expect(n.show).toBe(false);
+    expect(n.requireKey).toBe(false);
+  });
+
+  it("warns that ollama clears the stored runtime key without requiring one", () => {
+    const n = providerKeyNotice("openai", "ollama", false);
+    expect(n.show).toBe(true);
+    expect(n.requireKey).toBe(false);
+    expect(n.tone).toBe("warn");
+    expect(n.message).toMatch(/clear the stored runtime API key/);
+  });
+
+  it("requires a key when moving from legacy blank state to a keyed provider", () => {
+    const n = providerKeyNotice("", "gemini", false);
+    expect(n.requireKey).toBe(true);
   });
 });

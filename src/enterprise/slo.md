@@ -60,6 +60,13 @@ The advisor needs AI. Enable it and set an API key from the admin UI — see
 and a key is present, the enable toggle on the **SLOs** page stays disabled and
 shows the reason.
 
+When changing to OpenAI, DeepSeek, Qwen, Claude, or Gemini, enter a new key for
+the selected provider in the same save. A provider-only change is rejected with
+HTTP 422 and `code: provider_key_required`, leaving the previous provider, key,
+and enabled state active. Switching to Ollama clears the stored runtime key.
+Use **Revert to YAML floor** to remove the override and return to the provider
+and key configured in YAML.
+
 ## 2. Enable the feature and set the cadence
 
 Open **SLOs**. As an admin you'll see an **Enable SLI/SLO auto-define** toggle

@@ -215,27 +215,21 @@ function SettingsBody({
 
   const busy = save.isPending || clear.isPending;
   const onOverride = view.source === "override";
+  const blankWouldChangePersistedProvider =
+    onOverride && (view.provider ?? "").trim() !== "";
   const noKeyMsg = noEncryptionKeyMessage(save.error);
 
-  // When the operator stages a provider change
-  // without entering the matching key, warn that the previous key would be
-  // reused (Bearer providers) or fall back to the YAML key (claude/gemini
-  // header-auth). Save then asks for an explicit confirmation.
+  // Keyed provider changes require a matching key in the same save. Ollama is
+  // keyless and clears any stored runtime credential.
   const providerNotice = providerKeyNotice(
     view.provider ?? "",
     provider,
     keyInput.trim().length > 0,
+    onOverride,
   );
 
   const onSave = () => {
-    if (
-      providerNotice.requireKey &&
-      !window.confirm(
-        `${providerNotice.message}\n\nSave anyway and reuse the existing key?`,
-      )
-    ) {
-      return; // operator backed out — let them enter the matching key first
-    }
+    if (providerNotice.requireKey) return;
     save.mutate({ enabled, provider, apiKey: keyInput.trim() });
   };
 
@@ -286,7 +280,11 @@ function SettingsBody({
           onChange={(e) => setProvider(e.target.value)}
           className="input h-9 max-w-sm text-sm"
         >
-          <option value="">Use config default</option>
+          <option value="" disabled={blankWouldChangePersistedProvider}>
+            {blankWouldChangePersistedProvider
+              ? "Revert to YAML floor below"
+              : "Use config default"}
+          </option>
           {AI_PROVIDERS.map((p) => (
             <option key={p} value={p}>
               {p}
@@ -321,7 +319,11 @@ function SettingsBody({
         <label className="field-label" htmlFor="ai-api-key">
           API key{" "}
           <span className="font-normal text-ink-400">
-            (leave blank to keep the current key)
+            {providerNotice.requireKey
+              ? `(required for ${provider})`
+              : provider === "ollama"
+                ? "(cleared when saved)"
+                : "(leave blank to keep the current key)"}
           </span>
         </label>
         <div className="relative max-w-sm">
@@ -367,7 +369,7 @@ function SettingsBody({
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || providerNotice.requireKey}
           onClick={onSave}
           className="btn btn-primary"
         >

@@ -29,8 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   cosine top-K index (no external vector DB); `Index` interface is the seam
   an enterprise hosted backend swaps in without forking the tool.
 - **Runbook corpus store + ingestion** (`pkg/runbook`) — blob-backed
-  corpus persisted via `storage.Provider` (every record carries an `OrgID`
-  for per-tenant scoping). The server auto-ingests the runbook source
+  corpus persisted via `storage.Provider`. Every record carries the manager's
+  boot write org as provenance; tenant isolation requires an org-scoped storage
+  provider because the shared blob is not filtered per record. The server auto-ingests the runbook source
   directory of Markdown runbooks (optional YAML front-matter for
   title/services/tags) at boot: it embeds new or edited runbooks and
   persists the vectors it loads into the index. Re-ingest is incremental
@@ -48,6 +49,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Helm** — `agent.tools.findRunbook.*` values + configmap wiring.
 
 ### Fixed
+
+#### Enterprise runtime AI settings
+- **Provider credentials are isolated on runtime switches.** Changing between
+  keyed providers now requires the new provider's API key in the same save;
+  otherwise the server returns HTTP 422 with `code: provider_key_required` and
+  preserves the prior provider, key, and enabled state. Switching to Ollama is
+  keyless and clears the stored runtime key. The AI-settings provider control
+  no longer offers a silent config-default save while an override exists; use
+  **Revert to YAML floor** to remove the override.
+- **Archived incident analysis respects the trusted data read scope.** Sync and
+  streaming Analyze may read the frozen default-org archive when it is present
+  in the server-computed scope, while model settings and writes remain pinned
+  to the scope's write org. Foreign incidents are rejected before model or key
+  resolution.
+- **Boot diagnostics distinguish local configuration errors from provider
+  failures.** Unsupported providers and empty models now receive actionable,
+  safe messages (including supported providers where relevant); raw SDK and
+  provider responses remain excluded from logs.
 
 #### AI SRE Agent — Telegram channel
 - **HTML-escape the agent Telegram template** (`config/agent_telegram.tmpl`,

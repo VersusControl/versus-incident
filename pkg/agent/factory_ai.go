@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -149,12 +150,12 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 
 	// Detect-task wiring -----------------------------------------------------
 	detectAgent, err := detect.New(context.Background(), detectCfg, detect.Options{
-		HTTPClient:  httpClient,
-		AuthKeyFunc: authKeyFn,
-		Runtime:     aiRT,
+		HTTPClient:     httpClient,
+		RuntimeKeyFunc: authKeyFn,
+		Runtime:        aiRT,
 	})
 	if err != nil {
-		log.Printf("agent: detect agent disabled: %v", err)
+		logAIConstructionFailure("detect", detectCfg, err)
 		return AIBundle{}
 	}
 
@@ -227,7 +228,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		// the find_runbook tool is wired with the manager's embedder +
 		// searcher. Uploads atomically rebuild the index, so newly uploaded
 		// runbooks are searchable without a restart.
-		runbookMgr = buildRunbookManager(cfg, store, httpClient)
+		runbookMgr = buildRunbookManager(cfg, store, scope, httpClient, authKeyFn, aiRT)
 		var embedder core.Embedder
 		var runbookSearcher commontools.RunbookSearcher
 		if runbookMgr != nil && runbookMgr.HasEmbedder() {
@@ -270,9 +271,9 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		analyzeRuntime := aiRT
 		analyzeRuntime.Revision = analyzeGeneration.Revision
 		a, aErr := analyze.New(context.Background(), analyzeBaseCfg, runtimeTools, analyze.Options{
-			HTTPClient:  httpClient,
-			AuthKeyFunc: authKeyFn,
-			Runtime:     analyzeRuntime,
+			HTTPClient:     httpClient,
+			RuntimeKeyFunc: authKeyFn,
+			Runtime:        analyzeRuntime,
 			ToolProvider: func() ([]core.Tool, error) {
 				return analyzeGeneration.Filter(aitools.AgentAnalyze, runtimeTools)
 			},
@@ -280,12 +281,13 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 			ParallelTools: cfg.Tools.ParallelTools,
 		})
 		if aErr != nil {
-			log.Printf("agent: analyze agent disabled: %v", aErr)
+			logAIConstructionFailure("analyze", analyzeBaseCfg, aErr)
 		} else {
-			analyzeAgent = a
+			analyzeAgent = &bootScopedAIAgent{delegate: a, scope: scope.Normalized()}
 			analyzeRate = ai.NewRateLimiter(analyzeBaseCfg.MaxCallsPerHour)
+			safeModel := einowrap.SafeProviderError(analyzeBaseCfg.Provider, analyzeBaseCfg.Model, nil).Model
 			log.Printf("agent: analyze agent enabled model=%s tools=%d",
-				analyzeBaseCfg.Model, len(analyzeTools))
+				safeModel, len(analyzeTools))
 		}
 	}
 
@@ -300,7 +302,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	chatRuntime := aiRT
 	chatRuntime.Revision = chatGeneration.Revision
 	if built, chatErr := chatagent.New(context.Background(), chatCfg, runtimeTools, chatagent.Options{
-		HTTPClient: httpClient, AuthKeyFunc: authKeyFn, Runtime: chatRuntime,
+		HTTPClient: httpClient, RuntimeKeyFunc: authKeyFn, Runtime: chatRuntime,
 		ToolProvider: func() ([]core.Tool, error) {
 			return chatGeneration.Filter(aitools.AgentChat, runtimeTools)
 		},
@@ -309,12 +311,13 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		},
 		ToolTimeout: parseDurationOr(cfg.Tools.ToolTimeout, chatagent.DefaultToolTimeout),
 	}); chatErr != nil {
-		log.Printf("agent: chat agent disabled: %v", chatErr)
+		logAIConstructionFailure("chat", chatCfg, chatErr)
 	} else {
 		concreteChat = built
 		chatAgent = built
 		chatRate = ai.NewDistributedRateLimiter(chatCfg.MaxCallsPerHour, store, scope.Normalized().Write, time.Now)
-		log.Printf("agent: chat agent enabled model=%s tools=%d", chatCfg.Model, len(chatTools))
+		safeModel := einowrap.SafeProviderError(chatCfg.Provider, chatCfg.Model, nil).Model
+		log.Printf("agent: chat agent enabled model=%s tools=%d", safeModel, len(chatTools))
 	}
 
 	// Router wiring ----------------------------------------------------------
@@ -341,9 +344,12 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 			if serviceScope.Normalized().Write != bootScope.Write {
 				return nil
 			}
-			return chatagent.NewServiceWithLocationProvider(
+			return chatagent.NewServiceWithLocationProviderAndContextDecorator(
 				chatagent.NewSessionStore(store, serviceScope, time.Now), r, concreteChat, time.Now,
 				locationProvider,
+				func(ctx context.Context) context.Context {
+					return DecorateAIContext(ctx, serviceScope)
+				},
 			)
 		}
 	}
@@ -363,6 +369,33 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		ToolSnapshot:        toolSnapshot,
 		ObserveSourceHealth: detectionHealth.Observe,
 	}
+}
+
+func logAIConstructionFailure(task string, cfg config.AgentAIConfig, cause error) {
+	var configErr *einowrap.ConfigError
+	if errors.As(cause, &configErr) {
+		log.Printf("agent: %s agent disabled: configuration error: %v", task, configErr)
+		return
+	}
+	safe := einowrap.SafeProviderError(cfg.Provider, cfg.Model, cause)
+	log.Printf("agent: %s agent disabled: provider=%q model=%q class=%q", task, safe.Provider, safe.Model, safe.Class)
+}
+
+type bootScopedAIAgent struct {
+	delegate core.AIAgent
+	scope    tenancy.OrgScope
+}
+
+func (agent *bootScopedAIAgent) Name() string { return agent.delegate.Name() }
+
+func (agent *bootScopedAIAgent) Kind() core.AITaskKind { return agent.delegate.Kind() }
+
+func (agent *bootScopedAIAgent) Run(ctx context.Context, task core.AITask) (*core.AICallResult, error) {
+	requestScope, ok := AIContextScope(ctx)
+	if !ok || requestScope.Write != agent.scope.Write {
+		return nil, fmt.Errorf("analyze: requested scope is unavailable")
+	}
+	return agent.delegate.Run(ctx, task)
 }
 
 func loadCurrentTools(manager *aitools.Manager, scope tenancy.OrgScope, snapshot func(tenancy.OrgScope) aitools.Snapshot, agent aitools.AgentKind, runtime []core.Tool) ([]core.Tool, error) {
@@ -669,7 +702,11 @@ func boundCapabilityText(value string) string {
 // embedding model is configured the manager still loads the corpus so
 // operators can upload/list/delete runbooks; those runbooks become
 // searchable once an embedding model is set and the corpus re-ingested.
-func buildRunbookManager(cfg config.AgentConfig, store storage.Provider, httpClient *http.Client) *runbook.Manager {
+func buildRunbookManager(cfg config.AgentConfig, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, runtimeKey func(context.Context) (string, bool), runtime einowrap.RuntimeAI) *runbook.Manager {
+	return buildRunbookManagerFromDir(cfg, store, scope, httpClient, runtimeKey, runtime, filepath.Join(storage.DefaultDataDir, runbook.SourceSubdir))
+}
+
+func buildRunbookManagerFromDir(cfg config.AgentConfig, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, runtimeKey func(context.Context) (string, bool), runtime einowrap.RuntimeAI, sourceDir string) *runbook.Manager {
 	if store == nil {
 		log.Printf("agent: runbooks disabled: no storage backend for runbook corpus")
 		return nil
@@ -684,38 +721,102 @@ func buildRunbookManager(cfg config.AgentConfig, store storage.Provider, httpCli
 	var embedder core.Embedder
 	embCfg := cfg.Tools.FindRunbook
 	if embCfg.EmbeddingModel != "" {
-		e, embErr := einowrap.NewEmbedder(context.Background(), config.AgentAIConfig{
+		base := config.AgentAIConfig{
 			Provider: cfg.AI.Provider,
 			Model:    embCfg.EmbeddingModel,
 			APIKey:   cfg.AI.APIKey,
-		}, einowrap.Options{
-			HTTPClient: httpClient,
-		})
-		if embErr != nil {
-			log.Printf("agent: find_runbook disabled: embedder init failed: %v", embErr)
+		}
+		embeddingKey := func(ctx context.Context) (string, bool) {
+			if runtime.Provider != nil {
+				if provider, ok := runtime.Provider(ctx); ok && !einowrap.IsSupportedEmbedderProvider(provider) {
+					return "", false
+				}
+			}
+			if runtimeKey == nil {
+				return "", false
+			}
+			return runtimeKey(ctx)
+		}
+		holder := einowrap.NewEmbedderHolder(base, einowrap.Options{
+			HTTPClient:     httpClient,
+			RuntimeKeyFunc: embeddingKey,
+		}, runtime)
+		bootCtx := DecorateAIContext(context.Background(), scope)
+		if _, embErr := holder.Get(bootCtx); embErr != nil {
+			var configErr *einowrap.ConfigError
+			if errors.As(embErr, &configErr) {
+				log.Printf("agent: find_runbook disabled: embedder configuration error: %v", configErr)
+			} else {
+				safeErr := einowrap.SafeProviderError(effectiveEmbeddingProvider(bootCtx, base.Provider, runtime), base.Model, embErr)
+				log.Printf("agent: find_runbook disabled: embedder init failed: %v", safeErr)
+			}
 		} else {
-			embedder = e
+			embedder = &runtimeEmbedder{holder: holder, scope: scope.Normalized(), provider: base.Provider, model: embCfg.EmbeddingModel, runtime: runtime}
 		}
 	}
 
-	mgr := runbook.NewManager(rbStore, embedder)
+	bootScope := scope.Normalized()
+	mgr := runbook.NewManager(rbStore, embedder, bootScope.Write, func(ctx context.Context) context.Context {
+		return DecorateAIContext(ctx, bootScope)
+	})
 
 	// Auto-ingest the runbook source dir so operators never run a separate
 	// CLI. Ingestion is incremental — unchanged runbooks reuse their cached
 	// vector, so a reboot with no edits makes no embedding calls. A no-op
 	// when no embedder is configured. Non-fatal: we still serve the
 	// previously-persisted corpus on failure.
-	dir := filepath.Join(storage.DefaultDataDir, runbook.SourceSubdir)
-	if n, ingErr := mgr.IngestDir(context.Background(), dir, ""); ingErr != nil {
+	if n, ingErr := mgr.IngestDir(context.Background(), sourceDir); ingErr != nil {
 		log.Printf("agent: find_runbook: runbook ingest failed: %v (serving previously-persisted corpus)", ingErr)
 	} else if n > 0 {
-		log.Printf("agent: find_runbook: ingested %d runbook(s) from %s", n, dir)
+		log.Printf("agent: find_runbook: ingested %d runbook(s) from %s", n, sourceDir)
 	}
 
 	if embedder != nil {
-		log.Printf("agent: find_runbook enabled model=%s runbooks=%d", embCfg.EmbeddingModel, rbStore.Len())
+		safeModel := einowrap.SafeProviderError(cfg.AI.Provider, embCfg.EmbeddingModel, nil).Model
+		log.Printf("agent: find_runbook enabled model=%s runbooks=%d", safeModel, rbStore.Len())
 	} else {
 		log.Printf("agent: runbooks UI enabled (no embedding model; uploads not searchable until configured) runbooks=%d", rbStore.Len())
 	}
 	return mgr
+}
+
+type runtimeEmbedder struct {
+	holder   *einowrap.Holder[core.Embedder]
+	scope    tenancy.OrgScope
+	provider string
+	model    string
+	runtime  einowrap.RuntimeAI
+}
+
+func (embedder *runtimeEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	requestScope, ok := AIContextScope(ctx)
+	if !ok || requestScope.Write != embedder.scope.Write {
+		return nil, fmt.Errorf("AI scope mismatch")
+	}
+	current, err := embedder.holder.Get(ctx)
+	if err != nil {
+		return nil, einowrap.SafeProviderError(embedder.effectiveProvider(ctx), embedder.model, err)
+	}
+	vectors, err := current.Embed(ctx, texts)
+	if err != nil {
+		return nil, einowrap.SafeProviderError(embedder.effectiveProvider(ctx), embedder.model, err)
+	}
+	return vectors, nil
+}
+
+func (embedder *runtimeEmbedder) effectiveProvider(ctx context.Context) string {
+	return effectiveEmbeddingProvider(ctx, embedder.provider, embedder.runtime)
+}
+
+func effectiveEmbeddingProvider(ctx context.Context, configured string, runtime einowrap.RuntimeAI) string {
+	if runtime.Provider != nil {
+		if provider, ok := runtime.Provider(ctx); ok && einowrap.IsSupportedEmbedderProvider(provider) {
+			return strings.ToLower(strings.TrimSpace(provider))
+		}
+	}
+	provider := strings.ToLower(strings.TrimSpace(configured))
+	if provider == "" {
+		return einowrap.DefaultProvider
+	}
+	return provider
 }

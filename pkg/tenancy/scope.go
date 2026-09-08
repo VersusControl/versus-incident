@@ -12,6 +12,12 @@ type OrgScope struct {
 	Read  []string
 }
 
+// ScopeSource exposes a trusted organization scope computed by a storage or
+// tenancy boundary. Implementations must not derive it from request input.
+type ScopeSource interface {
+	OrgScope() OrgScope
+}
+
 // NormalizeOrgID returns a non-empty organization ID.
 func NormalizeOrgID(orgID string) string {
 	if orgID == "" {
@@ -56,4 +62,31 @@ func (s OrgScope) Normalized() OrgScope {
 func (s OrgScope) OrgIDs() []string {
 	normalized := s.Normalized()
 	return normalized.Read
+}
+
+// Contains reports whether orgID is in the normalized read scope.
+func (s OrgScope) Contains(orgID string) bool {
+	orgID = NormalizeOrgID(orgID)
+	for _, candidate := range s.Normalized().Read {
+		if candidate == orgID {
+			return true
+		}
+	}
+	return false
+}
+
+// ScopeForWrite returns source's trusted read scope when it is pinned to the
+// requested write org. A missing or mismatched source fails closed to a
+// single-org scope for writeOrg.
+func ScopeForWrite(source any, writeOrg string) OrgScope {
+	fallback := NewOrgScope(writeOrg)
+	scoped, ok := source.(ScopeSource)
+	if !ok || scoped == nil {
+		return fallback
+	}
+	candidate := scoped.OrgScope().Normalized()
+	if candidate.Write != fallback.Write {
+		return fallback
+	}
+	return candidate
 }

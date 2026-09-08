@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"testing"
+
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 // stubAISettings is a fake AISettingsResolver whose answers are fixed per
@@ -94,6 +96,42 @@ type stubProviderAISettings struct {
 	stubAISettings
 	provider   string
 	providerOK bool
+}
+
+type decoratingAISettings struct {
+	stubAISettings
+}
+
+type decoratedScopeKey struct{}
+
+func (*decoratingAISettings) DecorateAIContext(ctx context.Context, scope tenancy.OrgScope) context.Context {
+	return context.WithValue(ctx, decoratedScopeKey{}, scope.Write)
+}
+
+func TestDecorateAIContext_OptionalResolverCapability(t *testing.T) {
+	SetAISettingsResolver(nil)
+	t.Cleanup(func() { SetAISettingsResolver(nil) })
+
+	ctx := context.WithValue(context.Background(), "caller", "authorized")
+	got := DecorateAIContext(ctx, tenancy.NewOrgScope("org-a"))
+	if scope, ok := AIContextScope(got); !ok || scope.Write != "org-a" || got.Value("caller") != "authorized" {
+		t.Fatalf("OSS decoration scope/value = (%+v,%v,%v)", scope, ok, got.Value("caller"))
+	}
+
+	SetAISettingsResolver(&stubAISettings{})
+	got = DecorateAIContext(ctx, tenancy.NewOrgScope("org-a"))
+	if scope, ok := AIContextScope(got); !ok || scope.Write != "org-a" || got.Value(decoratedScopeKey{}) != nil {
+		t.Fatalf("resolver without decorator changed private decoration: scope=%+v ok=%v", scope, ok)
+	}
+
+	SetAISettingsResolver(&decoratingAISettings{})
+	got = DecorateAIContext(ctx, tenancy.NewOrgScope("org-a"))
+	if got.Value(decoratedScopeKey{}) != "org-a" {
+		t.Fatalf("decorated scope = %v, want org-a", got.Value(decoratedScopeKey{}))
+	}
+	if got.Value("caller") != "authorized" {
+		t.Fatal("decoration discarded an existing caller value")
+	}
 }
 
 func (s *stubProviderAISettings) EffectiveProvider(context.Context) (string, bool) {

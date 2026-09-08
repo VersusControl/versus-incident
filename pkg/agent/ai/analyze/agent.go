@@ -51,6 +51,7 @@ const (
 // notification path.
 type Agent struct {
 	cfg          config.AgentAIConfig
+	runtime      einowrap.RuntimeAI
 	chatModel    model.ToolCallingChatModel
 	holder       *einowrap.Holder[model.ToolCallingChatModel]
 	buildAgent   func(context.Context, model.ToolCallingChatModel) (*react.Agent, error)
@@ -65,10 +66,9 @@ type Options struct {
 	BaseURL    string
 	Timeout    time.Duration
 
-	// AuthKeyFunc is an OPTIONAL per-request Authorization override passed
-	// straight to the chat model's transport. Nil (the OSS default) leaves
-	// the YAML-keyed header untouched.
-	AuthKeyFunc func(ctx context.Context) (key string, ok bool)
+	// RuntimeKeyFunc is an optional per-request provider credential override.
+	// Nil keeps the configured YAML credential.
+	RuntimeKeyFunc func(ctx context.Context) (key string, ok bool)
 
 	// Runtime folds optional runtime overrides (provider / enabled / key
 	// state) into the model holder's rebuild signature. The zero value (the
@@ -161,6 +161,7 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 
 	a := &Agent{
 		cfg:          cfg,
+		runtime:      opts.Runtime,
 		tools:        reg,
 		toolDisplays: displays,
 		maxIter:      maxIter,
@@ -180,16 +181,16 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 	}
 
 	a.holder = einowrap.NewToolCallingChatModelHolder(cfg, einowrap.Options{
-		HTTPClient:  opts.HTTPClient,
-		BaseURL:     opts.BaseURL,
-		Timeout:     opts.Timeout,
-		AuthKeyFunc: opts.AuthKeyFunc,
+		HTTPClient:     opts.HTTPClient,
+		BaseURL:        opts.BaseURL,
+		Timeout:        opts.Timeout,
+		RuntimeKeyFunc: opts.RuntimeKeyFunc,
 	}, opts.Runtime)
 	// Build once up front so a bad config (empty model, explicitly-set
 	// unknown provider) still fails fast at construction.
 	base, err := a.holder.Get(ctx)
 	if err != nil {
-		return nil, err
+		return nil, safeAnalyzeProviderError(ctx, a.effectiveProvider(ctx), a.cfg.Model, err)
 	}
 	if _, err := buildReactAgent(ctx, base); err != nil {
 		return nil, err
@@ -224,6 +225,18 @@ func (a *Agent) Name() string { return "analyze" }
 
 // Kind implements core.AIAgent.
 func (a *Agent) Kind() core.AITaskKind { return core.AITaskAnalyze }
+
+func (a *Agent) effectiveProvider(ctx context.Context) string {
+	if a.runtime.Provider != nil {
+		if provider, ok := a.runtime.Provider(ctx); ok && einowrap.IsSupportedProvider(provider) {
+			return provider
+		}
+	}
+	if strings.TrimSpace(a.cfg.Provider) == "" {
+		return einowrap.DefaultProvider
+	}
+	return a.cfg.Provider
+}
 
 // Run implements core.AIAgent. Rejects any non-AnalyzeTask.
 func (a *Agent) Run(ctx context.Context, task core.AITask) (*core.AICallResult, error) {
@@ -268,13 +281,19 @@ func (a *Agent) run(ctx context.Context, snap core.AnalyzeIncidentSnapshot) (*co
 	// / model / runtime state changed (nil holder ⇒ fixed test override).
 	reactAgent, err := a.reactAgent(ctx)
 	if err != nil {
-		return &core.AICallResult{UserPrompt: user, Model: a.cfg.Model}, fmt.Errorf("analyze: build react agent: %w", err)
+		safeErr := safeAnalyzeProviderError(ctx, a.effectiveProvider(ctx), a.cfg.Model, err)
+		return &core.AICallResult{UserPrompt: user, Model: safeAnalyzeResultModel(a.cfg.Model, safeErr)}, safeErr
 	}
 
 	// The audit trace is built from Eino tool callbacks rather than
 	// hand instrumentation, so it captures every tool the framework
 	// dispatches (including concurrent calls in one turn).
-	collector := &traceCollector{obsCtx: ctx, toolDisplays: a.toolDisplays}
+	collector := &traceCollector{
+		obsCtx:       ctx,
+		toolDisplays: a.toolDisplays,
+		provider:     a.effectiveProvider(ctx),
+		model:        a.cfg.Model,
+	}
 	handler := utilcb.NewHandlerHelper().
 		ChatModel(collector.chatModelHandler()).
 		Tool(collector.toolHandler()).
@@ -296,12 +315,13 @@ func (a *Agent) run(ctx context.Context, snap core.AnalyzeIncidentSnapshot) (*co
 	traces := collector.ordered()
 
 	if err != nil {
+		safeErr := safeAnalyzeProviderError(ctx, a.effectiveProvider(ctx), a.cfg.Model, err)
 		return &core.AICallResult{
 			UserPrompt: user,
 			DurationMs: durationMs,
-			Model:      a.cfg.Model,
+			Model:      safeAnalyzeResultModel(a.cfg.Model, safeErr),
 			ToolCalls:  traces,
-		}, fmt.Errorf("analyze: react agent: %w", err)
+		}, safeErr
 	}
 	if out == nil {
 		return &core.AICallResult{
@@ -341,6 +361,28 @@ func (a *Agent) run(ctx context.Context, snap core.AnalyzeIncidentSnapshot) (*co
 		Model:       a.cfg.Model,
 		ToolCalls:   traces,
 	}, nil
+}
+
+func safeAnalyzeProviderError(ctx context.Context, provider, model string, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("analyze: run timed out: %w", context.DeadlineExceeded)
+	}
+	var configErr *einowrap.ConfigError
+	if errors.As(err, &configErr) {
+		return configErr
+	}
+	return einowrap.SafeProviderError(provider, model, err)
+}
+
+func safeAnalyzeResultModel(configured string, err error) string {
+	var providerErr *einowrap.ProviderError
+	if errors.As(err, &providerErr) {
+		return providerErr.Model
+	}
+	return configured
 }
 
 // streamFinalMessage runs the ReAct loop in streaming mode and reassembles
@@ -404,6 +446,8 @@ type traceCollector struct {
 	// own ctx, so the observer is held here rather than read from those.
 	obsCtx       context.Context
 	toolDisplays map[string]string
+	provider     string
+	model        string
 	// drains tracks the goroutines reading each streamed model turn.
 	drains sync.WaitGroup
 }
@@ -477,7 +521,7 @@ func (c *traceCollector) chatModelHandler() *utilcb.ModelCallbackHandler {
 				Turn: int(turn),
 			}
 			if err != nil {
-				ev.Error = err.Error()
+				ev.Error = einowrap.SafeProviderError(c.provider, c.model, err).Diagnostic
 			}
 			c.emit(ev)
 			return ctx
@@ -523,7 +567,7 @@ func (c *traceCollector) drainModelStream(output *schema.StreamReader[*model.Cal
 		Output: capOutput(strings.TrimSpace(sb.String())),
 	}
 	if streamErr != nil {
-		ev.Error = streamErr.Error()
+		ev.Error = einowrap.SafeProviderError(c.provider, c.model, streamErr).Diagnostic
 	}
 	c.emit(ev)
 }

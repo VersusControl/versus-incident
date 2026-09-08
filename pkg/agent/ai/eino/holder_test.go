@@ -183,6 +183,28 @@ func TestHolder_KeyStateRebuild(t *testing.T) {
 	}
 }
 
+func TestGeminiHolder_RuntimeOnlyKeySetClearRebuilds(t *testing.T) {
+	var keySet atomic.Bool
+	keySet.Store(true)
+	key := "runtime-gemini-key"
+	holder := einowrap.NewChatModelHolder(config.AgentAIConfig{Provider: "gemini", Model: "gemini-test"}, einowrap.Options{
+		RuntimeKeyFunc: func(context.Context) (string, bool) { return key, true },
+	}, einowrap.RuntimeAI{KeySet: func(context.Context) (bool, bool) { return keySet.Load(), true }})
+	configured, err := holder.Get(context.Background())
+	if err != nil {
+		t.Fatalf("runtime-only Gemini build: %v", err)
+	}
+	key = ""
+	keySet.Store(false)
+	cleared, err := holder.Get(context.Background())
+	if err != nil {
+		t.Fatalf("cleared Gemini rebuild: %v", err)
+	}
+	if configured == cleared {
+		t.Fatal("runtime key set-to-clear transition did not rebuild Gemini client")
+	}
+}
+
 func TestHolder_RuntimeRevisionRebuilds(t *testing.T) {
 	var revision atomic.Int64
 	runtime := einowrap.RuntimeAI{Revision: func(context.Context) (string, bool) {
