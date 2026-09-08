@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 // aisettings.go — the single-slot runtime AI-settings resolver seam.
@@ -42,6 +43,17 @@ type AIProviderResolver interface {
 	EffectiveProvider(ctx context.Context) (provider string, ok bool)
 }
 
+// AIContextDecorator is an OPTIONAL extension of AISettingsResolver. It lets
+// a consumer attach its private runtime-settings identity to ctx from a scope
+// the server has already resolved and trusted. OSS does not interpret the
+// scope and registers no decorator, so community contexts pass through
+// unchanged.
+type AIContextDecorator interface {
+	DecorateAIContext(ctx context.Context, scope tenancy.OrgScope) context.Context
+}
+
+type aiScopeContextKey struct{}
+
 // Process-wide single slot. A consumer registers a resolver at boot; the
 // worker reads it once per tick and the chat-model transport reads it once
 // per request. Mutex-guarded so a boot-time registration is safely visible
@@ -69,6 +81,30 @@ func aiSettingsResolver() AISettingsResolver {
 	aiSettingsMu.Lock()
 	defer aiSettingsMu.Unlock()
 	return aiSettingsResolverSlot
+}
+
+// DecorateAIContext applies the registered resolver's optional context
+// decorator for a server-resolved scope. With no resolver or no decorator it
+// returns ctx unchanged. Callers must derive scope from trusted tenancy state,
+// never from request bodies or client-selected headers.
+func DecorateAIContext(ctx context.Context, scope tenancy.OrgScope) context.Context {
+	scope = scope.Normalized()
+	ctx = context.WithValue(ctx, aiScopeContextKey{}, scope)
+	resolver := aiSettingsResolver()
+	decorator, ok := resolver.(AIContextDecorator)
+	if !ok || decorator == nil {
+		return ctx
+	}
+	return decorator.DecorateAIContext(ctx, scope)
+}
+
+// AIContextScope returns the trusted scope attached by DecorateAIContext.
+func AIContextScope(ctx context.Context) (tenancy.OrgScope, bool) {
+	if ctx == nil {
+		return tenancy.OrgScope{}, false
+	}
+	scope, ok := ctx.Value(aiScopeContextKey{}).(tenancy.OrgScope)
+	return scope.Normalized(), ok
 }
 
 // orgAISettingsGetter is the optional capability a registered
@@ -192,6 +228,11 @@ func aiRuntime() einowrap.RuntimeAI {
 		},
 		KeySet: func(ctx context.Context) (bool, bool) {
 			if r := aiSettingsResolver(); r != nil {
+				if presence, ok := r.(interface {
+					EffectiveKeySet(context.Context) (bool, bool)
+				}); ok {
+					return presence.EffectiveKeySet(ctx)
+				}
 				_, ok := r.EffectiveKey(ctx)
 				return ok, true
 			}

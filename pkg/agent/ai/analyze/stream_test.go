@@ -387,7 +387,7 @@ func TestStream_EmptyChunkEmitsNoDelta(t *testing.T) {
 }
 
 // TestStream_MidStreamErrorFailsRun asserts a stream that breaks part-way
-// fails the run with the underlying cause rather than persisting a truncated
+// fails safely rather than exposing its raw cause or persisting a truncated
 // answer as if it were complete.
 func TestStream_MidStreamErrorFailsRun(t *testing.T) {
 	fake := &fakeChat{
@@ -400,8 +400,8 @@ func TestStream_MidStreamErrorFailsRun(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Run succeeded despite a broken stream; result = %+v", res)
 	}
-	if !strings.Contains(err.Error(), "connection reset") {
-		t.Fatalf("error = %v, want the underlying stream failure", err)
+	if strings.Contains(err.Error(), "connection reset") || !strings.Contains(err.Error(), "Could not connect securely") {
+		t.Fatalf("error = %v, want a sanitized connection failure", err)
 	}
 	if res == nil || res.RawResponse != "" {
 		t.Fatalf("a truncated answer was persisted as an answer: %+v", res)

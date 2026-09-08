@@ -3,10 +3,13 @@ package detect
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -168,6 +171,37 @@ func TestAgent_RuntimeProviderOverride(t *testing.T) {
 	}
 	if _, ok := b.ChatModel().(*einoopenai.ChatModel); !ok {
 		t.Fatalf("fail-closed ChatModel = %T, want *einoopenai.ChatModel", b.ChatModel())
+	}
+}
+
+func TestAgent_RebuildFailureUsesSafeProviderError(t *testing.T) {
+	const secret = "runtime-build-secret"
+	cfg := config.AgentAIConfig{Provider: "gemini", Model: "unsafe\r\n" + secret}
+	a := &Agent{cfg: cfg, SampleFn: defaultSampleFn}
+	a.chat = einowrap.NewModelHolder(cfg, einowrap.Options{}, einowrap.RuntimeAI{}, func(context.Context, config.AgentAIConfig, einowrap.Options) (model.BaseChatModel, error) {
+		return nil, fmt.Errorf("construction reflected %s\r\nforged=true", secret)
+	})
+
+	_, err := a.Run(context.Background(), core.DetectTask{Result: core.AgentResult{PatternID: "pattern"}})
+	var providerErr *einowrap.ProviderError
+	if !errors.As(err, &providerErr) {
+		t.Fatalf("rebuild failure = %T %v, want ProviderError", err, err)
+	}
+	encoded := providerErr.Provider + providerErr.Model + providerErr.Diagnostic
+	if strings.Contains(encoded, secret) || strings.Contains(encoded, "forged=true") || strings.ContainsAny(encoded, "\r\n") {
+		t.Fatalf("safe rebuild failure retained malicious input: %+v", providerErr)
+	}
+}
+
+func TestSafeDetectProviderErrorPreservesContextIdentity(t *testing.T) {
+	for _, target := range []error{context.Canceled, context.DeadlineExceeded} {
+		err := safeDetectProviderError(context.Background(), "openai", "model", fmt.Errorf("provider wrapper: %w", target))
+		if !errors.Is(err, target) {
+			t.Errorf("safeDetectProviderError(%v) = %v, identity not preserved", target, err)
+		}
+		if strings.Contains(err.Error(), "provider wrapper") {
+			t.Errorf("safeDetectProviderError(%v) exposed raw provider wrapper: %v", target, err)
+		}
 	}
 }
 

@@ -3,6 +3,8 @@ package eino_test
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -17,6 +19,23 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
+
+func unsetGeminiAPIKeyEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"GOOGLE_API_KEY", "GEMINI_API_KEY"} {
+		value, present := os.LookupEnv(name)
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("unset %s: %v", name, err)
+		}
+		t.Cleanup(func() {
+			if present {
+				_ = os.Setenv(name, value)
+				return
+			}
+			_ = os.Unsetenv(name)
+		})
+	}
+}
 
 // TestChatModel_Gemini_EgressUsesAPIKeyHeader proves the Gemini provider path
 // end to end against a canned Generative Language API backend: the request
@@ -218,5 +237,206 @@ func TestEmbedder_Gemini_EgressUsesAPIKeyHeader(t *testing.T) {
 	}
 	if len(vecs[0]) != 3 || vecs[1][0] != float32(1.1) {
 		t.Errorf("vector narrowing wrong: %v", vecs)
+	}
+}
+
+func TestGeminiRuntimeOnlyCredentialsRotateAndClearPerRequest(t *testing.T) {
+	unsetGeminiAPIKeyEnv(t)
+	var mu sync.Mutex
+	var captures []capturedEgress
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		mu.Lock()
+		captures = append(captures, capturedEgress{header: request.Header.Clone(), url: request.URL.String(), body: string(body)})
+		mu.Unlock()
+		writer.Header().Set("Content-Type", "application/json")
+		if strings.Contains(request.URL.Path, "embedContent") {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"embeddings": []map[string]any{{"values": []float64{1, 0, 0}}}})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"candidates": []map[string]any{{"content": map[string]any{"role": "model", "parts": []map[string]any{{"text": "ok"}}}, "finishReason": "STOP"}}})
+	}))
+	defer server.Close()
+
+	key := "runtime-gemini-first"
+	keyOK := true
+	keyFn := func(context.Context) (string, bool) { return key, keyOK }
+	chatModel, err := einowrap.NewChatModel(context.Background(), config.AgentAIConfig{
+		Provider: "gemini", Model: "gemini-test", MaxTokens: 16,
+	}, einowrap.Options{BaseURL: server.URL, RuntimeKeyFunc: keyFn})
+	if err != nil {
+		t.Fatalf("runtime-only Gemini chat construction: %v", err)
+	}
+	embedder, err := einowrap.NewEmbedder(context.Background(), config.AgentAIConfig{
+		Provider: "gemini", Model: "gemini-embedding-test",
+	}, einowrap.Options{BaseURL: server.URL, RuntimeKeyFunc: keyFn})
+	if err != nil {
+		t.Fatalf("runtime-only Gemini embedder construction: %v", err)
+	}
+
+	callChat := func() {
+		if _, callErr := chatModel.Generate(context.Background(), []*schema.Message{schema.UserMessage("hello")}); callErr != nil {
+			t.Fatalf("Gemini chat call: %v", callErr)
+		}
+	}
+	callEmbed := func() {
+		if _, callErr := embedder.Embed(context.Background(), []string{"hello"}); callErr != nil {
+			t.Fatalf("Gemini embedding call: %v", callErr)
+		}
+	}
+	callChat()
+	callEmbed()
+	key = "runtime-gemini-rotated"
+	callChat()
+	callEmbed()
+	key = ""
+	callChat()
+	callEmbed()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(captures) != 6 {
+		t.Fatalf("captured %d requests, want 6", len(captures))
+	}
+	for index, want := range []string{"runtime-gemini-first", "runtime-gemini-first", "runtime-gemini-rotated", "runtime-gemini-rotated", "", ""} {
+		assertCredentialEgress(t, captures[index], "gemini", want)
+	}
+}
+
+type geminiOrgContextKey struct{}
+
+func TestGeminiCachedHolderDoesNotCarryCredentialAcrossOrgs(t *testing.T) {
+	unsetGeminiAPIKeyEnv(t)
+	var mu sync.Mutex
+	var captures []capturedEgress
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		mu.Lock()
+		captures = append(captures, capturedEgress{header: request.Header.Clone(), url: request.URL.String(), body: string(body)})
+		mu.Unlock()
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{"candidates": []map[string]any{{"content": map[string]any{"role": "model", "parts": []map[string]any{{"text": "ok"}}}, "finishReason": "STOP"}}})
+	}))
+	defer server.Close()
+
+	runtimeKey := func(ctx context.Context) (string, bool) {
+		if ctx.Value(geminiOrgContextKey{}) == "org-a" {
+			return "org-a-runtime-secret", true
+		}
+		return "", false
+	}
+	holder := einowrap.NewChatModelHolder(config.AgentAIConfig{
+		Provider: "gemini", APIKey: "yaml-fallback", Model: "gemini-test", MaxTokens: 16,
+	}, einowrap.Options{BaseURL: server.URL, HTTPClient: server.Client(), RuntimeKeyFunc: runtimeKey}, einowrap.RuntimeAI{
+		KeySet: func(context.Context) (bool, bool) { return true, true },
+	})
+	call := func(org string) {
+		ctx := context.WithValue(context.Background(), geminiOrgContextKey{}, org)
+		chatModel, err := holder.Get(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := chatModel.Generate(ctx, []*schema.Message{schema.UserMessage("hello")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	call("org-a")
+	call("org-b")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(captures) != 2 {
+		t.Fatalf("captured %d requests, want 2", len(captures))
+	}
+	assertCredentialEgress(t, captures[0], "gemini", "org-a-runtime-secret")
+	assertCredentialEgress(t, captures[1], "gemini", "yaml-fallback")
+	if got := captures[1].header.Get("x-goog-api-key"); got == "org-a-runtime-secret" {
+		t.Fatal("org A runtime credential egressed for org B")
+	}
+}
+
+func TestGeminiEmptyYAMLDoesNotUseAmbientCredentials(t *testing.T) {
+	t.Setenv("GOOGLE_API_KEY", "ambient-google-secret")
+	t.Setenv("GEMINI_API_KEY", "ambient-gemini-secret")
+	var mu sync.Mutex
+	var captures []capturedEgress
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		mu.Lock()
+		captures = append(captures, capturedEgress{header: request.Header.Clone(), url: request.URL.String(), body: string(body)})
+		mu.Unlock()
+		writer.Header().Set("Content-Type", "application/json")
+		if strings.Contains(request.URL.Path, "embedContent") {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"embeddings": []map[string]any{{"values": []float64{1, 0, 0}}}})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"candidates": []map[string]any{{"content": map[string]any{"role": "model", "parts": []map[string]any{{"text": "ok"}}}, "finishReason": "STOP"}}})
+	}))
+	defer server.Close()
+
+	chatModel, err := einowrap.NewChatModel(context.Background(), config.AgentAIConfig{
+		Provider: "gemini", Model: "gemini-test", MaxTokens: 16,
+	}, einowrap.Options{BaseURL: server.URL, HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := chatModel.Generate(context.Background(), []*schema.Message{schema.UserMessage("hello")}); err != nil {
+		t.Fatal(err)
+	}
+	embedder, err := einowrap.NewEmbedder(context.Background(), config.AgentAIConfig{
+		Provider: "gemini", Model: "gemini-embedding-test",
+	}, einowrap.Options{BaseURL: server.URL, HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := embedder.Embed(context.Background(), []string{"hello"}); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(captures) != 2 {
+		t.Fatalf("captured %d requests, want 2", len(captures))
+	}
+	for index, capture := range captures {
+		assertCredentialEgress(t, capture, "gemini", "")
+		for _, secret := range []string{"ambient-google-secret", "ambient-gemini-secret"} {
+			if strings.Contains(capture.url, secret) || strings.Contains(capture.body, secret) {
+				t.Fatalf("request %d leaked ambient credential outside headers", index+1)
+			}
+		}
+	}
+}
+
+func TestGeminiRuntimeClearWithEmptyYAMLOnCleanEnvironment(t *testing.T) {
+	unsetGeminiAPIKeyEnv(t)
+	var mu sync.Mutex
+	var captures []capturedEgress
+	server := newCredentialCaptureServer(t, &captures, &mu)
+	defer server.Close()
+	clearKey := func(context.Context) (string, bool) { return "", true }
+
+	chatModel, err := einowrap.NewChatModel(context.Background(), config.AgentAIConfig{
+		Provider: "gemini", Model: "gemini-test", MaxTokens: 16,
+	}, einowrap.Options{BaseURL: server.URL, HTTPClient: server.Client(), RuntimeKeyFunc: clearKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = chatModel.Generate(context.Background(), []*schema.Message{schema.UserMessage("hello")})
+	embedder, err := einowrap.NewEmbedder(context.Background(), config.AgentAIConfig{
+		Provider: "gemini", Model: "gemini-embedding-test",
+	}, einowrap.Options{BaseURL: server.URL, HTTPClient: server.Client(), RuntimeKeyFunc: clearKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = embedder.Embed(context.Background(), []string{"hello"})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(captures) != 2 {
+		t.Fatalf("captured %d requests, want 2", len(captures))
+	}
+	for _, capture := range captures {
+		assertCredentialEgress(t, capture, "gemini", "")
 	}
 }

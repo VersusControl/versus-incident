@@ -156,7 +156,7 @@ func (c *RunbookAdminController) upload(ctx *fiber.Ctx) error {
 		files = append(files, runbook.UploadFile{Name: fh.Filename, Content: data})
 	}
 
-	n, err := c.mgr.Upload(ctx.UserContext(), files, "")
+	n, err := c.mgr.Upload(ctx.UserContext(), files)
 	if err != nil {
 		return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}

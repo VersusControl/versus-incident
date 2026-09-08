@@ -3,12 +3,16 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	aidetect "github.com/VersusControl/versus-incident/pkg/agent/ai/detect"
+	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/storage"
@@ -19,6 +23,12 @@ import (
 type batchSource struct {
 	name    string
 	signals []core.Signal
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }
 
 func (s *batchSource) Name() string { return s.name }
@@ -124,6 +134,63 @@ func TestWorker_Seam_DetectEmitsUnknown(t *testing.T) {
 
 	if emit != 1 {
 		t.Fatalf("detect emitted %d times, want 1 (one unknown pattern)", emit)
+	}
+}
+
+func TestWorker_Seam_DetectSanitizesReflectedRuntimeKey(t *testing.T) {
+	const runtimeKey = "runtime-secret\r\nforged=true"
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("provider reflected authorization %q", req.Header.Get("Authorization"))
+	})}
+	detectAgent, err := aidetect.New(context.Background(), config.AgentAIConfig{
+		Provider: "openai",
+		APIKey:   "yaml-key",
+		Model:    "gpt-4o-mini",
+	}, aidetect.Options{
+		HTTPClient: client,
+		BaseURL:    "https://provider.invalid/v1",
+		RuntimeKeyFunc: func(context.Context) (string, bool) {
+			return runtimeKey, true
+		},
+		Runtime: einowrap.RuntimeAI{
+			KeySet: func(context.Context) (bool, bool) { return true, true },
+		},
+	})
+	if err != nil {
+		t.Fatalf("New detect agent: %v", err)
+	}
+
+	src := &batchSource{name: "es", signals: repeatSignals("service=api reflected id=", 5)}
+	w := newSeamWorker(t, "detect", src, AIBundle{Detect: detectAgent}, func(*core.AIFinding, core.AgentResult, string, string) error {
+		return nil
+	})
+	store := storage.NewMemory()
+	w.detect, err = LoadDetectLog(store, 10)
+	if err != nil {
+		t.Fatalf("LoadDetectLog: %v", err)
+	}
+
+	logs := captureLog(t, func() { w.tickSource(context.Background(), src, "detect") })
+	if err := w.detect.Persist(); err != nil {
+		t.Fatalf("persist DetectLog: %v", err)
+	}
+	reloaded, err := LoadDetectLog(store, 10)
+	if err != nil {
+		t.Fatalf("reload DetectLog: %v", err)
+	}
+	events := reloaded.All()
+	if len(events) != 1 {
+		t.Fatalf("persisted events = %d, want 1", len(events))
+	}
+	event := events[0]
+	if strings.Contains(logs, runtimeKey) || strings.Contains(logs, "forged=true") || strings.ContainsAny(event.Error, "\r\n") ||
+		strings.Contains(event.Error, runtimeKey) || strings.Contains(event.Error, "forged=true") ||
+		strings.Contains(event.RawResponse, runtimeKey) || strings.Contains(event.UserPrompt, runtimeKey) || strings.Contains(event.Template, runtimeKey) ||
+		strings.Contains(strings.Join(event.Samples, ""), runtimeKey) {
+		t.Fatalf("runtime credential leaked: logs=%q event=%+v", logs, event)
+	}
+	if event.Error == "" || event.Outcome != "emitted_basic_error" || event.RawResponse != "" || event.UserPrompt != "" {
+		t.Fatalf("persisted safe failure = %+v, want useful error class and no model artifacts", event)
 	}
 }
 

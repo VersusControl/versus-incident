@@ -86,6 +86,9 @@ func TestSupportedProvidersExported(t *testing.T) {
 		if !einowrap.IsSupportedProvider(name) {
 			t.Fatalf("IsSupportedProvider(%q) = false, want true", name)
 		}
+		if keyless := einowrap.IsKeylessProvider(name); keyless != (name == "ollama") {
+			t.Fatalf("IsKeylessProvider(%q) = %v, want %v", name, keyless, name == "ollama")
+		}
 	}
 	// Case-insensitive, and empty normalises to the openai default.
 	if !einowrap.IsSupportedProvider("OpenAI") || !einowrap.IsSupportedProvider("  DeepSeek ") {
@@ -97,6 +100,9 @@ func TestSupportedProvidersExported(t *testing.T) {
 	// An unknown value is rejected at the boundary.
 	if einowrap.IsSupportedProvider("bogus-llm") {
 		t.Fatal("IsSupportedProvider(\"bogus-llm\") = true, want false")
+	}
+	if einowrap.IsKeylessProvider("bogus-llm") {
+		t.Fatal("IsKeylessProvider(\"bogus-llm\") = true, want false")
 	}
 }
 
@@ -268,8 +274,7 @@ func TestChatModel_Qwen_EgressBearerAndJSONMode(t *testing.T) {
 }
 
 // TestChatModel_Ollama_KeylessAndNativeFormat proves the Ollama path: Ollama is
-// keyless, so NO Authorization header is sent (the AuthKeyFunc transport is a
-// harmless no-op with no resolver), and JSON-mode is requested via the native
+// keyless, so NO Authorization header is sent, and JSON-mode is requested via the native
 // `format` field rather than an OpenAI response_format object. The reply
 // round-trips through detect.ParseFinding.
 func TestChatModel_Ollama_KeylessAndNativeFormat(t *testing.T) {

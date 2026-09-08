@@ -19,20 +19,19 @@ import (
 )
 
 func TestModelResponseDiagnosticClassifiesWithoutLeakingProviderBody(t *testing.T) {
-	const checkLogs = " Check the Versus server logs for the full provider error."
 	tests := []struct {
 		name    string
 		failure string
 		want    string
 	}{
-		{name: "authentication", failure: "status 401 invalid_api_key sk-secret", want: `Claude authentication failed for model "claude-sonnet-5"; verify the configured API key.` + checkLogs},
-		{name: "model", failure: "status 404 model_not_found sk-secret", want: `Claude model "claude-sonnet-5" was not found or is unavailable to this account.` + checkLogs},
-		{name: "quota", failure: "status 429 rate_limit sk-secret", want: `Claude rate limit or quota was reached for model "claude-sonnet-5"; retry later or check provider limits.` + checkLogs},
-		{name: "temperature", failure: "status 400 invalid_request_error: `temperature` is deprecated for this model", want: `Claude model "claude-sonnet-5" rejected the configured temperature; set AGENT_AI_TEMPERATURE=-1 to omit it, restart Versus, and retry.` + checkLogs},
-		{name: "message ordering", failure: `status 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.1: role 'system' must precede an 'assistant' message or end the array"}}`, want: `Claude rejected the generated chat history for model "claude-sonnet-5": messages.1: role 'system' must precede an 'assistant' message or end the array.` + checkLogs},
-		{name: "spaced message ordering", failure: `status 400 prefix {"type": "error", "error": {"type": "invalid_request_error", "message": "messages.2: roles must alternate"}} trailing`, want: `Claude rejected the generated chat history for model "claude-sonnet-5": messages.2: roles must alternate.` + checkLogs},
-		{name: "unsafe validation body", failure: `status 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.1: leaked sk-secret"}}`, want: `Claude rejected the request for model "claude-sonnet-5" as invalid; verify model compatibility and token limits.` + checkLogs},
-		{name: "unknown", failure: "provider exploded with sk-secret", want: `Claude could not produce a response with model "claude-sonnet-5"; verify provider configuration and model access.` + checkLogs},
+		{name: "authentication", failure: "status 401 invalid_api_key sk-secret", want: `Claude authentication failed for model "claude-sonnet-5"; verify the configured API key.`},
+		{name: "model", failure: "status 404 model_not_found sk-secret", want: `Claude model "claude-sonnet-5" was not found or is unavailable to this account.`},
+		{name: "quota", failure: "status 429 rate_limit sk-secret", want: `Claude rate limit or quota was reached for model "claude-sonnet-5"; retry later or check provider limits.`},
+		{name: "temperature", failure: "status 400 invalid_request_error: `temperature` is deprecated for this model", want: `Claude model "claude-sonnet-5" rejected the configured temperature; set AGENT_AI_TEMPERATURE=-1 to omit it, restart Versus, and retry.`},
+		{name: "message ordering", failure: `status 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.1: role 'system' must precede an 'assistant' message or end the array"}}`, want: `Claude rejected the request for model "claude-sonnet-5" as invalid; verify model compatibility and token limits.`},
+		{name: "spaced message ordering", failure: `status 400 prefix {"type": "error", "error": {"type": "invalid_request_error", "message": "messages.2: roles must alternate"}} trailing`, want: `Claude rejected the request for model "claude-sonnet-5" as invalid; verify model compatibility and token limits.`},
+		{name: "unsafe validation body", failure: `status 400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.1: leaked sk-secret"}}`, want: `Claude rejected the request for model "claude-sonnet-5" as invalid; verify model compatibility and token limits.`},
+		{name: "unknown", failure: "provider exploded with sk-secret", want: `Claude could not produce a response with model "claude-sonnet-5"; verify provider configuration and model access.`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -51,16 +50,22 @@ func TestModelResponseDiagnosticClassifiesWithoutLeakingProviderBody(t *testing.
 	}
 }
 
-func TestModelResponseDiagnosticLogsOriginalProviderError(t *testing.T) {
+func TestModelResponseDiagnosticLogsOnlySafeClassification(t *testing.T) {
 	var output bytes.Buffer
 	originalWriter := log.Writer()
 	log.SetOutput(&output)
 	t.Cleanup(func() { log.SetOutput(originalWriter) })
 
-	failure := "HTTP 400 Bad Request: `temperature` is Deprecated for This Model"
-	_ = modelResponseDiagnostic("claude", "claude-sonnet-5", failure)
-	if !strings.Contains(output.String(), failure) {
-		t.Fatalf("log output = %q, want original provider error %q", output.String(), failure)
+	failure := "HTTP 401 reflected sk-runtime-secret\r\nforged=true"
+	_ = newModelResponseError("claude", "claude-sonnet-5", errors.New(failure))
+	logged := output.String()
+	if strings.Contains(logged, "sk-runtime-secret") || strings.Contains(logged, "forged=true") {
+		t.Fatalf("log leaked raw provider error: %q", logged)
+	}
+	for _, safe := range []string{`provider="claude"`, `model="claude-sonnet-5"`, `class="authentication"`} {
+		if !strings.Contains(logged, safe) {
+			t.Fatalf("safe log = %q, want %q", logged, safe)
+		}
 	}
 }
 

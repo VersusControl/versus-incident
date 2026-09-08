@@ -1,20 +1,30 @@
 package controllers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 
+	"github.com/VersusControl/versus-incident/pkg/agent"
+	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
+	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/services"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 // scriptedAgent is a stand-in analyze agent. It replays a fixed list of events
@@ -23,6 +33,187 @@ type scriptedAgent struct {
 	events []core.AnalyzeEvent
 	result *core.AICallResult
 	err    error
+}
+
+type analyzeRuntimeOrgKey struct{}
+
+type analyzeRuntimeResolver struct{ key string }
+
+func (resolver *analyzeRuntimeResolver) EffectiveKey(ctx context.Context) (string, bool) {
+	_, ok := ctx.Value(analyzeRuntimeOrgKey{}).(string)
+	return resolver.key, ok
+}
+
+func (*analyzeRuntimeResolver) EffectiveEnabled(context.Context) (bool, bool) { return true, true }
+
+func (*analyzeRuntimeResolver) EffectiveProvider(context.Context) (string, bool) {
+	return "openai", true
+}
+
+func (*analyzeRuntimeResolver) EffectiveKeySet(context.Context) (bool, bool) { return true, true }
+
+func (*analyzeRuntimeResolver) DecorateAIContext(ctx context.Context, scope tenancy.OrgScope) context.Context {
+	return context.WithValue(ctx, analyzeRuntimeOrgKey{}, scope.Normalized().Write)
+}
+
+type analyzeRewriteTransport struct {
+	target *url.URL
+	base   http.RoundTripper
+}
+
+func (transport analyzeRewriteTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	clone := request.Clone(request.Context())
+	clonedURL := *request.URL
+	clonedURL.Scheme = transport.target.Scheme
+	clonedURL.Host = transport.target.Host
+	clone.URL = &clonedURL
+	return transport.base.RoundTrip(clone)
+}
+
+func TestAnalyzeHTTPPathsUseRuntimeCredentialAndSanitizeReflectedErrors(t *testing.T) {
+	const runtimeKey = "runtime-analyze-secret"
+	var capturesMu sync.Mutex
+	var authorizations []string
+	provider := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		capturesMu.Lock()
+		authorizations = append(authorizations, request.Header.Get("Authorization"))
+		capturesMu.Unlock()
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(writer).Encode(map[string]any{"error": map[string]any{"message": "reflected " + runtimeKey + "\r\nforged=true"}})
+	}))
+	defer provider.Close()
+	target, err := url.Parse(provider.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	previousLogWriter := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousLogWriter) })
+
+	resolver := &analyzeRuntimeResolver{key: runtimeKey}
+	agent.SetAISettingsResolver(resolver)
+	middleware.SetOrgResolver(func(*fiber.Ctx) string { return "org-a" })
+	t.Cleanup(func() {
+		agent.SetAISettingsResolver(nil)
+		middleware.SetOrgResolver(nil)
+		services.SetStorage(nil)
+		services.SetAnalyzeAgent(nil)
+	})
+
+	store := storage.NewMemory()
+	record := seedStreamIncident(t, store)
+	record.OrgID = "org-a"
+	if err := store.SaveIncident(record); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := agent.LoadCatalog(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: analyzeRewriteTransport{target: target, base: http.DefaultTransport}}
+	bundle := agent.BuildAIsForScope(config.AgentConfig{AI: config.AgentAIConfig{
+		Enable: true, Provider: "openai", APIKey: "", Model: "gpt-4o-mini", MaxTokens: 32,
+	}}, catalog, store, tenancy.NewOrgScope("org-a"), client)
+	if bundle.Analyze == nil {
+		t.Fatal("Analyze agent was not built")
+	}
+	services.SetStorage(store)
+	services.SetAnalyzeAgent(bundle.Analyze)
+
+	controller := NewIncidentAdminController()
+	app := fiber.New()
+	app.Use(middleware.OrgInjector())
+	app.Post("/incidents/:id/analyze", controller.analyze)
+	app.Post("/incidents/:id/analyze/stream", controller.analyzeStream)
+
+	syncResponse, err := app.Test(httptest.NewRequest("POST", "/incidents/inc-1/analyze", nil), 10_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncBody, _ := io.ReadAll(syncResponse.Body)
+	syncResponse.Body.Close()
+	streamResponse, streamBody := callStream(t, app)
+	if syncResponse.StatusCode != fiber.StatusBadGateway || streamResponse.status != fiber.StatusOK {
+		t.Fatalf("statuses sync=%d stream=%d", syncResponse.StatusCode, streamResponse.status)
+	}
+
+	analyses, err := store.ListAnalyses(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, _ := json.Marshal(analyses)
+	for name, value := range map[string]string{
+		"sync response": string(syncBody), "SSE response": streamBody, "logs": logs.String(), "persistence": string(persisted),
+	} {
+		if strings.Contains(value, runtimeKey) || strings.Contains(value, "forged=true") {
+			t.Fatalf("%s leaked reflected provider error: %q", name, value)
+		}
+	}
+	for _, analysis := range analyses {
+		if strings.Contains(analysis.RawResponse, runtimeKey) || strings.Contains(analysis.Error, runtimeKey) {
+			t.Fatalf("analysis leaked runtime key: %+v", analysis)
+		}
+		for _, trace := range analysis.ToolCalls {
+			encoded, _ := json.Marshal(trace)
+			if strings.Contains(string(encoded), runtimeKey) {
+				t.Fatalf("tool trace leaked runtime key: %s", encoded)
+			}
+		}
+	}
+	capturesMu.Lock()
+	defer capturesMu.Unlock()
+	if len(authorizations) != 2 {
+		t.Fatalf("captured Authorization headers = %q, want two calls", authorizations)
+	}
+	for _, authorization := range authorizations {
+		if authorization != "Bearer "+runtimeKey {
+			t.Fatalf("Authorization = %q, want runtime key", authorization)
+		}
+	}
+}
+
+func TestAnalyzeHTTPPathsSanitizeBuildFailureInSyncSSEAndPersistence(t *testing.T) {
+	const secret = "runtime-build-reflection-secret"
+	store := storage.NewMemory()
+	seedStreamIncident(t, store)
+	services.SetStorage(store)
+	buildErr := einowrap.SafeProviderError("gemini\r\nforged=true", "unsafe\r\n"+secret, errors.New("build reflected "+secret))
+	services.SetAnalyzeAgent(&scriptedAgent{
+		result: &core.AICallResult{Model: buildErr.Model},
+		err:    buildErr,
+	})
+	t.Cleanup(func() {
+		services.SetStorage(nil)
+		services.SetAnalyzeAgent(nil)
+	})
+
+	controller := NewIncidentAdminController()
+	app := fiber.New()
+	app.Post("/incidents/:id/analyze", controller.analyze)
+	app.Post("/incidents/:id/analyze/stream", controller.analyzeStream)
+	syncResponse, err := app.Test(httptest.NewRequest("POST", "/incidents/inc-1/analyze", nil), 10_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncBody, _ := io.ReadAll(syncResponse.Body)
+	syncResponse.Body.Close()
+	streamResponse, streamBody := callStream(t, app)
+	if syncResponse.StatusCode != fiber.StatusBadGateway || streamResponse.status != fiber.StatusOK {
+		t.Fatalf("statuses sync=%d stream=%d", syncResponse.StatusCode, streamResponse.status)
+	}
+	analyses, err := store.ListAnalyses(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, _ := json.Marshal(analyses)
+	for name, value := range map[string]string{"sync response": string(syncBody), "SSE response": streamBody, "persistence": string(persisted)} {
+		if strings.Contains(value, secret) || strings.Contains(value, "forged=true") {
+			t.Fatalf("%s leaked malicious build failure: %q", name, value)
+		}
+	}
 }
 
 func (s *scriptedAgent) Name() string          { return "analyze" }
@@ -504,6 +695,9 @@ type ctxProbeAgent struct {
 	errDuringRun error
 	hasDeadline  bool
 	remaining    time.Duration
+	org          string
+	authorized   bool
+	hasObserver  bool
 }
 
 func (c *ctxProbeAgent) Name() string          { return "analyze" }
@@ -516,5 +710,200 @@ func (c *ctxProbeAgent) Run(ctx context.Context, _ core.AITask) (*core.AICallRes
 	if ok {
 		c.remaining = time.Until(dl)
 	}
+	c.org, _ = ctx.Value(analyzeOrgKey{}).(string)
+	c.authorized = core.CallerAuthorized(ctx, core.PermissionInfrastructureView)
+	c.hasObserver = core.AnalyzeObserverFrom(ctx) != nil
 	return c.result, nil
+}
+
+type analyzeOrgKey struct{}
+
+type analyzeContextResolver struct {
+	scopes []tenancy.OrgScope
+}
+
+func (*analyzeContextResolver) EffectiveKey(context.Context) (string, bool) {
+	return "", false
+}
+
+func (*analyzeContextResolver) EffectiveEnabled(context.Context) (bool, bool) {
+	return false, false
+}
+
+func (resolver *analyzeContextResolver) DecorateAIContext(ctx context.Context, scope tenancy.OrgScope) context.Context {
+	resolver.scopes = append(resolver.scopes, scope.Normalized())
+	return context.WithValue(ctx, analyzeOrgKey{}, scope.Write)
+}
+
+func TestAnalyzeHandlersDecorateTrustedRequestScope(t *testing.T) {
+	store := storage.NewMemory()
+	record := seedStreamIncident(t, store)
+	record.OrgID = "org-a"
+	if err := store.SaveIncident(record); err != nil {
+		t.Fatal(err)
+	}
+	agent.SetAISettingsResolver(&analyzeContextResolver{})
+	middleware.SetOrgResolver(func(*fiber.Ctx) string { return "org-a" })
+	t.Cleanup(func() {
+		agent.SetAISettingsResolver(nil)
+		middleware.SetOrgResolver(nil)
+		services.SetStorage(nil)
+		services.SetAnalyzeAgent(nil)
+	})
+	services.SetStorage(store)
+
+	controller := NewIncidentAdminController()
+	streamProbe := &ctxProbeAgent{result: okResult()}
+	services.SetAnalyzeAgent(streamProbe)
+	streamApp := fiber.New()
+	streamApp.Use(func(ctx *fiber.Ctx) error {
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	streamApp.Use(middleware.OrgInjector())
+	streamApp.Post("/incidents/:id/analyze/stream", controller.analyzeStream)
+	callStream(t, streamApp)
+	if streamProbe.org != "org-a" {
+		t.Fatalf("stream analyze org = %q, want org-a", streamProbe.org)
+	}
+	if !streamProbe.authorized || !streamProbe.hasObserver {
+		t.Fatalf("stream context lost authorization or observer: authorized=%v observer=%v", streamProbe.authorized, streamProbe.hasObserver)
+	}
+
+	syncProbe := &ctxProbeAgent{result: okResult()}
+	services.SetAnalyzeAgent(syncProbe)
+	syncApp := fiber.New()
+	syncApp.Use(func(ctx *fiber.Ctx) error {
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	syncApp.Use(middleware.OrgInjector())
+	syncApp.Post("/incidents/:id/analyze", controller.analyze)
+	response, err := syncApp.Test(httptest.NewRequest("POST", "/incidents/inc-1/analyze", nil), 10_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if syncProbe.org != "org-a" {
+		t.Fatalf("sync analyze org = %q, want org-a", syncProbe.org)
+	}
+	if !syncProbe.authorized || syncProbe.hasObserver {
+		t.Fatalf("sync context authorization/observer = %v/%v, want true/false", syncProbe.authorized, syncProbe.hasObserver)
+	}
+}
+
+type analyzeScopedStore struct {
+	storage.Provider
+	scope tenancy.OrgScope
+}
+
+func (store analyzeScopedStore) OrgScope() tenancy.OrgScope { return store.scope }
+
+func TestAnalyzeHandlersAdmitTrustedReadScopeAndPinRuntimeToWriteOrg(t *testing.T) {
+	base := storage.NewMemory()
+	writeRecord := seedStreamIncident(t, base)
+	writeRecord.OrgID = "licensed"
+	if err := base.SaveIncident(writeRecord); err != nil {
+		t.Fatal(err)
+	}
+	archiveRecord := *writeRecord
+	archiveRecord.ID = "inc-archive"
+	archiveRecord.OrgID = storage.DefaultOrgID
+	if err := base.SaveIncident(&archiveRecord); err != nil {
+		t.Fatal(err)
+	}
+	foreignRecord := *writeRecord
+	foreignRecord.ID = "inc-foreign"
+	foreignRecord.OrgID = "foreign"
+	if err := base.SaveIncident(&foreignRecord); err != nil {
+		t.Fatal(err)
+	}
+
+	store := analyzeScopedStore{Provider: base, scope: tenancy.NewOrgScope("licensed", storage.DefaultOrgID)}
+	resolver := &analyzeContextResolver{}
+	agent.SetAISettingsResolver(resolver)
+	middleware.SetOrgResolver(func(*fiber.Ctx) string { return "licensed" })
+	t.Cleanup(func() {
+		agent.SetAISettingsResolver(nil)
+		middleware.SetOrgResolver(nil)
+		services.SetStorage(nil)
+		services.SetAnalyzeAgent(nil)
+	})
+	services.SetStorage(store)
+	controller := NewIncidentAdminController()
+
+	for _, path := range []string{"analyze", "analyze/stream"} {
+		for _, incidentID := range []string{"inc-1", "inc-archive"} {
+			probe := &ctxProbeAgent{result: okResult()}
+			services.SetAnalyzeAgent(probe)
+			app := fiber.New()
+			app.Use(middleware.OrgInjector())
+			app.Post("/incidents/:id/analyze", controller.analyze)
+			app.Post("/incidents/:id/analyze/stream", controller.analyzeStream)
+			response, err := app.Test(httptest.NewRequest("POST", "/incidents/"+incidentID+"/"+path, nil), 10_000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode != fiber.StatusOK || !probe.ran || probe.org != "licensed" {
+				t.Fatalf("%s %s status/run/runtime = %d/%v/%q", path, incidentID, response.StatusCode, probe.ran, probe.org)
+			}
+		}
+	}
+	for _, scope := range resolver.scopes {
+		if scope.Write != "licensed" || !scope.Contains(storage.DefaultOrgID) {
+			t.Fatalf("decorated scope = %#v, want licensed write plus default read", scope)
+		}
+	}
+
+	probe := &ctxProbeAgent{result: okResult()}
+	decorationsBeforeForeign := len(resolver.scopes)
+	services.SetAnalyzeAgent(probe)
+	app := fiber.New()
+	app.Use(middleware.OrgInjector())
+	app.Post("/incidents/:id/analyze", controller.analyze)
+	response, err := app.Test(httptest.NewRequest("POST", "/incidents/inc-foreign/analyze", nil), 10_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != fiber.StatusNotFound || probe.ran {
+		t.Fatalf("foreign status/run = %d/%v, want 404/false", response.StatusCode, probe.ran)
+	}
+	if len(resolver.scopes) != decorationsBeforeForeign {
+		t.Fatal("foreign incident reached runtime scope/key decoration")
+	}
+}
+
+func TestAnalyzeHandlersRejectForeignIncidentBeforeAgentRun(t *testing.T) {
+	store := storage.NewMemory()
+	seedStreamIncident(t, store)
+	middleware.SetOrgResolver(func(*fiber.Ctx) string { return "org-b" })
+	t.Cleanup(func() {
+		middleware.SetOrgResolver(nil)
+		services.SetStorage(nil)
+		services.SetAnalyzeAgent(nil)
+	})
+	services.SetStorage(store)
+	probe := &ctxProbeAgent{result: okResult()}
+	services.SetAnalyzeAgent(probe)
+	controller := NewIncidentAdminController()
+	app := fiber.New()
+	app.Use(middleware.OrgInjector())
+	app.Post("/incidents/:id/analyze", controller.analyze)
+	app.Post("/incidents/:id/analyze/stream", controller.analyzeStream)
+
+	for _, path := range []string{"/incidents/inc-1/analyze", "/incidents/inc-1/analyze/stream"} {
+		response, err := app.Test(httptest.NewRequest("POST", path, nil), 10_000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != fiber.StatusNotFound {
+			t.Fatalf("%s status = %d, want 404", path, response.StatusCode)
+		}
+	}
+	if probe.ran {
+		t.Fatal("Analyze agent ran for a foreign incident scope")
+	}
 }

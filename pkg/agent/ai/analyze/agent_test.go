@@ -3,6 +3,7 @@ package analyze
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
+	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
@@ -43,6 +45,18 @@ type fakeChat struct {
 	// streamCalls counts Stream dispatches, so a test can prove which of
 	// the two model entry points the agent took.
 	streamCalls int32
+}
+
+type errorChat struct{ err error }
+
+func (chat errorChat) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	return nil, chat.err
+}
+func (chat errorChat) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return nil, chat.err
+}
+func (chat errorChat) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return chat, nil
 }
 
 func (f *fakeChat) next(in []*schema.Message) *schema.Message {
@@ -257,6 +271,63 @@ func TestAgent_RejectsNonAnalyzeTask(t *testing.T) {
 	a := newAgentWithFake(t, &fakeChat{turns: []*schema.Message{schema.AssistantMessage("{}", nil)}}, nil, 1)
 	if _, err := a.Run(context.Background(), core.DetectTask{}); err == nil {
 		t.Fatalf("expected error for DetectTask")
+	}
+}
+
+func TestAgent_BuildFailureUsesSafeProviderError(t *testing.T) {
+	const secret = "runtime-build-secret"
+	cfg := config.AgentAIConfig{Provider: "gemini", Model: "unsafe\r\n" + secret}
+	agent := &Agent{cfg: cfg, buildAgent: nil}
+	agent.holder = einowrap.NewModelHolder(cfg, einowrap.Options{}, einowrap.RuntimeAI{}, func(context.Context, config.AgentAIConfig, einowrap.Options) (model.ToolCallingChatModel, error) {
+		return nil, fmt.Errorf("construction reflected %s\r\nforged=true", secret)
+	})
+
+	result, err := agent.Run(context.Background(), core.AnalyzeTask{Snapshot: core.AnalyzeIncidentSnapshot{IncidentID: "inc-build"}})
+	if result == nil {
+		t.Fatal("build failure did not return an auditable result")
+	}
+	var providerErr *einowrap.ProviderError
+	if !errors.As(err, &providerErr) {
+		t.Fatalf("build failure = %T %v, want ProviderError", err, err)
+	}
+	encoded := providerErr.Provider + providerErr.Model + providerErr.Diagnostic
+	if strings.Contains(encoded, secret) || strings.Contains(encoded, "forged=true") || strings.ContainsAny(encoded, "\r\n") {
+		t.Fatalf("safe build failure retained malicious input: %+v", providerErr)
+	}
+	if result.Model != providerErr.Model {
+		t.Fatalf("result model = %q, want sanitized %q", result.Model, providerErr.Model)
+	}
+}
+
+func TestNew_PreservesTrustedInitialConfigError(t *testing.T) {
+	const secret = "initial-build-secret"
+	_, err := New(context.Background(), config.AgentAIConfig{
+		Provider: "unsupported\r\n" + secret,
+		Model:    "unsafe\r\n" + secret,
+	}, nil, Options{})
+	var configErr *einowrap.ConfigError
+	if !errors.As(err, &configErr) {
+		t.Fatalf("New error = %T %v, want ConfigError", err, err)
+	}
+	if err != configErr {
+		t.Fatalf("New error = %T %v, want the original typed ConfigError", err, err)
+	}
+	if message := configErr.Error(); strings.Contains(message, secret) || strings.ContainsAny(message, "\r\n") || !strings.Contains(message, "supported:") {
+		t.Fatalf("trusted config error is unsafe or unactionable: %q", message)
+	}
+}
+
+func TestAgent_RunPreservesContextCancellation(t *testing.T) {
+	agent, err := New(context.Background(), config.AgentAIConfig{Provider: "openai", Model: "fake"}, nil, Options{ChatModel: errorChat{err: fmt.Errorf("provider wrapper: %w", context.Canceled)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = agent.Run(context.Background(), core.AnalyzeTask{Snapshot: core.AnalyzeIncidentSnapshot{IncidentID: "inc-cancel"}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context cancellation identity", err)
+	}
+	if strings.Contains(fmt.Sprint(err), "provider wrapper") {
+		t.Fatalf("cancellation exposed raw provider wrapper: %v", err)
 	}
 }
 

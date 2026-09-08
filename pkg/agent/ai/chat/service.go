@@ -50,6 +50,7 @@ type Service struct {
 	runTimeout   time.Duration
 	leaseTTL     time.Duration
 	leaseRenewal time.Duration
+	decorate     func(context.Context) context.Context
 
 	mu     sync.Mutex
 	active map[string]activeRun
@@ -78,6 +79,13 @@ func NewServiceWithLocation(store *SessionStore, chatRouter TurnRunner, seeder d
 // NewServiceWithLocationProvider resolves the current report timezone for
 // every turn so runtime settings changes do not require a process restart.
 func NewServiceWithLocationProvider(store *SessionStore, chatRouter TurnRunner, seeder discoverySeeder, now func() time.Time, location func() *time.Location) *Service {
+	return NewServiceWithLocationProviderAndContextDecorator(store, chatRouter, seeder, now, location, nil)
+}
+
+// NewServiceWithLocationProviderAndContextDecorator constructs a service that
+// decorates every detached turn context before seed, tool, and model execution.
+// A nil decorator preserves the OSS identity behavior.
+func NewServiceWithLocationProviderAndContextDecorator(store *SessionStore, chatRouter TurnRunner, seeder discoverySeeder, now func() time.Time, location func() *time.Location, decorate func(context.Context) context.Context) *Service {
 	if now == nil {
 		now = time.Now
 	}
@@ -87,7 +95,7 @@ func NewServiceWithLocationProvider(store *SessionStore, chatRouter TurnRunner, 
 	return &Service{
 		store: store, router: chatRouter, seeder: seeder, now: now, location: location,
 		owner: uuid.NewString(), runTimeout: DefaultRunTimeout, leaseTTL: defaultLeaseTTL,
-		leaseRenewal: defaultLeaseRenewal, active: map[string]activeRun{},
+		leaseRenewal: defaultLeaseRenewal, decorate: decorate, active: map[string]activeRun{},
 	}
 }
 
@@ -231,6 +239,9 @@ func (service *Service) prepare(ctx context.Context, id, message string, attachm
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), service.runTimeout)
 	recorder := &eventRecorder{delegate: core.ChatObserverFrom(ctx)}
 	runCtx = core.WithChatObserver(runCtx, recorder)
+	if service.decorate != nil {
+		runCtx = service.decorate(runCtx)
+	}
 	service.mu.Lock()
 	if _, exists := service.active[id]; exists {
 		service.mu.Unlock()

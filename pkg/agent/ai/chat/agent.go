@@ -39,15 +39,15 @@ const (
 var errModelResponseUnavailable = errors.New("chat: model response unavailable")
 
 type Options struct {
-	HTTPClient   *http.Client
-	BaseURL      string
-	Timeout      time.Duration
-	AuthKeyFunc  func(context.Context) (string, bool)
-	Runtime      einowrap.RuntimeAI
-	ChatModel    model.ToolCallingChatModel
-	ToolTimeout  time.Duration
-	ToolProvider func() ([]core.Tool, error)
-	SeedProvider func() ([]core.Tool, error)
+	HTTPClient     *http.Client
+	BaseURL        string
+	Timeout        time.Duration
+	RuntimeKeyFunc func(context.Context) (string, bool)
+	Runtime        einowrap.RuntimeAI
+	ChatModel      model.ToolCallingChatModel
+	ToolTimeout    time.Duration
+	ToolProvider   func() ([]core.Tool, error)
+	SeedProvider   func() ([]core.Tool, error)
 }
 
 type Agent struct {
@@ -96,7 +96,7 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 		return agent, nil
 	}
 	agent.holder = einowrap.NewToolCallingChatModelHolder(cfg, einowrap.Options{
-		HTTPClient: opts.HTTPClient, BaseURL: opts.BaseURL, Timeout: opts.Timeout, AuthKeyFunc: opts.AuthKeyFunc,
+		HTTPClient: opts.HTTPClient, BaseURL: opts.BaseURL, Timeout: opts.Timeout, RuntimeKeyFunc: opts.RuntimeKeyFunc,
 	}, opts.Runtime)
 	chatModel, err := agent.holder.Get(ctx)
 	if err != nil {
@@ -364,95 +364,13 @@ func (err *modelResponseError) Error() string { return errModelResponseUnavailab
 func (err *modelResponseError) Unwrap() error { return errModelResponseUnavailable }
 
 func newModelResponseError(provider, model string, cause error) error {
-	return &modelResponseError{diagnostic: modelResponseDiagnostic(provider, model, cause.Error())}
+	safe := einowrap.SafeProviderError(provider, model, cause)
+	log.Printf("chat model provider error: provider=%q model=%q class=%q", safe.Provider, safe.Model, safe.Class)
+	return &modelResponseError{diagnostic: safe.Diagnostic}
 }
 
 func modelResponseDiagnostic(provider, model, failure string) string {
-	provider = safeModelIdentifier(provider, "openai")
-	model = safeModelIdentifier(model, "configured model")
-	label := strings.ToUpper(provider[:1]) + provider[1:]
-	normalizedFailure := strings.ToLower(failure)
-	checkLogs := " Check the Versus server logs for the full provider error."
-
-	log.Printf("chat model provider error: provider=%q model=%q error=%s", provider, model, failure)
-
-	if detail := safeProviderValidationDetail(failure); detail != "" {
-		return fmt.Sprintf("%s rejected the generated chat history for model %q: %s.%s", label, model, strings.TrimSuffix(detail, "."), checkLogs)
-	}
-	switch {
-	case normalizedFailure == "empty_response":
-		return fmt.Sprintf("%s model %q returned no assistant content; increase the completion-token budget or choose a compatible model.%s", label, model, checkLogs)
-	case strings.Contains(normalizedFailure, "temperature") && (strings.Contains(normalizedFailure, "deprecated") || strings.Contains(normalizedFailure, "unsupported") || strings.Contains(normalizedFailure, "not support")):
-		return fmt.Sprintf("%s model %q rejected the configured temperature; set AGENT_AI_TEMPERATURE=-1 to omit it, restart Versus, and retry.%s", label, model, checkLogs)
-	case strings.Contains(normalizedFailure, "401"), strings.Contains(normalizedFailure, "unauthorized"), strings.Contains(normalizedFailure, "authentication"), strings.Contains(normalizedFailure, "invalid_api_key"), strings.Contains(normalizedFailure, "invalid api key"):
-		return fmt.Sprintf("%s authentication failed for model %q; verify the configured API key.%s", label, model, checkLogs)
-	case strings.Contains(normalizedFailure, "403"), strings.Contains(normalizedFailure, "forbidden"), strings.Contains(normalizedFailure, "permission denied"):
-		return fmt.Sprintf("%s denied access to model %q; verify model permissions.%s", label, model, checkLogs)
-	case strings.Contains(normalizedFailure, "404"), strings.Contains(normalizedFailure, "model_not_found"), strings.Contains(normalizedFailure, "model not found"), strings.Contains(normalizedFailure, "not_found_error"):
-		return fmt.Sprintf("%s model %q was not found or is unavailable to this account.%s", label, model, checkLogs)
-	case strings.Contains(normalizedFailure, "429"), strings.Contains(normalizedFailure, "rate limit"), strings.Contains(normalizedFailure, "rate_limit"):
-		return fmt.Sprintf("%s rate limit or quota was reached for model %q; retry later or check provider limits.%s", label, model, checkLogs)
-	case strings.Contains(normalizedFailure, "400"), strings.Contains(normalizedFailure, "invalid_request"):
-		return fmt.Sprintf("%s rejected the request for model %q as invalid; verify model compatibility and token limits.%s", label, model, checkLogs)
-	case strings.Contains(normalizedFailure, "timeout"), strings.Contains(normalizedFailure, "deadline exceeded"):
-		return fmt.Sprintf("%s timed out while calling model %q.%s", label, model, checkLogs)
-	case strings.Contains(normalizedFailure, "connection refused"), strings.Contains(normalizedFailure, "no such host"), strings.Contains(normalizedFailure, "tls"):
-		return fmt.Sprintf("Could not connect securely to %s for model %q.%s", label, model, checkLogs)
-	default:
-		return fmt.Sprintf("%s could not produce a response with model %q; verify provider configuration and model access.%s", label, model, checkLogs)
-	}
-}
-
-func safeProviderValidationDetail(failure string) string {
-	type providerErrorEnvelope struct {
-		Error struct {
-			Type    string `json:"type"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	var envelope providerErrorEnvelope
-	for offset := 0; offset < len(failure); {
-		start := strings.IndexByte(failure[offset:], '{')
-		if start < 0 {
-			return ""
-		}
-		start += offset
-		envelope = providerErrorEnvelope{}
-		if err := json.NewDecoder(strings.NewReader(failure[start:])).Decode(&envelope); err == nil && envelope.Error.Type == "invalid_request_error" {
-			break
-		}
-		offset = start + 1
-	}
-	if envelope.Error.Type != "invalid_request_error" {
-		return ""
-	}
-	detail := strings.Join(strings.Fields(envelope.Error.Message), " ")
-	lower := strings.ToLower(detail)
-	if len(detail) == 0 || len(detail) > 512 || !strings.HasPrefix(lower, "messages.") {
-		return ""
-	}
-	for _, sensitive := range []string{"sk-", "api key", "apikey", "authorization", "bearer", "password", "secret", "token="} {
-		if strings.Contains(lower, sensitive) {
-			return ""
-		}
-	}
-	return detail
-}
-
-func safeModelIdentifier(value, fallback string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return fallback
-	}
-	if len(value) > 128 {
-		return fallback
-	}
-	for _, character := range value {
-		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune("._:/-", character)) {
-			return fallback
-		}
-	}
-	return value
+	return einowrap.SafeProviderError(provider, model, errors.New(failure)).Diagnostic
 }
 
 func (agent *Agent) effectiveProvider(ctx context.Context) string {

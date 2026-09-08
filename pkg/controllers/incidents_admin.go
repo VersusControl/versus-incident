@@ -17,6 +17,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/services"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -780,6 +781,11 @@ func (i *IncidentAdminController) analyze(c *fiber.Ctx) error {
 	if err != nil {
 		return incidentStorageError(c, "get incident for analysis", err)
 	}
+	requestOrg := storage.NormalizeOrgID(middleware.OrgFromContext(c))
+	requestScope := tenancy.ScopeForWrite(store, requestOrg)
+	if !requestScope.Contains(rec.OrgID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
+	}
 
 	var body analyzeRequest
 	// Body is optional; tolerate parse errors as "no body".
@@ -789,6 +795,7 @@ func (i *IncidentAdminController) analyze(c *fiber.Ctx) error {
 	// forever. The agent has its own iteration cap on top of this.
 	ctx, cancel := context.WithTimeout(callerContext(c, c.UserContext()), analyzeRunTimeout)
 	defer cancel()
+	ctx = agent.DecorateAIContext(ctx, requestScope)
 
 	analysis, runErr, saveErr := runAndPersistAnalysis(ctx, rec, body.RequestedBy)
 	if saveErr != nil {
@@ -897,6 +904,11 @@ func (i *IncidentAdminController) analyzeStream(c *fiber.Ctx) error {
 	if err != nil {
 		return incidentStorageError(c, "get incident for analysis stream", err)
 	}
+	requestOrg := storage.NormalizeOrgID(middleware.OrgFromContext(c))
+	requestScope := tenancy.ScopeForWrite(store, requestOrg)
+	if !requestScope.Contains(rec.OrgID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
+	}
 
 	var body analyzeRequest
 	_ = c.BodyParser(&body)
@@ -905,6 +917,7 @@ func (i *IncidentAdminController) analyzeStream(c *fiber.Ctx) error {
 	events := make(chan core.AnalyzeEvent, 256)
 
 	runCtx, cancel := context.WithTimeout(callerContext(c, context.Background()), analyzeRunTimeout)
+	runCtx = agent.DecorateAIContext(runCtx, requestScope)
 	go func() {
 		defer cancel()
 		defer close(events)
