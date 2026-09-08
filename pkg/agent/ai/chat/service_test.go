@@ -75,6 +75,61 @@ func (runner *captureTaskRunner) RunChat(_ context.Context, task core.ChatTask) 
 	return &core.ChatTurnResult{Markdown: "answer"}, nil
 }
 
+type contextCaptureRunner struct {
+	ctx chan context.Context
+}
+
+func (runner *contextCaptureRunner) RunChat(ctx context.Context, _ core.ChatTask) (*core.ChatTurnResult, error) {
+	runner.ctx <- ctx
+	return &core.ChatTurnResult{Markdown: "answer"}, nil
+}
+
+type testChatObserver struct{}
+
+func (testChatObserver) OnChatEvent(core.ChatEvent) {}
+
+type chatScopeKey struct{}
+
+func TestServiceDetachedContextRetainsValuesAndReceivesScope(t *testing.T) {
+	store := NewSessionStore(storage.NewMemory(), tenancy.NewOrgScope("org-a"), time.Now)
+	runner := &contextCaptureRunner{ctx: make(chan context.Context, 1)}
+	service := NewServiceWithLocationProviderAndContextDecorator(
+		store, runner, nil, time.Now, func() *time.Location { return time.UTC },
+		func(ctx context.Context) context.Context {
+			return context.WithValue(ctx, chatScopeKey{}, "org-a")
+		},
+	)
+	session, err := service.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer := testChatObserver{}
+	requestCtx, cancel := context.WithCancel(context.Background())
+	requestCtx = core.WithCallerAuthorization(requestCtx, core.CallerAuthorization{
+		Authenticated: true,
+		Permissions:   map[core.Permission]bool{core.PermissionInfrastructureView: true},
+	})
+	requestCtx = core.WithChatObserver(requestCtx, observer)
+	outcomes, err := service.Start(requestCtx, session.ID, "inspect", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	runCtx := <-runner.ctx
+	if runCtx.Value(chatScopeKey{}) != "org-a" {
+		t.Fatalf("decorated scope = %v, want org-a", runCtx.Value(chatScopeKey{}))
+	}
+	if !core.CallerAuthorized(runCtx, core.PermissionInfrastructureView) {
+		t.Fatal("detached context lost caller authorization")
+	}
+	if core.ChatObserverFrom(runCtx) == nil {
+		t.Fatal("detached context lost chat observer")
+	}
+	if err := (<-outcomes).Err; err != nil {
+		t.Fatal(err)
+	}
+}
+
 type countingSeeder struct{ calls int }
 
 func (seeder *countingSeeder) Seed(context.Context) []core.ToolCallTrace {
@@ -142,7 +197,7 @@ func TestServicePersistsSafeModelResponseDetail(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := session.Turns[len(session.Turns)-1]
-	want := `Claude model "claude-sonnet-5" was not found or is unavailable to this account. Check the Versus server logs for the full provider error.`
+	want := `Claude model "claude-sonnet-5" was not found or is unavailable to this account.`
 	if last.Content != want || len(last.Events) == 0 || last.Events[len(last.Events)-1].Error != want {
 		t.Fatalf("failure turn = %+v, want safe provider detail %q", last, want)
 	}
@@ -161,7 +216,7 @@ func TestServicePersistsTemperatureOmissionGuidance(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := session.Turns[len(session.Turns)-1]
-	for _, required := range []string{"AGENT_AI_TEMPERATURE=-1", "restart Versus", "server logs"} {
+	for _, required := range []string{"AGENT_AI_TEMPERATURE=-1", "restart Versus"} {
 		if !strings.Contains(last.Content, required) || len(last.Events) == 0 || !strings.Contains(last.Events[len(last.Events)-1].Error, required) {
 			t.Fatalf("failure turn = %+v, want guidance containing %q", last, required)
 		}

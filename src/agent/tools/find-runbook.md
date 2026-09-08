@@ -35,6 +35,17 @@ corpus is re-ingested.
 > [AI Analyze mode](../ai-analyze-mode.md). The same
 > `agent.ai.api_key` is reused for the embeddings call.
 
+Runtime AI settings are resolved for every upload and query. OpenAI uses
+`Authorization: Bearer`, Gemini uses `x-goog-api-key`, and Ollama sends no AI
+credential. Key rotation is visible on the next embedding request.
+
+Embedding support is intentionally narrower than chat support: OpenAI, Gemini,
+and Ollama are registered. If a runtime switch selects a chat-only provider
+such as Claude, DeepSeek, or Qwen, runbook embedding stays on the configured
+embedding provider and the runtime key is not applied. The configured YAML key
+for that embedding provider remains the fallback. This prevents a key selected
+for one provider from reaching another provider's embedding endpoint.
+
 ## What the agent sees
 
 The agent calls the tool with a natural-language query and gets back
@@ -217,6 +228,11 @@ egresses raw.
 To keep embeddings fully inside your own network, set `agent.ai.provider`
 to `ollama` (or `gemini`) — the embedder selects its backend from the same
 provider as the chat path. No code change is required.
+
+Boot ingestion is pinned to the server's boot scope. Uploads use the trusted
+middleware write org, and query embedding inherits the decorated Chat or
+Analyze context. A missing or mismatched scope fails before an embedding
+request is sent.
 
 ## Pre-baking the corpus (optional)
 

@@ -3,7 +3,6 @@ package eino
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -22,20 +21,19 @@ import (
 
 // DefaultProvider is the model backend used when AgentAIConfig.Provider is
 // empty. It is the OSS default and preserves the historical OpenAI behaviour
-// byte-for-byte (JSON-mode, MaxCompletionTokens, AuthKeyFunc transport, the
+// byte-for-byte (JSON-mode, MaxCompletionTokens, runtime-key transport, the
 // test-only Options.BaseURL seam).
 const DefaultProvider = "openai"
 
 // chatModelRequest is the normalized, provider-agnostic input the registry
-// passes to each builder. The HTTPClient is already wrapped with the
-// AuthKeyFunc transport (see NewChatModel/NewToolCallingChatModel), so every
-// provider that authenticates with a Bearer Authorization header honours the
-// runtime key override for free.
+// passes to each builder. The HTTPClient is wrapped after provider resolution
+// with that provider's native runtime credential policy.
 type chatModelRequest struct {
 	apiKey      string
 	model       string
 	baseURL     string // test-only Options.BaseURL; "" uses the provider default
 	httpClient  *http.Client
+	runtimeKey  func(context.Context) (string, bool)
 	timeout     time.Duration
 	maxTokens   int
 	temperature *float32
@@ -99,6 +97,14 @@ func IsSupportedProvider(name string) bool {
 	return isChatProvider(resolveProvider(name))
 }
 
+// IsKeylessProvider reports whether a registered chat provider intentionally
+// sends no provider credential. Consumers use this registry-derived policy
+// when deciding whether a provider transition requires a replacement key.
+func IsKeylessProvider(name string) bool {
+	provider := resolveProvider(name)
+	return isChatProvider(provider) && chatCredentialPolicy(provider) == credentialNone
+}
+
 // newProviderChatModel resolves the provider and dispatches to its builder.
 // An unknown/unsupported provider fails fast here with a clear error — there
 // is NO silent fallback to openai.
@@ -106,9 +112,26 @@ func newProviderChatModel(ctx context.Context, provider string, req chatModelReq
 	name := resolveProvider(provider)
 	build, ok := chatModelBuilders[name]
 	if !ok {
-		return nil, fmt.Errorf("eino: unsupported ai provider %q (supported: %s)", name, strings.Join(supportedProviders(), ", "))
+		return nil, unsupportedProviderConfigError(name, false, supportedProviders())
 	}
+	if name == "gemini" {
+		req.apiKey, req.runtimeKey = geminiCredentials(req.apiKey, req.runtimeKey)
+	}
+	req.httpClient = withRuntimeKeyRoundTripper(req.httpClient, req.timeout, req.runtimeKey, chatCredentialPolicy(name))
 	return build(ctx, req)
+}
+
+func chatCredentialPolicy(provider string) credentialPolicy {
+	switch provider {
+	case "claude":
+		return credentialClaude
+	case "gemini":
+		return credentialGemini
+	case "ollama":
+		return credentialNone
+	default:
+		return credentialBearer
+	}
 }
 
 // openAIFixedSamplingPrefixes lists the OpenAI model-id families whose
@@ -154,7 +177,7 @@ func isFixedSamplingModel(model string) bool {
 // buildOpenAIChatModel is the default path. It preserves the historical OpenAI
 // wiring — JSON-mode response format, MaxCompletionTokens (the reasoning-safe
 // field), the configured temperature, the test-only BaseURL, and the
-// AuthKeyFunc-wrapped HTTPClient — with one model-aware refinement: for
+// runtime-key-wrapped HTTPClient — with one model-aware refinement: for
 // beta-limited / reasoning families (see isFixedSamplingModel) temperature is
 // omitted so the provider applies its fixed default instead of rejecting the
 // request. The SDK never sets top_p / n / presence_penalty / frequency_penalty
@@ -188,8 +211,7 @@ func buildOpenAIChatModel(ctx context.Context, req chatModelRequest) (model.Tool
 }
 
 // buildDeepSeekChatModel wires the OpenAI-compatible DeepSeek backend. It
-// accepts a Bearer key, so the AuthKeyFunc transport on req.httpClient works
-// unchanged.
+// accepts a Bearer key, so the provider policy uses Authorization.
 func buildDeepSeekChatModel(ctx context.Context, req chatModelRequest) (model.ToolCallingChatModel, error) {
 	conf := &einodeepseek.ChatModelConfig{
 		APIKey:     req.apiKey,
@@ -235,8 +257,9 @@ func buildQwenChatModel(ctx context.Context, req chatModelRequest) (model.ToolCa
 }
 
 // buildOllamaChatModel wires a local Ollama server. Ollama is keyless, so the
-// AuthKeyFunc transport is a harmless no-op. BaseURL defaults to the local
-// daemon when unset. JSON-mode is requested via the native `format` field.
+// runtime credential policy strips every recognized credential header.
+// BaseURL defaults to the local daemon when unset. JSON-mode is requested via
+// the native `format` field.
 func buildOllamaChatModel(ctx context.Context, req chatModelRequest) (model.ToolCallingChatModel, error) {
 	baseURL := req.baseURL
 	if baseURL == "" {
@@ -255,8 +278,8 @@ func buildOllamaChatModel(ctx context.Context, req chatModelRequest) (model.Tool
 }
 
 // buildClaudeChatModel wires Anthropic Claude (direct API). Claude authenticates
-// with the x-api-key header rather than a Bearer token, so the AuthKeyFunc
-// override does not apply; the configured APIKey is used. MaxTokens is required
+// with the x-api-key header rather than a Bearer token; the runtime policy
+// replaces the configured key in that native header. MaxTokens is required
 // (>0) by the SDK — the caller always supplies a non-zero default. Anthropic has
 // no response_format knob, so jsonMode is advisory only (detect's ParseFinding
 // is tolerant of fenced/plain JSON).
@@ -277,9 +300,8 @@ func buildClaudeChatModel(ctx context.Context, req chatModelRequest) (model.Tool
 
 // buildGeminiChatModel wires Google Gemini (the Generative Language API) via the
 // genai client. Gemini authenticates with the api key through the x-goog-api-key
-// header set by the genai client — NOT a Bearer token — so, exactly like
-// Claude's x-api-key path, the AuthKeyFunc Bearer override on req.httpClient does
-// not apply; the configured req.apiKey is passed straight to the client.
+// header set by the genai client — NOT a Bearer token — and the runtime policy
+// replaces the configured key in that native header.
 // req.baseURL is honoured as the genai HTTPOptions.BaseURL (the test-only
 // httptest seam). Gemini exposes structured JSON output only via a full
 // ResponseJSONSchema, not a bare response_mime_type toggle, so jsonMode is
@@ -301,11 +323,32 @@ func buildGeminiChatModel(ctx context.Context, req chatModelRequest) (model.Tool
 	return einogemini.NewChatModel(ctx, conf)
 }
 
+const geminiConstructionAPIKey = "versus-non-secret-placeholder"
+
+// geminiCredentials prevents the genai SDK from consulting ambient Google
+// credential environment variables or retaining a runtime org secret in its
+// cached client. Runtime resolution remains entirely request-scoped: an
+// explicit answer replaces the header (including an explicit empty clear),
+// while no opinion deterministically falls back to the configured YAML key.
+func geminiCredentials(configured string, runtime func(context.Context) (string, bool)) (string, func(context.Context) (string, bool)) {
+	if runtime == nil && configured != "" {
+		return configured, nil
+	}
+	if runtime == nil {
+		return geminiConstructionAPIKey, func(context.Context) (string, bool) { return "", true }
+	}
+	return geminiConstructionAPIKey, func(ctx context.Context) (string, bool) {
+		if key, ok := runtime(ctx); ok {
+			return key, true
+		}
+		return configured, true
+	}
+}
+
 // newGeminiClient builds the google.golang.org/genai client shared by the Gemini
 // chat and embedding builders. It pins the Gemini API backend (never Vertex) and
-// passes the api key directly: Gemini sends it via the x-goog-api-key header, so
-// the Bearer AuthKeyFunc override that req.httpClient may carry is a harmless
-// no-op for this provider. baseURL is the test-only endpoint override ("" uses
+// passes the configured api key directly; the per-instance transport may
+// replace it in x-goog-api-key at request time. baseURL is the test-only endpoint override ("" uses
 // the public Gemini endpoint); httpClient and timeout are threaded through so the
 // per-request deadline holds even when the SDK supplies its own default client.
 func newGeminiClient(ctx context.Context, apiKey, baseURL string, httpClient *http.Client, timeout time.Duration) (*genai.Client, error) {

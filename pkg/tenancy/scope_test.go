@@ -37,3 +37,20 @@ func TestOrgScopeNormalizesBlankAndOwnsReadSlice(t *testing.T) {
 		t.Fatalf("OrgIDs returned aliased storage: scope.Read = %v", scope.Read)
 	}
 }
+
+type testScopeSource struct{ scope OrgScope }
+
+func (source *testScopeSource) OrgScope() OrgScope { return source.scope }
+
+func TestScopeForWriteUsesOnlyMatchingTrustedScope(t *testing.T) {
+	source := &testScopeSource{scope: NewOrgScope("licensed", DefaultOrgID)}
+	got := ScopeForWrite(source, "licensed")
+	if !got.Contains("licensed") || !got.Contains(DefaultOrgID) || got.Contains("foreign") {
+		t.Fatalf("matching scope = %#v", got)
+	}
+
+	got = ScopeForWrite(source, "foreign")
+	if !reflect.DeepEqual(got, NewOrgScope("foreign")) {
+		t.Fatalf("mismatched scope = %#v, want foreign-only fallback", got)
+	}
+}

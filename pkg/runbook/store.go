@@ -8,9 +8,9 @@
 //
 // Persistence goes through storage.Provider (ReadBlob/WriteBlob), the
 // same seam the pattern catalog and shadow log use — never os.WriteFile.
-// Every record carries an OrgID (default storage.DefaultOrgID) so the
-// enterprise org-injection seam scopes runbooks per-tenant with zero OSS
-// change.
+// Every record carries the manager's boot write org as provenance. The shared
+// blob is not filtered per record; deployments that need isolated corpora must
+// provide an org-scoped storage.Provider.
 package runbook
 
 import (
@@ -50,10 +50,9 @@ const excerptMaxRunes = 600
 // alongside the record so the corpus never needs re-embedding at boot.
 type Record struct {
 	ID string `json:"id"`
-	// OrgID scopes the runbook to one organization. Defaults to
-	// storage.DefaultOrgID ("default") so single-tenant OSS users never
-	// see or set it; enterprise multi-tenant routing reads it to isolate
-	// per-org corpora.
+	// OrgID records the manager's boot write org. It defaults to
+	// storage.DefaultOrgID ("default") for single-tenant OSS deployments.
+	// Isolation is provided by the storage.Provider, not record filtering.
 	OrgID     string    `json:"org_id,omitempty"`
 	Title     string    `json:"title"`
 	Services  []string  `json:"services,omitempty"`

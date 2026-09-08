@@ -16,7 +16,7 @@ import (
 // The model PROVIDER (openai | deepseek | qwen | ollama | claude | gemini) is
 // chosen at CONSTRUCTION time: each provider picks a different SDK/builder
 // (provider.go), so a provider change cannot hot-reload through a request
-// header the way the per-request key override (AuthKeyFunc) does — the model
+// header the way the per-request runtime key override does — the model
 // object must be REBUILT. A Holder is the rebuild lifecycle: it caches a built
 // model keyed by its effective signature and rebuilds only when that signature
 // changes, so steady-state has no per-call cost while an operator's runtime
@@ -36,7 +36,7 @@ import (
 // never rebuilt).
 //
 // Provider composes with the existing per-request key override: the key VALUE
-// still hot-reloads through the AuthKeyFunc transport WITHOUT a rebuild (it is
+// still hot-reloads through the provider-native transport WITHOUT a rebuild (it is
 // NOT part of the signature); only the provider, the model id, and the
 // enable/key-presence STATE force a rebuild.
 type RuntimeAI struct {

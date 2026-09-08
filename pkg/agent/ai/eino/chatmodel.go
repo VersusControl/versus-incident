@@ -12,7 +12,6 @@ package eino
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -22,7 +21,7 @@ import (
 )
 
 // BaseURL is overridable for tests. Production code passes "" to use
-// the Eino / go-openai default (https://api.openai.com/v1). The agent
+// the provider default endpoint. It is intentionally not a config field:
 // admin endpoints never expose this; only the chatmodel test sets it
 // to point at an httptest server.
 type Options struct {
@@ -30,61 +29,75 @@ type Options struct {
 	BaseURL    string
 	Timeout    time.Duration
 
-	// AuthKeyFunc is an OPTIONAL per-request Authorization override. When
-	// non-nil the outbound transport calls it for every request: if it
-	// returns ok the request's Authorization header is replaced with
-	// "Bearer <key>" AFTER the SDK set its YAML-keyed header (so the
-	// override wins); ok=false leaves the YAML-keyed header untouched. When
-	// nil the transport is a plain pass-through and the client is used
-	// exactly as before — this is the OSS byte-for-byte path. The package
-	// stays generic: it knows nothing about who supplies the key (the agent
-	// package injects a function backed by its runtime AISettingsResolver,
-	// which avoids an import cycle because eino never imports agent).
-	AuthKeyFunc func(ctx context.Context) (key string, ok bool)
+	// RuntimeKeyFunc is an OPTIONAL per-request provider credential override.
+	// Provider builders apply it using their native authentication scheme.
+	// ok=false leaves the SDK's configured key untouched; ok=true with an
+	// empty key explicitly clears credentials for that request.
+	RuntimeKeyFunc func(ctx context.Context) (key string, ok bool)
 }
 
-// authRoundTripper injects a runtime Authorization override onto every
-// outbound request. It consults keyFn per request, so a hot-swapped key
-// takes effect without rebuilding the client. Per the http.RoundTripper
-// contract it must not mutate the input request, so it clones the request
-// (which deep-copies the header) before writing the override.
-type authRoundTripper struct {
-	base  http.RoundTripper
-	keyFn func(ctx context.Context) (key string, ok bool)
+type credentialPolicy uint8
+
+const (
+	credentialBearer credentialPolicy = iota
+	credentialClaude
+	credentialGemini
+	credentialNone
+)
+
+var credentialHeaders = []string{"Authorization", "x-api-key", "x-goog-api-key"}
+
+type runtimeKeyRoundTripper struct {
+	base   http.RoundTripper
+	keyFn  func(ctx context.Context) (key string, ok bool)
+	policy credentialPolicy
 }
 
-func (a authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	base := a.base
+func (t runtimeKeyRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	if a.keyFn == nil {
+	if t.keyFn == nil && t.policy != credentialNone {
 		return base.RoundTrip(req)
 	}
-	key, ok := a.keyFn(req.Context())
-	if !ok {
-		// No opinion: send the request exactly as the SDK built it.
+	key, ok := "", false
+	if t.keyFn != nil {
+		key, ok = t.keyFn(req.Context())
+	}
+	if !ok && t.policy != credentialNone {
 		return base.RoundTrip(req)
 	}
 	clone := req.Clone(req.Context())
-	clone.Header.Set("Authorization", "Bearer "+key)
+	for _, header := range credentialHeaders {
+		clone.Header.Del(header)
+	}
+	if key != "" {
+		switch t.policy {
+		case credentialBearer:
+			clone.Header.Set("Authorization", "Bearer "+key)
+		case credentialClaude:
+			clone.Header.Set("x-api-key", key)
+		case credentialGemini:
+			clone.Header.Set("x-goog-api-key", key)
+		}
+	}
 	return base.RoundTrip(clone)
 }
 
-// withAuthRoundTripper returns an *http.Client whose transport injects the
-// runtime Authorization override. When keyFn is nil the input client is
-// returned unchanged (nil included), so the no-resolver path is byte-for-
-// byte identical to the pre-seam wiring. The input client is never mutated:
-// a shallow copy is wrapped so the caller's client keeps its own transport.
-func withAuthRoundTripper(c *http.Client, timeout time.Duration, keyFn func(ctx context.Context) (key string, ok bool)) *http.Client {
-	if keyFn == nil {
+func (o Options) runtimeKeyFunc() func(context.Context) (string, bool) {
+	return o.RuntimeKeyFunc
+}
+
+func withRuntimeKeyRoundTripper(c *http.Client, timeout time.Duration, keyFn func(ctx context.Context) (key string, ok bool), policy credentialPolicy) *http.Client {
+	if keyFn == nil && policy != credentialNone {
 		return c
 	}
 	if c == nil {
 		c = &http.Client{Timeout: timeout}
 	}
 	wrapped := *c
-	wrapped.Transport = authRoundTripper{base: c.Transport, keyFn: keyFn}
+	wrapped.Transport = runtimeKeyRoundTripper{base: c.Transport, keyFn: keyFn, policy: policy}
 	return &wrapped
 }
 
@@ -100,7 +113,7 @@ func withAuthRoundTripper(c *http.Client, timeout time.Duration, keyFn func(ctx 
 // for tests).
 func NewChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (model.BaseChatModel, error) {
 	if cfg.Model == "" {
-		return nil, fmt.Errorf("eino: model is empty")
+		return nil, emptyModelConfigError(false)
 	}
 
 	timeout := opts.Timeout
@@ -121,7 +134,8 @@ func NewChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (
 		apiKey:      cfg.APIKey,
 		model:       cfg.Model,
 		baseURL:     opts.BaseURL,
-		httpClient:  withAuthRoundTripper(opts.HTTPClient, timeout, opts.AuthKeyFunc),
+		httpClient:  opts.HTTPClient,
+		runtimeKey:  opts.runtimeKeyFunc(),
 		timeout:     timeout,
 		maxTokens:   maxCompletionTokens,
 		temperature: resolveTemperature(cfg.Temperature, 0.2),
@@ -141,7 +155,7 @@ func NewChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (
 // providers to reject the tool-call turns.
 func NewToolCallingChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (model.ToolCallingChatModel, error) {
 	if cfg.Model == "" {
-		return nil, fmt.Errorf("eino: model is empty")
+		return nil, emptyModelConfigError(false)
 	}
 
 	timeout := opts.Timeout
@@ -160,7 +174,8 @@ func NewToolCallingChatModel(ctx context.Context, cfg config.AgentAIConfig, opts
 		apiKey:      cfg.APIKey,
 		model:       cfg.Model,
 		baseURL:     opts.BaseURL,
-		httpClient:  withAuthRoundTripper(opts.HTTPClient, timeout, opts.AuthKeyFunc),
+		httpClient:  opts.HTTPClient,
+		runtimeKey:  opts.runtimeKeyFunc(),
 		timeout:     timeout,
 		maxTokens:   maxCompletionTokens,
 		temperature: resolveTemperature(cfg.Temperature, 0.2),

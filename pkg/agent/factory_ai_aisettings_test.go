@@ -1,10 +1,15 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log"
+	"strings"
 	"testing"
 	"time"
 
+	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
@@ -118,5 +123,59 @@ func TestBuildAIsForScopeWithChatLocationUsesProvider(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("location provider calls = %d, want 1", calls)
+	}
+}
+
+func TestAIConstructionFailureLogDoesNotRetainRawProviderCause(t *testing.T) {
+	const secret = "reflected-runtime-secret"
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	for _, task := range []string{"detect", "chat"} {
+		logAIConstructionFailure(task, config.AgentAIConfig{Provider: "gemini", Model: "gemini-test"}, errors.New("status 401: key="+secret+"\r\nforged=true"))
+	}
+	got := output.String()
+	if strings.Contains(got, secret) || strings.Contains(got, "forged=true") {
+		t.Fatalf("construction log retained raw provider cause: %q", got)
+	}
+	for _, field := range []string{`detect agent disabled`, `chat agent disabled`, `provider="gemini"`, `model="gemini-test"`, `class="authentication"`} {
+		if !strings.Contains(got, field) {
+			t.Errorf("construction log %q missing %q", got, field)
+		}
+	}
+}
+
+func TestAIConstructionFailureLogExplainsTrustedConfigurationErrors(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	_, unsupportedErr := einowrap.NewChatModel(context.Background(), config.AgentAIConfig{Provider: "unknown", Model: "model"}, einowrap.Options{})
+	_, emptyModelErr := einowrap.NewChatModel(context.Background(), config.AgentAIConfig{Provider: "openai"}, einowrap.Options{})
+	_, embedderErr := einowrap.NewEmbedder(context.Background(), config.AgentAIConfig{Provider: "claude", Model: "embedding"}, einowrap.Options{})
+	for _, constructionErr := range []error{unsupportedErr, emptyModelErr, embedderErr} {
+		var configErr *einowrap.ConfigError
+		if !errors.As(constructionErr, &configErr) {
+			t.Fatalf("construction error = %T, want *eino.ConfigError", constructionErr)
+		}
+	}
+	logAIConstructionFailure("detect", config.AgentAIConfig{}, unsupportedErr)
+	logAIConstructionFailure("analyze", config.AgentAIConfig{}, emptyModelErr)
+	logAIConstructionFailure("find_runbook", config.AgentAIConfig{}, embedderErr)
+
+	got := output.String()
+	for _, want := range []string{
+		`configuration error: eino: unsupported ai provider "unknown"`,
+		`supported: claude, deepseek, gemini, ollama, openai, qwen`,
+		`configuration error: eino: model is empty`,
+		`unsupported ai provider "claude" for embeddings`,
+		`supported: gemini, ollama, openai`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("construction diagnostics %q missing %q", got, want)
+		}
 	}
 }
