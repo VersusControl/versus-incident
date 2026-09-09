@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
+	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
@@ -151,7 +152,7 @@ func TestAgentToolsPutRejectsInvalidInputsWithBoundedAudit(t *testing.T) {
 	}
 }
 
-func TestAgentToolsetsListReturnsExactlySevenChildFreeCardsInServerOrder(t *testing.T) {
+func TestAgentToolsetsListReturnsExactlyEightChildFreeCardsInServerOrder(t *testing.T) {
 	app, _ := toolAdminApp(t, aitools.Snapshot{})
 	response, err := app.Test(httptest.NewRequest("GET", "/api/admin/agent/toolsets?agent=chat", nil), -1)
 	if err != nil {
@@ -162,7 +163,7 @@ func TestAgentToolsetsListReturnsExactlySevenChildFreeCardsInServerOrder(t *test
 	if err := json.NewDecoder(response.Body).Decode(&rows); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"kubernetes", "source-control", "logs", "metrics", "traces", "find_runbook", "describe_dependencies"}
+	want := []string{"kubernetes", "source-control", "logs", "elasticsearch-logs", "metrics", "traces", "find_runbook", "describe_dependencies"}
 	if len(rows) != len(want) {
 		t.Fatalf("rows = %d, want %d", len(rows), len(want))
 	}
@@ -207,14 +208,52 @@ func TestAgentToolsetsFailClosedPermissionNewerPolicyAndCatalogCount(t *testing.
 	}
 	for _, row := range rows {
 		switch row.ID {
-		case "kubernetes":
+		case "kubernetes", "elasticsearch-logs":
 			if row.State != aitools.StateNeedsPermission {
-				t.Fatalf("Kubernetes state=%s reason=%q", row.State, row.Reason)
+				t.Fatalf("%s state=%s reason=%q", row.ID, row.State, row.Reason)
 			}
 		case "versus-core":
 			if row.ChildCount != versusCount {
 				t.Fatalf("versus child count=%d want=%d", row.ChildCount, versusCount)
 			}
+		}
+	}
+}
+
+func TestAgentToolsetsExposeElasticsearchOnlyWithInfrastructurePermission(t *testing.T) {
+	for _, allowed := range []bool{false, true} {
+		app := fiber.New()
+		app.Use(func(ctx *fiber.Ctx) error {
+			middleware.MarkAuthorized(ctx)
+			middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), allowed)
+			return ctx.Next()
+		})
+		snapshot := aitools.Snapshot{DataSources: map[string]aitools.DependencyStatus{"elasticsearch": {Configured: true, Healthy: true}}}
+		NewAgentToolsAdminController(aitools.NewManager(storage.NewMemory()), func(tenancy.OrgScope) aitools.Snapshot { return snapshot }).Register(app.Group("/api"))
+		response, err := app.Test(httptest.NewRequest("GET", "/api/admin/agent/toolsets?agent=chat", nil), -1)
+		if err != nil || response.StatusCode != fiber.StatusOK {
+			t.Fatalf("allowed=%t status=%v err=%v", allowed, response.StatusCode, err)
+		}
+		var rows []ToolsetAvailability
+		if err := json.NewDecoder(response.Body).Decode(&rows); err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		found := false
+		for _, row := range rows {
+			if row.ID != "elasticsearch-logs" {
+				continue
+			}
+			found = true
+			if allowed && row.State != aitools.StateAvailable {
+				t.Fatalf("authorized state=%s reason=%q", row.State, row.Reason)
+			}
+			if !allowed && row.State != aitools.StateNeedsPermission {
+				t.Fatalf("unauthorized state=%s reason=%q", row.State, row.Reason)
+			}
+		}
+		if !found {
+			t.Fatal("Elasticsearch toolset missing")
 		}
 	}
 }

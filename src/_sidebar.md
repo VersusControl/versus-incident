@@ -100,6 +100,7 @@
   - [Regex](/agent/regex)
 
 - Migration
+  - [v1.4.26](/migration/migration-v1.4.26.md)
   - [v1.4.25](/migration/migration-v1.4.25.md)
   - [v1.4.22](/migration/migration-v1.4.22.md)
   - [v1.4.13](/migration/migration-v1.4.13.md)

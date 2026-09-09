@@ -395,7 +395,7 @@ function ChannelCard({
                   id={`${channel}-${f.name}`}
                   type={f.secret && !showSecret[f.name] ? "password" : "text"}
                   autoComplete="off"
-                  placeholder={f.secret && mf?.set ? "•••• stored — blank keeps it" : ""}
+                  placeholder={f.secret && mf?.set ? "•••• stored" : ""}
                   value={values[f.name] ?? ""}
                   disabled={busy}
                   onChange={(e) =>

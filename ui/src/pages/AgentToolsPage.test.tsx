@@ -16,6 +16,7 @@ const rows: AgentToolsetAvailability[] = [
   { id: "kubernetes", section: "connector", display_name: "Kubernetes", description: "Inspect Kubernetes.", icon_key: "kubernetes", docs_url: "https://docs.versusincident.com/#/agent/tools/kubernetes", ui_path: "/agent/kubernetes", visibility: "always", state: "needs_integration", reason: "Kubernetes is not connected.", action: "/settings?tab=agent", action_label: "Connect Kubernetes", enabled: true, child_count: 9, requirement: { kind: "integration", integration: "kubernetes" } },
   { id: "source-control", section: "connector", display_name: "Source control", description: "Read recent changes.", icon_key: "git", docs_url: "https://docs.versusincident.com/#/agent/tools/recent-changes", visibility: "always", state: "needs_integration", reason: "GitHub is not connected.", action: "/settings?tab=agent", action_label: "Connect GitHub", enabled: true, child_count: 1, requirement: { kind: "integration", integration: "github" } },
   { id: "logs", section: "datasource", display_name: "Logs", description: "Read bounded logs.", icon_key: "logs", docs_url: "https://docs.versusincident.com/#/agent/data-sources", ui_path: "/agent/logs", visibility: "always", state: "available", reason: "Log tools are available.", action: "/settings?tab=agent", action_label: "Add a data source", enabled: true, child_count: 1, requirement: { kind: "datasource", signal_kind: "logs" } },
+  { id: "elasticsearch-logs", section: "datasource", display_name: "Elasticsearch", description: "Discover mappings and shard health, and search bounded data in configured log indices.", icon_key: "elasticsearch", docs_url: "https://docs.versusincident.com/#/agent/data-sources", ui_path: "/agent/logs", visibility: "always", state: "available", reason: "Elasticsearch tools are available.", action: "/settings?tab=agent", action_label: "Add a data source", enabled: true, child_count: 4, requirement: { kind: "datasource", signal_kind: "elasticsearch" } },
   { id: "metrics", section: "datasource", display_name: "Metrics", description: "Summarize metrics.", icon_key: "metrics", docs_url: "https://docs.versusincident.com/#/agent/data-sources/prometheus", ui_path: "/agent/metrics", visibility: "always", state: "needs_license", reason: "Metric tools need an Enterprise source.", action: "https://versuscontrol.com/enterprise", action_label: "Learn more", enabled: true, child_count: 1, requirement: { kind: "datasource", signal_kind: "metrics" } },
   { id: "traces", section: "datasource", display_name: "Traces", description: "Inspect traces.", icon_key: "traces", docs_url: "https://docs.versusincident.com/#/agent/data-sources/traces", ui_path: "/agent/traces", visibility: "always", state: "available", reason: "Trace tools are available.", action: "/settings?tab=agent", action_label: "Add a data source", enabled: true, child_count: 1, requirement: { kind: "datasource", signal_kind: "traces" } },
   { id: "find_runbook", section: "common", display_name: "Find runbook", description: "Search runbooks.", icon_key: "runbook", docs_url: "https://docs.versusincident.com/#/agent/tools/find-runbook", ui_path: "/agent/runbooks", visibility: "always", state: "needs_capability", reason: "Runbook indexing is not configured.", action: "/admin#agent-ai-settings", action_label: "AI settings", enabled: true, child_count: 1, requirement: { kind: "capability" } },
@@ -37,8 +38,7 @@ const config = {
 
 const providerDocs = {
   File: "https://docs.versusincident.com/#/agent/data-sources/file",
-  Elasticsearch: "https://docs.versusincident.com/#/agent/data-sources/elasticsearch",
-  Loki: "https://docs.versusincident.com/#/agent/data-sources/loki",
+    Loki: "https://docs.versusincident.com/#/agent/data-sources/loki",
   "CloudWatch Logs": "https://docs.versusincident.com/#/agent/data-sources/cloudwatch-logs",
   Graylog: "https://docs.versusincident.com/#/agent/data-sources/graylog",
   Splunk: "https://docs.versusincident.com/#/agent/data-sources/splunk",
@@ -64,7 +64,33 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 describe("AgentToolsPage", () => {
-  it("renders twelve provider aliases and hides the three generic datasource owners", async () => {
+  it("renders one Elasticsearch datasource card with the dedicated asset", async () => {
+    renderPage();
+    const heading = await screen.findByRole("heading", { name: "Elasticsearch" });
+    const card = heading.closest("article");
+    const icon = card?.querySelector('img[src="/elasticsearch.svg"]');
+    expect(icon?.getAttribute("width")).toBe("24");
+    expect(icon?.getAttribute("height")).toBe("24");
+    expect(icon?.getAttribute("aria-hidden")).toBe("true");
+    expect(card?.querySelector("svg.tool-brand-icon")).toBeNull();
+    expect(screen.getAllByRole("heading", { name: /Elasticsearch/ })).toHaveLength(1);
+
+    const fileLogsCard = screen.getByRole("heading", { name: "File" }).closest("article");
+    expect(fileLogsCard?.querySelector('img[src="/elasticsearch.svg"]')).toBeNull();
+    expect(fileLogsCard?.querySelector("svg.tool-brand-icon")).toBeTruthy();
+  });
+
+  it("keeps the Elasticsearch asset off generic file logs", async () => {
+    renderPage();
+    const elasticsearchHeading = await screen.findByRole("heading", { name: "Elasticsearch" });
+    expect(elasticsearchHeading.closest("article")?.querySelector('img[src="/elasticsearch.svg"]')).toBeTruthy();
+
+    const fileLogsCard = screen.getByRole("heading", { name: "File" }).closest("article");
+    expect(fileLogsCard?.querySelector('img[src="/elasticsearch.svg"]')).toBeNull();
+    expect(fileLogsCard?.querySelector("svg.tool-brand-icon")).toBeTruthy();
+  });
+
+  it("renders one Elasticsearch card and hides the generic datasource owners", async () => {
     renderPage();
     expect(screen.getByLabelText("Loading tools")).toBeTruthy();
     await screen.findByText("Kubernetes");
@@ -72,11 +98,12 @@ describe("AgentToolsPage", () => {
     expect(screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)).toEqual(["Connectors", "Data Source Tools", "Common"]);
     const datasourceSection = document.querySelector('[aria-labelledby="tools-datasource"]') as HTMLElement;
     expect(within(datasourceSection).getAllByRole("article")).toHaveLength(12);
-    expect(within(datasourceSection).queryByRole("heading", { name: "Logs", exact: true })).toBeNull();
-    expect(within(datasourceSection).queryByRole("heading", { name: "Metrics", exact: true })).toBeNull();
-    expect(within(datasourceSection).queryByRole("heading", { name: "Traces", exact: true })).toBeNull();
+    expect(within(datasourceSection).queryByRole("heading", { name: "Logs" })).toBeNull();
+    expect(within(datasourceSection).queryByRole("heading", { name: "Metrics" })).toBeNull();
+    expect(within(datasourceSection).queryByRole("heading", { name: "Traces" })).toBeNull();
+    expect(within(datasourceSection).getByRole("heading", { name: "Elasticsearch" })).toBeTruthy();
     for (const provider of Object.keys(providerDocs)) {
-      expect(within(datasourceSection).getByRole("heading", { name: provider, exact: true })).toBeTruthy();
+      expect(within(datasourceSection).getByRole("heading", { name: provider })).toBeTruthy();
     }
     expect(document.querySelectorAll(".md\\:grid-cols-2")).toHaveLength(3);
     expect(document.querySelectorAll(".xl\\:grid-cols-3")).toHaveLength(3);
@@ -103,11 +130,11 @@ describe("AgentToolsPage", () => {
     renderPage();
     await screen.findByText("Kubernetes");
     expect(screen.getAllByRole("link", { name: /^Open / }).map((link) => link.getAttribute("href"))).toEqual([
-      "/agent/kubernetes", "/agent/logs", "/agent/logs", "/agent/traces", "/agent/runbooks",
+      "/agent/kubernetes", "/agent/logs", "/agent/logs", "/agent/logs", "/agent/traces", "/agent/runbooks",
     ]);
     expect(screen.getAllByRole("button", { name: / settings$/ })).toHaveLength(16);
     expect(screen.queryByRole("link", { name: /documentation/i })).toBeNull();
-    expect(screen.getByText("Elasticsearch").closest("article")?.textContent).toContain("Data source needed");
+    expect(screen.getByText("Elasticsearch").closest("article")?.textContent).toContain("Ready");
     expect(screen.getByText("CloudWatch Logs").closest("article")?.querySelector('a[href="/agent/logs"]')).toBeNull();
     expect(screen.getByText("Prometheus").closest("article")?.querySelector('a[href="/agent/metrics"]')).toBeNull();
     expect(screen.getByText("SigNoz Traces").closest("article")?.querySelector('a[href="/agent/traces"]')).toBeNull();
@@ -254,21 +281,62 @@ describe("AgentToolsPage", () => {
     await waitFor(() => expect(api.setAgentToolsetEnabled).toHaveBeenCalledWith("chat", "logs", false));
   });
 
-  it("disables policy toggles for unconfigured providers even when the shared base is available", async () => {
+  it("uses the server-owned Elasticsearch state, reason, and policy toggle", async () => {
     renderPage();
     await screen.findByText("Elasticsearch");
     fireEvent.click(screen.getByRole("button", { name: "Elasticsearch settings" }));
     const dialog = screen.getByRole("dialog", { name: "Elasticsearch" });
+    const checkbox = within(dialog).getByRole("checkbox", { name: "Enable Elasticsearch for chat" }) as HTMLInputElement;
+    expect(checkbox.disabled).toBe(false);
+    expect(dialog.textContent).toContain("Elasticsearch tools are available.");
+    expect(dialog.textContent).toContain("Discover mappings and shard health");
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(api.setAgentToolsetEnabled).toHaveBeenCalledWith("chat", "elasticsearch-logs", false));
+  });
+
+  it("uses the single Elasticsearch card for an Elasticsearch-only config", async () => {
+    vi.mocked(api.getAgentConfig).mockResolvedValueOnce({
+      ...config,
+      sources: [{ name: "Production Elasticsearch", type: "elasticsearch", enable: true }],
+    });
+    renderPage();
+
+    const dedicatedCard = (await screen.findByRole("heading", { name: "Elasticsearch" })).closest("article") as HTMLElement;
+    expect(dedicatedCard.textContent).toContain("Ready");
+
+    fireEvent.click(within(dedicatedCard).getByRole("button", { name: "Elasticsearch settings" }));
+    const dialog = screen.getByRole("dialog", { name: "Elasticsearch" });
+    const dedicatedToggle = within(dialog).getByRole("checkbox", { name: "Enable Elasticsearch for chat" }) as HTMLInputElement;
+    expect(dedicatedToggle.disabled).toBe(false);
+    expect(dedicatedToggle.checked).toBe(true);
+    expect(dialog.textContent).toContain("Discover mappings and shard health");
+    fireEvent.click(dedicatedToggle);
+    await waitFor(() => expect(api.setAgentToolsetEnabled).toHaveBeenCalledWith("chat", "elasticsearch-logs", false));
+  });
+
+  it("keeps the server-owned Elasticsearch permission state authoritative", async () => {
+    vi.mocked(api.listAgentToolsets).mockResolvedValueOnce(rows.map((row) =>
+      row.id === "elasticsearch-logs"
+        ? { ...row, state: "needs_permission", reason: "Elasticsearch access is not permitted." }
+        : row,
+    ));
+    renderPage();
+    await screen.findByText("Elasticsearch");
+    expect(screen.getByText("Elasticsearch").closest("article")?.textContent).toContain("No access");
+    expect(screen.queryByRole("link", { name: "Open Elasticsearch" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Elasticsearch settings" }));
+    const dialog = screen.getByRole("dialog", { name: "Elasticsearch" });
+    expect(dialog.textContent).toContain("Elasticsearch access is not permitted.");
     expect((within(dialog).getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
-    expect(dialog.textContent).toContain("Elasticsearch is not configured.");
   });
 
   it("uses neutral shared status when source configuration cannot be queried", async () => {
     vi.mocked(api.getAgentConfig).mockRejectedValueOnce(new Error("config unavailable"));
     renderPage();
     await screen.findByText("File");
-    expect(screen.getAllByText("Shared status unknown")).toHaveLength(9);
+    expect(screen.getAllByText("Shared status unknown")).toHaveLength(8);
     expect(screen.getAllByText("Enterprise")).toHaveLength(3);
+    expect(screen.getByText("Elasticsearch").closest("article")?.textContent).toContain("Ready");
     expect(screen.getByText("File").closest("article")?.querySelector('a[href="/agent/logs"]')).toBeNull();
     expect(screen.getByText("Grafana Tempo").closest("article")?.querySelector('a[href="/agent/traces"]')).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "File settings" }));

@@ -29,6 +29,7 @@ func (nonTailingSource) Pull(context.Context, time.Time) ([]core.Signal, time.Ti
 func TestApplyTailReplaySpan_AddsThePersistIntervalToEveryTail(t *testing.T) {
 	es, err := NewElasticsearchSource("es", config.AgentElasticsearchSourceConfig{
 		Addresses:     []string{"http://localhost:9200"},
+		AllowLoopback: true,
 		Index:         "logs-*",
 		ReorderWindow: "10s",
 	})

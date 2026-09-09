@@ -22,10 +22,12 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/router"
 	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
+	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
 	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	elasticsearchapp "github.com/VersusControl/versus-incident/pkg/elasticsearch"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	"github.com/VersusControl/versus-incident/pkg/runbook"
 	"github.com/VersusControl/versus-incident/pkg/signalsources"
@@ -105,6 +107,11 @@ func BuildAIsForScopeWithChatLocationAndKubernetes(cfg config.AgentConfig, catal
 func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location, kubernetesService *kubernetes.Service) AIBundle {
 	toolSettings := aitools.NewManager(store)
 	configuredToolSnapshot := configuredToolAvailabilitySnapshot(cfg, store)
+	elasticsearchSources, elasticsearchErrs := buildElasticsearchToolSources(cfg.Sources)
+	for _, err := range elasticsearchErrs {
+		log.Printf("agent: Elasticsearch tool source warning: %v", err)
+	}
+	configuredToolSnapshot.DataSources["elasticsearch"] = elasticsearchConstructionStatus(configuredToolSnapshot.DataSources["elasticsearch"], elasticsearchSources, elasticsearchErrs)
 	var kubernetesErr error
 	if kubernetesService == nil {
 		kubernetesService, kubernetesErr = NewKubernetesService(cfg.Tools.Kubernetes, scope)
@@ -190,6 +197,9 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		for _, e := range redactErrs {
 			log.Printf("agent: analyze reader redactor warning: %v", e)
 		}
+		for _, source := range elasticsearchSources {
+			source.Service.SetScrubber(redactor)
+		}
 		if kubernetesService != nil {
 			kubernetesService.SetScrubber(redactor)
 		}
@@ -247,6 +257,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		traces := newTraceReaderAdapter(cfg.Tools.QueryTraces.Tempo)
 
 		runtimeTools = buildAnalyzeTools(store, scope, newCatalogAdapterWithThreshold(catalog, cfg.Catalog.AutoPromoteAfter), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher, metrics, traces, detectionHealth)
+		runtimeTools = append(runtimeTools, elasticsearchtools.New(elasticsearchSources)...)
 		runtimeTools = append(runtimeTools, k8stools.New(kubernetesService)...)
 		toolSnapshot = func(requestScope tenancy.OrgScope) aitools.Snapshot {
 			return buildToolAvailabilitySnapshot(configuredToolSnapshot, reader, graph, changes, embedder, runbookSearcher, metrics, traces, detectionHealth.DetectionHealth(requestScope))
@@ -469,9 +480,10 @@ func configuredToolAvailabilitySnapshot(cfg config.AgentConfig, store storage.Pr
 	}
 	return aitools.Snapshot{
 		DataSources: map[string]aitools.DependencyStatus{
-			"logs":    configured(configuredSignals[signalsources.KindLogs], "Log data source"),
-			"metrics": metrics,
-			"traces":  traces,
+			"logs":          configured(configuredSignals[signalsources.KindLogs], "Log data source"),
+			"elasticsearch": configured(hasEnabledElasticsearch(cfg.Sources), "Elasticsearch log source"),
+			"metrics":       metrics,
+			"traces":        traces,
 		},
 		Integrations: map[string]aitools.DependencyStatus{"github": configured(hasGit, "GitHub"), "kubernetes": configured(strings.TrimSpace(cfg.Tools.Kubernetes.Endpoint) != "" || strings.TrimSpace(cfg.Tools.Kubernetes.Auth.Mode) != "", "Kubernetes cluster")},
 		Capabilities: map[string]aitools.DependencyStatus{
@@ -504,7 +516,7 @@ func buildToolAvailabilitySnapshot(configured aitools.Snapshot, reader commontoo
 	}
 	return aitools.Snapshot{
 		DataSources: map[string]aitools.DependencyStatus{
-			"logs": dataSource("logs", configured.DataSources["logs"], reader != nil), "metrics": dataSource("metrics", configured.DataSources["metrics"], metrics != nil), "traces": dataSource("traces", configured.DataSources["traces"], traces != nil),
+			"logs": dataSource("logs", configured.DataSources["logs"], reader != nil), "elasticsearch": configured.DataSources["elasticsearch"], "metrics": dataSource("metrics", configured.DataSources["metrics"], metrics != nil), "traces": dataSource("traces", configured.DataSources["traces"], traces != nil),
 		},
 		Integrations: map[string]aitools.DependencyStatus{
 			"github": resolved(configured.Integrations["github"], changes != nil), "kubernetes": resolved(configured.Integrations["kubernetes"], configured.Integrations["kubernetes"].Configured && configured.Integrations["kubernetes"].Healthy),
@@ -513,6 +525,56 @@ func buildToolAvailabilitySnapshot(configured aitools.Snapshot, reader commontoo
 			"ai_embedder": resolved(configured.Capabilities["ai_embedder"], embedder != nil), "runbook_index": resolved(configured.Capabilities["runbook_index"], runbooks != nil), "dependency_graph": resolved(configured.Capabilities["dependency_graph"], graph != nil && graph.Len() > 0),
 		},
 	}
+}
+
+func hasEnabledElasticsearch(sources []config.AgentSourceConfig) bool {
+	for _, source := range sources {
+		if source.Enable && source.Type == "elasticsearch" {
+			return true
+		}
+	}
+	return false
+}
+
+func buildElasticsearchToolSources(sources []config.AgentSourceConfig) ([]elasticsearchtools.Source, []error) {
+	result := make([]elasticsearchtools.Source, 0)
+	errs := make([]error, 0)
+	seen := make(map[string]struct{})
+	for _, source := range sources {
+		if !source.Enable || source.Type != "elasticsearch" {
+			continue
+		}
+		name := strings.TrimSpace(source.Name)
+		if name == "" {
+			errs = append(errs, fmt.Errorf("Elasticsearch tool source name is required"))
+			continue
+		}
+		if _, duplicate := seen[name]; duplicate {
+			errs = append(errs, fmt.Errorf("Elasticsearch tool source %q is duplicated", boundAvailabilityText(name, 80)))
+			continue
+		}
+		seen[name] = struct{}{}
+		service, err := elasticsearchapp.NewService(source.Elasticsearch)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("Elasticsearch tool source %q has invalid configuration", boundAvailabilityText(name, 80)))
+			continue
+		}
+		result = append(result, elasticsearchtools.Source{Name: name, Service: service})
+	}
+	if len(errs) > 0 {
+		return nil, errs
+	}
+	slices.SortFunc(result, func(left, right elasticsearchtools.Source) int { return strings.Compare(left.Name, right.Name) })
+	return result, errs
+}
+
+func elasticsearchConstructionStatus(status aitools.DependencyStatus, sources []elasticsearchtools.Source, errs []error) aitools.DependencyStatus {
+	status.Constructed = status.Configured && len(errs) == 0 && len(sources) > 0
+	status.Healthy = status.Constructed
+	if status.Configured && !status.Constructed {
+		status.Health = "configuration"
+	}
+	return status
 }
 
 func sourceKindHealth(snapshot versustools.DetectionHealthSnapshot, kind string) (bool, bool, string, string) {

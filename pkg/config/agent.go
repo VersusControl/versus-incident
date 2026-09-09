@@ -209,8 +209,10 @@ type AgentElasticsearchSourceConfig struct {
 	Password           string   `mapstructure:"password"`
 	APIKey             string   `mapstructure:"api_key"`
 	InsecureSkipVerify bool     `mapstructure:"insecure_skip_verify"`
+	AllowLoopback      bool     `mapstructure:"allow_loopback"`
 	Index              string   `mapstructure:"index"`
 	TimeField          string   `mapstructure:"time_field"`
+	TieBreakerField    string   `mapstructure:"tie_breaker_field"`
 	Query              string   `mapstructure:"query"` // Lucene-style query string
 	MessageField       string   `mapstructure:"message_field"`
 	SeverityField      string   `mapstructure:"severity_field"`

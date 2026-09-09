@@ -170,6 +170,7 @@ func TestServicePersistsUserAndAssistantTurns(t *testing.T) {
 }
 
 func TestServicePersistsActionableModelResponseFailure(t *testing.T) {
+	discardExpectedLogs(t)
 	service, id := newTestService(t, unavailableModelRunner{})
 	if _, err := service.Send(context.Background(), id, "what changed?", nil); !errors.Is(err, errModelResponseUnavailable) {
 		t.Fatalf("Send error = %v, want model response unavailable", err)
@@ -188,6 +189,7 @@ func TestServicePersistsActionableModelResponseFailure(t *testing.T) {
 }
 
 func TestServicePersistsSafeModelResponseDetail(t *testing.T) {
+	discardExpectedLogs(t)
 	service, id := newTestService(t, detailedUnavailableModelRunner{})
 	if _, err := service.Send(context.Background(), id, "what changed?", nil); !errors.Is(err, errModelResponseUnavailable) {
 		t.Fatalf("Send error = %v, want model response unavailable", err)
@@ -207,6 +209,7 @@ func TestServicePersistsSafeModelResponseDetail(t *testing.T) {
 }
 
 func TestServicePersistsTemperatureOmissionGuidance(t *testing.T) {
+	discardExpectedLogs(t)
 	service, id := newTestService(t, deprecatedTemperatureRunner{})
 	if _, err := service.Send(context.Background(), id, "what changed?", nil); !errors.Is(err, errModelResponseUnavailable) {
 		t.Fatalf("Send error = %v, want model response unavailable", err)
@@ -456,6 +459,7 @@ func TestServiceOverallTimeoutReleasesSession(t *testing.T) {
 }
 
 func TestServiceRecoversDetachedPanicAndNilResult(t *testing.T) {
+	discardExpectedLogs(t)
 	for _, runner := range []TurnRunner{panicRunner{}, nilRunner{}} {
 		service, id := newTestService(t, runner)
 		outcomes, err := service.Start(context.Background(), id, "run", nil)

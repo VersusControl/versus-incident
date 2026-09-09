@@ -579,7 +579,7 @@ function ConnectionEditor({
               type={showSecret ? "text" : "password"}
               autoComplete="off"
               placeholder={
-                view?.client_secret_set ? "•••• stored — blank keeps it" : "client secret"
+                view?.client_secret_set ? "•••• stored" : "client secret"
               }
               value={secretInput}
               disabled={busy}

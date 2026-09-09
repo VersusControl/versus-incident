@@ -11,26 +11,25 @@
 package signalsources
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
+	"math"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	elasticsearchapp "github.com/VersusControl/versus-incident/pkg/elasticsearch"
 )
 
 // ElasticsearchSource pulls log documents from one or more Elasticsearch
 // addresses using the `_search` API with a `range` filter on the configured
-// time field. It uses sort-by-time + `search_after` for stable pagination.
+// time field. It uses time plus a configured doc-values tie breaker and
+// `search_after` for stable pagination.
 //
 // This intentionally avoids the official ES client to keep the dependency
 // surface small. The set of features used (basic auth, API-key auth,
@@ -49,9 +48,10 @@ import (
 // its backend so a restart resumes on both halves of the position rather than
 // replaying the window.
 type ElasticsearchSource struct {
-	name   string
-	cfg    config.AgentElasticsearchSourceConfig
-	client *http.Client
+	name            string
+	cfg             config.AgentElasticsearchSourceConfig
+	client          *elasticsearchapp.Client
+	projectedFields []string
 
 	// reorderWindow is how far below the cursor each tick re-scans (inclusive)
 	// to catch out-of-order / late-indexed docs. Documents indexed more than
@@ -83,7 +83,13 @@ type ElasticsearchSource struct {
 // minute comfortably covers Elasticsearch's default ~1s refresh lag plus minor
 // clock skew and bursty ingestion, while keeping the per-tick re-scan and dedup
 // set small.
-const defaultESReorderWindow = time.Minute
+const (
+	defaultESReorderWindow = time.Minute
+	maximumESPageSize      = 1000
+	maximumESPullItems     = 10000
+	maximumESPullBytes     = 8 << 20
+	maximumESScanItems     = defaultTailDedupMax
+)
 
 // NewElasticsearchSource validates config and returns a ready source.
 func NewElasticsearchSource(name string, cfg config.AgentElasticsearchSourceConfig) (*ElasticsearchSource, error) {
@@ -102,6 +108,9 @@ func NewElasticsearchSource(name string, cfg config.AgentElasticsearchSourceConf
 	if cfg.PageSize <= 0 {
 		cfg.PageSize = 500
 	}
+	if cfg.PageSize > maximumESPageSize {
+		cfg.PageSize = maximumESPageSize
+	}
 
 	reorderWindow := defaultESReorderWindow
 	if cfg.ReorderWindow != "" {
@@ -110,14 +119,16 @@ func NewElasticsearchSource(name string, cfg config.AgentElasticsearchSourceConf
 		}
 	}
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify},
+	service, err := elasticsearchapp.NewService(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("elasticsearch source %q: %w", name, err)
 	}
 	src := &ElasticsearchSource{
-		name:          name,
-		cfg:           cfg,
-		client:        &http.Client{Transport: tr, Timeout: 30 * time.Second},
-		reorderWindow: reorderWindow,
+		name:            name,
+		cfg:             service.Config(),
+		client:          service.Client(),
+		projectedFields: service.ProjectedFields(),
+		reorderWindow:   reorderWindow,
 	}
 	src.dedup = NewTailDedup(src.Name())
 	return src, nil
@@ -215,39 +226,89 @@ func (s *ElasticsearchSource) Pull(ctx context.Context, since time.Time) ([]core
 	// document the query returned.
 	var seen []DedupRow
 	var searchAfter []interface{}
+	var previousTuple *esPaginationTuple
+	seenTies := make(map[string]struct{})
+	acceptedBytes := 0
+	emittedItems := 0
+	scannedItems := 0
+	scanBudgetExhausted := false
+	effectivePageSize := s.cfg.PageSize
 
-	// Cap total iterations so a misconfigured query can't loop forever.
-	const maxPages = 20
+	// Cap scanned hits separately from emitted rows. Replayed dedup hits do not
+	// consume the delivery budgets, so a later tick can cross the retained
+	// same-timestamp prefix and reach unseen rows without an unbounded scan.
+	maxPages := maximumESScanItems
+pageLoop:
 	for page := 0; page < maxPages; page++ {
-		body, err := s.buildQuery(lower, now, searchAfter)
-		if err != nil {
-			return signals, cursor, err
-		}
-		resp, err := s.doSearch(ctx, body)
-		if err != nil {
-			return signals, cursor, err
+		var resp *esSearchResponse
+		for {
+			body, err := s.buildQueryPage(lower, now, searchAfter, effectivePageSize)
+			if err != nil {
+				return signals, cursor, err
+			}
+			resp, err = s.doSearch(ctx, body)
+			if !errors.Is(err, elasticsearchapp.ErrResponseTooLarge) {
+				if err != nil {
+					return signals, cursor, err
+				}
+				break
+			}
+			if effectivePageSize == 1 {
+				return signals, cursor, fmt.Errorf("elasticsearch source %q: one projected document exceeds the 8 MiB response limit; tail cannot advance: %w", s.name, err)
+			}
+			effectivePageSize = max(1, effectivePageSize/2)
 		}
 		hits := resp.Hits.Hits
 		if len(hits) == 0 {
 			break
 		}
+		validatedTuple, validationErr := s.validatePaginationPage(hits, previousTuple, seenTies)
+		if validationErr != nil {
+			return nil, since, validationErr
+		}
+		previousTuple = validatedTuple
 		for _, h := range hits {
+			if scannedItems >= maximumESScanItems {
+				scanBudgetExhausted = true
+				break pageLoop
+			}
+			scannedItems++
+			if s.dedup.Has(h.ID) {
+				continue
+			}
+			if emittedItems >= maximumESPullItems {
+				break pageLoop
+			}
+			encoded, encodeErr := json.Marshal(h.Source)
+			if encodeErr != nil {
+				return signals, ClampCursor(cursor, since, now), elasticsearchapp.ErrResponseTooLarge
+			}
+			if acceptedBytes+len(encoded) > maximumESPullBytes {
+				break pageLoop
+			}
 			sig, ok := s.signalFromHit(h)
 			if !ok {
 				continue
 			}
+			acceptedBytes += len(encoded)
+			emittedItems++
 			if sig.Timestamp.After(cursor) {
 				cursor = sig.Timestamp
 			}
 			seen = append(seen, DedupRow{ID: h.ID, TS: sig.Timestamp})
-			if s.dedup.Has(h.ID) {
-				// Already delivered on a previous tick — the inclusive
-				// re-scan pulled it back; skip so it isn't learned twice.
-				continue
-			}
 			signals = append(signals, sig)
 		}
-		if len(hits) < s.cfg.PageSize {
+		if emittedItems >= maximumESPullItems {
+			break
+		}
+		if scannedItems >= maximumESScanItems {
+			scanBudgetExhausted = true
+			break
+		}
+		if len(hits) < effectivePageSize {
+			break
+		}
+		if page == maxPages-1 {
 			break
 		}
 		searchAfter = hits[len(hits)-1].Sort
@@ -266,6 +327,9 @@ func (s *ElasticsearchSource) Pull(ctx context.Context, since time.Time) ([]core
 	// lower bound — one reorder window below the cursor the tick started from —
 	// so the set covers whichever cursor turns out to be the durable one.
 	s.dedup.Stage(seen, lower)
+	if scanBudgetExhausted && len(signals) == 0 {
+		return nil, since, fmt.Errorf("elasticsearch source %q: scanned %d documents without reaching an unseen row; increase tie_breaker_field selectivity or narrow query/reorder_window", s.name, maximumESScanItems)
+	}
 
 	return signals, cursor, nil
 }
@@ -313,7 +377,47 @@ type esHit struct {
 	Sort   []interface{}          `json:"sort,omitempty"`
 }
 
+type esPaginationTuple struct {
+	timestamp time.Time
+	tie       string
+}
+
+func (s *ElasticsearchSource) validatePaginationPage(hits []esHit, previous *esPaginationTuple, seenTies map[string]struct{}) (*esPaginationTuple, error) {
+	for _, hit := range hits {
+		if len(hit.Sort) != 2 {
+			return nil, s.paginationTupleError()
+		}
+		sortTimestamp, sortTimestampOK := parseElasticsearchTime(hit.Sort[0])
+		sortTie, sortTieOK := hit.Sort[1].(string)
+		sourceTieValue, sourceTieFound := lookupField(hit.Source, s.cfg.TieBreakerField)
+		sourceTie, sourceTieOK := sourceTieValue.(string)
+		if !sortTimestampOK || !sortTieOK || strings.TrimSpace(sortTie) == "" ||
+			!sourceTieFound || !sourceTieOK || strings.TrimSpace(sourceTie) == "" || sourceTie != sortTie {
+			return nil, s.paginationTupleError()
+		}
+		if _, duplicate := seenTies[sortTie]; duplicate {
+			return nil, s.paginationTupleError()
+		}
+		current := &esPaginationTuple{timestamp: sortTimestamp, tie: sortTie}
+		if previous != nil && (!current.timestamp.After(previous.timestamp) &&
+			(!current.timestamp.Equal(previous.timestamp) || current.tie <= previous.tie)) {
+			return nil, s.paginationTupleError()
+		}
+		seenTies[sortTie] = struct{}{}
+		previous = current
+	}
+	return previous, nil
+}
+
+func (s *ElasticsearchSource) paginationTupleError() error {
+	return fmt.Errorf("elasticsearch source %q: invalid pagination ordering for tie_breaker_field %q; configure a non-empty unique keyword field with doc-values whose value is present in _source and returned as sort[1]", s.name, s.cfg.TieBreakerField)
+}
+
 func (s *ElasticsearchSource) buildQuery(lower, upper time.Time, searchAfter []interface{}) ([]byte, error) {
+	return s.buildQueryPage(lower, upper, searchAfter, s.cfg.PageSize)
+}
+
+func (s *ElasticsearchSource) buildQueryPage(lower, upper time.Time, searchAfter []interface{}, pageSize int) ([]byte, error) {
 	rangeFilter := map[string]interface{}{
 		s.cfg.TimeField: map[string]interface{}{
 			"gte":    lower.UTC().Format(time.RFC3339Nano),
@@ -332,9 +436,11 @@ func (s *ElasticsearchSource) buildQuery(lower, upper time.Time, searchAfter []i
 	}
 
 	body := map[string]interface{}{
-		"size": s.cfg.PageSize,
+		"size":    pageSize,
+		"_source": s.projectedFields,
 		"sort": []interface{}{
 			map[string]interface{}{s.cfg.TimeField: map[string]interface{}{"order": "asc"}},
+			map[string]interface{}{s.cfg.TieBreakerField: map[string]interface{}{"order": "asc"}},
 		},
 		"query": map[string]interface{}{
 			"bool": map[string]interface{}{"must": must},
@@ -347,57 +453,11 @@ func (s *ElasticsearchSource) buildQuery(lower, upper time.Time, searchAfter []i
 }
 
 func (s *ElasticsearchSource) doSearch(ctx context.Context, body []byte) (*esSearchResponse, error) {
-	var lastErr error
-	for _, addr := range s.cfg.Addresses {
-		u := strings.TrimRight(addr, "/") + "/" + s.cfg.Index + "/_search"
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-		s.applyAuth(req)
-
-		resp, err := s.client.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		data, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if resp.StatusCode >= 400 {
-			lastErr = fmt.Errorf("elasticsearch %s: %d %s", u, resp.StatusCode, truncate(string(data), 256))
-			continue
-		}
-		var out esSearchResponse
-		if err := json.Unmarshal(data, &out); err != nil {
-			lastErr = fmt.Errorf("decode elasticsearch response: %w", err)
-			continue
-		}
-		return &out, nil
+	var out esSearchResponse
+	if err := s.client.SearchIngestJSON(ctx, body, &out); err != nil {
+		return nil, err
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no elasticsearch addresses configured")
-	}
-	return nil, lastErr
-}
-
-func (s *ElasticsearchSource) applyAuth(req *http.Request) {
-	if s.cfg.APIKey != "" {
-		req.Header.Set("Authorization", "ApiKey "+s.cfg.APIKey)
-		return
-	}
-	if s.cfg.Username != "" {
-		token := base64.StdEncoding.EncodeToString(
-			[]byte(s.cfg.Username + ":" + s.cfg.Password),
-		)
-		req.Header.Set("Authorization", "Basic "+token)
-	}
+	return &out, nil
 }
 
 // signalFromHit maps an _source document to a core.Signal. It returns false
@@ -418,13 +478,19 @@ func (s *ElasticsearchSource) signalFromHit(h esHit) (core.Signal, bool) {
 			fields[f] = v
 		}
 	}
+	projected := make(map[string]interface{})
+	for _, field := range s.projectedFields {
+		if value, found := lookupField(h.Source, field); found {
+			projected[field] = value
+		}
+	}
 	return core.Signal{
 		Source:    s.Name(),
 		Timestamp: ts,
 		Severity:  sev,
 		Message:   msg,
 		Fields:    fields,
-		Raw:       h.Source,
+		Raw:       projected,
 	}, true
 }
 
@@ -485,17 +551,24 @@ func extractTime(src map[string]interface{}, field string) (time.Time, bool) {
 	if !ok {
 		return time.Time{}, false
 	}
-	switch t := v.(type) {
+	return parseElasticsearchTime(v)
+}
+
+func parseElasticsearchTime(value interface{}) (time.Time, bool) {
+	switch typed := value.(type) {
 	case string:
 		// Try a couple of common ES formats.
 		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.000Z"} {
-			if ts, err := time.Parse(layout, t); err == nil {
+			if ts, err := time.Parse(layout, typed); err == nil {
 				return ts.UTC(), true
 			}
 		}
 	case float64:
 		// epoch millis
-		return time.UnixMilli(int64(t)).UTC(), true
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || typed != math.Trunc(typed) || typed < math.MinInt64 || typed >= math.MaxInt64 {
+			return time.Time{}, false
+		}
+		return time.UnixMilli(int64(typed)).UTC(), true
 	}
 	return time.Time{}, false
 }

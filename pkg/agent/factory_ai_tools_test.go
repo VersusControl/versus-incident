@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
+	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
 	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -247,6 +249,102 @@ func TestConfiguredReadersResolveAndRegisterWithoutWorkerObservations(t *testing
 			}
 		})
 	}
+}
+
+func TestElasticsearchToolSourcesAreSourceDrivenAndDeterministic(t *testing.T) {
+	valid := func(name string) config.AgentSourceConfig {
+		return config.AgentSourceConfig{Name: name, Type: "elasticsearch", Enable: true, Elasticsearch: config.AgentElasticsearchSourceConfig{Addresses: []string{"http://localhost:9200"}, AllowLoopback: true, Index: name + "-*"}}
+	}
+	tests := []struct {
+		name       string
+		sources    []config.AgentSourceConfig
+		wantNames  []string
+		wantErrors int
+		configured bool
+	}{
+		{name: "absent"},
+		{name: "other log source", sources: []config.AgentSourceConfig{{Name: "file", Type: "file", Enable: true}}},
+		{name: "disabled", sources: []config.AgentSourceConfig{{Name: "disabled", Type: "elasticsearch", Enable: false}}},
+		{name: "invalid", sources: []config.AgentSourceConfig{{Name: "invalid", Type: "elasticsearch", Enable: true}}, wantErrors: 1, configured: true},
+		{name: "single", sources: []config.AgentSourceConfig{valid("primary")}, wantNames: []string{"primary"}, configured: true},
+		{name: "multiple sorted", sources: []config.AgentSourceConfig{valid("zeta"), valid("alpha")}, wantNames: []string{"alpha", "zeta"}, configured: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			built, errs := buildElasticsearchToolSources(test.sources)
+			if len(errs) != test.wantErrors {
+				t.Fatalf("errors = %d, want %d", len(errs), test.wantErrors)
+			}
+			names := make([]string, 0, len(built))
+			for _, source := range built {
+				names = append(names, source.Name)
+			}
+			wantNames := test.wantNames
+			if wantNames == nil {
+				wantNames = []string{}
+			}
+			if !reflect.DeepEqual(names, wantNames) {
+				t.Fatalf("source names = %v, want %v", names, test.wantNames)
+			}
+			snapshot := configuredToolAvailabilitySnapshot(config.AgentConfig{Sources: test.sources}, nil)
+			if snapshot.DataSources["elasticsearch"].Configured != test.configured {
+				t.Fatalf("configured = %t, want %t", snapshot.DataSources["elasticsearch"].Configured, test.configured)
+			}
+			tools := elasticsearchtools.New(built)
+			wantTools := 0
+			if len(test.wantNames) > 0 {
+				wantTools = 4
+			}
+			if got, want := len(tools), wantTools; got != want {
+				t.Fatalf("tool count = %d, want %d", got, want)
+			}
+		})
+	}
+}
+
+func TestElasticsearchCatalogRequirementDoesNotUnlockForOtherLogs(t *testing.T) {
+	configured := configuredToolAvailabilitySnapshot(config.AgentConfig{Sources: []config.AgentSourceConfig{{Name: "file", Type: "file", Enable: true}}}, nil)
+	configured.DataSources["logs"] = aitools.DependencyStatus{Configured: true, Constructed: true, Healthy: true}
+	view := aitools.NewManager(storage.NewMemory())
+	runtime := []core.Tool{
+		settingsCompatibleTool{name: "get_related_logs"},
+		settingsCompatibleTool{name: "list_log_indices"},
+	}
+	filtered, err := view.Filter(tenancy.DefaultOrgScope(), aitools.AgentAnalyze, runtime, configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 1 || filtered[0].Name() != "get_related_logs" {
+		t.Fatalf("filtered tools = %v", toolNamesForTest(filtered))
+	}
+}
+
+func TestElasticsearchConstructionFailsClosedAndReadinessIsConfigurationBased(t *testing.T) {
+	valid := config.AgentSourceConfig{Name: "valid", Type: "elasticsearch", Enable: true, Elasticsearch: config.AgentElasticsearchSourceConfig{Addresses: []string{"http://localhost:9200"}, AllowLoopback: true, Index: "logs-*"}}
+	invalid := config.AgentSourceConfig{Name: "invalid", Type: "elasticsearch", Enable: true}
+	built, errs := buildElasticsearchToolSources([]config.AgentSourceConfig{valid, invalid})
+	if len(errs) != 1 || len(built) != 0 {
+		t.Fatalf("partial construction built=%v errors=%v", built, errs)
+	}
+	configured := configuredToolAvailabilitySnapshot(config.AgentConfig{Sources: []config.AgentSourceConfig{valid, invalid}}, nil).DataSources["elasticsearch"]
+	status := elasticsearchConstructionStatus(configured, built, errs)
+	if !status.Configured || status.Constructed || status.Healthy || status.Health != "configuration" {
+		t.Fatalf("partial construction status = %+v", status)
+	}
+
+	built, errs = buildElasticsearchToolSources([]config.AgentSourceConfig{valid})
+	status = elasticsearchConstructionStatus(configured, built, errs)
+	if !status.Constructed || !status.Healthy || status.Health != "" {
+		t.Fatalf("complete construction status = %+v", status)
+	}
+}
+
+func toolNamesForTest(tools []core.Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name())
+	}
+	return names
 }
 
 type registrationMetricReader struct{}

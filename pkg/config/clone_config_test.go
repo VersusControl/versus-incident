@@ -128,10 +128,12 @@ func TestCloneConfigCarriesElasticsearchReorderWindow(t *testing.T) {
 			Name: "prod",
 			Type: "elasticsearch",
 			Elasticsearch: AgentElasticsearchSourceConfig{
-				Addresses:     []string{"http://es:9200"},
-				Index:         "logs-*",
-				ExtraFields:   []string{"error.stack_trace"},
-				ReorderWindow: "90s",
+				Addresses:       []string{"http://es:9200"},
+				AllowLoopback:   true,
+				Index:           "logs-*",
+				TieBreakerField: "event.sequence",
+				ExtraFields:     []string{"error.stack_trace"},
+				ReorderWindow:   "90s",
 			},
 		},
 	}
@@ -145,10 +147,14 @@ func TestCloneConfigCarriesElasticsearchReorderWindow(t *testing.T) {
 
 	// Mutating the clone must not touch the source (deep copy, no shared slices).
 	dst.Agent.Sources[0].Elasticsearch.ReorderWindow = "mutated"
+	dst.Agent.Sources[0].Elasticsearch.TieBreakerField = "mutated"
 	dst.Agent.Sources[0].Elasticsearch.Addresses[0] = "http://mutated:9200"
 	dst.Agent.Sources[0].Elasticsearch.ExtraFields[0] = "mutated"
 	if src.Agent.Sources[0].Elasticsearch.ReorderWindow != "90s" {
 		t.Error("clone shares reorder_window with the source")
+	}
+	if src.Agent.Sources[0].Elasticsearch.TieBreakerField != "event.sequence" {
+		t.Error("clone omitted or shares tie_breaker_field with the source")
 	}
 	if src.Agent.Sources[0].Elasticsearch.Addresses[0] != "http://es:9200" {
 		t.Error("clone shares the Addresses slice with the source")

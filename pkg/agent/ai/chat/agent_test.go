@@ -1,11 +1,9 @@
 package chat
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +17,7 @@ import (
 )
 
 func TestModelResponseDiagnosticClassifiesWithoutLeakingProviderBody(t *testing.T) {
+	discardExpectedLogs(t)
 	tests := []struct {
 		name    string
 		failure string
@@ -51,10 +50,7 @@ func TestModelResponseDiagnosticClassifiesWithoutLeakingProviderBody(t *testing.
 }
 
 func TestModelResponseDiagnosticLogsOnlySafeClassification(t *testing.T) {
-	var output bytes.Buffer
-	originalWriter := log.Writer()
-	log.SetOutput(&output)
-	t.Cleanup(func() { log.SetOutput(originalWriter) })
+	output := captureExpectedLogs(t)
 
 	failure := "HTTP 401 reflected sk-runtime-secret\r\nforged=true"
 	_ = newModelResponseError("claude", "claude-sonnet-5", errors.New(failure))
@@ -137,6 +133,7 @@ func TestAgentResolvesKubernetesAuthorizationForEveryTurn(t *testing.T) {
 		agent := &Agent{tools: []core.Tool{
 			namedTool{name: "counting"},
 			namedTool{name: "get_cluster_overview"},
+			namedTool{name: "list_log_indices"},
 		}}
 		for index, allowed := range permissions {
 			ctx := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{
@@ -151,7 +148,7 @@ func TestAgentResolvesKubernetesAuthorizationForEveryTurn(t *testing.T) {
 			}
 			want := []string{"counting"}
 			if allowed {
-				want = append(want, "get_cluster_overview")
+				want = append(want, "get_cluster_overview", "list_log_indices")
 			}
 			got := make([]string, 0, len(available))
 			for _, tool := range available {
