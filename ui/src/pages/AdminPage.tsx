@@ -21,7 +21,7 @@ export function AdminPage() {
     <>
       <TopBar
         title="Admin"
-        subtitle="Enterprise configuration — runtime mode, AI, SSO access, and members"
+        subtitle="Enterprise configuration"
       />
       <main className="flex-1 overflow-auto p-6">
         {/* Runtime mode control (Enterprise; RBAC runtime:manage). Reads its own

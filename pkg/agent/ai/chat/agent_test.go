@@ -1,11 +1,9 @@
 package chat
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +17,7 @@ import (
 )
 
 func TestModelResponseDiagnosticClassifiesWithoutLeakingProviderBody(t *testing.T) {
+	discardExpectedLogs(t)
 	tests := []struct {
 		name    string
 		failure string
@@ -51,10 +50,7 @@ func TestModelResponseDiagnosticClassifiesWithoutLeakingProviderBody(t *testing.
 }
 
 func TestModelResponseDiagnosticLogsOnlySafeClassification(t *testing.T) {
-	var output bytes.Buffer
-	originalWriter := log.Writer()
-	log.SetOutput(&output)
-	t.Cleanup(func() { log.SetOutput(originalWriter) })
+	output := captureExpectedLogs(t)
 
 	failure := "HTTP 401 reflected sk-runtime-secret\r\nforged=true"
 	_ = newModelResponseError("claude", "claude-sonnet-5", errors.New(failure))

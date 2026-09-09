@@ -268,10 +268,7 @@ function SettingsBody({
       {/* Model provider — a change rebuilds the model at runtime (no restart) */}
       <div>
         <label className="field-label" htmlFor="ai-provider">
-          Model provider{" "}
-          <span className="font-normal text-ink-400">
-            (enter the matching key below when you switch)
-          </span>
+          Model provider
         </label>
         <select
           id="ai-provider"
@@ -331,7 +328,7 @@ function SettingsBody({
             id="ai-api-key"
             type={showKey ? "text" : "password"}
             autoComplete="off"
-            placeholder={view.key_set ? "•••• stored — blank keeps it" : "sk-…"}
+            placeholder={view.key_set ? "•••• stored" : "sk-…"}
             value={keyInput}
             disabled={busy}
             onChange={(e) => setKeyInput(e.target.value)}

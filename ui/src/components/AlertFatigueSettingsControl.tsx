@@ -477,7 +477,7 @@ function FatigueChannelBody({
                     type={f.secret && !revealed ? "password" : "text"}
                     autoComplete="off"
                     placeholder={
-                      f.secret && stored?.set ? "•••• stored — blank keeps it" : ""
+                      f.secret && stored?.set ? "•••• stored" : ""
                     }
                     value={values[f.name] ?? ""}
                     disabled={busy}
