@@ -11,7 +11,7 @@ require (
 	github.com/cloudwego/eino-ext/components/embedding/ollama v0.0.0-20260616080858-ab17b7308bf8
 	github.com/cloudwego/eino-ext/components/model/claude v0.1.22
 	github.com/cloudwego/eino-ext/components/model/deepseek v0.1.6
-	github.com/cloudwego/eino-ext/components/model/gemini v0.1.33
+	github.com/cloudwego/eino-ext/components/model/gemini v0.1.35
 	github.com/cloudwego/eino-ext/components/model/ollama v0.1.9
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 	github.com/cloudwego/eino-ext/components/model/qwen v0.1.9
@@ -24,7 +24,7 @@ require (
 	github.com/spf13/viper v1.21.0
 	golang.org/x/image v0.45.0
 	golang.org/x/time v0.15.0
-	google.golang.org/genai v1.63.0
+	google.golang.org/genai v1.70.0
 )
 
 require github.com/googleapis/gax-go/v2 v2.17.0 // indirect
