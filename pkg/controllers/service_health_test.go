@@ -104,9 +104,14 @@ func TestServiceHealthSettingsBoundsConflictAndPermission(t *testing.T) {
 func TestServiceHealthSnapshotIsOrgIsolated(t *testing.T) {
 	store := storage.NewMemory()
 	manager := servicehealth.NewManager(store)
+	generatedAt := time.Now().UTC()
 	for _, org := range []string{"org-a", "org-b"} {
-		if err := manager.SaveSnapshot(org, servicehealth.SnapshotEnvelope{SnapshotID: org, GeneratedAt: time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC), SettingsRevision: 0, Services: []servicehealth.ServiceSnapshot{{OrgID: org, Service: org}}}); err != nil {
+		if err := manager.SaveSnapshot(org, servicehealth.SnapshotEnvelope{SnapshotID: org, GeneratedAt: generatedAt, SettingsRevision: 0, Services: []servicehealth.ServiceSnapshot{{OrgID: org, Service: org}}}); err != nil {
 			t.Fatal(err)
+		}
+		stored, ok, err := manager.LoadSnapshot(org)
+		if err != nil || !ok || stored.SnapshotID != org {
+			t.Fatalf("stored snapshot for %q = id %q, found %t, err %v", org, stored.SnapshotID, ok, err)
 		}
 	}
 	app := fiber.New(fiber.Config{Immutable: true})
@@ -119,7 +124,7 @@ func TestServiceHealthSnapshotIsOrgIsolated(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(envelope.Services) != 1 || envelope.Services[0].OrgID != "org-a" {
-		t.Fatalf("envelope = %#v", envelope)
+		t.Fatalf("snapshot id %q services = %#v, want one org-a service", envelope.SnapshotID, envelope.Services)
 	}
 	body, err := json.Marshal(envelope)
 	if err != nil {
