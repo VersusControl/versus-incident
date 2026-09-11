@@ -1,6 +1,9 @@
 package signalsources
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 // -----------------------------------------------------------------------------
 // Data-source KIND taxonomy.
@@ -12,12 +15,12 @@ import "sync"
 // metrics/traces learn-all by default), and future per-kind UI grouping or
 // routing.
 //
-// This registry mirrors Register / RegisterTypedBrain: OSS registers the six
+// This registry mirrors Register / RegisterTypedBrain: OSS registers the seven
 // built-in LOG types from init() below; the enterprise module registers its
 // metric (`prometheus`) and trace (`traces`) types through the SAME seam from
 // its own init() — the established one-way direction (enterprise → OSS). OSS
-// never imports enterprise. Any unregistered/unknown type defaults to KindLogs
-// so behaviour is identical to before this taxonomy existed.
+// never imports enterprise. Unregistered types resolve to KindUnknown so callers
+// cannot silently treat an unknown source family as logs.
 // -----------------------------------------------------------------------------
 
 // Kind is the family a signal-source type belongs to. The string values match
@@ -26,6 +29,7 @@ import "sync"
 type Kind string
 
 const (
+	KindUnknown Kind = "unknown"
 	KindLogs    Kind = "logs"
 	KindMetrics Kind = "metrics"
 	KindTraces  Kind = "traces"
@@ -56,16 +60,21 @@ func RegisterKind(sourceType string, kind Kind) {
 	kindRegistry[sourceType] = kind
 }
 
-// KindOf returns the registered KIND for a source type, or KindLogs when the
-// type is unknown/unregistered. The log default keeps any unrecognised type
-// behaving exactly as it did before the taxonomy existed.
+// KindOf returns the registered KIND for a source type, or KindUnknown when the
+// type is unknown or unregistered.
 func KindOf(sourceType string) Kind {
 	kindRegistryMu.RLock()
 	defer kindRegistryMu.RUnlock()
 	if k, ok := kindRegistry[sourceType]; ok {
 		return k
 	}
-	return KindLogs
+	return KindUnknown
+}
+
+// MatchesConfiguredName relates an adapter's stable runtime ID (commonly
+// "type:name") to its configured instance name without guessing its kind.
+func MatchesConfiguredName(sourceID, configuredName string) bool {
+	return sourceID == configuredName || configuredName != "" && strings.HasSuffix(sourceID, ":"+configuredName)
 }
 
 // init registers the built-in OSS log source types. The type strings match

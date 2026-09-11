@@ -45,9 +45,11 @@ func adminGatewayGuard(c *fiber.Ctx) error {
 }
 
 func grantCommunityPermissions(c *fiber.Ctx) {
-	permission := string(core.PermissionInfrastructureView)
-	if _, explicit := middleware.RequestPermission(c, permission); !explicit {
-		middleware.SetRequestPermission(c, permission, true)
+	for _, permission := range []core.Permission{core.PermissionInfrastructureView, core.PermissionServiceHealthSettingsWrite} {
+		name := string(permission)
+		if _, explicit := middleware.RequestPermission(c, name); !explicit {
+			middleware.SetRequestPermission(c, name, true)
+		}
 	}
 }
 

@@ -2026,6 +2026,88 @@ export interface KubernetesWorkload {
   partial_failures?: Array<{ resource_id?: string; class: string }>;
 }
 
+export type ServiceHealthState =
+  | "ready"
+  | "partial"
+  | "not_configured"
+  | "collecting"
+  | "no_data"
+  | "unsupported"
+  | "error"
+  | "stale"
+  | "restricted";
+
+export interface ServiceHealthAvailability {
+  state: ServiceHealthState;
+  reason_code?: string;
+  action_id?: string;
+}
+
+export interface ServiceHealthLogEvidence {
+  service: string;
+  source_id: string;
+  matched_logs: number;
+  unique_patterns: number;
+  new_patterns: number;
+  unknown_patterns: number;
+  spiking_patterns: number;
+  severity_counts: Record<string, number>;
+  latest_observation?: string;
+  estimated: boolean;
+}
+
+export interface ServiceHealthService {
+  org_id: string;
+  service: string;
+  domain: string;
+  kind: string;
+  severity: string;
+  assessment_basis: string;
+  logs: ServiceHealthLogEvidence;
+  availability: Record<string, ServiceHealthAvailability>;
+  active_incidents: number | null;
+}
+
+export interface ServiceHealthDomain {
+  name: string;
+  severity: string;
+  service_count: number;
+  observed_count: number;
+  affected_count: number;
+}
+
+export interface ServiceHealthCapability {
+  family: string;
+  measures: Record<string, ServiceHealthAvailability>;
+}
+
+export interface ServiceHealthSettings {
+  interval_seconds: number;
+  window_seconds: number;
+  revision: number;
+  diagnostic?: string;
+}
+
+export interface ServiceHealthSnapshot {
+  snapshot_id: string;
+  generated_at: string;
+  latest_attempt: string;
+  latest_success?: string;
+  next_collection_at: string;
+  settings_revision: number;
+  window_seconds: number;
+  services: ServiceHealthService[];
+  domains: ServiceHealthDomain[];
+  facets: Record<string, number>;
+  coverage: {
+    total_services: number;
+    observed_services: number;
+    partial: boolean;
+  };
+  capabilities: ServiceHealthCapability[];
+  pending_settings?: ServiceHealthSettings;
+}
+
 export const api = {
   listAgentTools: (agent: AgentToolKind) =>
     request<AgentToolAvailability[]>(`/api/admin/agent/tools?agent=${agent}`),
@@ -2585,6 +2667,19 @@ export const api = {
     request<{ services: Record<string, ServiceInfo> }>(
       "/api/agent/services",
     ).then((r) => r.services ?? {}),
+  getServiceHealth: () =>
+    request<ServiceHealthSnapshot>("/api/agent/service-health"),
+  getServiceHealthSettings: () =>
+    request<ServiceHealthSettings>("/api/agent/service-health/settings"),
+  updateServiceHealthSettings: (settings: ServiceHealthSettings) =>
+    request<ServiceHealthSettings>("/api/agent/service-health/settings", {
+      method: "PATCH",
+      body: JSON.stringify({
+        interval_seconds: settings.interval_seconds,
+        window_seconds: settings.window_seconds,
+        revision: settings.revision,
+      }),
+    }),
   // listServicesIndex is the Services-page variant: it returns one bounded page
   // of services (the back-compat name→facts MAP) PLUS the whole-set total in a
   // single request. Pass `offset` to load the next chunk; `next_offset` is

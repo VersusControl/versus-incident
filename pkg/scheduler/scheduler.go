@@ -41,6 +41,10 @@ type Job struct {
 	Name string
 	// Interval is the period between runs. Required; must be > 0.
 	Interval time.Duration
+	// ResolveInterval optionally returns the current period before each wait.
+	// Invalid values fall back to Interval. This lets a persisted runtime
+	// setting reschedule one registered job without replacing or duplicating it.
+	ResolveInterval func() time.Duration
 	// Run executes one evaluation. It MUST honour ctx cancellation and MUST
 	// be read-only / analyze-kind (see the package contract). Required.
 	Run func(ctx context.Context) error
@@ -254,17 +258,27 @@ func (s *Scheduler) runJob(ctx context.Context, j Job) {
 		}
 	}
 
-	ticker := time.NewTicker(j.Interval)
-	defer ticker.Stop()
-
 	for {
 		s.invoke(ctx, j)
+		timer := time.NewTimer(j.interval())
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
+}
+
+func (j Job) interval() time.Duration {
+	if j.ResolveInterval != nil {
+		if interval := j.ResolveInterval(); interval > 0 {
+			return interval
+		}
+	}
+	return j.Interval
 }
 
 func (s *Scheduler) jitterFor(j Job) time.Duration {

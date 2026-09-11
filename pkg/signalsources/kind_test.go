@@ -3,8 +3,8 @@ package signalsources
 import "testing"
 
 // TestKindOf_DefaultsAndRegistered verifies the taxonomy lookup: the built-in
-// OSS log types resolve to KindLogs, an unknown type defaults to
-// KindLogs, and types registered through the seam (as the enterprise module
+// OSS log types resolve to KindLogs, an unknown type stays unknown, and types
+// registered through the seam (as the enterprise module
 // does for prometheus/traces) resolve to their declared kind. The enterprise
 // types are registered here in-test to keep this OSS test OSS-only.
 func TestKindOf_DefaultsAndRegistered(t *testing.T) {
@@ -15,10 +15,8 @@ func TestKindOf_DefaultsAndRegistered(t *testing.T) {
 		}
 	}
 
-	// Unknown/unregistered types default to logs (back-compat: behave exactly
-	// as before the taxonomy existed).
-	if got := KindOf("unknown-type"); got != KindLogs {
-		t.Errorf("KindOf(unknown-type) = %q, want %q (default)", got, KindLogs)
+	if got := KindOf("unknown-type"); got != KindUnknown {
+		t.Errorf("KindOf(unknown-type) = %q, want %q", got, KindUnknown)
 	}
 
 	// Enterprise types register through the same seam. Mirror that here.
@@ -29,6 +27,22 @@ func TestKindOf_DefaultsAndRegistered(t *testing.T) {
 	}
 	if got := KindOf("traces"); got != KindTraces {
 		t.Errorf("KindOf(traces) = %q, want %q", got, KindTraces)
+	}
+}
+
+func TestMatchesConfiguredName(t *testing.T) {
+	for _, test := range []struct {
+		sourceID, configured string
+		want                 bool
+	}{
+		{sourceID: "loki:production", configured: "production", want: true},
+		{sourceID: "production", configured: "production", want: true},
+		{sourceID: "loki:other", configured: "production", want: false},
+		{sourceID: "loki:", configured: "", want: false},
+	} {
+		if got := MatchesConfiguredName(test.sourceID, test.configured); got != test.want {
+			t.Errorf("MatchesConfiguredName(%q, %q) = %v, want %v", test.sourceID, test.configured, got, test.want)
+		}
 	}
 }
 

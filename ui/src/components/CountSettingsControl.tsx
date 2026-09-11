@@ -92,7 +92,7 @@ export function CountSettingsControl() {
     <div className="card space-y-4 p-4">
       <div>
         <h3 className="text-sm font-semibold text-ink-100">
-          Incident count window
+          Incident Count Window
           <InfoHint
             label="About the incident count window"
             text="How far back the incident counts look. Applies to the header badge, the Now tiles and the Incidents tabs together, so no two surfaces disagree."

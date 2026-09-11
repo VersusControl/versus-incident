@@ -66,7 +66,7 @@ function sectionLinks(title: string) {
 describe("chat integration policy", () => {
   it("keeps the cold chat page lazy and mounts every canonical DC5 route", () => {
     expect(appSource).toMatch(/lazyPage\(\(\) => import\("\.\/pages\/ChatPage"\)/);
-    expect(appSource).toContain('<Route path="/agent/chat" element={<ChatPage />} />');
+    expect(appSource).toContain('<Route path="/agent/chat" element={<AgentRequiredRoute title="DevOps Agent"><ChatPage /></AgentRequiredRoute>} />');
     expect(appSource).toContain('<Route path="/agent/tools" element={<AgentToolsPage />} />');
     expect(appSource).toContain('<Route path="/agent/runbooks" element={<RunbooksPage />} />');
   });

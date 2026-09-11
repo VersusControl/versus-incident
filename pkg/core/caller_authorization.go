@@ -5,7 +5,10 @@ import "context"
 // Permission is an application capability evaluated for the current caller.
 type Permission string
 
-const PermissionInfrastructureView Permission = "infrastructure:view"
+const (
+	PermissionInfrastructureView         Permission = "infrastructure:view"
+	PermissionServiceHealthSettingsWrite Permission = "service-health:settings:write"
+)
 
 type callerAuthorizationKey struct{}
 

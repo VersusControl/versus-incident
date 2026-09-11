@@ -112,15 +112,15 @@ describe("Decisions Shadow + Spike — a Service column was ADDED (Service first
   });
 });
 
-describe("Agent overview Lifetime totals — Service · Shadow · Detect order", () => {
+describe("Agent overview service-first navigation", () => {
   const src = read("../pages/AgentOverviewPage.tsx");
-  it("orders the Services / Shadow / Detect tiles Service-first", () => {
-    const grid = src.slice(src.indexOf('grid grid-cols-2 gap-3 lg:grid-cols-4"'));
-    const services = grid.indexOf('label="Services tracked"');
-    const shadow = grid.indexOf('label="Shadow events"');
-    const detect = grid.indexOf('label="Detect events"');
+  it("orders Services before Activity and Learning instead of lifetime tiles", () => {
+    const services = src.indexOf('id: "services"');
+    const activity = src.indexOf('id: "activity"');
+    const learning = src.indexOf('id: "learning"');
     expect(services).toBeGreaterThan(-1);
-    expect(services).toBeLessThan(shadow);
-    expect(shadow).toBeLessThan(detect);
+    expect(services).toBeLessThan(activity);
+    expect(activity).toBeLessThan(learning);
+    expect(src.includes("KpiTile")).toBe(false);
   });
 });

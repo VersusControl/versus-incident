@@ -1,0 +1,52 @@
+.heatmap-workspace { padding-top: 12px; }
+.heatmap-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 20px 0 16px;
+}
+.heatmap-toolbar .input { font-size: 12px; min-height: 36px; }
+.heatmap-canvas {
+  display: grid;
+  gap: 22px;
+  padding: 18px;
+  border-radius: 6px;
+  background: rgb(var(--surface));
+  min-height: 180px;
+}
+.heatmap-canvas[data-view="grid"] { grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); align-items: start; }
+.heatmap-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+  gap: 8px;
+}
+.heatmap-list { display: grid; gap: 4px; }
+.heatmap-service {
+  --tile-tone: var(--ink-400);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+  min-height: 152px;
+  padding: 14px;
+  border: 0;
+  border-radius: 4px;
+  text-align: left;
+  color: rgb(var(--ink-100));
+  background: color-mix(in srgb, rgb(var(--tile-tone)) 9%, rgb(var(--surface)));
+  box-shadow: inset 0 3px 0 rgb(var(--tile-tone));
+  transition: background-color 120ms ease;
+}
+.heatmap-service[data-impact="nominal"] { --tile-tone: var(--sev-ok); }
+.heatmap-service[data-impact="pressure"], .heatmap-service[data-impact="creeping"] { --tile-tone: var(--sev-warn); }
+.heatmap-service[data-impact="critical"], .heatmap-service[data-impact="degraded"] { --tile-tone: var(--sev-critical); }
+.heatmap-service:hover { background: color-mix(in srgb, rgb(var(--tile-tone)) 16%, rgb(var(--surface))); }
+.heatmap-service:focus-visible { outline: 2px solid rgb(var(--accent)); outline-offset: 3px; }
+.heatmap-service-row { min-height: 80px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); box-shadow: inset 3px 0 0 rgb(var(--tile-tone)); }
+@media (max-width: 560px) {
+  .heatmap-canvas { padding: 12px; }
+  .heatmap-service-row { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) { .heatmap-service { transition: none; } }
