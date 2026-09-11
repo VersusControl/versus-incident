@@ -389,7 +389,7 @@ export function ServicesPage() {
         title="Services"
         subtitle={total != null ? `${total.toLocaleString()} discovered` : undefined}
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <button
               className="btn btn-primary"
               onClick={() => setShowAdd(true)}

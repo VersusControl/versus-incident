@@ -204,6 +204,35 @@ export function useCountUp(target: number, duration = 350): number {
 }
 
 // ---------------------------------------------------------------------------
+// useIsMobileViewport — tracks the shared mobile breakpoint. Reports desktop
+// when matchMedia is unavailable, so a non-browser render never hides content
+// behind a tab.
+// ---------------------------------------------------------------------------
+export function useIsMobileViewport(): boolean {
+  // Resolved during the first render so a phone never mounts the desktop
+  // layout and fires its queries before the effect corrects it.
+  const [isMobile, setIsMobile] = useState(() => matchesMobileViewport());
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia(MOBILE_VIEWPORT);
+    const update = () => setIsMobile(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  return isMobile;
+}
+
+const MOBILE_VIEWPORT = "(max-width: 1023px)";
+
+function matchesMobileViewport(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  return window.matchMedia(MOBILE_VIEWPORT).matches;
+}
+
+// ---------------------------------------------------------------------------
 // useNowTick — a clock that re-renders the consumer every `intervalMs`.
 // Windowed computations (hourlyBuckets) must anchor on this, not on a
 // Date.now() captured inside a data-keyed useMemo: TanStack structural

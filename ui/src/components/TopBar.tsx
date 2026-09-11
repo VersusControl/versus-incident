@@ -68,10 +68,19 @@ export function TopBar({
 
   return (
     <header
-      className="z-sticky flex h-14 shrink-0 items-center justify-between gap-1.5
-             border-b border-ink-600 bg-surface-sunken px-2 sm:gap-3 sm:px-4 lg:px-6"
+      className={clsx(
+        "z-sticky flex shrink-0 items-center justify-between gap-1.5 border-b border-ink-600 bg-surface-sunken px-2 sm:gap-3 sm:px-4 lg:px-6",
+        actions
+          ? "min-h-14 flex-wrap py-2 sm:h-14 sm:flex-nowrap sm:py-0"
+          : "h-14",
+      )}
     >
-      <div className="flex min-w-0 items-center gap-1.5 sm:gap-3">
+      <div
+        className={clsx(
+          "flex min-w-0 items-center gap-1.5 sm:gap-3",
+          actions && "basis-full sm:basis-auto",
+        )}
+      >
         <button
           aria-label="Open navigation"
           className="rounded-control p-1.5 text-ink-300 hover:bg-ink-700 hover:text-ink-100 lg:hidden"
@@ -79,8 +88,8 @@ export function TopBar({
         >
           <Menu size={18} />
         </button>
-        <div className="flex min-w-0 items-baseline gap-3">
-          <h1 className="shrink-0 whitespace-nowrap text-base font-semibold text-ink-50">{title}</h1>
+        <div className="flex min-w-0 flex-1 items-baseline gap-3">
+          <h1 className="min-w-0 flex-1 break-words text-base font-semibold text-ink-50 sm:flex-none sm:shrink-0 sm:whitespace-nowrap">{title}</h1>
           {subtitle && (
             <span className="hidden truncate text-xs text-ink-300 sm:inline">
               {subtitle}
@@ -89,7 +98,13 @@ export function TopBar({
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-1.5 sm:gap-3">
+      <div
+        data-testid={actions ? "topbar-actions" : undefined}
+        className={clsx(
+          "flex shrink-0 items-center gap-1.5 sm:gap-3",
+          actions && "min-w-0 basis-full flex-wrap justify-end sm:basis-auto sm:flex-nowrap",
+        )}
+      >
         {actions}
         <TopBarIdentity />
         <SignOutButton />

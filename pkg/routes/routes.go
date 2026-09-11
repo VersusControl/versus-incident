@@ -3,12 +3,13 @@ package routes
 import (
 	"github.com/VersusControl/versus-incident/pkg/controllers"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
+	"github.com/VersusControl/versus-incident/pkg/servicehealth"
 	"github.com/VersusControl/versus-incident/pkg/teams"
 
 	"github.com/gofiber/fiber/v2"
 )
 
-func SetupRoutes(app *fiber.App, teamsStore *teams.Store) {
+func SetupRoutes(app *fiber.App, teamsStore *teams.Store, healthManagers ...*servicehealth.Manager) {
 	// Health check endpoint
 	app.Get("/healthz", controllers.HealthCheck)
 
@@ -35,4 +36,9 @@ func SetupRoutes(app *fiber.App, teamsStore *teams.Store) {
 	controllers.NewSpikeAdminController().Register(api)
 	controllers.NewCountSettingsController().Register(api)
 	controllers.NewChatAdminController(nil).Register(api)
+	var healthManager *servicehealth.Manager
+	if len(healthManagers) > 0 {
+		healthManager = healthManagers[0]
+	}
+	controllers.NewServiceHealthController(healthManager).Register(api)
 }

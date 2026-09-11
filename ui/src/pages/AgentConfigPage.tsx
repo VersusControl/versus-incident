@@ -104,7 +104,7 @@ export function AgentConfigPanel() {
 
       <div className="card">
         <div className="card-header">
-          <h2 className="card-title">AI analyzer</h2>
+          <h2 className="card-title">AI</h2>
           <EnablePill enabled={cfg.data.ai.enable} />
         </div>
         <div className="card-body">

@@ -612,7 +612,7 @@ export function ChatPage() {
         >
           <main className="relative min-w-0 overflow-hidden">
             {unavailable ? (
-              <div className="mx-auto mt-16 max-w-lg px-4"><div role="alert" className="rounded-card border border-sev-warn/40 bg-sev-warn/10 p-5"><h2 className="font-semibold text-ink-50">Chat is not enabled</h2><p className="mt-2 text-sm text-ink-300">Enable the AI chat service and model configuration, then retry.</p><button className="btn mt-4" onClick={() => sessionsQ.refetch()}>Retry</button></div></div>
+              <div className="mx-auto mt-16 max-w-lg px-4"><div role="alert" className="rounded-card border border-sev-warn/40 bg-sev-warn/10 p-5"><h2 className="font-semibold text-ink-50">Chat is not enabled</h2><p className="mt-2 text-sm text-ink-300">Enable the AI Agent (AGENT_ENABLE=true) and model configuration, then retry.</p><button className="btn mt-4" onClick={() => sessionsQ.refetch()}>Retry</button></div></div>
             ) : sessionsQ.isError ? (
               <div className="mx-auto mt-12 max-w-lg px-4"><RetryableError error={sessionsQ.error} onRetry={() => sessionsQ.refetch()} retrying={sessionsQ.isFetching} context="Couldn't load chat history" /></div>
             ) : (

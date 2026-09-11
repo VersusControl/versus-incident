@@ -6,6 +6,7 @@ import { SpikeSettingsControl } from "@/components/SpikeSettingsControl";
 import { CountSettingsControl } from "@/components/CountSettingsControl";
 import { IncidentsConfigPanel } from "./IncidentsConfigPage";
 import { AgentConfigPanel } from "./AgentConfigPage";
+import { ServiceHealthSettingsControl } from "@/components/ServiceHealthSettingsControl";
 
 // SettingsPage — the Manage-zone home for the configuration views, grouped by
 // intent into URL-synced tabs (?tab=alerting|agent|tuning) so each view is
@@ -53,6 +54,7 @@ export function SettingsPage() {
           </div>
         ) : (
           <div className="space-y-4">
+            <ServiceHealthSettingsControl />
             <CountSettingsControl />
             <SpikeSettingsControl />
             <ReportSettingsControl />

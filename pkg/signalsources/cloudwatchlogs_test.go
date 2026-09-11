@@ -54,6 +54,7 @@ func TestCloudWatchLogs_SignalFromCWEvent(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected signal, got skip")
 	}
+	assertNormalizedSignal(t, sig, "cloudwatchlogs:test")
 	if sig.Source != "cloudwatchlogs:test" {
 		t.Errorf("unexpected source %q", sig.Source)
 	}
@@ -143,6 +144,7 @@ func TestCloudWatchLogs_Pull(t *testing.T) {
 	if len(signals) != 2 {
 		t.Fatalf("expected 2 signals, got %d", len(signals))
 	}
+	assertNormalizedSignal(t, signals[0], "cloudwatchlogs:test")
 	if signals[0].Message != "ERROR connection refused" {
 		t.Errorf("unexpected message %q", signals[0].Message)
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,7 +67,7 @@ type Worker struct {
 	matchAll *RegexMatcher
 	// kindByName maps an enabled source NAME to its data-source KIND
 	// (signalsources.KindOf(type)). It drives per-kind matcher selection in
-	// matcherForSource; unknown/unregistered types resolve to KindLogs.
+	// matcherForSource; unknown/unregistered types resolve to KindUnknown.
 	kindByName map[string]signalsources.Kind
 	// metricsMatcher / tracesMatcher hold the OPTIONAL top-level per-kind regex
 	// override built from agent.regex.metrics / agent.regex.traces. nil when
@@ -81,6 +82,8 @@ type Worker struct {
 	ai                       AIBundle
 	emitter                  Emitter
 	continueDetectionEpisode DetectionEpisodeRecorder
+	healthRecorder           core.LogHealthRecorder
+	orgID                    string
 
 	pollInterval    time.Duration
 	persistEvery    time.Duration
@@ -130,6 +133,12 @@ type WorkerOptions struct {
 	// finding does not flow through to channels).
 	Emitter                  Emitter
 	ContinueDetectionEpisode DetectionEpisodeRecorder
+	// HealthRecorder receives source-neutral post-grouping log projections.
+	// It never pulls a source or classifies an observation itself.
+	HealthRecorder core.LogHealthRecorder
+	// OrgID is the trusted write organization for worker-produced records.
+	// Empty preserves the single-tenant OSS default.
+	OrgID string
 }
 
 // NewWorker validates options and applies defaults.
@@ -148,6 +157,8 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 		ai:                       opt.AI,
 		emitter:                  opt.Emitter,
 		continueDetectionEpisode: opt.ContinueDetectionEpisode,
+		healthRecorder:           opt.HealthRecorder,
+		orgID:                    storage.NormalizeOrgID(opt.OrgID),
 	}
 
 	if w.miner == nil {
@@ -199,12 +210,19 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 	if pat := opt.Cfg.Regex.Traces; pat != "" {
 		w.tracesMatcher, _ = NewRegexMatcher(config.AgentRegexConfig{DefaultPattern: pat})
 	}
-	w.kindByName = make(map[string]signalsources.Kind, len(opt.Cfg.Sources))
-	for _, s := range opt.Cfg.Sources {
-		if !s.Enable {
-			continue
+	w.kindByName = make(map[string]signalsources.Kind, len(w.sources))
+	for _, configured := range opt.Cfg.Sources {
+		if configured.Enable {
+			w.kindByName[configured.Name] = signalsources.KindOf(configured.Type)
 		}
-		w.kindByName[s.Name] = signalsources.KindOf(s.Type)
+	}
+	for _, source := range w.sources {
+		for _, configured := range opt.Cfg.Sources {
+			if configured.Enable && signalsources.MatchesConfiguredName(source.Name(), configured.Name) {
+				w.kindByName[source.Name()] = signalsources.KindOf(configured.Type)
+				break
+			}
+		}
 	}
 
 	// Resolve per-type brains. In OSS this registers nothing (the log brain is
@@ -442,6 +460,14 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 	since := w.loadCursor(ctx, src.Name())
 
 	signals, newCursor, err := src.Pull(ctx, since)
+	if w.healthRecorder != nil && scheduler.Owns("service-health") && w.sourceKind(src.Name()) == signalsources.KindLogs {
+		if recordErr := w.healthRecorder.RecordSourceHealth(ctx, core.SourceHealthObservation{
+			OrgID: w.orgID, SourceID: src.Name(), AttemptedAt: time.Now().UTC(),
+			Succeeded: err == nil, ErrorClass: sourceHealthErrorClass(err),
+		}); recordErr != nil {
+			log.Printf("agent: recording source health for %s failed: %v", src.Name(), recordErr)
+		}
+	}
 	if w.ai.ObserveSourceHealth != nil {
 		w.ai.ObserveSourceHealth(src.Name(), err, time.Now())
 	}
@@ -604,7 +630,27 @@ func (w *Worker) processSourceBatch(ctx context.Context, src core.SignalSource, 
 		// classify against the pre-fold snapshot and sink. Split into its own
 		// method (with early-returns for grace/known/suppressed) so the
 		// promotion step below always runs, on every path, in every mode.
-		w.handleObservation(ctx, mode, src, o, mean, std, confident, detector, verdicts)
+		verdict, classified, inGrace := w.handleObservation(ctx, mode, src, o, mean, std, confident, detector, verdicts)
+		if w.healthRecorder != nil && scheduler.Owns("service-health") && learner.Kind() == "logs" {
+			projection := core.LogHealthObservation{
+				OrgID: w.orgID, SourceID: src.Name(), Service: o.Service,
+				PatternID: o.Key, ObservedAt: o.Timestamp, Frequency: o.Frequency,
+				StrongestSeverity: o.StrongestSeverity, NewPattern: o.IsNew, InGrace: inGrace,
+				ExpectedRate: mean, ExpectedSpread: std, LifecycleClassified: classified,
+			}
+			if classified {
+				projection.LifecycleClass = verdict.Class.String()
+			}
+			if err := w.healthRecorder.RecordLogHealth(ctx, projection); err != nil {
+				log.Printf("agent: recording log health fold from %s failed: %v", src.Name(), err)
+				if statusErr := w.healthRecorder.RecordSourceHealth(ctx, core.SourceHealthObservation{
+					OrgID: w.orgID, SourceID: src.Name(), AttemptedAt: time.Now().UTC(),
+					Succeeded: false, ErrorClass: "unavailable",
+				}); statusErr != nil {
+					log.Printf("agent: recording degraded health projection for %s failed: %v", src.Name(), statusErr)
+				}
+			}
+		}
 
 		// Auto-promotion runs on the LEARN path, once per folded observation, in
 		// EVERY mode — including training, which never calls Classify. It is
@@ -639,7 +685,7 @@ func (w *Worker) handleObservation(
 	confident bool,
 	detector core.SignalDetector,
 	verdicts map[string]int,
-) {
+) (core.TypedVerdict, bool, bool) {
 	switch mode {
 	case "training":
 		// Pure observation. No verdict, no incident.
@@ -648,6 +694,7 @@ func (w *Worker) handleObservation(
 			log.Printf("%sagent: new pattern %q (source=%s tag=%q) → %q%s",
 				colorGreen, o.Key, src.Name(), w.shadowTag(o), truncateString(o.Signal, 120), colorReset)
 		}
+		return core.TypedVerdict{}, false, false
 
 	case "shadow", "detect":
 		// New-service grace is shared by shadow and detect: shadow is meant
@@ -661,7 +708,7 @@ func (w *Worker) handleObservation(
 				log.Printf("%sagent[%s]: new pattern %q (service=%q in grace, learning only) → %q%s",
 					colorGreen, mode, o.Key, o.Service, truncateString(o.Signal, 120), colorReset)
 			}
-			return
+			return core.TypedVerdict{}, false, true
 		}
 
 		v := detector.Classify(o, mean, std, confident)
@@ -672,14 +719,14 @@ func (w *Worker) handleObservation(
 		// is a no-op for the OSS log brain; it is what lets a metric/trace
 		// brain keep learning a fresh key without firing.
 		if !v.Confident {
-			return
+			return v, true, false
 		}
 		// A known, non-spiking pattern is normal — nothing to surface.
 		if v.Class == core.VerdictKnownPattern {
 			if mode == "detect" {
 				w.recordKnownDetectionContinuation(src.Name(), detector.Kind(), o)
 			}
-			return
+			return v, true, false
 		}
 
 		// Mode-specific sink: shadow records to NDJSON; detect calls
@@ -699,10 +746,41 @@ func (w *Worker) handleObservation(
 			outcome := w.emitDetect(ctx, src.Name(), detector.Kind(), o.Key, o.Signal, o.Service, o.Frequency, o.Samples, v.Class, v.Baseline, v.Score, std, v.Reason, observationSeverity(o))
 			verdicts["emit_"+outcome]++
 		}
+		return v, true, false
 
 	default:
 		log.Printf("agent: unknown mode=%q, treating as training", mode)
 		verdicts["learned"]++
+		return core.TypedVerdict{}, false, false
+	}
+}
+
+func (w *Worker) sourceKind(name string) signalsources.Kind {
+	if kind := w.kindByName[name]; kind != "" {
+		return kind
+	}
+	return signalsources.KindUnknown
+}
+
+func sourceHealthErrorClass(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "timeout"
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "unauthorized"), strings.Contains(message, "authentication"):
+		return "authentication"
+	case strings.Contains(message, "forbidden"), strings.Contains(message, "permission"):
+		return "permission"
+	case strings.Contains(message, "rate limit"), strings.Contains(message, "too many requests"):
+		return "rate_limit"
+	case strings.Contains(message, "connect"), strings.Contains(message, "network"):
+		return "connection"
+	default:
+		return "unavailable"
 	}
 }
 
@@ -975,7 +1053,8 @@ func (w *Worker) shadowTag(o core.Observation) string {
 //     agent.regex.traces (metricsMatcher / tracesMatcher), when set;
 //  2. the per-kind built-in default — match-all for metrics/traces;
 //  3. the global logs matcher (w.matcher) for the logs kind and any
-//     unknown/unregistered type (which KindOf defaults to KindLogs).
+//     unknown/unregistered type. KindOf reports KindUnknown for an unknown
+//     type, which reaches the switch default and uses the logs matcher.
 //
 // Only the log-brain path consults this; metric/trace sources bound to their
 // proper enterprise brain group by fields and never hit it. The per-kind

@@ -46,7 +46,7 @@ func repeatSignals(prefix string, n int) []core.Signal {
 	return out
 }
 
-func newSeamWorker(t *testing.T, mode string, src core.SignalSource, bundle AIBundle, emitter Emitter) *Worker {
+func newSeamWorker(t *testing.T, mode string, src core.SignalSource, bundle AIBundle, emitter Emitter, orgIDs ...string) *Worker {
 	t.Helper()
 	cat, err := LoadCatalog(storage.NewMemory())
 	if err != nil {
@@ -59,6 +59,10 @@ func newSeamWorker(t *testing.T, mode string, src core.SignalSource, bundle AIBu
 	svc, errs := NewServiceMatcher([]string{`service=(\w+)`})
 	if len(errs) > 0 {
 		t.Fatalf("NewServiceMatcher: %v", errs)
+	}
+	orgID := ""
+	if len(orgIDs) > 0 {
+		orgID = orgIDs[0]
 	}
 	w, err := NewWorker(WorkerOptions{
 		Cfg: config.AgentConfig{
@@ -77,6 +81,7 @@ func newSeamWorker(t *testing.T, mode string, src core.SignalSource, bundle AIBu
 		Services: svc,
 		AI:       bundle,
 		Emitter:  emitter,
+		OrgID:    orgID,
 	})
 	if err != nil {
 		t.Fatalf("NewWorker: %v", err)

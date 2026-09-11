@@ -118,6 +118,13 @@ describe("ServicesPage row actions", () => {
     );
   });
 
+  it("does not render Service Health after it moved to Agent Overview", async () => {
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "Services" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Service Health" })).toBeNull();
+  });
+
   it("opens a peek from the per-row eye without navigating", async () => {
     renderPage();
     const eye = await screen.findByLabelText("View service checkout");

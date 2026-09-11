@@ -96,7 +96,7 @@ export function SpikeSettingsControl() {
     <div className="card space-y-4 p-4">
       <div>
         <h3 className="text-sm font-semibold text-ink-100">
-          Spike baseline
+          Spike Baseline
           <InfoHint
             label="About the spike baseline mode"
             text="Which learned baseline a volume spike is scored against. This is the global default; a pattern's own override wins over it."

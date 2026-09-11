@@ -96,7 +96,7 @@ export function ReportSettingsControl() {
     <div className="card space-y-4 p-4">
       <div>
         <h3 className="text-sm font-semibold text-ink-100">
-          Incidents report
+          Incidents Report
           <InfoHint
             label="About the Incidents report"
             text="A shareable analytics dashboard over a time window — incident volume, severity breakdown and trend."

@@ -498,6 +498,7 @@ func TestSigNozSource_ForwardOrderAndCursorAdvance(t *testing.T) {
 	if got := messagesOf(sigs); len(got) != 3 || got[0] != "one" || got[2] != "three" {
 		t.Fatalf("tick1 messages = %v, want [one two three] in forward order", got)
 	}
+	assertNormalizedSignal(t, sigs[0], "signoz:test")
 	if want := base.Add(20 * time.Second); !cursor.Equal(want) {
 		t.Fatalf("tick1 cursor = %v, want %v (max timestamp seen)", cursor, want)
 	}

@@ -57,6 +57,7 @@ func TestFileSource_FromBeginningReadsAllAndAdvances(t *testing.T) {
 	if len(signals) != 3 {
 		t.Fatalf("expected 3 signals, got %d", len(signals))
 	}
+	assertNormalizedSignal(t, signals[0], "file:test")
 	if signals[0].Message != "line one" || signals[2].Message != "line three" {
 		t.Errorf("unexpected messages: %+v", signals)
 	}
