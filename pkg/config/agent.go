@@ -1,5 +1,7 @@
 package config
 
+import "crypto/x509"
+
 // -----------------------------------------------------------------------------
 // Agent mode (AI incident detection)
 // -----------------------------------------------------------------------------
@@ -379,7 +381,7 @@ type AgentSplunkSourceConfig struct {
 // ReorderWindow below the poll cursor with `order: [timestamp asc, id asc]` and
 // de-duplicates on the log row `id`.
 type AgentSignozSourceConfig struct {
-	// Address is the SigNoz base URL, e.g. "http://signoz:8080" (self-hosted,
+	// Address is the SigNoz base URL, e.g. "https://signoz.example.internal" (self-hosted,
 	// the UI/API port) or "https://<region>.signoz.cloud" (Cloud). Required.
 	Address string `mapstructure:"address"`
 	// APIKey is sent as the `SIGNOZ-API-KEY` header. Required. This is the
@@ -389,10 +391,17 @@ type AgentSignozSourceConfig struct {
 	// It is delivered as a header, never as a query parameter, so a SigNoz URL
 	// appearing in a log line or an error string cannot leak it.
 	APIKey string `mapstructure:"api_key"`
-	// InsecureSkipVerify disables TLS certificate verification. DEVELOPMENT
-	// ONLY — it makes the connection trivially interceptable. Leave false
-	// against Cloud and against any self-hosted instance reachable off-host.
+	// InsecureSkipVerify is retained for config compatibility but rejected
+	// because this source always sends credentials. It must remain false.
 	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"`
+	// AllowLoopback permits a loopback destination for local verified-TLS testing.
+	AllowLoopback bool `mapstructure:"allow_loopback"`
+	// RootCAs optionally supplies additional trust roots for programmatic source
+	// construction. It is not loaded from or exposed through operator config.
+	RootCAs *x509.CertPool `mapstructure:"-" json:"-" yaml:"-"`
+	// AllowPrivateNetworks permits RFC1918 and unique-local destinations for
+	// explicitly trusted self-hosted SigNoz deployments.
+	AllowPrivateNetworks bool `mapstructure:"allow_private_networks"`
 	// Query is a SigNoz v5 filter EXPRESSION (the same syntax the Logs
 	// Explorer filter bar takes), e.g.
 	// `severity_text = 'ERROR' AND service.name = 'api'`.

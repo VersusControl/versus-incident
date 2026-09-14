@@ -55,6 +55,9 @@ const (
 // Name implements core.AnalyzeTool.
 func (QueryMetrics) Name() string        { return "query_metrics" }
 func (QueryMetrics) DisplayName() string { return "Checking metrics" }
+func (QueryMetrics) AvailabilityCapability() (string, string, int) {
+	return "query_metrics", "metrics", 1
+}
 
 // Description implements core.AnalyzeTool.
 func (QueryMetrics) Description() string {

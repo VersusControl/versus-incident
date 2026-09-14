@@ -13,8 +13,9 @@ sources:
     type: signoz
     enable: true
     signoz:
-      address: http://signoz:8080
+      address: https://signoz.example.internal
       api_key: ${SIGNOZ_API_KEY}
+      allow_private_networks: true
       query: "severity_text = 'ERROR' AND service.name = 'api'"
       page_size: 500
 ```
@@ -43,13 +44,15 @@ sources:
 
 ```yaml
 signoz:
-  address: http://signoz:8080       # REQUIRED. SigNoz base URL — the UI/API port
-                                    # self-hosted, or https://<region>.signoz.cloud.
+  address: https://signoz.example.internal # REQUIRED final verified HTTPS origin,
+                                           # or https://<region>.signoz.cloud.
   api_key: ${SIGNOZ_API_KEY}        # REQUIRED. Sent as the SIGNOZ-API-KEY header.
                                     # The QUERY key from Settings → API Keys —
-                                    # NOT the signoz-ingestion-key.
+                                    # NOT the signoz-ingestion-key. Minimum 8 bytes.
 
-  insecure_skip_verify: false       # dev only — disables TLS verification.
+  insecure_skip_verify: false       # must remain false when api_key is configured.
+  allow_private_networks: true      # opt in only for trusted RFC1918/ULA self-hosting.
+  allow_loopback: false             # opt in only for verified-TLS localhost testing.
 
   query: "severity_text = 'ERROR'"  # v5 filter EXPRESSION (same syntax as the
                                     # Logs Explorer filter bar). Empty matches
@@ -64,6 +67,15 @@ signoz:
   page_size: 500                    # per-request `limit`; clamped to 1000.
   reorder_window: 2m                # how far below the cursor each tick re-scans.
 ```
+
+SigNoz credentials always require verified HTTPS. Plain HTTP and
+`insecure_skip_verify: true` are rejected, redirects are not followed, and
+ambient `HTTP_PROXY`/`HTTPS_PROXY` settings are ignored. Configure the final
+origin after any redirect. Private and loopback destinations are revalidated
+when the socket connects; private self-hosting requires
+`allow_private_networks: true`, while loopback additionally requires
+`allow_loopback: true`. Metadata, link-local, unspecified, and multicast
+destinations remain blocked under every policy.
 
 ### Addressing attributes
 
@@ -112,13 +124,22 @@ mean; leave it bare otherwise.
   at a different row set.
 - **De-duplication** — rows already delivered are tracked by the log
   row `id` and skipped when the overlapping re-scan pulls them back, so
-  each row is learned once. A row without an `id` falls back to a
-  composite of its timestamp and the first 256 characters of its
-  message.
+  each row is learned once. The exact configured API key is removed from
+  the ID before de-duplication or persistence; an ID equal to the key becomes
+  the stable, non-empty `[REDACTED:SIGNOZ_API_KEY]` marker. A row without an
+  `id` falls back to a composite of its timestamp and the first 256 characters
+  of its already-sanitized message.
 - **Restarts** — both halves of the position are durable: the timestamp
-  in the poll cursor, the `id` set alongside it. A restart resumes with
-  **no duplicates and no dropped rows**. Without Redis both halves are
+  in the poll cursor, the sanitized `id` set alongside it. A restart resumes
+  with **no duplicates and no dropped rows**. Without Redis both halves are
   in-process, and a restart re-reads one reorder window once.
+- **Successful-content sanitization** — before ingestion returns a signal, it
+  removes the exact configured API key from `Message`, `Severity`, nested
+  `Fields` and `Raw` map keys and values, arrays, and de-duplication material.
+  Operators may see `[REDACTED:SIGNOZ_API_KEY]` where that exact value appeared.
+  Query, window, row and byte bounds, timeout, cursor, retry, pagination, and
+  overlap behavior are otherwise preserved; secret-bearing content and IDs are
+  intentionally not preserved byte for byte.
 - **Timestamps** — read from the row envelope, falling back to the
   row's own `timestamp` attribute. SigNoz stamps log timestamps in
   nanoseconds; a bare epoch number is interpreted by magnitude
@@ -127,7 +148,34 @@ mean; leave it bare otherwise.
   (`/api/v5/query_range`), the API key travels as a header and never as
   a query parameter, transient rejections (429 / 5xx / transport
   errors) are retried up to 3 attempts, and a response body is capped
-  at 16 MiB.
+  at 16 MiB. Redirects are deliberately not followed; set `address` to
+  the final verified HTTPS origin reported by the redirect.
+
+## Read-only AI tools
+
+An enabled OSS `signoz` source contributes `discover_log_fields` and
+`read_log_records` to Chat and Analyze. Licensed metric and trace sources add
+`discover_metrics`, `read_metric_series`, `discover_trace_fields`, and
+`read_trace_spans`. These names describe capabilities rather than providers.
+
+Discovery APIs return metadata for the whole SigNoz source and do not accept
+the configured `query` scope. For that reason, any source with a non-empty
+scope contributes only its read tool; source-wide discovery is disabled rather
+than presented as scoped. Read requests always combine model filters with the
+configured source scope.
+
+Interactive reads cap rows at 100 and series at 50. Metric responses separately
+retain the newest 1,000 datapoints per series and 5,000 datapoints total, and
+report `rows`, `metrics`, `series`, or `datapoints` truncation as applicable.
+Discovery returns at most 100 deterministic field keys or values, reports
+`complete: false`, and identifies `discovery_field_keys` or
+`discovery_field_values` when the client applies that bound.
+
+Model-supplied service, operation, severity, metric, aggregation, field and text
+literals reject single quotes, double quotes, backslashes, and control
+characters. This conservative restriction avoids depending on undocumented
+SigNoz filter escape semantics; use the trusted source `query` for
+operator-authored expressions.
 
 ### What `reorder_window` is for
 
@@ -195,10 +243,9 @@ is what this field accepts, and whatever it rejects fails the tick.
 
 ## Limitations
 
-- **No analyze auto-wire.** Configuring a SigNoz source does **not**
-  populate the `query_metrics` / `query_traces`
-  [analyze tools](../tools/tools.md) — those still point at
-  Prometheus / Tempo and are configured by hand. Planned, not shipped.
+- **Generic readers remain separate.** SigNoz capability tools do not enable
+  the generic `query_metrics` or `query_traces` tools. Those still require
+  their Prometheus or Tempo reader configuration.
 - **SigNoz alerts are not ingested.** This is a data source that tails
   logs, not an alert receiver.
 
@@ -206,8 +253,16 @@ is what this field accepts, and whatever it rejects fails the tick.
 
 A runnable stack lives at `examples/docker-compose/signoz/`
 ([on GitHub](https://github.com/VersusControl/versus-incident/tree/main/examples/docker-compose/signoz)) —
-SigNoz plus Versus, every value defaulted so `docker compose up -d`
-works with no configuration.
+SigNoz plus Versus. Set the final verified HTTPS reader origin before starting
+it:
+
+```bash
+export SIGNOZ_READ_ADDRESS=https://signoz.example.com
+docker compose up -d
+```
+
+The internal HTTP service remains available to the bootstrap container and UI;
+Versus uses only `SIGNOZ_READ_ADDRESS` for credentialed reads.
 
 > **It is a heavy stack.** SigNoz brings ClickHouse, ClickHouse Keeper,
 > Postgres and an OTel collector — budget **≥4 GB** of Docker memory.
@@ -223,6 +278,7 @@ them at <http://localhost:3000/api/agent/patterns>.
 | `401` / `403` on every tick | Wrong key type — an **ingestion** key was used instead of a **query** API key, or the key was revoked. |
 | `404` on `/api/v5/query_range` | SigNoz is older than **v0.87.0**; the v5 endpoint does not exist yet. Upgrade. |
 | `400` on every tick | Invalid `query` — test the filter expression in the Logs Explorer first. |
+| `3xx` with “configure the final address” | `address` points at a redirecting ingress or HTTP-to-HTTPS hop. Configure the redirect target directly. |
 | No new entries but logs exist in SigNoz | `query` matches nothing in the current window, or `address` points at the collector (4317/4318) instead of the SigNoz UI/API port. |
 | Severity always empty | `severity_field` (default `severity_text`) is not populated on your rows — point it at the attribute your shipper actually sets. |
 | A burst of repeated signals after a restart | The `id` set is persisted only when Redis is configured. Without it, one `reorder_window` is re-read once per restart. |

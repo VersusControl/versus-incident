@@ -37,8 +37,9 @@ func TestApplyTailReplaySpan_AddsThePersistIntervalToEveryTail(t *testing.T) {
 		t.Fatalf("new elasticsearch source: %v", err)
 	}
 	sz, err := NewSigNozSource("sz", config.AgentSignozSourceConfig{
-		Address:       "http://localhost:8080",
-		APIKey:        "k",
+		Address:       "https://localhost:8080",
+		APIKey:        "test-api-key",
+		AllowLoopback: true,
 		ReorderWindow: "10s",
 	})
 	if err != nil {

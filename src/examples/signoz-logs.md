@@ -40,8 +40,9 @@ sources:
     type: signoz
     enable: true
     signoz:
-      address: ${SIGNOZ_ADDRESS}
+      address: ${SIGNOZ_READ_ADDRESS}
       api_key: ${SIGNOZ_API_KEY}
+      # allow_private_networks: true # intentional RFC1918/ULA self-hosting only
 
       # The same syntax you'd type into the Logs Explorer filter bar. Not
       # LogQL, not PromQL. Leave it empty to read every log in the window;
@@ -101,14 +102,24 @@ If you want to see what it *would* have alerted on before committing, `mode: sha
 docker run -d \
   -p 3000:3000 \
   -v $(pwd)/config:/app/config \
-  -e SIGNOZ_ADDRESS=http://signoz:8080 \
-  -e SIGNOZ_API_KEY=your-minted-key \
+  -e SIGNOZ_READ_ADDRESS=https://signoz.example.com \
+  -e SIGNOZ_API_KEY="$SIGNOZ_API_KEY" \
   -e SLACK_TOKEN=xoxb-your-token \
   -e SLACK_CHANNEL_ID=C01234567 \
   ghcr.io/versuscontrol/versus-incident
 ```
 
-Point `SIGNOZ_ADDRESS` at the SigNoz **query service** — the same host and port that serves the UI, `:8080` on a stock self-hosted install. On Cloud it's your workspace URL.
+Point `SIGNOZ_READ_ADDRESS` at the SigNoz **Query Service** URL, not the OTLP
+collector used to send telemetry into SigNoz. It must be the final,
+non-redirecting HTTPS origin and its certificate must be trusted by the Versus
+runtime. The reader requires TLS 1.2 or newer, rejects
+`insecure_skip_verify: true`, and requires an API key of at least 8 bytes.
+
+Keep `allow_private_networks: true` only when that origin intentionally resolves
+to an RFC1918 or IPv6 unique-local address. For verified-TLS local development,
+use `allow_loopback: true` instead. Neither flag disables certificate
+verification or permits metadata and link-local destinations. SigNoz Cloud uses
+the final HTTPS workspace origin and does not need either network opt-in.
 
 ## Step 5: Check it's actually reading
 

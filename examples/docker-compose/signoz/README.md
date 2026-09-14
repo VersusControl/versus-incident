@@ -59,11 +59,15 @@ cannot push logs-pipeline changes to this collector.
 ## Run
 
 ```bash
+export SIGNOZ_READ_ADDRESS=https://signoz.example.internal
 docker compose up -d
 ```
 
-Everything is `${VAR:-default}`, so this needs zero configuration. First boot
-takes ~1 minute: the ClickHouse schema migration runs before SigNoz starts.
+`SIGNOZ_READ_ADDRESS` must be the final verified HTTPS origin exposed by your
+TLS terminator; the credentialed Versus reader refuses the stack's internal
+plain-HTTP address. Private RFC1918/ULA destinations are explicitly trusted by
+the example source config. First boot takes ~1 minute: the ClickHouse schema
+migration runs before SigNoz starts.
 
 ### The API key
 

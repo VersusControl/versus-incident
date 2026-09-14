@@ -1,16 +1,17 @@
 package signalsources
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	signozapp "github.com/VersusControl/versus-incident/pkg/signoz"
 )
 
 // -----------------------------------------------------------------------------
@@ -32,10 +33,8 @@ import (
 // construction.
 // -----------------------------------------------------------------------------
 
-// SigNozQueryRangePath is the ONLY path this client may ever request. It is a
-// literal, not a template: there is nothing to interpolate and therefore
-// nothing to steer.
-const SigNozQueryRangePath = "/api/v5/query_range"
+// SigNozQueryRangePath is the ONLY path this client may ever request.
+const SigNozQueryRangePath = signozapp.QueryRangePath
 
 // Signal names accepted by `spec.signal` and request types accepted by
 // `requestType` in a v5 query body.
@@ -48,12 +47,6 @@ const (
 	SigNozRequestTypeTimeSeries = "time_series"
 	SigNozRequestTypeScalar     = "scalar"
 )
-
-// sigNozMaxBodyBytes caps how much of a response we will read into memory. A
-// page is bounded (page_size ≤ 1000 rows), so a body larger than this is either
-// a misconfigured query or a hostile/broken endpoint; either way we refuse it
-// rather than letting one tick exhaust the worker's memory.
-const sigNozMaxBodyBytes = 16 << 20 // 16 MiB
 
 // sigNozMaxAttempts bounds how many times one request is issued, including the
 // first. Retries cover transient rejection only (429 / 5xx / transport error);
@@ -156,8 +149,7 @@ type SigNozRawResult struct {
 // SigNozQuerier issues v5 query_range reads against one SigNoz instance.
 type SigNozQuerier struct {
 	address string
-	apiKey  string
-	client  *http.Client
+	client  *signozapp.Client
 
 	// retryBase is the first backoff interval; each further attempt doubles it.
 	// Overridable in tests so retry behaviour can be asserted without sleeping.
@@ -166,8 +158,22 @@ type SigNozQuerier struct {
 	sleep func(time.Duration)
 }
 
+// SigNozNetworkPolicy explicitly trusts local or private destinations while
+// retaining verified HTTPS and connect-time destination checks.
+type SigNozNetworkPolicy struct {
+	AllowLoopback bool
+	AllowPrivate  bool
+	RootCAs       *x509.CertPool
+}
+
 // NewSigNozQuerier validates the endpoint and returns a ready client.
 func NewSigNozQuerier(address, apiKey string, insecureSkipVerify bool) (*SigNozQuerier, error) {
+	return NewSigNozQuerierWithPolicy(address, apiKey, insecureSkipVerify, SigNozNetworkPolicy{})
+}
+
+// NewSigNozQuerierWithPolicy constructs a querier with explicit destination
+// trust. Credentials still require verified HTTPS under every policy.
+func NewSigNozQuerierWithPolicy(address, apiKey string, insecureSkipVerify bool, policy SigNozNetworkPolicy) (*SigNozQuerier, error) {
 	address = strings.TrimRight(strings.TrimSpace(address), "/")
 	if address == "" {
 		return nil, fmt.Errorf("signoz: address is required")
@@ -185,14 +191,13 @@ func NewSigNozQuerier(address, apiKey string, insecureSkipVerify bool) (*SigNozQ
 	if strings.TrimSpace(apiKey) == "" {
 		return nil, fmt.Errorf("signoz: api_key is required")
 	}
-
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureSkipVerify},
+	client, err := signozapp.NewClient(signozapp.Config{Address: address, APIKey: apiKey, InsecureSkipVerify: insecureSkipVerify, AllowLoopback: policy.AllowLoopback, AllowPrivate: policy.AllowPrivate, RootCAs: policy.RootCAs}, signozapp.IngestPolicy())
+	if err != nil {
+		return nil, fmt.Errorf("signoz: %w", err)
 	}
 	return &SigNozQuerier{
 		address:   address,
-		apiKey:    apiKey,
-		client:    &http.Client{Transport: tr, Timeout: 30 * time.Second},
+		client:    client,
 		retryBase: 250 * time.Millisecond,
 	}, nil
 }
@@ -243,35 +248,17 @@ func (q *SigNozQuerier) post(ctx context.Context, body []byte) ([]byte, error) {
 			}
 		}
 
-		// A fresh reader per attempt: the previous attempt consumed the last one.
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("SIGNOZ-API-KEY", q.apiKey)
-
-		resp, err := q.client.Do(req)
+		data, err := q.client.Do(ctx, http.MethodPost, signozapp.QueryRangePath, nil, json.RawMessage(body))
 		if err != nil {
 			lastErr = fmt.Errorf("signoz %s: %w", u, err)
+			if errors.Is(err, signozapp.ErrResponseTooLarge) {
+				return nil, lastErr
+			}
+			var status *signozapp.StatusError
+			if errors.As(err, &status) && !signozapp.Retryable(err) {
+				return nil, lastErr
+			}
 			continue
-		}
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, sigNozMaxBodyBytes))
-		_ = resp.Body.Close()
-		if readErr != nil {
-			lastErr = fmt.Errorf("signoz %s: read response: %w", u, readErr)
-			continue
-		}
-
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			lastErr = fmt.Errorf("signoz %s: %d %q", u, resp.StatusCode, truncate(string(data), 256))
-			continue
-		}
-		if resp.StatusCode >= 400 {
-			// Permanent: a bad filter expression or a rejected key. Retrying
-			// only multiplies the damage.
-			return nil, fmt.Errorf("signoz %s: %d %q", u, resp.StatusCode, truncate(string(data), 256))
 		}
 		return data, nil
 	}

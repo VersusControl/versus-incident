@@ -15,7 +15,8 @@ func TestCatalogIsCompleteOrderedAndUnique(t *testing.T) {
 	wantGroups := []Group{
 		GroupVersus, GroupVersus, GroupVersus, GroupVersus, GroupVersus, GroupVersus,
 		GroupVersus, GroupVersus, GroupVersus, GroupVersus, GroupVersus,
-		GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon,
+		GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon,
+		GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon,
 		GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s,
 	}
 	got := Catalog()
@@ -44,12 +45,18 @@ func TestCatalogDestinationsAreExactAndSafe(t *testing.T) {
 		"get_pattern": {docsVersus, ""}, "list_analyses": {docsVersus, "/analyses"}, "get_alert_decision": {docsVersus, "/agent/decisions"},
 		"list_capabilities": {docsVersus, ""}, "get_detection_health": {docsVersus, ""},
 		"get_related_logs":      {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
+		"discover_log_fields":   {"https://docs.versusincident.com/#/agent/data-sources/signoz", "/agent/logs"},
+		"read_log_records":      {"https://docs.versusincident.com/#/agent/data-sources/signoz", "/agent/logs"},
 		"list_log_indices":      {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
 		"get_log_mappings":      {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
 		"search_logs":           {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
 		"get_log_shards":        {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
 		"query_metrics":         {"https://docs.versusincident.com/#/agent/data-sources/prometheus", "/agent/metrics"},
+		"discover_metrics":      {"https://docs.versusincident.com/#/agent/data-sources/signoz", "/agent/metrics"},
+		"read_metric_series":    {"https://docs.versusincident.com/#/agent/data-sources/signoz", "/agent/metrics"},
 		"query_traces":          {"https://docs.versusincident.com/#/agent/data-sources/traces", "/agent/traces"},
+		"discover_trace_fields": {"https://docs.versusincident.com/#/agent/data-sources/signoz", "/agent/traces"},
+		"read_trace_spans":      {"https://docs.versusincident.com/#/agent/data-sources/signoz", "/agent/traces"},
 		"find_runbook":          {"https://docs.versusincident.com/#/agent/tools/find-runbook", "/agent/runbooks"},
 		"recent_changes":        {"https://docs.versusincident.com/#/agent/tools/recent-changes", ""},
 		"describe_dependencies": {docsTools + "?id=describe_dependencies", ""},
@@ -192,10 +199,10 @@ func TestToolsetsAreExactOrderedAndOwnEveryVisibleTool(t *testing.T) {
 	}{
 		{"kubernetes", SectionConnector, "kubernetes", []string{"get_cluster_overview", "discover_k8s_resources", "query_k8s_resources", "get_k8s_resource", "list_workloads", "get_workload", "list_k8s_events", "get_pod_logs"}},
 		{"source-control", SectionConnector, "git", []string{"recent_changes"}},
-		{"logs", SectionDataSource, "logs", []string{"get_related_logs"}},
+		{"logs", SectionDataSource, "logs", []string{"get_related_logs", "discover_log_fields", "read_log_records"}},
 		{"elasticsearch-logs", SectionDataSource, "elasticsearch", []string{"list_log_indices", "get_log_mappings", "search_logs", "get_log_shards"}},
-		{"metrics", SectionDataSource, "metrics", []string{"query_metrics"}},
-		{"traces", SectionDataSource, "traces", []string{"query_traces"}},
+		{"metrics", SectionDataSource, "metrics", []string{"query_metrics", "discover_metrics", "read_metric_series"}},
+		{"traces", SectionDataSource, "traces", []string{"query_traces", "discover_trace_fields", "read_trace_spans"}},
 		{"find_runbook", SectionCommon, "runbook", []string{"find_runbook"}},
 		{"describe_dependencies", SectionCommon, "dependencies", []string{"describe_dependencies"}},
 	}

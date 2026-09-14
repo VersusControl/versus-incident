@@ -11,6 +11,7 @@ sources:
     signoz:
       address: ${SIGNOZ_ADDRESS}
       api_key: ${SIGNOZ_API_KEY}
+      allow_private_networks: true
       # A v5 filter EXPRESSION (the Logs Explorer filter-bar syntax), not
       # LogQL and not PromQL. Empty matches every log in the window; narrow it
       # with e.g. `severity_text = 'ERROR'` or `service.name = 'checkout'`.

@@ -55,6 +55,9 @@ const (
 // Name implements core.AnalyzeTool.
 func (QueryTraces) Name() string        { return "query_traces" }
 func (QueryTraces) DisplayName() string { return "Checking traces" }
+func (QueryTraces) AvailabilityCapability() (string, string, int) {
+	return "query_traces", "traces", 1
+}
 
 // Description implements core.AnalyzeTool.
 func (QueryTraces) Description() string {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +68,17 @@ func TestBuildAnalyzeToolsRuntimeCatalogContract(t *testing.T) {
 		if _, ok := aitools.Lookup(tool.Name()); !ok {
 			t.Errorf("runtime tool %q is absent from availability catalog", tool.Name())
 		}
+	}
+}
+
+func TestBuildSigNozToolSourcesUsesOnlyOSSLogType(t *testing.T) {
+	sources, errs := buildSigNozToolSources([]config.AgentSourceConfig{
+		{Name: "logs", Type: "signoz", Enable: true, Signoz: config.AgentSignozSourceConfig{Address: "https://signoz.example", APIKey: "test-api-key"}},
+		{Name: "metrics", Type: "signoz_metrics", Enable: true, Options: map[string]any{"address": "https://signoz.example", "api_key": "key"}},
+		{Name: "disabled", Type: "signoz", Enable: false},
+	}, nil)
+	if len(errs) != 0 || len(sources) != 1 || sources[0].Name != "logs" {
+		t.Fatalf("sources=%v errors=%v", sources, errs)
 	}
 }
 
@@ -239,15 +251,89 @@ func TestConfiguredReadersResolveAndRegisterWithoutWorkerObservations(t *testing
 		t.Run(test.name, func(t *testing.T) {
 			configured := configuredToolAvailabilitySnapshot(test.cfg, nil)
 			snapshot := buildToolAvailabilitySnapshot(configured, test.reader, nil, nil, nil, nil, test.metrics, test.traces, versustools.DetectionHealthSnapshot{})
+			var runtimeTool core.Tool = settingsCompatibleTool{name: test.tool}
+			if test.metrics != nil {
+				runtimeTool = commontools.QueryMetrics{Reader: test.metrics}
+			}
+			if test.traces != nil {
+				runtimeTool = commontools.QueryTraces{Reader: test.traces}
+			}
+			runtime := []core.Tool{runtimeTool}
+			snapshot = aitools.BindRuntimeCapabilities(snapshot, runtime)
 			requirement := aitools.Requirement{Kind: aitools.RequirementDataSource, SignalKind: test.kind}
 			if got := aitools.Resolve(requirement, snapshot, true); got.State != aitools.StateAvailable {
 				t.Fatalf("resolution = %+v", got)
 			}
-			filtered, err := aitools.NewManager(storage.NewMemory()).Filter(tenancy.DefaultOrgScope(), aitools.AgentAnalyze, []core.Tool{settingsCompatibleTool{name: test.tool}}, snapshot)
-			if err != nil || len(filtered) != 1 || filtered[0].Name() != test.tool {
-				t.Fatalf("filtered = %+v, err = %v", filtered, err)
+			for _, agentKind := range []aitools.AgentKind{aitools.AgentChat, aitools.AgentAnalyze} {
+				filtered, err := aitools.NewManager(storage.NewMemory()).Filter(tenancy.DefaultOrgScope(), agentKind, runtime, snapshot)
+				if err != nil || len(filtered) != 1 || filtered[0].Name() != test.tool {
+					t.Fatalf("%s filtered = %+v, err = %v", agentKind, filtered, err)
+				}
 			}
 		})
+	}
+}
+
+func TestSpecializedRuntimeCapabilitiesResolveWithoutGenericReaders(t *testing.T) {
+	configured := aitools.Snapshot{
+		DataSources: map[string]aitools.DependencyStatus{
+			"logs":    {Configured: true, Name: "Log data source"},
+			"metrics": {Configured: true, Name: "Metric data source"},
+			"traces":  {Configured: true, Name: "Trace data source"},
+		},
+		Capabilities: map[string]aitools.DependencyStatus{},
+	}
+	wantCounts := map[string]int{
+		"discover_log_fields": 2, "read_log_records": 2,
+		"discover_trace_fields": 3, "read_trace_spans": 3,
+		"discover_metrics": 4, "read_metric_series": 4,
+	}
+	runtime := make([]core.Tool, 0, len(wantCounts)+2)
+	for name, count := range wantCounts {
+		metadata, ok := aitools.Lookup(name)
+		if !ok {
+			t.Fatalf("catalog missing %q", name)
+		}
+		runtime = append(runtime, capabilityTestTool{settingsCompatibleTool: settingsCompatibleTool{name: name}, signalKind: metadata.Requirement.SignalKind, sourceCount: count})
+	}
+	runtime = append(runtime, settingsCompatibleTool{name: "query_metrics"}, settingsCompatibleTool{name: "query_traces"})
+	snapshot := buildToolAvailabilitySnapshot(configured, nil, nil, nil, nil, nil, nil, nil, versustools.DetectionHealthSnapshot{})
+	snapshot = aitools.BindRuntimeCapabilities(snapshot, runtime)
+	for _, kind := range []string{"logs", "metrics", "traces"} {
+		if got := snapshot.DataSources[kind]; !got.Constructed || !got.Healthy {
+			t.Errorf("%s card status = %+v", kind, got)
+		}
+	}
+	for name, wantCount := range wantCounts {
+		metadata, _ := aitools.Lookup(name)
+		if got := aitools.Resolve(metadata.Requirement, snapshot, true); got.State != aitools.StateAvailable {
+			t.Errorf("Resolve(%s) = %+v", name, got)
+		}
+		if got := snapshot.Capabilities[name]; got.Count != wantCount || !got.Constructed || !got.Healthy {
+			t.Errorf("capability %s = %+v, want count %d", name, got, wantCount)
+		}
+	}
+	for _, generic := range []string{"query_metrics", "query_traces"} {
+		metadata, _ := aitools.Lookup(generic)
+		if got := aitools.Resolve(metadata.Requirement, snapshot, true); got.State != aitools.StateUnhealthy {
+			t.Errorf("Resolve(%s) = %+v, want unhealthy", generic, got)
+		}
+	}
+	manager := aitools.NewManager(storage.NewMemory())
+	for _, agentKind := range []aitools.AgentKind{aitools.AgentChat, aitools.AgentAnalyze} {
+		filtered, err := manager.Filter(tenancy.DefaultOrgScope(), agentKind, runtime, snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := toolNamesForTest(filtered)
+		if len(got) != len(wantCounts) {
+			t.Fatalf("%s filtered = %v", agentKind, got)
+		}
+		for _, generic := range []string{"query_metrics", "query_traces"} {
+			if slices.Contains(got, generic) {
+				t.Errorf("%s capability unlocked generic tool %s", agentKind, generic)
+			}
+		}
 	}
 }
 
@@ -413,6 +499,16 @@ func (settingsCompatibleTool) Description() string        { return "test" }
 func (settingsCompatibleTool) ArgsSchema() map[string]any { return map[string]any{"type": "object"} }
 func (tool settingsCompatibleTool) Invoke(context.Context, json.RawMessage) (*core.ToolResult, error) {
 	return &core.ToolResult{Tool: tool.name, Found: true}, nil
+}
+
+type capabilityTestTool struct {
+	settingsCompatibleTool
+	signalKind  string
+	sourceCount int
+}
+
+func (tool capabilityTestTool) AvailabilityCapability() (string, string, int) {
+	return tool.name, tool.signalKind, tool.sourceCount
 }
 
 type generationProvider struct {

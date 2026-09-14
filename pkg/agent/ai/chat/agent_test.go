@@ -134,6 +134,7 @@ func TestAgentResolvesKubernetesAuthorizationForEveryTurn(t *testing.T) {
 			namedTool{name: "counting"},
 			namedTool{name: "get_cluster_overview"},
 			namedTool{name: "list_log_indices"},
+			namedTool{name: "read_log_records"},
 		}}
 		for index, allowed := range permissions {
 			ctx := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{
@@ -148,7 +149,7 @@ func TestAgentResolvesKubernetesAuthorizationForEveryTurn(t *testing.T) {
 			}
 			want := []string{"counting"}
 			if allowed {
-				want = append(want, "get_cluster_overview", "list_log_indices")
+				want = append(want, "get_cluster_overview", "list_log_indices", "read_log_records")
 			}
 			got := make([]string, 0, len(available))
 			for _, tool := range available {
