@@ -391,10 +391,10 @@ type AgentSignozSourceConfig struct {
 	// It is delivered as a header, never as a query parameter, so a SigNoz URL
 	// appearing in a log line or an error string cannot leak it.
 	APIKey string `mapstructure:"api_key"`
-	// InsecureSkipVerify is retained for config compatibility but rejected
-	// because this source always sends credentials. It must remain false.
+	// InsecureSkipVerify disables certificate verification for HTTPS. It has no
+	// effect when Address uses HTTP.
 	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"`
-	// AllowLoopback permits a loopback destination for local verified-TLS testing.
+	// AllowLoopback permits a loopback destination for local testing.
 	AllowLoopback bool `mapstructure:"allow_loopback"`
 	// RootCAs optionally supplies additional trust roots for programmatic source
 	// construction. It is not loaded from or exposed through operator config.

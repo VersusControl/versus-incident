@@ -168,12 +168,12 @@ sources:
   #   type: signoz
   #   enable: false
   #   signoz:
-  #     address: https://signoz.example.internal # final verified HTTPS UI/API origin
+  #     address: https://signoz.example.internal # Query Service UI/API origin
   #     # address: https://<region>.signoz.cloud # SigNoz Cloud
   #     api_key: ${SIGNOZ_API_KEY}
   #     # allow_private_networks: true  # required for trusted RFC1918/ULA self-hosting
-  #     # allow_loopback: false         # verified-TLS localhost tests only
-  #     insecure_skip_verify: false     # required; credentials reject insecure TLS
+  #     # allow_loopback: false         # required for localhost tests
+  #     insecure_skip_verify: false     # HTTPS only; ignored for HTTP
   #     query: "severity_text = 'ERROR' AND service.name = 'api'"   # v5 filter expression
   #     message_field: body
   #     severity_field: severity_text

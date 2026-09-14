@@ -38,15 +38,15 @@ you decide this source sees everything you expect.
 If you do not already run SigNoz, the OSS example at
 `examples/docker-compose/signoz/`
 ([on GitHub](https://github.com/VersusControl/versus-incident/tree/main/examples/docker-compose/signoz))
-brings up a full stack after you supply the final verified HTTPS reader origin:
+brings up a full stack with a direct internal HTTP reader:
 
 ```bash
-export SIGNOZ_READ_ADDRESS=https://signoz.example.com
 docker compose up -d
 ```
 
-The internal HTTP service is for bootstrap and UI access only; the credentialed
-Versus reader uses `SIGNOZ_READ_ADDRESS`.
+The example explicitly trusts its Docker-private destination. HTTP sends the
+query API key in plaintext, so production deployments should set
+`SIGNOZ_READ_ADDRESS` to a verified HTTPS origin.
 
 > **It is a heavy stack** — ClickHouse, ClickHouse Keeper, Postgres and
 > an OTel collector. Budget **≥4 GB** of Docker memory.
@@ -71,7 +71,7 @@ sources:
     type: signoz_metrics
     enable: true
     options:
-      address: https://signoz.example.internal # final verified HTTPS origin
+      address: https://signoz.example.internal # final HTTP(S) Query Service origin
       # address: https://<region>.signoz.cloud
       api_key: ${SIGNOZ_API_KEY}
       allow_private_networks: true         # trusted RFC1918/ULA self-hosting only
@@ -243,11 +243,11 @@ connection-only.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `address` | — (required) | Final verified HTTPS SigNoz origin, self-hosted or `https://<region>.signoz.cloud`. |
+| `address` | — (required) | Final HTTP(S) SigNoz Query Service origin, self-hosted or `https://<region>.signoz.cloud`. Verified HTTPS is recommended for production; HTTP sends the API key in plaintext. |
 | `api_key` | — (required) | Sent as the `SIGNOZ-API-KEY` header. The **query** key from Settings → API Keys. |
-| `insecure_skip_verify` | `false` | Must remain false; credentials reject unverifiable TLS. |
+| `insecure_skip_verify` | `false` | Disable certificate verification for HTTPS. Ignored for HTTP. |
 | `allow_private_networks` | `false` | Trust RFC1918/ULA destinations for an explicitly trusted self-hosted deployment. |
-| `allow_loopback` | `false` | Trust loopback only for verified-TLS local testing. |
+| `allow_loopback` | `false` | Trust loopback for local testing, independently of HTTP/TLS. |
 | `step` | `60s` | Sampling resolution (the v5 `stepInterval`). |
 | `metrics` | built-in catalog | Metric names **added to** the default catalog. Histogram components are dotted; base counters keep the producer's `_total`. |
 | `filter` | unset | SigNoz v5 filter expression ANDed into every read, e.g. `deployment.environment = 'prod'`. Dotted attribute names; not PromQL. |

@@ -292,7 +292,7 @@ services:
       AGENT_AI_ENABLE: ${AGENT_AI_ENABLE:-false}
       AGENT_AI_API_KEY: ${AGENT_AI_API_KEY:-}
       AGENT_AI_MODEL: ${AGENT_AI_MODEL:-gpt-4o-mini}
-      SIGNOZ_ADDRESS: ${SIGNOZ_READ_ADDRESS:?set SIGNOZ_READ_ADDRESS to the final verified HTTPS SigNoz origin}
+      SIGNOZ_ADDRESS: ${SIGNOZ_READ_ADDRESS:-http://signoz:8080}
       SIGNOZ_API_KEY: ${SIGNOZ_API_KEY:-}
       SIGNOZ_QUERY: ${SIGNOZ_QUERY:-}
     # Fall back to the bootstrapped key when the operator did not supply one.

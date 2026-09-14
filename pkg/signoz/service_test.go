@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -521,13 +522,74 @@ func TestServiceExactKeyScrubReturnsFreshStructures(t *testing.T) {
 	}
 }
 
+func TestClientMethodPathAllowlist(t *testing.T) {
+	var requests atomic.Int32
+	server, rootCAs := newTLSTestServer(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		fmt.Fprint(writer, `{}`)
+	}))
+	client, err := NewClient(testConfig(server, rootCAs, testAPIKey), ToolPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	allowed := map[string]string{
+		QueryRangePath:  http.MethodPost,
+		FieldKeysPath:   http.MethodGet,
+		FieldValuesPath: http.MethodGet,
+		MetricsPath:     http.MethodGet,
+	}
+	methods := []string{
+		http.MethodGet,
+		http.MethodHead,
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodPatch,
+		http.MethodDelete,
+		http.MethodConnect,
+		http.MethodOptions,
+		http.MethodTrace,
+	}
+	for path, allowedMethod := range allowed {
+		t.Run(allowedMethod+" "+path, func(t *testing.T) {
+			before := requests.Load()
+			if _, err := client.Do(context.Background(), allowedMethod, path, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if got := requests.Load(); got != before+1 {
+				t.Fatalf("requests = %d, want %d", got, before+1)
+			}
+		})
+		for _, method := range methods {
+			if method == allowedMethod {
+				continue
+			}
+			t.Run(method+" "+path, func(t *testing.T) {
+				before := requests.Load()
+				if _, err := client.Do(context.Background(), method, path, nil, nil); !errors.Is(err, ErrInvalidArgument) {
+					t.Fatalf("error = %v", err)
+				}
+				if got := requests.Load(); got != before {
+					t.Fatalf("requests = %d, want %d", got, before)
+				}
+			})
+		}
+	}
+
+	before := requests.Load()
+	if _, err := client.Do(context.Background(), http.MethodGet, "/api/v1/unknown", nil, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("unknown path error = %v", err)
+	}
+	if got := requests.Load(); got != before {
+		t.Fatalf("unknown path requests = %d, want %d", got, before)
+	}
+}
+
 func TestNewClientCredentialTransportPolicy(t *testing.T) {
 	tests := []struct {
 		name   string
 		config Config
 	}{
-		{name: "plain HTTP", config: Config{Address: "http://signoz.example", APIKey: testAPIKey}},
-		{name: "insecure TLS", config: Config{Address: "https://signoz.example", APIKey: testAPIKey, InsecureSkipVerify: true}},
 		{name: "URL userinfo", config: Config{Address: "https://user@signoz.example", APIKey: testAPIKey}},
 		{name: "loopback by default", config: Config{Address: "https://127.0.0.1", APIKey: testAPIKey}},
 		{name: "private by default", config: Config{Address: "https://10.0.0.1", APIKey: testAPIKey}},
@@ -540,6 +602,61 @@ func TestNewClientCredentialTransportPolicy(t *testing.T) {
 			}
 		})
 	}
+	httpRequests := 0
+	httpServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		httpRequests++
+		if request.TLS != nil || request.Header.Get("SIGNOZ-API-KEY") != testAPIKey {
+			t.Fatalf("HTTP request TLS=%v api_key=%q", request.TLS, request.Header.Get("SIGNOZ-API-KEY"))
+		}
+		fmt.Fprint(writer, `{}`)
+	}))
+	t.Cleanup(httpServer.Close)
+	for _, insecureSkipVerify := range []bool{false, true} {
+		client, err := NewClient(Config{Address: httpServer.URL, APIKey: testAPIKey, AllowLoopback: true, InsecureSkipVerify: insecureSkipVerify}, ToolPolicy())
+		if err != nil {
+			t.Fatalf("HTTP insecure_skip_verify=%t: %v", insecureSkipVerify, err)
+		}
+		if _, err := client.Do(context.Background(), http.MethodGet, MetricsPath, nil, nil); err != nil {
+			t.Fatalf("HTTP insecure_skip_verify=%t request: %v", insecureSkipVerify, err)
+		}
+	}
+	if httpRequests != 2 {
+		t.Fatalf("HTTP requests = %d, want 2", httpRequests)
+	}
+
+	var tlsHandlerRequests atomic.Int32
+	insecureServer := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		tlsHandlerRequests.Add(1)
+		fmt.Fprint(writer, `{}`)
+	}))
+	t.Cleanup(insecureServer.Close)
+	verifiedClient, err := NewClient(Config{Address: insecureServer.URL, APIKey: testAPIKey, AllowLoopback: true, InsecureSkipVerify: false}, ToolPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifiedClient.Do(context.Background(), http.MethodGet, MetricsPath, nil, nil); err == nil {
+		t.Fatal("self-signed HTTPS without a trusted root succeeded")
+	} else {
+		var verificationError *tls.CertificateVerificationError
+		if !errors.As(err, &verificationError) {
+			t.Fatalf("self-signed HTTPS error = %T, want certificate verification failure", err)
+		}
+	}
+	if got := tlsHandlerRequests.Load(); got != 0 {
+		t.Fatalf("self-signed verified request reached handler %d times", got)
+	}
+
+	insecureClient, err := NewClient(Config{Address: insecureServer.URL, APIKey: testAPIKey, AllowLoopback: true, InsecureSkipVerify: true}, ToolPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := insecureClient.Do(context.Background(), http.MethodGet, MetricsPath, nil, nil); err != nil {
+		t.Fatalf("self-signed HTTPS with insecure_skip_verify: %v", err)
+	}
+	if got := tlsHandlerRequests.Load(); got != 1 {
+		t.Fatalf("self-signed insecure request reached handler %d times, want 1", got)
+	}
+
 	server, rootCAs := newTLSTestServer(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { fmt.Fprint(writer, `{}`) }))
 	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")

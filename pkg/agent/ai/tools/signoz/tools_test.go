@@ -35,8 +35,9 @@ func TestNewKeepsSourceKindsSeparate(t *testing.T) {
 }
 
 func TestNewOmitsSourceWideDiscoveryForScopedBindings(t *testing.T) {
-	server, rootCAs := newTLSTestServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	service, err := signozapp.NewService(signozapp.Config{Address: server.URL, APIKey: "test-api-key", AllowLoopback: true, RootCAs: rootCAs, ScopeFilter: "service.name = 'checkout'"}, signozapp.ToolPolicy())
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(server.Close)
+	service, err := signozapp.NewService(signozapp.Config{Address: server.URL, APIKey: "test-api-key", InsecureSkipVerify: true, AllowLoopback: true, ScopeFilter: "service.name = 'checkout'"}, signozapp.ToolPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -44,15 +44,15 @@ sources:
 
 ```yaml
 signoz:
-  address: https://signoz.example.internal # REQUIRED final verified HTTPS origin,
+  address: https://signoz.example.internal # REQUIRED final HTTP(S) Query Service origin,
                                            # or https://<region>.signoz.cloud.
   api_key: ${SIGNOZ_API_KEY}        # REQUIRED. Sent as the SIGNOZ-API-KEY header.
                                     # The QUERY key from Settings → API Keys —
                                     # NOT the signoz-ingestion-key. Minimum 8 bytes.
 
-  insecure_skip_verify: false       # must remain false when api_key is configured.
+  insecure_skip_verify: false       # HTTPS only; ignored for HTTP.
   allow_private_networks: true      # opt in only for trusted RFC1918/ULA self-hosting.
-  allow_loopback: false             # opt in only for verified-TLS localhost testing.
+  allow_loopback: false             # opt in only for localhost testing.
 
   query: "severity_text = 'ERROR'"  # v5 filter EXPRESSION (same syntax as the
                                     # Logs Explorer filter bar). Empty matches
@@ -68,8 +68,10 @@ signoz:
   reorder_window: 2m                # how far below the cursor each tick re-scans.
 ```
 
-SigNoz credentials always require verified HTTPS. Plain HTTP and
-`insecure_skip_verify: true` are rejected, redirects are not followed, and
+Verified HTTPS is recommended for production. HTTP is accepted for trusted
+networks, but sends the API key in plaintext. For HTTPS,
+`insecure_skip_verify: true` explicitly disables certificate verification; the
+flag is accepted but has no effect for HTTP. Redirects are not followed and
 ambient `HTTP_PROXY`/`HTTPS_PROXY` settings are ignored. Configure the final
 origin after any redirect. Private and loopback destinations are revalidated
 when the socket connects; private self-hosting requires
@@ -149,7 +151,7 @@ mean; leave it bare otherwise.
   a query parameter, transient rejections (429 / 5xx / transport
   errors) are retried up to 3 attempts, and a response body is capped
   at 16 MiB. Redirects are deliberately not followed; set `address` to
-  the final verified HTTPS origin reported by the redirect.
+  the final HTTP(S) origin reported by the redirect.
 
 ## Read-only AI tools
 
@@ -253,16 +255,16 @@ is what this field accepts, and whatever it rejects fails the tick.
 
 A runnable stack lives at `examples/docker-compose/signoz/`
 ([on GitHub](https://github.com/VersusControl/versus-incident/tree/main/examples/docker-compose/signoz)) —
-SigNoz plus Versus. Set the final verified HTTPS reader origin before starting
-it:
+SigNoz plus Versus. Its source explicitly trusts the internal Docker network:
 
 ```bash
-export SIGNOZ_READ_ADDRESS=https://signoz.example.com
 docker compose up -d
 ```
 
-The internal HTTP service remains available to the bootstrap container and UI;
-Versus uses only `SIGNOZ_READ_ADDRESS` for credentialed reads.
+The local reader defaults to `http://signoz:8080`, which sends the API key in
+plaintext inside that trusted network. Set `SIGNOZ_READ_ADDRESS` to a verified
+HTTPS Query Service origin for production. Bootstrap and OTLP endpoints remain
+separate from the reader address.
 
 > **It is a heavy stack.** SigNoz brings ClickHouse, ClickHouse Keeper,
 > Postgres and an OTel collector — budget **≥4 GB** of Docker memory.

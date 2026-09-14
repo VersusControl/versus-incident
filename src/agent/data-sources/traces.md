@@ -216,7 +216,7 @@ sources:
     type: signoz_traces
     enable: true
     options:
-      address: https://signoz.example.internal # final verified HTTPS origin
+      address: https://signoz.example.internal # final HTTP(S) Query Service origin
       # address: https://<region>.signoz.cloud
       api_key: ${SIGNOZ_API_KEY}
       allow_private_networks: true         # trusted RFC1918/ULA self-hosting only
@@ -232,11 +232,11 @@ That is the whole operator surface for the auto flow. **No `query:`, no TraceQL.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `address` | — (required) | Final verified HTTPS SigNoz origin, self-hosted or `https://<region>.signoz.cloud`. |
+| `address` | — (required) | Final HTTP(S) SigNoz Query Service origin, self-hosted or `https://<region>.signoz.cloud`. Verified HTTPS is recommended for production; HTTP sends the API key in plaintext. |
 | `api_key` | — (required) | Sent as the `SIGNOZ-API-KEY` header. The **query** key, not the ingestion key. |
-| `insecure_skip_verify` | `false` | Must remain false; credentials reject unverifiable TLS. |
+| `insecure_skip_verify` | `false` | Disable certificate verification for HTTPS. Ignored for HTTP. |
 | `allow_private_networks` | `false` | Trust RFC1918/ULA destinations for an explicitly trusted self-hosted deployment. |
-| `allow_loopback` | `false` | Trust loopback only for verified-TLS local testing. |
+| `allow_loopback` | `false` | Trust loopback for local testing, independently of HTTP/TLS. |
 | `query` | unset | A v5 filter expression, **appended** as an extra pinned target (it never turns off auto-learning). |
 | `page_size` | `100` | Spans searched per target per tick. |
 | `max_services` | `50` | Service-enumeration cap. |

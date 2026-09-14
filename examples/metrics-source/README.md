@@ -395,14 +395,14 @@ bring up the SigNoz overlay. It adds a self-hosted SigNoz stack and swaps in the
 source variant that replaces both backends:
 
 ```bash
-export SIGNOZ_READ_ADDRESS=https://signoz.example.internal
 docker compose -f docker-compose.yml -f docker-compose.signoz.yml up -d
 ```
 
-`SIGNOZ_READ_ADDRESS` must be the final verified HTTPS origin exposed by your
-TLS terminator. The credentialed reader refuses the stack's internal HTTP
-address; the overlay explicitly opts trusted RFC1918/ULA destinations into the
-private-network policy.
+The overlay defaults `SIGNOZ_READ_ADDRESS` to `http://signoz:8080` on its trusted
+Docker network and explicitly opts that RFC1918 destination into the private
+network policy. HTTP sends the query API key in plaintext, so production
+deployments should override it with a final HTTPS origin and leave certificate
+verification enabled.
 
 > **Heavy.** SigNoz is ClickHouse + ZooKeeper + a schema migrator + an OTel
 > collector + the SigNoz server. Budget **at least 4 GB of Docker memory** on

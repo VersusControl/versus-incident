@@ -480,6 +480,28 @@ func TestNewSigNozQuerierWithPolicyAllowsVerifiedTLSLoopback(t *testing.T) {
 	}
 }
 
+func TestNewSigNozQuerierWithPolicyAllowsHTTPAndIgnoresTLSFlag(t *testing.T) {
+	const apiKey = "test-api-key"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.TLS != nil || request.Header.Get("SIGNOZ-API-KEY") != apiKey {
+			t.Fatalf("request TLS=%v api_key=%q", request.TLS, request.Header.Get("SIGNOZ-API-KEY"))
+		}
+		_, _ = writer.Write([]byte(`{"data":{"data":{"results":[]}}}`))
+	}))
+	t.Cleanup(server.Close)
+	querier, err := NewSigNozQuerierWithPolicy(server.URL, apiKey, true, SigNozNetworkPolicy{AllowLoopback: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = querier.QueryRangeRaw(context.Background(), SigNozQueryRangeRequest{
+		Start: time.Now().Add(-time.Minute), End: time.Now(),
+		Queries: []SigNozBuilderQuery{{Name: "A", Signal: SigNozSignalLogs, Limit: 1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestSigNozSource_NoSecretInURLOrErrors asserts what the header-based auth
 // buys us: the API key is never in a URL, so it can never reach an error
 // string, a log line, or a proxy access log. Asserted, not assumed.

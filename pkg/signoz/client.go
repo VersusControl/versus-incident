@@ -14,7 +14,12 @@ import (
 	"strings"
 )
 
-var allowedPaths = map[string]struct{}{QueryRangePath: {}, FieldKeysPath: {}, FieldValuesPath: {}, MetricsPath: {}}
+var allowedMethodsByPath = map[string]string{
+	QueryRangePath:  http.MethodPost,
+	FieldKeysPath:   http.MethodGet,
+	FieldValuesPath: http.MethodGet,
+	MetricsPath:     http.MethodGet,
+}
 
 const minimumAPIKeyLength = 8
 
@@ -64,12 +69,6 @@ func NewClient(config Config, policy Policy) (*Client, error) {
 	if len(config.APIKey) < minimumAPIKeyLength {
 		return nil, fmt.Errorf("%w: api key must be at least %d bytes", ErrInvalidConfig, minimumAPIKeyLength)
 	}
-	if parsed.Scheme != "https" {
-		return nil, fmt.Errorf("%w: api key requires verified HTTPS", ErrInvalidConfig)
-	}
-	if config.InsecureSkipVerify {
-		return nil, fmt.Errorf("%w: api key requires verified HTTPS; insecure_skip_verify cannot be enabled", ErrInvalidConfig)
-	}
 	if !validEndpointHost(parsed.Hostname(), config.AllowLoopback, config.AllowPrivate) {
 		return nil, fmt.Errorf("%w: address host is not permitted", ErrInvalidConfig)
 	}
@@ -77,7 +76,7 @@ func NewClient(config Config, policy Policy) (*Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.DialContext = guardedDialContext(&net.Dialer{}, config.AllowLoopback, config.AllowPrivate)
-	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: config.RootCAs}
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: config.RootCAs, InsecureSkipVerify: config.InsecureSkipVerify}
 	return &Client{baseURL: address, apiKey: config.APIKey, maximumBytes: policy.MaximumBytes, httpClient: &http.Client{Transport: transport, Timeout: policy.Timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
@@ -138,7 +137,7 @@ func validResolvedAddress(address net.IP, allowLoopback, allowPrivate bool) bool
 
 // Endpoint returns one allowlisted endpoint URL.
 func (client *Client) Endpoint(path string) (string, error) {
-	if _, ok := allowedPaths[path]; !ok {
+	if _, ok := allowedMethodsByPath[path]; !ok {
 		return "", fmt.Errorf("%w: endpoint is not allowlisted", ErrInvalidArgument)
 	}
 	return client.baseURL + path, nil
@@ -146,6 +145,10 @@ func (client *Client) Endpoint(path string) (string, error) {
 
 // Do executes one bounded request against an allowlisted read endpoint.
 func (client *Client) Do(ctx context.Context, method, path string, query url.Values, payload any) ([]byte, error) {
+	allowedMethod, ok := allowedMethodsByPath[path]
+	if !ok || method != allowedMethod {
+		return nil, fmt.Errorf("%w: method is not allowlisted for endpoint", ErrInvalidArgument)
+	}
 	endpoint, err := client.Endpoint(path)
 	if err != nil {
 		return nil, err

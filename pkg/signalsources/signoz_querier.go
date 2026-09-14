@@ -159,7 +159,7 @@ type SigNozQuerier struct {
 }
 
 // SigNozNetworkPolicy explicitly trusts local or private destinations while
-// retaining verified HTTPS and connect-time destination checks.
+// retaining connect-time destination checks independently of transport security.
 type SigNozNetworkPolicy struct {
 	AllowLoopback bool
 	AllowPrivate  bool
@@ -172,7 +172,7 @@ func NewSigNozQuerier(address, apiKey string, insecureSkipVerify bool) (*SigNozQ
 }
 
 // NewSigNozQuerierWithPolicy constructs a querier with explicit destination
-// trust. Credentials still require verified HTTPS under every policy.
+// trust. HTTPS verification is controlled independently by insecureSkipVerify.
 func NewSigNozQuerierWithPolicy(address, apiKey string, insecureSkipVerify bool, policy SigNozNetworkPolicy) (*SigNozQuerier, error) {
 	address = strings.TrimRight(strings.TrimSpace(address), "/")
 	if address == "" {

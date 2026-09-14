@@ -110,16 +110,17 @@ docker run -d \
 ```
 
 Point `SIGNOZ_READ_ADDRESS` at the SigNoz **Query Service** URL, not the OTLP
-collector used to send telemetry into SigNoz. It must be the final,
-non-redirecting HTTPS origin and its certificate must be trusted by the Versus
-runtime. The reader requires TLS 1.2 or newer, rejects
-`insecure_skip_verify: true`, and requires an API key of at least 8 bytes.
+collector used to send telemetry into SigNoz. HTTPS with certificate verification
+is recommended for production. HTTP is supported for trusted networks but sends
+the API key in plaintext. `insecure_skip_verify: true` disables certificate
+verification for HTTPS only and is ignored for HTTP. API keys must be at least
+8 bytes and redirects are not followed.
 
 Keep `allow_private_networks: true` only when that origin intentionally resolves
-to an RFC1918 or IPv6 unique-local address. For verified-TLS local development,
-use `allow_loopback: true` instead. Neither flag disables certificate
-verification or permits metadata and link-local destinations. SigNoz Cloud uses
-the final HTTPS workspace origin and does not need either network opt-in.
+to an RFC1918 or IPv6 unique-local address. For local loopback testing, use
+`allow_loopback: true` instead. These destination flags are independent of the
+HTTP/TLS choice and never permit metadata or link-local destinations. SigNoz
+Cloud uses an HTTPS workspace origin and does not need either network opt-in.
 
 ## Step 5: Check it's actually reading
 
