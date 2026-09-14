@@ -2,6 +2,7 @@ package signalsources
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -15,6 +16,35 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
+
+func newSigNozTLSTestServer(t *testing.T, handler http.Handler) (*httptest.Server, *x509.CertPool) {
+	t.Helper()
+	server := httptest.NewTLSServer(handler)
+	rootCAs := x509.NewCertPool()
+	rootCAs.AddCert(server.Certificate())
+	t.Cleanup(server.Close)
+	return server, rootCAs
+}
+
+func newSigNozTLSTestQuerier(t *testing.T, handler http.Handler, apiKey string) *SigNozQuerier {
+	t.Helper()
+	server, rootCAs := newSigNozTLSTestServer(t, handler)
+	querier, err := NewSigNozQuerierWithPolicy(server.URL, apiKey, false, SigNozNetworkPolicy{AllowLoopback: true, RootCAs: rootCAs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return querier
+}
+
+var sigNozSourceTestRoots sync.Map
+
+func newSigNozSourceTestServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	server, rootCAs := newSigNozTLSTestServer(t, handler)
+	sigNozSourceTestRoots.Store(server.URL, rootCAs)
+	t.Cleanup(func() { sigNozSourceTestRoots.Delete(server.URL) })
+	return server
+}
 
 // -----------------------------------------------------------------------------
 // fakeSigNoz — an httptest stand-in for SigNoz's v5 query API.
@@ -228,14 +258,20 @@ func (f *fakeSigNoz) handler(t *testing.T) http.HandlerFunc {
 func newTestSigNozSource(t *testing.T, addr string, mutate func(*config.AgentSignozSourceConfig)) *SigNozSource {
 	t.Helper()
 	cfg := config.AgentSignozSourceConfig{
-		Address:  addr,
-		APIKey:   "test-signoz-key",
-		PageSize: 50,
+		Address:       addr,
+		APIKey:        "test-signoz-key",
+		AllowLoopback: true,
+		PageSize:      50,
 	}
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	src, err := NewSigNozSource("test", cfg)
+	rootCAs, _ := sigNozSourceTestRoots.Load(addr)
+	var roots *x509.CertPool
+	if rootCAs != nil {
+		roots = rootCAs.(*x509.CertPool)
+	}
+	src, err := newSigNozSource("test", cfg, roots)
 	if err != nil {
 		t.Fatalf("NewSigNozSource: %v", err)
 	}
@@ -271,6 +307,11 @@ func TestSigNozSource_ConstructorValidation(t *testing.T) {
 			wantErr: `signoz source "s": api_key is required`,
 		},
 		{
+			name:    "short api key",
+			cfg:     config.AgentSignozSourceConfig{Address: "https://signoz.example", APIKey: "short"},
+			wantErr: "api key must be at least 8 bytes",
+		},
+		{
 			name:    "non-http scheme",
 			cfg:     config.AgentSignozSourceConfig{Address: "file:///etc/passwd", APIKey: "k"},
 			wantErr: "must use http or https",
@@ -295,7 +336,7 @@ func TestSigNozSource_ConstructorValidation(t *testing.T) {
 }
 
 func TestSigNozSource_Defaults(t *testing.T) {
-	src := newTestSigNozSource(t, "http://signoz:8080/", func(c *config.AgentSignozSourceConfig) {
+	src := newTestSigNozSource(t, "https://signoz.example:8080/", func(c *config.AgentSignozSourceConfig) {
 		c.PageSize = 0
 	})
 	if src.cfg.MessageField != "body" {
@@ -314,7 +355,7 @@ func TestSigNozSource_Defaults(t *testing.T) {
 		t.Errorf("Name() = %q, want signoz:test", src.Name())
 	}
 
-	clamped := newTestSigNozSource(t, "http://signoz:8080", func(c *config.AgentSignozSourceConfig) {
+	clamped := newTestSigNozSource(t, "https://signoz.example:8080", func(c *config.AgentSignozSourceConfig) {
 		c.PageSize = 100000
 	})
 	if clamped.cfg.PageSize != maxSigNozPageSize {
@@ -328,7 +369,7 @@ func TestSigNozSource_Defaults(t *testing.T) {
 		"30s":            30 * time.Second,
 	}
 	for in, want := range cases {
-		s := newTestSigNozSource(t, "http://signoz:8080", func(c *config.AgentSignozSourceConfig) {
+		s := newTestSigNozSource(t, "https://signoz.example:8080", func(c *config.AgentSignozSourceConfig) {
 			c.ReorderWindow = in
 		})
 		if s.reorderWindow != want {
@@ -347,7 +388,7 @@ func TestSigNozSource_Defaults(t *testing.T) {
 // filter expression, and the mandatory `timestamp asc, id asc` tiebreak order.
 func TestSigNozSource_RequestShape(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
@@ -409,11 +450,11 @@ func TestSigNozSource_RequestShape(t *testing.T) {
 // the one allowed path.
 func TestSigNozQuerier_PathIsPinned(t *testing.T) {
 	for _, addr := range []string{
-		"http://signoz:8080",
-		"http://signoz:8080/",
+		"https://signoz.example:8080",
+		"https://signoz.example:8080/",
 		"https://eu.signoz.cloud",
 	} {
-		q, err := NewSigNozQuerier(addr, "k", false)
+		q, err := NewSigNozQuerier(addr, "test-api-key", false)
 		if err != nil {
 			t.Fatalf("NewSigNozQuerier(%q): %v", addr, err)
 		}
@@ -426,6 +467,41 @@ func TestSigNozQuerier_PathIsPinned(t *testing.T) {
 	}
 }
 
+func TestNewSigNozQuerierWithPolicyAllowsVerifiedTLSLoopback(t *testing.T) {
+	querier := newSigNozTLSTestQuerier(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte(`{"data":{"data":{"results":[]}}}`))
+	}), "test-api-key")
+	_, err := querier.QueryRangeRaw(context.Background(), SigNozQueryRangeRequest{
+		Start: time.Now().Add(-time.Minute), End: time.Now(),
+		Queries: []SigNozBuilderQuery{{Name: "A", Signal: SigNozSignalLogs, Limit: 1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewSigNozQuerierWithPolicyAllowsHTTPAndIgnoresTLSFlag(t *testing.T) {
+	const apiKey = "test-api-key"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.TLS != nil || request.Header.Get("SIGNOZ-API-KEY") != apiKey {
+			t.Fatalf("request TLS=%v api_key=%q", request.TLS, request.Header.Get("SIGNOZ-API-KEY"))
+		}
+		_, _ = writer.Write([]byte(`{"data":{"data":{"results":[]}}}`))
+	}))
+	t.Cleanup(server.Close)
+	querier, err := NewSigNozQuerierWithPolicy(server.URL, apiKey, true, SigNozNetworkPolicy{AllowLoopback: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = querier.QueryRangeRaw(context.Background(), SigNozQueryRangeRequest{
+		Start: time.Now().Add(-time.Minute), End: time.Now(),
+		Queries: []SigNozBuilderQuery{{Name: "A", Signal: SigNozSignalLogs, Limit: 1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestSigNozSource_NoSecretInURLOrErrors asserts what the header-based auth
 // buys us: the API key is never in a URL, so it can never reach an error
 // string, a log line, or a proxy access log. Asserted, not assumed.
@@ -433,7 +509,7 @@ func TestSigNozSource_NoSecretInURLOrErrors(t *testing.T) {
 	const secret = "super-secret-signoz-key"
 
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	src := newTestSigNozSource(t, ts.URL, func(c *config.AgentSignozSourceConfig) {
@@ -449,9 +525,8 @@ func TestSigNozSource_NoSecretInURLOrErrors(t *testing.T) {
 	if req.APIKey != secret {
 		t.Fatalf("SIGNOZ-API-KEY header = %q, want the key", req.APIKey)
 	}
-
 	// A rejecting backend must not echo the key into the error either.
-	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	bad := newSigNozSourceTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid api key", http.StatusUnauthorized)
 	}))
 	defer bad.Close()
@@ -468,6 +543,96 @@ func TestSigNozSource_NoSecretInURLOrErrors(t *testing.T) {
 	}
 }
 
+func TestSigNozSource_ScrubsExactAPIKeyBeforeSignalAndDedupEgress(t *testing.T) {
+	const secret = "opaque-source-key-7f3d"
+	base := time.Date(2026, 9, 12, 8, 0, 0, 0, time.UTC)
+	nested := map[string]any{
+		secret + "-map-key": []any{
+			"prefix " + secret + " suffix",
+			map[string]any{"nested": secret},
+		},
+	}
+	fake := newFakeSigNoz()
+	fake.addFull(fakeSigNozRow{
+		id:  secret,
+		ts:  base,
+		msg: "message " + secret,
+		sev: "critical-" + secret,
+		extra: map[string]any{
+			"configured": secret,
+			"nested":     nested,
+		},
+	})
+	fake.addFull(fakeSigNozRow{
+		id:  "second-" + secret,
+		ts:  base.Add(time.Second),
+		msg: secret,
+		sev: secret,
+		extra: map[string]any{
+			"configured": []any{secret, map[string]any{secret: "value-" + secret}},
+		},
+	})
+	server := newSigNozSourceTestServer(t, fake.handler(t))
+	source := newTestSigNozSource(t, server.URL, func(cfg *config.AgentSignozSourceConfig) {
+		cfg.APIKey = secret
+		cfg.ExtraFields = []string{"configured", "nested"}
+	})
+	source.nowFn = func() time.Time { return base.Add(time.Minute) }
+	backend := newFakeDedupBackend()
+	source.SetTailDedupBackend(backend)
+
+	signals, cursor, err := source.Pull(context.Background(), base.Add(-time.Second))
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(signals) != 2 {
+		t.Fatalf("Pull returned %d signals, want 2", len(signals))
+	}
+	if !cursor.Equal(base.Add(time.Second)) {
+		t.Fatalf("cursor = %s, want %s", cursor, base.Add(time.Second))
+	}
+	encoded, err := json.Marshal(signals)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) {
+		t.Fatalf("serialized signals contain configured API key: %s", encoded)
+	}
+	if nested[secret+"-map-key"].([]any)[0] != "prefix "+secret+" suffix" || nested[secret+"-map-key"].([]any)[1].(map[string]any)["nested"] != secret {
+		t.Fatal("source mutated the provider fixture")
+	}
+
+	if err := source.Commit(context.Background()); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	backend.mu.Lock()
+	encodedDedup, err := json.Marshal(backend.sets)
+	backend.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encodedDedup), secret) {
+		t.Fatalf("persisted dedup state contains configured API key: %s", encodedDedup)
+	}
+	stored := backend.sets[source.Name()]
+	if len(stored) != 2 {
+		t.Fatalf("persisted dedup IDs = %#v, want two distinct scrubbed IDs", stored)
+	}
+	for id := range stored {
+		if id == "" {
+			t.Fatal("persisted dedup ID is empty after exact-key scrubbing")
+		}
+	}
+
+	replayed, replayCursor, err := source.Pull(context.Background(), cursor)
+	if err != nil {
+		t.Fatalf("overlapping Pull: %v", err)
+	}
+	if len(replayed) != 0 || !replayCursor.Equal(cursor) {
+		t.Fatalf("overlapping Pull returned %d signals at cursor %s, want 0 at %s", len(replayed), replayCursor, cursor)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Cursor behaviour
 // -----------------------------------------------------------------------------
@@ -477,7 +642,7 @@ func TestSigNozSource_NoSecretInURLOrErrors(t *testing.T) {
 // idle tick leaves the cursor where it was.
 func TestSigNozSource_ForwardOrderAndCursorAdvance(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
@@ -526,7 +691,7 @@ func TestSigNozSource_ForwardOrderAndCursorAdvance(t *testing.T) {
 // rows are delivered exactly once across the two ticks.
 func TestSigNozSource_MillisecondTieDoesNotDropRows(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
@@ -578,7 +743,7 @@ func TestSigNozSource_MillisecondTieDoesNotDropRows(t *testing.T) {
 // would point at a different row set).
 func TestSigNozSource_OffsetWalkWithinTick(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
@@ -639,7 +804,7 @@ func TestSigNozSource_OffsetWalkWithinTick(t *testing.T) {
 // beyond the window is not, which is what keeps the dedup set bounded.
 func TestSigNozSource_ReorderWindowBound(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
@@ -683,7 +848,7 @@ func TestSigNozSource_ReorderWindowBound(t *testing.T) {
 // untrusted producer timestamp — cannot strand the tail past `now`.
 func TestSigNozSource_CursorNeverPassesWallClock(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
@@ -722,7 +887,7 @@ func TestSigNozSource_CursorNeverPassesWallClock(t *testing.T) {
 // tailing_dedup_test.go.
 func TestSigNozSource_CursorPersistenceAcrossRestart(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
@@ -775,7 +940,7 @@ func TestSigNozSource_CursorPersistenceAcrossRestart(t *testing.T) {
 // relearn its window instead of being suppressed by pre-clear ids.
 func TestSigNozSource_RewindClearsDedup(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
@@ -807,7 +972,7 @@ func TestSigNozSource_RewindClearsDedup(t *testing.T) {
 
 func TestSigNozSource_FieldMapping(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
@@ -864,7 +1029,7 @@ func TestSigNozSource_FieldMapping(t *testing.T) {
 func TestSigNozSource_TimestampFallbacks(t *testing.T) {
 	fake := newFakeSigNoz()
 	fake.omitEnvelopeTimestamp = true
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
@@ -894,7 +1059,7 @@ func TestSigNozSource_TimestampFallbacks(t *testing.T) {
 func TestSigNozSource_DedupWithoutRowID(t *testing.T) {
 	fake := newFakeSigNoz()
 	fake.omitRowID = true
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
@@ -924,7 +1089,7 @@ func TestSigNozSource_DedupWithoutRowID(t *testing.T) {
 // most wants used to resolve to nothing.
 func TestSigNozSource_NestedAttributeContainers(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
@@ -999,7 +1164,7 @@ func TestSigNozSource_NestedAttributeContainers(t *testing.T) {
 // attribute rather than using the severity_text column must not silently get "".
 func TestSigNozSource_SeverityFromNestedContainer(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
@@ -1164,13 +1329,12 @@ func TestSigNozSource_MalformedPayloadsFailSoft(t *testing.T) {
 	since := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			q := newSigNozTLSTestQuerier(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(tc.body))
-			}))
-			defer ts.Close()
-
-			src := newTestSigNozSource(t, ts.URL, nil)
+			}), "test-api-key")
+			src := newTestSigNozSource(t, q.address, func(config *config.AgentSignozSourceConfig) { config.AllowLoopback = true })
+			src.querier = q
 			src.nowFn = func() time.Time { return since.Add(time.Minute) }
 
 			sigs, cursor, err := src.Pull(context.Background(), since)
@@ -1213,7 +1377,7 @@ func TestSigNozQuerier_RetriesTransientAndNotBadRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
 			calls := 0
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			q := newSigNozTLSTestQuerier(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				n := calls
 				calls++
@@ -1224,17 +1388,11 @@ func TestSigNozQuerier_RetriesTransientAndNotBadRequest(t *testing.T) {
 					return
 				}
 				http.Error(w, "backend says no", tc.status)
-			}))
-			defer ts.Close()
-
-			q, err := NewSigNozQuerier(ts.URL, "k", false)
-			if err != nil {
-				t.Fatalf("new querier: %v", err)
-			}
+			}), "test-api-key")
 			var slept []time.Duration
 			q.sleep = func(d time.Duration) { slept = append(slept, d) }
 
-			_, err = q.QueryRangeRaw(context.Background(), SigNozQueryRangeRequest{
+			_, err := q.QueryRangeRaw(context.Background(), SigNozQueryRangeRequest{
 				Start:   time.Now().Add(-time.Minute),
 				End:     time.Now(),
 				Queries: []SigNozBuilderQuery{{Name: "A", Signal: SigNozSignalLogs, Limit: 10}},
@@ -1265,10 +1423,28 @@ func TestSigNozQuerier_RetriesTransientAndNotBadRequest(t *testing.T) {
 	}
 }
 
+func TestSigNozQuerier_OmitsUpstreamBodyAndAPIKeyFromErrors(t *testing.T) {
+	const apiKeyCanary = "SIGNOZ_INGEST_API_KEY_CANARY_83c2"
+	const bodyCanary = "SIGNOZ_INGEST_BODY_CANARY_f60a"
+	querier := newSigNozTLSTestQuerier(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(bodyCanary + " " + apiKeyCanary))
+	}), apiKeyCanary)
+	querier.sleep = func(time.Duration) {}
+	_, readErr := querier.QueryRangeRaw(context.Background(), SigNozQueryRangeRequest{
+		Start:   time.Now().Add(-time.Minute),
+		End:     time.Now(),
+		Queries: []SigNozBuilderQuery{{Name: "A", Signal: SigNozSignalLogs, Limit: 10}},
+	})
+	if readErr == nil || strings.Contains(readErr.Error(), apiKeyCanary) || strings.Contains(readErr.Error(), bodyCanary) || !strings.Contains(readErr.Error(), "status 500") {
+		t.Fatalf("safe ingestion error = %v", readErr)
+	}
+}
+
 // TestSigNozQuerier_NoQueriesRejected keeps a caller from sending an empty
 // composite query, which SigNoz rejects with a 400 that costs a round trip.
 func TestSigNozQuerier_NoQueriesRejected(t *testing.T) {
-	q, err := NewSigNozQuerier("http://signoz:8080", "k", false)
+	q, err := NewSigNozQuerier("https://signoz.example:8080", "test-api-key", false)
 	if err != nil {
 		t.Fatalf("new querier: %v", err)
 	}
@@ -1336,22 +1512,16 @@ func TestSigNozQuerier_DecodesBothEnvelopeNestings(t *testing.T) {
 func TestSigNozQuerier_ContextCancellationStopsRetry(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	q := newSigNozTLSTestQuerier(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		calls++
 		mu.Unlock()
 		http.Error(w, "nope", http.StatusServiceUnavailable)
-	}))
-	defer ts.Close()
-
-	q, err := NewSigNozQuerier(ts.URL, "k", false)
-	if err != nil {
-		t.Fatalf("new querier: %v", err)
-	}
+	}), "test-api-key")
 	ctx, cancel := context.WithCancel(context.Background())
 	q.sleep = func(time.Duration) { cancel() }
 
-	_, err = q.QueryRangeRaw(ctx, SigNozQueryRangeRequest{
+	_, err := q.QueryRangeRaw(ctx, SigNozQueryRangeRequest{
 		Start:   time.Now().Add(-time.Minute),
 		End:     time.Now(),
 		Queries: []SigNozBuilderQuery{{Name: "A", Signal: SigNozSignalLogs, Limit: 10}},
@@ -1378,7 +1548,7 @@ func TestSigNozQuerier_ContextCancellationStopsRetry(t *testing.T) {
 // these bytes. Freeze the clock, freeze the cursor, compare the raw bytes.
 func TestSigNozSource_LogsRequestBodyIsByteIdentical(t *testing.T) {
 	var got []byte
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := newSigNozSourceTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got == nil {
 			got, _ = io.ReadAll(r.Body)
 		}
@@ -1615,16 +1785,10 @@ func TestSigNozQuerier_MetricsValidation(t *testing.T) {
 // query costs zero round trips.
 func TestSigNozQuerier_ValidationRunsBeforeAnyRequest(t *testing.T) {
 	calls := 0
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	q := newSigNozTLSTestQuerier(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		_, _ = w.Write([]byte(`{"data":{"data":{"results":[]}}}`))
-	}))
-	defer ts.Close()
-
-	q, err := NewSigNozQuerier(ts.URL, "k", false)
-	if err != nil {
-		t.Fatalf("new querier: %v", err)
-	}
+	}), "test-api-key")
 	if _, err := q.QueryRange(context.Background(), SigNozQueryRangeRequest{
 		Start:       time.Now().Add(-time.Hour),
 		End:         time.Now(),

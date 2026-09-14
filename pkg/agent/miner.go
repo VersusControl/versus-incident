@@ -1,7 +1,7 @@
 package agent
 
 import (
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"regexp"
 	"strings"
@@ -44,7 +44,7 @@ type minerNode struct {
 
 // MinerCluster is one learned log template plus its observation count.
 type MinerCluster struct {
-	ID     string   // "p-<sha1[:12]>"
+	ID     string   // "p-<12 lowercase hex>"
 	Tokens []string // current template tokens (with `<*>` for variables)
 	Size   int      // total observations matched into this cluster
 }
@@ -335,7 +335,6 @@ func mergeTemplates(existing, incoming []string) []string {
 // initial token list. Stability isn't required (the catalog stores it), but a
 // content-derived ID makes catalog diffs easier to read across runs.
 func newPatternID(tokens []string) string {
-	h := sha1.New()
-	h.Write([]byte(strings.Join(tokens, " ")))
-	return "p-" + hex.EncodeToString(h.Sum(nil))[:12]
+	sum := sha256.Sum256([]byte(strings.Join(tokens, " ")))
+	return "p-" + hex.EncodeToString(sum[:])[:12]
 }

@@ -102,6 +102,14 @@ func NewManager(store storage.Provider) *Manager {
 	return &Manager{store: store, now: time.Now, pending: map[string]*pendingState{}}
 }
 
+func newManagerWithClock(store storage.Provider, now func() time.Time) *Manager {
+	manager := NewManager(store)
+	if now != nil {
+		manager.now = now
+	}
+	return manager
+}
+
 func orgKey(prefix, orgID string) string {
 	sum := sha256.Sum256([]byte(storage.NormalizeOrgID(orgID)))
 	return prefix + "/" + hex.EncodeToString(sum[:16])

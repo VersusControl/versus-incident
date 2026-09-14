@@ -398,6 +398,12 @@ source variant that replaces both backends:
 docker compose -f docker-compose.yml -f docker-compose.signoz.yml up -d
 ```
 
+The overlay defaults `SIGNOZ_READ_ADDRESS` to `http://signoz:8080` on its trusted
+Docker network and explicitly opts that RFC1918 destination into the private
+network policy. HTTP sends the query API key in plaintext, so production
+deployments should override it with a final HTTPS origin and leave certificate
+verification enabled.
+
 > **Heavy.** SigNoz is ClickHouse + ZooKeeper + a schema migrator + an OTel
 > collector + the SigNoz server. Budget **at least 4 GB of Docker memory** on
 > top of the base stack. Do **not** combine this with
@@ -437,12 +443,15 @@ determinism. SigNoz does not support this shape; bump the tags here if it drifts
 The compatibility floor for the source is **SigNoz v0.87.0**, where
 `/api/v5/query_range` first appears.
 
-### Two honest differences from the Prometheus path
+### Two differences from the Prometheus path
 
-**No auto-wire.** Configuring the SigNoz sources lights up the **detect** path
-only. `query_metrics` / `query_traces` still build Prometheus and Tempo clients,
-so they are *not* auto-wired from a SigNoz source in v1 — point them at a
-Prometheus/Tempo by hand if you need the analyze path.
+**Provider-neutral read tools.** The licensed `signoz_metrics` and
+`signoz_traces` sources contribute `discover_metrics`, `read_metric_series`,
+`discover_trace_fields`, and `read_trace_spans` to Chat and Analyze. Add an OSS
+`signoz` logs source to contribute `discover_log_fields` and
+`read_log_records`. These six capability names are intentionally independent of
+the provider. They do not populate the separate Prometheus/Tempo
+`query_metrics` or `query_traces` tools.
 
 **No operator-authored queries.** SigNoz's v5 API speaks filter expressions, not
 PromQL/TraceQL, so these sources discover their own watch-set instead of
@@ -498,8 +507,7 @@ metrics-source/
 │   ├── agent_sources.traces.yaml   # + traces source (traces overlay only)
 │   ├── agent_sources.signoz.yaml   # signoz_metrics + signoz_traces (signoz overlay only)
 │   └── agent_sources.cloudwatch.yaml # CloudWatch metrics source (cloudwatch compose only)
-│   #  NOTE: no tools.yaml — query_metrics/query_traces are auto-wired
-│   #  (Prometheus/Tempo only; the SigNoz sources are detect-path only)
+│   #  NOTE: no tools.yaml — sources contribute their matching read tools
 ├── prometheus/
 │   └── prometheus.yml              # scrapes the pushgateway (honor_labels: true)
 ├── tempo/

@@ -35,7 +35,7 @@ type Runtime struct {
 func NewRuntime(options RuntimeOptions) *Runtime {
 	manager := options.Manager
 	if manager == nil {
-		manager = NewManager(options.Store)
+		manager = newManagerWithClock(options.Store, options.Now)
 	}
 	collector := NewCollector(CollectorOptions{
 		Manager: manager, Store: options.Store, Services: options.Services,

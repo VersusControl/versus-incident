@@ -386,7 +386,7 @@ func TestRedisTailDedupBackend_KeysAreSourceScoped(t *testing.T) {
 // the cursor's own millisecond while the process was down still arrives.
 func TestSigNozSource_PersistedDedupSurvivesRestart(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 8, 21, 8, 0, 0, 0, time.UTC)
@@ -444,7 +444,7 @@ func TestSigNozSource_PersistedDedupSurvivesRestart(t *testing.T) {
 // suppressed. The duplicate is the point; the alternative is a hole.
 func TestSigNozSource_UncommittedRowsReplayAfterAnAbruptRestart(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 8, 21, 8, 30, 0, 0, time.UTC)
@@ -485,7 +485,7 @@ func TestSigNozSource_UncommittedRowsReplayAfterAnAbruptRestart(t *testing.T) {
 // operator asked to relearn — in this process AND in the next one.
 func TestSigNozSource_RewindClearsPersistedDedup(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 8, 21, 8, 0, 0, 0, time.UTC)
@@ -539,7 +539,7 @@ func TestSigNozSource_RewindClearsPersistedDedup(t *testing.T) {
 // the set was made durable — the window replays, and still nothing is lost.
 func TestSigNozSource_RestartWithoutBackendIsUnchanged(t *testing.T) {
 	fake := newFakeSigNoz()
-	ts := httptest.NewServer(fake.handler(t))
+	ts := newSigNozSourceTestServer(t, fake.handler(t))
 	defer ts.Close()
 
 	base := time.Date(2026, 8, 21, 8, 0, 0, 0, time.UTC)
@@ -800,7 +800,7 @@ func TestAttachTailDedupBackend_OnlyBindsTailingSources(t *testing.T) {
 		t.Fatalf("new es: %v", err)
 	}
 	sz, err := NewSigNozSource("sz", config.AgentSignozSourceConfig{
-		Address: "http://signoz:8080", APIKey: "k",
+		Address: "https://signoz.example:8080", APIKey: "test-api-key",
 	})
 	if err != nil {
 		t.Fatalf("new signoz: %v", err)

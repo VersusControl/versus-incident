@@ -24,6 +24,7 @@ import (
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
+	signoztools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/signoz"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
@@ -127,6 +128,7 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 		}
 		current = k8stools.FilterAuthorized(ctx, current)
 		current = elasticsearchtools.FilterAuthorized(ctx, current)
+		current = signoztools.FilterAuthorized(ctx, current)
 		_, _, einoTools, err := prepareTools(current, toolTimeout)
 		if err != nil {
 			return nil, err

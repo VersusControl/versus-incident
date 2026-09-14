@@ -433,14 +433,16 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 					PageSize:           s.Splunk.PageSize,
 				},
 				Signoz: AgentSignozSourceConfig{
-					Address:            s.Signoz.Address,
-					APIKey:             s.Signoz.APIKey,
-					InsecureSkipVerify: s.Signoz.InsecureSkipVerify,
-					Query:              s.Signoz.Query,
-					MessageField:       s.Signoz.MessageField,
-					SeverityField:      s.Signoz.SeverityField,
-					PageSize:           s.Signoz.PageSize,
-					ReorderWindow:      s.Signoz.ReorderWindow,
+					Address:              s.Signoz.Address,
+					APIKey:               s.Signoz.APIKey,
+					InsecureSkipVerify:   s.Signoz.InsecureSkipVerify,
+					AllowLoopback:        s.Signoz.AllowLoopback,
+					AllowPrivateNetworks: s.Signoz.AllowPrivateNetworks,
+					Query:                s.Signoz.Query,
+					MessageField:         s.Signoz.MessageField,
+					SeverityField:        s.Signoz.SeverityField,
+					PageSize:             s.Signoz.PageSize,
+					ReorderWindow:        s.Signoz.ReorderWindow,
 				},
 			}
 			if s.Elasticsearch.Addresses != nil {
@@ -463,6 +465,9 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 			}
 			if s.Signoz.ExtraFields != nil {
 				c.Signoz.ExtraFields = append([]string(nil), s.Signoz.ExtraFields...)
+			}
+			if s.Signoz.RootCAs != nil {
+				c.Signoz.RootCAs = s.Signoz.RootCAs.Clone()
 			}
 			if s.Options != nil {
 				c.Options = cloneAnyMap(s.Options)

@@ -13,10 +13,11 @@
 # learn a baseline per (service, signal). Connection details are the whole
 # required config.
 #
-# ALSO DIFFERENT FROM THE PROMETHEUS PATH: the analyze tools are NOT auto-wired
-# for SigNoz in v1. `query_metrics` / `query_traces` still build Prometheus and
-# Tempo clients, so configuring these sources lights up the DETECT path only.
-# Point the analyze tools at a Prometheus/Tempo by hand if you need them.
+# SigNoz sources contribute provider-neutral read tools. The licensed metric
+# and trace sources add `discover_metrics`, `read_metric_series`,
+# `discover_trace_fields`, and `read_trace_spans`; an OSS `signoz` logs source
+# adds `discover_log_fields` and `read_log_records`. They do not populate the
+# separate Prometheus/Tempo `query_metrics` or `query_traces` tools.
 #
 # The API key is minted by the signoz-bootstrap one-shot and injected as
 # SIGNOZ_API_KEY; export your own to override. Never commit a real key here.
@@ -27,6 +28,7 @@ sources:
     options:
       address: ${SIGNOZ_ADDRESS}
       api_key: ${SIGNOZ_API_KEY}
+      allow_private_networks: true
       step: 60s
       # `metrics:` ADDS to the built-in catalog (SigNoz's own span metrics,
       # `signoz_calls_total` and `signoz_latency.bucket`), it does not replace
@@ -56,4 +58,5 @@ sources:
     options:
       address: ${SIGNOZ_ADDRESS}
       api_key: ${SIGNOZ_API_KEY}
+      allow_private_networks: true
       page_size: 100

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"unicode"
+
+	"github.com/VersusControl/versus-incident/pkg/core"
 )
 
 // State is the server-resolved availability state rendered by admin clients.
@@ -27,6 +29,7 @@ type DependencyStatus struct {
 	Configured  bool
 	Constructed bool
 	Healthy     bool
+	Count       int
 	Name        string
 	Health      string
 }
@@ -36,6 +39,47 @@ type Snapshot struct {
 	DataSources  map[string]DependencyStatus
 	Integrations map[string]DependencyStatus
 	Capabilities map[string]DependencyStatus
+}
+
+// RuntimeCapability is implemented by tools whose construction is a more
+// precise availability fact than their broad signal kind.
+type RuntimeCapability interface {
+	AvailabilityCapability() (capability string, signalKind string, sourceCount int)
+}
+
+// BindRuntimeCapabilities adds actual constructed tool/source facts without
+// changing the broad data-source status used by generic readers.
+func BindRuntimeCapabilities(snapshot Snapshot, runtime []core.Tool) Snapshot {
+	if snapshot.Capabilities == nil {
+		snapshot.Capabilities = make(map[string]DependencyStatus)
+	}
+	for _, candidate := range runtime {
+		reporter, ok := candidate.(RuntimeCapability)
+		if !ok {
+			continue
+		}
+		capability, signalKind, sourceCount := reporter.AvailabilityCapability()
+		if capability == "" || sourceCount <= 0 {
+			continue
+		}
+		status := DependencyStatus{Configured: true, Constructed: true, Healthy: true, Count: sourceCount, Name: displayRequirement(signalKind) + " read capability"}
+		if source, ok := snapshot.DataSources[signalKind]; ok && source.Configured && source.Health != "" && source.Health != "configuration" {
+			status.Healthy = source.Healthy
+			status.Health = source.Health
+			if source.Name != "" {
+				status.Name = source.Name
+			}
+		}
+		snapshot.Capabilities[capability] = status
+		source := snapshot.DataSources[signalKind]
+		source.Constructed = true
+		if source.Health == "" || source.Health == "configuration" {
+			source.Healthy = true
+			source.Health = ""
+		}
+		snapshot.DataSources[signalKind] = source
+	}
+	return snapshot
 }
 
 // EntitlementDecision lets an external module distinguish a purchase gate from
@@ -110,7 +154,17 @@ func requirementStatus(requirement Requirement, snapshot Snapshot) (DependencySt
 		return DependencyStatus{Configured: true, Healthy: true, Name: "Versus"}, true
 	case RequirementDataSource:
 		status, ok := snapshot.DataSources[requirement.SignalKind]
-		return status, ok && status.Configured
+		if !ok || !status.Configured {
+			return status, false
+		}
+		if len(requirement.Capabilities) == 0 {
+			return status, true
+		}
+		capability, present := snapshot.Capabilities[requirement.Capabilities[0]]
+		if !present || !capability.Configured {
+			return DependencyStatus{Configured: true, Name: status.Name, Health: "configuration"}, true
+		}
+		return capability, true
 	case RequirementIntegration:
 		status, ok := snapshot.Integrations[requirement.Integration]
 		return status, ok && status.Configured

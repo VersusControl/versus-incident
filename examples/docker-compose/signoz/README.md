@@ -62,8 +62,12 @@ cannot push logs-pipeline changes to this collector.
 docker compose up -d
 ```
 
-Everything is `${VAR:-default}`, so this needs zero configuration. First boot
-takes ~1 minute: the ClickHouse schema migration runs before SigNoz starts.
+The local example defaults `SIGNOZ_READ_ADDRESS` to `http://signoz:8080` on its
+trusted Docker network and explicitly permits that private destination. HTTP
+sends the query API key in plaintext, so production deployments should override
+it with a final, non-redirecting HTTPS origin whose certificate is trusted by
+Versus. First boot takes ~1 minute: the ClickHouse schema migration runs before
+SigNoz starts.
 
 ### The API key
 

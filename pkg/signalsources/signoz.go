@@ -2,6 +2,7 @@ package signalsources
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"log"
 	"slices"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	signozapp "github.com/VersusControl/versus-incident/pkg/signoz"
 )
 
 // SigNozSource pulls log rows from SigNoz through the v5 query API
@@ -81,6 +83,10 @@ const sigNozMaxPagesPerTick = 20
 
 // NewSigNozSource validates config and returns a ready source.
 func NewSigNozSource(name string, cfg config.AgentSignozSourceConfig) (*SigNozSource, error) {
+	return newSigNozSource(name, cfg, cfg.RootCAs)
+}
+
+func newSigNozSource(name string, cfg config.AgentSignozSourceConfig, rootCAs *x509.CertPool) (*SigNozSource, error) {
 	if cfg.Address == "" {
 		return nil, fmt.Errorf("signoz source %q: address is required", name)
 	}
@@ -107,7 +113,7 @@ func NewSigNozSource(name string, cfg config.AgentSignozSourceConfig) (*SigNozSo
 		}
 	}
 
-	querier, err := NewSigNozQuerier(cfg.Address, cfg.APIKey, cfg.InsecureSkipVerify)
+	querier, err := NewSigNozQuerierWithPolicy(cfg.Address, cfg.APIKey, cfg.InsecureSkipVerify, SigNozNetworkPolicy{AllowLoopback: cfg.AllowLoopback, AllowPrivate: cfg.AllowPrivateNetworks, RootCAs: rootCAs})
 	if err != nil {
 		return nil, fmt.Errorf("signoz source %q: %w", name, err)
 	}
@@ -290,11 +296,6 @@ func (s *SigNozSource) signalFromRow(row *SigNozRawRow) (core.Signal, string, bo
 	// row arrives without one, fall back to a composite so dedup still
 	// suppresses the overlapping re-scan instead of silently re-emitting the
 	// whole reorder window every tick.
-	id := sigNozString(data, "id")
-	if id == "" {
-		id = ts.Format(time.RFC3339Nano) + "|" + truncate(msg, 256)
-	}
-
 	fields := make(map[string]interface{}, len(s.cfg.ExtraFields))
 	for _, f := range s.cfg.ExtraFields {
 		if v, ok := sigNozLookupField(data, f); ok {
@@ -302,14 +303,20 @@ func (s *SigNozSource) signalFromRow(row *SigNozRawRow) (core.Signal, string, bo
 		}
 	}
 
-	return core.Signal{
+	signal := signozapp.ScrubSignalExactSecret(core.Signal{
 		Source:    s.Name(),
 		Timestamp: ts,
 		Severity:  sigNozString(data, s.cfg.SeverityField),
 		Message:   msg,
 		Fields:    fields,
 		Raw:       data,
-	}, id, true
+	}, s.cfg.APIKey)
+	id := signozapp.ScrubExactSecret(sigNozString(data, "id"), s.cfg.APIKey)
+	if id == "" {
+		id = ts.Format(time.RFC3339Nano) + "|" + truncate(signal.Message, 256)
+	}
+
+	return signal, id, true
 }
 
 // sigNozAttributeContainers are the row maps SigNoz nests OTLP attributes in,

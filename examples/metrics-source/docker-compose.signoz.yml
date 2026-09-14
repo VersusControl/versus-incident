@@ -208,7 +208,7 @@ services:
       signoz-bootstrap:
         condition: service_completed_successfully
     environment:
-      SIGNOZ_ADDRESS: ${SIGNOZ_ADDRESS:-http://signoz:8080}
+      SIGNOZ_ADDRESS: ${SIGNOZ_READ_ADDRESS:-http://signoz:8080}
       SIGNOZ_API_KEY: ${SIGNOZ_API_KEY:-}
     # Fall back to the bootstrapped key when the operator did not supply one.
     # The override replaces the image CMD, so the enterprise binary path is

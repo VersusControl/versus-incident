@@ -38,7 +38,15 @@ you decide this source sees everything you expect.
 If you do not already run SigNoz, the OSS example at
 `examples/docker-compose/signoz/`
 ([on GitHub](https://github.com/VersusControl/versus-incident/tree/main/examples/docker-compose/signoz))
-brings up a full stack with `docker compose up -d`.
+brings up a full stack with a direct internal HTTP reader:
+
+```bash
+docker compose up -d
+```
+
+The example explicitly trusts its Docker-private destination. HTTP sends the
+query API key in plaintext, so production deployments should set
+`SIGNOZ_READ_ADDRESS` to a verified HTTPS origin.
 
 > **It is a heavy stack** — ClickHouse, ClickHouse Keeper, Postgres and
 > an OTel collector. Budget **≥4 GB** of Docker memory.
@@ -63,9 +71,10 @@ sources:
     type: signoz_metrics
     enable: true
     options:
-      address: http://signoz:8080          # self-hosted UI/API port
+      address: https://signoz.example.internal # final HTTP(S) Query Service origin
       # address: https://<region>.signoz.cloud
       api_key: ${SIGNOZ_API_KEY}
+      allow_private_networks: true         # trusted RFC1918/ULA self-hosting only
 ```
 
 ## 3. What it discovers
@@ -114,8 +123,9 @@ metrics are all in that category:
 
 ```yaml
 options:
-  address: http://signoz:8080
+  address: https://signoz.example.internal
   api_key: ${SIGNOZ_API_KEY}
+  allow_private_networks: true
   metrics:                                  # ADDED to the default catalog
     - http_server_duration.bucket
     - system_memory_usage
@@ -135,8 +145,9 @@ names are **dotted** — this is not PromQL:
 
 ```yaml
 options:
-  address: http://signoz:8080
+  address: https://signoz.example.internal
   api_key: ${SIGNOZ_API_KEY}
+  allow_private_networks: true
   filter: "deployment.environment = 'prod' AND k8s.namespace.name = 'payments'"
 ```
 
@@ -213,8 +224,9 @@ license unlocked the source. `generic=false` confirms services were
 attributed; `generic=true` means it fell back to a global scope (see
 [limitations](#limitations)).
 
-There is **no** `auto-wired query_metrics tool` line — that is expected,
-not a failure. See [limitations](#limitations).
+For an unscoped source, the catalog also includes `discover_metrics` and
+`read_metric_series` for Chat and Analyze. A configured `filter:` disables only
+source-wide discovery; metric reads remain available and preserve that scope.
 
 Then work through the modes exactly as in the
 [Prometheus guide](./prometheus.md#3-understand-the-three-modes):
@@ -231,9 +243,11 @@ connection-only.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `address` | — (required) | SigNoz base URL — the UI/API port self-hosted, or `https://<region>.signoz.cloud`. |
+| `address` | — (required) | Final HTTP(S) SigNoz Query Service origin, self-hosted or `https://<region>.signoz.cloud`. Verified HTTPS is recommended for production; HTTP sends the API key in plaintext. |
 | `api_key` | — (required) | Sent as the `SIGNOZ-API-KEY` header. The **query** key from Settings → API Keys. |
-| `insecure_skip_verify` | `false` | Skip TLS verification — **local dev only**, never production. |
+| `insecure_skip_verify` | `false` | Disable certificate verification for HTTPS. Ignored for HTTP. |
+| `allow_private_networks` | `false` | Trust RFC1918/ULA destinations for an explicitly trusted self-hosted deployment. |
+| `allow_loopback` | `false` | Trust loopback for local testing, independently of HTTP/TLS. |
 | `step` | `60s` | Sampling resolution (the v5 `stepInterval`). |
 | `metrics` | built-in catalog | Metric names **added to** the default catalog. Histogram components are dotted; base counters keep the producer's `_total`. |
 | `filter` | unset | SigNoz v5 filter expression ANDed into every read, e.g. `deployment.environment = 'prod'`. Dotted attribute names; not PromQL. |
@@ -264,11 +278,11 @@ before you reach for a longer `discovery_interval`.
 
 These are real gaps in the first release, not configuration mistakes.
 
-- **No analyze auto-wire.** A configured `signoz_metrics` source does
-  **not** populate the `query_metrics`
-  [analyze tool](../../agent/tools/tools.md) — unlike the
-  `prometheus` source, which does. Configure `tools.query_metrics` by
-  hand, or keep pointing it at Prometheus. Planned, not shipped.
+- **Provider-specific generic readers remain separate.** A configured
+  `signoz_metrics` source contributes `discover_metrics` and
+  `read_metric_series`; it does not populate the Prometheus
+  `query_metrics` [analyze tool](../../agent/tools/tools.md). Configure that
+  separate tool only when you also want Prometheus-backed queries.
 - **Metric discovery is catalog-based.** Metrics outside the default
   catalog are invisible unless you name them in `metrics:`. The v5 query
   API cannot enumerate metric names, so there is no automatic
@@ -283,7 +297,7 @@ These are real gaps in the first release, not configuration mistakes.
 
 | Symptom | Cause / fix |
 |---|---|
-| `requires Versus Enterprise`, `sources=0` | The license is missing the **`intelligence`** feature (or you are on an OSS build). Mint a key that includes `intelligence`. This is the open-core line: OSS keeps only the on-demand `query_metrics` tool, not the standing source. |
+| `requires Versus Enterprise`, `sources=0` | The license is missing the **`intelligence`** feature (or you are on an OSS build). Mint a key that includes `intelligence`. OSS supports the `signoz` logs source and its log read tools; SigNoz metrics/traces sources and their four read tools require Enterprise. |
 | `401` / `403` on every read | An **ingestion** key was used instead of a **query** API key, or the key was revoked. |
 | `404` on `/api/v5/query_range` | SigNoz is older than **v0.87.0**. Upgrade. |
 | `discovered 0 signal(s)` | No spans in the discovery lookback, or none of the catalog metrics answered with a finite sample for any service. Confirm traces are flowing, then widen `discovery_lookback`. |
@@ -291,7 +305,7 @@ These are real gaps in the first release, not configuration mistakes.
 | A metric you care about is never watched | It is outside the default catalog — add it with `metrics:`. |
 | A metric you do not want learned | Add it to the org **Disable-Learn** policy (`metrics`, exact names or globs). Narrowing `filter:` stops it being read at all. |
 | `probe budget (500) spent; watch-set is partial` in the notes | The deployment is larger than one discovery pass can probe. Lower `max_services`, or narrow with `filter:` so the budget covers what matters. |
-| No `auto-wired query_metrics tool` line at boot | Expected — see [limitations](#limitations). |
+| `discover_metrics` is absent | The source has a configured `filter:`; source-wide discovery is withheld because it cannot honestly apply that scope. `read_metric_series` remains available. |
 
 ## See also
 

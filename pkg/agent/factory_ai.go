@@ -24,6 +24,7 @@ import (
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
+	signoztools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/signoz"
 	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -31,6 +32,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	"github.com/VersusControl/versus-incident/pkg/runbook"
 	"github.com/VersusControl/versus-incident/pkg/signalsources"
+	signozapp "github.com/VersusControl/versus-incident/pkg/signoz"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
@@ -200,6 +202,14 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		for _, source := range elasticsearchSources {
 			source.Service.SetScrubber(redactor)
 		}
+		signozSources, signozErrs := buildSigNozToolSources(cfg.Sources, redactor)
+		for _, e := range signozErrs {
+			log.Printf("agent: SigNoz tool source warning: %v", e)
+		}
+		extensionTools, extensionErrs := contributedTools(scope, cfg.Sources, redactor)
+		for _, e := range extensionErrs {
+			log.Printf("agent: runtime tool contributor warning: %v", e)
+		}
 		if kubernetesService != nil {
 			kubernetesService.SetScrubber(redactor)
 		}
@@ -259,8 +269,11 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		runtimeTools = buildAnalyzeTools(store, scope, newCatalogAdapterWithThreshold(catalog, cfg.Catalog.AutoPromoteAfter), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher, metrics, traces, detectionHealth)
 		runtimeTools = append(runtimeTools, elasticsearchtools.New(elasticsearchSources)...)
 		runtimeTools = append(runtimeTools, k8stools.New(kubernetesService)...)
+		runtimeTools = append(runtimeTools, signoztools.New(signozSources)...)
+		runtimeTools = append(runtimeTools, extensionTools...)
 		toolSnapshot = func(requestScope tenancy.OrgScope) aitools.Snapshot {
-			return buildToolAvailabilitySnapshot(configuredToolSnapshot, reader, graph, changes, embedder, runbookSearcher, metrics, traces, detectionHealth.DetectionHealth(requestScope))
+			snapshot := buildToolAvailabilitySnapshot(configuredToolSnapshot, reader, graph, changes, embedder, runbookSearcher, metrics, traces, detectionHealth.DetectionHealth(requestScope))
+			return aitools.BindRuntimeCapabilities(snapshot, runtimeTools)
 		}
 		initialView, loadErr := toolSettings.LoadToolsets(scope)
 		if loadErr != nil {
@@ -454,10 +467,10 @@ func (generation *toolGeneration) Filter(agent aitools.AgentKind, runtime []core
 }
 
 func configuredToolAvailabilitySnapshot(cfg config.AgentConfig, store storage.Provider) aitools.Snapshot {
-	configuredSignals := make(map[signalsources.Kind]bool)
+	configuredSignals := make(map[signalsources.Kind]int)
 	for _, source := range cfg.Sources {
 		if source.Enable {
-			configuredSignals[signalsources.KindOf(source.Type)] = true
+			configuredSignals[signalsources.KindOf(source.Type)]++
 		}
 	}
 	hasGit := len(cfg.Tools.RecentChanges.Git.Repos) > 0
@@ -466,21 +479,33 @@ func configuredToolAvailabilitySnapshot(cfg config.AgentConfig, store storage.Pr
 	configured := func(ok bool, name string) aitools.DependencyStatus {
 		return aitools.DependencyStatus{Configured: ok, Healthy: ok, Name: name}
 	}
-	metrics := configured(configuredSignals[signalsources.KindMetrics] || strings.TrimSpace(cfg.Tools.QueryMetrics.Prometheus.Address) != "", "Metric data source")
+	prometheusConfigured := strings.TrimSpace(cfg.Tools.QueryMetrics.Prometheus.Address) != ""
+	metrics := configured(configuredSignals[signalsources.KindMetrics] > 0 || prometheusConfigured, "Metric data source")
+	metrics.Count = configuredSignals[signalsources.KindMetrics]
+	if prometheusConfigured {
+		metrics.Count++
+	}
 	metrics.Constructed = newMetricReaderAdapter(cfg.Tools.QueryMetrics.Prometheus) != nil
 	if metrics.Configured && !metrics.Constructed {
 		metrics.Healthy = false
 		metrics.Health = "configuration"
 	}
-	traces := configured(configuredSignals[signalsources.KindTraces] || strings.TrimSpace(cfg.Tools.QueryTraces.Tempo.Address) != "", "Trace data source")
+	tempoConfigured := strings.TrimSpace(cfg.Tools.QueryTraces.Tempo.Address) != ""
+	traces := configured(configuredSignals[signalsources.KindTraces] > 0 || tempoConfigured, "Trace data source")
+	traces.Count = configuredSignals[signalsources.KindTraces]
+	if tempoConfigured {
+		traces.Count++
+	}
 	traces.Constructed = newTraceReaderAdapter(cfg.Tools.QueryTraces.Tempo) != nil
 	if traces.Configured && !traces.Constructed {
 		traces.Healthy = false
 		traces.Health = "configuration"
 	}
+	logs := configured(configuredSignals[signalsources.KindLogs] > 0, "Log data source")
+	logs.Count = configuredSignals[signalsources.KindLogs]
 	return aitools.Snapshot{
 		DataSources: map[string]aitools.DependencyStatus{
-			"logs":          configured(configuredSignals[signalsources.KindLogs], "Log data source"),
+			"logs":          logs,
 			"elasticsearch": configured(hasEnabledElasticsearch(cfg.Sources), "Elasticsearch log source"),
 			"metrics":       metrics,
 			"traces":        traces,
@@ -565,6 +590,36 @@ func buildElasticsearchToolSources(sources []config.AgentSourceConfig) ([]elasti
 		return nil, errs
 	}
 	slices.SortFunc(result, func(left, right elasticsearchtools.Source) int { return strings.Compare(left.Name, right.Name) })
+	return result, errs
+}
+
+func buildSigNozToolSources(sources []config.AgentSourceConfig, scrubber core.Scrubber) ([]signoztools.Source, []error) {
+	result := make([]signoztools.Source, 0)
+	errs := make([]error, 0)
+	seen := make(map[string]struct{})
+	for _, source := range sources {
+		if !source.Enable || source.Type != "signoz" {
+			continue
+		}
+		name := strings.TrimSpace(source.Name)
+		if name == "" {
+			errs = append(errs, fmt.Errorf("SigNoz tool source name is required"))
+			continue
+		}
+		if _, duplicate := seen[name]; duplicate {
+			errs = append(errs, fmt.Errorf("SigNoz tool source %q is duplicated", boundAvailabilityText(name, 80)))
+			continue
+		}
+		seen[name] = struct{}{}
+		service, err := signozapp.NewService(signozapp.Config{Address: source.Signoz.Address, APIKey: source.Signoz.APIKey, InsecureSkipVerify: source.Signoz.InsecureSkipVerify, AllowLoopback: source.Signoz.AllowLoopback, AllowPrivate: source.Signoz.AllowPrivateNetworks, ScopeFilter: source.Signoz.Query}, signozapp.ToolPolicy())
+		if err != nil {
+			errs = append(errs, fmt.Errorf("SigNoz tool source %q has invalid configuration", boundAvailabilityText(name, 80)))
+			continue
+		}
+		service.SetScrubber(scrubber)
+		result = append(result, signoztools.Source{Name: name, Kind: signozapp.SignalLogs, Service: service})
+	}
+	slices.SortFunc(result, func(left, right signoztools.Source) int { return strings.Compare(left.Name, right.Name) })
 	return result, errs
 }
 

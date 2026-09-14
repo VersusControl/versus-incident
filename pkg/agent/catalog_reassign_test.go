@@ -210,7 +210,7 @@ func TestCatalog_RepointService_InMemory(t *testing.T) {
 // re-points its fleet-wide read view.
 func TestCatalog_RepointService_RoutesThroughStore(t *testing.T) {
 	fake := &fakeCatalogStore{patterns: map[string]*Pattern{
-		"p-ec7767235887": {ID: "p-ec7767235887", Service: "api"},
+		"p-83b3179af1b7": {ID: "p-83b3179af1b7", Service: "api"},
 	}}
 	SetCatalogStore(fake)
 	t.Cleanup(func() { SetCatalogStore(nil) })
@@ -219,7 +219,7 @@ func TestCatalog_RepointService_RoutesThroughStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCatalog: %v", err)
 	}
-	if !cat.RepointService("p-ec7767235887", "cache") {
+	if !cat.RepointService("p-83b3179af1b7", "cache") {
 		t.Fatalf("RepointService returned false, want true (store Curate succeeded)")
 	}
 
@@ -231,8 +231,8 @@ func TestCatalog_RepointService_RoutesThroughStore(t *testing.T) {
 	if edit.Kind != CatalogEditRepointService {
 		t.Errorf("curate kind = %q, want %q", edit.Kind, CatalogEditRepointService)
 	}
-	if edit.PatternID != "p-ec7767235887" || edit.Service != "cache" {
-		t.Errorf("curate = {PatternID:%q, Service:%q}, want {p-ec7767235887, cache}", edit.PatternID, edit.Service)
+	if edit.PatternID != "p-83b3179af1b7" || edit.Service != "cache" {
+		t.Errorf("curate = {PatternID:%q, Service:%q}, want {p-83b3179af1b7, cache}", edit.PatternID, edit.Service)
 	}
 
 	// The guard runs BEFORE the store, so a blank/"_unknown" target never even

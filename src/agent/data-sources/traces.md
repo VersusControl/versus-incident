@@ -216,9 +216,10 @@ sources:
     type: signoz_traces
     enable: true
     options:
-      address: http://signoz:8080          # self-hosted UI/API port
+      address: https://signoz.example.internal # final HTTP(S) Query Service origin
       # address: https://<region>.signoz.cloud
       api_key: ${SIGNOZ_API_KEY}
+      allow_private_networks: true         # trusted RFC1918/ULA self-hosting only
 ```
 
 That is the whole operator surface for the auto flow. **No `query:`, no TraceQL.**
@@ -231,9 +232,11 @@ That is the whole operator surface for the auto flow. **No `query:`, no TraceQL.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `address` | — (required) | SigNoz base URL — the UI/API port self-hosted, or `https://<region>.signoz.cloud`. |
+| `address` | — (required) | Final HTTP(S) SigNoz Query Service origin, self-hosted or `https://<region>.signoz.cloud`. Verified HTTPS is recommended for production; HTTP sends the API key in plaintext. |
 | `api_key` | — (required) | Sent as the `SIGNOZ-API-KEY` header. The **query** key, not the ingestion key. |
-| `insecure_skip_verify` | `false` | Skip TLS verification — **local dev only**, never production. |
+| `insecure_skip_verify` | `false` | Disable certificate verification for HTTPS. Ignored for HTTP. |
+| `allow_private_networks` | `false` | Trust RFC1918/ULA destinations for an explicitly trusted self-hosted deployment. |
+| `allow_loopback` | `false` | Trust loopback for local testing, independently of HTTP/TLS. |
 | `query` | unset | A v5 filter expression, **appended** as an extra pinned target (it never turns off auto-learning). |
 | `page_size` | `100` | Spans searched per target per tick. |
 | `max_services` | `50` | Service-enumeration cap. |
@@ -268,17 +271,19 @@ dialect is a **v5 filter expression**, not TraceQL:
 
 ```yaml
 options:
-  address: http://signoz:8080
+  address: https://signoz.example.internal
   api_key: ${SIGNOZ_API_KEY}
+  allow_private_networks: true
   query: "service.name = 'checkout'"     # added alongside auto-discovered targets
 ```
 
 ### Limitations
 
-- **No analyze auto-wire.** A configured `signoz_traces` source does **not** populate the
-  `query_traces` [analyze tool](../tools/tools.md) — unlike the `traces` (Tempo)
-  source, which does. Configure `tools.query_traces` by hand, or keep pointing it at Tempo.
-  Planned, not shipped.
+- **Provider-specific generic readers remain separate.** A configured
+  `signoz_traces` source contributes `discover_trace_fields` and
+  `read_trace_spans` to Chat and Analyze; it does not populate the Tempo
+  `query_traces` [analyze tool](../tools/tools.md). Configure that separate tool
+  only when you also want Tempo-backed queries.
 - **Discovery is sample-based.** A service that emitted no spans inside the discovery
   lookback is not discovered until the next pass. Widen `discovery_lookback` or raise
   `discovery_samples` on a quiet backend.

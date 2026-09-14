@@ -167,7 +167,7 @@ func TestAgentResolvesKubernetesAuthorizationForEveryRun(t *testing.T) {
 	for _, permissions := range [][]bool{{true, false, true}, {false, true, false}} {
 		fake := &fakeChat{turns: []*schema.Message{schema.AssistantMessage(`{"title":"t","summary":"s","next_steps":["x"]}`, nil)}}
 		agent, err := New(context.Background(), config.AgentAIConfig{Model: "fake"}, []core.Tool{
-			&stubTool{name: "get_incident"}, &stubTool{name: "get_cluster_overview"}, &stubTool{name: "list_log_indices"},
+			&stubTool{name: "get_incident"}, &stubTool{name: "get_cluster_overview"}, &stubTool{name: "list_log_indices"}, &stubTool{name: "read_log_records"},
 		}, Options{ChatModel: fake})
 		if err != nil {
 			t.Fatal(err)
@@ -184,7 +184,7 @@ func TestAgentResolvesKubernetesAuthorizationForEveryRun(t *testing.T) {
 		for index, allowed := range permissions {
 			want := "get_incident"
 			if allowed {
-				want += ",get_cluster_overview,list_log_indices"
+				want += ",get_cluster_overview,list_log_indices,read_log_records"
 			}
 			if got := strings.Join(fake.toolBindings[index+1], ","); got != want {
 				t.Fatalf("permissions=%v turn=%d tools=%s want=%s", permissions, index, got, want)

@@ -1,10 +1,58 @@
 package agent
 
 import (
+	"encoding/hex"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestNewPatternID_SHA256(t *testing.T) {
+	tokens := []string{"hello", "world"}
+	const want = "p-b94d27b9934d"
+
+	got := newPatternID(tokens)
+	if got != want {
+		t.Fatalf("newPatternID() = %q, want %q", got, want)
+	}
+	if len(got) != 14 {
+		t.Fatalf("len(newPatternID()) = %d, want 14", len(got))
+	}
+	hexPart := got[2:]
+	if _, err := hex.DecodeString(hexPart); err != nil {
+		t.Fatalf("newPatternID() hex suffix is invalid: %v", err)
+	}
+	if hexPart != strings.ToLower(hexPart) {
+		t.Fatalf("newPatternID() suffix = %q, want lowercase hex", hexPart)
+	}
+	if again := newPatternID(tokens); again != got {
+		t.Fatalf("newPatternID() is unstable: first %q, second %q", got, again)
+	}
+	if distinct := newPatternID([]string{"hello", "versus"}); distinct == got {
+		t.Fatalf("distinct token lists produced the same ID %q", got)
+	}
+}
+
+func TestMiner_AddClusterPreservesLegacyPatternID(t *testing.T) {
+	const legacyID = "p-2aae6c35c94f"
+	m := NewMiner(0.4, 4, 100)
+	m.AddCluster(legacyID, "hello world", 7)
+
+	gotID, gotTemplate, isNew := m.Cluster("hello world")
+	if isNew {
+		t.Fatal("matching traffic created a new cluster for a restored legacy ID")
+	}
+	if gotID != legacyID {
+		t.Fatalf("matching traffic returned ID %q, want restored legacy ID %q", gotID, legacyID)
+	}
+	if gotTemplate != "hello world" {
+		t.Fatalf("matching traffic returned template %q, want %q", gotTemplate, "hello world")
+	}
+	clusters := m.Snapshot()
+	if len(clusters) != 1 || clusters[0].ID != legacyID || clusters[0].Size != 8 {
+		t.Fatalf("restored cluster changed after matching traffic: %+v", clusters)
+	}
+}
 
 func TestMiner_ClustersSimilarMessages(t *testing.T) {
 	m := NewMiner(0.4, 4, 100)
