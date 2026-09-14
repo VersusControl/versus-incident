@@ -268,7 +268,7 @@ on-demand **analyze** investigation. Shared keys apply to both; the
 agent:
   ai:
     enable: true
-    provider: openai            # openai | deepseek | qwen | ollama | claude | gemini
+    provider: openai            # openai | deepseek | qwen | ollama | claude | gemini | litellm
     api_key: ${AGENT_AI_API_KEY}
     model: gpt-4o-mini          # shared default for detect + analyze
     temperature: 0.2
@@ -290,11 +290,39 @@ temperature at `1` and reject any explicit value.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `enable` | bool | `false` | Turns on the AI SRE (detect triage + analyze). Env: `AGENT_AI_ENABLE`. |
-| `provider` | string | `openai` | Model backend: `openai`, `deepseek`, `qwen`, `ollama`, `claude`, or `gemini`. An unknown value fails fast (no silent fallback). Env: `AGENT_AI_PROVIDER`. |
+| `provider` | string | `openai` | Model backend: `openai`, `deepseek`, `qwen`, `ollama`, `claude`, `gemini`, or `litellm`. An unknown value fails fast (no silent fallback). Env: `AGENT_AI_PROVIDER`. |
 | `api_key` | string | — | API key for the model provider. Env: `AGENT_AI_API_KEY`. |
 | `model` | string | — | Shared default model for both tasks. Env: `AGENT_AI_MODEL`. |
 | `temperature` | float | `0.2` | Randomness control. Set `-1` to omit the field for beta-limited / reasoning models that reject explicit temperature values. |
 | `analyze.model` | string | inherits `model` | Optional stronger model just for analyze. |
+
+### LiteLLM gateway
+
+Set `provider: litellm` to route the AI SRE through a
+[LiteLLM proxy](https://docs.litellm.ai/docs/simple_proxy) — one
+OpenAI-compatible endpoint that fans out to 100+ upstream providers
+(OpenAI, Anthropic, Bedrock, Vertex, Azure, Gemini, self-hosted, ...).
+This lets you centralise API keys, spend limits, caching, and fallbacks
+in the proxy while Versus keeps a single, stable configuration.
+
+```yaml
+agent:
+  ai:
+    enable: true
+    provider: litellm
+    api_key: ${LITELLM_VIRTUAL_KEY}   # the proxy virtual key (Bearer)
+    model: gpt-5                       # a LiteLLM model alias from your proxy config
+    temperature: 0.2
+    max_tokens: 1024
+```
+
+The backend speaks the OpenAI chat-completions wire format, so JSON-mode
+(detect) and tool-calling (analyze) work unchanged. `model` is the
+**model alias** defined in your LiteLLM proxy config, not a raw provider
+id; the proxy maps it to the upstream deployment and drops any
+per-provider-unsupported sampling params server-side. The endpoint
+defaults to a local proxy at `http://localhost:4000/v1` (the common
+sidecar deployment).
 
 > The tool-loop knobs `tool_timeout` and `parallel_tools` moved to the
 > root of `tools.yaml` (see below) — they apply to every analyze tool
