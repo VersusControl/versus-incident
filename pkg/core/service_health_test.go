@@ -1,7 +1,9 @@
 package core_test
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -36,5 +38,29 @@ func TestHealthProviderRequestHasOnlyNeutralBoundedInputs(t *testing.T) {
 	}
 	if _, ok := typeOf.FieldByName("Budget"); !ok {
 		t.Fatal("health provider request has no server budget")
+	}
+}
+
+func TestHealthAssessmentPreservesAssessedZeroAndWithheldValues(t *testing.T) {
+	zero := 0.0
+	assessed, err := json.Marshal(core.HealthAssessment{RegressionScore: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withheld, err := json.Marshal(core.HealthAssessment{ReasonCode: "insufficient_baseline"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(assessed) == string(withheld) || !strings.Contains(string(assessed), `"regression_score":0`) || !strings.Contains(string(withheld), `"regression_score":null`) || !strings.Contains(string(withheld), `"silent":null`) {
+		t.Fatalf("assessed=%s withheld=%s", assessed, withheld)
+	}
+}
+
+func TestSignalEvidenceCarriesTrustedAttribution(t *testing.T) {
+	typeOf := reflect.TypeOf(core.SignalEvidence{})
+	for _, required := range []string{"OrgID", "Service", "Operation", "Family", "Measure", "SourceRef", "SignalRef"} {
+		if _, ok := typeOf.FieldByName(required); !ok {
+			t.Fatalf("signal evidence has no %s attribution", required)
+		}
 	}
 }

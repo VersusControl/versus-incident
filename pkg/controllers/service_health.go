@@ -32,7 +32,7 @@ func (controller *ServiceHealthController) getServiceHealth(ctx *fiber.Ctx) erro
 	if controller.manager == nil {
 		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "service health unavailable"})
 	}
-	snapshot, err := controller.manager.SnapshotOrEmpty(middleware.OrgFromContext(ctx))
+	snapshot, err := controller.manager.SnapshotFor(ctx.UserContext(), middleware.OrgFromContext(ctx))
 	if err != nil {
 		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "service health unavailable"})
 	}

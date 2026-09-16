@@ -2056,16 +2056,65 @@ export interface ServiceHealthLogEvidence {
   estimated: boolean;
 }
 
+export interface ServiceHealthSignalEvidence {
+  org_id: string;
+  service: string;
+  operation?: string;
+  family: string;
+  measure: string;
+  value: number | null;
+  unit?: string;
+  numerator?: number;
+  denominator?: number;
+  availability: ServiceHealthAvailability;
+  source_ref: string;
+  signal_ref?: string;
+  observed_at: string;
+  window_start: string;
+  window_end: string;
+  fresh_until?: string;
+  provenance?: string;
+}
+
+export interface ServiceHealthAssessmentDriver {
+  family: string;
+  measure: string;
+  operation?: string;
+  weight?: number;
+}
+
+export interface ServiceHealthAssessment {
+  org_id: string;
+  service: string;
+  regression_score?: number | null;
+  regressing?: boolean;
+  silent?: boolean | null;
+  confidence: number;
+  reason_code?: string;
+  drivers?: ServiceHealthAssessmentDriver[];
+  included_families?: string[];
+  algorithm_version: string;
+  baseline_reference?: string;
+  assessed_at: string;
+  fresh_until?: string;
+  severity?: string;
+  raise_severity?: boolean;
+  alert_state_known?: boolean;
+}
+
 export interface ServiceHealthService {
   org_id: string;
   service: string;
   domain: string;
   kind: string;
   severity: string;
+  base_severity?: string;
   assessment_basis: string;
   logs: ServiceHealthLogEvidence;
   availability: Record<string, ServiceHealthAvailability>;
   active_incidents: number | null;
+  evidence?: ServiceHealthSignalEvidence[];
+  assessment?: ServiceHealthAssessment;
 }
 
 export interface ServiceHealthDomain {

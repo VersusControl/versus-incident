@@ -74,12 +74,63 @@ function liveSnapshot(): Snapshot {
   };
 }
 
+function enterpriseSnapshot(): Snapshot {
+  const snapshot = liveSnapshot();
+  const services = snapshot.services as Array<Record<string, unknown>>;
+  services[0] = {
+    ...services[0],
+    active_incidents: 0,
+    severity: "critical",
+    base_severity: "pressure",
+    assessment_basis: "Logs + patterns + incidents + Metrics + Traces",
+    evidence: [
+      { org_id: "acme", service: "checkout-service-with-a-long-production-name", family: "metrics", measure: "latency", value: 284.5, unit: "ms", availability: { state: "ready" }, source_ref: "prometheus", signal_ref: "latency_p99", observed_at: fixedTime, window_start: "2026-09-10T11:55:00Z", window_end: fixedTime, fresh_until: "2026-09-10T12:05:00Z", provenance: "learned_latest" },
+      { org_id: "acme", service: "checkout-service-with-a-long-production-name", family: "metrics", measure: "request_error_ratio", value: 0.0375, unit: "ratio", availability: { state: "ready" }, source_ref: "prometheus", signal_ref: "error_rate", observed_at: fixedTime, window_start: "2026-09-10T11:55:00Z", window_end: fixedTime, fresh_until: "2026-09-10T12:05:00Z", provenance: "learned_latest" },
+      { org_id: "acme", service: "checkout-service-with-a-long-production-name", family: "metrics", measure: "throughput", value: 42, unit: "req/s", availability: { state: "ready" }, source_ref: "prometheus", signal_ref: "request_rate", observed_at: fixedTime, window_start: "2026-09-10T11:55:00Z", window_end: fixedTime, fresh_until: "2026-09-10T12:05:00Z", provenance: "learned_latest" },
+    ],
+    assessment: { org_id: "acme", service: "checkout-service-with-a-long-production-name", regression_score: 82, regressing: true, silent: true, confidence: 0.91, reason_code: "baseline_regression", drivers: [{ family: "traces", measure: "latency", operation: "POST /checkout" }], included_families: ["metrics", "traces"], algorithm_version: "learned-adverse-z-v2", baseline_reference: "learned:traces:latency_p99", assessed_at: fixedTime, fresh_until: "2026-09-10T12:05:00Z", severity: "critical", raise_severity: true, alert_state_known: true },
+  };
+  return {
+    ...snapshot,
+    services,
+    facets: { critical: 1, nominal: 1, regressing: 1, silent_regressions: 1 },
+    capabilities: [
+      { family: "logs", measures: { activity: { state: "ready" }, patterns: { state: "ready" }, anomalies: { state: "ready" } } },
+      { family: "internal", measures: { incidents: { state: "ready" }, patterns: { state: "ready" } } },
+      { family: "metrics", measures: { latency: { state: "ready" }, request_error_ratio: { state: "ready" }, throughput: { state: "ready" } } },
+      { family: "assessment", measures: { regression_score: { state: "ready" }, silent: { state: "ready" } } },
+    ],
+  };
+}
+
+function staleSnapshot(): Snapshot {
+  const snapshot = enterpriseSnapshot();
+  const services = snapshot.services as Array<Record<string, unknown>>;
+  const checkout = services[0];
+  const logs = checkout.logs as Record<string, unknown>;
+  const assessment = checkout.assessment as Record<string, unknown>;
+  services[0] = {
+    ...checkout,
+    logs: { ...logs, latest_observation: "2026-09-10T11:50:00Z" },
+    availability: {
+      logs: { state: "stale", reason_code: "stale_baseline" },
+      internal: { state: "ready" },
+      "assessment.regression_score": { state: "stale", reason_code: "stale_baseline" },
+    },
+    evidence: [
+      { org_id: "acme", service: checkout.service, family: "metrics", measure: "latency", value: null, unit: "ms", availability: { state: "no_data", reason_code: "no_observations_in_window" }, source_ref: "prometheus", signal_ref: "latency_p99", observed_at: "0001-01-01T00:00:00Z", window_start: "2026-09-10T11:55:00Z", window_end: fixedTime },
+    ],
+    assessment: { ...assessment, silent: true },
+  };
+  return { ...snapshot, services };
+}
+
 async function json(route: Route, body: unknown, status = 200) {
   await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 }
 
 async function installApi(page: Page, health: Snapshot) {
-  const state = { settings: { interval_seconds: 60, window_seconds: 300, revision: 0 }, patchBodies: [] as unknown[] };
+  const state = { health, settings: { interval_seconds: 60, window_seconds: 300, revision: 0 }, patchBodies: [] as unknown[] };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -106,7 +157,7 @@ async function installApi(page: Page, health: Snapshot) {
     if (requestPath === "/api/agent/services" && request.method() === "GET") {
       return json(route, { services: { checkout: { first_seen: fixedTime, manual: false, in_grace: false, grace_seconds_remaining: 0 } }, total: 1, next_offset: null });
     }
-    if (requestPath === "/api/agent/service-health") return json(route, health);
+    if (requestPath === "/api/agent/service-health") return json(route, state.health);
     if (requestPath === "/api/agent/service-health/settings" && request.method() === "GET") return json(route, state.settings);
     if (requestPath === "/api/agent/service-health/settings" && request.method() === "PATCH") {
       const body = request.postDataJSON();
@@ -133,6 +184,36 @@ async function expectNoHorizontalOverflow(page: Page) {
   const widths = await page.evaluate(() => ({ viewport: window.innerWidth, body: document.body.scrollWidth, root: document.documentElement.scrollWidth }));
   expect(widths.body).toBeLessThanOrEqual(widths.viewport);
   expect(widths.root).toBeLessThanOrEqual(widths.viewport);
+}
+
+async function expectPanelWithinViewport(page: Page) {
+  const panel = page.getByRole("dialog").locator("aside");
+  await expect.poll(async () => {
+    const box = await panel.boundingBox();
+    return box?.x ?? -Infinity;
+  }).toBeGreaterThanOrEqual(-1);
+  await expect.poll(async () => {
+    const box = await panel.boundingBox();
+    return box ? box.x + box.width : Infinity;
+  }).toBeLessThanOrEqual(page.viewportSize()?.width ?? 0);
+}
+
+async function expectPanelLayout(page: Page) {
+  const panel = page.getByRole("dialog").locator("aside");
+  const header = panel.locator(":scope > div").first();
+  const body = panel.locator(":scope > .overlay-body");
+  const footer = panel.locator(":scope > div").last();
+  const [panelBox, headerBox, bodyBox, footerBox] = await Promise.all([
+    panel.boundingBox(), header.boundingBox(), body.boundingBox(), footer.boundingBox(),
+  ]);
+  expect(panelBox).not.toBeNull();
+  expect(headerBox).not.toBeNull();
+  expect(bodyBox).not.toBeNull();
+  expect(footerBox).not.toBeNull();
+  expect(bodyBox!.y).toBeGreaterThanOrEqual(headerBox!.y + headerBox!.height - 1);
+  expect(bodyBox!.y + bodyBox!.height).toBeLessThanOrEqual(footerBox!.y + 1);
+  expect(await body.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await expect(panel.getByRole("heading", { level: 2 })).not.toBeEmpty();
 }
 
 test("no-source preview is labeled, isolated, and responsive", async ({ page }) => {
@@ -163,7 +244,34 @@ test("live OSS evidence supports mode, facet, domain drill-down, and service nav
   expect(firstTile?.y).toBeLessThan(620);
   await expect(page.getByRole("heading", { name: "Lifetime totals" })).not.toBeVisible();
   await page.screenshot({ path: path.join(screenshotDir, "live-grid-desktop.png"), fullPage: true });
+  const checkoutTile = page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name" });
+  await checkoutTile.click();
+  let dialog = page.getByRole("dialog", { name: "checkout-service-with-a-long-production-name" });
+  await expect(dialog.getByText("Log events")).toBeVisible();
+  await expect(dialog.getByText("Active incidents")).toBeVisible();
+  await expect(dialog.getByRole("tab", { name: "Signals" })).toHaveCount(0);
+  await expectPanelWithinViewport(page);
+  await expectPanelLayout(page);
+  const desktopPanel = await dialog.locator("aside").boundingBox();
+  expect(desktopPanel!.width).toBeGreaterThanOrEqual(680);
+  expect(desktopPanel!.width).toBeLessThanOrEqual(760);
+  await page.screenshot({ path: path.join(screenshotDir, "oss-detail-dark.png"), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
+  await expectPanelWithinViewport(page);
+  await expectPanelLayout(page);
+  await expect(dialog.getByRole("button", { name: "Expand panel" })).toHaveCount(0);
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: path.join(screenshotDir, "oss-detail-mobile-dark.png"), fullPage: true });
+  const openService = dialog.getByRole("link", { name: "Open service" });
+  const closePanel = dialog.getByRole("button", { name: "Close panel" });
+  await openService.focus();
+  await page.keyboard.press("Tab");
+  await expect(closePanel).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(openService).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(checkoutTile).toBeFocused();
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: path.join(screenshotDir, "live-grid-mobile.png"), fullPage: true });
   await page.setViewportSize({ width: 1280, height: 900 });
@@ -189,24 +297,113 @@ test("live OSS evidence supports mode, facet, domain drill-down, and service nav
   await page.getByRole("button", { name: "List view" }).click();
   await page.getByRole("searchbox", { name: "Find a service" }).fill("checkout");
   await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name" }).click();
-  await expect(page.getByRole("dialog")).toBeVisible();
-  await expect(page.getByText("Logs and incident records")).toBeVisible();
-  await page.screenshot({ path: path.join(screenshotDir, "live-drilldown-desktop.png"), fullPage: true });
+  dialog = page.getByRole("dialog", { name: "checkout-service-with-a-long-production-name" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("Log events")).toBeVisible();
+  await expect(dialog.getByText("Active incidents")).toBeVisible();
+  await expectPanelWithinViewport(page);
+  await expectPanelLayout(page);
+  await page.screenshot({ path: path.join(screenshotDir, "oss-detail-light.png"), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
-  const panel = page.getByRole("dialog").locator("aside");
-  await expect.poll(async () => {
-    const box = await panel.boundingBox();
-    return box ? Math.abs(box.x) : Infinity;
-  }).toBeLessThan(1);
-  await expect.poll(async () => {
-    const box = await panel.boundingBox();
-    return box ? box.x + box.width : Infinity;
-  }).toBeLessThanOrEqual(391);
+  await expectPanelWithinViewport(page);
+  const mobilePanel = await dialog.locator("aside").boundingBox();
+  expect(mobilePanel!.width).toBe(390);
+  expect(mobilePanel!.height).toBe(844);
+  await expectPanelLayout(page);
   await expect(page.getByRole("button", { name: "Close panel" })).toBeInViewport();
   await expectNoHorizontalOverflow(page);
-  await page.screenshot({ path: path.join(screenshotDir, "live-drilldown-mobile.png"), fullPage: true });
+  await page.screenshot({ path: path.join(screenshotDir, "oss-detail-mobile-light.png"), fullPage: true });
   await page.getByRole("link", { name: "Open service" }).click();
   await expect(page).toHaveURL(/\/agent\/services\/checkout-service-with-a-long-production-name$/);
+});
+
+test("Enterprise evidence is removed and announced when entitlement disappears", async ({ page }) => {
+  const state = await installApi(page, enterpriseSnapshot());
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openAuthenticated(page, "/agent");
+  const dataMode = page.getByLabel("Show data");
+  await expect(dataMode.getByRole("option", { name: "Latency P99" })).toHaveCount(1);
+  await expect(dataMode.getByRole("option", { name: "Regression" })).toHaveCount(1);
+  await expect(dataMode.getByRole("option", { name: "Apdex" })).toHaveCount(0);
+  await dataMode.selectOption("latency");
+  const healthState = page.getByLabel("Health state");
+  await healthState.selectOption("regressing");
+  await expect(page.getByText("284.5 ms")).toBeVisible();
+  await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText(/Heuristic confidence 91%/)).toBeVisible();
+  await expect(dialog.getByText(/Latency P99.*POST \/checkout/)).toBeVisible();
+  await expect(dialog).not.toContainText("learned-adverse-z-v1");
+  await expect(dialog).not.toContainText("learned:metrics:latency_p99");
+  await expectPanelWithinViewport(page);
+  await expectPanelLayout(page);
+  const collapsedBox = await dialog.locator("aside").boundingBox();
+  expect(collapsedBox!.width).toBeGreaterThanOrEqual(680);
+  expect(collapsedBox!.width).toBeLessThanOrEqual(760);
+  await page.screenshot({ path: path.join(screenshotDir, "enterprise-detail-dark.png"), fullPage: true });
+  await dialog.getByRole("button", { name: "Expand panel" }).click();
+  const expandedBox = await dialog.locator("aside").boundingBox();
+  expect(expandedBox!.width).toBeGreaterThan(collapsedBox!.width + 200);
+  await expect(dialog.getByRole("button", { name: "Collapse panel" })).toBeVisible();
+  await dialog.getByRole("tab", { name: "Signals" }).click();
+  await dialog.locator("details").filter({ hasText: "Latency P99" }).locator("summary").click();
+  await expect(dialog.getByText("latency_p99")).toBeVisible();
+  await expect(dialog.getByText("Prometheus").first()).toBeVisible();
+  await dialog.getByRole("button", { name: "Collapse panel" }).click();
+  await dialog.getByRole("button", { name: "Close panel" }).click();
+  const lightSwitch = page.getByRole("button", { name: "Switch to light theme" });
+  if (await lightSwitch.isVisible()) await lightSwitch.click();
+  await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name" }).click();
+  await expectPanelWithinViewport(page);
+  await expectPanelLayout(page);
+  await page.screenshot({ path: path.join(screenshotDir, "enterprise-detail-light.png"), fullPage: true });
+
+  const refreshed = enterpriseSnapshot();
+  const refreshedServices = refreshed.services as Array<Record<string, unknown>>;
+  refreshedServices[0] = { ...refreshedServices[0], active_incidents: 3 };
+  state.health = refreshed;
+  await page.getByRole("button", { name: "Refresh service health" }).evaluate((element) => (element as HTMLButtonElement).click());
+  await dialog.getByRole("tab", { name: "Overview" }).click();
+  await expect(dialog.getByText("3", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("No Versus incident")).toHaveCount(0);
+
+  state.health = liveSnapshot();
+  await page.getByRole("button", { name: "Refresh service health" }).evaluate((element) => (element as HTMLButtonElement).click());
+  await expect(dataMode).toHaveValue("combined");
+  await expect(healthState).toHaveValue("all");
+  await expect(page.getByText("Premium Service Health data is no longer available. Showing All data and all services.")).toBeAttached();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(dataMode.getByRole("option", { name: "Latency P99" })).toHaveCount(0);
+  await expect(page.getByText("284.5 ms")).toHaveCount(0);
+  await expect(page.getByText("No Versus incident")).toHaveCount(0);
+  await expect(page.getByText("POST /checkout")).toHaveCount(0);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectNoHorizontalOverflow(page);
+  await page.screenshot({ path: path.join(screenshotDir, "license-loss-mobile.png"), fullPage: true });
+});
+
+test("stale and missing evidence stays explicitly unavailable in both themes", async ({ page }) => {
+  await installApi(page, staleSnapshot());
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openAuthenticated(page, "/agent");
+  await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Stale").first()).toBeVisible();
+  await expect(dialog.getByText("82 / 100")).toHaveCount(0);
+  await expect(dialog.getByText(/Heuristic confidence/)).toHaveCount(0);
+  await expect(dialog.getByText("No Versus incident")).toHaveCount(0);
+  await dialog.getByRole("tab", { name: "Signals" }).click();
+  await expect(dialog.locator("summary").getByText("No recent data")).toBeVisible();
+  await expectPanelLayout(page);
+  await page.screenshot({ path: path.join(screenshotDir, "stale-missing-detail-dark.png"), fullPage: true });
+  await dialog.getByRole("button", { name: "Close panel" }).click();
+  const lightSwitch = page.getByRole("button", { name: "Switch to light theme" });
+  if (await lightSwitch.isVisible()) await lightSwitch.click();
+  await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name" }).click();
+  await expectPanelWithinViewport(page);
+  await expectPanelLayout(page);
+  await page.screenshot({ path: path.join(screenshotDir, "stale-missing-detail-light.png"), fullPage: true });
 });
 
 test("desktop stacks every section and mobile falls back to tabs", async ({ page }) => {

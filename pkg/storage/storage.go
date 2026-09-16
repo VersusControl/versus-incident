@@ -21,6 +21,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -177,6 +178,36 @@ type Provider interface {
 	// connections, db pools). Calling Close on a closed provider is a
 	// no-op.
 	Close() error
+}
+
+// BlobPageLister is an optional bounded enumeration capability. Implementations
+// return at most limit blobs in lexical name order, strictly after cursor.
+// Callers that require bounded storage work must fail closed when it is absent.
+type BlobPageLister interface {
+	ListBlobsPage(ctx context.Context, prefix, cursor string, limit int) ([]Blob, error)
+}
+
+// BoundedBlobPageLister is the stronger paging capability used when callers
+// must account for skipped index entries as well as returned blobs. Next is
+// the last key examined, so malformed or concurrently removed entries cannot
+// strand a caller on the same page. Implementations must bound all work by
+// limit and report the bytes read from artifact files.
+type BoundedBlobPageLister interface {
+	ListBlobsPageBounded(ctx context.Context, prefix, cursor string, limit int) (BlobPage, error)
+}
+
+// BlobDeleter is an optional exact-key blob deletion capability.
+type BlobDeleter interface {
+	DeleteBlob(name string) error
+}
+
+// BlobPage is one resource-bounded keyset page.
+type BlobPage struct {
+	Blobs   []Blob
+	Next    string
+	Scanned int
+	Bytes   int64
+	Done    bool
 }
 
 // IncidentMutationChecker is an optional capability for scoped providers that

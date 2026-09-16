@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"sort"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 type memoryProvider struct {
 	mu                sync.RWMutex
 	blobs             map[string][]byte
+	blobNames         []string
 	blobAt            map[string]time.Time // per-blob updated_at, for Lifecycle purge
 	incidents         []*IncidentRecord
 	analyses          []*AnalysisRecord
@@ -373,6 +375,9 @@ func (m *memoryProvider) WriteBlob(name string, data []byte) error {
 	defer m.mu.Unlock()
 	cp := make([]byte, len(data))
 	copy(cp, data)
+	if _, exists := m.blobs[name]; !exists {
+		m.addBlobName(name)
+	}
 	m.blobs[name] = cp
 	m.blobAt[name] = time.Now().UTC()
 	return nil
@@ -393,6 +398,7 @@ func (m *memoryProvider) CreateBlobIfAbsent(name string, data []byte) (bool, err
 	cp := make([]byte, len(data))
 	copy(cp, data)
 	m.blobs[name] = cp
+	m.addBlobName(name)
 	m.blobAt[name] = time.Now().UTC()
 	return true, nil
 }
@@ -414,9 +420,13 @@ func (m *memoryProvider) CompareAndSwapBlob(name string, expected, replacement [
 		}
 		delete(m.blobs, name)
 		delete(m.blobAt, name)
+		m.removeBlobName(name)
 		return true, nil
 	}
 	stored := append([]byte(nil), replacement...)
+	if !exists {
+		m.addBlobName(name)
+	}
 	m.blobs[name] = stored
 	m.blobAt[name] = time.Now().UTC()
 	return true, nil
@@ -436,6 +446,71 @@ func (m *memoryProvider) ListBlobs(prefix string) ([]Blob, error) {
 		out = append(out, Blob{Name: name, Data: cp})
 	}
 	return out, nil
+}
+
+func (m *memoryProvider) ListBlobsPage(ctx context.Context, prefix, cursor string, limit int) ([]Blob, error) {
+	page, err := m.ListBlobsPageBounded(ctx, prefix, cursor, limit)
+	return page.Blobs, err
+}
+
+func (m *memoryProvider) ListBlobsPageBounded(ctx context.Context, prefix, cursor string, limit int) (BlobPage, error) {
+	if err := ctx.Err(); err != nil {
+		return BlobPage{}, err
+	}
+	if limit <= 0 {
+		return BlobPage{Done: true}, nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	start := sort.SearchStrings(m.blobNames, cursor)
+	for start < len(m.blobNames) && m.blobNames[start] <= cursor {
+		start++
+	}
+	names := make([]string, 0, limit)
+	for index := start; index < len(m.blobNames) && len(names) < limit; index++ {
+		name := m.blobNames[index]
+		if name < prefix {
+			continue
+		}
+		if !strings.HasPrefix(name, prefix) {
+			break
+		}
+		names = append(names, name)
+	}
+	out := make([]Blob, 0, len(names))
+	var bytesRead int64
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return BlobPage{}, err
+		}
+		data := append([]byte(nil), m.blobs[name]...)
+		bytesRead += int64(len(data))
+		out = append(out, Blob{Name: name, Data: data})
+	}
+	next := cursor
+	if len(names) > 0 {
+		next = names[len(names)-1]
+	}
+	done := len(names) < limit
+	return BlobPage{Blobs: out, Next: next, Scanned: len(names), Bytes: bytesRead, Done: done}, nil
+}
+
+func (m *memoryProvider) addBlobName(name string) {
+	index := sort.SearchStrings(m.blobNames, name)
+	if index < len(m.blobNames) && m.blobNames[index] == name {
+		return
+	}
+	m.blobNames = append(m.blobNames, "")
+	copy(m.blobNames[index+1:], m.blobNames[index:])
+	m.blobNames[index] = name
+}
+
+func (m *memoryProvider) removeBlobName(name string) {
+	index := sort.SearchStrings(m.blobNames, name)
+	if index >= len(m.blobNames) || m.blobNames[index] != name {
+		return
+	}
+	m.blobNames = append(m.blobNames[:index], m.blobNames[index+1:]...)
 }
 
 func (m *memoryProvider) SaveIncident(rec *IncidentRecord) error {
@@ -772,6 +847,7 @@ func (m *memoryProvider) PurgeOlderThan(domain string, cutoff time.Time) (int, e
 			if at.Before(cutoff) {
 				delete(m.blobs, name)
 				delete(m.blobAt, name)
+				m.removeBlobName(name)
 				n++
 			}
 		}
@@ -807,6 +883,7 @@ func (m *memoryProvider) DeleteByID(domain, id string) error {
 		}
 		delete(m.blobs, id)
 		delete(m.blobAt, id)
+		m.removeBlobName(id)
 		return nil
 	default:
 		return ErrUnknownDomain

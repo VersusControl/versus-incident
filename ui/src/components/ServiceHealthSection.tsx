@@ -60,6 +60,15 @@ const PREVIEW_STATES = new Set<ServiceHealthState>([
   "error",
 ]);
 
+const KNOWN_ACTION_IDS = new Set([
+  "connect_log_source",
+  "review_log_source",
+  "connect_metric_source",
+  "review_metric_source",
+  "connect_trace_source",
+  "review_trace_source",
+]);
+
 function stateForCapability(snapshot: ServiceHealthSnapshot, family: string): ServiceHealthState {
   const measures = snapshot.capabilities.find((item) => item.family === family)?.measures;
   if (!measures || Object.keys(measures).length === 0) return "unsupported";
@@ -131,16 +140,18 @@ function ExamplePreview() {
 function actionFor(snapshot: ServiceHealthSnapshot): ServiceHealthAvailability | undefined {
   const candidates = [
     ...snapshot.capabilities
-      .filter((capability) => capability.family === "logs" || capability.family === "internal")
+      .filter((capability) => capability.family === "logs" || capability.family === "internal" ||
+        Object.values(capability.measures).some((measure) => measure.state !== "restricted"))
       .flatMap((capability) => Object.values(capability.measures)),
     ...snapshot.services.flatMap((service) => Object.values(service.availability ?? {})),
   ];
-  const actionable = candidates.find((item) => item.action_id && item.state === "error")
-    ?? candidates.find((item) => item.action_id && item.state === "stale")
-    ?? candidates.find((item) => item.action_id && item.state === "partial")
-    ?? candidates.find((item) => item.action_id && item.state === "not_configured")
-    ?? candidates.find((item) => item.action_id && item.state === "unsupported")
-    ?? candidates.find((item) => item.action_id && item.state === "restricted");
+  const knownAction = (item: ServiceHealthAvailability) => Boolean(item.action_id && KNOWN_ACTION_IDS.has(item.action_id));
+  const actionable = candidates.find((item) => knownAction(item) && item.state === "error")
+    ?? candidates.find((item) => knownAction(item) && item.state === "stale")
+    ?? candidates.find((item) => knownAction(item) && item.state === "partial")
+    ?? candidates.find((item) => knownAction(item) && item.state === "not_configured")
+    ?? candidates.find((item) => knownAction(item) && item.state === "unsupported")
+    ?? candidates.find((item) => knownAction(item) && item.state === "restricted");
   if (actionable || hasUsableEvidence(snapshot)) return actionable;
   return candidates.find((item) => item.state === "collecting")
     ?? candidates.find((item) => item.state === "no_data");
@@ -161,6 +172,22 @@ function GapAction({ snapshot }: { snapshot: ServiceHealthSnapshot }) {
   } else if (gap.action_id === "review_log_source") {
     title = "Log connection needs attention";
     label = "Review connection";
+  } else if (gap.action_id === "connect_metric_source") {
+    title = "Metrics not connected";
+    label = "Connect a metric source";
+    href = "/agent/metrics";
+  } else if (gap.action_id === "review_metric_source") {
+    title = "Metric collection needs attention";
+    label = "Review metric source";
+    href = "/agent/metrics";
+  } else if (gap.action_id === "connect_trace_source") {
+    title = "Traces not connected";
+    label = "Connect a trace source";
+    href = "/agent/traces";
+  } else if (gap.action_id === "review_trace_source") {
+    title = "Trace collection needs attention";
+    label = "Review trace source";
+    href = "/agent/traces";
   } else if (gap.state === "collecting") {
     title = meaningfulTimestamp(snapshot.next_collection_at)
       ? `Next update ${fmtRel(snapshot.next_collection_at)}`
@@ -222,7 +249,9 @@ export function ServiceHealthSection() {
   const state = query.isError ? "stale" : currentState(snapshot, realEvidence);
   const stateCopy = STATE_PRESENTATION[state];
   const showPreview = !realEvidence && PREVIEW_STATES.has(state);
-  const families = ["logs", "internal", "metrics", "traces"];
+  const families = ["logs", "internal", "metrics", "traces"].filter((family) =>
+    family === "logs" || family === "internal" || snapshot.capabilities.some((capability) =>
+      capability.family === family && Object.values(capability.measures).some((measure) => measure.state !== "restricted")));
   const affected = snapshot.services.filter((service) => ["critical", "degraded", "pressure", "creeping"].includes(service.severity)).length;
 
   return (

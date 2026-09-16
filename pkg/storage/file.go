@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,12 +47,28 @@ type fileProvider struct {
 
 const fileBlobLockShardCount = 256
 
-var fileBlobLocks [fileBlobLockShardCount]sync.Mutex
+const (
+	filePageMaxLimit     = 1000
+	filePageMaxBlobBytes = 1 << 20
+	filePageMaxBytes     = 16 << 20
+	fileTrieNodeBytes    = 33
+)
+
+var (
+	fileBlobLocks                [fileBlobLockShardCount]sync.Mutex
+	fileModelStateNamespaceLocks [fileBlobLockShardCount]sync.Mutex
+)
 
 func fileBlobLock(path string) *sync.Mutex {
 	hash := fnv.New32a()
 	_, _ = hash.Write([]byte(path))
 	return &fileBlobLocks[hash.Sum32()%fileBlobLockShardCount]
+}
+
+func fileModelStateNamespaceLock(path string) *sync.Mutex {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(path))
+	return &fileModelStateNamespaceLocks[hash.Sum32()%fileBlobLockShardCount]
 }
 
 // NewFile returns a Provider backed by the local filesystem.
@@ -62,6 +79,9 @@ func NewFile(opts FileOptions) (Provider, error) {
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("storage: mkdir %s: %w", dir, err)
+	}
+	if err := validateSecureStorageRoot(dir); err != nil {
+		return nil, fmt.Errorf("storage: validate data directory %s: %w", dir, err)
 	}
 	max := opts.MaxIncidents
 	if max <= 0 {
@@ -86,6 +106,16 @@ func (p *fileProvider) blobPath(name string) string {
 }
 
 func (p *fileProvider) ReadBlob(name string) ([]byte, error) {
+	if _, _, ok := parseModelStateName(name); ok {
+		data, err := readSecureModelStateBlob(context.Background(), p.dir, name, -1)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("storage: read blob %s: %w", name, err)
+		}
+		return data, nil
+	}
 	data, err := os.ReadFile(p.blobPath(name))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -97,12 +127,49 @@ func (p *fileProvider) ReadBlob(name string) ([]byte, error) {
 }
 
 func (p *fileProvider) WriteBlob(name string, data []byte) error {
+	if _, _, ok := parseModelStateName(name); ok {
+		if err := writeSecureModelStateBlob(p.dir, name, data, true); err != nil {
+			return fmt.Errorf("storage: write blob %s: %w", name, err)
+		}
+		return nil
+	}
 	target := p.blobPath(name)
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("storage: mkdir blob dir: %w", err)
 	}
 	if err := writeFileAtomicSync(target, data, 0o644); err != nil {
 		return fmt.Errorf("storage: write blob %s: %w", name, err)
+	}
+	return nil
+}
+
+func (p *fileProvider) WriteModelStateBlob(name string, data []byte) error {
+	_, key, indexed := parseModelStateName(name)
+	if !indexed || len(key) > 255 {
+		return ErrInvalidModelKey
+	}
+	lock := fileBlobLock(filepath.Join(p.dir, ".indexes", name))
+	lock.Lock()
+	defer lock.Unlock()
+	if err := writeSecureModelStateBlob(p.dir, name, data, true); err != nil {
+		return fmt.Errorf("storage: write blob %s: %w", name, err)
+	}
+	return nil
+}
+
+func (p *fileProvider) DeleteBlob(name string) error {
+	_, key, indexed := parseModelStateName(name)
+	if !indexed || len(key) > 255 {
+		return ErrUnsupported
+	}
+	lock := fileBlobLock(filepath.Join(p.dir, ".indexes", name))
+	lock.Lock()
+	defer lock.Unlock()
+	if err := deleteSecureModelStateBlob(p.dir, name); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("storage: remove blob %s: %w", name, err)
 	}
 	return nil
 }
@@ -116,6 +183,16 @@ func (p *fileProvider) WriteBlob(name string, data []byte) error {
 // untouched and the call returns written==false so the caller re-reads the
 // stored bytes via ReadBlob.
 func (p *fileProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error) {
+	if _, _, ok := parseModelStateName(name); ok {
+		lock := fileBlobLock(filepath.Join(p.dir, ".indexes", name))
+		lock.Lock()
+		defer lock.Unlock()
+		written, err := compareAndSwapSecureModelStateBlob(p.dir, name, nil, data)
+		if err != nil {
+			return false, fmt.Errorf("storage: create blob %s: %w", name, err)
+		}
+		return written, nil
+	}
 	target := p.blobPath(name)
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return false, fmt.Errorf("storage: mkdir blob dir: %w", err)
@@ -151,6 +228,16 @@ func (p *fileProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error
 // is restricted to one process in HA configurations, so this coordinates all
 // provider instances that can address the same directory.
 func (p *fileProvider) CompareAndSwapBlob(name string, expected, replacement []byte) (bool, error) {
+	if _, _, ok := parseModelStateName(name); ok {
+		lock := fileBlobLock(filepath.Join(p.dir, ".indexes", name))
+		lock.Lock()
+		defer lock.Unlock()
+		swapped, err := compareAndSwapSecureModelStateBlob(p.dir, name, expected, replacement)
+		if err != nil {
+			return false, fmt.Errorf("storage: compare-and-swap blob %s: %w", name, err)
+		}
+		return swapped, nil
+	}
 	target := p.blobPath(name)
 	lock := fileBlobLock(target)
 	lock.Lock()
@@ -194,6 +281,13 @@ func (p *fileProvider) CompareAndSwapBlob(name string, expected, replacement []b
 // naturally enumerates a whole namespace. In-flight ".json.tmp" files from
 // an atomic write are skipped (they don't carry the ".json" suffix).
 func (p *fileProvider) ListBlobs(prefix string) ([]Blob, error) {
+	if prefix == ModelStateNamespace || strings.HasPrefix(prefix, ModelStateNamespace+"/") {
+		out, err := listSecureModelStateBlobs(p.dir, prefix)
+		if err != nil {
+			return nil, fmt.Errorf("storage: list blobs %q: %w", prefix, err)
+		}
+		return out, nil
+	}
 	var out []Blob
 	err := filepath.WalkDir(p.dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -222,6 +316,20 @@ func (p *fileProvider) ListBlobs(prefix string) ([]Blob, error) {
 	}
 	return out, nil
 }
+
+func (p *fileProvider) ListBlobsPage(ctx context.Context, prefix, cursor string, limit int) ([]Blob, error) {
+	page, err := p.ListBlobsPageBounded(ctx, prefix, cursor, limit)
+	return page.Blobs, err
+}
+
+func (p *fileProvider) ListBlobsPageBounded(ctx context.Context, prefix, cursor string, limit int) (BlobPage, error) {
+	return listSecureModelStatePage(ctx, p.dir, prefix, cursor, limit)
+}
+
+var (
+	errUnsafeFile   = errors.New("storage: unsafe non-regular file")
+	errFileTooLarge = errors.New("storage: file exceeds bounded read")
+)
 
 // writeFileAtomicSync writes data to a sibling tmp file, fsyncs it,
 // then renames over the target. The fsync between write and rename is

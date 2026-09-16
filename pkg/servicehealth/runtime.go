@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/scheduler"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
@@ -15,12 +16,17 @@ const ScheduleJobName = "service-health"
 
 // RuntimeOptions supplies generic local readers for one Service Health runtime.
 type RuntimeOptions struct {
-	Manager   *Manager
-	Store     storage.Provider
-	Services  func() []ServiceMetadata
-	Patterns  func() []PatternMetadata
-	SourceIDs []string
-	Now       func() time.Time
+	Manager           *Manager
+	Store             storage.Provider
+	Services          func() []ServiceMetadata
+	Patterns          func() []PatternMetadata
+	SourceIDs         []string
+	Providers         []core.HealthProvider
+	ProviderSourceIDs []string
+	Assessor          HealthAssessor
+	EnrichmentAccess  EnrichmentAccess
+	Projection        SnapshotProjection
+	Now               func() time.Time
 }
 
 // Runtime carries the manager mounted by routes and its shared scheduler job.
@@ -37,9 +43,14 @@ func NewRuntime(options RuntimeOptions) *Runtime {
 	if manager == nil {
 		manager = newManagerWithClock(options.Store, options.Now)
 	}
+	if options.Projection != nil {
+		manager.SetSnapshotProjection(options.Projection)
+	}
 	collector := NewCollector(CollectorOptions{
 		Manager: manager, Store: options.Store, Services: options.Services,
-		Patterns: options.Patterns, SourceIDs: options.SourceIDs, Now: options.Now,
+		Patterns: options.Patterns, SourceIDs: options.SourceIDs,
+		Providers: options.Providers, ProviderSourceIDs: options.ProviderSourceIDs,
+		Assessor: options.Assessor, EnrichmentAccess: options.EnrichmentAccess, Now: options.Now,
 	})
 	runtime := &Runtime{Manager: manager}
 	runtime.Job = scheduler.Job{
