@@ -522,6 +522,49 @@ func (p *postgresProvider) ListBlobs(prefix string) ([]Blob, error) {
 	return out, nil
 }
 
+func (p *postgresProvider) ListBlobsPage(ctx context.Context, prefix, cursor string, limit int) ([]Blob, error) {
+	page, err := p.ListBlobsPageBounded(ctx, prefix, cursor, limit)
+	return page.Blobs, err
+}
+
+func (p *postgresProvider) ListBlobsPageBounded(ctx context.Context, prefix, cursor string, limit int) (BlobPage, error) {
+	if err := ctx.Err(); err != nil {
+		return BlobPage{}, err
+	}
+	if limit <= 0 {
+		return BlobPage{Done: true}, nil
+	}
+	like := escapeLike(prefix) + "%"
+	parts := make([]string, 0, len(allBlobTables()))
+	for _, table := range allBlobTables() {
+		parts = append(parts, fmt.Sprintf(`SELECT name, data FROM %s WHERE name LIKE $1 ESCAPE '\' AND name > $2`, table))
+	}
+	query := `SELECT name, data FROM (` + strings.Join(parts, ` UNION ALL `) + `) AS blobs ORDER BY name LIMIT $3`
+	rows, err := p.db.QueryContext(ctx, query, like, cursor, limit)
+	if err != nil {
+		return BlobPage{}, fmt.Errorf("storage: page blobs: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Blob, 0, limit)
+	var bytesRead int64
+	for rows.Next() {
+		var blob Blob
+		if err := rows.Scan(&blob.Name, &blob.Data); err != nil {
+			return BlobPage{}, fmt.Errorf("storage: scan blob page: %w", err)
+		}
+		bytesRead += int64(len(blob.Data))
+		out = append(out, blob)
+	}
+	if err := rows.Err(); err != nil {
+		return BlobPage{}, fmt.Errorf("storage: page blob rows: %w", err)
+	}
+	next := cursor
+	if len(out) > 0 {
+		next = out[len(out)-1].Name
+	}
+	return BlobPage{Blobs: out, Next: next, Scanned: len(out), Bytes: bytesRead, Done: len(out) < limit}, nil
+}
+
 // escapeLike escapes the SQL LIKE metacharacters in s so it is matched as a
 // literal prefix. Pairs with the `ESCAPE '\'` clause in ListBlobs.
 func escapeLike(s string) string {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -14,7 +15,11 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
-const maxIncidentJoinRows = 2000
+const (
+	maxIncidentJoinRows      = 2000
+	MaxEvidencePerService    = 64
+	maxEvidenceIdentityBytes = 512
+)
 
 // ServiceMetadata is the source-neutral catalog view used by the collector.
 type ServiceMetadata struct {
@@ -31,24 +36,51 @@ type PatternMetadata struct {
 	LastSeen time.Time
 }
 
+// AssessmentRequest contains only validated evidence and the current OSS
+// snapshots. Assessors may enrich these snapshots but cannot replace them.
+type AssessmentRequest struct {
+	OrgID       string
+	WindowStart time.Time
+	WindowEnd   time.Time
+	Evidence    []core.SignalEvidence
+	Inputs      []core.HealthAssessmentInput
+	Services    []ServiceSnapshot
+}
+
+// HealthAssessor computes optional source-neutral enrichment over validated evidence.
+type HealthAssessor interface {
+	Assess(context.Context, AssessmentRequest) ([]core.HealthAssessment, error)
+}
+
+// EnrichmentAccess revalidates whether premium enrichment may be persisted.
+type EnrichmentAccess func(context.Context, string) error
+
 // CollectorOptions supplies trusted, already-local readers. No option can pull a signal source.
 type CollectorOptions struct {
-	Manager   *Manager
-	Store     storage.Provider
-	Services  func() []ServiceMetadata
-	Patterns  func() []PatternMetadata
-	SourceIDs []string
-	Now       func() time.Time
+	Manager           *Manager
+	Store             storage.Provider
+	Services          func() []ServiceMetadata
+	Patterns          func() []PatternMetadata
+	SourceIDs         []string
+	Providers         []core.HealthProvider
+	ProviderSourceIDs []string
+	Assessor          HealthAssessor
+	EnrichmentAccess  EnrichmentAccess
+	Now               func() time.Time
 }
 
 // Collector builds and persists OSS snapshots without external reads.
 type Collector struct {
-	manager   *Manager
-	store     storage.Provider
-	services  func() []ServiceMetadata
-	patterns  func() []PatternMetadata
-	sourceIDs []string
-	now       func() time.Time
+	manager           *Manager
+	store             storage.Provider
+	services          func() []ServiceMetadata
+	patterns          func() []PatternMetadata
+	sourceIDs         []string
+	providers         []core.HealthProvider
+	providerSourceIDs []string
+	assessor          HealthAssessor
+	enrichmentAccess  EnrichmentAccess
+	now               func() time.Time
 }
 
 // NewCollector creates a bounded snapshot collector.
@@ -57,7 +89,13 @@ func NewCollector(options CollectorOptions) *Collector {
 	if now == nil {
 		now = time.Now
 	}
-	return &Collector{manager: options.Manager, store: options.Store, services: options.Services, patterns: options.Patterns, sourceIDs: append([]string(nil), options.SourceIDs...), now: now}
+	return &Collector{
+		manager: options.Manager, store: options.Store, services: options.Services,
+		patterns: options.Patterns, sourceIDs: append([]string(nil), options.SourceIDs...),
+		providers:         append([]core.HealthProvider(nil), options.Providers...),
+		providerSourceIDs: append([]string(nil), options.ProviderSourceIDs...),
+		assessor:          options.Assessor, enrichmentAccess: options.EnrichmentAccess, now: now,
+	}
 }
 
 // Collect builds one snapshot under the captured settings revision and saves it atomically.
@@ -77,10 +115,234 @@ func (collector *Collector) Collect(ctx context.Context, orgID string) (Snapshot
 		return SnapshotEnvelope{}, err
 	}
 	snapshot := collector.build(orgID, settings, windowEnd, rows, statuses)
+	collector.enrich(ctx, orgID, settings, &snapshot)
+	if collector.enrichmentAccess != nil && !safeEnrichmentAccess(ctx, collector.enrichmentAccess, orgID) {
+		stripAccessControlledSnapshot(&snapshot)
+	}
 	if err := collector.manager.SaveSnapshot(orgID, snapshot); err != nil {
 		return SnapshotEnvelope{}, err
 	}
 	return snapshot, nil
+}
+
+type evidenceCandidate struct {
+	evidence      core.SignalEvidence
+	input         *core.HealthAssessmentInput
+	providerOrder int
+}
+
+func (collector *Collector) enrich(ctx context.Context, orgID string, settings Settings, snapshot *SnapshotEnvelope) {
+	if len(collector.providers) == 0 && collector.assessor == nil {
+		return
+	}
+	windowEnd := snapshot.GeneratedAt
+	windowStart := windowEnd.Add(-time.Duration(settings.WindowSeconds) * time.Second)
+	serviceIndex := make(map[string]int, len(snapshot.Services))
+	serviceIDs := make([]string, 0, len(snapshot.Services))
+	for index := range snapshot.Services {
+		serviceIndex[snapshot.Services[index].Service] = index
+		serviceIDs = append(serviceIDs, snapshot.Services[index].Service)
+	}
+	if len(serviceIDs) == 0 {
+		return
+	}
+	sourceIDs := append([]string(nil), collector.providerSourceIDs...)
+	if len(sourceIDs) > MaxPremiumSources {
+		sourceIDs = sourceIDs[:MaxPremiumSources]
+		snapshot.Coverage.Partial = true
+	}
+	remaining := core.HealthBudget{
+		Requests: MaxExternalRequests, RequestsPerSource: MaxRequestsPerSource,
+		Rows: MaxRowsPerSource * MaxPremiumSources, ResponseBytes: MaxResponseBytes,
+		CumulativeBytes: MaxCumulativeBytes, Concurrency: MaxConcurrency,
+	}
+	timeout := 25 * time.Second
+	if intervalLimit := time.Duration(settings.IntervalSeconds)*time.Second - 5*time.Second; intervalLimit < timeout {
+		timeout = intervalLimit
+	}
+	providerCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	deadline, _ := providerCtx.Deadline()
+	candidates := make(map[string]evidenceCandidate)
+	for providerOrder, provider := range collector.providers {
+		if provider == nil || remaining.Requests == 0 || remaining.Rows == 0 || remaining.CumulativeBytes == 0 {
+			snapshot.Coverage.Partial = true
+			continue
+		}
+		providerCapabilities := safeProviderCapabilities(providerCtx, provider, orgID)
+		request := core.HealthCollectRequest{
+			OrgID: orgID, SourceIDs: append([]string(nil), sourceIDs...), ServiceIDs: append([]string(nil), serviceIDs...),
+			WindowStart: windowStart, WindowEnd: windowEnd, Deadline: deadline, Budget: remaining,
+		}
+		collection, err := safeProviderCollect(providerCtx, provider, request)
+		if err != nil {
+			markProviderCapabilities(snapshot, providerCapabilities, core.HealthError, "provider_error")
+			snapshot.Coverage.Partial = true
+			continue
+		}
+		if !usageWithinBudget(collection.Usage, remaining) || !usageCoversEvidence(collection.Usage, collection.Evidence) {
+			markProviderCapabilities(snapshot, providerCapabilities, core.HealthPartial, "provider_budget_exceeded")
+			snapshot.Coverage.Partial = true
+			continue
+		}
+		if collection.Partial {
+			snapshot.Coverage.Partial = true
+		}
+		inputs := validAssessmentInputs(collection.AssessmentInputs, collection.Evidence, orgID)
+		remaining.Requests -= collection.Usage.Requests
+		remaining.Rows -= collection.Usage.Rows
+		remaining.CumulativeBytes -= collection.Usage.ResponseBytes
+		if len(collection.Evidence) > remaining.Rows+collection.Usage.Rows || !evidenceWithinSourceBounds(collection.Evidence) {
+			markProviderCapabilities(snapshot, providerCapabilities, core.HealthPartial, "provider_budget_exceeded")
+			snapshot.Coverage.Partial = true
+			continue
+		}
+		mergeCapabilities(snapshot, providerCapabilities)
+		for _, evidence := range collection.Evidence {
+			if !validEvidence(evidence, orgID, serviceIndex, windowStart, windowEnd) {
+				snapshot.Coverage.Partial = true
+				continue
+			}
+			evidence.Availability.ActionID = allowedActionID(evidence.Availability.ActionID)
+			evidence.Availability.ReasonCode = safeProviderReason(evidence.Availability.ReasonCode)
+			key := evidenceKey(evidence)
+			candidate := evidenceCandidate{evidence: evidence, input: inputs[assessmentInputKey(evidence)], providerOrder: providerOrder}
+			if current, ok := candidates[key]; !ok || preferEvidence(candidate, current) {
+				candidates[key] = candidate
+			}
+		}
+	}
+	selected := make([]evidenceCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		selected = append(selected, candidate)
+	}
+	sort.Slice(selected, func(i, j int) bool {
+		left, right := selected[i].evidence, selected[j].evidence
+		return evidenceKey(left)+"\x00"+left.SourceRef < evidenceKey(right)+"\x00"+right.SourceRef
+	})
+	validated := make([]core.SignalEvidence, 0, len(selected))
+	assessmentInputs := make([]core.HealthAssessmentInput, 0, len(selected))
+	perService := map[string]int{}
+	evidenceCapabilities := map[string]map[string]core.MeasureAvailability{}
+	for _, candidate := range selected {
+		evidence := candidate.evidence
+		if perService[evidence.Service] >= MaxEvidencePerService {
+			snapshot.Coverage.Partial = true
+			continue
+		}
+		perService[evidence.Service]++
+		index := serviceIndex[evidence.Service]
+		snapshot.Services[index].Evidence = append(snapshot.Services[index].Evidence, evidence)
+		snapshot.Services[index].Availability[evidence.Family+"."+evidence.Measure] = evidence.Availability
+		snapshot.Services[index].AssessmentBasis = appendAssessmentBasis(snapshot.Services[index].AssessmentBasis, evidence.Family)
+		if evidenceCapabilities[evidence.Family] == nil {
+			evidenceCapabilities[evidence.Family] = map[string]core.MeasureAvailability{}
+		}
+		evidenceCapabilities[evidence.Family][evidence.Measure] = evidence.Availability
+		validated = append(validated, evidence)
+		if candidate.input != nil {
+			assessmentInputs = append(assessmentInputs, *candidate.input)
+		}
+	}
+	capabilityAdditions := make([]core.HealthCapability, 0, len(evidenceCapabilities))
+	for family, measures := range evidenceCapabilities {
+		capabilityAdditions = append(capabilityAdditions, core.HealthCapability{Family: family, Measures: measures})
+	}
+	mergeCapabilities(snapshot, capabilityAdditions)
+	collector.assess(providerCtx, orgID, windowStart, windowEnd, validated, assessmentInputs, snapshot, serviceIndex)
+}
+
+func appendAssessmentBasis(basis, family string) string {
+	label := ""
+	switch family {
+	case "metrics":
+		label = "Metrics"
+	case "traces":
+		label = "Traces"
+	}
+	if label == "" {
+		return basis
+	}
+	for _, part := range strings.Split(basis, " + ") {
+		if part == label {
+			return basis
+		}
+	}
+	if basis == "" {
+		return label
+	}
+	return basis + " + " + label
+}
+
+func (collector *Collector) assess(ctx context.Context, orgID string, windowStart, windowEnd time.Time, evidence []core.SignalEvidence, inputs []core.HealthAssessmentInput, snapshot *SnapshotEnvelope, serviceIndex map[string]int) {
+	if collector.assessor == nil {
+		return
+	}
+	assessments, err := safeAssess(ctx, collector.assessor, AssessmentRequest{
+		OrgID: orgID, WindowStart: windowStart, WindowEnd: windowEnd,
+		Evidence: append([]core.SignalEvidence(nil), evidence...), Inputs: append([]core.HealthAssessmentInput(nil), inputs...), Services: append([]ServiceSnapshot(nil), snapshot.Services...),
+	})
+	if err != nil {
+		mergeCapabilities(snapshot, []core.HealthCapability{{Family: "assessment", Measures: map[string]core.MeasureAvailability{
+			"regression_score": {State: core.HealthError, ReasonCode: "assessor_error"},
+			"silent":           {State: core.HealthError, ReasonCode: "assessor_error"},
+		}}})
+		snapshot.Coverage.Partial = true
+		return
+	}
+	for _, assessment := range assessments {
+		index, ok := serviceIndex[assessment.Service]
+		if !ok || !validAssessment(assessment, orgID, snapshot.Services[index], windowEnd) {
+			snapshot.Coverage.Partial = true
+			continue
+		}
+		copy := assessment
+		snapshot.Services[index].Assessment = &copy
+		if assessment.RaiseSeverity && severityRank(assessment.Severity) > severityRank(snapshot.Services[index].Severity) {
+			snapshot.Services[index].BaseSeverity = snapshot.Services[index].Severity
+			snapshot.Services[index].Severity = assessment.Severity
+		}
+	}
+	mergeAssessmentCapabilities(snapshot)
+	recomputeDerived(snapshot)
+}
+
+func safeProviderCapabilities(ctx context.Context, provider core.HealthProvider, orgID string) (capabilities []core.HealthCapability) {
+	defer func() {
+		if recover() != nil {
+			capabilities = nil
+		}
+	}()
+	return sanitizeCapabilities(provider.Capabilities(ctx, orgID))
+}
+
+func safeProviderCollect(ctx context.Context, provider core.HealthProvider, request core.HealthCollectRequest) (collection core.HealthCollection, err error) {
+	defer func() {
+		if recover() != nil {
+			collection = core.HealthCollection{}
+			err = fmt.Errorf("provider failed")
+		}
+	}()
+	return provider.Collect(ctx, request)
+}
+
+func safeAssess(ctx context.Context, assessor HealthAssessor, request AssessmentRequest) (assessments []core.HealthAssessment, err error) {
+	defer func() {
+		if recover() != nil {
+			assessments = nil
+			err = fmt.Errorf("assessor failed")
+		}
+	}()
+	return assessor.Assess(ctx, request)
+}
+
+func safeEnrichmentAccess(ctx context.Context, access EnrichmentAccess, orgID string) (allowed bool) {
+	defer func() {
+		if recover() != nil {
+			allowed = false
+		}
+	}()
+	return access(ctx, orgID) == nil
 }
 
 func (collector *Collector) build(orgID string, settings Settings, now time.Time, rows []WindowAggregate, statuses []SourceStatus) SnapshotEnvelope {
@@ -413,6 +675,396 @@ func latestSourceTimes(statuses []SourceStatus) (time.Time, time.Time) {
 		}
 	}
 	return attempt, success
+}
+
+var supportedEvidenceMeasures = map[string]map[string]struct{}{
+	"metrics": {
+		"latency": {}, "request_error_ratio": {}, "throughput": {}, "apdex": {},
+	},
+	"traces": {
+		"latency": {}, "request_error_ratio": {}, "throughput": {}, "request_context": {},
+	},
+	"assessment": {
+		"regression_score": {}, "silent": {},
+	},
+}
+
+var allowedHealthActions = map[string]struct{}{
+	"connect_metric_source":        {},
+	"review_metric_source":         {},
+	"connect_trace_source":         {},
+	"review_trace_source":          {},
+	"review_enterprise_capability": {},
+}
+
+var allowedProviderReasons = map[string]struct{}{
+	"authentication":              {},
+	"entitlement":                 {},
+	"insufficient_baseline":       {},
+	"missing_distribution":        {},
+	"missing_service_attribution": {},
+	"missing_target":              {},
+	"no_observations_in_window":   {},
+	"permission":                  {},
+	"sampled_data":                {},
+	"source_not_configured":       {},
+	"stale_baseline":              {},
+	"timeout":                     {},
+	"unsupported_measure":         {},
+	"zero_traffic":                {},
+}
+
+var allowedAssessmentReasons = map[string]struct{}{
+	"alert_state_unknown":    {},
+	"baseline_regression":    {},
+	"incident_state_unknown": {},
+	"incompatible_baseline":  {},
+	"insufficient_baseline":  {},
+	"low_confidence":         {},
+	"no_regression":          {},
+	"score_withheld":         {},
+	"stale_baseline":         {},
+}
+
+func usageWithinBudget(usage core.HealthUsage, budget core.HealthBudget) bool {
+	if usage.Sources < 0 || usage.Requests < 0 || usage.Rows < 0 || usage.ResponseBytes < 0 || usage.LargestResponseBytes < 0 {
+		return false
+	}
+	if usage.Sources > MaxPremiumSources || usage.Requests > budget.Requests || usage.Rows > budget.Rows || usage.ResponseBytes > budget.CumulativeBytes || usage.LargestResponseBytes > budget.ResponseBytes || usage.LargestResponseBytes > usage.ResponseBytes {
+		return false
+	}
+	sources := usage.Sources
+	if sources == 0 {
+		sources = 1
+	}
+	return usage.Requests <= sources*budget.RequestsPerSource && usage.Rows <= sources*MaxRowsPerSource
+}
+
+func usageCoversEvidence(usage core.HealthUsage, evidence []core.SignalEvidence) bool {
+	if len(evidence) == 0 {
+		return true
+	}
+	sources := map[string]struct{}{}
+	for _, item := range evidence {
+		sources[item.SourceRef] = struct{}{}
+	}
+	return usage.Requests > 0 && usage.Rows >= len(evidence) && usage.Sources >= len(sources)
+}
+
+func evidenceWithinSourceBounds(evidence []core.SignalEvidence) bool {
+	counts := map[string]int{}
+	for _, item := range evidence {
+		counts[item.SourceRef]++
+		if len(counts) > MaxPremiumSources || counts[item.SourceRef] > MaxRowsPerSource {
+			return false
+		}
+	}
+	return true
+}
+
+func validEvidence(evidence core.SignalEvidence, orgID string, services map[string]int, windowStart, windowEnd time.Time) bool {
+	if storage.NormalizeOrgID(evidence.OrgID) != orgID || evidence.Service == "" || len(evidence.Service) > maxEvidenceIdentityBytes {
+		return false
+	}
+	if _, ok := services[evidence.Service]; !ok || len(evidence.Operation) > maxEvidenceIdentityBytes || evidence.SourceRef == "" || len(evidence.SourceRef) > maxEvidenceIdentityBytes || len(evidence.SignalRef) > maxEvidenceIdentityBytes {
+		return false
+	}
+	if (evidence.Family != "metrics" && evidence.Family != "traces") || !supportedEvidenceMeasure(evidence.Family, evidence.Measure) || !validHealthState(evidence.Availability.State) {
+		return false
+	}
+	if !evidence.WindowStart.Equal(windowStart) || !evidence.WindowEnd.Equal(windowEnd) || evidence.ObservedAt.After(windowEnd) {
+		return false
+	}
+	if evidence.Availability.State != core.HealthStale && evidence.ObservedAt.Before(windowStart) {
+		return false
+	}
+	if nonFinite(evidence.Value) || nonFinite(evidence.Numerator) || nonFinite(evidence.Denominator) {
+		return false
+	}
+	if evidence.Availability.State == core.HealthReady && evidence.Value == nil && (evidence.Numerator == nil || evidence.Denominator == nil) {
+		return false
+	}
+	if evidence.Measure == "request_error_ratio" && evidence.Numerator == nil && evidence.Denominator == nil {
+		if evidence.Value != nil && (*evidence.Value < 0 || *evidence.Value > 1) {
+			return false
+		}
+	} else if evidence.Numerator != nil || evidence.Denominator != nil {
+		if evidence.Numerator == nil || evidence.Denominator == nil || *evidence.Denominator <= 0 || *evidence.Numerator < 0 || *evidence.Numerator > *evidence.Denominator {
+			return false
+		}
+	}
+	return true
+}
+
+func nonFinite(value *float64) bool {
+	return value != nil && (math.IsNaN(*value) || math.IsInf(*value, 0))
+}
+
+func supportedEvidenceMeasure(family, measure string) bool {
+	measures, ok := supportedEvidenceMeasures[family]
+	if !ok {
+		return false
+	}
+	_, ok = measures[measure]
+	return ok
+}
+
+func validHealthState(state core.HealthState) bool {
+	switch state {
+	case core.HealthReady, core.HealthPartial, core.HealthNotConfigured, core.HealthCollecting, core.HealthNoData, core.HealthUnsupported, core.HealthError, core.HealthStale, core.HealthRestricted:
+		return true
+	default:
+		return false
+	}
+}
+
+func allowedActionID(actionID string) string {
+	if _, ok := allowedHealthActions[actionID]; ok {
+		return actionID
+	}
+	return ""
+}
+
+func safeProviderReason(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	if _, ok := allowedProviderReasons[reason]; ok {
+		return reason
+	}
+	return "provider_status_unavailable"
+}
+
+func evidenceKey(evidence core.SignalEvidence) string {
+	return strings.Join([]string{
+		storage.NormalizeOrgID(evidence.OrgID), evidence.Service, evidence.Operation,
+		evidence.Family, evidence.Measure, evidence.WindowStart.UTC().Format(time.RFC3339Nano),
+		evidence.WindowEnd.UTC().Format(time.RFC3339Nano),
+	}, "\x00")
+}
+
+func assessmentInputKey(evidence core.SignalEvidence) string {
+	return strings.Join([]string{
+		storage.NormalizeOrgID(evidence.OrgID), evidence.Service, evidence.Operation,
+		evidence.Family, evidence.Measure, evidence.SourceRef, evidence.SignalRef,
+	}, "\x00")
+}
+
+func validAssessmentInputs(inputs []core.HealthAssessmentInput, evidence []core.SignalEvidence, orgID string) map[string]*core.HealthAssessmentInput {
+	evidenceKeys := make(map[string]struct{}, len(evidence))
+	for _, item := range evidence {
+		evidenceKeys[assessmentInputKey(item)] = struct{}{}
+	}
+	validated := make(map[string]*core.HealthAssessmentInput, len(inputs))
+	for index := range inputs {
+		item := &inputs[index]
+		key := assessmentInputKey(core.SignalEvidence{
+			OrgID: item.OrgID, Service: item.Service, Operation: item.Operation,
+			Family: item.Family, Measure: item.Measure, SourceRef: item.SourceRef, SignalRef: item.SignalRef,
+		})
+		if storage.NormalizeOrgID(item.OrgID) != orgID || math.IsNaN(item.ExpectedMean) || math.IsInf(item.ExpectedMean, 0) || math.IsNaN(item.ExpectedStd) || math.IsInf(item.ExpectedStd, 0) || item.ExpectedStd < 0 || item.ObservationCount < 0 || item.MaturityThreshold < 0 {
+			continue
+		}
+		if _, ok := evidenceKeys[key]; !ok {
+			continue
+		}
+		if _, duplicate := validated[key]; !duplicate {
+			copy := *item
+			validated[key] = &copy
+		}
+	}
+	return validated
+}
+
+func preferEvidence(candidate, current evidenceCandidate) bool {
+	candidateReady := candidate.evidence.Availability.State == core.HealthReady
+	currentReady := current.evidence.Availability.State == core.HealthReady
+	if candidateReady != currentReady {
+		return candidateReady
+	}
+	if !candidate.evidence.FreshUntil.Equal(current.evidence.FreshUntil) {
+		return candidate.evidence.FreshUntil.After(current.evidence.FreshUntil)
+	}
+	if !candidate.evidence.ObservedAt.Equal(current.evidence.ObservedAt) {
+		return candidate.evidence.ObservedAt.After(current.evidence.ObservedAt)
+	}
+	if candidate.providerOrder != current.providerOrder {
+		return candidate.providerOrder < current.providerOrder
+	}
+	return candidate.evidence.SourceRef < current.evidence.SourceRef
+}
+
+func sanitizeCapabilities(capabilities []core.HealthCapability) []core.HealthCapability {
+	out := make([]core.HealthCapability, 0, len(capabilities))
+	for _, capability := range capabilities {
+		if capability.Family != "metrics" && capability.Family != "traces" {
+			continue
+		}
+		measures := map[string]core.MeasureAvailability{}
+		for measure, availability := range capability.Measures {
+			if !supportedEvidenceMeasure(capability.Family, measure) || !validHealthState(availability.State) {
+				continue
+			}
+			availability.ActionID = allowedActionID(availability.ActionID)
+			availability.ReasonCode = safeProviderReason(availability.ReasonCode)
+			measures[measure] = availability
+		}
+		if len(measures) > 0 {
+			out = append(out, core.HealthCapability{Family: capability.Family, Measures: measures})
+		}
+	}
+	return out
+}
+
+func mergeCapabilities(snapshot *SnapshotEnvelope, additions []core.HealthCapability) {
+	for _, addition := range additions {
+		index := -1
+		for existingIndex := range snapshot.Capabilities {
+			if snapshot.Capabilities[existingIndex].Family == addition.Family {
+				index = existingIndex
+				break
+			}
+		}
+		if index < 0 {
+			snapshot.Capabilities = append(snapshot.Capabilities, Capability{Family: addition.Family, Measures: map[string]core.MeasureAvailability{}})
+			index = len(snapshot.Capabilities) - 1
+		}
+		for measure, availability := range addition.Measures {
+			current, exists := snapshot.Capabilities[index].Measures[measure]
+			if !exists || current.State == core.HealthRestricted {
+				snapshot.Capabilities[index].Measures[measure] = availability
+				continue
+			}
+			snapshot.Capabilities[index].Measures[measure] = combineCapabilityAvailability(current, availability)
+		}
+	}
+	sort.SliceStable(snapshot.Capabilities, func(i, j int) bool { return snapshot.Capabilities[i].Family < snapshot.Capabilities[j].Family })
+}
+
+func combineCapabilityAvailability(current, next core.MeasureAvailability) core.MeasureAvailability {
+	if current.State == next.State {
+		if current.ReasonCode == "" {
+			return current
+		}
+		return next
+	}
+	if (current.State == core.HealthReady && (next.State == core.HealthError || next.State == core.HealthPartial)) ||
+		(next.State == core.HealthReady && (current.State == core.HealthError || current.State == core.HealthPartial)) {
+		return core.MeasureAvailability{State: core.HealthPartial, ReasonCode: "provider_partial"}
+	}
+	return next
+}
+
+func markProviderCapabilities(snapshot *SnapshotEnvelope, capabilities []core.HealthCapability, state core.HealthState, reason string) {
+	marked := make([]core.HealthCapability, 0, len(capabilities))
+	for _, capability := range capabilities {
+		measures := make(map[string]core.MeasureAvailability, len(capability.Measures))
+		actionID := "review_metric_source"
+		if capability.Family == "traces" {
+			actionID = "review_trace_source"
+		}
+		for measure := range capability.Measures {
+			measures[measure] = core.MeasureAvailability{State: state, ReasonCode: reason, ActionID: actionID}
+		}
+		marked = append(marked, core.HealthCapability{Family: capability.Family, Measures: measures})
+	}
+	mergeCapabilities(snapshot, marked)
+}
+
+func validAssessment(assessment core.HealthAssessment, orgID string, service ServiceSnapshot, windowEnd time.Time) bool {
+	if storage.NormalizeOrgID(assessment.OrgID) != orgID || assessment.Service != service.Service || assessment.AlgorithmVersion == "" {
+		return false
+	}
+	if math.IsNaN(assessment.Confidence) || math.IsInf(assessment.Confidence, 0) || assessment.Confidence < 0 || assessment.Confidence > 1 || nonFinite(assessment.RegressionScore) {
+		return false
+	}
+	if assessment.RegressionScore != nil && (*assessment.RegressionScore < 0 || *assessment.RegressionScore > 100) {
+		return false
+	}
+	if (assessment.RegressionScore == nil || assessment.Silent == nil) && assessment.ReasonCode == "" {
+		return false
+	}
+	if assessment.ReasonCode != "" {
+		if _, ok := allowedAssessmentReasons[assessment.ReasonCode]; !ok {
+			return false
+		}
+	}
+	if assessment.AssessedAt.IsZero() || assessment.AssessedAt.After(windowEnd) || (!assessment.FreshUntil.IsZero() && assessment.FreshUntil.Before(assessment.AssessedAt)) {
+		return false
+	}
+	if assessment.Silent != nil {
+		if service.ActiveIncidents == nil {
+			return false
+		}
+		if *assessment.Silent && (*service.ActiveIncidents != 0 || !assessment.AlertStateKnown) {
+			return false
+		}
+		if !*assessment.Silent && *service.ActiveIncidents == 0 && !assessment.AlertStateKnown {
+			return false
+		}
+	}
+	if assessment.Severity != "" && severityRank(assessment.Severity) == 0 {
+		return false
+	}
+	for _, family := range assessment.IncludedFamilies {
+		if !supportedAssessmentFamily(family) {
+			return false
+		}
+	}
+	for _, driver := range assessment.Drivers {
+		if !supportedAssessmentDriver(driver.Family, driver.Measure) || math.IsNaN(driver.Weight) || math.IsInf(driver.Weight, 0) {
+			return false
+		}
+	}
+	return true
+}
+
+func supportedAssessmentFamily(family string) bool {
+	return family == "logs" || family == "internal" || family == "metrics" || family == "traces"
+}
+
+func supportedAssessmentDriver(family, measure string) bool {
+	switch family {
+	case "logs":
+		return measure == "activity" || measure == "patterns" || measure == "anomalies"
+	case "internal":
+		return measure == "incidents" || measure == "patterns"
+	default:
+		return supportedEvidenceMeasure(family, measure) && family != "assessment"
+	}
+}
+
+func mergeAssessmentCapabilities(snapshot *SnapshotEnvelope) {
+	scoreState := core.MeasureAvailability{State: core.HealthNoData, ReasonCode: "assessment_withheld"}
+	silentState := core.MeasureAvailability{State: core.HealthNoData, ReasonCode: "assessment_withheld"}
+	for _, service := range snapshot.Services {
+		if service.Assessment == nil {
+			continue
+		}
+		if service.Assessment.RegressionScore != nil {
+			scoreState = core.MeasureAvailability{State: core.HealthReady}
+		}
+		if service.Assessment.Silent != nil {
+			silentState = core.MeasureAvailability{State: core.HealthReady}
+		}
+	}
+	mergeCapabilities(snapshot, []core.HealthCapability{{Family: "assessment", Measures: map[string]core.MeasureAvailability{
+		"regression_score": scoreState, "silent": silentState,
+	}}})
+}
+
+func recomputeDerived(snapshot *SnapshotEnvelope) {
+	snapshot.Domains = aggregateDomains(snapshot.Services)
+	snapshot.Facets = map[string]int{}
+	for _, service := range snapshot.Services {
+		snapshot.Facets[service.Severity]++
+		if service.Assessment != nil && service.Assessment.Regressing {
+			snapshot.Facets["regressing"]++
+		}
+		if service.Assessment != nil && service.Assessment.Silent != nil && *service.Assessment.Silent {
+			snapshot.Facets["silent_regressions"]++
+		}
+	}
 }
 
 func capabilities(logsConfigured bool) []Capability {

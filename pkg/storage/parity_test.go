@@ -15,9 +15,11 @@ package storage_test
 // parallel at the goroutine and provider level.
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -326,9 +328,33 @@ func runBlobListing(t *testing.T, p storage.Provider) {
 		"patterns":                               []byte(`{"doc":"patterns"}`),
 	}
 	for name, data := range blobs {
-		if err := p.WriteBlob(name, data); err != nil {
+		writer := p.WriteBlob
+		if modelWriter, ok := p.(interface {
+			WriteModelStateBlob(string, []byte) error
+		}); ok && strings.HasPrefix(name, storage.ModelStateNamespace+"/") && strings.Count(name, "/") == 3 {
+			writer = modelWriter.WriteModelStateBlob
+		}
+		if err := writer(name, data); err != nil {
 			t.Fatalf("WriteBlob(%s): %v", name, err)
 		}
+	}
+
+	lister, ok := p.(storage.BlobPageLister)
+	if !ok {
+		t.Fatal("built-in provider does not implement bounded blob paging")
+	}
+	first, err := lister.ListBlobsPage(context.Background(), "models/acme/intel-baseline/", "", 1)
+	if err != nil || len(first) != 1 || first[0].Name != "models/acme/intel-baseline/svcA~rate" {
+		t.Fatalf("first blob page=%v err=%v", first, err)
+	}
+	second, err := lister.ListBlobsPage(context.Background(), "models/acme/intel-baseline/", first[0].Name, 1)
+	if err != nil || len(second) != 1 || second[0].Name != "models/acme/intel-baseline/svcB~rate" {
+		t.Fatalf("second blob page=%v err=%v", second, err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := lister.ListBlobsPage(canceled, "models/acme/", "", 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled blob page error=%v", err)
 	}
 
 	// List one org+agent namespace: exactly the two baseline artifacts.

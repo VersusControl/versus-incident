@@ -91,11 +91,17 @@ func ValidateSettings(settings Settings) error {
 
 // Manager is the storage-backed Service Health recorder and snapshot store.
 type Manager struct {
-	store   storage.Provider
-	now     func() time.Time
-	mu      sync.Mutex
-	pending map[string]*pendingState
+	store        storage.Provider
+	now          func() time.Time
+	mu           sync.Mutex
+	pending      map[string]*pendingState
+	projectionMu sync.RWMutex
+	projection   SnapshotProjection
 }
+
+// SnapshotProjection applies request-org access policy to a snapshot at read time.
+// A nil projection preserves the OSS response exactly.
+type SnapshotProjection func(context.Context, string, SnapshotEnvelope) (SnapshotEnvelope, error)
 
 // NewManager constructs a manager over the shared storage provider.
 func NewManager(store storage.Provider) *Manager {
@@ -108,6 +114,16 @@ func newManagerWithClock(store storage.Provider, now func() time.Time) *Manager 
 		manager.now = now
 	}
 	return manager
+}
+
+// SetSnapshotProjection installs an instance-scoped, concurrent-safe read projection.
+func (manager *Manager) SetSnapshotProjection(projection SnapshotProjection) {
+	if manager == nil {
+		return
+	}
+	manager.projectionMu.Lock()
+	manager.projection = projection
+	manager.projectionMu.Unlock()
 }
 
 func orgKey(prefix, orgID string) string {
@@ -662,10 +678,13 @@ type ServiceSnapshot struct {
 	Domain          string                              `json:"domain"`
 	Kind            string                              `json:"kind"`
 	Severity        string                              `json:"severity"`
+	BaseSeverity    string                              `json:"base_severity,omitempty"`
 	AssessmentBasis string                              `json:"assessment_basis"`
 	Logs            WindowAggregate                     `json:"logs"`
 	Availability    map[string]core.MeasureAvailability `json:"availability"`
 	ActiveIncidents *int                                `json:"active_incidents"`
+	Evidence        []core.SignalEvidence               `json:"evidence,omitempty"`
+	Assessment      *core.HealthAssessment              `json:"assessment,omitempty"`
 }
 
 type DomainSnapshot struct {
@@ -682,10 +701,7 @@ type CoverageSummary struct {
 	Partial          bool `json:"partial"`
 }
 
-type Capability struct {
-	Family   string                              `json:"family"`
-	Measures map[string]core.MeasureAvailability `json:"measures"`
-}
+type Capability = core.HealthCapability
 
 type snapshotHistory struct {
 	Snapshots []SnapshotEnvelope `json:"snapshots"`
@@ -778,9 +794,33 @@ func (manager *Manager) LoadSnapshot(orgID string) (SnapshotEnvelope, bool, erro
 	return history.Snapshots[len(history.Snapshots)-1], true, nil
 }
 
-// SnapshotOrEmpty reads the newest persisted snapshot or returns a static
-// fresh-install envelope. It never aggregates buckets or calls a source.
+// SnapshotFor reads and projects the newest persisted snapshot for one request org.
+// It never aggregates buckets or calls a source.
+func (manager *Manager) SnapshotFor(ctx context.Context, orgID string) (SnapshotEnvelope, error) {
+	snapshot, err := manager.snapshotOrEmpty(orgID)
+	if err != nil {
+		return SnapshotEnvelope{}, err
+	}
+	manager.projectionMu.RLock()
+	projection := manager.projection
+	manager.projectionMu.RUnlock()
+	if projection == nil {
+		return snapshot, nil
+	}
+	projected, err := applySnapshotProjection(ctx, projection, storage.NormalizeOrgID(orgID), snapshot)
+	if err != nil {
+		stripAccessControlledSnapshot(&snapshot)
+		return snapshot, nil
+	}
+	return projected, nil
+}
+
+// SnapshotOrEmpty preserves the context-free OSS read contract.
 func (manager *Manager) SnapshotOrEmpty(orgID string) (SnapshotEnvelope, error) {
+	return manager.SnapshotFor(context.Background(), orgID)
+}
+
+func (manager *Manager) snapshotOrEmpty(orgID string) (SnapshotEnvelope, error) {
 	settings, err := manager.LoadSettings(orgID)
 	if err != nil {
 		return SnapshotEnvelope{}, err
@@ -819,6 +859,98 @@ func (manager *Manager) SnapshotOrEmpty(orgID string) (SnapshotEnvelope, error) 
 		Domains: []DomainSnapshot{}, Facets: map[string]int{},
 		Coverage: CoverageSummary{}, Capabilities: capabilities(false),
 	}, nil
+}
+
+func applySnapshotProjection(ctx context.Context, projection SnapshotProjection, orgID string, snapshot SnapshotEnvelope) (projected SnapshotEnvelope, err error) {
+	defer func() {
+		if recover() != nil {
+			projected = SnapshotEnvelope{}
+			err = fmt.Errorf("service health projection failed")
+		}
+	}()
+	projected, err = projection(ctx, orgID, snapshot)
+	if err != nil {
+		return SnapshotEnvelope{}, err
+	}
+	for _, service := range projected.Services {
+		if storage.NormalizeOrgID(service.OrgID) != orgID {
+			return SnapshotEnvelope{}, fmt.Errorf("service health projection changed organization scope")
+		}
+		for _, evidence := range service.Evidence {
+			if storage.NormalizeOrgID(evidence.OrgID) != orgID || evidence.Service != service.Service {
+				return SnapshotEnvelope{}, fmt.Errorf("service health projection changed evidence scope")
+			}
+		}
+		if service.Assessment != nil && (storage.NormalizeOrgID(service.Assessment.OrgID) != orgID || service.Assessment.Service != service.Service) {
+			return SnapshotEnvelope{}, fmt.Errorf("service health projection changed assessment scope")
+		}
+	}
+	return projected, nil
+}
+
+func stripAccessControlledSnapshot(snapshot *SnapshotEnvelope) {
+	for index := range snapshot.Services {
+		service := &snapshot.Services[index]
+		service.Evidence = nil
+		service.Assessment = nil
+		service.AssessmentBasis = stripPremiumAssessmentBasis(service.AssessmentBasis)
+		if service.BaseSeverity != "" {
+			service.Severity = service.BaseSeverity
+			service.BaseSeverity = ""
+		}
+		for key := range service.Availability {
+			if strings.HasPrefix(key, "metrics.") || strings.HasPrefix(key, "traces.") || strings.HasPrefix(key, "assessment.") {
+				delete(service.Availability, key)
+			}
+		}
+	}
+	retained := snapshot.Capabilities[:0]
+	for _, capability := range snapshot.Capabilities {
+		if capability.Family != "metrics" && capability.Family != "traces" && capability.Family != "assessment" {
+			retained = append(retained, capability)
+		}
+	}
+	for _, capability := range capabilities(false) {
+		if capability.Family == "metrics" || capability.Family == "traces" {
+			retained = append(retained, capability)
+		}
+	}
+	snapshot.Capabilities = retained
+	snapshot.Coverage.Partial = baseCoveragePartial(*snapshot)
+	snapshot.Domains = aggregateDomains(snapshot.Services)
+	snapshot.Facets = map[string]int{}
+	for _, service := range snapshot.Services {
+		snapshot.Facets[service.Severity]++
+	}
+}
+
+func stripPremiumAssessmentBasis(basis string) string {
+	parts := strings.Split(basis, " + ")
+	retained := parts[:0]
+	for _, part := range parts {
+		if part != "Metrics" && part != "Traces" {
+			retained = append(retained, part)
+		}
+	}
+	return strings.Join(retained, " + ")
+}
+
+func baseCoveragePartial(snapshot SnapshotEnvelope) bool {
+	if snapshot.Coverage.TotalServices > len(snapshot.Services) {
+		return true
+	}
+	for _, service := range snapshot.Services {
+		if service.Logs.Truncated {
+			return true
+		}
+		for _, family := range []string{"logs", "internal"} {
+			switch service.Availability[family].State {
+			case core.HealthPartial, core.HealthError, core.HealthStale:
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func markSnapshotStale(snapshot *SnapshotEnvelope, reason string) {

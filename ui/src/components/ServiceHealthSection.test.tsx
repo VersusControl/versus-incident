@@ -183,6 +183,44 @@ describe("ServiceHealthSection", () => {
     expect(screen.queryByRole("link", { name: "Connect a log source" })).toBeNull();
   });
 
+  it.each([
+    ["metrics", "not_configured", "connect_metric_source", "Connect a metric source", "/agent/metrics"],
+    ["metrics", "stale", "review_metric_source", "Review metric source", "/agent/metrics"],
+    ["traces", "not_configured", "connect_trace_source", "Connect a trace source", "/agent/traces"],
+    ["traces", "error", "review_trace_source", "Review trace source", "/agent/traces"],
+  ] as Array<[string, ServiceHealthState, string, string, string]>)("maps the fixed %s action without accepting a URL", async (family, state, actionID, label, href) => {
+    Object.assign(role, { enterprise: true, hasSession: true, isAdmin: true });
+    vi.mocked(api.getServiceHealth).mockResolvedValue(snapshot({
+      capabilities: [
+        { family: "logs", measures: { activity: availability("ready") } },
+        { family: "internal", measures: { incidents: availability("ready") } },
+        { family, measures: { latency: availability(state, actionID) } },
+      ],
+    }));
+    renderSection();
+    const action = await screen.findByRole("link", { name: label });
+    expect(action.getAttribute("href")).toBe(href);
+    expect(screen.getAllByRole("link", { name: label })).toHaveLength(1);
+  });
+
+  it("hides unknown actions and gives a licensed viewer permission guidance", async () => {
+    Object.assign(role, { enterprise: true, hasSession: true, isAdmin: false });
+    vi.mocked(api.getServiceHealth).mockResolvedValue(snapshot({
+      capabilities: [
+        { family: "logs", measures: { activity: availability("ready") } },
+        { family: "internal", measures: { incidents: availability("ready") } },
+        { family: "metrics", measures: {
+          latency: availability("error", "https://example.invalid/configure"),
+          throughput: availability("not_configured", "connect_metric_source"),
+        } },
+      ],
+    }));
+    renderSection();
+    expect(await screen.findByText("Ask an administrator")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: /metric source/i })).toBeNull();
+    expect(document.body.textContent).not.toContain("example.invalid");
+  });
+
   it("uses the auth error flow and never renders preview for unauthorized responses", async () => {
     vi.mocked(api.getServiceHealth).mockRejectedValue(new ApiError(401, "unauthorized"));
     renderSection();
