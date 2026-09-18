@@ -1,3 +1,4 @@
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
   Activity,
@@ -25,6 +26,7 @@ import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { useServiceHealthQuery } from "@/lib/useServiceHealth";
 import { SERVICE_HEALTH_STATE_COPY } from "@/lib/serviceHealthPresentation";
 import { ServiceHealthExplorer } from "@/components/ServiceHealthExplorer";
+import { ServiceTopologyStrip } from "@/components/ServiceTopologyStrip";
 
 const STATE_PRESENTATION: Record<
   ServiceHealthState,
@@ -214,15 +216,42 @@ function GapAction({ snapshot }: { snapshot: ServiceHealthSnapshot }) {
   );
 }
 
+function ServiceHealthLayout({
+  children,
+  footer,
+  snapshot,
+  onSelectService,
+  workspace = false,
+}: {
+  children: ReactNode;
+  footer?: ReactNode;
+  snapshot?: ServiceHealthSnapshot;
+  onSelectService: (service: string) => void;
+  workspace?: boolean;
+}) {
+  return (
+    <section
+      className={workspace ? "heatmap-workspace" : "min-h-40 pt-3"}
+      aria-labelledby="service-health-title"
+      data-testid={workspace ? "service-health-section" : undefined}
+    >
+      {children}
+      <ServiceTopologyStrip snapshot={snapshot} onSelectService={onSelectService} />
+      {footer}
+    </section>
+  );
+}
+
 export function ServiceHealthSection() {
   const query = useServiceHealthQuery();
+  const [selectedService, setSelectedService] = useState<string | null>(null);
 
   if (query.isPending) {
     return (
-      <section className="min-h-40 pt-3" aria-labelledby="service-health-title">
+      <ServiceHealthLayout onSelectService={setSelectedService}>
         <h2 id="service-health-title" className="inline-flex items-center gap-2 text-base font-semibold text-ink-50"><Radio size={17} className="text-ink-300" aria-hidden />Service Heatmap</h2>
         <p className="mt-3 inline-flex items-center gap-2 text-xs text-ink-300"><RefreshCw size={14} className="animate-spin" aria-hidden /> Loading current assessment…</p>
-      </section>
+      </ServiceHealthLayout>
     );
   }
 
@@ -230,17 +259,18 @@ export function ServiceHealthSection() {
   if (query.isError && (!query.data || accessDenied)) {
     const unauthorized = query.error instanceof ApiError && query.error.status === 401;
     return (
-      <section className="min-h-40 pt-3" aria-labelledby="service-health-title">
+      <ServiceHealthLayout onSelectService={setSelectedService}>
         <h2 id="service-health-title" className="inline-flex items-center gap-2 text-base font-semibold text-ink-50"><Radio size={17} className="text-ink-300" aria-hidden />Service Heatmap</h2>
-        <div className="mt-3">
-          <RetryableError
-            error={query.error}
-            onRetry={() => query.refetch()}
-            retrying={query.isRefetching}
-            context={unauthorized ? "Your session is no longer authorized" : "Couldn't load Service Health"}
-          />
-        </div>
-      </section>
+        {accessDenied ? (
+          <div role="alert" className="mt-3 rounded-card border border-sev-critical/40 bg-sev-critical/10 p-3 text-xs font-medium text-ink-50">
+            {unauthorized ? "Your session is no longer authorized." : "Service Health is unavailable for this session."}
+          </div>
+        ) : (
+          <div className="mt-3">
+            <RetryableError error={query.error} onRetry={() => query.refetch()} retrying={query.isRefetching} context="Couldn't load Service Health" />
+          </div>
+        )}
+      </ServiceHealthLayout>
     );
   }
 
@@ -255,7 +285,15 @@ export function ServiceHealthSection() {
   const affected = snapshot.services.filter((service) => ["critical", "degraded", "pressure", "creeping"].includes(service.severity)).length;
 
   return (
-    <section className="heatmap-workspace" aria-labelledby="service-health-title" data-testid="service-health-section">
+    <ServiceHealthLayout
+      workspace
+      snapshot={snapshot}
+      onSelectService={setSelectedService}
+      footer={<section className="mt-5 flex flex-wrap items-center justify-between gap-3" aria-label="Data sources">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">{families.map((family) => <HealthStateBadge key={family} prefix={family === "internal" ? "Incidents" : family[0].toUpperCase() + family.slice(1)} state={stateForCapability(snapshot, family)} />)}</div>
+        <GapAction snapshot={snapshot} />
+      </section>}
+    >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 id="service-health-title" className="inline-flex items-center gap-2 text-lg font-semibold text-ink-50"><Radio size={18} className="text-ink-300" aria-hidden />Service Heatmap</h2>
         <div className="flex flex-wrap items-center gap-3 text-xs text-ink-300">
@@ -277,13 +315,9 @@ export function ServiceHealthSection() {
       {query.isError && <p className="mt-3 text-xs text-sev-warn" role="status">Refresh failed. Showing the last assessment.</p>}
       {snapshot.pending_settings && <p className="mt-2 text-xs text-ink-400">New timing applies on the next collection</p>}
 
-      {snapshot.services.length > 0 && <ServiceHealthExplorer snapshot={snapshot} />}
+      {snapshot.services.length > 0 && <ServiceHealthExplorer snapshot={snapshot} selectedService={selectedService} onSelectedServiceChange={setSelectedService} />}
       {!realEvidence && <p className="mt-5 text-sm text-ink-300">{stateCopy.detail}</p>}
       {showPreview && <ExamplePreview />}
-      <section className="mt-5 flex flex-wrap items-center justify-between gap-3" aria-label="Data sources">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">{families.map((family) => <HealthStateBadge key={family} prefix={family === "internal" ? "Incidents" : family[0].toUpperCase() + family.slice(1)} state={stateForCapability(snapshot, family)} />)}</div>
-        <GapAction snapshot={snapshot} />
-      </section>
-    </section>
+    </ServiceHealthLayout>
   );
 }

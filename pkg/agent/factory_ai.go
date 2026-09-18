@@ -222,7 +222,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		// tool. Built from the operator-authored upstream edges in
 		// tools.yaml (tools.describe_dependencies.services); a nil/empty
 		// graph omits the tool.
-		graph := buildDependencyGraph(cfg.Tools.DescribeDependencies.Services)
+		graph := BuildDependencyGraph(cfg.Tools.DescribeDependencies.Services)
 
 		// Optional git-backed change feed for the recent_changes tool. It
 		// mirror-clones each configured remote git repository into a local

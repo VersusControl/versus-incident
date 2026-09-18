@@ -2,10 +2,12 @@ package tools
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
 	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
+	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
@@ -27,6 +29,27 @@ func TestDescribeDependencies_Metadata(t *testing.T) {
 	req, ok := schema["required"].([]string)
 	if !ok || len(req) != 1 || req[0] != "service" {
 		t.Errorf("ArgsSchema required = %v, want [service]", schema["required"])
+	}
+}
+
+func TestDependencyGraphTopologyIsDeterministicAndBounded(t *testing.T) {
+	graph := NewDependencyGraph(map[string][]string{
+		"web": {"db", "api", "api", "web"},
+		"api": {"db"},
+	})
+
+	got := graph.Topology(2, 2)
+	if got.Availability != core.HealthPartial || len(got.Provenance) != 1 || got.Provenance[0] != "operator_config" {
+		t.Fatalf("metadata = %#v", got)
+	}
+	if want := []core.ServiceTopologyNode{{Service: "api"}, {Service: "db"}}; !reflect.DeepEqual(got.Nodes, want) {
+		t.Fatalf("nodes = %#v, want %#v", got.Nodes, want)
+	}
+	if want := []core.ServiceTopologyEdge{{Service: "api", DependsOn: "db", Source: "operator_config"}}; !reflect.DeepEqual(got.Edges, want) {
+		t.Fatalf("edges = %#v, want %#v", got.Edges, want)
+	}
+	if got.OmittedNodes != 1 || got.OmittedEdges != 2 {
+		t.Fatalf("omissions = nodes %d edges %d", got.OmittedNodes, got.OmittedEdges)
 	}
 }
 

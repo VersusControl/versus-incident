@@ -599,7 +599,7 @@ func TestRuntimeThreadsProviderAssessorAndReadProjection(t *testing.T) {
 }
 
 func healthTestNow() time.Time {
-	return time.Date(2026, 9, 15, 12, 5, 0, 0, time.UTC)
+	return time.Now().UTC().Truncate(time.Minute)
 }
 
 func oneHealthService() []servicehealth.ServiceMetadata {

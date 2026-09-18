@@ -6,14 +6,17 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/servicehealth"
+	"github.com/VersusControl/versus-incident/pkg/servicetopology"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 
 	"github.com/gofiber/fiber/v2"
@@ -61,6 +64,107 @@ func TestServiceHealthEmptyInstallAndSettingsRoundTrip(t *testing.T) {
 		t.Fatalf("settings = %#v", settings)
 	}
 }
+
+func TestServiceTopologyStaticGraphIsDeterministicAndDoesNotBlockHealth(t *testing.T) {
+	health := servicehealth.NewManager(storage.NewMemory())
+	graph := commontools.NewDependencyGraph(map[string][]string{
+		"web": {"db", "api", "api"},
+		"api": {"db"},
+	})
+	controller := NewServiceHealthControllerWithTopology(health, servicetopology.NewManager(graph, nil))
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(middleware.OrgInjector())
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	app.Get("/api/agent/service-topology", controller.getServiceTopology)
+	app.Get("/api/agent/service-health", controller.getServiceHealth)
+
+	response, err := app.Test(httptest.NewRequest("GET", "/api/agent/service-topology", nil))
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("topology status = %v, err %v", response.StatusCode, err)
+	}
+	var topology core.ServiceTopology
+	if err := json.NewDecoder(response.Body).Decode(&topology); err != nil {
+		t.Fatal(err)
+	}
+	wantNodes := []core.ServiceTopologyNode{{Service: "api"}, {Service: "db"}, {Service: "web"}}
+	wantEdges := []core.ServiceTopologyEdge{
+		{Service: "api", DependsOn: "db", Source: "operator_config"},
+		{Service: "web", DependsOn: "api", Source: "operator_config"},
+		{Service: "web", DependsOn: "db", Source: "operator_config"},
+	}
+	if topology.Availability != core.HealthReady || !reflect.DeepEqual(topology.Nodes, wantNodes) || !reflect.DeepEqual(topology.Edges, wantEdges) {
+		t.Fatalf("topology = %#v", topology)
+	}
+	response, err = app.Test(httptest.NewRequest("GET", "/api/agent/service-health", nil))
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("service health status = %v, err %v", response.StatusCode, err)
+	}
+}
+
+func TestServiceTopologyMissingGraphIsUnavailableAndHealthStillWorks(t *testing.T) {
+	controller := NewServiceHealthControllerWithTopology(servicehealth.NewManager(storage.NewMemory()), servicetopology.NewManager(nil, nil))
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(middleware.OrgInjector())
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	app.Get("/topology", controller.getServiceTopology)
+	app.Get("/health", controller.getServiceHealth)
+
+	response, _ := app.Test(httptest.NewRequest("GET", "/topology", nil))
+	var topology core.ServiceTopology
+	if err := json.NewDecoder(response.Body).Decode(&topology); err != nil {
+		t.Fatal(err)
+	}
+	if topology.Availability != core.HealthNotConfigured || len(topology.Nodes) != 0 || len(topology.Edges) != 0 {
+		t.Fatalf("topology = %#v", topology)
+	}
+	response, _ = app.Test(httptest.NewRequest("GET", "/health", nil))
+	if response.StatusCode != fiber.StatusOK {
+		t.Fatalf("service health status = %d", response.StatusCode)
+	}
+}
+
+func TestServiceTopologyRequiresExplicitInfrastructurePermission(t *testing.T) {
+	controller := NewServiceHealthControllerWithTopology(servicehealth.NewManager(storage.NewMemory()), servicetopology.NewManager(nil, nil))
+	for _, test := range []struct {
+		name       string
+		permission *bool
+		want       int
+	}{
+		{name: "missing", want: fiber.StatusForbidden},
+		{name: "denied", permission: boolPointer(false), want: fiber.StatusForbidden},
+		{name: "allowed", permission: boolPointer(true), want: fiber.StatusOK},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app := fiber.New(fiber.Config{Immutable: true})
+			if test.permission != nil {
+				app.Use(func(ctx *fiber.Ctx) error {
+					middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), *test.permission)
+					return ctx.Next()
+				})
+			}
+			app.Get("/topology", controller.getServiceTopology)
+			response, err := app.Test(httptest.NewRequest("GET", "/topology", nil))
+			if err != nil || response.StatusCode != test.want {
+				t.Fatalf("status = %v, err = %v", response.StatusCode, err)
+			}
+		})
+	}
+
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Get("/health", controller.getServiceHealth)
+	response, _ := app.Test(httptest.NewRequest("GET", "/health", nil))
+	if response.StatusCode != fiber.StatusOK {
+		t.Fatalf("independent Service Health status = %d", response.StatusCode)
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
 
 func TestServiceHealthSettingsBoundsConflictAndPermission(t *testing.T) {
 	manager := servicehealth.NewManager(storage.NewMemory())
@@ -179,5 +283,14 @@ func TestServiceHealthRouteRequiresGatewayAuthorization(t *testing.T) {
 	_, _ = io.ReadAll(response.Body)
 	if response.StatusCode != fiber.StatusUnauthorized {
 		t.Fatalf("status = %d", response.StatusCode)
+	}
+	response, err = app.Test(httptest.NewRequest("GET", "/api/agent/service-topology", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	_, _ = io.ReadAll(response.Body)
+	if response.StatusCode != fiber.StatusUnauthorized {
+		t.Fatalf("topology status = %d", response.StatusCode)
 	}
 }

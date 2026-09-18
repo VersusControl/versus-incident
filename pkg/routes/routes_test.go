@@ -56,3 +56,19 @@ func TestSetupRoutes_GatewaySessionExchangePrecedesExtensionAuth(t *testing.T) {
 		t.Errorf("protected status = %d, want %d", protectedResp.StatusCode, fiber.StatusTeapot)
 	}
 }
+
+func TestSetupRoutesWithTopologyMountsGatewayProtectedEndpoint(t *testing.T) {
+	middleware.SetAuthMiddleware(nil)
+	t.Cleanup(func() { middleware.SetAuthMiddleware(nil) })
+	app := fiber.New(fiber.Config{Immutable: true})
+	SetupRoutesWithTopology(app, nil, nil, nil)
+
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/agent/service-topology", nil), -1)
+	if err != nil {
+		t.Fatalf("topology request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != fiber.StatusUnauthorized {
+		t.Fatalf("topology status = %d, want %d", response.StatusCode, fiber.StatusUnauthorized)
+	}
+}

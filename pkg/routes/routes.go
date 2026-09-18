@@ -4,12 +4,22 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/controllers"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/servicehealth"
+	"github.com/VersusControl/versus-incident/pkg/servicetopology"
 	"github.com/VersusControl/versus-incident/pkg/teams"
 
 	"github.com/gofiber/fiber/v2"
 )
 
 func SetupRoutes(app *fiber.App, teamsStore *teams.Store, healthManagers ...*servicehealth.Manager) {
+	var healthManager *servicehealth.Manager
+	if len(healthManagers) > 0 {
+		healthManager = healthManagers[0]
+	}
+	SetupRoutesWithTopology(app, teamsStore, healthManager, nil)
+}
+
+// SetupRoutesWithTopology mounts the standard routes with an independent topology service.
+func SetupRoutesWithTopology(app *fiber.App, teamsStore *teams.Store, healthManager *servicehealth.Manager, topologyManager *servicetopology.Manager) {
 	// Health check endpoint
 	app.Get("/healthz", controllers.HealthCheck)
 
@@ -36,9 +46,7 @@ func SetupRoutes(app *fiber.App, teamsStore *teams.Store, healthManagers ...*ser
 	controllers.NewSpikeAdminController().Register(api)
 	controllers.NewCountSettingsController().Register(api)
 	controllers.NewChatAdminController(nil).Register(api)
-	var healthManager *servicehealth.Manager
-	if len(healthManagers) > 0 {
-		healthManager = healthManagers[0]
-	}
-	controllers.NewServiceHealthController(healthManager).Register(api)
+	// The static graph is boot-pinned global configuration in the current
+	// single-organization OSS architecture; request authorization remains scoped.
+	controllers.NewServiceHealthControllerWithTopology(healthManager, topologyManager).Register(api)
 }

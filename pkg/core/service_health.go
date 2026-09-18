@@ -20,6 +20,51 @@ const (
 	HealthRestricted    HealthState = "restricted"
 )
 
+// ServiceTopology is a bounded service-dependency graph with honest source metadata.
+type ServiceTopology struct {
+	Availability HealthState           `json:"availability"`
+	Extensions   *TopologyExtension    `json:"extensions,omitempty"`
+	Provenance   []string              `json:"provenance"`
+	Nodes        []ServiceTopologyNode `json:"nodes"`
+	Edges        []ServiceTopologyEdge `json:"edges"`
+	OmittedNodes int                   `json:"omitted_nodes,omitempty"`
+	OmittedEdges int                   `json:"omitted_edges,omitempty"`
+}
+
+// TopologyExtension reports optional extension coverage without describing the
+// retained static graph as restricted when an extension is unavailable.
+type TopologyExtension struct {
+	Availability HealthState `json:"availability"`
+}
+
+// ServiceTopologyNode identifies one service without provider payloads.
+type ServiceTopologyNode struct {
+	Service string `json:"service"`
+}
+
+// ServiceTopologyEdge records a directed dependency from service to upstream.
+type ServiceTopologyEdge struct {
+	Service   string `json:"service"`
+	DependsOn string `json:"depends_on"`
+	Source    string `json:"source"`
+}
+
+// ServiceTopologyRequest carries trusted scope and hard output caps. Providers
+// must independently enforce entitlement and organization access.
+type ServiceTopologyRequest struct {
+	OrgID    string
+	MaxNodes int
+	MaxEdges int
+}
+
+// ServiceTopologyProvider returns authorized additional topology only. It must
+// not acquire raw payloads or infer service edges from operation names. A zero
+// budget is an availability probe: providers must not perform unbounded reads
+// and must report partial availability or omissions when extension data exists.
+type ServiceTopologyProvider interface {
+	ServiceTopology(context.Context, ServiceTopologyRequest) (ServiceTopology, error)
+}
+
 // MeasureAvailability separates operational state from a nullable value.
 type MeasureAvailability struct {
 	State      HealthState `json:"state"`

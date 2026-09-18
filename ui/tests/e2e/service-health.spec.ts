@@ -125,12 +125,43 @@ function staleSnapshot(): Snapshot {
   return { ...snapshot, services };
 }
 
+function topologyFor(health: Snapshot): Snapshot {
+  if (!health.snapshot_id) {
+    return {
+      availability: "ready",
+      provenance: ["static_config"],
+      nodes: [{ service: "checkout" }, { service: "database" }],
+      edges: [{ service: "checkout", depends_on: "database", source: "static_config" }],
+    };
+  }
+  return {
+    availability: "ready",
+    provenance: ["operator_config"],
+    nodes: [
+      { service: "catalog" },
+      { service: "checkout-service-with-a-long-production-name" },
+      { service: "payments-database-with-a-long-production-name" },
+    ],
+    edges: [
+      { service: "checkout-service-with-a-long-production-name", depends_on: "catalog", source: "operator_config" },
+      { service: "checkout-service-with-a-long-production-name", depends_on: "payments-database-with-a-long-production-name", source: "operator_config" },
+    ],
+  };
+}
+
 async function json(route: Route, body: unknown, status = 200) {
   await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 }
 
 async function installApi(page: Page, health: Snapshot) {
-  const state = { health, settings: { interval_seconds: 60, window_seconds: 300, revision: 0 }, patchBodies: [] as unknown[] };
+  const state = {
+    health,
+    topology: topologyFor(health),
+    topologyStatus: 200,
+    topologyRequests: 0,
+    settings: { interval_seconds: 60, window_seconds: 300, revision: 0 },
+    patchBodies: [] as unknown[],
+  };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -158,6 +189,11 @@ async function installApi(page: Page, health: Snapshot) {
       return json(route, { services: { checkout: { first_seen: fixedTime, manual: false, in_grace: false, grace_seconds_remaining: 0 } }, total: 1, next_offset: null });
     }
     if (requestPath === "/api/agent/service-health") return json(route, state.health);
+    if (requestPath === "/api/agent/service-topology") {
+      state.topologyRequests += 1;
+      if (state.topologyStatus !== 200) return json(route, { error: "private topology policy" }, state.topologyStatus);
+      return json(route, state.topology);
+    }
     if (requestPath === "/api/agent/service-health/settings" && request.method() === "GET") return json(route, state.settings);
     if (requestPath === "/api/agent/service-health/settings" && request.method() === "PATCH") {
       const body = request.postDataJSON();
@@ -181,9 +217,10 @@ async function openAuthenticated(page: Page, route: string) {
 }
 
 async function expectNoHorizontalOverflow(page: Page) {
-  const widths = await page.evaluate(() => ({ viewport: window.innerWidth, body: document.body.scrollWidth, root: document.documentElement.scrollWidth }));
-  expect(widths.body).toBeLessThanOrEqual(widths.viewport);
-  expect(widths.root).toBeLessThanOrEqual(widths.viewport);
+  await expect.poll(async () => page.evaluate(() => ({
+    body: document.body.scrollWidth <= window.innerWidth,
+    root: document.documentElement.scrollWidth <= window.innerWidth,
+  }))).toEqual({ body: true, root: true });
 }
 
 async function expectPanelWithinViewport(page: Page) {
@@ -220,14 +257,22 @@ test("no-source preview is labeled, isolated, and responsive", async ({ page }) 
   await installApi(page, emptySnapshot());
   await page.setViewportSize({ width: 1440, height: 1000 });
   await openAuthenticated(page, "/agent");
-  await expect(page.getByText("Example preview - sample data")).toBeVisible();
+  const preview = page.getByTestId("service-health-preview");
+  const topologyHeading = page.getByRole("heading", { name: "Service dependencies" });
+  await expect(preview.getByText("Example preview - sample data")).toBeVisible();
+  await expect(topologyHeading).toBeVisible();
+  await expect(page.getByText("Live topology")).toBeVisible();
+  await expect(page.getByRole("listitem", { name: "checkout depends on database; configured source" })).toBeVisible();
+  const previewBox = await preview.boundingBox();
+  const topologyBox = await topologyHeading.boundingBox();
+  expect(topologyBox!.y).toBeGreaterThan(previewBox!.y + previewBox!.height);
   await expect(page.getByTestId("service-health-coverage-summary")).toContainText("0 with data");
   await expect(page.getByTestId("service-health-preview").getByRole("link")).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: path.join(screenshotDir, "no-source-desktop.png"), fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByText("Example preview - sample data")).toBeVisible();
+  await expect(preview.getByText("Example preview - sample data")).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await expect(page.getByRole("heading", { name: "Agent Overview", exact: true })).toBeVisible();
   await page.screenshot({ path: path.join(screenshotDir, "no-source-mobile.png"), fullPage: true });
@@ -236,15 +281,18 @@ test("no-source preview is labeled, isolated, and responsive", async ({ page }) 
 test("live OSS evidence supports mode, facet, domain drill-down, and service navigation", async ({ page }) => {
   await installApi(page, liveSnapshot());
   await openAuthenticated(page, "/agent");
-  await expect(page.getByRole("button", { name: "Inspect catalog" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Inspect catalog", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Service Heatmap", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Service dependencies" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Inspect catalog, health Normal" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "payments-database-with-a-long-production-name, no health snapshot available" })).toBeVisible();
   await expect(page.getByText("Impact based on combined evidence")).toHaveCount(0);
   await expect(page.getByText("Patterns + incidents")).toHaveCount(0);
-  const firstTile = await page.getByRole("button", { name: "Inspect catalog" }).boundingBox();
+  const firstTile = await page.getByRole("button", { name: "Inspect catalog", exact: true }).boundingBox();
   expect(firstTile?.y).toBeLessThan(620);
   await expect(page.getByRole("heading", { name: "Lifetime totals" })).not.toBeVisible();
   await page.screenshot({ path: path.join(screenshotDir, "live-grid-desktop.png"), fullPage: true });
-  const checkoutTile = page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name" });
+  const checkoutTile = page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name", exact: true });
   await checkoutTile.click();
   let dialog = page.getByRole("dialog", { name: "checkout-service-with-a-long-production-name" });
   await expect(dialog.getByText("Log events")).toBeVisible();
@@ -272,13 +320,14 @@ test("live OSS evidence supports mode, facet, domain drill-down, and service nav
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(checkoutTile).toBeFocused();
+  await expect(page.getByTestId("service-topology-strip")).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await page.screenshot({ path: path.join(screenshotDir, "live-grid-mobile.png"), fullPage: true });
   await page.setViewportSize({ width: 1280, height: 900 });
   const lightSwitch = page.getByRole("button", { name: "Switch to light theme" });
   if (await lightSwitch.isVisible()) await lightSwitch.click();
   await expect(page.getByTestId("service-health-domains")).toHaveCSS("background-color", "rgb(255, 255, 255)");
-  await expect.poll(async () => page.getByRole("button", { name: "Inspect catalog" }).evaluate((element) => {
+  await expect.poll(async () => page.getByRole("button", { name: "Inspect catalog", exact: true }).evaluate((element) => {
     const canvas = document.createElement("canvas");
     canvas.width = 1; canvas.height = 1;
     const context = canvas.getContext("2d")!;
@@ -289,14 +338,14 @@ test("live OSS evidence supports mode, facet, domain drill-down, and service nav
   await page.screenshot({ path: path.join(screenshotDir, "live-grid-light.png"), fullPage: true });
   await expect(page.getByTestId("service-health-preview")).toHaveCount(0);
   await page.getByLabel("Health state").selectOption("pressure");
-  await expect(page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name", exact: true })).toBeVisible();
   await expect(page.getByText("Log events")).toBeVisible();
   await page.getByLabel("Show data").selectOption("incidents");
   await expect(page.getByText("Active incidents")).toBeVisible();
   await expect(page.getByText("Log events")).toHaveCount(0);
   await page.getByRole("button", { name: "List view" }).click();
   await page.getByRole("searchbox", { name: "Find a service" }).fill("checkout");
-  await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name" }).click();
+  await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name", exact: true }).click();
   dialog = page.getByRole("dialog", { name: "checkout-service-with-a-long-production-name" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText("Log events")).toBeVisible();
@@ -317,6 +366,125 @@ test("live OSS evidence supports mode, facet, domain drill-down, and service nav
   await expect(page).toHaveURL(/\/agent\/services\/checkout-service-with-a-long-production-name$/);
 });
 
+test("partial topology scrolls on mobile and supports keyboard activation", async ({ page }) => {
+  const state = await installApi(page, liveSnapshot());
+  state.topology = {
+    availability: "partial",
+    provenance: ["operator_config"],
+    nodes: [
+      { service: "catalog" },
+      { service: "checkout-service-with-a-long-production-name" },
+      { service: "payments-database-with-a-long-production-name" },
+      { service: "worker-without-a-current-health-snapshot" },
+    ],
+    edges: [
+      { service: "checkout-service-with-a-long-production-name", depends_on: "catalog", source: "operator_config" },
+      { service: "checkout-service-with-a-long-production-name", depends_on: "payments-database-with-a-long-production-name", source: "operator_config" },
+    ],
+    omitted_nodes: 2,
+    omitted_edges: 3,
+  };
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openAuthenticated(page, "/agent");
+
+  const strip = page.getByTestId("service-topology-strip");
+  await expect(strip).toBeVisible();
+  await expect(strip).toHaveAttribute("aria-label", /scroll horizontally/);
+  await expect(page.getByText("Partial coverage")).toBeVisible();
+  await expect(page.getByTestId("service-topology-omitted")).toHaveText("2 services and 3 relationships omitted.");
+  expect(await strip.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+  await strip.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+  expect(await strip.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+  await expectNoHorizontalOverflow(page);
+
+  const matched = page.getByRole("button", { name: "Inspect catalog, health Normal" });
+  await matched.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog", { name: "catalog" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(matched).toBeFocused();
+
+  const unmatched = page.getByRole("button", { name: "worker-without-a-current-health-snapshot, no health snapshot available" });
+  await unmatched.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("service-topology-announcement")).toHaveText("worker-without-a-current-health-snapshot is not represented in the current health snapshot.");
+  await page.screenshot({ path: path.join(screenshotDir, "topology-partial-mobile.png"), fullPage: true });
+});
+
+for (const status of [401, 403]) test(`topology refetch fails closed after a ${status} response`, async ({ page }) => {
+  const state = await installApi(page, liveSnapshot());
+  state.topology = {
+    availability: "partial",
+    provenance: ["operator_config"],
+    nodes: [
+      { service: "catalog" },
+      { service: "checkout-service-with-a-long-production-name" },
+      { service: "worker-without-a-current-health-snapshot" },
+    ],
+    edges: [
+      { service: "checkout-service-with-a-long-production-name", depends_on: "catalog", source: "operator_config" },
+    ],
+    omitted_nodes: 2,
+    omitted_edges: 3,
+  };
+  await openAuthenticated(page, "/agent");
+
+  await expect(page.getByRole("listitem", { name: "checkout-service-with-a-long-production-name depends on catalog; configured source" })).toBeVisible();
+  await expect(page.getByText("Configured").first()).toBeVisible();
+  await expect(page.getByTestId("service-topology-omitted")).toHaveText("2 services and 3 relationships omitted.");
+  if (status === 403) {
+    await page.getByRole("button", { name: "worker-without-a-current-health-snapshot, no health snapshot available" }).press("Enter");
+    await expect(page.getByTestId("service-topology-announcement")).toHaveText("worker-without-a-current-health-snapshot is not represented in the current health snapshot.");
+  }
+
+  state.topologyStatus = status;
+  await page.waitForTimeout(15_100);
+  await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+
+  await expect(page.getByRole("alert")).toHaveText("Service topology is unavailable for this session.");
+  await expect(page.getByTestId("service-topology-strip")).toHaveCount(0);
+  await expect(page.getByText("Configured")).toHaveCount(0);
+  await expect(page.getByTestId("service-topology-omitted")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
+  await expect(page.getByTestId("service-topology-announcement")).toHaveCount(0);
+  await expect(page.getByText("private topology policy")).toHaveCount(0);
+  expect(state.topologyRequests).toBe(2);
+  await page.waitForTimeout(500);
+  expect(state.topologyRequests).toBe(2);
+});
+
+test("transient topology refetch retains the cached graph with warning and Retry", async ({ page }) => {
+  const state = await installApi(page, liveSnapshot());
+  await openAuthenticated(page, "/agent");
+  const relationship = page.getByRole("listitem", { name: "checkout-service-with-a-long-production-name depends on catalog; configured source" });
+  await expect(relationship).toBeVisible();
+
+  state.topologyStatus = 503;
+  await page.waitForTimeout(15_100);
+  await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+
+  await expect(page.getByText("Showing saved topology. Refresh failed.")).toBeVisible();
+  await expect(relationship).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(page.getByText("private topology policy")).toHaveCount(0);
+  expect(state.topologyRequests).toBe(2);
+});
+
+test("initial restricted and not-configured topology states remain honest", async ({ page }) => {
+  const state = await installApi(page, liveSnapshot());
+  state.topologyStatus = 403;
+  await openAuthenticated(page, "/agent");
+  await expect(page.getByRole("alert")).toHaveText("Service topology is unavailable for this session.");
+  await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
+  await expect(page.getByText("private topology policy")).toHaveCount(0);
+
+  state.topologyStatus = 200;
+  state.topology = { availability: "not_configured", provenance: [], nodes: [], edges: [] };
+  await page.reload();
+  await expect(page.getByText("No service dependencies are configured.")).toBeVisible();
+  await expect(page.getByTestId("service-topology-strip")).toHaveCount(0);
+});
+
 test("Enterprise evidence is removed and announced when entitlement disappears", async ({ page }) => {
   const state = await installApi(page, enterpriseSnapshot());
   await page.setViewportSize({ width: 1280, height: 900 });
@@ -329,7 +497,7 @@ test("Enterprise evidence is removed and announced when entitlement disappears",
   const healthState = page.getByLabel("Health state");
   await healthState.selectOption("regressing");
   await expect(page.getByText("284.5 ms")).toBeVisible();
-  await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name" }).click();
+  await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText(/Heuristic confidence 91%/)).toBeVisible();
   await expect(dialog.getByText(/Latency P99.*POST \/checkout/)).toBeVisible();
@@ -353,7 +521,7 @@ test("Enterprise evidence is removed and announced when entitlement disappears",
   await dialog.getByRole("button", { name: "Close panel" }).click();
   const lightSwitch = page.getByRole("button", { name: "Switch to light theme" });
   if (await lightSwitch.isVisible()) await lightSwitch.click();
-  await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name" }).click();
+  await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name", exact: true }).click();
   await expectPanelWithinViewport(page);
   await expectPanelLayout(page);
   await page.screenshot({ path: path.join(screenshotDir, "enterprise-detail-light.png"), fullPage: true });
@@ -387,7 +555,7 @@ test("stale and missing evidence stays explicitly unavailable in both themes", a
   await installApi(page, staleSnapshot());
   await page.setViewportSize({ width: 1280, height: 900 });
   await openAuthenticated(page, "/agent");
-  await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name" }).click();
+  await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("Stale").first()).toBeVisible();
   await expect(dialog.getByText("82 / 100")).toHaveCount(0);
@@ -400,7 +568,7 @@ test("stale and missing evidence stays explicitly unavailable in both themes", a
   await dialog.getByRole("button", { name: "Close panel" }).click();
   const lightSwitch = page.getByRole("button", { name: "Switch to light theme" });
   if (await lightSwitch.isVisible()) await lightSwitch.click();
-  await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name" }).click();
+  await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name", exact: true }).click();
   await expectPanelWithinViewport(page);
   await expectPanelLayout(page);
   await page.screenshot({ path: path.join(screenshotDir, "stale-missing-detail-light.png"), fullPage: true });

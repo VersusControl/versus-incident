@@ -351,14 +351,27 @@ function coverageLabel(service: ServiceHealthService) {
     : `Logs ${SERVICE_HEALTH_STATE_COPY[state].label.toLowerCase()}`;
 }
 
-export function ServiceHealthExplorer({ snapshot }: { snapshot: ServiceHealthSnapshot }) {
+export function ServiceHealthExplorer({
+  snapshot,
+  selectedService,
+  onSelectedServiceChange,
+}: {
+  snapshot: ServiceHealthSnapshot;
+  selectedService?: string | null;
+  onSelectedServiceChange?: (service: string | null) => void;
+}) {
   const [mode, setMode] = useState<EvidenceMode>("combined");
   const [view, setView] = useState<"grid" | "list">("grid");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
-  const [selected, setSelected] = useState<string | null>(null);
+  const [internalSelected, setInternalSelected] = useState<string | null>(null);
+  const selected = selectedService === undefined ? internalSelected : selectedService;
+  const setSelected = useCallback((service: string | null) => {
+    if (selectedService === undefined) setInternalSelected(service);
+    onSelectedServiceChange?.(service);
+  }, [onSelectedServiceChange, selectedService]);
   const [availabilityNotice, setAvailabilityNotice] = useState("");
-  const close = useCallback(() => setSelected(null), []);
+  const close = useCallback(() => setSelected(null), [setSelected]);
   const modes = modesFor(snapshot);
   const modeSignature = modes.join("|");
   const premiumStates = snapshot.capabilities
@@ -381,7 +394,7 @@ export function ServiceHealthExplorer({ snapshot }: { snapshot: ServiceHealthSna
       setAvailabilityNotice("Premium Service Health data is no longer available. Showing All data and all services.");
     }
     if (premiumStates.length > 0) hadPremiumAccess.current = hasPremiumAccess;
-  }, [filter, hasPremiumAccess, mode, modeSignature, premiumAccessDenied, premiumStates.length, snapshot.facets.regressing]);
+  }, [filter, hasPremiumAccess, mode, modeSignature, premiumAccessDenied, premiumStates.length, setSelected, snapshot.facets.regressing]);
   useEffect(() => {
     if (!availabilityNotice) return;
     const timeout = window.setTimeout(() => setAvailabilityNotice(""), 4000);
@@ -403,7 +416,7 @@ export function ServiceHealthExplorer({ snapshot }: { snapshot: ServiceHealthSna
   const inspecting = snapshot.services.find((service) => service.service === selected);
   useEffect(() => {
     if (selected && !snapshot.services.some((service) => service.service === selected)) setSelected(null);
-  }, [selected, snapshot.services]);
+  }, [selected, setSelected, snapshot.services]);
 
   return <>
     <p className="sr-only" aria-live="polite">{availabilityNotice}</p>
