@@ -28,6 +28,8 @@ type DependencyGraph struct {
 	known map[string]bool
 }
 
+const staticTopologyProvenance = "operator_config"
+
 // NewDependencyGraph builds a DependencyGraph from per-service upstream
 // edges. The map key is a service name; the value is the list of
 // services it depends on. Self-edges and duplicate neighbours are
@@ -70,6 +72,67 @@ func (g *DependencyGraph) Len() int {
 		return 0
 	}
 	return len(g.known)
+}
+
+// Topology returns a deterministic bounded projection of the same graph used by
+// describe_dependencies. Limits below zero are treated as zero.
+func (g *DependencyGraph) Topology(maxNodes, maxEdges int) core.ServiceTopology {
+	result := core.ServiceTopology{
+		Availability: core.HealthNotConfigured,
+		Provenance:   []string{},
+		Nodes:        []core.ServiceTopologyNode{},
+		Edges:        []core.ServiceTopologyEdge{},
+	}
+	if g == nil || len(g.known) == 0 {
+		return result
+	}
+	result.Availability = core.HealthReady
+	result.Provenance = []string{staticTopologyProvenance}
+	services := make([]string, 0, len(g.known))
+	for service := range g.known {
+		services = append(services, service)
+	}
+	sort.Strings(services)
+	if maxNodes < 0 {
+		maxNodes = 0
+	}
+	for _, service := range services {
+		if len(result.Nodes) >= maxNodes {
+			result.OmittedNodes++
+			continue
+		}
+		result.Nodes = append(result.Nodes, core.ServiceTopologyNode{Service: service})
+	}
+	included := make(map[string]struct{}, len(result.Nodes))
+	for _, node := range result.Nodes {
+		included[node.Service] = struct{}{}
+	}
+	edges := make([]core.ServiceTopologyEdge, 0)
+	for _, service := range services {
+		for _, dependency := range g.upstream[service] {
+			if _, ok := included[service]; !ok {
+				result.OmittedEdges++
+				continue
+			}
+			if _, ok := included[dependency]; !ok {
+				result.OmittedEdges++
+				continue
+			}
+			edges = append(edges, core.ServiceTopologyEdge{Service: service, DependsOn: dependency, Source: staticTopologyProvenance})
+		}
+	}
+	if maxEdges < 0 {
+		maxEdges = 0
+	}
+	if len(edges) > maxEdges {
+		result.OmittedEdges += len(edges) - maxEdges
+		edges = edges[:maxEdges]
+	}
+	result.Edges = edges
+	if result.OmittedNodes > 0 || result.OmittedEdges > 0 {
+		result.Availability = core.HealthPartial
+	}
+	return result
 }
 
 // DescribeDependencies surfaces the upstream and downstream neighbours of

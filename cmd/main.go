@@ -24,6 +24,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/scheduler"
 	"github.com/VersusControl/versus-incident/pkg/servicehealth"
 	"github.com/VersusControl/versus-incident/pkg/services"
+	"github.com/VersusControl/versus-incident/pkg/servicetopology"
 	"github.com/VersusControl/versus-incident/pkg/signalsources"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/teams"
@@ -115,6 +116,7 @@ func main() {
 		teamsStore = nil
 	}
 	healthManager := servicehealth.NewManager(store)
+	topologyManager := servicetopology.NewManager(agent.BuildDependencyGraph(cfg.Agent.Tools.DescribeDependencies.Services), nil)
 
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true, // Disable the default Fiber banner
@@ -138,7 +140,7 @@ func main() {
 	// multi-tenant scoping.
 	app.Use(middleware.OrgInjector())
 
-	routes.SetupRoutes(app, teamsStore, healthManager)
+	routes.SetupRoutesWithTopology(app, teamsStore, healthManager, topologyManager)
 
 	// Start queue listeners
 	if cfg.Queue.Enable {

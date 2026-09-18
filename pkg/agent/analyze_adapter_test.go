@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -13,6 +14,23 @@ import (
 )
 
 type panicPullSource struct{ name string }
+
+func TestBuildDependencyGraphUsesConfiguredStaticEdges(t *testing.T) {
+	graph := BuildDependencyGraph([]config.ServiceDependency{{Name: "web", DependsOn: []string{"db", "api", "api"}}})
+	if graph == nil {
+		t.Fatal("graph is nil")
+	}
+	want := []core.ServiceTopologyEdge{
+		{Service: "web", DependsOn: "api", Source: "operator_config"},
+		{Service: "web", DependsOn: "db", Source: "operator_config"},
+	}
+	if got := graph.Topology(10, 10).Edges; !reflect.DeepEqual(got, want) {
+		t.Fatalf("edges = %#v, want %#v", got, want)
+	}
+	if BuildDependencyGraph(nil) != nil {
+		t.Fatal("empty configuration should not register a graph")
+	}
+}
 
 func (source panicPullSource) Name() string { return source.name }
 func (panicPullSource) Pull(context.Context, time.Time) ([]core.Signal, time.Time, error) {

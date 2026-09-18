@@ -305,11 +305,11 @@ func (a *catalogAdapter) toView(p *Pattern) versustools.PatternView {
 	return view
 }
 
-// buildDependencyGraph converts the operator-authored config service
+// BuildDependencyGraph converts the operator-authored config service
 // graph into the tools-package DependencyGraph used by the
 // describe_dependencies tool. A nil/empty input yields a nil graph so
 // the tool is omitted by buildAnalyzeTools.
-func buildDependencyGraph(nodes []config.ServiceDependency) *commontools.DependencyGraph {
+func BuildDependencyGraph(nodes []config.ServiceDependency) *commontools.DependencyGraph {
 	if len(nodes) == 0 {
 		return nil
 	}

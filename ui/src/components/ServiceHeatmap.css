@@ -45,6 +45,36 @@
 .heatmap-service:hover { background: color-mix(in srgb, rgb(var(--tile-tone)) 16%, rgb(var(--surface))); }
 .heatmap-service:focus-visible { outline: 2px solid rgb(var(--accent)); outline-offset: 3px; }
 .heatmap-service-row { min-height: 80px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); box-shadow: inset 3px 0 0 rgb(var(--tile-tone)); }
+.topology-section { margin-top: 20px; padding-top: 16px; border-top: 1px solid rgb(var(--border)); }
+.topology-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: rgb(var(--ink-300)); }
+.topology-provenance { border-left: 2px solid rgb(var(--ink-400)); padding-left: 6px; font-weight: 600; color: rgb(var(--ink-300)); }
+.topology-scroll { overflow-x: auto; padding: 4px 3px 10px; scrollbar-gutter: stable; }
+.topology-scroll:focus-visible { outline: 2px solid rgb(var(--accent)); outline-offset: 2px; }
+.topology-track { display: flex; width: max-content; min-width: 100%; align-items: stretch; gap: 24px; }
+.topology-relationship { display: grid; grid-template-columns: 160px 56px 160px; align-items: center; gap: 8px; }
+.topology-node {
+  --node-tone: var(--ink-400);
+  display: flex;
+  width: 160px;
+  min-height: 68px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, rgb(var(--node-tone)) 45%, rgb(var(--border)));
+  border-radius: 4px;
+  text-align: left;
+  background: color-mix(in srgb, rgb(var(--node-tone)) 7%, rgb(var(--surface)));
+}
+.topology-node[data-impact="nominal"] { --node-tone: var(--sev-ok); }
+.topology-node[data-impact="pressure"], .topology-node[data-impact="creeping"] { --node-tone: var(--sev-warn); }
+.topology-node[data-impact="critical"], .topology-node[data-impact="degraded"] { --node-tone: var(--sev-critical); }
+.topology-node:hover { background: color-mix(in srgb, rgb(var(--node-tone)) 13%, rgb(var(--surface))); }
+.topology-node:focus-visible { outline: 2px solid rgb(var(--accent)); outline-offset: 3px; }
+.topology-node-name { overflow-wrap: anywhere; font-size: 12px; font-weight: 600; line-height: 1.25; color: rgb(var(--ink-100)); }
+.topology-node-status { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; line-height: 1.2; color: rgb(var(--node-tone)); }
+.topology-edge { display: flex; min-width: 0; flex-direction: column; align-items: center; gap: 3px; color: rgb(var(--ink-400)); }
+.topology-edge span { max-width: 56px; overflow-wrap: anywhere; text-align: center; font-size: 9px; line-height: 1.1; }
 @media (max-width: 560px) {
   .heatmap-canvas { padding: 12px; }
   .heatmap-service-row { grid-template-columns: minmax(0, 1fr); }

@@ -1,15 +1,16 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import { api, ApiError, type ServiceHealthSnapshot, type ServiceHealthState } from "@/lib/api";
+import { api, ApiError, type ServiceHealthSnapshot, type ServiceHealthState, type ServiceTopology } from "@/lib/api";
 import { ServiceHealthSection } from "./ServiceHealthSection";
 import { SERVICE_HEALTH_STATE_COPY } from "@/lib/serviceHealthPresentation";
 
 vi.mock("@/lib/api", async (importActual) => {
   const actual = await importActual<typeof import("@/lib/api")>();
-  return { ...actual, api: { ...actual.api, getServiceHealth: vi.fn() } };
+  return { ...actual, api: { ...actual.api, getServiceHealth: vi.fn(), getServiceTopology: vi.fn() } };
 });
 
 const role = vi.hoisted(() => ({ enterprise: false, isAdmin: false, hasSession: false, loading: false }));
@@ -72,6 +73,16 @@ function service(overrides: Partial<ServiceHealthSnapshot["services"][number]> =
   };
 }
 
+function topology(overrides: Partial<ServiceTopology> = {}): ServiceTopology {
+  return {
+    availability: "not_configured",
+    provenance: [],
+    nodes: [],
+    edges: [],
+    ...overrides,
+  };
+}
+
 function LocationProbe() {
   return <span data-testid="location">{useLocation().pathname}</span>;
 }
@@ -95,6 +106,8 @@ function renderSection() {
 describe("ServiceHealthSection", () => {
   beforeEach(() => {
     Object.assign(role, { enterprise: false, isAdmin: false, hasSession: false, loading: false });
+    vi.mocked(api.getServiceTopology).mockReset();
+    vi.mocked(api.getServiceTopology).mockResolvedValue(topology());
   });
 
   it.each([
@@ -171,6 +184,80 @@ describe("ServiceHealthSection", () => {
     expect(screen.getByTestId("location").textContent).toBe("/agent/services/checkout");
   });
 
+  it("opens the existing detail drawer from a keyboard-operated topology node", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getServiceHealth).mockResolvedValue(snapshot({
+      services: [service()],
+      facets: { pressure: 1 },
+      coverage: { total_services: 1, observed_services: 1, partial: false },
+    }));
+    vi.mocked(api.getServiceTopology).mockResolvedValue(topology({
+      availability: "ready",
+      provenance: ["operator_config"],
+      nodes: [{ service: "checkout" }, { service: "database" }],
+      edges: [{ service: "checkout", depends_on: "database", source: "operator_config" }],
+    }));
+    renderSection();
+
+    const node = await screen.findByRole("button", { name: "Inspect checkout, health Warning" });
+    node.focus();
+    expect(document.activeElement).toBe(node);
+    await user.keyboard("{Enter}");
+
+    expect(within(screen.getByRole("dialog")).getByText("checkout")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "database, no health snapshot available" })).toBeTruthy();
+  });
+
+  it("keeps a healthy heatmap when the independent topology request fails", async () => {
+    vi.mocked(api.getServiceHealth).mockResolvedValue(snapshot({
+      services: [service()],
+      facets: { pressure: 1 },
+      coverage: { total_services: 1, observed_services: 1, partial: false },
+    }));
+    vi.mocked(api.getServiceTopology).mockRejectedValue(new ApiError(503, "upstream topology internals"));
+    const { container } = renderSection();
+
+    expect(await screen.findByRole("button", { name: "Inspect checkout" })).toBeTruthy();
+    expect(await screen.findByText("Service topology couldn't be loaded.")).toBeTruthy();
+    expect(screen.queryByTestId("service-topology-strip")).toBeNull();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(container.querySelector(".lucide-circle-alert")).toBeTruthy();
+    expect(container.querySelector(".lucide-lock-keyhole")).toBeNull();
+    expect(document.body.textContent).not.toContain("upstream topology internals");
+  });
+
+  it.each([401, 403])("hides Retry and sanitizes an initial %s topology failure", async (status) => {
+    vi.mocked(api.getServiceHealth).mockResolvedValue(snapshot({
+      services: [service()],
+      coverage: { total_services: 1, observed_services: 1, partial: false },
+    }));
+    vi.mocked(api.getServiceTopology).mockRejectedValue(new ApiError(status, "private tenant policy"));
+    const { container } = renderSection();
+
+    expect(await screen.findByText("Service topology is unavailable for this session.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Inspect checkout" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(container.querySelector(".lucide-lock-keyhole")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("private tenant policy");
+  });
+
+  it("renders configured topology in its own live section after the sample preview when health has no evidence", async () => {
+    vi.mocked(api.getServiceHealth).mockResolvedValue(snapshot());
+    vi.mocked(api.getServiceTopology).mockResolvedValue(topology({
+      availability: "ready",
+      provenance: ["static_config"],
+      nodes: [{ service: "checkout" }, { service: "database" }],
+      edges: [{ service: "checkout", depends_on: "database", source: "static_config" }],
+    }));
+    renderSection();
+
+    const preview = await screen.findByTestId("service-health-preview");
+    const topologyHeading = await screen.findByRole("heading", { name: "Service dependencies" });
+    expect(screen.getByText("Live topology")).toBeTruthy();
+    expect(screen.getByRole("listitem", { name: "checkout depends on database; configured source" })).toBeTruthy();
+    expect(preview.compareDocumentPosition(topologyHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("shows one setup action to an OSS administrator and guidance without a failing control to a read-only user", async () => {
     vi.mocked(api.getServiceHealth).mockResolvedValue(snapshot());
     const { unmount } = renderSection();
@@ -222,10 +309,38 @@ describe("ServiceHealthSection", () => {
   });
 
   it("uses the auth error flow and never renders preview for unauthorized responses", async () => {
-    vi.mocked(api.getServiceHealth).mockRejectedValue(new ApiError(401, "unauthorized"));
+    vi.mocked(api.getServiceHealth).mockRejectedValue(new ApiError(401, "private session details"));
     renderSection();
-    expect(await screen.findByText(/session is no longer authorized/i)).toBeTruthy();
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("Your session is no longer authorized.");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(document.body.textContent).not.toContain("private session details");
     expect(screen.queryByTestId("service-health-preview")).toBeNull();
+  });
+
+  it.each([401, 403, 503])("keeps live topology visible with unmatched statuses after an initial %s health failure", async (status) => {
+    vi.mocked(api.getServiceHealth).mockRejectedValue(new ApiError(status, "private health failure"));
+    vi.mocked(api.getServiceTopology).mockResolvedValue(topology({
+      availability: "ready",
+      provenance: ["static_config"],
+      nodes: [{ service: "checkout" }, { service: "database" }],
+      edges: [{ service: "checkout", depends_on: "database", source: "static_config" }],
+    }));
+    renderSection();
+
+    if (status === 401) {
+      expect(await screen.findByText("Your session is no longer authorized.")).toBeTruthy();
+    } else if (status === 403) {
+      expect(await screen.findByText("Service Health is unavailable for this session.")).toBeTruthy();
+    } else {
+      expect(await screen.findByText("Couldn't load Service Health")).toBeTruthy();
+    }
+    expect(await screen.findByRole("listitem", { name: "checkout depends on database; configured source" })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "checkout, no health snapshot available" }).length).toBeGreaterThan(0);
+    expect(screen.queryByTestId("service-health-preview")).toBeNull();
+    if (status === 401 || status === 403) {
+      expect(document.body.textContent).not.toContain("private health failure");
+    }
   });
 
   it("keeps real evidence on refresh failure but hides it when access is revoked", async () => {

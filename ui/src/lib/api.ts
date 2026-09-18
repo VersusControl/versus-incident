@@ -2157,6 +2157,28 @@ export interface ServiceHealthSnapshot {
   pending_settings?: ServiceHealthSettings;
 }
 
+export interface ServiceTopologyNode {
+  service: string;
+}
+
+export interface ServiceTopologyEdge {
+  service: string;
+  depends_on: string;
+  source: string;
+}
+
+export interface ServiceTopology {
+  availability: ServiceHealthState;
+  extensions?: {
+    availability: ServiceHealthState;
+  };
+  provenance: string[];
+  nodes: ServiceTopologyNode[];
+  edges: ServiceTopologyEdge[];
+  omitted_nodes?: number;
+  omitted_edges?: number;
+}
+
 export const api = {
   listAgentTools: (agent: AgentToolKind) =>
     request<AgentToolAvailability[]>(`/api/admin/agent/tools?agent=${agent}`),
@@ -2718,6 +2740,8 @@ export const api = {
     ).then((r) => r.services ?? {}),
   getServiceHealth: () =>
     request<ServiceHealthSnapshot>("/api/agent/service-health"),
+  getServiceTopology: () =>
+    request<ServiceTopology>("/api/agent/service-topology"),
   getServiceHealthSettings: () =>
     request<ServiceHealthSettings>("/api/agent/service-health/settings"),
   updateServiceHealthSettings: (settings: ServiceHealthSettings) =>

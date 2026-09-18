@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, type ServiceHealthService } from "./api";
+import { api, ApiError, type ServiceHealthService, type ServiceTopology } from "./api";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -60,6 +60,22 @@ describe("Service Health API", () => {
       method: "PATCH",
       body: JSON.stringify({ interval_seconds: 30, window_seconds: 120, revision: 2 }),
     });
+  });
+
+  it("uses the independent topology route and preserves its bounded graph metadata", async () => {
+    const topology = {
+      availability: "partial",
+      provenance: ["operator_config"],
+      nodes: [{ service: "api" }, { service: "db" }],
+      edges: [{ service: "api", depends_on: "db", source: "operator_config" }],
+      omitted_nodes: 2,
+      omitted_edges: 3,
+    } satisfies ServiceTopology;
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(topology), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.getServiceTopology()).resolves.toEqual(topology);
+    expect(fetchMock).toHaveBeenCalledWith("/api/agent/service-topology", expect.any(Object));
   });
 
   it("preserves a settings conflict as ApiError status 409", async () => {
