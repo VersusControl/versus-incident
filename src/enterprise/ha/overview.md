@@ -22,7 +22,7 @@ Run the Enterprise SRE Agent as **multi-instance**. HA is the same binary you al
 
 ## How HA works
 
-![Versus Incident HA](../../docs/images/versus-incident-ha-overview.png)
+![Load-balanced Versus Enterprise replicas own separate source and job shares while using shared Postgres for incidents, sessions, and managed secrets](../../docs/images/versus-incident-ha-overview.svg)
 
 The binary expects exactly four things — every guide here satisfies them:
 
