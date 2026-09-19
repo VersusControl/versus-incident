@@ -4,7 +4,7 @@ import { ArrowUpRight, CheckCircle2, ChevronDown, CircleHelp, LayoutGrid, List, 
 import type { ServiceHealthAvailability, ServiceHealthService, ServiceHealthSignalEvidence, ServiceHealthSnapshot } from "@/lib/api";
 import { fmtAbs } from "@/lib/format";
 import { PeekField, PeekPanel } from "@/components/PeekPanel";
-import { healthDataLabel, healthMeasureLabel, healthReasonLabel, SERVICE_HEALTH_STATE_COPY } from "@/lib/serviceHealthPresentation";
+import { healthDataLabel, healthMeasureLabel, healthReasonLabel } from "@/lib/serviceHealthPresentation";
 import "./ServiceHeatmap.css";
 
 type EvidenceMode = "combined" | "logs" | "incidents" | "latency" | "request_error_ratio" | "throughput" | "regression";
@@ -191,7 +191,7 @@ function AssessmentSummary({ service, snapshot }: { service: ServiceHealthServic
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div>
         <h3 id="service-regression-title" className="text-sm font-semibold text-ink-50">Regression assessment</h3>
-        <p className="mt-1 text-sm text-ink-300">{status}</p>
+        {!current && <p className="mt-1 text-sm text-ink-300">{status}</p>}
       </div>
       {score != null && <span className="text-xl font-semibold tabular-nums text-ink-50">{formatNumber(score)} <span className="text-xs font-normal text-ink-400">/ 100</span></span>}
     </div>
@@ -208,7 +208,7 @@ function AssessmentSummary({ service, snapshot }: { service: ServiceHealthServic
         </li>)}
       </ul>
     </div>}
-    {score != null && <p className="mt-4 text-xs text-ink-300"><span className="inline-flex items-center gap-1" title="Ranking aid, not a probability">Heuristic confidence {Math.round(assessment.confidence * 100)}% <CircleHelp size={12} aria-hidden /></span></p>}
+    {score != null && <p className="mt-4 text-xs text-ink-300"><span className="inline-flex items-center gap-1" title="Ranking aid, not a probability">Confidence {Math.round(assessment.confidence * 100)}% <CircleHelp size={12} aria-hidden /></span></p>}
   </section>;
 }
 
@@ -221,7 +221,7 @@ function EvidenceRows({ evidence }: { evidence: ServiceHealthSignalEvidence[] })
         <ChevronDown size={15} className="text-ink-400 transition-transform group-open:rotate-180" aria-hidden />
       </summary>
       <dl className="grid grid-cols-2 gap-x-5 gap-y-3 pb-4 text-sm sm:grid-cols-3">
-        <PeekField label="State">{healthReasonLabel(item.availability.reason_code, item.availability.state)}</PeekField>
+        {item.availability.state !== "ready" && <PeekField label="State">{healthReasonLabel(item.availability.reason_code, item.availability.state)}</PeekField>}
         <PeekField label="Operation">{item.operation || "Service-wide"}</PeekField>
         <PeekField label="Observed">{validTime(item.observed_at) ? fmtAbs(item.observed_at) : "Not observed"}</PeekField>
         <PeekField label="Signal">{item.signal_ref || "Not provided"}</PeekField>
@@ -239,6 +239,9 @@ function ServiceHealthDetail({ service, snapshot }: { service: ServiceHealthServ
   const activeTab = tabs.includes(tab as "Overview" | "Logs") ? tab : "Overview";
   const tabSetId = useId();
   const assessmentAvailability = currentAssessmentAvailability(service, snapshot);
+  const logsState = service.availability.logs?.state ?? "unsupported";
+  const logsStatus = coverageLabel(service);
+  const incidentsState = service.availability.internal?.state ?? "unsupported";
 
   useEffect(() => setTab("Overview"), [service.service]);
   useEffect(() => {
@@ -262,7 +265,7 @@ function ServiceHealthDetail({ service, snapshot }: { service: ServiceHealthServ
       <p className="break-words text-sm text-ink-300 [overflow-wrap:anywhere]">{service.domain || "Ungrouped"}</p>
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
         <Impact service={service} />
-        <span className="text-xs text-ink-300">Collection: {SERVICE_HEALTH_STATE_COPY[service.availability.logs?.state ?? "unsupported"].label}</span>
+        {logsState !== "ready" && <span className="text-xs text-ink-300">Logs: {healthReasonLabel(service.availability.logs?.reason_code, logsState)}</span>}
         <span className="text-xs text-ink-400">Updated {validTime(snapshot.generated_at) ? fmtAbs(snapshot.generated_at) : "not available"}</span>
       </div>
     </div>
@@ -287,8 +290,8 @@ function ServiceHealthDetail({ service, snapshot }: { service: ServiceHealthServ
         <h3 id="service-availability-title" className="text-sm font-semibold text-ink-100">Availability</h3>
         <dl className="mt-3 grid grid-cols-2 gap-4 text-sm sm:grid-cols-3">
           <PeekField label="Impact">{impactLabels[service.severity] ?? "Unknown"}</PeekField>
-          <PeekField label="Logs">{coverageLabel(service)}</PeekField>
-          <PeekField label="Incident data">{SERVICE_HEALTH_STATE_COPY[service.availability.internal?.state ?? "unsupported"].label}</PeekField>
+          {logsStatus && <PeekField label="Logs">{logsStatus}</PeekField>}
+          {incidentsState !== "ready" && <PeekField label="Incident data">{healthReasonLabel(service.availability.internal?.reason_code, incidentsState)}</PeekField>}
         </dl>
       </section>
       <details className="border-t border-ink-600 pt-4">
@@ -308,7 +311,7 @@ function ServiceHealthDetail({ service, snapshot }: { service: ServiceHealthServ
     </section>}
 
     {activeTab === "Logs" && <section id={`${tabSetId}-logs-panel`} role="tabpanel" aria-labelledby={`${tabSetId}-logs-tab`} tabIndex={0} className="pt-5">
-      <div className="flex flex-wrap items-baseline justify-between gap-2"><h3 className="text-sm font-semibold text-ink-100">Log summary</h3><span className="text-xs text-ink-400">{coverageLabel(service)}</span></div>
+      <div className="flex flex-wrap items-baseline justify-between gap-2"><h3 className="text-sm font-semibold text-ink-100">Log summary</h3>{logsStatus && <span className="text-xs text-ink-400">{logsStatus}</span>}</div>
       <dl className="mt-4 grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
         <PeekField label="Events">{logValue(service, service.logs.matched_logs)}</PeekField>
         <PeekField label="Patterns">{logValue(service, service.logs.unique_patterns)}</PeekField>
@@ -344,11 +347,12 @@ function EvidenceValues({ service, snapshot, mode }: { service: ServiceHealthSer
   </dl>;
 }
 
-function coverageLabel(service: ServiceHealthService) {
+function coverageLabel(service: ServiceHealthService): string | null {
   const state = service.availability.logs?.state ?? "unsupported";
-  return measured(service) && service.logs.estimated
-    ? `Logs estimated (${SERVICE_HEALTH_STATE_COPY[state].label.toLowerCase()})`
-    : `Logs ${SERVICE_HEALTH_STATE_COPY[state].label.toLowerCase()}`;
+  if (state === "ready" && measured(service)) {
+    return service.logs.estimated ? "Estimated counts" : null;
+  }
+  return healthReasonLabel(service.availability.logs?.reason_code, state);
 }
 
 export function ServiceHealthExplorer({
@@ -461,7 +465,7 @@ export function ServiceHealthExplorer({
             className={`heatmap-service ${view === "list" ? "heatmap-service-row" : ""}`}>
             <div className="min-w-0"><div className="mb-2 flex items-center justify-between gap-2"><Impact service={service} /><ArrowUpRight size={14} className="shrink-0 text-ink-400" aria-hidden /></div>
               <h4 className="break-words text-sm font-semibold text-ink-50 [overflow-wrap:anywhere]">{service.service}</h4>
-              {(service.availability.logs?.state !== "ready" || service.logs.estimated) && <p className="mt-1 text-2xs text-ink-300">{coverageLabel(service)}</p>}
+              {(mode === "combined" || mode === "logs") && service.availability.logs?.state !== "ready" && <p className="mt-1 text-2xs text-ink-300">{coverageLabel(service)}</p>}
             </div>
             <EvidenceValues service={service} snapshot={snapshot} mode={mode} />
           </button>)}

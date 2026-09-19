@@ -66,11 +66,11 @@ describe("ServiceTopologyStrip", () => {
 
     const relationships = await screen.findAllByRole("listitem");
     expect(relationships.map((item) => item.getAttribute("aria-label"))).toEqual([
-      "api depends on db; configured source",
+      "api depends on db",
       "web depends on api; learned source",
-      "web depends on db; configured source",
+      "web depends on db",
     ]);
-    expect(screen.getAllByText("Configured").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Configured")).toBeNull();
     expect(screen.getAllByText("Learned").length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: "Inspect api, health Critical" })[0].getAttribute("data-impact")).toBe("critical");
     expect(screen.getByTestId("service-topology-strip").getAttribute("tabindex")).toBe("0");
@@ -111,7 +111,7 @@ describe("ServiceTopologyStrip", () => {
     }));
     renderStrip();
 
-    expect(await screen.findByRole("listitem", { name: "web depends on db; configured source" })).toBeTruthy();
+    expect(await screen.findByRole("listitem", { name: "web depends on db" })).toBeTruthy();
     expect(screen.queryByText("missing")).toBeNull();
     expect(screen.getByTestId("service-topology-omitted").textContent).toContain("3 relationships omitted.");
   });
@@ -144,13 +144,13 @@ describe("ServiceTopologyStrip", () => {
       .mockReturnValueOnce(refetch.promise);
     const { client } = renderStrip();
 
-    expect(await screen.findByRole("listitem", { name: "web depends on db; configured source" })).toBeTruthy();
+    expect(await screen.findByRole("listitem", { name: "web depends on db" })).toBeTruthy();
     const refresh = client.refetchQueries({ queryKey: ["service-topology"] });
     refetch.reject(new ApiError(503, "private upstream response"));
     await refresh;
 
     expect(await screen.findByText("Showing saved topology. Refresh failed.")).toBeTruthy();
-    expect(screen.getByRole("listitem", { name: "web depends on db; configured source" })).toBeTruthy();
+    expect(screen.getByRole("listitem", { name: "web depends on db" })).toBeTruthy();
     expect(screen.queryByText("private upstream response")).toBeNull();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   });
@@ -166,10 +166,10 @@ describe("ServiceTopologyStrip", () => {
       .mockReturnValueOnce(refetch.promise);
     const { client } = renderStrip();
 
-    expect(await screen.findByRole("listitem", { name: "web depends on db; configured source" })).toBeTruthy();
+    expect(await screen.findByRole("listitem", { name: "web depends on db" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "worker, no health snapshot available" }));
     expect(await screen.findByText("worker is not represented in the current health snapshot.")).toBeTruthy();
-    expect(screen.getAllByText("Configured").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Configured")).toBeNull();
     expect(screen.getByText("2 services and 3 relationships omitted.")).toBeTruthy();
 
     const refresh = client.refetchQueries({ queryKey: ["service-topology"] });
@@ -180,7 +180,7 @@ describe("ServiceTopologyStrip", () => {
     expect(document.body.textContent).not.toContain("worker");
     expect(screen.queryByText("Configured")).toBeNull();
     expect(screen.queryByText("2 services and 3 relationships omitted.")).toBeNull();
-    expect(screen.queryByRole("listitem", { name: "web depends on db; configured source" })).toBeNull();
+    expect(screen.queryByRole("listitem", { name: "web depends on db" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
     expect(screen.queryByTestId("service-topology-announcement")).toBeNull();
     expect(document.body.textContent).not.toContain("private tenant policy");
