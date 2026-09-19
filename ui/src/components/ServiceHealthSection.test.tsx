@@ -128,7 +128,8 @@ describe("ServiceHealthSection", () => {
           : capability),
       }));
       renderSection();
-      expect(await screen.findByText(`Logs: ${SERVICE_HEALTH_STATE_COPY[state].label}`, { exact: true })).toBeTruthy();
+      expect(await screen.findByText(SERVICE_HEALTH_STATE_COPY[state].detail, { exact: true })).toBeTruthy();
+      expect(screen.queryByText(`Logs: ${SERVICE_HEALTH_STATE_COPY[state].label}`, { exact: true })).toBeNull();
       expect(screen.getByText("Example preview - sample data")).toBeTruthy();
       expect(screen.queryByRole("link", { name: "checkout" })).toBeNull();
       expect(screen.getByTestId("service-health-coverage-summary").textContent).toContain("0 with data");
@@ -253,15 +254,17 @@ describe("ServiceHealthSection", () => {
 
     const preview = await screen.findByTestId("service-health-preview");
     const topologyHeading = await screen.findByRole("heading", { name: "Service dependencies" });
-    expect(screen.getByText("Live topology")).toBeTruthy();
-    expect(screen.getByRole("listitem", { name: "checkout depends on database; configured source" })).toBeTruthy();
+    expect(screen.getByRole("listitem", { name: "checkout depends on database" })).toBeTruthy();
+    expect(screen.queryByText("Configured")).toBeNull();
     expect(preview.compareDocumentPosition(topologyHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("shows one setup action to an OSS administrator and guidance without a failing control to a read-only user", async () => {
     vi.mocked(api.getServiceHealth).mockResolvedValue(snapshot());
     const { unmount } = renderSection();
-    expect(await screen.findAllByRole("link", { name: "Connect a log source" })).toHaveLength(1);
+    const logSourceLink = (await screen.findAllByRole("link", { name: "Connect a log source" }))[0];
+    expect(logSourceLink.getAttribute("href")).toBe("https://docs.versusincident.com/#/agent/data-sources");
+    expect(logSourceLink.getAttribute("target")).toBe("_blank");
     unmount();
 
     Object.assign(role, { enterprise: true, hasSession: true, isAdmin: false });
@@ -335,7 +338,7 @@ describe("ServiceHealthSection", () => {
     } else {
       expect(await screen.findByText("Couldn't load Service Health")).toBeTruthy();
     }
-    expect(await screen.findByRole("listitem", { name: "checkout depends on database; configured source" })).toBeTruthy();
+    expect(await screen.findByRole("listitem", { name: "checkout depends on database" })).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "checkout, no health snapshot available" }).length).toBeGreaterThan(0);
     expect(screen.queryByTestId("service-health-preview")).toBeNull();
     if (status === 401 || status === 403) {

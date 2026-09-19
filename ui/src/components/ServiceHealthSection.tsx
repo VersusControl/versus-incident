@@ -71,6 +71,8 @@ const KNOWN_ACTION_IDS = new Set([
   "review_trace_source",
 ]);
 
+const LOG_SOURCE_DOCS = "https://docs.versusincident.com/#/agent/data-sources";
+
 function stateForCapability(snapshot: ServiceHealthSnapshot, family: string): ServiceHealthState {
   const measures = snapshot.capabilities.find((item) => item.family === family)?.measures;
   if (!measures || Object.keys(measures).length === 0) return "unsupported";
@@ -171,6 +173,7 @@ function GapAction({ snapshot }: { snapshot: ServiceHealthSnapshot }) {
   if (gap.action_id === "connect_log_source") {
     title = "Logs not connected";
     label = "Connect a log source";
+    href = LOG_SOURCE_DOCS;
   } else if (gap.action_id === "review_log_source") {
     title = "Log connection needs attention";
     label = "Review connection";
@@ -206,7 +209,11 @@ function GapAction({ snapshot }: { snapshot: ServiceHealthSnapshot }) {
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
       <p className="text-xs text-ink-300">{title}</p>
       {canManage ? (
-        <Link className="shrink-0 font-medium text-link hover:underline" to={href}>{label}</Link>
+        href.startsWith("https://") ? (
+          <a className="shrink-0 font-medium text-link hover:underline" href={href} target="_blank" rel="noreferrer">{label}</a>
+        ) : (
+          <Link className="shrink-0 font-medium text-link hover:underline" to={href}>{label}</Link>
+        )
       ) : (
         <span className="inline-flex items-center gap-1.5 text-xs font-medium text-ink-200">
           <LockKeyhole size={13} aria-hidden /> Ask an administrator
@@ -214,6 +221,14 @@ function GapAction({ snapshot }: { snapshot: ServiceHealthSnapshot }) {
       )}
     </div>
   );
+}
+
+function actionFamily(gap: ServiceHealthAvailability | undefined): string | null {
+  if (gap?.action_id === "connect_log_source" || gap?.action_id === "review_log_source") return "logs";
+  if (gap?.action_id === "connect_metric_source" || gap?.action_id === "review_metric_source") return "metrics";
+  if (gap?.action_id === "connect_trace_source" || gap?.action_id === "review_trace_source") return "traces";
+  if (gap?.state === "collecting" || gap?.state === "no_data") return "logs";
+  return null;
 }
 
 function ServiceHealthLayout({
@@ -282,6 +297,13 @@ export function ServiceHealthSection() {
   const families = ["logs", "internal", "metrics", "traces"].filter((family) =>
     family === "logs" || family === "internal" || snapshot.capabilities.some((capability) =>
       capability.family === family && Object.values(capability.measures).some((measure) => measure.state !== "restricted")));
+  const familyIssues = families
+    .map((family) => ({ family, state: stateForCapability(snapshot, family) }))
+    .filter(({ state }) => state !== "ready");
+  const gap = actionFor(snapshot);
+  const resolvedFamily = actionFamily(gap);
+  const additionalFamilyIssues = familyIssues.filter(({ family }) =>
+    family !== resolvedFamily && !(showPreview && family === "logs"));
   const affected = snapshot.services.filter((service) => ["critical", "degraded", "pressure", "creeping"].includes(service.severity)).length;
 
   return (
@@ -289,8 +311,8 @@ export function ServiceHealthSection() {
       workspace
       snapshot={snapshot}
       onSelectService={setSelectedService}
-      footer={<section className="mt-5 flex flex-wrap items-center justify-between gap-3" aria-label="Data sources">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">{families.map((family) => <HealthStateBadge key={family} prefix={family === "internal" ? "Incidents" : family[0].toUpperCase() + family.slice(1)} state={stateForCapability(snapshot, family)} />)}</div>
+      footer={(additionalFamilyIssues.length > 0 || gap) && <section className="mt-5 flex flex-wrap items-center justify-between gap-3" aria-label="Data sources">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">{additionalFamilyIssues.map(({ family, state }) => <HealthStateBadge key={family} prefix={family === "internal" ? "Incidents" : family[0].toUpperCase() + family.slice(1)} state={state} />)}</div>
         <GapAction snapshot={snapshot} />
       </section>}
     >

@@ -7,8 +7,12 @@
   - [Spike Detection](/agent/spike)
   - [AI Detect Mode](/agent/ai-detect-mode)
   - [Service Detection](/agent/service-detection)
+  - [Service Heatmap](/agent/service-heatmap)
+  - [Incidents Report](/agent/incident-report)
+  - [AI Analyze](/agent/ai-analyze-mode)
   - [Configuration](/agent/configuration)
-  - [Data Sources](/agent/data-sources)
+  - Data Sources
+    - [Overview](/agent/data-sources)
     - [File](/agent/data-sources/file)
     - [Elasticsearch](/agent/data-sources/elasticsearch)
     - [Loki](/agent/data-sources/loki)
@@ -19,20 +23,19 @@
     - [Prometheus](/agent/data-sources/prometheus)
     - [CloudWatch Metrics](/agent/data-sources/cloudwatch-metrics)
     - [Traces](/agent/data-sources/traces)
-  - [Notification Channels](/agent/channels)
+  - Tools
+    - [Tool Reference](/agent/tools/tools)
+    - [Kubernetes Connector](/agent/tools/kubernetes)
+    - [Recent Changes](/agent/tools/recent-changes)
+    - [Find Runbook](/agent/tools/find-runbook)
+  - Notification Channels
+    - [Overview](/agent/channels)
     - [Slack](/agent/channels/slack)
     - [Microsoft Teams](/agent/channels/msteams)
     - [Telegram](/agent/channels/telegram)
     - [Viber](/agent/channels/viber)
     - [Email](/agent/channels/email)
     - [Lark](/agent/channels/lark)
-  - [AI Analyze](/agent/ai-analyze-mode)
-  - Tools
-    - [Tool Reference](/agent/tools/tools)
-    - [Kubernetes Connector](/agent/tools/kubernetes)
-    - [Recent Changes](/agent/tools/recent-changes)
-    - [Find Runbook](/agent/tools/find-runbook)
-  - [Incidents Report](/agent/incident-report)
 
 - Enterprise SRE Agent
   - [Getting Started](/enterprise/getting-started)

@@ -259,10 +259,11 @@ test("no-source preview is labeled, isolated, and responsive", async ({ page }) 
   await openAuthenticated(page, "/agent");
   const preview = page.getByTestId("service-health-preview");
   const topologyHeading = page.getByRole("heading", { name: "Service dependencies" });
+  const topologyRegion = page.getByRole("region", { name: "Service dependencies" });
   await expect(preview.getByText("Example preview - sample data")).toBeVisible();
   await expect(topologyHeading).toBeVisible();
-  await expect(page.getByText("Live topology")).toBeVisible();
-  await expect(page.getByRole("listitem", { name: "checkout depends on database; configured source" })).toBeVisible();
+  await expect(topologyRegion.getByText("Configured")).toHaveCount(0);
+  await expect(page.getByRole("listitem", { name: "checkout depends on database" })).toBeVisible();
   const previewBox = await preview.boundingBox();
   const topologyBox = await topologyHeading.boundingBox();
   expect(topologyBox!.y).toBeGreaterThan(previewBox!.y + previewBox!.height);
@@ -429,8 +430,8 @@ for (const status of [401, 403]) test(`topology refetch fails closed after a ${s
   };
   await openAuthenticated(page, "/agent");
 
-  await expect(page.getByRole("listitem", { name: "checkout-service-with-a-long-production-name depends on catalog; configured source" })).toBeVisible();
-  await expect(page.getByText("Configured").first()).toBeVisible();
+  await expect(page.getByRole("listitem", { name: "checkout-service-with-a-long-production-name depends on catalog" })).toBeVisible();
+  await expect(page.getByText("Configured")).toHaveCount(0);
   await expect(page.getByTestId("service-topology-omitted")).toHaveText("2 services and 3 relationships omitted.");
   if (status === 403) {
     await page.getByRole("button", { name: "worker-without-a-current-health-snapshot, no health snapshot available" }).press("Enter");
@@ -456,7 +457,7 @@ for (const status of [401, 403]) test(`topology refetch fails closed after a ${s
 test("transient topology refetch retains the cached graph with warning and Retry", async ({ page }) => {
   const state = await installApi(page, liveSnapshot());
   await openAuthenticated(page, "/agent");
-  const relationship = page.getByRole("listitem", { name: "checkout-service-with-a-long-production-name depends on catalog; configured source" });
+  const relationship = page.getByRole("listitem", { name: "checkout-service-with-a-long-production-name depends on catalog" });
   await expect(relationship).toBeVisible();
 
   state.topologyStatus = 503;
@@ -499,7 +500,7 @@ test("Enterprise evidence is removed and announced when entitlement disappears",
   await expect(page.getByText("284.5 ms")).toBeVisible();
   await page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText(/Heuristic confidence 91%/)).toBeVisible();
+  await expect(dialog.getByText(/Confidence 91%/)).toBeVisible();
   await expect(dialog.getByText(/Latency P99.*POST \/checkout/)).toBeVisible();
   await expect(dialog).not.toContainText("learned-adverse-z-v1");
   await expect(dialog).not.toContainText("learned:metrics:latency_p99");
@@ -615,6 +616,7 @@ test("Service Health timing saves through the settings API", async ({ page }) =>
   const panel = page.getByRole("region", { name: "Service Health timing" });
   const inputs = panel.getByRole("spinbutton");
   await expect(inputs).toHaveCount(2);
+  await page.screenshot({ path: path.join(screenshotDir, "timing-settings-desktop.png"), fullPage: true });
   await inputs.nth(0).fill("90");
   await inputs.nth(1).fill("600");
   await panel.getByRole("button", { name: "Save", exact: true }).click();

@@ -36,6 +36,13 @@ function provenanceLabel(source: string) {
   return "Other";
 }
 
+function relationshipLabel(edge: ServiceTopologyEdge) {
+  const source = provenanceLabel(edge.source);
+  return source === "Configured"
+    ? `${edge.service} depends on ${edge.depends_on}`
+    : `${edge.service} depends on ${edge.depends_on}; ${source.toLowerCase()} source`;
+}
+
 function NodeButton({
   name,
   health,
@@ -136,7 +143,7 @@ export function ServiceTopologyStrip({
     const hasGraph = nodes.length > 0;
     const provenance = [...new Set(
       [...topology.provenance, ...edges.map((edge) => edge.source)].map(provenanceLabel),
-    )].sort();
+    )].filter((label) => label !== "Configured").sort();
     const omittedNodes = topology.omitted_nodes ?? 0;
     const omittedEdges = (topology.omitted_edges ?? 0) + clientOmittedEdges;
 
@@ -153,9 +160,9 @@ export function ServiceTopologyStrip({
       </div>
       <div className="topology-scroll" data-testid="service-topology-strip" tabIndex={0} aria-label="Service dependency relationships; scroll horizontally for more">
         <div className="topology-track" role="list">
-          {edges.map((edge) => <div key={edgeKey(edge)} className="topology-relationship" role="listitem" aria-label={`${edge.service} depends on ${edge.depends_on}; ${provenanceLabel(edge.source).toLowerCase()} source`}>
+          {edges.map((edge) => <div key={edgeKey(edge)} className="topology-relationship" role="listitem" aria-label={relationshipLabel(edge)}>
             <NodeButton name={edge.service} health={healthByName.get(edge.service)} onSelect={onSelectService} onUnavailable={announceUnavailable} />
-            <span className="topology-edge" aria-hidden><ArrowRight size={17} /><span>{provenanceLabel(edge.source)}</span></span>
+            <span className="topology-edge" aria-hidden><ArrowRight size={17} />{provenanceLabel(edge.source) !== "Configured" && <span>{provenanceLabel(edge.source)}</span>}</span>
             <NodeButton name={edge.depends_on} health={healthByName.get(edge.depends_on)} onSelect={onSelectService} onUnavailable={announceUnavailable} />
           </div>)}
           {isolated.map((node) => <div key={node.service} role="listitem">
@@ -168,7 +175,7 @@ export function ServiceTopologyStrip({
       </p>}
     </> : <>
       {refreshWarning}
-      <p className="topology-state"><GitBranch size={13} aria-hidden />{emptyCopy(topology.availability)}</p>
+      <p className="topology-state">{emptyCopy(topology.availability)}</p>
       {(omittedNodes > 0 || omittedEdges > 0) && <p className="mt-2 text-2xs text-ink-400" data-testid="service-topology-omitted">{omittedCopy(omittedNodes, omittedEdges)} omitted.</p>}
     </>;
   }
@@ -177,7 +184,6 @@ export function ServiceTopologyStrip({
     <section className="topology-section" aria-labelledby="service-topology-title">
       <div className="flex flex-wrap items-center gap-2">
         <h3 id="service-topology-title" className="inline-flex items-center gap-2 text-sm font-semibold text-ink-100"><GitBranch size={15} className="text-ink-400" aria-hidden />Service dependencies</h3>
-        <span className="text-2xs font-medium uppercase text-ink-400">Live topology</span>
       </div>
       <div className="mt-2">{body}</div>
       {!accessDenied && <p className="sr-only" role="status" aria-live="polite" data-testid="service-topology-announcement">{announcement}</p>}

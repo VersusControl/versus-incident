@@ -72,7 +72,8 @@ describe("ServiceHealthExplorer", () => {
     show([stale]);
     const tile = screen.getByRole("button", { name: "Inspect checkout" });
     expect(within(tile).getByText("~18")).toBeTruthy();
-    expect(within(tile).getByText("Logs estimated (stale)")).toBeTruthy();
+    expect(within(tile).getByText("Stale")).toBeTruthy();
+    expect(tile.textContent).not.toContain("Reporting");
     expect(tile.textContent).not.toContain("·");
     fireEvent.change(screen.getByLabelText("Show data"), { target: { value: "incidents" } });
     expect(within(tile).getByText("Not assessed")).toBeTruthy();
@@ -164,7 +165,7 @@ describe("ServiceHealthExplorer", () => {
   ] as const)("uses licensed but unconfigured %s capability availability when %s has no service evidence", (family, measure) => {
     show([service("checkout")], { capabilities: [{ family, measures: { [measure]: { state: "not_configured" } } }] });
     fireEvent.change(screen.getByLabelText("Show data"), { target: { value: measure } });
-    expect(screen.getByText("Not connected")).toBeTruthy();
+    expect(screen.getAllByText("Not connected")).toHaveLength(1);
     expect(screen.queryByText("No recent data")).toBeNull();
   });
 
@@ -269,7 +270,7 @@ describe("ServiceHealthExplorer", () => {
     expect(screen.queryByText("No Versus incident")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Inspect checkout" }));
     const dialog = screen.getByRole("dialog");
-    expect(within(dialog).queryByText(/Heuristic confidence 78%/) != null).toBe(score != null);
+    expect(within(dialog).queryByText(/Confidence 78%/) != null).toBe(score != null);
     expect(dialog.textContent).toContain(expected);
     expect(within(dialog).getByText(/Latency P99.*POST \/pay/)).toBeTruthy();
     expect(dialog.textContent).not.toContain("learned-adverse-z-v1");
@@ -317,7 +318,7 @@ describe("ServiceHealthExplorer", () => {
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getAllByText("Stale").length).toBeGreaterThan(0);
     expect(within(dialog).queryByText("88 / 100")).toBeNull();
-    expect(within(dialog).queryByText(/Heuristic confidence/)).toBeNull();
+    expect(within(dialog).queryByText(/Confidence/)).toBeNull();
     expect(within(dialog).queryByText("No Versus incident")).toBeNull();
   });
 
@@ -337,7 +338,7 @@ describe("ServiceHealthExplorer", () => {
     expect(screen.getByText("Unavailable")).toBeTruthy();
     expect(screen.queryByText("No Versus incident")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Inspect checkout" }));
-    expect(within(screen.getByRole("dialog")).queryByText(/Heuristic confidence/)).toBeNull();
+    expect(within(screen.getByRole("dialog")).queryByText(/Confidence/)).toBeNull();
   });
 
   it("uses active incidents as the only visible incident-state indicator", () => {
