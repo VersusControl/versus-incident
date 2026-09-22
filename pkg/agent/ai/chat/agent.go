@@ -22,6 +22,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
+	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
 	signoztools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/signoz"
@@ -154,7 +155,8 @@ func (agent *Agent) availableTools(ctx context.Context) ([]core.Tool, error) {
 	}
 	tools = k8stools.FilterAuthorized(ctx, tools)
 	tools = elasticsearchtools.FilterAuthorized(ctx, tools)
-	return signoztools.FilterAuthorized(ctx, tools), nil
+	tools = signoztools.FilterAuthorized(ctx, tools)
+	return commontools.FilterBaselineAuthorized(ctx, tools), nil
 }
 
 func (agent *Agent) Name() string          { return "chat" }

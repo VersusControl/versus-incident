@@ -28,6 +28,7 @@ const impactLabels: Record<string, string> = {
 
 function provenanceLabel(source: string) {
   const normalized = source.toLowerCase();
+  if (normalized.startsWith("trace_parent_child:")) return "Traces";
   if (normalized.includes("operator") || normalized.includes("config") || normalized.includes("static")) {
     return "Configured";
   }

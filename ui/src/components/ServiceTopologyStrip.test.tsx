@@ -76,6 +76,18 @@ describe("ServiceTopologyStrip", () => {
     expect(screen.getByTestId("service-topology-strip").getAttribute("tabindex")).toBe("0");
   });
 
+  it("labels trace-derived relationships visually and accessibly", async () => {
+    vi.mocked(api.getServiceTopology).mockResolvedValue(graph({
+      provenance: ["trace_parent_child:signoz"],
+      edges: [{ service: "api", depends_on: "db", source: "trace_parent_child:signoz" }],
+    }));
+    renderStrip();
+
+    expect(await screen.findByRole("listitem", { name: "api depends on db; traces source" })).toBeTruthy();
+    expect(screen.getAllByText("Traces")).toHaveLength(2);
+    expect(screen.queryByText("Other")).toBeNull();
+  });
+
   it.each([
     ["not_configured", "No service dependencies are configured."],
     ["no_data", "No service dependency data is available."],

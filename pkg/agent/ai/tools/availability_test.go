@@ -1,9 +1,36 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"sync"
 	"testing"
+
+	"github.com/VersusControl/versus-incident/pkg/core"
 )
+
+type standaloneCapabilityTool struct{}
+
+func (standaloneCapabilityTool) Name() string               { return "standalone" }
+func (standaloneCapabilityTool) Description() string        { return "standalone" }
+func (standaloneCapabilityTool) ArgsSchema() map[string]any { return map[string]any{"type": "object"} }
+func (standaloneCapabilityTool) Invoke(context.Context, json.RawMessage) (*core.ToolResult, error) {
+	return &core.ToolResult{Tool: "standalone", Found: true}, nil
+}
+func (standaloneCapabilityTool) AvailabilityCapability() (string, string, int) {
+	return "baseline_provider", "", 1
+}
+
+func TestBindRuntimeCapabilitiesSupportsStandaloneCapability(t *testing.T) {
+	got := BindRuntimeCapabilities(Snapshot{}, []core.Tool{standaloneCapabilityTool{}})
+	status := got.Capabilities["baseline_provider"]
+	if !status.Configured || !status.Constructed || !status.Healthy || status.Count != 1 || status.Name != "Baseline provider" {
+		t.Fatalf("status = %#v", status)
+	}
+	if got.DataSources != nil {
+		t.Fatalf("standalone capability synthesized data sources: %#v", got.DataSources)
+	}
+}
 
 func TestResolveStateByRequirement(t *testing.T) {
 	SetEntitlementResolver(nil)

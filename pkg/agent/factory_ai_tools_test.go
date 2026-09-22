@@ -14,6 +14,7 @@ import (
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
 	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
+	"github.com/VersusControl/versus-incident/pkg/baseline"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/signalsources"
@@ -25,6 +26,12 @@ type registrationHealth struct{}
 
 func (registrationHealth) DetectionHealth(tenancy.OrgScope) versustools.DetectionHealthSnapshot {
 	return versustools.DetectionHealthSnapshot{Observation: "unknown"}
+}
+
+type factoryBaselineProviderFunc func(context.Context, core.BaselineRequest) (core.BaselineResult, error)
+
+func (provider factoryBaselineProviderFunc) DescribeBaselines(ctx context.Context, request core.BaselineRequest) (core.BaselineResult, error) {
+	return provider(ctx, request)
 }
 
 func TestBuildAnalyzeToolsPreservesBaseOrder(t *testing.T) {
@@ -108,6 +115,80 @@ func TestToolRegistrationFiltersChatAndAnalyzeIndependently(t *testing.T) {
 	}
 	if registered(chat, "get_incident") || !registered(analyze, "get_incident") {
 		t.Fatalf("independent filtering failed: chat=%v analyze=%v", registered(chat, "get_incident"), registered(analyze, "get_incident"))
+	}
+}
+
+func TestBaselineToolAvailabilityForChatAndAnalyze(t *testing.T) {
+	catalog, store := newBuildCatalog(t)
+	scope := tenancy.DefaultOrgScope()
+	provider := baseline.NewManager(baseline.Surface{Family: "logs", SourceType: "catalog", Provider: newLogBaselineProvider(catalog, scope, 5, store)})
+	runtime := []core.Tool{commontools.DescribeBaseline{Provider: provider, OrgID: scope.Write}}
+	snapshot := aitools.BindRuntimeCapabilities(aitools.Snapshot{}, runtime)
+	manager := aitools.NewManager(store)
+	registered := func(agent aitools.AgentKind) bool {
+		filtered, err := manager.Filter(scope, agent, runtime, snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(filtered) == 1 && filtered[0].Name() == "describe_baseline"
+	}
+	if !registered(aitools.AgentChat) || !registered(aitools.AgentAnalyze) {
+		t.Fatal("baseline tool is not available to both agents")
+	}
+	if _, err := manager.SetToolsetEnabled(scope, aitools.AgentChat, "describe_baseline", false); err != nil {
+		t.Fatal(err)
+	}
+	if registered(aitools.AgentChat) || !registered(aitools.AgentAnalyze) {
+		t.Fatal("baseline toolset policy did not remain agent-specific")
+	}
+	if got := newLogBaselineProvider(nil, scope, 5, store); got != nil {
+		t.Fatalf("nil catalog constructed provider %#v", got)
+	}
+}
+
+func TestBuildBaselineToolSupportsExtensionOnlyRegistration(t *testing.T) {
+	scope := tenancy.NewOrgScope("acme")
+	extension := baseline.Surface{Family: "metrics", SourceType: "intelligence", Provider: factoryBaselineProviderFunc(func(context.Context, core.BaselineRequest) (core.BaselineResult, error) {
+		return core.BaselineResult{Availability: core.HealthReady}, nil
+	})}
+	tool := buildBaselineTool(nil, []baseline.Surface{extension}, scope)
+	if tool == nil || tool.Name() != "describe_baseline" {
+		t.Fatalf("extension-only tool = %#v", tool)
+	}
+	runtime := []core.Tool{tool}
+	snapshot := aitools.BindRuntimeCapabilities(aitools.Snapshot{}, runtime)
+	manager := aitools.NewManager(storage.NewMemory())
+	for _, agentKind := range []aitools.AgentKind{aitools.AgentChat, aitools.AgentAnalyze} {
+		filtered, err := manager.Filter(scope, agentKind, runtime, snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(filtered) != 1 || filtered[0].Name() != "describe_baseline" {
+			t.Fatalf("%s tools = %#v", agentKind, filtered)
+		}
+	}
+	if got := buildBaselineTool(nil, nil, scope); got != nil {
+		t.Fatalf("no providers constructed tool %#v", got)
+	}
+}
+
+func TestBuildAIsConstructsBaselineToolFromExtensionWithoutCatalog(t *testing.T) {
+	const contributor = "factory-extension-only-test"
+	RegisterBaselineProviderContributor(contributor, func(tenancy.OrgScope, []config.AgentSourceConfig) ([]baseline.Surface, []error) {
+		return []baseline.Surface{{Family: "metrics", SourceType: "intelligence", Provider: factoryBaselineProviderFunc(func(context.Context, core.BaselineRequest) (core.BaselineResult, error) {
+			return core.BaselineResult{Availability: core.HealthReady}, nil
+		})}}, nil
+	})
+	t.Cleanup(func() { RegisterBaselineProviderContributor(contributor, nil) })
+
+	scope := tenancy.NewOrgScope("acme")
+	bundle := BuildAIsForScope(config.AgentConfig{AI: config.AgentAIConfig{Enable: true, Model: "gpt-4o-mini"}}, nil, storage.NewMemory(), scope, nil)
+	if bundle.Chat == nil || bundle.Analyze == nil || bundle.ToolSnapshot == nil {
+		t.Fatalf("extension-only bundle = %#v", bundle)
+	}
+	status := bundle.ToolSnapshot(scope).Capabilities["baseline_provider"]
+	if !status.Configured || !status.Constructed || !status.Healthy || status.Count != 1 {
+		t.Fatalf("baseline capability = %#v", status)
 	}
 }
 

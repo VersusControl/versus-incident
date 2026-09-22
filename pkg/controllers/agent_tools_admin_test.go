@@ -152,7 +152,7 @@ func TestAgentToolsPutRejectsInvalidInputsWithBoundedAudit(t *testing.T) {
 	}
 }
 
-func TestAgentToolsetsListReturnsExactlyEightChildFreeCardsInServerOrder(t *testing.T) {
+func TestAgentToolsetsListReturnsChildFreeCardsInServerOrder(t *testing.T) {
 	app, _ := toolAdminApp(t, aitools.Snapshot{})
 	response, err := app.Test(httptest.NewRequest("GET", "/api/admin/agent/toolsets?agent=chat", nil), -1)
 	if err != nil {
@@ -163,7 +163,7 @@ func TestAgentToolsetsListReturnsExactlyEightChildFreeCardsInServerOrder(t *test
 	if err := json.NewDecoder(response.Body).Decode(&rows); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"kubernetes", "source-control", "logs", "elasticsearch-logs", "metrics", "traces", "find_runbook", "describe_dependencies"}
+	want := []string{"kubernetes", "source-control", "logs", "elasticsearch-logs", "metrics", "traces", "find_runbook", "describe_dependencies", "describe_baseline"}
 	if len(rows) != len(want) {
 		t.Fatalf("rows = %d, want %d", len(rows), len(want))
 	}

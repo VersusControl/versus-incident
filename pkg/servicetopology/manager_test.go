@@ -75,7 +75,7 @@ func TestSnapshotProviderMustAuthorizeRequestOrg(t *testing.T) {
 }
 
 func TestSnapshotNoExtensionCoveragePreservesCompleteStaticTopology(t *testing.T) {
-	for _, availability := range []core.HealthState{core.HealthNotConfigured, core.HealthNoData, core.HealthRestricted} {
+	for _, availability := range []core.HealthState{core.HealthNotConfigured, core.HealthCollecting, core.HealthNoData, core.HealthRestricted, core.HealthUnsupported} {
 		t.Run(string(availability), func(t *testing.T) {
 			static := core.ServiceTopology{Availability: core.HealthReady, Provenance: []string{"operator_config"}, Nodes: []core.ServiceTopologyNode{{Service: "api"}}}
 			manager := NewManager(staticFixture{topology: static}, topologyProviderFunc(func(context.Context, core.ServiceTopologyRequest) (core.ServiceTopology, error) {

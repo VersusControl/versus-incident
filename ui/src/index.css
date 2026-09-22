@@ -123,9 +123,6 @@
 .tool-brand-icon { color: #fff; }
 [data-theme="light"] .tool-brand-kubernetes { color: #326ce5; }
 [data-theme="light"] .tool-brand-git { color: #f4512c; }
-[data-theme="light"] .tool-brand-logs,
-[data-theme="light"] .tool-brand-metrics,
-[data-theme="light"] .tool-brand-traces,
 [data-theme="light"] .tool-brand-runbook,
 [data-theme="light"] .tool-brand-dependencies,
 [data-theme="light"] .tool-brand-common { color: #000; }

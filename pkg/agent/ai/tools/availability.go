@@ -62,8 +62,12 @@ func BindRuntimeCapabilities(snapshot Snapshot, runtime []core.Tool) Snapshot {
 		if capability == "" || sourceCount <= 0 {
 			continue
 		}
-		status := DependencyStatus{Configured: true, Constructed: true, Healthy: true, Count: sourceCount, Name: displayRequirement(signalKind) + " read capability"}
-		if source, ok := snapshot.DataSources[signalKind]; ok && source.Configured && source.Health != "" && source.Health != "configuration" {
+		name := displayRequirement(capability)
+		if signalKind != "" {
+			name = displayRequirement(signalKind) + " read capability"
+		}
+		status := DependencyStatus{Configured: true, Constructed: true, Healthy: true, Count: sourceCount, Name: name}
+		if source, ok := snapshot.DataSources[signalKind]; signalKind != "" && ok && source.Configured && source.Health != "" && source.Health != "configuration" {
 			status.Healthy = source.Healthy
 			status.Health = source.Health
 			if source.Name != "" {
@@ -71,6 +75,12 @@ func BindRuntimeCapabilities(snapshot Snapshot, runtime []core.Tool) Snapshot {
 			}
 		}
 		snapshot.Capabilities[capability] = status
+		if signalKind == "" {
+			continue
+		}
+		if snapshot.DataSources == nil {
+			snapshot.DataSources = make(map[string]DependencyStatus)
+		}
 		source := snapshot.DataSources[signalKind]
 		source.Constructed = true
 		if source.Health == "" || source.Health == "configuration" {
