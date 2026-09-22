@@ -1,9 +1,8 @@
 import { useState, type ElementType } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { AlertCircle, ArrowUpRight, BookOpenText, Check, CircleOff, ExternalLink, FileText, GitBranch, Loader2, Network, RefreshCw, Settings, ShipWheel, Wrench } from "lucide-react";
+import { Activity, AlertCircle, ArrowUpRight, BookOpenText, Check, CircleOff, ExternalLink, FileText, GitBranch, Loader2, Network, RefreshCw, Settings, ShipWheel, Wrench } from "lucide-react";
 import { FaAws } from "react-icons/fa6";
-import { SiGrafana, SiGraylog, SiPrometheus, SiSplunk } from "react-icons/si";
 import { api, type AgentToolsetAvailability, type AgentToolKind, type AgentToolState } from "@/lib/api";
 import { Modal } from "@/components/Modal";
 import { TopBar } from "@/components/TopBar";
@@ -12,7 +11,7 @@ import { SkCard } from "@/components/Skeleton";
 
 const SECTIONS = ["connector", "datasource", "common"] as const;
 const SECTION_LABELS = { connector: "Connectors", datasource: "Data Source Tools", common: "Common" };
-type CatalogToolState = AgentToolState | "configured" | "shared_unknown";
+type CatalogToolState = AgentToolState | "configured" | "development" | "shared_unknown";
 type CatalogToolset = Omit<AgentToolsetAvailability, "state"> & {
   state: CatalogToolState;
   shared_state?: AgentToolState;
@@ -24,55 +23,66 @@ type CatalogToolset = Omit<AgentToolsetAvailability, "state"> & {
   shared_capability?: string;
 };
 
-function ElasticsearchIcon({ size = 24, className }: { size?: number; className?: string }) {
-  return <img src="/elasticsearch.svg" alt="" width={size} height={size} className={className} aria-hidden="true" />;
+function ToolIcon({ iconKey }: { iconKey: string }) {
+  const logo = PROVIDER_LOGOS[iconKey];
+  if (logo) {
+    return <img src={logo} alt="" width="24" height="24" className="size-6 object-contain" aria-hidden="true" />;
+  }
+  const Icon = ICONS[iconKey] ?? Wrench;
+  const iconColor = ICON_COLORS[iconKey] ?? ICON_COLORS.common;
+  return <Icon size={24} className={`tool-brand-icon ${iconColor}`} strokeWidth={2.2} aria-hidden="true" />;
 }
 
 const ICONS: Record<string, ElementType> = {
   kubernetes: ShipWheel,
   git: GitBranch,
   file: FileText,
-  elasticsearch: ElasticsearchIcon,
-  loki: SiGrafana,
+  logs: FileText,
+  metrics: Activity,
+  traces: Network,
   cloudwatch: FaAws,
-  graylog: SiGraylog,
-  splunk: SiSplunk,
-  signoz: Network,
-  prometheus: SiPrometheus,
-  tempo: SiGrafana,
   runbook: BookOpenText,
   dependencies: Network,
+  activity: Activity,
   common: Wrench,
+};
+const PROVIDER_LOGOS: Record<string, string> = {
+  elasticsearch: "/elasticsearch.svg",
+  loki: "/loki.svg",
+  graylog: "/graylog.svg",
+  splunk: "/splunk.svg",
+  signoz: "/signoz.svg",
+  prometheus: "/prometheus.svg",
+  tempo: "/tempo.svg",
 };
 const ICON_COLORS: Record<string, string> = {
   kubernetes: "tool-brand-kubernetes",
   git: "tool-brand-git",
   file: "tool-brand-common",
-  elasticsearch: "tool-brand-common",
-  loki: "tool-brand-common",
   cloudwatch: "tool-brand-common",
-  graylog: "tool-brand-common",
-  splunk: "tool-brand-common",
-  signoz: "tool-brand-common",
-  prometheus: "tool-brand-common",
-  tempo: "tool-brand-common",
   runbook: "tool-brand-runbook",
   dependencies: "tool-brand-dependencies",
   common: "tool-brand-common",
 };
 
+const SHARED_TOOL_NAMES: Record<string, string> = {
+  logs: "Logs tools",
+  metrics: "Metrics tools",
+  traces: "Trace tools",
+};
+
 const PROVIDERS = [
-  { base_id: "logs", type: "file", name: "File", description: "Read logs from local files.", icon_key: "file", docs_url: "https://docs.versusincident.com/#/agent/data-sources/file" },
-  { base_id: "logs", type: "loki", name: "Loki", description: "Query logs stored in Grafana Loki.", icon_key: "loki", docs_url: "https://docs.versusincident.com/#/agent/data-sources/loki" },
-  { base_id: "logs", type: "cloudwatchlogs", name: "CloudWatch Logs", description: "Query logs stored in Amazon CloudWatch.", icon_key: "cloudwatch", docs_url: "https://docs.versusincident.com/#/agent/data-sources/cloudwatch-logs" },
-  { base_id: "logs", type: "graylog", name: "Graylog", description: "Search logs stored in Graylog.", icon_key: "graylog", docs_url: "https://docs.versusincident.com/#/agent/data-sources/graylog" },
-  { base_id: "logs", type: "splunk", name: "Splunk", description: "Search logs stored in Splunk.", icon_key: "splunk", docs_url: "https://docs.versusincident.com/#/agent/data-sources/splunk" },
-  { base_id: "logs", type: "signoz", name: "SigNoz Logs", description: "Query logs stored in SigNoz.", icon_key: "signoz", docs_url: "https://docs.versusincident.com/#/agent/data-sources/signoz" },
-  { base_id: "metrics", type: "prometheus", name: "Prometheus", description: "Query metrics from Prometheus.", icon_key: "prometheus", docs_url: "https://docs.versusincident.com/#/agent/data-sources/prometheus" },
-  { base_id: "metrics", type: "cloudwatch_metrics", name: "CloudWatch Metrics", description: "Query metrics from Amazon CloudWatch.", icon_key: "cloudwatch", docs_url: "https://docs.versusincident.com/#/agent/data-sources/cloudwatch-metrics" },
-  { base_id: "metrics", type: "signoz_metrics", name: "SigNoz Metrics", description: "Query metrics from SigNoz.", icon_key: "signoz", docs_url: "https://docs.versusincident.com/#/enterprise/metrics/signoz" },
-  { base_id: "traces", type: "traces", name: "Grafana Tempo", description: "Inspect distributed traces in Grafana Tempo.", icon_key: "tempo", docs_url: "https://docs.versusincident.com/#/agent/data-sources/traces" },
-  { base_id: "traces", type: "signoz_traces", name: "SigNoz Traces", description: "Inspect distributed traces in SigNoz.", icon_key: "signoz", docs_url: "https://docs.versusincident.com/#/agent/data-sources/traces?id=signoz-backend" },
+  { base_id: "logs", type: "file", name: "File", description: "Read logs from local files.", icon_key: "file", developed: false, docs_url: "https://docs.versusincident.com/#/agent/data-sources/file" },
+  { base_id: "logs", type: "loki", name: "Loki", description: "Query logs stored in Grafana Loki.", icon_key: "loki", developed: false, docs_url: "https://docs.versusincident.com/#/agent/data-sources/loki" },
+  { base_id: "logs", type: "cloudwatchlogs", name: "CloudWatch Logs", description: "Query logs stored in Amazon CloudWatch.", icon_key: "cloudwatch", developed: false, docs_url: "https://docs.versusincident.com/#/agent/data-sources/cloudwatch-logs" },
+  { base_id: "logs", type: "graylog", name: "Graylog", description: "Search logs stored in Graylog.", icon_key: "graylog", developed: false, docs_url: "https://docs.versusincident.com/#/agent/data-sources/graylog" },
+  { base_id: "logs", type: "splunk", name: "Splunk", description: "Search logs stored in Splunk.", icon_key: "splunk", developed: false, docs_url: "https://docs.versusincident.com/#/agent/data-sources/splunk" },
+  { base_id: "logs", type: "signoz", name: "SigNoz Logs", description: "Query logs stored in SigNoz.", icon_key: "signoz", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/signoz" },
+  { base_id: "metrics", type: "prometheus", name: "Prometheus", description: "Query metrics from Prometheus.", icon_key: "prometheus", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/prometheus" },
+  { base_id: "metrics", type: "cloudwatch_metrics", name: "CloudWatch Metrics", description: "Query metrics from Amazon CloudWatch.", icon_key: "cloudwatch", developed: false, docs_url: "https://docs.versusincident.com/#/agent/data-sources/cloudwatch-metrics" },
+  { base_id: "metrics", type: "signoz_metrics", name: "SigNoz Metrics", description: "Query metrics from SigNoz.", icon_key: "signoz", developed: true, docs_url: "https://docs.versusincident.com/#/enterprise/metrics/signoz" },
+  { base_id: "traces", type: "traces", name: "Grafana Tempo", description: "Inspect distributed traces in Grafana Tempo.", icon_key: "tempo", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/traces" },
+  { base_id: "traces", type: "signoz_traces", name: "SigNoz Traces", description: "Inspect distributed traces in SigNoz.", icon_key: "signoz", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/traces?id=signoz-backend" },
 ] as const;
 
 function isCanonicalToolProvider(baseID: string, providerType: string): boolean {
@@ -93,15 +103,19 @@ function buildCatalog(toolsets: AgentToolsetAvailability[], sources: Awaited<Ret
     const configuredOutsideSources = configKnown && !configured && !siblingConfigured && isCanonicalToolProvider(base.id, provider.type) && ["available", "disabled_by_operator"].includes(base.state);
     const providerAvailable = configured || configuredOutsideSources;
     const authoritative = base.state === "needs_license" || base.state === "needs_permission";
-    const state: CatalogToolState = authoritative
-      ? base.state
+    const state: CatalogToolState = !provider.developed
+      ? "development"
+      : authoritative
+        ? base.state
       : !configKnown
         ? "shared_unknown"
         : providerAvailable
           ? base.state === "unhealthy" ? "unhealthy" : "configured"
           : "needs_datasource";
-    const reason = authoritative
-      ? base.reason
+    const reason = !provider.developed
+      ? "Provider-native agent tools are in development."
+      : authoritative
+        ? base.reason
       : !configKnown
         ? `Provider configuration is unavailable. This provider uses the shared ${base.display_name} agent capability.`
         : providerAvailable
@@ -122,17 +136,24 @@ function buildCatalog(toolsets: AgentToolsetAvailability[], sources: Awaited<Ret
       description: provider.description,
       icon_key: provider.icon_key,
       docs_url: provider.docs_url,
-      ui_path: providerAvailable && baseAllowsUI ? base.ui_path : undefined,
+      ui_path: provider.developed && providerAvailable && baseAllowsUI ? base.ui_path : undefined,
       state,
       reason,
     }];
   });
   return [
     ...toolsets
-      .filter((toolset) => toolset.section !== "datasource" || toolset.id === "elasticsearch-logs")
-      .map((toolset) => toolset.id === "elasticsearch-logs" ? { ...toolset, display_name: "Elasticsearch" } : toolset),
+      .map((toolset) => toolset.id === "elasticsearch-logs"
+        ? { ...toolset, display_name: "Elasticsearch" }
+        : SHARED_TOOL_NAMES[toolset.id]
+          ? { ...toolset, display_name: SHARED_TOOL_NAMES[toolset.id], icon_key: toolset.id, ui_path: undefined }
+          : toolset),
     ...providers,
   ];
+}
+
+function detailsDescriptionID(toolsetID: string): string {
+  return `toolset-${toolsetID.replace(/[^a-zA-Z0-9_-]/g, "-")}-setup-required`;
 }
 
 export function AgentToolsPage() {
@@ -215,18 +236,17 @@ export function AgentToolsPage() {
 }
 
 function ToolsetCard({ toolset, onDetails }: { toolset: CatalogToolset; onDetails: () => void }) {
-  const Icon = ICONS[toolset.icon_key] ?? Wrench;
-  const iconColor = ICON_COLORS[toolset.icon_key] ?? ICON_COLORS.common;
+  const development = toolset.state === "development";
   return (
     <article className="flex min-h-22 items-center gap-4 rounded-card border border-transparent bg-transparent p-4 transition-colors hover:border-ink-500/60 hover:bg-surface hover:shadow-card">
-      <div className="flex size-12 shrink-0 items-center justify-center rounded-xl border border-ink-600 bg-ink-800"><Icon size={24} className={`tool-brand-icon ${iconColor}`} strokeWidth={2.2} aria-hidden="true" /></div>
+      <div className="flex size-12 shrink-0 items-center justify-center rounded-xl border border-ink-600 bg-ink-800"><ToolIcon iconKey={toolset.icon_key} /></div>
       <div className="min-w-0 flex-1">
         <h3 className="text-base font-medium text-ink-50">{toolset.display_name}</h3>
         <StateBadge state={toolset.state} />
       </div>
       <div className="flex shrink-0 items-center gap-1">
         {toolset.ui_path && !["needs_license", "needs_permission"].includes(toolset.state) && <Link to={toolset.ui_path} aria-label={`Open ${toolset.display_name}`} title={`Open ${toolset.display_name}`} className="inline-flex size-11 items-center justify-center rounded-full text-ink-200 hover:bg-ink-700 hover:text-ink-50"><ArrowUpRight size={20} /></Link>}
-        <button type="button" onClick={onDetails} aria-label={`${toolset.display_name} settings`} title={`${toolset.display_name} settings`} className="inline-flex size-11 items-center justify-center rounded-full text-ink-300 hover:bg-ink-700 hover:text-ink-50"><Settings size={19} /></button>
+        <button type="button" onClick={onDetails} aria-label={`${toolset.display_name} ${development ? "details" : "settings"}`} title={development ? `About ${toolset.display_name}` : `${toolset.display_name} settings`} className="inline-flex size-11 items-center justify-center rounded-full text-ink-300 hover:bg-ink-700 hover:text-ink-50"><Settings size={19} /></button>
       </div>
     </article>
   );
@@ -244,6 +264,7 @@ function StateBadge({ state }: { state: CatalogToolState }) {
     unhealthy: "Unhealthy",
     shared_unknown: "Shared status unknown",
     configured: "Configured",
+    development: "Development",
   };
   const ready = state === "available" || state === "configured";
   const off = state === "disabled_by_operator";
@@ -251,16 +272,16 @@ function StateBadge({ state }: { state: CatalogToolState }) {
 }
 
 function ToolsetDetails({ toolset, agent, pending, onClose, onToggle }: { toolset: CatalogToolset; agent: AgentToolKind; pending: boolean; onClose: () => void; onToggle: (enabled: boolean) => void }) {
+  const development = toolset.state === "development";
+  const provider = Boolean(toolset.provider_type);
   const baseSatisfied = toolset.provider_type ? toolset.config_known && toolset.state === "configured" && (toolset.shared_state === "available" || toolset.shared_state === "disabled_by_operator") : toolset.state === "available" || toolset.state === "disabled_by_operator";
   const providerConfigured = !toolset.provider_type || Boolean(toolset.provider_configured);
   const satisfied = baseSatisfied && providerConfigured;
   const hiddenInternalAction = toolset.action.startsWith("/") && (toolset.id === "source-control" || toolset.section === "datasource" || toolset.section === "common");
-  const showAvailabilityAction = toolset.action && !hiddenInternalAction;
-  const Icon = ICONS[toolset.icon_key] ?? Wrench;
-  const iconColor = ICON_COLORS[toolset.icon_key] ?? ICON_COLORS.common;
-  return <Modal title={toolset.display_name} onClose={onClose} size="lg" footer={<>{toolset.docs_url && <a className="btn" href={toolset.docs_url} target="_blank" rel="noopener noreferrer">Documentation <ExternalLink size={13} /></a>}{toolset.ui_path && !["needs_license", "needs_permission"].includes(toolset.state) && <Link className="btn btn-primary" to={toolset.ui_path} onClick={onClose}>Open tool <ArrowUpRight size={13} /></Link>}{showAvailabilityAction && (toolset.action.startsWith("/") ? <Link className="btn btn-primary" to={toolset.action}>{toolset.action_label}</Link> : <a className="btn btn-primary" href={toolset.action} target="_blank" rel="noopener noreferrer">{toolset.action_label} <ExternalLink size={13} /></a>)}</>}>
-    <div className="flex items-start gap-3"><div className="flex size-12 shrink-0 items-center justify-center rounded-control border border-ink-600 bg-ink-800"><Icon size={24} className={`tool-brand-icon ${iconColor}`} strokeWidth={2.2} aria-hidden="true" /></div><div className="min-w-0"><p className="text-sm leading-6 text-ink-200">{toolset.description}</p><StateBadge state={toolset.state} /></div></div>
-    <dl className="mt-5 divide-y divide-ink-700 border-y border-ink-700 text-xs"><div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Availability</dt><dd className="text-ink-100">{toolset.reason}</dd></div>{toolset.shared_capability && <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Capability</dt><dd className="text-ink-100">Uses the shared {toolset.shared_capability} agent capability.</dd></div>}{toolset.configured_source_names && toolset.configured_source_names.length > 0 && <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Configured sources</dt><dd className="text-ink-100">{toolset.configured_source_names.join(", ")}</dd></div>}{toolset.health && <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Shared health</dt><dd className="text-ink-100">{toolset.health}</dd></div>}<div className="grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-3 py-3"><dt className="text-ink-400">{toolset.shared_capability ? `${toolset.shared_capability} tools` : agent === "chat" ? "Chat agent" : "Analyze agent"}</dt><dd><label className="inline-flex items-center gap-2 text-ink-100"><input type="checkbox" aria-label={`Enable ${toolset.shared_capability ?? toolset.display_name} for ${agent}`} aria-describedby={!satisfied ? `${toolset.id}-setup-required` : undefined} className="h-4 w-4 accent-good" checked={toolset.enabled && satisfied} disabled={!satisfied || pending} onChange={(event) => onToggle(event.target.checked)} /><span>{toolset.enabled && satisfied ? "Enabled" : "Disabled"}</span>{pending && <Loader2 size={13} className="animate-spin" />}</label>{toolset.shared_capability && <p className="mt-1 text-2xs text-sev-warning">This setting affects every configured {toolset.shared_capability.toLowerCase()} provider.</p>}</dd></div></dl>
-    {!satisfied && <div id={`${toolset.id}-setup-required`} className="mt-4 rounded-control border border-sev-warning/30 bg-sev-warning/10 p-3 text-xs leading-5 text-ink-200"><span className="font-medium">Setup required.</span> {toolset.reason}</div>}
+  const showAvailabilityAction = !development && toolset.action && !hiddenInternalAction;
+  return <Modal title={toolset.display_name} onClose={onClose} size="lg" footer={<>{toolset.docs_url && <a className="btn" href={toolset.docs_url} target="_blank" rel="noopener noreferrer">Documentation <ExternalLink size={13} /></a>}{!development && toolset.ui_path && !["needs_license", "needs_permission"].includes(toolset.state) && <Link className="btn btn-primary" to={toolset.ui_path} onClick={onClose}>Open tool <ArrowUpRight size={13} /></Link>}{showAvailabilityAction && (toolset.action.startsWith("/") ? <Link className="btn btn-primary" to={toolset.action}>{toolset.action_label}</Link> : <a className="btn btn-primary" href={toolset.action} target="_blank" rel="noopener noreferrer">{toolset.action_label} <ExternalLink size={13} /></a>)}</>}>
+    <div className="flex items-start gap-3"><div className="flex size-12 shrink-0 items-center justify-center rounded-control border border-ink-600 bg-ink-800"><ToolIcon iconKey={toolset.icon_key} /></div><div className="min-w-0"><p className="text-sm leading-6 text-ink-200">{toolset.description}</p><StateBadge state={toolset.state} /></div></div>
+    <dl className="mt-5 divide-y divide-ink-700 border-y border-ink-700 text-xs"><div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Availability</dt><dd className="text-ink-100">{toolset.reason}</dd></div>{!development && provider && toolset.configured_source_names && toolset.configured_source_names.length > 0 && <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Configured sources</dt><dd className="text-ink-100">{toolset.configured_source_names.join(", ")}</dd></div>}{!development && !provider && toolset.health && <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Health</dt><dd className="text-ink-100">{toolset.health}</dd></div>}{!development && !provider && <div className="grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-3 py-3"><dt className="text-ink-400">{agent === "chat" ? "Chat agent" : "Analyze agent"}</dt><dd><label className="inline-flex items-center gap-2 text-ink-100"><input type="checkbox" aria-label={`Enable ${toolset.display_name} for ${agent}`} aria-describedby={!satisfied ? detailsDescriptionID(toolset.id) : undefined} className="h-4 w-4 accent-good" checked={toolset.enabled && satisfied} disabled={!satisfied || pending} onChange={(event) => onToggle(event.target.checked)} /><span>{toolset.enabled && satisfied ? "Enabled" : "Disabled"}</span>{pending && <Loader2 size={13} className="animate-spin" />}</label></dd></div>}</dl>
+    {!development && !satisfied && <div id={detailsDescriptionID(toolset.id)} className="mt-4 rounded-control border border-sev-warning/30 bg-sev-warning/10 p-3 text-xs leading-5 text-ink-200"><span className="font-medium">Setup required.</span> {toolset.reason}</div>}
   </Modal>;
 }

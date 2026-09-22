@@ -26,6 +26,7 @@ import (
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
 	signoztools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/signoz"
 	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
+	"github.com/VersusControl/versus-incident/pkg/baseline"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	elasticsearchapp "github.com/VersusControl/versus-incident/pkg/elasticsearch"
@@ -210,6 +211,10 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		for _, e := range extensionErrs {
 			log.Printf("agent: runtime tool contributor warning: %v", e)
 		}
+		baselineExtensions, baselineErrs := contributedBaselineProviders(scope, cfg.Sources)
+		for _, e := range baselineErrs {
+			log.Printf("agent: baseline provider contributor warning: %v", e)
+		}
 		if kubernetesService != nil {
 			kubernetesService.SetScrubber(redactor)
 		}
@@ -267,6 +272,9 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		traces := newTraceReaderAdapter(cfg.Tools.QueryTraces.Tempo)
 
 		runtimeTools = buildAnalyzeTools(store, scope, newCatalogAdapterWithThreshold(catalog, cfg.Catalog.AutoPromoteAfter), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher, metrics, traces, detectionHealth)
+		if baselineTool := buildBaselineTool(newLogBaselineProvider(catalog, scope, cfg.Catalog.AutoPromoteAfter, store), baselineExtensions, scope); baselineTool != nil {
+			runtimeTools = append(runtimeTools, baselineTool)
+		}
 		runtimeTools = append(runtimeTools, elasticsearchtools.New(elasticsearchSources)...)
 		runtimeTools = append(runtimeTools, k8stools.New(kubernetesService)...)
 		runtimeTools = append(runtimeTools, signoztools.New(signozSources)...)
@@ -393,6 +401,14 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		ToolSnapshot:        toolSnapshot,
 		ObserveSourceHealth: detectionHealth.Observe,
 	}
+}
+
+func buildBaselineTool(baseProvider core.BaselineProvider, extensions []baseline.Surface, scope tenancy.OrgScope) core.Tool {
+	if baseProvider == nil && len(extensions) == 0 {
+		return nil
+	}
+	provider := baseline.NewManager(baseline.Surface{Family: "logs", SourceType: "catalog", Provider: baseProvider}, extensions...)
+	return commontools.DescribeBaseline{Provider: provider, OrgID: scope.Normalized().Write}
 }
 
 func logAIConstructionFailure(task string, cfg config.AgentAIConfig, cause error) {

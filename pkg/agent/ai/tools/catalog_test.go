@@ -17,6 +17,7 @@ func TestCatalogIsCompleteOrderedAndUnique(t *testing.T) {
 		GroupVersus, GroupVersus, GroupVersus, GroupVersus, GroupVersus,
 		GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon,
 		GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon,
+		GroupCommon,
 		GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s,
 	}
 	got := Catalog()
@@ -60,6 +61,7 @@ func TestCatalogDestinationsAreExactAndSafe(t *testing.T) {
 		"find_runbook":          {"https://docs.versusincident.com/#/agent/tools/find-runbook", "/agent/runbooks"},
 		"recent_changes":        {"https://docs.versusincident.com/#/agent/tools/recent-changes", ""},
 		"describe_dependencies": {docsTools + "?id=describe_dependencies", ""},
+		"describe_baseline":     {docsTools + "?id=describe_baseline", ""},
 		"get_cluster_overview":  {docsKubernetes, ""}, "discover_k8s_resources": {docsKubernetes, ""}, "query_k8s_resources": {docsKubernetes, ""},
 		"get_k8s_resource": {docsKubernetes, ""}, "list_workloads": {docsKubernetes, ""}, "get_workload": {docsKubernetes, ""},
 		"list_k8s_events": {docsKubernetes, ""}, "get_pod_logs": {docsKubernetes, ""},
@@ -103,6 +105,7 @@ func TestCatalogDocumentationTargetsExist(t *testing.T) {
 		"common-tools":          "## Common tools",
 		"kubernetes-tools":      "## Kubernetes tools",
 		"describe_dependencies": "### `describe_dependencies` :id=describe_dependencies",
+		"describe_baseline":     "### `describe_baseline` :id=describe_baseline",
 	}
 	checkedRoutes := make(map[string]struct{})
 	for _, metadata := range Catalog() {
@@ -205,6 +208,7 @@ func TestToolsetsAreExactOrderedAndOwnEveryVisibleTool(t *testing.T) {
 		{"traces", SectionDataSource, "traces", []string{"query_traces", "discover_trace_fields", "read_trace_spans"}},
 		{"find_runbook", SectionCommon, "runbook", []string{"find_runbook"}},
 		{"describe_dependencies", SectionCommon, "dependencies", []string{"describe_dependencies"}},
+		{"describe_baseline", SectionCommon, "activity", []string{"describe_baseline"}},
 	}
 	got := Toolsets()
 	if len(got) != len(want) {
@@ -214,7 +218,7 @@ func TestToolsetsAreExactOrderedAndOwnEveryVisibleTool(t *testing.T) {
 		if got[index].ID != want[index].id || got[index].Section != want[index].section || got[index].IconKey != want[index].icon || !reflect.DeepEqual(got[index].ToolNames, want[index].children) {
 			t.Errorf("Toolsets()[%d] = %#v, want id=%q section=%q icon=%q children=%v", index, got[index], want[index].id, want[index].section, want[index].icon, want[index].children)
 		}
-		if (got[index].ID == "kubernetes" || got[index].ID == "elasticsearch-logs") && got[index].Permission != core.PermissionInfrastructureView {
+		if (got[index].ID == "kubernetes" || got[index].ID == "elasticsearch-logs" || got[index].ID == "describe_baseline") && got[index].Permission != core.PermissionInfrastructureView {
 			t.Errorf("Toolsets()[%d] permission = %q, want %q", index, got[index].Permission, core.PermissionInfrastructureView)
 		}
 	}

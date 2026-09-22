@@ -89,6 +89,22 @@ Reads the operator-configured service dependency graph so the AI can reason
 about upstream causes and downstream impact. Configure the graph in
 `tools.describe_dependencies.services` as shown below.
 
+### `describe_baseline` :id=describe_baseline
+
+Reads learned expectations for one exact service and signal over a requested
+current window from 5 minutes through 24 hours. Use `logs` to return up to 50
+deterministically ordered log-pattern baselines, or pass an exact pattern ID as
+the signal to select one pattern. The response includes expected mean and
+standard deviation, observation count, confidence, last-trained time, source
+family, provenance, availability, and explicit truncation metadata.
+
+The tool requires `infrastructure:view`. It never returns raw samples, query
+expressions, endpoints, or credentials. The OSS catalog does not persist a
+comparable current window value, so log records return `current_value: null`
+with an explicit reason instead of manufacturing a service-wide rate. Licensed
+providers can append metric or trace records without replacing OSS log records;
+restricted or failed extensions leave log baselines available.
+
 ## Kubernetes tools
 
 See the [Kubernetes Connector](kubernetes.md) guide for authentication modes,

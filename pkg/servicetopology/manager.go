@@ -87,7 +87,7 @@ func (manager *Manager) Snapshot(ctx context.Context, orgID string) core.Service
 
 func noExtensionCoverage(availability core.HealthState) bool {
 	switch availability {
-	case core.HealthNotConfigured, core.HealthNoData, core.HealthRestricted:
+	case core.HealthNotConfigured, core.HealthCollecting, core.HealthNoData, core.HealthRestricted, core.HealthUnsupported:
 		return true
 	default:
 		return false

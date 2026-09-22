@@ -5,6 +5,56 @@ type AgentKind = "chat" | "analyze";
 type ToolSetting = { group: string; name: string; enabled: boolean };
 type ToolSettingsSnapshot = { agent: AgentKind; settings: ToolSetting[] };
 
+const REQUIRED_CARD_NAMES = [
+  "Kubernetes", "Source control",
+  "Logs tools", "File", "Loki", "CloudWatch Logs", "Graylog", "Splunk", "SigNoz Logs", "Elasticsearch",
+  "Metrics tools", "Prometheus", "CloudWatch Metrics", "SigNoz Metrics",
+  "Trace tools", "Grafana Tempo", "SigNoz Traces",
+  "Find runbook", "Describe dependencies", "Describe baseline",
+] as const;
+const DEVELOPMENT_PROVIDERS = ["File", "Loki", "CloudWatch Logs", "Graylog", "Splunk", "CloudWatch Metrics"] as const;
+const PROVIDER_LOGOS = {
+  Elasticsearch: "/elasticsearch.svg",
+  Loki: "/loki.svg",
+  Graylog: "/graylog.svg",
+  Splunk: "/splunk.svg",
+  "SigNoz Logs": "/signoz.svg",
+  "SigNoz Metrics": "/signoz.svg",
+  "SigNoz Traces": "/signoz.svg",
+  Prometheus: "/prometheus.svg",
+  "Grafana Tempo": "/tempo.svg",
+} as const;
+
+async function expectStableCatalog(page: import("@playwright/test").Page) {
+  const cards = page.locator("main article");
+  const versusCore = cards.filter({ has: page.getByRole("heading", { name: "Versus core", exact: true }) });
+  const stableCards = cards.filter({ hasNot: page.getByRole("heading", { name: "Versus core", exact: true }) });
+  await expect(stableCards).toHaveCount(20);
+  expect(await versusCore.count()).toBeLessThanOrEqual(1);
+
+  for (const name of REQUIRED_CARD_NAMES) {
+    await expect(page.getByRole("heading", { name, exact: true })).toHaveCount(1);
+    await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
+  }
+  for (const name of ["Logs tools", "Metrics tools", "Trace tools"]) {
+    await expect(page.getByRole("heading", { name, exact: true })).toHaveCount(1);
+  }
+  for (const provider of DEVELOPMENT_PROVIDERS) {
+    const card = cards.filter({ has: page.getByRole("heading", { name: provider, exact: true }) });
+    await expect(card.getByText("Development", { exact: true })).toHaveCount(1);
+  }
+  await expect(page.getByText("Development", { exact: true })).toHaveCount(6);
+  await expect(page.getByRole("heading", { name: "Elasticsearch", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("heading", { name: "SigNoz", exact: true })).toHaveCount(0);
+  for (const name of ["SigNoz Logs", "SigNoz Metrics", "SigNoz Traces"]) {
+    await expect(page.getByRole("heading", { name, exact: true })).toHaveCount(1);
+  }
+  for (const [provider, src] of Object.entries(PROVIDER_LOGOS)) {
+    const card = cards.filter({ has: page.getByRole("heading", { name: provider, exact: true }) });
+    await expect(card.locator(`img[src="${src}"]`)).toHaveCount(1);
+  }
+}
+
 async function setToolEnabled(page: import("@playwright/test").Page, agent: AgentKind, name: string, enabled: boolean) {
   return page.evaluate(async ({ agentKind, toolName, target }) => {
     const response = await fetch(`/api/admin/agent/tools/${agentKind}/${encodeURIComponent(toolName)}`, {
@@ -99,8 +149,7 @@ test.describe("Agent tool catalog", () => {
       await page.reload();
       await expect(page.getByRole("heading", { name: "Tool catalog" })).toBeVisible();
       await expect(page.getByRole("heading", { level: 2 })).toHaveText(["Connectors", "Data Source Tools", "Common"]);
-      await expect(page.locator("main article")).toHaveCount(16);
-      await expect(page.getByRole("heading", { name: "Elasticsearch", exact: true })).toHaveCount(1);
+      await expectStableCatalog(page);
       await expect(page.getByRole("textbox", { name: "Search tools" })).toHaveCount(0);
       await expect(page.getByRole("tablist")).toHaveCount(0);
       await expect(page.getByText("get_incident", { exact: true })).toHaveCount(0);
@@ -191,7 +240,7 @@ test.describe("Agent tool catalog", () => {
       await page.reload();
       await expect(page.getByRole("heading", { name: "Tool catalog" })).toBeVisible();
       const cards = page.locator("main article");
-      await expect(cards).toHaveCount(16);
+      await expectStableCatalog(page);
       const first = await cards.first().boundingBox();
       const second = await cards.nth(1).boundingBox();
       expect(first).not.toBeNull();
