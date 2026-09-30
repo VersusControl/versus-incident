@@ -251,6 +251,8 @@ type AgentLokiSourceConfig struct {
 	// Query is a LogQL selector, e.g. `{app="api",env="prod"} |= "error"`.
 	// Required.
 	Query string `mapstructure:"query"`
+	// ServiceLabel maps native tool service filters to a stream label. Empty defaults to "service".
+	ServiceLabel string `mapstructure:"service_label"`
 	// SeverityField, when set, is read from each entry's stream labels
 	// (e.g. "level") to populate Signal.Severity.
 	SeverityField string `mapstructure:"severity_field"`
@@ -341,6 +343,8 @@ type AgentGraylogSourceConfig struct {
 type AgentSplunkSourceConfig struct {
 	// Address is the Splunk REST base URL, e.g. "https://splunk:8089".
 	Address string `mapstructure:"address"`
+	Owner   string `mapstructure:"owner"`
+	App     string `mapstructure:"app"`
 	// Token is sent as `Authorization: Bearer <token>` and takes
 	// priority over Username/Password when set.
 	Token string `mapstructure:"token"`

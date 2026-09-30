@@ -6,11 +6,8 @@
 > They require the **enterprise image** and a license carrying the
 > **`intelligence`** entitlement. On the OSS image, `type: prometheus` /
 > `type: traces` returns *"requires Versus Enterprise"*, and the intelligence
-> wedge is a no-op. (OSS keeps only the on-demand `query_metrics` /
-> `query_traces` analyze tools — not the standing source, baselines, or SLO.)
+> wedge is a no-op. OSS does not provide metric or trace read tools.
 >
-> **One paid tier — Founding, $199/mo — unlocks this entire flow.**
-
 # Enterprise SRE flow — metric/trace data source → detect → analyze → intelligence → on-call
 
 This is the **end-to-end Versus Enterprise SRE walkthrough**: stand up the
@@ -24,43 +21,8 @@ stdlib only) pushing series to a **Prometheus Pushgateway** — the *same*
 fake-data UX as the OSS metrics example. There is no bespoke loadgen and no
 `curl /spike`.
 
-> The generator here is a self-contained copy of the OSS
-> `versus-incident/scripts/generate_fake_metrics.py`; the enterprise example
-> ships its own copy so it stands alone.
-
-## The flow at a glance
-
-```mermaid
-flowchart LR
-  gen["generate_fake_metrics.py<br/>(host, stdlib)"]
-  pg["Pushgateway<br/>:9091"]
-  prom["Prometheus<br/>:9090"]
-  tempo["Tempo<br/>:3200 / :4318<br/>(traces overlay)"]
-
-  gen -- "PUT exposition<br/>(--spike = 5xx + latency)" --> pg
-  gen -. "--otlp span" .-> tempo
-  pg -- "scrape (honor_labels)" --> prom
-
-  subgraph VE["Versus Enterprise (:3000)"]
-    src["prometheus / traces<br/>DATA SOURCE (X10)<br/>range-query rules each tick"]
-    worker["detect worker<br/>classify → incident"]
-    analyze["analyze<br/>query_metrics / query_traces<br/>(AUTO-WIRED, no tools.yaml)"]
-    intel["standing intelligence<br/>X16 baseline → X15 auto-SLO<br/>→ multi-window burn rate"]
-    oncall["on-call route<br/>Slack / Telegram / page"]
-  end
-
-  prom -- "rules fire N series" --> src
-  tempo -. "error traces" .-> src
-  src --> worker --> analyze
-  prom -- "scheduled re-pull" --> intel
-  intel -- "burn-rate finding<br/>CreateIncidentFromFinding" --> worker
-  worker --> oncall
-```
-
-**OSS vs Enterprise, honestly:** in OSS you get the on-demand
-`query_metrics` / `query_traces` correlation tools (you ask, the AI pulls).
-The **standing data source** that fires incidents on its own, plus the
-**learned baselines / auto-SLO / burn-rate**, are **Enterprise** — this example.
+> The generator here is the host-run
+> `scripts/generate_fake_metrics.py` in this example.
 
 ## Services
 
@@ -86,8 +48,7 @@ committed to this repo**, and `.env` (where you put yours) is gitignored.
 1. Obtain a license key with the `intelligence` entitlement from Versus
    (your enterprise dashboard / sales). It is the same offline JWT used by every
    self-hosted enterprise deployment; the org and entitlements live inside the
-   token. **Founding ($199/mo) is the single paid tier and unlocks the full
-   flow.**
+  token.
 2. Put it in your local `.env`:
 
    ```bash
@@ -188,11 +149,11 @@ python3 scripts/generate_fake_metrics.py --clear
 
 Use `--list` to print the exact series/labels emitted plus sample PromQL.
 
-## See `query_metrics` during investigation (the ANALYZE path)
+## Investigate with source-bound metric reads (the ANALYZE path)
 
 The detect path above works with **no API key**. To watch the agent pull the
-**auto-wired** `query_metrics` tool while *investigating* an incident, enable the
-AI analyzer in `.env`:
+licensed source's `discover_metrics` and `read_metric_series` capabilities
+while *investigating* an incident, enable the AI analyzer in `.env`:
 
 ```bash
 # in .env:
@@ -201,12 +162,14 @@ AI analyzer in `.env`:
 #   AGENT_AI_MODEL=gpt-4o-mini
 docker compose up -d --force-recreate versus
 python3 scripts/generate_fake_metrics.py --spike --duration 90
-docker compose logs -f versus      # watch for the auto-wired query_metrics calls
+docker compose logs -f versus      # inspect detection and any AI investigation
 ```
 
-`query_metrics` runs on-demand PromQL while the AI investigates — and it is
-**auto-wired** from the *same* source config (there is no `tools.yaml`; see
-[Auto-wire](#auto-wire)).
+The source contributes bounded discovery and series reads to Chat and Analyze;
+an AI key permits investigation but does not guarantee a tool call for every
+incident. Use the tool catalog or investigation trace to check which capability
+was used. There is no separate metric endpoint in `tools.yaml`; see
+[Source-bound reads](#source-bound-reads).
 
 ## Standing intelligence (X16 baseline → X15 auto-SLO → burn-rate)
 
@@ -221,7 +184,7 @@ emission path (`services.CreateIncidentFromFinding`) and out to on-call.
 | Stage | Runs in the quick demo? |
 |---|---|
 | Rule-based `prometheus` source fires an incident on `--spike` | ✅ Yes — immediate (this is the headline) |
-| Auto-wired `query_metrics` / `query_traces` during analyze | ✅ Yes (needs an AI key) |
+| Source-bound metric/trace discover and read during investigation | Available with licensed sources; AI-driven calls need an AI key |
 | **X15 auto-SLO derivation** (first scheduler pass derives + persists an SLO) | ⏳ After ~5m (the SLO job interval) |
 | **X16 learned-baseline anomaly** (confident seasonal model) | ⏳ Needs a learning window — tens of minutes to hours of samples |
 | **X15 multi-window burn-rate page** (1h + 6h windows, ≥14.4× / 6×) | ⏳ Needs a SUSTAINED spike across the policy windows |
@@ -270,8 +233,9 @@ it:
    agent[detect]: ... source=intel:slo category=slo severity=critical
    ```
 
-Run the binary in community mode (no `LICENSE_KEY`) and the wedge is a clean
-no-op — the rule-based source still fires incidents on its own.
+Without an `intelligence` license, neither this rule-based Enterprise source
+nor the standing-intelligence wedge runs; the example requires a licensed
+Enterprise binary.
 
 ## On-call — the end of the flow (page a human)
 
@@ -301,28 +265,29 @@ provider config lives in [config/config.yaml](config/config.yaml) under
 | Connect | `docker compose up -d` | `enterprise: agent started (mode=detect, sources=1)` |
 | Fire | `generate_fake_metrics.py --spike` | source range-queries rules → fires N signals |
 | Detect | (automatic) | `agent: tick prometheus:demo-prom signals=2 matched=2` → incident emitted |
-| Analyze | enable AI key, re-spike | auto-wired `query_metrics` / `query_traces` pull PromQL / traces |
+| Investigate | enable AI key, re-spike | licensed source exposes bounded discover/read capabilities to Chat and Analyze; calls depend on the investigation |
 | Intelligence | (automatic, with license) wait | SLO derived; (sustained) burn-rate finding emitted |
 | On-call | enable a channel | incident delivered to Slack/Telegram (or logged dry route) |
 
-## Auto-wire
+## Source-bound reads
 
-**Configuring the data source alone lights up the analyze tools.** Notice this
-example ships **no `tools.yaml`** — yet `query_metrics` works.
+An enabled, licensed `prometheus` source contributes `discover_metrics` and
+`read_metric_series` to Chat and Analyze. With the Tempo overlay, an enabled,
+licensed `traces` source contributes `discover_trace_fields` and
+`read_trace_spans`. These capabilities use their configured source's address,
+auth, and read policy; this example needs no `tools.yaml` entry for them.
 
-When the enterprise binary boots, it reads the `prometheus` (and, with the
-overlay, `traces`) source from [config/agent_sources.yaml](config/agent_sources.yaml)
-and **auto-wires** the matching analyze tool (`query_metrics` →
-`query_traces`) against the **same** backend address + auth, before the AI is
-built. So you configure the backend once, in the source, and both the
-detect path and the investigation path use it.
+The source configuration is in
+[config/agent_sources.yaml](config/agent_sources.yaml) (or the overlay's
+[config/agent_sources.traces.yaml](config/agent_sources.traces.yaml)). A source
+can detect without AI; interactive reads require the licensed source and a
+permitted caller. They do not expose arbitrary PromQL or TraceQL query tools.
 
-**Precedence — explicit tool config wins.** If you *do* add a
-`tools.yaml` with an explicit `query_metrics.prometheus.address` (resp.
-`query_traces.tempo.address`), that explicit address is left untouched and the
-source does **not** override it. This lets you point the analyze tool at a
-different/aggregated backend when you want to. Omit it (as here) and the
-zero-config path "just works".
+**No automatic config migration:** retired `query_metrics` / `query_traces`
+blocks in `tools.yaml` or inline `agent.tools` are rejected at startup. Remove
+them and explicitly move the backend connection and credentials into
+`agent_sources.yaml`; see the
+[migration guide](../../src/migration/migration-metric-trace-tools.md).
 
 ### Note the new `options:` schema
 
@@ -361,8 +326,9 @@ The `intelligence` entitlement unlocks both layers.
 
 ## Optional: traces (Tempo)
 
-To also exercise the enterprise `traces` source and the auto-wired
-`query_traces` tool, bring up the overlay (adds Tempo and swaps in the source
+To also exercise the licensed `traces` source and its
+`discover_trace_fields` / `read_trace_spans` capabilities, bring up the overlay
+(adds Tempo and swaps in the source
 variant that adds the `traces` source):
 
 ```bash
@@ -377,8 +343,8 @@ python3 scripts/generate_fake_metrics.py --spike --otlp http://localhost:4318 --
 ```
 
 The `traces` source searches Tempo for `{ status = error }` traces and emits a
-signal per matching trace; `query_traces` (also auto-wired, no tools.yaml) lets
-the AI pull redacted span summaries during investigation. Tempo's API is on
+signal per matching trace; the source-bound reads let a permitted caller inspect
+bounded trace fields and spans during investigation. Tempo's API is on
 `:3200`, OTLP on `:4318`.
 
 ## Optional: SigNoz (metrics + traces)
@@ -450,8 +416,7 @@ The compatibility floor for the source is **SigNoz v0.87.0**, where
 `discover_trace_fields`, and `read_trace_spans` to Chat and Analyze. Add an OSS
 `signoz` logs source to contribute `discover_log_fields` and
 `read_log_records`. These six capability names are intentionally independent of
-the provider. They do not populate the separate Prometheus/Tempo
-`query_metrics` or `query_traces` tools.
+the provider. They do not create generic Prometheus/Tempo query tools.
 
 **No operator-authored queries.** SigNoz's v5 API speaks filter expressions, not
 PromQL/TraceQL, so these sources discover their own watch-set instead of
@@ -507,7 +472,7 @@ metrics-source/
 │   ├── agent_sources.traces.yaml   # + traces source (traces overlay only)
 │   ├── agent_sources.signoz.yaml   # signoz_metrics + signoz_traces (signoz overlay only)
 │   └── agent_sources.cloudwatch.yaml # CloudWatch metrics source (cloudwatch compose only)
-│   #  NOTE: no tools.yaml — sources contribute their matching read tools
+│   #  NOTE: no tools.yaml — licensed sources contribute native discover/read tools
 ├── prometheus/
 │   └── prometheus.yml              # scrapes the pushgateway (honor_labels: true)
 ├── tempo/
@@ -535,6 +500,6 @@ docker compose -f docker-compose.cloudwatch.yml down -v
 
 ## Reference
 
-- Enterprise metrics & SRE flow (operator-facing): [../../src/enterprise/metrics.md](../../src/enterprise/metrics.md)
-- [Metrics & traces docs](https://docs.versusincident.com/#/agent/data-sources/metrics-traces)
+- Enterprise metrics reference: [Metrics overview](../../src/enterprise/metrics/overview.md)
+- Enterprise trace reference: [Traces](../../src/enterprise/traces.md)
 

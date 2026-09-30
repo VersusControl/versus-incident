@@ -154,7 +154,7 @@ func TestAgentConfigElasticsearchSourceExposesTieBreakerWithoutCredentials(t *te
 			Index: "logs-*", TimeField: "@timestamp", TieBreakerField: "trace.id", MessageField: "message",
 		},
 	}, {
-		Name: "default-tie", Type: "elasticsearch", Enable: true,
+		Name: "time-only", Type: "elasticsearch", Enable: true,
 		Elasticsearch: config.AgentElasticsearchSourceConfig{Index: "audit-*"},
 	}}
 	t.Cleanup(func() { cfg.Agent.Sources = previousSources })
@@ -174,8 +174,8 @@ func TestAgentConfigElasticsearchSourceExposesTieBreakerWithoutCredentials(t *te
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if len(body.Sources) != 2 || body.Sources[0].Details["tie_breaker_field"] != "trace.id" || body.Sources[1].Details["tie_breaker_field"] != "event.id" {
-		t.Fatalf("sources = %#v, want configured and effective-default tie_breaker_field values", body.Sources)
+	if len(body.Sources) != 2 || body.Sources[0].Details["tie_breaker_field"] != "trace.id" || body.Sources[1].Details["tie_breaker_field"] != "" {
+		t.Fatalf("sources = %#v, want the configured tie_breaker_field and empty when unset", body.Sources)
 	}
 	encoded, err := json.Marshal(body.Sources[0].Details)
 	if err != nil {

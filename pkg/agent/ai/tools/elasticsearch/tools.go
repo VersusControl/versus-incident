@@ -205,6 +205,9 @@ func safeToolError(err error) error {
 	if errors.Is(err, elasticsearchapp.ErrResponseTooLarge) {
 		return core.NewToolError(core.ToolErrorBackend, "log response exceeded its safe bound; narrow the configured index scope or query", err)
 	}
+	if errors.Is(err, elasticsearchapp.ErrShardFailure) {
+		return core.NewToolError(core.ToolErrorBackend, "log search failed on one or more shards; check that query and sort fields are mapped in the index", err)
+	}
 	return core.NewToolError(core.ToolErrorBackend, "log read failed", err)
 }
 

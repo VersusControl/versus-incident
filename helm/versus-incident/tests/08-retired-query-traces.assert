@@ -1,0 +1,4 @@
+kind: ConfigMap
+!REMOVE agent.tools
+!licensed Enterprise metric or trace source
+!migration/

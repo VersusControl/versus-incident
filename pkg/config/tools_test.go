@@ -73,6 +73,46 @@ func TestLoadToolsFile(t *testing.T) {
 	}
 }
 
+func TestUnknownToolPropertiesAreIgnored(t *testing.T) {
+	for _, name := range []string{"query_metrics", "query_traces", "unrecognized_tool"} {
+		for _, location := range []string{"inline", "tools.yaml"} {
+			t.Run(location+"/"+name, func(t *testing.T) {
+				dir := t.TempDir()
+				configPath := filepath.Join(dir, "config.yaml")
+				body := "tools:\n  tool_timeout: 37s\n  " + name + ":\n    unexpected:\n      nested: value\n"
+				if location == "inline" {
+					body = "agent:\n  " + strings.ReplaceAll(body, "\n", "\n  ")
+				} else {
+					if err := os.WriteFile(filepath.Join(dir, "tools.yaml"), []byte(body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					body = "agent: {}\n"
+				}
+				if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				loaded, err := loadConfigFromPath(configPath)
+				if err != nil {
+					t.Fatalf("load config: %v", err)
+				}
+				if loaded.Agent.Tools.ToolTimeout != "37s" {
+					t.Fatalf("tool_timeout = %q, want 37s", loaded.Agent.Tools.ToolTimeout)
+				}
+			})
+		}
+	}
+}
+
+func TestLoadToolsFileRejectsMalformedKnownTool(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tools.yaml")
+	if err := os.WriteFile(path, []byte("tools:\n  kubernetes:\n    auth: [invalid]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadToolsFile(path); err == nil {
+		t.Fatal("malformed known tool accepted")
+	}
+}
+
 // TestLoadToolsFile_DescribeDependencies asserts the tools.yaml loader
 // parses the describe_dependencies service-dependency graph.
 func TestLoadToolsFile_DescribeDependencies(t *testing.T) {

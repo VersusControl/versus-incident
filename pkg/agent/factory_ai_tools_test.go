@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"slices"
 	"strings"
@@ -11,16 +14,33 @@ import (
 	"time"
 
 	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
+	cloudwatchlogtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/cloudwatchlogs"
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
+	graylogtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/graylog"
+	lokitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/loki"
+	signoztools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/signoz"
+	splunktools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/splunk"
 	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
 	"github.com/VersusControl/versus-incident/pkg/baseline"
+	cloudwatchlogapp "github.com/VersusControl/versus-incident/pkg/cloudwatchlogs"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	graylogapp "github.com/VersusControl/versus-incident/pkg/graylog"
+	lokiapp "github.com/VersusControl/versus-incident/pkg/loki"
 	"github.com/VersusControl/versus-incident/pkg/signalsources"
+	signozapp "github.com/VersusControl/versus-incident/pkg/signoz"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 )
+
+type cloudWatchLogRoutingAPI struct{ calls int }
+
+func (api *cloudWatchLogRoutingAPI) FilterLogEvents(context.Context, *cloudwatchlogs.FilterLogEventsInput, ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.FilterLogEventsOutput, error) {
+	api.calls++
+	return &cloudwatchlogs.FilterLogEventsOutput{}, nil
+}
 
 type registrationHealth struct{}
 
@@ -36,7 +56,7 @@ func (provider factoryBaselineProviderFunc) DescribeBaselines(ctx context.Contex
 
 func TestBuildAnalyzeToolsPreservesBaseOrder(t *testing.T) {
 	catalog, store := newBuildCatalog(t)
-	tools := buildAnalyzeTools(store, tenancy.DefaultOrgScope(), newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	tools := buildAnalyzeTools(store, tenancy.DefaultOrgScope(), newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, nil)
 	want := []string{"get_incident", "get_pattern", "get_service", "get_system_overview", "list_services", "list_capabilities", "get_alert_decision", "search_incidents", "list_patterns", "list_analyses"}
 	if len(tools) != len(want) {
 		t.Fatalf("tools = %d, want %d", len(tools), len(want))
@@ -55,7 +75,7 @@ func TestBuildAnalyzeToolsPreservesBaseOrder(t *testing.T) {
 
 func TestBuildAnalyzeToolsRegistersAllDiscoveryTools(t *testing.T) {
 	catalog, store := newBuildCatalog(t)
-	tools := buildAnalyzeTools(store, tenancy.DefaultOrgScope(), newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, nil, nil, registrationHealth{})
+	tools := buildAnalyzeTools(store, tenancy.DefaultOrgScope(), newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, registrationHealth{})
 	want := []string{"get_incident", "get_pattern", "get_service", "get_system_overview", "list_services", "get_detection_health", "list_capabilities", "get_alert_decision", "search_incidents", "list_patterns", "list_analyses"}
 
 	registered := make(map[string]bool, len(tools))
@@ -71,7 +91,7 @@ func TestBuildAnalyzeToolsRegistersAllDiscoveryTools(t *testing.T) {
 
 func TestBuildAnalyzeToolsRuntimeCatalogContract(t *testing.T) {
 	catalog, store := newBuildCatalog(t)
-	for _, tool := range buildAnalyzeTools(store, tenancy.DefaultOrgScope(), newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, nil, nil, registrationHealth{}) {
+	for _, tool := range buildAnalyzeTools(store, tenancy.DefaultOrgScope(), newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, registrationHealth{}) {
 		if _, ok := aitools.Lookup(tool.Name()); !ok {
 			t.Errorf("runtime tool %q is absent from availability catalog", tool.Name())
 		}
@@ -89,10 +109,483 @@ func TestBuildSigNozToolSourcesUsesOnlyOSSLogType(t *testing.T) {
 	}
 }
 
+func TestLokiAndSigNozLogCapabilitiesRouteForChatAndAnalyze(t *testing.T) {
+	cloudAPI := &cloudWatchLogRoutingAPI{}
+	cloudReader, err := cloudwatchlogapp.NewReader(cloudAPI, cloudwatchlogapp.Scope{Region: "us-east-1", LogGroupName: "/prod"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lokiServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/loki/api/v1/query_range" {
+			t.Errorf("unexpected Loki path: %s", request.URL.Path)
+		}
+		fmt.Fprint(writer, `{"status":"success","data":{"resultType":"streams","result":[]}}`)
+	}))
+	defer lokiServer.Close()
+	lokiSources, errs := buildLokiToolSources([]config.AgentSourceConfig{
+		{Name: "loki-a", Type: "loki", Enable: true, Loki: config.AgentLokiSourceConfig{Address: lokiServer.URL, Query: `{service="api"}`}},
+		{Name: "off", Type: "loki", Enable: false},
+	}, nil)
+	if len(errs) != 0 || len(lokiSources) != 1 {
+		t.Fatalf("Loki sources=%v errors=%v", lokiSources, errs)
+	}
+	graylogServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("filter") != "streams:stream-1" {
+			t.Errorf("Graylog request missing stream scope: %s", request.URL.RawQuery)
+		}
+		fmt.Fprint(writer, `{"total_results":0,"messages":[]}`)
+	}))
+	defer graylogServer.Close()
+	graylogSources, graylogErrs := buildGraylogToolSources([]config.AgentSourceConfig{
+		{Name: "graylog-a", Type: "graylog", Enable: true, Graylog: config.AgentGraylogSourceConfig{Address: graylogServer.URL, Query: "service:api", StreamID: "stream-1"}},
+		{Name: "graylog-unsupported", Type: "graylog", Enable: true, Graylog: config.AgentGraylogSourceConfig{Address: graylogServer.URL, Query: "service:api OR service:worker"}},
+		{Name: "graylog-off", Type: "graylog", Enable: false},
+	}, nil)
+	if len(graylogSources) != 1 || len(graylogErrs) != 1 {
+		t.Fatalf("Graylog sources=%v errors=%v", graylogSources, graylogErrs)
+	}
+	splunkServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodPost:
+			fmt.Fprint(writer, `{"sid":"123.456"}`)
+		case request.Method == http.MethodDelete:
+			writer.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(request.URL.Path, "/results"):
+			fmt.Fprint(writer, `{"results":[]}`)
+		default:
+			fmt.Fprint(writer, `{"entry":[{"content":{"isDone":true}}]}`)
+		}
+	}))
+	defer splunkServer.Close()
+	splunkSources, splunkErrs := buildSplunkToolSources([]config.AgentSourceConfig{
+		{Name: "splunk-a", Type: "splunk", Enable: true, Splunk: config.AgentSplunkSourceConfig{Address: splunkServer.URL, Search: "index=main"}},
+		{Name: "splunk-unsupported", Type: "splunk", Enable: true, Splunk: config.AgentSplunkSourceConfig{Address: splunkServer.URL, Search: "index=main | stats count"}},
+		{Name: "splunk-off", Type: "splunk", Enable: false},
+	}, nil)
+	if len(splunkSources) != 1 || len(splunkErrs) != 1 {
+		t.Fatalf("Splunk sources=%v errors=%v", splunkSources, splunkErrs)
+	}
+	signozServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(writer, `{"data":{"data":{"results":[]}}}`)
+	}))
+	defer signozServer.Close()
+	signozService, err := signozapp.NewService(signozapp.Config{Address: signozServer.URL, APIKey: "test-api-key", AllowLoopback: true}, signozapp.ToolPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := combineLogTools(signoztools.New([]signoztools.Source{{Name: "signoz-a", Kind: signozapp.SignalLogs, Service: signozService}}), lokitools.New(lokiSources), graylogtools.New(graylogSources), splunktools.New(splunkSources), cloudwatchlogtools.New([]cloudwatchlogtools.Source{{Name: "cloud-a", Reader: cloudReader}}))
+	if len(runtime) != 2 {
+		t.Fatalf("duplicate log tools: %v", toolNamesForTest(runtime))
+	}
+	for _, candidate := range runtime {
+		want := map[string]string{
+			"discover_log_fields": "Discover bounded log fields within the selected source's supported scope; available arguments depend on the source.",
+			"read_log_records":    "Read bounded log records from the selected source; available filters depend on the source.",
+		}[candidate.Name()]
+		if candidate.Description() != want {
+			t.Errorf("%s description = %q, want %q", candidate.Name(), candidate.Description(), want)
+		}
+	}
+	var read core.Tool
+	for _, candidate := range runtime {
+		if candidate.Name() == "read_log_records" {
+			read = candidate
+		}
+	}
+	if read == nil || !slices.Equal(read.(core.SourceRoutedTool).SourceNames(), []string{"cloud-a", "graylog-a", "loki-a", "signoz-a", "splunk-a"}) {
+		t.Fatalf("route = %v", read)
+	}
+	if required, ok := read.ArgsSchema()["required"].([]string); ok && slices.Contains(required, "service") {
+		t.Fatalf("Loki label-only reads blocked by merged schema: %v", required)
+	}
+	for _, candidate := range runtime {
+		properties := candidate.ArgsSchema()["properties"].(map[string]any)
+		offset := properties["offset"].(map[string]any)
+		wantMaximum := any(lokiapp.MaximumOffset)
+		if candidate.Name() == "read_log_records" {
+			wantMaximum = signozapp.MaximumOffset
+		}
+		if offset["minimum"] != 0 || offset["maximum"] != wantMaximum || offset["description"] != "Interpretation and valid range depend on the selected source." {
+			t.Errorf("%s merged offset = %v", candidate.Name(), offset)
+		}
+		search := properties["search"].(map[string]any)
+		if search["description"] != "Interpretation and valid range depend on the selected source." {
+			t.Errorf("%s merged search = %v", candidate.Name(), search)
+		}
+	}
+	snapshot := aitools.BindRuntimeCapabilities(aitools.Snapshot{DataSources: map[string]aitools.DependencyStatus{"logs": {Configured: true}}}, runtime)
+	if got := snapshot.Capabilities["read_log_records"].Count; got != 5 {
+		t.Fatalf("source count = %d", got)
+	}
+	manager := aitools.NewManager(storage.NewMemory())
+	allowed := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
+	for _, kind := range []aitools.AgentKind{aitools.AgentAnalyze, aitools.AgentChat} {
+		filtered, err := manager.Filter(tenancy.DefaultOrgScope(), kind, runtime, snapshot)
+		if err != nil || len(filtered) != 2 {
+			t.Fatalf("%s: %v, %v", kind, toolNamesForTest(filtered), err)
+		}
+		for _, candidate := range filtered {
+			if candidate.Name() == "read_log_records" {
+				read = candidate
+			}
+		}
+		if read.(core.ContextAuthorizedTool).AuthorizedTool(context.Background()) != nil {
+			t.Fatal("catalog permission bypass")
+		}
+		for _, source := range []string{"cloud-a", "graylog-a", "loki-a", "signoz-a", "splunk-a"} {
+			arguments := `{"source":"` + source + `","service":"api"}`
+			switch source {
+			case "graylog-a":
+				arguments = `{"source":"graylog-a","filters":{"service":"api"}}`
+			case "splunk-a":
+				arguments = `{"source":"splunk-a","filters":{"host":"node"}}`
+			case "cloud-a":
+				arguments = `{"source":"cloud-a"}`
+			}
+			result, err := read.Invoke(allowed, json.RawMessage(arguments))
+			if err != nil || result.Data["source"] != source {
+				t.Fatalf("%s: %+v, %v", source, result, err)
+			}
+		}
+		if cloudAPI.calls != 1 {
+			t.Fatalf("CloudWatch calls after %s = %d, want 1", kind, cloudAPI.calls)
+		}
+		cloudAPI.calls = 0
+		for _, args := range []string{`{"service":"api"}`, `{"source":"absent","service":"api"}`, `{"source":"signoz-a","labels":{"service":"api"}}`, `{"source":"loki-a","severity":"critical"}`, `{"source":"graylog-a","labels":{"service":"api"}}`, `{"source":"splunk-a","filters":{"index":"other"}}`} {
+			if _, err := read.Invoke(allowed, json.RawMessage(args)); err == nil {
+				t.Fatalf("source fallthrough: %s", args)
+			}
+		}
+		for _, args := range []string{`{"source":"graylog-a","offset":100}`, `{"source":"graylog-a","search":"error*"}`} {
+			if _, err := read.Invoke(allowed, json.RawMessage(args)); err == nil {
+				t.Fatalf("Graylog accepted invalid provider argument: %s", args)
+			}
+		}
+	}
+}
+
+func TestSplunkSourceNamesAndUnsupportedScope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("source construction must not contact Splunk")
+	}))
+	defer server.Close()
+	secret := "private-splunk-token"
+	sources, errs := buildSplunkToolSources([]config.AgentSourceConfig{
+		{Name: "safe-source", Type: "splunk", Enable: true, Splunk: config.AgentSplunkSourceConfig{Address: server.URL, Search: "index=main", Token: secret}},
+		{Name: "admin-ops", Type: "splunk", Enable: true, Splunk: config.AgentSplunkSourceConfig{Address: server.URL, Search: "index=main", Owner: "admin", App: "ops"}},
+		{Name: "private-splunk-token", Type: "splunk", Enable: true, Splunk: config.AgentSplunkSourceConfig{Address: server.URL, Search: "index=main"}},
+		{Name: "invalid-scope", Type: "splunk", Enable: true, Splunk: config.AgentSplunkSourceConfig{Address: server.URL, Search: "index=main | stats count"}},
+		{Name: "disabled", Type: "splunk", Enable: false},
+	}, nil)
+	if len(sources) != 2 || sources[0].Name != "admin-ops" || sources[1].Name != "safe-source" || len(errs) != 2 {
+		t.Fatalf("sources=%v errs=%v", sources, errs)
+	}
+	for _, err := range errs {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("secret in warning: %v", err)
+		}
+	}
+}
+
+func TestUnsupportedSplunkToolScopePreservesStandingSource(t *testing.T) {
+	configured := config.AgentSourceConfig{
+		Name: "standing", Type: "splunk", Enable: true,
+		Splunk: config.AgentSplunkSourceConfig{Address: "http://localhost:8089", Search: "index=main | stats count"},
+	}
+	standing, buildErrs := BuildSources(config.AgentConfig{Sources: []config.AgentSourceConfig{configured}})
+	tools, toolErrs := buildSplunkToolSources([]config.AgentSourceConfig{configured}, nil)
+	if len(buildErrs) != 0 || len(standing) != 1 || standing[0].Name() != "splunk:standing" || len(tools) != 0 || len(toolErrs) != 1 {
+		t.Fatalf("standing=%v buildErrs=%v tools=%v toolErrs=%v", standing, buildErrs, tools, toolErrs)
+	}
+}
+
+func TestAmbiguousLogSourceOmitsCapability(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	signozService, err := signozapp.NewService(signozapp.Config{Address: server.URL, APIKey: "test-api-key", AllowLoopback: true}, signozapp.ToolPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lokiService, err := lokiapp.NewService(config.AgentLokiSourceConfig{Address: server.URL, Query: `{app="api"}`}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := combineLogTools(signoztools.New([]signoztools.Source{{Name: "duplicate", Kind: signozapp.SignalLogs, Service: signozService}}), lokitools.New([]lokitools.Source{{Name: "duplicate", Service: lokiService}}))
+	if len(combined) != 0 {
+		t.Fatalf("ambiguous source exposed capability: %v", toolNamesForTest(combined))
+	}
+	graylogService, err := graylogapp.NewService(config.AgentGraylogSourceConfig{Address: server.URL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined = combineLogTools(lokitools.New([]lokitools.Source{{Name: "duplicate", Service: lokiService}}), graylogtools.New([]graylogtools.Source{{Name: "duplicate", Service: graylogService}}))
+	if len(combined) != 0 {
+		t.Fatalf("Graylog duplicate exposed capability: %v", toolNamesForTest(combined))
+	}
+	graylogSources, errs := buildGraylogToolSources([]config.AgentSourceConfig{
+		{Name: "repeated", Type: "graylog", Enable: true, Graylog: config.AgentGraylogSourceConfig{Address: server.URL}},
+		{Name: "repeated", Type: "graylog", Enable: true, Graylog: config.AgentGraylogSourceConfig{Address: server.URL}},
+	}, nil)
+	if len(graylogSources) != 0 || len(errs) == 0 {
+		t.Fatalf("duplicate Graylog source remained active: %v, %v", graylogSources, errs)
+	}
+}
+
+type nameRedactor struct{}
+
+func (nameRedactor) Scrub(value string) string {
+	return strings.ReplaceAll(value, "sensitive", "[redacted]")
+}
+
+func TestGraylogToolSourceNamesStaySafe(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(writer, `{"total_results":1,"messages":[{"message":{"message":"ok"}}]}`)
+	}))
+	defer server.Close()
+	configFor := func(name string) config.AgentSourceConfig {
+		return config.AgentSourceConfig{Name: name, Type: "graylog", Enable: true, Graylog: config.AgentGraylogSourceConfig{Address: server.URL, APIToken: "token123"}}
+	}
+	sources, errs := buildGraylogToolSources([]config.AgentSourceConfig{
+		configFor("source-token123"), configFor("sensitive-name"),
+		configFor("source with spaces"), configFor("graylog-prod_1"),
+	}, nameRedactor{})
+	if len(sources) != 1 || sources[0].Name != "graylog-prod_1" || len(errs) != 3 {
+		t.Fatalf("sources=%v errors=%v", sources, errs)
+	}
+	for _, err := range errs {
+		if strings.Contains(err.Error(), "token123") || strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), strings.Repeat("a", 81)) {
+			t.Fatalf("source name leaked in error: %v", err)
+		}
+	}
+	tools := graylogtools.New(sources)
+	allowed := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
+	for _, tool := range tools {
+		encoded, err := json.Marshal(tool.ArgsSchema())
+		if err != nil || strings.Contains(string(encoded), "token123") || strings.Contains(string(encoded), "sensitive") || strings.Contains(string(encoded), strings.Repeat("a", 81)) {
+			t.Fatalf("unsafe schema: %s, %v", encoded, err)
+		}
+		result, err := tool.Invoke(allowed, json.RawMessage(`{"source":"graylog-prod_1"}`))
+		if err != nil || result.Data["source"] != "graylog-prod_1" {
+			t.Fatalf("valid source result = %+v, %v", result, err)
+		}
+	}
+}
+
+func TestGraylogToolSourceNamesRejectOtherSourceCredentialsAndFragments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(writer, `{"total_results":0,"messages":[]}`)
+	}))
+	defer server.Close()
+	graylog := func(name, token string) config.AgentSourceConfig {
+		return config.AgentSourceConfig{Name: name, Type: "graylog", Enable: true, Graylog: config.AgentGraylogSourceConfig{Address: server.URL, APIToken: token}}
+	}
+	secrets := []string{
+		"otherGraylogToken123", "lokiBearerToken123", "signozApiKey123",
+		"elasticApiKey123", "prometheusApiKey123", "tempoAuthorization123",
+	}
+	sources, errs := buildGraylogToolSources([]config.AgentSourceConfig{
+		graylog(secrets[0], "own-token"),
+		graylog("other-graylog", secrets[0]),
+		graylog("raylogToken1", "ownGraylogToken123"),
+		graylog("loki-"+secrets[1], ""),
+		graylog("signoz-"+secrets[2], ""),
+		graylog("elastic-"+secrets[3], ""),
+		graylog("prom-"+secrets[4], ""),
+		graylog("tempo-"+secrets[5], ""),
+		graylog("standing", ""),
+		graylog("api", ""),
+		{Type: "loki", Loki: config.AgentLokiSourceConfig{BearerToken: secrets[1]}},
+		{Type: "signoz", Signoz: config.AgentSignozSourceConfig{APIKey: secrets[2]}},
+		{Type: "elasticsearch", Elasticsearch: config.AgentElasticsearchSourceConfig{APIKey: secrets[3]}},
+		{Type: "prometheus", Options: map[string]interface{}{"auth": map[string]interface{}{"api_key": secrets[4]}}},
+		{Type: "traces", Options: map[string]interface{}{"headers": map[string]interface{}{"Authorization": secrets[5]}}},
+	}, nil)
+	if len(sources) != 3 || sources[0].Name != "api" || sources[1].Name != "other-graylog" || sources[2].Name != "standing" || len(errs) != 7 {
+		t.Fatalf("accepted names or error count unexpected: %d, %d", len(sources), len(errs))
+	}
+	for _, constructionErr := range errs {
+		for _, secret := range secrets {
+			if strings.Contains(constructionErr.Error(), secret) || strings.Contains(constructionErr.Error(), "raylogToken1") {
+				t.Fatal("construction error exposed credential material")
+			}
+		}
+	}
+	allowed := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
+	for _, tool := range graylogtools.New(sources) {
+		schema, err := json.Marshal(tool.ArgsSchema())
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := tool.Invoke(allowed, json.RawMessage(`{"source":"standing"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		encodedResult, err := json.Marshal(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, secret := range secrets {
+			if strings.Contains(string(schema), secret) || strings.Contains(string(encodedResult), secret) || strings.Contains(string(schema), "raylogToken1") || strings.Contains(string(encodedResult), "raylogToken1") {
+				t.Fatal("tool schema or result exposed credential material")
+			}
+		}
+	}
+}
+
+func TestGraylogToolSourceNamesBoundOptionCredentialScan(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(writer, `{"total_results":0,"messages":[]}`)
+	}))
+	defer server.Close()
+	graylog := func(name string) config.AgentSourceConfig {
+		return config.AgentSourceConfig{Name: name, Type: "graylog", Enable: true, Graylog: config.AgentGraylogSourceConfig{Address: server.URL}}
+	}
+	cycle := map[string]interface{}{}
+	cycle["nested"] = []interface{}{cycle}
+	deep := interface{}("deepSecret123")
+	for range 9 {
+		deep = []interface{}{deep}
+	}
+	wide := make([]interface{}, 1025)
+	for index := range wide {
+		wide[index] = index
+	}
+	for _, test := range []struct {
+		name    string
+		options map[string]interface{}
+	}{
+		{"cycle", cycle},
+		{"depth", map[string]interface{}{"api_key": deep}},
+		{"work", map[string]interface{}{"items": wide}},
+		{"unsupported", map[string]interface{}{"data": make(chan int)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sources, errs := buildGraylogToolSources([]config.AgentSourceConfig{graylog("safe-source"), {Type: "other", Options: test.options}}, nil)
+			if len(sources) != 0 || len(errs) == 0 || len(graylogtools.New(sources)) != 0 {
+				t.Fatalf("unsafe options registered Graylog tools: %d sources, %d errors", len(sources), len(errs))
+			}
+		})
+	}
+	const fragment = "FragmentXYZ"
+	const nestedSecret = "nestedCredential123"
+	sources, errs := buildGraylogToolSources([]config.AgentSourceConfig{
+		graylog("prod-" + fragment), graylog(nestedSecret), graylog("abc-safe"), graylog("safe-source"),
+		{Type: "other", Enable: false, Options: map[string]interface{}{
+			"api_key":  "prefix" + fragment + "suffix",
+			"password": []interface{}{[]interface{}{nestedSecret}},
+			"other":    "xxabcxx",
+		}},
+	}, nil)
+	if len(sources) != 2 || sources[0].Name != "abc-safe" || sources[1].Name != "safe-source" || len(errs) != 2 {
+		t.Fatalf("credential name filtering: %d sources, %d errors", len(sources), len(errs))
+	}
+	allowed := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
+	for _, tool := range graylogtools.New(sources) {
+		schema, err := json.Marshal(tool.ArgsSchema())
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := tool.Invoke(allowed, json.RawMessage(`{"source":"safe-source"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		encodedResult, err := json.Marshal(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{fragment, nestedSecret, "prod-" + fragment, "prefix" + fragment + "suffix"} {
+			if strings.Contains(string(schema), forbidden) || strings.Contains(string(encodedResult), forbidden) {
+				t.Fatal("rejected name exposed in tool schema or result")
+			}
+		}
+	}
+	for _, constructionErr := range errs {
+		if strings.Contains(constructionErr.Error(), fragment) || strings.Contains(constructionErr.Error(), nestedSecret) {
+			t.Fatal("construction error exposed credential material")
+		}
+	}
+}
+
+func TestGraylogToolSourceNamesGlobalWorkBudget(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(writer, `{"total_results":0,"messages":[]}`)
+	}))
+	defer server.Close()
+	const secret = "privateToken123"
+	graylog := config.AgentSourceConfig{Name: "safe-source", Type: "graylog", Enable: true, Graylog: config.AgentGraylogSourceConfig{Address: server.URL, APIToken: secret}}
+	other := config.AgentSourceConfig{Name: "ordinary", Type: "loki", Enable: true, Loki: config.AgentLokiSourceConfig{Address: server.URL, Query: `{service="api"}`}}
+
+	tooManySources := append([]config.AgentSourceConfig{graylog, other}, make([]config.AgentSourceConfig, 127)...)
+	longName := []config.AgentSourceConfig{graylog, {Name: strings.Repeat("a", 81), Type: "graylog", Enable: true, Graylog: graylog.Graylog}, other}
+	oversizedName := []config.AgentSourceConfig{graylog, {Name: strings.Repeat(" ", 2<<20) + "safe-source", Type: "graylog", Enable: true, Graylog: graylog.Graylog}, other}
+	largeCredential := []config.AgentSourceConfig{graylog, {Type: "other", Options: map[string]interface{}{"api_key": strings.Repeat("x", 64*1024) + secret}}, other}
+	longOptionKey := []config.AgentSourceConfig{graylog, {Type: "other", Options: map[string]interface{}{strings.Repeat("x", 2<<20): "value"}}, other}
+	largeOptionScalar := []config.AgentSourceConfig{graylog, {Type: "other", Options: map[string]interface{}{"label": strings.Repeat("x", 2<<20) + secret}}, other}
+	cumulativeOptionScalars := []config.AgentSourceConfig{graylog, {Type: "other", Options: map[string]interface{}{"labels": []string{strings.Repeat("x", 40*1024), strings.Repeat("y", 40*1024)}}}, other}
+	wideOptions := make([]config.AgentSourceConfig, 8)
+	wideOptions[0] = graylog
+	for index := 1; index < len(wideOptions); index++ {
+		wideOptions[index] = config.AgentSourceConfig{Type: "other", Enable: false, Options: map[string]interface{}{"items": make([]interface{}, 700)}}
+	}
+	tooManyNames := make([]config.AgentSourceConfig, 65)
+	for index := range tooManyNames {
+		tooManyNames[index] = graylog
+		tooManyNames[index].Name = fmt.Sprintf("graylog-%d", index)
+	}
+	for _, test := range []struct {
+		name    string
+		sources []config.AgentSourceConfig
+	}{
+		{"source count", tooManySources},
+		{"name length", longName},
+		{"raw source name", oversizedName},
+		{"credential bytes", largeCredential},
+		{"option key bytes", longOptionKey},
+		{"option scalar bytes", largeOptionScalar},
+		{"cumulative option scalars", cumulativeOptionScalars},
+		{"cumulative option nodes", wideOptions},
+		{"eligible names", tooManyNames},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sources, errs := buildGraylogToolSources(test.sources, nil)
+			if len(sources) != 0 || len(graylogtools.New(sources)) != 0 || len(errs) != 1 {
+				t.Fatalf("over-budget Graylog registration: %d sources, %d errors", len(sources), len(errs))
+			}
+			if errs[0].Error() != "Graylog tool source configuration exceeds safety limits" {
+				t.Fatal("budget error exposed configuration details")
+			}
+		})
+	}
+
+	valid, errs := buildGraylogToolSources([]config.AgentSourceConfig{graylog, other}, nil)
+	if len(valid) != 1 || len(errs) != 0 {
+		t.Fatalf("ordinary Graylog source rejected: %d sources, %d errors", len(valid), len(errs))
+	}
+	lokiSources, lokiErrs := buildLokiToolSources(tooManySources, nil)
+	if len(lokiSources) != 1 || len(lokiErrs) != 0 || len(lokitools.New(lokiSources)) == 0 {
+		t.Fatalf("unrelated Loki registration changed: %d sources, %d errors", len(lokiSources), len(lokiErrs))
+	}
+	allowed := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
+	for _, tool := range graylogtools.New(valid) {
+		schema, err := json.Marshal(tool.ArgsSchema())
+		if err != nil || strings.Contains(string(schema), secret) {
+			t.Fatalf("Graylog schema exposed credential: %v", err)
+		}
+		result, err := tool.Invoke(allowed, json.RawMessage(`{"source":"safe-source"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(result)
+		if err != nil || strings.Contains(string(encoded), secret) {
+			t.Fatalf("Graylog result exposed credential: %v", err)
+		}
+	}
+}
+
 func TestToolRegistrationFiltersChatAndAnalyzeIndependently(t *testing.T) {
 	catalog, store := newBuildCatalog(t)
 	scope := tenancy.DefaultOrgScope()
-	runtime := buildAnalyzeTools(store, scope, newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	runtime := buildAnalyzeTools(store, scope, newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, nil)
 	manager := aitools.NewManager(store)
 	if _, err := manager.SetEnabled(scope, aitools.AgentChat, "get_incident", false); err != nil {
 		t.Fatal(err)
@@ -240,7 +733,7 @@ func TestRuntimeSnapshotDistinguishesConfiguredFailureFromMissing(t *testing.T) 
 		"metrics": {Configured: false, Name: "Metric data source"},
 		"traces":  {Configured: false, Name: "Trace data source"},
 	}, Integrations: map[string]aitools.DependencyStatus{}, Capabilities: map[string]aitools.DependencyStatus{}}
-	snapshot := buildToolAvailabilitySnapshot(configured, nil, nil, nil, nil, nil, nil, nil, versustools.DetectionHealthSnapshot{})
+	snapshot := buildToolAvailabilitySnapshot(configured, nil, nil, nil, nil, nil, versustools.DetectionHealthSnapshot{})
 	logs := aitools.Resolve(aitools.Requirement{Kind: aitools.RequirementDataSource, SignalKind: "logs"}, snapshot, true)
 	metrics := aitools.Resolve(aitools.Requirement{Kind: aitools.RequirementDataSource, SignalKind: "metrics"}, snapshot, true)
 	if logs.State != aitools.StateUnhealthy || logs.Health != "configuration" {
@@ -251,15 +744,16 @@ func TestRuntimeSnapshotDistinguishesConfiguredFailureFromMissing(t *testing.T) 
 	}
 }
 
-func TestRuntimeSnapshotUsesConstructedReadersBeforeFirstObservation(t *testing.T) {
+func TestRuntimeSnapshotRequiresSourceNativeReadersBeforeFirstObservation(t *testing.T) {
 	configured := aitools.Snapshot{DataSources: map[string]aitools.DependencyStatus{
 		"logs":    {Configured: true, Name: "Log data source"},
 		"metrics": {Configured: true, Name: "Metric data source"},
 		"traces":  {Configured: true, Name: "Trace data source"},
 	}, Integrations: map[string]aitools.DependencyStatus{}, Capabilities: map[string]aitools.DependencyStatus{}}
-	snapshot := buildToolAvailabilitySnapshot(configured, &signalReaderAdapter{}, nil, nil, nil, nil, registrationMetricReader{}, registrationTraceReader{}, versustools.DetectionHealthSnapshot{})
+	snapshot := buildToolAvailabilitySnapshot(configured, &signalReaderAdapter{}, nil, nil, nil, nil, versustools.DetectionHealthSnapshot{})
 	for _, kind := range []string{"logs", "metrics", "traces"} {
-		if got := snapshot.DataSources[kind]; !got.Constructed || !got.Healthy || got.Health != "" {
+		got := snapshot.DataSources[kind]
+		if (kind == "logs" && (!got.Constructed || !got.Healthy)) || (kind != "logs" && got.Constructed) {
 			t.Errorf("unobserved %s health = %+v", kind, got)
 		}
 	}
@@ -289,7 +783,7 @@ func TestSourceKindHealthAggregatesAllUsableSources(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			snapshot := buildToolAvailabilitySnapshot(configured, &signalReaderAdapter{}, nil, nil, nil, nil, nil, nil, versustools.DetectionHealthSnapshot{Sources: test.sources})
+			snapshot := buildToolAvailabilitySnapshot(configured, &signalReaderAdapter{}, nil, nil, nil, nil, versustools.DetectionHealthSnapshot{Sources: test.sources})
 			got := snapshot.DataSources["logs"]
 			wantName := test.wantName
 			if wantName == "" {
@@ -297,59 +791,6 @@ func TestSourceKindHealthAggregatesAllUsableSources(t *testing.T) {
 			}
 			if got.Healthy != test.wantHealthy || got.Name != wantName || got.Health != test.wantClass {
 				t.Fatalf("status = %+v", got)
-			}
-		})
-	}
-}
-
-func TestConfiguredReadersResolveAndRegisterWithoutWorkerObservations(t *testing.T) {
-	tests := []struct {
-		name    string
-		cfg     config.AgentConfig
-		kind    string
-		tool    string
-		reader  commontools.SignalReader
-		metrics commontools.MetricReader
-		traces  commontools.TraceReader
-	}{
-		{
-			name: "OSS Prometheus reader without metric signal source", kind: "metrics", tool: "query_metrics",
-			cfg:     config.AgentConfig{Tools: config.ToolsConfig{QueryMetrics: config.QueryMetricsToolConfig{Prometheus: config.QueryMetricsPrometheusConfig{Address: "http://prometheus"}}}},
-			metrics: registrationMetricReader{},
-		},
-		{
-			name: "OSS Tempo reader without trace signal source", kind: "traces", tool: "query_traces",
-			cfg:    config.AgentConfig{Tools: config.ToolsConfig{QueryTraces: config.QueryTracesToolConfig{Tempo: config.QueryTracesTempoConfig{Address: "http://tempo"}}}},
-			traces: registrationTraceReader{},
-		},
-		{
-			name: "configured log source before first pull", kind: "logs", tool: "get_related_logs",
-			cfg:    config.AgentConfig{Sources: []config.AgentSourceConfig{{Name: "logs", Type: "file", Enable: true}}},
-			reader: &signalReaderAdapter{},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			configured := configuredToolAvailabilitySnapshot(test.cfg, nil)
-			snapshot := buildToolAvailabilitySnapshot(configured, test.reader, nil, nil, nil, nil, test.metrics, test.traces, versustools.DetectionHealthSnapshot{})
-			var runtimeTool core.Tool = settingsCompatibleTool{name: test.tool}
-			if test.metrics != nil {
-				runtimeTool = commontools.QueryMetrics{Reader: test.metrics}
-			}
-			if test.traces != nil {
-				runtimeTool = commontools.QueryTraces{Reader: test.traces}
-			}
-			runtime := []core.Tool{runtimeTool}
-			snapshot = aitools.BindRuntimeCapabilities(snapshot, runtime)
-			requirement := aitools.Requirement{Kind: aitools.RequirementDataSource, SignalKind: test.kind}
-			if got := aitools.Resolve(requirement, snapshot, true); got.State != aitools.StateAvailable {
-				t.Fatalf("resolution = %+v", got)
-			}
-			for _, agentKind := range []aitools.AgentKind{aitools.AgentChat, aitools.AgentAnalyze} {
-				filtered, err := aitools.NewManager(storage.NewMemory()).Filter(tenancy.DefaultOrgScope(), agentKind, runtime, snapshot)
-				if err != nil || len(filtered) != 1 || filtered[0].Name() != test.tool {
-					t.Fatalf("%s filtered = %+v, err = %v", agentKind, filtered, err)
-				}
 			}
 		})
 	}
@@ -377,8 +818,7 @@ func TestSpecializedRuntimeCapabilitiesResolveWithoutGenericReaders(t *testing.T
 		}
 		runtime = append(runtime, capabilityTestTool{settingsCompatibleTool: settingsCompatibleTool{name: name}, signalKind: metadata.Requirement.SignalKind, sourceCount: count})
 	}
-	runtime = append(runtime, settingsCompatibleTool{name: "query_metrics"}, settingsCompatibleTool{name: "query_traces"})
-	snapshot := buildToolAvailabilitySnapshot(configured, nil, nil, nil, nil, nil, nil, nil, versustools.DetectionHealthSnapshot{})
+	snapshot := buildToolAvailabilitySnapshot(configured, nil, nil, nil, nil, nil, versustools.DetectionHealthSnapshot{})
 	snapshot = aitools.BindRuntimeCapabilities(snapshot, runtime)
 	for _, kind := range []string{"logs", "metrics", "traces"} {
 		if got := snapshot.DataSources[kind]; !got.Constructed || !got.Healthy {
@@ -395,9 +835,8 @@ func TestSpecializedRuntimeCapabilitiesResolveWithoutGenericReaders(t *testing.T
 		}
 	}
 	for _, generic := range []string{"query_metrics", "query_traces"} {
-		metadata, _ := aitools.Lookup(generic)
-		if got := aitools.Resolve(metadata.Requirement, snapshot, true); got.State != aitools.StateUnhealthy {
-			t.Errorf("Resolve(%s) = %+v, want unhealthy", generic, got)
+		if _, ok := aitools.Lookup(generic); ok {
+			t.Errorf("retired tool %s remains in catalog", generic)
 		}
 	}
 	manager := aitools.NewManager(storage.NewMemory())
@@ -414,6 +853,67 @@ func TestSpecializedRuntimeCapabilitiesResolveWithoutGenericReaders(t *testing.T
 			if slices.Contains(got, generic) {
 				t.Errorf("%s capability unlocked generic tool %s", agentKind, generic)
 			}
+		}
+	}
+}
+
+func TestCloudWatchLogToolSourceRouting(t *testing.T) {
+	cloud := config.AgentSourceConfig{Name: "cloud", Type: "cloudwatchlogs", Enable: true, CloudWatchLogs: config.AgentCloudWatchLogsSourceConfig{Region: "us-east-1", LogGroupName: "/prod"}}
+	tools, errs := contributedTools(tenancy.DefaultOrgScope(), []config.AgentSourceConfig{cloud}, nil)
+	if len(errs) != 0 || len(tools) != 0 {
+		t.Fatalf("OSS CloudWatch source exposed native tools: %v %v", tools, errs)
+	}
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	api, err := cloudwatchlogapp.NewToolAPI(context.Background(), "us-east-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := cloudwatchlogapp.NewReader(api, cloudwatchlogapp.Scope{Region: "us-east-1", LogGroupName: "/prod"}, nil)
+	if err != nil || len(cloudwatchlogtools.New([]cloudwatchlogtools.Source{{Name: "cloud", Reader: reader}})) != 2 {
+		t.Fatalf("OSS CloudWatch adapter: %v", err)
+	}
+}
+
+func TestSourceReadCapabilitiesReflectConstructedLicensedReaders(t *testing.T) {
+	base := knowledgeCapabilities(tenancy.DefaultOrgScope(), nil, nil, nil, nil, nil, nil, nil, nil, ChatKnowledgeProviders{})
+	configured := aitools.Snapshot{DataSources: map[string]aitools.DependencyStatus{
+		"metrics": {Configured: true, Name: "Metric data source"},
+		"traces":  {Configured: true, Name: "Trace data source"},
+	}}
+	metric := capabilityTestTool{settingsCompatibleTool: settingsCompatibleTool{name: "read_metric_series"}, signalKind: "metrics", sourceCount: 1}
+	trace := capabilityTestTool{settingsCompatibleTool: settingsCompatibleTool{name: "read_trace_spans"}, signalKind: "traces", sourceCount: 1}
+	check := func(t *testing.T, runtime []core.Tool, wantMetrics, wantTraces bool) {
+		t.Helper()
+		statuses := sourceReadCapabilities(append([]versustools.CapabilityStatus(nil), base...), aitools.BindRuntimeCapabilities(configured, runtime), runtime)
+		for _, status := range statuses {
+			if status.Name == "metrics" && (status.Configured != wantMetrics || (status.Available == versustools.CapabilityStatusTrue) != wantMetrics) {
+				t.Fatalf("metrics = %+v, want available=%v", status, wantMetrics)
+			}
+			if status.Name == "traces" && (status.Configured != wantTraces || (status.Available == versustools.CapabilityStatusTrue) != wantTraces) {
+				t.Fatalf("traces = %+v, want available=%v", status, wantTraces)
+			}
+		}
+	}
+	check(t, nil, false, false)
+	check(t, []core.Tool{metric}, true, false)
+	check(t, []core.Tool{metric, trace}, true, true)
+	aitools.SetEntitlementResolver(func(requirement aitools.Requirement, _ aitools.DependencyStatus) aitools.EntitlementDecision {
+		return aitools.EntitlementDecision{Required: requirement.SignalKind == "metrics"}
+	})
+	t.Cleanup(func() { aitools.SetEntitlementResolver(nil) })
+	missing := sourceReadCapabilities(append([]versustools.CapabilityStatus(nil), base...), configured, nil)
+	for _, status := range missing {
+		if status.Name == "metrics" && (status.Licensed != versustools.CapabilityStatusFalse || status.Available != versustools.CapabilityStatusFalse) {
+			t.Fatalf("unlicensed absent metrics = %+v", status)
+		}
+	}
+	statuses := sourceReadCapabilities(append([]versustools.CapabilityStatus(nil), base...), aitools.BindRuntimeCapabilities(configured, []core.Tool{metric, trace}), []core.Tool{metric, trace})
+	for _, status := range statuses {
+		if status.Name == "metrics" && (status.Licensed != versustools.CapabilityStatusFalse || status.Available != versustools.CapabilityStatusFalse) {
+			t.Fatalf("unlicensed metrics = %+v", status)
+		}
+		if status.Name == "traces" && status.Available != versustools.CapabilityStatusTrue {
+			t.Fatalf("licensed traces = %+v", status)
 		}
 	}
 }
@@ -514,27 +1014,15 @@ func toolNamesForTest(tools []core.Tool) []string {
 	return names
 }
 
-type registrationMetricReader struct{}
-
-func (registrationMetricReader) QueryRange(context.Context, string, time.Time, time.Time) ([]commontools.MetricSeries, error) {
-	return nil, nil
-}
-
-type registrationTraceReader struct{}
-
-func (registrationTraceReader) QueryTraces(context.Context, string, string, time.Time, time.Time, int) ([]commontools.TraceSummary, error) {
-	return nil, nil
-}
-
 func TestMetricsObservationNeverUnlocksLogs(t *testing.T) {
 	configured := aitools.Snapshot{DataSources: map[string]aitools.DependencyStatus{
 		"logs":    {Configured: true, Name: "Log data source"},
 		"metrics": {Configured: true, Name: "Metric data source"},
 	}, Integrations: map[string]aitools.DependencyStatus{}, Capabilities: map[string]aitools.DependencyStatus{}}
 	health := versustools.DetectionHealthSnapshot{Sources: []versustools.SourceHealth{{Kind: "metrics", Configured: true, Observation: "healthy"}}}
-	snapshot := buildToolAvailabilitySnapshot(configured, nil, nil, nil, nil, nil, registrationMetricReader{}, nil, health)
-	if got := snapshot.DataSources["metrics"]; !got.Healthy {
-		t.Fatalf("metrics health = %+v", got)
+	snapshot := buildToolAvailabilitySnapshot(configured, nil, nil, nil, nil, nil, health)
+	if got := snapshot.DataSources["metrics"]; got.Constructed {
+		t.Fatalf("metric source constructed generic reader = %+v", got)
 	}
 	if got := snapshot.DataSources["logs"]; got.Healthy || got.Health != "configuration" {
 		t.Fatalf("logs health = %+v", got)
@@ -565,7 +1053,7 @@ func TestLiveSourceHealthFiltersAndRestoresLogTools(t *testing.T) {
 	}
 	for _, state := range states {
 		health.Observe("logs", state.err, time.Now())
-		snapshot := buildToolAvailabilitySnapshot(configured, &signalReaderAdapter{}, nil, nil, nil, nil, nil, nil, health.DetectionHealth(scope))
+		snapshot := buildToolAvailabilitySnapshot(configured, &signalReaderAdapter{}, nil, nil, nil, nil, health.DetectionHealth(scope))
 		filtered, err := manager.Filter(scope, aitools.AgentChat, runtime, snapshot)
 		if err != nil || len(filtered) != state.wantTools || snapshot.DataSources["logs"].Health != state.wantClass {
 			t.Fatalf("error=%v class=%q tools=%d filterErr=%v", state.err, snapshot.DataSources["logs"].Health, len(filtered), err)
@@ -698,7 +1186,7 @@ func TestSetChatKnowledgeProvidersFeedsToolsAndCapabilities(t *testing.T) {
 	SetChatKnowledgeProviders(ChatKnowledgeProviders{ServiceReliability: registrationReliability{}, AlertDecision: registrationDecision{}, CapabilityStatus: registrationStatus{}})
 	t.Cleanup(func() { SetChatKnowledgeProviders(ChatKnowledgeProviders{}) })
 	catalog, store := newBuildCatalog(t)
-	tools := buildAnalyzeTools(store, tenancy.DefaultOrgScope(), newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	tools := buildAnalyzeTools(store, tenancy.DefaultOrgScope(), newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, nil)
 
 	var service versustools.GetService
 	var decision versustools.GetAlertDecision
@@ -723,7 +1211,7 @@ func TestSetChatKnowledgeProvidersFeedsToolsAndCapabilities(t *testing.T) {
 
 func TestDataProvidersDoNotImplyCapabilityConfiguration(t *testing.T) {
 	providers := ChatKnowledgeProviders{ServiceReliability: registrationReliability{}, AlertDecision: registrationDecision{}}
-	capabilities := knowledgeCapabilities(tenancy.DefaultOrgScope(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, providers)
+	capabilities := knowledgeCapabilities(tenancy.DefaultOrgScope(), nil, nil, nil, nil, nil, nil, nil, nil, providers)
 	for _, capability := range capabilities {
 		if capability.Name == "service_reliability" || capability.Name == "alert_decisions" {
 			if capability.Configured || capability.Available != versustools.CapabilityStatusUnknown {
@@ -754,7 +1242,7 @@ func TestGenericKnowledgeCatalogWithFakeProviders(t *testing.T) {
 	})
 	t.Cleanup(func() { SetChatKnowledgeProviders(ChatKnowledgeProviders{}) })
 	catalog, store := newBuildCatalog(t)
-	tools := buildAnalyzeTools(store, tenancy.NewOrgScope("licensed", "default"), newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, nil, nil, registrationHealth{})
+	tools := buildAnalyzeTools(store, tenancy.NewOrgScope("licensed", "default"), newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, registrationHealth{})
 	byName := make(map[string]any, len(tools))
 	for _, tool := range tools {
 		byName[tool.Name()] = tool
@@ -815,7 +1303,7 @@ func TestCatalogAdapterWithThresholdPreservesNilInterface(t *testing.T) {
 	if adapter != nil {
 		t.Fatalf("adapter = %T, want nil interface", adapter)
 	}
-	tools := buildAnalyzeTools(nil, tenancy.DefaultOrgScope(), adapter, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	tools := buildAnalyzeTools(nil, tenancy.DefaultOrgScope(), adapter, nil, nil, nil, nil, nil, nil, nil, nil)
 	for _, tool := range tools {
 		if tool.Name() == "get_pattern" || tool.Name() == "get_service" || tool.Name() == "get_system_overview" || tool.Name() == "list_services" || tool.Name() == "list_patterns" {
 			t.Fatalf("catalog tool %q registered with nil catalog", tool.Name())
@@ -833,7 +1321,7 @@ func TestCatalogAdapterWithThresholdPreservesNilInterface(t *testing.T) {
 func TestBuildAnalyzeToolsThreadsOrgScope(t *testing.T) {
 	catalog, store := newBuildCatalog(t)
 	scope := tenancy.NewOrgScope("licensed", "default")
-	tools := buildAnalyzeTools(store, scope, newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	tools := buildAnalyzeTools(store, scope, newCatalogAdapter(catalog), nil, nil, nil, nil, nil, nil, nil, nil)
 	incident, ok := tools[0].(versustools.GetIncident)
 	if !ok {
 		t.Fatalf("tool[0] = %T, want GetIncident", tools[0])

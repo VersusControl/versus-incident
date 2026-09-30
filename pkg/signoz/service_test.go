@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,6 +21,106 @@ import (
 type replacingScrubber struct{}
 
 const testAPIKey = "test-api-key"
+
+func TestSigNozHarnessMetricDiscovery(t *testing.T) {
+	keyFile := os.Getenv("HARNESS_SIGNOZ_KEY_FILE")
+	if keyFile == "" {
+		t.Skip("HARNESS_SIGNOZ_KEY_FILE is not set")
+	}
+	key, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := os.Getenv("HARNESS_SIGNOZ_ADDRESS")
+	if address == "" {
+		port := os.Getenv("HARNESS_SIGNOZ_PORT")
+		if port == "" {
+			port = "18081"
+		}
+		address = "http://127.0.0.1:" + port
+	}
+	service, err := NewService(Config{Address: address, APIKey: strings.TrimSpace(string(key)), AllowLoopback: true}, ToolPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.ListMetrics(context.Background(), "demo_http_requests_total", 20)
+	if err != nil || result.Count == 0 {
+		t.Fatalf("live metric discovery count=%d err=%v", result.Count, err)
+	}
+	end := time.Now().UTC()
+	traces, err := service.SearchTraces(context.Background(), SearchRequest{
+		Start: end.Add(-30 * time.Minute), End: time.Now().UTC(), Service: "checkout", Limit: 10,
+	})
+	if err != nil || traces.Count == 0 || traces.Count > 10 {
+		t.Errorf("live trace search count=%d err=%v", traces.Count, err)
+	}
+	series, err := service.QueryMetrics(context.Background(), MetricRequest{
+		Start: end.Add(-30 * time.Minute), End: end, Service: "checkout", MetricName: "demo_http_requests_total", Step: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("live metric series: %v", err)
+	}
+	metricData, ok := series.Data["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("live metric series has no data: %+v", series)
+	}
+	inner, ok := metricData["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("live metric series has no query data: %+v", series)
+	}
+	results, ok := inner["results"].([]any)
+	if !ok {
+		t.Fatalf("live metric series has no results: %+v", series)
+	}
+	points := 0
+	for _, item := range results {
+		query, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("unexpected metric result: %T", item)
+		}
+		aggregations, ok := query["aggregations"].([]any)
+		if !ok {
+			t.Fatalf("unexpected metric aggregations: %T", query["aggregations"])
+		}
+		for _, aggregation := range aggregations {
+			group, ok := aggregation.(map[string]any)
+			if !ok {
+				t.Fatalf("unexpected metric aggregation: %T", aggregation)
+			}
+			items, ok := group["series"].([]any)
+			if !ok {
+				t.Fatalf("unexpected metric series: %T", group["series"])
+			}
+			for _, item := range items {
+				metric, ok := item.(map[string]any)
+				if !ok {
+					t.Fatalf("unexpected metric item: %T", item)
+				}
+				values, ok := metric["values"].([]any)
+				if !ok {
+					t.Fatalf("unexpected metric datapoints: %T", metric["values"])
+				}
+				for _, point := range values {
+					object, ok := point.(map[string]any)
+					if !ok {
+						t.Fatalf("unexpected metric datapoint: %T", point)
+					}
+					if _, ok := object["timestamp"].(float64); !ok {
+						t.Fatalf("unexpected metric timestamp: %T", object["timestamp"])
+					}
+					if _, ok := object["value"].(float64); !ok {
+						t.Fatalf("unexpected metric value: %T", object["value"])
+					}
+				}
+				points += len(values)
+			}
+		}
+	}
+	if series.Count == 0 || points == 0 || points > ToolPolicy().MaximumDatapoints {
+		t.Fatalf("live metric count=%d datapoints=%d", series.Count, points)
+	}
+	t.Logf("live metric count=%d datapoints=%d maximum=%d", series.Count, points, ToolPolicy().MaximumDatapoints)
+}
 
 func newTLSTestServer(t *testing.T, handler http.Handler) (*httptest.Server, *x509.CertPool) {
 	t.Helper()
@@ -82,8 +184,16 @@ func TestServiceSearchLogsUsesBoundedV5Payload(t *testing.T) {
 func TestServiceRejectsUnsafeBoundsAndRedirects(t *testing.T) {
 	targetCalled := false
 	target, _ := newTLSTestServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { targetCalled = true }))
+	sameOriginCalled := false
+	location := ""
 	server, rootCAs := newTLSTestServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		http.Redirect(writer, request, target.URL, http.StatusTemporaryRedirect)
+		if request.URL.Path != QueryRangePath {
+			sameOriginCalled = true
+			return
+		}
+		writer.Header().Set("Location", location)
+		writer.WriteHeader(http.StatusFound)
+		fmt.Fprint(writer, "REDIRECT_BODY_CANARY")
 	}))
 	service, err := NewService(testConfig(server, rootCAs, testAPIKey), ToolPolicy())
 	if err != nil {
@@ -93,8 +203,23 @@ func TestServiceRejectsUnsafeBoundsAndRedirects(t *testing.T) {
 	if _, err := service.SearchTraces(context.Background(), SearchRequest{Start: end.Add(-7 * time.Hour), End: end}); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("window error = %v", err)
 	}
-	if _, err := service.SearchTraces(context.Background(), SearchRequest{Start: end.Add(-time.Hour), End: end}); err == nil || targetCalled || !strings.Contains(err.Error(), "configure the final address") {
-		t.Fatalf("redirect error = %v targetCalled=%t", err, targetCalled)
+	for _, test := range []struct {
+		name     string
+		location string
+	}{
+		{"same origin", server.URL + "/login?token=LOCATION_CANARY"},
+		{"Keycloak SSO", target.URL + "/realms/versus/protocol/openid-connect/auth?token=LOCATION_CANARY"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			location = test.location
+			result, err := service.SearchTraces(context.Background(), SearchRequest{Start: end.Add(-time.Hour), End: end})
+			var statusErr *StatusError
+			if !reflect.DeepEqual(result, Result{}) || !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusFound ||
+				err.Error() != "SigNoz endpoint redirected: status 302; configure a non-redirecting SigNoz query API origin; do not use an SSO login endpoint" ||
+				targetCalled || sameOriginCalled || strings.Contains(fmt.Sprint(result, err), "LOCATION_CANARY") || strings.Contains(fmt.Sprint(result, err), "REDIRECT_BODY_CANARY") {
+				t.Fatalf("redirect result = %v error = %v targetCalled=%t sameOriginCalled=%t", result, err, targetCalled, sameOriginCalled)
+			}
+		})
 	}
 }
 
@@ -206,11 +331,30 @@ func TestServiceBoundsDiscoveryMapsDeterministically(t *testing.T) {
 func TestServiceMetricDatapointsUseSeparateNewestPointBudget(t *testing.T) {
 	values := make([]any, 75)
 	for index := range values {
-		values[index] = []any{index, index * 10}
+		values[index] = map[string]any{"timestamp": index, "value": index * 10}
 	}
-	fixture := map[string]any{"data": map[string]any{"data": map[string]any{"results": []any{map[string]any{"series": []any{map[string]any{"labels": map[string]any{"service": "api"}, "values": values}}}}}}}
-	server, rootCAs := newTLSTestServer(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(writer).Encode(fixture) }))
-	service, err := NewService(testConfig(server, rootCAs, testAPIKey), Policy{MaximumSeries: 1, MaximumDatapointsPerSeries: 60, MaximumDatapoints: 60})
+	fixture := map[string]any{"data": map[string]any{"data": map[string]any{"results": []any{map[string]any{"aggregations": []any{map[string]any{"series": []any{map[string]any{"labels": map[string]any{"service": "api"}, "values": values}}}}}}}}}
+	server, rootCAs := newTLSTestServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["requestType"] != "time_series" || payload["schemaVersion"] != "v1" {
+			t.Fatalf("unexpected v5 metric envelope: %v %v", payload["requestType"], payload["schemaVersion"])
+		}
+		spec := payload["compositeQuery"].(map[string]any)["queries"].([]any)[0].(map[string]any)["spec"].(map[string]any)
+		aggregation := spec["aggregations"].([]any)[0].(map[string]any)
+		if aggregation["metricName"] != "requests" || aggregation["timeAggregation"] != "avg" || aggregation["spaceAggregation"] != "avg" || spec["limit"] != float64(1) || spec["stepInterval"] != float64(60) {
+			t.Fatalf("invalid native metric query: aggregation=%v limit=%v step=%v", aggregation, spec["limit"], spec["stepInterval"])
+		}
+		if filter := spec["filter"].(map[string]any)["expression"].(string); filter != "(deployment.environment = 'prod') AND (service.name = 'api')" {
+			t.Fatalf("metric source filter = %q", filter)
+		}
+		_ = json.NewEncoder(writer).Encode(fixture)
+	}))
+	config := testConfig(server, rootCAs, testAPIKey)
+	config.ScopeFilter = "deployment.environment = 'prod'"
+	service, err := NewService(config, Policy{MaximumSeries: 1, MaximumDatapointsPerSeries: 60, MaximumDatapoints: 60})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,10 +363,52 @@ func TestServiceMetricDatapointsUseSeparateNewestPointBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	series := result.Data["data"].(map[string]any)["data"].(map[string]any)["results"].([]any)[0].(map[string]any)["series"].([]any)
+	series := result.Data["data"].(map[string]any)["data"].(map[string]any)["results"].([]any)[0].(map[string]any)["aggregations"].([]any)[0].(map[string]any)["series"].([]any)
 	points := series[0].(map[string]any)["values"].([]any)
-	if result.Count != 1 || !result.Truncated || fmt.Sprint(result.Truncation) != "[datapoints]" || len(points) != 60 || int(points[0].([]any)[0].(float64)) != 15 || int(points[59].([]any)[0].(float64)) != 74 {
+	if result.Count != 1 || !result.Truncated || fmt.Sprint(result.Truncation) != "[datapoints]" || len(points) != 60 || int(points[0].(map[string]any)["timestamp"].(float64)) != 15 || int(points[59].(map[string]any)["timestamp"].(float64)) != 74 {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestServiceMetricSeriesPreservesGaugeAndCumulativeValues(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		values string
+	}{
+		{name: "gauge", values: `[{"timestamp":1,"value":12},{"timestamp":2,"value":8}]`},
+		{name: "cumulative counter", values: `[{"timestamp":1,"value":100},{"timestamp":2,"value":125}]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			server, rootCAs := newTLSTestServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				calls++
+				if request.URL.Path != QueryRangePath || request.Method != http.MethodPost {
+					t.Errorf("unexpected metric request: %s %s", request.Method, request.URL.Path)
+				}
+				fmt.Fprintf(writer, `{"data":{"data":{"results":[{"aggregations":[{"series":[{"values":%s}]}]}]}}}`, test.values)
+			}))
+			service, err := NewService(testConfig(server, rootCAs, testAPIKey), ToolPolicy())
+			if err != nil {
+				t.Fatal(err)
+			}
+			end := time.Now().UTC().Add(-time.Minute)
+			result, err := service.QueryMetrics(context.Background(), MetricRequest{Start: end.Add(-time.Hour), End: end, MetricName: "demo_http_requests_total", Step: time.Minute})
+			if err != nil {
+				t.Fatal(err)
+			}
+			semantics := result.Data["metricSemantics"].(map[string]any)
+			if semantics["unit"] != "unknown" || semantics["temporality"] != "unspecified" || semantics["timeAggregation"] != "avg" || semantics["spaceAggregation"] != "avg" || !strings.Contains(semantics["interpretation"].(string), "not a per-second rate") {
+				t.Fatalf("metric semantics = %v", semantics)
+			}
+			series := result.Data["data"].(map[string]any)["data"].(map[string]any)["results"].([]any)[0].(map[string]any)["aggregations"].([]any)[0].(map[string]any)["series"].([]any)[0].(map[string]any)
+			var expected []any
+			if err := json.Unmarshal([]byte(test.values), &expected); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(series["values"], expected) || calls != 1 {
+				t.Fatalf("series=%v calls=%d", series["values"], calls)
+			}
+		})
 	}
 }
 

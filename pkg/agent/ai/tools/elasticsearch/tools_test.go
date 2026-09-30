@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -155,6 +156,14 @@ func TestResponseTooLargeIsBackendBoundsError(t *testing.T) {
 	code, message := core.ClassifyToolError(err)
 	if code != core.ToolErrorBackend || message != "log response exceeded its safe bound; narrow the configured index scope or query" {
 		t.Fatalf("response-too-large classification = %q %q", code, message)
+	}
+}
+
+func TestShardFailureIsModelSafeBackendError(t *testing.T) {
+	err := safeToolError(fmt.Errorf("%w: 1 of 1 shards failed; first failure query_shard_exception: No mapping found for [secret.field]", elasticsearchapp.ErrShardFailure))
+	code, message := core.ClassifyToolError(err)
+	if code != core.ToolErrorBackend || !strings.Contains(message, "failed on one or more shards") || strings.Contains(message, "secret.field") {
+		t.Fatalf("shard-failure classification = %q %q", code, message)
 	}
 }
 

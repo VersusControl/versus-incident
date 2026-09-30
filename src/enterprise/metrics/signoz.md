@@ -278,11 +278,10 @@ before you reach for a longer `discovery_interval`.
 
 These are real gaps in the first release, not configuration mistakes.
 
-- **Provider-specific generic readers remain separate.** A configured
-  `signoz_metrics` source contributes `discover_metrics` and
-  `read_metric_series`; it does not populate the Prometheus
-  `query_metrics` [analyze tool](../../agent/tools/tools.md). Configure that
-  separate tool only when you also want Prometheus-backed queries.
+- **Reads stay with their source.** A configured `signoz_metrics` source
+  contributes `discover_metrics` and `read_metric_series` for SigNoz.
+  Configure a separate `prometheus` source in `agent_sources.yaml` for
+  Prometheus-backed reads; there is no standalone query tool.
 - **Metric discovery is catalog-based.** Metrics outside the default
   catalog are invisible unless you name them in `metrics:`. The v5 query
   API cannot enumerate metric names, so there is no automatic

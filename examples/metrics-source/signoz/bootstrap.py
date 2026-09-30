@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -38,7 +39,14 @@ ACCOUNT_NAME = os.environ.get("SIGNOZ_SERVICE_ACCOUNT", "versus-agent")
 ROLE_NAME = os.environ.get("SIGNOZ_ROLE", "signoz-viewer")
 
 
-def call(path, body=None, token=None, method=None):
+def reset_instruction() -> str:
+    command = os.environ.get("SIGNOZ_RESET_COMMAND", "").strip()
+    if command:
+        return "reset the SigNoz installation with `%s` and start again." % command
+    return "reset the SigNoz installation and start again."
+
+
+def call(path, body=None, token=None, method=None, api_key=None):
     """One JSON request. Returns (status, decoded-or-raw-text)."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
@@ -49,6 +57,8 @@ def call(path, body=None, token=None, method=None):
     )
     if token:
         req.add_header("Authorization", "Bearer " + token)
+    if api_key:
+        req.add_header("SIGNOZ-API-KEY", api_key)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             raw = resp.read().decode("utf-8", "replace")
@@ -56,7 +66,7 @@ def call(path, body=None, token=None, method=None):
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", "replace")
         status = e.code
-    except urllib.error.URLError as e:
+    except (urllib.error.URLError, TimeoutError) as e:
         return 0, str(e)
     try:
         return status, json.loads(raw)
@@ -91,11 +101,8 @@ def register() -> str:
             print("registered first admin user %s (org %s)" % (EMAIL, org))
             return org
     sys.exit(
-        "could not register the first SigNoz user: %d %s\n"
-        "  This SigNoz already has an account, so a key cannot be minted "
-        "automatically. Create one in the UI and pass it as SIGNOZ_API_KEY, or "
-        "run `docker compose down -v` for a clean slate."
-        % (status, str(body)[:300])
+        "could not register the first SigNoz user (HTTP %d); %s"
+        % (status, reset_instruction())
     )
 
 
@@ -110,7 +117,7 @@ def login(org: str) -> str:
             token = (body.get("data") or {}).get("accessToken")
             if token:
                 return token
-        print("login attempt %d returned %d: %s" % (attempt + 1, status, str(body)[:200]))
+        print("login attempt %d returned HTTP %d" % (attempt + 1, status))
         time.sleep(3)
     sys.exit("could not log in to SigNoz as %s" % EMAIL)
 
@@ -127,8 +134,7 @@ def service_account(token: str) -> str:
         sid = (body.get("data") or {}).get("id")
         if sid:
             return sid
-    sys.exit("could not create the SigNoz service account: %d %s"
-             % (status, str(body)[:300]))
+    sys.exit("could not create the SigNoz service account (HTTP %d)" % status)
 
 
 def grant_role(token: str, sid: str) -> None:
@@ -145,14 +151,13 @@ def grant_role(token: str, sid: str) -> None:
                 role_id = role["id"]
                 break
     if not role_id:
-        sys.exit("SigNoz has no role named %r: %d %s"
-                 % (ROLE_NAME, status, str(body)[:300]))
+        sys.exit("SigNoz has no role named %r (HTTP %d)" % (ROLE_NAME, status))
     status, body = call(
         "/api/v1/service_accounts/%s/roles" % sid, {"id": role_id}, token=token
     )
     if status >= 300:
-        sys.exit("could not grant %s to the service account: %d %s"
-                 % (ROLE_NAME, status, str(body)[:300]))
+        sys.exit("could not grant %s to the service account (HTTP %d)"
+                 % (ROLE_NAME, status))
     print("granted %s to service account %s" % (ROLE_NAME, ACCOUNT_NAME))
 
 
@@ -167,7 +172,7 @@ def create_key(token: str, sid: str) -> str:
         key = (body.get("data") or {}).get("key")
         if key:
             return key
-    sys.exit("could not create a SigNoz API key: %d %s" % (status, str(body)[:300]))
+    sys.exit("could not create a SigNoz API key (HTTP %d)" % status)
 
 
 def main() -> int:
@@ -176,13 +181,27 @@ def main() -> int:
         print("SIGNOZ_API_KEY supplied by the operator; not minting one.")
         return 0
 
-    if os.path.exists(KEY_FILE) and os.path.getsize(KEY_FILE) > 0:
-        print("%s already holds a key; nothing to do." % KEY_FILE)
-        return 0
-
     version = wait_ready()
     print("signoz %s is up (setupCompleted=%s)"
           % (version.get("version"), version.get("setupCompleted")))
+
+    if os.path.exists(KEY_FILE) and os.path.getsize(KEY_FILE) > 0:
+        with open(KEY_FILE, encoding="utf-8") as fp:
+            saved_key = fp.read().strip()
+        if saved_key:
+            status, body = call("/api/v1/service_accounts/me", api_key=saved_key)
+            if status == 200 and isinstance(body, dict):
+                print("saved SigNoz API key is valid; nothing to do.")
+                return 0
+            if status not in (401, 403):
+                print("could not verify saved SigNoz API key (HTTP %d); retry/check SigNoz health or API compatibility; preserve state." % status)
+                return 1
+        print("saved SigNoz API key is invalid; " + reset_instruction())
+        return 1
+
+    if version.get("setupCompleted") is not False:
+        print("SigNoz is already initialized but has no saved API key; " + reset_instruction())
+        return 1
 
     org = register()
     token = login(org)
@@ -191,9 +210,24 @@ def main() -> int:
     key = create_key(token, sid)
 
     os.makedirs(os.path.dirname(KEY_FILE), exist_ok=True)
-    with open(KEY_FILE, "w", encoding="utf-8") as fp:
-        fp.write(key)
-    os.chmod(KEY_FILE, 0o600)
+    key_directory = os.path.dirname(KEY_FILE)
+    previous = os.stat(KEY_FILE, follow_symlinks=False) if os.path.lexists(KEY_FILE) else None
+    fd, temporary = tempfile.mkstemp(dir=key_directory)
+    try:
+        if previous is not None:
+            current = os.fstat(fd)
+            if (current.st_uid, current.st_gid) != (previous.st_uid, previous.st_gid):
+                os.fchown(fd, previous.st_uid, previous.st_gid)
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            fd = -1
+            fp.write(key)
+            fp.flush()
+        os.replace(temporary, KEY_FILE)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     # Never print the key itself — this log is what an operator pastes into a
     # bug report.
     print("wrote SigNoz API key (%d chars) to %s" % (len(key), KEY_FILE))

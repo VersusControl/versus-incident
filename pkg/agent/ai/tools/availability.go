@@ -217,7 +217,7 @@ func missingResolution(requirement Requirement, status DependencyStatus) Resolut
 		return Resolution{State: StateNeedsDataSource, Reason: fmt.Sprintf("No %s data source is connected, so this tool cannot read %s data.", kind, kind), Action: "/settings?tab=agent", ActionLabel: "Add a data source"}
 	case RequirementIntegration:
 		name := displayRequirement(requirement.Integration)
-		return Resolution{State: StateNeedsIntegration, Reason: fmt.Sprintf("%s is not connected, so this tool cannot %s.", name, integrationPurpose(requirement.Integration)), Action: integrationAction(requirement.Integration), ActionLabel: "Connect " + name}
+		return Resolution{State: StateNeedsIntegration, Reason: fmt.Sprintf("%s is not connected, so this tool cannot %s.", name, integrationPurpose(requirement.Integration)), Action: integrationAction(), ActionLabel: "Connect " + name}
 	case RequirementCapability:
 		name := status.Name
 		if name == "" {
@@ -260,7 +260,7 @@ func unhealthyReason(requirement Requirement, status DependencyStatus) string {
 
 func setupAction(requirement Requirement, unhealthy bool) string {
 	if requirement.Kind == RequirementIntegration {
-		return integrationAction(requirement.Integration)
+		return integrationAction()
 	}
 	if requirement.Kind == RequirementCapability && (contains(requirement.Capabilities, "ai_embedder") || contains(requirement.Capabilities, "runbook_index")) {
 		return "/admin#agent-ai-settings"
@@ -287,7 +287,7 @@ func setupActionLabel(requirement Requirement, unhealthy bool) string {
 	return "Configure data source"
 }
 
-func integrationAction(integration string) string {
+func integrationAction() string {
 	return "/settings?tab=agent"
 }
 

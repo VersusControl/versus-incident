@@ -397,6 +397,7 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 					BearerToken:        s.Loki.BearerToken,
 					InsecureSkipVerify: s.Loki.InsecureSkipVerify,
 					Query:              s.Loki.Query,
+					ServiceLabel:       s.Loki.ServiceLabel,
 					SeverityField:      s.Loki.SeverityField,
 					PageSize:           s.Loki.PageSize,
 				},
@@ -421,6 +422,8 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 					PageSize:           s.Graylog.PageSize,
 				},
 				Splunk: AgentSplunkSourceConfig{
+					Owner:              s.Splunk.Owner,
+					App:                s.Splunk.App,
 					Address:            s.Splunk.Address,
 					Token:              s.Splunk.Token,
 					Username:           s.Splunk.Username,
@@ -501,8 +504,6 @@ func cloneToolsConfig(src ToolsConfig) ToolsConfig {
 		}
 	}
 	out.FindRunbook = src.FindRunbook
-	out.QueryMetrics = src.QueryMetrics
-	out.QueryTraces = src.QueryTraces
 	out.Kubernetes = src.Kubernetes
 	out.Kubernetes.EndpointCIDRs = append([]string(nil), src.Kubernetes.EndpointCIDRs...)
 	return out

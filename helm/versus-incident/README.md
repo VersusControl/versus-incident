@@ -192,12 +192,6 @@ alert:
 | `agent.tools.recentChanges.git.repos` | Remote git repos read by the `recent_changes` tool (empty = unregistered) | `[]` |
 | `agent.tools.describeDependencies.services` | Service-dependency graph for the `describe_dependencies` tool (empty = unregistered) | `[]` |
 | `agent.tools.findRunbook.embeddingModel` | Embedding model for the `find_runbook` runbook-RAG tool (empty = unregistered) | `""` |
-| `agent.tools.queryMetrics.prometheus.address` | Prometheus endpoint for the `query_metrics` tool (empty = unregistered) | `""` |
-| `agent.tools.queryMetrics.prometheus.bearerToken` | Prometheus bearer token (stored in chart Secret) | `""` |
-| `agent.tools.queryMetrics.prometheus.password` | Prometheus HTTP Basic password (stored in chart Secret) | `""` |
-| `agent.tools.queryTraces.tempo.address` | Tempo endpoint for the `query_traces` tool (empty = unregistered) | `""` |
-| `agent.tools.queryTraces.tempo.bearerToken` | Tempo bearer token (stored in chart Secret) | `""` |
-| `agent.tools.queryTraces.tempo.password` | Tempo HTTP Basic password (stored in chart Secret) | `""` |
 | `agent.sources` | Inline list of signal sources (snake_case keys) | `[]` |
 | `extraEnv` | Extra container env vars — use these to supply `${VAR}` credentials referenced from `agent.sources` | `[]` |
 | `extraEnvFrom` | Bulk-import env from existing Secrets/ConfigMaps | `[]` |
@@ -220,6 +214,18 @@ alert:
 | `oncall.enable` | Enable on-call functionality | `false` |
 | `oncall.provider` | On-call provider ("aws_incident_manager" or "pagerduty") | `"aws_incident_manager"` |
 | `redis.enabled` | Enable bundled Redis (required for on-call) | `false` |
+
+The standalone `query_metrics` and `query_traces` tools are retired. For metric
+and trace reads, use a licensed Enterprise image with the `intelligence`
+entitlement and enabled `prometheus` / `traces` sources in `agent.sources`.
+These sources contribute `discover_metrics` / `read_metric_series` and
+`discover_trace_fields` / `read_trace_spans` to Chat and Analyze, respectively.
+There is no automatic migration: remove old `agent.tools.queryMetrics` and
+`agent.tools.queryTraces` values and move backend addresses and credentials to
+the corresponding source `options` (snake_case keys). Reference credentials as
+`${VAR}` in `agent.sources` and provide them via `extraEnv` / `extraEnvFrom`;
+source definitions are stored in a ConfigMap, not a Secret. OSS has no metric
+or trace read tools.
 
 > The SNS/SQS inbound toggles live under `alert.sns` / `alert.sqs` for backward
 > compatibility; the chart maps them into the binary's top-level `queue` block

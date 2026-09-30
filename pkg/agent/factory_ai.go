@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -23,17 +24,23 @@ import (
 	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
+	graylogtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/graylog"
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
+	lokitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/loki"
 	signoztools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/signoz"
+	splunktools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/splunk"
 	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
 	"github.com/VersusControl/versus-incident/pkg/baseline"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	elasticsearchapp "github.com/VersusControl/versus-incident/pkg/elasticsearch"
+	graylogapp "github.com/VersusControl/versus-incident/pkg/graylog"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+	lokiapp "github.com/VersusControl/versus-incident/pkg/loki"
 	"github.com/VersusControl/versus-incident/pkg/runbook"
 	"github.com/VersusControl/versus-incident/pkg/signalsources"
 	signozapp "github.com/VersusControl/versus-incident/pkg/signoz"
+	splunkapp "github.com/VersusControl/versus-incident/pkg/splunk"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
@@ -207,6 +214,18 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		for _, e := range signozErrs {
 			log.Printf("agent: SigNoz tool source warning: %v", e)
 		}
+		lokiSources, lokiErrs := buildLokiToolSources(cfg.Sources, redactor)
+		for _, e := range lokiErrs {
+			log.Printf("agent: Loki tool source warning: %v", e)
+		}
+		graylogSources, graylogErrs := buildGraylogToolSources(cfg.Sources, redactor)
+		for _, e := range graylogErrs {
+			log.Printf("agent: Graylog tool source warning: %v", e)
+		}
+		splunkSources, splunkErrs := buildSplunkToolSources(cfg.Sources, redactor)
+		for _, e := range splunkErrs {
+			log.Printf("agent: Splunk tool source warning: %v", e)
+		}
 		extensionTools, extensionErrs := contributedTools(scope, cfg.Sources, redactor)
 		for _, e := range extensionErrs {
 			log.Printf("agent: runtime tool contributor warning: %v", e)
@@ -261,27 +280,33 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 			runbookSearcher = newRunbookSearcherAdapter(runbookMgr.Index())
 		}
 
-		// Optional metric/trace readers for the query_metrics / query_traces
-		// tools. Each is configured independently in tools.yaml
-		// (tools.query_metrics.prometheus / tools.query_traces.tempo) so an
-		// on-demand analyze query never touches a detect-path source cursor.
-		// A blank endpoint yields a nil reader so buildAnalyzeTools omits
-		// the tool — community installs without a metric/trace backend are
-		// unaffected.
-		metrics := newMetricReaderAdapter(cfg.Tools.QueryMetrics.Prometheus)
-		traces := newTraceReaderAdapter(cfg.Tools.QueryTraces.Tempo)
-
-		runtimeTools = buildAnalyzeTools(store, scope, newCatalogAdapterWithThreshold(catalog, cfg.Catalog.AutoPromoteAfter), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher, metrics, traces, detectionHealth)
+		runtimeTools = buildAnalyzeTools(store, scope, newCatalogAdapterWithThreshold(catalog, cfg.Catalog.AutoPromoteAfter), reader, redactor, serviceMatcher, graph, changes, embedder, runbookSearcher, detectionHealth)
 		if baselineTool := buildBaselineTool(newLogBaselineProvider(catalog, scope, cfg.Catalog.AutoPromoteAfter, store), baselineExtensions, scope); baselineTool != nil {
 			runtimeTools = append(runtimeTools, baselineTool)
 		}
 		runtimeTools = append(runtimeTools, elasticsearchtools.New(elasticsearchSources)...)
 		runtimeTools = append(runtimeTools, k8stools.New(kubernetesService)...)
-		runtimeTools = append(runtimeTools, signoztools.New(signozSources)...)
-		runtimeTools = append(runtimeTools, extensionTools...)
+		var extensionLogTools, otherExtensions []core.Tool
+		for _, candidate := range extensionTools {
+			if candidate.Name() == "discover_log_fields" || candidate.Name() == "read_log_records" {
+				extensionLogTools = append(extensionLogTools, candidate)
+			} else {
+				otherExtensions = append(otherExtensions, candidate)
+			}
+		}
+		logTools := combineLogTools(signoztools.New(signozSources), lokitools.New(lokiSources), graylogtools.New(graylogSources), splunktools.New(splunkSources), extensionLogTools)
+		runtimeTools = append(runtimeTools, logTools...)
+		runtimeTools = append(runtimeTools, otherExtensions...)
 		toolSnapshot = func(requestScope tenancy.OrgScope) aitools.Snapshot {
-			snapshot := buildToolAvailabilitySnapshot(configuredToolSnapshot, reader, graph, changes, embedder, runbookSearcher, metrics, traces, detectionHealth.DetectionHealth(requestScope))
+			snapshot := buildToolAvailabilitySnapshot(configuredToolSnapshot, reader, graph, changes, embedder, runbookSearcher, detectionHealth.DetectionHealth(requestScope))
 			return aitools.BindRuntimeCapabilities(snapshot, runtimeTools)
+		}
+		for index, candidate := range runtimeTools {
+			if capabilityTool, ok := candidate.(versustools.ListCapabilities); ok {
+				capabilityTool.Capabilities = sourceReadCapabilities(capabilityTool.Capabilities, toolSnapshot(scope), runtimeTools)
+				runtimeTools[index] = capabilityTool
+				break
+			}
 		}
 		initialView, loadErr := toolSettings.LoadToolsets(scope)
 		if loadErr != nil {
@@ -495,28 +520,10 @@ func configuredToolAvailabilitySnapshot(cfg config.AgentConfig, store storage.Pr
 	configured := func(ok bool, name string) aitools.DependencyStatus {
 		return aitools.DependencyStatus{Configured: ok, Healthy: ok, Name: name}
 	}
-	prometheusConfigured := strings.TrimSpace(cfg.Tools.QueryMetrics.Prometheus.Address) != ""
-	metrics := configured(configuredSignals[signalsources.KindMetrics] > 0 || prometheusConfigured, "Metric data source")
+	metrics := configured(configuredSignals[signalsources.KindMetrics] > 0, "Metric data source")
 	metrics.Count = configuredSignals[signalsources.KindMetrics]
-	if prometheusConfigured {
-		metrics.Count++
-	}
-	metrics.Constructed = newMetricReaderAdapter(cfg.Tools.QueryMetrics.Prometheus) != nil
-	if metrics.Configured && !metrics.Constructed {
-		metrics.Healthy = false
-		metrics.Health = "configuration"
-	}
-	tempoConfigured := strings.TrimSpace(cfg.Tools.QueryTraces.Tempo.Address) != ""
-	traces := configured(configuredSignals[signalsources.KindTraces] > 0 || tempoConfigured, "Trace data source")
+	traces := configured(configuredSignals[signalsources.KindTraces] > 0, "Trace data source")
 	traces.Count = configuredSignals[signalsources.KindTraces]
-	if tempoConfigured {
-		traces.Count++
-	}
-	traces.Constructed = newTraceReaderAdapter(cfg.Tools.QueryTraces.Tempo) != nil
-	if traces.Configured && !traces.Constructed {
-		traces.Healthy = false
-		traces.Health = "configuration"
-	}
 	logs := configured(configuredSignals[signalsources.KindLogs] > 0, "Log data source")
 	logs.Count = configuredSignals[signalsources.KindLogs]
 	return aitools.Snapshot{
@@ -533,7 +540,7 @@ func configuredToolAvailabilitySnapshot(cfg config.AgentConfig, store storage.Pr
 	}
 }
 
-func buildToolAvailabilitySnapshot(configured aitools.Snapshot, reader commontools.SignalReader, graph *commontools.DependencyGraph, changes commontools.ChangeFeed, embedder core.Embedder, runbooks commontools.RunbookSearcher, metrics commontools.MetricReader, traces commontools.TraceReader, health versustools.DetectionHealthSnapshot) aitools.Snapshot {
+func buildToolAvailabilitySnapshot(configured aitools.Snapshot, reader commontools.SignalReader, graph *commontools.DependencyGraph, changes commontools.ChangeFeed, embedder core.Embedder, runbooks commontools.RunbookSearcher, health versustools.DetectionHealthSnapshot) aitools.Snapshot {
 	resolved := func(status aitools.DependencyStatus, healthy bool) aitools.DependencyStatus {
 		status.Healthy = status.Configured && healthy
 		if status.Configured && !status.Healthy {
@@ -557,7 +564,7 @@ func buildToolAvailabilitySnapshot(configured aitools.Snapshot, reader commontoo
 	}
 	return aitools.Snapshot{
 		DataSources: map[string]aitools.DependencyStatus{
-			"logs": dataSource("logs", configured.DataSources["logs"], reader != nil), "elasticsearch": configured.DataSources["elasticsearch"], "metrics": dataSource("metrics", configured.DataSources["metrics"], metrics != nil), "traces": dataSource("traces", configured.DataSources["traces"], traces != nil),
+			"logs": dataSource("logs", configured.DataSources["logs"], reader != nil), "elasticsearch": configured.DataSources["elasticsearch"], "metrics": configured.DataSources["metrics"], "traces": configured.DataSources["traces"],
 		},
 		Integrations: map[string]aitools.DependencyStatus{
 			"github": resolved(configured.Integrations["github"], changes != nil), "kubernetes": resolved(configured.Integrations["kubernetes"], configured.Integrations["kubernetes"].Configured && configured.Integrations["kubernetes"].Healthy),
@@ -639,6 +646,320 @@ func buildSigNozToolSources(sources []config.AgentSourceConfig, scrubber core.Sc
 	return result, errs
 }
 
+func buildLokiToolSources(sources []config.AgentSourceConfig, scrubber core.Scrubber) ([]lokitools.Source, []error) {
+	result := make([]lokitools.Source, 0)
+	var errs []error
+	seen := map[string]bool{}
+	for _, source := range sources {
+		if !source.Enable || source.Type != "loki" {
+			continue
+		}
+		name := strings.TrimSpace(source.Name)
+		if name == "" || seen[name] {
+			errs = append(errs, fmt.Errorf("Loki tool source name is missing or duplicated"))
+			continue
+		}
+		seen[name] = true
+		service, err := lokiapp.NewService(source.Loki, scrubber)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("Loki tool source %q: selector-only scope and safe endpoint are required", boundAvailabilityText(name, 80)))
+			continue
+		}
+		result = append(result, lokitools.Source{Name: name, Service: service})
+	}
+	slices.SortFunc(result, func(left, right lokitools.Source) int { return strings.Compare(left.Name, right.Name) })
+	return result, errs
+}
+
+const graylogMaxCredentialBytes = 64 * 1024
+
+func buildGraylogToolSources(sources []config.AgentSourceConfig, scrubber core.Scrubber) ([]graylogtools.Source, []error) {
+	const maxSources = 128
+	const maxGraylogNames = 64
+	if len(sources) > maxSources {
+		return nil, []error{fmt.Errorf("Graylog tool source configuration exceeds safety limits")}
+	}
+	result := make([]graylogtools.Source, 0)
+	var errs []error
+	counts := map[string]int{}
+	var credentials []string
+	credentialBytes := 0
+	optionNodes := 0
+	graylogNames := 0
+	addCredential := func(value string) bool {
+		if len(value) > graylogMaxCredentialBytes-credentialBytes {
+			return false
+		}
+		credentialBytes += len(value)
+		credentials = append(credentials, value)
+		return true
+	}
+	for _, source := range sources {
+		if source.Enable && source.Type == "graylog" && len(source.Name) > 80 {
+			return nil, []error{fmt.Errorf("Graylog tool source configuration exceeds safety limits")}
+		}
+		for _, value := range []string{
+			source.Graylog.APIToken, source.Graylog.Username, source.Graylog.Password,
+			source.Loki.BearerToken, source.Loki.Username, source.Loki.Password,
+			source.Signoz.APIKey,
+			source.Elasticsearch.APIKey, source.Elasticsearch.Username, source.Elasticsearch.Password,
+			source.Splunk.Token, source.Splunk.Username, source.Splunk.Password,
+		} {
+			if !addCredential(value) {
+				return nil, []error{fmt.Errorf("Graylog tool source configuration exceeds safety limits")}
+			}
+		}
+		if !collectSourceOptionCredentials(source.Options, &optionNodes, &credentialBytes, addCredential) {
+			return nil, []error{fmt.Errorf("Graylog tool source configuration exceeds safety limits")}
+		}
+		if source.Enable && source.Type == "graylog" {
+			graylogNames++
+			if graylogNames > maxGraylogNames {
+				return nil, []error{fmt.Errorf("Graylog tool source configuration exceeds safety limits")}
+			}
+			counts[strings.TrimSpace(source.Name)]++
+		}
+	}
+	for _, source := range sources {
+		if !source.Enable || source.Type != "graylog" {
+			continue
+		}
+		name := strings.TrimSpace(source.Name)
+		if name == "" || counts[name] != 1 {
+			errs = append(errs, fmt.Errorf("Graylog tool source name is missing or duplicated"))
+			continue
+		}
+		valid := len(name) <= 80
+		for index := 0; valid && index < len(name); index++ {
+			char := name[index]
+			if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || (index > 0 && (char == '-' || char == '_' || char == '.'))) {
+				valid = false
+				break
+			}
+		}
+		if !valid {
+			errs = append(errs, fmt.Errorf("Graylog tool source name is invalid"))
+			continue
+		}
+		for _, secret := range credentials {
+			if secret != "" && strings.Contains(name, secret) {
+				valid = false
+				break
+			}
+			for index := 0; index+8 <= len(name); index++ {
+				if strings.Contains(secret, name[index:index+8]) {
+					valid = false
+					break
+				}
+			}
+			if !valid {
+				break
+			}
+		}
+		if scrubber != nil && scrubber.Scrub(name) != name {
+			valid = false
+		}
+		if !valid {
+			errs = append(errs, fmt.Errorf("Graylog tool source name is invalid"))
+			continue
+		}
+		service, err := graylogapp.NewService(source.Graylog, scrubber)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("Graylog tool source has invalid configuration"))
+			continue
+		}
+		result = append(result, graylogtools.Source{Name: name, Service: service})
+	}
+	slices.SortFunc(result, func(left, right graylogtools.Source) int { return strings.Compare(left.Name, right.Name) })
+	return result, errs
+}
+
+func buildSplunkToolSources(sources []config.AgentSourceConfig, scrubber core.Scrubber) ([]splunktools.Source, []error) {
+	if len(sources) > 128 {
+		return nil, []error{fmt.Errorf("Splunk tool source configuration exceeds safety limits")}
+	}
+	var credentials []string
+	credentialBytes := 0
+	optionNodes := 0
+	counts := map[string]int{}
+	for _, source := range sources {
+		for _, value := range []string{
+			source.Splunk.Token, source.Splunk.Username, source.Splunk.Password,
+			source.Graylog.APIToken, source.Graylog.Username, source.Graylog.Password,
+			source.Loki.BearerToken, source.Loki.Username, source.Loki.Password,
+			source.Signoz.APIKey,
+			source.Elasticsearch.APIKey, source.Elasticsearch.Username, source.Elasticsearch.Password,
+		} {
+			if len(value) > graylogMaxCredentialBytes-credentialBytes {
+				return nil, []error{fmt.Errorf("Splunk tool source configuration exceeds safety limits")}
+			}
+			credentialBytes += len(value)
+			credentials = append(credentials, value)
+		}
+		addCredential := func(value string) bool {
+			if len(value) > graylogMaxCredentialBytes-credentialBytes {
+				return false
+			}
+			credentialBytes += len(value)
+			credentials = append(credentials, value)
+			return true
+		}
+		if !collectSourceOptionCredentials(source.Options, &optionNodes, &credentialBytes, addCredential) {
+			return nil, []error{fmt.Errorf("Splunk tool source configuration exceeds safety limits")}
+		}
+		if source.Enable && source.Type == "splunk" {
+			counts[strings.TrimSpace(source.Name)]++
+			if len(source.Name) > 80 || len(counts) > 64 {
+				return nil, []error{fmt.Errorf("Splunk tool source configuration exceeds safety limits")}
+			}
+		}
+	}
+	result := make([]splunktools.Source, 0)
+	var errs []error
+	for _, source := range sources {
+		if !source.Enable || source.Type != "splunk" {
+			continue
+		}
+		name := strings.TrimSpace(source.Name)
+		if name == "" || counts[name] != 1 {
+			errs = append(errs, fmt.Errorf("Splunk tool source name is missing or duplicated"))
+			continue
+		}
+		valid := len(name) <= 80
+		for index := 0; valid && index < len(name); index++ {
+			char := name[index]
+			if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || (index > 0 && (char == '-' || char == '_' || char == '.'))) {
+				valid = false
+			}
+		}
+		for _, secret := range credentials {
+			if secret != "" && strings.Contains(name, secret) {
+				valid = false
+			}
+			for index := 0; index+8 <= len(name); index++ {
+				if strings.Contains(secret, name[index:index+8]) {
+					valid = false
+					break
+				}
+			}
+		}
+		if scrubber != nil && scrubber.Scrub(name) != name {
+			valid = false
+		}
+		if !valid {
+			errs = append(errs, fmt.Errorf("Splunk tool source name is invalid"))
+			continue
+		}
+		service, err := splunkapp.NewService(source.Splunk, scrubber)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("Splunk tool source has invalid configuration"))
+			continue
+		}
+		result = append(result, splunktools.Source{Name: name, Service: service})
+	}
+	slices.SortFunc(result, func(left, right splunktools.Source) int { return strings.Compare(left.Name, right.Name) })
+	return result, errs
+}
+
+func collectSourceOptionCredentials(options map[string]interface{}, totalNodes, totalBytes *int, addCredential func(string) bool) bool {
+	// Count the root map as depth zero and every visited container or scalar as one node.
+	const maxDepth = 8
+	const maxNodes = 1024
+	const maxTotalNodes = 4096
+	const maxKeyBytes = 256
+	visited := 0
+	var scan func(reflect.Value, int, bool) bool
+	scan = func(value reflect.Value, depth int, credentialNamed bool) bool {
+		visited++
+		*totalNodes++
+		if depth > maxDepth || visited > maxNodes || *totalNodes > maxTotalNodes {
+			return false
+		}
+		for value.IsValid() && value.Kind() == reflect.Interface {
+			value = value.Elem()
+		}
+		if !value.IsValid() {
+			return true
+		}
+		switch value.Kind() {
+		case reflect.Map:
+			if value.Type().Key().Kind() != reflect.String {
+				return false
+			}
+			iterator := value.MapRange()
+			for iterator.Next() {
+				key := iterator.Key().String()
+				if len(key) > maxKeyBytes || len(key) > graylogMaxCredentialBytes-*totalBytes {
+					return false
+				}
+				*totalBytes += len(key)
+				normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(key))
+				matched := strings.Contains(normalized, "token") || strings.Contains(normalized, "secret") || strings.Contains(normalized, "password") || strings.Contains(normalized, "apikey") || strings.Contains(normalized, "username") || strings.Contains(normalized, "credential") || normalized == "authorization"
+				if !scan(iterator.Value(), depth+1, credentialNamed || matched) {
+					return false
+				}
+			}
+		case reflect.Slice, reflect.Array:
+			for index := 0; index < value.Len(); index++ {
+				if !scan(value.Index(index), depth+1, credentialNamed) {
+					return false
+				}
+			}
+		case reflect.String:
+			if credentialNamed {
+				if !addCredential(value.String()) {
+					return false
+				}
+			} else {
+				length := value.Len()
+				if length > graylogMaxCredentialBytes-*totalBytes {
+					return false
+				}
+				*totalBytes += length
+			}
+		case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+			reflect.Float32, reflect.Float64:
+		default:
+			return false
+		}
+		return true
+	}
+	return scan(reflect.ValueOf(options), 0, false)
+}
+
+func combineLogTools(groups ...[]core.Tool) []core.Tool {
+	var result []core.Tool
+	blocked := map[string]bool{}
+	for _, group := range groups {
+		for _, candidate := range group {
+			if blocked[candidate.Name()] {
+				continue
+			}
+			found := false
+			for index, existing := range result {
+				if existing.Name() != candidate.Name() {
+					continue
+				}
+				found = true
+				combined, err := CombineSourceRoutedTools(existing, candidate)
+				if err != nil {
+					log.Printf("agent: ambiguous log capability omitted: %s", candidate.Name())
+					blocked[candidate.Name()] = true
+					result = append(result[:index], result[index+1:]...)
+				} else {
+					result[index] = combined
+				}
+				break
+			}
+			if !found {
+				result = append(result, candidate)
+			}
+		}
+	}
+	return result
+}
+
 func elasticsearchConstructionStatus(status aitools.DependencyStatus, sources []elasticsearchtools.Source, errs []error) aitools.DependencyStatus {
 	status.Constructed = status.Configured && len(errs) == 0 && len(sources) > 0
 	status.Healthy = status.Constructed
@@ -684,7 +1005,7 @@ func boundAvailabilityText(value string, limit int) string {
 	return string(runes)
 }
 
-func buildAnalyzeTools(store storage.Provider, scope tenancy.OrgScope, catalog versustools.PatternCatalog, reader commontools.SignalReader, redactor commontools.LineRedactor, services commontools.ServiceExtractor, graph *commontools.DependencyGraph, changes commontools.ChangeFeed, embedder core.Embedder, runbooks commontools.RunbookSearcher, metrics commontools.MetricReader, traces commontools.TraceReader, health versustools.DetectionHealthReader) []core.Tool {
+func buildAnalyzeTools(store storage.Provider, scope tenancy.OrgScope, catalog versustools.PatternCatalog, reader commontools.SignalReader, redactor commontools.LineRedactor, services commontools.ServiceExtractor, graph *commontools.DependencyGraph, changes commontools.ChangeFeed, embedder core.Embedder, runbooks commontools.RunbookSearcher, health versustools.DetectionHealthReader) []core.Tool {
 	scope = scope.Normalized()
 	providers := chatKnowledgeProviders()
 	tools := make([]core.Tool, 0, 18)
@@ -711,7 +1032,7 @@ func buildAnalyzeTools(store storage.Provider, scope tenancy.OrgScope, catalog v
 		tools = append(tools, versustools.GetDetectionHealth{Reader: health, Scope: scope})
 	}
 	tools = append(tools,
-		versustools.ListCapabilities{Capabilities: knowledgeCapabilities(scope, store, catalog, reader, graph, changes, embedder, runbooks, metrics, traces, health, providers)},
+		versustools.ListCapabilities{Capabilities: knowledgeCapabilities(scope, store, catalog, reader, graph, changes, embedder, runbooks, health, providers)},
 		versustools.GetAlertDecision{Provider: providers.AlertDecision, Scope: scope, Redactor: redactor},
 	)
 	if store != nil {
@@ -737,16 +1058,10 @@ func buildAnalyzeTools(store storage.Provider, scope tenancy.OrgScope, catalog v
 	if embedder != nil && runbooks != nil {
 		tools = append(tools, commontools.FindRunbook{Embedder: embedder, Index: runbooks, Redactor: redactor})
 	}
-	if metrics != nil {
-		tools = append(tools, commontools.QueryMetrics{Reader: metrics})
-	}
-	if traces != nil {
-		tools = append(tools, commontools.QueryTraces{Reader: traces, Redactor: redactor})
-	}
 	return tools
 }
 
-func knowledgeCapabilities(scope tenancy.OrgScope, store storage.Provider, catalog versustools.PatternCatalog, reader commontools.SignalReader, graph *commontools.DependencyGraph, changes commontools.ChangeFeed, embedder core.Embedder, runbooks commontools.RunbookSearcher, metrics commontools.MetricReader, traces commontools.TraceReader, health versustools.DetectionHealthReader, providers ChatKnowledgeProviders) []versustools.CapabilityStatus {
+func knowledgeCapabilities(scope tenancy.OrgScope, store storage.Provider, catalog versustools.PatternCatalog, reader commontools.SignalReader, graph *commontools.DependencyGraph, changes commontools.ChangeFeed, embedder core.Embedder, runbooks commontools.RunbookSearcher, health versustools.DetectionHealthReader, providers ChatKnowledgeProviders) []versustools.CapabilityStatus {
 	status := func(name string, configured bool, setup string) versustools.CapabilityStatus {
 		available := versustools.CapabilityStatusFalse
 		reason := "not configured"
@@ -762,8 +1077,8 @@ func knowledgeCapabilities(scope tenancy.OrgScope, store storage.Provider, catal
 		status("catalog", catalog != nil, "Configure a pattern catalog."),
 		status("source_health", health != nil, "Configure detection source health reporting."),
 		status("logs", reader != nil, "Configure at least one log signal source."),
-		status("metrics", metrics != nil, "Configure a metrics query source."),
-		status("traces", traces != nil, "Configure a trace query source."),
+		status("metrics", false, "Configure a metrics data source."),
+		status("traces", false, "Configure a trace data source."),
 		{Name: "service_reliability", Group: "reliability", Licensed: versustools.CapabilityStatusUnknown, Available: versustools.CapabilityStatusUnknown, Reason: "status not reported", SetupAction: "Enable and configure a service reliability provider."},
 		{Name: "alert_decisions", Group: "decisions", Licensed: versustools.CapabilityStatusUnknown, Available: versustools.CapabilityStatusUnknown, Reason: "status not reported", SetupAction: "Enable and configure an alert decision provider."},
 		status("kubernetes", false, "Configure Kubernetes discovery for this deployment."),
@@ -775,6 +1090,51 @@ func knowledgeCapabilities(scope tenancy.OrgScope, store storage.Provider, catal
 		capabilities = mergeCapabilityStatuses(capabilities, providers.CapabilityStatus.CapabilityStatuses(scope.Normalized()))
 	}
 	return capabilities
+}
+
+func sourceReadCapabilities(statuses []versustools.CapabilityStatus, snapshot aitools.Snapshot, runtime []core.Tool) []versustools.CapabilityStatus {
+	for index := range statuses {
+		name := statuses[index].Name
+		readTool := ""
+		switch name {
+		case "metrics":
+			readTool = "read_metric_series"
+		case "traces":
+			readTool = "read_trace_spans"
+		default:
+			continue
+		}
+		present := false
+		for _, candidate := range runtime {
+			if candidate.Name() == readTool {
+				present = true
+				break
+			}
+		}
+		resolution := aitools.Resolve(aitools.Requirement{Kind: aitools.RequirementDataSource, SignalKind: name, Capabilities: []string{readTool}}, snapshot, true)
+		if resolution.State == aitools.StateNeedsLicense {
+			statuses[index].Licensed = versustools.CapabilityStatusFalse
+		}
+		if !present || !snapshot.Capabilities[readTool].Constructed {
+			statuses[index].Configured = false
+			statuses[index].Available = versustools.CapabilityStatusFalse
+			statuses[index].Reason = "native read capability not constructed"
+			continue
+		}
+		statuses[index].Configured = true
+		statuses[index].Available = versustools.CapabilityStatusFalse
+		if resolution.State == aitools.StateNeedsLicense || statuses[index].Licensed == versustools.CapabilityStatusFalse {
+			statuses[index].Licensed = versustools.CapabilityStatusFalse
+		} else if resolution.State == aitools.StateAvailable {
+			statuses[index].Licensed = versustools.CapabilityStatusTrue
+			statuses[index].Available = versustools.CapabilityStatusTrue
+			statuses[index].Reason = "configured"
+			statuses[index].SetupAction = ""
+		} else {
+			statuses[index].Reason = resolution.Reason
+		}
+	}
+	return statuses
 }
 
 func mergeCapabilityStatuses(base, reported []versustools.CapabilityStatus) []versustools.CapabilityStatus {

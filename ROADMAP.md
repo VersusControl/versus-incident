@@ -41,15 +41,23 @@ This file is the human-readable mirror.
 - [x] Frequency spike detection
 - [x] Service detection, with per-service attribution overrides
 - [x] New-service grace period
-- [x] Redaction before anything leaves the box
+- [x] Redaction of ingested log samples and selected tool output
 - [x] Detection audit log and agent dashboard
 
 ### AI SRE Agent — investigation
 - [x] On-demand incident analysis
 - [x] Read-only investigation tools — recent incidents, pattern history, service
       description, related logs, recent changes, service dependencies
-- [x] Metric and trace lookups during an investigation
 - [x] Runbook search over your own runbooks
+- [x] DevOps chat website interface for open-ended, on-demand service investigation
+- [x] Conversation history, streaming tool activity, and investigation loop
+      guardrails for repeated calls and stalled progress
+- [x] Kubernetes workload, resource, event, and pod-log investigation tools
+
+### Service health
+- [x] Service Heatmap with log and incident evidence, source coverage, and
+      explicit missing or stale data states
+- [x] Configurable collection interval and assessment window
 
 ### Signal sources
 - [x] Elasticsearch, File, Graylog, Splunk, Loki and CloudWatch Logs
@@ -73,27 +81,25 @@ This file is the human-readable mirror.
 
 In the order we intend to build.
 
-### Service readiness
-- [ ] Tools reporting a service's signal coverage, objectives, alert coverage
-      and runbook coverage
-- [ ] Infrastructure-aware tools — Kubernetes workloads and autoscalers, and IaC
-      manifests — so the agent can reason about capacity, scaling and resilience
-
 ### Agent quality
 - [ ] Evaluation harness — score the agent against recorded incidents whose
       answers are already known, so improvement and regression are measurable
 - [ ] A starter pack of scored scenarios shipped with the harness
+- [ ] End-to-end model egress guard that checks chat input and every tool result
+      for secrets before data reaches an AI provider
+
+### DevOps agent CLI
+- [ ] Separate `versus-devops` CLI that connects to a Versus server, shares web
+      sessions, and uses server-managed tools, skills, MCP, and policy
 
 ### Investigation depth
-- [ ] Investigate a service on demand, by name, without waiting for an alert
-- [ ] Investigation loop guardrails — skip repeat tool calls, stop when the agent
-      stops making progress, and open with the most useful evidence
+- [ ] Release-qualified native log read tools for configured providers
 - [ ] More read-only investigation tools, added where users actually need them
 
 ### Suggested remediation
-- [ ] Suggested actions for known-good categories, gated by an operator
-      allow-list
-- [ ] Text only — no auto-execution, human approval always required
+- [ ] Approved, scoped, non-destructive actions from an operator allow-list
+- [ ] Manual commands and guidance for delete/remove operations, never executed
+      by the agent
 
 ### Cost control
 - [ ] Model routing — cheaper model for refinement, stronger model for the final

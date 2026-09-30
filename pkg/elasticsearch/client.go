@@ -43,7 +43,50 @@ var (
 	ErrNotFound         = errors.New("elasticsearch: not found")
 	ErrResponseTooLarge = errors.New("elasticsearch: response too large")
 	ErrBackend          = errors.New("elasticsearch: backend unavailable")
+	ErrShardFailure     = errors.New("elasticsearch: search failed on one or more shards")
 )
+
+// ShardStats is the `_shards` header of a search response. Elasticsearch
+// reports per-shard query failures (for example sorting on an unmapped field)
+// with HTTP 200 and zero hits, so callers must check it before trusting hits.
+type ShardStats struct {
+	Total    int `json:"total"`
+	Failed   int `json:"failed"`
+	Failures []struct {
+		Reason struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		} `json:"reason"`
+	} `json:"failures"`
+}
+
+// Err returns ErrShardFailure with the failure count and a bounded, printable
+// first reason when any shard failed, and nil otherwise.
+func (stats ShardStats) Err() error {
+	if stats.Failed <= 0 {
+		return nil
+	}
+	if len(stats.Failures) == 0 {
+		return fmt.Errorf("%w: %d of %d shards failed", ErrShardFailure, stats.Failed, stats.Total)
+	}
+	first := stats.Failures[0].Reason
+	return fmt.Errorf("%w: %d of %d shards failed; first failure %s: %s", ErrShardFailure, stats.Failed, stats.Total,
+		printableBounded(first.Type, 64), printableBounded(first.Reason, 256))
+}
+
+func printableBounded(value string, limit int) string {
+	value = strings.Map(func(character rune) rune {
+		if character < 0x20 || character == 0x7f {
+			return ' '
+		}
+		return character
+	}, value)
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return string(runes)
+}
 
 // Client owns transport, authentication, failover, and source index scoping.
 type Client struct {
@@ -183,22 +226,40 @@ func validIndex(index string) bool {
 }
 
 func (client *Client) readJSON(ctx context.Context, policy operationPolicy, method, suffix string, query url.Values, body []byte, output any) error {
-	if client == nil || client.httpClient == nil || (method != http.MethodGet && method != http.MethodPost) || !strings.HasPrefix(suffix, "/_") || strings.ContainsAny(suffix, "?#\\\r\n") {
-		return ErrInvalidArguments
+	_, err := client.readJSONOn(ctx, policy, method, suffix, query, body, output, "")
+	return err
+}
+
+func (client *Client) readJSONOn(ctx context.Context, policy operationPolicy, method, suffix string, query url.Values, body []byte, output any, pinnedAddress string) (string, error) {
+	if client == nil || client.httpClient == nil || (method != http.MethodGet && method != http.MethodPost && (method != http.MethodDelete || suffix != "/_search/scroll")) || !strings.HasPrefix(suffix, "/_") || strings.ContainsAny(suffix, "?#\\\r\n") {
+		return "", ErrInvalidArguments
 	}
 	destination := reflect.ValueOf(output)
 	if destination.Kind() != reflect.Pointer || destination.IsNil() {
-		return ErrInvalidArguments
+		return "", ErrInvalidArguments
 	}
 	if len(body) > maximumRequestBytes || policy.timeout <= 0 || policy.maxBytes <= 0 || policy.maxBytes > maximumResponseBytes {
-		return ErrInvalidArguments
+		return "", ErrInvalidArguments
+	}
+	addresses := client.addresses
+	if pinnedAddress != "" {
+		addresses = nil
+		for _, address := range client.addresses {
+			if address == pinnedAddress {
+				addresses = []string{address}
+				break
+			}
+		}
+		if len(addresses) == 0 {
+			return "", ErrInvalidArguments
+		}
 	}
 	operationCtx, cancelOperation := context.WithTimeout(ctx, policy.timeout)
 	defer cancelOperation()
 	var lastErr error
-	for _, address := range client.addresses {
+	for _, address := range addresses {
 		if err := operationCtx.Err(); err != nil {
-			return err
+			return "", err
 		}
 		requestURL := address + client.scopedPath(suffix)
 		if len(query) > 0 {
@@ -217,7 +278,7 @@ func (client *Client) readJSON(ctx context.Context, policy operationPolicy, meth
 		response, err := client.httpClient.Do(request)
 		if err != nil {
 			if operationCtx.Err() != nil {
-				return operationCtx.Err()
+				return "", operationCtx.Err()
 			} else {
 				lastErr = preferredError(lastErr, ErrBackend)
 			}
@@ -227,9 +288,12 @@ func (client *Client) readJSON(ctx context.Context, policy operationPolicy, meth
 		_ = response.Body.Close()
 		if readErr != nil {
 			if operationCtx.Err() != nil {
-				return operationCtx.Err()
+				return "", operationCtx.Err()
 			}
 			lastErr = preferredError(lastErr, ErrBackend)
+			if suffix == "/_search" && query.Get("scroll") != "" {
+				return "", lastErr
+			}
 			continue
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -238,20 +302,26 @@ func (client *Client) readJSON(ctx context.Context, policy operationPolicy, meth
 		}
 		if int64(len(data)) > policy.maxBytes {
 			lastErr = preferredError(lastErr, ErrResponseTooLarge)
+			if suffix == "/_search" && query.Get("scroll") != "" {
+				return "", lastErr
+			}
 			continue
 		}
 		decoded := reflect.New(destination.Elem().Type())
 		if err := json.Unmarshal(data, decoded.Interface()); err != nil {
 			lastErr = preferredError(lastErr, ErrBackend)
+			if suffix == "/_search" && query.Get("scroll") != "" {
+				return "", lastErr
+			}
 			continue
 		}
 		destination.Elem().Set(decoded.Elem())
-		return nil
+		return address, nil
 	}
 	if lastErr == nil {
 		lastErr = ErrBackend
 	}
-	return lastErr
+	return "", lastErr
 }
 
 func preferredError(current, candidate error) error {
@@ -280,6 +350,8 @@ func (client *Client) scopedPath(suffix string) string {
 	switch suffix {
 	case "/_cat/indices", "/_cat/shards":
 		return suffix + "/" + client.index
+	case "/_search/scroll":
+		return suffix
 	default:
 		return "/" + client.index + suffix
 	}
@@ -318,7 +390,50 @@ func (client *Client) SearchJSON(ctx context.Context, body []byte, output any) e
 // SearchIngestJSON executes a tail search with the historical 30-second
 // operation timeout and a bounded response budget sized for structured pages.
 func (client *Client) SearchIngestJSON(ctx context.Context, body []byte, output any) error {
-	return client.readJSON(ctx, client.ingestPolicy, http.MethodPost, "/_search", nil, body, output)
+	return client.SearchIngestJSONWithPreference(ctx, "", body, output)
+}
+
+// SearchIngestJSONWithPreference is SearchIngestJSON with an Elasticsearch
+// `preference` routing value, so requests sharing it hit the same shard copies.
+// An empty preference sends none.
+func (client *Client) SearchIngestJSONWithPreference(ctx context.Context, preference string, body []byte, output any) error {
+	var query url.Values
+	if preference != "" {
+		query = url.Values{"preference": {preference}}
+	}
+	return client.readJSON(ctx, client.ingestPolicy, http.MethodPost, "/_search", query, body, output)
+}
+
+// OpenIngestScroll starts an index-scoped snapshot and returns its route.
+func (client *Client) OpenIngestScroll(ctx context.Context, body []byte, output any) (string, error) {
+	return client.readJSONOn(ctx, client.ingestPolicy, http.MethodPost, "/_search", url.Values{"scroll": {"1m"}}, body, output, "")
+}
+
+// NextIngestScroll reads the next page from a scroll opened by this client.
+func (client *Client) NextIngestScroll(ctx context.Context, address, scrollID string, output any) error {
+	if address == "" || scrollID == "" || len(scrollID) > 8192 {
+		return ErrInvalidArguments
+	}
+	body, err := json.Marshal(map[string]string{"scroll": "1m", "scroll_id": scrollID})
+	if err != nil {
+		return ErrInvalidArguments
+	}
+	_, err = client.readJSONOn(ctx, client.ingestPolicy, http.MethodPost, "/_search/scroll", nil, body, output, address)
+	return err
+}
+
+// ClearIngestScroll releases a server-side snapshot even after Pull is canceled.
+func (client *Client) ClearIngestScroll(ctx context.Context, address, scrollID string) error {
+	if address == "" || scrollID == "" {
+		return ErrInvalidArguments
+	}
+	body, err := json.Marshal(map[string][]string{"scroll_id": {scrollID}})
+	if err != nil {
+		return ErrInvalidArguments
+	}
+	var output struct{}
+	_, err = client.readJSONOn(ctx, client.ingestPolicy, http.MethodDelete, "/_search/scroll", nil, body, &output, address)
+	return err
 }
 
 // setTestBounds replaces transport bounds for package tests.

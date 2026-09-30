@@ -36,7 +36,6 @@ function ToolIcon({ iconKey }: { iconKey: string }) {
 const ICONS: Record<string, ElementType> = {
   kubernetes: ShipWheel,
   git: GitBranch,
-  file: FileText,
   logs: FileText,
   metrics: Activity,
   traces: Network,
@@ -58,7 +57,6 @@ const PROVIDER_LOGOS: Record<string, string> = {
 const ICON_COLORS: Record<string, string> = {
   kubernetes: "tool-brand-kubernetes",
   git: "tool-brand-git",
-  file: "tool-brand-common",
   cloudwatch: "tool-brand-common",
   runbook: "tool-brand-runbook",
   dependencies: "tool-brand-dependencies",
@@ -72,36 +70,27 @@ const SHARED_TOOL_NAMES: Record<string, string> = {
 };
 
 const PROVIDERS = [
-  { base_id: "logs", type: "file", name: "File", description: "Read logs from local files.", icon_key: "file", developed: false, docs_url: "https://docs.versusincident.com/#/agent/data-sources/file" },
-  { base_id: "logs", type: "loki", name: "Loki", description: "Query logs stored in Grafana Loki.", icon_key: "loki", developed: false, docs_url: "https://docs.versusincident.com/#/agent/data-sources/loki" },
-  { base_id: "logs", type: "cloudwatchlogs", name: "CloudWatch Logs", description: "Query logs stored in Amazon CloudWatch.", icon_key: "cloudwatch", developed: false, docs_url: "https://docs.versusincident.com/#/agent/data-sources/cloudwatch-logs" },
-  { base_id: "logs", type: "graylog", name: "Graylog", description: "Search logs stored in Graylog.", icon_key: "graylog", developed: false, docs_url: "https://docs.versusincident.com/#/agent/data-sources/graylog" },
-  { base_id: "logs", type: "splunk", name: "Splunk", description: "Search logs stored in Splunk.", icon_key: "splunk", developed: false, docs_url: "https://docs.versusincident.com/#/agent/data-sources/splunk" },
+  { base_id: "logs", type: "loki", name: "Loki", description: "Query logs stored in Grafana Loki.", icon_key: "loki", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/loki" },
+  { base_id: "logs", type: "cloudwatchlogs", name: "CloudWatch Logs", description: "Query logs stored in Amazon CloudWatch.", icon_key: "cloudwatch", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/cloudwatch-logs" },
+  { base_id: "logs", type: "graylog", name: "Graylog", description: "Search logs stored in Graylog.", icon_key: "graylog", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/graylog" },
+  { base_id: "logs", type: "splunk", name: "Splunk", description: "Search logs stored in Splunk.", icon_key: "splunk", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/splunk" },
   { base_id: "logs", type: "signoz", name: "SigNoz Logs", description: "Query logs stored in SigNoz.", icon_key: "signoz", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/signoz" },
   { base_id: "metrics", type: "prometheus", name: "Prometheus", description: "Query metrics from Prometheus.", icon_key: "prometheus", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/prometheus" },
-  { base_id: "metrics", type: "cloudwatch_metrics", name: "CloudWatch Metrics", description: "Query metrics from Amazon CloudWatch.", icon_key: "cloudwatch", developed: false, docs_url: "https://docs.versusincident.com/#/agent/data-sources/cloudwatch-metrics" },
+  { base_id: "metrics", type: "cloudwatch_metrics", name: "CloudWatch Metrics", description: "Query metrics from Amazon CloudWatch.", icon_key: "cloudwatch", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/cloudwatch-metrics" },
   { base_id: "metrics", type: "signoz_metrics", name: "SigNoz Metrics", description: "Query metrics from SigNoz.", icon_key: "signoz", developed: true, docs_url: "https://docs.versusincident.com/#/enterprise/metrics/signoz" },
   { base_id: "traces", type: "traces", name: "Grafana Tempo", description: "Inspect distributed traces in Grafana Tempo.", icon_key: "tempo", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/traces" },
   { base_id: "traces", type: "signoz_traces", name: "SigNoz Traces", description: "Inspect distributed traces in SigNoz.", icon_key: "signoz", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/traces?id=signoz-backend" },
 ] as const;
 
-function isCanonicalToolProvider(baseID: string, providerType: string): boolean {
-  return (baseID === "metrics" && providerType === "prometheus") || (baseID === "traces" && providerType === "traces");
-}
-
 function buildCatalog(toolsets: AgentToolsetAvailability[], sources: Awaited<ReturnType<typeof api.getAgentConfig>>["sources"] | undefined, configKnown: boolean): CatalogToolset[] {
   const baseByID = new Map(toolsets.map((toolset) => [toolset.id, toolset]));
-  const enabledSourceTypes = new Set(sources?.filter((source) => source.enable).map((source) => source.type) ?? []);
   const providers = PROVIDERS.flatMap((provider) => {
     const base = baseByID.get(provider.base_id);
     if (!base) return [];
     const configuredSourceNames = sources
       ?.filter((source) => source.enable && source.type === provider.type)
       .map((source) => source.name) ?? [];
-    const configured = configKnown && configuredSourceNames.length > 0;
-    const siblingConfigured = PROVIDERS.some((candidate) => candidate.base_id === base.id && enabledSourceTypes.has(candidate.type));
-    const configuredOutsideSources = configKnown && !configured && !siblingConfigured && isCanonicalToolProvider(base.id, provider.type) && ["available", "disabled_by_operator"].includes(base.state);
-    const providerAvailable = configured || configuredOutsideSources;
+    const providerAvailable = configKnown && configuredSourceNames.length > 0;
     const authoritative = base.state === "needs_license" || base.state === "needs_permission";
     const state: CatalogToolState = !provider.developed
       ? "development"
@@ -119,7 +108,7 @@ function buildCatalog(toolsets: AgentToolsetAvailability[], sources: Awaited<Ret
       : !configKnown
         ? `Provider configuration is unavailable. This provider uses the shared ${base.display_name} agent capability.`
         : providerAvailable
-          ? base.state === "unhealthy" ? `The shared ${base.display_name} agent capability is unhealthy.` : configuredOutsideSources ? `${provider.name} tools are configured outside agent sources.` : `${provider.name} is configured.`
+          ? base.state === "unhealthy" ? `The shared ${base.display_name} agent capability is unhealthy.` : `${provider.name} is configured.`
           : `${provider.name} is not configured.`;
     const baseAllowsUI = base.ui_path && !["needs_license", "needs_permission"].includes(base.state);
     return [{

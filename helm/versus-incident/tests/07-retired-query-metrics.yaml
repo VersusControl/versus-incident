@@ -1,0 +1,4 @@
+agent:
+  tools:
+    queryMetrics:
+      enable: false

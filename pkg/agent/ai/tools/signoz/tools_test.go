@@ -124,6 +124,36 @@ func TestAuthorizedInvokeScrubsExactAPIKeyFromSerializedResult(t *testing.T) {
 	}
 }
 
+func TestReadMetricSeriesReportsAveragingWithoutDiscovery(t *testing.T) {
+	calls := 0
+	service := testService(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		calls++
+		if request.URL.Path != signozapp.QueryRangePath || request.Method != http.MethodPost {
+			t.Errorf("unexpected metric request: %s %s", request.Method, request.URL.Path)
+		}
+		fmt.Fprint(writer, `{"data":{"data":{"results":[{"aggregations":[{"series":[{"values":[{"timestamp":1,"value":100},{"timestamp":2,"value":125}]}]}]}]}}}`)
+	}))
+	var readTool core.Tool
+	for _, candidate := range New([]Source{{Name: "metrics", Kind: signozapp.SignalMetrics, Service: service}}) {
+		if candidate.Name() == "read_metric_series" {
+			readTool = candidate
+		}
+	}
+	if readTool == nil {
+		t.Fatal("missing metric series tool")
+	}
+	ctx := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
+	result, err := readTool.Invoke(ctx, json.RawMessage(`{"service":"checkout","metric_name":"demo_http_requests_total"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := result.Data["result"].(map[string]any)
+	semantics := data["metricSemantics"].(map[string]any)
+	if semantics["timeAggregation"] != "avg" || semantics["temporality"] != "unspecified" || !strings.Contains(semantics["interpretation"].(string), "not a per-second rate") || calls != 1 {
+		t.Fatalf("metric semantics=%v calls=%d", semantics, calls)
+	}
+}
+
 func testService(t *testing.T, handler http.Handler) *signozapp.Service {
 	t.Helper()
 	server, rootCAs := newTLSTestServer(t, handler)

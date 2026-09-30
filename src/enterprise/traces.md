@@ -71,7 +71,15 @@ sources:
     options:
       backend: tempo
       address: http://localhost:3200   # host-published Tempo
+      allow_loopback: true              # opt in for tool reads to localhost
 ```
+
+The source's organization is assigned from the authenticated deployment runtime;
+there is no user-defined Tempo organization option. For the
+licensed `discover_trace_fields` and `read_trace_spans` bounded reads, set `allow_loopback: true`
+for this host-published demo, or `allow_private_networks: true` for a trusted
+private Docker endpoint instead. These flags govern the on-demand tools, not
+the standing source's detection.
 
 ## 3. Understand the three modes
 
@@ -127,11 +135,9 @@ docker run --rm --name versus-enterprise \
   ghcr.io/versuscontrol/versus-enterprise:latest
 ```
 
-On boot you should see:
+On boot, check the Enterprise start line:
 
 ```text
-enterprise: datasource: auto-wired query_traces tool from traces source "demo-traces"
-agent: analyze agent enabled model=gpt-4o-mini tools=5
 enterprise: agent started (mode=training, sources=1)
 ```
 
@@ -230,12 +236,12 @@ source `demo-traces`, a title, a severity, a confidence, and status *firing*. Th
 
 **Run the deep AI analysis (on demand).** Detect mode opens the incident with the
 lightweight classification above; the full **AI analysis** — the tool-using root-cause
-investigation that calls `query_traces`, searches runbooks, and correlates related
+investigation that can call source-bound `discover_trace_fields` and
+`read_trace_spans`, search runbooks, and correlate related
 signals — runs **only when you open the incident and click *Analyze*** on its detail page.
 That keeps every firing signal cheap and reserves the expensive multi-step investigation
-for the incidents you choose to dig into. The boot line
-`agent: analyze agent enabled ... tools=5` means this analyzer is *available*, not that it
-ran during detect.
+for the incidents you choose to dig into. These trace reads are contributed
+by the licensed `demo-traces` source, not configured in `tools.yaml`.
 
 ## Going further: name your own target (optional)
 
@@ -254,6 +260,7 @@ sources:
     options:
       backend: tempo
       address: http://localhost:3200
+      allow_loopback: true
       query: '{ status = error }'   # fires on every error trace the generator emits
       page_size: 100
 ```
@@ -276,8 +283,8 @@ docker compose -f docker-compose.yml -f docker-compose.traces.yml down -v
 
 | Symptom | Cause / fix |
 |---|---|
-| `requires Versus Enterprise` on every tick, `sources=0`, `mode=community` | The license is missing the **`intelligence`** feature (or you're on an OSS build). Mint a key that includes `intelligence`. This is the open-core line: OSS keeps only the on-demand `query_traces` tool, not the standing source. |
-| Boot fails to connect to Redis | Ensure the `versus-metrics-redis` container is healthy and published on `:6379`, and that `REDIS_HOST=localhost` / `REDIS_PORT=6379` / `REDIS_PASSWORD` are set in the run command. Redis here is **TLS-only** — Versus dials TLS by default, so do **not** set `REDIS_TLS=false`. See the metrics demo's [Redis connection troubleshooting (TLS + password)](./metrics.md#troubleshooting). |
+| `requires Versus Enterprise` on every tick, `sources=0`, `mode=community` | The license is missing the **`intelligence`** feature (or you're on an OSS build). Supply a key with `intelligence` to use the standing source and its source-bound trace tools. OSS has neither the source nor trace read tools. |
+| Boot fails to connect to Redis | Ensure the `versus-metrics-redis` container is healthy and published on `:6379`, and that `REDIS_HOST=localhost` / `REDIS_PORT=6379` / `REDIS_PASSWORD` are set in the run command. Redis here is **TLS-only** — Versus dials TLS by default, so do **not** set `REDIS_TLS=false`. See the metrics demo's [Redis connection troubleshooting (TLS + password)](./metrics/prometheus.md#troubleshooting). |
 | `analyze agent enabled` never appears, no AI summary | `AGENT_AI_ENABLE=true` and a real `AGENT_AI_API_KEY` are both required — set both in the run command. |
 | No signals even during a spike | Confirm `--otlp http://localhost:4318` is set and Tempo is ready (<http://localhost:3200/ready>). The generator's metrics push also needs the Pushgateway up, or it exits before sending spans. |
 | Demo emits nothing / `matched=0 skipped_no_match` every tick | Trace sources learn-all by default — there is no regex to set. Confirm you're on a build with the per-kind default (trace `type`s bypass the log text-regex) and that the source `type` is a traces type (`traces`). Do **not** edit the global `agent.regex.default_pattern` to widen it — that's logs-only and would loosen your log sources. To *intentionally* narrow the traces kind, set the optional top-level `agent.regex.traces` key (empty = learn-all). |
@@ -287,6 +294,6 @@ docker compose -f docker-compose.yml -f docker-compose.traces.yml down -v
 
 - New here? [Getting Started — Running the Enterprise Agent](./getting-started.md)
 - Reference: [Traces / Tempo (Enterprise)](../agent/data-sources/traces.md)
-- The metric twin of this demo: [Metrics demo, end to end](./metrics.md)
+- The metric twin of this demo: [Metrics demo, end to end](./metrics/prometheus.md)
 - The logs lifecycle this mirrors: [Shadow Mode](../agent/shadow-mode.md) · [AI Detect Mode](../agent/ai-detect-mode.md) · [AI Analyze Mode](../agent/ai-analyze-mode.md)
-- On-demand correlation tools: [Tool Reference](../agent/tools/tools.md)
+- Source-bound read tools: [Tool Reference](../agent/tools/tools.md)

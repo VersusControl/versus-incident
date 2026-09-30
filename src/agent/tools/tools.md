@@ -58,19 +58,6 @@ the AI model. The default time window is 15 minutes and the maximum is 1440
 minutes (24 hours). The tool returns 50 lines by default and caps the result at
 200 lines.
 
-### `query_metrics`
-
-Runs an on-demand PromQL range query during an investigation. This correlation
-tool is available in OSS and Enterprise; the standing source that discovers
-signals and opens incidents is Enterprise. See [Prometheus](../data-sources/prometheus.md)
-for setup and tiering.
-
-### `query_traces`
-
-Reads bounded distributed traces for a service and time window. This on-demand
-correlation tool is available in OSS and Enterprise; the standing source is
-Enterprise. See [Traces](../data-sources/traces.md) for setup and tiering.
-
 ### `find_runbook`
 
 Searches indexed runbooks for operational guidance. It requires an AI embedder
@@ -155,7 +142,7 @@ resource describe, and node inventory with scheduled pods.
 ## Tool configuration
 
 Configuration for `describe_dependencies`, `recent_changes`, `find_runbook`,
-`query_metrics`, `query_traces`, and Kubernetes lives in an optional **`tools.yaml`** file
+and Kubernetes lives in an optional **`tools.yaml`** file
 placed next to `config.yaml`. `tools.yaml` provides data and credentials; it is
 not a tool allow-list.
 
@@ -166,35 +153,6 @@ every tool dispatch:
 |---|---|---|
 | `tool_timeout` | `20s` | Caps a single tool dispatch so one slow lookup can't consume the 2-minute analysis budget. A timeout surfaces as a tool error, never a hard failure. |
 | `parallel_tools` | `false` | When the model emits several tool calls in one turn, run them concurrently instead of sequentially. The audit trail stays deterministically ordered either way. |
-
-### Configure `query_metrics`
-
-Point the on-demand tool at a Prometheus-compatible endpoint. An empty address
-leaves the tool unavailable.
-
-```yaml
-tools:
-  query_metrics:
-    prometheus:
-      address: http://prometheus:9090
-```
-
-See [Prometheus](../data-sources/prometheus.md) for authentication, TLS, and
-the OSS versus Enterprise boundary.
-
-### Configure `query_traces`
-
-Point the on-demand tool at a Tempo-compatible endpoint. An empty address
-leaves the tool unavailable.
-
-```yaml
-tools:
-  query_traces:
-    tempo:
-      address: http://tempo:3200
-```
-
-See [Traces](../data-sources/traces.md) for authentication, TLS, and tiering.
 
 ### Configure Kubernetes
 
@@ -319,14 +277,6 @@ tools:
 
   find_runbook:
     embedding_model: text-embedding-3-small
-
-  query_metrics:
-    prometheus:
-      address: http://prometheus:9090
-
-  query_traces:
-    tempo:
-      address: http://tempo:3200
 
   kubernetes:
     auth:

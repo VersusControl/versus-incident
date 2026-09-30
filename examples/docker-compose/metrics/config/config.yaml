@@ -49,10 +49,9 @@ agent:
   # Default `detect` so a triggered incident surfaces immediately. The OSS
   # trigger here is the `file` log source (see agent_sources.yaml): a host-run
   # `scripts/generate_noisy_logs.py --spike 5xx ...` writes `status=503` error
-  # lines that start an incident. With AI enabled, the analyze loop then pulls
-  # query_metrics/query_traces to correlate against the series pushed by
-  # `scripts/generate_fake_metrics.py`. (The standing metric/trace data source
-  # is Enterprise-only.)
+  # lines that start an incident in a separately configured agent. Licensed
+  # Enterprise metric/trace sources contribute source-bound discover/read tools
+  # for data pushed by `scripts/generate_fake_metrics.py`; OSS has no such reads.
   mode: ${AGENT_MODE}
   poll_interval: 15s
   lookback: 5m

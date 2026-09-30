@@ -2,8 +2,10 @@ package signalsources
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -158,6 +160,90 @@ func TestPrometheusQuerier_AddressRequired(t *testing.T) {
 	}
 }
 
+func TestBoundedPrometheusQuerierCapsResponseBytes(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+	}))
+	defer ts.Close()
+	q, err := NewBoundedPrometheusQuerier(ts.URL, PrometheusAuth{}, false, PrometheusReadLimits{Timeout: time.Second, MaxResponseBytes: 8, AllowLoopback: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.QueryRange(context.Background(), "up", time.Now().Add(-time.Minute), time.Now(), time.Minute); !errors.Is(err, ErrPrometheusResponseTooLarge) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestBoundedPrometheusQuerierRejectsUnsafeOriginsAndDestinations(t *testing.T) {
+	limits := PrometheusReadLimits{Timeout: time.Second, MaxResponseBytes: 1024}
+	for _, address := range []string{
+		"ftp://metrics.example", "https://user@metrics.example", "https://metrics.example/path",
+		"http://localhost:9090", "http://127.0.0.1:9090", "http://10.0.0.1:9090",
+		"http://169.254.169.254", "http://0.0.0.0", "http://224.0.0.1",
+	} {
+		if _, err := NewBoundedPrometheusQuerier(address, PrometheusAuth{}, false, limits); err == nil {
+			t.Fatalf("address %q accepted", address)
+		}
+	}
+	if _, err := NewBoundedPrometheusQuerier("http://10.0.0.1:9090", PrometheusAuth{}, false, PrometheusReadLimits{Timeout: time.Second, MaxResponseBytes: 1024, AllowPrivate: true}); err != nil {
+		t.Fatalf("explicit private destination: %v", err)
+	}
+	if _, err := NewBoundedPrometheusQuerier("http://169.254.169.254", PrometheusAuth{}, false, PrometheusReadLimits{Timeout: time.Second, MaxResponseBytes: 1024, AllowPrivate: true}); err == nil {
+		t.Fatal("metadata destination accepted with private opt-in")
+	}
+}
+
+func TestBoundedPrometheusQuerierTransportAndSanitizedFailures(t *testing.T) {
+	const token = "PROMETHEUS_SECRET_CANARY"
+	const body = "UPSTREAM_BODY_CANARY"
+	redirectTargetRequests := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectTargetRequests++
+		if r.Header.Get("Authorization") != "" {
+			t.Fatalf("redirect forwarded authorization %q", r.Header.Get("Authorization"))
+		}
+		w.Write(promRangeBody(t, nil))
+	}))
+	defer target.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		if strings.Contains(r.URL.RawQuery, "redirect") {
+			http.Redirect(w, r, target.URL, http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	q, err := NewBoundedPrometheusQuerier(server.URL, PrometheusAuth{BearerToken: token}, false, PrometheusReadLimits{Timeout: time.Second, MaxResponseBytes: 1024, AllowLoopback: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := q.client.Transport.(*http.Transport)
+	if transport.Proxy != nil || transport.TLSClientConfig.MinVersion != tls.VersionTLS12 || transport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatalf("unsafe transport proxy_set=%t tls=%+v", transport.Proxy != nil, transport.TLSClientConfig)
+	}
+	insecure, err := NewBoundedPrometheusQuerier(server.URL, PrometheusAuth{}, true, PrometheusReadLimits{Timeout: time.Second, MaxResponseBytes: 1024, AllowLoopback: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insecureTLS := insecure.client.Transport.(*http.Transport).TLSClientConfig
+	if !insecureTLS.InsecureSkipVerify || insecureTLS.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("configured insecure TLS = %+v", insecureTLS)
+	}
+	_, err = q.QueryInstant(context.Background(), "up", time.Now())
+	if err == nil || strings.Contains(err.Error(), server.URL) || strings.Contains(err.Error(), body) || strings.Contains(err.Error(), token) {
+		t.Fatalf("unsafe bounded error = %v", err)
+	}
+	_, err = q.QueryInstant(context.Background(), "redirect", time.Now())
+	if err == nil || redirectTargetRequests != 0 {
+		t.Fatalf("redirect error=%v target requests=%d", err, redirectTargetRequests)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Discovery reads (GET-only).
 // -----------------------------------------------------------------------------
@@ -193,6 +279,28 @@ func TestPrometheusQuerier_MetadataParses(t *testing.T) {
 	}
 }
 
+func TestPrometheusQuerier_MetadataForScopesRequest(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("metric"); got != "http_requests_total" {
+			t.Errorf("metric = %q", got)
+		}
+		w.Write([]byte(`{"status":"success","data":{"http_requests_total":[{"type":"counter"}]}}`))
+	}))
+	defer ts.Close()
+
+	q, _ := NewPrometheusQuerier(ts.URL, PrometheusAuth{}, false)
+	meta, err := q.MetadataFor(context.Background(), "http_requests_total", time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(meta) != 1 || meta["http_requests_total"].Type != "counter" {
+		t.Fatalf("metadata = %v", meta)
+	}
+	if _, err := q.MetadataFor(context.Background(), "", time.Time{}, time.Time{}); err == nil {
+		t.Fatal("empty metric name accepted")
+	}
+}
+
 func TestPrometheusQuerier_LabelValuesParsesAndSendsMatchers(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -222,6 +330,20 @@ func TestPrometheusQuerier_LabelValuesRequiresName(t *testing.T) {
 	q, _ := NewPrometheusQuerier("http://example", PrometheusAuth{}, false)
 	if _, err := q.LabelValues(context.Background(), "", time.Time{}, time.Time{}); err == nil {
 		t.Error("expected error for empty label name")
+	}
+}
+
+func TestPrometheusQuerier_LabelValuesLimitedSendsServerBound(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("limit"); got != "26" {
+			t.Errorf("limit = %q", got)
+		}
+		w.Write([]byte(`{"status":"success","data":["api"]}`))
+	}))
+	defer ts.Close()
+	q, _ := NewPrometheusQuerier(ts.URL, PrometheusAuth{}, false)
+	if _, err := q.LabelValuesLimited(context.Background(), "service", time.Time{}, time.Time{}, 26, "up"); err != nil {
+		t.Fatal(err)
 	}
 }
 
