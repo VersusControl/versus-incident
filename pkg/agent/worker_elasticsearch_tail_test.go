@@ -234,10 +234,11 @@ func TestWorker_ElasticsearchTail_LearnsWithoutClearAndRelearnsAfterClear(t *tes
 	ix.add("b2", "connection refused to db-02", base.Add(5*time.Second)) // C1 = base+5s
 
 	src, err := signalsources.NewElasticsearchSource("prod", config.AgentElasticsearchSourceConfig{
-		Addresses:     []string{ts.URL},
-		AllowLoopback: true,
-		Index:         "logs-*",
-		PageSize:      50,
+		Addresses:       []string{ts.URL},
+		AllowLoopback:   true,
+		Index:           "logs-*",
+		TieBreakerField: "event.id",
+		PageSize:        50,
 	})
 	if err != nil {
 		t.Fatalf("new source: %v", err)
@@ -330,7 +331,7 @@ func TestWorker_ElasticsearchTail_CappedBacklogAdvancesAcrossTicks(t *testing.T)
 	}
 
 	esSource, err := signalsources.NewElasticsearchSource("capped-backlog", config.AgentElasticsearchSourceConfig{
-		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 999,
+		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 999, TieBreakerField: "event.id",
 	})
 	if err != nil {
 		t.Fatalf("new source: %v", err)
@@ -476,7 +477,7 @@ func TestWorker_ElasticsearchTail_DecodedByteBudgetPersistsAndAdvances(t *testin
 	defer server.Close()
 
 	esSource, err := signalsources.NewElasticsearchSource("byte-budget", config.AgentElasticsearchSourceConfig{
-		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 1, ExtraFields: []string{"payload"},
+		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 1, ExtraFields: []string{"payload"}, TieBreakerField: "event.id",
 	})
 	if err != nil {
 		t.Fatalf("new source: %v", err)

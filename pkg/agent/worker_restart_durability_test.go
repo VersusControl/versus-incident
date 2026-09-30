@@ -248,11 +248,12 @@ func (h *restartHarness) processWithWindow(persistEvery time.Duration, reorderWi
 	h.t.Helper()
 
 	es, err := signalsources.NewElasticsearchSource("tail", config.AgentElasticsearchSourceConfig{
-		Addresses:     []string{h.url},
-		AllowLoopback: true,
-		Index:         "logs-*",
-		PageSize:      500,
-		ReorderWindow: reorderWindow,
+		Addresses:       []string{h.url},
+		AllowLoopback:   true,
+		Index:           "logs-*",
+		TieBreakerField: "event.id",
+		PageSize:        500,
+		ReorderWindow:   reorderWindow,
 	})
 	if err != nil {
 		h.t.Fatalf("new source: %v", err)
