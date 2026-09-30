@@ -1,4 +1,4 @@
-# AI Agent — Spike Detection
+# Spike Detection
 
 Spike detection answers a question that the normal "known/unknown"
 check cannot: **"This error is normal — but why is it happening 50

@@ -1,4 +1,4 @@
-# AI Agent — Configuration
+# Configuration
 
 This page is the reference for every knob the agent exposes. Pair it with
 [Getting Started](./getting-started.md) for a hands-on walkthrough.

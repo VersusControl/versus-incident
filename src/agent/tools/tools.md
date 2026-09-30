@@ -7,6 +7,8 @@ Common tools remain individual cards. Chat and Analyze have independent
 policies. Versus self-knowledge is internal and appears only as one recovery
 card when a legacy child policy disabled it.
 
+![Versus Tool Catalog](../../docs/images/agent-tool-catalog.png)
+
 During the one-release grouped-policy compatibility window, deployments must
 retain legacy child-deny fields until every old replica has been retired. A
 group change uses a legacy transition marker and child denies around the grouped

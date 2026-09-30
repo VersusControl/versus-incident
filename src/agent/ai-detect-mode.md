@@ -1,4 +1,4 @@
-# AI Agent — Detect Mode
+# Detect Mode
 
 Detect mode leverages AI to identify and alert on new or unusual patterns in real-time. It is designed for production environments where timely detection of anomalies is critical. Before enabling detect mode, ensure that your pattern catalog is well-curated and that shadow mode has been used to validate the system's behavior.
 

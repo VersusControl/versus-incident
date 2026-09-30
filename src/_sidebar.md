@@ -9,6 +9,7 @@
   - [Service Detection](/agent/service-detection)
   - [Service Heatmap](/agent/service-heatmap)
   - [Incidents Report](/agent/incident-report)
+  - [DevOps Agent](/agent/devops-agent)
   - [AI Analyze](/agent/ai-analyze-mode)
   - [Configuration](/agent/configuration)
   - Data Sources

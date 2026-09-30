@@ -1,4 +1,4 @@
-# AI Agent — Shadow Mode
+# Shadow Mode
 
 Shadow mode is the **practice run** between training and detect.
 The agent keeps learning, and on top of that it decides what it

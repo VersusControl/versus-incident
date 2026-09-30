@@ -9,13 +9,11 @@
 </p>
 
 <p align="center">
-  <strong>Versus Incident is the self-hosted AI SRE agent.</strong> It learns what your systems
-  normally look like and escalates only what is new or unexpected issues — routing to your chat channels and
-  on-call platform.
+  <strong>Your AI SRE Teammate</strong> </br>
 </p>
 
 <p align="center">
-  Free with MIT license · <a href="/#/compare/datadog-watchdog">Compare</a>
+  You don't have to monitor your systems alone. Versus Incident will keep track of your services, applications, and systems, detect new or unexpected problems, and provide your team with the evidence needed to investigate.
 </p>
 
 ![Versus](docs/images/versus-dashboard.svg)

@@ -1,4 +1,4 @@
-# AI Agent — Catalog
+# Catalog
 
 The **catalog** is the agent's long-term memory: the set of recurring log *patterns* it has learned, plus the *services* it has discovered, plus whatever verdict you've given each one. A "pattern" here is a reusable log template like `user_id = <*> login ok in <*>` — one shape that stands in for thousands of near-identical lines (see [Miner](./miner.md) for how lines become templates).
 
