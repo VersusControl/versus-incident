@@ -1,4 +1,4 @@
-# AI Agent — Incidents Report
+# Incidents Report
 
 At the end of a noisy week someone always asks the same question: *"So how many incidents did we actually have, and where?"* The **Incidents Report** answers it with one picture. It's a shareable, at-a-glance summary card for a time window — total incidents, how they broke down, which services got hit hardest, and the shape of the trend — rendered as an image and posted to a channel your team already reads.
 

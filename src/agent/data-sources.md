@@ -1,4 +1,4 @@
-# AI Agent — Data Sources
+# Data Sources
 
 The AI agent ingests log signals via pluggable **sources**. Every source
 implements the same contract — pull new signals since a cursor, return

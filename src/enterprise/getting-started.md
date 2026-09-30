@@ -1,4 +1,4 @@
-# Getting Started — Running the Enterprise Agent
+# Running the Enterprise Agent
 
 _Enterprise_
 

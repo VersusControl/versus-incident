@@ -53,13 +53,13 @@ const providerDocs = {
   "SigNoz Traces": "https://docs.versusincident.com/#/agent/data-sources/traces?id=signoz-backend",
 };
 const providerStates = {
-  Loki: "Development",
-  "CloudWatch Logs": "Development",
-  Graylog: "Development",
-  Splunk: "Development",
+  Loki: "Configured",
+  "CloudWatch Logs": "Configured",
+  Graylog: "Configured",
+  Splunk: "Configured",
   "SigNoz Logs": "Data source needed",
   Prometheus: "Enterprise",
-  "CloudWatch Metrics": "Development",
+  "CloudWatch Metrics": "Enterprise",
   "SigNoz Metrics": "Enterprise",
   "Grafana Tempo": "Configured",
   "SigNoz Traces": "Data source needed",
@@ -160,8 +160,8 @@ describe("AgentToolsPage", () => {
     expect(screen.queryByText("Inspect Kubernetes.")).toBeNull();
     expect(screen.queryByText("Metric tools need an Enterprise source.")).toBeNull();
     expect(screen.getAllByText("Connection needed").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Enterprise")).toHaveLength(3);
-    expect(screen.getAllByText("Development")).toHaveLength(5);
+    expect(screen.getAllByText("Enterprise")).toHaveLength(4);
+    expect(screen.queryAllByText("Development")).toHaveLength(0);
     expect(screen.getByText("Off")).toBeTruthy();
     expect(screen.queryByRole("checkbox")).toBeNull();
   });
@@ -170,18 +170,19 @@ describe("AgentToolsPage", () => {
     renderPage();
     await screen.findByText("Kubernetes");
     expect(screen.getAllByRole("link", { name: /^Open / }).map((link) => link.getAttribute("href"))).toEqual([
-      "/agent/kubernetes", "/agent/logs", "/agent/traces", "/agent/runbooks",
+      "/agent/kubernetes", "/agent/logs", "/agent/logs", "/agent/logs", "/agent/logs", "/agent/logs", "/agent/traces", "/agent/runbooks",
     ]);
-    expect(screen.getAllByRole("button", { name: / settings$/ })).toHaveLength(14);
-    expect(screen.getAllByRole("button", { name: / details$/ })).toHaveLength(5);
+    expect(screen.getAllByRole("button", { name: / settings$/ })).toHaveLength(19);
+    expect(screen.queryAllByRole("button", { name: / details$/ })).toHaveLength(0);
     expect(screen.queryByRole("link", { name: /documentation/i })).toBeNull();
     expect(screen.getByText("Elasticsearch").closest("article")?.textContent).toContain("Ready");
-    expect(screen.getByText("CloudWatch Logs").closest("article")?.querySelector('a[href="/agent/logs"]')).toBeNull();
+    expect(screen.getByText("CloudWatch Logs").closest("article")?.querySelector('a[href="/agent/logs"]')).toBeTruthy();
+    expect(screen.getByText("SigNoz Logs").closest("article")?.querySelector('a[href="/agent/logs"]')).toBeNull();
     expect(screen.getByText("Prometheus").closest("article")?.querySelector('a[href="/agent/metrics"]')).toBeNull();
     expect(screen.getByText("SigNoz Traces").closest("article")?.querySelector('a[href="/agent/traces"]')).toBeNull();
   });
 
-  it("shows the exact provider development and availability matrix", async () => {
+  it("shows the exact provider availability matrix", async () => {
     renderPage();
     await screen.findByText("Elasticsearch");
     expect(screen.getByText("Elasticsearch").closest("article")?.textContent).toContain("Ready");
@@ -207,48 +208,50 @@ describe("AgentToolsPage", () => {
     expect(screen.getByText("CloudWatch Logs").closest("article")?.querySelector("img")).toBeNull();
   });
 
-  it("keeps configured undeveloped providers informational only", async () => {
+  it("shows configured log providers with source names and open links", async () => {
     renderPage();
     await screen.findByText("Loki");
-    const developmentProviders = {
+    const configuredProviders = {
       Loki: ["Production Loki"],
       "CloudWatch Logs": ["CloudWatch application logs"],
       Graylog: ["Graylog production"],
       Splunk: ["Splunk production"],
-      "CloudWatch Metrics": ["CloudWatch production"],
     } as const;
-    const allConfiguredNames = Object.values(developmentProviders).flat();
-    for (const provider of Object.keys(developmentProviders)) {
-      expect(screen.getByText(provider).closest("article")?.textContent).toContain("Development");
-      expect(screen.queryByRole("link", { name: `Open ${provider}` })).toBeNull();
-      const details = screen.getByRole("button", { name: `${provider} details` });
-      expect(details.getAttribute("title")).toBe(`About ${provider}`);
-      fireEvent.click(details);
+    for (const [provider, sourceNames] of Object.entries(configuredProviders)) {
+      const card = screen.getByText(provider).closest("article") as HTMLElement;
+      expect(card.textContent).toContain("Configured");
+      expect(card.textContent).not.toContain("Development");
+      expect(within(card).getByRole("link", { name: `Open ${provider}` }).getAttribute("href")).toBe("/agent/logs");
+      fireEvent.click(screen.getByRole("button", { name: `${provider} settings` }));
       const dialog = screen.getByRole("dialog", { name: provider });
-      expect(dialog.textContent).toContain("Provider-native agent tools are in development.");
+      expect(dialog.textContent).toContain(`${provider} is configured.`);
+      expect(dialog.textContent).not.toContain("Provider-native agent tools are in development.");
       expect(dialog.textContent).not.toContain("Disabled");
       expect(dialog.textContent).not.toContain("Setup required");
       expect(dialog.textContent).not.toMatch(/shared (Logs|Metrics|Trace) agent capability/i);
-      expect(within(dialog).queryByText("Configured sources", { exact: true })).toBeNull();
-      for (const configuredName of allConfiguredNames) expect(dialog.textContent).not.toContain(configuredName);
+      expect(within(dialog).getByText("Configured sources", { exact: true })).toBeTruthy();
+      for (const sourceName of sourceNames) expect(dialog.textContent).toContain(sourceName);
       expect(within(dialog).queryByRole("checkbox")).toBeNull();
-      expect(within(dialog).queryByRole("link", { name: /Open tool|Add a data source|Learn more/ })).toBeNull();
+      expect(within(dialog).getByRole("link", { name: /Open tool/ }).getAttribute("href")).toBe("/agent/logs");
+      expect(within(dialog).queryByRole("link", { name: /Add a data source|Learn more/ })).toBeNull();
       expect(within(dialog).getByRole("link", { name: "Documentation" })).toBeTruthy();
       fireEvent.click(within(dialog).getByRole("button", { name: "Close dialog" }));
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     }
   });
 
-  it("keeps development authoritative over shared permission state", async () => {
+  it("keeps shared permission state authoritative for every log provider", async () => {
     vi.mocked(api.listAgentToolsets).mockResolvedValueOnce(rows.map((row) =>
       row.id === "logs" ? { ...row, state: "needs_permission", reason: "Log access is not permitted." } : row,
     ));
     renderPage();
     await screen.findByText("Loki");
-    for (const provider of ["Loki", "CloudWatch Logs", "Graylog", "Splunk"]) {
-      expect(screen.getByText(provider).closest("article")?.textContent).toContain("Development");
+    for (const provider of ["Loki", "CloudWatch Logs", "Graylog", "Splunk", "SigNoz Logs"]) {
+      const card = screen.getByText(provider).closest("article") as HTMLElement;
+      expect(card.textContent).toContain("No access");
+      expect(card.textContent).not.toContain("Development");
+      expect(within(card).queryByRole("link", { name: `Open ${provider}` })).toBeNull();
     }
-    expect(screen.getByText("SigNoz Logs").closest("article")?.textContent).toContain("No access");
   });
 
   it("requires an enabled source even when shared metrics and traces are available", async () => {
@@ -425,8 +428,7 @@ describe("AgentToolsPage", () => {
     renderPage();
     await screen.findByText("Loki");
     for (const [provider, docsURL] of Object.entries(providerDocs)) {
-      const suffix = providerStates[provider as keyof typeof providerStates] === "Development" ? "details" : "settings";
-      fireEvent.click(screen.getByRole("button", { name: `${provider} ${suffix}` }));
+      fireEvent.click(screen.getByRole("button", { name: `${provider} settings` }));
       const dialog = screen.getByRole("dialog", { name: provider });
       expect(within(dialog).getByRole("link", { name: "Documentation" }).getAttribute("href")).toBe(docsURL);
       expect(within(dialog).queryByRole("link", { name: "Add a data source" })).toBeNull();
@@ -510,9 +512,9 @@ describe("AgentToolsPage", () => {
     vi.mocked(api.getAgentConfig).mockRejectedValueOnce(new Error("config unavailable"));
     renderPage();
     await screen.findByText("SigNoz Logs");
-    expect(screen.getAllByText("Shared status unknown")).toHaveLength(3);
-    expect(screen.getAllByText("Enterprise")).toHaveLength(3);
-    expect(screen.getAllByText("Development")).toHaveLength(5);
+    expect(screen.getAllByText("Shared status unknown")).toHaveLength(7);
+    expect(screen.getAllByText("Enterprise")).toHaveLength(4);
+    expect(screen.queryAllByText("Development")).toHaveLength(0);
     expect(screen.getByText("Elasticsearch").closest("article")?.textContent).toContain("Ready");
     expect(screen.queryByText("File")).toBeNull();
     expect(screen.getByText("Grafana Tempo").closest("article")?.querySelector('a[href="/agent/traces"]')).toBeNull();

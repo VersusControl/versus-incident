@@ -1,4 +1,4 @@
-# Traces demo — Tempo
+# Tempo
 
 _Enterprise_
 
@@ -17,7 +17,7 @@ refuses to start (see [Troubleshooting](#troubleshooting)).
 
 ## What you'll build
 
-![Verus Incident Traces](../docs/images/versus-incident-traces-flow.png)
+![Versus Incident Traces](../docs/images/versus-incident-traces-flow.svg)
 
 The host-run generator POSTs OTLP spans to Tempo — during a spike roughly half are
 **error spans** with fat latency. The enterprise `traces` source **auto-discovers each

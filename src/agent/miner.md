@@ -1,4 +1,4 @@
-# AI Agent — Miner
+# Miner
 
 The **miner** is the part of the agent that takes noisy, never-quite-identical log lines and groups them into a small set of reusable **templates**. A template is a log line with its changing bits blanked out — `user_id = <*> login ok in <*>` stands in for `user_id=42 login ok in 12ms`, `user_id=99 login ok in 8ms`, and every other line of that shape.
 

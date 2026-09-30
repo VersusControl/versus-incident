@@ -1,4 +1,4 @@
-# AI Agent — Getting Started
+# Getting Started
 
 This guide takes you from nothing to a running agent in **training
 mode**, reading from a local file and saving what it learns to disk.

@@ -1,4 +1,4 @@
-# AI Agent — Service Detection
+# Service Detection
 
 Every log line the agent reads gets tagged with a **service** — the name of the app or component that produced it. Service detection is how the agent reads that name out of the raw log text, so it can group signals ("all the errors from `orders-api`") instead of treating your whole system as one undifferentiated stream.
 

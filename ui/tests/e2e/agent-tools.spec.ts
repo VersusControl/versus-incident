@@ -1,5 +1,9 @@
 import { expect, test, type TestInfo } from "@playwright/test";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { openApp, primaryNav } from "./helpers";
+
+const screenshotDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "screenshots", "agent-tools");
 
 type AgentKind = "chat" | "analyze";
 type ToolSetting = { group: string; name: string; enabled: boolean };
@@ -12,7 +16,6 @@ const REQUIRED_CARD_NAMES = [
   "Trace tools", "Grafana Tempo", "SigNoz Traces",
   "Find runbook", "Describe dependencies", "Describe baseline",
 ] as const;
-const DEVELOPMENT_PROVIDERS = ["Loki", "CloudWatch Logs", "Graylog", "Splunk", "CloudWatch Metrics"] as const;
 const PROVIDER_LOGOS = {
   Elasticsearch: "/elasticsearch.svg",
   Loki: "/loki.svg",
@@ -40,11 +43,7 @@ async function expectStableCatalog(page: import("@playwright/test").Page) {
   for (const name of ["Logs tools", "Metrics tools", "Trace tools"]) {
     await expect(page.getByRole("heading", { name, exact: true })).toHaveCount(1);
   }
-  for (const provider of DEVELOPMENT_PROVIDERS) {
-    const card = cards.filter({ has: page.getByRole("heading", { name: provider, exact: true }) });
-    await expect(card.getByText("Development", { exact: true })).toHaveCount(1);
-  }
-  await expect(page.getByText("Development", { exact: true })).toHaveCount(5);
+  await expect(page.getByText("Development", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Elasticsearch", exact: true })).toHaveCount(1);
   await expect(page.getByRole("heading", { name: "SigNoz", exact: true })).toHaveCount(0);
   for (const name of ["SigNoz Logs", "SigNoz Metrics", "SigNoz Traces"]) {
@@ -161,6 +160,7 @@ test.describe("Agent tool catalog", () => {
       await expect(page.getByText("infrastructure:view permission is required", { exact: false })).toHaveCount(0);
       await expect(page.getByText("Inspect Kubernetes.", { exact: true })).toHaveCount(0);
       await expect(page.getByRole("checkbox")).toHaveCount(0);
+      await page.screenshot({ path: path.join(screenshotDir, "tool-catalog-desktop.png"), fullPage: true });
 
       const rows = page.locator("main article");
       const runbookRow = rows.filter({ hasText: "Find runbook" });
@@ -247,6 +247,7 @@ test.describe("Agent tool catalog", () => {
       expect(first).not.toBeNull();
       expect(second).not.toBeNull();
       expect(Math.abs((first?.x ?? 0) - (second?.x ?? 0))).toBeLessThan(2);
+      await page.screenshot({ path: path.join(screenshotDir, "tool-catalog-mobile.png"), fullPage: true });
 
       await page.getByRole("button", { name: "analyze" }).click();
       await expect(page.getByText("get_incident", { exact: true })).toHaveCount(0);

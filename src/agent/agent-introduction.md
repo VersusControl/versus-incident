@@ -1,4 +1,4 @@
-# AI Agent — Introduction
+# Introduction AI SRE Agent
 
 The AI Agent is an SRE agent that watches your systems and points
 out anything that looks new or unusual. The plan is to cover the

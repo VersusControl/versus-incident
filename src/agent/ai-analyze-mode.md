@@ -1,4 +1,4 @@
-# AI Agent — Analyze Mode
+# Analyze Mode
 
 Analyze mode provides a **deep-dive investigation** for incidents. While detect mode identifies patterns and sends notifications, analyze mode helps you understand the root cause of an incident by gathering context and presenting structured insights directly in the dashboard.
 
