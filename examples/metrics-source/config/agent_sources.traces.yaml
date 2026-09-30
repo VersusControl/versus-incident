@@ -4,9 +4,10 @@
 # agent_sources.yaml only when you run with `-f docker-compose.traces.yml`.
 #
 # Both are ENTERPRISE DATA SOURCES, license-gated on the `intelligence`
-# entitlement, and both use the generic `options:` schema. Configuring them
-# auto-wires `query_metrics` (Prometheus) AND `query_traces` (Tempo) with no
-# tools.yaml entry.
+# entitlement, and both use the generic `options:` schema. The licensed
+# sources contribute `discover_metrics`, `read_metric_series`,
+# `discover_trace_fields`, and `read_trace_spans` to Chat and Analyze without
+# separate tools.yaml entries.
 sources:
   - name: demo-prom
     type: prometheus
@@ -29,5 +30,6 @@ sources:
     options:
       backend: tempo
       address: http://tempo:3200
+      allow_private_networks: true # deliberate opt-in for tool reads on this Docker network
       query: '{ status = error }'
       page_size: 100

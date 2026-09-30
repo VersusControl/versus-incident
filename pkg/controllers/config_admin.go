@@ -249,14 +249,10 @@ func (c *ConfigAdminController) agent(ctx *fiber.Ctx) error {
 		}
 		switch s.Type {
 		case "elasticsearch":
-			tieBreakerField := s.Elasticsearch.TieBreakerField
-			if tieBreakerField == "" {
-				tieBreakerField = "event.id"
-			}
 			entry["details"] = fiber.Map{
 				"index":                s.Elasticsearch.Index,
 				"time_field":           s.Elasticsearch.TimeField,
-				"tie_breaker_field":    tieBreakerField,
+				"tie_breaker_field":    s.Elasticsearch.TieBreakerField,
 				"message_field":        s.Elasticsearch.MessageField,
 				"page_size":            s.Elasticsearch.PageSize,
 				"address_count":        len(s.Elasticsearch.Addresses),

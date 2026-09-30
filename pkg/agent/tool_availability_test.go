@@ -10,18 +10,15 @@ import (
 )
 
 func TestToolAvailabilityServiceWorksWithoutWorkerOrAIConstruction(t *testing.T) {
-	service := NewToolAvailabilityService(config.AgentConfig{Tools: config.ToolsConfig{
-		QueryMetrics: config.QueryMetricsToolConfig{Prometheus: config.QueryMetricsPrometheusConfig{Address: "http://prometheus"}},
-		QueryTraces:  config.QueryTracesToolConfig{Tempo: config.QueryTracesTempoConfig{Address: "http://tempo"}},
-	}}, storage.NewMemory())
+	service := NewToolAvailabilityService(config.AgentConfig{}, storage.NewMemory())
 	if service.Manager == nil {
 		t.Fatal("manager is nil")
 	}
 	snapshot := service.Snapshot(tenancy.DefaultOrgScope())
 	for _, kind := range []string{"metrics", "traces"} {
 		status := snapshot.DataSources[kind]
-		if !status.Configured || !status.Constructed || !status.Healthy {
-			t.Fatalf("configured %s status = %+v", kind, status)
+		if status.Configured || status.Constructed {
+			t.Fatalf("retired %s reader status = %+v", kind, status)
 		}
 	}
 }

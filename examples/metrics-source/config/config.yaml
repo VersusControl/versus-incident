@@ -6,9 +6,8 @@
 #
 # This file does NOT declare the metric source — sources live in the sibling
 # `agent_sources.yaml`, which Versus loads automatically from the same
-# directory. There is intentionally NO `tools.yaml`: the enterprise binary
-# AUTO-WIRES the analyze `query_metrics`/`query_traces` tools from the data
-# source config (see the README "Auto-wire" section).
+# directory. There is intentionally NO `tools.yaml`: licensed sources
+# contribute native discovery and read tools to Chat and Analyze.
 
 name: versus
 host: 0.0.0.0

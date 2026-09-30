@@ -43,6 +43,15 @@ func TestCloneConfigCarriesChatKnobs(t *testing.T) {
 	}
 }
 
+func TestCloneConfigCarriesSplunkNamespace(t *testing.T) {
+	src := &Config{}
+	src.Agent.Sources = []AgentSourceConfig{{Name: "logs", Type: "splunk", Splunk: AgentSplunkSourceConfig{Owner: "admin", App: "ops"}}}
+	dst := cloneConfig(src)
+	if dst.Agent.Sources[0].Splunk.Owner != "admin" || dst.Agent.Sources[0].Splunk.App != "ops" {
+		t.Fatalf("namespace lost in clone: %+v", dst.Agent.Sources[0].Splunk)
+	}
+}
+
 // TestCloneToolsConfig asserts the per-tool config (tools.yaml) is
 // carried into the clone — including the root-level tool-loop knobs, the
 // recent_changes git repos, and the describe_dependencies graph — so
@@ -162,6 +171,14 @@ func TestCloneConfigCarriesElasticsearchReorderWindow(t *testing.T) {
 	}
 	if src.Agent.Sources[0].Elasticsearch.ExtraFields[0] != "error.stack_trace" {
 		t.Error("clone shares the ExtraFields slice with the source")
+	}
+}
+
+func TestCloneConfigCarriesLokiServiceLabel(t *testing.T) {
+	src := &Config{}
+	src.Agent.Sources = []AgentSourceConfig{{Name: "logs", Type: "loki", Loki: AgentLokiSourceConfig{ServiceLabel: "service_name"}}}
+	if got := cloneConfig(src).Agent.Sources[0].Loki.ServiceLabel; got != "service_name" {
+		t.Fatalf("cloned service_label = %q, want service_name", got)
 	}
 }
 

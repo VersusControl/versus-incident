@@ -41,7 +41,6 @@ const config = {
 } as AgentConfigView;
 
 const providerDocs = {
-  File: "https://docs.versusincident.com/#/agent/data-sources/file",
   Loki: "https://docs.versusincident.com/#/agent/data-sources/loki",
   "CloudWatch Logs": "https://docs.versusincident.com/#/agent/data-sources/cloudwatch-logs",
   Graylog: "https://docs.versusincident.com/#/agent/data-sources/graylog",
@@ -54,7 +53,6 @@ const providerDocs = {
   "SigNoz Traces": "https://docs.versusincident.com/#/agent/data-sources/traces?id=signoz-backend",
 };
 const providerStates = {
-  File: "Development",
   Loki: "Development",
   "CloudWatch Logs": "Development",
   Graylog: "Development",
@@ -102,33 +100,28 @@ describe("AgentToolsPage", () => {
     expect(icon?.getAttribute("aria-hidden")).toBe("true");
     expect(card?.querySelector("svg.tool-brand-icon")).toBeNull();
     expect(screen.getAllByRole("heading", { name: /Elasticsearch/ })).toHaveLength(1);
-
-    const fileLogsCard = screen.getByRole("heading", { name: "File" }).closest("article");
-    expect(fileLogsCard?.querySelector('img[src="/elasticsearch.svg"]')).toBeNull();
-    expect(fileLogsCard?.querySelector("svg.tool-brand-icon")).toBeTruthy();
   });
 
-  it("keeps the Elasticsearch asset off generic file logs", async () => {
+  it("omits the File provider card even when file sources are enabled", async () => {
     renderPage();
-    const elasticsearchHeading = await screen.findByRole("heading", { name: "Elasticsearch" });
-    expect(elasticsearchHeading.closest("article")?.querySelector('img[src="/elasticsearch.svg"]')).toBeTruthy();
-
-    const fileLogsCard = screen.getByRole("heading", { name: "File" }).closest("article");
-    expect(fileLogsCard?.querySelector('img[src="/elasticsearch.svg"]')).toBeNull();
-    expect(fileLogsCard?.querySelector("svg.tool-brand-icon")).toBeTruthy();
+    await screen.findByRole("heading", { name: "Elasticsearch" });
+    expect(screen.queryByRole("heading", { name: "File" })).toBeNull();
+    expect(screen.queryByText("Application file")).toBeNull();
+    expect(screen.queryByText("Archive file")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Logs tools" })).toBeTruthy();
   });
 
   it("renders one clearly named shared policy card for every datasource group", async () => {
     renderPage();
     expect(screen.getByLabelText("Loading tools")).toBeTruthy();
     await screen.findByText("Kubernetes");
-    expect(screen.getAllByRole("article")).toHaveLength(20);
+    expect(screen.getAllByRole("article")).toHaveLength(19);
     expect(screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)).toEqual(["Connectors", "Data Source Tools", "Common"]);
     const connectorSection = document.querySelector('[aria-labelledby="tools-connector"]') as HTMLElement;
     const datasourceSection = document.querySelector('[aria-labelledby="tools-datasource"]') as HTMLElement;
     const commonSection = document.querySelector('[aria-labelledby="tools-common"]') as HTMLElement;
     expect(within(connectorSection).getAllByRole("article")).toHaveLength(2);
-    expect(within(datasourceSection).getAllByRole("article")).toHaveLength(15);
+    expect(within(datasourceSection).getAllByRole("article")).toHaveLength(14);
     expect(within(commonSection).getAllByRole("article")).toHaveLength(3);
     for (const name of ["Logs tools", "Metrics tools", "Trace tools"]) {
       expect(within(datasourceSection).getAllByRole("heading", { name })).toHaveLength(1);
@@ -168,7 +161,7 @@ describe("AgentToolsPage", () => {
     expect(screen.queryByText("Metric tools need an Enterprise source.")).toBeNull();
     expect(screen.getAllByText("Connection needed").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Enterprise")).toHaveLength(3);
-    expect(screen.getAllByText("Development")).toHaveLength(6);
+    expect(screen.getAllByText("Development")).toHaveLength(5);
     expect(screen.getByText("Off")).toBeTruthy();
     expect(screen.queryByRole("checkbox")).toBeNull();
   });
@@ -180,7 +173,7 @@ describe("AgentToolsPage", () => {
       "/agent/kubernetes", "/agent/logs", "/agent/traces", "/agent/runbooks",
     ]);
     expect(screen.getAllByRole("button", { name: / settings$/ })).toHaveLength(14);
-    expect(screen.getAllByRole("button", { name: / details$/ })).toHaveLength(6);
+    expect(screen.getAllByRole("button", { name: / details$/ })).toHaveLength(5);
     expect(screen.queryByRole("link", { name: /documentation/i })).toBeNull();
     expect(screen.getByText("Elasticsearch").closest("article")?.textContent).toContain("Ready");
     expect(screen.getByText("CloudWatch Logs").closest("article")?.querySelector('a[href="/agent/logs"]')).toBeNull();
@@ -210,15 +203,14 @@ describe("AgentToolsPage", () => {
       expect(icon?.getAttribute("width")).toBe("24");
       expect(icon?.getAttribute("height")).toBe("24");
     }
-    expect(screen.getByText("File").closest("article")?.querySelector("img")).toBeNull();
+    expect(screen.queryByText("File")).toBeNull();
     expect(screen.getByText("CloudWatch Logs").closest("article")?.querySelector("img")).toBeNull();
   });
 
   it("keeps configured undeveloped providers informational only", async () => {
     renderPage();
-    await screen.findByText("File");
+    await screen.findByText("Loki");
     const developmentProviders = {
-      File: ["Application file", "Archive file"],
       Loki: ["Production Loki"],
       "CloudWatch Logs": ["CloudWatch application logs"],
       Graylog: ["Graylog production"],
@@ -252,27 +244,60 @@ describe("AgentToolsPage", () => {
       row.id === "logs" ? { ...row, state: "needs_permission", reason: "Log access is not permitted." } : row,
     ));
     renderPage();
-    await screen.findByText("File");
-    for (const provider of ["File", "Loki", "CloudWatch Logs", "Graylog", "Splunk"]) {
+    await screen.findByText("Loki");
+    for (const provider of ["Loki", "CloudWatch Logs", "Graylog", "Splunk"]) {
       expect(screen.getByText(provider).closest("article")?.textContent).toContain("Development");
     }
     expect(screen.getByText("SigNoz Logs").closest("article")?.textContent).toContain("No access");
   });
 
-  it("keeps canonical Prometheus and Tempo cards usable for tool-only configuration", async () => {
+  it("requires an enabled source even when shared metrics and traces are available", async () => {
     vi.mocked(api.getAgentConfig).mockResolvedValueOnce({ ...config, sources: config.sources.filter((source) => !["prometheus", "cloudwatch_metrics", "signoz_metrics", "traces", "signoz_traces"].includes(source.type)) });
     vi.mocked(api.listAgentToolsets).mockResolvedValueOnce(rows.map((row) =>
       row.id === "metrics" || row.id === "traces" ? { ...row, state: "available", reason: `${row.display_name} tools are available.` } : row,
     ));
     renderPage();
     await screen.findByText("Prometheus");
-    expect(screen.getByText("Prometheus").closest("article")?.textContent).toContain("Configured");
-    expect(screen.getByRole("link", { name: "Open Prometheus" }).getAttribute("href")).toBe("/agent/metrics");
-    expect(screen.getByRole("link", { name: "Open Grafana Tempo" }).getAttribute("href")).toBe("/agent/traces");
+    for (const provider of ["Prometheus", "Grafana Tempo"]) {
+      const card = screen.getByText(provider).closest("article");
+      expect(card?.textContent).toContain("Data source needed");
+      expect(card?.textContent).not.toContain("Development");
+    }
+    expect(screen.queryByRole("link", { name: "Open Prometheus" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Open Grafana Tempo" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Prometheus settings" }));
     const dialog = screen.getByRole("dialog", { name: "Prometheus" });
-    expect(dialog.textContent).toContain("configured outside agent sources");
+    expect(dialog.textContent).toContain("Prometheus is not configured.");
+    expect(dialog.textContent).not.toContain("configured outside agent sources");
     expect(within(dialog).queryByRole("checkbox")).toBeNull();
+  });
+
+  it("marks a licensed provider configured when its enabled source is present", async () => {
+    vi.mocked(api.listAgentToolsets).mockResolvedValueOnce(rows.map((row) =>
+      row.id === "metrics" ? { ...row, state: "available", reason: "Metric tools are available." } : row,
+    ));
+    renderPage();
+    await screen.findByText("Prometheus");
+    expect(screen.getByText("Prometheus").closest("article")?.textContent).toContain("Configured");
+    expect(screen.getByRole("link", { name: "Open Prometheus" }).getAttribute("href")).toBe("/agent/metrics");
+    fireEvent.click(screen.getByRole("button", { name: "Prometheus settings" }));
+    const dialog = screen.getByRole("dialog", { name: "Prometheus" });
+    expect(dialog.textContent).toContain("Prometheus is configured.");
+    expect(dialog.textContent).toContain("Prometheus primary");
+    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+  });
+
+  it("keeps needs_license authoritative when a Prometheus source is configured", async () => {
+    renderPage();
+    await screen.findByText("Prometheus");
+    const card = screen.getByText("Prometheus").closest("article");
+    expect(card?.textContent).toContain("Enterprise");
+    expect(card?.textContent).not.toContain("Development");
+    expect(screen.queryByRole("link", { name: "Open Prometheus" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Prometheus settings" }));
+    const dialog = screen.getByRole("dialog", { name: "Prometheus" });
+    expect(dialog.textContent).toContain("Metric tools need an Enterprise source.");
+    expect(dialog.textContent).not.toContain("Prometheus is configured.");
   });
 
   it("does not infer Prometheus from a configured sibling metrics provider", async () => {
@@ -398,7 +423,7 @@ describe("AgentToolsPage", () => {
 
   it("uses provider documentation URLs for every datasource settings dialog", async () => {
     renderPage();
-    await screen.findByText("File");
+    await screen.findByText("Loki");
     for (const [provider, docsURL] of Object.entries(providerDocs)) {
       const suffix = providerStates[provider as keyof typeof providerStates] === "Development" ? "details" : "settings";
       fireEvent.click(screen.getByRole("button", { name: `${provider} ${suffix}` }));
@@ -484,12 +509,12 @@ describe("AgentToolsPage", () => {
   it("uses neutral shared status when source configuration cannot be queried", async () => {
     vi.mocked(api.getAgentConfig).mockRejectedValueOnce(new Error("config unavailable"));
     renderPage();
-    await screen.findByText("File");
+    await screen.findByText("SigNoz Logs");
     expect(screen.getAllByText("Shared status unknown")).toHaveLength(3);
     expect(screen.getAllByText("Enterprise")).toHaveLength(3);
-    expect(screen.getAllByText("Development")).toHaveLength(6);
+    expect(screen.getAllByText("Development")).toHaveLength(5);
     expect(screen.getByText("Elasticsearch").closest("article")?.textContent).toContain("Ready");
-    expect(screen.getByText("File").closest("article")?.querySelector('a[href="/agent/logs"]')).toBeNull();
+    expect(screen.queryByText("File")).toBeNull();
     expect(screen.getByText("Grafana Tempo").closest("article")?.querySelector('a[href="/agent/traces"]')).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "SigNoz Logs settings" }));
     const dialog = screen.getByRole("dialog", { name: "SigNoz Logs" });

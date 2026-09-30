@@ -173,7 +173,7 @@ func (service *Service) QueryMetrics(ctx context.Context, request MetricRequest)
 	}
 	limit := boundedLimit(request.Limit, service.policy.MaximumSeries)
 	filter := combineFilters(service.scope, equalityFilter("service.name", request.Service))
-	aggregation := map[string]any{"metricName": request.MetricName}
+	aggregation := map[string]any{"metricName": request.MetricName, "timeAggregation": "avg", "spaceAggregation": "avg"}
 	for key, value := range map[string]string{"temporality": request.Temporality, "timeAggregation": request.TimeAggregation, "spaceAggregation": request.SpaceAggregation} {
 		if value = strings.TrimSpace(value); value != "" {
 			aggregation[key] = value
@@ -187,7 +187,23 @@ func (service *Service) QueryMetrics(ctx context.Context, request MetricRequest)
 		spec["stepInterval"] = seconds
 	}
 	payload := queryPayload(start, end, "time_series", spec)
-	return service.execute(ctx, QueryRangePath, nil, payload, responseSeries, service.policy.MaximumSeries, 0, limit)
+	result, err := service.execute(ctx, QueryRangePath, nil, payload, responseSeries, service.policy.MaximumSeries, 0, limit)
+	if err != nil {
+		return Result{}, err
+	}
+	temporality := "unspecified"
+	if value, ok := aggregation["temporality"].(string); ok {
+		temporality = value
+	}
+	semantics := map[string]any{
+		"unit": "unknown", "temporality": temporality,
+		"timeAggregation": aggregation["timeAggregation"], "spaceAggregation": aggregation["spaceAggregation"],
+	}
+	if aggregation["timeAggregation"] == "avg" {
+		semantics["interpretation"] = "averaged metric values; not a per-second rate"
+	}
+	result.Data["metricSemantics"] = semantics
+	return result, nil
 }
 
 // FieldKeys discovers bounded fields for one trusted signal.

@@ -331,8 +331,6 @@ data:
   {{- $git := $recentChanges.git | default dict }}
   {{- $describeDeps := $tools.describeDependencies | default dict }}
   {{- $findRunbook := $tools.findRunbook | default dict }}
-  {{- $queryMetrics := ($tools.queryMetrics | default dict).prometheus | default dict }}
-  {{- $queryTraces := ($tools.queryTraces | default dict).tempo | default dict }}
   tools.yaml: |
     # Per-tool DATA config for the analyze tools (rendered by Helm).
     # Credentials are NOT written here — they are injected as env vars from
@@ -439,20 +437,6 @@ data:
         {{- end }}
       find_runbook:
         embedding_model: {{ $findRunbook.embeddingModel | default "" | quote }}
-      query_metrics:
-        prometheus:
-          address: {{ $queryMetrics.address | default "" | quote }}
-          bearer_token: "${QUERY_METRICS_PROMETHEUS_BEARER_TOKEN}"
-          username: {{ $queryMetrics.username | default "" | quote }}
-          password: "${QUERY_METRICS_PROMETHEUS_PASSWORD}"
-          insecure_skip_verify: {{ dig "insecureSkipVerify" false $queryMetrics }}
-      query_traces:
-        tempo:
-          address: {{ $queryTraces.address | default "" | quote }}
-          bearer_token: "${QUERY_TRACES_TEMPO_BEARER_TOKEN}"
-          username: {{ $queryTraces.username | default "" | quote }}
-          password: "${QUERY_TRACES_TEMPO_PASSWORD}"
-          insecure_skip_verify: {{ dig "insecureSkipVerify" false $queryTraces }}
   {{- end }}
 
   {{- if .Values.templates.slack }}

@@ -7,12 +7,12 @@ type ToolSettingsSnapshot = { agent: AgentKind; settings: ToolSetting[] };
 
 const REQUIRED_CARD_NAMES = [
   "Kubernetes", "Source control",
-  "Logs tools", "File", "Loki", "CloudWatch Logs", "Graylog", "Splunk", "SigNoz Logs", "Elasticsearch",
+  "Logs tools", "Loki", "CloudWatch Logs", "Graylog", "Splunk", "SigNoz Logs", "Elasticsearch",
   "Metrics tools", "Prometheus", "CloudWatch Metrics", "SigNoz Metrics",
   "Trace tools", "Grafana Tempo", "SigNoz Traces",
   "Find runbook", "Describe dependencies", "Describe baseline",
 ] as const;
-const DEVELOPMENT_PROVIDERS = ["File", "Loki", "CloudWatch Logs", "Graylog", "Splunk", "CloudWatch Metrics"] as const;
+const DEVELOPMENT_PROVIDERS = ["Loki", "CloudWatch Logs", "Graylog", "Splunk", "CloudWatch Metrics"] as const;
 const PROVIDER_LOGOS = {
   Elasticsearch: "/elasticsearch.svg",
   Loki: "/loki.svg",
@@ -29,13 +29,14 @@ async function expectStableCatalog(page: import("@playwright/test").Page) {
   const cards = page.locator("main article");
   const versusCore = cards.filter({ has: page.getByRole("heading", { name: "Versus core", exact: true }) });
   const stableCards = cards.filter({ hasNot: page.getByRole("heading", { name: "Versus core", exact: true }) });
-  await expect(stableCards).toHaveCount(20);
+  await expect(stableCards).toHaveCount(19);
   expect(await versusCore.count()).toBeLessThanOrEqual(1);
 
   for (const name of REQUIRED_CARD_NAMES) {
     await expect(page.getByRole("heading", { name, exact: true })).toHaveCount(1);
     await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
   }
+  await expect(page.getByRole("heading", { name: "File", exact: true })).toHaveCount(0);
   for (const name of ["Logs tools", "Metrics tools", "Trace tools"]) {
     await expect(page.getByRole("heading", { name, exact: true })).toHaveCount(1);
   }
@@ -43,7 +44,7 @@ async function expectStableCatalog(page: import("@playwright/test").Page) {
     const card = cards.filter({ has: page.getByRole("heading", { name: provider, exact: true }) });
     await expect(card.getByText("Development", { exact: true })).toHaveCount(1);
   }
-  await expect(page.getByText("Development", { exact: true })).toHaveCount(6);
+  await expect(page.getByText("Development", { exact: true })).toHaveCount(5);
   await expect(page.getByRole("heading", { name: "Elasticsearch", exact: true })).toHaveCount(1);
   await expect(page.getByRole("heading", { name: "SigNoz", exact: true })).toHaveCount(0);
   for (const name of ["SigNoz Logs", "SigNoz Metrics", "SigNoz Traces"]) {

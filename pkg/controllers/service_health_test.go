@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http/httptest"
@@ -21,6 +22,13 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 )
+
+type countingTopologyProvider struct{ calls int }
+
+func (provider *countingTopologyProvider) ServiceTopology(context.Context, core.ServiceTopologyRequest) (core.ServiceTopology, error) {
+	provider.calls++
+	return core.ServiceTopology{Availability: core.HealthNoData}, nil
+}
 
 func serviceHealthTestApp(t *testing.T, manager *servicehealth.Manager) *fiber.App {
 	t.Helper()
@@ -130,7 +138,8 @@ func TestServiceTopologyMissingGraphIsUnavailableAndHealthStillWorks(t *testing.
 }
 
 func TestServiceTopologyRequiresExplicitInfrastructurePermission(t *testing.T) {
-	controller := NewServiceHealthControllerWithTopology(servicehealth.NewManager(storage.NewMemory()), servicetopology.NewManager(nil, nil))
+	provider := &countingTopologyProvider{}
+	controller := NewServiceHealthControllerWithTopology(servicehealth.NewManager(storage.NewMemory()), servicetopology.NewManager(nil, provider))
 	for _, test := range []struct {
 		name       string
 		permission *bool
@@ -152,6 +161,13 @@ func TestServiceTopologyRequiresExplicitInfrastructurePermission(t *testing.T) {
 			response, err := app.Test(httptest.NewRequest("GET", "/topology", nil))
 			if err != nil || response.StatusCode != test.want {
 				t.Fatalf("status = %v, err = %v", response.StatusCode, err)
+			}
+			expectedCalls := 0
+			if test.permission != nil && *test.permission {
+				expectedCalls = 1
+			}
+			if provider.calls != expectedCalls {
+				t.Fatalf("provider calls = %d, want %d", provider.calls, expectedCalls)
 			}
 		})
 	}

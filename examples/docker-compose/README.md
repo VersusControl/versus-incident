@@ -1,15 +1,15 @@
 # Docker Compose examples
 
 Each subfolder is a self-contained example for one AI-agent data
-source. They share the same minimal `config/config.yaml`; the only
-difference is `agent_sources.yaml` and which backing services are
-spun up alongside Versus + Redis.
+source or backend. Most start Versus and Redis with a local
+`agent_sources.yaml`; the metrics example starts only backing services for a
+separately configured Enterprise agent.
 
 | Example | Brings up | When to pick |
 |---|---|---|
 | [file/](./file/) | versus + redis | Quickest start; tail a local log file |
 | [loki/](./loki/) | versus + redis + **loki** + **grafana** | Test the `loki` source against a real Loki |
-| [metrics/](./metrics/) | versus + redis + **prometheus** + **pushgateway** | OSS metric/trace **correlation**: `query_metrics`/`query_traces` analyze tools pull host-pushed series during an AI investigation (incident triggered via a `file` log source). All fake data comes from the `scripts/` generators. The standing `prometheus`/`traces` *source* is Enterprise. |
+| [metrics/](./metrics/) | prometheus + **pushgateway** (optional Tempo overlay; no Versus container) | Host-run generators push synthetic series and optional traces. A separately configured, licensed Enterprise `prometheus` / `traces` source can detect anomalies and provide source-bound `discover_metrics` / `read_metric_series` and `discover_trace_fields` / `read_trace_spans` to Chat and Analyze. OSS has no metric/trace read tools. |
 | [elasticsearch/](./elasticsearch/) | versus + redis + **elasticsearch** + **kibana** | Test the `elasticsearch` source against a real ES |
 | [cloudwatch/](./cloudwatch/) | versus + redis | Test the `cloudwatchlogs` source against your AWS account |
 | [graylog/](./graylog/) | versus + redis + **graylog** + mongodb + opensearch | Test the `graylog` source against a real Graylog |
@@ -17,6 +17,10 @@ spun up alongside Versus + Redis.
 | [signoz/](./signoz/) | versus + redis + **signoz** + clickhouse + zookeeper + otel-collector | Test the `signoz` source against a real SigNoz. **Heavy — needs ≥4 GB of Docker memory.** |
 
 ## Workflow per example
+
+For the metrics backend-only example, follow its
+[own run instructions](./metrics/README.md) instead; there is no `versus`
+service to tail or recreate in that Compose stack.
 
 ```bash
 cd <example>
@@ -44,7 +48,7 @@ CloudWatch additionally requires `CW_LOG_GROUP_NAME` and AWS
 credentials — see [cloudwatch/README.md](./cloudwatch/) for the
 list.
 
-All examples expose Versus on `http://localhost:3000`. The Loki and
+Examples that start Versus expose it on `http://localhost:3000`. The Loki and
 Elasticsearch examples additionally expose their respective UIs
 (Grafana on `:3001`, Kibana on `:5601`). Graylog exposes its web UI
 on `:9000`; Splunk on `:8000`; SigNoz on `:8080` (and its OTLP

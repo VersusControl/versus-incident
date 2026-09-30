@@ -245,9 +245,10 @@ is what this field accepts, and whatever it rejects fails the tick.
 
 ## Limitations
 
-- **Generic readers remain separate.** SigNoz capability tools do not enable
-  the generic `query_metrics` or `query_traces` tools. Those still require
-  their Prometheus or Tempo reader configuration.
+- **Metric and trace reads require Enterprise sources.** The OSS `signoz`
+  source provides log tools only. Licensed `signoz_metrics` and
+  `signoz_traces` sources contribute their source-bound native metric and
+  trace read tools; configure them separately in `agent_sources.yaml`.
 - **SigNoz alerts are not ingested.** This is a data source that tails
   logs, not an alert receiver.
 

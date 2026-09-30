@@ -61,7 +61,15 @@ sources:
     enable: true
     options:
       address: http://localhost:9090   # host-published Prometheus
+      allow_loopback: true             # required for bounded AI reads to localhost
 ```
+
+Bounded AI reads accept only an exact `http` or `https` origin and public
+destinations by default. Set `allow_loopback: true` only for loopback endpoints,
+or `allow_private_networks: true` only for an explicitly trusted private-network
+endpoint. Metadata and link-local addresses remain blocked. These options do not
+change the standing source polling transport. TLS verification remains enabled
+unless `insecure_skip_verify: true` is explicitly configured.
 
 ## 3. Understand the three modes
 
@@ -118,12 +126,10 @@ docker run --rm --name versus-enterprise \
   ghcr.io/versuscontrol/versus-enterprise:latest
 ```
 
-On boot you should see:
+On boot, check source discovery and the Enterprise start line:
 
 ```text
-enterprise: datasource: auto-wired query_metrics tool from prometheus source "demo-prom"
 agent: standing metric source "demo-prom" discovered 12 signal(s) across N service(s) ...
-agent: analyze agent enabled model=gpt-4o-mini tools=5
 enterprise: agent started (mode=training, sources=1)
 ```
 
@@ -258,12 +264,11 @@ page shows what the source scored for each discovered signal.
 
 **Run the deep AI analysis (on demand).** Detect mode opens the incident with the
 lightweight classification above; the full **AI analysis** — the tool-using root-cause
-investigation that calls `query_metrics`, searches runbooks, and correlates related
+investigation that can call source-bound `discover_metrics` and
+`read_metric_series`, search runbooks, and correlate related
 signals — runs **only when you open the incident and click *Analyze*** on its detail page.
 That keeps every firing signal cheap and reserves the expensive multi-step investigation
-for the incidents you choose to dig into. The boot line
-`agent: analyze agent enabled ... tools=5` means this analyzer is *available*, not that it
-ran during detect.
+for the incidents you choose to dig into.
 
 ## Going further: name your own signals (optional)
 
@@ -277,6 +282,7 @@ sources:
     enable: true
     options:
       address: http://localhost:9090
+      allow_loopback: true
       step: 30s
       page_size: 500
       queries:
@@ -316,6 +322,7 @@ sources:
     enable: true
     options:
       address: http://localhost:9090
+      allow_loopback: true
       filter: '{namespace="prod", tier!="batch"}'   # discover + sample only this scope
 ```
 
@@ -336,7 +343,7 @@ docker compose down -v
 
 | Symptom | Cause / fix |
 |---|---|
-| `requires Versus Enterprise` on every tick, `sources=0`, `mode=community` | The license is missing the **`intelligence`** feature (or you're on an OSS build). Mint a key that includes `intelligence`. This is the open-core line: OSS keeps only the on-demand `query_metrics` tool, not the standing source. |
+| `requires Versus Enterprise` on every tick, `sources=0`, `mode=community` | The license is missing the **`intelligence`** feature (or you're on an OSS build). Supply a key with `intelligence` to use the standing source and its source-bound metric tools. OSS has neither the source nor metric read tools. |
 | Boot fails to connect to Redis | Ensure the `versus-metrics-redis` container is healthy and published on `:6379`, and that `REDIS_HOST=localhost` / `REDIS_PORT=6379` / `REDIS_PASSWORD` are set in the run command. Redis here is **TLS-only** — Versus dials TLS by default, so do **not** set `REDIS_TLS=false`. |
 | `NOAUTH` / `WRONGPASS` from Redis | `REDIS_PASSWORD` in the run command must match the password the container started with (`versus` unless you exported `REDIS_PASSWORD` before `docker compose up`). |
 | TLS handshake / `certificate signed by unknown authority` on Redis | The example uses a self-signed cert; keep `redis.insecure_skip_verify: true` in `config.yaml`, or set `REDIS_CA_CERT` to a real CA bundle. |

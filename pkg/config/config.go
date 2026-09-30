@@ -524,10 +524,11 @@ func loadToolsFile(path string) (ToolsConfig, error) {
 	var wrapper struct {
 		Tools ToolsConfig `mapstructure:"tools"`
 	}
+	metadata := &mapstructure.Metadata{}
 	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
 		Result:           &wrapper,
 		TagName:          "mapstructure",
-		ErrorUnused:      true,
+		Metadata:         metadata,
 		WeaklyTypedInput: true,
 		DecodeHook:       mapstructure.StringToSliceHookFunc(","),
 	})
@@ -536,6 +537,11 @@ func loadToolsFile(path string) (ToolsConfig, error) {
 	}
 	if err := decoder.Decode(expandEnvironmentScalars(v.AllSettings())); err != nil {
 		return ToolsConfig{}, fmt.Errorf("unmarshal: %w", err)
+	}
+	for _, unused := range metadata.Unused {
+		if !strings.HasPrefix(unused, "tools.") || strings.Contains(strings.TrimPrefix(unused, "tools."), ".") {
+			return ToolsConfig{}, fmt.Errorf("unmarshal: unused field %s", unused)
+		}
 	}
 	return wrapper.Tools, nil
 }

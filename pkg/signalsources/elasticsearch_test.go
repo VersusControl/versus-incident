@@ -20,6 +20,7 @@ import (
 func esResponse(t *testing.T, hits []esHit) []byte {
 	t.Helper()
 	resp := esSearchResponse{}
+	resp.ScrollID = "fixture-scroll"
 	resp.Hits.Hits = hits
 	b, err := json.Marshal(resp)
 	if err != nil {
@@ -79,14 +80,15 @@ func TestElasticsearch_PullBasic(t *testing.T) {
 	defer ts.Close()
 
 	src, err := NewElasticsearchSource("test", config.AgentElasticsearchSourceConfig{
-		Addresses:     []string{ts.URL},
-		AllowLoopback: true,
-		Index:         "logs-app-*",
-		TimeField:     "@timestamp",
-		MessageField:  "message",
-		SeverityField: "level",
-		ExtraFields:   []string{"service"},
-		PageSize:      10,
+		Addresses:       []string{ts.URL},
+		AllowLoopback:   true,
+		Index:           "logs-app-*",
+		TimeField:       "@timestamp",
+		TieBreakerField: "event.id",
+		MessageField:    "message",
+		SeverityField:   "level",
+		ExtraFields:     []string{"service"},
+		PageSize:        10,
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -146,6 +148,10 @@ func TestElasticsearch_TailAcceptsFiveHundredDocumentPageOverOneMiB(t *testing.T
 	}
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodDelete {
+			_, _ = writer.Write([]byte(`{}`))
+			return
+		}
 		requests++
 		writer.Header().Set("Content-Type", "application/json")
 		if requests == 1 {
@@ -209,7 +215,7 @@ func TestElasticsearch_PullRetriesOversizedPageAtSmallerSize(t *testing.T) {
 	defer server.Close()
 
 	source, err := NewElasticsearchSource("adaptive-page", config.AgentElasticsearchSourceConfig{
-		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 500,
+		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 500, TieBreakerField: "event.id",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -226,6 +232,190 @@ func TestElasticsearch_PullRetriesOversizedPageAtSmallerSize(t *testing.T) {
 	}
 	if len(searchAfters[0]) != 0 || len(searchAfters[1]) != 0 || len(searchAfters[2]) == 0 {
 		t.Fatalf("search_after sequence = %#v", searchAfters)
+	}
+}
+
+func TestElasticsearch_TimeOnlyFailedNextPageDoesNotFailOver(t *testing.T) {
+	for _, failure := range []string{"oversized", "transport"} {
+		t.Run(failure, func(t *testing.T) {
+			timestamp := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
+			first := esHit{ID: "first", Source: map[string]interface{}{
+				"@timestamp": timestamp.Format(time.RFC3339Nano), "message": "first",
+			}}
+			second := esHit{ID: "second", Source: map[string]interface{}{
+				"@timestamp": timestamp.Format(time.RFC3339Nano), "message": "second",
+			}}
+			clears := 0
+			nextCalls := 0
+			primary := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Method == http.MethodDelete {
+					clears++
+					_, _ = writer.Write([]byte(`{}`))
+					return
+				}
+				if request.URL.Path == "/logs-*/_search" {
+					_, _ = writer.Write(esResponse(t, []esHit{first}))
+					return
+				}
+				nextCalls++
+				if failure == "oversized" {
+					_, _ = writer.Write([]byte(`{"_scroll_id":"fixture-scroll","padding":"` + strings.Repeat("x", 8<<20) + `"}`))
+					return
+				}
+				connection, _, err := writer.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				_ = connection.Close()
+			}))
+			defer primary.Close()
+			fallbackCalls := 0
+			fallback := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				fallbackCalls++
+				_, _ = writer.Write(esResponse(t, []esHit{second}))
+			}))
+			defer fallback.Close()
+
+			source, err := NewElasticsearchSource("pinned", config.AgentElasticsearchSourceConfig{
+				Addresses: []string{primary.URL, fallback.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			since := timestamp.Add(-time.Hour)
+			signals, cursor, err := source.Pull(context.Background(), since)
+			if err == nil || signals != nil || !cursor.Equal(since) || nextCalls != 1 || fallbackCalls != 0 || clears != 1 {
+				t.Fatalf("signals=%d cursor=%v err=%v next=%d fallback=%d clears=%d", len(signals), cursor, err, nextCalls, fallbackCalls, clears)
+			}
+			if failure == "oversized" && !errors.Is(err, elasticsearchapp.ErrResponseTooLarge) {
+				t.Fatalf("error = %v, want oversized response", err)
+			}
+		})
+	}
+}
+
+func TestElasticsearch_TimeOnlyShrinksLaterOversizedPagesAcrossTicks(t *testing.T) {
+	timestamp := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
+	var openingSizes []int
+	position := 0
+	pageSize := 0
+	clears := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodDelete {
+			clears++
+			_, _ = writer.Write([]byte(`{}`))
+			return
+		}
+		if request.URL.Path == "/logs-*/_search" {
+			var query struct {
+				Size int `json:"size"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&query); err != nil {
+				t.Error(err)
+				return
+			}
+			pageSize = query.Size
+			openingSizes = append(openingSizes, pageSize)
+			position = 0
+		} else if pageSize > 1 {
+			_, _ = writer.Write([]byte(`{"_scroll_id":"fixture-scroll","padding":"` + strings.Repeat("x", 8<<20) + `"}`))
+			return
+		}
+		end := min(position+pageSize, 5)
+		hits := make([]esHit, 0, end-position)
+		for index := position; index < end; index++ {
+			hits = append(hits, esHit{ID: fmt.Sprintf("doc-%d", index), Source: map[string]interface{}{
+				"@timestamp": timestamp.Format(time.RFC3339Nano), "message": fmt.Sprintf("doc-%d", index),
+			}})
+		}
+		position = end
+		_, _ = writer.Write(esResponse(t, hits))
+	}))
+	defer server.Close()
+
+	source, err := NewElasticsearchSource("adaptive-scroll", config.AgentElasticsearchSourceConfig{
+		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	since := timestamp.Add(-time.Hour)
+	for attempt := 0; attempt < 2; attempt++ {
+		signals, cursor, err := source.Pull(context.Background(), since)
+		if !errors.Is(err, elasticsearchapp.ErrResponseTooLarge) || signals != nil || !cursor.Equal(since) {
+			t.Fatalf("attempt %d: signals=%d cursor=%v err=%v", attempt, len(signals), cursor, err)
+		}
+	}
+	signals, cursor, err := source.Pull(context.Background(), since)
+	if err != nil || len(signals) != 5 || !cursor.Equal(timestamp) {
+		t.Fatalf("recovered: signals=%d cursor=%v err=%v", len(signals), cursor, err)
+	}
+	seen := map[string]bool{}
+	for _, signal := range signals {
+		if seen[signal.Message] {
+			t.Fatalf("duplicate %q", signal.Message)
+		}
+		seen[signal.Message] = true
+	}
+	if fmt.Sprint(openingSizes) != "[4 2 1]" || clears != 3 {
+		t.Fatalf("open sizes=%v clears=%d", openingSizes, clears)
+	}
+}
+
+func TestElasticsearch_TimeOnlyClearsLongScrollID(t *testing.T) {
+	longID := strings.Repeat("s", 8193)
+	cleared := ""
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodDelete {
+			var body struct {
+				ScrollIDs []string `json:"scroll_id"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Error(err)
+			} else if len(body.ScrollIDs) == 1 {
+				cleared = body.ScrollIDs[0]
+			}
+			_, _ = writer.Write([]byte(`{}`))
+			return
+		}
+		_, _ = writer.Write([]byte(`{"_scroll_id":"` + longID + `","hits":{"hits":[]}}`))
+	}))
+	defer server.Close()
+	source, err := NewElasticsearchSource("long-id", config.AgentElasticsearchSourceConfig{
+		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().UTC().Add(-time.Hour)
+	signals, cursor, err := source.Pull(context.Background(), since)
+	if err == nil || !strings.Contains(err.Error(), "invalid scroll cursor") || signals != nil || !cursor.Equal(since) || cleared != longID {
+		t.Fatalf("signals=%d cursor=%v err=%v cleared=%t", len(signals), cursor, err, cleared == longID)
+	}
+}
+
+func TestElasticsearch_TimeOnlyOversizedOpenDoesNotCreateSecondSnapshot(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte(`{"_scroll_id":"hidden","padding":"` + strings.Repeat("x", 8<<20) + `"}`))
+	}))
+	defer primary.Close()
+	fallbackCalls := 0
+	fallback := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		fallbackCalls++
+		_, _ = writer.Write(esResponse(t, nil))
+	}))
+	defer fallback.Close()
+	source, err := NewElasticsearchSource("oversized-open", config.AgentElasticsearchSourceConfig{
+		Addresses: []string{primary.URL, fallback.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().UTC().Add(-time.Hour)
+	signals, cursor, err := source.Pull(context.Background(), since)
+	if !errors.Is(err, elasticsearchapp.ErrResponseTooLarge) || signals != nil || !cursor.Equal(since) || fallbackCalls != 0 {
+		t.Fatalf("signals=%d cursor=%v err=%v fallback=%d", len(signals), cursor, err, fallbackCalls)
 	}
 }
 
@@ -285,7 +475,7 @@ func TestElasticsearch_PullStopsAtAggregateItemBudget(t *testing.T) {
 	defer server.Close()
 
 	source, err := NewElasticsearchSource("item-budget", config.AgentElasticsearchSourceConfig{
-		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: pageSize,
+		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: pageSize, TieBreakerField: "event.id",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -355,7 +545,7 @@ func TestElasticsearch_PullStopsAtAggregateDecodedByteBudget(t *testing.T) {
 	defer server.Close()
 
 	source, err := NewElasticsearchSource("byte-budget", config.AgentElasticsearchSourceConfig{
-		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 1,
+		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 1, TieBreakerField: "event.id",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -396,7 +586,7 @@ func TestElasticsearch_PullRejectsRepeatedPageInsteadOfLooping(t *testing.T) {
 	defer server.Close()
 
 	source, err := NewElasticsearchSource("page-budget", config.AgentElasticsearchSourceConfig{
-		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 1,
+		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 1, TieBreakerField: "event.id",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -449,7 +639,7 @@ func TestElasticsearch_PullReportsExhaustedDedupScan(t *testing.T) {
 	defer server.Close()
 
 	source, err := NewElasticsearchSource("scan-bound", config.AgentElasticsearchSourceConfig{
-		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 1000,
+		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 1000, TieBreakerField: "event.id",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -461,6 +651,81 @@ func TestElasticsearch_PullReportsExhaustedDedupScan(t *testing.T) {
 	}
 	if len(signals) != 0 || !cursor.Equal(timestamp) {
 		t.Fatalf("signals=%d cursor=%v, want empty partial at original cursor %v", len(signals), cursor, timestamp)
+	}
+}
+
+func TestElasticsearch_TimeOnlyScanBudgetAdvisesConfiguringTieBreaker(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	base := now.Add(-55 * time.Second)
+	rows := make([]DedupRow, maximumESScanItems)
+	for index := range rows {
+		rows[index] = DedupRow{ID: fmt.Sprintf("doc-%05d", index), TS: base}
+	}
+	nextPosition := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodDelete {
+			_, _ = writer.Write([]byte(`{}`))
+			return
+		}
+		var query struct {
+			From     int    `json:"from"`
+			Size     int    `json:"size"`
+			ScrollID string `json:"scroll_id"`
+			Query    struct {
+				Bool struct {
+					Must []struct {
+						Range map[string]struct {
+							GTE string `json:"gte"`
+						} `json:"range"`
+					} `json:"must"`
+				} `json:"bool"`
+			} `json:"query"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&query); err != nil {
+			t.Fatal(err)
+		}
+		start := 0
+		if query.ScrollID != "" {
+			start = nextPosition
+			query.Size = 1000
+		} else {
+			lower, err := time.Parse(time.RFC3339Nano, query.Query.Bool.Must[0].Range["@timestamp"].GTE)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if offset := lower.Sub(base); offset > 0 {
+				start = int((offset + time.Millisecond - 1) / time.Millisecond)
+			}
+		}
+		start += query.From
+		end := min(start+query.Size, maximumESScanItems)
+		hits := make([]esHit, 0, max(0, end-start))
+		for index := start; index < end; index++ {
+			ts := rows[index].TS
+			hits = append(hits, esHit{ID: rows[index].ID, Source: map[string]interface{}{"@timestamp": ts.Format(time.RFC3339Nano), "message": "seen"}, Sort: []interface{}{float64(ts.UnixMilli())}})
+		}
+		nextPosition = end
+		response := esSearchResponse{ScrollID: "scan-snapshot"}
+		response.Hits.Hits = hits
+		_ = json.NewEncoder(writer).Encode(response)
+	}))
+	defer server.Close()
+
+	source, err := NewElasticsearchSource("time-only-scan", config.AgentElasticsearchSourceConfig{
+		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.nowFn = func() time.Time { return now }
+	source.dedup.Stage(rows, base.Add(-time.Minute))
+	since := now.Add(-time.Second)
+	signals, cursor, err := source.Pull(context.Background(), since)
+	if err == nil || !strings.Contains(err.Error(), "scanned 50000 documents") || !strings.Contains(err.Error(), "same-timestamp backlog") || !strings.Contains(err.Error(), "configure tie_breaker_field") || strings.Contains(err.Error(), "selectivity") {
+		t.Fatalf("error = %v, want advice to configure tie_breaker_field", err)
+	}
+	if len(signals) != 0 || !cursor.Equal(since) {
+		t.Fatalf("signals=%d cursor=%v, want none at %v", len(signals), cursor, since)
 	}
 }
 
@@ -539,10 +804,11 @@ func TestElasticsearch_Pagination(t *testing.T) {
 	defer ts.Close()
 
 	src, _ := NewElasticsearchSource("pager", config.AgentElasticsearchSourceConfig{
-		Addresses:     []string{ts.URL},
-		AllowLoopback: true,
-		Index:         "logs-*",
-		PageSize:      2, // page size = 2 so first page is "full" and triggers page 2
+		Addresses:       []string{ts.URL},
+		AllowLoopback:   true,
+		Index:           "logs-*",
+		TieBreakerField: "event.id",
+		PageSize:        2, // page size = 2 so first page is "full" and triggers page 2
 	})
 
 	signals, _, err := src.Pull(context.Background(), time.Time{})
@@ -617,7 +883,7 @@ func TestElasticsearch_PullRejectsInvalidPaginationOrderingWithoutAdvancingCurso
 				pageSize = 10
 			}
 			source, err := NewElasticsearchSource("invalid-order", config.AgentElasticsearchSourceConfig{
-				Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: pageSize,
+				Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", PageSize: pageSize, TieBreakerField: "event.id",
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -638,7 +904,9 @@ func TestElasticsearch_QueryStringSent(t *testing.T) {
 	var receivedBody string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		receivedBody = string(b)
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/_search") {
+			receivedBody = string(b)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(esResponse(t, nil))
 	}))

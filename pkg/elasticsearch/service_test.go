@@ -26,7 +26,7 @@ func TestServiceScopesEveryOperationAndProjectsResults(t *testing.T) {
 		case strings.HasPrefix(request.URL.Path, "/_cat/indices/"):
 			_, _ = writer.Write([]byte(`[{"index":"logs-2026","status":"green","docs.count":"7"}]`))
 		case strings.HasSuffix(request.URL.Path, "/_mapping"):
-			if got, want := request.URL.Query().Get("filter_path"), "*.mappings.properties.@timestamp,*.mappings.properties.event.properties.id,*.mappings.properties.message"; got != want {
+			if got, want := request.URL.Query().Get("filter_path"), "*.mappings.properties.@timestamp,*.mappings.properties.message"; got != want {
 				t.Errorf("mapping filter_path = %q, want %q", got, want)
 			}
 			_, _ = writer.Write([]byte(`{"logs-2026":{"mappings":{"properties":{"@timestamp":{"type":"date"},"message":{"type":"text"},"password":{"type":"keyword"},"user_email":{"type":"keyword"}}}}}`))
@@ -58,7 +58,7 @@ func TestServiceScopesEveryOperationAndProjectsResults(t *testing.T) {
 	if err != nil || len(mappings.Items) != 1 || len(mappings.Items[0].Fields) != 2 || mappings.Items[0].Fields[0].Name != "@timestamp" || mappings.Items[0].Fields[1].Name != "message" || mappings.TotalIndices != 1 || mappings.Truncated {
 		t.Fatalf("mappings = %#v, err = %v", mappings, err)
 	}
-	if mustJSON(mappings.AllowedFields) != `["@timestamp","event.id","message"]` || mappings.AllowedFieldsTruncated {
+	if mustJSON(mappings.AllowedFields) != `["@timestamp","message"]` || mappings.AllowedFieldsTruncated {
 		t.Fatalf("mapping allowed fields = %#v truncated=%v", mappings.AllowedFields, mappings.AllowedFieldsTruncated)
 	}
 	if encoded := mustJSON(mappings); strings.Contains(encoded, "password") || strings.Contains(encoded, "user_email") {
@@ -137,6 +137,59 @@ func TestClientAuthFailoverBoundsAndSecretSafeErrors(t *testing.T) {
 	bounded.setTestBounds(nil, 0, 16)
 	if err := bounded.readJSON(context.Background(), bounded.toolPolicy, http.MethodGet, "/_cat/indices", nil, nil, &[]any{}); !errors.Is(err, ErrResponseTooLarge) {
 		t.Fatalf("large response error = %v", err)
+	}
+}
+
+func TestClientIngestScrollUsesScopedOpenAndAuthenticatedCleanup(t *testing.T) {
+	var paths []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		paths = append(paths, request.Method+" "+request.URL.Path)
+		if _, _, ok := request.BasicAuth(); !ok {
+			t.Error("scroll operation missing credentials")
+		}
+		switch request.URL.Path {
+		case "/logs-*/_search":
+			if request.URL.Query().Get("scroll") != "1m" {
+				t.Error("scroll keepalive missing from index-scoped search")
+			}
+			_, _ = writer.Write([]byte(`{"_scroll_id":"opaque-id","hits":{"hits":[]}}`))
+		case "/_search/scroll":
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if request.Method == http.MethodPost && body["scroll_id"] != "opaque-id" {
+				t.Error("continuation did not use issued scroll id")
+			}
+			if request.Method == http.MethodDelete && mustJSON(body["scroll_id"]) != `["opaque-id"]` {
+				t.Error("cleanup did not use issued scroll id")
+			}
+			_, _ = writer.Write([]byte(`{"_scroll_id":"opaque-id","hits":{"hits":[]}}`))
+		default:
+			t.Errorf("unexpected scroll path %q", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(config.AgentElasticsearchSourceConfig{
+		Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", Username: "reader", Password: "private",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.httpClient = server.Client()
+	var response map[string]any
+	address, err := client.OpenIngestScroll(context.Background(), []byte(`{"size":1}`), &response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.NextIngestScroll(context.Background(), address, "opaque-id", &response); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ClearIngestScroll(context.Background(), address, "opaque-id"); err != nil {
+		t.Fatal(err)
+	}
+	if want := "[POST /logs-*/_search POST /_search/scroll DELETE /_search/scroll]"; fmt.Sprint(paths) != want {
+		t.Fatalf("scroll paths = %v, want %s", paths, want)
 	}
 }
 
@@ -499,7 +552,7 @@ func TestMappingQueryNarrowsConfiguredDottedFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "*.mappings.properties.@timestamp,*.mappings.properties.event.properties.id,*.mappings.properties.http.properties.response.properties.status_code,*.mappings.properties.message"
+	want := "*.mappings.properties.@timestamp,*.mappings.properties.http.properties.response.properties.status_code,*.mappings.properties.message"
 	if got := service.mappingQuery().Get("filter_path"); got != want {
 		t.Fatalf("filter_path = %q, want %q", got, want)
 	}
@@ -530,7 +583,7 @@ func TestSearchTruncatesOversizedDefaultProjectionDeterministically(t *testing.T
 	if err != nil || !result.Truncated {
 		t.Fatalf("search = %#v, err = %v", result, err)
 	}
-	allFields := append([]string{"@timestamp", "event.id", "message"}, extraFields...)
+	allFields := append([]string{"@timestamp", "message"}, extraFields...)
 	sort.Strings(allFields)
 	want := allFields[:MaximumFields]
 	if mustJSON(projected) != mustJSON(want) {
@@ -624,6 +677,37 @@ func TestSearchDisclosesServerSidePartialResults(t *testing.T) {
 	result, err := service.Search(context.Background(), SearchOptions{Limit: 1})
 	if err != nil || !result.TimedOut || !result.Truncated || result.Relation != "eq" {
 		t.Fatalf("partial search = %#v, err = %v", result, err)
+	}
+}
+
+func TestServiceWithoutTieBreakerProjectsOnlyConfiguredFields(t *testing.T) {
+	service, err := NewService(config.AgentElasticsearchSourceConfig{
+		Addresses: []string{"http://localhost:9200"}, AllowLoopback: true, Index: "logs-*", TieBreakerField: "  ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := service.Config().TieBreakerField; got != "" {
+		t.Fatalf("tie_breaker_field = %q, want empty when unset", got)
+	}
+	if got, want := mustJSON(service.ProjectedFields()), `["@timestamp","message"]`; got != want {
+		t.Fatalf("projected fields = %s, want %s", got, want)
+	}
+}
+
+func TestSearchReportsShardFailuresInsteadOfEmptyResult(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte(`{"_shards":{"total":3,"successful":0,"failed":3,"failures":[{"shard":0,"index":"logs-1","reason":{"type":"query_shard_exception","reason":"No mapping found for [event.id] in order to sort on\n"}}]},"hits":{"total":{"value":0,"relation":"eq"},"hits":[]}}`))
+	}))
+	defer server.Close()
+	service, err := NewService(config.AgentElasticsearchSourceConfig{Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Search(context.Background(), SearchOptions{Limit: 1})
+	if !errors.Is(err, ErrShardFailure) || !strings.Contains(err.Error(), "3 of 3 shards failed") || !strings.Contains(err.Error(), "query_shard_exception") ||
+		strings.Contains(err.Error(), "\n") {
+		t.Fatalf("error = %v, want sanitized shard failure", err)
 	}
 }
 

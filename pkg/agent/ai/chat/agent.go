@@ -25,6 +25,7 @@ import (
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
+	prometheustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/prometheus"
 	signoztools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/signoz"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -156,6 +157,7 @@ func (agent *Agent) availableTools(ctx context.Context) ([]core.Tool, error) {
 	tools = k8stools.FilterAuthorized(ctx, tools)
 	tools = elasticsearchtools.FilterAuthorized(ctx, tools)
 	tools = signoztools.FilterAuthorized(ctx, tools)
+	tools = prometheustools.FilterAuthorized(ctx, tools)
 	return commontools.FilterBaselineAuthorized(ctx, tools), nil
 }
 

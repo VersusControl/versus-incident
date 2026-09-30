@@ -18,9 +18,8 @@ import (
 // -----------------------------------------------------------------------------
 // TempoQuerier — a read-only client over Tempo's HTTP search API.
 //
-// Shared OSS infrastructure: the analyze `query_traces` tool consumes it (via a
-// bridge in pkg/agent), and the enterprise trace data source reuses the exact
-// same client. It only issues GET search requests — there is no write surface.
+// Shared OSS infrastructure for trace data sources and read-only trace tools.
+// It only issues GET search requests; there is no write surface.
 //
 // NOTE: only the Tempo backend is implemented in this client. A Jaeger reader
 // variant is a separate, deferred slice; consumers that need it switch on their

@@ -62,12 +62,18 @@ func New(sources []Source) []core.Tool {
 
 // FilterAuthorized removes SigNoz tools from unauthorized model catalogs.
 func FilterAuthorized(ctx context.Context, tools []core.Tool) []core.Tool {
-	if core.CallerAuthorized(ctx, core.PermissionInfrastructureView) {
-		return tools
-	}
 	result := make([]core.Tool, 0, len(tools))
 	for _, candidate := range tools {
 		if candidate == nil || !isTool(candidate.Name()) {
+			result = append(result, candidate)
+			continue
+		}
+		if filter, ok := candidate.(core.ContextAuthorizedTool); ok {
+			candidate = filter.AuthorizedTool(ctx)
+		} else if !core.CallerAuthorized(ctx, core.PermissionInfrastructureView) {
+			candidate = nil
+		}
+		if candidate != nil {
 			result = append(result, candidate)
 		}
 	}
@@ -96,7 +102,7 @@ var definitions = []definition{
 	{name: "discover_trace_fields", display: "Discover trace fields", description: "Discover bounded source-wide span fields on an unscoped configured source.", kind: signozapp.SignalTraces, action: actionFields, discovery: true},
 	{name: "read_trace_spans", display: "Read trace spans", description: "Read bounded spans using service, operation, error, and time filters.", kind: signozapp.SignalTraces, action: actionSearch},
 	{name: "discover_metrics", display: "Discover metrics", description: "Discover bounded source-wide metric metadata on an unscoped configured source.", kind: signozapp.SignalMetrics, action: actionMetrics, discovery: true},
-	{name: "read_metric_series", display: "Read metric series", description: "Read one bounded metric time series for a service and time window.", kind: signozapp.SignalMetrics, action: actionMetricQuery},
+	{name: "read_metric_series", display: "Read metric series", description: "Read one bounded averaged metric time series for a service and time window; values are not rates.", kind: signozapp.SignalMetrics, action: actionMetricQuery},
 }
 
 type tool struct {
@@ -105,9 +111,19 @@ type tool struct {
 	sourceNames []string
 }
 
+func (tool *tool) AuthorizedTool(ctx context.Context) core.Tool {
+	if !core.CallerAuthorized(ctx, core.PermissionInfrastructureView) {
+		return nil
+	}
+	return tool
+}
+
 func (tool *tool) Name() string        { return tool.definition.name }
 func (tool *tool) DisplayName() string { return tool.definition.display }
 func (tool *tool) Description() string { return tool.definition.description }
+func (tool *tool) SourceNames() []string {
+	return append([]string(nil), tool.sourceNames...)
+}
 func (tool *tool) AvailabilityCapability() (string, string, int) {
 	return tool.definition.name, string(tool.definition.kind), len(tool.sourceNames)
 }

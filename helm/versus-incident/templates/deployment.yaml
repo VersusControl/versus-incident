@@ -171,26 +171,6 @@ spec:
                   key: git_auth_token_{{ $i }}
             {{- end }}
             {{- end }}
-            - name: QUERY_METRICS_PROMETHEUS_BEARER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "versus-incident.fullname" . }}-secrets
-                  key: query_metrics_prometheus_bearer_token
-            - name: QUERY_METRICS_PROMETHEUS_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "versus-incident.fullname" . }}-secrets
-                  key: query_metrics_prometheus_password
-            - name: QUERY_TRACES_TEMPO_BEARER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "versus-incident.fullname" . }}-secrets
-                  key: query_traces_tempo_bearer_token
-            - name: QUERY_TRACES_TEMPO_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "versus-incident.fullname" . }}-secrets
-                  key: query_traces_tempo_password
             - name: KUBERNETES_TOKEN
               valueFrom:
                 secretKeyRef:

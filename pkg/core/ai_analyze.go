@@ -66,6 +66,20 @@ type Tool interface {
 	Invoke(ctx context.Context, args json.RawMessage) (*ToolResult, error)
 }
 
+// SourceRoutedTool identifies a provider tool whose existing capability can be
+// combined with another provider by dispatching an explicit source argument.
+type SourceRoutedTool interface {
+	Tool
+	SourceNames() []string
+}
+
+// ContextAuthorizedTool can remove unauthorized sources or the entire tool
+// before a model catalog is built. Implementations must not perform backend IO.
+type ContextAuthorizedTool interface {
+	Tool
+	AuthorizedTool(context.Context) Tool
+}
+
 // AnalyzeTool is retained for source compatibility.
 // Deprecated: use Tool.
 type AnalyzeTool = Tool

@@ -179,7 +179,7 @@ func (view ToolsetSettingsView) Enabled(agent AgentKind, id string) (bool, error
 	if view.settings.DisabledToolsets[agent][id] {
 		return false, nil
 	}
-	for _, name := range toolset.ToolNames {
+	for _, name := range legacyToolsetNames(toolset) {
 		if view.legacy.Disabled[agent][name] {
 			return false, nil
 		}
@@ -293,7 +293,7 @@ func (manager *Manager) SetToolsetEnabled(scope tenancy.OrgScope, agent AgentKin
 		wasEnabled = !migrateToolsetSettings(legacy).DisabledToolsets[agent][id]
 	}
 	legacyMatches := true
-	for _, name := range toolset.ToolNames {
+	for _, name := range legacyToolsetNames(toolset) {
 		if legacy.Disabled[agent][name] == enabled {
 			legacyMatches = false
 			break
@@ -303,7 +303,8 @@ func (manager *Manager) SetToolsetEnabled(scope tenancy.OrgScope, agent AgentKin
 	if wasEnabled == enabled && legacyMatches && !pending {
 		return false, nil
 	}
-	transitionLegacy, transitionChanged, err := manager.beginToolsetTransition(scope, agent, id, toolset.ToolNames, enabled)
+	names := legacyToolsetNames(toolset)
+	transitionLegacy, transitionChanged, err := manager.beginToolsetTransition(scope, agent, id, names, enabled)
 	if err != nil {
 		return false, err
 	}
@@ -324,7 +325,7 @@ func (manager *Manager) SetToolsetEnabled(scope tenancy.OrgScope, agent AgentKin
 		}
 		groupWasEnabled := !settings.DisabledToolsets[agent][id]
 		if groupWasEnabled == enabled && len(current) != 0 {
-			legacyChanged, finishErr := manager.finishToolsetTransition(scope, agent, id, toolset.ToolNames, enabled)
+			legacyChanged, finishErr := manager.finishToolsetTransition(scope, agent, id, names, enabled)
 			return transitionChanged || legacyChanged, finishErr
 		}
 		settings.DisabledToolsets[agent][id] = !enabled
@@ -337,7 +338,7 @@ func (manager *Manager) SetToolsetEnabled(scope tenancy.OrgScope, agent AgentKin
 			return false, err
 		}
 		if swapped {
-			legacyChanged, finishErr := manager.finishToolsetTransition(scope, agent, id, toolset.ToolNames, enabled)
+			legacyChanged, finishErr := manager.finishToolsetTransition(scope, agent, id, names, enabled)
 			return groupWasEnabled != enabled || transitionChanged || legacyChanged, finishErr
 		}
 	}
@@ -511,7 +512,7 @@ func migrateToolsetSettings(legacy persistedSettings) persistedToolsetSettings {
 	settings := emptyToolsetSettings()
 	for _, agent := range []AgentKind{AgentChat, AgentAnalyze} {
 		for _, toolset := range toolsets {
-			for _, name := range toolset.ToolNames {
+			for _, name := range legacyToolsetNames(toolset) {
 				if legacy.Disabled[agent][name] {
 					settings.DisabledToolsets[agent][toolset.ID] = true
 					break
@@ -520,6 +521,17 @@ func migrateToolsetSettings(legacy persistedSettings) persistedToolsetSettings {
 		}
 	}
 	return settings
+}
+
+func legacyToolsetNames(toolset ToolsetMetadata) []string {
+	switch toolset.ID {
+	case "metrics":
+		return append(append([]string(nil), toolset.ToolNames...), "query_metrics")
+	case "traces":
+		return append(append([]string(nil), toolset.ToolNames...), "query_traces")
+	default:
+		return toolset.ToolNames
+	}
 }
 
 func (manager *Manager) load(scope tenancy.OrgScope) (persistedSettings, []byte, error) {

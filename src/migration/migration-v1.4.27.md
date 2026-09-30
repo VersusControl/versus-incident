@@ -69,3 +69,51 @@ retries, pagination, and overlap handling retain their existing semantics.
 Secret-bearing content and de-duplication identifiers are intentionally
 sanitized before persistence, model input, or admin output; ingestion output is
 therefore not byte-for-byte unchanged.
+
+## Elasticsearch tie breaker field
+
+The Elasticsearch source's `tie_breaker_field` no longer defaults to
+`event.id`. When it is omitted, the source paginates on the time field alone:
+each tick uses a short-lived scroll snapshot to walk equal-timestamp pages
+without `from` offsets or the 10,000-result window. Emission remains bounded
+at 10,000 rows or 8 MiB per tick, and scanning at 50,000 hits. A time-only
+tick that cannot complete its snapshot within the scan bound reports an
+actionable error rather than risk losing a larger same-timestamp backlog.
+
+Deployments that relied on the implicit `event.id` default should set it
+explicitly to keep keyset (`search_after`) pagination:
+
+```yaml
+sources:
+  - name: production-logs
+    type: elasticsearch
+    enable: true
+    elasticsearch:
+      index: logs-*
+      tie_breaker_field: event.id
+```
+
+The field must be a unique keyword field with doc-values. Partial shard
+failures in a search response now surface as source errors instead of being
+read as an empty or short page, and the tick's cursor does not advance.
+
+## Auto metric and trace tools
+
+The on-demand `query_metrics` and `query_traces` tools is removed. We don't need config block `tools.query_metrics` and `tools.query_traces`, for now it auto enable when we configure an enabled `prometheus`, `traces`, `signoz_metrics`, or `signoz_traces` source in the `agent_sources.yaml` file. For example, a Prometheus metric source and a Tempo trace source:
+
+```yaml
+sources:
+  - name: production-metrics
+    type: prometheus
+    enable: true
+    options:
+      address: https://prometheus.example.internal
+      allow_private_networks: true
+  - name: production-traces
+    type: traces
+    enable: true
+    options:
+      backend: tempo
+      address: https://tempo.example.internal
+      allow_private_networks: true
+```

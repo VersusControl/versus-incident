@@ -111,9 +111,6 @@ func NewService(cfg config.AgentElasticsearchSourceConfig) (*Service, error) {
 	if cfg.MessageField == "" {
 		cfg.MessageField = "message"
 	}
-	if cfg.TieBreakerField == "" {
-		cfg.TieBreakerField = "event.id"
-	}
 	if err := normalizeConfiguredFields(&cfg); err != nil {
 		return nil, err
 	}
@@ -295,8 +292,9 @@ func (service *Service) Search(ctx context.Context, options SearchOptions) (Sear
 		return SearchResult{}, err
 	}
 	var raw struct {
-		TimedOut        bool `json:"timed_out"`
-		TerminatedEarly bool `json:"terminated_early"`
+		TimedOut        bool       `json:"timed_out"`
+		TerminatedEarly bool       `json:"terminated_early"`
+		Shards          ShardStats `json:"_shards"`
 		Hits            struct {
 			Total json.RawMessage `json:"total"`
 			Hits  []struct {
@@ -306,6 +304,9 @@ func (service *Service) Search(ctx context.Context, options SearchOptions) (Sear
 		} `json:"hits"`
 	}
 	if err := service.client.SearchJSON(ctx, body, &raw); err != nil {
+		return SearchResult{}, err
+	}
+	if err := raw.Shards.Err(); err != nil {
 		return SearchResult{}, err
 	}
 	total, relation := decodeTotal(raw.Hits.Total)
@@ -669,7 +670,7 @@ func normalizeConfiguredFields(cfg *config.AgentElasticsearchSourceConfig) error
 	}
 	fields := []namedField{
 		{name: "time_field", value: &cfg.TimeField},
-		{name: "tie_breaker_field", value: &cfg.TieBreakerField},
+		{name: "tie_breaker_field", value: &cfg.TieBreakerField, optional: true},
 		{name: "message_field", value: &cfg.MessageField},
 		{name: "severity_field", value: &cfg.SeverityField, optional: true},
 	}
@@ -688,7 +689,7 @@ func normalizeConfiguredFields(cfg *config.AgentElasticsearchSourceConfig) error
 			return fmt.Errorf("%w: extra_fields[%d] must be a concrete Elasticsearch field name without wildcards or metadata-field prefixes", ErrInvalidConfig, index)
 		}
 	}
-	if cfg.TieBreakerField == cfg.TimeField {
+	if cfg.TieBreakerField != "" && cfg.TieBreakerField == cfg.TimeField {
 		return fmt.Errorf("%w: tie_breaker_field must differ from time_field and identify a unique doc-values field", ErrInvalidConfig)
 	}
 	return nil

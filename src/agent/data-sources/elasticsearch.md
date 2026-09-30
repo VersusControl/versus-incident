@@ -1,7 +1,7 @@
 # Elasticsearch source
 
 Pulls log documents from Elasticsearch / OpenSearch / Elastic Cloud
-using the `_search` API with `search_after` pagination.
+using the `_search` API with a time-ordered, paginated range scan.
 
 ## Minimal config
 
@@ -17,7 +17,6 @@ sources:
       allow_loopback: false
       index: "logs-demo-*"
       time_field: "@timestamp"
-      tie_breaker_field: event.id
       query: '*'
       message_field: message
       reorder_window: 1m
@@ -38,7 +37,7 @@ elasticsearch:
 
   index: "logs-app-*"              # REQUIRED. Wildcards supported.
   time_field: "@timestamp"         # REQUIRED. Used for sort + range filter.
-  tie_breaker_field: event.id       # unique non-empty keyword field with doc_values
+  tie_breaker_field: event.id      # optional; unique non-empty keyword field with doc_values
   query: 'log.level:(error OR warn)'  # Lucene-style; "*" = match all.
 
   message_field: message           # field copied to Signal.Message
@@ -62,7 +61,6 @@ connects fine and matches **zero** documents — no error, no alert, nothing
 on the dashboard. Point both at the field that actually carries the text:
 ```yaml
       time_field: "@timestamp"
-      tie_breaker_field: event.id
       query: 'log:error'      # was message:error
       message_field: log      # was message
       page_size: 500
@@ -77,19 +75,43 @@ Not sure which field it is? Query the index and inspect one document:
   the durable delivered-ID set suppresses rows already emitted from that
   overlap. This lets a successful partial tick resume within a timestamp even
   though the persisted cursor itself is time-only.
-- **Pagination** — Within each inclusive `gte` reorder-window scan, sorts by
+- **Pagination (time-only, the default)** — Without `tie_breaker_field`, the
+  scan sorts by `time_field` ascending in a short-lived scroll snapshot, so it
+  works on indices with no unique field (for example Fluent Bit logs with
+  `@timestamp`, `log`, `time`, `kubernetes.*`). Scroll pages can cross 10,000
+  equal-timestamp documents without `from` offsets or changing shard-copy
+  order. Continuations and cleanup use the address that opened the snapshot;
+  a failed continuation fails the tick without advancing its cursor. Known
+  scroll IDs are cleared after success, cancellation, or failure. If an opening
+  response exceeds the 8 MiB limit before its ID can be decoded, or its ID is
+  too large to fit a bounded cleanup request, the server-side context cannot
+  be cleared by the source and expires after the one-minute scroll keepalive.
+- **Pagination (with `tie_breaker_field`)** — Sorts by
   `(time_field, tie_breaker_field)` ascending and passes both returned sort
   values to `search_after`. The tie breaker must be present, unique across
   matching documents, mapped as a keyword field with `doc_values`, and returned
-  as a non-empty string. `event.id` is the default for ECS-compatible indices.
+  as a non-empty string. Configure one when an index sees high-volume bursts
+  that share a timestamp (coarse, second-precision timestamps or batch
+  shippers), especially when a tick may need to scan 50,000 or more matching
+  documents. The field must be mapped in every index the
+  pattern matches.
   The source does not sort on `_id`, because `_id` has no doc values by default.
-- **Partial ticks** — A tick emits at most 10,000 documents or 8 MiB. Previously
-  delivered rows do not consume either limit, so later ticks scan through a
-  same-timestamp prefix and reach unseen rows. Total scanning remains bounded
-  at 50,000 hits per tick, matching the durable delivered-ID capacity;
-  exhausting that bound without an unseen row reports
-  an unhealthy source with guidance to narrow the query/window or fix tie-break
-  selectivity.
+- **Shard failures** — Elasticsearch reports per-shard failures (for example
+  sorting on an unmapped field) with HTTP 200 and no hits. The source treats
+  any failed shard as a failed tick: it reports the failure count and the first
+  reason, and does not advance the cursor.
+- **Partial ticks** — A tick emits at most 10,000 documents or 8 MiB, with
+  individual search responses capped at 8 MiB. Previously delivered rows do
+  not consume the emission limits, so later ticks can scan through a
+  same-timestamp prefix and reach unseen rows. Scanning remains bounded at
+  50,000 hits per tick. If a time-only scroll reaches that ceiling before
+  completion, the source fails the tick rather than advancing a timestamp-only
+  cursor across rows it cannot safely track with bounded durable dedup. Configure
+  a unique keyword `tie_breaker_field` or narrow the query/reorder window.
+  An oversized later scroll page also fails that tick without staging its
+  partial results; subsequent ticks reopen from the original cursor with a
+  smaller page size until the page fits. A single projected document larger
+  than 8 MiB still requires narrowing the query or projected fields.
 - **Auth precedence** — `api_key` wins over `username`/`password`
   when both are set.
 - **Credential transport** — Basic auth and API keys require verified HTTPS.
@@ -156,3 +178,4 @@ the catalog pick it up on the **Patterns** page in the admin UI.
 | Cursor never advances | `time_field` not present in returned docs, or `query` matches nothing. |
 | Only old data, then silence | `time_field` doesn't match the field your docs actually use. |
 | Connects, no error, nothing ingested | Your log body is in a different field than `query`/`message_field` target — Fluent Bit typically stores it in `log`, not `message`. Point both at the real field (see the Fluent Bit note above). |
+| `search failed on one or more shards … No mapping found for [<field>] in order to sort on` | `tie_breaker_field` names a field that is not mapped in the index. Remove it to use time-only pagination, or point it at a mapped unique keyword field. |

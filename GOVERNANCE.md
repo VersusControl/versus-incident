@@ -157,16 +157,6 @@ In practice:
 > enterprise-gated. That is the boundary in action: the seam is open, the
 > org-scaling wrapper is paid.
 
-> **"All signal sources" means the log-based sources shipped under MIT**
-> (Elasticsearch, Graylog, Splunk, Loki, CloudWatch Logs, file, …) — these are
-> OSS forever under §1. A **standing metric/trace ingestion source** (a source
-> that polls a PromQL/TraceQL rule each tick to *start* incidents) has **not**
-> shipped under MIT and is a **new** Enterprise capability; only the on-demand
-> `query_metrics`/`query_traces` correlation tools, the shared queriers, and the
-> generic `core.SignalSource` seam + registration hook are OSS. This is the
-> seam-in-OSS / wrapper-in-Enterprise pattern, not a narrowing of the OSS surface
-> (nothing MIT-released moves out).
-
 #### Documentation is part of the open core
 
 The product **documentation content** (the Markdown under `versus-incident/src`)

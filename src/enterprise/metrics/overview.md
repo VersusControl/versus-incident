@@ -27,21 +27,8 @@ supplied via the `LICENSE_KEY` environment variable. On an **OSS build**, a sour
 `type: prometheus`, `type: cloudwatch_metrics` or `type: signoz_metrics` returns
 **"requires Versus Enterprise"** and refuses to build.
 
-## OSS vs Enterprise
-
-| Capability | OSS | Enterprise |
-|---|---|---|
-| On-demand metric correlation during an investigation | ✅ | ✅ |
-| A standing metric source that **starts incidents itself** | ❌ | ✅ |
-| **Auto-discovered** signals (no PromQL, no metric names) | ❌ | ✅ |
-| **Learned** seasonal baseline + sustained-deviation paging | ❌ | ✅ |
-
-The **standing, auto-learned** metric source is the Enterprise wedge — OSS keeps the
-on-demand correlation tools, Enterprise adds the source that pages on its own.
-
 ## See also
 
 - [Prometheus / Metrics (Enterprise)](./prometheus.md)
 - [CloudWatch Metrics (Enterprise)](./cloudwatch-metrics.md)
 - [SigNoz Metrics (Enterprise)](./signoz.md)
-- OSS on-demand correlation tools: [Tool Reference](../../agent/tools/tools.md)

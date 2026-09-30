@@ -172,7 +172,7 @@ func TestToolsetPolicyMigratesEveryGroupAndPersistsLegacyDenies(t *testing.T) {
 	provider := storage.NewMemory()
 	manager := NewManager(provider)
 	scope := tenancy.NewOrgScope("org-a")
-	legacy := []byte(`{"disabled":{"chat":{"query_metrics":true,"get_related_logs":true},"analyze":{"recent_changes":true}}}`)
+	legacy := []byte(`{"disabled":{"chat":{"discover_metrics":true,"get_related_logs":true},"analyze":{"recent_changes":true}}}`)
 	if err := provider.WriteBlob(settingsBlobName(scope), legacy); err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestToolsetPolicyOverlayAndEnableAreFailClosedAndAgentIndependent(t *testin
 	provider := storage.NewMemory()
 	manager := NewManager(provider)
 	scope := tenancy.NewOrgScope("org-a")
-	if err := provider.WriteBlob(settingsBlobName(scope), []byte(`{"disabled":{"chat":{"query_metrics":true},"analyze":{}}}`)); err != nil {
+	if err := provider.WriteBlob(settingsBlobName(scope), []byte(`{"disabled":{"chat":{"discover_metrics":true},"analyze":{}}}`)); err != nil {
 		t.Fatal(err)
 	}
 	if enabled, err := manager.ToolsetEnabled(scope, AgentChat, "metrics"); err != nil || enabled {
@@ -216,11 +216,62 @@ func TestToolsetPolicyOverlayAndEnableAreFailClosedAndAgentIndependent(t *testin
 		t.Fatalf("enable legacy-only disabled toolset = %v, %v", changed, err)
 	}
 	legacy, _, err := manager.load(scope)
-	if err != nil || legacy.Disabled[AgentChat]["query_metrics"] {
+	if err != nil || legacy.Disabled[AgentChat]["discover_metrics"] {
 		t.Fatalf("legacy child was not cleared before enable: %#v, %v", legacy.Disabled, err)
 	}
 	if enabled, err := manager.ToolsetEnabled(scope, AgentChat, "metrics"); err != nil || !enabled {
 		t.Fatalf("chat enabled=%v err=%v", enabled, err)
+	}
+}
+
+func TestRetiredMetricTraceDeniesMigrateAndClearOnEnable(t *testing.T) {
+	for _, test := range []struct{ toolset, retired, native string }{
+		{"metrics", "query_metrics", "read_metric_series"},
+		{"traces", "query_traces", "read_trace_spans"},
+	} {
+		t.Run(test.toolset, func(t *testing.T) {
+			provider := storage.NewMemory()
+			manager := NewManager(provider)
+			scope := tenancy.NewOrgScope("org-a")
+			legacy, err := json.Marshal(persistedSettings{Disabled: map[AgentKind]map[string]bool{
+				AgentChat: {test.retired: true}, AgentAnalyze: {},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := provider.WriteBlob(settingsBlobName(scope), legacy); err != nil {
+				t.Fatal(err)
+			}
+			if enabled, err := manager.ToolsetEnabled(scope, AgentChat, test.toolset); err != nil || enabled {
+				t.Fatalf("legacy deny overlay enabled=%v err=%v", enabled, err)
+			}
+			if enabled, err := manager.ToolsetEnabled(scope, AgentAnalyze, test.toolset); err != nil || !enabled {
+				t.Fatalf("independent analyze enabled=%v err=%v", enabled, err)
+			}
+			if _, err := manager.SetToolsetEnabled(scope, AgentAnalyze, "logs", false); err != nil {
+				t.Fatal(err)
+			}
+			grouped, _, err := manager.loadToolsets(scope)
+			if err != nil || !grouped.DisabledToolsets[AgentChat][test.toolset] {
+				t.Fatalf("migrated deny=%v err=%v", grouped.DisabledToolsets, err)
+			}
+			if changed, err := manager.SetToolsetEnabled(scope, AgentChat, test.toolset, true); err != nil || !changed {
+				t.Fatalf("enable migrated toolset changed=%v err=%v", changed, err)
+			}
+			stored, _, err := manager.load(scope)
+			if err != nil || stored.Disabled[AgentChat][test.retired] {
+				t.Fatalf("retired deny not cleared: %+v err=%v", stored.Disabled, err)
+			}
+			if enabled, err := manager.ToolsetEnabled(scope, AgentChat, test.toolset); err != nil || !enabled {
+				t.Fatalf("native toolset enabled=%v err=%v", enabled, err)
+			}
+			if enabled, err := manager.Enabled(scope, AgentChat, test.native); err != nil || !enabled {
+				t.Fatalf("native child enabled=%v err=%v", enabled, err)
+			}
+			if _, err := manager.Enabled(scope, AgentChat, test.retired); !errors.Is(err, ErrUnknownTool) {
+				t.Fatalf("retired model tool remains registered: %v", err)
+			}
+		})
 	}
 }
 
@@ -315,7 +366,7 @@ func TestToolsetEnableClearsEveryLegacyChildWithOneLegacyCAS(t *testing.T) {
 	provider := &settingsCountingProvider{Provider: inner, reads: make(map[string]int), cas: make(map[string]int)}
 	manager := NewManager(provider)
 	scope := tenancy.NewOrgScope("org-a")
-	legacy := persistedSettings{Disabled: map[AgentKind]map[string]bool{AgentChat: {"query_metrics": true}, AgentAnalyze: {}}}
+	legacy := persistedSettings{Disabled: map[AgentKind]map[string]bool{AgentChat: {"get_related_logs": true}, AgentAnalyze: {}}}
 	for _, name := range toolsets[0].ToolNames {
 		legacy.Disabled[AgentChat][name] = true
 	}
@@ -345,7 +396,7 @@ func TestToolsetEnableClearsEveryLegacyChildWithOneLegacyCAS(t *testing.T) {
 			t.Fatalf("legacy child %q remained disabled", name)
 		}
 	}
-	if !stored.Disabled[AgentChat]["query_metrics"] {
+	if !stored.Disabled[AgentChat]["get_related_logs"] {
 		t.Fatal("unrelated legacy disable was cleared")
 	}
 }

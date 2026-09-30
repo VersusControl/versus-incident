@@ -195,7 +195,7 @@ services:
     volumes:
       - ./signoz/bootstrap.py:/bootstrap.py:ro
       - signoz-bootstrap:/bootstrap
-    restart: on-failure
+    restart: "no"
 
   versus:
     depends_on:

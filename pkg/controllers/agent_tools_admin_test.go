@@ -116,7 +116,7 @@ func TestAgentToolsPutSuccessAndUnsatisfiedDenialAuditExactlyOnce(t *testing.T) 
 	request = httptest.NewRequest("PUT", "/api/admin/agent/tools/chat/query_metrics", bytes.NewBufferString(`{"enabled":true}`))
 	request.Header.Set("Content-Type", "application/json")
 	response, err = app.Test(request, -1)
-	if err != nil || response.StatusCode != fiber.StatusConflict {
+	if err != nil || response.StatusCode != fiber.StatusBadRequest {
 		t.Fatalf("enable status=%v err=%v", response.StatusCode, err)
 	}
 	if len(*events) != 1 || (*events)[0].Result != middleware.AdminAuditDenied {

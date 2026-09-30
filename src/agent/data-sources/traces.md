@@ -119,6 +119,7 @@ sources:
     options:
       address: http://tempo:3200
       backend: tempo
+      allow_private_networks: true   # trusted Docker network for tool reads
 ```
 
 With auth and TLS:
@@ -131,6 +132,7 @@ sources:
     options:
       address: https://tempo.internal:3200
       backend: tempo
+      allow_private_networks: true   # trusted private endpoint for tool reads
       bearer_token: ${TEMPO_TOKEN}          # Authorization: Bearer <token>
       # username: ${TEMPO_USERNAME}         # fallback HTTP Basic
       # password: ${TEMPO_PASSWORD}
@@ -144,7 +146,21 @@ sources:
 | `bearer_token` / `username` / `password` | unset | Bearer auth, else HTTP Basic. |
 | `insecure_skip_verify` | `false` | Skip TLS verification — **local dev only**, never production. |
 
-That is the whole operator surface for the auto flow. **No `query:`, no TraceQL.**
+The Tempo source's organization is assigned from the authenticated deployment
+runtime; there is no user-defined Tempo organization option. For the Enterprise
+on-demand `discover_trace_fields` and
+`read_trace_spans` tools, the bounded read client denies private and loopback
+destinations by default. Set
+`allow_private_networks: true` only for a trusted RFC1918/ULA endpoint such as
+`tempo` on a Docker network; use `allow_loopback: true` instead for local
+`localhost` testing. `tool_scope_service` optionally restricts reads to one
+service and hides field discovery. For these bounded Tempo reads, bearer or
+HTTP Basic credentials require HTTPS except on a loopback HTTP origin with
+explicit `allow_loopback: true`; `allow_private_networks` does not allow
+credentialed private-network HTTP. These keys govern the read tools; the
+standing auto-learning source retains its existing behavior. The configured
+Enterprise source contributes these source-bound tools to Chat and Analyze;
+there is no standalone trace tool configuration.
 
 ### What it watches
 
@@ -171,7 +187,7 @@ The source and its learned baselines require a Versus Enterprise license, suppli
 
 | Capability | OSS | Enterprise |
 |---|---|---|
-| On-demand `query_traces` correlation during an investigation | ✅ | ✅ |
+| Source-bound `discover_trace_fields` and `read_trace_spans` | ❌ | ✅ |
 | Standing `traces` source that **starts incidents itself** | ❌ | ✅ |
 | **Auto-discovered** `(service, operation)` targets (no TraceQL) | ❌ | ✅ |
 | **Learned** p99/error-rate baseline + sustained-deviation paging | ❌ | ✅ |
@@ -193,6 +209,7 @@ sources:
     options:
       address: http://tempo:3200
       backend: tempo
+      allow_private_networks: true
       query: '{ status = error }'           # added alongside auto-discovered targets
 ```
 
@@ -279,18 +296,17 @@ options:
 
 ### Limitations
 
-- **Provider-specific generic readers remain separate.** A configured
-  `signoz_traces` source contributes `discover_trace_fields` and
-  `read_trace_spans` to Chat and Analyze; it does not populate the Tempo
-  `query_traces` [analyze tool](../tools/tools.md). Configure that separate tool
-  only when you also want Tempo-backed queries.
+- **Reads stay with their source.** A configured `signoz_traces` source
+  contributes `discover_trace_fields` and `read_trace_spans` to Chat and
+  Analyze for that SigNoz source. Use a separate `traces` source in
+  `agent_sources.yaml` for Tempo-backed reads.
 - **Discovery is sample-based.** A service that emitted no spans inside the discovery
   lookback is not discovered until the next pass. Widen `discovery_lookback` or raise
   `discovery_samples` on a quiet backend.
 
 ## See also
 
-- OSS on-demand correlation tools: [Tool Reference](../tools/tools.md)
+- Source-bound read tools: [Tool Reference](../tools/tools.md)
 - The metrics twin of this flow: [Prometheus / Metrics (Enterprise)](./prometheus.md)
 - SigNoz metrics (Enterprise): [SigNoz Metrics](../../enterprise/metrics/signoz.md)
 - SigNoz logs (OSS): [SigNoz source](./signoz.md)

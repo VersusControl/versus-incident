@@ -13,9 +13,9 @@ This is the metrics analogue of the sample log generator
 rather than receiving pushes, the standard way to inject synthetic series
 from a host script is a **Prometheus Pushgateway**: this script pushes a
 realistic, increasing time-series to a pushgateway that Prometheus then
-scrapes. The Versus `query_metrics` analyze tool can range-query those
-series (e.g. a 5xx rate / latency-quantile rule) while investigating an
-incident.
+scrapes. The licensed Prometheus source can evaluate those series for standing
+signals; `discover_metrics` and `read_metric_series` provide investigation
+reads through that source.
 
 It emits exactly the metric names the `metrics` example's PromQL uses, so
 existing rules keep working:
@@ -51,7 +51,8 @@ analogue of /calm).
 
 Optional traces — when --otlp <endpoint> is set (used by the example's
 traces overlay), each push also best-effort POSTs one OTLP/HTTP span to a
-Tempo backend so `query_traces` has error / latency-outlier traces to read.
+Tempo backend so `discover_trace_fields` and `read_trace_spans` have error /
+latency-outlier traces to read.
 This is fully optional and wrapped in try/except: the metrics path never
 depends on it.
 
@@ -220,7 +221,7 @@ def push_trace(otlp: str, service: str, spiking: bool) -> None:
     """Best-effort: POST one OTLP/HTTP span to the trace backend.
 
     Used by the Tempo traces overlay and by the SigNoz backend. During a spike,
-    ~half the spans are errors with fat latency so `query_traces` has anomalies
+    ~half the spans are errors with fat latency so `read_trace_spans` has anomalies
     to surface. Wrapped by the caller so a missing/slow backend never breaks
     the metrics path.
     """

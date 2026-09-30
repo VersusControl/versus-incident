@@ -314,9 +314,10 @@ sources:
 [`generate_fake_metrics.py`](generate_fake_metrics.py) is the metrics
 analogue of `generate_noisy_logs.py`. Because Prometheus *scrapes* rather
 than receiving pushes, the script pushes a realistic, increasing
-time-series to a **Prometheus Pushgateway** that Prometheus then scrapes —
-so the `query_metrics` analyze tool (and, on Enterprise, a standing
-`prometheus` source) has real series to range-query. Used by the
+time-series to a **Prometheus Pushgateway** that Prometheus then scrapes.
+A configured, licensed Enterprise `prometheus` source can detect anomalies
+and contribute source-bound `discover_metrics` and `read_metric_series` to
+Chat and Analyze. OSS has no metric read tools. Used by the
 [`metrics/`](../examples/docker-compose/metrics/) example.
 
 It emits exactly the metric names that example's PromQL uses:

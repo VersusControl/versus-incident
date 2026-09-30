@@ -3,7 +3,6 @@ package signoz
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/VersusControl/versus-incident/pkg/providerhttp"
 )
 
 var allowedMethodsByPath = map[string]string{
@@ -31,7 +32,7 @@ type StatusError struct {
 func (err *StatusError) Error() string {
 	switch err.StatusCode {
 	case http.StatusMultipleChoices, http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
-		return fmt.Sprintf("SigNoz endpoint redirected: status %d; configure the final address", err.StatusCode)
+		return fmt.Sprintf("SigNoz endpoint redirected: status %d; configure a non-redirecting SigNoz query API origin; do not use an SSO login endpoint", err.StatusCode)
 	case http.StatusUnauthorized:
 		return "SigNoz authentication failed: status 401"
 	case http.StatusForbidden:
@@ -69,30 +70,12 @@ func NewClient(config Config, policy Policy) (*Client, error) {
 	if len(config.APIKey) < minimumAPIKeyLength {
 		return nil, fmt.Errorf("%w: api key must be at least %d bytes", ErrInvalidConfig, minimumAPIKeyLength)
 	}
-	if !validEndpointHost(parsed.Hostname(), config.AllowLoopback, config.AllowPrivate) {
+	if !providerhttp.HostAllowed(parsed.Hostname(), providerhttp.Policy{AllowLoopback: config.AllowLoopback, AllowPrivate: config.AllowPrivate}) {
 		return nil, fmt.Errorf("%w: address host is not permitted", ErrInvalidConfig)
 	}
 	policy = normalizePolicy(policy)
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	transport.DialContext = guardedDialContext(&net.Dialer{}, config.AllowLoopback, config.AllowPrivate)
-	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: config.RootCAs, InsecureSkipVerify: config.InsecureSkipVerify}
-	return &Client{baseURL: address, apiKey: config.APIKey, maximumBytes: policy.MaximumBytes, httpClient: &http.Client{Transport: transport, Timeout: policy.Timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
-}
-
-func validEndpointHost(host string, allowLoopback, allowPrivate bool) bool {
-	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-	if host == "" || host == "metadata" || host == "metadata.google" || host == "metadata.google.internal" || host == "instance-data" || host == "instance-data.ec2.internal" {
-		return false
-	}
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
-		return allowLoopback
-	}
-	address := net.ParseIP(host)
-	if address == nil {
-		return true
-	}
-	return validResolvedAddress(address, allowLoopback, allowPrivate)
+	transport := providerhttp.NewTransport(providerhttp.Policy{AllowLoopback: config.AllowLoopback, AllowPrivate: config.AllowPrivate, InsecureSkipVerify: config.InsecureSkipVerify, RootCAs: config.RootCAs})
+	return &Client{baseURL: address, apiKey: config.APIKey, maximumBytes: policy.MaximumBytes, httpClient: &http.Client{Transport: transport, Timeout: policy.Timeout, CheckRedirect: providerhttp.RefuseRedirects}}, nil
 }
 
 func guardedDialContext(dialer *net.Dialer, allowLoopback, allowPrivate bool) func(context.Context, string, string) (net.Conn, error) {
@@ -126,13 +109,7 @@ func guardedDialContext(dialer *net.Dialer, allowLoopback, allowPrivate bool) fu
 }
 
 func validResolvedAddress(address net.IP, allowLoopback, allowPrivate bool) bool {
-	if address == nil || address.IsUnspecified() || address.IsMulticast() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() {
-		return false
-	}
-	if address.IsLoopback() {
-		return allowLoopback
-	}
-	return allowPrivate || !address.IsPrivate()
+	return providerhttp.AddressAllowed(address, providerhttp.Policy{AllowLoopback: allowLoopback, AllowPrivate: allowPrivate})
 }
 
 // Endpoint returns one allowlisted endpoint URL.

@@ -25,6 +25,7 @@ import (
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
+	prometheustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/prometheus"
 	signoztools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/signoz"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -130,6 +131,7 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts 
 		current = k8stools.FilterAuthorized(ctx, current)
 		current = elasticsearchtools.FilterAuthorized(ctx, current)
 		current = signoztools.FilterAuthorized(ctx, current)
+		current = prometheustools.FilterAuthorized(ctx, current)
 		current = commontools.FilterBaselineAuthorized(ctx, current)
 		_, _, einoTools, err := prepareTools(current, toolTimeout)
 		if err != nil {
