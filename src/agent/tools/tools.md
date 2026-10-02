@@ -47,7 +47,7 @@ The `common` group connects AI investigations to operational data. Each tool is
 offered only when its requirement is satisfied and its Chat or Analyze policy
 allows it.
 
-### `get_related_logs`
+**get_related_logs**
 
 Reads a bounded, redacted slice of logs for a service and time window. Configure
 a [log data source](../data-sources.md), then use the provider guide for details,
@@ -60,25 +60,25 @@ the AI model. The default time window is 15 minutes and the maximum is 1440
 minutes (24 hours). The tool returns 50 lines by default and caps the result at
 200 lines.
 
-### `find_runbook`
+**find_runbook**
 
 Searches indexed runbooks for operational guidance. It requires an AI embedder
 and a runbook index. See [Find Runbook](./find-runbook.md) for corpus setup,
 redaction, and air-gapped ingestion.
 
-### `recent_changes`
+**recent_changes**
 
 Reads recent commits from configured source repositories. It requires a GitHub
 integration and at least one repository. See
 [Recent Changes](./recent-changes.md) for authentication and repository setup.
 
-### `describe_dependencies` :id=describe_dependencies
+**describe_dependencies**
 
 Reads the operator-configured service dependency graph so the AI can reason
 about upstream causes and downstream impact. Configure the graph in
 `tools.describe_dependencies.services` as shown below.
 
-### `describe_baseline` :id=describe_baseline
+**describe_baseline**
 
 Reads learned expectations for one exact service and signal over a requested
 current window from 5 minutes through 24 hours. Use `logs` to return up to 50
@@ -104,43 +104,6 @@ model tools: `get_cluster_overview`, `discover_k8s_resources`,
 `query_k8s_resources`, `get_k8s_resource`, `list_workloads`, `get_workload`,
 `list_k8s_events`, and `get_pod_logs`.
 
-Discovery assigns a canonical `resource_id` to each readable group, version,
-resource, and scope. API and model callers use that identifier rather than
-constructing Kubernetes paths or relying on ambiguous Kind names. Missing
-optional APIs and RBAC denials are reported as unavailable or partial evidence,
-not as healthy empty results.
-
-Search is cross-kind: the service searches names across the bounded discovered
-readable registry, applies per-kind and total result budgets, ranks exact names
-first, and declares partial or truncated results. Workload listing covers
-Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, and Pods. Overview reads
-all pages up to its declared collection cap and reports all workload counts,
-warning events, and exact CPU/memory request, limit, and allocatable quantities.
-Cluster utilization uses complete Node Metrics totals when available and falls
-back to Pod Metrics only when node samples are absent or unavailable. The
-`usage_source` field and partial/truncated metadata identify which evidence was
-used and whether the selected collection was incomplete.
-
-Resource output is projected before it reaches the API or model. Secret and
-ConfigMap values, literal environment values, command payloads, managed fields,
-last-applied configuration, credentials, and arbitrary custom-resource payloads
-are not returned. Pod logs are limited to one pod/container request and bounded
-by time, lines, and bytes. Projection collection caps, aggregate response-size
-caps, and log truncation are explicit in their responses; Search and Describe
-attribute omitted evidence with `encoded_result_size` and partial metadata.
-
-The connector exposes read APIs under `/api/admin/kubernetes` for overview,
-discovery, resource search/list/get/describe, events, pod logs, and
-optional usage. The UI is at `/agent/kubernetes`. Both require
-`infrastructure:view`. There are no apply, patch, delete, exec, terminal, proxy,
-rollout, or Helm paths.
-
-The agent tool catalog intentionally owns connector navigation. Its Kubernetes
-card's **Open** action routes to `/agent/kubernetes`; the global sidebar does not
-duplicate connector-specific destinations. The page provides cluster freshness,
-namespace scope, health and capacity, warning events, cross-kind search,
-resource describe, and node inventory with scheduled pods.
-
 ## Tool configuration
 
 Configuration for `describe_dependencies`, `recent_changes`, `find_runbook`,
@@ -160,7 +123,7 @@ every tool dispatch:
 
 See [Kubernetes Connector](kubernetes.md) for complete configuration examples.
 
-### Configure `describe_dependencies`
+### Configure Describe Dependencies
 
 This tool maps service relationships (upstream /
 downstream) so the AI can reason about blast radius and root cause
@@ -191,7 +154,7 @@ tools:
           - queue
 ```
 
-### Configure `recent_changes`
+### Configure Recent Changes
 
 This tool reads commit histories from your deploy repositories so the AI
 can correlate an incident with a recent deploy or config change. Example:
@@ -216,7 +179,7 @@ tools:
 > covers arguments, the change-record shape, authentication (HTTPS tokens
 > and SSH keys), failure behavior, and a Docker example.
 
-### Configure `find_runbook`
+### Configure Find Runbook
 
 This tool grounds the analysis in **your team's own runbooks**. During an
 investigation it embeds a short query derived from the incident, runs a
@@ -244,7 +207,7 @@ Then place your `*.md` runbooks in the data folder under `runbooks/`
 > pre-baking the corpus with `runbook-ingest`, and managing runbooks from
 > the admin UI.
 
-## Complete `tools.yaml` example
+## Complete example
 
 A `tools.yaml` combining the common tool integrations and shared knobs:
 
@@ -318,7 +281,7 @@ config/
 └── tools.yaml              # ← analyze tool config
 ```
 
-### Docker Compose
+## Docker Compose
 
 ```yaml
 services:
