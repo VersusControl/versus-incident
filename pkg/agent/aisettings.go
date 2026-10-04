@@ -21,14 +21,21 @@ import (
 // process-wide slot, registered once at boot, mutex-guarded. OSS registers
 // nothing, so aiSettingsResolver() returns nil and every call site falls
 // back to the static YAML ai config — community behaviour is byte-for-byte
-// unchanged (one nil-check, no allocations, no goroutines, the outbound
-// transport is left as a plain pass-through).
+// unchanged for ordinary requests (one nil-check, no allocations, no
+// goroutines, and no runtime key substitution).
 
 // AISettingsResolver resolves effective AI settings at runtime. ok=false on
 // a method means "no opinion" -> caller uses the static YAML ai config.
 type AISettingsResolver interface {
 	EffectiveKey(ctx context.Context) (key string, ok bool)
 	EffectiveEnabled(ctx context.Context) (enabled bool, ok bool)
+}
+
+// AICredentialResolver atomically resolves the runtime credential and whether
+// one is configured. A configured credential that cannot be decrypted returns
+// an empty key with present=true, preventing fallback to a YAML credential.
+type AICredentialResolver interface {
+	EffectiveCredential(ctx context.Context) (key string, present bool)
 }
 
 // AIProviderResolver is an OPTIONAL extension of AISettingsResolver: a
@@ -41,6 +48,19 @@ type AISettingsResolver interface {
 // resolver keeps working unchanged. OSS registers nothing.
 type AIProviderResolver interface {
 	EffectiveProvider(ctx context.Context) (provider string, ok bool)
+}
+
+// AIBaseURLResolver is an OPTIONAL extension of AISettingsResolver. A
+// successful empty value explicitly clears the configured endpoint; ok=false
+// means inherit the static YAML endpoint.
+type AIBaseURLResolver interface {
+	EffectiveBaseURL(ctx context.Context) (baseURL string, ok bool)
+}
+
+// AIBoundKeyResolver returns a key only when the runtime destination still
+// matches the destination captured by a constructed model.
+type AIBoundKeyResolver interface {
+	EffectiveKeyFor(ctx context.Context, provider, baseURL string) (key string, ok bool)
 }
 
 // AIContextDecorator is an OPTIONAL extension of AISettingsResolver. It lets
@@ -183,17 +203,30 @@ func EffectiveAIKeySetForOrg(org, yamlKey string) bool {
 
 // aiSettingsKeyFunc returns a per-request key override function backed by
 // the registered AISettingsResolver, or nil when none is set. The chat
-// model wraps its outbound transport with this function only when it is
-// non-nil, so OSS (no resolver) keeps a plain pass-through transport and is
-// byte-for-byte unchanged. The returned function re-reads the live slot on
-// every call, so a hot-swapped key takes effect without a restart.
+// model consults this function for per-request key replacement when present.
+// With no resolver OSS performs no runtime key substitution. The returned
+// function re-reads the live slot on every call, so a hot-swapped key takes
+// effect without a restart.
 func aiSettingsKeyFunc() func(context.Context) (string, bool) {
 	if aiSettingsResolver() == nil {
 		return nil
 	}
 	return func(ctx context.Context) (string, bool) {
 		if r := aiSettingsResolver(); r != nil {
-			return r.EffectiveKey(ctx)
+			if credentials, ok := r.(AICredentialResolver); ok {
+				return credentials.EffectiveCredential(ctx)
+			}
+			key, ok := r.EffectiveKey(ctx)
+			if ok {
+				return key, true
+			}
+			if presence, ok := r.(interface {
+				EffectiveKeySet(context.Context) (bool, bool)
+			}); ok {
+				if set, known := presence.EffectiveKeySet(ctx); known && set {
+					return "", true
+				}
+			}
 		}
 		return "", false
 	}
@@ -214,9 +247,21 @@ func aiRuntime() einowrap.RuntimeAI {
 		return einowrap.RuntimeAI{}
 	}
 	return einowrap.RuntimeAI{
+		Credential: func(ctx context.Context, provider, baseURL string) (string, bool) {
+			if resolver, ok := aiSettingsResolver().(AIBoundKeyResolver); ok && resolver != nil {
+				return resolver.EffectiveKeyFor(ctx, provider, baseURL)
+			}
+			return "", false
+		},
 		Provider: func(ctx context.Context) (string, bool) {
 			if pr, ok := aiSettingsResolver().(AIProviderResolver); ok && pr != nil {
 				return pr.EffectiveProvider(ctx)
+			}
+			return "", false
+		},
+		BaseURL: func(ctx context.Context) (string, bool) {
+			if resolver, ok := aiSettingsResolver().(AIBaseURLResolver); ok && resolver != nil {
+				return resolver.EffectiveBaseURL(ctx)
 			}
 			return "", false
 		},

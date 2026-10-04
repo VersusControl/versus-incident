@@ -9,12 +9,27 @@
 .heatmap-toolbar .input { font-size: 12px; min-height: 36px; }
 .heatmap-canvas {
   display: grid;
+  align-content: start;
   gap: 22px;
-  padding: 18px;
+  padding: 0 18px 18px;
   border-radius: 6px;
   background: rgb(var(--surface));
   min-height: 180px;
+  max-height: clamp(320px, 62vh, 720px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
+.heatmap-group-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin-bottom: 8px;
+  padding-top: 18px;
+  padding-bottom: 6px;
+  background: rgb(var(--surface));
+}
+.heatmap-canvas > .heatmap-grid:first-child { margin-top: 18px; }
 .heatmap-canvas[data-view="grid"] { grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); align-items: start; }
 .heatmap-grid {
   display: grid;
@@ -76,7 +91,8 @@
 .topology-edge { display: flex; min-width: 0; flex-direction: column; align-items: center; gap: 3px; color: rgb(var(--ink-400)); }
 .topology-edge span { max-width: 56px; overflow-wrap: anywhere; text-align: center; font-size: 9px; line-height: 1.1; }
 @media (max-width: 560px) {
-  .heatmap-canvas { padding: 12px; }
+  .heatmap-canvas { padding: 0 12px 12px; max-height: 70vh; }
+  .heatmap-group-header { padding-top: 12px; }
   .heatmap-service-row { grid-template-columns: minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) { .heatmap-service { transition: none; } }

@@ -551,7 +551,7 @@ func TestGraylogToolSourceNamesGlobalWorkBudget(t *testing.T) {
 			if len(sources) != 0 || len(graylogtools.New(sources)) != 0 || len(errs) != 1 {
 				t.Fatalf("over-budget Graylog registration: %d sources, %d errors", len(sources), len(errs))
 			}
-			if errs[0].Error() != "Graylog tool source configuration exceeds safety limits" {
+			if errs[0].Error() != "agent: Graylog tool source configuration exceeds safety limits" {
 				t.Fatal("budget error exposed configuration details")
 			}
 		})

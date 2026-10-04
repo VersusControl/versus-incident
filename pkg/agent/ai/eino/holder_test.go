@@ -183,6 +183,47 @@ func TestHolder_KeyStateRebuild(t *testing.T) {
 	}
 }
 
+func TestHolder_RuntimeBaseURLOverrideClearAndInherit(t *testing.T) {
+	baseURL := ""
+	baseURLSet := false
+	builds := 0
+	holder := einowrap.NewModelHolder(
+		config.AgentAIConfig{Provider: "openai", BaseURL: "https://yaml.example/v1", Model: holderOpenAIModel},
+		einowrap.Options{},
+		einowrap.RuntimeAI{BaseURL: func(context.Context) (string, bool) { return baseURL, baseURLSet }},
+		func(_ context.Context, cfg config.AgentAIConfig, _ einowrap.Options) (string, error) {
+			builds++
+			return cfg.BaseURL, nil
+		},
+	)
+
+	assertEndpoint := func(want string) {
+		t.Helper()
+		got, err := holder.Get(context.Background())
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got != want {
+			t.Fatalf("effective BaseURL = %q, want %q", got, want)
+		}
+	}
+
+	assertEndpoint("https://yaml.example/v1")
+	baseURL, baseURLSet = "https://runtime.example/v1", true
+	assertEndpoint("https://runtime.example/v1")
+	assertEndpoint("https://runtime.example/v1")
+	if builds != 2 {
+		t.Fatalf("build count for stable URL = %d, want 2", builds)
+	}
+	baseURL = ""
+	assertEndpoint("")
+	baseURLSet = false
+	assertEndpoint("https://yaml.example/v1")
+	if builds != 4 {
+		t.Fatalf("build count after clear and inherit = %d, want 4", builds)
+	}
+}
+
 func TestGeminiHolder_RuntimeOnlyKeySetClearRebuilds(t *testing.T) {
 	var keySet atomic.Bool
 	keySet.Store(true)

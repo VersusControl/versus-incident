@@ -1,66 +1,52 @@
-import { useSearchParams } from "react-router-dom";
-import { TopBar } from "@/components/TopBar";
-import { SegmentedControl } from "@/components/SegmentedControl";
 import { ReportSettingsControl } from "@/components/ReportSettingsControl";
 import { SpikeSettingsControl } from "@/components/SpikeSettingsControl";
 import { CountSettingsControl } from "@/components/CountSettingsControl";
-import { IncidentsConfigPanel } from "./IncidentsConfigPage";
-import { AgentConfigPanel } from "./AgentConfigPage";
 import { ServiceHealthSettingsControl } from "@/components/ServiceHealthSettingsControl";
+import { SettingsLayout } from "@/components/settings/SettingsLayout";
+import { SETTINGS_LEGACY_TABS, SETTINGS_SECTIONS } from "@/components/settings/sections";
+import { IncidentsConfigSection } from "./IncidentsConfigPage";
+import { AgentConfigSection } from "./AgentConfigPage";
 
-// SettingsPage — the Manage-zone home for the configuration views, grouped by
-// intent into URL-synced tabs (?tab=alerting|agent|tuning) so each view is
-// deep-linkable:
-//   • Alerting  — how the agent alerts: the incident delivery / on-call config.
-//   • Agent     — the AI runtime configuration.
-//   • System — the editable runtime knobs: the incident-count window, the
-//     spike-detector baseline mode and the periodic incident report.
-// The ?tab=tuning param value is unchanged so existing deep links keep working.
-// The legacy /config/incidents route redirects to the default (Alerting) tab
-// and /config/agent to ?tab=agent. Every panel keeps its SecretBanner: secrets
-// never reach the browser, only their presence is shown.
+// SettingsPage (/settings) — running configuration and runtime tuning, one
+// section at a time. YAML-configured sections are read-only and never show
+// secret values; tuning sections save without a restart.
 export function SettingsPage() {
-  const [params] = useSearchParams();
-  const raw = params.get("tab");
-  const tab =
-    raw === "agent" ? "agent" : raw === "tuning" ? "tuning" : "alerting";
-
   return (
-    <>
-      <TopBar
-        title="Settings"
-        subtitle="Read-only view of the running configuration"
-      />
-      <main className="flex-1 overflow-auto p-6">
-        <div className="mb-4">
-          <SegmentedControl
-            param="tab"
-            defaultValue="alerting"
-            aria-label="Settings tabs"
-            options={[
-              { value: "alerting", label: "Alerting" },
-              { value: "agent", label: "Agent" },
-              { value: "tuning", label: "System" },
-            ]}
-          />
-        </div>
-        {tab === "alerting" ? (
-          <div className="space-y-4">
-            <IncidentsConfigPanel />
-          </div>
-        ) : tab === "agent" ? (
-          <div className="space-y-4">
-            <AgentConfigPanel />
-          </div>
-        ) : (
-          <div className="space-y-4">
-            <ServiceHealthSettingsControl />
-            <CountSettingsControl />
-            <SpikeSettingsControl />
-            <ReportSettingsControl />
-          </div>
-        )}
-      </main>
-    </>
+    <SettingsLayout
+      title="Settings"
+      navLabel="Settings sections"
+      sections={SETTINGS_SECTIONS}
+      legacy={{ tabs: SETTINGS_LEGACY_TABS }}
+      renderSection={renderSettingsSection}
+    />
   );
+}
+
+function renderSettingsSection(id: string) {
+  switch (id) {
+    case "count-window":
+      return <CountSettingsControl />;
+    case "service-health":
+      return <ServiceHealthSettingsControl />;
+    case "channels":
+      return <IncidentsConfigSection part="channels" />;
+    case "queues":
+      return <IncidentsConfigSection part="queues" />;
+    case "oncall":
+      return <IncidentsConfigSection part="oncall" />;
+    case "agent-runtime":
+      return <AgentConfigSection part="runtime" />;
+    case "agent-sources":
+      return <AgentConfigSection part="sources" />;
+    case "agent-ai":
+      return <AgentConfigSection part="ai" />;
+    case "agent-patterns":
+      return <AgentConfigSection part="patterns" />;
+    case "spike":
+      return <SpikeSettingsControl />;
+    case "reports":
+      return <ReportSettingsControl />;
+    default:
+      return <IncidentsConfigSection part="server" />;
+  }
 }

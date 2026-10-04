@@ -3,6 +3,7 @@ import { AlertTriangle, Loader2 } from "lucide-react";
 import { ApiError, type ServiceHealthSettings } from "@/lib/api";
 import { ErrorBox } from "@/components/feedback";
 import { AdminAccessNotice } from "@/components/AdminAccessNotice";
+import { SaveBar } from "@/components/settings/SettingsCard";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { useToast } from "@/components/toastContext";
 import { useServiceHealthSettingsQuery, useUpdateServiceHealthSettings } from "@/lib/useServiceHealth";
@@ -55,11 +56,8 @@ export function ServiceHealthSettingsControl() {
   const conflict = saveError instanceof ApiError && saveError.status === 409;
 
   return (
-    <section className="card space-y-4 p-4" aria-labelledby="service-health-settings-title">
-      <div>
-        <h3 id="service-health-settings-title" className="text-sm font-semibold text-ink-100">Service Health Timing</h3>
-        <p className="text-2xs text-ink-400">Service Health is always enabled. Timing changes apply without a restart.</p>
-      </div>
+    <section className="card space-y-4 p-4" aria-label="Service health timing">
+      <p className="text-2xs text-ink-400">Service Health is always enabled. Timing changes apply without a restart.</p>
 
       {settings.data.diagnostic && (
         <div className="flex gap-2 text-xs text-sev-warn" role="status">
@@ -121,11 +119,11 @@ export function ServiceHealthSettingsControl() {
             </div>
           )}
 
-          <div className="flex justify-end">
+          <SaveBar>
             <button type="button" className="btn btn-primary" disabled={!dirty || invalid || save.isPending} onClick={() => save.mutate(form)}>
               {save.isPending ? <><Loader2 size={12} className="animate-spin" aria-hidden /> Saving…</> : "Save"}
             </button>
-          </div>
+          </SaveBar>
         </>
       )}
     </section>

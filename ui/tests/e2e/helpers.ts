@@ -1,45 +1,62 @@
 import { expect, type Locator, type Page } from "@playwright/test";
 
 // ---------------------------------------------------------------------------
-// Shared helpers for the OSS (versus-incident) browser e2e. Everything
-// environment-specific (the base URL, the gateway secret) comes from env,
-// loaded by playwright.config.ts — never hardcoded here.
+// Shared helpers for the versus-incident SPA browser e2e. Everything
+// environment-specific (the base URL, credentials) comes from env, loaded by
+// playwright.config.ts or set by `harness-run/harness.sh e2e ui` — never
+// hardcoded here.
 //
-// Auth model: the OSS SPA exchanges `X-Gateway-Secret` once for an HttpOnly
-// session cookie. Reloads in the same browser context reuse that cookie.
+// Auth model: OSS exchanges `X-Gateway-Secret` once for an HttpOnly session
+// cookie; a licensed Enterprise build shows the local-admin login form instead.
+// Reloads in the same browser context reuse the session cookie.
 // ---------------------------------------------------------------------------
 
 export const env = {
   baseURL: process.env.E2E_BASE_URL ?? "http://localhost:8080",
   // The OSS single-admin gateway secret (== the server's GATEWAY_SECRET).
-  // Required — the settings pages 401 without it. Never hardcoded; the run/
-  // harness default is `dev-gateway-secret`.
   gatewaySecret: process.env.E2E_GATEWAY_SECRET ?? "",
+  // Enterprise built-in admin, captured by harness-run from the boot banner.
+  adminUsername: process.env.E2E_ADMIN_USERNAME ?? "admin",
+  adminPassword: process.env.E2E_ADMIN_PASSWORD ?? "",
+  licensed: process.env.E2E_LICENSED === "1",
 };
 
 export async function signInWithGatewaySecret(page: Page): Promise<void> {
   const secretField = page.getByLabel("Gateway secret");
-  const needsExchange = await Promise.race([
-    secretField.waitFor({ state: "visible", timeout: 30_000 }).then(() => true),
-    page.getByTestId("app-authenticated").waitFor({ state: "visible", timeout: 30_000 }).then(() => false),
+  const localLogin = page.getByTestId("local-login-form");
+  const surface = await Promise.race([
+    secretField.waitFor({ state: "visible", timeout: 30_000 }).then(() => "secret" as const),
+    localLogin.waitFor({ state: "visible", timeout: 30_000 }).then(() => "local" as const),
+    page.getByTestId("app-authenticated").waitFor({ state: "visible", timeout: 30_000 }).then(() => "authed" as const),
   ]);
-  if (!needsExchange) return;
-  if (!env.gatewaySecret) {
-    throw new Error(
-      "E2E_GATEWAY_SECRET is required — set it to the running OSS server's " +
-        "GATEWAY_SECRET (run/ harness default: dev-gateway-secret). " +
-        "Copy tests/e2e/.env.example to tests/e2e/.env and fill it in.",
-    );
+  if (surface === "authed") return;
+  if (surface === "local") {
+    if (!env.adminPassword) {
+      throw new Error(
+        "E2E_ADMIN_PASSWORD is required for an Enterprise build — run the suite " +
+          "through `harness-run/harness.sh e2e ui`, which sets it from the boot banner.",
+      );
+    }
+    await page.getByTestId("local-login-username").fill(env.adminUsername);
+    await page.getByTestId("local-login-password").fill(env.adminPassword);
+    await page.getByTestId("local-login-submit").click();
+  } else {
+    if (!env.gatewaySecret) {
+      throw new Error(
+        "E2E_GATEWAY_SECRET is required — run the suite through " +
+          "`harness-run/harness.sh e2e ui`, or set it in tests/e2e/.env.",
+      );
+    }
+    await secretField.fill(env.gatewaySecret);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
   }
-  await secretField.fill(env.gatewaySecret);
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(page.getByTestId("app-authenticated")).toBeVisible({
     timeout: 30_000,
   });
 }
 
 // openApp navigates to `path` and signs in only when this context has no valid
-// gateway session cookie.
+// session cookie.
 export async function openApp(page: Page, path = "/now"): Promise<void> {
   await page.goto(path);
   await signInWithGatewaySecret(page);

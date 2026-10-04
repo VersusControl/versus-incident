@@ -144,3 +144,71 @@ func TestNewChatModel_EmptyModel(t *testing.T) {
 		t.Fatalf("expected error for empty model")
 	}
 }
+
+func TestChatModelConfiguredBaseURL(t *testing.T) {
+	for _, toolCalling := range []bool{false, true} {
+		name := "detect"
+		if toolCalling {
+			name = "tool-calling"
+		}
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != "/v1/chat/completions" {
+					t.Errorf("path = %q", request.URL.Path)
+				}
+				if request.Header.Get("Authorization") != "Bearer custom-key" {
+					t.Error("custom endpoint did not receive bearer authentication")
+				}
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(writer, `{"id":"custom","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`)
+			}))
+			defer server.Close()
+			cfg := config.AgentAIConfig{Provider: "claude", BaseURL: server.URL + "/v1", Model: "custom-model", APIKey: "configured-key"}
+			opts := einowrap.Options{BaseURL: "http://unused.invalid", RuntimeKeyFunc: func(context.Context) (string, bool) {
+				return "custom-key", true
+			}}
+			ctx := context.Background()
+			if toolCalling {
+				holder := einowrap.NewToolCallingChatModelHolder(cfg, opts, einowrap.RuntimeAI{
+					Provider: func(context.Context) (string, bool) { return "gemini", true },
+					Credential: func(_ context.Context, provider, baseURL string) (string, bool) {
+						if provider != "openai" || baseURL != server.URL+"/v1" {
+							return "", true
+						}
+						return "custom-key", true
+					},
+				})
+				chatModel, err := holder.Get(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := chatModel.Generate(ctx, []*schema.Message{schema.UserMessage("test")}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				chatModel, err := einowrap.NewChatModel(ctx, cfg, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := chatModel.Generate(ctx, []*schema.Message{schema.UserMessage("test")}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestChatModelInvalidBaseURL(t *testing.T) {
+	for _, baseURL := range []string{"models.example/v1", "ftp://models.example", "https://user:secret@models.example/v1", "https://models.example/v1?key=secret", "https://models.example/v1#secret"} {
+		cfg := config.AgentAIConfig{BaseURL: baseURL, Model: "custom-model"}
+		if _, err := einowrap.NewChatModel(context.Background(), cfg, einowrap.Options{}); err == nil {
+			t.Error("invalid base_url accepted")
+		}
+		if _, err := einowrap.NewToolCallingChatModel(context.Background(), cfg, einowrap.Options{}); err == nil {
+			t.Error("invalid tool-calling base_url accepted")
+		}
+		if _, err := einowrap.NewEmbedder(context.Background(), cfg, einowrap.Options{}); err == nil {
+			t.Error("invalid embedding base_url accepted")
+		}
+	}
+}

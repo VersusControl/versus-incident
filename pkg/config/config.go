@@ -425,6 +425,9 @@ func loadConfigFromPath(path string) (*Config, error) {
 	if p := os.Getenv("AGENT_AI_PROVIDER"); p != "" {
 		loaded.Agent.AI.Provider = p
 	}
+	if baseURL, ok := os.LookupEnv("AGENT_AI_BASE_URL"); ok {
+		loaded.Agent.AI.BaseURL = baseURL
+	}
 	if k := os.Getenv("AGENT_AI_API_KEY"); k != "" {
 		loaded.Agent.AI.APIKey = k
 	}

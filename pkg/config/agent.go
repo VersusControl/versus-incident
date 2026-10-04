@@ -464,6 +464,7 @@ type AgentAIConfig struct {
 	// the SELECTED provider — operators change the key to match when they
 	// switch provider. An unsupported value fails fast at model construction.
 	Provider string `mapstructure:"provider"`
+	BaseURL  string `mapstructure:"base_url"`
 	// APIKey is the bearer token sent in the Authorization header.
 	APIKey string `mapstructure:"api_key"`
 	// Model is the model identifier, e.g. "gpt-4o-mini".

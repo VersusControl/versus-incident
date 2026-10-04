@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import {
   AlertTriangle,
+  ArrowUpRight,
   BellOff,
   BellRing,
   Bot,
@@ -568,7 +569,11 @@ function StatePill({ incident }: { incident: IncidentSummary }) {
   return <Pill tone="bad">open</Pill>;
 }
 
-// AgentPulse — mode + lifetime totals + enterprise Metrics/Traces status.
+function isAuthorizationFailure(error: unknown): boolean {
+  return error instanceof ApiError && [401, 403, 404].includes(error.status);
+}
+
+// AgentPulse — current signal counts with links to their detail views.
 function AgentPulse({
   status,
   config,
@@ -579,6 +584,7 @@ function AgentPulse({
   // Probe baselines to show Metrics/Traces learning progress (enterprise-only).
   const baselines = useQuery({
     queryKey: ["baselines-pulse"],
+    enabled: config.data?.enable === true,
     queryFn: async () => {
       try {
         return await api.listBaselines();
@@ -592,26 +598,30 @@ function AgentPulse({
     staleTime: 30_000,
     retry: 1,
   });
-  const enterpriseAvailable = baselines.data !== null && baselines.data !== undefined;
+  const enterpriseAvailable = baselines.data != null && !(baselines.isError && isAuthorizationFailure(baselines.error));
   const metricCount = baselines.data?.baselines?.filter((b) => b.type === "metric").length ?? 0;
   const traceCount = baselines.data?.baselines?.filter((b) => b.type === "trace").length ?? 0;
   const metricReady = baselines.data?.baselines?.filter((b) => b.type === "metric" && b.confident).length ?? 0;
   const traceReady = baselines.data?.baselines?.filter((b) => b.type === "trace" && b.confident).length ?? 0;
-  // When the agent is off the status query is disabled (stays "pending"), so
-  // suppress the status skeleton/error blocks — the agent-off pill above
-  // already communicates the state.
-  const agentOn = config.data?.enable !== false;
+  const agentOn = config.data?.enable === true;
 
   return (
-    <div className="card">
-      <div className="card-header">
-        <span className="card-title">Agent pulse</span>
-        <Link to="/agent" className="text-2xs text-link hover:underline">
-          Agent overview →
+    <section aria-labelledby="agent-pulse-title" className="border-y border-ink-600 bg-surface">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-ink-600/50 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <Bot size={16} className="text-ink-300" aria-hidden />
+          <h2 id="agent-pulse-title" className="text-sm font-semibold text-ink-100">Agent pulse</h2>
+        </div>
+        <Link to="/agent" className="inline-flex min-h-8 items-center gap-1 text-xs text-link hover:underline">
+          Agent overview <ArrowUpRight size={13} aria-hidden />
         </Link>
       </div>
-      <div className="card-body space-y-3">
-        {config.isPending && <div aria-hidden className="sk h-5 w-28" />}
+      <div className="min-w-0 p-4 sm:p-5">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-2xs font-medium uppercase tracking-wide text-ink-400">Signal activity</h3>
+          <span className="text-2xs text-ink-400">Current catalog · recorded events</span>
+        </div>
+        {config.isPending && <p role="status" className="py-6 text-sm text-ink-400">Awaiting runtime configuration</p>}
         {config.isError && (
           <RetryableError
             context="Couldn't load agent config"
@@ -620,32 +630,21 @@ function AgentPulse({
             retrying={config.isFetching}
           />
         )}
-        {config.isSuccess && (
-          <div className="flex items-center gap-2 text-2xs text-ink-300">
-            mode
-            {config.data.enable === false ? (
-              <Pill>agent off</Pill>
-            ) : (
-              <Pill
-                tone={
-                  config.data.mode === "detect"
-                    ? "good"
-                    : config.data.mode === "shadow"
-                      ? "warn"
-                      : "accent"
-                }
-              >
-                {config.data.mode || "—"}
-              </Pill>
-            )}
-          </div>
-        )}
-
+        {config.isSuccess && !agentOn && <p className="py-6 text-sm text-ink-400">Agent is disabled</p>}
         {agentOn && status.isPending && (
-          <div aria-hidden className="grid grid-cols-3 gap-2">
-            <div className="sk h-12" />
-            <div className="sk h-12" />
-            <div className="sk h-12" />
+          <div aria-hidden className={`grid gap-px overflow-hidden border border-ink-600/60 ${enterpriseAvailable ? "grid-cols-1 lg:grid-cols-5" : "grid-cols-3"}`}>
+            {enterpriseAvailable ? (
+              <>
+                <div className="grid grid-cols-3 gap-px lg:col-span-3">
+                  {Array.from({ length: 3 }, (_, index) => <div key={index} className="sk min-h-24 bg-surface" />)}
+                </div>
+                <div className="grid grid-cols-2 gap-px self-start lg:col-span-2 lg:self-stretch">
+                  {Array.from({ length: 2 }, (_, index) => <div key={index} className="sk min-h-24 bg-surface" />)}
+                </div>
+              </>
+            ) : (
+              Array.from({ length: 3 }, (_, index) => <div key={index} className="sk min-h-24 bg-surface" />)
+            )}
           </div>
         )}
         {agentOn && status.isError && (
@@ -657,19 +656,42 @@ function AgentPulse({
           />
         )}
 
-        {/* Signal stats. Enterprise: Logs · Metrics · Traces share one row,
-            same style. OSS: Logs · Shadow · Detect. The baselines probe gates
-            which block renders (null = locked OSS / no intelligence license). */}
-        {status.isSuccess && baselines.isPending && (
-          <div aria-hidden className="grid grid-cols-3 gap-2">
-            <div className="sk h-12" />
-            <div className="sk h-12" />
-            <div className="sk h-12" />
-          </div>
-        )}
-        {status.isSuccess && !baselines.isPending && enterpriseAvailable && (
-          <>
-            <div className="grid grid-cols-3 gap-2">
+        {agentOn && status.data !== undefined && !(status.isError && isAuthorizationFailure(status.error)) && (
+          <div className={`grid gap-px overflow-hidden border border-ink-600/60 ${enterpriseAvailable ? "grid-cols-1 lg:grid-cols-5" : "grid-cols-3"}`}>
+            {enterpriseAvailable ? (
+              <>
+                <div className="grid grid-cols-3 gap-px lg:col-span-3">
+                  <PulseSignalStat
+                    icon={ScrollText}
+                    label="Logs"
+                    total={status.data.patterns}
+                    unit="patterns"
+                    to="/agent/logs"
+                  />
+                  <PulseSignalStat icon={LineChart} label="Metrics" total={metricCount} ready={metricReady} to="/agent/metrics" />
+                  <PulseSignalStat icon={Waypoints} label="Traces" total={traceCount} ready={traceReady} to="/agent/traces" />
+                </div>
+                <div className="grid grid-cols-2 gap-px self-start lg:col-span-2 lg:self-stretch">
+                  <PulseSignalStat
+                    icon={EyeOff}
+                    label="Shadow"
+                    total={status.data.shadow_events ?? 0}
+                    unit="events"
+                    to="/agent/decisions?tab=shadow"
+                    decision
+                  />
+                  <PulseSignalStat
+                    icon={Sparkles}
+                    label="Detect"
+                    total={status.data.detect_events ?? 0}
+                    unit="events"
+                    to="/agent/decisions?tab=detect"
+                    decision
+                  />
+                </div>
+              </>
+            ) : (
+              <>
               <PulseSignalStat
                 icon={ScrollText}
                 label="Logs"
@@ -677,28 +699,27 @@ function AgentPulse({
                 unit="patterns"
                 to="/agent/logs"
               />
-              <PulseSignalStat
+              {enterpriseAvailable && <PulseSignalStat
                 icon={LineChart}
                 label="Metrics"
                 total={metricCount}
                 ready={metricReady}
                 to="/agent/metrics"
-              />
-              <PulseSignalStat
+              />}
+              {enterpriseAvailable && <PulseSignalStat
                 icon={Waypoints}
                 label="Traces"
                 total={traceCount}
                 ready={traceReady}
                 to="/agent/traces"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-2">
+              />}
               <PulseSignalStat
                 icon={EyeOff}
                 label="Shadow"
                 total={status.data.shadow_events ?? 0}
                 unit="events"
                 to="/agent/decisions?tab=shadow"
+                decision
               />
               <PulseSignalStat
                 icon={Sparkles}
@@ -706,57 +727,30 @@ function AgentPulse({
                 total={status.data.detect_events ?? 0}
                 unit="events"
                 to="/agent/decisions?tab=detect"
+                decision
               />
-            </div>
-          </>
+              </>
+            )}
+          </div>
         )}
-        {status.isSuccess && !baselines.isPending && !enterpriseAvailable && (
-          <>
-            <div className="grid grid-cols-3 gap-2">
-              <PulseSignalStat
-                icon={ScrollText}
-                label="Logs"
-                total={status.data.patterns}
-                unit="patterns"
-                to="/agent/logs"
-              />
-              <PulseSignalStat
-                icon={EyeOff}
-                label="Shadow"
-                total={status.data.shadow_events ?? 0}
-                unit="events"
-                to="/agent/decisions?tab=shadow"
-              />
-              <PulseSignalStat
-                icon={Sparkles}
-                label="Detect"
-                total={status.data.detect_events ?? 0}
-                unit="events"
-                to="/agent/decisions?tab=detect"
-              />
-            </div>
-            <div className="flex items-center gap-2 rounded-control border border-ink-700 bg-surface-raised px-3 py-2 text-2xs text-ink-400">
+        {agentOn && baselines.isPending && <p role="status" className="pt-3 text-xs text-ink-400">Loading metric and trace activity</p>}
+        {agentOn && baselines.isError && (
+          <RetryableError context="Couldn't load metric and trace activity" error={baselines.error} onRetry={() => baselines.refetch()} retrying={baselines.isFetching} />
+        )}
+        {agentOn && baselines.isSuccess && baselines.data === null && (
+            <div className="mt-3 flex items-center gap-2 border-t border-ink-600/50 pt-3 text-2xs text-ink-400">
               <Lock size={12} className="shrink-0" />
               <span>
                 Metrics &amp; Traces learning requires an{" "}
                 <Link to="/agent/metrics" className="text-link hover:underline">Enterprise license</Link>.
               </span>
             </div>
-          </>
         )}
-
-        <p className="text-2xs text-ink-300">
-          Lifetime totals — windowed (24h) agent stats aren't available yet.
-        </p>
       </div>
-    </div>
+    </section>
   );
 }
 
-// Unified signal stat tile for the Agent pulse — used for Logs, Metrics,
-// Traces, Shadow and Detect so every signal reads with the same style.
-// `ready` is optional (baselines have a confident/ready count; logs/events
-// don't) and only renders when the signal exposes it.
 function PulseSignalStat({
   icon: Icon,
   label,
@@ -764,6 +758,7 @@ function PulseSignalStat({
   ready,
   unit = "signals",
   to,
+  decision = false,
 }: {
   icon: typeof LineChart;
   label: string;
@@ -771,21 +766,27 @@ function PulseSignalStat({
   ready?: number;
   unit?: string;
   to: string;
+  decision?: boolean;
 }) {
   return (
     <Link
       to={to}
-      className="rounded-control border border-ink-600 bg-surface-raised px-3 py-2 transition-colors hover:border-ink-500"
+      className={`group flex min-h-24 min-w-0 flex-col justify-between gap-2 bg-surface p-3 transition-colors hover:bg-surface-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-link ${decision ? "bg-surface-raised/40" : ""}`}
     >
-      <div className="flex items-center gap-1.5 text-2xs text-ink-300">
-        <Icon size={12} />
-        <span className="uppercase tracking-wider">{label}</span>
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-2 text-xs font-medium text-ink-200">
+          <Icon size={14} className={`shrink-0 ${decision ? "text-ink-300" : "text-ink-400"}`} aria-hidden />
+          <span className="truncate">{label}</span>
+        </span>
+        <ArrowUpRight size={13} className="hidden shrink-0 text-ink-400 group-hover:text-link sm:block" aria-hidden />
       </div>
-      <div className="mt-1 text-xs text-ink-50">
-        <span className="font-semibold tabular-nums">{total}</span>
-        <span className="text-ink-300"> {unit}</span>
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-baseline gap-x-1.5">
+          <span className="text-xl font-semibold tabular-nums text-ink-50">{total.toLocaleString()}</span>
+          <span className="text-2xs text-ink-400">{unit}</span>
+        </div>
         {ready !== undefined && total > 0 && (
-          <span className="ml-1.5 text-2xs text-ink-300">({ready} ready)</span>
+          <span className="block text-2xs text-ink-400">{ready.toLocaleString()} ready</span>
         )}
       </div>
     </Link>

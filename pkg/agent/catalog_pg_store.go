@@ -43,25 +43,11 @@ import (
 // service reassignment). Persist writes learned rows; Curate writes the root
 // curated columns and the vs_services state. Reads fold the two together.
 
-// Table names are Go CONSTANTS — never interpolated from input — so every
-// query below is SQLi-safe (values are always bound as $N parameters).
 const (
-	tblPatterns = "vs_patterns"
-	tblLogs     = "vs_logs"
-	tblServices = "vs_services"
-
-	// pgPatternKindLog is the vs_patterns.kind the OSS catalog store owns.
-	// The enterprise intel store owns 'metric'/'trace' on the same
-	// root; the id namespacing keeps them from colliding under (org_id, id).
-	pgPatternKindLog = "log"
 	// pgVerdictKnown is the OSS brain's only alert-suppression verdict. A
 	// delete-tombstone folds onto it at Load so a suppressed pattern is not
 	// re-alerted even while live mining keeps re-learning it.
 	pgVerdictKnown = "known"
-	// pgServiceUnknown is the OSS sentinel for an unattributed signal. A
-	// pattern carrying it (or "") has no real attribution, so it must never
-	// clobber a real service in the real-wins upsert.
-	pgServiceUnknown = "_unknown"
 )
 
 // ---------------------------------------------------------------------------

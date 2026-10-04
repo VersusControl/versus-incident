@@ -219,8 +219,8 @@ func TestCloneConfigCarriesSignozSource(t *testing.T) {
 	if dst.Agent.Sources[0].Signoz.RootCAs == rootCAs {
 		t.Fatal("clone shares the RootCAs pool with the source")
 	}
-	if !reflect.DeepEqual(dst.Agent.Sources[0].Signoz.RootCAs.Subjects(), rootCAs.Subjects()) {
-		t.Fatal("clone did not carry the RootCAs trust subjects")
+	if !dst.Agent.Sources[0].Signoz.RootCAs.Equal(rootCAs) {
+		t.Fatal("clone did not carry the RootCAs trust certificates")
 	}
 
 	// Mutating the clone must not touch the source (deep copy, no shared slices).

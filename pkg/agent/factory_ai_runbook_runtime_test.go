@@ -26,9 +26,11 @@ import (
 type runbookRuntimeOrgKey struct{}
 
 type runbookRuntimeResolver struct {
-	mu       sync.RWMutex
-	key      string
-	provider string
+	mu         sync.RWMutex
+	key        string
+	provider   string
+	baseURL    string
+	baseURLSet bool
 }
 
 func (resolver *runbookRuntimeResolver) EffectiveKey(ctx context.Context) (string, bool) {
@@ -40,12 +42,40 @@ func (resolver *runbookRuntimeResolver) EffectiveKey(ctx context.Context) (strin
 	return resolver.key, true
 }
 
+func (resolver *runbookRuntimeResolver) EffectiveKeyFor(ctx context.Context, provider, baseURL string) (string, bool) {
+	if _, ok := ctx.Value(runbookRuntimeOrgKey{}).(string); !ok {
+		return "", false
+	}
+	resolver.mu.RLock()
+	defer resolver.mu.RUnlock()
+	if resolver.baseURLSet {
+		if strings.TrimSpace(baseURL) != strings.TrimSpace(resolver.baseURL) {
+			return "", true
+		}
+		if resolver.baseURL != "" && provider != einowrap.DefaultProvider {
+			return "", true
+		}
+	} else if strings.TrimSpace(baseURL) == "" && provider != resolver.provider {
+		return "", true
+	}
+	return resolver.key, true
+}
+
 func (*runbookRuntimeResolver) EffectiveEnabled(context.Context) (bool, bool) { return true, true }
 
 func (resolver *runbookRuntimeResolver) EffectiveProvider(context.Context) (string, bool) {
 	resolver.mu.RLock()
 	defer resolver.mu.RUnlock()
+	if resolver.baseURLSet && strings.TrimSpace(resolver.baseURL) != "" {
+		return einowrap.DefaultProvider, true
+	}
 	return resolver.provider, true
+}
+
+func (resolver *runbookRuntimeResolver) EffectiveBaseURL(context.Context) (string, bool) {
+	resolver.mu.RLock()
+	defer resolver.mu.RUnlock()
+	return resolver.baseURL, resolver.baseURLSet
 }
 
 func (resolver *runbookRuntimeResolver) EffectiveKeySet(context.Context) (bool, bool) {
@@ -198,7 +228,11 @@ func TestRunbookBootIngestUsesRuntimeCredentialFromRealDirectory(t *testing.T) {
 	resolver := &runbookRuntimeResolver{provider: "openai", key: runtimeKey}
 	SetAISettingsResolver(resolver)
 	t.Cleanup(func() { SetAISettingsResolver(nil) })
-	runtime := einowrap.RuntimeAI{Provider: resolver.EffectiveProvider, KeySet: resolver.EffectiveKeySet}
+	runtime := einowrap.RuntimeAI{
+		Credential: resolver.EffectiveKeyFor,
+		Provider:   resolver.EffectiveProvider,
+		KeySet:     resolver.EffectiveKeySet,
+	}
 	client := &http.Client{Transport: runbookRewriteTransport{target: target, base: http.DefaultTransport}}
 	manager := buildRunbookManagerFromDir(config.AgentConfig{
 		AI:    config.AgentAIConfig{Provider: "openai", Model: "gpt-4o-mini"},
@@ -212,6 +246,43 @@ func TestRunbookBootIngestUsesRuntimeCredentialFromRealDirectory(t *testing.T) {
 	}
 	if seenHeader != "Bearer "+runtimeKey {
 		t.Fatalf("boot ingest Authorization = %q, want runtime credential", seenHeader)
+	}
+}
+
+func TestRunbookEmbeddingUsesRuntimeEndpointForChatOnlyProvider(t *testing.T) {
+	const runtimeKey = "runtime-endpoint-embedding-key"
+	var seenAuthorization string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		seenAuthorization = request.Header.Get("Authorization")
+		var payload struct {
+			Input []string `json:"input"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&payload)
+		data := make([]map[string]any, len(payload.Input))
+		for index := range payload.Input {
+			data[index] = map[string]any{"object": "embedding", "index": index, "embedding": []float64{1, 0, 0}}
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{"object": "list", "data": data})
+	}))
+	defer server.Close()
+
+	resolver := &runbookRuntimeResolver{provider: "claude", key: runtimeKey, baseURL: server.URL, baseURLSet: true}
+	SetAISettingsResolver(resolver)
+	t.Cleanup(func() { SetAISettingsResolver(nil) })
+	manager := buildRunbookManagerFromDir(config.AgentConfig{
+		AI:    config.AgentAIConfig{Provider: "openai", BaseURL: "https://yaml.example/v1", APIKey: "yaml-key", Model: "chat-model"},
+		Tools: config.ToolsConfig{FindRunbook: config.FindRunbookToolConfig{EmbeddingModel: "text-embedding-3-small"}},
+	}, storage.NewMemory(), tenancy.NewOrgScope("org-a"), server.Client(), aiSettingsKeyFunc(), aiRuntime(), t.TempDir())
+	if manager == nil || !manager.HasEmbedder() {
+		t.Fatal("runtime endpoint did not build the OpenAI-compatible embedder")
+	}
+	ctx := DecorateAIContext(context.Background(), tenancy.NewOrgScope("org-a"))
+	if _, err := manager.Embedder().Embed(ctx, []string{"disk full"}); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if seenAuthorization != "Bearer "+runtimeKey {
+		t.Fatalf("runtime endpoint Authorization = %q, want runtime key", seenAuthorization)
 	}
 }
 

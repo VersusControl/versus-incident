@@ -156,6 +156,10 @@ async function json(route: Route, body: unknown, status = 200) {
 async function installApi(page: Page, health: Snapshot) {
   const state = {
     health,
+    agentConfig: { enable: true, mode: "detect", ai: { enable: false, provider: "", model: "" }, sources: [] },
+    status: { patterns: 124, dirty: false, shadow_events: 28, detect_events: 42 },
+    baselines: [] as Array<{ type: string; confident: boolean }>,
+    baselinesStatus: 403,
     topology: topologyFor(health),
     topologyStatus: 200,
     topologyRequests: 0,
@@ -171,8 +175,10 @@ async function installApi(page: Page, health: Snapshot) {
       return route.fulfill({ status: 204, headers: { "Set-Cookie": "versus_gateway_session=service-health-test; Path=/; HttpOnly; SameSite=Strict" }, body: "" });
     }
     if (requestPath.endsWith("/deployment") || requestPath.includes("/sso/")) return json(route, { error: "community" }, 403);
-    if (requestPath === "/api/admin/config/agent") return json(route, { enable: true, mode: "detect", ai: { enable: false }, sources: [] });
-    if (requestPath === "/api/agent/status") return json(route, { patterns: 124, dirty: false, shadow_events: 28, detect_events: 42 });
+    if (requestPath === "/api/admin/config/agent") return json(route, state.agentConfig);
+    if (requestPath === "/api/incidents") return json(route, []);
+    if (requestPath === "/api/incidents/counts") return json(route, { ai_detect: 0, webhook: 0, total: 0 });
+    if (requestPath === "/api/agent/status") return json(route, state.status);
     if (requestPath === "/api/agent/shadow/stats") return json(route, { events: 28, total_signals: 540, verdicts: { spike: 8 }, occurrences: 28 });
     if (requestPath === "/api/agent/detect/stats") return json(route, { outcome_emitted: 12, outcome_cached: 29, outcome_ai_error: 1, verdict_spike: 18, verdict_unknown: 7, verdict_normal: 17, severity_high: 9, severity_medium: 14, severity_low: 19 });
     if (requestPath === "/api/agent/patterns") return json(route, { patterns: [
@@ -184,7 +190,7 @@ async function installApi(page: Page, health: Snapshot) {
       { pattern_id: "checkout-timeout", first_seen: fixedTime, last_seen: fixedTime, verdict: "spike", sample_message: "Checkout requests are timing out" },
       { pattern_id: "payment-retry", first_seen: fixedTime, last_seen: fixedTime, verdict: "unknown", sample_message: "Payment provider retry detected" },
     ] });
-    if (requestPath === "/api/agent/baselines") return json(route, { error: "community" }, 403);
+    if (requestPath === "/api/agent/baselines") return json(route, state.baselinesStatus === 200 ? { org: "default", count: state.baselines.length, baselines: state.baselines } : { error: "community" }, state.baselinesStatus);
     if (requestPath === "/api/agent/services" && request.method() === "GET") {
       return json(route, { services: { checkout: { first_seen: fixedTime, manual: false, in_grace: false, grace_seconds_remaining: 0 } }, total: 1, next_offset: null });
     }
@@ -252,6 +258,80 @@ async function expectPanelLayout(page: Page) {
   expect(await body.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await expect(panel.getByRole("heading", { level: 2 })).not.toBeEmpty();
 }
+
+test("Now pulse activity is compact, navigable, and responsive", async ({ page }) => {
+  const state = await installApi(page, liveSnapshot());
+  state.baselinesStatus = 200;
+  state.baselines = [
+    ...Array.from({ length: 36 }, () => ({ type: "metric", confident: true })),
+    ...Array.from({ length: 12 }, () => ({ type: "metric", confident: false })),
+    ...Array.from({ length: 24 }, () => ({ type: "trace", confident: true })),
+  ];
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await openAuthenticated(page, "/now");
+  const pulse = page.getByRole("region", { name: "Agent pulse" });
+  await expect(pulse.getByRole("heading", { name: "Signal activity" })).toBeVisible();
+  await expect(pulse.getByText("Current catalog · recorded events")).toBeVisible();
+  await expect(pulse.getByRole("link", { name: "Agent overview" })).toHaveAttribute("href", "/agent");
+  await expect(pulse.getByRole("link", { name: "Logs 124 patterns" })).toHaveAttribute("href", "/agent/logs");
+  await expect(pulse.getByRole("link", { name: "Metrics 48 signals 36 ready" })).toHaveAttribute("href", "/agent/metrics");
+  await expect(pulse.getByRole("link", { name: "Traces 24 signals 24 ready" })).toHaveAttribute("href", "/agent/traces");
+  await expect(pulse.getByRole("link", { name: "Shadow 28 events" })).toHaveAttribute("href", "/agent/decisions?tab=shadow");
+  await expect(pulse.getByRole("link", { name: "Detect 42 events" })).toHaveAttribute("href", "/agent/decisions?tab=detect");
+  expect(await pulse.locator("div.grid").first().evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(5);
+  await expect(pulse.getByText("Runtime mode", { exact: true })).toHaveCount(0);
+  await expect(pulse.getByText("Configured AI model", { exact: true })).toHaveCount(0);
+  await expect(pulse.getByText("team-models/production-reasoning-model-with-extended-version-2026-10", { exact: true })).toHaveCount(0);
+  await pulse.scrollIntoViewIfNeeded();
+  await expectNoHorizontalOverflow(page);
+  await pulse.screenshot({ path: path.join(screenshotDir, "now-pulse-desktop.png"), animations: "disabled" });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await pulse.scrollIntoViewIfNeeded();
+  await expectNoHorizontalOverflow(page);
+  expect(await pulse.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  const pulseGrids = pulse.locator("div.grid");
+  expect(await pulseGrids.nth(1).evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(3);
+  expect(await pulseGrids.nth(2).evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(2);
+  await page.screenshot({ path: path.join(screenshotDir, "now-pulse-mobile.png"), fullPage: true, animations: "disabled" });
+
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  state.status = { patterns: 0, dirty: false, shadow_events: 0, detect_events: 0 };
+  state.baselines = [];
+  await page.reload();
+  for (const [name, href] of [
+    ["Logs 0 patterns", "/agent/logs"],
+    ["Metrics 0 signals", "/agent/metrics"],
+    ["Traces 0 signals", "/agent/traces"],
+    ["Shadow 0 events", "/agent/decisions?tab=shadow"],
+    ["Detect 0 events", "/agent/decisions?tab=detect"],
+  ]) {
+    await expect(pulse.getByRole("link", { name })).toHaveAttribute("href", href);
+  }
+
+  state.baselinesStatus = 403;
+  await page.reload();
+  await expect(pulse.getByRole("link", { name: "Enterprise license" })).toBeVisible();
+  await expect(pulse.getByRole("link", { name: "Logs 0 patterns" })).toBeVisible();
+  await expect(pulse.getByRole("link", { name: "Metrics 0 signals" })).toHaveCount(0);
+  await expect(pulse.getByRole("link", { name: "Traces 0 signals" })).toHaveCount(0);
+  expect(await pulse.locator("div.grid").first().evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(3);
+  await pulse.screenshot({ path: path.join(screenshotDir, "now-pulse-oss-locked-desktop.png"), animations: "disabled" });
+
+  state.baselinesStatus = 503;
+  await page.reload();
+  await expect(pulse.getByText("Couldn't load metric and trace activity")).toBeVisible();
+  await expect(pulse.getByRole("link", { name: "Enterprise license" })).toHaveCount(0);
+  await expect(pulse.getByRole("link", { name: "Logs 0 patterns" })).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  state.agentConfig.enable = false;
+  await page.reload();
+  await expect(pulse.getByText("Agent is disabled")).toBeVisible();
+  await expect(pulse.getByRole("link", { name: /Logs|Metrics|Traces|Shadow|Detect/ })).toHaveCount(0);
+  await expectNoHorizontalOverflow(page);
+  await pulse.screenshot({ path: path.join(screenshotDir, "now-pulse-off-mobile.png"), animations: "disabled" });
+});
 
 test("no-source preview is labeled, isolated, and responsive", async ({ page }) => {
   await installApi(page, emptySnapshot());

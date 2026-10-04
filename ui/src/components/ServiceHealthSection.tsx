@@ -169,7 +169,7 @@ function GapAction({ snapshot }: { snapshot: ServiceHealthSnapshot }) {
 
   let title = STATE_PRESENTATION[gap.state].detail;
   let label = "Open settings";
-  let href = "/settings?tab=agent";
+  let href = "/settings?section=agent-sources";
   if (gap.action_id === "connect_log_source") {
     title = "Logs not connected";
     label = "Connect a log source";
@@ -198,11 +198,11 @@ function GapAction({ snapshot }: { snapshot: ServiceHealthSnapshot }) {
       ? `Next update ${fmtRel(snapshot.next_collection_at)}`
       : "Waiting for logs";
     label = "View timing settings";
-    href = "/settings?tab=tuning";
+    href = "/settings?section=service-health";
   } else if (gap.state === "no_data") {
     title = "No logs in this window";
     label = "Review timing settings";
-    href = "/settings?tab=tuning";
+    href = "/settings?section=service-health";
   }
 
   return (
@@ -323,7 +323,7 @@ export function ServiceHealthSection() {
           {meaningfulTimestamp(snapshot.generated_at) && <span title={fmtAbs(snapshot.generated_at)}>Updated {fmtRel(snapshot.generated_at)}</span>}
           <div className="flex items-center gap-1">
             <button type="button" className="btn h-8 w-8 justify-center p-0" aria-label="Refresh service health" title="Refresh service health" disabled={query.isFetching} onClick={() => query.refetch()}><RefreshCw size={14} className={query.isFetching ? "animate-spin" : ""} aria-hidden /></button>
-            <Link className="btn h-8 w-8 justify-center p-0" to="/settings?tab=tuning" aria-label="Service Health Timing settings" title="Service Health Timing settings"><Settings2 size={14} aria-hidden /></Link>
+            <Link className="btn h-8 w-8 justify-center p-0" to="/settings?section=service-health" aria-label="Service Health Timing settings" title="Service Health Timing settings"><Settings2 size={14} aria-hidden /></Link>
           </div>
         </div>
       </div>

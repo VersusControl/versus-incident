@@ -20,16 +20,15 @@ function nonEmpty(value: string | undefined, fallback: string): string {
   return v === "" ? fallback : v;
 }
 
-// The OSS binary serves the embedded SPA on :8080 by default (the run/ harness
-// maps 127.0.0.1:${OSS_PORT:-8080}). Point E2E_BASE_URL at whatever host the
-// running instance is on.
+// The default targets a locally run binary on :8080. `harness-run/harness.sh e2e ui`
+// sets E2E_BASE_URL and credentials for the active harness app (OSS or Enterprise).
 const baseURL = nonEmpty(process.env.E2E_BASE_URL, "http://localhost:8080");
 const headful = (process.env.E2E_HEADFUL ?? "").toLowerCase() === "true";
 
-// This config drives a REAL running versus-incident (OSS) instance like an
-// operator. It does NOT start a server — bring one up first (see README):
-//   • run/ harness:  cd run && ./oss.sh   (rebuilds the SPA embed into the image)
-//   • or locally:    build ui/dist, then `go run ./cmd` from versus-incident/
+// This config drives a REAL running instance like an operator, unless a spec
+// intercepts the API itself. It does NOT start a server — bring one up first:
+//   • harness-run/harness.sh up oss            (or an enterprise-* scenario)
+//   • or locally: build ui/dist, then `go run ./cmd` from versus-incident/
 // Review-first: read the spec + README before running against any instance.
 export default defineConfig({
   testDir: ".",

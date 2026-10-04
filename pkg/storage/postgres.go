@@ -1555,16 +1555,6 @@ func (p *postgresProvider) SearchIncidentsForScope(scope tenancy.OrgScope, query
 	return scanIncidentRows(rows)
 }
 
-// searchIncidentsWhereSQL is the shared ILIKE predicate for incident search:
-// it matches the query against the title/service/source columns and, as a
-// fallback, the content JSON body. The pattern binds as $1. Kept as one
-// constant so the count and page queries search the exact same columns as
-// SearchIncidents.
-const searchIncidentsWhereSQL = `title      ILIKE $1 ESCAPE '\'
-		   OR service    ILIKE $1 ESCAPE '\'
-		   OR source     ILIKE $1 ESCAPE '\'
-		   OR content::text ILIKE $1 ESCAPE '\'`
-
 const scopedSearchIncidentsWhereSQL = `title      ILIKE $2 ESCAPE '\'
 		   OR service    ILIKE $2 ESCAPE '\'
 		   OR source     ILIKE $2 ESCAPE '\'

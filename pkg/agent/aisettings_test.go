@@ -18,6 +18,16 @@ type stubAISettings struct {
 	enableCall int
 }
 
+type atomicCredentialAISettings struct {
+	stubAISettings
+	key     string
+	present bool
+}
+
+func (s *atomicCredentialAISettings) EffectiveCredential(context.Context) (string, bool) {
+	return s.key, s.present
+}
+
 func (s *stubAISettings) EffectiveKey(context.Context) (string, bool) {
 	s.keyCalls++
 	return s.key, s.keyOK
@@ -90,12 +100,30 @@ func TestAISettingsKeyFunc_ReadsLiveSlot(t *testing.T) {
 	}
 }
 
+func TestAISettingsKeyFunc_SuppressesFallbackForPresentCredential(t *testing.T) {
+	t.Cleanup(func() { SetAISettingsResolver(nil) })
+	resolver := &atomicCredentialAISettings{present: true}
+	SetAISettingsResolver(resolver)
+	keyFunc := aiSettingsKeyFunc()
+
+	if key, ok := keyFunc(context.Background()); !ok || key != "" {
+		t.Fatalf("failed runtime decrypt = (%q,%v), want an explicit empty credential", key, ok)
+	}
+
+	resolver.present = false
+	if key, ok := keyFunc(context.Background()); ok || key != "" {
+		t.Fatalf("after runtime DELETE = (%q,%v), want no opinion for YAML fallback", key, ok)
+	}
+}
+
 // stubProviderAISettings is a resolver that ALSO implements
 // AIProviderResolver, so it can override the model provider at runtime.
 type stubProviderAISettings struct {
 	stubAISettings
 	provider   string
 	providerOK bool
+	baseURL    string
+	baseURLOK  bool
 }
 
 type decoratingAISettings struct {
@@ -103,6 +131,7 @@ type decoratingAISettings struct {
 }
 
 type decoratedScopeKey struct{}
+type aiCallerContextKey struct{}
 
 func (*decoratingAISettings) DecorateAIContext(ctx context.Context, scope tenancy.OrgScope) context.Context {
 	return context.WithValue(ctx, decoratedScopeKey{}, scope.Write)
@@ -112,10 +141,10 @@ func TestDecorateAIContext_OptionalResolverCapability(t *testing.T) {
 	SetAISettingsResolver(nil)
 	t.Cleanup(func() { SetAISettingsResolver(nil) })
 
-	ctx := context.WithValue(context.Background(), "caller", "authorized")
+	ctx := context.WithValue(context.Background(), aiCallerContextKey{}, "authorized")
 	got := DecorateAIContext(ctx, tenancy.NewOrgScope("org-a"))
-	if scope, ok := AIContextScope(got); !ok || scope.Write != "org-a" || got.Value("caller") != "authorized" {
-		t.Fatalf("OSS decoration scope/value = (%+v,%v,%v)", scope, ok, got.Value("caller"))
+	if scope, ok := AIContextScope(got); !ok || scope.Write != "org-a" || got.Value(aiCallerContextKey{}) != "authorized" {
+		t.Fatalf("OSS decoration scope/value = (%+v,%v,%v)", scope, ok, got.Value(aiCallerContextKey{}))
 	}
 
 	SetAISettingsResolver(&stubAISettings{})
@@ -129,13 +158,17 @@ func TestDecorateAIContext_OptionalResolverCapability(t *testing.T) {
 	if got.Value(decoratedScopeKey{}) != "org-a" {
 		t.Fatalf("decorated scope = %v, want org-a", got.Value(decoratedScopeKey{}))
 	}
-	if got.Value("caller") != "authorized" {
+	if got.Value(aiCallerContextKey{}) != "authorized" {
 		t.Fatal("decoration discarded an existing caller value")
 	}
 }
 
 func (s *stubProviderAISettings) EffectiveProvider(context.Context) (string, bool) {
 	return s.provider, s.providerOK
+}
+
+func (s *stubProviderAISettings) EffectiveBaseURL(context.Context) (string, bool) {
+	return s.baseURL, s.baseURLOK
 }
 
 // TestAIRuntime_NilResolver_Inert proves the OSS default: with no resolver
@@ -146,7 +179,7 @@ func TestAIRuntime_NilResolver_Inert(t *testing.T) {
 	t.Cleanup(func() { SetAISettingsResolver(nil) })
 
 	rt := aiRuntime()
-	if rt.Provider != nil || rt.Enabled != nil || rt.KeySet != nil {
+	if rt.Provider != nil || rt.BaseURL != nil || rt.Enabled != nil || rt.KeySet != nil {
 		t.Fatalf("aiRuntime() with no resolver = %+v, want all-nil funcs", rt)
 	}
 }
@@ -180,5 +213,19 @@ func TestAIRuntime_ProviderResolver(t *testing.T) {
 	rt = aiRuntime()
 	if p, ok := rt.Provider(context.Background()); !ok || p != "ollama" {
 		t.Fatalf("provider resolver Provider() = (%q,%v), want (ollama,true)", p, ok)
+	}
+	if value, ok := rt.BaseURL(context.Background()); ok || value != "" {
+		t.Fatalf("unset endpoint resolver BaseURL() = (%q,%v), want (empty,false)", value, ok)
+	}
+
+	SetAISettingsResolver(&stubProviderAISettings{baseURL: "https://runtime.example/v1", baseURLOK: true})
+	rt = aiRuntime()
+	if value, ok := rt.BaseURL(context.Background()); !ok || value != "https://runtime.example/v1" {
+		t.Fatalf("endpoint resolver BaseURL() = (%q,%v), want configured runtime URL", value, ok)
+	}
+	SetAISettingsResolver(&stubProviderAISettings{baseURLOK: true})
+	rt = aiRuntime()
+	if value, ok := rt.BaseURL(context.Background()); !ok || value != "" {
+		t.Fatalf("explicit clear BaseURL() = (%q,%v), want (empty,true)", value, ok)
 	}
 }

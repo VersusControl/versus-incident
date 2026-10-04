@@ -49,7 +49,7 @@ func newAuthCaptureServer(t *testing.T, seen *[]string, mu *sync.Mutex) *httptes
 
 // TestChatModel_AuthOverride_NoFunc_UsesYAMLKey proves the OSS path: with
 // no RuntimeKeyFunc the outbound Authorization header is the YAML key, exactly
-// as before the seam (byte-for-byte pass-through transport).
+// as before the seam (no runtime key replacement).
 func TestChatModel_AuthOverride_NoFunc_UsesYAMLKey(t *testing.T) {
 	var mu sync.Mutex
 	var seen []string
@@ -123,6 +123,46 @@ func TestChatModel_AuthOverride_FuncWins(t *testing.T) {
 	}
 	if seen[1] != "Bearer resolver-key" {
 		t.Errorf("call #2 Authorization = %q, want Bearer resolver-key (override wins)", seen[1])
+	}
+}
+
+func TestChatModel_RuntimeCredentialIsNotForwardedAcrossRedirect(t *testing.T) {
+	var attackerCalls int
+	var attackerMu sync.Mutex
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attackerMu.Lock()
+		attackerCalls++
+		attackerMu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer attacker.Close()
+
+	var originAuth string
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originAuth = r.Header.Get("Authorization")
+		http.Redirect(w, r, attacker.URL, http.StatusFound)
+	}))
+	defer origin.Close()
+
+	model, err := einowrap.NewChatModel(context.Background(), config.AgentAIConfig{
+		Provider: "openai", Model: "gpt-4o-mini", APIKey: "construction-key", MaxTokens: 16,
+	}, einowrap.Options{
+		HTTPClient:     origin.Client(),
+		RuntimeKeyFunc: func(context.Context) (string, bool) { return "runtime-secret", true },
+		BaseURL:        origin.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewChatModel: %v", err)
+	}
+	_, _ = model.Generate(context.Background(), []*schema.Message{schema.UserMessage("hello")})
+
+	if originAuth != "Bearer runtime-secret" {
+		t.Fatalf("origin Authorization = %q, want runtime key", originAuth)
+	}
+	attackerMu.Lock()
+	defer attackerMu.Unlock()
+	if attackerCalls != 0 {
+		t.Fatalf("cross-origin redirect reached credential recipient %d time(s)", attackerCalls)
 	}
 }
 
@@ -206,7 +246,15 @@ func TestChatModel_RuntimeCredentialRotationClearAndProviderHotSwitch(t *testing
 	provider := "openai"
 	key := "rotation-one-secret"
 	keyOK := true
-	runtime := einowrap.RuntimeAI{Provider: func(context.Context) (string, bool) { return provider, true }}
+	runtime := einowrap.RuntimeAI{
+		Provider: func(context.Context) (string, bool) { return provider, true },
+		Credential: func(_ context.Context, boundProvider, _ string) (string, bool) {
+			if boundProvider != provider {
+				return "", true
+			}
+			return key, keyOK
+		},
+	}
 	holder := einowrap.NewChatModelHolder(config.AgentAIConfig{
 		Provider: "openai", APIKey: "yaml-secret", Model: "credential-test-model", MaxTokens: 16,
 	}, einowrap.Options{BaseURL: server.URL, HTTPClient: server.Client(), RuntimeKeyFunc: func(context.Context) (string, bool) {

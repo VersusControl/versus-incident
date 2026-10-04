@@ -31,7 +31,7 @@ const DefaultProvider = "openai"
 type chatModelRequest struct {
 	apiKey      string
 	model       string
-	baseURL     string // test-only Options.BaseURL; "" uses the provider default
+	baseURL     string
 	httpClient  *http.Client
 	runtimeKey  func(context.Context) (string, bool)
 	timeout     time.Duration
@@ -323,7 +323,7 @@ func buildGeminiChatModel(ctx context.Context, req chatModelRequest) (model.Tool
 	return einogemini.NewChatModel(ctx, conf)
 }
 
-const geminiConstructionAPIKey = "versus-non-secret-placeholder"
+const runtimeConstructionAPIKey = "versus-non-secret-placeholder"
 
 // geminiCredentials prevents the genai SDK from consulting ambient Google
 // credential environment variables or retaining a runtime org secret in its
@@ -335,9 +335,9 @@ func geminiCredentials(configured string, runtime func(context.Context) (string,
 		return configured, nil
 	}
 	if runtime == nil {
-		return geminiConstructionAPIKey, func(context.Context) (string, bool) { return "", true }
+		return runtimeConstructionAPIKey, func(context.Context) (string, bool) { return "", true }
 	}
-	return geminiConstructionAPIKey, func(ctx context.Context) (string, bool) {
+	return runtimeConstructionAPIKey, func(ctx context.Context) (string, bool) {
 		if key, ok := runtime(ctx); ok {
 			return key, true
 		}

@@ -4,6 +4,7 @@ import { Loader2 } from "lucide-react";
 import { api, type SpikeSettings } from "@/lib/api";
 import { ErrorBox } from "@/components/feedback";
 import { InfoHint } from "@/components/InfoHint";
+import { SaveBar } from "@/components/settings/SettingsCard";
 import { useToast } from "@/components/toastContext";
 
 // SPIKE_DOCS is the docsify docs page the info icon points to (hash routing).
@@ -95,24 +96,17 @@ export function SpikeSettingsControl() {
   return (
     <div className="card space-y-4 p-4">
       <div>
-        <h3 className="text-sm font-semibold text-ink-100">
-          Spike Baseline
+        <div className="flex items-center gap-1">
+          <label className="field-label" htmlFor="spike-baseline-mode">
+            Default baseline mode
+          </label>
           <InfoHint
             label="About the spike baseline mode"
             text="Which learned baseline a volume spike is scored against. This is the global default; a pattern's own override wins over it."
             href={SPIKE_DOCS}
             linkLabel="Read the spike detection docs"
           />
-        </h3>
-        <p className="text-2xs text-ink-400">
-          The global baseline the spike z-score is measured against.
-        </p>
-      </div>
-
-      <div>
-        <label className="field-label" htmlFor="spike-baseline-mode">
-          Default baseline mode
-        </label>
+        </div>
         <select
           id="spike-baseline-mode"
           className="input"
@@ -132,7 +126,7 @@ export function SpikeSettingsControl() {
         )}
       </div>
 
-      <div className="flex justify-end">
+      <SaveBar>
         <button
           className="btn btn-primary"
           onClick={() => form && save.mutate(form)}
@@ -146,7 +140,7 @@ export function SpikeSettingsControl() {
             "Save"
           )}
         </button>
-      </div>
+      </SaveBar>
     </div>
   );
 }

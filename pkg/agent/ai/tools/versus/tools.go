@@ -249,28 +249,6 @@ func boundedIncidentsForScope(store storage.Provider, scope tenancy.OrgScope, li
 	return out, truncated, nil
 }
 
-func incidentsForScope(store storage.Provider, scope tenancy.OrgScope) ([]*storage.IncidentRecord, error) {
-	scope = scope.Normalized()
-	if scoped, ok := store.(storage.ScopedRangeLister); ok {
-		return scoped.ListIncidentsInRangeForScope(scope, time.Time{}, time.Time{}, 0)
-	}
-	all, err := store.ListIncidents(0)
-	if err != nil {
-		return nil, err
-	}
-	allowed := make(map[string]struct{}, len(scope.Read))
-	for _, orgID := range scope.OrgIDs() {
-		allowed[orgID] = struct{}{}
-	}
-	out := make([]*storage.IncidentRecord, 0, len(all))
-	for _, record := range all {
-		if _, ok := allowed[storage.NormalizeOrgID(record.OrgID)]; ok {
-			out = append(out, record)
-		}
-	}
-	return out, nil
-}
-
 func latestSamples(ring []string, limit int) []string {
 	if limit <= 0 || len(ring) == 0 {
 		return nil

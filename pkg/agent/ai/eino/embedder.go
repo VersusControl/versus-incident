@@ -79,7 +79,11 @@ func NewEmbedder(ctx context.Context, cfg config.AgentAIConfig, opts Options) (c
 		timeout = 30 * time.Second
 	}
 
-	name := resolveProvider(cfg.Provider)
+	provider, baseURL, err := configuredChatEndpoint(cfg, opts)
+	if err != nil {
+		return nil, err
+	}
+	name := resolveProvider(provider)
 	build, ok := embedderBuilders[name]
 	if !ok {
 		return nil, unsupportedProviderConfigError(name, true, supportedEmbedderProviders())
@@ -93,7 +97,7 @@ func NewEmbedder(ctx context.Context, cfg config.AgentAIConfig, opts Options) (c
 	emb, err := build(ctx, embedderRequest{
 		apiKey:     apiKey,
 		model:      cfg.Model,
-		baseURL:    opts.BaseURL,
+		baseURL:    baseURL,
 		httpClient: withRuntimeKeyRoundTripper(opts.HTTPClient, timeout, runtimeKey, chatCredentialPolicy(name)),
 		timeout:    timeout,
 	})

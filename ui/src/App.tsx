@@ -212,7 +212,7 @@ export default function App() {
           />
           <Route
             path="/config/agent"
-            element={<Navigate to="/settings?tab=agent" replace />}
+            element={<Navigate to="/settings?section=agent-runtime" replace />}
           />
           <Route
             path="/postmortems"

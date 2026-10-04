@@ -112,6 +112,22 @@ func TestConvertMarkdownToAdaptiveCard_Basics(t *testing.T) {
 	}
 }
 
+func TestConvertMarkdownToAdaptiveCard_LinksKeepFirstTarget(t *testing.T) {
+	card := ConvertMarkdownToAdaptiveCard("See [docs](https://example.com/docs) and [status](https://example.com/status)")
+	if len(card.Body) != 1 {
+		t.Fatalf("body has %d blocks, want 1", len(card.Body))
+	}
+	container := card.Body[0].(map[string]interface{})
+	items := container["items"].([]interface{})
+	if text := items[0].(map[string]interface{})["text"]; text != "See docs and status" {
+		t.Fatalf("link text = %v", text)
+	}
+	action := container["selectAction"].(map[string]interface{})
+	if action["type"] != "Action.OpenUrl" || action["url"] != "https://example.com/docs" {
+		t.Fatalf("link action = %v", action)
+	}
+}
+
 func TestConvertMarkdownToAdaptiveCard_SummaryFallback(t *testing.T) {
 	// No heading — summary falls back to the first non-empty line.
 	card := ConvertMarkdownToAdaptiveCard("first line\nsecond\n")

@@ -42,6 +42,7 @@ import { ChannelIcon } from "@/components/ChannelIcon";
 import { EmptyState } from "@/components/feedback";
 import { EnterpriseLockedBody } from "@/components/EnterpriseLocked";
 import { AdminAccessNotice } from "@/components/AdminAccessNotice";
+import { SettingsCard } from "@/components/settings/SettingsCard";
 import { SkRows } from "@/components/Skeleton";
 import { useToast } from "@/components/toastContext";
 
@@ -1376,15 +1377,7 @@ function DependencyEdgeEditor() {
 // ---------------------------------------------------------------------------
 
 function Shell({ children }: { children: React.ReactNode }) {
-  return (
-    <div id="alert-fatigue-settings" className="card mb-4 scroll-mt-4">
-      <div className="card-header">
-        <h2 className="card-title">Alert fatigue settings</h2>
-        <span className="text-2xs text-ink-400">Enterprise control</span>
-      </div>
-      <div className="card-body">{children}</div>
-    </div>
-  );
+  return <SettingsCard>{children}</SettingsCard>;
 }
 
 function LockedBody() {

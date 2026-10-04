@@ -1,65 +1,54 @@
-import { TopBar } from "@/components/TopBar";
 import { AgentModeControl } from "@/components/AgentModeControl";
 import { AgentAISettingsControl } from "@/components/AgentAISettingsControl";
 import { AgentChannelsSettingsControl } from "@/components/AgentChannelsSettingsControl";
 import { AlertFatigueSettingsControl } from "@/components/AlertFatigueSettingsControl";
 import { AgentSSOConnectionsControl } from "@/components/AgentSSOConnectionsControl";
 import { AdminMembersControl } from "@/components/AdminMembersControl";
+import { SettingsLayout } from "@/components/settings/SettingsLayout";
+import { ADMIN_LEGACY_HASHES, ADMIN_SECTIONS } from "@/components/settings/sections";
+import { useEffectiveRole } from "@/lib/useEffectiveRole";
 
-// AdminPage (/admin) — the Manage-zone home for Enterprise configuration. It
-// consolidates the privileged controls so operators have one obvious place to
-// manage runtime mode, AI settings, SSO / login access, and members + roles.
-//
-// Every control is authorized by the caller's RBAC role carried by their SSO
-// session (runtime:manage / sso:manage / roles:manage), NOT a static admin
-// token. Each control reads its own state and gates itself: OSS / community
-// builds render the locked Enterprise upsell, a signed-out operator is asked to
-// sign in, a viewer/responder sees a read-only notice, and only an admin/owner
-// gets the live control — so the page is safe to surface unconditionally.
+// AdminPage (/admin) — Enterprise administration, one section at a time.
+// Every control gates itself on the caller's RBAC role, so the page is safe to
+// show to any operator: community builds see the locked upsell per section.
 export function AdminPage() {
+  const access = useEffectiveRole();
+  const community = !access.loading && !access.enterprise;
+
   return (
-    <>
-      <TopBar
-        title="Admin"
-        subtitle="Enterprise configuration"
-      />
-      <main className="flex-1 overflow-auto p-6">
-        {/* Runtime mode control (Enterprise; RBAC runtime:manage). Reads its own
-            state so OSS / community renders the locked upsell and no control. */}
-        <AgentModeControl />
-
-        {/* AI settings control (Enterprise; RBAC runtime:manage). The mode
-            control's detect guard links here when AI is off. */}
-        <AgentAISettingsControl />
-
-        {/* Notification-channel settings control (Enterprise; RBAC
-            runtime:manage). Per-channel runtime creds + enable override; masked
-            write-only secrets, save takes effect without restart. Locked upsell
-            on OSS / community. */}
-        <AgentChannelsSettingsControl />
-
-        {/* Alert-fatigue configuration (Enterprise; RBAC runtime:manage). The
-            fatigue-channel default picker, the custom fatigue-channel override
-            form, and the correlation + dependency-aware suppression config. The
-            AlertFatigue page keeps only the Enable / Require-review toggles, the
-            review table, and the analytics strip. Locked upsell on OSS /
-            community. */}
-        <AlertFatigueSettingsControl />
-
-        {/* SSO / identity providers (Enterprise; RBAC sso:manage, per-org). The
-            single canonical SSO panel: a Keycloak-style list of Google /
-            Microsoft Entra / OIDC providers (one sign-in button each) plus the
-            login-enforcement policy (require SSO / MFA). Locked upsell on OSS /
-            community; the org is sourced from the license, not operator-picked. */}
-        <AgentSSOConnectionsControl />
-
-        {/* Members & roles (Enterprise; RBAC roles:manage, per-org). Lists the
-            people who sign in via SSO with their effective role, lets an admin
-            assign roles, and manages the deployment's default admin user. */}
-        <AdminMembersControl />
-      </main>
-    </>
+    <SettingsLayout
+      title="Admin"
+      navLabel="Admin sections"
+      sections={ADMIN_SECTIONS}
+      legacy={{ hashes: ADMIN_LEGACY_HASHES }}
+      lockedEnterprise={community}
+      headerActions={
+        access.loading ? null : (
+          <span className={community ? "pill" : "pill pill-accent"}>
+            {community ? "Community" : "Enterprise"}
+          </span>
+        )
+      }
+      renderSection={renderAdminSection}
+    />
   );
+}
+
+function renderAdminSection(id: string) {
+  switch (id) {
+    case "ai":
+      return <AgentAISettingsControl />;
+    case "channels":
+      return <AgentChannelsSettingsControl />;
+    case "alert-fatigue":
+      return <AlertFatigueSettingsControl />;
+    case "sso":
+      return <AgentSSOConnectionsControl />;
+    case "members":
+      return <AdminMembersControl />;
+    default:
+      return <AgentModeControl />;
+  }
 }
 
 export default AdminPage;

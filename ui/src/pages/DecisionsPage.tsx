@@ -1,6 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type UseQueryResult,
+} from "@tanstack/react-query";
 import {
   AlertTriangle,
   Database,
@@ -11,7 +16,12 @@ import {
   Timer,
 } from "lucide-react";
 import clsx from "clsx";
-import { api, type DetectEvent, type ShadowEvent } from "@/lib/api";
+import {
+  api,
+  type DetectEvent,
+  type DetectStats,
+  type ShadowEvent,
+} from "@/lib/api";
 import { fmtAbs, fmtRel, truncate } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
 import { buildSpikeRows, type SpikeRow } from "@/lib/spikeRows";
@@ -21,6 +31,7 @@ import { Pill, VerdictPill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { FilterBar } from "@/components/FilterBar";
+import { FilterPanel } from "@/components/FilterPanel";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -46,9 +57,14 @@ type Tab = "detect" | "shadow" | "spike";
 // land here via App.tsx redirects with ?tab=.
 export function DecisionsPage() {
   const [params] = useSearchParams();
+  const [outcomeFilter, setOutcomeFilter] = useState<OutcomeFilter>("all");
   const raw = params.get("tab");
   const tab: Tab =
     raw === "shadow" ? "shadow" : raw === "spike" ? "spike" : "detect";
+
+  useEffect(() => {
+    if (tab !== "detect") setOutcomeFilter("all");
+  }, [tab]);
 
   const detectStats = useQuery({
     queryKey: ["detect-stats"],
@@ -114,15 +130,64 @@ export function DecisionsPage() {
             />
           }
           actions={
-            // key={tab} resets confirm/mutation state when the tab flips so a
-            // pending Clear dialog can never target the other log. Spike is a
-            // read-only view of shadow data — no clear there.
-            tab !== "spike" ? <LogActions key={tab} tab={tab} /> : undefined
+            tab === "detect" ? (
+              <>
+                <FilterPanel
+                  facets={[]}
+                  activeCount={outcomeFilter === "all" ? 0 : 1}
+                  onToggle={() => {}}
+                  onClear={() => setOutcomeFilter("all")}
+                  controls={
+                    <div
+                      role="group"
+                      aria-label="Outcome filter"
+                      className="inline-flex flex-wrap gap-0.5 rounded-control border border-ink-500 bg-surface-raised p-0.5 text-xs"
+                    >
+                      {OUTCOMES.map((filter) => {
+                        const count = detectStats.data
+                          ? filter === "all"
+                            ? (detectStats.data.events ?? 0)
+                            : (detectStats.data[`outcome_${filter}`] ?? 0)
+                          : undefined;
+                        return (
+                          <button
+                            key={filter}
+                            onClick={() => setOutcomeFilter(filter)}
+                            aria-pressed={outcomeFilter === filter}
+                            className={clsx(
+                              "rounded px-3 py-1 transition-colors",
+                              outcomeFilter === filter
+                                ? "bg-accent-subtle text-ink-50"
+                                : "text-ink-300 hover:text-ink-100",
+                            )}
+                          >
+                            {OUTCOME_LABELS[filter]}
+                            {count !== undefined && (
+                              <span className="ml-1 text-2xs opacity-70">
+                                ({count})
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  }
+                />
+                <LogActions key={tab} tab={tab} />
+              </>
+            ) : tab !== "spike" ? (
+              // key={tab} resets confirm/mutation state when the tab flips so a
+              // pending Clear dialog can never target the other log.
+              <LogActions key={tab} tab={tab} />
+            ) : undefined
           }
         />
 
         {tab === "detect" ? (
-          <DetectTab />
+          <DetectTab
+            filter={outcomeFilter}
+            stats={detectStats}
+          />
         ) : tab === "spike" ? (
           <SpikeTab />
         ) : (
@@ -235,14 +300,15 @@ const OUTCOME_LABELS: Record<OutcomeFilter, string> = {
 
 const DETECT_COLS = 11;
 
-function DetectTab() {
+function DetectTab({
+  filter,
+  stats,
+}: {
+  filter: OutcomeFilter;
+  stats: UseQueryResult<DetectStats>;
+}) {
   const events = useQuery({ queryKey: ["detect"], queryFn: api.listDetect });
-  const stats = useQuery({
-    queryKey: ["detect-stats"],
-    queryFn: api.detectStats,
-  });
 
-  const [filter, setFilter] = useState<OutcomeFilter>("all");
   const [peekId, setPeekId] = useState<string | null>(null);
 
   const list = useMemo(() => {
@@ -282,38 +348,6 @@ function DetectTab() {
 
   return (
     <>
-      <div
-        role="group"
-        aria-label="Outcome filter"
-        className="mb-3 inline-flex flex-wrap gap-0.5 rounded-control border border-ink-500 bg-surface-raised p-0.5 text-xs"
-      >
-        {OUTCOMES.map((f) => {
-          const count = stats.data
-            ? f === "all"
-              ? (stats.data.events ?? 0)
-              : (stats.data[`outcome_${f}`] ?? 0)
-            : undefined;
-          return (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              aria-pressed={filter === f}
-              className={clsx(
-                "rounded px-3 py-1 transition-colors",
-                filter === f
-                  ? "bg-accent-subtle text-ink-50"
-                  : "text-ink-300 hover:text-ink-100",
-              )}
-            >
-              {OUTCOME_LABELS[f]}
-              {count !== undefined && (
-                <span className="ml-1 text-2xs opacity-70">({count})</span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
       {events.isError && (
         <div className="mb-3">
           <RetryableError
@@ -390,7 +424,7 @@ function DetectTab() {
                         title="No detect events yet"
                         hint="Switch the agent to detect mode and let it call the AI SRE."
                         action={
-                          <Link to="/settings?tab=agent" className="btn">
+                          <Link to="/settings?section=agent-runtime" className="btn">
                             View agent settings
                           </Link>
                         }

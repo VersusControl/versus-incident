@@ -41,13 +41,23 @@ operator to connect.
 | `list_capabilities` | Configured and available Versus capabilities and setup actions |
 | `get_detection_health` | Configured signal coverage and dark signal categories |
 
+## Kubernetes tools
+
+See the [Kubernetes Connector](kubernetes.md) guide for authentication modes,
+RBAC, private endpoint policy, refresh behavior, and troubleshooting.
+
+The Kubernetes connector provides one operator card and read-only
+model tools: `get_cluster_overview`, `discover_k8s_resources`,
+`query_k8s_resources`, `get_k8s_resource`, `list_workloads`, `get_workload`,
+`list_k8s_events`, and `get_pod_logs`.
+
 ## Common tools
 
 The `common` group connects AI investigations to operational data. Each tool is
 offered only when its requirement is satisfied and its Chat or Analyze policy
 allows it.
 
-**get_related_logs**
+### Get related logs
 
 Reads a bounded, redacted slice of logs for a service and time window. Configure
 a [log data source](../data-sources.md), then use the provider guide for details,
@@ -60,25 +70,25 @@ the AI model. The default time window is 15 minutes and the maximum is 1440
 minutes (24 hours). The tool returns 50 lines by default and caps the result at
 200 lines.
 
-**find_runbook**
+### Find runbook
 
 Searches indexed runbooks for operational guidance. It requires an AI embedder
 and a runbook index. See [Find Runbook](./find-runbook.md) for corpus setup,
 redaction, and air-gapped ingestion.
 
-**recent_changes**
+### Recent changes
 
 Reads recent commits from configured source repositories. It requires a GitHub
 integration and at least one repository. See
 [Recent Changes](./recent-changes.md) for authentication and repository setup.
 
-**describe_dependencies**
+### Describe dependencies :id=describe_dependencies
 
 Reads the operator-configured service dependency graph so the AI can reason
 about upstream causes and downstream impact. Configure the graph in
 `tools.describe_dependencies.services` as shown below.
 
-**describe_baseline**
+### Describe baseline :id=describe_baseline
 
 Reads learned expectations for one exact service and signal over a requested
 current window from 5 minutes through 24 hours. Use `logs` to return up to 50
@@ -93,16 +103,6 @@ comparable current window value, so log records return `current_value: null`
 with an explicit reason instead of manufacturing a service-wide rate. Licensed
 providers can append metric or trace records without replacing OSS log records;
 restricted or failed extensions leave log baselines available.
-
-## Kubernetes tools
-
-See the [Kubernetes Connector](kubernetes.md) guide for authentication modes,
-RBAC, private endpoint policy, refresh behavior, and troubleshooting.
-
-The Kubernetes connector provides one operator card and read-only
-model tools: `get_cluster_overview`, `discover_k8s_resources`,
-`query_k8s_resources`, `get_k8s_resource`, `list_workloads`, `get_workload`,
-`list_k8s_events`, and `get_pod_logs`.
 
 ## Tool configuration
 
@@ -119,11 +119,7 @@ every tool dispatch:
 | `tool_timeout` | `20s` | Caps a single tool dispatch so one slow lookup can't consume the 2-minute analysis budget. A timeout surfaces as a tool error, never a hard failure. |
 | `parallel_tools` | `false` | When the model emits several tool calls in one turn, run them concurrently instead of sequentially. The audit trail stays deterministically ordered either way. |
 
-### Configure Kubernetes
-
-See [Kubernetes Connector](kubernetes.md) for complete configuration examples.
-
-### Configure Describe Dependencies
+### Configure describe dependencies
 
 This tool maps service relationships (upstream /
 downstream) so the AI can reason about blast radius and root cause
@@ -154,7 +150,7 @@ tools:
           - queue
 ```
 
-### Configure Recent Changes
+### Configure recent changes
 
 This tool reads commit histories from your deploy repositories so the AI
 can correlate an incident with a recent deploy or config change. Example:
@@ -179,7 +175,7 @@ tools:
 > covers arguments, the change-record shape, authentication (HTTPS tokens
 > and SSH keys), failure behavior, and a Docker example.
 
-### Configure Find Runbook
+### Configure find runbook
 
 This tool grounds the analysis in **your team's own runbooks**. During an
 investigation it embeds a short query derived from the incident, runs a

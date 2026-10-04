@@ -44,6 +44,13 @@ func (resolver *analyzeRuntimeResolver) EffectiveKey(ctx context.Context) (strin
 	return resolver.key, ok
 }
 
+func (resolver *analyzeRuntimeResolver) EffectiveKeyFor(ctx context.Context, provider, baseURL string) (string, bool) {
+	if provider != einowrap.DefaultProvider || strings.TrimSpace(baseURL) != "" {
+		return "", true
+	}
+	return resolver.EffectiveKey(ctx)
+}
+
 func (*analyzeRuntimeResolver) EffectiveEnabled(context.Context) (bool, bool) { return true, true }
 
 func (*analyzeRuntimeResolver) EffectiveProvider(context.Context) (string, bool) {

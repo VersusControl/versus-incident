@@ -112,6 +112,41 @@ alert:
 // round-trips through the loader: the YAML key maps into
 // AgentAIConfig.Provider, an omitted block keeps the embedded openai default,
 // and the AGENT_AI_PROVIDER env var overrides the YAML value (env wins).
+func TestAgentAIBaseURL(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		env  string
+		want string
+	}{
+		{name: "yaml", want: "https://models.example/v1"},
+		{name: "env override", env: "https://override.example/v1", want: "https://override.example/v1"},
+		{name: "empty env clears", env: "", want: ""},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if testCase.name != "yaml" {
+				t.Setenv("AGENT_AI_BASE_URL", testCase.env)
+			}
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte("agent:\n  ai:\n    base_url: https://models.example/v1\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := loadConfigFromPath(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := loaded.Agent.AI.BaseURL; got != testCase.want {
+				t.Fatalf("BaseURL = %q, want %q", got, testCase.want)
+			}
+			if got := cloneConfig(loaded).Agent.AI.BaseURL; got != testCase.want {
+				t.Fatalf("cloned BaseURL = %q, want %q", got, testCase.want)
+			}
+			if got := loaded.Agent.AI.Resolve(AgentAITaskConfig{}).BaseURL; got != testCase.want {
+				t.Fatalf("resolved BaseURL = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestAgentAIProviderSelection(t *testing.T) {
 	writeConfig := func(t *testing.T, body string) string {
 		t.Helper()

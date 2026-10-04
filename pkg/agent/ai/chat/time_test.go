@@ -2,8 +2,8 @@ package chat
 
 import (
 	"archive/zip"
+	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -116,7 +116,11 @@ func TestResolveTimePhraseHandlesSkippedAndSubHourCivilBoundaries(t *testing.T) 
 }
 
 func TestResolveTimePhraseAllZonePostcondition(t *testing.T) {
-	archive, err := zip.OpenReader(filepath.Join(runtime.GOROOT(), "lib", "time", "zoneinfo.zip"))
+	goRoot, err := exec.Command("go", "env", "GOROOT").Output()
+	if err != nil {
+		t.Skipf("Go root unavailable: %v", err)
+	}
+	archive, err := zip.OpenReader(filepath.Join(strings.TrimSpace(string(goRoot)), "lib", "time", "zoneinfo.zip"))
 	if err != nil {
 		t.Skipf("zoneinfo archive unavailable: %v", err)
 	}

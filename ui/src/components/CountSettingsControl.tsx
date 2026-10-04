@@ -5,6 +5,7 @@ import { api, type CountSettings, type CountWindow } from "@/lib/api";
 import { COUNT_WINDOW_LABELS } from "@/lib/countWindow";
 import { ErrorBox } from "@/components/feedback";
 import { InfoHint } from "@/components/InfoHint";
+import { SaveBar } from "@/components/settings/SettingsCard";
 import { useToast } from "@/components/toastContext";
 
 // COUNT_WINDOWS are the lookbacks every incident-count surface can be bounded
@@ -91,22 +92,15 @@ export function CountSettingsControl() {
   return (
     <div className="card space-y-4 p-4">
       <div>
-        <h3 className="text-sm font-semibold text-ink-100">
-          Incident Count Window
+        <div className="flex items-center gap-1">
+          <label className="field-label" htmlFor="count-window">
+            Count incidents from
+          </label>
           <InfoHint
             label="About the incident count window"
             text="How far back the incident counts look. Applies to the header badge, the Now tiles and the Incidents tabs together, so no two surfaces disagree."
           />
-        </h3>
-        <p className="text-2xs text-ink-400">
-          Counts describe recent load rather than an all-time total.
-        </p>
-      </div>
-
-      <div>
-        <label className="field-label" htmlFor="count-window">
-          Count incidents from
-        </label>
+        </div>
         <select
           id="count-window"
           className="input"
@@ -128,7 +122,7 @@ export function CountSettingsControl() {
         )}
       </div>
 
-      <div className="flex justify-end">
+      <SaveBar>
         <button
           className="btn btn-primary"
           onClick={() => form && save.mutate(form)}
@@ -142,7 +136,7 @@ export function CountSettingsControl() {
             "Save"
           )}
         </button>
-      </div>
+      </SaveBar>
     </div>
   );
 }
