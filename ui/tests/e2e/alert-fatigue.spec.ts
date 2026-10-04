@@ -1,10 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
 
 // alert-fatigue.spec.ts — browser e2e for the Enterprise alert-fatigue operator
-// surface, driven like a real admin against a RUNNING enterprise console (the
-// run/ harness maps 127.0.0.1:${ENTERPRISE_PORT:-3000}). It does NOT start a
-// server — bring one up first (cd run && ./enterprise.sh) and point
-// E2E_BASE_URL at it.
+// surface, driven like a real admin against a RUNNING enterprise console. It
+// does NOT start a server — run it with
+// `harness-run/harness.sh up enterprise && harness-run/harness.sh e2e ui alert-fatigue`.
 //
 // Auth model: the enterprise binary authenticates the admin surface with a
 // server session minted by the built-in local-admin login form

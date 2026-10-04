@@ -14,6 +14,7 @@ import { Pill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { FilterBar } from "@/components/FilterBar";
+import { FilterPanel } from "@/components/FilterPanel";
 import { SearchInput } from "@/components/SearchInput";
 import { Pagination } from "@/components/Pagination";
 import { PeekPanel, PeekField } from "@/components/PeekPanel";
@@ -37,7 +38,11 @@ const COLS = 9;
 export function AnalysesListPage() {
   const [params, setParams] = useSearchParams();
   const tab = params.get("tab") ?? "analyses";
-  const status = params.get("status") ?? "all";
+  const requestedStatus = params.get("status");
+  const status =
+    requestedStatus === "ok" || requestedStatus === "error"
+      ? requestedStatus
+      : "all";
   const incidentFilter = params.get("incident");
   const q = params.get("q") ?? "";
 
@@ -149,50 +154,50 @@ export function AnalysesListPage() {
       />
 
       <main className="flex-1 overflow-auto p-6">
-        <div className="mb-3">
-          <SegmentedControl
-            param="tab"
-            defaultValue="analyses"
-            aria-label="Analyses view"
-            options={[
-              { value: "analyses", label: "Analyses" },
-              { value: "postmortems", label: "Post-mortems" },
-            ]}
-          />
-        </div>
-
-        {tab === "postmortems" ? (
-          <div className="card">
-            <EmptyState
-              title="Post-mortems are coming"
-              hint="They'll be generated from an incident's analyses, evidence and timeline."
+        <FilterBar
+          tabs={
+            <SegmentedControl
+              param="tab"
+              defaultValue="analyses"
+              aria-label="Analyses view"
+              options={[
+                { value: "analyses", label: "Analyses" },
+                { value: "postmortems", label: "Post-mortems" },
+              ]}
             />
-          </div>
-        ) : (
-          <>
-            <FilterBar
-              tabs={
-                <SegmentedControl
-                  param="status"
-                  defaultValue="all"
-                  aria-label="Call status filter"
-                  options={[
-                    { value: "all", label: "All" },
-                    { value: "ok", label: "OK" },
-                    { value: "error", label: "Error" },
-                  ]}
+          }
+          search={
+            tab === "analyses" ? (
+              <SearchInput
+                value={q}
+                onChange={(v) => setParam("q", v || null)}
+                placeholder="Search by incident, finding or model…"
+                ariaLabel="Search analyses"
+              />
+            ) : undefined
+          }
+          actions={
+            tab === "analyses" ? (
+              <>
+                <FilterPanel
+                  facets={[]}
+                  activeCount={status === "all" ? 0 : 1}
+                  onToggle={() => {}}
+                  onClear={() => setParam("status", null)}
+                  controls={
+                    <SegmentedControl
+                      param="status"
+                      defaultValue="all"
+                      aria-label="Call status filter"
+                      options={[
+                        { value: "all", label: "All" },
+                        { value: "ok", label: "OK" },
+                        { value: "error", label: "Error" },
+                      ]}
+                    />
+                  }
                 />
-              }
-              search={
-                <SearchInput
-                  value={q}
-                  onChange={(v) => setParam("q", v || null)}
-                  placeholder="Search by incident, finding or model…"
-                  ariaLabel="Search analyses"
-                />
-              }
-              actions={
-                incidentFilter ? (
+                {incidentFilter && (
                   <span className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-2xs text-ink-100">
                     <span className="text-ink-300">incident:</span>
                     <span
@@ -210,10 +215,21 @@ export function AnalysesListPage() {
                       <X size={11} aria-hidden />
                     </button>
                   </span>
-                ) : undefined
-              }
-            />
+                )}
+              </>
+            ) : undefined
+          }
+        />
 
+        {tab === "postmortems" ? (
+          <div className="card">
+            <EmptyState
+              title="Post-mortems are coming"
+              hint="They'll be generated from an incident's analyses, evidence and timeline."
+            />
+          </div>
+        ) : (
+          <>
             {isError && (
               <div className="mb-3">
                 <RetryableError

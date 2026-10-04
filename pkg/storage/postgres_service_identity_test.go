@@ -2,7 +2,6 @@ package storage_test
 
 import (
 	"database/sql"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -115,23 +114,6 @@ func cloudWatchDimensions(dimensions ...map[string]interface{}) map[string]inter
 		items[index] = dimension
 	}
 	return map[string]interface{}{"Trigger": map[string]interface{}{"Dimensions": items}}
-}
-
-func testPostgresDSN(t *testing.T) string {
-	t.Helper()
-	dsn := strings.TrimSpace(os.Getenv("TEST_POSTGRES_DSN"))
-	if dsn == "" {
-		t.Skip("TEST_POSTGRES_DSN not set; skipping postgres tests")
-	}
-	return dsn
-}
-
-func assertIndexExists(t *testing.T, db *sql.DB, name string) {
-	t.Helper()
-	var exists bool
-	if err := db.QueryRow(`SELECT to_regclass($1) IS NOT NULL`, name).Scan(&exists); err != nil || !exists {
-		t.Fatalf("index %s exists = %v, err=%v", name, exists, err)
-	}
 }
 
 func explainPlan(t *testing.T, db *sql.DB, query string) string {

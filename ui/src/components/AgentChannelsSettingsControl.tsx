@@ -7,7 +7,6 @@ import {
   EyeOff,
   Info,
   Loader2,
-  Radio,
   Send,
 } from "lucide-react";
 import {
@@ -29,6 +28,7 @@ import {
 import { ChannelIcon } from "@/components/ChannelIcon";
 import { AdminAccessNotice } from "@/components/AdminAccessNotice";
 import { EnterpriseLockedBody } from "@/components/EnterpriseLocked";
+import { SettingsCard } from "@/components/settings/SettingsCard";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { adminGateState } from "@/lib/role";
 import { useToast } from "@/components/toastContext";
@@ -542,20 +542,10 @@ function ProvenanceChip({ source }: { source: "override" | "yaml" }) {
   );
 }
 
-// ChannelsShell — the consistent card chrome every state renders inside.
+// ChannelsShell — the surface every state renders inside; the section heading
+// comes from the Admin settings layout.
 function ChannelsShell({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="card mb-4">
-      <div className="card-header">
-        <h2 className="card-title inline-flex items-center gap-2">
-          <Radio size={15} aria-hidden className="text-ink-400" />
-          Notification channels
-        </h2>
-        <span className="text-2xs text-ink-400">Enterprise control</span>
-      </div>
-      <div className="card-body">{children}</div>
-    </div>
-  );
+  return <SettingsCard>{children}</SettingsCard>;
 }
 
 // LockedBody — the shared Enterprise-only locked upsell, channels copy.

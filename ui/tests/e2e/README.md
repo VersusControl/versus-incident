@@ -16,7 +16,8 @@ recently-shipped UI surfaces:
 |---|---|
 | `report-schedule.spec.ts` | Settings → Detection & reports — enabling the schedule reveals/enables `send_time` + timezone; UTC↔Local + send time persist across a reload. |
 | `incident-intake.spec.ts` | Incidents page → Webhook origin tab — the "Auto-resolve" toggle is absent on the AI-detected tab, appears on the Webhook tab loading default ON, and persists across a reload. |
-| `helpers.ts` | Gateway-secret seeding + resilient locators. All env-sourced; nothing secret hardcoded. |
+| `ui-refresh.spec.ts` | Settings and Admin one-section layouts, and the Logs / Metrics / Traces filter panel and Flat / By service views, with desktop + mobile screenshots. |
+| `helpers.ts` | Sign-in (gateway secret or Enterprise local admin) + resilient locators. All env-sourced; nothing secret hardcoded. |
 | `playwright.config.ts` | Config — base URL, timeouts, headless/headful. Does **not** start a server. |
 | `.env.example` | Required env — copy to `.env` (gitignored) and fill. |
 
@@ -29,59 +30,32 @@ code to add hooks — the exact `data-testid`s requested from the Front-End are
 logged in [`../../../../plans/productization/global/qa-defects/QA-043.md`](../../../../plans/productization/global/qa-defects/QA-043.md).
 When those land, only `helpers.ts` needs updating; the specs stay put.
 
-## Auth model (why a gateway secret)
+## Auth model
 
-The OSS SPA exchanges `X-Gateway-Secret` once for an HttpOnly session cookie
-(`ui/src/lib/api.ts`). The harness fills the visible AuthGate form only when the
-browser context has no valid cookie (`helpers.ts` → `openApp`); reload tests
-reuse the existing session without re-entering the secret. The value comes from
-`E2E_GATEWAY_SECRET` and **must equal**
-the running server's `GATEWAY_SECRET` (config
-`gateway_secret: ${GATEWAY_SECRET}`) — never hardcoded.
+`helpers.ts` → `openApp` signs in only when the browser context has no valid
+session cookie, so reload tests reuse the session:
 
-## Bring up an OSS instance
+- **OSS** shows the gateway-secret form. `E2E_GATEWAY_SECRET` must equal the
+  server's `GATEWAY_SECRET`.
+- **Licensed Enterprise** shows the local-admin form (`local-login-*`). It uses
+  `E2E_ADMIN_USERNAME` / `E2E_ADMIN_PASSWORD`, which harness-run captures from
+  the first-boot banner. The gateway secret is retired in Enterprise.
 
-### Option A — the run/ harness (rebuilds the SPA embed)
+## Bring up an instance and run
 
-```sh
-cd run && ./oss.sh        # builds the image (rebuilds ui/dist + //go:embed), starts it
-# OSS up on http://localhost:8080  (GATEWAY_SECRET = dev-gateway-secret, run/env/shared.env)
-```
-
-Tear it down when done (never leave a stack running after a review):
+Use the QA harness. It builds the app (and its embedded SPA) from local source
+and passes the base URL and the right credentials to Playwright:
 
 ```sh
-docker compose -f run/docker-compose.yml --profile oss down --remove-orphans
+harness-run/harness.sh up oss                     # or enterprise-prometheus, enterprise-tempo, …
+harness-run/harness.sh e2e ui <spec> --project=chromium --reporter=list
+harness-run/harness.sh down
 ```
 
-### Option B — local `go run` (build the SPA first)
+Without the harness, build `ui/dist`, run `GATEWAY_SECRET=<secret> go run ./cmd`
+from `versus-incident/`, copy `.env.example` to `.env`, and run `npm run e2e`.
+First time only: `npx playwright install chromium`.
 
-The binary `//go:embed`s `ui/dist`, so build the SPA before running the server,
-or the embedded bundle is stale/empty:
-
-```sh
-cd versus-incident/ui && npm install && npm run build   # produces ui/dist
-cd .. && GATEWAY_SECRET=dev-gateway-secret go run ./cmd  # serves the embed on :8080
-```
-
-## Run the specs (once you have an instance)
-
-```sh
-cd versus-incident/ui
-
-# First time only — install Playwright's browser:
-npm install && npx playwright install chromium
-
-# Configure + run:
-cp tests/e2e/.env.example tests/e2e/.env   # set E2E_BASE_URL + E2E_GATEWAY_SECRET
-npm run e2e
-```
-
-- `E2E_BASE_URL` **must** be the running instance's origin (default
-  `http://localhost:8080`).
-- `E2E_GATEWAY_SECRET` **must** equal the server's `GATEWAY_SECRET`
-  (run/ harness default `dev-gateway-secret`) — the settings pages 401 without
-  it and the specs fail fast with a clear message.
 - Set `E2E_HEADFUL=true` to watch the run locally.
 
 ## Notes

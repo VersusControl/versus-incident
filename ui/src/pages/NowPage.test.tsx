@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
-import { describe, it, expect, afterEach, vi } from "vitest";
-import { render, screen, cleanup, within } from "@testing-library/react";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
+import { act, render, screen, cleanup, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { ToastProvider } from "@/components/Toast";
 import { NowPage } from "./NowPage";
 import {
   api,
+  ApiError,
   type IncidentStatusCounts,
   type IncidentSummary,
   type OriginCounts,
@@ -22,6 +23,7 @@ vi.mock("@/lib/api", async (importActual) => {
       incidentCounts: vi.fn(),
       getAgentConfig: vi.fn().mockResolvedValue({ enable: false }),
       status: vi.fn().mockResolvedValue({ patterns: 0 }),
+      listBaselines: vi.fn().mockRejectedValue(new actual.ApiError(404, "community")),
     },
   };
 });
@@ -58,20 +60,23 @@ function renderPageAt(entry = "/now") {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
-    <QueryClientProvider client={qc}>
-      <ToastProvider>
-        <MemoryRouter
-          initialEntries={[entry]}
-          future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
-        >
-          <Routes>
-            <Route path="/now" element={<NowPage />} />
-          </Routes>
-        </MemoryRouter>
-      </ToastProvider>
-    </QueryClientProvider>,
-  );
+  return {
+    queryClient: qc,
+    ...render(
+      <QueryClientProvider client={qc}>
+        <ToastProvider>
+          <MemoryRouter
+            initialEntries={[entry]}
+            future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+          >
+            <Routes>
+              <Route path="/now" element={<NowPage />} />
+            </Routes>
+          </MemoryRouter>
+        </ToastProvider>
+      </QueryClientProvider>,
+    ),
+  };
 }
 
 function setup(rows: IncidentSummary[] = []) {
@@ -116,5 +121,190 @@ describe("NowPage origin badges", () => {
     expect(screen.getByText("4")).toBeTruthy();
     expect(screen.getByText("35")).toBeTruthy();
     expect(screen.getByText(/counts over last 30d/)).toBeTruthy();
+  });
+});
+
+describe("NowPage Agent pulse", () => {
+  beforeEach(() => {
+    setup();
+    vi.mocked(api.getAgentConfig).mockResolvedValue({ enable: true } as Awaited<
+      ReturnType<typeof api.getAgentConfig>
+    >);
+    vi.mocked(api.listBaselines).mockReset().mockRejectedValue(new ApiError(404, "community"));
+    vi.mocked(api.status).mockResolvedValue({
+      patterns: 12,
+      shadow_events: 3,
+      detect_events: 4,
+    } as Awaited<ReturnType<typeof api.status>>);
+  });
+
+  it("shows compact current signal activity without runtime or model details", async () => {
+    vi.mocked(api.getAgentConfig).mockResolvedValue({
+      enable: true, mode: "detect", ai: { enable: true, provider: "openai", model: "o4-mini" },
+    } as Awaited<ReturnType<typeof api.getAgentConfig>>);
+    vi.mocked(api.listBaselines).mockResolvedValue({
+      org: "default",
+      count: 4,
+      baselines: [
+        { type: "metric", confident: true },
+        { type: "metric", confident: false },
+        { type: "trace", confident: true },
+        { type: "trace", confident: false },
+      ],
+    } as Awaited<ReturnType<typeof api.listBaselines>>);
+    renderPageAt();
+
+    const pulse = screen.getByRole("region", { name: "Agent pulse" });
+    expect(await within(pulse).findByRole("link", { name: /Logs 12 patterns/ })).toBeTruthy();
+    expect(within(pulse).getByRole("heading", { name: "Signal activity" })).toBeTruthy();
+    expect(within(pulse).getByText("Current catalog · recorded events")).toBeTruthy();
+    expect((await within(pulse).findByRole("link", { name: /Metrics 2 signals 1 ready/ })).getAttribute("href")).toBe("/agent/metrics");
+    expect((await within(pulse).findByRole("link", { name: /Traces 2 signals 1 ready/ })).getAttribute("href")).toBe("/agent/traces");
+    expect(within(pulse).getByRole("link", { name: /Shadow 3 events/ }).getAttribute("href")).toBe("/agent/decisions?tab=shadow");
+    expect(within(pulse).getByRole("link", { name: /Detect 4 events/ }).getAttribute("href")).toBe("/agent/decisions?tab=detect");
+    expect(within(pulse).getByRole("link", { name: /Agent overview/ }).getAttribute("href")).toBe("/agent");
+    for (const removedContent of ["Runtime mode", "Configured AI model", "o4-mini", "openai"]) {
+      expect(within(pulse).queryByText(removedContent, { exact: true })).toBeNull();
+    }
+  });
+
+  it("keeps zero activity counts navigable", async () => {
+    vi.mocked(api.status).mockResolvedValue({
+      patterns: 0,
+      shadow_events: 0,
+      detect_events: 0,
+    } as Awaited<ReturnType<typeof api.status>>);
+    vi.mocked(api.listBaselines).mockResolvedValue({
+      org: "default", count: 0, baselines: [],
+    } as Awaited<ReturnType<typeof api.listBaselines>>);
+    renderPageAt();
+
+    const pulse = screen.getByRole("region", { name: "Agent pulse" });
+    expect(await within(pulse).findByRole("link", { name: /Logs 0 patterns/ })).toBeTruthy();
+    expect((await within(pulse).findByRole("link", { name: /Metrics 0 signals/ })).getAttribute("href")).toBe("/agent/metrics");
+    expect((await within(pulse).findByRole("link", { name: /Traces 0 signals/ })).getAttribute("href")).toBe("/agent/traces");
+    expect(within(pulse).getByRole("link", { name: /Shadow 0 events/ }).getAttribute("href")).toBe("/agent/decisions?tab=shadow");
+    expect(within(pulse).getByRole("link", { name: /Detect 0 events/ }).getAttribute("href")).toBe("/agent/decisions?tab=detect");
+  });
+
+  it("keeps baseline loading visible until the activity request completes", async () => {
+    let resolveBaselines!: (value: Awaited<ReturnType<typeof api.listBaselines>>) => void;
+    vi.mocked(api.listBaselines).mockReturnValue(new Promise((resolve) => {
+      resolveBaselines = resolve;
+    }));
+    renderPageAt();
+
+    const pulse = screen.getByRole("region", { name: "Agent pulse" });
+    expect(await within(pulse).findByText("Loading metric and trace activity")).toBeTruthy();
+    resolveBaselines({ org: "default", count: 0, baselines: [] });
+    expect(await within(pulse).findByRole("link", { name: /Metrics 0 signals/ })).toBeTruthy();
+  });
+
+  it("keeps baseline authorization failures as an Enterprise lock", async () => {
+    renderPageAt();
+
+    const pulse = screen.getByRole("region", { name: "Agent pulse" });
+    expect(await within(pulse).findByRole("link", { name: "Enterprise license" })).toBeTruthy();
+    expect(within(pulse).getByRole("link", { name: /Logs 12 patterns/ })).toBeTruthy();
+    expect(within(pulse).queryByRole("link", { name: /Metrics 0 signals/ })).toBeNull();
+    expect(within(pulse).queryByRole("link", { name: /Traces 0 signals/ })).toBeNull();
+  });
+
+  it("shows transient baseline failures without presenting them as a license lock", async () => {
+    vi.mocked(api.listBaselines).mockRejectedValue(new ApiError(503, "Unavailable"));
+    renderPageAt();
+
+    const pulse = screen.getByRole("region", { name: "Agent pulse" });
+    expect(await within(pulse).findByText("Couldn't load metric and trace activity", {}, { timeout: 3000 })).toBeTruthy();
+    expect(within(pulse).getByRole("link", { name: /Logs 12 patterns/ })).toBeTruthy();
+    expect(within(pulse).queryByRole("link", { name: "Enterprise license" })).toBeNull();
+  });
+
+  it("retains cached signal and baseline counts after transient refetch failures", async () => {
+    const statusData = { patterns: 12, shadow_events: 3, detect_events: 4 } as Awaited<
+      ReturnType<typeof api.status>
+    >;
+    const baselineData = {
+      org: "default",
+      count: 2,
+      baselines: [
+        { type: "metric", confident: true },
+        { type: "trace", confident: false },
+      ],
+    } as Awaited<ReturnType<typeof api.listBaselines>>;
+    vi.mocked(api.status).mockReset().mockRejectedValue(new ApiError(503, "Unavailable"));
+    vi.mocked(api.status).mockResolvedValueOnce(statusData);
+    vi.mocked(api.listBaselines).mockReset().mockRejectedValue(new TypeError("Failed to fetch"));
+    vi.mocked(api.listBaselines).mockResolvedValueOnce(baselineData);
+    const { queryClient } = renderPageAt();
+    const pulse = screen.getByRole("region", { name: "Agent pulse" });
+
+    expect(await within(pulse).findByRole("link", { name: /Logs 12 patterns/ })).toBeTruthy();
+    expect(await within(pulse).findByRole("link", { name: /Metrics 1 signals 1 ready/ })).toBeTruthy();
+    await act(async () => {
+      await Promise.all([
+        queryClient.refetchQueries({ queryKey: ["status-pulse"], exact: true }),
+        queryClient.refetchQueries({ queryKey: ["baselines-pulse"], exact: true }),
+      ]);
+    });
+
+    expect(within(pulse).getByRole("link", { name: /Logs 12 patterns/ })).toBeTruthy();
+    expect(within(pulse).getByRole("link", { name: /Metrics 1 signals 1 ready/ })).toBeTruthy();
+    expect(within(pulse).getByRole("link", { name: /Traces 1 signals/ })).toBeTruthy();
+    expect(within(pulse).getByText("Couldn't load agent status")).toBeTruthy();
+    expect(within(pulse).getByText("Couldn't load metric and trace activity")).toBeTruthy();
+    expect(within(pulse).queryByRole("link", { name: "Enterprise license" })).toBeNull();
+  });
+
+  it("hides cached signal and premium baseline counts after authorization failures", async () => {
+    const statusData = { patterns: 12, shadow_events: 3, detect_events: 4 } as Awaited<
+      ReturnType<typeof api.status>
+    >;
+    const baselineData = {
+      org: "default",
+      count: 1,
+      baselines: [{ type: "metric", confident: true }],
+    } as Awaited<ReturnType<typeof api.listBaselines>>;
+    vi.mocked(api.status).mockReset().mockRejectedValue(new ApiError(401, "Unauthorized"));
+    vi.mocked(api.status).mockResolvedValueOnce(statusData);
+    vi.mocked(api.listBaselines).mockReset().mockRejectedValue(new ApiError(401, "Unauthorized"));
+    vi.mocked(api.listBaselines).mockResolvedValueOnce(baselineData);
+    const { queryClient } = renderPageAt();
+    const pulse = screen.getByRole("region", { name: "Agent pulse" });
+
+    expect(await within(pulse).findByRole("link", { name: /Logs 12 patterns/ })).toBeTruthy();
+    expect(await within(pulse).findByRole("link", { name: /Metrics 1 signals 1 ready/ })).toBeTruthy();
+    await act(async () => {
+      await Promise.all([
+        queryClient.refetchQueries({ queryKey: ["status-pulse"], exact: true }),
+        queryClient.refetchQueries({ queryKey: ["baselines-pulse"], exact: true }),
+      ]);
+    });
+
+    expect(within(pulse).queryByRole("link", { name: /Logs 12 patterns/ })).toBeNull();
+    expect(within(pulse).queryByRole("link", { name: /Metrics 1 signals/ })).toBeNull();
+    expect(within(pulse).queryByRole("link", { name: "Enterprise license" })).toBeNull();
+    expect(within(pulse).getByText("Couldn't load agent status")).toBeTruthy();
+    expect(within(pulse).getByText("Couldn't load metric and trace activity")).toBeTruthy();
+
+    vi.mocked(api.listBaselines).mockRejectedValueOnce(new ApiError(403, "Forbidden"));
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: ["baselines-pulse"], exact: true });
+    });
+    expect(within(pulse).getByRole("link", { name: "Enterprise license" })).toBeTruthy();
+    expect(within(pulse).queryByRole("link", { name: /Metrics 1 signals/ })).toBeNull();
+  });
+
+  it("shows the disabled state without requesting signal activity", async () => {
+    vi.mocked(api.getAgentConfig).mockResolvedValue({ enable: false } as Awaited<
+      ReturnType<typeof api.getAgentConfig>
+    >);
+    renderPageAt();
+
+    const pulse = screen.getByRole("region", { name: "Agent pulse" });
+    expect(await within(pulse).findByText("Agent is disabled")).toBeTruthy();
+    expect(within(pulse).getByRole("heading", { name: "Signal activity" })).toBeTruthy();
+    expect(within(pulse).queryByRole("link", { name: /Logs|Metrics|Traces|Shadow|Detect/ })).toBeNull();
+    expect(api.listBaselines).not.toHaveBeenCalled();
   });
 });

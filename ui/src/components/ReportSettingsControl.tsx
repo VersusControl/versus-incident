@@ -11,6 +11,7 @@ import {
 } from "@/lib/reportSchedule";
 import { ErrorBox } from "@/components/feedback";
 import { InfoHint } from "@/components/InfoHint";
+import { SaveBar } from "@/components/settings/SettingsCard";
 import { useToast } from "@/components/toastContext";
 
 // INCIDENT_REPORT_DOCS is the docsify docs page the info icon points to. The
@@ -94,29 +95,22 @@ export function ReportSettingsControl() {
 
   return (
     <div className="card space-y-4 p-4">
-      <div>
-        <h3 className="text-sm font-semibold text-ink-100">
-          Incidents Report
-          <InfoHint
-            label="About the Incidents report"
-            text="A shareable analytics dashboard over a time window — incident volume, severity breakdown and trend."
-            href={INCIDENT_REPORT_DOCS}
-            linkLabel="Read the incident report docs"
+      <div className="flex items-center gap-1">
+        <label className="flex items-center gap-2 text-sm text-ink-200">
+          <input
+            type="checkbox"
+            checked={form.enable}
+            onChange={(e) => set("enable", e.target.checked)}
           />
-        </h3>
-        <p className="text-2xs text-ink-400">
-          An incident analytics dashboard.
-        </p>
-      </div>
-
-      <label className="flex items-center gap-2 text-sm text-ink-200">
-        <input
-          type="checkbox"
-          checked={form.enable}
-          onChange={(e) => set("enable", e.target.checked)}
+          Enable the incidents report action
+        </label>
+        <InfoHint
+          label="About the Incidents report"
+          text="A shareable analytics dashboard over a time window — incident volume, severity breakdown and trend."
+          href={INCIDENT_REPORT_DOCS}
+          linkLabel="Read the incident report docs"
         />
-        Enable the incidents report action
-      </label>
+      </div>
 
       <div>
         <label className="field-label" htmlFor="rs-title">
@@ -299,7 +293,7 @@ export function ReportSettingsControl() {
         />
       </div>
 
-      <div className="flex justify-end">
+      <SaveBar>
         <button
           className="btn btn-primary"
           data-testid="report-settings-save"
@@ -314,7 +308,7 @@ export function ReportSettingsControl() {
             "Save"
           )}
         </button>
-      </div>
+      </SaveBar>
     </div>
   );
 }

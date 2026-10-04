@@ -283,17 +283,6 @@ func ConvertMarkdownToAdaptiveCard(markdown string) AdaptiveCard {
 			// Extract the link info for actions
 			links := linkRegex.FindAllStringSubmatch(line, -1)
 			if len(links) > 0 {
-				actions := make([]interface{}, 0, len(links))
-				for _, link := range links {
-					if len(link) == 3 {
-						actions = append(actions, map[string]interface{}{
-							"type":  "Action.OpenUrl",
-							"title": link[1],
-							"url":   link[2],
-						})
-					}
-				}
-
 				// Create a container with the text and action buttons
 				container := map[string]interface{}{
 					"type":  "Container",

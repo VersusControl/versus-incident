@@ -57,9 +57,11 @@ func TestEmbedder_EmbedsViaOpenAICompatibleEndpoint(t *testing.T) {
 
 	ctx := context.Background()
 	emb, err := einowrap.NewEmbedder(ctx, config.AgentAIConfig{
-		APIKey: "test-key",
-		Model:  "text-embedding-3-small",
-	}, einowrap.Options{BaseURL: srv.URL})
+		Provider: "claude",
+		BaseURL:  srv.URL,
+		APIKey:   "test-key",
+		Model:    "text-embedding-3-small",
+	}, einowrap.Options{})
 	if err != nil {
 		t.Fatalf("NewEmbedder: %v", err)
 	}

@@ -1083,6 +1083,9 @@ export interface AgentModeView {
 export interface AISettingsView {
   enabled: boolean;
   provider: string;
+  base_url: string;
+  base_url_inherited: boolean;
+  yaml_base_url: string;
   key_set: boolean;
   last4: string;
   yaml_enabled: boolean;
@@ -1118,6 +1121,22 @@ export interface AISettingsInput {
   enabled: boolean;
   provider?: string;
   api_key?: string;
+  base_url?: string;
+}
+
+export function buildAISettingsInput(
+  enabled: boolean,
+  provider?: string,
+  apiKey?: string,
+  baseURL?: string,
+): AISettingsInput {
+  const body: AISettingsInput = { enabled };
+  const prov = provider?.trim() ?? "";
+  const key = apiKey?.trim() ?? "";
+  if (prov) body.provider = prov;
+  if (key) body.api_key = key;
+  if (baseURL !== undefined) body.base_url = baseURL.trim();
+  return body;
 }
 
 // ---------- Runtime notification-channel settings (Enterprise, RBAC runtime:manage) ----------
@@ -2535,16 +2554,17 @@ export const api = {
   // plumbing as the mode control — the SSO session cookie, never a static
   // token. getAISettings returns the MASKED view (no key, ever). setAISettings
   // omits api_key when blank so the caller can toggle `enabled` without
-  // resubmitting the key; the key is passed straight through to the single PUT
-  // and never persisted client-side.
+  // resubmitting the key. An omitted base_url preserves the current endpoint;
+  // an explicit empty string selects the provider's native endpoint.
   getAISettings: () =>
     sessionRequest<AISettingsView>("/enterprise/api/agent/ai-settings"),
-  setAISettings: (enabled: boolean, provider?: string, apiKey?: string) => {
-    const key = apiKey?.trim() ?? "";
-    const prov = provider?.trim() ?? "";
-    const body: AISettingsInput = { enabled };
-    if (prov) body.provider = prov;
-    if (key) body.api_key = key;
+  setAISettings: (
+    enabled: boolean,
+    provider?: string,
+    apiKey?: string,
+    baseURL?: string,
+  ) => {
+    const body = buildAISettingsInput(enabled, provider, apiKey, baseURL);
     return sessionRequest<AISettingsView>("/enterprise/api/agent/ai-settings", {
       method: "PUT",
       body: JSON.stringify(body),

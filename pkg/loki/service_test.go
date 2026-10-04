@@ -42,7 +42,6 @@ func TestReadIntersectsScopeAndBoundsInterleavedStreams(t *testing.T) {
 	}))
 	defer server.Close()
 	service, err := NewService(config.AgentLokiSourceConfig{Address: server.URL, Query: `{service=~"api|worker",service!="worker",env!~"dev|test"}`, TenantID: "tenant", BearerToken: token}, nil)
-	const secret = "SUPER_SECRET_TOKEN"
 	if err != nil {
 		t.Fatal(err)
 	}

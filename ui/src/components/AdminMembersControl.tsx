@@ -26,6 +26,7 @@ import { isNoOtherAdminError } from "@/lib/localAdmin";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { AdminAccessNotice } from "@/components/AdminAccessNotice";
 import { EnterpriseLockedBody } from "@/components/EnterpriseLocked";
+import { SettingsCard } from "@/components/settings/SettingsCard";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/toastContext";
 
@@ -526,15 +527,8 @@ function normalizeRole(role: string | undefined): AssignableRole {
     : "viewer";
 }
 
-// MembersShell — the consistent card chrome every state renders inside.
+// MembersShell — the surface every state renders inside; the section heading
+// comes from the Admin settings layout.
 function MembersShell({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="card mb-4" data-testid="members-control">
-      <div className="card-header">
-        <h2 className="card-title">Members &amp; roles</h2>
-        <span className="text-2xs text-ink-400">Enterprise control</span>
-      </div>
-      <div className="card-body">{children}</div>
-    </div>
-  );
+  return <SettingsCard testId="members-control">{children}</SettingsCard>;
 }

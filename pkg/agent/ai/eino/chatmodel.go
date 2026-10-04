@@ -12,7 +12,10 @@ package eino
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/components/model"
@@ -20,10 +23,6 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 )
 
-// BaseURL is overridable for tests. Production code passes "" to use
-// the provider default endpoint. It is intentionally not a config field:
-// admin endpoints never expose this; only the chatmodel test sets it
-// to point at an httptest server.
 type Options struct {
 	HTTPClient *http.Client
 	BaseURL    string
@@ -90,15 +89,29 @@ func (o Options) runtimeKeyFunc() func(context.Context) (string, bool) {
 }
 
 func withRuntimeKeyRoundTripper(c *http.Client, timeout time.Duration, keyFn func(ctx context.Context) (key string, ok bool), policy credentialPolicy) *http.Client {
-	if keyFn == nil && policy != credentialNone {
-		return c
-	}
 	if c == nil {
 		c = &http.Client{Timeout: timeout}
 	}
 	wrapped := *c
 	wrapped.Transport = runtimeKeyRoundTripper{base: c.Transport, keyFn: keyFn, policy: policy}
+	checkRedirect := c.CheckRedirect
+	wrapped.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if policy != credentialNone && len(via) > 0 && !sameOrigin(request.URL, via[len(via)-1].URL) {
+			return http.ErrUseLastResponse
+		}
+		if checkRedirect != nil {
+			return checkRedirect(request, via)
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
+		}
+		return nil
+	}
 	return &wrapped
+}
+
+func sameOrigin(left, right *url.URL) bool {
+	return left != nil && right != nil && strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
 }
 
 // NewChatModel builds an Eino ChatModel configured for JSON-mode
@@ -130,10 +143,14 @@ func NewChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (
 		maxCompletionTokens = 2048
 	}
 
-	return newProviderChatModel(ctx, cfg.Provider, chatModelRequest{
+	provider, baseURL, err := configuredChatEndpoint(cfg, opts)
+	if err != nil {
+		return nil, err
+	}
+	return newProviderChatModel(ctx, provider, chatModelRequest{
 		apiKey:      cfg.APIKey,
 		model:       cfg.Model,
-		baseURL:     opts.BaseURL,
+		baseURL:     baseURL,
 		httpClient:  opts.HTTPClient,
 		runtimeKey:  opts.runtimeKeyFunc(),
 		timeout:     timeout,
@@ -170,10 +187,14 @@ func NewToolCallingChatModel(ctx context.Context, cfg config.AgentAIConfig, opts
 		maxCompletionTokens = 4096
 	}
 
-	return newProviderChatModel(ctx, cfg.Provider, chatModelRequest{
+	provider, baseURL, err := configuredChatEndpoint(cfg, opts)
+	if err != nil {
+		return nil, err
+	}
+	return newProviderChatModel(ctx, provider, chatModelRequest{
 		apiKey:      cfg.APIKey,
 		model:       cfg.Model,
-		baseURL:     opts.BaseURL,
+		baseURL:     baseURL,
 		httpClient:  opts.HTTPClient,
 		runtimeKey:  opts.runtimeKeyFunc(),
 		timeout:     timeout,
@@ -181,6 +202,32 @@ func NewToolCallingChatModel(ctx context.Context, cfg config.AgentAIConfig, opts
 		temperature: resolveTemperature(cfg.Temperature, 0.2),
 		jsonMode:    false,
 	})
+}
+
+func configuredChatEndpoint(cfg config.AgentAIConfig, opts Options) (string, string, error) {
+	baseURL := strings.TrimSpace(cfg.BaseURL)
+	if baseURL != "" {
+		if err := ValidateBaseURL(baseURL); err != nil {
+			return "", "", err
+		}
+		return DefaultProvider, baseURL, nil
+	}
+	return cfg.Provider, opts.BaseURL, nil
+}
+
+// ValidateBaseURL accepts only absolute HTTP(S) endpoints without userinfo,
+// query parameters, or fragments. The same policy is used at config load and
+// runtime settings write boundaries; the value is never included in errors.
+func ValidateBaseURL(baseURL string) error {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return nil
+	}
+	endpoint, err := url.Parse(baseURL)
+	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return &ConfigError{message: "eino: base_url must be an absolute HTTP(S) URL without credentials, query, or fragment"}
+	}
+	return nil
 }
 
 // A NEGATIVE value is the explicit "omit temperature" sentinel: it returns nil

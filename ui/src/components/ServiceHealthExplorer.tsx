@@ -459,7 +459,7 @@ export function ServiceHealthExplorer({
     {visible.length === 0 && <p className="py-8 text-sm text-ink-300" role="status">No services match these filters.</p>}
     <div className="heatmap-canvas" data-view={view} data-testid="service-health-domains">
       {[...groups].map(([domain, services]) => <section key={domain} aria-label={domain}>
-        <div className="mb-2 flex flex-wrap items-baseline gap-2"><h3 className="break-words text-xs font-semibold text-ink-200 [overflow-wrap:anywhere]">{domain}</h3><span className="text-2xs text-ink-400">{services.length}</span></div>
+        <div className="heatmap-group-header flex flex-wrap items-baseline gap-2"><h3 className="break-words text-xs font-semibold text-ink-200 [overflow-wrap:anywhere]">{domain}</h3><span className="text-2xs text-ink-400">{services.length}</span></div>
         <div className={view === "grid" ? "heatmap-grid" : "heatmap-list"}>
           {services.map((service) => <button key={service.service} type="button" aria-label={`Inspect ${service.service}`} data-impact={service.severity} onClick={() => setSelected(service.service)}
             className={`heatmap-service ${view === "list" ? "heatmap-service-row" : ""}`}>

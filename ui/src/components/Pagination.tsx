@@ -10,9 +10,12 @@ import type { PaginationState } from "@/lib/pagination";
 // renders nothing when everything fits on one page so small tables stay clean.
 export function Pagination({
   state,
+  noun,
   className,
 }: {
   state: PaginationState;
+  // noun names what is counted when it isn't rows, e.g. "services".
+  noun?: string;
   className?: string;
 }) {
   const { page, pageCount, total, start, end, setPage } = state;
@@ -30,6 +33,7 @@ export function Pagination({
     >
       <span className="tabular-nums">
         {fmt(displayStart)}–{fmt(end)} of {fmt(total)}
+        {noun ? ` ${noun}` : null}
       </span>
       <div className="flex items-center gap-1">
         <button

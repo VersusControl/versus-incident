@@ -101,8 +101,8 @@ func TestCatalogDocumentationTargetsExist(t *testing.T) {
 		"versus-tools":          "## Versus tools",
 		"common-tools":          "## Common tools",
 		"kubernetes-tools":      "## Kubernetes tools",
-		"describe_dependencies": "### `describe_dependencies` :id=describe_dependencies",
-		"describe_baseline":     "### `describe_baseline` :id=describe_baseline",
+		"describe_dependencies": "### Describe dependencies :id=describe_dependencies",
+		"describe_baseline":     "### Describe baseline :id=describe_baseline",
 	}
 	checkedRoutes := make(map[string]struct{})
 	for _, metadata := range Catalog() {

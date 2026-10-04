@@ -49,6 +49,27 @@ import { usePagination } from "@/lib/pagination";
 import { SortHeader } from "@/components/SortHeader";
 import { useSortableRows } from "@/lib/sortRows";
 import { useToast } from "@/components/toastContext";
+import { ActiveFilterChips, FilterPanel } from "@/components/FilterPanel";
+import { ServiceGroupedRows } from "@/components/ServiceGroupRows";
+import {
+  applyFacets,
+  facetChips,
+  facetViews,
+  type FacetDef,
+  withoutFacets,
+} from "@/lib/listFilters";
+import { useFacetFilters } from "@/lib/useFacetFilters";
+import { GROUP_BY_SERVICE, GROUP_PARAM } from "@/lib/serviceGroups";
+import { useServiceGrouping } from "@/lib/useServiceGrouping";
+
+const LOG_FACETS: readonly FacetDef<Pattern>[] = [
+  { id: "service", label: "Service", values: (p) => p.service ?? "", format: displayService },
+  { id: "rule", label: "Rule", values: (p) => p.rule_name ?? "", format: (v) => v || "No rule" },
+  { id: "source", label: "Source", values: (p) => p.source ?? "", format: (v) => v || "Unknown" },
+  { id: "tag", label: "Tag", values: (p) => p.tags ?? [] },
+];
+
+const logService = (p: Pattern) => p.service ?? "";
 
 // Verdict filter is URL-synced via SegmentedControl. "uncurated" is a real
 // sentinel value mapping to verdict === "" — never an <option value="">
@@ -73,7 +94,7 @@ type VerdictVars = { id: string; verdict: string };
 export function PatternsPage() {
   const qc = useQueryClient();
   const toast = useToast();
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const verdictFilter = params.get(VERDICT_PARAM) ?? "all";
   const scope = isExclusionScope(params.get(SCOPE_PARAM));
 
@@ -221,10 +242,11 @@ export function PatternsPage() {
   });
 
   // ----- filtering ---------------------------------------------------------
+  const facets = useFacetFilters(LOG_FACETS);
   const filtered = useMemo(() => {
     if (!data) return [];
     const needle = q.trim().toLowerCase();
-    return data.filter((p) => {
+    return applyFacets(data, LOG_FACETS, facets.selection).filter((p) => {
       if (!matchesVerdict(p, verdictFilter)) return false;
       if (!needle) return true;
       return (
@@ -234,7 +256,7 @@ export function PatternsPage() {
         (p.rule_name ?? "").toLowerCase().includes(needle)
       );
     });
-  }, [data, q, verdictFilter]);
+  }, [data, q, verdictFilter, facets.selection]);
 
   const counts = useMemo(() => {
     if (!data) return null;
@@ -280,9 +302,11 @@ export function PatternsPage() {
   // ----- pagination (100/page) — resets to page 1 when the verdict filter,
   // scope tab, search, or sort changes so a filter never strands the operator
   // on an empty page.
-  const pg = usePagination(sorted.rows, {
-    resetKey: `${verdictFilter}|${scope}|${q}|${sorted.signature}`,
-  });
+  const listKey = `${verdictFilter}|${scope}|${q}|${facets.signature}|${sorted.signature}`;
+  const pg = usePagination(sorted.rows, { resetKey: listKey });
+  const grouping = useServiceGrouping(sorted.rows, logService, listKey);
+  // The rows actually on screen, in display order, for selection and j/k.
+  const visibleRows = grouping.grouped ? grouping.visibleRows : pg.pageItems;
 
   // ----- selection + action bar -------------------------------------------
   // The checkbox selection is the ONE row-action model: a select-all checkbox
@@ -293,10 +317,10 @@ export function PatternsPage() {
   // resets on verdict / scope / search / PAGE change.
   const bulkActions = buildLogsBulkActions({ scope, excludeVisible: excl.visible });
   const bulkEnabled = bulkActions.length > 0;
-  const pageKeys = useMemo(() => pg.pageItems.map((p) => p.id), [pg.pageItems]);
+  const pageKeys = useMemo(() => visibleRows.map((p) => p.id), [visibleRows]);
   const bulk = useBulkSelection(
     pageKeys,
-    `${verdictFilter}|${scope}|${q}|${sorted.signature}|${pg.page}`,
+    `${listKey}|${grouping.grouped}|${pg.page}|${grouping.pagination.page}`,
   );
 
   const onBulkAction = (spec: { id: string }) => {
@@ -328,13 +352,13 @@ export function PatternsPage() {
 
   // ----- keyboard: j/k rows · Enter view · K known -------------------------
   const keys = useTableKeys({
-    size: pg.pageItems.length,
+    size: visibleRows.length,
     onOpen: (i) => {
-      const row = pg.pageItems[i];
+      const row = visibleRows[i];
       if (row) setPeekId(row.id);
     },
     extra: (key, index) => {
-      const row = pg.pageItems[index];
+      const row = visibleRows[index];
       if (!row) return false;
       if (key === "K") {
         verdictMutation.mutate({ id: row.id, verdict: "known" });
@@ -383,47 +407,78 @@ export function PatternsPage() {
       <main className="flex-1 overflow-auto p-4 lg:p-6">
         <FilterBar
           tabs={
-            <>
-              <SegmentedControl
-                param={VERDICT_PARAM}
-                defaultValue="all"
-                aria-label="Verdict filter"
-                options={[
-                  { value: "all", label: "All", badge: counts?.all },
-                  {
-                    value: "uncurated",
-                    label: "Still learning",
-                    badge: counts?.uncurated,
-                  },
-                  { value: "known", label: "Known", badge: counts?.known },
-                ]}
-              />
-              {excl.visible && (
-                <SegmentedControl
-                  param={SCOPE_PARAM}
-                  defaultValue="active"
-                  aria-label="Learning scope"
-                  options={[
-                    { value: "active", label: "Active", badge: scopeCounts.active },
-                    {
-                      value: "ignored",
-                      label: "Ignored",
-                      badge: scopeCounts.ignored,
-                    },
-                  ]}
-                />
-              )}
-            </>
-          }
-          search={
-            <SearchInput
-              value={q}
-              onChange={setQ}
-              className="w-full max-w-md sm:w-auto sm:flex-1"
-              placeholder="Search template, service, id, or rule…"
+            <SegmentedControl
+              param={VERDICT_PARAM}
+              defaultValue="all"
+              aria-label="Verdict filter"
+              options={[
+                { value: "all", label: "All", badge: counts?.all },
+                {
+                  value: "uncurated",
+                  label: "Still learning",
+                  badge: counts?.uncurated,
+                },
+                { value: "known", label: "Known", badge: counts?.known },
+              ]}
             />
           }
-          actions={<AutoRefreshControl state={refresh} />}
+          search={
+            <>
+              <SearchInput
+                value={q}
+                onChange={setQ}
+                className="w-full max-w-md sm:w-auto sm:flex-1"
+                placeholder="Search template, service, id, or rule…"
+              />
+              <FilterPanel
+                facets={facetViews(data ?? [], LOG_FACETS, facets.selection)}
+                activeCount={facets.activeCount + (excl.visible && scope === "ignored" ? 1 : 0)}
+                onToggle={facets.toggle}
+                onClear={() =>
+                  setParams(
+                    (prev) => {
+                      const next = withoutFacets(prev, LOG_FACETS);
+                      if (excl.visible) next.delete(SCOPE_PARAM);
+                      return next;
+                    },
+                    { replace: true },
+                  )
+                }
+                controls={
+                  excl.visible ? (
+                    <SegmentedControl
+                      param={SCOPE_PARAM}
+                      defaultValue="active"
+                      aria-label="Learning scope"
+                      options={[
+                        { value: "active", label: "Active", badge: scopeCounts.active },
+                        { value: "ignored", label: "Ignored", badge: scopeCounts.ignored },
+                      ]}
+                    />
+                  ) : undefined
+                }
+              />
+            </>
+          }
+          actions={
+            <>
+              <SegmentedControl
+                param={GROUP_PARAM}
+                defaultValue={GROUP_BY_SERVICE}
+                aria-label="List view"
+                options={[
+                  { value: GROUP_BY_SERVICE, label: "By service" },
+                  { value: "flat", label: "Flat" },
+                ]}
+              />
+              <AutoRefreshControl state={refresh} />
+            </>
+          }
+        />
+        <ActiveFilterChips
+          chips={facetChips(LOG_FACETS, facets.selection)}
+          onRemove={facets.toggle}
+          onClear={facets.clear}
         />
 
         {isError ? (
@@ -534,7 +589,14 @@ export function PatternsPage() {
                       </td>
                     </tr>
                   )}
-                  {pg.pageItems.map((p, i) => (
+                  <ServiceGroupedRows
+                    grouped={grouping.grouped}
+                    views={grouping.views}
+                    flatRows={pg.pageItems}
+                    colSpan={cols}
+                    onToggle={grouping.toggle}
+                    onShowMore={grouping.showMore}
+                    renderRow={(p, i) => (
                     <tr key={p.id} {...keys.rowProps(i)}>
                       {bulkEnabled && (
                         <td className="w-8">
@@ -614,11 +676,16 @@ export function PatternsPage() {
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    )}
+                  />
                 </tbody>
               </table>
             </div>
-            <Pagination state={pg} />
+            {grouping.grouped ? (
+              <Pagination state={grouping.pagination} noun="services" />
+            ) : (
+              <Pagination state={pg} />
+            )}
             {(isFetchingNextPage || hasNextPage) && (
               <div
                 className="flex items-center justify-center gap-1.5 border-t border-ink-600 px-3 py-2 text-2xs text-ink-400"

@@ -78,7 +78,6 @@ func NewToolAPIWithHTTPClient(ctx context.Context, region string, client aws.HTT
 	}
 	return cloudwatchlogs.NewFromConfig(cfg, func(options *cloudwatchlogs.Options) {
 		options.BaseEndpoint = nil
-		options.EndpointResolver = nil
 		options.EndpointResolverV2 = pinnedResolver{}
 		options.HTTPClient = pinnedClient{client: client, host: resolved.URI.Host}
 		options.RetryMaxAttempts = 1

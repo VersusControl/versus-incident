@@ -308,6 +308,7 @@ agent:
     # Model backend: openai | deepseek | qwen | ollama | claude | gemini.
     # apiKey below must be the credential for the provider selected here.
     provider: openai
+    baseUrl: ""
     # API key for the selected provider. Stored in the chart Secret and
     # exposed as the AGENT_AI_API_KEY env var.
     apiKey: ""

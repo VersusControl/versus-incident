@@ -594,17 +594,17 @@ func buildElasticsearchToolSources(sources []config.AgentSourceConfig) ([]elasti
 		}
 		name := strings.TrimSpace(source.Name)
 		if name == "" {
-			errs = append(errs, fmt.Errorf("Elasticsearch tool source name is required"))
+			errs = append(errs, fmt.Errorf("agent: Elasticsearch tool source name is required"))
 			continue
 		}
 		if _, duplicate := seen[name]; duplicate {
-			errs = append(errs, fmt.Errorf("Elasticsearch tool source %q is duplicated", boundAvailabilityText(name, 80)))
+			errs = append(errs, fmt.Errorf("agent: Elasticsearch tool source %q is duplicated", boundAvailabilityText(name, 80)))
 			continue
 		}
 		seen[name] = struct{}{}
 		service, err := elasticsearchapp.NewService(source.Elasticsearch)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("Elasticsearch tool source %q has invalid configuration", boundAvailabilityText(name, 80)))
+			errs = append(errs, fmt.Errorf("agent: Elasticsearch tool source %q has invalid configuration", boundAvailabilityText(name, 80)))
 			continue
 		}
 		result = append(result, elasticsearchtools.Source{Name: name, Service: service})
@@ -656,13 +656,13 @@ func buildLokiToolSources(sources []config.AgentSourceConfig, scrubber core.Scru
 		}
 		name := strings.TrimSpace(source.Name)
 		if name == "" || seen[name] {
-			errs = append(errs, fmt.Errorf("Loki tool source name is missing or duplicated"))
+			errs = append(errs, fmt.Errorf("agent: Loki tool source name is missing or duplicated"))
 			continue
 		}
 		seen[name] = true
 		service, err := lokiapp.NewService(source.Loki, scrubber)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("Loki tool source %q: selector-only scope and safe endpoint are required", boundAvailabilityText(name, 80)))
+			errs = append(errs, fmt.Errorf("agent: Loki tool source %q: selector-only scope and safe endpoint are required", boundAvailabilityText(name, 80)))
 			continue
 		}
 		result = append(result, lokitools.Source{Name: name, Service: service})
@@ -677,7 +677,7 @@ func buildGraylogToolSources(sources []config.AgentSourceConfig, scrubber core.S
 	const maxSources = 128
 	const maxGraylogNames = 64
 	if len(sources) > maxSources {
-		return nil, []error{fmt.Errorf("Graylog tool source configuration exceeds safety limits")}
+		return nil, []error{fmt.Errorf("agent: Graylog tool source configuration exceeds safety limits")}
 	}
 	result := make([]graylogtools.Source, 0)
 	var errs []error
@@ -696,7 +696,7 @@ func buildGraylogToolSources(sources []config.AgentSourceConfig, scrubber core.S
 	}
 	for _, source := range sources {
 		if source.Enable && source.Type == "graylog" && len(source.Name) > 80 {
-			return nil, []error{fmt.Errorf("Graylog tool source configuration exceeds safety limits")}
+			return nil, []error{fmt.Errorf("agent: Graylog tool source configuration exceeds safety limits")}
 		}
 		for _, value := range []string{
 			source.Graylog.APIToken, source.Graylog.Username, source.Graylog.Password,
@@ -706,16 +706,16 @@ func buildGraylogToolSources(sources []config.AgentSourceConfig, scrubber core.S
 			source.Splunk.Token, source.Splunk.Username, source.Splunk.Password,
 		} {
 			if !addCredential(value) {
-				return nil, []error{fmt.Errorf("Graylog tool source configuration exceeds safety limits")}
+				return nil, []error{fmt.Errorf("agent: Graylog tool source configuration exceeds safety limits")}
 			}
 		}
 		if !collectSourceOptionCredentials(source.Options, &optionNodes, &credentialBytes, addCredential) {
-			return nil, []error{fmt.Errorf("Graylog tool source configuration exceeds safety limits")}
+			return nil, []error{fmt.Errorf("agent: Graylog tool source configuration exceeds safety limits")}
 		}
 		if source.Enable && source.Type == "graylog" {
 			graylogNames++
 			if graylogNames > maxGraylogNames {
-				return nil, []error{fmt.Errorf("Graylog tool source configuration exceeds safety limits")}
+				return nil, []error{fmt.Errorf("agent: Graylog tool source configuration exceeds safety limits")}
 			}
 			counts[strings.TrimSpace(source.Name)]++
 		}
@@ -726,7 +726,7 @@ func buildGraylogToolSources(sources []config.AgentSourceConfig, scrubber core.S
 		}
 		name := strings.TrimSpace(source.Name)
 		if name == "" || counts[name] != 1 {
-			errs = append(errs, fmt.Errorf("Graylog tool source name is missing or duplicated"))
+			errs = append(errs, fmt.Errorf("agent: Graylog tool source name is missing or duplicated"))
 			continue
 		}
 		valid := len(name) <= 80
@@ -738,7 +738,7 @@ func buildGraylogToolSources(sources []config.AgentSourceConfig, scrubber core.S
 			}
 		}
 		if !valid {
-			errs = append(errs, fmt.Errorf("Graylog tool source name is invalid"))
+			errs = append(errs, fmt.Errorf("agent: Graylog tool source name is invalid"))
 			continue
 		}
 		for _, secret := range credentials {
@@ -760,12 +760,12 @@ func buildGraylogToolSources(sources []config.AgentSourceConfig, scrubber core.S
 			valid = false
 		}
 		if !valid {
-			errs = append(errs, fmt.Errorf("Graylog tool source name is invalid"))
+			errs = append(errs, fmt.Errorf("agent: Graylog tool source name is invalid"))
 			continue
 		}
 		service, err := graylogapp.NewService(source.Graylog, scrubber)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("Graylog tool source has invalid configuration"))
+			errs = append(errs, fmt.Errorf("agent: Graylog tool source has invalid configuration"))
 			continue
 		}
 		result = append(result, graylogtools.Source{Name: name, Service: service})
@@ -776,7 +776,7 @@ func buildGraylogToolSources(sources []config.AgentSourceConfig, scrubber core.S
 
 func buildSplunkToolSources(sources []config.AgentSourceConfig, scrubber core.Scrubber) ([]splunktools.Source, []error) {
 	if len(sources) > 128 {
-		return nil, []error{fmt.Errorf("Splunk tool source configuration exceeds safety limits")}
+		return nil, []error{fmt.Errorf("agent: Splunk tool source configuration exceeds safety limits")}
 	}
 	var credentials []string
 	credentialBytes := 0
@@ -791,7 +791,7 @@ func buildSplunkToolSources(sources []config.AgentSourceConfig, scrubber core.Sc
 			source.Elasticsearch.APIKey, source.Elasticsearch.Username, source.Elasticsearch.Password,
 		} {
 			if len(value) > graylogMaxCredentialBytes-credentialBytes {
-				return nil, []error{fmt.Errorf("Splunk tool source configuration exceeds safety limits")}
+				return nil, []error{fmt.Errorf("agent: Splunk tool source configuration exceeds safety limits")}
 			}
 			credentialBytes += len(value)
 			credentials = append(credentials, value)
@@ -805,12 +805,12 @@ func buildSplunkToolSources(sources []config.AgentSourceConfig, scrubber core.Sc
 			return true
 		}
 		if !collectSourceOptionCredentials(source.Options, &optionNodes, &credentialBytes, addCredential) {
-			return nil, []error{fmt.Errorf("Splunk tool source configuration exceeds safety limits")}
+			return nil, []error{fmt.Errorf("agent: Splunk tool source configuration exceeds safety limits")}
 		}
 		if source.Enable && source.Type == "splunk" {
 			counts[strings.TrimSpace(source.Name)]++
 			if len(source.Name) > 80 || len(counts) > 64 {
-				return nil, []error{fmt.Errorf("Splunk tool source configuration exceeds safety limits")}
+				return nil, []error{fmt.Errorf("agent: Splunk tool source configuration exceeds safety limits")}
 			}
 		}
 	}
@@ -822,7 +822,7 @@ func buildSplunkToolSources(sources []config.AgentSourceConfig, scrubber core.Sc
 		}
 		name := strings.TrimSpace(source.Name)
 		if name == "" || counts[name] != 1 {
-			errs = append(errs, fmt.Errorf("Splunk tool source name is missing or duplicated"))
+			errs = append(errs, fmt.Errorf("agent: Splunk tool source name is missing or duplicated"))
 			continue
 		}
 		valid := len(name) <= 80
@@ -847,12 +847,12 @@ func buildSplunkToolSources(sources []config.AgentSourceConfig, scrubber core.Sc
 			valid = false
 		}
 		if !valid {
-			errs = append(errs, fmt.Errorf("Splunk tool source name is invalid"))
+			errs = append(errs, fmt.Errorf("agent: Splunk tool source name is invalid"))
 			continue
 		}
 		service, err := splunkapp.NewService(source.Splunk, scrubber)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("Splunk tool source has invalid configuration"))
+			errs = append(errs, fmt.Errorf("agent: Splunk tool source has invalid configuration"))
 			continue
 		}
 		result = append(result, splunktools.Source{Name: name, Service: service})
@@ -1216,11 +1216,18 @@ func buildRunbookManagerFromDir(cfg config.AgentConfig, store storage.Provider, 
 	if embCfg.EmbeddingModel != "" {
 		base := config.AgentAIConfig{
 			Provider: cfg.AI.Provider,
+			BaseURL:  cfg.AI.BaseURL,
 			Model:    embCfg.EmbeddingModel,
 			APIKey:   cfg.AI.APIKey,
 		}
 		embeddingKey := func(ctx context.Context) (string, bool) {
-			if runtime.Provider != nil {
+			hasBaseURL := strings.TrimSpace(cfg.AI.BaseURL) != ""
+			if runtime.BaseURL != nil {
+				if baseURL, ok := runtime.BaseURL(ctx); ok {
+					hasBaseURL = strings.TrimSpace(baseURL) != ""
+				}
+			}
+			if !hasBaseURL && runtime.Provider != nil {
 				if provider, ok := runtime.Provider(ctx); ok && !einowrap.IsSupportedEmbedderProvider(provider) {
 					return "", false
 				}

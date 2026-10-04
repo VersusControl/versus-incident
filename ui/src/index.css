@@ -134,6 +134,10 @@ body,
   height: 100%;
 }
 
+#root {
+  overflow: clip;
+}
+
 html {
   /* Native scrollbars, form controls and UA widgets follow the theme. */
   color-scheme: dark;

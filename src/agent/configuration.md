@@ -291,10 +291,22 @@ temperature at `1` and reject any explicit value.
 |---|---|---|---|
 | `enable` | bool | `false` | Turns on the AI SRE (detect triage + analyze). Env: `AGENT_AI_ENABLE`. |
 | `provider` | string | `openai` | Model backend: `openai`, `deepseek`, `qwen`, `ollama`, `claude`, or `gemini`. An unknown value fails fast (no silent fallback). Env: `AGENT_AI_PROVIDER`. |
+| `base_url` | string | `""` | Custom OpenAI-compatible chat-completions base URL. When nonempty, takes precedence over `provider` for Detect, Chat, and Analyze. Env: `AGENT_AI_BASE_URL`; an empty env value restores provider selection. |
 | `api_key` | string | — | API key for the model provider. Env: `AGENT_AI_API_KEY`. |
 | `model` | string | — | Shared default model for both tasks. Env: `AGENT_AI_MODEL`. |
 | `temperature` | float | `0.2` | Randomness control. Set `-1` to omit the field for beta-limited / reasoning models that reject explicit temperature values. |
 | `analyze.model` | string | inherits `model` | Optional stronger model just for analyze. |
+
+For a custom server, configure its API base including any required prefix:
+
+```yaml
+agent:
+  ai:
+    enable: true
+    base_url: https://models.example.com/v1
+    api_key: ${AGENT_AI_API_KEY}
+    model: custom-model
+```
 
 > The tool-loop knobs `tool_timeout` and `parallel_tools` moved to the
 > root of `tools.yaml` (see below) — they apply to every analyze tool

@@ -48,14 +48,15 @@ export function AppShell() {
           Skip to content
         </a>
 
-        <div className="flex h-full overflow-hidden" data-testid="app-authenticated">
+        {/* overflow-clip (not hidden): a clipped frame can't be scrolled by focus or scrollIntoView. */}
+        <div className="flex h-full min-h-0 overflow-clip" data-testid="app-authenticated">
           <Sidebar />
           <div
             id="main"
             ref={mainRef}
             tabIndex={-1}
             style={{ outline: "none" }}
-            className="flex min-w-0 flex-1 flex-col overflow-hidden outline-none focus-visible:outline-none"
+            className="flex min-h-0 min-w-0 flex-1 flex-col overflow-clip outline-none focus-visible:outline-none"
           >
             {/* Keyed by pathname: a page crash keeps the shell navigable and
                 navigating away remounts a clean boundary — and drops the cached

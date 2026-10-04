@@ -2,13 +2,17 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import {
+  SETTINGS_LEGACY_TABS,
+  SETTINGS_SECTIONS,
+  resolveSection,
+} from "@/components/settings/sections";
 
 // Source-pinned guards (mounting these pages needs the full react-query +
 // router context — see adminUiImprovements.test.ts / tableConsistency.test.tsx),
 // for two changes:
-//   • Settings groups the incident-delivery config with the spike baseline
-//     control under one "Alerting" tab, leaving the agent runtime + report on
-//     the "Agent" tab — no empty tab.
+//   • Settings renders one section at a time from the shared section registry,
+//     so every registered section has a matching control.
 //   • The incident / decision / analysis tables reuse the SAME building blocks
 //     as the logs / metrics / traces tables: row-select checkboxes feeding a
 //     BulkActionBar, an eye that opens a PeekPanel, and pagination.
@@ -16,40 +20,27 @@ import path from "node:path";
 const here = path.dirname(fileURLToPath(import.meta.url)); // src/lib
 const read = (rel: string) => readFileSync(path.resolve(here, rel), "utf8");
 
-describe("Settings — three tabs: Alerting, Agent, System", () => {
+describe("Settings — one section at a time", () => {
   const src = read("../pages/SettingsPage.tsx");
 
-  it("defaults to Alerting and offers all three tabs", () => {
-    expect(src.includes('defaultValue="alerting"')).toBe(true);
-    expect(src.includes('{ value: "alerting", label: "Alerting" }')).toBe(true);
-    expect(src.includes('{ value: "agent", label: "Agent" }')).toBe(true);
-    // The tab param value stays "tuning" so existing deep links keep working.
-    expect(src.includes('{ value: "tuning", label: "System" }')).toBe(true);
+  it("uses the shared layout with the settings registry and legacy tabs", () => {
+    expect(src.includes("<SettingsLayout")).toBe(true);
+    expect(src.includes("sections={SETTINGS_SECTIONS}")).toBe(true);
+    expect(src.includes("legacy={{ tabs: SETTINGS_LEGACY_TABS }}")).toBe(true);
   });
 
-  it("Alerting tab shows the incident-delivery config only (spike moved out)", () => {
-    const alerting = src.slice(
-      src.indexOf('tab === "alerting"'),
-      src.indexOf('tab === "agent"'),
-    );
-    expect(alerting.includes("<IncidentsConfigPanel />")).toBe(true);
-    expect(alerting.includes("<SpikeSettingsControl />")).toBe(false);
+  it("renders a control for every registered section", () => {
+    for (const s of SETTINGS_SECTIONS) {
+      if (s.id === SETTINGS_SECTIONS[0].id) continue; // the default branch
+      expect(src.includes(`case "${s.id}":`)).toBe(true);
+    }
   });
 
-  it("Agent tab shows the agent runtime config only (report moved out)", () => {
-    const agent = src.slice(
-      src.indexOf('tab === "agent"'),
-      src.indexOf(") : ("),
-    );
-    expect(agent.includes("<AgentConfigPanel />")).toBe(true);
-    expect(agent.includes("<ReportSettingsControl />")).toBe(false);
-  });
-
-  it("System tab groups the count window + spike baseline + incident report", () => {
-    const tuning = src.slice(src.indexOf(") : ("));
-    expect(tuning.includes("<CountSettingsControl />")).toBe(true);
-    expect(tuning.includes("<SpikeSettingsControl />")).toBe(true);
-    expect(tuning.includes("<ReportSettingsControl />")).toBe(true);
+  it("keeps the tuning controls on their own sections", () => {
+    expect(src.includes("<CountSettingsControl />")).toBe(true);
+    expect(src.includes("<ServiceHealthSettingsControl />")).toBe(true);
+    expect(src.includes("<SpikeSettingsControl />")).toBe(true);
+    expect(src.includes("<ReportSettingsControl />")).toBe(true);
   });
 });
 
@@ -100,17 +91,15 @@ describe("Service detail — the pattern peek shows samples + baselines", () => 
   });
 });
 
-// The old /config/* URLs must keep resolving after the Settings reorg: the two
-// pre-reorg config pages now live as tabs on /settings, so their legacy paths
-// redirect there — incidents config to the default (Alerting) tab, agent config
-// to the Agent tab. Source-pinned against the router (mounting App needs the
-// whole auth + react-query context) and cross-checked against the tab the
-// destination reads, so a redirect can never land on a tab Settings ignores.
-describe("Legacy /config/* URLs redirect into the Settings tabs", () => {
+// The old /config/* URLs must keep resolving: incidents config redirects to the
+// default Settings section, agent config to the agent runtime section. Source-
+// pinned against the router (mounting App needs the whole auth + react-query
+// context) and cross-checked against the registry, so a redirect can never
+// land on a section Settings doesn't know.
+describe("Legacy /config/* URLs redirect into Settings sections", () => {
   const app = read("../App.tsx");
-  const settings = read("../pages/SettingsPage.tsx");
 
-  it("redirects /config/incidents to the default Settings (Alerting) tab", () => {
+  it("redirects /config/incidents to the default Settings section", () => {
     expect(
       /path="\/config\/incidents"[\s\S]*?Navigate to="\/settings" replace/.test(
         app,
@@ -118,21 +107,22 @@ describe("Legacy /config/* URLs redirect into the Settings tabs", () => {
     ).toBe(true);
   });
 
-  it("redirects /config/agent to the Agent tab on Settings", () => {
+  it("redirects /config/agent to the agent runtime section", () => {
     expect(
-      /path="\/config\/agent"[\s\S]*?Navigate to="\/settings\?tab=agent" replace/.test(
+      /path="\/config\/agent"[\s\S]*?Navigate to="\/settings\?section=agent-runtime" replace/.test(
         app,
       ),
     ).toBe(true);
+    expect(
+      resolveSection(SETTINGS_SECTIONS, { section: "agent-runtime" }).id,
+    ).toBe("agent-runtime");
   });
 
-  it("Settings selects each tab from its ?tab= value and defaults to Alerting", () => {
-    // Every current tab must be reachable via its own ?tab= value, and an
-    // unknown/absent value must fall back to the default (Alerting) tab — the
-    // /config/agent redirect target (?tab=agent) therefore opens the Agent tab.
-    expect(settings.includes('raw === "agent" ? "agent"')).toBe(true);
-    expect(settings.includes('raw === "tuning" ? "tuning"')).toBe(true);
-    expect(settings.includes(': "alerting"')).toBe(true);
-    expect(settings.includes('const raw = params.get("tab")')).toBe(true);
+  it("maps every pre-section ?tab= value to a known section", () => {
+    for (const tab of ["alerting", "agent", "tuning"]) {
+      const r = resolveSection(SETTINGS_SECTIONS, { tab }, { tabs: SETTINGS_LEGACY_TABS });
+      expect(r.fromLegacy).toBe(true);
+      expect(SETTINGS_SECTIONS.some((s) => s.id === r.id)).toBe(true);
+    }
   });
 });

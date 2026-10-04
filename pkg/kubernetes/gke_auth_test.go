@@ -65,6 +65,8 @@ type contextCheckingTokenSource struct {
 	want context.Context
 }
 
+type gkeCallerContextKey struct{}
+
 func (source contextCheckingTokenSource) Token(ctx context.Context) (*oauth2.Token, error) {
 	if ctx != source.want {
 		return nil, errors.New("caller context was not forwarded")
@@ -73,7 +75,7 @@ func (source contextCheckingTokenSource) Token(ctx context.Context) (*oauth2.Tok
 }
 
 func TestGKESourceForwardsCallerContext(t *testing.T) {
-	ctx := context.WithValue(context.Background(), struct{}{}, "caller")
+	ctx := context.WithValue(context.Background(), gkeCallerContextKey{}, "caller")
 	source := newGKESource(contextCheckingTokenSource{want: ctx}, time.Now)
 	if _, err := source.Authorization(ctx); err != nil {
 		t.Fatal(err)

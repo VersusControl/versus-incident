@@ -301,6 +301,7 @@ data:
       ai:
         enable: {{ $ai.enable }}
         provider: {{ $ai.provider | default "openai" | quote }}
+        base_url: {{ $ai.baseUrl | default "" | quote }}
         api_key: ${AGENT_AI_API_KEY}
         model: {{ $ai.model | default "gpt-4o-mini" | quote }}
         temperature: {{ $ai.temperature | default 0.2 }}
