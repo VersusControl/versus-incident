@@ -42,7 +42,7 @@ type chatModelRequest struct {
 	// jsonMode forces structured JSON output. detect (NewChatModel) sets it;
 	// the tool-calling analyze path (NewToolCallingChatModel) does not, because
 	// JSON-mode and tool_calls are mutually exclusive on most providers.
-	jsonMode bool
+	jsonMode    bool
 	egressGuard egress.Guard
 }
 

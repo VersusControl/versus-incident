@@ -52,7 +52,7 @@ func (tool ProposalTool) Invoke(ctx context.Context, args json.RawMessage) (*cor
 			Kind: core.ChatEventApproval,
 			Approval: &core.ChatApproval{
 				ID: approval.ID, ProposalID: approval.Proposal.ID, RunID: approval.Proposal.RunID,
-				Type: string(approval.Proposal.Type),
+				Type:   string(approval.Proposal.Type),
 				Target: fmt.Sprintf("%s/%s/%s", approval.Proposal.Target.Namespace, approval.Proposal.Target.Kind, approval.Proposal.Target.Name),
 				Effect: approval.Proposal.DryRun, Risk: string(approval.Proposal.Risk),
 				State: approval.State, ExpiresAt: approval.ExpiresAt,

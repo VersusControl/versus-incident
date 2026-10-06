@@ -22,7 +22,6 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/detect"
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/router"
-	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
@@ -32,6 +31,7 @@ import (
 	signoztools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/signoz"
 	splunktools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/splunk"
 	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
+	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	"github.com/VersusControl/versus-incident/pkg/baseline"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -66,7 +66,7 @@ type AIBundle struct {
 	AnalyzeRate *ai.RateLimiter // separate hourly cap for analyze
 	ChatRate    *ai.RateLimiter
 	// ChatService returns an org-scoped durable service. Nil when chat is unavailable.
-	ChatService func(scope tenancy.OrgScope) *chatagent.Service
+	ChatService   func(scope tenancy.OrgScope) *chatagent.Service
 	ActionService func(scope tenancy.OrgScope) *act.Service
 	// Runbooks is the runbook corpus manager shared by the find_runbook
 	// read path and the admin runbooks UI (upload/list/delete). Nil when

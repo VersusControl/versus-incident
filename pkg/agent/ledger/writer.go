@@ -22,12 +22,12 @@ var ErrLedgerUnavailable = errors.New("agent ledger unavailable")
 type TriggerKind string
 
 const (
-	TriggerUser      TriggerKind = "user"
-	TriggerIncident  TriggerKind = "incident"
-	TriggerSchedule  TriggerKind = "schedule"
-	TriggerCI        TriggerKind = "ci"
-	TriggerMCP       TriggerKind = "mcp"
-	TriggerSubagent  TriggerKind = "subagent"
+	TriggerUser     TriggerKind = "user"
+	TriggerIncident TriggerKind = "incident"
+	TriggerSchedule TriggerKind = "schedule"
+	TriggerCI       TriggerKind = "ci"
+	TriggerMCP      TriggerKind = "mcp"
+	TriggerSubagent TriggerKind = "subagent"
 )
 
 type Subject struct {

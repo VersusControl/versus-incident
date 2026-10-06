@@ -48,7 +48,7 @@ type Record struct {
 	Generation          int64
 	Labels              map[string]string
 	Selector            map[string]string
-	References           map[string][]string
+	References          map[string][]string
 	Owners              []OwnerRef
 	Target              *OwnerRef
 	CreatedAt           time.Time

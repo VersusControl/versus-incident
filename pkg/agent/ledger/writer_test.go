@@ -44,7 +44,7 @@ func TestBlobWriterRequiresRecordedTrigger(t *testing.T) {
 
 type completionFailureWriter struct{ appends int }
 
-func (writer *completionFailureWriter) Begin(context.Context, Trigger) error { return nil }
+func (writer *completionFailureWriter) Begin(context.Context, Trigger) error            { return nil }
 func (writer *completionFailureWriter) Close(context.Context, string, RunOutcome) error { return nil }
 func (writer *completionFailureWriter) Append(_ context.Context, entry Entry) (Entry, error) {
 	writer.appends++
@@ -58,8 +58,8 @@ func (writer *completionFailureWriter) Append(_ context.Context, entry Entry) (E
 type invokedTool struct{ calls int }
 
 func (*invokedTool) Name() string               { return "read_status" }
-func (*invokedTool) Description() string         { return "read status" }
-func (*invokedTool) ArgsSchema() map[string]any  { return map[string]any{"type": "object"} }
+func (*invokedTool) Description() string        { return "read status" }
+func (*invokedTool) ArgsSchema() map[string]any { return map[string]any{"type": "object"} }
 func (tool *invokedTool) Invoke(context.Context, json.RawMessage) (*core.ToolResult, error) {
 	tool.calls++
 	return &core.ToolResult{Tool: tool.Name(), Found: true}, nil

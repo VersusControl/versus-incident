@@ -18,34 +18,34 @@ const (
 )
 
 type ChatApproval struct {
-	ID        string    `json:"id"`
-	ProposalID string   `json:"proposal_id"`
-	RunID     string    `json:"run_id"`
-	Type      string    `json:"type"`
-	Target    string    `json:"target"`
-	Effect    string    `json:"effect"`
-	Risk      string    `json:"risk"`
-	State     string    `json:"state"`
-	ExpiresAt time.Time `json:"expires_at"`
+	ID         string    `json:"id"`
+	ProposalID string    `json:"proposal_id"`
+	RunID      string    `json:"run_id"`
+	Type       string    `json:"type"`
+	Target     string    `json:"target"`
+	Effect     string    `json:"effect"`
+	Risk       string    `json:"risk"`
+	State      string    `json:"state"`
+	ExpiresAt  time.Time `json:"expires_at"`
 }
 
 // ChatEvent is one observable step of a chat turn. Error contains only a safe
 // classification; backend and model errors must never cross this boundary.
 type ChatEvent struct {
-	Seq         int64          `json:"seq"`
-	At          time.Time      `json:"at"`
-	Kind        string         `json:"kind"`
-	Delta       string         `json:"delta,omitempty"`
-	Tool        string         `json:"tool,omitempty"`
-	CallID      string         `json:"call_id,omitempty"`
-	ToolDisplay string         `json:"tool_display,omitempty"`
-	Args        string         `json:"args,omitempty"`
-	Output      string         `json:"output,omitempty"`
-	DurationMs  int64          `json:"duration_ms,omitempty"`
-	Error       string         `json:"error,omitempty"`
-	Citations   []ChatCitation `json:"citations,omitempty"`
-	Approval    *ChatApproval  `json:"approval,omitempty"`
-	ApprovalNonce string       `json:"approval_nonce,omitempty"`
+	Seq           int64          `json:"seq"`
+	At            time.Time      `json:"at"`
+	Kind          string         `json:"kind"`
+	Delta         string         `json:"delta,omitempty"`
+	Tool          string         `json:"tool,omitempty"`
+	CallID        string         `json:"call_id,omitempty"`
+	ToolDisplay   string         `json:"tool_display,omitempty"`
+	Args          string         `json:"args,omitempty"`
+	Output        string         `json:"output,omitempty"`
+	DurationMs    int64          `json:"duration_ms,omitempty"`
+	Error         string         `json:"error,omitempty"`
+	Citations     []ChatCitation `json:"citations,omitempty"`
+	Approval      *ChatApproval  `json:"approval,omitempty"`
+	ApprovalNonce string         `json:"approval_nonce,omitempty"`
 }
 
 // ChatObserver receives events synchronously. Implementations must return

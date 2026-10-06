@@ -17,13 +17,13 @@ import (
 	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
 	cloudwatchlogtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/cloudwatchlogs"
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
-	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
 	graylogtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/graylog"
 	lokitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/loki"
 	signoztools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/signoz"
 	splunktools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/splunk"
 	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
+	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	"github.com/VersusControl/versus-incident/pkg/baseline"
 	cloudwatchlogapp "github.com/VersusControl/versus-incident/pkg/cloudwatchlogs"
 	"github.com/VersusControl/versus-incident/pkg/config"
@@ -119,7 +119,7 @@ func TestProposalToolIsAddedOnlyToChatRuntime(t *testing.T) {
 func TestKubernetesActionsRejectPodServiceAccountReuse(t *testing.T) {
 	_, err := buildKubernetesActionAdapters(config.KubernetesToolConfig{
 		Endpoint: "https://cluster.example",
-		Actions: config.KubernetesActionsToolConfig{Enable: true, Auth: config.KubernetesAuthConfig{Mode: "in_cluster"}},
+		Actions:  config.KubernetesActionsToolConfig{Enable: true, Auth: config.KubernetesAuthConfig{Mode: "in_cluster"}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "separate actor credential") {
 		t.Fatalf("in-cluster actor auth error=%v", err)

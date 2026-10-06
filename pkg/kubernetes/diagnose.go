@@ -8,10 +8,10 @@ import (
 )
 
 type DiagnoseOptions struct {
-	ResourceID string
-	Kind       string
-	Namespace  string
-	Name       string
+	ResourceID   string
+	Kind         string
+	Namespace    string
+	Name         string
 	LogTail      int
 	ChangeWindow time.Duration
 }
@@ -19,13 +19,13 @@ type DiagnoseOptions struct {
 type Diagnosis struct {
 	Workload      WorkloadDetail      `json:"workload"`
 	WarningEvents []ProjectedResource `json:"warning_events,omitempty"`
-	WorstPodLogs  *PodLogs         `json:"worst_pod_logs,omitempty"`
-	Changes       []Change         `json:"changes"`
-	Neighborhood  kubegraph.Graph  `json:"neighborhood"`
-	Partial       []PartialFailure `json:"partial_failures,omitempty"`
-	Omitted       []string         `json:"omitted_categories,omitempty"`
-	Truncated     bool             `json:"truncated"`
-	Sync          SyncStatus       `json:"sync"`
+	WorstPodLogs  *PodLogs            `json:"worst_pod_logs,omitempty"`
+	Changes       []Change            `json:"changes"`
+	Neighborhood  kubegraph.Graph     `json:"neighborhood"`
+	Partial       []PartialFailure    `json:"partial_failures,omitempty"`
+	Omitted       []string            `json:"omitted_categories,omitempty"`
+	Truncated     bool                `json:"truncated"`
+	Sync          SyncStatus          `json:"sync"`
 }
 
 // DiagnoseWorkload combines bounded workload, warning-event and scrubbed log evidence.

@@ -83,7 +83,7 @@ func TestCloneToolsConfig(t *testing.T) {
 				EKS:  KubernetesEKSConfig{ClusterName: "production", Region: "us-east-1"},
 			},
 			EndpointCIDRs: []string{"10.20.0.0/16"},
-			Actions: KubernetesActionsToolConfig{Enable: true, Auth: KubernetesAuthConfig{Mode: "token_file", TokenFile: "/run/secrets/kubernetes-actor/token"}, MaxReplicas: 12, Timeout: "15s"},
+			Actions:       KubernetesActionsToolConfig{Enable: true, Auth: KubernetesAuthConfig{Mode: "token_file", TokenFile: "/run/secrets/kubernetes-actor/token"}, MaxReplicas: 12, Timeout: "15s"},
 		},
 	}
 	got := cloneToolsConfig(src)

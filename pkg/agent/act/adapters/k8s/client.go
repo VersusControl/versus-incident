@@ -79,7 +79,8 @@ func NewClient(config ClientConfig) (API, error) {
 	caData := config.CAData
 	if config.CAFile != "" {
 		file, openErr := os.Open(config.CAFile)
-		if openErr != nil {			return nil, errors.New("kubernetes action CA is unavailable")
+		if openErr != nil {
+			return nil, errors.New("kubernetes action CA is unavailable")
 		}
 		caData, err = io.ReadAll(io.LimitReader(file, (4<<20)+1))
 		closeErr := file.Close()

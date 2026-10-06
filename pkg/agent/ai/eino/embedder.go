@@ -21,11 +21,11 @@ import (
 // with the chat path, HTTPClient is wrapped with the effective embedding
 // provider's native credential policy.
 type embedderRequest struct {
-	apiKey     string
-	model      string
-	baseURL    string
-	httpClient *http.Client
-	timeout    time.Duration
+	apiKey      string
+	model       string
+	baseURL     string
+	httpClient  *http.Client
+	timeout     time.Duration
 	egressGuard egress.Guard
 }
 

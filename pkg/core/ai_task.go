@@ -98,7 +98,7 @@ type ChatAttachment struct {
 	Incident *ChatIncidentContext `json:"incident,omitempty"`
 	Service  string               `json:"service,omitempty"`
 	Time     *ChatTimeRange       `json:"time_range,omitempty"`
-	Resource *ChatResourceRef    `json:"resource,omitempty"`
+	Resource *ChatResourceRef     `json:"resource,omitempty"`
 }
 
 // ChatTask is one user turn in a durable chat session.

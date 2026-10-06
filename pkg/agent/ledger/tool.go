@@ -18,8 +18,8 @@ type LedgeredTool struct {
 }
 
 func (tool LedgeredTool) Name() string               { return tool.Tool.Name() }
-func (tool LedgeredTool) Description() string         { return tool.Tool.Description() }
-func (tool LedgeredTool) ArgsSchema() map[string]any  { return tool.Tool.ArgsSchema() }
+func (tool LedgeredTool) Description() string        { return tool.Tool.Description() }
+func (tool LedgeredTool) ArgsSchema() map[string]any { return tool.Tool.ArgsSchema() }
 
 func (tool LedgeredTool) Invoke(ctx context.Context, args json.RawMessage) (*core.ToolResult, error) {
 	run, ok := RunFromContext(ctx)
