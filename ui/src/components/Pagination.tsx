@@ -1,6 +1,6 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import clsx from "clsx";
-import type { PaginationState } from "@/lib/pagination";
+import type { CursorPaginationState, PaginationState } from "@/lib/pagination";
 
 // Pagination — the single client-side pager wired into every agent admin
 // table. Page size is fixed at 100 (PAGE_SIZE): the founder hit a 2000+ row
@@ -59,5 +59,21 @@ export function Pagination({
         </button>
       </div>
     </div>
+  );
+}
+
+export function CursorPagination({ state, next, className }: { state: CursorPaginationState; next?: string; className?: string }) {
+  return (
+    <nav aria-label="Page navigation" className={clsx("flex items-center justify-between gap-2 border-t border-ink-500/40 px-3 py-2 text-2xs text-ink-300", className)}>
+      <span className="tabular-nums">Page {state.page}</span>
+      <div className="flex items-center gap-1">
+        <button type="button" className="btn px-2 py-1" disabled={!state.canPrevious} onClick={state.previousPage} aria-label="Previous page">
+          <ChevronLeft size={12} aria-hidden /> Prev
+        </button>
+        <button type="button" className="btn px-2 py-1" disabled={!next} onClick={() => state.nextPage(next)} aria-label="Next page">
+          Next <ChevronRight size={12} aria-hidden />
+        </button>
+      </div>
+    </nav>
   );
 }

@@ -22,6 +22,7 @@ import (
 	utilcb "github.com/cloudwego/eino/utils/callbacks"
 
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
+	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
@@ -219,7 +220,7 @@ func prepareTools(tools []core.Tool, timeout time.Duration) (map[string]core.Too
 		}
 		registry[value.Name()] = value
 		displays[value.Name()] = core.ToolDisplayName(value)
-		einotool, err := einowrap.NewTool(value, timeout, maxToolOutputBytes)
+		 einotool, err := einowrap.NewTool(ledger.LedgeredTool{Tool: value}, timeout, maxToolOutputBytes)
 		if err != nil {
 			return nil, nil, nil, err
 		}

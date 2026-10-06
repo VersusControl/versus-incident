@@ -24,6 +24,14 @@ export interface PaginationState extends PageSlice {
   setPage: (page: number) => void;
 }
 
+export interface CursorPaginationState {
+  page: number;
+  cursor?: string;
+  canPrevious: boolean;
+  previousPage: () => void;
+  nextPage: (next?: string) => void;
+}
+
 // pageSlice resolves the current window for a `total`-length list. It clamps a
 // stale/out-of-range page (e.g. the list shrank under the cursor after a
 // filter) down to the last real page and never returns page < 1.
@@ -74,4 +82,30 @@ export function usePagination<T>(
   );
 
   return { ...slice, setPage, pageItems };
+}
+
+export function useCursorPagination(resetKey: string): CursorPaginationState {
+  const [state, setState] = useState<{ resetKey: string; cursors: string[]; page: number }>({
+    resetKey,
+    cursors: [],
+    page: 1,
+  });
+  if (state.resetKey !== resetKey) {
+    setState({ resetKey, cursors: [], page: 1 });
+  }
+  const current = state.resetKey === resetKey ? state : { resetKey, cursors: [], page: 1 };
+  return {
+    page: current.page,
+    cursor: current.cursors[current.page - 2],
+    canPrevious: current.page > 1,
+    previousPage: () => setState((value) => value.resetKey === resetKey && value.page > 1
+      ? { ...value, page: value.page - 1 }
+      : value),
+    nextPage: (next) => {
+      if (!next) return;
+      setState((value) => value.resetKey === resetKey
+        ? { ...value, cursors: [...value.cursors.slice(0, value.page), next], page: value.page + 1 }
+        : value);
+    },
+  };
 }

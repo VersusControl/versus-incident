@@ -160,12 +160,20 @@ export function AgentToolsPage() {
     retry: false,
   });
   const catalog = buildCatalog(toolsets.data ?? [], config.data?.sources, config.isSuccess);
+  const actionsToolset = toolsets.data?.find((toolset) => toolset.id === "kubernetes-actions");
   const toggle = useMutation({
-    mutationFn: (input: { toolset: CatalogToolset; enabled: boolean }) =>
-      api.setAgentToolsetEnabled(agent, input.toolset.policy_id ?? input.toolset.id, input.enabled),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent-toolsets", agent] }),
+    mutationFn: (input: { agent: AgentToolKind; toolset: CatalogToolset; enabled: boolean }) =>
+      api.setAgentToolsetEnabled(input.agent, input.toolset.policy_id ?? input.toolset.id, input.enabled),
+    onSuccess: (_result, input) => queryClient.invalidateQueries({ queryKey: ["agent-toolsets", input.agent] }),
   });
   const selected = catalog.find((toolset) => toolset.id === selectedID) ?? null;
+  const toggleError = toggle.isError
+    && toggle.variables?.agent === agent
+    && selected !== null
+    && ((toggle.variables.toolset.policy_id ?? toggle.variables.toolset.id) === (selected.policy_id ?? selected.id)
+      || (selected.id === "kubernetes" && toggle.variables.toolset.id === actionsToolset?.id))
+    ? toggle.error
+    : null;
 
   return (
     <main className="min-w-0 flex-1 overflow-auto">
@@ -201,15 +209,8 @@ export function AgentToolsPage() {
             No tools are known to this build.
           </div>
         )}
-        {toggle.isError && (
-          <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded border border-sev-critical/40 bg-sev-critical/10 p-3 text-sm text-sev-critical">
-            <span className="flex items-center gap-2"><AlertCircle size={16} />{toggle.error.message}</span>
-            <button className="btn" onClick={() => toggle.reset()}><RefreshCw size={14} /> Dismiss</button>
-          </div>
-        )}
-
         {SECTIONS.map((section) => {
-          const rows = catalog.filter((toolset) => toolset.section === section);
+          const rows = catalog.filter((toolset) => toolset.section === section && toolset.id !== "kubernetes-actions");
           if (rows.length === 0) return null;
           return <section key={section} aria-labelledby={`tools-${section}`}>
             <h2 id={`tools-${section}`} className="mb-3 text-sm font-semibold text-ink-100">{SECTION_LABELS[section]}</h2>
@@ -219,7 +220,19 @@ export function AgentToolsPage() {
           </section>;
         })}
       </div>
-      {selected && <ToolsetDetails toolset={selected} agent={agent} pending={toggle.isPending && toggle.variables?.toolset.id === selected.id} onClose={() => setSelectedID(null)} onToggle={(enabled) => toggle.mutate({ toolset: selected, enabled })} />}
+      {selected && <ToolsetDetails
+        toolset={selected}
+        agent={agent}
+        toggleError={toggleError}
+        onDismissToggleError={() => toggle.reset()}
+        saving={toggle.isPending}
+        actionsToolset={selected.id === "kubernetes" ? actionsToolset : undefined}
+        pending={toggle.isPending && toggle.variables?.agent === agent && toggle.variables.toolset.id === selected.id}
+        actionsPending={toggle.isPending && toggle.variables?.agent === agent && toggle.variables.toolset.id === actionsToolset?.id}
+        onClose={() => setSelectedID(null)}
+        onToggle={(enabled) => toggle.mutate({ agent, toolset: selected, enabled })}
+        onToggleActions={(enabled) => actionsToolset && toggle.mutate({ agent, toolset: actionsToolset, enabled })}
+      />}
     </main>
   );
 }
@@ -260,17 +273,78 @@ function StateBadge({ state }: { state: CatalogToolState }) {
   return <span className={`mt-1 inline-flex items-center gap-1 text-2xs ${ready ? "text-sev-ok" : off ? "text-ink-400" : state === "unhealthy" ? "text-sev-critical" : ""}`}>{ready ? <Check size={11} /> : off ? <CircleOff size={11} /> : <AlertCircle size={11} />}{labels[state]}</span>;
 }
 
-function ToolsetDetails({ toolset, agent, pending, onClose, onToggle }: { toolset: CatalogToolset; agent: AgentToolKind; pending: boolean; onClose: () => void; onToggle: (enabled: boolean) => void }) {
+function PolicySwitch({ checked, label, stateLabel, description, disabled, pending, onToggle }: {
+  checked: boolean;
+  label: string;
+  stateLabel: string;
+  description: string;
+  disabled: boolean;
+  pending: boolean;
+  onToggle: (enabled: boolean) => void;
+}) {
+  return <div className="flex items-start gap-3">
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled || pending}
+      onClick={() => onToggle(!checked)}
+      className={`relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-150 motion-reduce:transition-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-60 ${checked ? "bg-link" : "bg-ink-600"}`}
+    >
+      <span className={`inline-block size-4 rounded-full bg-white transition-transform duration-150 motion-reduce:transition-none ${checked ? "translate-x-4" : "translate-x-0.5"}`} />
+    </button>
+    <span className="min-w-0 flex-1">
+      <span className="flex flex-wrap items-center gap-2 text-xs font-medium text-ink-100">
+        {stateLabel}
+        <span className={`rounded-full px-1.5 py-0.5 text-2xs ${checked ? "bg-link/15 text-link" : "bg-ink-600 text-ink-300"}`}>{checked ? "Enabled" : "Disabled"}</span>
+        {pending && <Loader2 size={13} className="animate-spin text-link" aria-label="Saving" />}
+      </span>
+      <span className="mt-1 block text-2xs leading-5 text-ink-400">{description}</span>
+    </span>
+  </div>;
+}
+
+function ToolsetDetails({ toolset, agent, toggleError, onDismissToggleError, saving, pending, actionsToolset, actionsPending, onClose, onToggle, onToggleActions }: {
+  toolset: CatalogToolset;
+  agent: AgentToolKind;
+  toggleError: Error | null;
+  onDismissToggleError: () => void;
+  saving: boolean;
+  pending: boolean;
+  actionsToolset?: AgentToolsetAvailability;
+  actionsPending: boolean;
+  onClose: () => void;
+  onToggle: (enabled: boolean) => void;
+  onToggleActions: (enabled: boolean) => void;
+}) {
   const development = toolset.state === "development";
   const provider = Boolean(toolset.provider_type);
-  const baseSatisfied = toolset.provider_type ? toolset.config_known && toolset.state === "configured" && (toolset.shared_state === "available" || toolset.shared_state === "disabled_by_operator") : toolset.state === "available" || toolset.state === "disabled_by_operator";
+  const baseSatisfied = toolset.provider_type ? toolset.config_known === true && toolset.state === "configured" && (toolset.shared_state === "available" || toolset.shared_state === "disabled_by_operator") : toolset.state === "available" || toolset.state === "disabled_by_operator";
   const providerConfigured = !toolset.provider_type || Boolean(toolset.provider_configured);
   const satisfied = baseSatisfied && providerConfigured;
+  const actionsSatisfied = actionsToolset?.state === "available" || actionsToolset?.state === "disabled_by_operator";
   const hiddenInternalAction = toolset.action.startsWith("/") && (toolset.id === "source-control" || toolset.section === "datasource" || toolset.section === "common");
   const showAvailabilityAction = !development && toolset.action && !hiddenInternalAction;
   return <Modal title={toolset.display_name} onClose={onClose} size="lg" footer={<>{toolset.docs_url && <a className="btn" href={toolset.docs_url} target="_blank" rel="noopener noreferrer">Documentation <ExternalLink size={13} /></a>}{!development && toolset.ui_path && !["needs_license", "needs_permission"].includes(toolset.state) && <Link className="btn btn-primary" to={toolset.ui_path} onClick={onClose}>Open tool <ArrowUpRight size={13} /></Link>}{showAvailabilityAction && (toolset.action.startsWith("/") ? <Link className="btn btn-primary" to={toolset.action}>{toolset.action_label}</Link> : <a className="btn btn-primary" href={toolset.action} target="_blank" rel="noopener noreferrer">{toolset.action_label} <ExternalLink size={13} /></a>)}</>}>
+    {toggleError && <div role="alert" className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded border border-sev-critical/40 bg-sev-critical/10 p-3 text-sm text-sev-critical">
+      <span className="flex items-center gap-2"><AlertCircle size={16} />{toggleError.message}</span>
+      <button className="btn" onClick={onDismissToggleError}><RefreshCw size={14} /> Dismiss</button>
+    </div>}
     <div className="flex items-start gap-3"><div className="flex size-12 shrink-0 items-center justify-center rounded-control border border-ink-600 bg-ink-800"><ToolIcon iconKey={toolset.icon_key} /></div><div className="min-w-0"><p className="text-sm leading-6 text-ink-200">{toolset.description}</p><StateBadge state={toolset.state} /></div></div>
-    <dl className="mt-5 divide-y divide-ink-700 border-y border-ink-700 text-xs"><div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Availability</dt><dd className="text-ink-100">{toolset.reason}</dd></div>{!development && provider && toolset.configured_source_names && toolset.configured_source_names.length > 0 && <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Configured sources</dt><dd className="text-ink-100">{toolset.configured_source_names.join(", ")}</dd></div>}{!development && !provider && toolset.health && <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Health</dt><dd className="text-ink-100">{toolset.health}</dd></div>}{!development && !provider && <div className="grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-3 py-3"><dt className="text-ink-400">{agent === "chat" ? "Chat agent" : "Analyze agent"}</dt><dd><label className="inline-flex items-center gap-2 text-ink-100"><input type="checkbox" aria-label={`Enable ${toolset.display_name} for ${agent}`} aria-describedby={!satisfied ? detailsDescriptionID(toolset.id) : undefined} className="h-4 w-4 accent-good" checked={toolset.enabled && satisfied} disabled={!satisfied || pending} onChange={(event) => onToggle(event.target.checked)} /><span>{toolset.enabled && satisfied ? "Enabled" : "Disabled"}</span>{pending && <Loader2 size={13} className="animate-spin" />}</label></dd></div>}</dl>
+    <dl className="mt-5 divide-y divide-ink-700 border-y border-ink-700 text-xs"><div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Availability</dt><dd className="text-ink-100">{toolset.reason}</dd></div>{!development && provider && toolset.configured_source_names && toolset.configured_source_names.length > 0 && <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Configured sources</dt><dd className="text-ink-100">{toolset.configured_source_names.join(", ")}</dd></div>}{!development && !provider && toolset.health && <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Health</dt><dd className="text-ink-100">{toolset.health}</dd></div>}{!development && !provider && <div className="grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-3 py-3"><dt className="text-ink-400">{agent === "chat" ? "Chat agent" : "Analyze agent"}</dt><dd><PolicySwitch checked={toolset.enabled && satisfied} label={`Enable ${toolset.display_name} for ${agent}`} stateLabel={agent === "chat" ? "Chat agent" : "Analyze agent"} description={toolset.reason} disabled={!satisfied || saving} pending={pending} onToggle={onToggle} /></dd></div>}</dl>
+    {!development && toolset.id === "kubernetes" && actionsToolset && <section aria-labelledby="kubernetes-actions-policy" className="mt-4 rounded-control border border-ink-600/60 bg-ink-700/20 p-3">
+      <div className="flex flex-wrap items-center gap-2"><h3 id="kubernetes-actions-policy" className="text-xs font-semibold text-ink-100">Actions</h3><StateBadge state={actionsToolset.state} /></div>
+      <div className="mt-3"><PolicySwitch
+        checked={actionsToolset.enabled && actionsSatisfied}
+        label={`Enable Kubernetes actions for ${agent}`}
+        stateLabel={`${agent === "chat" ? "Chat" : "Analyze"} agent`}
+        description={actionsSatisfied ? actionsToolset.reason : `Setup required. ${actionsToolset.reason}`}
+        disabled={!actionsSatisfied || saving}
+        pending={actionsPending}
+        onToggle={onToggleActions}
+      /></div>
+    </section>}
     {!development && !satisfied && <div id={detailsDescriptionID(toolset.id)} className="mt-4 rounded-control border border-sev-warning/30 bg-sev-warning/10 p-3 text-xs leading-5 text-ink-200"><span className="font-medium">Setup required.</span> {toolset.reason}</div>}
   </Modal>;
 }

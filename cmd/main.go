@@ -214,6 +214,9 @@ func main() {
 	if kubernetesErr != nil {
 		log.Printf("kubernetes: connector unavailable: %v", kubernetesErr)
 	}
+	if kubernetesService != nil {
+		kubernetesService.SetChangeStorage(store)
+	}
 	toolAvailability.BindIntegrationConstruction("kubernetes", kubernetesService != nil)
 	if kubernetesService != nil {
 		redactor, _ := agent.NewRedactor(cfg.Agent.Redaction.Enable && cfg.Agent.Redaction.RedactIPs, cfg.Agent.Redaction.ExtraPatterns)
@@ -289,7 +292,9 @@ func registerToolAvailabilityController(app *fiber.App, availability *agent.Tool
 	if len(services) > 0 {
 		kubernetesService = services[0]
 	}
-	controllers.NewKubernetesAdminControllerWithRegistry(kubernetes.NewServiceRegistry(kubernetesService)).Register(app.Group("/api"))
+	registry := kubernetes.NewServiceRegistry(kubernetesService)
+	controllers.SetChatKubernetesServiceResolver(func(orgID string) *kubernetes.Service { return registry.ResolveOrg(orgID) })
+	controllers.NewKubernetesAdminControllerWithRegistry(registry).Register(app.Group("/api"))
 }
 
 // startAgent constructs the worker, starts it in a goroutine, and registers
@@ -450,6 +455,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		Register(api)
 	controllers.NewRunbookAdminController(aiBundle.Runbooks).Register(api)
 	controllers.SetChatServiceFactory(aiBundle.ChatService)
+	controllers.SetAgentApprovalServiceFactory(aiBundle.ActionService)
 
 	return catalog, agentDone, nil
 }

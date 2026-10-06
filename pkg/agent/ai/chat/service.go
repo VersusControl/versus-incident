@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/router"
+	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
 
@@ -51,6 +52,7 @@ type Service struct {
 	leaseTTL     time.Duration
 	leaseRenewal time.Duration
 	decorate     func(context.Context) context.Context
+	ledger       ledger.Writer
 
 	mu     sync.Mutex
 	active map[string]activeRun
@@ -92,10 +94,20 @@ func NewServiceWithLocationProviderAndContextDecorator(store *SessionStore, chat
 	if location == nil {
 		location = func() *time.Location { return time.UTC }
 	}
-	return &Service{
+	service := &Service{
 		store: store, router: chatRouter, seeder: seeder, now: now, location: location,
 		owner: uuid.NewString(), runTimeout: DefaultRunTimeout, leaseTTL: defaultLeaseTTL,
 		leaseRenewal: defaultLeaseRenewal, decorate: decorate, active: map[string]activeRun{},
+	}
+	if store != nil && store.provider != nil {
+		service.ledger = ledger.NewBlobWriter(store.provider, store.org)
+	}
+	return service
+}
+
+func (service *Service) SetLedgerWriter(writer ledger.Writer) {
+	if service != nil {
+		service.ledger = writer
 	}
 }
 
@@ -264,6 +276,14 @@ func (service *Service) prepare(ctx context.Context, id, message string, attachm
 	service.mu.Lock()
 	service.active[id] = activeRun{cancel: cancel, epoch: epoch}
 	service.mu.Unlock()
+	runID := uuid.NewString()
+	if service.ledger == nil || service.ledger.Begin(runCtx, ledger.Trigger{
+		RunID: runID, Kind: ledger.TriggerUser, Principal: service.store.org,
+		Org: service.store.org, Surface: "api", PolicyVersion: "oss-default", At: service.now().UTC(),
+	}) != nil {
+		return nil, nil, "", nil, errors.Join(ledger.ErrLedgerUnavailable, service.release(id))
+	}
+	runCtx = ledger.WithRun(runCtx, service.ledger, runID)
 	go service.renewLease(runCtx, id, epoch, cancel)
 	return runCtx, session, message, cloneAttachment(attachment), nil
 }
@@ -317,9 +337,6 @@ func (service *Service) persistFailure(ctx context.Context, id, message string) 
 }
 
 func (service *Service) execute(runCtx context.Context, session *Session, id, message string, attachment *core.ChatAttachment) (result *core.ChatTurnResult, runErr error) {
-	if err := service.store.SetStatus(id, SessionRunning, false); err != nil {
-		return nil, err
-	}
 	finalStatus := SessionFailed
 	defer func() {
 		if statusErr := service.store.SetStatus(id, finalStatus, false); statusErr != nil && runErr == nil {
@@ -327,6 +344,30 @@ func (service *Service) execute(runCtx context.Context, session *Session, id, me
 			runErr = statusErr
 		}
 	}()
+	run, hasLedger := ledger.RunFromContext(runCtx)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if hasLedger {
+				_ = run.Writer.Close(context.WithoutCancel(runCtx), run.RunID, ledger.RunOutcome{State: "failed", Code: "panic"})
+			}
+			panic(recovered)
+		}
+		if !hasLedger {
+			return
+		}
+		outcome := ledger.RunOutcome{State: "done"}
+		if runErr != nil {
+			outcome.State = "failed"
+			outcome.Code = "run_failed"
+		}
+		if closeErr := run.Writer.Close(context.WithoutCancel(runCtx), run.RunID, outcome); closeErr != nil {
+			finalStatus = SessionFailed
+			runErr = errors.Join(runErr, ledger.ErrLedgerUnavailable)
+		}
+	}()
+	if err := service.store.SetStatus(id, SessionRunning, false); err != nil {
+		return nil, err
+	}
 	if !session.Seeded {
 		if err := service.seed(runCtx, id); err != nil {
 			return nil, err
@@ -439,18 +480,35 @@ func (recorder *eventRecorder) OnChatEvent(event core.ChatEvent) {
 	}
 	event = boundEvents([]core.ChatEvent{event})[0]
 	recorder.mu.Lock()
-	if len(recorder.events) < MaxEventsPerTurn-1 {
+	if event.Kind == core.ChatEventApproval {
+		if len(recorder.events) >= MaxEventsPerTurn {
+			recorder.evictOrdinaryEventLocked()
+		}
+		recorder.events = append(recorder.events, event)
+	} else if len(recorder.events) < MaxEventsPerTurn-1 {
 		recorder.events = append(recorder.events, event)
 	} else {
-		head := MaxEventsPerTurn / 2
-		copy(recorder.events[head:], recorder.events[head+1:])
-		recorder.events[len(recorder.events)-1] = event
-		recorder.dropped++
+		if recorder.evictOrdinaryEventLocked() {
+			recorder.events = append(recorder.events, event)
+		}
 	}
 	recorder.mu.Unlock()
 	if recorder.delegate != nil {
 		recorder.delegate.OnChatEvent(event)
 	}
+}
+
+func (recorder *eventRecorder) evictOrdinaryEventLocked() bool {
+	for position, event := range recorder.events {
+		if event.Kind == core.ChatEventApproval {
+			continue
+		}
+		copy(recorder.events[position:], recorder.events[position+1:])
+		recorder.events = recorder.events[:len(recorder.events)-1]
+		recorder.dropped++
+		return true
+	}
+	return false
 }
 
 func (recorder *eventRecorder) snapshot() []core.ChatEvent {
@@ -538,5 +596,18 @@ func validateAttachment(attachment *core.ChatAttachment) error {
 			return ErrInvalidAttachment
 		}
 	}
+	if resource := attachment.Resource; resource != nil {
+		if resource.Provider != "kubernetes" || !validAttachmentText(resource.Cluster, 256) || !validAttachmentText(resource.ResourceID, 256) || !validAttachmentText(resource.Name, 253) || !validOptionalAttachmentText(resource.Namespace, 253) {
+			return ErrInvalidAttachment
+		}
+	}
 	return nil
+}
+
+func validAttachmentText(value string, maxBytes int) bool {
+	return value != "" && len(value) <= maxBytes && strings.TrimSpace(value) == value && !strings.ContainsAny(value, "\x00\r\n")
+}
+
+func validOptionalAttachmentText(value string, maxBytes int) bool {
+	return value == "" || validAttachmentText(value, maxBytes)
 }

@@ -89,6 +89,24 @@ describe("reduceChatEvent", () => {
     ]);
   });
 
+  it("preserves nonce-bearing approval events as actionable stream blocks", () => {
+    const approval = reduceChatEvent(emptyChatStream, event(1, "approval_required", {
+      approval: { id: "approval-1", proposal_id: "proposal-1", run_id: "run-1", type: "restart", target: "Deployment/shop/checkout", effect: "restart checkout", risk: "medium", state: "pending", expires_at: "2026-10-05T13:00:00Z" },
+      approval_nonce: "nonce-value",
+    }));
+
+    expect(approval.blocks).toMatchObject([{ kind: "approval", event: { approval: { id: "approval-1" }, approval_nonce: "nonce-value" } }]);
+  });
+
+  it("preserves nonce-bearing approval events as actionable stream blocks", () => {
+    const approval = reduceChatEvent(emptyChatStream, event(1, "approval_required", {
+      approval: { id: "approval-1", proposal_id: "proposal-1", run_id: "run-1", type: "restart", target: "Deployment/shop/checkout", effect: "restart checkout", risk: "medium", state: "pending", expires_at: "2026-10-05T13:00:00Z" },
+      approval_nonce: "nonce-value",
+    }));
+
+    expect(approval.blocks).toMatchObject([{ kind: "approval", event: { approval: { id: "approval-1" }, approval_nonce: "nonce-value" } }]);
+  });
+
   it("resets all live state before a new run", () => {
     const active = reduceChatEvent(
       emptyChatStream,

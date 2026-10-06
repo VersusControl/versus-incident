@@ -45,9 +45,9 @@ type AgentConfig struct {
 	// in the file are expanded against the process environment.
 	Sources []AgentSourceConfig `mapstructure:"sources"`
 
-	// Tools holds per-tool configuration for analyze-mode tools that need
-	// external data (e.g. the `recent_changes` tool's git repository and
-	// the `describe_dependencies` tool's service-dependency graph).
+	// Tools holds per-tool configuration for agent tools that need external
+	// data (e.g. `recent_changes` git repositories and the `describe_dependencies`
+	// service-dependency graph).
 	// Versus loads it from the file `tools.yaml` sitting next to the main
 	// config file (path is hardcoded; missing file is OK — tools needing
 	// config then simply degrade to a clean "nothing found"). The file's

@@ -15,12 +15,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/agent/act"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/analyze"
 	chatagent "github.com/VersusControl/versus-incident/pkg/agent/ai/chat"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/detect"
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/router"
+	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
@@ -43,6 +45,7 @@ import (
 	splunkapp "github.com/VersusControl/versus-incident/pkg/splunk"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
+	"github.com/google/uuid"
 )
 
 // AIBundle bundles every AI-side dependency. All fields are nil-safe:
@@ -64,6 +67,7 @@ type AIBundle struct {
 	ChatRate    *ai.RateLimiter
 	// ChatService returns an org-scoped durable service. Nil when chat is unavailable.
 	ChatService func(scope tenancy.OrgScope) *chatagent.Service
+	ActionService func(scope tenancy.OrgScope) *act.Service
 	// Runbooks is the runbook corpus manager shared by the find_runbook
 	// read path and the admin runbooks UI (upload/list/delete). Nil when
 	// storage is unavailable. Present even without embeddings so operators
@@ -133,12 +137,42 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		status.Health = "configuration"
 		configuredToolSnapshot.Integrations["kubernetes"] = status
 	} else if kubernetesService != nil {
+		kubernetesService.SetChangeStorage(store)
 		status := configuredToolSnapshot.Integrations["kubernetes"]
 		status.Configured = true
 		status.Constructed = true
 		status.Healthy = true
 		configuredToolSnapshot.Integrations["kubernetes"] = status
 	}
+	var actionService *act.Service
+	var actionServiceFactory func(tenancy.OrgScope) *act.Service
+	actionStatus := aitools.DependencyStatus{Configured: cfg.Tools.Kubernetes.Actions.Enable, Health: "configuration"}
+	if cfg.Tools.Kubernetes.Actions.Enable {
+		adapters, actionErr := buildKubernetesActionAdapters(cfg.Tools.Kubernetes)
+		if actionErr == nil && store != nil && len(adapters) > 0 {
+			actionService, actionErr = act.NewService(store, scope.Normalized().Write, ledger.NewBlobWriter(store, scope.Normalized().Write), nil, adapters...)
+		} else if actionErr == nil {
+			actionErr = errors.New("durable action storage is unavailable")
+		}
+		if actionErr != nil {
+			log.Printf("agent: Kubernetes action actor unavailable: %v", actionErr)
+		} else {
+			actionStatus.Constructed = true
+			actionStatus.Healthy = true
+			actionStatus.Health = ""
+			bootScope := scope.Normalized()
+			actionServiceFactory = func(requestScope tenancy.OrgScope) *act.Service {
+				if requestScope.Normalized().Write != bootScope.Write {
+					return nil
+				}
+				return actionService
+			}
+		}
+	}
+	if configuredToolSnapshot.Capabilities == nil {
+		configuredToolSnapshot.Capabilities = make(map[string]aitools.DependencyStatus)
+	}
+	configuredToolSnapshot.Capabilities["kubernetes_actions"] = actionStatus
 	toolSnapshot := func(tenancy.OrgScope) aitools.Snapshot { return configuredToolSnapshot }
 	// Resolve the detect-task config up front so the construction gate can
 	// see whether a model is actually configured.
@@ -152,7 +186,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	// registers no resolver, so this collapses to the original
 	// `!cfg.AI.Enable` gate and is byte-for-byte unchanged.
 	if !cfg.AI.Enable && (aiSettingsResolver() == nil || detectCfg.Model == "") {
-		return AIBundle{ToolSettings: toolSettings, ToolSnapshot: toolSnapshot}
+		return AIBundle{ToolSettings: toolSettings, ToolSnapshot: toolSnapshot, ActionService: actionServiceFactory}
 	}
 
 	// Per-request Authorization override backed by the runtime resolver.
@@ -173,7 +207,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	})
 	if err != nil {
 		logAIConstructionFailure("detect", detectCfg, err)
-		return AIBundle{}
+		return AIBundle{ToolSettings: toolSettings, ToolSnapshot: toolSnapshot, ActionService: actionServiceFactory}
 	}
 
 	detectCache := ai.NewResultCache(parseDurationOr(detectCfg.CacheTTL, time.Hour), store)
@@ -188,6 +222,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	var analyzeTools []core.Tool
 	var chatTools []core.Tool
 	var runtimeTools []core.Tool
+	var chatRuntimeTools []core.Tool
 	var runbookMgr *runbook.Manager
 	var detectionHealth *detectionHealthAdapter
 	{
@@ -254,7 +289,15 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		// (tools.recent_changes.git.repos). An empty repos list leaves the
 		// feed nil so the tool is omitted; the `git` binary must be on PATH
 		// when configured.
-		changes := commontools.NewGitChangeFeed(buildGitRepos(cfg.Tools.RecentChanges.Git))
+		gitChanges := commontools.NewGitChangeFeed(buildGitRepos(cfg.Tools.RecentChanges.Git))
+		configuredGit := configuredToolSnapshot.Integrations["github"]
+		configuredGit.Constructed = gitChanges != nil
+		configuredToolSnapshot.Integrations["github"] = configuredGit
+		var kubernetesChanges commontools.ChangeFeed
+		if kubernetesService != nil && store != nil {
+			kubernetesChanges = newKubernetesChangeFeed(kubernetesService)
+		}
+		changes := mergeChangeFeeds(gitChanges, kubernetesChanges, newActionChangeFeed(actionService))
 
 		// Optional runbook-RAG seam for the find_runbook tool. When an
 		// embedding model is configured (tools.yaml
@@ -311,18 +354,19 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		initialView, loadErr := toolSettings.LoadToolsets(scope)
 		if loadErr != nil {
 			log.Printf("agent: tool settings unavailable: %v", loadErr)
-			return AIBundle{ToolSettings: toolSettings, ToolSnapshot: toolSnapshot, ObserveSourceHealth: detectionHealth.Observe}
+			return AIBundle{ToolSettings: toolSettings, ToolSnapshot: toolSnapshot, ObserveSourceHealth: detectionHealth.Observe, ActionService: actionServiceFactory}
 		}
 		initialSnapshot := toolSnapshot(scope)
+		chatRuntimeTools = chatRuntimeToolCatalog(runtimeTools, actionService)
 		analyzeTools, err = initialView.Filter(aitools.AgentAnalyze, runtimeTools, initialSnapshot)
 		if err != nil {
 			log.Printf("agent: analyze tool settings unavailable: %v", err)
-			return AIBundle{ToolSettings: toolSettings, ToolSnapshot: toolSnapshot, ObserveSourceHealth: detectionHealth.Observe}
+			return AIBundle{ToolSettings: toolSettings, ToolSnapshot: toolSnapshot, ObserveSourceHealth: detectionHealth.Observe, ActionService: actionServiceFactory}
 		}
-		chatTools, err = initialView.Filter(aitools.AgentChat, runtimeTools, initialSnapshot)
+		chatTools, err = initialView.Filter(aitools.AgentChat, chatRuntimeTools, initialSnapshot)
 		if err != nil {
 			log.Printf("agent: chat tool settings unavailable: %v", err)
-			return AIBundle{ToolSettings: toolSettings, ToolSnapshot: toolSnapshot, ObserveSourceHealth: detectionHealth.Observe}
+			return AIBundle{ToolSettings: toolSettings, ToolSnapshot: toolSnapshot, ObserveSourceHealth: detectionHealth.Observe, ActionService: actionServiceFactory}
 		}
 		analyzeGeneration := newToolGeneration(toolSettings, scope, toolSnapshot)
 		analyzeRuntime := aiRT
@@ -340,7 +384,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		if aErr != nil {
 			logAIConstructionFailure("analyze", analyzeBaseCfg, aErr)
 		} else {
-			analyzeAgent = &bootScopedAIAgent{delegate: a, scope: scope.Normalized()}
+			analyzeAgent = &bootScopedAIAgent{delegate: a, scope: scope.Normalized(), ledger: ledger.NewBlobWriter(store, scope.Normalized().Write)}
 			analyzeRate = ai.NewRateLimiter(analyzeBaseCfg.MaxCallsPerHour)
 			safeModel := einowrap.SafeProviderError(analyzeBaseCfg.Provider, analyzeBaseCfg.Model, nil).Model
 			log.Printf("agent: analyze agent enabled model=%s tools=%d",
@@ -358,13 +402,13 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	chatGeneration := newToolGeneration(toolSettings, scope, toolSnapshot)
 	chatRuntime := aiRT
 	chatRuntime.Revision = chatGeneration.Revision
-	if built, chatErr := chatagent.New(context.Background(), chatCfg, runtimeTools, chatagent.Options{
+	if built, chatErr := chatagent.New(context.Background(), chatCfg, chatRuntimeTools, chatagent.Options{
 		HTTPClient: httpClient, RuntimeKeyFunc: authKeyFn, Runtime: chatRuntime,
 		ToolProvider: func() ([]core.Tool, error) {
-			return chatGeneration.Filter(aitools.AgentChat, runtimeTools)
+			return chatGeneration.Filter(aitools.AgentChat, chatRuntimeTools)
 		},
 		SeedProvider: func() ([]core.Tool, error) {
-			return loadCurrentTools(toolSettings, scope, toolSnapshot, aitools.AgentChat, runtimeTools)
+			return loadCurrentTools(toolSettings, scope, toolSnapshot, aitools.AgentChat, chatRuntimeTools)
 		},
 		ToolTimeout: parseDurationOr(cfg.Tools.ToolTimeout, chatagent.DefaultToolTimeout),
 	}); chatErr != nil {
@@ -421,6 +465,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 		AnalyzeRate:         analyzeRate,
 		ChatRate:            chatRate,
 		ChatService:         chatServiceFactory,
+		ActionService:       actionServiceFactory,
 		Runbooks:            runbookMgr,
 		ToolSettings:        toolSettings,
 		ToolSnapshot:        toolSnapshot,
@@ -449,6 +494,7 @@ func logAIConstructionFailure(task string, cfg config.AgentAIConfig, cause error
 type bootScopedAIAgent struct {
 	delegate core.AIAgent
 	scope    tenancy.OrgScope
+	ledger   ledger.Writer
 }
 
 func (agent *bootScopedAIAgent) Name() string { return agent.delegate.Name() }
@@ -460,7 +506,51 @@ func (agent *bootScopedAIAgent) Run(ctx context.Context, task core.AITask) (*cor
 	if !ok || requestScope.Write != agent.scope.Write {
 		return nil, fmt.Errorf("analyze: requested scope is unavailable")
 	}
-	return agent.delegate.Run(ctx, task)
+	if agent.ledger == nil {
+		return nil, ledger.ErrLedgerUnavailable
+	}
+	runID := uuid.NewString()
+	trigger := ledger.Trigger{RunID: runID, Kind: ledger.TriggerIncident, Principal: agent.scope.Write, Org: agent.scope.Write, Surface: "api", PolicyVersion: "oss-default", At: time.Now().UTC()}
+	if analyzeTask, ok := task.(core.AnalyzeTask); ok {
+		trigger.Subject = ledger.Subject{Kind: "incident", ID: analyzeTask.Snapshot.IncidentID}
+		if analyzeTask.Snapshot.RequestedBy != "" {
+			trigger.Principal = analyzeTask.Snapshot.RequestedBy
+		}
+	}
+	if err := agent.ledger.Begin(ctx, trigger); err != nil {
+		return nil, ledger.ErrLedgerUnavailable
+	}
+	ctx = ledger.WithRun(ctx, agent.ledger, runID)
+	closed := false
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if !closed {
+				_ = agent.ledger.Close(context.WithoutCancel(ctx), runID, ledger.RunOutcome{State: "failed", Code: "panic"})
+			}
+			panic(recovered)
+		}
+	}()
+	result, runErr := agent.delegate.Run(ctx, task)
+	closed = true
+	closeErr := agent.ledger.Close(context.WithoutCancel(ctx), runID, ledger.RunOutcome{State: ledgerOutcomeState(runErr), Code: ledgerOutcomeCode(runErr)})
+	if closeErr != nil {
+		return result, errors.Join(runErr, ledger.ErrLedgerUnavailable)
+	}
+	return result, runErr
+}
+
+func ledgerOutcomeState(err error) string {
+	if err != nil {
+		return "failed"
+	}
+	return "done"
+}
+
+func ledgerOutcomeCode(err error) string {
+	if err != nil {
+		return "run_failed"
+	}
+	return ""
 }
 
 func loadCurrentTools(manager *aitools.Manager, scope tenancy.OrgScope, snapshot func(tenancy.OrgScope) aitools.Snapshot, agent aitools.AgentKind, runtime []core.Tool) ([]core.Tool, error) {
@@ -536,6 +626,7 @@ func configuredToolAvailabilitySnapshot(cfg config.AgentConfig, store storage.Pr
 		Integrations: map[string]aitools.DependencyStatus{"github": configured(hasGit, "GitHub"), "kubernetes": configured(strings.TrimSpace(cfg.Tools.Kubernetes.Endpoint) != "" || strings.TrimSpace(cfg.Tools.Kubernetes.Auth.Mode) != "", "Kubernetes cluster")},
 		Capabilities: map[string]aitools.DependencyStatus{
 			"ai_embedder": configured(hasEmbedder, "AI embedder"), "runbook_index": configured(hasEmbedder && store != nil, "Runbook index"), "dependency_graph": configured(hasGraph, "Dependency graph"),
+			"change_feed": configured(hasGit || (store != nil && (strings.TrimSpace(cfg.Tools.Kubernetes.Endpoint) != "" || strings.TrimSpace(cfg.Tools.Kubernetes.Auth.Mode) != "")), "Change feed"),
 		},
 	}
 }
@@ -567,10 +658,11 @@ func buildToolAvailabilitySnapshot(configured aitools.Snapshot, reader commontoo
 			"logs": dataSource("logs", configured.DataSources["logs"], reader != nil), "elasticsearch": configured.DataSources["elasticsearch"], "metrics": configured.DataSources["metrics"], "traces": configured.DataSources["traces"],
 		},
 		Integrations: map[string]aitools.DependencyStatus{
-			"github": resolved(configured.Integrations["github"], changes != nil), "kubernetes": resolved(configured.Integrations["kubernetes"], configured.Integrations["kubernetes"].Configured && configured.Integrations["kubernetes"].Healthy),
+			"github": resolved(configured.Integrations["github"], configured.Integrations["github"].Constructed && changes != nil), "kubernetes": resolved(configured.Integrations["kubernetes"], configured.Integrations["kubernetes"].Configured && configured.Integrations["kubernetes"].Healthy),
 		},
 		Capabilities: map[string]aitools.DependencyStatus{
 			"ai_embedder": resolved(configured.Capabilities["ai_embedder"], embedder != nil), "runbook_index": resolved(configured.Capabilities["runbook_index"], runbooks != nil), "dependency_graph": resolved(configured.Capabilities["dependency_graph"], graph != nil && graph.Len() > 0),
+			"change_feed": resolved(configured.Capabilities["change_feed"], changes != nil),
 		},
 	}
 }
@@ -1003,6 +1095,14 @@ func boundAvailabilityText(value string, limit int) string {
 		runes = runes[:limit]
 	}
 	return string(runes)
+}
+
+func chatRuntimeToolCatalog(readTools []core.Tool, actionService *act.Service) []core.Tool {
+	if actionService == nil {
+		return readTools
+	}
+	chatTools := append([]core.Tool(nil), readTools...)
+	return append(chatTools, act.ProposalTool{Service: actionService})
 }
 
 func buildAnalyzeTools(store storage.Provider, scope tenancy.OrgScope, catalog versustools.PatternCatalog, reader commontools.SignalReader, redactor commontools.LineRedactor, services commontools.ServiceExtractor, graph *commontools.DependencyGraph, changes commontools.ChangeFeed, embedder core.Embedder, runbooks commontools.RunbookSearcher, health versustools.DetectionHealthReader) []core.Tool {

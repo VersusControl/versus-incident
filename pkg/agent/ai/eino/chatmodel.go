@@ -11,8 +11,11 @@
 package eino
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -20,6 +23,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 
+	"github.com/VersusControl/versus-incident/pkg/agent/egress"
 	"github.com/VersusControl/versus-incident/pkg/config"
 )
 
@@ -33,6 +37,7 @@ type Options struct {
 	// ok=false leaves the SDK's configured key untouched; ok=true with an
 	// empty key explicitly clears credentials for that request.
 	RuntimeKeyFunc func(ctx context.Context) (key string, ok bool)
+	EgressGuard    egress.Guard
 }
 
 type credentialPolicy uint8
@@ -88,12 +93,15 @@ func (o Options) runtimeKeyFunc() func(context.Context) (string, bool) {
 	return o.RuntimeKeyFunc
 }
 
-func withRuntimeKeyRoundTripper(c *http.Client, timeout time.Duration, keyFn func(ctx context.Context) (key string, ok bool), policy credentialPolicy) *http.Client {
+func withGuardedRuntimeKeyRoundTripper(c *http.Client, timeout time.Duration, keyFn func(ctx context.Context) (key string, ok bool), policy credentialPolicy, guard egress.Guard) *http.Client {
 	if c == nil {
 		c = &http.Client{Timeout: timeout}
 	}
+	if guard == nil {
+		guard = egress.NewDefaultGuard()
+	}
 	wrapped := *c
-	wrapped.Transport = runtimeKeyRoundTripper{base: c.Transport, keyFn: keyFn, policy: policy}
+	wrapped.Transport = guardedRoundTripper{base: runtimeKeyRoundTripper{base: c.Transport, keyFn: keyFn, policy: policy}, guard: guard}
 	checkRedirect := c.CheckRedirect
 	wrapped.CheckRedirect = func(request *http.Request, via []*http.Request) error {
 		if policy != credentialNone && len(via) > 0 && !sameOrigin(request.URL, via[len(via)-1].URL) {
@@ -108,6 +116,42 @@ func withRuntimeKeyRoundTripper(c *http.Client, timeout time.Duration, keyFn fun
 		return nil
 	}
 	return &wrapped
+}
+
+type guardedRoundTripper struct {
+	base  http.RoundTripper
+	guard egress.Guard
+}
+
+func (transport guardedRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request == nil || request.Body == nil || request.Body == http.NoBody {
+		return nil, egress.ErrEgressBlocked
+	}
+	if err := request.Context().Err(); err != nil {
+		return nil, errors.Join(egress.ErrEgressBlocked, err)
+	}
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		return nil, egress.ErrEgressBlocked
+	}
+	_ = request.Body.Close()
+	kind := egress.PartHistory
+	if strings.Contains(strings.ToLower(request.URL.Path), "embed") {
+		kind = egress.PartEmbedding
+	}
+	result, err := egress.Apply(request.Context(), transport.guard, egress.Request{
+		Destination: "model:provider",
+		Parts:       []egress.Part{{Kind: kind, Text: string(body)}},
+	})
+	if err != nil {
+		return nil, egress.ErrEgressBlocked
+	}
+	cleanBody := []byte(result.Parts[0].Text)
+	clone := request.Clone(request.Context())
+	clone.Body = io.NopCloser(bytes.NewReader(cleanBody))
+	clone.ContentLength = int64(len(cleanBody))
+	clone.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(cleanBody)), nil }
+	return transport.base.RoundTrip(clone)
 }
 
 func sameOrigin(left, right *url.URL) bool {
@@ -158,7 +202,8 @@ func NewChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (
 		temperature: resolveTemperature(cfg.Temperature, 0.2),
 		// Force JSON-mode so ParseFinding can decode the reply with the
 		// same tolerance it had under the raw HTTP client.
-		jsonMode: true,
+		jsonMode:    true,
+		egressGuard: opts.EgressGuard,
 	})
 }
 
@@ -201,6 +246,7 @@ func NewToolCallingChatModel(ctx context.Context, cfg config.AgentAIConfig, opts
 		maxTokens:   maxCompletionTokens,
 		temperature: resolveTemperature(cfg.Temperature, 0.2),
 		jsonMode:    false,
+		egressGuard: opts.EgressGuard,
 	})
 }
 

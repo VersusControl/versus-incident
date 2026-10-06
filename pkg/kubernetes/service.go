@@ -12,11 +12,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 )
 
 const (
 	defaultPageSize    = 100
 	maxPageSize        = 500
+	minimumPageSize    = 10
+	discoveryRequests  = 512
 	maxStringBytes     = 2048
 	maxPodLogBytes     = 128 << 10
 	maxProjectionItems = 128
@@ -73,6 +77,7 @@ type ProjectedResource struct {
 	Summary             map[string]any    `json:"summary,omitempty"`
 	Conditions          []Condition       `json:"conditions,omitempty"`
 	ProjectionTruncated []string          `json:"projection_truncated,omitempty"`
+	metricsValid        bool
 }
 
 type ObjectRef struct {
@@ -134,6 +139,7 @@ type Overview struct {
 	Truncated         bool             `json:"truncated"`
 	Omitted           []string         `json:"omitted_categories,omitempty"`
 	Partial           []PartialFailure `json:"partial_failures,omitempty"`
+	Sync              SyncStatus       `json:"sync"`
 }
 
 // ResourceUsage is one bounded exact pod or node Metrics API sample.
@@ -151,6 +157,7 @@ type ResourceUsage struct {
 type MetricsSourceStatus struct {
 	Availability string     `json:"availability"`
 	Fresh        bool       `json:"fresh"`
+	Complete     bool       `json:"complete"`
 	Total        int        `json:"total"`
 	CPU          string     `json:"cpu,omitempty"`
 	Memory       string     `json:"memory,omitempty"`
@@ -203,6 +210,9 @@ type Service struct {
 	mu       *sync.Mutex
 	cache    map[string]discoveryCacheEntry
 	scrubber Scrubber
+	indexes  *kubeindex.Registry
+	changes  *changeStoreState
+	traffic  *trafficProviderState
 }
 
 // SetScrubber installs the shared model/API text redactor.
@@ -217,7 +227,7 @@ func NewService(client *Client, scope Scope, discoveryTTL time.Duration) *Servic
 	if discoveryTTL <= 0 || discoveryTTL > time.Hour {
 		discoveryTTL = 5 * time.Minute
 	}
-	return &Service{client: client, scope: scope, ttl: discoveryTTL, mu: &sync.Mutex{}, cache: make(map[string]discoveryCacheEntry)}
+	return &Service{client: client, scope: scope, ttl: discoveryTTL, mu: &sync.Mutex{}, cache: make(map[string]discoveryCacheEntry), indexes: kubeindex.NewRegistry(16, 250000), changes: newChangeStoreState(), traffic: &trafficProviderState{}}
 }
 
 // Scoped returns a service for another org/cluster/credential that shares the
@@ -226,7 +236,7 @@ func (service *Service) Scoped(scope Scope) *Service {
 	if service == nil {
 		return nil
 	}
-	return &Service{client: service.client, scope: scope, ttl: service.ttl, mu: service.mu, cache: service.cache, scrubber: service.scrubber}
+	return &Service{client: service.client, scope: scope, ttl: service.ttl, mu: service.mu, cache: service.cache, scrubber: service.scrubber, indexes: service.indexes, changes: service.changes, traffic: service.traffic}
 }
 
 // Scope returns the immutable cache and request identity of this service.
@@ -286,7 +296,7 @@ func (service *Service) InvalidateDiscovery() {
 
 // Discover builds a preferred-version resource registry with partial failures.
 func (service *Service) Discover(ctx context.Context) (Discovery, error) {
-	ctx, cancel := ensureOperationBudget(ctx)
+	ctx, cancel := withOperationBudget(ctx, defaultOperationTimeout, discoveryRequests, defaultOperationBytes, defaultOperationItems)
 	defer cancel()
 	key := service.cacheKey()
 	service.mu.Lock()
@@ -374,15 +384,23 @@ func (service *Service) discoverVersion(ctx context.Context, group, version, api
 
 // List reads one discovered resource page and safely projects every item.
 func (service *Service) List(ctx context.Context, options ListOptions) (ResourcePage, error) {
+	page, _, err := service.listPage(ctx, options)
+	return page, err
+}
+
+func (service *Service) listPage(ctx context.Context, options ListOptions) (ResourcePage, int, error) {
 	ctx, cancel := ensureOperationBudget(ctx)
 	defer cancel()
+	if len(options.Continue) > 4096 {
+		return ResourcePage{}, 0, ErrInvalidArguments
+	}
 	definition, err := service.resolve(ctx, options.ResourceID)
 	if err != nil {
-		return ResourcePage{}, err
+		return ResourcePage{}, 0, err
 	}
 	apiPath, err := resourcePath(definition, options.Namespace, "")
 	if err != nil {
-		return ResourcePage{}, err
+		return ResourcePage{}, 0, err
 	}
 	limit := options.Limit
 	if limit <= 0 {
@@ -391,89 +409,82 @@ func (service *Service) List(ctx context.Context, options ListOptions) (Resource
 	if limit > maxPageSize {
 		limit = maxPageSize
 	}
-	query := url.Values{"limit": {strconv.Itoa(limit)}}
+	query := url.Values{}
 	if options.Labels != "" {
 		if !safeSelector(options.Labels) {
-			return ResourcePage{}, ErrInvalidArguments
+			return ResourcePage{}, 0, ErrInvalidArguments
 		}
 		query.Set("labelSelector", options.Labels)
 	}
 	if options.Fields != "" {
 		if !safeSelector(options.Fields) {
-			return ResourcePage{}, ErrInvalidArguments
+			return ResourcePage{}, 0, ErrInvalidArguments
 		}
 		query.Set("fieldSelector", options.Fields)
 	}
 	if options.Continue != "" {
-		query.Set("continue", boundString(options.Continue))
+		query.Set("continue", options.Continue)
 	}
-	var raw struct {
-		Items    []map[string]any `json:"items"`
-		Metadata struct {
-			Continue string `json:"continue"`
-		} `json:"metadata"`
-	}
-	if err := service.client.GetJSON(ctx, apiPath+"?"+query.Encode(), &raw); err != nil {
-		return ResourcePage{}, err
-	}
-	result := ResourcePage{Continue: boundString(raw.Metadata.Continue), Truncated: raw.Metadata.Continue != ""}
-	itemLimit := operationBudgetFrom(ctx).takeItems(len(raw.Items))
-	if itemLimit < len(raw.Items) {
-		raw.Items = raw.Items[:itemLimit]
-		result.Truncated = true
-		result.Continue = ""
-		result.Omitted = append(result.Omitted, definition.ID, "budget_exhausted")
-		result.Partial = append(result.Partial, PartialFailure{ResourceID: definition.ID, Scope: "operation", Class: "budget_exhausted"})
-	}
-	encodedBytes := 0
-	for index, item := range raw.Items {
-		if index >= limit {
+	for {
+		query.Set("limit", strconv.Itoa(limit))
+		var raw struct {
+			Items    []map[string]any `json:"items"`
+			Metadata struct {
+				Continue string `json:"continue"`
+			} `json:"metadata"`
+		}
+		if err := service.client.GetJSON(ctx, apiPath+"?"+query.Encode(), &raw); err != nil {
+			if errors.Is(err, ErrResponseTooLarge) && limit > minimumPageSize {
+				limit = max(minimumPageSize, limit/2)
+				continue
+			}
+			return ResourcePage{}, limit, err
+		}
+		result := ResourcePage{Truncated: raw.Metadata.Continue != ""}
+		if len(raw.Metadata.Continue) <= 4096 {
+			result.Continue = raw.Metadata.Continue
+		} else {
+			result.Partial = append(result.Partial, PartialFailure{ResourceID: definition.ID, Scope: "pagination", Class: "cursor_limit"})
+		}
+		itemLimit := operationBudgetFrom(ctx).takeItems(len(raw.Items))
+		if itemLimit < len(raw.Items) {
+			raw.Items = raw.Items[:itemLimit]
 			result.Truncated = true
 			result.Continue = ""
-			result.Omitted = append(result.Omitted, "item_limit")
-			result.Partial = append(result.Partial, PartialFailure{ResourceID: definition.ID, Scope: "projection", Class: "item_limit"})
-			break
+			result.Omitted = append(result.Omitted, definition.ID, "budget_exhausted")
+			result.Partial = append(result.Partial, PartialFailure{ResourceID: definition.ID, Scope: "operation", Class: "budget_exhausted"})
 		}
-		projected := service.projectResource(definition, item)
-		encoded, _ := json.Marshal(projected)
-		if encodedBytes+len(encoded) > maxResultBytes {
-			result.Truncated = true
-			result.EncodedTruncated = true
-			result.Continue = ""
-			result.Omitted = append(result.Omitted, "encoded_result_size")
-			result.Partial = append(result.Partial, PartialFailure{ResourceID: definition.ID, Scope: "projection", Class: "encoded_result_size"})
-			break
+		encodedBytes := 0
+		for index, item := range raw.Items {
+			if index >= limit {
+				result.Truncated = true
+				result.Continue = ""
+				result.Omitted = appendUnique(result.Omitted, "item_limit")
+				result.Partial = append(result.Partial, PartialFailure{ResourceID: definition.ID, Scope: "projection", Class: "item_limit"})
+				break
+			}
+			projected := service.projectResource(definition, item)
+			encoded, _ := json.Marshal(projected)
+			if encodedBytes+len(encoded) > maxResultBytes {
+				result.Truncated = true
+				result.EncodedTruncated = true
+				result.Continue = ""
+				result.Omitted = appendUnique(result.Omitted, definition.ID)
+				result.Omitted = appendUnique(result.Omitted, "encoded_result_size")
+				result.Partial = append(result.Partial, PartialFailure{ResourceID: definition.ID, Scope: "projection", Class: "encoded_result_size"})
+				break
+			}
+			encodedBytes += len(encoded)
+			result.Items = append(result.Items, projected)
 		}
-		encodedBytes += len(encoded)
-		result.Items = append(result.Items, projected)
+		return result, limit, nil
 	}
-	return result, nil
 }
 
-// Get reads one discovered resource by canonical ID and name.
-func (service *Service) Get(ctx context.Context, resourceID, namespace, name string) (ProjectedResource, error) {
-	ctx, cancel := ensureOperationBudget(ctx)
-	defer cancel()
-	definition, err := service.resolve(ctx, resourceID)
-	if err != nil {
-		return ProjectedResource{}, err
-	}
-	apiPath, err := resourcePath(definition, namespace, name)
-	if err != nil {
-		return ProjectedResource{}, err
-	}
-	var raw map[string]any
-	if err := service.client.GetJSON(ctx, apiPath, &raw); err != nil {
-		return ProjectedResource{}, err
-	}
-	return service.projectResource(definition, raw), nil
-}
-
-// Overview returns bounded health counts and explicit partial failures.
 func (service *Service) Overview(ctx context.Context) (Overview, error) {
 	ctx, cancel := ensureOperationBudgetRequests(ctx, overviewOperationRequests)
 	defer cancel()
-	result := Overview{Connector: "kubernetes", ClusterID: service.scope.ClusterID, ObservedAt: time.Now().UTC(), UsageSource: "unavailable", MetricsStatus: "unavailable"}
+	result := Overview{Connector: "kubernetes", ClusterID: service.scope.ClusterID, ObservedAt: time.Now().UTC(), UsageSource: "unavailable", MetricsStatus: "unavailable", Sync: SyncStatus{State: "direct"}}
 	var err error
 	var discovery Discovery
 	ctx, discovery, err = service.withDiscovery(ctx)
@@ -481,14 +492,83 @@ func (service *Service) Overview(ctx context.Context) (Overview, error) {
 		return result, err
 	}
 	result.Partial = append(result.Partial, discovery.Partial...)
+	usage, usageErr := service.Usage(ctx, "", maxPageSize)
+	if usageErr != nil {
+		result.Partial = append(result.Partial, PartialFailure{ResourceID: "metrics.k8s.io", Class: errorClass(usageErr)})
+	} else {
+		result.Partial = append(result.Partial, usage.Partial...)
+		result.Truncated = result.Truncated || usage.Truncated
+		for _, omitted := range usage.Omitted {
+			result.Omitted = appendUnique(result.Omitted, omitted)
+		}
+		selected := usage.NodeMetrics
+		if selected.Total > 0 && selected.Complete {
+			result.UsageSource = "node_metrics"
+		} else if usage.PodMetrics.Total > 0 && usage.PodMetrics.Complete {
+			selected = usage.PodMetrics
+			result.UsageSource = "pod_metrics"
+		} else if usage.NodeMetrics.Total > 0 {
+			result.UsageSource = "node_metrics"
+		} else if usage.PodMetrics.Total > 0 {
+			selected = usage.PodMetrics
+			result.UsageSource = "pod_metrics"
+		}
+		if selected.Total > 0 {
+			if selected.Complete {
+				result.MetricsStatus = selected.Availability
+				result.MetricsFresh = selected.Fresh
+				result.UsageCPU = selected.CPU
+				result.UsageMemory = selected.Memory
+				result.MetricsObservedAt = selected.ObservedAt
+			} else {
+				result.MetricsStatus = "partial"
+			}
+		}
+	}
 	requestedCPU, limitedCPU := new(big.Rat), new(big.Rat)
 	requestedMemory, limitedMemory := new(big.Rat), new(big.Rat)
 	allocatableCPU, allocatableMemory := new(big.Rat), new(big.Rat)
+	availableResources := make(map[string]bool, len(discovery.Resources))
+	for _, resource := range discovery.Resources {
+		availableResources[resource.ID] = true
+	}
+	var indexKinds []string
+	for _, kind := range []string{"Node", "Pod"} {
+		if availableResources[indexedResourceIDs[kind]] {
+			indexKinds = append(indexKinds, kind)
+		}
+	}
+	indexedRecords := make(map[string][]kubeindex.Record)
+	readyIndexedKinds := make(map[string]bool)
+	if len(indexKinds) > 0 {
+		view, syncStatus, indexErr := service.IndexSnapshot(ctx, indexKinds...)
+		if indexErr == nil {
+			readyKinds := 0
+			for _, kind := range indexKinds {
+				if syncStatus.Kinds[kind].State == "ready" {
+					readyKinds++
+					readyIndexedKinds[kind] = true
+				}
+			}
+			for _, record := range view.Records {
+				if readyIndexedKinds[record.Kind] {
+					indexedRecords[record.Kind] = append(indexedRecords[record.Kind], record)
+				}
+			}
+			if readyKinds > 0 {
+				result.Sync = SyncStatus{State: "indexed", AgeSeconds: syncStatus.AgeSeconds, Partial: readyKinds != len(indexKinds) || syncStatus.Partial}
+				if readyKinds != len(indexKinds) {
+					result.Sync.State = "partial"
+				}
+			}
+		}
+	}
 	for _, request := range []struct {
 		id    string
+		kind  string
 		apply func(ProjectedResource)
 	}{
-		{"core~v1~nodes", func(item ProjectedResource) {
+		{"core~v1~nodes", "Node", func(item ProjectedResource) {
 			result.Nodes++
 			if conditionTrue(item.Conditions, "Ready") {
 				result.ReadyNodes++
@@ -496,7 +576,7 @@ func (service *Service) Overview(ctx context.Context) (Overview, error) {
 			addSummaryQuantity(allocatableCPU, item.Summary, "allocatable_cpu")
 			addSummaryQuantity(allocatableMemory, item.Summary, "allocatable_memory")
 		}},
-		{"core~v1~pods", func(item ProjectedResource) {
+		{"core~v1~pods", "Pod", func(item ProjectedResource) {
 			result.Pods++
 			if item.Summary["phase"] == "Running" {
 				result.RunningPods++
@@ -506,23 +586,26 @@ func (service *Service) Overview(ctx context.Context) (Overview, error) {
 			addSummaryQuantity(requestedMemory, item.Summary, "requested_memory")
 			addSummaryQuantity(limitedMemory, item.Summary, "limited_memory")
 		}},
-		{"core~v1~namespaces", func(item ProjectedResource) {
+		{"core~v1~namespaces", "", func(item ProjectedResource) {
 			result.Namespaces++
 			if phase := summaryString(item.Summary, "phase"); phase == "" || phase == "Active" {
 				result.ActiveNamespaces++
 			}
 		}},
-		{"apps~v1~deployments", func(ProjectedResource) { result.Workloads++ }},
-		{"apps~v1~statefulsets", func(ProjectedResource) { result.Workloads++ }},
-		{"apps~v1~daemonsets", func(ProjectedResource) { result.Workloads++ }},
-		{"batch~v1~jobs", func(ProjectedResource) { result.Workloads++ }},
-		{"batch~v1~cronjobs", func(ProjectedResource) { result.Workloads++ }},
-		{"core~v1~events", func(item ProjectedResource) {
-			if item.Summary["type"] == "Warning" {
-				result.Warnings++
-			}
-		}},
+		{"apps~v1~deployments", "", func(ProjectedResource) { result.Workloads++ }},
+		{"apps~v1~statefulsets", "", func(ProjectedResource) { result.Workloads++ }},
+		{"apps~v1~daemonsets", "", func(ProjectedResource) { result.Workloads++ }},
+		{"batch~v1~jobs", "", func(ProjectedResource) { result.Workloads++ }},
+		{"batch~v1~cronjobs", "", func(ProjectedResource) { result.Workloads++ }},
 	} {
+		if request.kind != "" && readyIndexedKinds[request.kind] {
+			if records, ready := indexedRecords[request.kind]; ready {
+				for _, record := range records {
+					request.apply(projectedIndexRecord(record))
+				}
+				continue
+			}
+		}
 		page, err := service.listAll(ctx, ListOptions{ResourceID: request.id})
 		if err != nil {
 			result.Truncated = true
@@ -541,31 +624,61 @@ func (service *Service) Overview(ctx context.Context) (Overview, error) {
 	}
 	result.RequestedCPU, result.LimitedCPU, result.AllocatableCPU = rationalString(requestedCPU), rationalString(limitedCPU), rationalString(allocatableCPU)
 	result.RequestedMemory, result.LimitedMemory, result.AllocatableMemory = rationalString(requestedMemory), rationalString(limitedMemory), rationalString(allocatableMemory)
-	usage, usageErr := service.Usage(ctx, "", maxPageSize)
-	if usageErr != nil {
-		result.Partial = append(result.Partial, PartialFailure{ResourceID: "metrics.k8s.io", Class: errorClass(usageErr)})
-	} else {
-		result.Partial = append(result.Partial, usage.Partial...)
-		result.Truncated = result.Truncated || usage.Truncated
-		for _, omitted := range usage.Omitted {
-			result.Omitted = appendUnique(result.Omitted, omitted)
-		}
-		selected := usage.NodeMetrics
-		if selected.Total > 0 {
-			result.UsageSource = "node_metrics"
-		} else if usage.PodMetrics.Total > 0 {
-			selected = usage.PodMetrics
-			result.UsageSource = "pod_metrics"
-		}
-		if selected.Total > 0 {
-			result.MetricsStatus = selected.Availability
-			result.MetricsFresh = selected.Fresh
-			result.UsageCPU = selected.CPU
-			result.UsageMemory = selected.Memory
-			result.MetricsObservedAt = selected.ObservedAt
-		}
-	}
+	result.Sync.Partial = result.Sync.Partial || result.Truncated || len(result.Partial) > 0
 	return result, nil
+}
+
+// Get reads and safely projects one discovered Kubernetes resource.
+func (service *Service) Get(ctx context.Context, resourceID, namespace, name string) (ProjectedResource, error) {
+	ctx, cancel := ensureOperationBudget(ctx)
+	defer cancel()
+	if !safeSegment(name) || namespace != "" && !safeSegment(namespace) {
+		return ProjectedResource{}, ErrInvalidArguments
+	}
+	ctx, _, err := service.withDiscovery(ctx)
+	if err != nil {
+		return ProjectedResource{}, err
+	}
+	definition, err := service.resolve(ctx, resourceID)
+	if err != nil {
+		return ProjectedResource{}, err
+	}
+	apiPath, err := resourcePath(definition, namespace, name)
+	if err != nil {
+		return ProjectedResource{}, err
+	}
+	var raw map[string]any
+	if err := service.client.GetJSON(ctx, apiPath, &raw); err != nil {
+		return ProjectedResource{}, err
+	}
+	return service.projectResource(definition, raw), nil
+}
+
+func projectedIndexRecord(record kubeindex.Record) ProjectedResource {
+	summary := make(map[string]any, len(record.Summary))
+	for key, value := range record.Summary {
+		summary[key] = value
+	}
+	conditions := []Condition{}
+	if record.Kind == "Node" {
+		status := "False"
+		if record.NodeReady {
+			status = "True"
+		}
+		conditions = append(conditions, Condition{Type: "Ready", Status: status})
+	}
+	return ProjectedResource{Kind: record.Kind, Summary: summary, Conditions: conditions}
+}
+
+func projectedWorkloadIndexRecord(record kubeindex.Record) ProjectedResource {
+	projected := projectedIndexRecord(record)
+	projected.ResourceID = indexedResourceIDs[record.Kind]
+	projected.Kind, projected.Namespace, projected.Name, projected.UID = record.Kind, record.Namespace, record.Name, record.UID
+	projected.Labels = record.Labels
+	for _, owner := range record.Owners {
+		projected.Owners = append(projected.Owners, ObjectRef{Kind: owner.Kind, Namespace: owner.Namespace, Name: owner.Name, UID: owner.UID})
+	}
+	return projected
 }
 
 // Usage returns bounded pod and node Metrics API samples with freshness metadata.
@@ -591,12 +704,13 @@ func (service *Service) Usage(ctx context.Context, namespace string, limit int) 
 	for _, definition := range discovery.Resources {
 		available[definition.ID] = true
 	}
+	collectionIncomplete := false
 	for _, request := range []struct {
 		id   string
 		kind string
 	}{
-		{"metrics.k8s.io~v1beta1~pods", "Pod"},
 		{"metrics.k8s.io~v1beta1~nodes", "Node"},
+		{"metrics.k8s.io~v1beta1~pods", "Pod"},
 	} {
 		if !available[request.id] {
 			result.Omitted = appendUnique(result.Omitted, request.id)
@@ -608,6 +722,7 @@ func (service *Service) Usage(ctx context.Context, namespace string, limit int) 
 		}
 		page, listErr := service.listAll(ctx, ListOptions{ResourceID: request.id, Namespace: metricNamespace})
 		if listErr != nil {
+			collectionIncomplete = true
 			result.Partial = append(result.Partial, PartialFailure{ResourceID: request.id, Class: errorClass(listErr)})
 			continue
 		}
@@ -616,7 +731,11 @@ func (service *Service) Usage(ctx context.Context, namespace string, limit int) 
 			result.Omitted = appendUnique(result.Omitted, request.id)
 		}
 		result.Partial = append(result.Partial, page.Partial...)
+		complete := !page.Truncated && len(page.Partial) == 0
+		validSamples := true
+		var metrics []ResourceUsage
 		for _, item := range page.Items {
+			validSamples = validSamples && item.metricsValid
 			metric := ResourceUsage{Kind: request.kind, Namespace: item.Namespace, Name: item.Name, Window: summaryString(item.Summary, "window"), CPU: summaryString(item.Summary, "usage_cpu"), Memory: summaryString(item.Summary, "usage_memory")}
 			if timestamp := summaryString(item.Summary, "timestamp"); timestamp != "" {
 				metric.Timestamp, _ = time.Parse(time.RFC3339Nano, timestamp)
@@ -626,18 +745,35 @@ func (service *Service) Usage(ctx context.Context, namespace string, limit int) 
 			} else {
 				result.Nodes = append(result.Nodes, metric)
 			}
+			metrics = append(metrics, metric)
+		}
+		status := summarizeMetricsSource(metrics, result.ObservedAt)
+		status.Complete = complete && validSamples
+		if !status.Complete {
+			collectionIncomplete = true
+			status.Fresh = false
+			if status.Total > 0 {
+				status.Availability = "partial"
+			}
 		}
 		if request.kind == "Pod" {
-			result.PodMetrics = summarizeMetricsSource(result.Pods, result.ObservedAt)
+			result.PodMetrics = status
 		} else {
-			result.NodeMetrics = summarizeMetricsSource(result.Nodes, result.ObservedAt)
+			result.NodeMetrics = status
 		}
 	}
 	if len(result.Pods)+len(result.Nodes) == 0 {
+		if collectionIncomplete {
+			result.Availability = "partial"
+		}
 		return result, nil
 	}
 	result.Availability = "available"
 	result.Fresh = true
+	if collectionIncomplete {
+		result.Availability = "partial"
+		result.Fresh = false
+	}
 	cutoff := result.ObservedAt.Add(-5 * time.Minute)
 	for _, metric := range append(append([]ResourceUsage(nil), result.Pods...), result.Nodes...) {
 		if metric.Timestamp.IsZero() || metric.Timestamp.Before(cutoff) {
@@ -688,6 +824,10 @@ func summarizeMetricsSource(metrics []ResourceUsage, observedAt time.Time) Metri
 
 // PodLogs reads one bounded pod log stream, optionally selecting a container.
 func (service *Service) PodLogs(ctx context.Context, namespace, pod, container string, previous bool, sinceSeconds, tailLines int) (PodLogs, error) {
+	return service.podLogs(ctx, namespace, pod, container, previous, sinceSeconds, tailLines, false)
+}
+
+func (service *Service) podLogs(ctx context.Context, namespace, pod, container string, previous bool, sinceSeconds, tailLines int, timestamps bool) (PodLogs, error) {
 	ctx, cancel := ensureOperationBudget(ctx)
 	defer cancel()
 	for _, value := range []string{namespace, pod} {
@@ -711,6 +851,9 @@ func (service *Service) PodLogs(ctx context.Context, namespace, pod, container s
 		tailLines = 500
 	}
 	query := url.Values{"previous": {strconv.FormatBool(previous)}, "sinceSeconds": {strconv.Itoa(sinceSeconds)}, "tailLines": {strconv.Itoa(tailLines)}}
+	if timestamps {
+		query.Set("timestamps", "true")
+	}
 	if container != "" {
 		query.Set("container", container)
 	}
@@ -843,6 +986,9 @@ func (service *Service) projectResource(definition ResourceDefinition, raw map[s
 	metadata, _ := raw["metadata"].(map[string]any)
 	labels, labelsTruncated := boundedStringMap(metadata["labels"], maxProjectionItems)
 	result := ProjectedResource{ResourceID: definition.ID, APIVersion: boundString(stringValue(raw["apiVersion"])), Kind: boundString(stringValue(raw["kind"])), Namespace: boundString(stringValue(metadata["namespace"])), Name: boundString(stringValue(metadata["name"])), UID: boundString(stringValue(metadata["uid"])), Labels: labels}
+	if definition.Kind == "PodMetrics" || definition.Kind == "NodeMetrics" {
+		result.metricsValid = validMetricsSample(definition.Kind, raw)
+	}
 	if labelsTruncated {
 		result.ProjectionTruncated = append(result.ProjectionTruncated, "labels")
 	}
@@ -1054,6 +1200,7 @@ func safeSummary(kind string, raw map[string]any, scrubber Scrubber) map[string]
 			summary["selector"] = stringMap(selector)
 		}
 	}
+	projectGitOpsSummary(kind, raw, summary, scrubber)
 	projectResourceReferences(kind, metadata, spec, summary)
 	if created := stringValue(metadata["creationTimestamp"]); created != "" {
 		summary["created_at"] = boundString(created)
@@ -1073,6 +1220,9 @@ func projectWorkloadSummary(summary, spec, status map[string]any) {
 	for _, key := range []string{"replicas", "parallelism", "completions", "minReadySeconds", "progressDeadlineSeconds", "terminationGracePeriodSeconds"} {
 		if value, ok := spec[key]; ok {
 			summary[camelToSnake(key)] = safeScalar(value)
+			if key == "replicas" {
+				summary["desired_replicas"] = safeScalar(value)
+			}
 		}
 	}
 	for _, key := range []string{"replicas", "readyReplicas", "currentReplicas", "updatedReplicas", "availableReplicas", "unavailableReplicas", "desiredNumberScheduled", "currentNumberScheduled", "numberReady", "succeeded", "failed", "active"} {
@@ -1213,6 +1363,39 @@ func metricsSummary(summary map[string]any, containers []map[string]any) {
 	}
 }
 
+func validMetricsSample(kind string, raw map[string]any) bool {
+	var usages []map[string]any
+	switch kind {
+	case "PodMetrics":
+		for _, container := range mapSlice(raw["containers"]) {
+			usage, ok := container["usage"].(map[string]any)
+			if !ok {
+				return false
+			}
+			usages = append(usages, usage)
+		}
+	case "NodeMetrics":
+		usage, ok := raw["usage"].(map[string]any)
+		if !ok {
+			return false
+		}
+		usages = append(usages, usage)
+	default:
+		return false
+	}
+	if len(usages) == 0 {
+		return false
+	}
+	for _, usage := range usages {
+		for _, name := range []string{"cpu", "memory"} {
+			if _, err := ParseQuantity(stringValue(usage[name])); err != nil {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func copyQuantity(summary map[string]any, key string, raw any) {
 	if quantity, err := ParseQuantity(stringValue(raw)); err == nil {
 		summary[key] = quantity.RatString()
@@ -1255,6 +1438,8 @@ func errorClass(err error) string {
 	switch {
 	case errors.Is(err, ErrOperationBudget):
 		return "budget_exhausted"
+	case errors.Is(err, errPreviousUnavailable):
+		return "previous_unavailable"
 	case errors.Is(err, ErrForbidden):
 		return "forbidden"
 	case errors.Is(err, ErrUnauthorized):

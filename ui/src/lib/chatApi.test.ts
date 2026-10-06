@@ -109,6 +109,28 @@ describe("chat API", () => {
     ]);
   });
 
+  it("uses the shared approval list and decision routes", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = String(input);
+      if (url.endsWith("/api/v1/agent/approvals?state=pending")) {
+        return Promise.resolve(new Response(JSON.stringify({ approvals: [] }), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ id: "approval-1", state: "approved" }), { status: 200 }));
+    });
+
+    await api.listAgentApprovals("pending");
+    await api.approveAgentApproval("approval/1", "nonce-value");
+    await api.rejectAgentApproval("approval-2", "Not safe to apply");
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/v1/agent/approvals?state=pending",
+      "/api/v1/agent/approvals/approval%2F1/approve",
+      "/api/v1/agent/approvals/approval-2/reject",
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({ nonce: "nonce-value" });
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual({ reason: "Not safe to apply" });
+  });
+
   it("dispatches auth-expired and throws a safe ApiError on 401", async () => {
     setSecret("rotated");
     const expired = vi.fn();

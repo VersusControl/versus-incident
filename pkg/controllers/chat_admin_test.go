@@ -15,8 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/agent/act"
 	chatagent "github.com/VersusControl/versus-incident/pkg/agent/ai/chat"
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/router"
+	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
+	"github.com/VersusControl/versus-incident/pkg/agentapi"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
@@ -37,7 +40,8 @@ func (rateLimitedAPIRunner) RunChat(context.Context, core.ChatTask) (*core.ChatT
 
 func (apiChatRunner) RunChat(ctx context.Context, _ core.ChatTask) (*core.ChatTurnResult, error) {
 	core.EmitChatEvent(ctx, core.ChatEvent{Seq: 1, Kind: core.ChatEventModelDelta, Delta: "hello\nworld"})
-	core.EmitChatEvent(ctx, core.ChatEvent{Seq: 2, Kind: core.ChatEventRunFinished})
+	core.EmitChatEvent(ctx, core.ChatEvent{Seq: 2, Kind: core.ChatEventApproval, Approval: &core.ChatApproval{ID: "approval-1", State: "pending"}, ApprovalNonce: "nonce-from-turn"})
+	core.EmitChatEvent(ctx, core.ChatEvent{Seq: 3, Kind: core.ChatEventRunFinished})
 	return &core.ChatTurnResult{Markdown: "hello"}, nil
 }
 
@@ -116,6 +120,273 @@ func createChatSession(t *testing.T, app *fiber.App) string {
 		t.Fatal(err)
 	}
 	return session.ID
+}
+
+func TestChatCallerContextPreservesExplicitApprovalPermission(t *testing.T) {
+	allowed := true
+	app := fiber.New()
+	app.Use(func(c *fiber.Ctx) error {
+		middleware.MarkAuthorized(c)
+		middleware.SetRequestPermission(c, string(core.PermissionAgentApprove), allowed)
+		return c.Next()
+	})
+	app.Get("/permission", func(c *fiber.Ctx) error {
+		ctx := core.WithCallerAuthorization(context.Background(), callerAuthorization(c))
+		if !core.CallerAuthorized(ctx, core.PermissionAgentApprove) {
+			return c.SendStatus(fiber.StatusForbidden)
+		}
+		return c.SendStatus(fiber.StatusOK)
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/permission", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("authorized caller status=%d err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+	allowed = false
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, "/permission", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("denied caller status=%d err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+}
+
+func TestCommunityPermissionGrantIncludesAgentApproval(t *testing.T) {
+	app := fiber.New()
+	app.Get("/community", func(c *fiber.Ctx) error {
+		grantCommunityPermissions(c)
+		ctx := core.WithCallerAuthorization(c.UserContext(), callerAuthorization(c))
+		if !core.CallerAuthorized(ctx, core.PermissionAgentApprove) || core.CallerActor(ctx) != communityRequestActor {
+			return c.SendStatus(fiber.StatusForbidden)
+		}
+		return c.SendStatus(fiber.StatusOK)
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/community", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("community approval permission status=%d err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+}
+
+func TestAPIV1ChatAliasesReuseSessionAndTurnRuntime(t *testing.T) {
+	app, _ := chatTestApp(t, storage.NewMemory(), apiChatRunner{}, true)
+	bootstrapResponse, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/agent/bootstrap", nil), -1)
+	if err != nil || bootstrapResponse.StatusCode != fiber.StatusOK {
+		t.Fatalf("API-v1 bootstrap status=%d err=%v", bootstrapResponse.StatusCode, err)
+	}
+	var bootstrap agentapi.Bootstrap
+	if err := json.NewDecoder(bootstrapResponse.Body).Decode(&bootstrap); err != nil {
+		t.Fatal(err)
+	}
+	bootstrapResponse.Body.Close()
+	if bootstrap.APIVersion != agentapi.APIVersion || len(bootstrap.Profiles) != 1 || bootstrap.Profiles[0].Name != "chat" {
+		t.Fatalf("unexpected bootstrap contract: %+v", bootstrap)
+	}
+	created, err := app.Test(httptest.NewRequest(http.MethodPost, "/api/v1/agent/sessions", nil), -1)
+	if err != nil || created.StatusCode != fiber.StatusCreated {
+		t.Fatalf("API-v1 create status=%d err=%v", created.StatusCode, err)
+	}
+	var session chatagent.Session
+	if err := json.NewDecoder(created.Body).Decode(&session); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/agent/sessions/"+session.ID+"/turns", strings.NewReader(`{"message":"investigate checkout"}`))
+	request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	request.Header.Set(fiber.HeaderAccept, "text/event-stream")
+	response, err := app.Test(request, -1)
+	if err != nil || response.StatusCode != fiber.StatusOK || !strings.HasPrefix(response.Header.Get(fiber.HeaderContentType), "text/event-stream") {
+		t.Fatalf("API-v1 turn status=%d content-type=%q err=%v", response.StatusCode, response.Header.Get(fiber.HeaderContentType), err)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil || !strings.Contains(string(body), "event: model_delta") || !strings.Contains(string(body), "event: approval_required") || !strings.Contains(string(body), "nonce-from-turn") || !strings.Contains(string(body), "event: run_finished") {
+		t.Fatalf("API-v1 turn stream=%q err=%v", body, err)
+	}
+	replayResponse, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/agent/sessions/"+session.ID+"/events?after=0", nil), -1)
+	if err != nil || replayResponse.StatusCode != fiber.StatusOK {
+		t.Fatalf("API-v1 replay status=%d err=%v", replayResponse.StatusCode, err)
+	}
+	var replay agentapi.Replay
+	if err := json.NewDecoder(replayResponse.Body).Decode(&replay); err != nil {
+		t.Fatal(err)
+	}
+	replayResponse.Body.Close()
+	if replay.SessionID != session.ID || len(replay.Events) == 0 || replay.Events[len(replay.Events)-1].Kind != core.ChatEventRunFinished {
+		t.Fatalf("unexpected replay: %+v", replay)
+	}
+	jsonSessionResponse, err := app.Test(httptest.NewRequest(http.MethodPost, "/api/v1/agent/sessions", nil), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jsonSession agentapi.Session
+	if err := json.NewDecoder(jsonSessionResponse.Body).Decode(&jsonSession); err != nil {
+		t.Fatal(err)
+	}
+	jsonSessionResponse.Body.Close()
+	jsonTurn := httptest.NewRequest(http.MethodPost, "/api/v1/agent/sessions/"+jsonSession.ID+"/turns", strings.NewReader(`{"message":"status","mode":"interactive","profile":"chat"}`))
+	jsonTurn.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	jsonResponse, err := app.Test(jsonTurn, -1)
+	if err != nil || jsonResponse.StatusCode != fiber.StatusOK || !strings.HasPrefix(jsonResponse.Header.Get(fiber.HeaderContentType), fiber.MIMEApplicationJSON) {
+		t.Fatalf("API-v1 JSON turn status=%d content-type=%q err=%v", jsonResponse.StatusCode, jsonResponse.Header.Get(fiber.HeaderContentType), err)
+	}
+	var turnResponse agentapi.TurnResponse
+	if err := json.NewDecoder(jsonResponse.Body).Decode(&turnResponse); err != nil {
+		t.Fatal(err)
+	}
+	jsonResponse.Body.Close()
+	if turnResponse.SessionID != jsonSession.ID || turnResponse.Assistant.Content == "" || len(turnResponse.Assistant.Events) == 0 || turnResponse.Assistant.Events[0].Kind != core.ChatEventModelDelta {
+		t.Fatalf("unexpected JSON turn response: %+v", turnResponse)
+	}
+	foundApproval := false
+	for _, event := range turnResponse.Assistant.Events {
+		if event.Kind == core.ChatEventApproval && event.Approval != nil && event.Approval.ID == "approval-1" && event.ApprovalNonce == "nonce-from-turn" {
+			foundApproval = true
+		}
+	}
+	if !foundApproval {
+		t.Fatalf("JSON turn response lost approval event: %+v", turnResponse.Assistant.Events)
+	}
+}
+
+type approvalRouteAdapter struct{}
+
+func (approvalRouteAdapter) Type() act.ActionType { return "k8s.rollout_restart" }
+func (approvalRouteAdapter) Destructive() bool    { return false }
+func (approvalRouteAdapter) Schema() map[string]any {
+	return map[string]any{"type": "object"}
+}
+func (approvalRouteAdapter) Validate(context.Context, act.Proposal) error { return nil }
+func (approvalRouteAdapter) DryRun(context.Context, act.Proposal) (string, error) {
+	return "restart workload", nil
+}
+func (approvalRouteAdapter) Execute(context.Context, act.Proposal) (act.Result, error) {
+	return act.Result{Summary: "restart requested"}, nil
+}
+func (approvalRouteAdapter) Verify(context.Context, act.Proposal, act.Result) (act.Verification, error) {
+	return act.Verification{Verified: true, Summary: "rollout ready"}, nil
+}
+
+func TestAgentAPIApprovalRoutesRequirePermissionAndUseBoundNonce(t *testing.T) {
+	provider := storage.NewMemory()
+	service, err := act.NewService(provider, "default", ledger.NewBlobWriter(provider, "default"), nil, approvalRouteAdapter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetAgentApprovalServiceFactory(func(tenancy.OrgScope) *act.Service { return service })
+	t.Cleanup(func() { SetAgentApprovalServiceFactory(nil) })
+
+	deniedApp := fiber.New()
+	deniedApp.Use(middleware.OrgInjector())
+	deniedApp.Use(func(c *fiber.Ctx) error {
+		middleware.MarkAuthorized(c)
+		return c.Next()
+	})
+	NewChatAdminController(nil).Register(deniedApp.Group("/api"))
+	denied, err := deniedApp.Test(httptest.NewRequest(http.MethodGet, "/api/v1/agent/approvals", nil), -1)
+	if err != nil || denied.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("approval without permission status=%d err=%v", denied.StatusCode, err)
+	}
+	deniedBootstrap, err := deniedApp.Test(httptest.NewRequest(http.MethodGet, "/api/v1/agent/bootstrap", nil), -1)
+	if err != nil || deniedBootstrap.StatusCode != fiber.StatusOK {
+		t.Fatalf("bootstrap without approval permission status=%d err=%v", deniedBootstrap.StatusCode, err)
+	}
+	var deniedFeatures agentapi.Bootstrap
+	if err := json.NewDecoder(deniedBootstrap.Body).Decode(&deniedFeatures); err != nil {
+		t.Fatal(err)
+	}
+	deniedBootstrap.Body.Close()
+	if deniedFeatures.Features.Approvals || deniedFeatures.Features.Ledger {
+		t.Fatalf("bootstrap exposed unavailable approval features: %+v", deniedFeatures.Features)
+	}
+	deniedProposal := httptest.NewRequest(http.MethodPost, "/api/v1/agent/proposals", strings.NewReader(`{"type":"k8s.rollout_restart","target":{"kind":"Deployment","namespace":"shop","name":"checkout"},"params":{},"reason":"restore service"}`))
+	deniedProposal.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	denied, err = deniedApp.Test(deniedProposal, -1)
+	if err != nil || denied.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("proposal without permission status=%d err=%v", denied.StatusCode, err)
+	}
+
+	missingActorApp := fiber.New()
+	missingActorApp.Use(middleware.OrgInjector())
+	missingActorApp.Use(func(c *fiber.Ctx) error {
+		middleware.MarkAuthorized(c)
+		middleware.SetRequestPermission(c, string(core.PermissionAgentApprove), true)
+		return c.Next()
+	})
+	NewChatAdminController(nil).Register(missingActorApp.Group("/api"))
+	missingActorRequest := httptest.NewRequest(http.MethodPost, "/api/v1/agent/proposals", strings.NewReader(`{"type":"k8s.rollout_restart","target":{"kind":"Deployment","namespace":"shop","name":"checkout"},"params":{},"reason":"restore service"}`))
+	missingActorRequest.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	missingActorResponse, err := missingActorApp.Test(missingActorRequest, -1)
+	if err != nil || missingActorResponse.StatusCode != fiber.StatusConflict {
+		t.Fatalf("proposal with permission but no principal status=%d err=%v", missingActorResponse.StatusCode, err)
+	}
+	missingActorResponse.Body.Close()
+
+	app := fiber.New()
+	app.Use(middleware.OrgInjector())
+	app.Use(func(c *fiber.Ctx) error {
+		middleware.MarkAuthorized(c)
+		middleware.SetRequestPermission(c, string(core.PermissionAgentApprove), true)
+		middleware.SetRequestActor(c, "operator-1")
+		return c.Next()
+	})
+	NewChatAdminController(nil).Register(app.Group("/api"))
+	bootstrapResponse, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/agent/bootstrap", nil), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bootstrap agentapi.Bootstrap
+	if err := json.NewDecoder(bootstrapResponse.Body).Decode(&bootstrap); err != nil {
+		t.Fatal(err)
+	}
+	bootstrapResponse.Body.Close()
+	if !bootstrap.Features.Approvals || !bootstrap.Features.Ledger {
+		t.Fatalf("approval features = %+v", bootstrap.Features)
+	}
+	proposalRequest := httptest.NewRequest(http.MethodPost, "/api/v1/agent/proposals", strings.NewReader(`{"type":"k8s.rollout_restart","target":{"kind":"Deployment","namespace":"shop","name":"checkout"},"params":{},"reason":"restore service"}`))
+	proposalRequest.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	proposalResponse, err := app.Test(proposalRequest, -1)
+	if err != nil || proposalResponse.StatusCode != fiber.StatusCreated {
+		responseBody, _ := io.ReadAll(proposalResponse.Body)
+		t.Fatalf("proposal status=%d body=%s err=%v", proposalResponse.StatusCode, responseBody, err)
+	}
+	var proposal act.ProposalResult
+	if err := json.NewDecoder(proposalResponse.Body).Decode(&proposal); err != nil {
+		t.Fatal(err)
+	}
+	proposalResponse.Body.Close()
+	if proposal.Proposal == nil || proposal.Approval == nil || proposal.Nonce == "" {
+		t.Fatalf("proposal response=%+v", proposal)
+	}
+
+	listResponse, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/agent/approvals?state=pending", nil), -1)
+	if err != nil || listResponse.StatusCode != fiber.StatusOK {
+		t.Fatalf("approval list status=%d err=%v", listResponse.StatusCode, err)
+	}
+	var list struct {
+		Approvals []act.Approval `json:"approvals"`
+	}
+	if err := json.NewDecoder(listResponse.Body).Decode(&list); err != nil {
+		t.Fatal(err)
+	}
+	listResponse.Body.Close()
+	if len(list.Approvals) != 1 || list.Approvals[0].ID != proposal.Approval.ID {
+		t.Fatalf("approval list = %+v", list)
+	}
+
+	body := strings.NewReader(`{"nonce":"` + proposal.Nonce + `"}`)
+	approveRequest := httptest.NewRequest(http.MethodPost, "/api/v1/agent/approvals/"+proposal.Approval.ID+"/approve", body)
+	approveRequest.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	approved, err := app.Test(approveRequest, -1)
+	if err != nil || approved.StatusCode != fiber.StatusOK {
+		responseBody, _ := io.ReadAll(approved.Body)
+		t.Fatalf("approval status=%d body=%s err=%v", approved.StatusCode, responseBody, err)
+	}
+	var result act.Approval
+	if err := json.NewDecoder(approved.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	approved.Body.Close()
+	if result.State != "verified" || result.Approver != "operator-1" {
+		t.Fatalf("approval result = %+v", result)
+	}
 }
 
 func TestChatAdminRequiresAuth(t *testing.T) {
@@ -376,14 +647,19 @@ func TestChatStreamObserverReservesTerminalSlot(t *testing.T) {
 	for index := 0; index < 10; index++ {
 		observer.OnChatEvent(core.ChatEvent{Seq: int64(index + 1), Kind: core.ChatEventModelDelta})
 	}
-	observer.OnChatEvent(core.ChatEvent{Seq: 11, Kind: core.ChatEventRunFinished})
+	observer.OnChatEvent(core.ChatEvent{Seq: 11, Kind: core.ChatEventApproval, Approval: &core.ChatApproval{ID: "approval-1"}, ApprovalNonce: "nonce-1"})
+	observer.OnChatEvent(core.ChatEvent{Seq: 12, Kind: core.ChatEventRunFinished})
 	if !observer.terminal.Load() {
 		t.Fatal("terminal event was not enqueued")
 	}
 	found := false
 	for len(events) > 0 {
-		if (<-events).Kind == core.ChatEventRunFinished {
+		queued := <-events
+		if queued.Kind == core.ChatEventRunFinished {
 			found = true
+		}
+		if queued.Kind == core.ChatEventApproval && (queued.Approval == nil || queued.Approval.ID != "approval-1" || queued.ApprovalNonce != "nonce-1") {
+			t.Fatal("approval event lost its ID or nonce")
 		}
 	}
 	if !found {

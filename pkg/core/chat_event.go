@@ -14,7 +14,20 @@ const (
 	ChatEventRunFinished  = "run_finished"
 	ChatEventRunFailed    = "run_failed"
 	ChatEventRunCancelled = "run_cancelled"
+	ChatEventApproval     = "approval_required"
 )
+
+type ChatApproval struct {
+	ID        string    `json:"id"`
+	ProposalID string   `json:"proposal_id"`
+	RunID     string    `json:"run_id"`
+	Type      string    `json:"type"`
+	Target    string    `json:"target"`
+	Effect    string    `json:"effect"`
+	Risk      string    `json:"risk"`
+	State     string    `json:"state"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
 
 // ChatEvent is one observable step of a chat turn. Error contains only a safe
 // classification; backend and model errors must never cross this boundary.
@@ -31,6 +44,8 @@ type ChatEvent struct {
 	DurationMs  int64          `json:"duration_ms,omitempty"`
 	Error       string         `json:"error,omitempty"`
 	Citations   []ChatCitation `json:"citations,omitempty"`
+	Approval    *ChatApproval  `json:"approval,omitempty"`
+	ApprovalNonce string       `json:"approval_nonce,omitempty"`
 }
 
 // ChatObserver receives events synchronously. Implementations must return

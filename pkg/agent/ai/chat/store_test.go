@@ -593,14 +593,16 @@ func TestSessionStoreBoundsAggregateTraceAndBlobGrowth(t *testing.T) {
 	}
 	prefix := `"\\世界`
 	payload := prefix + strings.Repeat("x", MaxToolPayloadBytes-len(prefix))
-	events := make([]core.ChatEvent, 4)
-	for index := range events {
+	toolPayload := prefix + strings.Repeat("x", MaxToolPayloadBytes/2-len(prefix))
+	events := make([]core.ChatEvent, 3)
+	for index := range events[:len(events)-1] {
 		events[index] = core.ChatEvent{Kind: core.ChatEventModelDelta, Delta: payload, Args: payload, Output: payload}
 	}
 	events[len(events)-1].Kind = core.ChatEventRunFinished
 	toolCalls := []core.ToolCallTrace{
-		{Name: "query_logs", Args: payload, Output: payload},
-		{Name: "query_metrics", Args: payload, Output: payload},
+		{Name: strings.Repeat("t", 256), CallID: strings.Repeat("c", 256), Args: toolPayload, Output: toolPayload},
+		{Name: strings.Repeat("t", 256), CallID: strings.Repeat("c", 256), Args: toolPayload, Output: toolPayload},
+		{Name: strings.Repeat("t", 256), CallID: strings.Repeat("c", 256), Args: toolPayload, Output: toolPayload},
 	}
 	citations := make([]core.ChatCitation, MaxCitationsPerTrace)
 	for index := range citations {
@@ -702,6 +704,47 @@ func TestSessionStoreCreateSurvivesFixedClockPruning(t *testing.T) {
 }
 
 func TestBoundsPreserveRunesWhitespaceAndTerminal(t *testing.T) {
+	preserveApproval := func() {
+		events := make([]core.ChatEvent, MaxEventsPerTurn+20)
+		for index := range events {
+			events[index] = core.ChatEvent{Seq: int64(index + 1), Kind: core.ChatEventModelDelta, Delta: "trace"}
+		}
+		events[MaxEventsPerTurn/2] = core.ChatEvent{
+			Seq: 129, Kind: core.ChatEventApproval, ApprovalNonce: "approval-nonce",
+			Approval: &core.ChatApproval{ID: "approval-1", State: "pending"},
+		}
+		events[len(events)-1].Kind = core.ChatEventRunFinished
+		bounded := boundEvents(events)
+		foundApproval, foundTerminal := false, false
+		for _, event := range bounded {
+			if event.Kind == core.ChatEventApproval {
+				foundApproval = event.Approval != nil && event.Approval.ID == "approval-1" && event.ApprovalNonce == "approval-nonce"
+			}
+			foundTerminal = foundTerminal || event.Kind == core.ChatEventRunFinished
+		}
+		if !foundApproval || !foundTerminal {
+			t.Fatalf("bounded events lost approval or terminal: approval=%v terminal=%v", foundApproval, foundTerminal)
+		}
+
+		largeEvents := []core.ChatEvent{{Kind: core.ChatEventModelDelta, Output: strings.Repeat("x", MaxMessageBytes)}}
+		largeEvents = append(largeEvents, core.ChatEvent{Kind: core.ChatEventApproval, ApprovalNonce: "approval-nonce", Approval: &core.ChatApproval{ID: "approval-1", State: "pending"}})
+		largeEvents = append(largeEvents, core.ChatEvent{Kind: core.ChatEventRunFinished})
+		encoded, err := compactSessionDocument(&Session{Turns: []Turn{{Role: TurnAssistant, Content: "answer", Events: largeEvents}}}, time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var compacted Session
+		if err := json.Unmarshal(encoded, &compacted); err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range compacted.Turns[len(compacted.Turns)-1].Events {
+			if event.Kind == core.ChatEventApproval && event.ApprovalNonce == "approval-nonce" && event.Approval != nil && event.Approval.ID == "approval-1" {
+				return
+			}
+		}
+		t.Fatal("session compaction discarded approval ID or nonce")
+	}
+	preserveApproval()
 	value := " \n世界abc"
 	if got := capRawString(value, 6); got != " \n世" {
 		t.Fatalf("bounded value = %q", got)

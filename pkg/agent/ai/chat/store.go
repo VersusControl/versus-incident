@@ -102,6 +102,7 @@ type sessionLease struct {
 
 type SessionStore struct {
 	provider storage.Provider
+	org      string
 	blobName string
 	now      func() time.Time
 }
@@ -116,7 +117,7 @@ func NewSessionStore(provider storage.Provider, scope tenancy.OrgScope, now func
 	org := scope.Normalized().Write
 	hash := sha256.Sum256([]byte(org))
 	blobName := chatSessionBlobPrefix + hex.EncodeToString(hash[:8])
-	return &SessionStore{provider: provider, blobName: blobName, now: now}
+	return &SessionStore{provider: provider, org: org, blobName: blobName, now: now}
 }
 
 func (store *SessionStore) indexBlobName() string { return store.blobName + "/index" }
@@ -568,7 +569,7 @@ func compactProtectedTurns(session *Session, now time.Time) ([]byte, error) {
 func terminalEvents(events []core.ChatEvent) []core.ChatEvent {
 	var terminals []core.ChatEvent
 	for _, event := range events {
-		if event.Kind == core.ChatEventRunFinished || event.Kind == core.ChatEventRunFailed || event.Kind == core.ChatEventRunCancelled || event.Kind == "run_throttled" {
+		if event.Kind == core.ChatEventApproval || event.Kind == core.ChatEventRunFinished || event.Kind == core.ChatEventRunFailed || event.Kind == core.ChatEventRunCancelled || event.Kind == "run_throttled" {
 			terminals = append(terminals, event)
 		}
 	}
@@ -907,13 +908,7 @@ func boundToolCalls(calls []core.ToolCallTrace) []core.ToolCallTrace {
 
 func boundEvents(events []core.ChatEvent) []core.ChatEvent {
 	if len(events) > MaxEventsPerTurn {
-		head := MaxEventsPerTurn / 2
-		tail := MaxEventsPerTurn - head - 1
-		bounded := make([]core.ChatEvent, 0, MaxEventsPerTurn)
-		bounded = append(bounded, events[:head]...)
-		bounded = append(bounded, core.ChatEvent{Kind: "events_elided", Output: fmt.Sprintf("%d events omitted", len(events)-head-tail)})
-		bounded = append(bounded, events[len(events)-tail:]...)
-		events = bounded
+		events = prioritizeBoundedEvents(events)
 	}
 	out := append([]core.ChatEvent(nil), events...)
 	for index := range out {
@@ -931,13 +926,7 @@ func boundEvents(events []core.ChatEvent) []core.ChatEvent {
 	if len(encoded) <= MaxEventBytesPerTurn {
 		return out
 	}
-	if len(out) > 2 {
-		out = []core.ChatEvent{
-			out[0],
-			{Kind: "events_elided", Output: fmt.Sprintf("%d events omitted", len(out)-2)},
-			out[len(out)-1],
-		}
-	}
+	out = criticalChatEvents(out)
 	encoded, _ = json.Marshal(out)
 	if len(encoded) > MaxEventBytesPerTurn {
 		for index := range out {
@@ -952,14 +941,80 @@ func boundEvents(events []core.ChatEvent) []core.ChatEvent {
 	}
 	encoded, _ = json.Marshal(out)
 	if len(encoded) > MaxEventBytesPerTurn {
-		terminal := core.ChatEvent{Kind: out[len(out)-1].Kind, Seq: out[len(out)-1].Seq}
-		out = []core.ChatEvent{{Kind: "events_elided"}, terminal}
-	}
-	encoded, _ = json.Marshal(out)
-	if len(encoded) > MaxEventBytesPerTurn {
-		return []core.ChatEvent{{Kind: "events_elided"}}
+		return criticalChatEvents(out)
 	}
 	return out
+}
+
+func prioritizeBoundedEvents(events []core.ChatEvent) []core.ChatEvent {
+	critical := make([]bool, len(events))
+	criticalCount := 0
+	for position, event := range events {
+		if isCriticalChatEvent(event) {
+			critical[position] = true
+			criticalCount++
+		}
+	}
+	normalBudget := MaxEventsPerTurn - criticalCount - 1
+	if normalBudget < 0 {
+		normalBudget = 0
+	}
+	headBudget := min(MaxEventsPerTurn/2, normalBudget)
+	tailBudget := normalBudget - headBudget
+	normalPositions := make([]int, 0, len(events)-criticalCount)
+	for position := range events {
+		if !critical[position] {
+			normalPositions = append(normalPositions, position)
+		}
+	}
+	keep := make([]bool, len(events))
+	copy(keep, critical)
+	for _, position := range normalPositions[:min(headBudget, len(normalPositions))] {
+		keep[position] = true
+	}
+	for _, position := range normalPositions[max(0, len(normalPositions)-tailBudget):] {
+		keep[position] = true
+	}
+	result := make([]core.ChatEvent, 0, MaxEventsPerTurn+criticalCount)
+	dropped := 0
+	markerInserted := false
+	for position, event := range events {
+		if keep[position] {
+			result = append(result, event)
+			continue
+		}
+		dropped++
+		if !markerInserted {
+			result = append(result, core.ChatEvent{Kind: "events_elided"})
+			markerInserted = true
+		}
+	}
+	if markerInserted {
+		for position := range result {
+			if result[position].Kind == "events_elided" {
+				result[position].Output = fmt.Sprintf("%d events omitted", dropped)
+				break
+			}
+		}
+	}
+	return result
+}
+
+func criticalChatEvents(events []core.ChatEvent) []core.ChatEvent {
+	result := make([]core.ChatEvent, 0)
+	for _, event := range events {
+		if isCriticalChatEvent(event) {
+			result = append(result, event)
+		}
+	}
+	if len(result) == 0 {
+		return []core.ChatEvent{{Kind: "events_elided"}}
+	}
+	return result
+}
+
+func isCriticalChatEvent(event core.ChatEvent) bool {
+	return event.Kind == core.ChatEventApproval || event.Kind == core.ChatEventRunFinished || event.Kind == core.ChatEventRunFailed || event.Kind == core.ChatEventRunCancelled || event.Kind == "run_throttled"
 }
 
 func boundCitations(citations []core.ChatCitation) []core.ChatCitation {

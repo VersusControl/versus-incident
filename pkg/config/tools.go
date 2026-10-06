@@ -54,6 +54,14 @@ type KubernetesToolConfig struct {
 	AllowLoopback        bool                 `mapstructure:"allow_loopback"`
 	AllowPrivateNetworks bool                 `mapstructure:"allow_private_networks"`
 	EndpointCIDRs        []string             `mapstructure:"endpoint_cidrs"`
+	Actions              KubernetesActionsToolConfig `mapstructure:"actions"`
+}
+
+type KubernetesActionsToolConfig struct {
+	Enable      bool                 `mapstructure:"enable"`
+	Auth        KubernetesAuthConfig `mapstructure:"auth"`
+	MaxReplicas int                  `mapstructure:"max_replicas"`
+	Timeout     string               `mapstructure:"timeout"`
 }
 
 // KubernetesAuthConfig selects exactly one Kubernetes authentication source.

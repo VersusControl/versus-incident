@@ -36,6 +36,42 @@ func TestKubernetesReaderRBACTemplateIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestKubernetesActorRBACTemplateUsesExplicitNonDestructiveVerbs(t *testing.T) {
+	template, err := os.ReadFile("../../helm/versus-incident/templates/actor-rbac.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(template)
+	verbs := quotedTemplateFieldValues(t, content, "verbs")
+	resources := quotedTemplateFieldValues(t, content, "resources")
+	seenVerbs := map[string]bool{}
+	for _, verb := range verbs {
+		if verb != "get" && verb != "patch" && verb != "create" {
+			t.Errorf("Kubernetes actor RBAC contains forbidden verb %q", verb)
+		}
+		seenVerbs[verb] = true
+	}
+	if len(seenVerbs) != 3 {
+		t.Fatalf("actor verbs = %v", seenVerbs)
+	}
+	allowedResources := map[string]bool{
+		"deployments": true, "deployments/scale": true, "statefulsets": true,
+		"statefulsets/scale": true, "daemonsets": true, "cronjobs": true, "jobs": true, "nodes": true,
+	}
+	for _, resource := range resources {
+		if !allowedResources[resource] {
+			t.Errorf("Kubernetes actor RBAC contains unapproved resource %q", resource)
+		}
+		delete(allowedResources, resource)
+	}
+	if len(allowedResources) != 0 {
+		t.Errorf("Kubernetes actor RBAC is missing scoped resources: %v", allowedResources)
+	}
+	if !regexp.MustCompile(`(?m)resources: \["jobs"\]\s*\n\s*verbs: \["get", "create"\]`).MatchString(content) {
+		t.Fatal("create must be limited to Jobs for CronJob triggers")
+	}
+}
+
 func quotedTemplateFieldValues(t *testing.T, content, field string) []string {
 	t.Helper()
 	fieldPattern := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(field) + `:\s*\[([^]]*)\]`)

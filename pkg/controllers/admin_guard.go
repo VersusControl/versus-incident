@@ -11,6 +11,8 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+const communityRequestActor = "gateway"
+
 // adminGatewayGuard is the ONE gateway-secret guard shared by every admin
 // controller. Extracting it out of eight per-controller copies removes the
 // order-dependent double-registration Fiber creates when two controllers mount
@@ -45,7 +47,10 @@ func adminGatewayGuard(c *fiber.Ctx) error {
 }
 
 func grantCommunityPermissions(c *fiber.Ctx) {
-	for _, permission := range []core.Permission{core.PermissionInfrastructureView, core.PermissionServiceHealthSettingsWrite} {
+	if middleware.RequestActor(c) == "" {
+		middleware.SetRequestActor(c, communityRequestActor)
+	}
+	for _, permission := range []core.Permission{core.PermissionInfrastructureView, core.PermissionServiceHealthSettingsWrite, core.PermissionAgentApprove} {
 		name := string(permission)
 		if _, explicit := middleware.RequestPermission(c, name); !explicit {
 			middleware.SetRequestPermission(c, name, true)
@@ -59,7 +64,11 @@ func callerAuthorization(c *fiber.Ctx) core.CallerAuthorization {
 	if explicit {
 		permissions[core.PermissionInfrastructureView] = allowed
 	}
-	return core.CallerAuthorization{Authenticated: true, Permissions: permissions}
+	allowed, explicit = middleware.RequestPermission(c, string(core.PermissionAgentApprove))
+	if explicit {
+		permissions[core.PermissionAgentApprove] = allowed
+	}
+	return core.CallerAuthorization{Authenticated: true, Actor: requestActor(c), Permissions: permissions}
 }
 
 func callerContext(c *fiber.Ctx, parent context.Context) context.Context {

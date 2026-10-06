@@ -84,12 +84,21 @@ type ChatIncidentContext struct {
 	Created  time.Time `json:"created,omitempty"`
 }
 
+type ChatResourceRef struct {
+	Provider   string `json:"provider"`
+	Cluster    string `json:"cluster"`
+	ResourceID string `json:"resource_id"`
+	Namespace  string `json:"namespace,omitempty"`
+	Name       string `json:"name"`
+}
+
 // ChatAttachment grounds a turn without restricting the conversation to that
 // context. Each field is optional and validated by the chat service.
 type ChatAttachment struct {
 	Incident *ChatIncidentContext `json:"incident,omitempty"`
 	Service  string               `json:"service,omitempty"`
 	Time     *ChatTimeRange       `json:"time_range,omitempty"`
+	Resource *ChatResourceRef    `json:"resource,omitempty"`
 }
 
 // ChatTask is one user turn in a durable chat session.

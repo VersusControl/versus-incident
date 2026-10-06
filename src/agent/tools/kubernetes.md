@@ -1,26 +1,114 @@
-# Kubernetes Connector
+# Kubernetes Connector and Dashboard
 
-The Kubernetes connector gives Versus read-only tools: cluster
-overview, API discovery, resource search/list/get, workload list/get, events,
-and pod logs. It never applies, patches, deletes, executes in a pod,
-opens a terminal or proxy, performs a rollout, or runs Helm.
+Explore your Kubernetes environment in one place: cluster health and capacity,
+workloads, resource relationships, recent changes, Helm releases, and GitOps
+status. Open a resource to inspect its events, logs, metrics, and deployment
+context without switching between tools.
 
-## Native authentication
+The AI SRE can use the same cluster context in Chat and Analyze. Start with the
+dashboard to understand a workload, then investigate it in chat with the
+resource already attached.
 
-Environment references in `tools.yaml` are expanded only after strict YAML
-parsing and only inside decoded string values. Both `$VAR` and `${VAR}`.
+## Kubernetes Harness Dashboard
 
-An empty mode preserves legacy `endpoint` plus top-level `token_file` only when
-the nested `auth` object is otherwise empty. Any configured `auth.*` field
-requires an explicit `auth.mode`. Kubeconfig supplies endpoint, CA, TLS
-name, and credentials. Every other mode uses top-level `endpoint`, `ca_data` or
-`ca_file`, and optional `server_name`. Except for `in_cluster`, Versus does not
-discover the Kubernetes endpoint or CA: obtain and mount them separately.
+Open **Tools > Kubernetes** after connecting your cluster. The dashboard has
+eight tabs; screenshots below use a synthetic cluster.
 
-The examples below use `ca_data: ${KUBERNETES_CA_DATA}`. Set that environment
-variable to the cluster's base64-encoded CA certificate. If you mount a PEM CA
-file instead, replace `ca_data` with `ca_file: /run/kubernetes/ca.crt`. Configure
-only one of `ca_data` or `ca_file`.
+### Overview
+
+See ready nodes, running pods, workload and namespace counts, and CPU and memory
+capacity. Usage and resource requests are shown separately, with the metrics
+source and sample time beside them. Missing metrics are labelled **Unavailable**
+rather than shown as zero.
+
+Grouped issues, top pod usage, recent changes, and release and traffic summaries
+help you choose what to inspect next. The topology preview loads independently
+across namespaces. **Full topology** opens the namespace explorer.
+
+The full-width **Workloads** list supports name, namespace, and kind filters.
+Select a node to inspect its scheduled pods.
+
+![Kubernetes dashboard overview with cluster health, capacity, and grouped issues](../../docs/images/kubernetes-harness-overview.png)
+
+### Issues
+
+Problems are grouped by resource and severity. Filter by severity or namespace,
+then select **Open resource** to inspect the affected workload. Pagination loads
+the next page without expanding the whole dashboard.
+
+![Grouped Kubernetes issues with severity and namespace filters](../../docs/images/kubernetes-harness-issues.png)
+
+### Timeline
+
+Follow resource creation and deletion, image updates, replica changes, and spec
+changes. Choose a time window and filter by namespace or resource kind. Select
+a change to open the resource's timeline in the details panel. Recorded history
+gaps remain visible so missing evidence is not mistaken for no activity.
+
+![Kubernetes Timeline tab with time-window, namespace, and resource-kind filters](../../docs/images/kubernetes-harness-timeline.png)
+
+### Topology
+
+Start with the namespace blocks. Search for a namespace and select it to explore
+its connected resources; this graph is not paginated.
+
+![Clickable namespace blocks in the Kubernetes topology explorer](../../docs/images/kubernetes-harness-namespaces.png)
+
+The filter sidebar groups resource kinds and shows their counts. Ingress,
+Service, Deployment, and Pod are visible by default. Use the eye icons to show
+or hide other kinds, or reveal all kinds at once. Refresh the graph from the
+sidebar, and use pan, zoom, and **Fit to view** to navigate it.
+
+Connections show which resources manage, expose, route to, or configure others.
+Select a resource to open its details. Resources without relationships are not
+shown; use **Resources** to browse workloads outside the graph. If permissions
+or collection limits prevent a complete graph, the dashboard shows an error
+instead of presenting partial results as complete.
+
+![Namespace topology with grouped visibility filters and connected resources](../../docs/images/kubernetes-harness-topology.png)
+
+### Resources
+
+Search workloads and filter by kind, including Deployments, StatefulSets,
+DaemonSets, Jobs, CronJobs, and Pods. Select a row to open its details. The list
+scrolls within the panel and loads additional pages as requested.
+
+![Kubernetes resource inventory with name and kind filters](../../docs/images/kubernetes-harness-resources.png)
+
+### Helm
+
+Inspect release status, health, namespace, and revision. Expand a release to
+view its revision history. This view shows release metadata, not chart values
+or rendered manifests, and does not run Helm operations.
+
+![Helm tab showing an empty release-metadata inventory](../../docs/images/kubernetes-harness-helm.png)
+
+### GitOps
+
+Review discovered Argo CD and Flux applications, including sync state, health,
+and revision. The **Argo Rollouts** section automatically lists detected
+Rollouts and their strategy, progress, and canary weight.
+
+If the relevant APIs are not installed or cannot be read, the page explains
+what is unavailable instead of showing an empty successful result.
+
+![GitOps tab explaining that application APIs and the Argo Rollouts CRD are not discovered](../../docs/images/kubernetes-harness-gitops.png)
+
+### Traffic
+
+> **Enterprise**
+
+See observed service-to-service request rates, error rates, latency, and
+bytes per second where the source provides them. Filter by namespace and time
+window; check the source and freshness before interpreting a flow. Without
+supported telemetry, the page shows an unavailable state rather than inventing
+connections.
+
+![Kubernetes service traffic view with its source availability state](../../docs/images/kubernetes-harness-traffic.png)
+
+## Configuration
+
+Configure in `tools.yaml` file.
 
 ### In-cluster ServiceAccount
 
@@ -308,12 +396,6 @@ file/data, and context selection. It rejects insecure TLS, proxy URLs, basic
 auth, impersonation, every exec command, and legacy auth-provider credentials.
 Cloud credential HTTP clients have deadlines, bounded bodies, no redirects or
 proxy inheritance, TLS verification, and fixed production endpoints.
-
-Failures are classified without response bodies or credentials. Check file
-permissions, cloud identity prerequisites, Kubernetes RBAC, CA trust, and
-endpoint CIDRs. Tokens, presigned URLs, key bytes, client secrets, assertions,
-and provider response bodies are never returned in catalog, admin, audit, or
-error payloads.
 
 The admin API and Kubernetes page return a safe error code, explanation, and
 next action:

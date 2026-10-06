@@ -24,6 +24,11 @@ vi.mock("@/lib/api", async (importActual) => {
       deleteChatSession: vi.fn(),
       cancelChatRun: vi.fn(),
       streamChatMessage: vi.fn(),
+      listAgentApprovals: vi.fn(),
+      approveAgentApproval: vi.fn(),
+      rejectAgentApproval: vi.fn(),
+      kubernetesOverview: vi.fn(),
+      kubernetesSearch: vi.fn(),
     },
   };
 });
@@ -62,6 +67,9 @@ beforeEach(() => {
   vi.mocked(api.createChatSession).mockResolvedValue(baseSession);
   vi.mocked(api.deleteChatSession).mockResolvedValue(undefined);
   vi.mocked(api.cancelChatRun).mockResolvedValue(undefined);
+  vi.mocked(api.listAgentApprovals).mockResolvedValue({ approvals: [] });
+  vi.mocked(api.approveAgentApproval).mockResolvedValue({ id: "approval-1", proposal: { id: "proposal-1", run_id: "run-1", type: "restart", target: { kind: "Deployment", namespace: "shop", name: "checkout" }, params: {}, params_hash: "hash", dry_run: "restart checkout", risk: "medium", reason: "Restore service", proposed_by: "agent", expires_at: "2026-10-05T13:00:00Z" }, state: "approved", expires_at: "2026-10-05T13:00:00Z" });
+  vi.mocked(api.rejectAgentApproval).mockResolvedValue({ id: "approval-1", proposal: { id: "proposal-1", run_id: "run-1", type: "restart", target: { kind: "Deployment", namespace: "shop", name: "checkout" }, params: {}, params_hash: "hash", dry_run: "restart checkout", risk: "medium", reason: "Restore service", proposed_by: "agent", expires_at: "2026-10-05T13:00:00Z" }, state: "rejected", expires_at: "2026-10-05T13:00:00Z" });
   vi.mocked(api.streamChatMessage).mockResolvedValue({
     seq: 2,
     at: "2026-08-28T10:06:00Z",
@@ -143,6 +151,49 @@ describe("ChatPage", () => {
     await waitFor(() => expect(api.createChatSession).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getAllByText("Deployment v42 changed checkout.")).toHaveLength(1));
     expect(api.streamChatMessage).toHaveBeenCalledWith("session-1", "What changed?", undefined, expect.any(Function), expect.any(AbortSignal));
+  });
+
+  it("keeps approval cards after chat completes and submits the operator decision", async () => {
+    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
+      onEvent({ seq: 1, at: "", kind: "approval_required", approval: { id: "approval-1", proposal_id: "proposal-1", run_id: "run-1", type: "restart", target: "Deployment/shop/checkout", effect: "Restart checkout", risk: "medium", state: "pending", expires_at: "2026-10-05T13:00:00Z" }, approval_nonce: "nonce-value" });
+      return { seq: 2, at: "", kind: "run_finished" };
+    });
+    renderPage();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart checkout" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    const card = await screen.findByRole("region", { name: "Action approval" });
+    expect(within(card).getByText("Deployment/shop/checkout")).toBeTruthy();
+    fireEvent.change(within(card).getByRole("textbox", { name: "Reason for rejection" }), { target: { value: "The rollout is still active" } });
+    fireEvent.click(within(card).getByRole("button", { name: "Reject action" }));
+
+    await waitFor(() => expect(api.rejectAgentApproval).toHaveBeenCalledWith("approval-1", "The rollout is still active"));
+    expect(await within(card).findByText(/rejected/)).toBeTruthy();
+    expect(api.approveAgentApproval).not.toHaveBeenCalled();
+  });
+
+  it("searches with the Kubernetes resource API and sends the selected attachment", async () => {
+    vi.mocked(api.kubernetesOverview).mockResolvedValue({ connector: "kubernetes", cluster_id: "cluster-a", observed_at: "2026-10-05T12:00:00Z", nodes: 1, ready_nodes: 1, pods: 1, running_pods: 1, namespaces: 1, active_namespaces: 1, workloads: 1, warnings: 0, metrics_fresh: false, truncated: false });
+    vi.mocked(api.kubernetesSearch).mockResolvedValue({ items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "checkout" }], truncated: false });
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Attach Kubernetes resource" }));
+    const picker = await screen.findByRole("dialog", { name: "Attach Kubernetes resource" });
+    fireEvent.change(within(picker).getByRole("combobox", { name: "Search Kubernetes resources" }), { target: { value: "checkout" } });
+    const result = await within(picker).findByRole("option", { name: /checkout/ });
+    await waitFor(() => expect(api.kubernetesSearch).toHaveBeenCalledWith("", "checkout", 20));
+    fireEvent.click(result);
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Investigate this workload" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.streamChatMessage).toHaveBeenCalledWith("session-1", "Investigate this workload", { resource: { provider: "kubernetes", cluster: "cluster-a", resource_id: "apps~v1~deployments", namespace: "shop", name: "checkout" } }, expect.any(Function), expect.any(AbortSignal)));
+  });
+
+  it("renders an attachment backlink on persisted user turns", async () => {
+    vi.mocked(api.getChatSession).mockResolvedValue({ ...baseSession, turns: [{ id: "u1", role: "user", content: "Investigate this", created_at: baseSession.created_at, attachment: { resource: { provider: "kubernetes", cluster: "cluster-a", resource_id: "apps~v1~deployments", namespace: "shop", name: "checkout" } } }] });
+    renderPage("/agent/chat?session=session-1");
+    const link = await screen.findByRole("link", { name: /shop\/checkout Open in topology/ });
+    expect(link.getAttribute("href")).toContain("/agent/kubernetes?");
+    expect(link.getAttribute("href")).toContain("view=topology");
+    expect(link.getAttribute("href")).toContain("r=apps%7Ev1%7Edeployments%2Fshop%2Fcheckout");
   });
 
   it("shows safe model provider details when a chat run fails", async () => {

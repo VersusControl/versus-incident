@@ -30,9 +30,12 @@ var (
 	ErrForbidden             = errors.New("kubernetes: forbidden")
 	ErrNotFound              = errors.New("kubernetes: not found")
 	ErrResponseTooLarge      = errors.New("kubernetes: response too large")
+	errPreviousUnavailable   = errors.New("kubernetes: previous container unavailable")
 	ErrRedirect              = errors.New("kubernetes: redirect refused")
 	ErrInvalidArguments      = errors.New("kubernetes: invalid arguments")
 	ErrOperationBudget       = errors.New("kubernetes: operation budget exhausted")
+	ErrGraphIncomplete       = errors.New("kubernetes: complete graph could not be verified")
+	ErrCompleteGraphLimit    = errors.New("kubernetes: complete graph safety limit exceeded")
 	ErrCredentialUnavailable = errors.New("kubernetes: credential unavailable")
 )
 
@@ -147,6 +150,17 @@ func (client *Client) GetJSON(ctx context.Context, apiPath string, output any) e
 	return nil
 }
 
+func (client *Client) GetMetadataJSON(ctx context.Context, apiPath string, output any) error {
+	data, err := client.get(ctx, apiPath, "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1")
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, output); err != nil {
+		return errors.New("kubernetes: invalid metadata API response")
+	}
+	return nil
+}
+
 func (client *Client) get(ctx context.Context, apiPath, accept string) ([]byte, error) {
 	data, truncated, err := client.getBounded(ctx, apiPath, accept, client.maxBodyBytes)
 	if err != nil {
@@ -200,6 +214,13 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if response.StatusCode == http.StatusBadRequest {
+			body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+			message := strings.ToLower(string(body))
+			if strings.Contains(message, "previous terminated container") && strings.Contains(message, "not found") {
+				return nil, false, errPreviousUnavailable
+			}
+		}
 		return nil, false, classifyStatus(response.StatusCode)
 	}
 	if maxBytes <= 0 || maxBytes > client.maxBodyBytes {

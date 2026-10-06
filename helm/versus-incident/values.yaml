@@ -26,6 +26,14 @@ kubernetesReaderRBAC:
   # generic Gateway and HTTPRoute reads are needed.
   gatewayAPI: false
 
+# Optional, separate service-account grants for supported Kubernetes actor
+# operations. Mount its token as the actor auth token_file; never reuse the
+# read-only connector credential.
+kubernetesActionsRBAC:
+  enabled: false
+  namespace: ""
+  serviceAccountName: ""
+
 service:
   type: ClusterIP
   port: 3000

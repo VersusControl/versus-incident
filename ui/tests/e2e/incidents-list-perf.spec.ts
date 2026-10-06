@@ -15,8 +15,8 @@ import { openApp } from "./helpers";
 //   3. the incident detail (peek) renders the promoted typed columns;
 //   4. resolving from the UI updates the row + decrements the unresolved badge.
 //
-// Bring the stack up first (harness-run/harness.sh up oss) and run via
-// `harness-run/harness.sh e2e ui incidents-list-perf`.
+// Bring the stack up first (plans/harness-run/harness.sh up oss) and run via
+// `plans/harness-run/harness.sh e2e ui incidents-list-perf`.
 // ---------------------------------------------------------------------------
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

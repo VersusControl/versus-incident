@@ -23,6 +23,8 @@ func TestDiagnoseErrorReturnsSafeActionableClasses(t *testing.T) {
 		{name: "missing resource", err: ErrNotFound, code: "resource_unavailable"},
 		{name: "timeout", err: context.DeadlineExceeded, code: "request_timeout", retryable: true},
 		{name: "budget", err: ErrOperationBudget, code: "operation_budget_exhausted", retryable: true},
+		{name: "incomplete graph", err: ErrGraphIncomplete, code: "graph_incomplete", retryable: true},
+		{name: "graph limit", err: ErrCompleteGraphLimit, code: "graph_limit_exceeded", retryable: false},
 		{name: "response cap", err: ErrResponseTooLarge, code: "response_too_large"},
 		{name: "redirect", err: ErrRedirect, code: "redirect_refused"},
 		{name: "certificate", err: x509.UnknownAuthorityError{}, code: "tls_verification_failed"},

@@ -17,6 +17,8 @@ import (
 	aclopenai "github.com/cloudwego/eino-ext/libs/acl/openai"
 	"github.com/cloudwego/eino/components/model"
 	"google.golang.org/genai"
+
+	"github.com/VersusControl/versus-incident/pkg/agent/egress"
 )
 
 // DefaultProvider is the model backend used when AgentAIConfig.Provider is
@@ -41,6 +43,7 @@ type chatModelRequest struct {
 	// the tool-calling analyze path (NewToolCallingChatModel) does not, because
 	// JSON-mode and tool_calls are mutually exclusive on most providers.
 	jsonMode bool
+	egressGuard egress.Guard
 }
 
 // chatModelBuilder constructs the provider-specific eino model. Every builder
@@ -117,7 +120,7 @@ func newProviderChatModel(ctx context.Context, provider string, req chatModelReq
 	if name == "gemini" {
 		req.apiKey, req.runtimeKey = geminiCredentials(req.apiKey, req.runtimeKey)
 	}
-	req.httpClient = withRuntimeKeyRoundTripper(req.httpClient, req.timeout, req.runtimeKey, chatCredentialPolicy(name))
+	req.httpClient = withGuardedRuntimeKeyRoundTripper(req.httpClient, req.timeout, req.runtimeKey, chatCredentialPolicy(name), req.egressGuard)
 	return build(ctx, req)
 }
 
