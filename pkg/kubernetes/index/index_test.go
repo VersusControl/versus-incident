@@ -172,7 +172,7 @@ func TestSubscribeEmitsUpdatesAndDeletesOnlyAfterCompleteSync(t *testing.T) {
 	if err := index.Ingest("Pod", []Record{updated}, false, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if delta := <-deltas; delta.Op != "upsert" || delta.Old == nil || delta.New == nil || delta.New.Phase != "Running" {
+	if delta := receiveDelta(t, deltas); delta.Op != "upsert" || delta.Old == nil || delta.New == nil || delta.New.Phase != "Running" {
 		t.Fatalf("unexpected partial upsert delta: %#v", delta)
 	}
 	if len(deltas) != 0 {
@@ -181,7 +181,7 @@ func TestSubscribeEmitsUpdatesAndDeletesOnlyAfterCompleteSync(t *testing.T) {
 	if err := index.Ingest("Pod", []Record{updated}, true, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if delta := <-deltas; delta.Op != "delete" || delta.Old == nil || delta.Old.UID != "uid-b" {
+	if delta := receiveDelta(t, deltas); delta.Op != "delete" || delta.Old == nil || delta.Old.UID != "uid-b" {
 		t.Fatalf("complete sync did not emit the expected delete: %#v", delta)
 	}
 }
@@ -196,8 +196,46 @@ func TestSubscribeSignalsResyncWhenConsumerFallsBehind(t *testing.T) {
 	if err := index.Ingest("Pod", []Record{pod("uid-a", "a"), pod("uid-b", "b")}, false, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if delta := <-deltas; !delta.Resync {
+	if delta := receiveDelta(t, deltas); !delta.Resync {
 		t.Fatalf("slow consumer received stale delta instead of resync: %#v", delta)
+	}
+}
+
+func TestSubscribeDoesNotEmitBeforeFirstCompleteSync(t *testing.T) {
+	index := New(10)
+	deltas, unsubscribe := index.Subscribe(8)
+	defer unsubscribe()
+	if err := index.Ingest("Pod", []Record{pod("uid-a", "a")}, false, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if len(deltas) != 0 {
+		t.Fatal("initial partial sync emitted a delta")
+	}
+	if err := index.Ingest("Pod", []Record{pod("uid-a", "a"), pod("uid-b", "b")}, true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if len(deltas) != 0 {
+		t.Fatal("initial complete sync emitted a delta")
+	}
+	if err := index.Ingest("Pod", []Record{pod("uid-a", "a")}, true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if delta := receiveDelta(t, deltas); delta.Op != "delete" || delta.Old == nil || delta.Old.UID != "uid-b" {
+		t.Fatalf("sync after initialization did not emit a delete: %#v", delta)
+	}
+}
+
+func receiveDelta(t *testing.T, deltas <-chan Delta) Delta {
+	t.Helper()
+	select {
+	case delta, open := <-deltas:
+		if !open {
+			t.Fatal("delta stream closed before the expected notification")
+		}
+		return delta
+	default:
+		t.Fatal("synchronous index update did not publish the expected delta")
+		return Delta{}
 	}
 }
 

@@ -52,6 +52,13 @@ func (store *Store) Upsert(resource, namespace, name string, body json.RawMessag
 	if err := json.Unmarshal(body, &object); err != nil {
 		return ErrInvalidRequest
 	}
+	return store.upsertObject(resource, namespace, name, object)
+}
+
+func (store *Store) upsertObject(resource, namespace, name string, object map[string]any) error {
+	if store == nil || !safeSegment(resource) || !safeOptionalSegment(namespace) || !safeSegment(name) || object == nil {
+		return ErrInvalidRequest
+	}
 	metadata, ok := object["metadata"].(map[string]any)
 	if !ok {
 		metadata = make(map[string]any)
@@ -70,7 +77,7 @@ func (store *Store) Upsert(resource, namespace, name string, body json.RawMessag
 		return ErrInvalidRequest
 	}
 	key := objectKey{resource: resource, namespace: namespace, name: name}
-	store.objects[key] = storedObject{key: key, rv: store.nextRV, body: append(json.RawMessage(nil), encoded...)}
+	store.objects[key] = storedObject{key: key, rv: store.nextRV, body: encoded}
 	return nil
 }
 
