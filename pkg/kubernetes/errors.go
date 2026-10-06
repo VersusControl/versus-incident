@@ -39,6 +39,10 @@ func DiagnoseError(err error) ErrorDetail {
 		return ErrorDetail{Code: "request_timeout", Message: "The Kubernetes read timed out.", Action: "Check API-server reachability and increase tools.kubernetes.timeout only after resolving network or control-plane latency.", Retryable: true}
 	case errors.Is(err, ErrOperationBudget):
 		return ErrorDetail{Code: "operation_budget_exhausted", Message: "The Kubernetes read reached its safety budget.", Action: "Narrow the namespace, resource category, search query, or requested result limits.", Retryable: true}
+	case errors.Is(err, ErrGraphIncomplete):
+		return ErrorDetail{Code: "graph_incomplete", Message: "Kubernetes could not verify every resource in the selected namespace.", Action: "Restore read-only discovery and list access for the namespace's graph resources, then retry.", Retryable: true}
+	case errors.Is(err, ErrCompleteGraphLimit):
+		return ErrorDetail{Code: "graph_limit_exceeded", Message: "The complete namespace graph exceeds the safe response limit.", Action: "Choose a namespace with fewer resources or reduce its resource count, then retry.", Retryable: false}
 	case errors.Is(err, ErrResponseTooLarge):
 		return ErrorDetail{Code: "response_too_large", Message: "The Kubernetes API response exceeded the safe size limit.", Action: "Narrow the namespace, selectors, resource category, or result limit.", Retryable: false}
 	case errors.Is(err, ErrRedirect):

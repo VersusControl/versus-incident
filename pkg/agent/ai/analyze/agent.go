@@ -27,6 +27,7 @@ import (
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
 	prometheustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/prometheus"
 	signoztools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/signoz"
+	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
@@ -219,7 +220,7 @@ func prepareTools(tools []core.Tool, timeout time.Duration) (map[string]core.Too
 		}
 		registry[value.Name()] = value
 		displays[value.Name()] = core.ToolDisplayName(value)
-		einotool, err := einowrap.NewTool(value, timeout, maxToolOutputBytes)
+		einotool, err := einowrap.NewTool(ledger.LedgeredTool{Tool: value}, timeout, maxToolOutputBytes)
 		if err != nil {
 			return nil, nil, nil, err
 		}

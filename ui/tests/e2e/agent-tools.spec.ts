@@ -45,6 +45,7 @@ async function expectStableCatalog(page: import("@playwright/test").Page) {
   }
   await expect(page.getByText("Development", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Elasticsearch", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("heading", { name: "Kubernetes actions", exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "SigNoz", exact: true })).toHaveCount(0);
   for (const name of ["SigNoz Logs", "SigNoz Metrics", "SigNoz Traces"]) {
     await expect(page.getByRole("heading", { name, exact: true })).toHaveCount(1);
@@ -159,7 +160,7 @@ test.describe("Agent tool catalog", () => {
       await expect(page.getByText("No access", { exact: true })).toBeVisible();
       await expect(page.getByText("infrastructure:view permission is required", { exact: false })).toHaveCount(0);
       await expect(page.getByText("Inspect Kubernetes.", { exact: true })).toHaveCount(0);
-      await expect(page.getByRole("checkbox")).toHaveCount(0);
+      await expect(page.getByRole("switch")).toHaveCount(0);
       await page.screenshot({ path: path.join(screenshotDir, "tool-catalog-desktop.png"), fullPage: true });
 
       const rows = page.locator("main article");
@@ -198,6 +199,43 @@ test.describe("Agent tool catalog", () => {
     }
   });
 
+  test("keeps the Actions policy inside Kubernetes settings on desktop and mobile", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await openApp(page, "/agent/tools");
+    const actionPolicy = await page.evaluate(async () => {
+      const response = await fetch("/api/admin/agent/toolsets?agent=chat", { credentials: "same-origin" });
+      if (!response.ok) throw new Error(`toolset request failed: ${response.status}`);
+      const policies = await response.json() as Array<{ id: string; state: string; enabled: boolean; reason: string }>;
+      return policies.find((policy) => policy.id === "kubernetes-actions") ?? null;
+    });
+    await expectStableCatalog(page);
+    const kubernetesCard = page.locator("main article").filter({ has: page.getByRole("heading", { name: "Kubernetes", exact: true }) });
+    await kubernetesCard.getByRole("button", { name: "Kubernetes settings" }).click();
+    const details = page.getByRole("dialog", { name: "Kubernetes" });
+    const actions = details.getByRole("region", { name: "Actions" });
+    if (actionPolicy) {
+      const canToggle = ["available", "disabled_by_operator"].includes(actionPolicy.state);
+      await expect(actions).toContainText(actionPolicy.reason);
+      await expect(actions.getByRole("switch", { name: "Enable Kubernetes actions for chat" })).toHaveAttribute("aria-checked", String(actionPolicy.enabled && canToggle));
+      if (canToggle) await expect(actions.getByRole("switch")).toBeEnabled();
+      else await expect(actions.getByRole("switch")).toBeDisabled();
+    } else {
+      await expect(actions).toHaveCount(0);
+    }
+    await expect(page.getByRole("heading", { name: "Kubernetes actions", exact: true })).toHaveCount(0);
+    await expect(details).toBeVisible();
+    await expect(details.getByRole("button", { name: "Close dialog" })).toBeVisible();
+    await page.evaluate(() => document.fonts.ready.then(() => undefined));
+    await page.screenshot({ path: path.join(screenshotDir, "kubernetes-actions-settings-desktop.png"), fullPage: true, animations: "disabled" });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(details).toBeVisible();
+    await expect(details.getByRole("button", { name: "Close dialog" })).toBeVisible();
+    await page.evaluate(() => document.fonts.ready.then(() => undefined));
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+    await page.screenshot({ path: path.join(screenshotDir, "kubernetes-actions-settings-mobile.png"), fullPage: true, animations: "disabled" });
+  });
+
   test("surfaces disabled Versus recovery details in settings", async ({ page }, testInfo) => {
     await openApp(page, "/agent/tools");
     const chatSettings = await captureVersusSettings(page, "chat");
@@ -218,7 +256,7 @@ test.describe("Agent tool catalog", () => {
       await expect(page.getByRole("heading", { name: "Describe dependencies" })).toBeVisible();
       await page.getByRole("button", { name: "Describe dependencies settings" }).click();
       const details = page.getByRole("dialog", { name: "Describe dependencies" });
-      await expect(details.getByRole("checkbox")).toBeDisabled();
+      await expect(details.getByRole("switch")).toBeDisabled();
       await expect(details).toContainText(/Setup required|not configured|unavailable/i);
     } catch (error) {
       primaryError = error;

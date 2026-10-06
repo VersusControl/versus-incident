@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -145,6 +146,112 @@ func TestServiceDiscoveryFallbackPaginationAndCache(t *testing.T) {
 	}
 }
 
+func TestServiceDiscoveryFindsArgoAfterManyAPIgroups(t *testing.T) {
+	groups := make([]any, 0, 71)
+	for index := 0; index < 70; index++ {
+		name := "extension-" + strconv.Itoa(index) + ".example.test"
+		groups = append(groups, map[string]any{"name": name, "preferredVersion": map[string]any{"version": "v1"}})
+	}
+	groups = append(groups, map[string]any{"name": "argoproj.io", "preferredVersion": map[string]any{"version": "v1alpha1"}})
+	var groupRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": groups})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{}})
+		case "/apis/argoproj.io/v1alpha1":
+			groupRequests.Add(1)
+			writeJSON(writer, map[string]any{"resources": []any{
+				map[string]any{"name": "applications", "kind": "Application", "namespaced": true, "verbs": []string{"get", "list"}},
+				map[string]any{"name": "rollouts", "kind": "Rollout", "namespaced": true, "verbs": []string{"get", "list"}},
+			}})
+		default:
+			if strings.HasPrefix(request.URL.Path, "/apis/extension-") {
+				groupRequests.Add(1)
+				writeJSON(writer, map[string]any{"resources": []any{}})
+				return
+			}
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	discovery, err := service.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsResource(discovery.Resources, "argoproj.io~v1alpha1~applications") || !containsResource(discovery.Resources, "argoproj.io~v1alpha1~rollouts") {
+		t.Fatalf("Argo resources missing after %d API group requests: %#v", groupRequests.Load(), discovery)
+	}
+	if len(discovery.Partial) != 0 {
+		t.Fatalf("discovery was partial despite reachable API groups: %#v", discovery.Partial)
+	}
+}
+
+func TestListAllRetriesOversizedPageAndKeepsReducedLimit(t *testing.T) {
+	var requestedLimits []string
+	var returnedItems []any
+	for index := 0; index < 25; index++ {
+		returnedItems = append(returnedItems, map[string]any{
+			"apiVersion": "apps/v1", "kind": "Deployment",
+			"metadata": map[string]any{"name": "deployment-" + strconv.Itoa(index), "namespace": "default", "annotations": map[string]string{"payload": strings.Repeat("x", 240)}},
+		})
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{map[string]any{"name": "apps", "preferredVersion": map[string]any{"version": "v1"}}}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{}})
+		case "/apis/apps/v1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "deployments", "kind": "Deployment", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/apis/apps/v1/namespaces/default/deployments":
+			requestedLimits = append(requestedLimits, request.URL.Query().Get("limit"))
+			limit, _ := strconv.Atoi(request.URL.Query().Get("limit"))
+			start, _ := strconv.Atoi(request.URL.Query().Get("continue"))
+			end := min(start+limit, len(returnedItems))
+			continuation := ""
+			if end < len(returnedItems) {
+				continuation = strconv.Itoa(end)
+			}
+			writeJSON(writer, map[string]any{"metadata": map[string]any{"continue": continuation}, "items": returnedItems[start:end]})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	service.client.maxBodyBytes = 4096
+	page, err := service.listAll(context.Background(), ListOptions{ResourceID: "apps~v1~deployments", Namespace: "default"})
+	if err != nil || len(page.Items) != len(returnedItems) || page.Truncated {
+		t.Fatalf("list items=%d truncated=%v err=%v limits=%v", len(page.Items), page.Truncated, err, requestedLimits)
+	}
+	if len(requestedLimits) < 4 || requestedLimits[0] != "100" || requestedLimits[len(requestedLimits)-1] != "10" {
+		t.Fatalf("LIST limits did not fall back and persist: %v", requestedLimits)
+	}
+	for _, limit := range requestedLimits[len(requestedLimits)-2:] {
+		if limit != "10" {
+			t.Fatalf("later page did not retain the reduced limit: %v", requestedLimits)
+		}
+	}
+}
+
+func containsResource(resources []ResourceDefinition, id string) bool {
+	for _, resource := range resources {
+		if resource.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func TestListWorkloadsPaginatesAndValidatesKind(t *testing.T) {
 	var podPages atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -179,6 +286,213 @@ func TestListWorkloadsPaginatesAndValidatesKind(t *testing.T) {
 	if _, err := service.ListWorkloads(context.Background(), "default", "ReplicaSet", 3); !errors.Is(err, ErrInvalidArguments) {
 		t.Fatalf("invalid workload kind error = %v", err)
 	}
+}
+
+func TestWorkloadsFiltersCountsAndPaginatesSharedIndex(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{
+				map[string]any{"name": "apps", "preferredVersion": map[string]string{"version": "v1"}},
+				map[string]any{"name": "batch", "preferredVersion": map[string]string{"version": "v1"}},
+			}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/apis/apps/v1":
+			writeJSON(writer, map[string]any{"resources": []any{
+				map[string]any{"name": "deployments", "kind": "Deployment", "namespaced": true, "verbs": []string{"get", "list"}},
+				map[string]any{"name": "statefulsets", "kind": "StatefulSet", "namespaced": true, "verbs": []string{"get", "list"}},
+				map[string]any{"name": "daemonsets", "kind": "DaemonSet", "namespaced": true, "verbs": []string{"get", "list"}},
+			}})
+		case "/apis/batch/v1":
+			writeJSON(writer, map[string]any{"resources": []any{
+				map[string]any{"name": "jobs", "kind": "Job", "namespaced": true, "verbs": []string{"get", "list"}},
+				map[string]any{"name": "cronjobs", "kind": "CronJob", "namespaced": true, "verbs": []string{"get", "list"}},
+			}})
+		case "/api/v1/pods":
+			writeJSON(writer, map[string]any{"items": []any{workloadListFixture("Pod", "checkout-pod"), workloadListFixture("Pod", "other-pod")}})
+		case "/apis/apps/v1/deployments":
+			writeJSON(writer, map[string]any{"items": []any{workloadListFixture("Deployment", "checkout-b"), workloadListFixture("Deployment", "checkout-a")}})
+		case "/apis/apps/v1/statefulsets", "/apis/apps/v1/daemonsets", "/apis/batch/v1/jobs", "/apis/batch/v1/cronjobs":
+			writeJSON(writer, map[string]any{"items": []any{}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	page, err := service.Workloads(t.Context(), WorkloadListOptions{Namespace: "shop", Query: "CHECK", Limit: 1})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Kind != "Deployment" || page.Items[0].Name != "checkout-a" || page.Next != "1" || !page.Truncated {
+		t.Fatalf("first workload page = %#v err=%v", page, err)
+	}
+	wantCounts := map[string]int{"Deployment": 2, "StatefulSet": 0, "DaemonSet": 0, "Job": 0, "CronJob": 0, "Pod": 1}
+	if !reflect.DeepEqual(page.Counts, wantCounts) {
+		t.Fatalf("workload counts = %#v, want %#v", page.Counts, wantCounts)
+	}
+	page, err = service.Workloads(t.Context(), WorkloadListOptions{Namespace: "shop", Query: "check", Limit: 1, Cursor: page.Next})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Name != "checkout-b" || page.Next != "2" {
+		t.Fatalf("second workload page = %#v err=%v", page, err)
+	}
+	page, err = service.Workloads(t.Context(), WorkloadListOptions{Namespace: "shop", Query: "check", Limit: 1, Cursor: page.Next})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Kind != "Pod" || page.Next != "" || page.Truncated {
+		t.Fatalf("last workload page = %#v err=%v", page, err)
+	}
+}
+
+func TestListEventsUsesNextCursorAndNeverNullItems(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "events", "kind": "Event", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/api/v1/namespaces/shop/events":
+			if request.URL.Query().Get("fieldSelector") != "type=Warning" {
+				t.Errorf("event field selector = %q", request.URL.Query().Get("fieldSelector"))
+			}
+			if request.URL.Query().Get("continue") == "event-page-2" {
+				writeJSON(writer, map[string]any{"items": []any{map[string]any{"kind": "Event", "metadata": map[string]any{"name": "second", "namespace": "shop"}, "type": "Warning"}}})
+				return
+			}
+			writeJSON(writer, map[string]any{"metadata": map[string]any{"continue": "event-page-2"}, "items": []any{map[string]any{"kind": "Event", "metadata": map[string]any{"name": "first", "namespace": "shop"}, "type": "Warning"}}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	page, err := service.ListEvents(t.Context(), EventOptions{Namespace: "shop", Type: "Warning", Limit: 1})
+	if err != nil || page.Items == nil || len(page.Items) != 1 || page.Items[0].Name != "first" || page.Next != "event-page-2" || !page.Truncated {
+		t.Fatalf("first event page = %#v err=%v", page, err)
+	}
+	page, err = service.ListEvents(t.Context(), EventOptions{Namespace: "shop", Type: "Warning", Limit: 1, Cursor: page.Next})
+	if err != nil || page.Items == nil || len(page.Items) != 1 || page.Items[0].Name != "second" || page.Next != "" || page.Truncated {
+		t.Fatalf("second event page = %#v err=%v", page, err)
+	}
+}
+
+func workloadListFixture(kind, name string) map[string]any {
+	return map[string]any{
+		"apiVersion": "v1", "kind": kind,
+		"metadata": map[string]any{"uid": kind + "/" + name, "namespace": "shop", "name": name},
+		"status":   map[string]any{"phase": "Running"},
+	}
+}
+
+func TestListWorkloadsRetriesOversizedPagesAndKeepsReducedLimit(t *testing.T) {
+	var requestedLimits []string
+	var returnedItems []any
+	for index := 0; index < 25; index++ {
+		returnedItems = append(returnedItems, map[string]any{
+			"apiVersion": "apps/v1", "kind": "Deployment",
+			"metadata": map[string]any{"name": "deployment-" + strconv.Itoa(index), "namespace": "default", "annotations": map[string]string{"payload": strings.Repeat("x", 240)}},
+		})
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{map[string]any{"name": "apps", "preferredVersion": map[string]any{"version": "v1"}}}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{}})
+		case "/apis/apps/v1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "deployments", "kind": "Deployment", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/apis/apps/v1/namespaces/default/deployments":
+			requestedLimits = append(requestedLimits, request.URL.Query().Get("limit"))
+			limit, _ := strconv.Atoi(request.URL.Query().Get("limit"))
+			start, _ := strconv.Atoi(request.URL.Query().Get("continue"))
+			end := min(start+limit, len(returnedItems))
+			continuation := ""
+			if end < len(returnedItems) {
+				continuation = strconv.Itoa(end)
+			}
+			writeJSON(writer, map[string]any{"metadata": map[string]any{"continue": continuation}, "items": returnedItems[start:end]})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	service.client.maxBodyBytes = 4096
+	page, err := service.ListWorkloads(context.Background(), "default", "Deployment", 25)
+	if err != nil || len(page.Items) != len(returnedItems) || page.Truncated {
+		t.Fatalf("workloads=%d truncated=%v err=%v limits=%v", len(page.Items), page.Truncated, err, requestedLimits)
+	}
+	if len(requestedLimits) < 4 || requestedLimits[0] != "25" || requestedLimits[2] != "10" || requestedLimits[3] != "10" {
+		t.Fatalf("workload LIST limits did not fall back and persist: %v", requestedLimits)
+	}
+}
+
+func TestWorkloadLogsEncodeEmptyCollectionsAndClassifyUnavailablePreviousLogs(t *testing.T) {
+	var includePod atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{map[string]any{"name": "apps", "preferredVersion": map[string]any{"version": "v1"}}}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/apis/apps/v1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "deployments", "kind": "Deployment", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/apis/apps/v1/namespaces/default/deployments/checkout":
+			writeJSON(writer, map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": "checkout", "namespace": "default"}, "spec": map[string]any{"selector": map[string]any{"matchLabels": map[string]string{"app": "checkout"}}}})
+		case "/api/v1/namespaces/default/pods":
+			items := []any{}
+			if includePod.Load() {
+				pod := podFixture("checkout-pod")
+				metadata := pod["metadata"].(map[string]any)
+				metadata["labels"] = map[string]string{"app": "checkout"}
+				metadata["ownerReferences"] = []any{map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "name": "checkout"}}
+				items = append(items, pod)
+			}
+			writeJSON(writer, map[string]any{"items": items})
+		default:
+			if strings.HasSuffix(request.URL.Path, "/log") && request.URL.Query().Get("previous") == "true" {
+				http.Error(writer, `previous terminated container "app" not found`, http.StatusBadRequest)
+				return
+			}
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	options := WorkloadLogOptions{Namespace: "default", Kind: "Deployment", Name: "checkout", Previous: true}
+
+	empty, err := service.WorkloadLogs(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"lines", "pods", "omitted_pods"} {
+		if strings.TrimSpace(string(fields[field])) != "[]" {
+			t.Errorf("%s = %s, want [] in %s", field, fields[field], encoded)
+		}
+	}
+
+	includePod.Store(true)
+	logs, err := service.WorkloadLogs(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, partial := range logs.Partial {
+		if partial.Scope == "logs" && partial.Class == "previous_unavailable" {
+			return
+		}
+	}
+	t.Fatalf("missing previous container was not reported as a partial failure: %#v", logs.Partial)
 }
 
 func TestListInvalidatesContinuationWhenServerExceedsLimit(t *testing.T) {
@@ -338,17 +652,26 @@ func TestGetWorkloadReturnsTypedBoundedRelatedFacts(t *testing.T) {
 
 func TestUsageAndOverviewExposeMetricsAvailabilityFreshnessAndExactQuantities(t *testing.T) {
 	for _, test := range []struct {
-		name        string
-		nodeMetrics bool
-		wantCPU     string
-		wantMemory  string
-		wantSource  string
+		name              string
+		nodeMetrics       bool
+		invalidPodMetrics bool
+		wantCPU           string
+		wantMemory        string
+		wantSource        string
+		wantUsageFresh    bool
+		wantOverviewFresh bool
+		wantMetricsStatus string
 	}{
-		{name: "node metrics preferred", nodeMetrics: true, wantCPU: "1", wantMemory: "2147483648", wantSource: "node_metrics"},
-		{name: "pod metrics fallback", wantCPU: "1/4", wantMemory: "1073741824", wantSource: "pod_metrics"},
+		{name: "node metrics preferred", nodeMetrics: true, wantCPU: "1", wantMemory: "2147483648", wantSource: "node_metrics", wantOverviewFresh: true, wantMetricsStatus: "available"},
+		{name: "pod metrics fallback", wantCPU: "1/4", wantMemory: "1073741824", wantSource: "pod_metrics", wantUsageFresh: true, wantOverviewFresh: true, wantMetricsStatus: "available"},
+		{name: "invalid pod quantity", invalidPodMetrics: true, wantSource: "pod_metrics", wantMetricsStatus: "partial"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			timestamp := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+			podCPU := "250m"
+			if test.invalidPodMetrics {
+				podCPU = "invalid"
+			}
 			podTimestamp := timestamp
 			if test.nodeMetrics {
 				podTimestamp = time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339Nano)
@@ -371,7 +694,7 @@ func TestUsageAndOverviewExposeMetricsAvailabilityFreshnessAndExactQuantities(t 
 					}
 					writeJSON(writer, map[string]any{"resources": resources})
 				case "/apis/metrics.k8s.io/v1beta1/namespaces/payments/pods", "/apis/metrics.k8s.io/v1beta1/pods":
-					writeJSON(writer, map[string]any{"items": []any{map[string]any{"apiVersion": "metrics.k8s.io/v1beta1", "kind": "PodMetrics", "metadata": map[string]any{"namespace": "payments", "name": "api-1"}, "timestamp": podTimestamp, "window": "30s", "containers": []any{map[string]any{"usage": map[string]any{"cpu": "250m", "memory": "1Gi"}}}}}})
+					writeJSON(writer, map[string]any{"items": []any{map[string]any{"apiVersion": "metrics.k8s.io/v1beta1", "kind": "PodMetrics", "metadata": map[string]any{"namespace": "payments", "name": "api-1"}, "timestamp": podTimestamp, "window": "30s", "containers": []any{map[string]any{"usage": map[string]any{"cpu": podCPU, "memory": "1Gi"}}}}}})
 				case "/apis/metrics.k8s.io/v1beta1/nodes":
 					writeJSON(writer, map[string]any{"items": []any{map[string]any{"apiVersion": "metrics.k8s.io/v1beta1", "kind": "NodeMetrics", "metadata": map[string]any{"name": "node-a"}, "timestamp": timestamp, "window": "30s", "usage": map[string]any{"cpu": "1", "memory": "2Gi"}}}})
 				case "/api/v1/pods":
@@ -394,15 +717,20 @@ func TestUsageAndOverviewExposeMetricsAvailabilityFreshnessAndExactQuantities(t 
 			if test.nodeMetrics {
 				wantNodes = 1
 			}
-			wantUsageFresh := !test.nodeMetrics
-			if err != nil || usage.Availability == "unavailable" || usage.Fresh != wantUsageFresh || len(usage.Pods) != 1 || len(usage.Nodes) != wantNodes || usage.Pods[0].CPU != "1/4" || usage.PodMetrics.Total != 1 || usage.PodMetrics.CPU != "1/4" {
+			if err != nil || usage.Availability == "unavailable" || usage.Fresh != test.wantUsageFresh || len(usage.Pods) != 1 || len(usage.Nodes) != wantNodes || usage.PodMetrics.Total != 1 || usage.PodMetrics.Complete == test.invalidPodMetrics {
 				t.Fatalf("usage = %#v err=%v", usage, err)
+			}
+			if !test.invalidPodMetrics && (usage.Pods[0].CPU != "1/4" || usage.PodMetrics.CPU != "1/4") {
+				t.Fatalf("pod metrics sample = %#v source=%#v", usage.Pods[0], usage.PodMetrics)
+			}
+			if test.invalidPodMetrics && (usage.Fresh || usage.PodMetrics.Fresh || usage.PodMetrics.Availability != "partial") {
+				t.Fatalf("invalid pod metrics were reported fresh: %#v", usage)
 			}
 			if test.nodeMetrics && (usage.NodeMetrics.Total != 1 || !usage.NodeMetrics.Fresh || usage.NodeMetrics.CPU != "1") {
 				t.Fatalf("node metrics = %#v", usage.NodeMetrics)
 			}
 			overview, err := service.Overview(context.Background())
-			if err != nil || overview.MetricsStatus != "available" || !overview.MetricsFresh || overview.UsageCPU != test.wantCPU || overview.UsageMemory != test.wantMemory || overview.UsageSource != test.wantSource || overview.MetricsObservedAt == nil {
+			if err != nil || overview.MetricsStatus != test.wantMetricsStatus || overview.MetricsFresh != test.wantOverviewFresh || overview.UsageCPU != test.wantCPU || overview.UsageMemory != test.wantMemory || overview.UsageSource != test.wantSource || (!test.invalidPodMetrics && overview.MetricsObservedAt == nil) || (test.invalidPodMetrics && overview.MetricsObservedAt != nil) {
 				t.Fatalf("overview metrics = %#v err=%v", overview, err)
 			}
 		})
@@ -451,12 +779,47 @@ func TestOverviewUsesFullPreCapMetricsFreshnessAndTotals(t *testing.T) {
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
 	usage, err := service.Usage(context.Background(), "", 500)
-	if err != nil || !usage.Truncated || len(usage.Nodes) != 500 || usage.NodeMetrics.Total != 501 || usage.NodeMetrics.Fresh || usage.NodeMetrics.Availability != "stale" || usage.NodeMetrics.CPU != "501" || !containsString(usage.Omitted, "metrics.k8s.io~v1beta1~nodes") || len(usage.Partial) != 1 {
+	if err != nil || !usage.Truncated || len(usage.Nodes) != 500 || usage.NodeMetrics.Total != 501 || !usage.NodeMetrics.Complete || usage.NodeMetrics.Fresh || usage.NodeMetrics.Availability != "stale" || usage.NodeMetrics.CPU != "501" || !containsString(usage.Omitted, "metrics.k8s.io~v1beta1~nodes") || len(usage.Partial) != 1 {
 		t.Fatalf("usage = %#v err=%v", usage, err)
 	}
 	overview, err := service.Overview(context.Background())
 	if err != nil || overview.UsageSource != "node_metrics" || overview.MetricsFresh || overview.MetricsStatus != "stale" || overview.UsageCPU != "501" || !overview.Truncated || !containsString(overview.Omitted, "metrics.k8s.io~v1beta1~nodes") {
 		t.Fatalf("overview = %#v err=%v", overview, err)
+	}
+}
+
+func TestOverviewDoesNotAggregateIncompleteMetrics(t *testing.T) {
+	timestamp := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	metrics := []any{
+		map[string]any{"kind": "PodMetrics", "metadata": map[string]any{"namespace": "shop", "name": "pod-a"}, "timestamp": timestamp, "containers": []any{map[string]any{"usage": map[string]any{"cpu": "1", "memory": "1Gi"}}}},
+		map[string]any{"kind": "PodMetrics", "metadata": map[string]any{"namespace": "shop", "name": "pod-b"}, "timestamp": timestamp, "containers": []any{map[string]any{"usage": map[string]any{"cpu": "2", "memory": "2Gi"}}}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{map[string]any{"name": "metrics.k8s.io", "preferredVersion": map[string]any{"version": "v1beta1"}}}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{}})
+		case "/apis/metrics.k8s.io/v1beta1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "PodMetrics", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/apis/metrics.k8s.io/v1beta1/pods":
+			writeJSON(writer, map[string]any{"items": metrics})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	if _, err := service.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := withOperationBudget(context.Background(), time.Second, 256, 32<<20, 1)
+	defer cancel()
+	overview, err := service.Overview(ctx)
+	if err != nil || overview.UsageSource != "pod_metrics" || overview.MetricsStatus != "partial" || overview.MetricsFresh || overview.UsageCPU != "" || overview.UsageMemory != "" {
+		t.Fatalf("incomplete metrics overview=%+v err=%v", overview, err)
 	}
 }
 
@@ -496,7 +859,9 @@ func TestOverviewCountsPodsAcrossSafeInternalPages(t *testing.T) {
 	}))
 	defer server.Close()
 
-	overview, err := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"}).Overview(context.Background())
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	service.indexes = nil
+	overview, err := service.Overview(context.Background())
 	if err != nil || overview.Pods != podCount || podRequests.Load() != 66 || containsString(overview.Omitted, "core~v1~pods") || containsString(overview.Omitted, "budget_exhausted") {
 		t.Fatalf("overview=%#v pod requests=%d err=%v", overview, podRequests.Load(), err)
 	}
@@ -527,7 +892,7 @@ func TestOverviewMarksFailedPodCollectionUnavailableAndPreservesDiscoveryPartial
 	defer server.Close()
 
 	overview, err := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"}).Overview(context.Background())
-	if err != nil || overview.Pods != 0 || !overview.Truncated || !containsString(overview.Omitted, "core~v1~pods") {
+	if err != nil || overview.Pods != 0 || !overview.Truncated || !overview.Sync.Partial || overview.Sync.State != "direct" || !containsString(overview.Omitted, "core~v1~pods") {
 		t.Fatalf("overview=%#v err=%v", overview, err)
 	}
 	foundPodFailure, foundDiscoveryFailure := false, false
@@ -537,6 +902,77 @@ func TestOverviewMarksFailedPodCollectionUnavailableAndPreservesDiscoveryPartial
 	}
 	if !foundPodFailure || !foundDiscoveryFailure {
 		t.Fatalf("partial failures=%#v", overview.Partial)
+	}
+}
+
+func TestOverviewReadsMetricsBeforeInventoryBudgetIsExhausted(t *testing.T) {
+	timestamp := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	var eventRequests atomic.Int32
+	var podMetricRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{
+				map[string]any{"name": "metrics.k8s.io", "preferredVersion": map[string]string{"version": "v1beta1"}},
+				map[string]any{"name": "apps", "preferredVersion": map[string]string{"version": "v1"}},
+			}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{
+				map[string]any{"name": "nodes", "kind": "Node", "verbs": []string{"get", "list"}},
+				map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}},
+				map[string]any{"name": "events", "kind": "Event", "namespaced": true, "verbs": []string{"get", "list"}},
+				map[string]any{"name": "namespaces", "kind": "Namespace", "verbs": []string{"get", "list"}},
+			}})
+		case "/apis/metrics.k8s.io/v1beta1":
+			writeJSON(writer, map[string]any{"resources": []any{
+				map[string]any{"name": "nodes", "kind": "NodeMetrics", "verbs": []string{"get", "list"}},
+				map[string]any{"name": "pods", "kind": "PodMetrics", "namespaced": true, "verbs": []string{"get", "list"}},
+			}})
+		case "/apis/apps/v1":
+			writeJSON(writer, map[string]any{"resources": []any{
+				map[string]any{"name": "deployments", "kind": "Deployment", "namespaced": true, "verbs": []string{"get", "list"}},
+				map[string]any{"name": "statefulsets", "kind": "StatefulSet", "namespaced": true, "verbs": []string{"get", "list"}},
+			}})
+		case "/apis/metrics.k8s.io/v1beta1/nodes":
+			writeJSON(writer, map[string]any{"items": []any{map[string]any{"kind": "NodeMetrics", "metadata": map[string]any{"name": "node-a"}, "timestamp": timestamp, "window": "30s", "usage": map[string]any{"cpu": "2", "memory": "2Gi"}}}})
+		case "/apis/metrics.k8s.io/v1beta1/pods":
+			podMetricRequests.Add(1)
+			continuation, _ := strconv.Atoi(request.URL.Query().Get("continue"))
+			writeJSON(writer, map[string]any{"metadata": map[string]any{"continue": strconv.Itoa(continuation + 1)}, "items": []any{map[string]any{"kind": "PodMetrics", "metadata": map[string]any{"namespace": "shop", "name": "pod-a"}, "timestamp": timestamp, "containers": []any{map[string]any{"usage": map[string]any{"cpu": "1", "memory": "1Gi"}}}}}})
+		case "/api/v1/events":
+			eventRequests.Add(1)
+			writeJSON(writer, map[string]any{"items": []any{map[string]any{"kind": "Event", "type": "Warning"}}})
+		default:
+			writeJSON(writer, map[string]any{"items": []any{}})
+		}
+	}))
+	defer server.Close()
+
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	service.indexes = nil
+	if _, err := service.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := withOperationBudget(context.Background(), time.Second, 4, 1<<20, 100)
+	defer cancel()
+	overview, err := service.Overview(ctx)
+	if err != nil || overview.MetricsStatus != "available" || !overview.MetricsFresh || overview.UsageSource != "node_metrics" || overview.UsageCPU != "2" {
+		t.Fatalf("overview metrics=%+v err=%v", overview, err)
+	}
+	if podMetricRequests.Load() != 3 {
+		t.Fatalf("pod metrics requests=%d; node metrics should be read before the constrained pod collection", podMetricRequests.Load())
+	}
+	if overview.Warnings != 0 || eventRequests.Load() != 0 {
+		t.Fatalf("overview warnings=%d event requests=%d; dashboard must not fetch duplicate Events", overview.Warnings, eventRequests.Load())
+	}
+	budgetExhausted := false
+	for _, partial := range overview.Partial {
+		budgetExhausted = budgetExhausted || partial.Class == "budget_exhausted"
+	}
+	if !overview.Truncated || !budgetExhausted {
+		t.Fatalf("inventory budget exhaustion was not surfaced: %+v", overview)
 	}
 }
 
@@ -647,6 +1083,7 @@ func TestTerminalEncodedSizeTruncationPropagatesThroughAggregates(t *testing.T) 
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "test"})
+	service.indexes = nil
 	direct, err := service.List(context.Background(), ListOptions{ResourceID: "core~v1~pods", Namespace: "default"})
 	if err != nil || !direct.Truncated || !direct.EncodedTruncated || direct.Continue != "" || len(direct.Partial) != 1 {
 		t.Fatalf("direct list = %#v err=%v", direct, err)
@@ -1041,6 +1478,37 @@ func TestServiceScrubsPodLogs(t *testing.T) {
 	logs, err := service.PodLogs(context.Background(), "default", "pod", "app", false, 60, 10)
 	if err != nil || strings.Contains(logs.Text, "secret") {
 		t.Fatalf("logs = %#v err=%v", logs, err)
+	}
+}
+
+func TestWorkloadLogPodsPrioritizeHealthThenNewest(t *testing.T) {
+	older := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Hour)
+	pods := []WorkloadPod{
+		{Name: "running", Phase: "Running", CreatedAt: newer},
+		{Name: "pending", Phase: "Pending", CreatedAt: newer},
+		{Name: "failed-old", Phase: "Failed", CreatedAt: older},
+		{Name: "failed-new", Phase: "Failed", CreatedAt: newer},
+	}
+	prioritizeWorkloadLogPods(pods)
+	want := []string{"failed-new", "failed-old", "pending", "running"}
+	for index, pod := range pods {
+		if pod.Name != want[index] {
+			t.Fatalf("pod order = %#v, want %v", pods, want)
+		}
+	}
+}
+
+func TestWorkloadLogGrepIsLiteralAndUsesScrubbedText(t *testing.T) {
+	scrubbed := replacingScrubber{}.Scrub("2026-10-05T12:00:00Z token=secret and pattern.*")
+	if got := filterWorkloadLogLines(scrubbed, "secret"); len(got) != 0 {
+		t.Fatalf("secret grep returned scrubbed data: %v", got)
+	}
+	if got := filterWorkloadLogLines(scrubbed, "pattern.*"); len(got) != 1 {
+		t.Fatalf("literal grep results = %v", got)
+	}
+	if got := filterWorkloadLogLines(scrubbed, "pattern.x"); len(got) != 0 {
+		t.Fatalf("grep treated punctuation as a pattern: %v", got)
 	}
 }
 

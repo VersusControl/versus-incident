@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -76,9 +76,14 @@ const providerLogos = {
   "Grafana Tempo": "/tempo.svg",
 } as const;
 
-function renderPage() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+function renderPage(client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })) {
   return render(<QueryClientProvider client={client}><MemoryRouter><AgentToolsPage /></MemoryRouter></QueryClientProvider>);
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => { resolve = complete; });
+  return { promise, resolve };
 }
 
 beforeEach(() => {
@@ -163,7 +168,7 @@ describe("AgentToolsPage", () => {
     expect(screen.getAllByText("Enterprise")).toHaveLength(4);
     expect(screen.queryAllByText("Development")).toHaveLength(0);
     expect(screen.getByText("Off")).toBeTruthy();
-    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(screen.queryByRole("switch")).toBeNull();
   });
 
   it("matches exact enabled source types and gates inherited UI links", async () => {
@@ -231,7 +236,7 @@ describe("AgentToolsPage", () => {
       expect(dialog.textContent).not.toMatch(/shared (Logs|Metrics|Trace) agent capability/i);
       expect(within(dialog).getByText("Configured sources", { exact: true })).toBeTruthy();
       for (const sourceName of sourceNames) expect(dialog.textContent).toContain(sourceName);
-      expect(within(dialog).queryByRole("checkbox")).toBeNull();
+      expect(within(dialog).queryByRole("switch")).toBeNull();
       expect(within(dialog).getByRole("link", { name: /Open tool/ }).getAttribute("href")).toBe("/agent/logs");
       expect(within(dialog).queryByRole("link", { name: /Add a data source|Learn more/ })).toBeNull();
       expect(within(dialog).getByRole("link", { name: "Documentation" })).toBeTruthy();
@@ -272,7 +277,7 @@ describe("AgentToolsPage", () => {
     const dialog = screen.getByRole("dialog", { name: "Prometheus" });
     expect(dialog.textContent).toContain("Prometheus is not configured.");
     expect(dialog.textContent).not.toContain("configured outside agent sources");
-    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+    expect(within(dialog).queryByRole("switch")).toBeNull();
   });
 
   it("marks a licensed provider configured when its enabled source is present", async () => {
@@ -287,7 +292,7 @@ describe("AgentToolsPage", () => {
     const dialog = screen.getByRole("dialog", { name: "Prometheus" });
     expect(dialog.textContent).toContain("Prometheus is configured.");
     expect(dialog.textContent).toContain("Prometheus primary");
-    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+    expect(within(dialog).queryByRole("switch")).toBeNull();
   });
 
   it("keeps needs_license authoritative when a Prometheus source is configured", async () => {
@@ -326,12 +331,12 @@ describe("AgentToolsPage", () => {
     const dialog = screen.getByRole("dialog", { name: "SigNoz Logs" });
     expect(dialog.textContent).toContain("shared Logs agent capability is unhealthy");
     expect(dialog.textContent).not.toContain("backend unavailable");
-    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+    expect(within(dialog).queryByRole("switch")).toBeNull();
     fireEvent.click(within(dialog).getByRole("button", { name: "Close dialog" }));
     fireEvent.click(screen.getByRole("button", { name: "Logs tools settings" }));
     const baseDialog = screen.getByRole("dialog", { name: "Logs tools" });
     expect(baseDialog.textContent).toContain("backend unavailable");
-    expect((within(baseDialog).getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
+    expect((within(baseDialog).getByRole("switch") as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("does not infer canonical providers from an unhealthy shared capability", async () => {
@@ -351,12 +356,12 @@ describe("AgentToolsPage", () => {
     await screen.findByText("SigNoz Logs");
     fireEvent.click(screen.getByRole("button", { name: "SigNoz Logs settings" }));
     let dialog = screen.getByRole("dialog", { name: "SigNoz Logs" });
-    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+    expect(within(dialog).queryByRole("switch")).toBeNull();
     expect(dialog.textContent).not.toContain("shared Logs agent capability");
     fireEvent.click(within(dialog).getByRole("button", { name: "Close dialog" }));
     fireEvent.click(screen.getByRole("button", { name: "Logs tools settings" }));
     dialog = screen.getByRole("dialog", { name: "Logs tools" });
-    expect(within(dialog).getByRole("checkbox", { name: "Enable Logs tools for chat" })).toBeTruthy();
+    expect(within(dialog).getByRole("switch", { name: "Enable Logs tools for chat" })).toBeTruthy();
   });
 
   it("keeps permission-blocked tools visible without exposing their internal page", async () => {
@@ -390,7 +395,7 @@ describe("AgentToolsPage", () => {
     await screen.findByText("Prometheus");
     fireEvent.click(screen.getByRole("button", { name: "Prometheus settings" }));
     let dialog = screen.getByRole("dialog", { name: "Prometheus" });
-    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+    expect(within(dialog).queryByRole("switch")).toBeNull();
     const documentation = within(dialog).getByRole("link", { name: "Documentation" });
     expect(documentation.getAttribute("target")).toBe("_blank");
     expect(documentation.getAttribute("rel")).toBe("noopener noreferrer");
@@ -398,7 +403,7 @@ describe("AgentToolsPage", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Close dialog" }));
     fireEvent.click(screen.getByRole("button", { name: "Metrics tools settings" }));
     dialog = screen.getByRole("dialog", { name: "Metrics tools" });
-    const checkbox = within(dialog).getByRole("checkbox") as HTMLInputElement;
+    const checkbox = within(dialog).getByRole("switch") as HTMLButtonElement;
     expect(checkbox.disabled).toBe(true);
     fireEvent.click(checkbox);
     expect(api.setAgentToolsetEnabled).not.toHaveBeenCalled();
@@ -445,7 +450,7 @@ describe("AgentToolsPage", () => {
     await screen.findByText("Logs tools");
     for (const [name, id] of [["Logs tools", "logs"], ["Metrics tools", "metrics"], ["Trace tools", "traces"]] as const) {
       fireEvent.click(screen.getByRole("button", { name: `${name} settings` }));
-      fireEvent.click(within(screen.getByRole("dialog", { name })).getByRole("checkbox"));
+      fireEvent.click(within(screen.getByRole("dialog", { name })).getByRole("switch"));
       await waitFor(() => expect(api.setAgentToolsetEnabled).toHaveBeenCalledWith("chat", id, false));
       fireEvent.click(within(screen.getByRole("dialog", { name })).getByRole("button", { name: "Close dialog" }));
     }
@@ -453,7 +458,7 @@ describe("AgentToolsPage", () => {
     await waitFor(() => expect(api.listAgentToolsets).toHaveBeenCalledWith("analyze"));
     for (const [name, id] of [["Logs tools", "logs"], ["Metrics tools", "metrics"], ["Trace tools", "traces"]] as const) {
       fireEvent.click(await screen.findByRole("button", { name: `${name} settings` }));
-      fireEvent.click(within(screen.getByRole("dialog", { name })).getByRole("checkbox"));
+      fireEvent.click(within(screen.getByRole("dialog", { name })).getByRole("switch"));
       await waitFor(() => expect(api.setAgentToolsetEnabled).toHaveBeenCalledWith("analyze", id, false));
       fireEvent.click(within(screen.getByRole("dialog", { name })).getByRole("button", { name: "Close dialog" }));
     }
@@ -464,7 +469,7 @@ describe("AgentToolsPage", () => {
     await screen.findByText("Elasticsearch");
     fireEvent.click(screen.getByRole("button", { name: "Elasticsearch settings" }));
     const dialog = screen.getByRole("dialog", { name: "Elasticsearch" });
-    const checkbox = within(dialog).getByRole("checkbox", { name: "Enable Elasticsearch for chat" }) as HTMLInputElement;
+    const checkbox = within(dialog).getByRole("switch", { name: "Enable Elasticsearch for chat" }) as HTMLButtonElement;
     expect(checkbox.disabled).toBe(false);
     expect(dialog.textContent).toContain("Elasticsearch tools are available.");
     expect(dialog.textContent).toContain("Discover mappings and shard health");
@@ -484,9 +489,9 @@ describe("AgentToolsPage", () => {
 
     fireEvent.click(within(dedicatedCard).getByRole("button", { name: "Elasticsearch settings" }));
     const dialog = screen.getByRole("dialog", { name: "Elasticsearch" });
-    const dedicatedToggle = within(dialog).getByRole("checkbox", { name: "Enable Elasticsearch for chat" }) as HTMLInputElement;
+    const dedicatedToggle = within(dialog).getByRole("switch", { name: "Enable Elasticsearch for chat" }) as HTMLButtonElement;
     expect(dedicatedToggle.disabled).toBe(false);
-    expect(dedicatedToggle.checked).toBe(true);
+    expect(dedicatedToggle.getAttribute("aria-checked")).toBe("true");
     expect(dialog.textContent).toContain("Discover mappings and shard health");
     fireEvent.click(dedicatedToggle);
     await waitFor(() => expect(api.setAgentToolsetEnabled).toHaveBeenCalledWith("chat", "elasticsearch-logs", false));
@@ -505,7 +510,7 @@ describe("AgentToolsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Elasticsearch settings" }));
     const dialog = screen.getByRole("dialog", { name: "Elasticsearch" });
     expect(dialog.textContent).toContain("Elasticsearch access is not permitted.");
-    expect((within(dialog).getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
+    expect((within(dialog).getByRole("switch") as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("uses neutral shared status when source configuration cannot be queried", async () => {
@@ -521,7 +526,7 @@ describe("AgentToolsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "SigNoz Logs settings" }));
     const dialog = screen.getByRole("dialog", { name: "SigNoz Logs" });
     expect(dialog.textContent).toContain("Provider configuration is unavailable.");
-    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+    expect(within(dialog).queryByRole("switch")).toBeNull();
   });
 
   it("uses a stable sanitized setup description ID for provider IDs", async () => {
@@ -538,21 +543,55 @@ describe("AgentToolsPage", () => {
     renderPage();
     await screen.findByText("Kubernetes");
     fireEvent.click(screen.getByRole("button", { name: "Describe dependencies settings" }));
-    fireEvent.click(within(screen.getByRole("dialog", { name: "Describe dependencies" })).getByRole("checkbox"));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Describe dependencies" })).getByRole("switch"));
     await waitFor(() => expect(api.setAgentToolsetEnabled).toHaveBeenCalledWith("chat", "describe_dependencies", true));
+  });
+
+  it("shows Kubernetes action setup reason inside Kubernetes settings without a separate card", async () => {
+    vi.mocked(api.listAgentToolsets).mockResolvedValueOnce([...rows, {
+      id: "kubernetes-actions", section: "connector", display_name: "Kubernetes actions", description: "Propose Kubernetes actions.", icon_key: "kubernetes", visibility: "always", state: "needs_capability", reason: "A separate Kubernetes actor credential is not configured.", action: "", action_label: "", enabled: true, child_count: 1, requirement: { kind: "capability", capabilities: ["kubernetes_actions"] },
+    }]);
+    renderPage();
+    await screen.findByText("Kubernetes");
+    expect(screen.queryByRole("heading", { name: "Kubernetes actions" })).toBeNull();
+    expect(screen.getAllByRole("article")).toHaveLength(19);
+    fireEvent.click(screen.getByRole("button", { name: "Kubernetes settings" }));
+    const dialog = screen.getByRole("dialog", { name: "Kubernetes" });
+    const actions = within(dialog).getByRole("region", { name: "Actions" });
+    expect(within(actions).getByText("Setup required. A separate Kubernetes actor credential is not configured.")).toBeTruthy();
+    const toggle = within(actions).getByRole("switch", { name: "Enable Kubernetes actions for chat" }) as HTMLButtonElement;
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(toggle.disabled).toBe(true);
+    expect(api.setAgentToolsetEnabled).not.toHaveBeenCalled();
+  });
+
+  it("toggles Kubernetes actions through its own policy ID when available", async () => {
+    vi.mocked(api.listAgentToolsets).mockResolvedValueOnce([...rows, {
+      id: "kubernetes-actions", section: "connector", display_name: "Kubernetes actions", description: "Propose Kubernetes actions.", icon_key: "kubernetes", visibility: "always", state: "available", reason: "A separate Kubernetes actor is configured.", action: "", action_label: "", enabled: true, child_count: 1, requirement: { kind: "capability", capabilities: ["kubernetes_actions"] },
+    }]);
+    renderPage();
+    await screen.findByText("Kubernetes");
+    fireEvent.click(screen.getByRole("button", { name: "Kubernetes settings" }));
+    const dialog = screen.getByRole("dialog", { name: "Kubernetes" });
+    const toggle = within(within(dialog).getByRole("region", { name: "Actions" })).getByRole("switch", { name: "Enable Kubernetes actions for chat" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect((within(dialog).getByRole("switch", { name: "Enable Kubernetes for chat" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(toggle);
+    await waitFor(() => expect(api.setAgentToolsetEnabled).toHaveBeenCalledWith("chat", "kubernetes-actions", false));
+    expect(api.setAgentToolsetEnabled).not.toHaveBeenCalledWith("chat", "kubernetes", false);
   });
 
   it("toggles independently per selected agent and refetches authoritative state", async () => {
     renderPage();
     await screen.findByText("Kubernetes");
     fireEvent.click(screen.getByRole("button", { name: "Describe dependencies settings" }));
-    fireEvent.click(within(screen.getByRole("dialog", { name: "Describe dependencies" })).getByRole("checkbox"));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Describe dependencies" })).getByRole("switch"));
     await waitFor(() => expect(api.setAgentToolsetEnabled).toHaveBeenCalledWith("chat", "describe_dependencies", true));
     fireEvent.click(screen.getByRole("button", { name: "Close dialog" }));
     fireEvent.click(screen.getByRole("button", { name: "analyze" }));
     await waitFor(() => expect(api.listAgentToolsets).toHaveBeenCalledWith("analyze"));
     fireEvent.click(await screen.findByRole("button", { name: "Describe dependencies settings" }));
-    expect(within(screen.getByRole("dialog", { name: "Describe dependencies" })).getByText("Analyze agent")).toBeTruthy();
+    expect(within(screen.getByRole("dialog", { name: "Describe dependencies" })).getByRole("switch", { name: "Enable Describe dependencies for analyze" })).toBeTruthy();
   });
 
   it("keeps a rejected mutation actionable and dismissible", async () => {
@@ -560,10 +599,143 @@ describe("AgentToolsPage", () => {
     renderPage();
     await screen.findByText("Kubernetes");
     fireEvent.click(screen.getByRole("button", { name: "Describe dependencies settings" }));
-    fireEvent.click(within(screen.getByRole("dialog", { name: "Describe dependencies" })).getByRole("checkbox"));
-    expect((await screen.findByRole("alert")).textContent).toContain("Requirement is not satisfied");
-    fireEvent.click(screen.getByRole("button", { name: /Dismiss/ }));
+    const dialog = screen.getByRole("dialog", { name: "Describe dependencies" });
+    const policy = within(dialog).getByRole("switch");
+    fireEvent.click(policy);
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert.textContent).toContain("Requirement is not satisfied");
+    expect(within(dialog).queryByRole("alert")).toBe(alert);
+    expect((policy as HTMLButtonElement).getAttribute("aria-checked")).toBe("false");
+    expect(screen.queryByRole("alert", { name: /Requirement is not satisfied/ })).toBeNull();
+    fireEvent.click(within(alert).getByRole("button", { name: /Dismiss/ }));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("shows a rejected read-policy denial only for its matching agent and tool", async () => {
+    vi.mocked(api.setAgentToolsetEnabled).mockRejectedValueOnce(new Error("Read access is not permitted"));
+    renderPage();
+    await screen.findByText("Kubernetes");
+    fireEvent.click(screen.getByRole("button", { name: "Describe dependencies settings" }));
+    let dialog = screen.getByRole("dialog", { name: "Describe dependencies" });
+    fireEvent.click(within(dialog).getByRole("switch"));
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("Read access is not permitted");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close dialog" }));
+    fireEvent.click(screen.getByRole("button", { name: "Source control settings" }));
+    dialog = screen.getByRole("dialog", { name: "Source control" });
+    expect(within(dialog).queryByRole("alert")).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close dialog" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "analyze" }));
+    await waitFor(() => expect(api.listAgentToolsets).toHaveBeenCalledWith("analyze"));
+    fireEvent.click(await screen.findByRole("button", { name: "Describe dependencies settings" }));
+    dialog = screen.getByRole("dialog", { name: "Describe dependencies" });
+    expect(within(dialog).queryByRole("alert")).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close dialog" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "chat" }));
+    await waitFor(() => expect(api.listAgentToolsets).toHaveBeenCalledWith("chat"));
+    fireEvent.click(await screen.findByRole("button", { name: "Describe dependencies settings" }));
+    dialog = screen.getByRole("dialog", { name: "Describe dependencies" });
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("Read access is not permitted");
+  });
+
+  it("shows a rejected Kubernetes-actions denial only in its matching Kubernetes dialog", async () => {
+    const actions: AgentToolsetAvailability = {
+      id: "kubernetes-actions", section: "connector", display_name: "Kubernetes actions", description: "Propose Kubernetes actions.", icon_key: "kubernetes", visibility: "always", state: "available", reason: "A separate Kubernetes actor is configured.", action: "", action_label: "", enabled: true, child_count: 1, requirement: { kind: "capability", capabilities: ["kubernetes_actions"] },
+    };
+    vi.mocked(api.listAgentToolsets).mockResolvedValue([
+      ...rows.map((row) => row.id === "kubernetes" ? { ...row, state: "available", reason: "Kubernetes is connected." } : row),
+      actions,
+    ]);
+    vi.mocked(api.setAgentToolsetEnabled).mockRejectedValueOnce(new Error("Kubernetes actions are not permitted"));
+    renderPage();
+    await screen.findByText("Kubernetes");
+    fireEvent.click(screen.getByRole("button", { name: "Kubernetes settings" }));
+    let dialog = screen.getByRole("dialog", { name: "Kubernetes" });
+    const actionToggle = within(within(dialog).getByRole("region", { name: "Actions" })).getByRole("switch");
+    fireEvent.click(actionToggle);
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("Kubernetes actions are not permitted");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close dialog" }));
+    fireEvent.click(screen.getByRole("button", { name: "Source control settings" }));
+    dialog = screen.getByRole("dialog", { name: "Source control" });
+    expect(within(dialog).queryByRole("alert")).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close dialog" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "analyze" }));
+    await waitFor(() => expect(api.listAgentToolsets).toHaveBeenCalledWith("analyze"));
+    fireEvent.click(await screen.findByRole("button", { name: "Kubernetes settings" }));
+    dialog = screen.getByRole("dialog", { name: "Kubernetes" });
+    expect(within(dialog).queryByRole("alert")).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close dialog" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "chat" }));
+    await waitFor(() => expect(api.listAgentToolsets).toHaveBeenCalledWith("chat"));
+    fireEvent.click(await screen.findByRole("button", { name: "Kubernetes settings" }));
+    dialog = screen.getByRole("dialog", { name: "Kubernetes" });
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("Kubernetes actions are not permitted");
+  });
+
+  it("locks both Kubernetes policy switches across read and action saves", async () => {
+    const readSave = deferred<Awaited<ReturnType<typeof api.setAgentToolsetEnabled>>>();
+    const actionSave = deferred<Awaited<ReturnType<typeof api.setAgentToolsetEnabled>>>();
+    let saveIndex = 0;
+    vi.mocked(api.listAgentToolsets).mockResolvedValue([...rows.map((row) => row.id === "kubernetes"
+      ? { ...row, state: "available", reason: "Kubernetes is connected." }
+      : row), {
+      id: "kubernetes-actions", section: "connector", display_name: "Kubernetes actions", description: "Propose Kubernetes actions.", icon_key: "kubernetes", visibility: "always", state: "available", reason: "A separate Kubernetes actor is configured.", action: "", action_label: "", enabled: true, child_count: 1, requirement: { kind: "capability", capabilities: ["kubernetes_actions"] },
+    }]);
+    vi.mocked(api.setAgentToolsetEnabled).mockImplementation(() => [readSave.promise, actionSave.promise][saveIndex++]);
+    renderPage();
+    await screen.findByText("Kubernetes");
+    fireEvent.click(screen.getByRole("button", { name: "Kubernetes settings" }));
+    const dialog = screen.getByRole("dialog", { name: "Kubernetes" });
+    const readPolicy = within(dialog).getByRole("switch", { name: "Enable Kubernetes for chat" }) as HTMLButtonElement;
+    const actionPolicy = within(dialog).getByRole("switch", { name: "Enable Kubernetes actions for chat" }) as HTMLButtonElement;
+
+    fireEvent.click(readPolicy);
+    await waitFor(() => {
+      expect(readPolicy.disabled).toBe(true);
+      expect(actionPolicy.disabled).toBe(true);
+    });
+    await act(async () => readSave.resolve({ agent: "chat", id: "kubernetes", enabled: false, changed: true }));
+    await waitFor(() => expect(readPolicy.disabled).toBe(false));
+    expect(actionPolicy.disabled).toBe(false);
+
+    fireEvent.click(actionPolicy);
+    await waitFor(() => {
+      expect(readPolicy.disabled).toBe(true);
+      expect(actionPolicy.disabled).toBe(true);
+    });
+    await act(async () => actionSave.resolve({ agent: "chat", id: "kubernetes-actions", enabled: false, changed: true }));
+    await waitFor(() => expect(actionPolicy.disabled).toBe(false));
+    expect(readPolicy.disabled).toBe(false);
+  });
+
+  it("keeps a pending save attached to its original agent", async () => {
+    const save = deferred<Awaited<ReturnType<typeof api.setAgentToolsetEnabled>>>();
+    vi.mocked(api.setAgentToolsetEnabled).mockReturnValue(save.promise);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderPage(client);
+    await screen.findByText("Kubernetes");
+    fireEvent.click(screen.getByRole("button", { name: "Describe dependencies settings" }));
+    let dialog = screen.getByRole("dialog", { name: "Describe dependencies" });
+    fireEvent.click(within(dialog).getByRole("switch", { name: "Enable Describe dependencies for chat" }));
+    await waitFor(() => expect(within(dialog).getByLabelText("Saving")).toBeTruthy());
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close dialog" }));
+    fireEvent.click(screen.getByRole("button", { name: "analyze" }));
+    await waitFor(() => expect(api.listAgentToolsets).toHaveBeenCalledWith("analyze"));
+    fireEvent.click(await screen.findByRole("button", { name: "Describe dependencies settings" }));
+    dialog = screen.getByRole("dialog", { name: "Describe dependencies" });
+    const analyzePolicy = await within(dialog).findByRole("switch", { name: "Enable Describe dependencies for analyze" });
+    expect((analyzePolicy as HTMLButtonElement).disabled).toBe(true);
+    expect(within(dialog).queryByLabelText("Saving")).toBeNull();
+
+    await act(async () => save.resolve({ agent: "chat", id: "describe_dependencies", enabled: true, changed: true }));
+    await waitFor(() => expect(client.getQueryState(["agent-toolsets", "chat"])?.isInvalidated).toBe(true));
+    expect(client.getQueryState(["agent-toolsets", "analyze"])?.isInvalidated).not.toBe(true);
+    expect(api.setAgentToolsetEnabled).toHaveBeenCalledWith("chat", "describe_dependencies", true);
   });
 
   it("renders recoverable error and empty states", async () => {

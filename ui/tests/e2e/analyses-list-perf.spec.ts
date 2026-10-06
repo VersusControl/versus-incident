@@ -14,8 +14,8 @@ import { openApp } from "./helpers";
 //   2. "Load more" fetches the next page ON DEMAND via offset (not a
 //      whole-table pull) and appends rows.
 //
-// Bring the stack up first (harness-run/harness.sh up oss), seed ~3k vs_analyses
-// rows, and run via `harness-run/harness.sh e2e ui analyses-list-perf`.
+// Bring the stack up first (plans/harness-run/harness.sh up oss), seed ~3k vs_analyses
+// rows, and run via `plans/harness-run/harness.sh e2e ui analyses-list-perf`.
 // ---------------------------------------------------------------------------
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

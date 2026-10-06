@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/agent/ai/router"
+	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
@@ -18,6 +20,20 @@ import (
 type blockingRunner struct {
 	started chan struct{}
 	once    sync.Once
+}
+
+func TestEventRecorderRetainsApprovalWhenTraceBufferIsFull(t *testing.T) {
+	recorder := &eventRecorder{}
+	for sequence := 0; sequence < MaxEventsPerTurn*2; sequence++ {
+		recorder.OnChatEvent(core.ChatEvent{Seq: int64(sequence + 1), Kind: core.ChatEventModelDelta, Delta: "trace"})
+	}
+	recorder.OnChatEvent(core.ChatEvent{Seq: 9999, Kind: core.ChatEventApproval, ApprovalNonce: "approval-nonce", Approval: &core.ChatApproval{ID: "approval-1"}})
+	for _, event := range recorder.snapshot() {
+		if event.Kind == core.ChatEventApproval && event.Approval != nil && event.Approval.ID == "approval-1" && event.ApprovalNonce == "approval-nonce" {
+			return
+		}
+	}
+	t.Fatal("event recorder discarded approval under trace pressure")
 }
 
 func (runner *blockingRunner) RunChat(ctx context.Context, _ core.ChatTask) (*core.ChatTurnResult, error) {
@@ -166,6 +182,30 @@ func TestServicePersistsUserAndAssistantTurns(t *testing.T) {
 	}
 	if session.Status != SessionIdle {
 		t.Fatalf("status = %q", session.Status)
+	}
+}
+
+type beginFailureWriter struct{}
+
+func (beginFailureWriter) Begin(context.Context, ledger.Trigger) error {
+	return ledger.ErrLedgerUnavailable
+}
+func (beginFailureWriter) Append(context.Context, ledger.Entry) (ledger.Entry, error) {
+	return ledger.Entry{}, ledger.ErrLedgerUnavailable
+}
+func (beginFailureWriter) Close(context.Context, string, ledger.RunOutcome) error {
+	return ledger.ErrLedgerUnavailable
+}
+
+func TestLedgerBeginFailureBlocksChatRunner(t *testing.T) {
+	runner := &captureTaskRunner{}
+	service, id := newTestService(t, runner)
+	service.SetLedgerWriter(beginFailureWriter{})
+	if _, err := service.Send(context.Background(), id, "inspect", nil); !errors.Is(err, ledger.ErrLedgerUnavailable) {
+		t.Fatalf("Send error=%v, want ledger unavailable", err)
+	}
+	if runner.task.Message != "" {
+		t.Fatalf("runner was invoked despite trigger failure: %+v", runner.task)
 	}
 }
 
@@ -518,6 +558,47 @@ func TestValidateAttachment(t *testing.T) {
 	}
 	if err := validateAttachment(&core.ChatAttachment{Service: "api", Time: &core.ChatTimeRange{Start: now.Add(-time.Hour), End: now}}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateKubernetesResourceAttachment(t *testing.T) {
+	valid := &core.ChatAttachment{Resource: &core.ChatResourceRef{Provider: "kubernetes", Cluster: "cluster-a", ResourceID: "apps~v1~deployments", Namespace: "shop", Name: "checkout"}}
+	if err := validateAttachment(valid); err != nil {
+		t.Fatalf("valid resource attachment rejected: %v", err)
+	}
+	for _, ref := range []*core.ChatResourceRef{
+		{Provider: "github", Cluster: "cluster-a", ResourceID: "apps~v1~deployments", Name: "checkout"},
+		{Provider: "kubernetes", Cluster: "", ResourceID: "apps~v1~deployments", Name: "checkout"},
+		{Provider: "kubernetes", Cluster: "cluster-a", ResourceID: "apps~v1~deployments", Name: ""},
+		{Provider: "kubernetes", Cluster: "cluster-a", ResourceID: "apps~v1~deployments", Namespace: "bad\nnamespace", Name: "checkout"},
+	} {
+		if err := validateAttachment(&core.ChatAttachment{Resource: ref}); !errors.Is(err, ErrInvalidAttachment) {
+			t.Errorf("invalid resource %#v error=%v", ref, err)
+		}
+	}
+}
+
+func TestServicePassesAndPersistsKubernetesResourceAttachment(t *testing.T) {
+	store := NewSessionStore(storage.NewMemory(), tenancy.DefaultOrgScope(), time.Now)
+	runner := &captureTaskRunner{}
+	service := NewService(store, runner, nil, time.Now)
+	session, err := service.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource := &core.ChatResourceRef{Provider: "kubernetes", Cluster: "cluster-a", ResourceID: "apps~v1~deployments", Namespace: "shop", Name: "checkout"}
+	if _, err := service.Send(context.Background(), session.ID, "Investigate checkout", &core.ChatAttachment{Resource: resource}); err != nil {
+		t.Fatal(err)
+	}
+	if runner.task.Attachment == nil || !reflect.DeepEqual(runner.task.Attachment.Resource, resource) {
+		t.Fatalf("runner attachment=%#v, want %#v", runner.task.Attachment, resource)
+	}
+	persisted, err := service.Get(session.ID)
+	if err != nil || len(persisted.Turns) != 2 || persisted.Turns[0].Role != TurnUser || persisted.Turns[0].Attachment == nil || !reflect.DeepEqual(persisted.Turns[0].Attachment.Resource, resource) {
+		t.Fatalf("persisted resource attachment=%#v err=%v", persisted, err)
+	}
+	if persisted.Turns[1].Role != TurnAssistant || persisted.Turns[1].Content != "answer" || persisted.Turns[1].Attachment != nil {
+		t.Fatalf("persisted assistant turn=%#v", persisted.Turns[1])
 	}
 }
 

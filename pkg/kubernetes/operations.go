@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 const (
@@ -44,9 +47,19 @@ type SearchResult struct {
 // WorkloadPage aggregates the supported workload kinds.
 type WorkloadPage struct {
 	Items     []ProjectedResource `json:"items"`
+	Counts    map[string]int      `json:"counts,omitempty"`
+	Next      string              `json:"next,omitempty"`
 	Truncated bool                `json:"truncated"`
 	Omitted   []string            `json:"omitted_categories,omitempty"`
 	Partial   []PartialFailure    `json:"partial_failures,omitempty"`
+}
+
+type WorkloadListOptions struct {
+	Namespace string
+	Kind      string
+	Query     string
+	Limit     int
+	Cursor    string
 }
 
 // WorkloadContainer is the bounded operational view of one workload container.
@@ -60,10 +73,11 @@ type WorkloadContainer struct {
 
 // WorkloadPod captures status and placement for one related pod.
 type WorkloadPod struct {
-	Name         string `json:"name"`
-	Phase        string `json:"phase,omitempty"`
-	Node         string `json:"node,omitempty"`
-	RestartCount int64  `json:"restart_count"`
+	Name         string    `json:"name"`
+	Phase        string    `json:"phase,omitempty"`
+	Node         string    `json:"node,omitempty"`
+	RestartCount int64     `json:"restart_count"`
+	CreatedAt    time.Time `json:"created_at,omitempty"`
 }
 
 // WorkloadDetail is a dedicated bounded SRE view, not a generic resource projection.
@@ -111,6 +125,34 @@ type ResourceDescription struct {
 	Partial     []PartialFailure    `json:"partial_failures,omitempty"`
 }
 
+type WorkloadLogOptions struct {
+	Namespace    string
+	Kind         string
+	Name         string
+	Pod          string
+	Container    string
+	Previous     bool
+	SinceSeconds int
+	TailLines    int
+	Grep         string
+	MaxPods      int
+}
+
+type WorkloadLogLine struct {
+	Pod       string    `json:"pod"`
+	Container string    `json:"container,omitempty"`
+	At        time.Time `json:"at,omitempty"`
+	Text      string    `json:"text"`
+}
+
+type WorkloadLogs struct {
+	Pods        []string          `json:"pods"`
+	Lines       []WorkloadLogLine `json:"lines"`
+	Truncated   bool              `json:"truncated"`
+	OmittedPods []string          `json:"omitted_pods"`
+	Partial     []PartialFailure  `json:"partial_failures,omitempty"`
+}
+
 // EventOptions is the server-owned object event filter contract.
 type EventOptions struct {
 	Namespace string
@@ -119,7 +161,17 @@ type EventOptions struct {
 	Name      string
 	UID       string
 	Continue  string
+	Cursor    string
 	Limit     int
+}
+
+type EventPage struct {
+	Items            []ProjectedResource `json:"items"`
+	Next             string              `json:"next,omitempty"`
+	Truncated        bool                `json:"truncated"`
+	Partial          []PartialFailure    `json:"partial_failures,omitempty"`
+	EncodedTruncated bool                `json:"-"`
+	Omitted          []string            `json:"-"`
 }
 
 var workloadResources = []struct {
@@ -289,9 +341,10 @@ func (service *Service) listAll(ctx context.Context, options ListOptions) (Resou
 	if err != nil {
 		return result, err
 	}
-	options.Limit = listAllPageSize
+	pageLimit := listAllPageSize
 	for len(result.Items) < maxCollectedItems {
-		page, err := service.List(ctx, options)
+		options.Limit = pageLimit
+		page, effectiveLimit, err := service.listPage(ctx, options)
 		if err != nil {
 			if errors.Is(err, ErrOperationBudget) {
 				result.Truncated = true
@@ -302,6 +355,7 @@ func (service *Service) listAll(ctx context.Context, options ListOptions) (Resou
 			}
 			return result, err
 		}
+		pageLimit = effectiveLimit
 		result.Truncated = result.Truncated || page.Truncated && page.Continue == ""
 		result.EncodedTruncated = result.EncodedTruncated || page.EncodedTruncated
 		for _, omitted := range page.Omitted {
@@ -545,10 +599,11 @@ func (service *Service) ListWorkloads(ctx context.Context, namespace, kind strin
 	}
 	for _, candidate := range selected {
 		kindItems := 0
+		kindPageLimit := maxPageSize
 		continuation := ""
 		for kindItems < limit {
-			pageLimit := min(limit-kindItems, maxPageSize)
-			page, err := service.List(ctx, ListOptions{ResourceID: candidate.ResourceID, Namespace: namespace, Continue: continuation, Limit: pageLimit})
+			pageLimit := min(limit-kindItems, kindPageLimit)
+			page, effectiveLimit, err := service.listPage(ctx, ListOptions{ResourceID: candidate.ResourceID, Namespace: namespace, Continue: continuation, Limit: pageLimit})
 			if err != nil {
 				class := errorClass(err)
 				if errors.Is(err, ErrNotFound) {
@@ -562,6 +617,7 @@ func (service *Service) ListWorkloads(ctx context.Context, namespace, kind strin
 				}
 				break
 			}
+			kindPageLimit = effectiveLimit
 			result.Truncated = result.Truncated || (page.Truncated && page.Continue == "")
 			for _, omitted := range page.Omitted {
 				result.Omitted = appendUnique(result.Omitted, omitted)
@@ -605,6 +661,122 @@ func (service *Service) ListWorkloads(ctx context.Context, namespace, kind strin
 	result.Items, result.Omitted, sizeTruncated = trimAggregateItems(result.Items, result.Omitted)
 	result.Truncated = result.Truncated || sizeTruncated
 	return result, nil
+}
+
+// Workloads lists one stable page of supported workload projections.
+func (service *Service) Workloads(ctx context.Context, options WorkloadListOptions) (WorkloadPage, error) {
+	if options.Namespace != "" && !safeSegment(options.Namespace) || options.Query != "" && len(options.Query) > 253 {
+		return WorkloadPage{}, ErrInvalidArguments
+	}
+	if options.Kind != "" && !isWorkloadKind(options.Kind) {
+		return WorkloadPage{}, ErrInvalidArguments
+	}
+	limit := normalizePageLimit(options.Limit)
+	ctx, cancel := ensureOperationBudget(ctx)
+	defer cancel()
+	result := WorkloadPage{Items: []ProjectedResource{}, Counts: make(map[string]int, len(workloadResources))}
+	for _, candidate := range workloadResources {
+		result.Counts[candidate.Kind] = 0
+	}
+	var resources []ProjectedResource
+	indexKinds := make([]string, 0, len(workloadResources))
+	for _, candidate := range workloadResources {
+		indexKinds = append(indexKinds, candidate.Kind)
+	}
+	view, status, indexErr := service.IndexSnapshot(ctx, indexKinds...)
+	indexReady := indexErr == nil
+	if indexReady {
+		for _, candidate := range workloadResources {
+			if status.Kinds[candidate.Kind].State != "ready" {
+				indexReady = false
+				break
+			}
+		}
+	}
+	if indexReady {
+		for _, record := range view.Records {
+			if !isWorkloadKind(record.Kind) {
+				continue
+			}
+			resources = append(resources, projectedWorkloadIndexRecord(record))
+		}
+	} else {
+		for _, candidate := range workloadResources {
+			page, listErr := service.listAll(ctx, ListOptions{ResourceID: candidate.ResourceID, Namespace: options.Namespace})
+			if listErr != nil {
+				class := errorClass(listErr)
+				if errors.Is(listErr, ErrNotFound) {
+					class = "unsupported"
+				}
+				result.Partial = append(result.Partial, PartialFailure{ResourceID: candidate.ResourceID, Class: class})
+				result.Truncated = true
+				continue
+			}
+			resources = append(resources, page.Items...)
+			result.Partial = append(result.Partial, page.Partial...)
+			result.Truncated = result.Truncated || page.Truncated
+			result.Omitted = append(result.Omitted, page.Omitted...)
+		}
+	}
+	query := strings.ToLower(strings.TrimSpace(options.Query))
+	filtered := make([]ProjectedResource, 0, len(resources))
+	for _, resource := range resources {
+		if options.Namespace != "" && resource.Namespace != options.Namespace || query != "" && !strings.Contains(strings.ToLower(resource.Name), query) && !strings.Contains(strings.ToLower(resource.Namespace), query) {
+			continue
+		}
+		result.Counts[resource.Kind]++
+		if options.Kind == "" || resource.Kind == options.Kind {
+			filtered = append(filtered, resource)
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].Kind != filtered[j].Kind {
+			return filtered[i].Kind < filtered[j].Kind
+		}
+		if filtered[i].Namespace != filtered[j].Namespace {
+			return filtered[i].Namespace < filtered[j].Namespace
+		}
+		return filtered[i].Name < filtered[j].Name
+	})
+	start, end, next, err := pageWindow(options.Cursor, limit, len(filtered))
+	if err != nil {
+		return WorkloadPage{}, err
+	}
+	result.Items = append(result.Items, filtered[start:end]...)
+	result.Next = next
+	result.Truncated = result.Truncated || next != ""
+	var sizeTruncated bool
+	result.Items, result.Omitted, sizeTruncated = trimAggregateItems(result.Items, result.Omitted)
+	result.Truncated = result.Truncated || sizeTruncated
+	if sizeTruncated {
+		start, _ := strconv.Atoi(options.Cursor)
+		result.Next = strconv.Itoa(start + len(result.Items))
+	}
+	return result, nil
+}
+
+func normalizePageLimit(limit int) int {
+	if limit <= 0 {
+		return 50
+	}
+	return min(limit, 200)
+}
+
+func pageWindow(cursor string, limit, total int) (int, int, string, error) {
+	offset := 0
+	if cursor != "" {
+		parsed, err := strconv.Atoi(cursor)
+		if err != nil || parsed < 0 || parsed > total {
+			return 0, 0, "", ErrInvalidArguments
+		}
+		offset = parsed
+	}
+	end := min(offset+limit, total)
+	next := ""
+	if end < total {
+		next = strconv.Itoa(end)
+	}
+	return offset, end, next, nil
 }
 
 func trimAggregateItems(items []ProjectedResource, omitted []string) ([]ProjectedResource, []string, bool) {
@@ -666,6 +838,7 @@ func (service *Service) GetWorkload(ctx context.Context, namespace, kind, name s
 	result.Truncated = podTruncated
 	for _, pod := range pods {
 		result.Pods = append(result.Pods, WorkloadPod{Name: pod.Name, Phase: summaryString(pod.Summary, "phase"), Node: summaryString(pod.Summary, "node"), RestartCount: summaryIntValue(pod.Summary, "restart_count")})
+		result.Pods[len(result.Pods)-1].CreatedAt = resourceTime(pod.Summary)
 		if node := summaryString(pod.Summary, "node"); node != "" {
 			result.Nodes = append(result.Nodes, node)
 		}
@@ -754,6 +927,180 @@ func (service *Service) relatedPods(ctx context.Context, namespace, kind, name s
 		truncated = true
 	}
 	return result, page.Partial, page.Omitted, truncated
+}
+
+func (service *Service) WorkloadLogs(ctx context.Context, options WorkloadLogOptions) (WorkloadLogs, error) {
+	if options.Namespace == "" || options.Name == "" || options.Grep != "" && len(options.Grep) > 256 || options.Pod != "" && !safeSegment(options.Pod) {
+		return WorkloadLogs{}, ErrInvalidArguments
+	}
+	if options.SinceSeconds < 0 || options.SinceSeconds > 86400 || options.TailLines < 0 || options.TailLines > 1000 {
+		return WorkloadLogs{}, ErrInvalidArguments
+	}
+	if options.MaxPods <= 0 || options.MaxPods > 10 {
+		options.MaxPods = 10
+	}
+	if options.TailLines == 0 {
+		options.TailLines = 200
+	}
+	if options.Kind != "Pod" {
+		if _, ok := workloadResourceID(options.Kind); !ok {
+			return WorkloadLogs{}, ErrInvalidArguments
+		}
+	}
+
+	ctx, cancel := ensureOperationBudget(ctx)
+	defer cancel()
+	workload, err := service.GetWorkload(ctx, options.Namespace, options.Kind, options.Name)
+	if err != nil {
+		return WorkloadLogs{}, err
+	}
+	pods := append([]WorkloadPod(nil), workload.Pods...)
+	if options.Pod != "" {
+		pods = filterWorkloadPods(pods, options.Pod)
+		if len(pods) == 0 {
+			return WorkloadLogs{}, ErrNotFound
+		}
+	}
+	prioritizeWorkloadLogPods(pods)
+	result := WorkloadLogs{Pods: []string{}, Lines: []WorkloadLogLine{}, OmittedPods: []string{}, Partial: append([]PartialFailure(nil), workload.Partial...)}
+	if len(pods) > options.MaxPods {
+		result.Truncated = true
+		for _, pod := range pods[options.MaxPods:] {
+			result.OmittedPods = append(result.OmittedPods, pod.Name)
+		}
+		pods = pods[:options.MaxPods]
+	}
+	result.Pods = make([]string, len(pods))
+	for index, pod := range pods {
+		result.Pods[index] = pod.Name
+	}
+
+	type podResult struct {
+		pod  WorkloadPod
+		logs PodLogs
+		err  error
+	}
+	results := make(chan podResult, len(pods))
+	semaphore := make(chan struct{}, 3)
+	var workers sync.WaitGroup
+	for _, pod := range pods {
+		workers.Add(1)
+		go func(pod WorkloadPod) {
+			defer workers.Done()
+			select {
+			case semaphore <- struct{}{}:
+			case <-ctx.Done():
+				results <- podResult{pod: pod, err: ctx.Err()}
+				return
+			}
+			defer func() { <-semaphore }()
+			logs, readErr := service.podLogs(ctx, options.Namespace, pod.Name, options.Container, options.Previous, options.SinceSeconds, options.TailLines, true)
+			results <- podResult{pod: pod, logs: logs, err: readErr}
+		}(pod)
+	}
+	workers.Wait()
+	close(results)
+	const maxWorkloadLogBytes = 512 << 10
+	var encodedBytes int
+	for item := range results {
+		if item.err != nil {
+			result.Truncated = true
+			result.OmittedPods = appendUnique(result.OmittedPods, item.pod.Name)
+			result.Partial = append(result.Partial, PartialFailure{ResourceID: "core~v1~pods", Scope: "logs", Class: errorClass(item.err)})
+			continue
+		}
+		result.Truncated = result.Truncated || item.logs.Truncated
+		for _, line := range filterWorkloadLogLines(item.logs.Text, options.Grep) {
+			at, text := parseTimestampedLogLine(line)
+			entry := WorkloadLogLine{Pod: item.pod.Name, Container: item.logs.Container, At: at, Text: text}
+			encoded, _ := json.Marshal(entry)
+			if encodedBytes+len(encoded) > maxWorkloadLogBytes {
+				result.Truncated = true
+				result.OmittedPods = appendUnique(result.OmittedPods, item.pod.Name)
+				break
+			}
+			encodedBytes += len(encoded)
+			result.Lines = append(result.Lines, entry)
+		}
+	}
+	sort.SliceStable(result.Lines, func(i, j int) bool {
+		if result.Lines[i].At.IsZero() != result.Lines[j].At.IsZero() {
+			return !result.Lines[i].At.IsZero()
+		}
+		if !result.Lines[i].At.Equal(result.Lines[j].At) {
+			return result.Lines[i].At.Before(result.Lines[j].At)
+		}
+		if result.Lines[i].Pod != result.Lines[j].Pod {
+			return result.Lines[i].Pod < result.Lines[j].Pod
+		}
+		return result.Lines[i].Text < result.Lines[j].Text
+	})
+	return result, nil
+}
+
+func filterWorkloadPods(pods []WorkloadPod, name string) []WorkloadPod {
+	for _, pod := range pods {
+		if pod.Name == name {
+			return []WorkloadPod{pod}
+		}
+	}
+	return nil
+}
+
+func prioritizeWorkloadLogPods(pods []WorkloadPod) {
+	sort.SliceStable(pods, func(i, j int) bool {
+		left, right := podLogPriority(pods[i]), podLogPriority(pods[j])
+		if left != right {
+			return left > right
+		}
+		if !pods[i].CreatedAt.Equal(pods[j].CreatedAt) {
+			return pods[i].CreatedAt.After(pods[j].CreatedAt)
+		}
+		if pods[i].RestartCount != pods[j].RestartCount {
+			return pods[i].RestartCount > pods[j].RestartCount
+		}
+		return pods[i].Name < pods[j].Name
+	})
+}
+
+func filterWorkloadLogLines(text, grep string) []string {
+	lines := strings.Split(text, "\n")
+	if grep == "" {
+		return lines
+	}
+	needle := strings.ToLower(grep)
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.Contains(strings.ToLower(line), needle) {
+			filtered = append(filtered, line)
+		}
+	}
+	return filtered
+}
+
+func podLogPriority(pod WorkloadPod) int {
+	switch pod.Phase {
+	case "Failed":
+		return 3
+	case "Pending":
+		return 2
+	case "Running":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func parseTimestampedLogLine(line string) (time.Time, string) {
+	separator := strings.IndexByte(line, ' ')
+	if separator <= 0 {
+		return time.Time{}, line
+	}
+	at, err := time.Parse(time.RFC3339Nano, line[:separator])
+	if err != nil {
+		return time.Time{}, line
+	}
+	return at, line[separator+1:]
 }
 
 func (service *Service) relatedWorkloadResources(ctx context.Context, resourceID, namespace string) ([]ProjectedResource, []PartialFailure, []string, bool) {
@@ -955,19 +1302,19 @@ func enforceDescriptionSize(result *ResourceDescription) {
 }
 
 // ListEvents lists events using server-authored field selectors only.
-func (service *Service) ListEvents(ctx context.Context, options EventOptions) (ResourcePage, error) {
+func (service *Service) ListEvents(ctx context.Context, options EventOptions) (EventPage, error) {
 	ctx, cancel := ensureOperationBudget(ctx)
 	defer cancel()
 	if options.Namespace != "" && !safeSegment(options.Namespace) {
-		return ResourcePage{}, ErrInvalidArguments
+		return EventPage{}, ErrInvalidArguments
 	}
 	if options.Kind != "" || options.Name != "" || options.UID != "" {
 		if options.Kind == "" || options.Name == "" || !safeEventField(options.Kind) || !safeEventField(options.Name) || (options.UID != "" && !safeEventField(options.UID)) {
-			return ResourcePage{}, ErrInvalidArguments
+			return EventPage{}, ErrInvalidArguments
 		}
 	}
 	if options.Type != "" && options.Type != "Warning" && options.Type != "Normal" {
-		return ResourcePage{}, ErrInvalidArguments
+		return EventPage{}, ErrInvalidArguments
 	}
 	fields := ""
 	if options.Type != "" {
@@ -982,7 +1329,18 @@ func (service *Service) ListEvents(ctx context.Context, options EventOptions) (R
 			fields += ",involvedObject.uid=" + options.UID
 		}
 	}
-	return service.List(ctx, ListOptions{ResourceID: "core~v1~events", Namespace: options.Namespace, Fields: fields, Continue: options.Continue, Limit: options.Limit})
+	continuation := options.Cursor
+	if continuation == "" {
+		continuation = options.Continue
+	}
+	page, err := service.List(ctx, ListOptions{ResourceID: "core~v1~events", Namespace: options.Namespace, Fields: fields, Continue: continuation, Limit: normalizePageLimit(options.Limit)})
+	if err != nil {
+		return EventPage{}, err
+	}
+	if page.Items == nil {
+		page.Items = []ProjectedResource{}
+	}
+	return EventPage{Items: page.Items, Next: page.Continue, Truncated: page.Truncated, Partial: page.Partial, EncodedTruncated: page.EncodedTruncated, Omitted: page.Omitted}, nil
 }
 
 func (service *Service) listAllEvents(ctx context.Context, options EventOptions) (ResourcePage, error) {
@@ -993,14 +1351,14 @@ func (service *Service) listAllEvents(ctx context.Context, options EventOptions)
 		if err != nil {
 			return result, err
 		}
-		result.Truncated = result.Truncated || page.Truncated && page.Continue == ""
+		result.Truncated = result.Truncated || page.Truncated && page.Next == ""
 		result.EncodedTruncated = result.EncodedTruncated || page.EncodedTruncated
 		for _, omitted := range page.Omitted {
 			result.Omitted = appendUnique(result.Omitted, omitted)
 		}
 		result.Partial = append(result.Partial, page.Partial...)
 		result.Items = append(result.Items, page.Items...)
-		options.Continue = page.Continue
+		options.Continue = page.Next
 		if options.Continue == "" {
 			return result, nil
 		}

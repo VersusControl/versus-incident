@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/agent/act"
 	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
 	cloudwatchlogtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/cloudwatchlogs"
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
@@ -22,6 +23,7 @@ import (
 	signoztools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/signoz"
 	splunktools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/splunk"
 	versustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/versus"
+	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	"github.com/VersusControl/versus-incident/pkg/baseline"
 	cloudwatchlogapp "github.com/VersusControl/versus-incident/pkg/cloudwatchlogs"
 	"github.com/VersusControl/versus-incident/pkg/config"
@@ -95,6 +97,32 @@ func TestBuildAnalyzeToolsRuntimeCatalogContract(t *testing.T) {
 		if _, ok := aitools.Lookup(tool.Name()); !ok {
 			t.Errorf("runtime tool %q is absent from availability catalog", tool.Name())
 		}
+	}
+}
+
+func TestProposalToolIsAddedOnlyToChatRuntime(t *testing.T) {
+	provider := storage.NewMemory()
+	service, err := act.NewService(provider, "org-a", ledger.NewBlobWriter(provider, "org-a"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analyzeTools := []core.Tool{}
+	chatTools := chatRuntimeToolCatalog(analyzeTools, service)
+	if len(analyzeTools) != 0 || len(chatTools) != 1 || chatTools[0].Name() != "propose_action" {
+		t.Fatalf("analyze tools=%v chat tools=%v", analyzeTools, chatTools)
+	}
+	if got := chatRuntimeToolCatalog(analyzeTools, nil); len(got) != 0 {
+		t.Fatalf("chat tool catalog without an actor = %v", got)
+	}
+}
+
+func TestKubernetesActionsRejectPodServiceAccountReuse(t *testing.T) {
+	_, err := buildKubernetesActionAdapters(config.KubernetesToolConfig{
+		Endpoint: "https://cluster.example",
+		Actions:  config.KubernetesActionsToolConfig{Enable: true, Auth: config.KubernetesAuthConfig{Mode: "in_cluster"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "separate actor credential") {
+		t.Fatalf("in-cluster actor auth error=%v", err)
 	}
 }
 

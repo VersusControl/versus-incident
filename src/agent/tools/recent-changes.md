@@ -2,18 +2,20 @@
 
 Most incidents trace back to a change. A deploy went out, a config flag
 flipped, a migration landed — and minutes later the errors started. The
-`recent_changes` tool gives the analyze agent the one piece of context
+`recent_changes` tool gives Chat and Analyze one piece of context
 that turns a guess into a root cause: *what changed just before this
 broke?*
 
-It reads the commit history of your deploy repositories and hands the
-agent a time-ordered list of recent changes, newest first. When a spike
+It merges Kubernetes object changes with commit history from configured
+deploy repositories and hands the agents a time-ordered list of recent
+changes, newest first. Kubernetes-only installations need no GitHub
+connection. When a spike
 in `api` errors appears five minutes after a commit titled "migrate
 users table" landed, the agent can flag that deploy as the probable
 trigger instead of speculating.
 
-> **Note:** This tool is read-only. It clones and reads git history. It
-> never pushes, writes, or runs anything in your repositories.
+> **Note:** This tool is read-only. It reads the Kubernetes change index and
+> configured Git history; it never changes clusters or repositories.
 
 ## What the agent sees
 
@@ -22,11 +24,11 @@ record:
 
 | Field | Source | Example |
 |---|---|---|
-| `timestamp` | Commit time (UTC) | `2026-06-12T11:58:03Z` |
-| `service` | Per-repo `service`, or derived from the repo name | `api` |
-| `kind` | Always `commit` for git-sourced changes | `commit` |
-| `summary` | First line of the commit message | `migrate users table` |
-| `ref` | Short commit SHA | `a1b2c3d` |
+| `timestamp` | Commit or Kubernetes change time (UTC) | `2026-06-12T11:58:03Z` |
+| `service` | Configured or derived service name | `api` |
+| `kind` | `commit` or a Kubernetes change kind | `commit` |
+| `summary` | Commit subject or bounded Kubernetes change summary | `migrate users table` |
+| `ref` | Optional short commit SHA or Kubernetes resource reference | `a1b2c3d` |
 
 The agent can also pass arguments to narrow the view:
 
@@ -35,7 +37,7 @@ The agent can also pass arguments to narrow the view:
 | `service` | string | *(all)* | Case-insensitive exact match on the service name. |
 | `window_minutes` | integer | `120` | Look back this many minutes from now. Capped at `1440` (24 hours). |
 
-## In the analysis flow
+## In the Chat and Analyze flows
 
 Here's how the tool shows up during a real investigation. An incident
 fires on the `api` service:
@@ -43,7 +45,7 @@ fires on the `api` service:
 > **Incident:** `api` — 500 error rate jumped from 0.1% to 12% at
 > 11:58 UTC.
 
-The analyze agent wants to know what changed just before the spike, so it
+The agent wants to know what changed just before the spike, so it
 emits a `recent_changes` call scoped to the affected service:
 
 ```json
@@ -56,9 +58,9 @@ emits a `recent_changes` call scoped to the affected service:
 }
 ```
 
-The tool reads each configured repository's commit history within the
-window and returns the standard envelope, newest first. `found` is `true`
-because a matching commit landed inside the window:
+The tool reads available feed records within the window and returns the
+standard envelope, newest first. `found` is `true` because a matching change
+landed inside the window:
 
 ```json
 {
@@ -87,16 +89,18 @@ it returned — is recorded in the **Tool calls** section of the analysis
 result, so you can audit exactly which change the agent correlated
 against.
 
-> **Note:** When no commit falls in the window (or no repos are
-> configured), the tool returns `found: false` with no `changes`. The
-> analysis still completes — it just proceeds without change correlation.
+> **Note:** When no change falls in the window, the tool returns
+> `found: false` with no `changes`. The agent still completes without change
+> correlation. With neither a Kubernetes feed nor Git repositories configured,
+> the capability is unavailable.
 
 ## Configuration
 
 The tool lives in [`tools.yaml`](../../configuration/configuration.md), next to
 your `config.yaml`. List your deploy repositories under
-`tools.recent_changes.git.repos`. With an empty `repos` list the tool is
-not registered, and analyses proceed without change awareness.
+`tools.recent_changes.git.repos`. An empty `repos` list is valid when a
+Kubernetes change feed is available; with neither source configured, the tool
+is unavailable to both agents.
 
 ```yaml
 tools:

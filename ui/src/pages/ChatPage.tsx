@@ -16,7 +16,9 @@ import {
   Clock3,
   History,
   LoaderCircle,
+  Paperclip,
   Plus,
+  Search,
   Send,
   Trash2,
   Wrench,
@@ -35,6 +37,7 @@ import {
   type ChatEvent,
   type ChatSession,
   type ChatSessionSummary,
+  type ChatResourceAttachment,
   type ChatToolCall,
   type ChatTurn,
 } from "@/lib/api";
@@ -111,6 +114,25 @@ function sessionTitle(summary: ChatSessionSummary, full?: ChatSession) {
   return firstUser ? truncate(firstUser, 54) : `Chat · ${fmtRel(summary.updated_at)}`;
 }
 
+function kubernetesResourceHref(resource: ChatResourceAttachment) {
+  const query = new URLSearchParams({ view: "topology", r: `${resource.resource_id}/${resource.namespace ?? ""}/${resource.name}` });
+  return `/agent/kubernetes?${query}`;
+}
+
+function resourceAttachmentFromSearch(params: URLSearchParams): ChatResourceAttachment | null {
+  if (params.get("provider") !== "kubernetes") return null;
+  const resource_id = params.get("resource_id") ?? "";
+  const name = params.get("name") ?? "";
+  if (!resource_id || !name) return null;
+  return {
+    provider: "kubernetes",
+    cluster: params.get("cluster") ?? "",
+    resource_id,
+    namespace: params.get("namespace") || undefined,
+    name,
+  };
+}
+
 function toolProse(event: ChatEvent) {
   const label =
     event.tool_display ||
@@ -176,6 +198,55 @@ function ToolPayload({ label, value }: { label: string; value: string }) {
   );
 }
 
+function ActionApprovalCard({ event }: { event: ChatEvent }) {
+  const approval = event.approval;
+  const [state, setState] = useState(approval?.state ?? "pending");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  if (!approval) return null;
+
+  const decide = async (decision: "approve" | "reject") => {
+    if (!event.approval_nonce || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = decision === "approve"
+        ? await api.approveAgentApproval(approval.id, event.approval_nonce)
+        : await api.rejectAgentApproval(approval.id, reason.trim());
+      setState(result.state);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "The approval request failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const pending = state === "pending";
+  const expiry = Date.parse(approval.expires_at);
+
+  return <section aria-label="Action approval" className="my-4 overflow-hidden rounded-card border border-sev-warning/40 bg-surface-raised">
+    <header className="flex flex-wrap items-center justify-between gap-2 border-b border-ink-500/40 px-4 py-3">
+      <h3 className="flex items-center gap-2 text-sm font-semibold text-ink-50"><Clock3 size={15} className="text-sev-warning" />Action requires approval</h3>
+      <span className="pill pill-warn">{approval.risk} risk · {state}</span>
+    </header>
+    <dl className="grid gap-x-4 gap-y-3 px-4 py-3 text-xs sm:grid-cols-[minmax(100px,140px)_1fr]">
+      <dt className="text-ink-400">Action</dt><dd className="break-words text-ink-100">{approval.type}</dd>
+      <dt className="text-ink-400">Target</dt><dd className="break-words text-ink-100">{approval.target}</dd>
+      <dt className="text-ink-400">Dry run</dt><dd className="break-words text-ink-100">{approval.effect}</dd>
+      {Number.isFinite(expiry) && <><dt className="text-ink-400">Expires</dt><dd><time dateTime={approval.expires_at} className="text-ink-200">{new Date(expiry).toLocaleString()}</time></dd></>}
+    </dl>
+    {pending && <div className="space-y-3 border-t border-ink-500/40 px-4 py-3">
+      <label className="block text-xs text-ink-300">Rejection reason<input aria-label="Reason for rejection" className="input mt-1 w-full" value={reason} onChange={(change) => setReason(change.target.value)} disabled={busy} maxLength={512} /></label>
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className="btn btn-primary" onClick={() => void decide("approve")} disabled={busy || !event.approval_nonce}>{busy ? "Submitting…" : "Approve action"}</button>
+        <button type="button" className="btn" onClick={() => void decide("reject")} disabled={busy || !event.approval_nonce || !reason.trim()}>Reject action</button>
+        {!event.approval_nonce && <span role="status" className="self-center text-xs text-ink-400">Approval actions are unavailable for this event.</span>}
+      </div>
+      {error && <p role="alert" className="text-xs text-sev-critical">{error}</p>}
+    </div>}
+  </section>;
+}
+
 function traceEvent(call: ChatToolCall, seq: number): ChatEvent {
   return {
     seq,
@@ -234,7 +305,10 @@ function TurnView({ turn, onEvidence }: { turn: ChatTurn; onEvidence: (value: Ev
   if (turn.role === "user") {
     return (
       <div className="my-4 flex justify-end">
-        <div className="max-w-[85%] rounded-2xl bg-ink-700 px-4 py-2.5 text-sm leading-6 text-ink-50">{turn.content}</div>
+        <div className="max-w-[85%] rounded-2xl bg-ink-700 px-4 py-2.5 text-sm leading-6 text-ink-50">
+          {turn.content}
+          {turn.attachment?.resource && <Link to={kubernetesResourceHref(turn.attachment.resource)} className="mt-2 flex items-center gap-2 border-t border-ink-500/50 pt-2 text-left text-xs text-link hover:underline"><Paperclip size={13} aria-hidden="true"/><span className="min-w-0 truncate">{turn.attachment.resource.namespace ? `${turn.attachment.resource.namespace}/` : ""}{turn.attachment.resource.name}</span><span className="shrink-0 text-2xs text-ink-300">Open in topology</span></Link>}
+        </div>
       </div>
     );
   }
@@ -260,6 +334,7 @@ function LiveBlocks({ blocks, terminal }: { blocks: ChatStreamBlock[]; terminal:
     <div className="my-6 min-w-0">
       {blocks.map((block) => {
         if (block.kind === "tool") return <ToolActivity key={block.key} event={block.event} />;
+        if (block.kind === "approval") return <ActionApprovalCard key={block.key} event={block.event} />;
         if (block.kind === "compaction") return <div key={block.key} className="my-3 text-center text-2xs italic text-ink-400">{block.text}</div>;
         return <MarkdownText key={block.key}>{block.text}</MarkdownText>;
       })}
@@ -324,13 +399,16 @@ function HistoryList({ sessions, selected, selectedFull, loading, deleteErrors, 
   );
 }
 
-function Composer({ value, onChange, onSubmit, running, stopping, onStop }: {
+function Composer({ value, onChange, onSubmit, running, stopping, onStop, resource, onOpenResourcePicker, onRemoveResource }: {
   value: string;
   onChange: (value: string) => void;
   onSubmit: () => void;
   running: boolean;
   stopping: boolean;
   onStop: () => void;
+  resource: ChatResourceAttachment | null;
+  onOpenResourcePicker: () => void;
+  onRemoveResource: () => void;
 }) {
   const submit = (event: FormEvent) => { event.preventDefault(); if (!running && value.trim()) onSubmit(); };
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -338,16 +416,20 @@ function Composer({ value, onChange, onSubmit, running, stopping, onStop }: {
   };
   return (
     <form onSubmit={submit} className="flex items-end gap-2 rounded-[24px] border border-ink-500/70 bg-surface px-3 py-2 shadow-card">
-      <textarea
-        value={value}
-        onChange={(event) => onChange(capChatMessage(event.target.value))}
-        onKeyDown={keyDown}
-        rows={1}
-        placeholder="Ask about your system"
-        aria-label="Message"
-        style={{ outline: "none" }}
-        className="max-h-40 min-h-10 flex-1 resize-none bg-transparent px-2 py-2 text-base leading-6 text-ink-50 outline-none placeholder:text-ink-400 focus:outline-none focus-visible:outline-none lg:text-sm"
-      />
+      <div className="min-w-0 flex-1">
+        {resource && <div className="mb-1 flex min-w-0 items-center gap-2 px-2 text-2xs text-link"><Paperclip size={12} aria-hidden="true"/><span className="truncate">{resource.namespace ? `${resource.namespace}/` : ""}{resource.name}</span><button type="button" className="btn-icon ml-auto size-7 shrink-0" aria-label="Remove Kubernetes resource attachment" title="Remove attachment" onClick={onRemoveResource}><X size={13}/></button></div>}
+        <textarea
+          value={value}
+          onChange={(event) => onChange(capChatMessage(event.target.value))}
+          onKeyDown={keyDown}
+          rows={1}
+          placeholder="Ask about your system"
+          aria-label="Message"
+          style={{ outline: "none" }}
+          className="max-h-40 min-h-10 w-full resize-none bg-transparent px-2 py-2 text-base leading-6 text-ink-50 outline-none placeholder:text-ink-400 focus:outline-none focus-visible:outline-none lg:text-sm"
+        />
+      </div>
+      {!running && <button type="button" onClick={onOpenResourcePicker} aria-label="Attach Kubernetes resource" title="Attach Kubernetes resource" className="mb-0.5 inline-flex size-10 shrink-0 items-center justify-center rounded-full text-ink-300 hover:bg-ink-700"><Paperclip size={17}/></button>}
       {running ? (
         <button type="button" onClick={onStop} disabled={stopping} aria-label={stopping ? "Stopping" : "Stop"} title={stopping ? "Stopping" : "Stop"} className="mb-0.5 inline-flex size-10 shrink-0 items-center justify-center rounded-full bg-ink-100 text-ink-900 disabled:opacity-60"><CircleStop size={17} /></button>
       ) : (
@@ -364,6 +446,10 @@ export function ChatPage() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [evidence, setEvidence] = useState<EvidenceSelection | null>(null);
   const [draft, setDraft] = useState("");
+  const [resourceAttachment, setResourceAttachment] = useState<ChatResourceAttachment | null>(() => resourceAttachmentFromSearch(searchParams));
+  const [resourcePickerOpen, setResourcePickerOpen] = useState(false);
+  const [resourceQuery, setResourceQuery] = useState("");
+  const [debouncedResourceQuery, setDebouncedResourceQuery] = useState("");
   const [liveRuns, setLiveRuns] = useState<Record<string, LiveRun>>({});
   const [deleteErrors, setDeleteErrors] = useState<Record<string, Error>>({});
   const abortRefs = useRef(new Map<string, AbortController>());
@@ -372,6 +458,13 @@ export function ChatPage() {
   const evidenceDialogRef = useRef<HTMLDivElement | null>(null);
   const conversationRef = useRef<HTMLDivElement | null>(null);
   const [isMobile, setIsMobile] = useState(false);
+  const resourceOverview = useQuery({ queryKey: ["kubernetes-overview"], queryFn: api.kubernetesOverview, enabled: resourcePickerOpen, retry: false });
+  const resourceResults = useQuery({
+    queryKey: ["chat-kubernetes-search", debouncedResourceQuery],
+    queryFn: () => api.kubernetesSearch("", debouncedResourceQuery, 20),
+    enabled: resourcePickerOpen && debouncedResourceQuery.trim().length > 0,
+    retry: false,
+  });
 
   const sessionsQ = useQuery({
     queryKey: ["chat-sessions"],
@@ -405,6 +498,11 @@ export function ChatPage() {
   }, []);
 
   useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedResourceQuery(resourceQuery.trim()), 200);
+    return () => window.clearTimeout(timer);
+  }, [resourceQuery]);
+
+  useEffect(() => {
     const modalOpen = isMobile && Boolean(evidence);
     const content = conversationRef.current;
     if (!content) return;
@@ -423,9 +521,9 @@ export function ChatPage() {
   }, []);
 
   const newThread = () => {
-    setSearchParams({}); setDraft(""); setEvidence(null); setHistoryOpen(false);
+    setSearchParams({}); setDraft(""); setEvidence(null); setHistoryOpen(false); setResourceAttachment(null);
   };
-  const selectThread = (id: string) => { setSearchParams({ session: id }); setHistoryOpen(false); setEvidence(null); };
+  const selectThread = (id: string) => { setSearchParams({ session: id }); setHistoryOpen(false); setEvidence(null); setResourceAttachment(null); };
   const openEvidence = (value: EvidenceSelection) => {
     evidenceTriggerRef.current = document.activeElement as HTMLElement | null;
     setEvidence(value);
@@ -461,8 +559,10 @@ export function ChatPage() {
   const send = async () => {
     const message = draft.trim();
     if (!message || active || submittingRef.current) return;
+    const attachment = resourceAttachment ? { resource: resourceAttachment } : undefined;
     submittingRef.current = true;
     setDraft("");
+    setResourceAttachment(null);
     let id = selectedId;
     try {
       if (!id) {
@@ -471,7 +571,7 @@ export function ChatPage() {
         queryClient.setQueryData(["chat-session", id], created);
         setSearchParams({ session: id });
       }
-      const optimisticTurn: ChatTurn = { id: `local-${Date.now()}`, role: "user", content: message, created_at: new Date().toISOString() };
+      const optimisticTurn: ChatTurn = { id: `local-${Date.now()}`, role: "user", content: message, created_at: new Date().toISOString(), attachment };
       setLiveRuns((runs) => ({
         ...runs,
         [id as string]: { active: true, optimistic: optimisticTurn, persistedTurnIds: turns.map((turn) => turn.id), stream: emptyChatStream, error: null, stopping: false },
@@ -479,14 +579,17 @@ export function ChatPage() {
       submittingRef.current = false;
       const controller = new AbortController();
       abortRefs.current.set(id, controller);
-      await api.streamChatMessage(id, message, undefined, (event) => {
+      await api.streamChatMessage(id, message, attachment, (event) => {
         setLiveRuns((runs) => {
           const run = runs[id as string];
           return run ? { ...runs, [id as string]: { ...run, stream: reduceChatEvent(run.stream, event) } } : runs;
         });
       }, controller.signal);
+      setResourceAttachment(null);
       const refreshed = await queryClient.fetchQuery({ queryKey: ["chat-session", id], queryFn: () => api.getChatSession(id as string), staleTime: 0 });
       if (refreshed.status !== "running") setLiveRuns((runs) => {
+        const run = runs[id as string];
+        if (run?.stream.blocks.some((block) => block.kind === "approval")) return runs;
           const next = { ...runs };
           delete next[id as string];
           return next;
@@ -594,12 +697,29 @@ export function ChatPage() {
     delete next[id];
     return next;
   })} />;
+  const selectResourceAttachment = (resource: { resource_id: string; kind: string; namespace?: string; name: string }) => {
+    const cluster = resourceOverview.data?.cluster_id ?? "";
+    setResourceAttachment({ provider: "kubernetes", cluster, resource_id: resource.resource_id, namespace: resource.namespace, name: resource.name });
+    setResourcePickerOpen(false);
+    setResourceQuery("");
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-surface-sunken">
       <TopBar title="DevOps Agent" subtitle={sessionQ.data?.status === "running" ? "Running" : ""} actions={<><button type="button" onClick={() => setHistoryOpen(true)} aria-label="Open chat history" title="Open chat history" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><History size={16} /></button><Link to="/agent/tools" aria-label="Open Tool catalog" title="Open Tool catalog" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><Wrench size={16} /></Link></>} />
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
         {historyOpen && <Modal title="Thread history" size="lg" onClose={() => setHistoryOpen(false)} footer={<button type="button" className="btn inline-flex items-center gap-2" onClick={newThread}><Plus size={14} />New thread</button>}>{history}</Modal>}
+        {resourcePickerOpen && <Modal title="Attach Kubernetes resource" size="md" onClose={() => setResourcePickerOpen(false)} footer={<button type="button" className="btn" onClick={() => setResourcePickerOpen(false)}>Close</button>}>
+          <label className="mb-3 flex items-center gap-2 text-xs text-ink-300"><Search size={14} aria-hidden="true"/><span className="sr-only">Search Kubernetes resources</span><input autoFocus role="combobox" aria-label="Search Kubernetes resources" aria-expanded="true" aria-controls="chat-kubernetes-results" className="input w-full" value={resourceQuery} onChange={(event) => setResourceQuery(event.target.value)} placeholder="Search names and namespaces" /></label>
+          {resourceOverview.isError && <p role="status" className="mb-2 text-xs text-sev-warning">Kubernetes cluster context is unavailable.</p>}
+          <div id="chat-kubernetes-results" role="listbox" aria-label="Kubernetes resource results" className="max-h-[min(50vh,24rem)] overflow-y-auto">
+            {resourceResults.isFetching && <p role="status" className="p-3 text-xs text-ink-400">Searching projected resources.</p>}
+            {resourceResults.isError && <p role="status" className="p-3 text-xs text-sev-warning">Resource search is unavailable.</p>}
+            {(resourceResults.data?.items ?? []).map((resource) => <button type="button" role="option" aria-selected="false" key={`${resource.resource_id}:${resource.namespace}:${resource.name}`} onClick={() => selectResourceAttachment(resource)} className="flex w-full items-center justify-between gap-3 border-b border-ink-700 px-3 py-3 text-left hover:bg-ink-800"><span className="min-w-0"><span className="block truncate text-sm text-ink-100">{resource.name}</span><span className="block truncate text-2xs text-ink-400">{resource.kind} · {resource.namespace || "Cluster scope"}</span></span><span className="pill">Attach</span></button>)}
+            {debouncedResourceQuery && !resourceResults.isFetching && !resourceResults.isError && !resourceResults.data?.items?.length && <p role="status" className="p-3 text-xs text-ink-400">No matching resources found.</p>}
+          </div>
+          {(resourceResults.data?.truncated || resourceResults.data?.partial_failures?.length) && <p role="status" className="mt-2 text-2xs text-sev-warning">Search results are bounded or partial.</p>}
+        </Modal>}
 
         <div
           ref={conversationRef}
@@ -633,7 +753,7 @@ export function ChatPage() {
                   </div>
                 </div>
                 {conversationStarted && !scroll.following && <button type="button" onClick={scroll.scrollToBottom} className="absolute bottom-44 left-1/2 z-sticky flex -translate-x-1/2 items-center gap-2 rounded-full border border-ink-500/60 bg-surface px-3 py-2 text-xs text-ink-200 shadow-overlay"><ArrowDown size={14} />Scroll to bottom</button>}
-                <div className={clsx("absolute left-0 right-0 z-sticky mx-auto max-w-3xl px-4 transition-[bottom,transform] duration-300", conversationStarted ? "bottom-4" : "bottom-[20vh]")}><Composer value={draft} onChange={setDraft} onSubmit={send} running={active} stopping={selectedRun?.stopping ?? false} onStop={stop} /></div>
+                <div className={clsx("absolute left-0 right-0 z-sticky mx-auto max-w-3xl px-4 transition-[bottom,transform] duration-300", conversationStarted ? "bottom-4" : "bottom-[20vh]")}><Composer value={draft} onChange={setDraft} onSubmit={send} running={active} stopping={selectedRun?.stopping ?? false} onStop={stop} resource={resourceAttachment} onOpenResourcePicker={() => setResourcePickerOpen(true)} onRemoveResource={() => setResourceAttachment(null)} /></div>
               </>
             )}
           </main>

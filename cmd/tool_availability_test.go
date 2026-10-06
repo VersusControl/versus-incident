@@ -47,10 +47,25 @@ func TestToolCatalogGETDoesNotConstructDisabledAgentDependencies(t *testing.T) {
 			if err := json.NewDecoder(response.Body).Decode(&rows); err != nil {
 				t.Fatal(err)
 			}
+			readerFound, actionFound := false, false
 			for _, row := range rows {
-				if row.Group == aitools.GroupK8s && (row.State != aitools.StateUnhealthy || row.Health != "configuration") {
+				if row.Group != aitools.GroupK8s {
+					continue
+				}
+				if row.Name == "propose_action" {
+					actionFound = true
+					if row.State != aitools.StateNeedsCapability || row.Health != "" {
+						t.Fatalf("Kubernetes action tool %q = state %q health %q", row.Name, row.State, row.Health)
+					}
+					continue
+				}
+				readerFound = true
+				if row.State != aitools.StateUnhealthy || row.Health != "configuration" {
 					t.Fatalf("Kubernetes tool %q = state %q health %q", row.Name, row.State, row.Health)
 				}
+			}
+			if !readerFound || !actionFound {
+				t.Fatalf("Kubernetes catalog presence: reader = %t, action = %t", readerFound, actionFound)
 			}
 			kubernetesResponse, err := app.Test(httptest.NewRequest("GET", "/api/admin/kubernetes/overview", nil), -1)
 			if err != nil || kubernetesResponse.StatusCode != fiber.StatusServiceUnavailable {

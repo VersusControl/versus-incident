@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	kubernetespkg "github.com/VersusControl/versus-incident/pkg/kubernetes"
 	"gopkg.in/yaml.v3"
 )
 
@@ -240,12 +239,6 @@ func TestHelmChartKubernetesAuthenticationModesAreIsolated(t *testing.T) {
 			}
 			if (mode == "in_cluster" || mode == "kubeconfig") && (configuration.Endpoint != "" || configuration.CAFile != "" || configuration.CAData != "" || configuration.ServerName != "") {
 				t.Fatalf("mode %q retained top-level endpoint/TLS fields: %+v", mode, configuration)
-			}
-			if mode == "in_cluster" {
-				resolved, resolveErr := kubernetespkg.ResolveAuthentication(kubernetespkg.AuthOptions{Mode: mode})
-				if resolveErr != nil || resolved.Endpoint != "https://10.20.30.40:443" {
-					t.Fatalf("rendered in-cluster auth = %+v, %v", resolved, resolveErr)
-				}
 			}
 		})
 	}

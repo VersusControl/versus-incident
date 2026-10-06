@@ -47,9 +47,9 @@ Use the QA harness. It builds the app (and its embedded SPA) from local source
 and passes the base URL and the right credentials to Playwright:
 
 ```sh
-harness-run/harness.sh up oss                     # or enterprise-prometheus, enterprise-tempo, …
-harness-run/harness.sh e2e ui <spec> --project=chromium --reporter=list
-harness-run/harness.sh down
+plans/harness-run/harness.sh up oss                     # or enterprise-prometheus, enterprise-tempo, …
+plans/harness-run/harness.sh e2e ui <spec> --project=chromium --reporter=list
+plans/harness-run/harness.sh down
 ```
 
 Without the harness, build `ui/dist`, run `GATEWAY_SECRET=<secret> go run ./cmd`

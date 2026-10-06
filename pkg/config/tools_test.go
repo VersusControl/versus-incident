@@ -6,8 +6,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	kubernetespkg "github.com/VersusControl/versus-incident/pkg/kubernetes"
 )
 
 // TestLoadToolsFile asserts the tools.yaml loader parses the root-level
@@ -70,6 +68,35 @@ func TestLoadToolsFile(t *testing.T) {
 	}
 	if repos[1].Auth.SSHKeyPath != "/etc/versus/web_key" {
 		t.Fatalf("repos[1].auth.ssh_key_path = %q, want per-repo override", repos[1].Auth.SSHKeyPath)
+	}
+}
+
+func TestLoadToolsFileKeepsKubernetesActorCredentialSeparate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tools.yaml")
+	content := `tools:
+  kubernetes:
+    endpoint: https://cluster.example
+    auth:
+      mode: token_file
+      token_file: /run/secrets/kubernetes-reader/token
+    actions:
+      enable: true
+      max_replicas: 8
+      auth:
+        mode: token_file
+        token_file: /run/secrets/kubernetes-actor/token
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadToolsFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := got.Kubernetes.Auth.TokenFile
+	actor := got.Kubernetes.Actions.Auth.TokenFile
+	if !got.Kubernetes.Actions.Enable || got.Kubernetes.Actions.MaxReplicas != 8 || reader != "/run/secrets/kubernetes-reader/token" || actor != "/run/secrets/kubernetes-actor/token" || reader == actor {
+		t.Fatalf("reader token=%q actor config=%+v", reader, got.Kubernetes.Actions)
 	}
 }
 
@@ -230,7 +257,7 @@ func TestLoadToolsFileAcceptsCommaStringSlice(t *testing.T) {
 	}
 }
 
-func TestCopiedAKSExamplesStrictlyDecodeAndResolve(t *testing.T) {
+func TestCopiedAKSExamplesStrictlyDecode(t *testing.T) {
 	t.Setenv("KUBERNETES_AKS_CLIENT_SECRET", "fixture-client-secret")
 	for name, body := range map[string]string{
 		"client secret": `tools:
@@ -271,13 +298,14 @@ func TestCopiedAKSExamplesStrictlyDecodeAndResolve(t *testing.T) {
 			}
 			configuration := tools.Kubernetes
 			auth := configuration.Auth.AKS
-			resolved, err := kubernetespkg.ResolveAuthentication(kubernetespkg.AuthOptions{
-				Mode: configuration.Auth.Mode, Endpoint: configuration.Endpoint, CAFile: configuration.CAFile,
-				AKSCredentialMode: auth.CredentialMode, AKSServerID: auth.ServerID, AKSTenantID: auth.TenantID,
-				AKSClientID: auth.ClientID, AKSClientSecret: auth.ClientSecret, AKSFederatedTokenFile: auth.FederatedTokenFile, AKSEnvironment: auth.Environment,
-			})
-			if err != nil || resolved.Endpoint != configuration.Endpoint || resolved.CAFile != configuration.CAFile {
-				t.Fatalf("resolved = %+v, %v", resolved, err)
+			if configuration.Endpoint != "https://production.example.azmk8s.io" || configuration.CAFile != "/run/secrets/kubernetes/ca.crt" || configuration.Auth.Mode != "aks" {
+				t.Fatalf("Kubernetes config = %+v", configuration)
+			}
+			if name == "client secret" && (auth.CredentialMode != "client_secret" || auth.Environment != "public" || auth.ServerID != "api://AKS_SERVER_APP_ID" || auth.TenantID != "TENANT_ID" || auth.ClientID != "CLIENT_ID" || auth.ClientSecret != "fixture-client-secret") {
+				t.Fatalf("client-secret AKS config = %+v", auth)
+			}
+			if name == "managed identity" && (auth.CredentialMode != "managed_identity" || auth.Environment != "public" || auth.ServerID != "api://AKS_SERVER_APP_ID" || auth.ClientID != "OPTIONAL_USER_ASSIGNED_IDENTITY_CLIENT_ID") {
+				t.Fatalf("managed-identity AKS config = %+v", auth)
 			}
 		})
 	}

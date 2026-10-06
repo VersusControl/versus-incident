@@ -8,12 +8,17 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
+	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -66,6 +71,87 @@ func TestKubernetesAdminAuthorizationAndDiscoveryAdapter(t *testing.T) {
 	}
 }
 
+func TestKubernetesTrafficRouteReturnsExplicitOSSUnavailableState(t *testing.T) {
+	service := kubernetes.NewService(nil, kubernetes.Scope{ClusterID: "cluster-a"}, 0)
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/traffic?namespace=shop&window=5m", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("traffic route status=%d err=%v", response.StatusCode, err)
+	}
+	var result kubernetes.Traffic
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if result.Available || result.Reason == "" || result.Window != "5m" || len(result.Edges) != 0 {
+		t.Fatalf("traffic response = %+v", result)
+	}
+}
+
+func TestKubernetesGraphRouteForwardsCompleteQueryValidation(t *testing.T) {
+	service := kubernetes.NewService(nil, kubernetes.Scope{ClusterID: "cluster-a"}, 0)
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/graph?complete=true", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("complete graph query status=%d err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+	for _, query := range []string{
+		"complete=true&namespace=shop&limit=bad",
+		"complete=true&namespace=shop&max_nodes=bad",
+		"complete=true&namespace=shop&cursor=",
+		"complete=true&namespace=shop&limit=",
+		"complete=true&namespace=shop&max_nodes=",
+		"complete=tru&namespace=shop",
+		"complete=&namespace=shop",
+		"complete=garbage&complete=true&namespace=shop",
+	} {
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/graph?"+query, nil), -1)
+		if err != nil || response.StatusCode != fiber.StatusBadRequest {
+			t.Errorf("graph query %q status=%d err=%v", query, response.StatusCode, err)
+		}
+		response.Body.Close()
+	}
+}
+
+func TestKubernetesOverviewGraphRouteRejectsQueriesAndRequiresPermission(t *testing.T) {
+	for _, allowed := range []bool{false, true} {
+		app := fiber.New()
+		app.Use(func(ctx *fiber.Ctx) error {
+			middleware.MarkAuthorized(ctx)
+			middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), allowed)
+			return ctx.Next()
+		})
+		NewKubernetesAdminController(kubernetes.NewService(nil, kubernetes.Scope{ClusterID: "test"}, 0)).Register(app.Group("/api"))
+		for _, query := range []string{"namespace=shop", "namespace=", "cursor=", "limit=1", "max_nodes=500", "complete=true", "connected_only=false", "unknown=value"} {
+			response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/graph/overview?"+query, nil), -1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			want := fiber.StatusForbidden
+			if allowed {
+				want = fiber.StatusBadRequest
+			}
+			if response.StatusCode != want {
+				t.Errorf("allowed=%v query=%q status=%d want=%d", allowed, query, response.StatusCode, want)
+			}
+		}
+	}
+}
+
 func TestKubernetesAdminRegistersOnlyGetRoutes(t *testing.T) {
 	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: "http://127.0.0.1", AllowLoopbackHTTP: true})
 	if err != nil {
@@ -85,6 +171,261 @@ func TestKubernetesAdminRegistersOnlyGetRoutes(t *testing.T) {
 				t.Fatal("topology route is registered")
 			}
 		}
+	}
+}
+
+func TestKubernetesStreamRequiresInfrastructureView(t *testing.T) {
+	var clusterRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		clusterRequests.Add(1)
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "test"}, 0)
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), false)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/stream", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusForbidden || clusterRequests.Load() != 0 {
+		t.Fatalf("stream status=%d cluster requests=%d err=%v", response.StatusCode, clusterRequests.Load(), err)
+	}
+}
+
+func TestKubernetesChangesRouteReturnsBoundedDTOAndRejectsInvalidTime(t *testing.T) {
+	service := kubernetes.NewService(nil, kubernetes.Scope{ClusterID: "cluster-a"}, 0)
+	provider := storage.NewMemory()
+	service.SetChangeStorage(provider)
+	store := kubechanges.NewStore(provider, kubeindex.Scope{ClusterID: "cluster-a"})
+	now := time.Now().UTC()
+	if err := store.Append([]kubechanges.Change{
+		{ID: "change-a", Cluster: "cluster-a", Kind: "Deployment", Namespace: "shop", Name: "api-a", UID: "uid-a", Type: kubechanges.Created, At: now.Add(-time.Minute)},
+		{ID: "change-b", Cluster: "cluster-a", Kind: "Deployment", Namespace: "shop", Name: "api-b", UID: "uid-b", Type: kubechanges.Created, At: now},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/changes?limit=1", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("changes status=%d err=%v", response.StatusCode, err)
+	}
+	var body struct {
+		Items     []kubernetes.Change `json:"items"`
+		Next      string              `json:"next"`
+		Truncated bool                `json:"truncated"`
+		Gaps      []any               `json:"gaps"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil || body.Items == nil || body.Gaps == nil || len(body.Items) != 1 || body.Next == "" || !body.Truncated {
+		t.Fatalf("changes DTO=%#v decode err=%v", body, err)
+	}
+	response.Body.Close()
+	second, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/changes?limit=1&cursor="+body.Next, nil), -1)
+	if err != nil || second.StatusCode != fiber.StatusOK {
+		t.Fatalf("changes cursor status=%d err=%v", second.StatusCode, err)
+	}
+	var secondPage struct {
+		Items []kubernetes.Change `json:"items"`
+		Next  string              `json:"next"`
+	}
+	if err := json.NewDecoder(second.Body).Decode(&secondPage); err != nil || secondPage.Items == nil || len(secondPage.Items) != 1 || secondPage.Items[0].Name == body.Items[0].Name || secondPage.Next != "" {
+		t.Fatalf("changes cursor DTO=%#v decode err=%v", secondPage, err)
+	}
+	second.Body.Close()
+	bad, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/changes?since=not-a-time", nil), -1)
+	if err != nil || bad.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("invalid time status=%d err=%v", bad.StatusCode, err)
+	}
+}
+
+func TestKubernetesRolloutsListRouteKeepsNameRoute(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"groups": []any{map[string]any{"name": "argoproj.io", "versions": []any{map[string]any{"groupVersion": "argoproj.io/v1alpha1", "version": "v1alpha1"}}, "preferredVersion": map[string]any{"groupVersion": "argoproj.io/v1alpha1", "version": "v1alpha1"}}}})
+		case "/api/v1":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{}})
+		case "/apis/argoproj.io/v1alpha1":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{map[string]any{"name": "rollouts", "kind": "Rollout", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/apis/argoproj.io/v1alpha1/namespaces/shop/rollouts":
+			if request.URL.Query().Get("continue") == "page-2" {
+				_ = json.NewEncoder(writer).Encode(map[string]any{"items": []any{map[string]any{"kind": "Rollout", "metadata": map[string]any{"name": "second", "namespace": "shop"}, "status": map[string]any{"phase": "Healthy"}}}})
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"metadata": map[string]any{"continue": "page-2"}, "items": []any{map[string]any{"kind": "Rollout", "metadata": map[string]any{"name": "checkout", "namespace": "shop"}, "status": map[string]any{"phase": "Progressing"}}}})
+		case "/apis/argoproj.io/v1alpha1/namespaces/shop/rollouts/checkout":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"kind": "Rollout", "metadata": map[string]any{"name": "checkout", "namespace": "shop"}, "status": map[string]any{"phase": "Progressing"}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(kubernetes.NewService(client, kubernetes.Scope{ClusterID: "cluster-a"}, 0)).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/rollouts?namespace=shop&limit=1", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("rollouts route status=%d err=%v", response.StatusCode, err)
+	}
+	var page kubernetes.RolloutPage
+	if err := json.NewDecoder(response.Body).Decode(&page); err != nil || page.Items == nil || len(page.Items) != 1 || page.Next != "page-2" || !page.Truncated {
+		t.Fatalf("rollouts response=%#v decode err=%v", page, err)
+	}
+	response.Body.Close()
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/rollouts?namespace=shop&limit=1&cursor=page-2", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("rollouts cursor status=%d err=%v", response.StatusCode, err)
+	}
+	page = kubernetes.RolloutPage{}
+	if err := json.NewDecoder(response.Body).Decode(&page); err != nil || len(page.Items) != 1 || page.Items[0].Name != "second" || page.Next != "" {
+		t.Fatalf("rollouts cursor response=%#v decode err=%v", page, err)
+	}
+	response.Body.Close()
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/rollouts/shop/checkout", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("named rollout route status=%d err=%v", response.StatusCode, err)
+	}
+	var rollout kubernetes.Rollout
+	if err := json.NewDecoder(response.Body).Decode(&rollout); err != nil || rollout.Name != "checkout" {
+		t.Fatalf("named rollout response=%#v decode err=%v", rollout, err)
+	}
+	response.Body.Close()
+}
+
+func TestKubernetesEventsRouteDefaultsWarningAndPages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"groups": []any{}})
+		case "/api/v1":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{map[string]any{"name": "events", "kind": "Event", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/api/v1/namespaces/shop/events":
+			if request.URL.Query().Get("fieldSelector") != "type=Warning" {
+				t.Errorf("event field selector=%q", request.URL.Query().Get("fieldSelector"))
+			}
+			if request.URL.Query().Get("continue") == "page-2" {
+				_ = json.NewEncoder(writer).Encode(map[string]any{"items": []any{map[string]any{"kind": "Event", "metadata": map[string]any{"name": "second", "namespace": "shop"}, "type": "Warning"}}})
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"metadata": map[string]any{"continue": "page-2"}, "items": []any{map[string]any{"kind": "Event", "metadata": map[string]any{"name": "first", "namespace": "shop"}, "type": "Warning"}}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(kubernetes.NewService(client, kubernetes.Scope{ClusterID: "cluster-a"}, 0)).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/events?namespace=shop&limit=1", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("events route status=%d err=%v", response.StatusCode, err)
+	}
+	var page kubernetes.EventPage
+	if err := json.NewDecoder(response.Body).Decode(&page); err != nil || page.Items == nil || len(page.Items) != 1 || page.Items[0].Name != "first" || page.Next != "page-2" {
+		t.Fatalf("events response=%#v decode err=%v", page, err)
+	}
+	response.Body.Close()
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/events?namespace=shop&limit=1&cursor=page-2", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("events cursor status=%d err=%v", response.StatusCode, err)
+	}
+	page = kubernetes.EventPage{}
+	if err := json.NewDecoder(response.Body).Decode(&page); err != nil || page.Items == nil || len(page.Items) != 1 || page.Items[0].Name != "second" || page.Next != "" {
+		t.Fatalf("events cursor response=%#v decode err=%v", page, err)
+	}
+	response.Body.Close()
+}
+
+func TestChatKubernetesAttachmentRequiresScopedInfrastructurePermission(t *testing.T) {
+	var discoveryRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		discoveryRequests.Add(1)
+		switch request.URL.Path {
+		case "/api":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"groups": []any{}})
+		case "/api/v1":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := kubernetes.NewServiceRegistry(kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster-a"}, 0))
+	SetChatKubernetesServiceResolver(func(orgID string) *kubernetes.Service { return registry.ResolveOrg(orgID) })
+	t.Cleanup(func() { SetChatKubernetesServiceResolver(nil); middleware.SetOrgResolver(nil) })
+	middleware.SetOrgResolver(func(ctx *fiber.Ctx) string { return ctx.Get("X-Test-Org") })
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(middleware.OrgInjector())
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), ctx.Get("X-Allow-Infra") == "true")
+		return ctx.Next()
+	})
+	app.Get("/validate", func(ctx *fiber.Ctx) error {
+		attachment := &core.ChatAttachment{Resource: &core.ChatResourceRef{Provider: "kubernetes", Cluster: ctx.Query("cluster"), ResourceID: "core~v1~pods", Namespace: "shop", Name: "checkout"}}
+		if err := validateChatKubernetesAttachment(ctx, attachment); err != nil {
+			return err
+		}
+		return ctx.JSON(attachment)
+	})
+	request := func(cluster, allowed string) (*http.Response, error) {
+		req := httptest.NewRequest(http.MethodGet, "/validate?cluster="+cluster, nil)
+		req.Header.Set("X-Test-Org", "org-a")
+		req.Header.Set("X-Allow-Infra", allowed)
+		return app.Test(req, -1)
+	}
+	allowed, err := request("cluster-a", "true")
+	if err != nil || allowed.StatusCode != fiber.StatusOK {
+		t.Fatalf("allowed attachment status=%d err=%v", allowed.StatusCode, err)
+	}
+	wrongCluster, err := request("cluster-b", "true")
+	if err != nil || wrongCluster.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("foreign cluster status=%d err=%v", wrongCluster.StatusCode, err)
+	}
+	denied, err := request("cluster-a", "false")
+	if err != nil || denied.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("missing permission status=%d err=%v", denied.StatusCode, err)
+	}
+	if discoveryRequests.Load() != 3 {
+		t.Fatalf("unauthorized attachment attempts caused discovery egress: requests=%d", discoveryRequests.Load())
 	}
 }
 
@@ -179,6 +520,18 @@ func TestKubernetesHTTPResolvesInjectedOrgThroughSharedServiceRegistry(t *testin
 	}
 	if controller.resolve("org-b") == resolved {
 		t.Fatal("distinct organizations shared one service instance")
+	}
+	for _, orgID := range []string{"org-a", "org-b"} {
+		request := httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/graph/overview", nil)
+		request.Header.Set("X-Test-Org", orgID)
+		response, err := app.Test(request, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != fiber.StatusOK || controller.resolve(orgID).Scope().OrgID != orgID {
+			t.Fatalf("overview org=%q status=%d scope=%+v", orgID, response.StatusCode, controller.resolve(orgID).Scope())
+		}
 	}
 }
 

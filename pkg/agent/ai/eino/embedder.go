@@ -12,6 +12,7 @@ import (
 	einoopenaiemb "github.com/cloudwego/eino-ext/components/embedding/openai"
 	"github.com/cloudwego/eino/components/embedding"
 
+	"github.com/VersusControl/versus-incident/pkg/agent/egress"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
@@ -20,11 +21,12 @@ import (
 // with the chat path, HTTPClient is wrapped with the effective embedding
 // provider's native credential policy.
 type embedderRequest struct {
-	apiKey     string
-	model      string
-	baseURL    string
-	httpClient *http.Client
-	timeout    time.Duration
+	apiKey      string
+	model       string
+	baseURL     string
+	httpClient  *http.Client
+	timeout     time.Duration
+	egressGuard egress.Guard
 }
 
 // embedderBuilder constructs a provider-specific eino embedding client behind
@@ -98,7 +100,7 @@ func NewEmbedder(ctx context.Context, cfg config.AgentAIConfig, opts Options) (c
 		apiKey:     apiKey,
 		model:      cfg.Model,
 		baseURL:    baseURL,
-		httpClient: withRuntimeKeyRoundTripper(opts.HTTPClient, timeout, runtimeKey, chatCredentialPolicy(name)),
+		httpClient: withGuardedRuntimeKeyRoundTripper(opts.HTTPClient, timeout, runtimeKey, chatCredentialPolicy(name), opts.EgressGuard),
 		timeout:    timeout,
 	})
 	if err != nil {

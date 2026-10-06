@@ -64,7 +64,11 @@ func TestAgentToolsListIncludesAllGroupsAndUnavailableKubernetes(t *testing.T) {
 		if row.DocsURL == "" {
 			t.Errorf("tool %s has no documentation destination", row.Name)
 		}
-		if row.Group == aitools.GroupK8s && row.State != aitools.StateNeedsIntegration {
+		if row.Group == aitools.GroupK8s && row.Name == "propose_action" {
+			if row.State != aitools.StateNeedsCapability {
+				t.Errorf("k8s action tool state = %s", row.State)
+			}
+		} else if row.Group == aitools.GroupK8s && row.State != aitools.StateNeedsIntegration {
 			t.Errorf("k8s tool %s state = %s", row.Name, row.State)
 		}
 	}
@@ -163,7 +167,7 @@ func TestAgentToolsetsListReturnsChildFreeCardsInServerOrder(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&rows); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"kubernetes", "source-control", "logs", "elasticsearch-logs", "metrics", "traces", "find_runbook", "describe_dependencies", "describe_baseline"}
+	want := []string{"kubernetes", "kubernetes-actions", "source-control", "logs", "elasticsearch-logs", "metrics", "traces", "find_runbook", "describe_dependencies", "describe_baseline"}
 	if len(rows) != len(want) {
 		t.Fatalf("rows = %d, want %d", len(rows), len(want))
 	}
@@ -175,7 +179,7 @@ func TestAgentToolsetsListReturnsChildFreeCardsInServerOrder(t *testing.T) {
 			t.Errorf("row %s exposed hidden child names", id)
 		}
 	}
-	if rows[0]["child_count"] != float64(8) || rows[0]["icon_key"] != "kubernetes" || rows[0]["ui_path"] != "/agent/kubernetes" {
+	if rows[0]["child_count"] != float64(19) || rows[0]["icon_key"] != "kubernetes" || rows[0]["ui_path"] != "/agent/kubernetes" {
 		t.Fatalf("Kubernetes card = %#v", rows[0])
 	}
 }

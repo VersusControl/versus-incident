@@ -9,6 +9,7 @@ const MAX_TOTAL_BYTES = 64 * 1024;
 export type ChatStreamBlock =
   | { kind: "text"; key: string; text: string; streaming: boolean }
   | { kind: "tool"; key: string; event: ChatEvent }
+  | { kind: "approval"; key: string; event: ChatEvent }
   | { kind: "compaction"; key: string; text: string };
 
 export interface ChatStreamState {
@@ -88,6 +89,8 @@ export function reduceChatEvent(
     }
     if (index >= 0) blocks[index] = { ...blocks[index], event: bounded } as ChatStreamBlock;
     else blocks.push({ kind: "tool", key: `tool-${bounded.call_id || bounded.seq}`, event: bounded });
+  } else if (bounded.kind === "approval_required" && bounded.approval) {
+    blocks.push({ kind: "approval", key: `approval-${bounded.approval.id}`, event: bounded });
   } else if (bounded.kind === "compacted" || bounded.kind === "events_elided" || bounded.kind === "trace_compacted") {
     blocks.push({
       kind: "compaction",

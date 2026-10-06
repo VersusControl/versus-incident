@@ -404,6 +404,12 @@ body {
     }
   }
 
+  /* Panel entrance — reuses the row fade so dashboard cards settle in
+     together; reduced motion collapses it via the global rule. */
+  .rise-in {
+    animation: row-in 220ms ease-out backwards;
+  }
+
   /* Skip link — first tab stop, visible only on focus. */
   .skip-link {
     @apply fixed left-2 top-2 z-toast -translate-y-16 rounded-control

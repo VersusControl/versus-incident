@@ -17,7 +17,11 @@ func TestCatalogIsCompleteOrderedAndUnique(t *testing.T) {
 		GroupVersus, GroupVersus, GroupVersus, GroupVersus, GroupVersus,
 		GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon,
 		GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon,
-		GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s,
+		GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s,
+		GroupK8s, GroupK8s,
+		GroupK8s,
+		GroupK8s,
+		GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s,
 	}
 	got := Catalog()
 	if len(got) != len(wantGroups) {
@@ -61,7 +65,13 @@ func TestCatalogDestinationsAreExactAndSafe(t *testing.T) {
 		"describe_baseline":     {docsTools + "?id=describe_baseline", ""},
 		"get_cluster_overview":  {docsKubernetes, ""}, "discover_k8s_resources": {docsKubernetes, ""}, "query_k8s_resources": {docsKubernetes, ""},
 		"get_k8s_resource": {docsKubernetes, ""}, "list_workloads": {docsKubernetes, ""}, "get_workload": {docsKubernetes, ""},
+		"get_k8s_changes": {docsKubernetes, ""}, "get_k8s_neighborhood": {docsKubernetes, ""},
 		"list_k8s_events": {docsKubernetes, ""}, "get_pod_logs": {docsKubernetes, ""},
+		"get_workload_logs": {docsKubernetes, ""}, "list_k8s_issues": {docsKubernetes, ""}, "top_k8s_resources": {docsKubernetes, ""},
+		"list_gitops_apps": {docsKubernetes, ""}, "get_rollout_status": {docsKubernetes, ""}, "list_rollouts": {docsKubernetes, ""},
+		"list_helm_releases": {docsKubernetes, ""}, "get_helm_release": {docsKubernetes, ""},
+		"diagnose_k8s_workload": {docsKubernetes, ""},
+		"propose_action":        {docsKubernetes, ""},
 	}
 	got := make(map[string][2]string, len(want))
 	for _, metadata := range Catalog() {
@@ -197,7 +207,8 @@ func TestToolsetsAreExactOrderedAndOwnEveryVisibleTool(t *testing.T) {
 		icon     string
 		children []string
 	}{
-		{"kubernetes", SectionConnector, "kubernetes", []string{"get_cluster_overview", "discover_k8s_resources", "query_k8s_resources", "get_k8s_resource", "list_workloads", "get_workload", "list_k8s_events", "get_pod_logs"}},
+		{"kubernetes", SectionConnector, "kubernetes", []string{"get_cluster_overview", "discover_k8s_resources", "query_k8s_resources", "get_k8s_resource", "list_workloads", "get_workload", "list_k8s_events", "get_pod_logs", "get_workload_logs", "list_k8s_issues", "get_k8s_changes", "get_k8s_neighborhood", "top_k8s_resources", "list_gitops_apps", "get_rollout_status", "list_rollouts", "list_helm_releases", "get_helm_release", "diagnose_k8s_workload"}},
+		{"kubernetes-actions", SectionConnector, "kubernetes", []string{"propose_action"}},
 		{"source-control", SectionConnector, "git", []string{"recent_changes"}},
 		{"logs", SectionDataSource, "logs", []string{"get_related_logs", "discover_log_fields", "read_log_records"}},
 		{"elasticsearch-logs", SectionDataSource, "elasticsearch", []string{"list_log_indices", "get_log_mappings", "search_logs", "get_log_shards"}},
@@ -217,6 +228,9 @@ func TestToolsetsAreExactOrderedAndOwnEveryVisibleTool(t *testing.T) {
 		}
 		if (got[index].ID == "kubernetes" || got[index].ID == "elasticsearch-logs" || got[index].ID == "describe_baseline") && got[index].Permission != core.PermissionInfrastructureView {
 			t.Errorf("Toolsets()[%d] permission = %q, want %q", index, got[index].Permission, core.PermissionInfrastructureView)
+		}
+		if got[index].ID == "kubernetes-actions" && got[index].Permission != core.PermissionAgentApprove {
+			t.Errorf("Toolsets()[%d] permission = %q, want %q", index, got[index].Permission, core.PermissionAgentApprove)
 		}
 	}
 	if err := validateToolsetCatalog(); err != nil {
@@ -240,5 +254,31 @@ func TestToolsetsCopyIsDetached(t *testing.T) {
 	}
 	if !detached {
 		t.Fatal("Toolsets returned mutable backing storage")
+	}
+}
+
+func TestRecentChangesUsesSharedChangeFeedCapability(t *testing.T) {
+	var foundTool, foundToolset bool
+	for _, tool := range Catalog() {
+		if tool.Name == "recent_changes" {
+			foundTool = tool.Requirement.Kind == RequirementCapability && reflect.DeepEqual(tool.Requirement.Capabilities, []string{"change_feed"})
+		}
+	}
+	for _, toolset := range Toolsets() {
+		if toolset.ID == "source-control" {
+			foundToolset = toolset.Requirement.Kind == RequirementCapability && reflect.DeepEqual(toolset.Requirement.Capabilities, []string{"change_feed"})
+		}
+	}
+	if !foundTool || !foundToolset {
+		t.Fatalf("recent changes gates: catalog=%v toolset=%v", foundTool, foundToolset)
+	}
+}
+
+func TestKubernetesChangeCatalogEntriesRequireKubernetesIntegration(t *testing.T) {
+	for _, name := range []string{"get_k8s_changes", "get_k8s_neighborhood"} {
+		metadata, ok := Lookup(name)
+		if !ok || metadata.Group != GroupK8s || metadata.Requirement.Kind != RequirementIntegration || metadata.Requirement.Integration != "kubernetes" {
+			t.Errorf("catalog entry %q = %+v, found=%v", name, metadata, ok)
+		}
 	}
 }

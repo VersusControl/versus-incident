@@ -40,10 +40,10 @@ class BootstrapRecoveryTest(unittest.TestCase):
             with patch.object(bootstrap, "KEY_FILE", str(key_file)), patch.object(
                 bootstrap, "wait_ready", return_value={"setupCompleted": True}
             ), patch.object(bootstrap, "call", return_value=(403, {})), patch.dict(
-                os.environ, {"SIGNOZ_API_KEY": "", "SIGNOZ_RESET_COMMAND": "harness-run/harness.sh reset"}
+                os.environ, {"SIGNOZ_API_KEY": "", "SIGNOZ_RESET_COMMAND": "plans/harness-run/harness.sh reset"}
             ), redirect_stdout(output):
                 self.assertEqual(bootstrap.main(), 1)
-            self.assertIn("harness-run/harness.sh reset", output.getvalue())
+            self.assertIn("plans/harness-run/harness.sh reset", output.getvalue())
             self.assertNotIn("secret-key", output.getvalue())
 
     def test_unverified_key_preserves_state(self):
@@ -56,7 +56,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
                 with patch.object(bootstrap, "KEY_FILE", str(key_file)), patch.object(
                     bootstrap, "wait_ready", return_value={"setupCompleted": True}
                 ), patch.object(bootstrap, "call", return_value=(status, body)), patch.dict(
-                    os.environ, {"SIGNOZ_API_KEY": "", "SIGNOZ_RESET_COMMAND": "harness-run/harness.sh reset"}
+                    os.environ, {"SIGNOZ_API_KEY": "", "SIGNOZ_RESET_COMMAND": "plans/harness-run/harness.sh reset"}
                 ), redirect_stdout(output):
                     self.assertEqual(bootstrap.main(), 1)
                 self.assertIn("retry/check SigNoz health or API compatibility; preserve state", output.getvalue())
@@ -72,7 +72,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
             with patch.object(bootstrap, "KEY_FILE", str(key_file)), patch.object(
                 bootstrap, "wait_ready", return_value={"setupCompleted": True}
             ), patch.object(bootstrap.urllib.request, "urlopen", side_effect=TimeoutError("secret-timeout")), patch.dict(
-                os.environ, {"SIGNOZ_API_KEY": "", "SIGNOZ_RESET_COMMAND": "harness-run/harness.sh reset"}
+                os.environ, {"SIGNOZ_API_KEY": "", "SIGNOZ_RESET_COMMAND": "plans/harness-run/harness.sh reset"}
             ), redirect_stdout(output):
                 self.assertEqual(bootstrap.main(), 1)
             self.assertIn("HTTP 0", output.getvalue())

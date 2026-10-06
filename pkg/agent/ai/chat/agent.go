@@ -27,6 +27,7 @@ import (
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
 	prometheustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/prometheus"
 	signoztools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/signoz"
+	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
@@ -118,7 +119,11 @@ func (agent *Agent) buildRunner(ctx context.Context, chatModel model.ToolCalling
 	}
 	einoTools := make([]tool.BaseTool, 0, len(tools))
 	for _, value := range tools {
-		adapted, err := einowrap.NewTool(guardedTool{Tool: value}, agent.toolTimeout, MaxToolPayloadBytes)
+		var runtimeTool core.Tool = value
+		if _, ok := ledger.RunFromContext(ctx); ok {
+			runtimeTool = ledger.LedgeredTool{Tool: value}
+		}
+		adapted, err := einowrap.NewTool(guardedTool{Tool: runtimeTool}, agent.toolTimeout, MaxToolPayloadBytes)
 		if err != nil {
 			return nil, err
 		}

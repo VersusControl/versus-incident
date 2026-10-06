@@ -507,6 +507,7 @@ func cloneToolsConfig(src ToolsConfig) ToolsConfig {
 	out.FindRunbook = src.FindRunbook
 	out.Kubernetes = src.Kubernetes
 	out.Kubernetes.EndpointCIDRs = append([]string(nil), src.Kubernetes.EndpointCIDRs...)
+	out.Kubernetes.Actions = src.Kubernetes.Actions
 	return out
 }
 

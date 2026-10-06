@@ -224,6 +224,25 @@ func TestToolsetPolicyOverlayAndEnableAreFailClosedAndAgentIndependent(t *testin
 	}
 }
 
+func TestLegacySourceControlDenyStillFiltersChangeFeed(t *testing.T) {
+	provider := storage.NewMemory()
+	manager := NewManager(provider)
+	scope := tenancy.NewOrgScope("org-a")
+	if err := provider.WriteBlob(settingsBlobName(scope), []byte(`{"disabled":{"chat":{"recent_changes":true},"analyze":{}}}`)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := Snapshot{Capabilities: map[string]DependencyStatus{"change_feed": {Configured: true, Healthy: true, Name: "Change feed"}}}
+	runtime := []core.Tool{settingsTool("recent_changes")}
+	chat, err := manager.Filter(scope, AgentChat, runtime, snapshot)
+	if err != nil || len(chat) != 0 {
+		t.Fatalf("legacy Chat deny filtered=%v err=%v", chat, err)
+	}
+	analyze, err := manager.Filter(scope, AgentAnalyze, runtime, snapshot)
+	if err != nil || len(analyze) != 1 || analyze[0].Name() != "recent_changes" {
+		t.Fatalf("Analyze change feed filtered=%v err=%v", analyze, err)
+	}
+}
+
 func TestRetiredMetricTraceDeniesMigrateAndClearOnEnable(t *testing.T) {
 	for _, test := range []struct{ toolset, retired, native string }{
 		{"metrics", "query_metrics", "read_metric_series"},

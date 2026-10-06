@@ -37,6 +37,8 @@ import (
 // is stored for the lifetime of a request.
 const OrgContextKey = "versus.org_id"
 
+const requestActorContextKey = "versus.actor"
+
 // OrgResolver extracts the org id for a request. Returning "" means "no
 // explicit org" and falls back to storage.DefaultOrgID.
 type OrgResolver func(c *fiber.Ctx) string
@@ -103,6 +105,17 @@ func SetRequestPermission(c *fiber.Ctx, permission string, allowed bool) {
 func RequestPermission(c *fiber.Ctx, permission string) (allowed, explicit bool) {
 	allowed, explicit = c.Locals(requestPermissionPrefix + permission).(bool)
 	return allowed, explicit
+}
+
+// SetRequestActor records an actor identifier supplied by an authenticated adapter.
+func SetRequestActor(c *fiber.Ctx, actor string) {
+	c.Locals(requestActorContextKey, strings.Clone(strings.TrimSpace(actor)))
+}
+
+// RequestActor returns the verified actor identifier supplied by an auth adapter.
+func RequestActor(c *fiber.Ctx) string {
+	actor, _ := c.Locals(requestActorContextKey).(string)
+	return actor
 }
 
 // SetOrgResolver registers the function used to resolve an org id from a

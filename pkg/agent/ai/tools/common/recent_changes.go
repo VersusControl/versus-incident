@@ -45,7 +45,7 @@ type ChangeFeed interface {
 }
 
 // RecentChanges surfaces recent deploys, config changes, and
-// feature-flag flips so the analyze agent can correlate an incident with
+// feature-flag flips so Chat and Analyze can correlate an incident with
 // what changed just before it. It is strictly read-only.
 type RecentChanges struct {
 	Feed ChangeFeed

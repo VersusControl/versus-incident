@@ -4,7 +4,7 @@
 // session cookie. The secret is never retained after the exchange.
 
 import type { LearnExclusions } from "@/lib/learnExclude";
-import { ANALYSIS_SSE_LIMITS, readEventStream } from "@/lib/sse";
+import { ANALYSIS_SSE_LIMITS, readEventStream, type ServerSentEvent } from "@/lib/sse";
 
 // LearnExclusionsWire is the raw enterprise learn-exclusion policy shape ON THE
 // WIRE. It differs from the UI's LearnExclusions in ONE field name: the
@@ -774,6 +774,7 @@ export type ChatEventKind =
   | "run_cancelled"
   | "run_throttled"
   | "events_elided"
+  | "approval_required"
   | "trace_compacted";
 
 export interface ChatIncidentContext {
@@ -790,16 +791,72 @@ export interface ChatTimeRange {
   end?: string;
 }
 
+export interface ChatResourceAttachment {
+  provider: "kubernetes";
+  cluster: string;
+  resource_id: string;
+  namespace?: string;
+  name: string;
+}
+
 export interface ChatAttachment {
   incident?: ChatIncidentContext;
   service?: string;
   time_range?: ChatTimeRange;
+  resource?: ChatResourceAttachment;
 }
 
 export interface ChatCitation {
   tool: string;
   label?: string;
   locator?: string;
+}
+
+export interface ChatApprovalEvent {
+  id: string;
+  proposal_id: string;
+  run_id: string;
+  type: string;
+  target: string;
+  effect: string;
+  risk: string;
+  state: string;
+  expires_at: string;
+}
+
+export interface AgentApproval {
+  id: string;
+  proposal: AgentProposal;
+  state: string;
+  approver?: string;
+  expires_at: string;
+  executed_at?: string;
+  verified_at?: string;
+  result?: { summary?: string; metadata?: unknown };
+  verification?: { verified: boolean; summary: string };
+}
+
+export interface AgentProposal {
+  id: string;
+  run_id: string;
+  type: string;
+  target: { cluster?: string; namespace?: string; kind: string; name: string };
+  params: unknown;
+  params_hash: string;
+  binding_hash: string;
+  dry_run: string;
+  risk: string;
+  reason: string;
+  proposed_by: string;
+  created_at: string;
+  expires_at: string;
+}
+
+export interface AgentProposalResult {
+  proposal?: AgentProposal;
+  approval?: AgentApproval;
+  nonce?: string;
+  guide?: { action: string; command: string; risk: string };
 }
 
 export interface ChatToolCall {
@@ -824,6 +881,8 @@ export interface ChatEvent {
   duration_ms?: number;
   error?: string;
   citations?: ChatCitation[];
+  approval?: ChatApprovalEvent;
+  approval_nonce?: string;
 }
 
 export interface ChatTurn {
@@ -1968,36 +2027,47 @@ export interface KubernetesResourcePage {
   partial_failures?: Array<{ resource_id?: string; class: string }> | null;
 }
 
-async function listKubernetesResources(resourceId: string, fields = ""): Promise<KubernetesResourcePage> {
+async function listKubernetesResources(resourceId: string, fields = "", continuation = ""): Promise<KubernetesResourcePage> {
+  const query = new URLSearchParams({ resource_id: resourceId, limit: "20" });
+  if (fields) query.set("fields", fields);
+  if (continuation) query.set("continue", continuation);
+  const page = await request<KubernetesResourcePage>(`/api/admin/kubernetes/resources?${query}`);
+  return { ...page, items: page.items ?? [] };
+}
+
+async function listAllKubernetesNamespaces(): Promise<KubernetesResourcePage> {
   const items: KubernetesResource[] = [];
-  const omitted = new Set<string>();
-  const partial: NonNullable<KubernetesResourcePage["partial_failures"]> = [];
+  const partial_failures: NonNullable<KubernetesResourcePage["partial_failures"]> = [];
+  const omitted_categories = new Set<string>();
+  const seenContinuations = new Set<string>();
   let continuation = "";
   let truncated = false;
+
   do {
-    const query = new URLSearchParams({ resource_id: resourceId, limit: "100" });
-    if (fields) query.set("fields", fields);
-    if (continuation) query.set("continue", continuation);
-    const page = await request<KubernetesResourcePage>(`/api/admin/kubernetes/resources?${query}`);
-    items.push(...(page.items ?? []).slice(0, 500 - items.length));
-    for (const value of page.omitted_categories ?? []) omitted.add(value);
-    partial.push(...(page.partial_failures ?? []));
+    const page = await listKubernetesResources("core~v1~namespaces", "", continuation);
+    items.push(...page.items ?? []);
+    partial_failures.push(...page.partial_failures ?? []);
+    page.omitted_categories?.forEach((category) => omitted_categories.add(category));
     continuation = page.continue ?? "";
-    truncated = truncated || Boolean(page.truncated && !continuation);
-  } while (continuation && items.length < 500);
-  if (continuation) truncated = true;
+    truncated = page.truncated && !continuation;
+    if (continuation && seenContinuations.has(continuation)) {
+      throw new Error("Namespace listing returned a repeated continuation token.");
+    }
+    if (continuation) seenContinuations.add(continuation);
+  } while (continuation);
+
   return {
     items,
     truncated,
-    ...(continuation ? { continue: continuation } : {}),
-    ...(omitted.size ? { omitted_categories: [...omitted] } : {}),
-    ...(partial.length ? { partial_failures: partial } : {}),
+    ...(omitted_categories.size ? { omitted_categories: [...omitted_categories] } : {}),
+    ...(partial_failures.length ? { partial_failures } : {}),
   };
 }
 
 export interface KubernetesMetricsSourceStatus {
   availability: "available" | "stale" | "unavailable";
   fresh: boolean;
+  complete: boolean;
   total: number;
   cpu?: string;
   memory?: string;
@@ -2043,6 +2113,244 @@ export interface KubernetesWorkload {
   truncated: boolean;
   omitted_categories?: string[];
   partial_failures?: Array<{ resource_id?: string; class: string }>;
+}
+
+export interface KubernetesWorkloadPage {
+  items: KubernetesResource[];
+  counts?: Record<string, number>;
+  next?: string;
+  truncated: boolean;
+  omitted_categories?: string[];
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+}
+
+export interface KubernetesObjectRef {
+  api_version?: string;
+  kind: string;
+  namespace?: string;
+  name: string;
+  uid?: string;
+}
+
+export interface KubernetesIssue {
+  root: KubernetesObjectRef;
+  rule: string;
+  severity: "critical" | "warning" | "info";
+  count: number;
+  examples?: KubernetesObjectRef[];
+  first_seen?: string;
+  last_seen?: string;
+}
+
+export interface KubernetesIssuePage {
+  items: KubernetesIssue[];
+  totals: Record<string, number>;
+  truncated: boolean;
+  next?: string;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+  sync: { state: string; age_s: number; partial: boolean };
+}
+
+export type KubernetesChangeType = "created" | "deleted" | "image_changed" | "replicas_changed" | "spec_changed";
+
+export interface KubernetesChange {
+  id: string;
+  cluster: string;
+  kind: string;
+  namespace?: string;
+  name: string;
+  uid: string;
+  type: KubernetesChangeType;
+  fields?: Array<{ path: string; from: string; to: string }>;
+  at: string;
+  service?: string;
+}
+
+export interface KubernetesChangesPage {
+  items: KubernetesChange[];
+  next?: string;
+  truncated?: boolean;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+  gaps?: Array<{ from: string; to: string }>;
+  sync: { state: string; age_s: number; partial: boolean };
+}
+
+export interface KubernetesGraphNode {
+  id: string;
+  kind: string;
+  namespace?: string;
+  name: string;
+  health?: string;
+  group: string;
+}
+
+export interface KubernetesGraphEdge {
+  from: string;
+  to: string;
+  type: "manages" | "exposes" | "routes-to" | "uses" | "configures" | "scales";
+}
+
+export interface KubernetesGraph {
+  nodes: KubernetesGraphNode[];
+  edges: KubernetesGraphEdge[];
+  omitted: Record<string, number>;
+  next?: string;
+  truncated?: boolean;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+  sync: { state: string; age_s: number; partial: boolean };
+}
+
+export interface KubernetesTrafficEdge {
+  from: { namespace: string; kind: string; name: string };
+  to: { namespace: string; kind: string; name: string };
+  rate_per_sec?: number | null;
+  error_rate?: number | null;
+  p95_ms?: number | null;
+  bytes_per_sec?: number | null;
+}
+
+export interface KubernetesTraffic {
+  available: boolean;
+  reason?: string;
+  source?: string;
+  window: string;
+  observed_at?: string;
+  edges?: KubernetesTrafficEdge[];
+  unmapped: number;
+  external?: string[];
+  truncated: boolean;
+}
+
+export interface KubernetesIndexStatus {
+  state: string;
+  age_s: number;
+  partial: boolean;
+  kinds?: Record<string, { state: string; observed_at?: string; last_attempt_at?: string; records: number; partial: boolean; error?: string }>;
+}
+
+export interface KubernetesTopPage {
+  items: Array<{
+    kind: string;
+    namespace?: string;
+    name: string;
+    timestamp?: string;
+    window?: string;
+    cpu?: string;
+    memory?: string;
+    request_cpu?: string;
+    request_memory?: string;
+    owner?: KubernetesObjectRef;
+  }>;
+  items_available?: boolean;
+  total: number;
+  truncated: boolean;
+  availability: "available" | "stale" | "unavailable";
+  fresh: boolean;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+  sync: { state: string; age_s: number; partial: boolean };
+}
+
+type KubernetesTopPageDto = Omit<KubernetesTopPage, "items" | "items_available"> & {
+  items: KubernetesTopPage["items"] | null;
+};
+
+export interface KubernetesPodLogs {
+  cluster_id: string;
+  namespace: string;
+  pod: string;
+  container: string;
+  previous: boolean;
+  since_seconds: number;
+  tail_lines: number;
+  text: string;
+  truncated: boolean;
+  partial_failures?: Array<{ resource_id?: string; scope?: string; class: string }>;
+}
+
+export interface KubernetesWorkloadLogs {
+  pods: string[];
+  lines: Array<{ pod: string; container?: string; at?: string; text: string }>;
+  truncated: boolean;
+  omitted_pods?: string[];
+  partial_failures?: Array<{ resource_id?: string; scope?: string; class: string }>;
+}
+
+export interface KubernetesEventsPage {
+  items: KubernetesResource[];
+  next?: string;
+  truncated: boolean;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+}
+
+export interface KubernetesDiagnosis {
+  workload: KubernetesWorkload;
+  warning_events?: KubernetesResource[];
+  worst_pod_logs?: KubernetesPodLogs;
+  changes: KubernetesChange[];
+  neighborhood: KubernetesGraph;
+  partial_failures?: Array<{ resource_id?: string; scope?: string; class: string }>;
+  omitted_categories?: string[];
+  truncated: boolean;
+  sync: { state: string; age_s: number; partial: boolean };
+}
+
+export interface KubernetesHelmRevision {
+  revision: number;
+  status: string;
+  created?: string;
+}
+
+export interface KubernetesHelmRelease {
+  namespace: string;
+  name: string;
+  current: KubernetesHelmRevision;
+  history: KubernetesHelmRevision[];
+  health: string;
+}
+
+export interface KubernetesGitOpsApp {
+  tool: string;
+  kind: string;
+  namespace: string;
+  name: string;
+  sync: string;
+  health: string;
+  revision?: string;
+  last_sync_at?: string;
+  message?: string;
+  source?: string;
+  suspended: boolean;
+}
+
+export interface KubernetesGitOpsPage {
+  items: KubernetesGitOpsApp[];
+  available: boolean;
+  reason?: string;
+  next?: string;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+  truncated: boolean;
+}
+
+export interface KubernetesRolloutPage {
+  items: KubernetesRollout[];
+  available: boolean;
+  reason?: string;
+  next?: string;
+  truncated: boolean;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+}
+
+export interface KubernetesRollout {
+  namespace: string;
+  name: string;
+  phase: string;
+  strategy?: string;
+  step: number;
+  total_steps: number;
+  stable_rs?: string;
+  canary_rs?: string;
+  weight?: number;
+  message?: string;
 }
 
 export type ServiceHealthState =
@@ -2208,27 +2516,155 @@ export const api = {
     ),
   listAgentToolsets: (agent: AgentToolKind) =>
     request<AgentToolsetAvailability[]>(`/api/admin/agent/toolsets?agent=${agent}`),
+  proposeAgentAction: (proposal: { type: string; target: AgentProposal["target"]; params: unknown; reason: string }) =>
+    request<AgentProposalResult>("/api/v1/agent/proposals", {
+      method: "POST",
+      body: JSON.stringify(proposal),
+    }),
   setAgentToolsetEnabled: (agent: AgentToolKind, id: string, enabled: boolean) =>
     request<{ agent: AgentToolKind; id: string; enabled: boolean; changed: boolean }>(
       `/api/admin/agent/toolsets/${agent}/${encodeURIComponent(id)}`,
       { method: "PUT", body: JSON.stringify({ enabled }) },
     ),
   kubernetesOverview: () => request<KubernetesOverview>("/api/admin/kubernetes/overview"),
-  kubernetesNodes: () => listKubernetesResources("core~v1~nodes"),
-  kubernetesNodePods: (node: string) => listKubernetesResources("core~v1~pods", "spec.nodeName=" + node),
+  kubernetesOverviewGraph: () => request<KubernetesGraph>("/api/admin/kubernetes/graph/overview"),
+  kubernetesIssues: (options: { namespace?: string; severity?: string; kind?: string; limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesIssuePage>(`/api/admin/kubernetes/issues?${query}`);
+  },
+  kubernetesChanges: (options: { since?: string; until?: string; namespace?: string; kind?: string; name?: string; type?: KubernetesChangeType; limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesChangesPage>(`/api/admin/kubernetes/changes?${query}`);
+  },
+  kubernetesGraph: (options: { namespace?: string; group_by?: "namespace" | "app"; max_nodes?: number; connected_only?: boolean; complete?: boolean; limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesGraph>(`/api/admin/kubernetes/graph?${query}`);
+  },
+  kubernetesNeighborhood: (options: { resource_id?: string; kind?: string; namespace?: string; name?: string; hops?: number; max_nodes?: number }) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesGraph>(`/api/admin/kubernetes/graph/neighborhood?${query}`);
+  },
+  kubernetesTraffic: (options: { namespace?: string; source?: string; window?: "5m" | "15m" | "1h" } = {}) => {
+    const query = new URLSearchParams({ window: options.window ?? "15m" });
+    if (options.namespace) query.set("namespace", options.namespace);
+    if (options.source) query.set("source", options.source);
+    return request<KubernetesTraffic>(`/api/admin/kubernetes/traffic?${query}`);
+  },
+  kubernetesTop: (options: { kind: "pod" | "node"; namespace?: string; sort?: "cpu" | "memory"; limit?: number }): Promise<KubernetesTopPage> => {
+    const query = new URLSearchParams({ kind: options.kind });
+    if (options.namespace) query.set("namespace", options.namespace);
+    if (options.sort) query.set("sort", options.sort);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    return request<KubernetesTopPageDto>(`/api/admin/kubernetes/top?${query}`)
+      .then((page): KubernetesTopPage => ({
+        ...page,
+        items: page.items ?? [],
+        items_available: Array.isArray(page.items),
+      }));
+  },
+  kubernetesNodes: (cursor?: string) => listKubernetesResources("core~v1~nodes", "", cursor),
+  kubernetesNamespaces: () => listAllKubernetesNamespaces(),
+  kubernetesNodePods: (node: string, cursor?: string) => listKubernetesResources("core~v1~pods", "spec.nodeName=" + node, cursor),
   kubernetesUsage: (namespace = "") => request<KubernetesUsage>(`/api/admin/kubernetes/usage?namespace=${encodeURIComponent(namespace)}`),
-  kubernetesWorkloads: (namespace = "") =>
-    request<{ items: KubernetesResource[] | null; truncated: boolean; omitted_categories?: string[] | null; partial_failures?: Array<{ resource_id?: string; class: string }> | null }>(`/api/admin/kubernetes/workloads?namespace=${encodeURIComponent(namespace)}&limit=500`),
+  kubernetesWorkloads: async (options: { namespace?: string; kind?: string; q?: string; limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    const page = await request<Omit<KubernetesWorkloadPage, "items"> & { items: KubernetesResource[] | null }>(`/api/admin/kubernetes/workloads?${query}`);
+    return { ...page, items: Array.isArray(page.items) ? page.items : [] };
+  },
   kubernetesWorkload: (kind: string, namespace: string, name: string) =>
     request<KubernetesWorkload>(`/api/admin/kubernetes/workloads/${encodeURIComponent(kind)}/${encodeURIComponent(name)}?namespace=${encodeURIComponent(namespace)}`),
-  kubernetesSearch: (namespace: string, query: string) =>
+  kubernetesWorkloadLogs: async (kind: string, namespace: string, name: string, options: { container?: string; previous?: boolean; since_seconds?: number; tail_lines?: number; grep?: string } = {}) => {
+    const query = new URLSearchParams({ namespace });
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    const response = await request<Omit<KubernetesWorkloadLogs, "pods" | "lines"> & { pods?: string[] | null; lines?: KubernetesWorkloadLogs["lines"] | null }>(`/api/admin/kubernetes/workloads/${encodeURIComponent(kind)}/${encodeURIComponent(name)}/logs?${query}`);
+    return { ...response, pods: Array.isArray(response.pods) ? response.pods : [], lines: Array.isArray(response.lines) ? response.lines : [] };
+  },
+  kubernetesPodLogs: (namespace: string, name: string, options: { container?: string; previous?: boolean; since_seconds?: number; tail_lines?: number } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesPodLogs>(`/api/admin/kubernetes/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/logs?${query}`);
+  },
+  kubernetesDiagnose: (resourceId: string, namespace: string, name: string, logTail = 40) => {
+    const query = new URLSearchParams({ namespace, log_tail: String(logTail) });
+    return request<KubernetesDiagnosis>(`/api/admin/kubernetes/diagnose/${encodeURIComponent(resourceId)}/${encodeURIComponent(name)}?${query}`);
+  },
+  kubernetesReleases: (options: { namespace?: string; limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<{ items: KubernetesHelmRelease[]; next?: string; truncated: boolean; partial_failures?: Array<{ resource_id?: string; class: string }> }>(`/api/admin/kubernetes/releases?${query}`);
+  },
+  kubernetesRelease: (namespace: string, name: string) =>
+    request<KubernetesHelmRelease>(`/api/admin/kubernetes/releases/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`),
+  kubernetesGitOpsApps: (options: { namespace?: string; tool?: string; limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesGitOpsPage>(`/api/admin/kubernetes/gitops/apps?${query}`);
+  },
+  kubernetesStream: async (onEvent: (event: ServerSentEvent) => void, signal?: AbortSignal): Promise<void> => {
+    const headers = new Headers({ Accept: "text/event-stream" });
+    const secret = getSecret() ?? "";
+    if (secret) headers.set("X-Gateway-Secret", secret);
+    const response = await fetch(`${API_BASE}/api/admin/kubernetes/stream?kinds=Node,Pod,Deployment`, {
+      headers,
+      credentials: "same-origin",
+      cache: "no-store",
+      signal,
+    });
+    if (!response.ok || !response.body) {
+      const text = await response.text().catch(() => "");
+      if (response.status === 401) notifyAuthExpired();
+      throw new ApiError(response.status, text || `stream failed (${response.status})`);
+    }
+    if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("text/event-stream")) {
+      await response.body.cancel();
+      throw new ApiError(502, "stream returned an invalid content type");
+    }
+    await readEventStream(response.body, onEvent, { ...ANALYSIS_SSE_LIMITS, maxLineBytes: 66 << 10, maxFrameBytes: 66 << 10, maxTotalBytes: 16 << 20, maxEvents: 10_000 });
+  },
+  kubernetesRollout: (namespace: string, name: string) =>
+    request<KubernetesRollout>(`/api/admin/kubernetes/rollouts/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`),
+  kubernetesRollouts: (options: { namespace?: string; limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesRolloutPage>(`/api/admin/kubernetes/rollouts?${query}`);
+  },
+  kubernetesSearch: (namespace: string, query: string, totalLimit = 500) =>
     request<{ items: KubernetesResource[] | null; truncated: boolean; omitted_categories?: string[] | null; partial_failures?: Array<{ resource_id?: string; class: string }> | null }>(
-      `/api/admin/kubernetes/resources/search?namespace=${encodeURIComponent(namespace)}&q=${encodeURIComponent(query)}&per_kind_limit=100&limit=500`,
+      `/api/admin/kubernetes/resources/search?namespace=${encodeURIComponent(namespace)}&q=${encodeURIComponent(query)}&per_kind_limit=${Math.min(totalLimit, 100)}&limit=${Math.min(totalLimit, 500)}`,
     ),
-  kubernetesEvents: (namespace = "") =>
-    request<{ items: KubernetesResource[] | null; truncated: boolean; partial_failures?: Array<{ resource_id?: string; class: string }> | null }>(
-      `/api/admin/kubernetes/events?namespace=${encodeURIComponent(namespace)}&type=Warning&limit=500`,
-    ),
+  kubernetesEvents: async (options: { namespace?: string; limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams({ type: "Warning" });
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    const response = await request<Omit<KubernetesEventsPage, "items"> & { items: KubernetesResource[] | null }>(`/api/admin/kubernetes/events?${query}`);
+    return { ...response, items: response.items ?? [] };
+  },
   kubernetesDescribe: (resourceId: string, namespace: string, name: string) =>
     request<{ resource: KubernetesResource; related_resources?: Array<{ kind: string; namespace?: string; name: string }>; events?: KubernetesResource[]; partial_failures?: Array<{ resource_id?: string; class: string }> }>(
       `/api/admin/kubernetes/resources/${encodeURIComponent(resourceId)}/${encodeURIComponent(name)}/describe?namespace=${encodeURIComponent(namespace)}`,
@@ -3022,6 +3458,18 @@ export const api = {
     ),
   getChatSession: (id: string) =>
     request<ChatSession>(`/api/admin/chat/sessions/${encodeURIComponent(id)}`),
+  listAgentApprovals: (state: "pending" | "all" = "pending") =>
+    request<{ approvals: AgentApproval[] }>(`/api/v1/agent/approvals?state=${state}`),
+  approveAgentApproval: (id: string, nonce: string) =>
+    request<AgentApproval>(`/api/v1/agent/approvals/${encodeURIComponent(id)}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ nonce }),
+    }),
+  rejectAgentApproval: (id: string, reason: string) =>
+    request<AgentApproval>(`/api/v1/agent/approvals/${encodeURIComponent(id)}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
   deleteChatSession: (id: string) =>
     request<void>(`/api/admin/chat/sessions/${encodeURIComponent(id)}`, {
       method: "DELETE",

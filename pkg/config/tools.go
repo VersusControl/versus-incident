@@ -41,19 +41,27 @@ type ToolsConfig struct {
 
 // KubernetesToolConfig configures one read-only Kubernetes API connection.
 type KubernetesToolConfig struct {
-	Endpoint             string               `mapstructure:"endpoint"`
-	TokenFile            string               `mapstructure:"token_file"`
-	CAFile               string               `mapstructure:"ca_file"`
-	CAData               string               `mapstructure:"ca_data"`
-	ServerName           string               `mapstructure:"server_name"`
-	Auth                 KubernetesAuthConfig `mapstructure:"auth"`
-	ClusterID            string               `mapstructure:"cluster_id"`
-	CredentialID         string               `mapstructure:"credential_id"`
-	Timeout              string               `mapstructure:"timeout"`
-	DiscoveryTTL         string               `mapstructure:"discovery_ttl"`
-	AllowLoopback        bool                 `mapstructure:"allow_loopback"`
-	AllowPrivateNetworks bool                 `mapstructure:"allow_private_networks"`
-	EndpointCIDRs        []string             `mapstructure:"endpoint_cidrs"`
+	Endpoint             string                      `mapstructure:"endpoint"`
+	TokenFile            string                      `mapstructure:"token_file"`
+	CAFile               string                      `mapstructure:"ca_file"`
+	CAData               string                      `mapstructure:"ca_data"`
+	ServerName           string                      `mapstructure:"server_name"`
+	Auth                 KubernetesAuthConfig        `mapstructure:"auth"`
+	ClusterID            string                      `mapstructure:"cluster_id"`
+	CredentialID         string                      `mapstructure:"credential_id"`
+	Timeout              string                      `mapstructure:"timeout"`
+	DiscoveryTTL         string                      `mapstructure:"discovery_ttl"`
+	AllowLoopback        bool                        `mapstructure:"allow_loopback"`
+	AllowPrivateNetworks bool                        `mapstructure:"allow_private_networks"`
+	EndpointCIDRs        []string                    `mapstructure:"endpoint_cidrs"`
+	Actions              KubernetesActionsToolConfig `mapstructure:"actions"`
+}
+
+type KubernetesActionsToolConfig struct {
+	Enable      bool                 `mapstructure:"enable"`
+	Auth        KubernetesAuthConfig `mapstructure:"auth"`
+	MaxReplicas int                  `mapstructure:"max_replicas"`
+	Timeout     string               `mapstructure:"timeout"`
 }
 
 // KubernetesAuthConfig selects exactly one Kubernetes authentication source.
