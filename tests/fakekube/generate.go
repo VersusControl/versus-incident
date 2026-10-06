@@ -1,7 +1,6 @@
 package fakekube
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -130,10 +129,6 @@ func SeedScenario(store *Store, name string, seed int64) error {
 	return nil
 }
 
-func putObject(store *Store, resource, namespace, name string, object any) error {
-	encoded, err := json.Marshal(object)
-	if err != nil {
-		return err
-	}
-	return store.Upsert(resource, namespace, name, encoded)
+func putObject(store *Store, resource, namespace, name string, object map[string]any) error {
+	return store.upsertObject(resource, namespace, name, object)
 }

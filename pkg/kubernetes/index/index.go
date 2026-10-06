@@ -70,12 +70,13 @@ type Record struct {
 }
 
 type KindStatus struct {
-	State         string    `json:"state"`
-	ObservedAt    time.Time `json:"observed_at,omitempty"`
-	LastAttemptAt time.Time `json:"last_attempt_at,omitempty"`
-	Records       int       `json:"records"`
-	Partial       bool      `json:"partial"`
-	Error         string    `json:"error,omitempty"`
+	State           string    `json:"state"`
+	ObservedAt      time.Time `json:"observed_at,omitempty"`
+	LastAttemptAt   time.Time `json:"last_attempt_at,omitempty"`
+	Records         int       `json:"records"`
+	Partial         bool      `json:"partial"`
+	Error           string    `json:"error,omitempty"`
+	hasCompleteSync bool
 }
 
 type Snapshot struct {
@@ -198,7 +199,7 @@ func (index *Index) Ingest(kind string, records []Record, complete bool, observe
 	if newCount > index.maxRecords {
 		return ErrRecordLimit
 	}
-	emitDeltas := index.kinds[kind].State == "ready"
+	emitDeltas := index.kinds[kind].hasCompleteSync
 	deltas := make([]Delta, 0, len(prepared))
 	if complete {
 		for uid, current := range index.records {
@@ -235,6 +236,7 @@ func (index *Index) Ingest(kind string, records []Record, complete bool, observe
 	status.Records = kindRecordCount(index.records, kind)
 	status.Partial = !complete
 	status.Error = ""
+	status.hasCompleteSync = status.hasCompleteSync || complete
 	index.kinds[kind] = status
 	for _, delta := range deltas {
 		index.publishLocked(delta)
