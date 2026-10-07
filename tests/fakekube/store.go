@@ -44,6 +44,31 @@ func NewStore() *Store {
 	return &Store{objects: make(map[objectKey]storedObject)}
 }
 
+func (store *Store) reserve(additional int) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	objects := make(map[objectKey]storedObject, len(store.objects)+additional)
+	for key, object := range store.objects {
+		objects[key] = object
+	}
+	store.objects = objects
+}
+
+func (store *Store) upsertGeneratedPod(pod generatedPod) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	resourceVersion := store.nextRV + 1
+	pod.Metadata.ResourceVersion = strconv.FormatUint(resourceVersion, 10)
+	encoded, err := json.Marshal(pod)
+	if err != nil {
+		return ErrInvalidRequest
+	}
+	key := objectKey{resource: "pods", namespace: pod.Metadata.Namespace, name: pod.Metadata.Name}
+	store.objects[key] = storedObject{key: key, rv: resourceVersion, body: encoded}
+	store.nextRV = resourceVersion
+	return nil
+}
+
 func (store *Store) Upsert(resource, namespace, name string, body json.RawMessage) error {
 	if store == nil || !safeSegment(resource) || !safeOptionalSegment(namespace) || !safeSegment(name) || !json.Valid(body) || len(body) > 1<<20 {
 		return ErrInvalidRequest
