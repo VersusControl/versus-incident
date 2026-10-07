@@ -1,10 +1,71 @@
 package fakekube
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/url"
+	"reflect"
 	"testing"
 )
+
+func TestGeneratedPodMatchesValidatedStoreInsertion(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		phase    string
+		ready    bool
+		restarts int
+		state    json.RawMessage
+	}{
+		{name: "running", phase: "Running", ready: true, state: json.RawMessage(`{"running":{}}`)},
+		{name: "crashing", phase: "Pending", restarts: 6, state: json.RawMessage(`{"waiting":{"reason":"CrashLoopBackOff"}}`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			generated, validated := NewStore(), NewStore()
+			for _, store := range []*Store{generated, validated} {
+				if err := store.Upsert("configmaps", "shop", "existing", json.RawMessage(`{"kind":"ConfigMap"}`)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			generated.reserve(10)
+			pod := generatedPod{
+				Kind:     "Pod",
+				Metadata: generatedPodMetadata{Name: "web-0", Namespace: "shop", UID: "uid-web-0", Labels: generatedPodLabels{Application: "web", App: "web"}, OwnerReferences: []generatedPodOwner{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "web-rs", UID: "uid-web-rs"}}},
+				Spec:     generatedPodSpec{NodeName: "node-000", Containers: []generatedPodContainer{{Name: "app", Image: "example.invalid/checkout:v1"}}},
+				Status:   generatedPodStatus{Phase: test.phase, ContainerStatuses: []generatedPodContainerStatus{{Name: "app", Ready: test.ready, RestartCount: test.restarts, State: test.state}}},
+			}
+			body, err := json.Marshal(pod)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validated.Upsert("pods", "shop", "web-0", body); err != nil {
+				t.Fatal(err)
+			}
+			if err := generated.upsertGeneratedPod(pod); err != nil {
+				t.Fatal(err)
+			}
+			actual, found := generated.Get("pods", "shop", "web-0")
+			if !found || generated.Count("configmaps") != 1 {
+				t.Fatal("generated insertion or capacity reservation lost an object")
+			}
+			expected, _ := validated.Get("pods", "shop", "web-0")
+			var actualObject, expectedObject map[string]any
+			if err := json.Unmarshal(actual, &actualObject); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(expected, &expectedObject); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(actualObject, expectedObject) {
+				t.Fatalf("generated object=%v, want %v", actualObject, expectedObject)
+			}
+			actual[0] = '!'
+			retained, _ := generated.Get("pods", "shop", "web-0")
+			if bytes.Equal(actual, retained) || !json.Valid(retained) {
+				t.Fatal("Get exposed the stored generated body for mutation")
+			}
+		})
+	}
+}
 
 func TestStoreListPaginatesAndAppliesSelectors(t *testing.T) {
 	store := NewStore()
