@@ -52,6 +52,7 @@ async function renderSidebar() {
     ),
   );
   await waitFor(() => expect(apiMocks.getSSODeployment).toHaveBeenCalledOnce());
+  await screen.findByText("Enterprise");
 }
 
 function sectionLinks(title: string) {
@@ -68,29 +69,32 @@ describe("chat integration policy", () => {
     expect(appSource).toMatch(/lazyPage\(\(\) => import\("\.\/pages\/ChatPage"\)/);
     expect(appSource).toContain('<Route path="/agent/chat" element={<AgentRequiredRoute title="DevOps Agent"><ChatPage /></AgentRequiredRoute>} />');
     expect(appSource).toContain('<Route path="/agent/tools" element={<AgentToolsPage />} />');
+    expect(appSource).toContain('<Route path="/agent/kubernetes" element={<KubernetesPage />} />');
     expect(appSource).toContain('<Route path="/agent/runbooks" element={<RunbooksPage />} />');
   });
 
-  it("renders Chat in Respond and Tool catalog in AI without a Runbooks item", async () => {
+  it("renders Chat in Respond and Connectors & Tools in AI without a Runbooks item", async () => {
     await renderSidebar();
 
     expect(sectionLinks("Respond")).toEqual(["/now", "/incidents", "/agent/chat"]);
-    expect(sectionLinks("AI").slice(0, 3)).toEqual([
-      "/agent/tools",
+    expect(sectionLinks("Connectors")).toEqual(["/agent/kubernetes"]);
+    expect(sectionLinks("AI")).toEqual([
       "/agent/decisions",
       "/analyses",
+      "/agent/tools",
     ]);
     expect(screen.queryByRole("link", { name: "Runbooks" })).toBeNull();
     expect(screen.queryByText("Tools", { selector: "div" })).toBeNull();
   });
 
-  it("keeps Tool catalog readable while agent-backed pages are disabled", async () => {
+  it("keeps connectors and tools readable while agent-backed pages are disabled", async () => {
     apiMocks.getAgentConfig.mockResolvedValue({ enable: false });
     await renderSidebar();
 
-    const tools = screen.getByRole("link", { name: "Tool catalog" });
+    const tools = screen.getByRole("link", { name: "Connectors & Tools" });
     expect(tools.getAttribute("href")).toBe("/agent/tools");
     expect(tools.getAttribute("title")).toBeNull();
+    expect(screen.getByRole("link", { name: "Kubernetes" }).getAttribute("title")).toBeNull();
     await waitFor(() =>
       expect(screen.getByRole("link", { name: /Chat/ }).getAttribute("title")).toContain(
         "AI agent is disabled",

@@ -19,8 +19,8 @@ type ToolAvailabilityService struct {
 }
 
 // NewToolAvailabilityService builds the lightweight catalog dependencies.
-func NewToolAvailabilityService(cfg config.AgentConfig, store storage.Provider) *ToolAvailabilityService {
-	configured := configuredToolAvailabilitySnapshot(cfg, store)
+func NewToolAvailabilityService(cfg config.AgentConfig, store storage.Provider, connectors ...config.ConnectorsConfig) *ToolAvailabilityService {
+	configured := configuredToolAvailabilitySnapshot(cfg, store, connectors...)
 	return &ToolAvailabilityService{
 		Manager:  aitools.NewManager(store),
 		snapshot: func(tenancy.OrgScope) aitools.Snapshot { return configured },

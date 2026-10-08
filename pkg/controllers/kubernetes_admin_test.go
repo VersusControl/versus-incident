@@ -1,13 +1,17 @@
 package controllers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -68,6 +72,252 @@ func TestKubernetesAdminAuthorizationAndDiscoveryAdapter(t *testing.T) {
 		if err != nil || response.StatusCode != test.want {
 			t.Errorf("authorized=%v permitted=%v status=%v err=%v", test.authorized, test.permitted, response.StatusCode, err)
 		}
+	}
+}
+
+type streamTestScrubber struct{}
+
+func (streamTestScrubber) Scrub(value string) string {
+	return strings.ReplaceAll(value, "secret", "[redacted]")
+}
+
+func TestKubernetesPodLogSSEDisconnectAndShutdown(t *testing.T) {
+	for _, shutdown := range []bool{false, true} {
+		t.Run(map[bool]string{false: "disconnect", true: "shutdown"}[shutdown], func(t *testing.T) {
+			closed := make(chan struct{})
+			upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Write([]byte("2026-10-01T00:00:00Z safe\n"))
+				writer.(http.Flusher).Flush()
+				<-request.Context().Done()
+				close(closed)
+			}))
+			defer upstream.Close()
+			client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			service := kubernetes.NewService(client, kubernetes.Scope{}, 0)
+			service.SetScrubber(streamTestScrubber{})
+			lifecycle, stop := context.WithCancel(context.Background())
+			defer stop()
+			service.SetLogStreamContext(lifecycle)
+			app := fiber.New(fiber.Config{DisableStartupMessage: true})
+			app.Use(func(ctx *fiber.Ctx) error {
+				middleware.MarkAuthorized(ctx)
+				middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+				return ctx.Next()
+			})
+			NewKubernetesAdminControllerWithRegistry(kubernetes.NewServiceRegistry(service)).Register(app.Group("/api"))
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			serverDone := make(chan struct{})
+			go func() { defer close(serverDone); _ = app.Listener(listener) }()
+			defer func() { stop(); _ = app.ShutdownWithTimeout(time.Second); <-serverDone }()
+			requestContext, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			request, _ := http.NewRequestWithContext(requestContext, "GET", "http://"+listener.Addr().String()+"/api/admin/kubernetes/pods/default/pod/logs/stream", nil)
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			reader := bufio.NewReader(response.Body)
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					t.Fatal(err)
+				}
+				if line == "event: line\n" {
+					break
+				}
+			}
+			if shutdown {
+				stop()
+			} else {
+				cancel()
+				response.Body.Close()
+			}
+			select {
+			case <-closed:
+			case <-time.After(6 * time.Second):
+				t.Fatal("upstream survived disconnect or shutdown")
+			}
+		})
+	}
+}
+
+func TestKubernetesPodLogSSEContract(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		status         int
+		payload, query string
+		allowed        bool
+		wantStatus     int
+	}{
+		{"finite", 200, "2026-10-01T00:00:00Z secret\n", "previous=true&container=app", true, 200},
+		{"read-error", 200, "2026-10-01T00:00:00Z secret\ninvalid secret\n", "previous=true&container=app", true, 200},
+		{"without-prefix", 200, "2026-10-01T00:00:00Z secret\n", "previous=true&container=app&timestamps=false", true, 200},
+		{"safe-error", 403, "upstream-secret", "", true, 200},
+		{"previous-unavailable", 400, `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"BadRequest","code":400,"message":"previous terminated container \"app\" in pod \"pod\" not found"}`, "previous=true", true, 200},
+		{"previous-invalid-container", 400, `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"BadRequest","code":400,"message":"container upstream-secret is not valid for pod"}`, "previous=true&container=app", true, 200},
+		{"previous-raw-error", 400, "upstream-secret", "previous=true", true, 200},
+		{"denied", 200, "secret", "", false, 403},
+		{"malformed", 200, "secret", "tail_lines=bad", true, 400},
+		{"duplicate", 200, "secret", "previous=false&previous=true", true, 400},
+		{"unknown", 200, "secret", "follow=false", true, 400},
+		{"zero", 200, "secret", "tail_lines=0", true, 400},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				requests.Add(1)
+				writer.WriteHeader(test.status)
+				writer.Write([]byte(test.payload))
+			}))
+			defer server.Close()
+			client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "org-a", ClusterID: "test"}, 0)
+			service.SetScrubber(streamTestScrubber{})
+			app := fiber.New()
+			app.Use(func(ctx *fiber.Ctx) error {
+				middleware.MarkAuthorized(ctx)
+				middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), test.allowed)
+				return ctx.Next()
+			})
+			NewKubernetesAdminController(service).Register(app.Group("/api"))
+			response, err := app.Test(httptest.NewRequest("GET", "/api/admin/kubernetes/pods/default/pod/logs/stream?"+test.query, nil), -1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(response.Body)
+			response.Body.Close()
+			if err != nil || response.StatusCode != test.wantStatus || bytes.Contains(body, []byte("secret")) {
+				t.Fatalf("status=%d body=%s err=%v", response.StatusCode, body, err)
+			}
+			if test.wantStatus != 200 {
+				if requests.Load() != 0 {
+					t.Fatal("invalid/denied request reached upstream")
+				}
+				return
+			}
+			if response.Header.Get("Content-Type") != "text/event-stream" || !bytes.Contains(body, []byte("event: heartbeat")) || !bytes.Contains(body, []byte("event: end")) {
+				t.Fatalf("SSE response=%s", body)
+			}
+			if test.status == 200 && (!bytes.Contains(body, []byte("event: line")) || !bytes.Contains(body, []byte(`"cursor":"`)) || bytes.Contains(body, []byte("id: "))) {
+				t.Fatalf("missing line or cursor: %s", body)
+			}
+			if test.status == 200 {
+				prefix := `"text":"2026-10-01T00:00:00Z [redacted]"`
+				if strings.Contains(test.query, "timestamps=false") {
+					prefix = `"text":"[redacted]"`
+				}
+				if !bytes.Contains(body, []byte(prefix)) || !bytes.Contains(body, []byte(`"timestamp":"2026-10-01T00:00:00Z"`)) {
+					t.Fatalf("timestamp contract: %s", body)
+				}
+			}
+			if test.status != 200 && !bytes.Contains(body, []byte("event: error")) {
+				t.Fatalf("missing safe error: %s", body)
+			}
+			if test.status == http.StatusBadRequest {
+				code := "invalid_arguments"
+				if test.name == "previous-unavailable" {
+					code = "previous_unavailable"
+				}
+				if !bytes.Contains(body, []byte(`"code":"`+code+`"`)) || !bytes.Contains(body, []byte(`"reason":"error"`)) || bytes.Contains(body, []byte(`"retryable":true`)) {
+					t.Fatalf("incorrect safe Status envelope: %s", body)
+				}
+			}
+			if test.name == "read-error" && (!bytes.Contains(body, []byte("event: error")) || !bytes.Contains(body, []byte(`"reason":"error","replay_uncertain":true`))) {
+				t.Fatalf("missing error checkpoint or uncertainty: %s", body)
+			}
+		})
+	}
+}
+
+func TestKubernetesPodLogSSEOverlapResumeContract(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Has("sinceTime") && request.URL.Query().Get("sinceTime") != "2026-09-30T23:59:59.999999999Z" {
+			t.Errorf("resume overlap: %v", request.URL.Query())
+		}
+		writer.Write([]byte("2026-10-01T00:00:01Z secret\n2026-10-01T00:00:00Z secret\n2026-10-01T00:00:01Z secret\n"))
+		if request.URL.Query().Has("sinceTime") {
+			writer.Write([]byte("2026-10-01T00:00:00Z secret\n2026-10-01T00:00:01Z secret\n"))
+		}
+	}))
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "org-a"}, 0)
+	service.SetScrubber(streamTestScrubber{})
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	readEvents := func(cursor string) []kubernetes.PodLogStreamEvent {
+		t.Helper()
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/pods/default/pod/logs/stream?cursor="+cursor, nil), -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var events []kubernetes.PodLogStreamEvent
+		scanner := bufio.NewScanner(response.Body)
+		var eventName string
+		for scanner.Scan() {
+			line := scanner.Text()
+			switch {
+			case strings.HasPrefix(line, "event: "):
+				eventName = strings.TrimPrefix(line, "event: ")
+			case strings.HasPrefix(line, "id: "):
+				t.Fatal("cursor duplicated into SSE ID")
+			case strings.HasPrefix(line, "data: "):
+				var event kubernetes.PodLogStreamEvent
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+					t.Fatal(err)
+				}
+				event.Event = eventName
+				events = append(events, event)
+			}
+		}
+		if scanner.Err() != nil {
+			t.Fatal(scanner.Err())
+		}
+		return events
+	}
+	initial := readEvents("")
+	var cursor string
+	for _, event := range initial {
+		if event.Event == "end" {
+			cursor = event.Cursor
+			break
+		}
+	}
+	if cursor == "" {
+		t.Fatal("initial stream has no cursor")
+	}
+	resumed := readEvents(cursor)
+	var lines int
+	for _, event := range resumed {
+		if event.Event == "line" {
+			lines++
+			if event.ReplayUncertain || strings.Contains(event.Text, "secret") || event.Ordinal < 2 || event.Cursor != "" {
+				t.Fatalf("unsafe or unqualified replay: %+v", event)
+			}
+		}
+	}
+	end := resumed[len(resumed)-1]
+	if lines != 2 || end.Event != "end" || end.Reason != "complete" || end.ReplayUncertain || end.Cursor == "" || end.Cursor == cursor {
+		t.Fatalf("resume terminal contract: %+v", resumed)
 	}
 }
 

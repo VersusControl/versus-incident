@@ -128,7 +128,7 @@ func (controller *AgentToolsAdminController) listToolsets(ctx *fiber.Ctx) error 
 		}
 	}
 	if legacyDisabled {
-		result = append(result, ToolsetAvailability{ID: "versus-core", Section: aitools.SectionCommon, DisplayName: "Versus core", Description: "Restore disabled Versus self-knowledge tools.", IconKey: "common", DocsURL: "https://docs.versusincident.com/#/agent/tools/tools?id=versus-tools", Visibility: aitools.VisibilityNonDefault, State: aitools.StateDisabledByOperator, Reason: "Legacy Versus tools are disabled.", Enabled: false, ChildCount: versusToolCount(), Requirement: aitools.Requirement{Kind: aitools.RequirementNone}})
+		result = append(result, ToolsetAvailability{ID: "versus-core", Section: aitools.SectionCommon, DisplayName: "Versus core", Description: "Restore disabled Versus self-knowledge tools.", IconKey: "common", DocsURL: "https://docs.versusincident.com/#/agent/tools/overview?id=versus-tools", Visibility: aitools.VisibilityNonDefault, State: aitools.StateDisabledByOperator, Reason: "Legacy Versus tools are disabled.", Enabled: false, ChildCount: versusToolCount(), Requirement: aitools.Requirement{Kind: aitools.RequirementNone}})
 	}
 	return ctx.JSON(result)
 }

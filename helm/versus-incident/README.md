@@ -6,7 +6,7 @@ The agent's read-only Kubernetes connector supports native in-cluster, token,
 client-certificate, safe kubeconfig, EKS IAM, AKS Entra, and closed GKE
 service-account, file-workload-identity, or metadata-workload-identity
 authentication. It does not require or execute cloud CLIs or auth plugins. See
-[Kubernetes Connector](https://docs.versusincident.com/#/agent/tools/kubernetes)
+[Kubernetes Connector](https://docs.versusincident.com/#/agent/connectors/kubernetes)
 for complete values and cloud prerequisites.
 
 ## Requirements

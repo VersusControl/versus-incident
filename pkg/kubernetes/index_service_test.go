@@ -16,6 +16,35 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
+func TestIndexRecordRetainsProjectedWorkloadValues(t *testing.T) {
+	for _, numeric := range []struct {
+		name  string
+		value any
+	}{{"integer", 3}, {"decoded", float64(3)}, {"string", "3"}} {
+		for _, containers := range []struct {
+			name  string
+			value any
+		}{{"projected", []map[string]any{{"name": "app", "image": "example.invalid/api:v1"}}}, {"decoded", []any{map[string]any{"name": "app", "image": "example.invalid/api:v1"}}}} {
+			t.Run(numeric.name+"/"+containers.name, func(t *testing.T) {
+				resource := ProjectedResource{UID: "deployment-api", Kind: "Deployment", Namespace: "shop", Name: "api", Summary: map[string]any{
+					"desired_replicas": numeric.value, "ready_replicas": numeric.value, "available_replicas": numeric.value,
+					"generation": numeric.value, "observed_generation": numeric.value, "containers": containers.value,
+				}}
+				record := indexRecord(resource)
+				if record.Replicas != 3 || record.Ready != 3 || record.Available != 3 || record.Generation != 3 || record.ObservedGeneration != 3 || len(record.Images) != 1 || record.Images[0] != "example.invalid/api:v1" {
+					t.Fatalf("projected workload values lost: %+v", record)
+				}
+			})
+		}
+	}
+	for _, invalid := range []any{-1, 1.5, "invalid", "2147483648", nil} {
+		record := indexRecord(ProjectedResource{Summary: map[string]any{"desired_replicas": invalid}})
+		if record.Replicas != 0 {
+			t.Fatalf("invalid replica count accepted: %v", invalid)
+		}
+	}
+}
+
 func TestIndexSnapshotSharesSameScopeAndIsolatesOrganizations(t *testing.T) {
 	var podLists atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

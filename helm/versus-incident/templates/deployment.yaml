@@ -171,6 +171,7 @@ spec:
                   key: git_auth_token_{{ $i }}
             {{- end }}
             {{- end }}
+                {{- end }}
             - name: KUBERNETES_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -196,6 +197,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "versus-incident.fullname" . }}-secrets
                   key: kubernetes_aks_client_secret
+            {{- range $key := list "token" "client_certificate_data" "client_key_data" "aks_client_secret" }}
+            - name: KUBERNETES_ACTOR_{{ $key | upper }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" $ }}-secrets
+                  key: kubernetes_actor_{{ $key }}
             {{- end }}
 
             {{- if .Values.alert.slack.enable }}
@@ -589,6 +596,9 @@ spec:
             - name: config-volume
               mountPath: /app/config/config.yaml
               subPath: config.yaml
+            - name: config-volume
+              mountPath: /app/config/connectors.yaml
+              subPath: connectors.yaml
             {{- if .Values.agent.enable }}
             - name: config-volume
               mountPath: /app/config/agent_sources.yaml

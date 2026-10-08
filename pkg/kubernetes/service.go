@@ -204,15 +204,20 @@ type Scrubber interface{ Scrub(string) string }
 
 // Service owns all Kubernetes path construction, decoding, projection, and relationships.
 type Service struct {
-	client   *Client
-	scope    Scope
-	ttl      time.Duration
-	mu       *sync.Mutex
-	cache    map[string]discoveryCacheEntry
-	scrubber Scrubber
-	indexes  *kubeindex.Registry
-	changes  *changeStoreState
-	traffic  *trafficProviderState
+	client           *Client
+	scope            Scope
+	ttl              time.Duration
+	mu               *sync.Mutex
+	cache            map[string]discoveryCacheEntry
+	scrubber         Scrubber
+	indexes          *kubeindex.Registry
+	changes          *changeStoreState
+	traffic          *trafficProviderState
+	logStreamContext context.Context
+}
+
+func (service *Service) SetLogStreamContext(ctx context.Context) {
+	service.logStreamContext = ctx
 }
 
 // SetScrubber installs the shared model/API text redactor.
@@ -236,7 +241,7 @@ func (service *Service) Scoped(scope Scope) *Service {
 	if service == nil {
 		return nil
 	}
-	return &Service{client: service.client, scope: scope, ttl: service.ttl, mu: service.mu, cache: service.cache, scrubber: service.scrubber, indexes: service.indexes, changes: service.changes, traffic: service.traffic}
+	return &Service{client: service.client, scope: scope, ttl: service.ttl, mu: service.mu, cache: service.cache, scrubber: service.scrubber, indexes: service.indexes, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext}
 }
 
 // Scope returns the immutable cache and request identity of this service.
@@ -1134,6 +1139,21 @@ func safeSummary(kind string, raw map[string]any, scrubber Scrubber) map[string]
 	}
 	if kind == "Pod" {
 		resourceSummary(summary, mapSlice(spec["containers"]))
+		logContainers := make([]map[string]string, 0)
+		for _, group := range []struct{ field, kind string }{{"containers", "regular"}, {"initContainers", "init"}, {"ephemeralContainers", "ephemeral"}} {
+			for _, container := range mapSlice(spec[group.field]) {
+				name := stringValue(container["name"])
+				if !validPodLogName(name, 63, false) {
+					continue
+				}
+				if len(logContainers) >= maxProjectionItems {
+					summary["log_containers_truncated"] = true
+					break
+				}
+				logContainers = append(logContainers, map[string]string{"name": name, "type": group.kind})
+			}
+		}
+		summary["log_containers"] = logContainers
 		var restarts int64
 		for _, container := range mapSlice(status["containerStatuses"]) {
 			if value, ok := container["restartCount"].(float64); ok {

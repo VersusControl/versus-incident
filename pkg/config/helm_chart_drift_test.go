@@ -94,9 +94,9 @@ var chartScenarios = []chartScenario{
 	{name: "kubernetes-client-certificate", args: kubernetesModeArgs("client_certificate")},
 	{name: "kubernetes-kubeconfig", args: kubernetesModeArgs("kubeconfig")},
 	{name: "kubernetes-eks", args: kubernetesModeArgs("eks")},
-	{name: "kubernetes-aks-workload-identity", args: kubernetesModeArgs("aks", "agent.tools.kubernetes.auth.aks.credentialMode=workload_identity")},
-	{name: "kubernetes-aks-client-secret", args: kubernetesModeArgs("aks", "agent.tools.kubernetes.auth.aks.credentialMode=client_secret")},
-	{name: "kubernetes-aks-managed-identity", args: kubernetesModeArgs("aks", "agent.tools.kubernetes.auth.aks.credentialMode=managed_identity")},
+	{name: "kubernetes-aks-workload-identity", args: kubernetesModeArgs("aks", "connectors.kubernetes.auth.aks.credentialMode=workload_identity")},
+	{name: "kubernetes-aks-client-secret", args: kubernetesModeArgs("aks", "connectors.kubernetes.auth.aks.credentialMode=client_secret")},
+	{name: "kubernetes-aks-managed-identity", args: kubernetesModeArgs("aks", "connectors.kubernetes.auth.aks.credentialMode=managed_identity")},
 	{name: "kubernetes-gke", args: kubernetesModeArgs("gke")},
 	{name: "coverage", args: []string{"-f", coverageValues}},
 	{name: "coverage-pagerduty", args: []string{"-f", coverageValues, "--set", "oncall.provider=pagerduty"}},
@@ -112,28 +112,28 @@ var chartScenarios = []chartScenario{
 
 func kubernetesModeArgs(mode string, overrides ...string) []string {
 	values := []string{
-		"agent.tools.kubernetes.auth.mode=" + mode,
-		"agent.tools.kubernetes.endpoint=https://cluster.example",
-		"agent.tools.kubernetes.caFile=/run/kubernetes/ca.crt",
-		"agent.tools.kubernetes.serverName=cluster.internal",
-		"agent.tools.kubernetes.auth.token=fixture-token",
-		"agent.tools.kubernetes.auth.tokenFile=/run/kubernetes/token",
-		"agent.tools.kubernetes.auth.clientCertificate.certificateFile=/run/kubernetes/client.crt",
-		"agent.tools.kubernetes.auth.clientCertificate.keyFile=/run/kubernetes/client.key",
-		"agent.tools.kubernetes.auth.kubeconfig.path=/run/kubernetes/config",
-		"agent.tools.kubernetes.auth.kubeconfig.context=production",
-		"agent.tools.kubernetes.auth.eks.clusterName=production",
-		"agent.tools.kubernetes.auth.eks.region=us-east-1",
-		"agent.tools.kubernetes.auth.eks.roleARN=arn:aws:iam::123456789012:role/reader",
-		"agent.tools.kubernetes.auth.eks.profile=production",
-		"agent.tools.kubernetes.auth.aks.credentialMode=client_secret",
-		"agent.tools.kubernetes.auth.aks.serverID=api://aks-server",
-		"agent.tools.kubernetes.auth.aks.tenantID=tenant",
-		"agent.tools.kubernetes.auth.aks.clientID=client",
-		"agent.tools.kubernetes.auth.aks.clientSecret=fixture-secret",
-		"agent.tools.kubernetes.auth.aks.federatedTokenFile=/run/azure/token",
-		"agent.tools.kubernetes.auth.aks.environment=government",
-		"agent.tools.kubernetes.auth.gke.credentialsFile=/run/google/credentials.json",
+		"connectors.kubernetes.auth.mode=" + mode,
+		"connectors.kubernetes.endpoint=https://cluster.example",
+		"connectors.kubernetes.caFile=/run/kubernetes/ca.crt",
+		"connectors.kubernetes.serverName=cluster.internal",
+		"connectors.kubernetes.auth.token=fixture-token",
+		"connectors.kubernetes.auth.tokenFile=/run/kubernetes/token",
+		"connectors.kubernetes.auth.clientCertificate.certificateFile=/run/kubernetes/client.crt",
+		"connectors.kubernetes.auth.clientCertificate.keyFile=/run/kubernetes/client.key",
+		"connectors.kubernetes.auth.kubeconfig.path=/run/kubernetes/config",
+		"connectors.kubernetes.auth.kubeconfig.context=production",
+		"connectors.kubernetes.auth.eks.clusterName=production",
+		"connectors.kubernetes.auth.eks.region=us-east-1",
+		"connectors.kubernetes.auth.eks.roleARN=arn:aws:iam::123456789012:role/reader",
+		"connectors.kubernetes.auth.eks.profile=production",
+		"connectors.kubernetes.auth.aks.credentialMode=client_secret",
+		"connectors.kubernetes.auth.aks.serverID=api://aks-server",
+		"connectors.kubernetes.auth.aks.tenantID=tenant",
+		"connectors.kubernetes.auth.aks.clientID=client",
+		"connectors.kubernetes.auth.aks.clientSecret=fixture-secret",
+		"connectors.kubernetes.auth.aks.federatedTokenFile=/run/azure/token",
+		"connectors.kubernetes.auth.aks.environment=government",
+		"connectors.kubernetes.auth.gke.credentialsFile=/run/google/credentials.json",
 	}
 	values = append(values, overrides...)
 	args := make([]string, 0, len(values)*2)
@@ -141,6 +141,43 @@ func kubernetesModeArgs(mode string, overrides ...string) []string {
 		args = append(args, "--set-string", value)
 	}
 	return args
+}
+
+func TestHelmRejectsToolKubernetesKeysSafely(t *testing.T) {
+	requireRenderableChart(t)
+	for _, value := range []string{"agent.tools.kubernetes.endpoint=sensitive-value", "agent.tools.kubernetes={}", "agent.tools.kubernetes=null"} {
+		command := exec.Command("helm", "template", "connector-check", chartDir, "--set", "agent.enable=false", "--set", value)
+		output, err := command.CombinedOutput()
+		if err == nil || bytes.Contains(output, []byte("sensitive-value")) || !bytes.Contains(output, []byte("must use connectors.kubernetes")) {
+			t.Fatalf("obsolete key rejection: err=%v output=%s", err, output)
+		}
+	}
+}
+
+func TestHelmConnectorsWithoutAgentAndSeparateActor(t *testing.T) {
+	requireRenderableChart(t)
+	for _, mode := range []string{"in_cluster", "token", "token_file", "client_certificate", "kubeconfig", "eks", "aks", "gke"} {
+		t.Run(mode, func(t *testing.T) {
+			args := kubernetesModeArgs(mode)
+			args = append(args, "--set", "agent.enable=false", "--set", "connectors.kubernetes.actions.enable=true", "--set-string", "connectors.kubernetes.actions.auth.mode="+mode, "--set-string", "connectors.kubernetes.actions.auth.tokenFile=/run/actor", "--set-string", "connectors.kubernetes.actions.auth.aks.credentialMode=managed_identity")
+			files := renderChartFiles(t, chartScenario{name: "disabled-agent-connector", args: args})
+			directory := t.TempDir()
+			for name, body := range files {
+				if strings.HasSuffix(name, ".yaml") {
+					if err := os.WriteFile(filepath.Join(directory, name), []byte(body), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			loaded, err := loadConfigFromPath(filepath.Join(directory, "config.yaml"))
+			if err != nil || loaded.Agent.Enable || loaded.Connectors.Kubernetes.Auth.Mode != mode || loaded.Connectors.Kubernetes.Actions.Auth.Mode != mode || !loaded.Connectors.Kubernetes.Actions.Enable {
+				t.Fatalf("connector render: %v", err)
+			}
+			if mode == "token_file" && loaded.Connectors.Kubernetes.Auth.TokenFile == loaded.Connectors.Kubernetes.Actions.Auth.TokenFile {
+				t.Fatal("actor credential inherited reader")
+			}
+		})
+	}
 }
 
 // renderChartFiles runs `helm template` for one scenario and returns the config
@@ -232,7 +269,7 @@ func TestHelmChartKubernetesAuthenticationModesAreIsolated(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			configuration := loaded.Agent.Tools.Kubernetes
+			configuration := loaded.Connectors.Kubernetes
 			mode := configuration.Auth.Mode
 			if mode != "eks" && configuration.Auth.EKS != (KubernetesEKSConfig{}) || mode != "aks" && configuration.Auth.AKS != (KubernetesAKSConfig{}) || mode != "gke" && configuration.Auth.GKE != (KubernetesGKEConfig{}) {
 				t.Fatalf("mode %q retained inactive cloud auth: %+v", mode, configuration.Auth)

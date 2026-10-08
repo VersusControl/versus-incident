@@ -1,6 +1,8 @@
 import { expect, test, type Locator } from "@playwright/test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as https from "node:https";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { openApp } from "./helpers";
 import type { KubernetesGraph, KubernetesOverview, KubernetesResourcePage, KubernetesTopPage, KubernetesTraffic, KubernetesUsage } from "../../src/lib/api";
@@ -12,6 +14,63 @@ async function expectNoTopologyPagination(panel: Locator) {
 
 const screenshotDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "screenshots", "kubernetes", "fakekube");
 const defaultKinds = ["Ingress", "Service", "Deployment", "Pod"];
+
+test.beforeEach(async ({ request }, testInfo) => {
+  if (process.env.E2E_KUBERNETES_DOCS !== "1") return;
+  const timelineCapture = testInfo.title === "captures populated timeline";
+  const trafficCapture = testInfo.title === "captures populated traffic";
+  if (!timelineCapture && !trafficCapture) return;
+  test.setTimeout(240_000);
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const api = (endpoint: string) => JSON.parse(execFileSync(path.join(root, "plans/harness-run/harness.sh"), ["api", "enterprise", "GET", endpoint], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  const fake = async (endpoint: string, body?: unknown): Promise<string> => new Promise((resolve, reject) => {
+    const call = https.request(`https://localhost:19443${endpoint}`, { method: body ? "POST" : "GET", ca: fs.readFileSync(path.join(root, "plans/harness-run/.state/fakekube/ca.crt")), headers: body ? { "Content-Type": "application/json" } : {} }, (response) => {
+      let text = "";
+      response.on("data", (chunk) => { text += chunk; });
+      response.on("end", () => response.statusCode === 200 ? resolve(text) : reject(new Error(`fake API HTTP ${response.statusCode}`)));
+    });
+    call.on("error", reject);
+    call.end(body ? JSON.stringify(body) : undefined);
+  });
+  const timeline = async () => {
+    const creations = JSON.parse(fs.readFileSync(path.join(root, "plans/harness-run/config/k8s/populated-changes.json"), "utf8"));
+    expect(creations.map((creation: { name: string }) => creation.name)).toEqual(["checkout-api", "checkout-web", "checkout-worker"]);
+    await expect.poll(() => {
+      api("/api/admin/kubernetes/overview");
+      const changes = api("/api/admin/kubernetes/changes?namespace=shop&limit=100");
+      return changes.sync.state === "ready" && !changes.sync.partial;
+    }, { timeout: 60_000, intervals: [1000, 3000] }).toBe(true);
+    const suffix = Date.now().toString(36);
+    for (const creation of creations) {
+      const timestamp = new Date().toISOString();
+      const name = `${creation.name}-${suffix}`;
+      creation.name = name;
+      creation.object.metadata.name = name;
+      creation.object.metadata.uid = `deployment-${name}-shop`;
+      creation.object.metadata.creationTimestamp = timestamp;
+      creation.object.metadata.labels.app = name;
+      creation.object.metadata.labels["app.kubernetes.io/name"] = name;
+      creation.object.spec.selector.matchLabels.app = name;
+      creation.object.spec.template.metadata.labels.app = name;
+      await fake("/_fake/mutate", creation);
+      await expect.poll(() => api("/api/admin/kubernetes/changes?namespace=shop&limit=100").items.some((item: { name: string; type: string; at: string }) => item.name === name && item.type === "created" && Date.parse(item.at) >= Date.parse(timestamp) - 1000), { timeout: 60_000, intervals: [1000, 3000, 5000] }).toBe(true);
+      console.log(`Live timeline recorded creation: ${name}`);
+    }
+  };
+  const traffic = async () => {
+    await expect.poll(async () => {
+      const metrics = await fake("/_fake/traffic-metrics");
+      expect((await request.post("http://127.0.0.1:19091/metrics/job/kubernetes-populated", { data: metrics, headers: { "Content-Type": "text/plain" } })).ok()).toBe(true);
+      const samples = await request.get("http://127.0.0.1:19090/api/v1/query", { params: { query: 'min(count_over_time(istio_requests_total[15m]))' } });
+      const result = (await samples.json()).data.result;
+      const data = api("/api/admin/kubernetes/traffic?source=istio&window=15m");
+      return Number(result[0]?.value[1] ?? 0) >= 2 && data.available && data.edges.some((edge: { rate_per_sec: number; error_rate: number; p95_ms: number }) => edge.rate_per_sec > 0 && edge.error_rate > 0 && edge.p95_ms > 0);
+    }, { timeout: 120_000, intervals: [1000, 3000, 5000] }).toBe(true);
+    console.log("Live Istio traffic ready: >=2 Prometheus samples and positive request/error/p95 observations.");
+  };
+  if (timelineCapture && process.env.E2E_KUBERNETES_TIMELINE_SEED !== "0") await timeline();
+  if (trafficCapture) await traffic();
+});
 
 async function expectGraphCounts(panel: Locator, data: KubernetesGraph, kinds?: string[]) {
   const nodes = data.nodes.filter((node) => !kinds || kinds.includes(node.kind));
@@ -25,8 +84,7 @@ async function expectDefaultFilters(panel: Locator, data: KubernetesGraph) {
   for (const group of ["Networking", "Workloads", "Configuration"]) {
     await expect(sidebar.locator("summary", { hasText: group })).toBeVisible();
   }
-  await expect(sidebar.getByRole("button", { name: "Refresh topology", exact: true })).toBeVisible();
-  await expect(panel.getByRole("button", { name: "Refresh topology", exact: true })).toHaveCount(1);
+  await expect(panel.getByRole("group", { name: "Topology namespace controls", exact: true }).getByRole("button", { name: "Refresh namespace topology", exact: true })).toBeVisible();
   for (const kind of new Set([...defaultKinds, ...data.nodes.map((node) => node.kind)])) {
     const visible = defaultKinds.includes(kind);
     const toggle = sidebar.getByRole("button", { name: `${visible ? "Hide" : "Show"} ${kind}`, exact: true });
@@ -51,6 +109,326 @@ const captureViews = [
   { id: "releases", label: "Helm" },
   { id: "gitops", label: "GitOps" },
 ] as const;
+
+for (const viewport of [
+  { name: "desktop", width: 1440, height: 1100, deviceScaleFactor: 2 },
+  { name: "mobile", width: 390, height: 844, deviceScaleFactor: 1 },
+]) {
+  test.describe(`Kubernetes populated documentation ${viewport.name}`, () => {
+    test.use({ viewport: { width: viewport.width, height: viewport.height }, deviceScaleFactor: viewport.deviceScaleFactor });
+    test.skip(process.env.E2E_KUBERNETES_BACKEND !== "fake", "requires the harness fake Kubernetes backend");
+    test.skip(process.env.E2E_KUBERNETES_DOCS !== "1", "opt-in populated documentation fixture contract");
+
+    for (const view of ["timeline", "releases", "gitops", "traffic", "topology"] as const) {
+      test(`captures populated ${view}`, async ({ page }) => {
+        if (view === "topology" && viewport.name === "desktop") await page.setViewportSize({ width: 1600, height: 1000 });
+        const endpoint = { timeline: "changes", releases: "releases", gitops: "gitops/apps", traffic: "traffic", topology: "resources" }[view];
+        const loaded = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/admin/kubernetes/${endpoint}`);
+        const rolloutsLoaded = view === "gitops" ? page.waitForResponse((response) => new URL(response.url()).pathname === "/api/admin/kubernetes/rollouts") : null;
+        await openApp(page, `/agent/kubernetes?view=${view}`);
+        const response = await loaded;
+        const rolloutResponse = rolloutsLoaded ? await rolloutsLoaded : null;
+        expect(response.status()).toBe(200);
+        const data = await response.json();
+        const panel = page.locator("#kubernetes-view-panel");
+        await expect(panel).toBeVisible();
+        const capture = async (name: string) => {
+          await expect(panel.getByText(/^Loading/i)).toHaveCount(0);
+          await expect(panel).not.toContainText(/not detected|no projected changes|no Helm release labels|no service flows/i);
+          if (view !== "traffic") await expect(panel).not.toContainText(/unavailable/i);
+          expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+          await page.locator("main").evaluate((main) => main.scrollTo({ top: 0 }));
+          fs.mkdirSync(screenshotDir, { recursive: true });
+          const image = await page.screenshot({ path: path.join(screenshotDir, `docs-${name}-${viewport.name}.png`), animations: "disabled", scale: "device" });
+          expect(image.readUInt32BE(16)).toBe(page.viewportSize()!.width * viewport.deviceScaleFactor);
+          expect(image.readUInt32BE(20)).toBe(page.viewportSize()!.height * viewport.deviceScaleFactor);
+        };
+        if (view === "topology") {
+          expect(data.items.length, "namespace inventory must be populated").toBeGreaterThan(0);
+          const controls = panel.getByRole("group", { name: "Topology namespace controls", exact: true });
+          await expect(controls.getByRole("combobox", { name: "Topology namespace", exact: true })).toHaveValue("");
+          await expect(controls.getByRole("button", { name: "Refresh namespaces", exact: true })).toBeInViewport();
+          const shop = panel.getByRole("button", { name: "Open namespace shop topology", exact: true });
+          if (viewport.name === "mobile") await shop.scrollIntoViewIfNeeded();
+          await expect(shop).toBeInViewport();
+          await capture("namespaces");
+          const graphLoaded = page.waitForResponse((result) => new URL(result.url()).pathname === "/api/admin/kubernetes/graph");
+          await shop.click();
+          const graphResponse = await graphLoaded;
+          expect(graphResponse.status()).toBe(200);
+          const graph: KubernetesGraph = await graphResponse.json();
+          expect(graph.nodes.length).toBeGreaterThan(0);
+          expect(graph.edges.length).toBeGreaterThan(0);
+          expect(graph.sync.partial).toBe(false);
+          expect(graph.truncated ?? false).toBe(false);
+          expect(graph.partial_failures ?? []).toEqual([]);
+          expect(Object.values(graph.omitted ?? {}).some((count) => count > 0)).toBe(false);
+          expect(graph.next ?? "").toBe("");
+          await expect(controls.getByRole("combobox", { name: "Topology namespace", exact: true })).toHaveValue("shop");
+          await expect(controls.getByRole("button", { name: "Refresh namespace topology", exact: true })).toBeInViewport();
+          expect(await controls.evaluate((group) => {
+            const boxes = [...group.querySelectorAll("button, select")].map((control) => control.getBoundingClientRect());
+            return boxes.every((box, index) => box.left >= 0 && box.right <= window.innerWidth && boxes.slice(index + 1).every((other) => box.right <= other.left || other.right <= box.left || box.bottom <= other.top || other.bottom <= box.top));
+          }), "namespace selection, back, and refresh controls must not overlap or overflow").toBe(true);
+          await expect(panel.locator("button[data-node-id]")).toHaveCount(graph.nodes.filter((node) => defaultKinds.includes(node.kind)).length);
+          await expectDefaultFilters(panel, graph);
+          await expectGraphCounts(panel, graph, defaultKinds);
+          await expectNoTopologyPagination(panel);
+          await expect(panel.getByText(/^Loading/i)).toHaveCount(0);
+          await expect(panel.getByRole("alert")).toHaveCount(0);
+          const graphViewport = panel.getByLabel("Scrollable topology graph", { exact: true });
+          const scale = () => graphViewport.locator("div[style*='transform: scale']").evaluate((element) => new DOMMatrix(getComputedStyle(element).transform).a);
+          await panel.getByRole("button", { name: "Fit topology to view", exact: true }).click();
+          if (viewport.name === "mobile") {
+            for (const control of [controls.getByRole("button", { name: "Namespaces", exact: true }), controls.getByRole("combobox"), controls.getByRole("button", { name: "Refresh namespace topology", exact: true }), ...await panel.getByRole("group", { name: "Topology view controls", exact: true }).getByRole("button").all()]) {
+              await control.scrollIntoViewIfNeeded();
+              await expect(control).toBeInViewport({ ratio: 1 });
+            }
+            for (let step = 0; step < 10 && await scale() < 1; step++) await panel.getByRole("button", { name: "Zoom in topology", exact: true }).click();
+            expect(await scale(), "mobile graph must use readable internal zoom").toBeGreaterThanOrEqual(1);
+            await graphViewport.scrollIntoViewIfNeeded();
+            await expect(graphViewport.locator("button[data-node-id]").first()).toBeInViewport({ ratio: 1 });
+            await panel.getByRole("button", { name: "Pan topology right", exact: true }).click();
+            expect(await graphViewport.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+            expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+            return;
+          }
+          expect(await scale(), "desktop graph must not shrink node names below readable size").toBeGreaterThanOrEqual(0.9);
+          const selectedNodes = graph.nodes.filter((node) => defaultKinds.includes(node.kind));
+          const selectedIds = new Set(selectedNodes.map((node) => node.id));
+          await expect(graphViewport.locator("button[data-node-id]")).toHaveCount(selectedNodes.length);
+          await expect(graphViewport.locator("svg g[data-edge-from][data-edge-to]")).toHaveCount(graph.edges.filter((edge) => selectedIds.has(edge.from) && selectedIds.has(edge.to)).length);
+          await page.locator("main").evaluate((main) => main.scrollTo({ top: 0 }));
+          for (const control of [controls, panel.getByRole("group", { name: "Topology view controls", exact: true }), panel.getByLabel("Relationship key", { exact: true })]) await expect(control).toBeInViewport({ ratio: 1 });
+          const geometryFailures = await graphViewport.evaluate((viewport) => {
+            const bounds = viewport.getBoundingClientRect();
+            const nodes = [...viewport.querySelectorAll<HTMLButtonElement>("button[data-node-id]")];
+            const edges = [...viewport.querySelectorAll<SVGGElement>("svg g[data-edge-from][data-edge-to]")];
+            const failures: string[] = [];
+            for (const node of nodes) {
+              const box = node.getBoundingClientRect();
+              if (box.left < bounds.left || box.right > bounds.right || box.top < bounds.top || box.bottom > bounds.bottom || box.top < 0 || box.bottom > window.innerHeight) failures.push(`clipped node: ${node.title}`);
+              for (const text of node.querySelectorAll<HTMLElement>("span")) if (text.scrollWidth > text.clientWidth) failures.push(`truncated node text: ${node.title}`);
+            }
+            for (const edge of edges) {
+              const label = edge.querySelector("rect")?.getBoundingClientRect();
+              if (!label) { failures.push("missing relationship label"); continue; }
+              if (label.left < bounds.left || label.right > bounds.right || label.top < bounds.top || label.bottom > bounds.bottom) failures.push(`clipped label: ${edge.textContent}`);
+              for (const node of nodes) {
+                const box = node.getBoundingClientRect();
+                if (label.left < box.right && label.right > box.left && label.top < box.bottom && label.bottom > box.top) failures.push(`label overlaps node: ${edge.textContent} / ${node.title}`);
+              }
+              for (const other of edges.filter((candidate) => candidate !== edge)) {
+                const curve = other.querySelector<SVGPathElement>("path");
+                const matrix = curve?.getScreenCTM();
+                if (!curve || !matrix) continue;
+                const length = curve.getTotalLength();
+                for (let distance = 0; distance <= length; distance += 1) {
+                  const point = curve.getPointAtLength(distance).matrixTransform(matrix);
+                  if (point.x > label.left && point.x < label.right && point.y > label.top && point.y < label.bottom) {
+                    failures.push(`edge ${other.textContent} crosses label ${edge.textContent}`);
+                    break;
+                  }
+                }
+              }
+            }
+            return failures;
+          });
+          expect(geometryFailures, "reject intrinsic routing overlaps; do not conceal them with capture styling").toEqual([]);
+          await capture("topology");
+          return;
+        }
+        if (view === "traffic") {
+          expect(data.available, "real traffic contributor must be connected").toBe(true);
+          expect(data.edges.length, "observed service flows must be populated").toBeGreaterThan(0);
+          const flow = data.edges[0];
+          for (const field of ["rate_per_sec", "error_rate", "p95_ms"]) expect(typeof flow[field], `${field} must be observed`).toBe("number");
+          expect(data.edges.some((edge: { rate_per_sec: number; error_rate: number; p95_ms: number }) => edge.rate_per_sec > 0 && edge.error_rate > 0 && edge.p95_ms > 0)).toBe(true);
+          expect(data.source).toBe("istio");
+          expect(data.window).toBe("15m0s");
+          console.log(`Observed Istio traffic: ${JSON.stringify(data.edges)}`);
+          await expect(panel).toContainText(flow.from.name);
+          await expect(panel).toContainText(flow.to.name);
+        } else {
+          expect(data.items.length, `${view} real fixture inventory must be populated`).toBeGreaterThan(0);
+          const item = data.items[0];
+          await expect(panel).toContainText(item.name);
+          if (view === "timeline") {
+            expect(data.items.length, "timeline must contain multiple genuinely recorded changes").toBeGreaterThan(1);
+            if (process.env.E2E_KUBERNETES_TIMELINE_SEED !== "0") {
+              for (const name of ["checkout-api", "checkout-web", "checkout-worker"]) expect(data.items.some((change: { name: string; type: string }) => change.name.startsWith(`${name}-`) && change.type === "created")).toBe(true);
+            }
+            for (const change of data.items) {
+              expect(change.name).toBeTruthy();
+              expect(change.type).toBeTruthy();
+              expect(Number.isFinite(Date.parse(change.at))).toBe(true);
+            }
+            expect(item.type).toBeTruthy();
+            expect(item.at).toBeTruthy();
+            await expect(panel.getByRole("button", { name: new RegExp(`${item.kind} ${item.name}`) }).first()).toBeVisible();
+          }
+          if (view === "releases") {
+            expect(item.current.revision).toBeGreaterThanOrEqual(2);
+            expect(item.current.status).toBeTruthy();
+            await panel.locator("article").first().getByRole("button").click();
+            await expect(panel).toContainText(`Revision ${item.current.revision}`);
+            await expect(panel).toContainText("Revision 1");
+            await expect(panel).toContainText(item.current.status);
+          }
+          if (view === "gitops") {
+            expect(data.available).toBe(true);
+            expect(data.items.length, "GitOps must expose at least two discovered apps").toBeGreaterThanOrEqual(2);
+            expect(item.sync).toBeTruthy();
+            expect(item.health).toBeTruthy();
+            for (const app of data.items) {
+              expect(app.revision).toBeTruthy();
+              expect(app.sync).toBeTruthy();
+              expect(app.health).toBeTruthy();
+              await expect(panel).toContainText(app.revision);
+            }
+            await expect(panel).toContainText(item.sync);
+            await expect(panel).toContainText(item.health);
+            expect(rolloutResponse!.status()).toBe(200);
+            const rollouts = await rolloutResponse!.json();
+            expect(rollouts.available).toBe(true);
+            expect(rollouts.items.length, "discovered Rollouts must be populated").toBeGreaterThan(0);
+            await expect(panel.getByRole("region", { name: "Argo Rollouts", exact: true })).toContainText(rollouts.items[0].name);
+            const rollout = rollouts.items[0];
+            expect(rollout.weight).toBe(50);
+            expect(rollout.strategy).toBe("canary");
+            expect(rollout.stable_rs).toBe("checkout-stable");
+            expect(rollout.canary_rs).toBe("checkout-canary");
+            const region = panel.getByRole("region", { name: "Argo Rollouts", exact: true });
+            for (const value of ["50%", rollout.strategy, rollout.stable_rs, rollout.canary_rs]) await expect(region).toContainText(value);
+            const resource = await page.request.get(`/api/admin/kubernetes/resources/argoproj.io~v1alpha1~rollouts/${rollout.name}/describe?namespace=${rollout.namespace}`);
+            expect(resource.ok()).toBe(true);
+            const actual = await resource.json();
+            expect(actual.resource.summary.rollout_stable_rs).toBe(rollout.stable_rs);
+            expect(actual.resource.summary.rollout_canary_rs).toBe(rollout.canary_rs);
+            expect(actual.resource.summary.replicas).toBe(4);
+            expect(actual.resource.summary.updatedReplicas).toBe(2);
+            expect(actual.resource.summary.readyReplicas).toBe(4);
+            console.log(`Observed GitOps apps and rollout: ${JSON.stringify({ apps: data.items, rollout, replicas: actual.resource.summary })}`);
+          }
+        }
+        await capture(view === "releases" ? "helm" : view);
+      });
+    }
+  });
+}
+
+test.describe("Kubernetes documentation consumer", () => {
+  const docsURL = process.env.E2E_KUBERNETES_DOCS_URL;
+  test.skip(!docsURL, "requires an existing local Docsify server");
+  for (const viewport of [
+    { name: "desktop", width: 1440, height: 1000 },
+    { name: "mobile", width: 390, height: 844 },
+  ]) {
+    test(`loads published Kubernetes images ${viewport.name}`, async ({ page }) => {
+      const target = new URL(docsURL!);
+      expect(["localhost", "127.0.0.1", "[::1]"]).toContain(target.hostname);
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto(`${target.origin}/#/agent/connectors/kubernetes`);
+      await expect(page.getByRole("heading", { name: "Kubernetes Connector and Dashboard", exact: true })).toBeVisible();
+      const sidebar = page.locator(".sidebar-nav");
+      const groups = sidebar.locator(":scope > ul > li > .nav-section-toggle");
+      await expect.poll(() => groups.count()).toBeGreaterThan(1);
+      for (const group of await groups.all()) {
+        const open = ["AI SRE Agent", "Connectors"].includes((await group.innerText()).trim());
+        await expect(group).toHaveAttribute("aria-expanded", String(open));
+        expect(await group.evaluate((button) => button.parentElement!.querySelector<HTMLUListElement>(":scope > ul")!.hidden)).toBe(!open);
+      }
+      for (const nested of await sidebar.locator(".nav-sub-toggle").all()) await expect(nested).toHaveAttribute("aria-expanded", "false");
+      if (viewport.name === "mobile") await page.locator("#menuToggle").click();
+      const agent = sidebar.getByRole("button", { name: "AI SRE Agent", exact: true });
+      await agent.click();
+      await expect(agent).toHaveAttribute("aria-expanded", "false");
+      await agent.press("Enter");
+      await expect(agent).toHaveAttribute("aria-expanded", "true");
+      const connectors = sidebar.getByRole("button", { name: "Connectors", exact: true });
+      await connectors.click();
+      await expect(connectors).toHaveAttribute("aria-expanded", "false");
+      await sidebar.locator(":scope > ul > li").filter({ has: page.getByRole("button", { name: "AI SRE Agent", exact: true }) }).getByRole("link", { name: "Configuration", exact: true }).click();
+      await expect(page).toHaveURL(/#\/agent\/configuration$/);
+      await expect(page.locator(".markdown-section h1")).toContainText(/configuration/i);
+      await expect(sidebar.getByRole("button", { name: "Connectors", exact: true })).toHaveAttribute("aria-expanded", "false");
+      await page.goto(`${target.origin}/#/examples/eks-irsa-kubernetes-reader`);
+      await expect(sidebar.getByRole("button", { name: "Examples", exact: true })).toHaveAttribute("aria-expanded", "true");
+      await page.locator(".markdown-section").getByRole("link", { name: "Kubernetes connector reference", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Kubernetes Connector and Dashboard", exact: true })).toBeVisible();
+      await expect(sidebar.getByRole("button", { name: "Connectors", exact: true })).toHaveAttribute("aria-expanded", "true");
+      await page.goto(`${target.origin}/#/enterprise/sso/google`);
+      await expect(sidebar.locator('a.active[href="#/enterprise/sso/google"]')).toHaveCount(1);
+      await expect(sidebar.getByRole("button", { name: "Enterprise SRE Agent", exact: true })).toHaveAttribute("aria-expanded", "true");
+      await expect(sidebar.getByRole("button", { name: "Single Sign-On (SSO)", exact: true })).toHaveAttribute("aria-expanded", "true");
+      await page.goto(`${target.origin}/#/agent/connectors/kubernetes`);
+      await expect(page.getByRole("heading", { name: "Kubernetes Connector and Dashboard", exact: true })).toBeVisible();
+      for (const name of ["timeline", "helm", "gitops", "traffic", "namespaces", "topology"]) {
+        const image = page.locator(`.markdown-section img[src$="kubernetes-harness-${name}.png"]`);
+        await image.scrollIntoViewIfNeeded();
+        await expect(image).toBeVisible();
+        await expect.poll(() => image.evaluate((element) => {
+          const bitmap = element as HTMLImageElement;
+          return bitmap.complete && bitmap.naturalWidth > 0 && bitmap.naturalHeight > 0;
+        })).toBe(true);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      await page.screenshot({ path: path.join(screenshotDir, `docs-consumer-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+      await page.goto(`${target.origin}/#/agent/tools/kubernetes`);
+      await expect(page.getByRole("heading", { name: "Kubernetes Connector and Dashboard", exact: true })).toBeVisible();
+    });
+
+    test(`reveals active documentation item on navigation and reload ${viewport.name}`, async ({ page }) => {
+      const target = new URL(docsURL!);
+      expect(["localhost", "127.0.0.1", "[::1]"]).toContain(target.hostname);
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      const sidebar = page.locator(".sidebar-nav");
+      const expectCurrentVisible = async (route: string, groups: string[]) => {
+        const active = sidebar.locator(`a[href="#${route}"]`);
+        for (const group of groups) await expect(sidebar.getByRole("button", { name: group, exact: true })).toHaveAttribute("aria-expanded", "true");
+        await expect(active).toHaveClass(/active/);
+        await expect(active).toHaveAttribute("aria-current", "page");
+        await expect.poll(() => active.evaluate((link) => {
+          const menu = link.closest(".sidebar-nav")!;
+          const bounds = menu.getBoundingClientRect();
+          const item = link.getBoundingClientRect();
+          return item.top >= bounds.top - 1 && item.bottom <= bounds.bottom + 1;
+        })).toBe(true);
+        if (viewport.name === "mobile") {
+          await page.locator("#menuToggle").click();
+          await expect(active).toBeInViewport({ ratio: 1 });
+          await page.locator("#menuToggle").click();
+        } else await expect(active).toBeInViewport({ ratio: 1 });
+      };
+      await page.goto(`${target.origin}/#/introduction`);
+      await expect(page.locator(".markdown-section h1")).toBeVisible();
+      await page.evaluate(() => { location.hash = "/agent/regex"; });
+      await expect(page.getByRole("heading", { name: "Regex", exact: true })).toBeVisible();
+      await expectCurrentVisible("/agent/regex", ["Core Concept"]);
+      expect(await sidebar.evaluate((menu) => menu.scrollTop)).toBeGreaterThan(0);
+      await page.reload();
+      await expect(page.getByRole("heading", { name: "Regex", exact: true })).toBeVisible();
+      await expectCurrentVisible("/agent/regex", ["Core Concept"]);
+      expect(await page.locator(".content").evaluate((content) => content.scrollTop)).toBe(0);
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      if (viewport.name === "mobile") await page.locator("#menuToggle").click();
+      await page.screenshot({ path: path.join(screenshotDir, `docs-active-regex-reload-${viewport.name}.png`), animations: "disabled" });
+      await sidebar.getByRole("button", { name: "Core Concept", exact: true }).click();
+      await page.evaluate(() => { location.hash = "/agent/regex?id=regex"; });
+      await expect(sidebar.getByRole("button", { name: "Core Concept", exact: true })).toHaveAttribute("aria-expanded", "false");
+      await page.goto(`${target.origin}/#/enterprise/sso/google`);
+      await expect(page.locator(".markdown-section h1")).toBeVisible();
+      await expectCurrentVisible("/enterprise/sso/google", ["Enterprise SRE Agent", "Single Sign-On (SSO)"]);
+      await page.reload();
+      await expect(page.locator(".markdown-section h1")).toBeVisible();
+      await expectCurrentVisible("/enterprise/sso/google", ["Enterprise SRE Agent", "Single Sign-On (SSO)"]);
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      if (viewport.name === "mobile") await page.locator("#menuToggle").click();
+      await page.screenshot({ path: path.join(screenshotDir, `docs-active-sidebar-${viewport.name}.png`), animations: "disabled" });
+    });
+  }
+});
 
 test.describe("Live Kubernetes explorer captures", () => {
   test.skip(process.env.E2E_KUBERNETES_BACKEND !== "fake", "requires the harness fake Kubernetes backend");
@@ -266,8 +644,9 @@ test.describe("Live Kubernetes explorer captures", () => {
         }
       });
     }
-    test(`captures logs ${viewport.name}`, async ({ page }) => {
+    test(`captures logs ${viewport.name}`, async ({ page, context }) => {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await context.grantPermissions(["clipboard-read", "clipboard-write"]);
       await openApp(page, "/agent/kubernetes?view=overview");
       await expect(page.getByText("Nodes ready 0/1")).toBeVisible();
       await page.getByLabel("Workload namespace").fill("payments");
@@ -279,9 +658,28 @@ test.describe("Live Kubernetes explorer captures", () => {
       await expect(detail.getByText("No object-scoped events were returned.", { exact: true })).toBeVisible();
       fs.mkdirSync(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `drawer-events-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+      const streamRequest = page.waitForRequest((request) => new URL(request.url()).pathname.endsWith("/logs/stream"));
       await detail.getByRole("tab", { name: "Logs", exact: true }).click();
-      await expect(detail.locator("pre")).toContainText("REDACTED");
+      expect(new URL((await streamRequest).url()).searchParams.get("timestamps")).toBe("false");
+      const output = detail.getByLabel("Pod log output");
+      await expect(output).toContainText("REDACTED");
       await expect(detail).not.toContainText("super-secret-value");
+      await detail.getByLabel("Pause logs").click();
+      const timestampPattern = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g;
+      for (const enabled of [true, false, true]) {
+        await detail.getByLabel("Timestamps").setChecked(enabled);
+        const rendered = (await output.locator("[data-log-key]").allTextContents()).map((line) => line.replace(/\n$/, "")).join("\n");
+        const lines = rendered.split("\n");
+        expect(lines.length).toBeGreaterThan(0);
+        for (const line of lines) expect(line.match(timestampPattern) ?? []).toHaveLength(enabled ? 1 : 0);
+        await detail.getByLabel("Copy scrubbed logs").click();
+        expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(rendered);
+        const download = page.waitForEvent("download");
+        await detail.getByLabel("Download scrubbed logs").click();
+        const file = await download;
+        expect(file.suggestedFilename()).toBe("checkout-api-0-logs.txt");
+        expect(fs.readFileSync((await file.path())!, "utf8")).toBe(rendered);
+      }
       fs.mkdirSync(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `logs-${viewport.name}.png`), fullPage: true, animations: "disabled" });
     });
@@ -420,6 +818,73 @@ for (const format of [
     }
   });
 }
+
+test.describe("Inventory overview acceptance", () => {
+  test.skip(process.env.E2E_KUBERNETES_BACKEND !== "fake", "requires the real harness fake Kubernetes backend");
+
+  for (const viewport of [{ name: "desktop", width: 1440, height: 1100 }, { name: "mobile", width: 390, height: 844 }]) {
+    test(`uses inventory counts and a fixed schematic without graph reads ${viewport.name}`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      const graphReads: URL[] = [];
+      page.on("request", (request) => {
+        const url = new URL(request.url());
+        if (/\/kubernetes\/(?:graph|overview\/graph)/.test(url.pathname)) graphReads.push(url);
+      });
+      await openApp(page, "/agent/kubernetes?view=overview");
+      const panel = page.getByRole("region", { name: "Overview topology", exact: true });
+      const schematic = panel.getByRole("img", { name: "Kubernetes relationship schematic", exact: true });
+      await expect(schematic).toBeVisible();
+      await expect(schematic).toHaveAttribute("viewBox", "0 0 700 370");
+      await expect(schematic.locator('[data-topology-role="namespace"]')).toHaveCount(2);
+      await expect(schematic.locator('[data-topology-role="pod"]')).toHaveCount(4);
+      await expect(panel).toContainText("not observed cluster edges");
+      await expect(panel.locator("[data-node-id]")).toHaveCount(0);
+      const inventoryCounts: Record<string, number> = {};
+      for (const [kind, resourceId] of Object.entries({ Namespace: "core~v1~namespaces", Node: "core~v1~nodes", Pod: "core~v1~pods", Service: "core~v1~services", Deployment: "apps~v1~deployments" })) {
+        let cursor = "";
+        let count = 0;
+        do {
+          const response = await page.request.get("/api/admin/kubernetes/resources", { params: { resource_id: resourceId, limit: "200", ...(cursor ? { cursor } : {}) } });
+          expect(response.status()).toBe(200);
+          const data: KubernetesResourcePage = await response.json();
+          expect(data.sync.partial).toBe(false);
+          count += data.items.length;
+          cursor = data.next || "";
+        } while (cursor);
+        inventoryCounts[kind] = count;
+        const term = panel.getByLabel("Cluster resource counts").locator("dt").filter({ hasText: new RegExp(`^${kind}$`) });
+        await expect(term.locator("..").locator("dd")).toHaveText(count.toLocaleString());
+      }
+      expect(inventoryCounts.Pod).toBeGreaterThan(4);
+      await expect(schematic.locator('[data-topology-role="namespace"]')).toHaveCount(2);
+      await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+      await expect(schematic).toBeVisible();
+      expect(graphReads).toEqual([]);
+      await panel.scrollIntoViewIfNeeded();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      await page.screenshot({ path: path.join(screenshotDir, `inventory-overview-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+      await testInfo.attach("inventory-counts", { body: JSON.stringify(inventoryCounts), contentType: "application/json" });
+      await panel.getByRole("button", { name: "View all relationships", exact: true }).click();
+      await expect(page.getByRole("tab", { name: "Topology", exact: true })).toHaveAttribute("aria-selected", "true");
+      const topology = page.getByRole("region", { name: "Kubernetes topology", exact: true });
+      await expect(topology.getByRole("group", { name: "Namespace blocks", exact: true })).toBeVisible();
+      expect(graphReads).toEqual([]);
+      const namespace = process.env.E2E_KUBERNETES_DOCS === "1" ? "shop" : "payments";
+      const loaded = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/admin/kubernetes/graph");
+      await topology.getByRole("button", { name: `Open namespace ${namespace} topology`, exact: true }).click();
+      const response = await loaded;
+      expect(response.status()).toBe(200);
+      const graph: KubernetesGraph = await response.json();
+      expect(graph.nodes.length).toBeGreaterThan(0);
+      expect(graph.nodes.every((node) => !node.namespace || node.namespace === namespace)).toBe(true);
+      await expectDefaultFilters(topology, graph);
+      for (const url of graphReads) expect(Object.fromEntries(url.searchParams)).toEqual({ namespace, complete: "true", connected_only: "true" });
+      await topology.getByRole("button", { name: "Namespaces", exact: true }).click();
+      await expect(topology.getByRole("group", { name: "Namespace blocks", exact: true })).toBeVisible();
+    });
+  }
+});
 
 test.describe("Kubernetes repaired snapshot delta", () => {
   test.skip(process.env.E2E_KUBERNETES_BACKEND !== "fake", "requires the harness fake Kubernetes backend");
@@ -866,6 +1331,504 @@ test.describe("Kubernetes repaired snapshot delta", () => {
       expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
       fs.mkdirSync(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `delta-topology-large-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+    });
+  }
+});
+
+test.describe("Live Pod stream acceptance", () => {
+  test.skip(process.env.E2E_KUBERNETES_BACKEND !== "fake", "requires the real harness fake Kubernetes backend");
+  type Counter = { path: string; container: string; previous: boolean; follow: boolean; requests: number; active: number; cancelled: number; completed: number; disconnected: number; unavailable: number; chunks: number; since_time?: string };
+  const logPath = "/api/v1/namespaces/payments/pods/checkout-api-0/log";
+  const ca = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/.state/fakekube/ca.crt");
+  const counters = () => new Promise<Counter[]>((resolve, reject) => {
+    const request = https.get("https://localhost:19443/_fake/log-streams", { ca: fs.readFileSync(ca), timeout: 5000 }, (response) => {
+      let body = "";
+      response.on("data", (chunk) => { body += chunk; });
+      response.on("end", () => {
+        if (response.statusCode !== 200) return reject(new Error(`observer status ${response.statusCode}`));
+        try { resolve(JSON.parse(body)); } catch (failure) { reject(failure); }
+      });
+      response.on("error", reject);
+    });
+    request.on("timeout", () => request.destroy(new Error("observer timeout")));
+    request.on("error", reject);
+  });
+  const current = async (container = "api", previous = false) => (await counters()).find((counter) => counter.path === logPath && counter.container === container && counter.previous === previous && counter.follow === !previous);
+  const active = async () => (await counters()).filter((counter) => counter.path === logPath).reduce((total, counter) => total + counter.active, 0);
+  const control = (container: string, options: { disconnect_after_chunks?: number; remaining?: number; previous_available?: boolean } = {}) => new Promise<void>((resolve, reject) => {
+    const body = JSON.stringify({ path: logPath, container, ...options });
+    const request = https.request("https://localhost:19443/_fake/log-streams", { method: "POST", ca: fs.readFileSync(ca), timeout: 5000, headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } }, (response) => {
+      response.resume();
+      response.on("end", () => response.statusCode === 200 ? resolve() : reject(new Error(`observer control status ${response.statusCode}`)));
+      response.on("error", reject);
+    });
+    request.on("timeout", () => request.destroy(new Error("observer control timeout")));
+    request.on("error", reject);
+    request.end(body);
+  });
+  const rawSecrets = /(?:super|split|previous|synthetic-oversized)-secret-value|synthetic-record-padding/;
+
+  test.afterEach(async ({ page }) => {
+    await page.goto("about:blank");
+    for (const container of ["api", "sidecar", "setup", "debug"]) await control(container);
+    await expect.poll(active).toBe(0);
+  });
+
+  for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: "mobile", width: 390, height: 844 }]) {
+    test(`live arriving lines, checkpoints, exports, and upstream cancellation ${viewport.name}`, async ({ page, context }, testInfo) => {
+      test.setTimeout(90_000);
+      await page.setViewportSize(viewport);
+      await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+      const requests: URL[] = [];
+      page.on("request", (request) => { if (new URL(request.url()).pathname.endsWith("/logs/stream")) requests.push(new URL(request.url())); });
+      await openApp(page, "/agent/kubernetes?r=core~v1~pods/payments/checkout-api-0&tab=logs");
+      const detail = page.getByRole("dialog", { name: "Details panel" });
+      const output = detail.getByLabel("Pod log output");
+      const lines = output.locator("[data-log-key]");
+      await expect(output).toContainText("REDACTED");
+      await expect(output).toContainText("fakekube follow line 30");
+      await expect(output).toContainText("[oversized log line omitted]");
+      await expect(output).not.toContainText(rawSecrets);
+      const repeated = lines.filter({ hasText: "fakekube repeated identical line" });
+      await expect(repeated).toHaveCount(2);
+      const beforePause = await current();
+      expect(beforePause?.active).toBe(1);
+      expect(beforePause!.chunks).toBeGreaterThan(35);
+      await detail.getByLabel("Pause logs").click();
+      await expect(detail.getByLabel("Log connection status")).toHaveText("paused");
+      await expect.poll(active).toBe(0);
+      expect((await current())!.cancelled).toBeGreaterThan(beforePause!.cancelled);
+      const pausedKeys = await lines.evaluateAll((elements) => elements.map((element) => element.getAttribute("data-log-key")));
+      for (const enabled of [false, true, false]) {
+        await detail.getByLabel("Timestamps").setChecked(enabled);
+        const rendered = (await lines.allTextContents()).map((line) => line.replace(/\n$/, "")).join("\n");
+        expect(rendered).not.toMatch(rawSecrets);
+        expect(rendered).toContain("[oversized log line omitted]");
+        expect(rendered).toContain("fakekube follow line 30");
+        for (const line of rendered.split("\n")) expect(line.match(/2026-01-01T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g) ?? []).toHaveLength(enabled ? 1 : 0);
+        await detail.getByLabel("Copy scrubbed logs").click();
+        expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(rendered);
+        const downloaded = page.waitForEvent("download");
+        await detail.getByLabel("Download scrubbed logs").click();
+        const file = await downloaded;
+        expect(fs.readFileSync((await file.path())!, "utf8")).toBe(rendered);
+      }
+      await detail.getByLabel("Resume logs").click();
+      await expect.poll(() => requests.at(-1)?.searchParams.has("cursor")).toBe(true);
+      expect(requests.at(-1)!.searchParams.has("since_seconds")).toBe(false);
+      expect(requests.at(-1)!.searchParams.has("tail_lines")).toBe(false);
+      await expect.poll(() => lines.count()).toBeGreaterThan(pausedKeys.length);
+      await expect(repeated).toHaveCount(2);
+      expect((await lines.evaluateAll((elements) => elements.map((element) => element.getAttribute("data-log-key")))).slice(0, pausedKeys.length)).toEqual(pausedKeys);
+      expect((await current())!.since_time).toBeTruthy();
+      await detail.getByLabel("Follow", { exact: true }).uncheck();
+      await expect(detail.getByLabel("Follow", { exact: true })).not.toBeChecked();
+      await output.evaluate((element) => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll")); });
+      const heldKeys = await lines.count();
+      await expect.poll(() => lines.count()).toBeGreaterThan(heldKeys + 3);
+      expect(await output.evaluate((element) => element.scrollTop)).toBeLessThanOrEqual(1);
+      await detail.getByLabel("Wrap lines").uncheck();
+      await expect(output).toHaveClass(/whitespace-pre(?!-wrap)/);
+      await detail.getByLabel("Wrap lines").check();
+      await detail.getByLabel("Log filter").fill("fakekube follow line");
+      await expect(output).not.toContainText("repeated identical");
+      await detail.getByLabel("Log filter").fill(".");
+      await expect(output).toHaveText("No log lines match this filter.");
+      await detail.getByLabel("Log filter").fill("");
+      await detail.getByLabel("Follow", { exact: true }).check();
+      await detail.getByLabel("Scroll logs to bottom").click();
+      await expect.poll(() => output.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThanOrEqual(48);
+      await output.evaluate((element) => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll")); });
+      const scrolledKeys = await lines.count();
+      await expect.poll(() => lines.count()).toBeGreaterThan(scrolledKeys + 3);
+      expect(await output.evaluate((element) => element.scrollTop)).toBeLessThanOrEqual(1);
+      await detail.getByLabel("Scroll logs to bottom").click();
+      const beforeChange = (await current())!.cancelled;
+      await detail.getByLabel("Log since seconds").selectOption("60");
+      await expect.poll(() => requests.at(-1)?.searchParams.get("since_seconds")).toBe("60");
+      await expect.poll(async () => (await current())!.cancelled).toBeGreaterThan(beforeChange);
+      await detail.getByLabel("Log tail lines").selectOption("100");
+      await expect.poll(() => requests.at(-1)?.searchParams.get("tail_lines")).toBe("100");
+      const containers = await detail.getByLabel("Log container").locator("option").evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value));
+      expect(containers).toEqual(["api", "sidecar", "setup", "debug"]);
+      await expect(detail.getByLabel("Log container").locator("option")).toHaveText(["api (regular)", "sidecar (regular)", "setup (init)", "debug (ephemeral)"]);
+      await expect.poll(async () => (await current())?.active).toBe(1);
+      const switched = (await current())!.cancelled;
+      const alternative = "sidecar";
+      const sidecarRequests = (await current(alternative))?.requests ?? 0;
+      await detail.getByLabel("Log container").selectOption(alternative);
+      await expect.poll(() => requests.at(-1)?.searchParams.get("container")).toBe(alternative);
+      await expect.poll(async () => (await current())!.active).toBe(0);
+      expect((await current())!.cancelled).toBeGreaterThan(switched);
+      await expect.poll(async () => (await current(alternative))?.requests ?? 0).toBeGreaterThan(sidecarRequests);
+      await expect.poll(async () => (await current(alternative))?.active).toBe(1);
+      await expect(output).toContainText("container=sidecar");
+      await detail.getByLabel("Previous container logs").check();
+      await expect(detail.getByLabel("Log connection status")).toHaveText("ended");
+      await expect(output).toContainText("fakekube previous");
+      await expect(output).not.toContainText(rawSecrets);
+      await expect.poll(active).toBe(0);
+      expect((await current(alternative, true))!.completed).toBeGreaterThan(0);
+      await detail.getByLabel("Previous container logs").uncheck();
+      await expect(output).toContainText("fakekube follow line 30");
+      await detail.getByLabel("Pause logs").click();
+      await expect.poll(active).toBe(0);
+      const beforeDisconnect = await current(alternative);
+      const reconnectStart = requests.length;
+      await control(alternative, { disconnect_after_chunks: 40, remaining: 1 });
+      await detail.getByLabel("Resume logs").click();
+      await expect.poll(async () => (await current(alternative))!.disconnected, { timeout: 20_000 }).toBeGreaterThan(beforeDisconnect!.disconnected);
+      await expect.poll(async () => (await current(alternative))!.requests, { timeout: 20_000 }).toBeGreaterThan(beforeDisconnect!.requests + 1);
+      const reconnectRequests = requests.slice(reconnectStart);
+      expect(reconnectRequests.length).toBeGreaterThanOrEqual(2);
+      expect(reconnectRequests.at(-1)!.searchParams.has("cursor")).toBe(true);
+      expect(reconnectRequests.at(-1)!.searchParams.has("since_seconds")).toBe(false);
+      expect(reconnectRequests.at(-1)!.searchParams.has("tail_lines")).toBe(false);
+      expect((await current(alternative))!.since_time).toBeTruthy();
+      await expect(output).toContainText("fakekube follow line 64", { timeout: 25_000 });
+      await expect.poll(async () => (await current(alternative))!.active).toBe(1);
+      expect(await lines.count()).toBeLessThanOrEqual(10_000);
+      expect(Buffer.byteLength(await output.innerText())).toBeLessThan(4 * 1024 * 1024);
+      await expect(output).not.toContainText(rawSecrets);
+      for (const container of ["setup", "debug"]) {
+        await detail.getByLabel("Log container").selectOption(container);
+        await expect(output).toContainText(`container=${container}`);
+        const unavailable = (await current(container, true))?.unavailable ?? 0;
+        await detail.getByLabel("Previous container logs").check();
+        await expect(detail.getByRole("alert")).toContainText("no previous container instance");
+        await expect.poll(async () => (await current(container, true))?.unavailable ?? 0).toBeGreaterThan(unavailable);
+        await expect.poll(active).toBe(0);
+        await detail.getByLabel("Previous container logs").uncheck();
+        await expect(output).toContainText(`container=${container}`);
+      }
+      await detail.getByLabel("Log container").selectOption("api");
+      await expect(output).toContainText("fakekube follow line");
+      const apiPrevious = (await current("api", true))?.completed ?? 0;
+      await detail.getByLabel("Previous container logs").check();
+      await expect(detail.getByLabel("Log connection status")).toHaveText("ended");
+      await expect(output).toContainText("fakekube previous");
+      await expect(output).not.toContainText(rawSecrets);
+      await expect.poll(async () => (await current("api", true))?.completed ?? 0).toBeGreaterThan(apiPrevious);
+      await expect.poll(active).toBe(0);
+      await detail.getByLabel("Previous container logs").uncheck();
+      await expect(output).toContainText("[oversized log line omitted]");
+      await expect(output).toContainText("fakekube follow line 30");
+      await detail.getByLabel("Pause logs").click();
+      await expect.poll(active).toBe(0);
+      const captured = (await lines.allTextContents()).map((line) => line.replace(/\n$/, "")).join("\n");
+      expect(captured).not.toMatch(rawSecrets);
+      await detail.getByLabel("Copy scrubbed logs").click();
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(captured);
+      const capturedDownload = page.waitForEvent("download");
+      await detail.getByLabel("Download scrubbed logs").click();
+      expect(fs.readFileSync((await (await capturedDownload).path())!, "utf8")).toBe(captured);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      await page.screenshot({ path: path.join(screenshotDir, `live-pod-stream-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+      await detail.getByLabel("Resume logs").click();
+      await expect.poll(active).toBe(1);
+      const beforeClose = (await current())!.cancelled;
+      await detail.getByRole("button", { name: "Close panel" }).click();
+      await expect.poll(active).toBe(0);
+      expect((await current())!.cancelled).toBeGreaterThan(beforeClose);
+      await openApp(page, "/agent/kubernetes?r=core~v1~pods/payments/checkout-api-0&tab=logs");
+      await expect.poll(active).toBe(1);
+      const beforeUnmount = (await current())!.cancelled;
+      await page.goto("/now");
+      await expect.poll(active).toBe(0);
+      expect((await current())!.cancelled).toBeGreaterThan(beforeUnmount);
+      await testInfo.attach("upstream-counters", { body: JSON.stringify(await counters(), null, 2), contentType: "application/json" });
+    });
+
+    test(`live drawer URL keyboard and aligned topology ${viewport.name}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await openApp(page, "/agent/kubernetes?r=apps~v1~deployments/payments/checkout-api&tab=actions");
+      const detail = page.getByRole("dialog", { name: "Details panel" });
+      const tabs = detail.getByRole("tablist", { name: "Resource detail views" });
+      await expect(tabs.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
+      await expect(tabs.getByRole("tab", { name: /^(Logs|Actions)$/ })).toHaveCount(0);
+      await expect(page).not.toHaveURL(/tab=actions/);
+      await tabs.getByRole("tab", { name: "Events", exact: true }).focus();
+      await page.keyboard.press("ArrowRight");
+      await expect(tabs.getByRole("tab", { name: "YAML", exact: true })).toBeFocused();
+      await page.evaluate(() => { window.history.pushState(null, "", "/agent/kubernetes?r=apps~v1~deployments/payments/checkout-api&tab=logs"); window.dispatchEvent(new PopStateEvent("popstate")); });
+      await expect(tabs.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
+      await expect(page).not.toHaveURL(/tab=logs/);
+      await page.keyboard.press("Escape");
+      await expect(detail).toHaveCount(0);
+      await page.getByRole("tab", { name: "Topology", exact: true }).click();
+      await page.getByRole("button", { name: "Open namespace payments topology" }).click();
+      const controls = page.getByRole("group", { name: "Topology namespace controls" });
+      const boxes = await controls.locator("button,select").evaluateAll((elements) => elements.map((element) => { const box = element.getBoundingClientRect(); return { top: box.top, bottom: box.bottom }; }));
+      expect(boxes).toHaveLength(3);
+      expect(Math.max(...boxes.map((box) => box.top))).toBeLessThan(Math.min(...boxes.map((box) => box.bottom)));
+      const refreshed = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/admin/kubernetes/graph");
+      await controls.getByLabel("Refresh namespace topology").click();
+      expect(new URL((await refreshed).url()).searchParams.get("namespace")).toBe("payments");
+      await expect(page.getByLabel("Scrollable topology graph", { exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      await page.screenshot({ path: path.join(screenshotDir, `live-topology-control-row-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+    });
+  }
+
+  test("live unauthenticated stream denial never reaches upstream", async ({ request }) => {
+    const before = await counters();
+    const response = await request.get("/api/admin/kubernetes/pods/payments/checkout-api-0/logs/stream?container=api");
+    expect(response.status()).toBe(401);
+    expect(await counters()).toEqual(before);
+  });
+});
+
+test.describe("Pod log streaming fixtures", () => {
+  test.beforeEach(async ({ page }, testInfo) => {
+    const overviewRefresh = testInfo.title.startsWith("Overview refresh");
+    const changeAt = new Date(Date.now() - 60_000).toISOString();
+    const pod = { resource_id: "core~v1~pods", kind: "Pod", namespace: "payments", name: "checkout-api-0", summary: { phase: "Running", log_containers: [{ name: "app", type: "regular" }, { name: "setup", type: "init" }, { name: "debug", type: "ephemeral" }] } };
+    const deployment = { resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "payments", name: "checkout-api", summary: { ready_replicas: 1, desired_replicas: 1 } };
+    await page.addInitScript(() => {
+      const signals: Array<{ url: string; aborted: boolean }> = [];
+      Object.defineProperty(window, "podStreamSignals", { value: signals });
+      const original = window.fetch;
+      window.fetch = (input, init) => {
+        const url = String(input);
+        if (url.includes("/logs/stream")) {
+          const entry = { url, aborted: false };
+          signals.push(entry);
+          init?.signal?.addEventListener("abort", () => { entry.aborted = true; }, { once: true });
+        }
+        return original(input, init);
+      };
+    });
+    await page.route("**/api/**", async (route) => {
+      const url = new URL(route.request().url());
+      const pathname = url.pathname;
+      if (pathname.endsWith("/logs/stream")) {
+        if (url.searchParams.get("previous") === "true") return route.fulfill({ contentType: "text/event-stream", body: 'event: error\ndata: {"code":"previous_unavailable","message":"Previous logs unavailable"}\n\nevent: end\ndata: {"reason":"error"}\n\n' });
+        const prefix = url.searchParams.get("timestamps") === "false" ? "" : "2026-10-07T12:00:00Z ";
+        const lines = Array.from({ length: 300 }, (_, index) => `event: line\ndata: ${JSON.stringify({ text: prefix + (index % 2 ? "repeated token=[REDACTED] a.b" : "repeated axb"), container: url.searchParams.get("container") || "app", timestamp: "2026-10-07T12:00:00Z", sequence: index + 1, ordinal: index + 1, ...((index + 1) % 32 === 0 ? { cursor: `cursor-${index + 1}` } : {}) })}\n\n`).join("");
+        return route.fulfill({ contentType: "text/event-stream", body: `event: heartbeat\ndata: {}\n\n${lines}event: heartbeat\ndata: {"cursor":"cursor-300"}\n\nevent: end\ndata: {"reason":"complete","cursor":"cursor-300"}\n\n` });
+      }
+      if (pathname === "/api/admin/config/agent") return route.fulfill({ json: { enable: false, mode: "shadow", sources: [], ai: { enable: false }, catalog: {}, miner: {}, regex: { rules: [] }, redaction: {}, service_patterns: [] } });
+      if (pathname === "/api/admin/kubernetes/overview") return route.fulfill({ json: { connector: "kubernetes", cluster_id: "fixture", observed_at: "2026-10-07T12:00:00Z", nodes: 1, ready_nodes: 1, pods: 1, running_pods: 1, namespaces: 1, active_namespaces: 1, workloads: 1, warnings: 0, truncated: false } });
+      if (pathname === "/api/admin/kubernetes/usage") return route.fulfill({ json: { observed_at: "2026-10-07T12:00:00Z", availability: "unavailable", fresh: false, pods: [], nodes: [], truncated: false } });
+      if (pathname === "/api/admin/kubernetes/top") return route.fulfill({ json: { items: [], total: 0, truncated: false, availability: "unavailable", fresh: false, sync: { state: "ready", partial: false, age_s: 0 } } });
+      if (pathname === "/api/admin/kubernetes/workloads") return route.fulfill({ json: { items: [pod, deployment], counts: { Pod: 1, Deployment: 1 }, truncated: false } });
+      if (overviewRefresh && pathname === "/api/admin/kubernetes/changes") return route.fulfill({ json: { items: [{ id: "synthetic-creation", cluster: "fixture", kind: "Pod", namespace: pod.namespace, name: pod.name, type: "created", at: changeAt }], gaps: [], sync: { state: "ready", partial: false, age_s: 0 } } });
+      if (pathname.endsWith("/describe")) return route.fulfill({ json: { resource: pathname.includes("deployments") ? deployment : pod, events: [] } });
+      if (pathname.startsWith("/api/admin/kubernetes/workloads/")) return route.fulfill({ json: { ...pod, truncated: false } });
+      if (pathname === "/api/admin/kubernetes/resources") return route.fulfill({ json: { items: url.searchParams.get("resource_id") === "core~v1~namespaces" ? [{ resource_id: "core~v1~namespaces", kind: "Namespace", name: "payments" }] : [], truncated: false } });
+      if (pathname.includes("/graph")) return route.fulfill({ json: { nodes: [{ id: "deployment", kind: "Deployment", namespace: "payments", name: "checkout-api", group: "payments" }, { id: "pod", kind: "Pod", namespace: "payments", name: "checkout-api-0", group: "payments" }], edges: [{ from: "deployment", to: "pod", type: "manages" }], omitted: {}, sync: { state: "ready", partial: false, age_s: 0 } } });
+      if (pathname === "/api/admin/kubernetes/stream") return route.fulfill({ contentType: "text/event-stream", body: "event: heartbeat\ndata: {}\n\n" });
+      if (pathname === "/api/admin/kubernetes/traffic") return route.fulfill({ json: { available: false, reason: "No traffic source", window: "15m", unmapped: 0, truncated: false } });
+      if (pathname.includes("/enterprise/")) return route.fulfill({ status: 404, json: { error: "Community deployment" } });
+      return route.fulfill({ json: { items: [], totals: {}, gaps: [], truncated: false, sync: { state: "ready", partial: false, age_s: 0 } } });
+    });
+  });
+
+  for (const viewport of [{ name: "desktop", width: 1440, height: 1100 }, { name: "mobile", width: 390, height: 844 }]) {
+    test(`Overview refresh keeps paired count cards and inventory tabs ${viewport.name}`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.clock.install();
+      const endpoints = ["overview", "usage", "workloads", "resources", "issues", "top", "changes", "releases", "traffic"];
+      const requests: Array<{ endpoint: string; since: string | null; until: string | null }> = [];
+      const graphReads: string[] = [];
+      let responseStatus = 200;
+      let releasePending = () => {};
+      let pending: Promise<void> | undefined;
+      await page.route((url) => url.pathname.startsWith("/api/admin/kubernetes/"), async (route) => {
+        const url = new URL(route.request().url());
+        const endpoint = url.pathname.split("/").at(-1)!;
+        if (endpoint.includes("graph")) graphReads.push(url.pathname);
+        if (!endpoints.includes(endpoint)) return route.fallback();
+        requests.push({ endpoint, since: url.searchParams.get("since"), until: url.searchParams.get("until") });
+        if (pending) await pending;
+        if (responseStatus !== 200) return route.fulfill({ status: responseStatus, json: { error: responseStatus === 403 ? "Synthetic permission denied" : "Synthetic temporary failure" } });
+        return route.fallback();
+      });
+      await openApp(page, "/agent/kubernetes?view=overview");
+      const summary = page.getByRole("region", { name: "Triage summary", exact: true });
+      const topology = page.getByRole("region", { name: "Overview topology", exact: true });
+      const changes = summary.locator("article").filter({ has: page.getByRole("heading", { name: "Recent changes (60m)", exact: true }) });
+      await expect(changes.getByText("Pod payments/checkout-api-0", { exact: true })).toBeVisible();
+      await expect(summary.getByRole("status", { name: /^Loading/ })).toHaveCount(0);
+      await expect.poll(() => new Set(requests.map(({ endpoint }) => endpoint)).size).toBe(endpoints.length);
+      await page.clock.pauseAt(await page.evaluate(() => new Date(Date.now() + 1000).toISOString()));
+      await page.clock.runFor(1000);
+      await expect(topology.getByRole("img", { name: "Kubernetes relationship schematic", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("region", { name: "Workloads", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("region", { name: "Nodes", exact: true })).toHaveCount(0);
+      const counts = topology.getByLabel("Cluster resource counts");
+      await expect(counts.locator('dl[aria-label="Reported resource counts"] dt')).toHaveText(["Namespace", "Node", "Pod", "Workloads (aggregate)"]);
+      const unreported = counts.locator('dl[aria-label="Unreported resource counts"] dd');
+      expect(await unreported.count()).toBeGreaterThan(0);
+      for (const value of await unreported.all()) {
+        await expect(value).toHaveText("0");
+        await expect(value).toHaveAttribute("title", "Count not reported");
+        await expect(value).toHaveAttribute("aria-label", /count not reported, displayed as zero$/);
+      }
+      const snapshot = async () => ({
+        cards: await summary.locator("article").evaluateAll((cards) => cards.map((card) => ({ text: card.textContent, width: card.getBoundingClientRect().width, height: card.getBoundingClientRect().height }))),
+        counts: await counts.innerText(),
+      });
+      const loaded = await snapshot();
+      const expectStableSnapshot = async () => {
+        const current = await snapshot();
+        expect(current.counts).toBe(loaded.counts);
+        expect(current.cards).toHaveLength(loaded.cards.length);
+        for (const [index, card] of current.cards.entries()) {
+          expect(card.text).toBe(loaded.cards[index].text);
+          expect(card.width).toBeCloseTo(loaded.cards[index].width, 1);
+          expect(card.height).toBeCloseTo(loaded.cards[index].height, 1);
+        }
+      };
+      const historyBox = (await changes.boundingBox())!;
+      const topologyBox = (await topology.boundingBox())!;
+      expect(historyBox.height).toBeCloseTo(topologyBox.height, 1);
+      expect(historyBox.height).toBeCloseTo(416, 1);
+      if (viewport.name === "desktop") {
+        await expect.poll(async () => Math.abs((await changes.boundingBox())!.y - (await topology.boundingBox())!.y)).toBeLessThan(0.05);
+        expect(topologyBox.x).toBeGreaterThanOrEqual(historyBox.x + historyBox.width);
+      } else {
+        expect(topologyBox.y).toBeGreaterThanOrEqual(historyBox.y + historyBox.height);
+      }
+      const countScroller = topology.getByRole("region", { name: "Topology resource counts", exact: true });
+      await expect(countScroller).toHaveCSS("overflow-y", "auto");
+      await expect(changes.getByRole("region", { name: "Recent change history", exact: true })).toHaveCSS("overflow-y", "auto");
+      await countScroller.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      if (viewport.name === "mobile") expect(await countScroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+      await countScroller.evaluate((element) => { element.scrollTop = 0; });
+      const capture = async (state: string) => {
+        expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+        fs.mkdirSync(screenshotDir, { recursive: true });
+        for (const [section, target] of [["changes", changes], ["topology", topology]] as const) {
+          await target.evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
+          await expect(target.getByRole("heading", { level: 2 })).toBeInViewport();
+          await page.screenshot({ path: path.join(screenshotDir, `overview-refresh-${state}-${section}-${viewport.name}.png`), animations: "disabled" });
+        }
+      };
+      await capture("loaded");
+      pending = new Promise<void>((resolve) => { releasePending = resolve; });
+      const initialChange = requests.find(({ endpoint }) => endpoint === "changes")!;
+      requests.length = 0;
+      await page.clock.runFor(30_000);
+      await expect.poll(() => requests.some(({ endpoint }) => endpoint === "changes")).toBe(true);
+      const timerChange = requests.find(({ endpoint }) => endpoint === "changes")!;
+      expect(Date.parse(timerChange.until!) - Date.parse(timerChange.since!)).toBe(3_600_000);
+      expect(Date.parse(timerChange.until!)).toBeGreaterThan(Date.parse(initialChange.until!));
+      await expectStableSnapshot();
+      await expect(summary.getByRole("status", { name: /^Loading/ })).toHaveCount(0);
+      await capture("timer-pending");
+      pending = undefined;
+      releasePending();
+      await page.clock.runFor(1000);
+      await expect(page.getByRole("button", { name: "Refresh Kubernetes data", exact: true })).toBeEnabled();
+      pending = new Promise<void>((resolve) => { releasePending = resolve; });
+      requests.length = 0;
+      await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+      await expect.poll(() => new Set(requests.map(({ endpoint }) => endpoint)).size).toBe(endpoints.length);
+      await expectStableSnapshot();
+      await expect(page.getByLabel("Loading Kubernetes overview", { exact: true })).toHaveCount(0);
+      await expect(summary.getByRole("status", { name: /^Loading/ })).toHaveCount(0);
+      await capture("manual-pending");
+      responseStatus = 503;
+      pending = undefined;
+      releasePending();
+      await page.clock.runFor(1000);
+      await expect(page.getByRole("button", { name: "Refresh Kubernetes data", exact: true })).toBeEnabled();
+      await expectStableSnapshot();
+      await expect(counts.locator('dl[aria-label="Reported resource counts"]')).toBeVisible();
+      expect(graphReads).toEqual([]);
+      responseStatus = 200;
+      await page.getByRole("tab", { name: "Workloads", exact: true }).click();
+      await expect(page.getByRole("region", { name: "Workloads", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Select Pod payments/checkout-api-0", exact: true })).toBeVisible();
+      await expect(page).toHaveURL(/view=resources/);
+      await page.getByRole("tab", { name: "Nodes", exact: true }).click();
+      await expect(page.getByRole("region", { name: "Nodes", exact: true })).toBeVisible();
+      await expect(page.getByRole("region", { name: "Workloads", exact: true })).toHaveCount(0);
+      await expect(page).toHaveURL(/view=nodes/);
+      await testInfo.attach("refresh-requests", { body: JSON.stringify(requests), contentType: "application/json" });
+    });
+  }
+
+  for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: "mobile", width: 390, height: 844 }]) {
+    test(`Pod stream controls, exports, cancellation, and unavailable previous ${viewport.name}`, async ({ page, context }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+      await openApp(page, "/agent/kubernetes?r=core~v1~pods/payments/checkout-api-0&tab=logs");
+      const detail = page.getByRole("dialog", { name: "Details panel" });
+      await expect(detail.getByRole("tab", { name: "Actions", exact: true })).toHaveCount(0);
+      const output = detail.getByLabel("Pod log output");
+      await expect(output).toContainText("[REDACTED]");
+      await expect(detail.getByLabel("Log connection status")).toHaveText("ended");
+      await expect(detail.getByText("300 / 300 lines", { exact: true })).toBeVisible();
+      await expect(detail.getByLabel("Log container").locator("option")).toHaveText(["app (regular)", "setup (init)", "debug (ephemeral)"]);
+      await detail.getByLabel("Log filter").fill("a.b");
+      await expect(output).not.toContainText("axb");
+      await expect(detail.getByText("150 / 300 lines", { exact: true })).toBeVisible();
+      for (const enabled of [true, false, true]) {
+        await detail.getByLabel("Timestamps").setChecked(enabled);
+        const rendered = (await output.locator("[data-log-key]").allTextContents()).map((line) => line.replace(/\n$/, "")).join("\n");
+        await detail.getByLabel("Copy scrubbed logs").click();
+        const copied = await page.evaluate(() => navigator.clipboard.readText());
+        expect(copied).toBe(rendered);
+        expect(copied.split("\n")).toHaveLength(150);
+        for (const line of copied.split("\n")) expect(line.match(/2026-10-07T12:00:00Z/g) ?? []).toHaveLength(enabled ? 1 : 0);
+        expect(copied).toContain("[REDACTED]");
+        expect(copied).not.toContain("axb");
+        const downloaded = page.waitForEvent("download");
+        await detail.getByLabel("Download scrubbed logs").click();
+        const file = await downloaded;
+        expect(file.suggestedFilename()).toBe("checkout-api-0-logs.txt");
+        expect(fs.readFileSync((await file.path())!, "utf8")).toBe(copied);
+      }
+      await detail.getByLabel("Pause logs").click();
+      await expect.poll(() => page.evaluate(() => (window as unknown as { podStreamSignals: Array<{ aborted: boolean }> }).podStreamSignals[0].aborted)).toBe(true);
+      const resumed = page.waitForRequest((request) => new URL(request.url()).searchParams.has("cursor"));
+      await detail.getByLabel("Resume logs").click();
+      const resumeQuery = new URL((await resumed).url()).searchParams;
+      expect(resumeQuery.get("cursor")).toBe("cursor-300");
+      expect(resumeQuery.has("since_seconds")).toBe(false);
+      expect(resumeQuery.has("tail_lines")).toBe(false);
+      await detail.getByLabel("Log container").selectOption("setup");
+      await expect.poll(() => page.evaluate(() => (window as unknown as { podStreamSignals: Array<{ url: string }> }).podStreamSignals.at(-1)?.url)).toContain("container=setup");
+      await detail.getByLabel("Previous container logs").check();
+      await expect(detail.getByRole("alert")).toContainText("no previous container instance");
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      await page.screenshot({ path: path.join(screenshotDir, `pod-stream-controls-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+      await detail.getByRole("button", { name: "Close panel" }).click();
+      await expect.poll(() => page.evaluate(() => (window as unknown as { podStreamSignals: Array<{ aborted: boolean }> }).podStreamSignals.every((entry) => entry.aborted))).toBe(true);
+    });
+
+    test(`visible drawer tabs, history fallback, and aligned topology controls ${viewport.name}`, async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await openApp(page, "/agent/kubernetes?r=apps~v1~deployments/payments/checkout-api&tab=actions");
+      const detail = page.getByRole("dialog", { name: "Details panel" });
+      const tabs = detail.getByRole("tablist", { name: "Resource detail views" });
+      await expect(tabs.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
+      await expect(tabs.getByRole("tab", { name: /^(Logs|Actions)$/ })).toHaveCount(0);
+      await expect(page).not.toHaveURL(/tab=actions/);
+      await tabs.getByRole("tab", { name: "Events", exact: true }).focus();
+      await page.keyboard.press("ArrowRight");
+      await expect(tabs.getByRole("tab", { name: "YAML", exact: true })).toBeFocused();
+      await page.evaluate(() => { window.history.pushState(null, "", "/agent/kubernetes?r=apps~v1~deployments/payments/checkout-api&tab=logs"); window.dispatchEvent(new PopStateEvent("popstate")); });
+      await expect(tabs.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
+      await expect(page).not.toHaveURL(/tab=logs/);
+      await detail.getByRole("button", { name: "Close panel" }).click();
+      await page.getByRole("tab", { name: "Topology", exact: true }).click();
+      await page.getByRole("button", { name: "Open namespace payments topology" }).click();
+      const controls = page.getByRole("group", { name: "Topology namespace controls" });
+      const boxes = await controls.locator("button,select").evaluateAll((elements) => elements.map((element) => { const box = element.getBoundingClientRect(); return { top: box.top, bottom: box.bottom, left: box.left, right: box.right }; }));
+      expect(boxes).toHaveLength(3);
+      expect(Math.max(...boxes.map((box) => box.top))).toBeLessThan(Math.min(...boxes.map((box) => box.bottom)));
+      const refreshed = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/admin/kubernetes/graph");
+      await controls.getByLabel("Refresh namespace topology").click();
+      expect(new URL((await refreshed).url()).searchParams.get("namespace")).toBe("payments");
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      await page.screenshot({ path: path.join(screenshotDir, `topology-control-row-${viewport.name}.png`), fullPage: true, animations: "disabled" });
     });
   }
 });

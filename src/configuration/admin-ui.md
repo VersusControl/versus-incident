@@ -209,11 +209,3 @@ Files inside the `./data` directory (`/app/data` in the container image):
 > a **config stub** — the provider returns `storage: backend not
 > implemented`. Stick with `file` (the default) in production until
 > these land.
-
-## Running without the UI
-
-If you only need the API surface (for example, in a tightly-scoped CI
-fixture), simply leave `GATEWAY_SECRET` unset. The admin endpoints stay
-unregistered and the root path serves a small "UI not built" landing
-page that links to `/api/incidents` and `/healthz`. The notification
-fan-out is unaffected.

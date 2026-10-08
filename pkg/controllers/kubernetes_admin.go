@@ -67,6 +67,7 @@ func (controller *KubernetesAdminController) Register(router fiber.Router) {
 	group.Get("/workloads/:kind/:name/logs", controller.workloadLogs)
 	group.Get("/events", controller.events)
 	group.Get("/pods/:namespace/:name/logs", controller.logs)
+	group.Get("/pods/:namespace/:name/logs/stream", controller.podLogStream)
 	group.Get("/usage", controller.usage)
 }
 

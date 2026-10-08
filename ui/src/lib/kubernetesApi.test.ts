@@ -1,12 +1,62 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api } from "./api";
+import { api, clearSecret, setSecret } from "./api";
 
 afterEach(() => {
   vi.restoreAllMocks();
+  clearSecret();
 });
 
 describe("Kubernetes resource API", () => {
+  it("streams Pod lines with gateway headers, cancellation, and cursor-only resume options", async () => {
+    setSecret("test-gateway");
+    const signal = new AbortController().signal;
+    const onEvent = vi.fn();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response('event: line\ndata: {"text":"repeated","container":"app","ordinal":2,"cursor":"resume"}\n\nevent: end\ndata: {"reason":"complete"}\n\n', { headers: { "Content-Type": "text/event-stream" } }));
+    await api.kubernetesPodLogStream("payments", "checkout", { container: "app", cursor: "resume", since_seconds: 3600, tail_lines: 500 }, onEvent, signal);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/admin/kubernetes/pods/payments/checkout/logs/stream?timestamps=true&container=app&cursor=resume");
+    const init = fetchMock.mock.calls[0][1];
+    expect(new Headers(init?.headers).get("X-Gateway-Secret")).toBe("test-gateway");
+    expect(init?.signal).toBe(signal);
+    expect(init?.credentials).toBe("same-origin");
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ event: "line", text: "repeated", ordinal: 2 }));
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ event: "end", reason: "complete" }));
+  });
+
+  it("never exposes upstream HTTP bodies as Pod stream errors", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("private upstream credentials", { status: 403 }));
+    await expect(api.kubernetesPodLogStream("payments", "checkout", {}, vi.fn(), new AbortController().signal)).rejects.toThrow("Pod log stream failed (HTTP 403).");
+  });
+
+  it("reads JSON checkpoints on every event without using SSE ids and defaults missing uncertainty to false", async () => {
+    const cursor = "checkpoint".repeat(400);
+    const events = ["line", "heartbeat", "limit", "error", "end"];
+    const body = events.map((event) => `id: not-a-cursor\nevent: ${event}\ndata: ${JSON.stringify({ text: "same", container: "app", timestamp: "2026-10-07T12:00:00Z", ordinal: 1, sequence: 1, cursor, ...(event === "limit" ? { replay_uncertain: true } : {}) })}\n\n`).join("") + 'id: ignored\nevent: heartbeat\ndata: {}\n\n';
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { headers: { "Content-Type": "text/event-stream" } }));
+    const onEvent = vi.fn();
+    await api.kubernetesPodLogStream("shop", "api", {}, onEvent, new AbortController().signal);
+    expect(onEvent.mock.calls.slice(0, 5).map(([event]) => event.cursor)).toEqual(events.map(() => cursor));
+    expect(onEvent.mock.calls.map(([event]) => event.replay_uncertain)).toEqual([false, false, true, false, false, false]);
+    expect(onEvent.mock.calls[5][0].cursor).toBeUndefined();
+  });
+
+  it.each([
+    'event: line\ndata: {"text":42,"container":"app"}\n\n',
+    'event: line\ndata: {"text":"safe","container":"app","cursor":42}\n\n',
+    'event: line\ndata: {"text":"safe","container":"app","ordinal":-1}\n\n',
+    'event: heartbeat\ndata: {"replay_uncertain":"false"}\n\n',
+    `event: heartbeat\ndata: ${JSON.stringify({ cursor: "x".repeat((16 << 10) + 1) })}\n\n`,
+    'event: heartbeat\ndata: invalid-json\n\n',
+  ])("rejects malformed Pod stream events", async (body) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { headers: { "Content-Type": "text/event-stream" } }));
+    await expect(api.kubernetesPodLogStream("shop", "api", {}, vi.fn(), new AbortController().signal)).rejects.toThrow(/Invalid Pod log/);
+  });
+
+  it("passes abort failures through without exposing a body", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new DOMException("Aborted", "AbortError"));
+    await expect(api.kubernetesPodLogStream("shop", "api", {}, vi.fn(), new AbortController().signal)).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("reads the complete all-namespace overview graph without pagination or namespace filters", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ nodes: [], edges: [], omitted: {}, sync: { state: "ready", age_s: 0, partial: false } }), { status: 200 }));
     await api.kubernetesOverviewGraph();

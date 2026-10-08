@@ -48,17 +48,47 @@ type requestKey struct {
 	accept string
 }
 
+type logStreamKey struct {
+	Path      string `json:"path"`
+	Container string `json:"container"`
+	Previous  bool   `json:"previous"`
+	Follow    bool   `json:"follow"`
+}
+
+type LogStreamCounter struct {
+	logStreamKey
+	Requests     int64  `json:"requests"`
+	Active       int64  `json:"active"`
+	Cancelled    int64  `json:"cancelled"`
+	Completed    int64  `json:"completed"`
+	Disconnected int64  `json:"disconnected"`
+	Unavailable  int64  `json:"unavailable"`
+	Chunks       int64  `json:"chunks"`
+	SinceTime    string `json:"since_time,omitempty"`
+}
+
+type logControl struct {
+	Path                  string `json:"path"`
+	Container             string `json:"container"`
+	DisconnectAfterChunks int    `json:"disconnect_after_chunks"`
+	Remaining             int    `json:"remaining"`
+	PreviousAvailable     *bool  `json:"previous_available,omitempty"`
+}
+
 type Server struct {
-	store    *Store
-	scenario string
-	mu       sync.Mutex
-	faults   map[string]Fault
-	counters map[requestKey]requestCount
+	store       *Store
+	scenario    string
+	startedAt   time.Time
+	mu          sync.Mutex
+	faults      map[string]Fault
+	counters    map[requestKey]requestCount
+	logStreams  map[logStreamKey]LogStreamCounter
+	logControls map[logStreamKey]logControl
 }
 
 func NewServer(config Config) (*Server, error) {
 	store := NewStore()
-	server := &Server{store: store, scenario: config.Scenario, faults: make(map[string]Fault), counters: make(map[requestKey]requestCount)}
+	server := &Server{store: store, scenario: config.Scenario, startedAt: time.Now(), faults: make(map[string]Fault), counters: make(map[requestKey]requestCount), logStreams: make(map[logStreamKey]LogStreamCounter), logControls: make(map[logStreamKey]logControl)}
 	for resource, fault := range config.Faults {
 		server.faults[resource] = fault
 	}
@@ -114,6 +144,13 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		writeJSON(counting, discoveryForPath(request.URL.Path, server.scenario))
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/_fake/counters"):
 		writeJSON(counting, server.requestCounters())
+	case request.Method == http.MethodGet && request.URL.Path == "/_fake/traffic-metrics" && server.scenario == "populated":
+		counting.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = io.WriteString(counting, trafficMetrics(time.Since(server.startedAt)))
+	case request.Method == http.MethodGet && request.URL.Path == "/_fake/log-streams":
+		writeJSON(counting, server.logStreamCounters())
+	case request.Method == http.MethodPost && request.URL.Path == "/_fake/log-streams":
+		server.controlLogs(counting, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/_fake/mutate":
 		server.mutate(counting, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/apis/metrics.k8s.io/"):
@@ -313,13 +350,300 @@ func (server *Server) metrics(writer http.ResponseWriter, request *http.Request)
 
 func (server *Server) logs(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	if request.URL.Path == "/api/v1/namespaces/payments/pods/checkout-api-0/log" && (request.URL.Query().Get("container") == "" || request.URL.Query().Get("container") == "api") {
-		if _, exists := server.store.Get("pods", "payments", "checkout-api-0"); exists {
-			_, _ = io.WriteString(writer, "2026-01-01T00:00:00Z fakekube checkout api token=super-secret-value\n")
+	query := request.URL.Query()
+	if query.Get("timestamps") == "true" && (query.Get("follow") == "true" || query.Get("follow") == "false" && query.Get("previous") == "true") {
+		server.streamLogs(writer, request)
+		return
+	}
+	container, previousAvailable, code := server.logContainer(request.URL.Path, query.Get("container"))
+	if code != http.StatusOK {
+		http.Error(writer, "unknown pod or container", code)
+		return
+	}
+	key := logStreamKey{Path: request.URL.Path, Container: container, Previous: query.Get("previous") == "true"}
+	control := server.takeLogControl(key)
+	if control.PreviousAvailable != nil {
+		previousAvailable = *control.PreviousAvailable
+	}
+	update := server.observeLog(key, query.Get("sinceTime"))
+	defer update(func(counter *LogStreamCounter) { counter.Active-- })
+	if key.Previous && !previousAvailable {
+		update(func(counter *LogStreamCounter) { counter.Unavailable++ })
+		http.Error(writer, "previous terminated container instance unavailable", http.StatusBadRequest)
+		return
+	}
+	line := "2026-01-01T00:00:00Z fakekube synthetic container=" + container + " finite log line\n"
+	if container == "" {
+		line = time.Now().UTC().Format(time.RFC3339Nano) + " fakekube log line\n"
+	}
+	if key.Previous {
+		line = "2026-01-01T00:00:00Z fakekube previous synthetic container=" + container + "\n"
+	}
+	if request.URL.Path == "/api/v1/namespaces/payments/pods/checkout-api-0/log" && container == "api" {
+		line = "2026-01-01T00:00:00Z fakekube checkout api token=super-secret-value\n"
+	}
+	if _, err := io.WriteString(writer, line); err != nil {
+		update(func(counter *LogStreamCounter) { counter.Cancelled++ })
+		return
+	}
+	update(func(counter *LogStreamCounter) { counter.Chunks++; counter.Completed++ })
+}
+
+func (server *Server) logContainer(path, selected string) (string, bool, int) {
+	parts := splitPath(path)
+	if len(parts) != 7 || parts[0] != "api" || parts[1] != "v1" || parts[2] != "namespaces" || parts[4] != "pods" || parts[6] != "log" {
+		return "", false, http.StatusNotFound
+	}
+	object, exists := server.store.Get("pods", parts[3], parts[5])
+	if !exists {
+		return "", false, http.StatusNotFound
+	}
+	type namedContainer struct {
+		Name string `json:"name"`
+	}
+	var pod struct {
+		Spec struct {
+			Containers          []namedContainer `json:"containers"`
+			InitContainers      []namedContainer `json:"initContainers"`
+			EphemeralContainers []namedContainer `json:"ephemeralContainers"`
+		} `json:"spec"`
+		Status map[string]json.RawMessage `json:"status"`
+	}
+	if json.Unmarshal(object, &pod) != nil {
+		return "", false, http.StatusBadRequest
+	}
+	if selected == "" && len(pod.Spec.Containers) == 0 && len(pod.Spec.InitContainers) == 0 && len(pod.Spec.EphemeralContainers) == 0 {
+		return "", false, http.StatusOK
+	}
+	for _, group := range []struct {
+		containers []namedContainer
+		status     string
+	}{{pod.Spec.Containers, "containerStatuses"}, {pod.Spec.InitContainers, "initContainerStatuses"}, {pod.Spec.EphemeralContainers, "ephemeralContainerStatuses"}} {
+		for _, container := range group.containers {
+			if selected == "" && group.status == "containerStatuses" {
+				selected = container.Name
+			}
+			if container.Name != selected {
+				continue
+			}
+			var statuses []struct {
+				Name         string `json:"name"`
+				RestartCount int    `json:"restartCount"`
+			}
+			if json.Unmarshal(pod.Status[group.status], &statuses) == nil {
+				for _, status := range statuses {
+					if status.Name == selected {
+						return selected, status.RestartCount > 0, http.StatusOK
+					}
+				}
+			}
+			return selected, false, http.StatusOK
+		}
+	}
+	return "", false, http.StatusBadRequest
+}
+
+func (server *Server) controlLogs(writer http.ResponseWriter, request *http.Request) {
+	defer request.Body.Close()
+	request.Body = http.MaxBytesReader(writer, request.Body, 4096)
+	var control logControl
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&control); err != nil || control.DisconnectAfterChunks < 0 || control.DisconnectAfterChunks > 1024 || control.Remaining < 0 || control.Remaining > 100 || (control.DisconnectAfterChunks == 0) != (control.Remaining == 0) {
+		http.Error(writer, "invalid log control", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		http.Error(writer, "invalid log control", http.StatusBadRequest)
+		return
+	}
+	container, _, code := server.logContainer(control.Path, control.Container)
+	if code != http.StatusOK {
+		http.Error(writer, "unknown pod or container", code)
+		return
+	}
+	control.Container = container
+	server.mu.Lock()
+	server.logControls[logStreamKey{Path: control.Path, Container: container}] = control
+	server.mu.Unlock()
+	writeJSON(writer, control)
+}
+
+func (server *Server) takeLogControl(key logStreamKey) logControl {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	follow := key.Follow
+	key.Previous, key.Follow = false, false
+	control := server.logControls[key]
+	if follow && control.Remaining > 0 {
+		next := control
+		next.Remaining--
+		server.logControls[key] = next
+	} else {
+		control.DisconnectAfterChunks, control.Remaining = 0, 0
+	}
+	return control
+}
+
+func (server *Server) observeLog(key logStreamKey, since string) func(func(*LogStreamCounter)) {
+	update := func(change func(*LogStreamCounter)) {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		counter := server.logStreams[key]
+		counter.logStreamKey = key
+		change(&counter)
+		server.logStreams[key] = counter
+	}
+	update(func(counter *LogStreamCounter) { counter.Requests++; counter.Active++; counter.SinceTime = since })
+	return update
+}
+
+func (server *Server) logStreamCounters() []LogStreamCounter {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	result := make([]LogStreamCounter, 0, len(server.logStreams))
+	for _, counter := range server.logStreams {
+		result = append(result, counter)
+	}
+	sort.Slice(result, func(first, second int) bool {
+		if result[first].Path != result[second].Path {
+			return result[first].Path < result[second].Path
+		}
+		if result[first].Container != result[second].Container {
+			return result[first].Container < result[second].Container
+		}
+		if result[first].Follow != result[second].Follow {
+			return result[first].Follow
+		}
+		return !result[first].Previous && result[second].Previous
+	})
+	return result
+}
+
+func (server *Server) streamLogs(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	container, previousAvailable, code := server.logContainer(request.URL.Path, request.URL.Query().Get("container"))
+	if code != http.StatusOK {
+		http.Error(writer, "unknown pod or container", code)
+		return
+	}
+	flusher, ok := writer.(http.Flusher)
+	if !ok {
+		http.Error(writer, "streaming unavailable", http.StatusInternalServerError)
+		return
+	}
+	query := request.URL.Query()
+	var since time.Time
+	if value := query.Get("sinceTime"); value != "" {
+		var err error
+		since, err = time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			http.Error(writer, "invalid sinceTime", http.StatusBadRequest)
 			return
 		}
 	}
-	_, _ = io.WriteString(writer, time.Now().UTC().Format(time.RFC3339Nano)+" fakekube log line\n")
+	key := logStreamKey{Path: request.URL.Path, Container: container, Previous: query.Get("previous") == "true", Follow: query.Get("follow") == "true" && query.Get("previous") != "true"}
+	control := server.takeLogControl(key)
+	if control.PreviousAvailable != nil {
+		previousAvailable = *control.PreviousAvailable
+	}
+	update := server.observeLog(key, query.Get("sinceTime"))
+	completed := false
+	disconnected := false
+	unavailable := key.Previous && !previousAvailable
+	defer func() {
+		update(func(counter *LogStreamCounter) {
+			counter.Active--
+			if unavailable {
+				counter.Unavailable++
+			} else if disconnected {
+				counter.Disconnected++
+			} else if completed {
+				counter.Completed++
+			} else {
+				counter.Cancelled++
+			}
+		})
+	}()
+	if unavailable {
+		http.Error(writer, "previous terminated container instance unavailable", http.StatusBadRequest)
+		return
+	}
+	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	chunksWritten := 0
+	writeLine := func(timestamp time.Time, text string) bool {
+		if timestamp.Before(since) {
+			return true
+		}
+		if container != "api" {
+			text += " container=" + container
+		}
+		line := timestamp.Format(time.RFC3339Nano) + " " + text + "\n"
+		chunks := []string{line}
+		if split := strings.Index(line, "secret-value"); split >= 0 {
+			chunks = []string{line[:split+3], line[split+3:]}
+		}
+		for _, chunk := range chunks {
+			select {
+			case <-request.Context().Done():
+				return false
+			default:
+			}
+			if _, err := io.WriteString(writer, chunk); err != nil {
+				return false
+			}
+			update(func(counter *LogStreamCounter) { counter.Chunks++ })
+			flusher.Flush()
+			chunksWritten++
+			if key.Follow && control.Remaining > 0 && chunksWritten >= control.DisconnectAfterChunks {
+				disconnected = true
+				panic(http.ErrAbortHandler)
+			}
+			timer := time.NewTimer(20 * time.Millisecond)
+			select {
+			case <-request.Context().Done():
+				timer.Stop()
+				return false
+			case <-timer.C:
+			}
+		}
+		return true
+	}
+	if key.Previous {
+		completed = writeLine(base, "fakekube previous token=previous-secret-value")
+		return
+	}
+	lines := []string{
+		"fakekube repeated identical line",
+		"fakekube repeated identical line",
+		"fakekube token=super-secret-value",
+		"fakekube password=split-secret-value",
+	}
+	if tail, err := strconv.Atoi(query.Get("tailLines")); err == nil && tail > 0 && tail < len(lines) {
+		lines = lines[len(lines)-tail:]
+	}
+	for _, line := range lines {
+		if !writeLine(base, line) {
+			return
+		}
+	}
+	if !writeLine(base, "fakekube synthetic oversized password=synthetic-oversized-secret-value "+strings.Repeat("synthetic-record-padding ", 800)) {
+		return
+	}
+	flusher.Flush()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for sequence := int64(1); ; sequence++ {
+		select {
+		case <-request.Context().Done():
+			return
+		case <-ticker.C:
+			if !writeLine(base.Add(time.Duration(sequence)*time.Second), fmt.Sprintf("fakekube follow line %d", sequence)) {
+				return
+			}
+		}
+	}
 }
 
 func resourceForPath(path string) string {
@@ -424,16 +748,16 @@ func discoveryForPath(path, scenario string) map[string]any {
 	} else if strings.HasPrefix(path, "/apis/autoscaling/") {
 		group = "autoscaling"
 		resources = []map[string]any{{"name": "horizontalpodautoscalers", "kind": "HorizontalPodAutoscaler", "namespaced": true, "verbs": []string{"get", "list"}}}
-	} else if scenario == "gitops" && strings.HasPrefix(path, "/apis/argoproj.io/") {
+	} else if (scenario == "gitops" || scenario == "populated") && strings.HasPrefix(path, "/apis/argoproj.io/") {
 		group = "argoproj.io"
 		resources = []map[string]any{
 			{"name": "applications", "kind": "Application", "namespaced": true, "verbs": []string{"get", "list"}},
 			{"name": "rollouts", "kind": "Rollout", "namespaced": true, "verbs": []string{"get", "list"}},
 		}
-	} else if scenario == "gitops" && strings.HasPrefix(path, "/apis/kustomize.toolkit.fluxcd.io/") {
+	} else if (scenario == "gitops" || scenario == "populated") && strings.HasPrefix(path, "/apis/kustomize.toolkit.fluxcd.io/") {
 		group = "kustomize.toolkit.fluxcd.io"
 		resources = []map[string]any{{"name": "kustomizations", "kind": "Kustomization", "namespaced": true, "verbs": []string{"get", "list"}}}
-	} else if scenario == "gitops" && strings.HasPrefix(path, "/apis/helm.toolkit.fluxcd.io/") {
+	} else if (scenario == "gitops" || scenario == "populated") && strings.HasPrefix(path, "/apis/helm.toolkit.fluxcd.io/") {
 		group = "helm.toolkit.fluxcd.io"
 		resources = []map[string]any{{"name": "helmreleases", "kind": "HelmRelease", "namespaced": true, "verbs": []string{"get", "list"}}}
 	} else if path != "/api/v1" {
@@ -456,7 +780,7 @@ func discoveryForPath(path, scenario string) map[string]any {
 func apiGroups(scenario string) map[string]any {
 	groups := []map[string]any{}
 	groupVersions := map[string]string{"apps": "v1", "batch": "v1", "networking.k8s.io": "v1", "autoscaling": "v1"}
-	if scenario == "gitops" {
+	if scenario == "gitops" || scenario == "populated" {
 		groupVersions["argoproj.io"] = "v1alpha1"
 		groupVersions["kustomize.toolkit.fluxcd.io"] = "v1"
 		groupVersions["helm.toolkit.fluxcd.io"] = "v2"

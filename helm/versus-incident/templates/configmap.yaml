@@ -324,21 +324,13 @@ data:
       {{- end }}
   {{- end }}
 
-  {{- if .Values.agent.enable }}
-  {{- $tools := .Values.agent.tools | default dict }}
-  {{- $kubernetes := $tools.kubernetes | default dict }}
+  {{- if hasKey (.Values.agent.tools | default dict) "kubernetes" }}
+  {{- fail "Kubernetes configuration must use connectors.kubernetes" }}
+  {{- end }}
+  {{- $kubernetes := (.Values.connectors | default dict).kubernetes | default dict }}
   {{- $kubernetesAuth := $kubernetes.auth | default dict }}
-  {{- $recentChanges := $tools.recentChanges | default dict }}
-  {{- $git := $recentChanges.git | default dict }}
-  {{- $describeDeps := $tools.describeDependencies | default dict }}
-  {{- $findRunbook := $tools.findRunbook | default dict }}
-  tools.yaml: |
-    # Per-tool DATA config for the analyze tools (rendered by Helm).
-    # Credentials are NOT written here — they are injected as env vars from
-    # the chart Secret and expanded by the loader at boot.
-    tools:
-      tool_timeout: {{ $tools.toolTimeout | default "20s" | quote }}
-      parallel_tools: {{ dig "parallelTools" false $tools }}
+  connectors.yaml: |
+    connectors:
       kubernetes:
         {{- $kubernetesAuthMode := $kubernetesAuth.mode | default "" }}
         {{- if and (ne $kubernetesAuthMode "in_cluster") (ne $kubernetesAuthMode "kubeconfig") }}
@@ -395,6 +387,23 @@ data:
           gke:
             credentials_file: {{ ($kubernetesAuth.gke | default dict).credentialsFile | default "" | quote }}
           {{- end }}
+        {{- $actions := $kubernetes.actions | default dict }}
+        actions:
+          enable: {{ dig "enable" false $actions }}
+          max_replicas: {{ $actions.maxReplicas | default 20 }}
+          timeout: {{ $actions.timeout | default "15s" | quote }}
+          auth:
+            {{- include "versus-incident.connectorAuth" (dict "auth" ($actions.auth | default dict) "prefix" "KUBERNETES_ACTOR") | nindent 12 }}
+  {{- if .Values.agent.enable }}
+  {{- $tools := .Values.agent.tools | default dict }}
+  {{- $recentChanges := $tools.recentChanges | default dict }}
+  {{- $git := $recentChanges.git | default dict }}
+  {{- $describeDeps := $tools.describeDependencies | default dict }}
+  {{- $findRunbook := $tools.findRunbook | default dict }}
+  tools.yaml: |
+    tools:
+      tool_timeout: {{ $tools.toolTimeout | default "20s" | quote }}
+      parallel_tools: {{ dig "parallelTools" false $tools }}
       recent_changes:
         git:
           auth:

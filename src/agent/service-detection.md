@@ -1,36 +1,20 @@
 # Service Detection
 
-Every log line the agent reads gets tagged with a **service** — the name of the app or component that produced it. Service detection is how the agent reads that name out of the raw log text, so it can group signals ("all the errors from `orders-api`") instead of treating your whole system as one undifferentiated stream.
+Every log line the agent reads gets tagged with a **service**; the name of the app or component that produced it. Service detection is how the agent reads that name out of the raw log text, so it can group signals ("all the errors from `orders-api`") instead of treating your whole system as one undifferentiated stream.
 
-Without it, every signal lands in a single bucket called `_unknown`, and anything that reasons per service — new-service grace, per-service catalogs, the AI's "which service is on fire" summary — has nothing to work with.
+Without it, every signal lands in a single bucket called `_unknown`, and anything that reasons per service; new-service grace, per-service catalogs, the AI's "which service is on fire" summary; has nothing to work with.
 
-> **Note:** A "service" here is just a label pulled out of the log line. It doesn't have to match anything in Kubernetes or your service mesh — it's whatever string your logs call the app.
+> **Note:** A "service" here is just a label pulled out of the log line. It doesn't have to match anything in Kubernetes or your service mesh; it's whatever string your logs call the app.
 
 ## What a service is, and why it matters
 
 | Term | One-sentence meaning |
 |---|---|
 | **Service** | The name of the app/component a log line came from, e.g. `orders-api`. |
-| **`_unknown`** | The fallback a signal lands in when no pattern matches — detection is off, or your logs don't fit any rule. |
+| **`_unknown`** | The fallback a signal lands in when no pattern matches; detection is off, or your logs don't fit any rule. |
 | **Detection off** | An empty `service_patterns` list. Every signal becomes `_unknown`. |
 
 Grouping by service is what lets the agent say "there's a spike in `orders-api`" instead of "there's a spike somewhere." If detection is off or wrong, every per-service feature collapses back to one global bucket.
-
-## How detection works
-
-For each log line, the agent runs these steps in order:
-
-1. **Strip colour codes.** Console loggers (Spring Boot, Logback) wrap fields in ANSI colour escapes like `\x1b[34morders-api\x1b[m`. The agent removes them first, so a colourised name matches the same as a plain one. (No colour bytes in the line? This step costs nothing.)
-2. **Try each pattern in order.** `service_patterns` is an ordered list of regexes, tried top to bottom.
-3. **First match wins.** The moment a pattern matches, the agent stops — later patterns are not tried.
-4. **Take the captured name.** Each pattern has one capture group `( … )`; the text it captures is the service name.
-5. **Skip bare log levels.** If that captured text is exactly a log level (`TRACE`, `DEBUG`, `INFO`, `WARN`, `WARNING`, `ERROR`, `FATAL`), the agent ignores this match and continues to the next pattern — a service is never named `DEBUG`.
-6. **Skip purely-numeric tokens.** If that captured text has no letters at all — only digits and separators like `1210`, `8080`, or `10.0.0.1` — it's a thread id / PID / port / address, never a service. The agent skips it and continues to the next pattern. A name that merely *contains* digits (`s3`, `api-v2`, `auth-service-2`) still has a letter and is kept.
-7. **Skip known thread names.** If that captured text is a recognisable JVM / servlet-container / reactor thread name — a Tomcat connector worker like `nio-8080-exec-8`, a pool thread like `pool-2-thread-1`, `Thread-5`, `ForkJoinPool-1-worker-3`, or a reactor loop like `reactor-http-nio-4` — it's a worker thread, never a service. These contain letters (so the numeric guard alone can't catch them), so a dedicated guard skips them and continues to the next pattern. A real service that merely *looks* similar (`nio-gateway`, `task-runner`, `order-service-2`) is **not** rejected.
-
-If nothing matches (or the list is empty), the service is `_unknown`.
-
-> **Note:** The shipped config includes the default list below, so detection works out of the box. To turn it off, set `service_patterns: []` — every signal then becomes `_unknown`.
 
 ## Default patterns
 
@@ -49,7 +33,7 @@ Versus ships a default `service_patterns` list (from `pkg/config/default_config.
 | 9 | syslog / journald `name[pid]:` | `orders-api[1234]: connection reset` | `orders-api` |
 | 10 | Generic single bracket (last resort) | `[orders-api] cache miss` | `orders-api` |
 
-### Colour codes, log levels, numeric tokens, and thread names
+**Colour codes, log levels, numeric tokens, and thread names**
 
 Four guards run automatically for **every** pattern, default or custom:
 
@@ -57,6 +41,22 @@ Four guards run automatically for **every** pattern, default or custom:
 - **A bare log level is never a service.** If a pattern's capture group is exactly `TRACE` / `DEBUG` / `INFO` / `WARN` / `WARNING` / `ERROR` / `FATAL`, the match is skipped and the next pattern is tried. So a line like `[DEBUG] starting up` is never filed under a service called `DEBUG` — it falls through to a later pattern or to `_unknown`. Only a *bare* level is refused; `error-service` is a perfectly valid name.
 - **A purely-numeric token is never a service.** If a pattern's capture group has no letters at all — only digits and separators such as `1210`, `8080`, or `10.0.0.1` — it's a thread id / PID / port / address, so the match is skipped and the next pattern is tried. A bracketed thread id like `[1210]` never surfaces as the service. A name that merely *contains* digits (`s3`, `api-v2`, `auth-service-2`) still has a letter and is kept.
 - **A known thread name is never a service.** If a pattern's capture group is a recognisable JVM / servlet-container / reactor worker-thread name — a Tomcat connector thread (`nio-8080-exec-8`, `http-nio-8080-exec-3`, `https-jsse-nio-8443-exec-1`, `ajp-nio-8009-exec-2`), a pool/JVM thread (`pool-2-thread-1`, `Thread-5`, `ForkJoinPool-1-worker-3`), a Spring executor (`taskExecutor-1`, `scheduling-1`), or a Netty/Reactor loop (`reactor-http-nio-4`, `boundedElastic-1`, `parallel-2`) — it's a worker thread, so the match is skipped and the next pattern is tried. These contain letters, so the numeric guard alone can't catch them. The guard is deliberately tight and anchored so it rejects **only** clear thread shapes: a real service such as `nio-gateway`, `task-runner`, or `order-service-2` still passes. Thread-name conventions vary across frameworks — this guard covers the common JVM / Tomcat / Netty / Reactor shapes; if your stack emits a different thread name, add a `service_patterns` rule that anchors on your service field rather than the thread bracket.
+
+## How detection works
+
+For each log line, the agent runs these steps in order:
+
+1. **Strip colour codes.** Console loggers (Spring Boot, Logback) wrap fields in ANSI colour escapes like `\x1b[34morders-api\x1b[m`. The agent removes them first, so a colourised name matches the same as a plain one. (No colour bytes in the line? This step costs nothing.)
+2. **Try each pattern in order.** `service_patterns` is an ordered list of regexes, tried top to bottom.
+3. **First match wins.** The moment a pattern matches, the agent stops — later patterns are not tried.
+4. **Take the captured name.** Each pattern has one capture group `( … )`; the text it captures is the service name.
+5. **Skip bare log levels.** If that captured text is exactly a log level (`TRACE`, `DEBUG`, `INFO`, `WARN`, `WARNING`, `ERROR`, `FATAL`), the agent ignores this match and continues to the next pattern — a service is never named `DEBUG`.
+6. **Skip purely-numeric tokens.** If that captured text has no letters at all — only digits and separators like `1210`, `8080`, or `10.0.0.1` — it's a thread id / PID / port / address, never a service. The agent skips it and continues to the next pattern. A name that merely *contains* digits (`s3`, `api-v2`, `auth-service-2`) still has a letter and is kept.
+7. **Skip known thread names.** If that captured text is a recognisable JVM / servlet-container / reactor thread name — a Tomcat connector worker like `nio-8080-exec-8`, a pool thread like `pool-2-thread-1`, `Thread-5`, `ForkJoinPool-1-worker-3`, or a reactor loop like `reactor-http-nio-4` — it's a worker thread, never a service. These contain letters (so the numeric guard alone can't catch them), so a dedicated guard skips them and continues to the next pattern. A real service that merely *looks* similar (`nio-gateway`, `task-runner`, `order-service-2`) is **not** rejected.
+
+If nothing matches (or the list is empty), the service is `_unknown`.
+
+> **Note:** The shipped config includes the default list below, so detection works out of the box. To turn it off, set `service_patterns: []`; every signal then becomes `_unknown`.
 
 ## Define your own service pattern
 

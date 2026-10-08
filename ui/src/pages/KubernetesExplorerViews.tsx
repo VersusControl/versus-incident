@@ -9,6 +9,8 @@ import {
   type KubernetesGraph,
   type KubernetesGraphNode,
   type KubernetesIssue,
+  type KubernetesIndexStatus,
+  type KubernetesOverview,
   type KubernetesResource,
   type KubernetesTopPage,
   type KubernetesTraffic,
@@ -128,13 +130,17 @@ export function PartialFailuresDisclosure({ failures }: { failures?: Array<{ res
   </div>;
 }
 
-function OverviewCard({ title, icon, tone = "accent", meta, action, className = "", delay = 0, children }: {
+const overviewPairHeight = "h-[26rem] max-h-[26rem]";
+
+function OverviewCard({ title, icon, tone = "accent", meta, action, className = "", bodyClassName = "", scrollLabel, delay = 0, children }: {
   title: string;
   icon: ReactNode;
   tone?: keyof typeof overviewTones;
   meta?: ReactNode;
   action?: { label: string; onClick: () => void };
   className?: string;
+  bodyClassName?: string;
+  scrollLabel?: string;
   delay?: number;
   children: ReactNode;
 }) {
@@ -149,7 +155,7 @@ function OverviewCard({ title, icon, tone = "accent", meta, action, className = 
         </h2>
         {meta}
       </header>
-      <div className="min-w-0 flex-1">{children}</div>
+      <div role={scrollLabel ? "region" : undefined} aria-label={scrollLabel} tabIndex={scrollLabel ? 0 : undefined} className={`min-h-0 min-w-0 flex-1 ${bodyClassName}`}>{children}</div>
       {action && (
         <button type="button" onClick={action.onClick} className="flex w-full items-center justify-between gap-2 border-t border-ink-500/40 px-4 py-2.5 text-left text-xs font-medium text-link transition-colors duration-150 hover:bg-ink-600/30">
           {action.label}
@@ -172,8 +178,8 @@ function CardNote({ children, tone = "muted" }: { children: ReactNode; tone?: "m
   return <p role="status" className={`p-4 text-xs ${tone === "warn" ? "text-sev-warning" : "text-ink-400"}`}>{children}</p>;
 }
 
-function ExplorerHeader({ icon, title, description, trailing }: { icon: ReactNode; title: string; description?: string; trailing?: ReactNode }) {
-  return <header className="card-header flex-wrap gap-3">
+function ExplorerHeader({ icon, title, description, trailing, controlRow = false }: { icon: ReactNode; title: string; description?: string; trailing?: ReactNode; controlRow?: boolean }) {
+  return <header className={`card-header gap-3 ${controlRow ? "flex-col items-stretch sm:flex-row sm:items-center sm:flex-nowrap" : "flex-wrap"}`}>
     <div className="flex min-w-0 items-center gap-3">
       <span aria-hidden="true" className="inline-flex size-8 shrink-0 items-center justify-center rounded-control bg-accent/10 text-link">{icon}</span>
       <div className="min-w-0"><h2 className="card-title">{title}</h2>{description && <p className="mt-1 text-2xs text-ink-400">{description}</p>}</div>
@@ -248,13 +254,65 @@ function ChangeActivity({ changes, windowEnd }: { changes: KubernetesChange[]; w
   );
 }
 
-export function KubernetesOverviewInsights({ onSelectResource, onSelectView }: { onSelectResource: ResourceSelection; onSelectView: (tab: KubernetesExplorerTab) => void }) {
+function OverviewTopology({ overview, indexStatus, indexLive, unavailable, onFullTopology }: { overview: KubernetesOverview; indexStatus: KubernetesIndexStatus | null; indexLive: boolean; unavailable: boolean; onFullTopology: () => void }) {
+  const overviewFields = { Node: "nodes", Pod: "pods", Namespace: "namespaces" } as const;
+  const kinds = [...new Set(["Namespace", "Node", "Ingress", "Gateway", "HTTPRoute", "Service", "Deployment", "ReplicaSet", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod", "HorizontalPodAutoscaler", "ConfigMap", "Secret", "PersistentVolumeClaim", "Event", ...Object.keys(indexStatus?.kinds ?? {})])];
+  const missingCount = { display: "0", reported: false };
+  const countFor = (kind: string) => {
+    if (unavailable) return missingCount;
+    const indexed = indexStatus?.kinds?.[kind];
+    if (indexed) {
+      if (!Number.isSafeInteger(indexed.records) || indexed.records < 0 || !["ready", "stale", "partial"].includes(indexed.state) || indexed.error) return missingCount;
+      const partial = indexed.partial || indexed.state === "partial";
+      const qualifier = !indexLive || indexed.state === "stale" || indexStatus?.state === "stale" ? " (stale)" : partial ? " (partial)" : "";
+      return { display: `${indexed.records.toLocaleString()}${qualifier}${partial && qualifier === " (stale)" ? " (partial)" : ""}`, reported: true };
+    }
+    const field = overviewFields[kind as keyof typeof overviewFields];
+    if (!field) return missingCount;
+    const resourceId = resourceIdForKind(kind);
+    if (overview.partial_failures?.some((failure) => !failure.resource_id || failure.resource_id === resourceId) || overview.omitted_categories?.some((category) => category === kind || category === resourceId || category === field)) return missingCount;
+    const count = overview[field];
+    return Number.isSafeInteger(count) && count >= 0 ? { display: `${count.toLocaleString()}${overview.truncated ? " (partial)" : ""}`, reported: true } : missingCount;
+  };
+  const workloadKinds = ["Deployment", "ReplicaSet", "StatefulSet", "DaemonSet", "Job", "CronJob"];
+  const showWorkloads = workloadKinds.some((kind) => !countFor(kind).reported || /partial|stale/.test(countFor(kind).display));
+  const workloadUnavailable = unavailable || !Number.isSafeInteger(overview.workloads) || overview.workloads < 0 || overview.partial_failures?.some((failure) => !failure.resource_id || workloadKinds.some((kind) => failure.resource_id === resourceIdForKind(kind))) || overview.omitted_categories?.some((category) => category === "workloads" || workloadKinds.some((kind) => category === kind || category === resourceIdForKind(kind)));
+  const counts = kinds.map((kind) => ({ kind, ...countFor(kind) }));
+  if (showWorkloads) counts.push({ kind: "Workloads (aggregate)", display: workloadUnavailable ? "0" : `${overview.workloads.toLocaleString()}${overview.truncated ? " (partial)" : ""}`, reported: !workloadUnavailable });
+  const resourceColor = (kind: string) => kind === "Ingress" || kind === "Gateway" || kind === "HTTPRoute" ? "text-accent" : kind === "Service" || kind === "Node" ? "text-sev-info" : kind === "ConfigMap" || kind === "Secret" || kind === "PersistentVolumeClaim" ? "text-sev-warning" : "text-sev-ok";
+  return <section aria-label="Overview topology" className="min-w-0">
+    <OverviewCard title="Topology" icon={<Network size={15} aria-hidden="true" />} tone="ok" className={overviewPairHeight} bodyClassName="dark-scroll overflow-y-auto overscroll-contain" scrollLabel="Topology resource counts" meta={<button type="button" className="btn shrink-0" aria-label="View all relationships" onClick={onFullTopology}><Network size={14} aria-hidden="true" />Full topology</button>}>
+      <div className="min-w-0 p-4 sm:p-5">
+        <div aria-label="Cluster resource counts" className="min-w-0 space-y-4">
+          {[true, false].map((reported) => {
+            const entries = counts.filter((count) => count.reported === reported);
+            if (!entries.length) return null;
+            return <div key={String(reported)} className={reported ? "" : "border-t border-ink-500/40 pt-3"}>
+              <h3 className="mb-2 text-2xs font-medium uppercase tracking-wider text-ink-400">{reported ? "Reported resources" : "Not reported"}</h3>
+              <dl aria-label={reported ? "Reported resource counts" : "Unreported resource counts"} className="grid grid-cols-1 gap-x-5 gap-y-1 sm:grid-cols-2">
+                {entries.map(({ kind, display }) => <div key={kind} className="flex min-w-0 items-center justify-between gap-3 py-1">
+                  <dt className={`flex min-w-0 items-center gap-2.5 break-words text-xs ${reported ? "text-ink-200" : "text-ink-400"}`}><span aria-hidden="true" className={`size-2 shrink-0 rounded-full ${reported ? `bg-current ${resourceColor(kind)}` : "border border-ink-400"}`} />{kind}</dt>
+                  <dd title={reported ? undefined : "Count not reported"} aria-label={reported ? undefined : `${kind}: count not reported, displayed as zero`} className={`shrink-0 text-sm font-semibold tabular-nums ${reported ? "text-ink-100" : "text-ink-400"}`}>{display}</dd>
+                </div>)}
+              </dl>
+            </div>;
+          })}
+        </div>
+      </div>
+    </OverviewCard>
+  </section>;
+}
+
+export function KubernetesOverviewInsights({ overview, indexStatus, indexLive, unavailable, onSelectResource, onSelectView }: { overview: KubernetesOverview; indexStatus: KubernetesIndexStatus | null; indexLive: boolean; unavailable: boolean; onSelectResource: ResourceSelection; onSelectView: (tab: KubernetesExplorerTab) => void }) {
   const [windowEnd, setWindowEnd] = useState(() => Date.now());
   const issues = useQuery({ queryKey: ["kubernetes-issues", "overview"], queryFn: () => api.kubernetesIssues({ limit: 5 }), retry: false });
   const top = useQuery({ queryKey: ["kubernetes-top", "pod", "cpu", 5], queryFn: () => api.kubernetesTop({ kind: "pod", sort: "cpu", limit: 5 }), retry: false });
   const changes = useQuery({
-    queryKey: ["kubernetes-changes", "overview", windowEnd],
-    queryFn: () => api.kubernetesChanges({ since: new Date(windowEnd - 60 * 60_000).toISOString(), until: new Date(windowEnd).toISOString(), limit: 100 }),
+    queryKey: ["kubernetes-changes", "overview", overview.cluster_id],
+    queryFn: () => {
+      const until = Date.now();
+      return api.kubernetesChanges({ since: new Date(until - 60 * 60_000).toISOString(), until: new Date(until).toISOString(), limit: 100 });
+    },
     retry: false,
   });
   const releases = useQuery({ queryKey: ["kubernetes-releases", "overview"], queryFn: () => api.kubernetesReleases({ limit: 5 }), retry: false });
@@ -263,10 +321,14 @@ export function KubernetesOverviewInsights({ onSelectResource, onSelectView }: {
     queryFn: () => api.kubernetesTraffic({ namespace: undefined, window: "15m" }),
     retry: false,
   });
+  const { refetch: refetchChanges } = changes;
   useEffect(() => {
-    const timer = window.setInterval(() => setWindowEnd(Date.now()), 30_000);
+    const timer = window.setInterval(() => {
+      setWindowEnd(Date.now());
+      void refetchChanges();
+    }, 30_000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [refetchChanges]);
 
   const issueTotals = issues.data?.totals ?? {};
   const issueTotal = Object.values(issueTotals).reduce((sum, count) => sum + count, 0);
@@ -284,9 +346,9 @@ export function KubernetesOverviewInsights({ onSelectResource, onSelectView }: {
         action={{ label: "View all issues", onClick: () => onSelectView("issues") }}
         className="xl:col-span-2"
       >
-        {issues.isPending && <CardSkeleton label="Loading issue summary" />}
-        {issues.isError && <CardNote>Issue summary unavailable.</CardNote>}
-        {issues.data && (
+        {issues.isPending && !issues.data && <CardSkeleton label="Loading issue summary" />}
+        {issues.isError && (!issues.data || issues.error instanceof ApiError && [401, 403].includes(issues.error.status)) && <CardNote>Issue summary unavailable.</CardNote>}
+        {issues.data && !(issues.error instanceof ApiError && [401, 403].includes(issues.error.status)) && (
           <>
             {issueTotal > 0 && (
               <div className="border-b border-ink-500/40 px-4 py-3">
@@ -326,22 +388,24 @@ export function KubernetesOverviewInsights({ onSelectResource, onSelectView }: {
         meta={top.data && <span className={`pill ${top.data.fresh ? "pill-good" : ""}`}>{top.data.fresh ? "Fresh" : top.data.availability}</span>}
         delay={40}
       >
-        {top.isPending && <CardSkeleton label="Loading usage ranking" rows={4} />}
-        {top.isError && <CardNote>Usage ranking unavailable.</CardNote>}
-        {top.data && <TopUsageRows data={top.data} compact onRefresh={() => void top.refetch()} />}
+        {top.isPending && !top.data && <CardSkeleton label="Loading usage ranking" rows={4} />}
+        {top.isError && (!top.data || top.error instanceof ApiError && [401, 403].includes(top.error.status)) && <CardNote>Usage ranking unavailable.</CardNote>}
+        {top.data && !(top.error instanceof ApiError && [401, 403].includes(top.error.status)) && <TopUsageRows data={top.data} compact onRefresh={() => void top.refetch()} />}
       </OverviewCard>
 
+      <div className="grid min-w-0 gap-4 md:col-span-2 xl:col-span-3 lg:grid-cols-2">
       <OverviewCard
         title="Recent changes (60m)"
         icon={<History size={14} aria-hidden="true" />}
-        meta={changes.data && <span className="text-xs tabular-nums text-ink-400">{changes.data.items.length}{changes.data.next ? "+" : ""} changes</span>}
+        meta={!unavailable && changes.data && !(changes.error instanceof ApiError && [401, 403].includes(changes.error.status)) && <span className="text-xs tabular-nums text-ink-400">{changes.data.items.length}{changes.data.next ? "+" : ""} changes</span>}
         action={{ label: "View all changes", onClick: () => onSelectView("timeline") }}
-        className="xl:col-span-2"
-        delay={80}
+        className={overviewPairHeight}
+        bodyClassName="dark-scroll overflow-y-auto overscroll-contain"
+        scrollLabel="Recent change history"
       >
-        {changes.isPending && <CardSkeleton label="Loading change history" />}
-        {changes.isError && <CardNote>Recent change history unavailable.</CardNote>}
-        {changes.data && <>
+        {changes.isPending && !changes.data && <CardSkeleton label="Loading change history" />}
+        {changes.isError && (!changes.data || changes.error instanceof ApiError && [401, 403].includes(changes.error.status)) && <CardNote>Recent change history unavailable.</CardNote>}
+        {changes.data && !(changes.error instanceof ApiError && [401, 403].includes(changes.error.status)) && <>
           <ChangeActivity changes={changes.data.items} windowEnd={windowEnd} />
           {changes.data.items.length === 0 ? <CardNote>No projected changes were recorded in the last hour.</CardNote> : <ol className="mt-2 divide-y divide-ink-700 border-t border-ink-500/40">{changes.data.items.slice(0, 4).map((change) => {
             const resource_id = resourceIdForKind(change.kind);
@@ -351,7 +415,8 @@ export function KubernetesOverviewInsights({ onSelectResource, onSelectView }: {
         </>}
       </OverviewCard>
 
-      <KubernetesGraphView preview onSelectResource={onSelectResource} onFullTopology={() => onSelectView("topology")} />
+      <OverviewTopology overview={overview} indexStatus={indexStatus} indexLive={indexLive} unavailable={unavailable} onFullTopology={() => onSelectView("topology")} />
+      </div>
 
       <OverviewCard
         title="Helm releases"
@@ -361,9 +426,9 @@ export function KubernetesOverviewInsights({ onSelectResource, onSelectView }: {
         action={{ label: "View all releases", onClick: () => onSelectView("releases") }}
         delay={160}
       >
-        {releases.isPending && <CardSkeleton label="Loading release summary" />}
-        {releases.isError && <CardNote>Release summary unavailable.</CardNote>}
-        {releases.data && (releaseList.length === 0 ? <CardNote>No Helm release labels were found.</CardNote> : (
+        {releases.isPending && !releases.data && <CardSkeleton label="Loading release summary" />}
+        {releases.isError && (!releases.data || releases.error instanceof ApiError && [401, 403].includes(releases.error.status)) && <CardNote>Release summary unavailable.</CardNote>}
+        {releases.data && !(releases.error instanceof ApiError && [401, 403].includes(releases.error.status)) && (releaseList.length === 0 ? <CardNote>No Helm release labels were found.</CardNote> : (
           <ul className="divide-y divide-ink-700">
             {[...unhealthyReleases, ...releaseList.filter((release) => release.health === "healthy")].slice(0, 4).map((release) => (
               <li key={`${release.namespace}:${release.name}`} className="flex items-center gap-3 px-4 py-2.5">
@@ -385,15 +450,15 @@ export function KubernetesOverviewInsights({ onSelectResource, onSelectView }: {
         className="md:col-span-2 xl:col-span-2"
         delay={200}
       >
-        {traffic.isPending && <CardSkeleton label="Loading traffic summary" />}
-        {traffic.isError && <CardNote>Traffic status not reported.</CardNote>}
-        {traffic.data && !traffic.data.available && (
+        {traffic.isPending && !traffic.data && <CardSkeleton label="Loading traffic summary" />}
+        {traffic.isError && (!traffic.data || traffic.error instanceof ApiError && [401, 403].includes(traffic.error.status)) && <CardNote>Traffic status not reported.</CardNote>}
+        {traffic.data && !(traffic.error instanceof ApiError && [401, 403].includes(traffic.error.status)) && !traffic.data.available && (
           <div className="flex items-start gap-3 p-4">
             <span aria-hidden="true" className="mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-dashed border-ink-500 text-ink-400"><Waypoints size={14} /></span>
             <p className="text-xs leading-5 text-ink-300">{trafficUnavailableLabel(traffic.data.reason) === "License required" ? "Service-to-service flows need a licensed telemetry source." : "Connect a flow source to see service-to-service request rates, errors, and latency."}</p>
           </div>
         )}
-        {traffic.data?.available && (trafficEdges.length === 0 ? <CardNote>No service flows were observed in this window.</CardNote> : (
+        {traffic.data?.available && !(traffic.error instanceof ApiError && [401, 403].includes(traffic.error.status)) && (trafficEdges.length === 0 ? <CardNote>No service flows were observed in this window.</CardNote> : (
           <ul className="divide-y divide-ink-700">
             {trafficEdges.slice(0, 4).map((edge, index) => (
               <li key={`${trafficWorkloadLabel(edge.from)}:${trafficWorkloadLabel(edge.to)}:${index}`} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 text-xs">
@@ -429,6 +494,7 @@ function TopUsageRows({ data, compact = false, onRefresh }: { data: KubernetesTo
 export function KubernetesExplorerTabContent({ tab, onSelectResource }: { tab: KubernetesExplorerTab; onSelectResource: ResourceSelection }) {
   switch (tab) {
     case "overview": return null;
+    case "nodes": return null;
     case "issues": return <IssuesView onSelectResource={onSelectResource} />;
     case "resources": return <ResourcesView onSelectResource={onSelectResource} />;
     case "releases": return <ReleasesView />;
@@ -698,13 +764,13 @@ function KubernetesGraphView({ onSelectResource, preview = false, onFullTopology
   };
 
   return <section className={`min-w-0 max-w-full overflow-hidden border-y border-ink-700 ${preview ? "md:col-span-2 xl:col-span-3" : ""}`} aria-label={preview ? "Overview topology" : "Kubernetes topology"}>
-    <ExplorerHeader icon={<Network size={15} />} title={preview ? "Topology" : "Projected relationships"} trailing={preview ? <button type="button" className="btn" aria-label="View all relationships" onClick={onFullTopology}><Network size={14} aria-hidden="true" />Full topology</button> : <div className="flex flex-wrap items-center gap-2">
-        {namespace && <button type="button" className="btn" onClick={() => selectNamespace("")}><ArrowLeft size={14} aria-hidden="true" />Namespaces</button>}
+    <ExplorerHeader controlRow={!preview} icon={<Network size={15} />} title={preview ? "Topology" : "Projected relationships"} trailing={preview ? <button type="button" className="btn" aria-label="View all relationships" onClick={onFullTopology}><Network size={14} aria-hidden="true" />Full topology</button> : <div role="group" aria-label="Topology namespace controls" className="flex w-full min-w-0 flex-nowrap items-center gap-2 sm:w-auto sm:flex-1 sm:justify-end">
+      {namespace && <button type="button" className="btn shrink-0" onClick={() => selectNamespace("")}><ArrowLeft size={14} aria-hidden="true" />Namespaces</button>}
         <label className="sr-only" htmlFor="kubernetes-graph-namespace">Select topology namespace</label>
-        <select id="kubernetes-graph-namespace" aria-label="Topology namespace" className="input max-w-56" value={namespace} onChange={(event) => selectNamespace(event.target.value)}>
+        <select id="kubernetes-graph-namespace" aria-label="Topology namespace" className="input min-w-0 flex-1 sm:max-w-56" value={namespace} onChange={(event) => selectNamespace(event.target.value)}>
           <option value="">Select a namespace</option>{namespaceNames.map((value) => <option key={value} value={value}>{value}</option>)}
         </select>
-        {!namespace && <button type="button" className="btn-icon" aria-label="Refresh namespaces" title="Refresh namespaces" onClick={() => void namespaces.refetch()}><RotateCcw size={14} /></button>}
+        <button type="button" className="btn-icon shrink-0" aria-label={namespace ? "Refresh namespace topology" : "Refresh namespaces"} title={namespace ? "Refresh namespace topology" : "Refresh namespaces"} onClick={() => void (namespace ? graph.refetch() : namespaces.refetch())}><RotateCcw size={14} /></button>
       </div>} />
     {!preview && namespaces.isPending && <CardSkeleton label="Loading Kubernetes namespaces" rows={4} />}
     {!preview && namespaces.isError && <div role="alert" className="p-4 text-sm text-sev-warning"><p>Namespace list unavailable. Check Kubernetes resource-list permission and retry.</p><p className="mt-1 break-words text-xs">{namespaces.error.message}</p><button type="button" className="btn mt-3" onClick={() => void namespaces.refetch()}>Retry namespace list</button></div>}

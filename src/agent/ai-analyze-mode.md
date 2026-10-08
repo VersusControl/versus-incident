@@ -69,7 +69,7 @@ they returned) is recorded with every analysis and shown in the
 **Tool calls** section of the analysis result, so you can audit exactly
 what the AI looked at.
 
-See the [Tool Reference](./tools/tools.md) for the current catalog,
+See the [Tool Reference](./tools/overview.md) for the current catalog,
 availability requirements, `tools.yaml` configuration, authentication, and
 Docker examples.
 

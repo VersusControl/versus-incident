@@ -306,7 +306,7 @@ options:
 
 ## See also
 
-- Source-bound read tools: [Tool Reference](../tools/tools.md)
+- Source-bound read tools: [Tool Reference](../tools/overview.md)
 - The metrics twin of this flow: [Prometheus / Metrics (Enterprise)](./prometheus.md)
 - SigNoz metrics (Enterprise): [SigNoz Metrics](../../enterprise/metrics/signoz.md)
 - SigNoz logs (OSS): [SigNoz source](./signoz.md)

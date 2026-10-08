@@ -13,15 +13,15 @@ vi.mock("@/lib/api", async (importActual) => {
 });
 
 const rows: AgentToolsetAvailability[] = [
-  { id: "kubernetes", section: "connector", display_name: "Kubernetes", description: "Inspect Kubernetes.", icon_key: "kubernetes", docs_url: "https://docs.versusincident.com/#/agent/tools/kubernetes", ui_path: "/agent/kubernetes", visibility: "always", state: "needs_integration", reason: "Kubernetes is not connected.", action: "/settings?tab=agent", action_label: "Connect Kubernetes", enabled: true, child_count: 9, requirement: { kind: "integration", integration: "kubernetes" } },
+  { id: "kubernetes", section: "connector", display_name: "Kubernetes", description: "Inspect Kubernetes.", icon_key: "kubernetes", docs_url: "https://docs.versusincident.com/#/agent/connectors/kubernetes", ui_path: "/agent/kubernetes", visibility: "always", state: "needs_integration", reason: "Kubernetes is not connected.", action: "/settings?tab=agent", action_label: "Connect Kubernetes", enabled: true, child_count: 9, requirement: { kind: "integration", integration: "kubernetes" } },
   { id: "source-control", section: "connector", display_name: "Source control", description: "Read recent changes.", icon_key: "git", docs_url: "https://docs.versusincident.com/#/agent/tools/recent-changes", visibility: "always", state: "needs_integration", reason: "GitHub is not connected.", action: "/settings?tab=agent", action_label: "Connect GitHub", enabled: true, child_count: 1, requirement: { kind: "integration", integration: "github" } },
   { id: "logs", section: "datasource", display_name: "Logs", description: "Read bounded logs.", icon_key: "logs", docs_url: "https://docs.versusincident.com/#/agent/data-sources", ui_path: "/agent/logs", visibility: "always", state: "available", reason: "Log tools are available.", action: "/settings?tab=agent", action_label: "Add a data source", enabled: true, child_count: 1, requirement: { kind: "datasource", signal_kind: "logs" } },
   { id: "elasticsearch-logs", section: "datasource", display_name: "Elasticsearch", description: "Discover mappings and shard health, and search bounded data in configured log indices.", icon_key: "elasticsearch", docs_url: "https://docs.versusincident.com/#/agent/data-sources", ui_path: "/agent/logs", visibility: "always", state: "available", reason: "Elasticsearch tools are available.", action: "/settings?tab=agent", action_label: "Add a data source", enabled: true, child_count: 4, requirement: { kind: "datasource", signal_kind: "elasticsearch" } },
   { id: "metrics", section: "datasource", display_name: "Metrics", description: "Summarize metrics.", icon_key: "metrics", docs_url: "https://docs.versusincident.com/#/agent/data-sources/prometheus", ui_path: "/agent/metrics", visibility: "always", state: "needs_license", reason: "Metric tools need an Enterprise source.", action: "https://versuscontrol.com/enterprise", action_label: "Learn more", enabled: true, child_count: 1, requirement: { kind: "datasource", signal_kind: "metrics" } },
   { id: "traces", section: "datasource", display_name: "Traces", description: "Inspect traces.", icon_key: "traces", docs_url: "https://docs.versusincident.com/#/agent/data-sources/traces", ui_path: "/agent/traces", visibility: "always", state: "available", reason: "Trace tools are available.", action: "/settings?tab=agent", action_label: "Add a data source", enabled: true, child_count: 1, requirement: { kind: "datasource", signal_kind: "traces" } },
   { id: "find_runbook", section: "common", display_name: "Find runbook", description: "Search runbooks.", icon_key: "runbook", docs_url: "https://docs.versusincident.com/#/agent/tools/find-runbook", ui_path: "/agent/runbooks", visibility: "always", state: "needs_capability", reason: "Runbook indexing is not configured.", action: "/admin#agent-ai-settings", action_label: "AI settings", enabled: true, child_count: 1, requirement: { kind: "capability" } },
-  { id: "describe_dependencies", section: "common", display_name: "Describe dependencies", description: "Inspect dependencies.", icon_key: "dependencies", docs_url: "https://docs.versusincident.com/#/agent/tools/tools?id=describe_dependencies", visibility: "always", state: "disabled_by_operator", reason: "Not offered to the agent.", action: "", action_label: "", enabled: false, child_count: 1, requirement: { kind: "capability" } },
-  { id: "describe_baseline", section: "common", display_name: "Describe baseline", description: "Inspect bounded learned expectations for a service signal.", icon_key: "activity", docs_url: "https://docs.versusincident.com/#/agent/tools/tools?id=describe_baseline", visibility: "always", state: "needs_capability", reason: "Baseline provider is not configured.", action: "", action_label: "", enabled: true, child_count: 1, requirement: { kind: "capability", capabilities: ["baseline_provider"] }, permission: "infrastructure:view" },
+  { id: "describe_dependencies", section: "common", display_name: "Describe dependencies", description: "Inspect dependencies.", icon_key: "dependencies", docs_url: "https://docs.versusincident.com/#/agent/tools/overview?id=describe_dependencies", visibility: "always", state: "disabled_by_operator", reason: "Not offered to the agent.", action: "", action_label: "", enabled: false, child_count: 1, requirement: { kind: "capability" } },
+  { id: "describe_baseline", section: "common", display_name: "Describe baseline", description: "Inspect bounded learned expectations for a service signal.", icon_key: "activity", docs_url: "https://docs.versusincident.com/#/agent/tools/overview?id=describe_baseline", visibility: "always", state: "needs_capability", reason: "Baseline provider is not configured.", action: "", action_label: "", enabled: true, child_count: 1, requirement: { kind: "capability", capabilities: ["baseline_provider"] }, permission: "infrastructure:view" },
 ];
 
 const config = {
@@ -95,6 +95,15 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 describe("AgentToolsPage", () => {
+  it("names the page Connectors & Tools and remains readable with the agent disabled", async () => {
+    vi.mocked(api.getAgentConfig).mockResolvedValueOnce({ ...config, enable: false });
+    renderPage();
+    expect(screen.getByRole("heading", { level: 1, name: "Connectors & Tools" })).toBeTruthy();
+    expect(screen.getByRole("banner").textContent).toBe("Connectors & Tools");
+    const kubernetes = await screen.findByRole("heading", { name: "Kubernetes" });
+    expect(within(kubernetes.closest("article")!).getByRole("link", { name: "Open Kubernetes" }).getAttribute("href")).toBe("/agent/kubernetes");
+  });
+
   it("renders one Elasticsearch datasource card with the dedicated asset", async () => {
     renderPage();
     const heading = await screen.findByRole("heading", { name: "Elasticsearch" });
@@ -384,7 +393,7 @@ describe("AgentToolsPage", () => {
     expect(dialog.textContent).toContain("Connection needed");
     expect(dialog.textContent).toContain("Kubernetes is not connected.");
     expect(dialog.textContent).toContain("Chat agent");
-    expect(within(dialog).getByRole("link", { name: /Documentation/ }).getAttribute("href")).toBe("https://docs.versusincident.com/#/agent/tools/kubernetes");
+    expect(within(dialog).getByRole("link", { name: /Documentation/ }).getAttribute("href")).toBe("https://docs.versusincident.com/#/agent/connectors/kubernetes");
     expect(within(dialog).getByRole("link", { name: "Connect Kubernetes" }).getAttribute("href")).toBe("/settings?tab=agent");
     fireEvent.click(screen.getByRole("button", { name: "Close dialog" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());

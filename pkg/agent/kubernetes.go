@@ -22,11 +22,11 @@ func NewKubernetesService(cfg config.KubernetesToolConfig, scope tenancy.OrgScop
 	}
 	timeout, err := time.ParseDuration(cfg.Timeout)
 	if err != nil && cfg.Timeout != "" {
-		return nil, err
+		return nil, errors.New("kubernetes: invalid timeout configuration")
 	}
 	ttl, err := time.ParseDuration(cfg.DiscoveryTTL)
 	if err != nil && cfg.DiscoveryTTL != "" {
-		return nil, err
+		return nil, errors.New("kubernetes: invalid discovery TTL configuration")
 	}
 	clientConfig := kubernetes.Config{Endpoint: cfg.Endpoint, TokenFile: cfg.TokenFile, CAFile: cfg.CAFile, ServerName: cfg.ServerName}
 	if cfg.CAData != "" {

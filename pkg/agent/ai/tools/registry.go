@@ -90,9 +90,9 @@ type ToolsetMetadata struct {
 }
 
 const (
-	docsTools      = "https://docs.versusincident.com/#/agent/tools/tools"
+	docsTools      = "https://docs.versusincident.com/#/agent/tools/overview"
 	docsVersus     = docsTools + "?id=versus-tools"
-	docsKubernetes = "https://docs.versusincident.com/#/agent/tools/kubernetes"
+	docsKubernetes = "https://docs.versusincident.com/#/agent/connectors/kubernetes"
 )
 
 // Catalog returns every known tool in UI order, including planned tools whose

@@ -46,7 +46,7 @@ func buildKubernetesActionAdapters(cfg config.KubernetesToolConfig) ([]act.Adapt
 	}
 	parsedTimeout, err := time.ParseDuration(timeout)
 	if err != nil && timeout != "" {
-		return nil, err
+		return nil, errors.New("kubernetes actions: invalid timeout configuration")
 	}
 	api, err := k8sactions.NewClient(k8sactions.ClientConfig{
 		Endpoint: auth.Endpoint, CAFile: auth.CAFile, CAData: auth.CAData, ServerName: auth.ServerName,

@@ -88,39 +88,46 @@ type AIBundle struct {
 // httpClient may be nil — a default *http.Client is used by the chat
 // model. store may be nil — caches degrade to in-memory only; the
 // analyze agent's tool registry will also be smaller.
-func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, httpClient *http.Client) AIBundle {
-	return buildAIs(cfg, catalog, store, tenancy.DefaultOrgScope(), httpClient, nil, nil)
+func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, httpClient *http.Client, connectors ...config.ConnectorsConfig) AIBundle {
+	return buildAIs(cfg, connectorDependency(connectors), catalog, store, tenancy.DefaultOrgScope(), httpClient, nil, nil)
 }
 
 // BuildAIsWithKubernetes reuses the connector service already registered for HTTP.
-func BuildAIsWithKubernetes(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, httpClient *http.Client, kubernetesService *kubernetes.Service) AIBundle {
-	return buildAIs(cfg, catalog, store, tenancy.DefaultOrgScope(), httpClient, nil, kubernetesService)
+func BuildAIsWithKubernetes(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, httpClient *http.Client, kubernetesService *kubernetes.Service, connectors ...config.ConnectorsConfig) AIBundle {
+	return buildAIs(cfg, connectorDependency(connectors), catalog, store, tenancy.DefaultOrgScope(), httpClient, nil, kubernetesService)
 }
 
 // BuildAIsForScope constructs every AI dependency with an ordered organization
 // read scope. Writes remain owned by the supplied storage provider; the scope
 // applies only to read-only analyze tools. BuildAIs supplies the default-only
 // scope used by single-tenant OSS deployments.
-func BuildAIsForScope(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client) AIBundle {
-	return buildAIs(cfg, catalog, store, scope.Normalized(), httpClient, nil, nil)
+func BuildAIsForScope(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, connectors ...config.ConnectorsConfig) AIBundle {
+	return buildAIs(cfg, connectorDependency(connectors), catalog, store, scope.Normalized(), httpClient, nil, nil)
 }
 
 // BuildAIsForScopeWithChatLocation constructs scoped AI dependencies and uses
 // locationProvider to resolve chat date phrases. A nil provider preserves the
 // OSS behavior of loading report settings from store.
-func BuildAIsForScopeWithChatLocation(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location) AIBundle {
-	return buildAIs(cfg, catalog, store, scope.Normalized(), httpClient, locationProvider, nil)
+func BuildAIsForScopeWithChatLocation(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location, connectors ...config.ConnectorsConfig) AIBundle {
+	return buildAIs(cfg, connectorDependency(connectors), catalog, store, scope.Normalized(), httpClient, locationProvider, nil)
 }
 
 // BuildAIsForScopeWithChatLocationAndKubernetes reuses the connector service
 // already registered for HTTP while preserving scoped reads and chat time.
-func BuildAIsForScopeWithChatLocationAndKubernetes(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location, kubernetesService *kubernetes.Service) AIBundle {
-	return buildAIs(cfg, catalog, store, scope.Normalized(), httpClient, locationProvider, kubernetesService)
+func BuildAIsForScopeWithChatLocationAndKubernetes(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location, kubernetesService *kubernetes.Service, connectors ...config.ConnectorsConfig) AIBundle {
+	return buildAIs(cfg, connectorDependency(connectors), catalog, store, scope.Normalized(), httpClient, locationProvider, kubernetesService)
 }
 
-func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location, kubernetesService *kubernetes.Service) AIBundle {
+func connectorDependency(connectors []config.ConnectorsConfig) config.ConnectorsConfig {
+	if len(connectors) == 1 {
+		return connectors[0]
+	}
+	return config.ConnectorsConfig{}
+}
+
+func buildAIs(cfg config.AgentConfig, connectors config.ConnectorsConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location, kubernetesService *kubernetes.Service) AIBundle {
 	toolSettings := aitools.NewManager(store)
-	configuredToolSnapshot := configuredToolAvailabilitySnapshot(cfg, store)
+	configuredToolSnapshot := configuredToolAvailabilitySnapshot(cfg, store, connectors)
 	elasticsearchSources, elasticsearchErrs := buildElasticsearchToolSources(cfg.Sources)
 	for _, err := range elasticsearchErrs {
 		log.Printf("agent: Elasticsearch tool source warning: %v", err)
@@ -128,7 +135,7 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	configuredToolSnapshot.DataSources["elasticsearch"] = elasticsearchConstructionStatus(configuredToolSnapshot.DataSources["elasticsearch"], elasticsearchSources, elasticsearchErrs)
 	var kubernetesErr error
 	if kubernetesService == nil {
-		kubernetesService, kubernetesErr = NewKubernetesService(cfg.Tools.Kubernetes, scope)
+		kubernetesService, kubernetesErr = NewKubernetesService(connectors.Kubernetes, scope)
 	}
 	if kubernetesErr != nil {
 		status := configuredToolSnapshot.Integrations["kubernetes"]
@@ -146,9 +153,9 @@ func buildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 	}
 	var actionService *act.Service
 	var actionServiceFactory func(tenancy.OrgScope) *act.Service
-	actionStatus := aitools.DependencyStatus{Configured: cfg.Tools.Kubernetes.Actions.Enable, Health: "configuration"}
-	if cfg.Tools.Kubernetes.Actions.Enable {
-		adapters, actionErr := buildKubernetesActionAdapters(cfg.Tools.Kubernetes)
+	actionStatus := aitools.DependencyStatus{Configured: connectors.Kubernetes.Actions.Enable, Health: "configuration"}
+	if connectors.Kubernetes.Actions.Enable {
+		adapters, actionErr := buildKubernetesActionAdapters(connectors.Kubernetes)
 		if actionErr == nil && store != nil && len(adapters) > 0 {
 			actionService, actionErr = act.NewService(store, scope.Normalized().Write, ledger.NewBlobWriter(store, scope.Normalized().Write), nil, adapters...)
 		} else if actionErr == nil {
@@ -597,7 +604,8 @@ func (generation *toolGeneration) Filter(agent aitools.AgentKind, runtime []core
 	return generation.view.Filter(agent, runtime, generation.current)
 }
 
-func configuredToolAvailabilitySnapshot(cfg config.AgentConfig, store storage.Provider) aitools.Snapshot {
+func configuredToolAvailabilitySnapshot(cfg config.AgentConfig, store storage.Provider, dependencies ...config.ConnectorsConfig) aitools.Snapshot {
+	connectors := connectorDependency(dependencies)
 	configuredSignals := make(map[signalsources.Kind]int)
 	for _, source := range cfg.Sources {
 		if source.Enable {
@@ -623,10 +631,10 @@ func configuredToolAvailabilitySnapshot(cfg config.AgentConfig, store storage.Pr
 			"metrics":       metrics,
 			"traces":        traces,
 		},
-		Integrations: map[string]aitools.DependencyStatus{"github": configured(hasGit, "GitHub"), "kubernetes": configured(strings.TrimSpace(cfg.Tools.Kubernetes.Endpoint) != "" || strings.TrimSpace(cfg.Tools.Kubernetes.Auth.Mode) != "", "Kubernetes cluster")},
+		Integrations: map[string]aitools.DependencyStatus{"github": configured(hasGit, "GitHub"), "kubernetes": configured(strings.TrimSpace(connectors.Kubernetes.Endpoint) != "" || strings.TrimSpace(connectors.Kubernetes.Auth.Mode) != "", "Kubernetes cluster")},
 		Capabilities: map[string]aitools.DependencyStatus{
 			"ai_embedder": configured(hasEmbedder, "AI embedder"), "runbook_index": configured(hasEmbedder && store != nil, "Runbook index"), "dependency_graph": configured(hasGraph, "Dependency graph"),
-			"change_feed": configured(hasGit || (store != nil && (strings.TrimSpace(cfg.Tools.Kubernetes.Endpoint) != "" || strings.TrimSpace(cfg.Tools.Kubernetes.Auth.Mode) != "")), "Change feed"),
+			"change_feed": configured(hasGit || (store != nil && (strings.TrimSpace(connectors.Kubernetes.Endpoint) != "" || strings.TrimSpace(connectors.Kubernetes.Auth.Mode) != "")), "Change feed"),
 		},
 	}
 }

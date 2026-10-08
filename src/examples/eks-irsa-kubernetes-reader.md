@@ -226,21 +226,22 @@ agent:
   enable: true
   ai:
     enable: true
-  tools:
-    kubernetes:
-      endpoint: https://API_ID.eks.us-east-1.amazonaws.com
-      caData: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t...
-      auth:
-        mode: eks
-        eks:
-          clusterName: production
-          region: us-east-1
-          roleARN: ""
-          profile: ""
+
+connectors:
+  kubernetes:
+    endpoint: https://API_ID.eks.us-east-1.amazonaws.com
+    caData: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t...
+    auth:
+      mode: eks
+      eks:
+        clusterName: production
+        region: us-east-1
+        roleARN: ""
+        profile: ""
 ```
 
 `caData` is the target cluster's base64-encoded certificate-authority data. It is
-stored in the chart Secret and expanded into `tools.yaml`; it is not written as
+stored in the chart Secret and expanded into `connectors.yaml`; it is not written as
 plaintext into the ConfigMap.
 
 Leave `roleARN` empty when the IRSA role itself is the principal in the EKS access
@@ -376,11 +377,10 @@ or forbidden evidence.
 When Versus reads only the cluster where it runs, prefer:
 
 ```yaml
-agent:
-  tools:
-    kubernetes:
-      auth:
-        mode: in_cluster
+connectors:
+  kubernetes:
+    auth:
+      mode: in_cluster
 
 kubernetesReaderRBAC:
   enabled: true
@@ -391,5 +391,5 @@ the Versus ServiceAccount. IRSA and an EKS access entry are unnecessary.
 
 ## Next
 
-- [Kubernetes connector reference](/agent/tools/kubernetes)
+- [Kubernetes connector reference](/agent/connectors/kubernetes)
 - [Helm configuration](/configuration/helm)

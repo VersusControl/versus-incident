@@ -4,6 +4,7 @@ export type KubernetesExplorerTab =
   | "timeline"
   | "topology"
   | "resources"
+  | "nodes"
   | "releases"
   | "gitops"
   | "traffic";
@@ -13,7 +14,8 @@ export const kubernetesExplorerTabs: Array<{ id: KubernetesExplorerTab; label: s
   { id: "issues", label: "Issues" },
   { id: "timeline", label: "Timeline" },
   { id: "topology", label: "Topology" },
-  { id: "resources", label: "Resources" },
+  { id: "resources", label: "Workloads" },
+  { id: "nodes", label: "Nodes" },
   { id: "releases", label: "Helm" },
   { id: "gitops", label: "GitOps" },
   { id: "traffic", label: "Traffic" },

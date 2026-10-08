@@ -4,7 +4,7 @@ This guide explains how to deploy Versus Incident using Helm, a package manager 
 
 For the agent's read-only Kubernetes connection, including native EKS, AKS,
 and GKE authentication values, see the
-[Kubernetes Connector](../agent/tools/kubernetes.md). No cloud CLI or
+[Kubernetes Connector](../agent/connectors/kubernetes.md). No cloud CLI or
 Kubernetes credential plugin is installed or executed.
 
 ## Requirements
