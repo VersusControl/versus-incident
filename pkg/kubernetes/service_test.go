@@ -2,8 +2,12 @@ package kubernetes
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/VersusControl/versus-incident/pkg/core"
 )
 
 func TestOperationBudgetBoundsSlowPaginationWithoutLeakingGoroutines(t *testing.T) {
@@ -1028,6 +1034,34 @@ func TestProjectionAndResultEncodedSizeBounds(t *testing.T) {
 	}
 }
 
+func TestPodLogContainerNamesProjection(t *testing.T) {
+	pod := podFixture("pod")
+	spec := pod["spec"].(map[string]any)
+	spec["initContainers"] = []any{map[string]any{"name": "setup", "env": []any{map[string]any{"value": "must-not-cross"}}}}
+	spec["ephemeralContainers"] = []any{map[string]any{"name": "debug", "env": []any{map[string]any{"value": "must-not-cross"}}}}
+	summary := safeSummary("Pod", pod, replacingScrubber{})
+	containers, ok := summary["log_containers"].([]map[string]string)
+	if !ok || len(containers) != 3 || containers[0]["type"] != "regular" || containers[1]["type"] != "init" || containers[2]["type"] != "ephemeral" {
+		t.Fatalf("container names=%v", containers)
+	}
+	encoded, _ := json.Marshal(containers)
+	if strings.Contains(string(encoded), "must-not-cross") || strings.Contains(string(encoded), "secret") {
+		t.Fatal("raw environment crossed the log container projection")
+	}
+	var oversized []any
+	for index := 0; index < maxProjectionItems+1; index++ {
+		oversized = append(oversized, map[string]any{"name": "container-" + strconv.Itoa(index)})
+	}
+	spec["containers"] = oversized
+	summary = safeSummary("Pod", pod, nil)
+	if len(summary["log_containers"].([]map[string]string)) != maxProjectionItems || summary["log_containers_truncated"] != true {
+		t.Fatal("container projection is unbounded")
+	}
+	if _, found := safeSummary("Deployment", pod, nil)["log_containers"]; found {
+		t.Fatal("non-Pod log navigation metadata added")
+	}
+}
+
 func TestAggregateEncodedTrimAttributesDroppedTailWithoutDuplicateOmissions(t *testing.T) {
 	items := []ProjectedResource{
 		{ResourceID: "apps~v1~deployments", Kind: "Deployment", Name: "kept", Summary: map[string]any{"value": strings.Repeat("a", 600000)}},
@@ -1465,6 +1499,815 @@ func TestErrorClassDoesNotExposeStatus(t *testing.T) {
 }
 
 type replacingScrubber struct{}
+
+func logStreamTestContext() context.Context {
+	return core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
+}
+
+func TestPodLogStreamFramingResumeAndScope(t *testing.T) {
+	var queries []url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		queries = append(queries, request.URL.Query())
+		for _, chunk := range []string{"2026-10-01T00:00:00Z token=sec", "ret\n2026-10-01T00:00:00Z repeated\n", "2026-10-01T00:00:00Z repeated\n2026-10-01T00:00:01Z final"} {
+			writer.Write([]byte(chunk))
+			writer.(http.Flusher).Flush()
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "org-a", ClusterID: "cluster"})
+	service.SetScrubber(replacingScrubber{})
+	options := PodLogStreamOptions{Namespace: "default", Pod: "pod", Container: "app"}
+	var events []PodLogStreamEvent
+	collect := func(event PodLogStreamEvent) error { events = append(events, event); return nil }
+	if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 5 || strings.Contains(events[0].Text, "secret") || events[1].Text != events[2].Text || events[2].Ordinal != 3 || events[4].Event != "end" || queries[0].Get("follow") != "true" || queries[0].Get("timestamps") != "true" || queries[0].Get("tailLines") != "500" {
+		t.Fatalf("events=%+v queries=%v", events, queries)
+	}
+	encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Ordinal: 2})
+	options.Cursor = base64.RawURLEncoding.EncodeToString(encoded)
+	events = nil
+	if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 || events[0].Text != "repeated" || events[0].Ordinal != 3 || queries[1].Get("sinceTime") == "" || queries[1].Has("tailLines") {
+		t.Fatalf("resume events=%+v", events)
+	}
+	other := service.Scoped(Scope{OrgID: "org-b", ClusterID: "cluster"})
+	if err := other.ValidatePodLogStream(options); !errors.Is(err, ErrInvalidArguments) {
+		t.Fatalf("cross-org cursor accepted: %v", err)
+	}
+	options.Container = "other"
+	if err := service.ValidatePodLogStream(options); !errors.Is(err, ErrInvalidArguments) {
+		t.Fatalf("cross-container cursor accepted: %v", err)
+	}
+}
+
+func TestPodLogStreamLimitsAndPrevious(t *testing.T) {
+	for _, test := range []struct {
+		name, payload, reason string
+		duration, idle        time.Duration
+		bytes                 int64
+	}{
+		{"bytes", "2026-10-01T00:00:00Z secret\n", "bytes", time.Second, time.Second, 10},
+		{"encoded-bytes", "2026-10-01T00:00:00Z secret\n", "bytes", time.Second, time.Second, 100},
+		{"quiet-follow", "", "duration", 40 * time.Millisecond, 10 * time.Millisecond, MaxLogStreamBytes},
+		{"duration", "", "duration", 20 * time.Millisecond, time.Second, MaxLogStreamBytes},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.WriteHeader(200)
+				writer.(http.Flusher).Flush()
+				if test.payload != "" {
+					writer.Write([]byte(test.payload))
+					return
+				}
+				<-request.Context().Done()
+			}))
+			defer server.Close()
+			service := newTestService(t, server.URL, Scope{})
+			service.SetScrubber(replacingScrubber{})
+			var events []PodLogStreamEvent
+			err := service.streamPodLogs(context.Background(), PodLogStreamOptions{Namespace: "default", Pod: "pod"}, func(event PodLogStreamEvent) error { events = append(events, event); return nil }, test.duration, test.idle, 5*time.Millisecond, test.bytes)
+			if err != nil || len(events) < 2 || events[len(events)-2].Event != "limit" || events[len(events)-2].Reason != test.reason || events[len(events)-1].Event != "end" {
+				t.Fatalf("events=%+v err=%v", events, err)
+			}
+			for _, event := range events {
+				if event.Event == "line" {
+					t.Fatal("partial or oversized line escaped")
+				}
+			}
+		})
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("follow") != "false" || request.URL.Query().Get("previous") != "true" {
+			t.Error("previous used follow")
+		}
+		writer.WriteHeader(400)
+		writer.Write([]byte(`{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"BadRequest","code":400,"message":"previous terminated container \"app\" in pod \"pod\" not found"}`))
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{})
+	service.SetScrubber(replacingScrubber{})
+	err := service.StreamPodLogs(logStreamTestContext(), PodLogStreamOptions{Namespace: "default", Pod: "pod", Previous: true}, func(PodLogStreamEvent) error { return nil })
+	if !errors.Is(err, errPreviousUnavailable) || strings.Contains(DiagnoseError(err).Message, "secret") {
+		t.Fatalf("previous error=%v", err)
+	}
+}
+
+func TestPodLogStreamOversizedRecordsContinue(t *testing.T) {
+	for _, size := range []int{MaxLogStreamLineBytes, MaxLogStreamLineBytes + 1, 3*MaxLogStreamLineBytes + 7} {
+		for _, finalNewline := range []bool{false, true} {
+			t.Run(strconv.Itoa(size)+"-"+strconv.FormatBool(finalNewline), func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+					writer.Write([]byte("2026-10-01T00:00:00Z " + strings.Repeat("x", size) + "secret\xff\n"))
+					writer.Write([]byte("2026-10-01T00:00:01Z ordinary secret\n"))
+					writer.Write([]byte("2026-10-01T00:00:02Z " + strings.Repeat("x", size) + "secret"))
+					if finalNewline {
+						writer.Write([]byte("\n"))
+					}
+				}))
+				defer server.Close()
+				service := newTestService(t, server.URL, Scope{})
+				service.SetScrubber(replacingScrubber{})
+				var events []PodLogStreamEvent
+				err := service.StreamPodLogs(logStreamTestContext(), PodLogStreamOptions{Namespace: "default", Pod: "pod"}, func(event PodLogStreamEvent) error { events = append(events, event); return nil })
+				if err != nil || len(events) != 4 || events[0].Text != "[oversized log line omitted]" || events[1].Text != "ordinary [redacted]" || events[2].Text != "[oversized log line omitted]" || events[3].Reason != "complete" || events[3].Cursor == "" || events[2].Cursor != "" {
+					t.Fatalf("oversized continuation: %+v err=%v", events, err)
+				}
+				for _, event := range events {
+					if strings.Contains(event.Text, "secret") || strings.Contains(event.Text, "xxx") || event.Event == "limit" {
+						t.Fatal("oversized fragment escaped or stopped stream")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestPodLogStreamExactLineBoundaryAndLimitCursor(t *testing.T) {
+	for _, size := range []int{MaxLogStreamLineBytes, MaxLogStreamLineBytes + 1} {
+		prefix := "2026-10-01T00:00:00Z "
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			writer.Write([]byte(prefix + strings.Repeat("x", size-len(prefix)-1) + "\n"))
+		}))
+		service := newTestService(t, server.URL, Scope{})
+		service.SetScrubber(replacingScrubber{})
+		var events []PodLogStreamEvent
+		err := service.StreamPodLogs(logStreamTestContext(), PodLogStreamOptions{Namespace: "default", Pod: "pod"}, func(event PodLogStreamEvent) error { events = append(events, event); return nil })
+		server.Close()
+		if err != nil || len(events) != 2 {
+			t.Fatalf("line boundary %d: %+v err=%v", size, events, err)
+		}
+		if size == MaxLogStreamLineBytes && events[0].Text != strings.Repeat("x", size-len(prefix)-1) || size > MaxLogStreamLineBytes && events[0].Text != "[oversized log line omitted]" {
+			t.Fatalf("incorrect exact line boundary %d", size)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Write([]byte("2026-10-01T00:00:00Z safe\n2026-10-01T00:00:01Z " + strings.Repeat("x", 2000) + "\n"))
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{})
+	service.SetScrubber(replacingScrubber{})
+	var events []PodLogStreamEvent
+	err := service.streamPodLogs(context.Background(), PodLogStreamOptions{Namespace: "default", Pod: "pod"}, func(event PodLogStreamEvent) error { events = append(events, event); return nil }, time.Second, time.Second, time.Second, 1500)
+	if err != nil || len(events) != 3 || events[0].Event != "line" || events[1].Event != "limit" || events[1].Reason != "bytes" || events[1].Retryable || events[1].Cursor == "" || events[2].Cursor != events[1].Cursor {
+		t.Fatalf("limit cursor advanced past emitted data: %+v err=%v", events, err)
+	}
+	cursor, cursorErr := service.logCursor(PodLogStreamOptions{Namespace: "default", Pod: "pod", Cursor: events[2].Cursor})
+	if cursorErr != nil || cursor.Timestamp.Format(time.RFC3339Nano) != events[0].Timestamp || cursor.Ordinal != events[0].Ordinal {
+		t.Fatalf("limit cursor includes undelivered data: %+v %v", cursor, cursorErr)
+	}
+}
+
+func TestPodLogStreamOversizedMalformedRecordContinues(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Write([]byte(strings.Repeat("secret", MaxLogStreamLineBytes) + "\n2026-10-01T00:00:00Z ordinary secret\n"))
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{})
+	service.SetScrubber(replacingScrubber{})
+	var events []PodLogStreamEvent
+	err := service.StreamPodLogs(logStreamTestContext(), PodLogStreamOptions{Namespace: "default", Pod: "pod"}, func(event PodLogStreamEvent) error { events = append(events, event); return nil })
+	if err != nil || len(events) != 3 || events[0].Text != "[oversized log line omitted]" || events[0].Cursor != "" || !events[0].ReplayUncertain || events[1].Text != "ordinary [redacted]" {
+		t.Fatalf("malformed oversized record: %+v err=%v", events, err)
+	}
+}
+
+func TestPodLogStreamDiscardBudgetAndCancellation(t *testing.T) {
+	for _, cancelStream := range []bool{false, true} {
+		t.Run(strconv.FormatBool(cancelStream), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			closed := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				defer close(closed)
+				writer.Write([]byte("2026-10-01T00:00:00Z " + strings.Repeat("secret", MaxLogStreamLineBytes)))
+				writer.(http.Flusher).Flush()
+				if cancelStream {
+					cancel()
+				}
+				<-request.Context().Done()
+			}))
+			defer server.Close()
+			service := newTestService(t, server.URL, Scope{})
+			service.SetScrubber(replacingScrubber{})
+			var events []PodLogStreamEvent
+			budget := int64(2 * MaxLogStreamLineBytes)
+			if cancelStream {
+				budget = MaxLogStreamBytes
+			}
+			err := service.streamPodLogs(ctx, PodLogStreamOptions{Namespace: "default", Pod: "pod"}, func(event PodLogStreamEvent) error { events = append(events, event); return nil }, time.Second, time.Second, time.Second, budget)
+			if cancelStream {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("discard cancellation: %v", err)
+				}
+			} else if err != nil || len(events) != 2 || events[0].Event != "limit" || events[0].Reason != "bytes" {
+				t.Fatalf("discard budget: %+v err=%v", events, err)
+			}
+			for _, event := range events {
+				if event.Event == "line" {
+					t.Fatal("partial discarded record emitted")
+				}
+			}
+			select {
+			case <-closed:
+			case <-time.After(time.Second):
+				t.Fatal("discard reader survived cancellation")
+			}
+		})
+	}
+}
+
+func TestPodLogStreamInterleavedOccurrenceResume(t *testing.T) {
+	var queries []url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		queries = append(queries, request.URL.Query())
+		writer.Write([]byte("2026-10-01T00:00:01Z repeated\n2026-10-01T00:00:00Z repeated\n2026-10-01T00:00:01Z repeated\n2026-10-01T00:00:00Z repeated\n2026-10-01T00:00:02Z final\n"))
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{})
+	service.SetScrubber(replacingScrubber{})
+	options := PodLogStreamOptions{Namespace: "default", Pod: "pod"}
+	var events []PodLogStreamEvent
+	collect := func(event PodLogStreamEvent) error { events = append(events, event); return nil }
+	if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || len(events) != 6 || events[2].Ordinal != 2 || events[3].Ordinal != 2 {
+		t.Fatalf("interleaved: %+v err=%v", events, err)
+	}
+	encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: time.Date(2026, 10, 1, 0, 0, 1, 0, time.UTC), Ordinal: 2, Occurrences: map[string]uint64{"2026-10-01T00:00:00Z": 1, "2026-10-01T00:00:01Z": 2}})
+	options.Cursor = base64.RawURLEncoding.EncodeToString(encoded)
+	events = nil
+	if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || len(events) != 3 || events[0].Timestamp != "2026-10-01T00:00:00Z" || events[0].Ordinal != 2 || events[0].Text != "repeated" || events[0].ReplayUncertain || events[2].ReplayUncertain {
+		t.Fatalf("interleaved resume: %+v err=%v", events, err)
+	}
+	if queries[1].Get("sinceTime") != "2026-09-30T23:59:59.999999999Z" || queries[1].Has("tailLines") {
+		t.Fatalf("overlap query: %v", queries[1])
+	}
+	options.Cursor = events[2].Cursor
+	events = nil
+	if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || len(events) != 1 || events[0].Event != "end" || events[0].ReplayUncertain {
+		t.Fatalf("successive resume lost identities: %+v err=%v", events, err)
+	}
+}
+
+func TestPodLogStreamRetainedResumeBoundary(t *testing.T) {
+	for _, spacing := range []time.Duration{time.Second, 3 * time.Second} {
+		t.Run(spacing.String(), func(t *testing.T) {
+			base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				since, _ := time.Parse(time.RFC3339Nano, request.URL.Query().Get("sinceTime"))
+				for index := 0; index < 140; index++ {
+					timestamp := base.Add(time.Duration(index) * spacing)
+					if timestamp.Before(since) {
+						continue
+					}
+					writer.Write([]byte(timestamp.Format(time.RFC3339Nano) + " repeated\n"))
+				}
+			}))
+			defer server.Close()
+			service := newTestService(t, server.URL, Scope{})
+			service.SetScrubber(replacingScrubber{})
+			options := PodLogStreamOptions{Namespace: "default", Pod: "pod"}
+			var final PodLogStreamEvent
+			lines := 0
+			collect := func(event PodLogStreamEvent) error {
+				final = event
+				if event.Event == "line" {
+					lines++
+				}
+				return nil
+			}
+			if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || lines != 140 || final.ReplayUncertain != (spacing == time.Second) {
+				t.Fatalf("initial lines=%d final=%+v err=%v", lines, final, err)
+			}
+			options.Cursor = final.Cursor
+			lines = 0
+			if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || lines != 0 || final.ReplayUncertain {
+				t.Fatalf("resume lines=%d final=%+v err=%v", lines, final, err)
+			}
+		})
+	}
+}
+
+func TestPodLogStreamCheckpointBandwidth(t *testing.T) {
+	const lineCount = 10000
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		for index := 0; index < lineCount; index++ {
+			writer.Write([]byte(base.Add(time.Duration(index)*time.Millisecond).Format(time.RFC3339Nano) + " x\n"))
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{})
+	service.SetScrubber(replacingScrubber{})
+	options := PodLogStreamOptions{Namespace: "default", Pod: "pod"}
+	lines, checkpoints, wireBytes := 0, 0, 0
+	var final PodLogStreamEvent
+	err := service.StreamPodLogs(logStreamTestContext(), options, func(event PodLogStreamEvent) error {
+		payload, _ := json.Marshal(event)
+		wireBytes += len(payload) + len(event.Event) + len("event: \ndata: \n\n")
+		final = event
+		if event.Event == "limit" {
+			t.Fatalf("premature bandwidth limit at %d lines", lines)
+		}
+		if event.Event == "line" {
+			lines++
+			if event.Ordinal != 1 || event.Sequence != uint64(lines) {
+				t.Fatalf("incorrect line identity: %+v", event)
+			}
+			if (event.Cursor != "") != (lines%logCursorCheckpoint == 0) {
+				t.Fatalf("incorrect checkpoint cadence at line %d", lines)
+			}
+			if event.Cursor != "" {
+				checkpoints++
+				options.Cursor = event.Cursor
+				if _, err := service.logCursor(options); err != nil {
+					t.Fatalf("invalid checkpoint: %v", err)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil || lines != lineCount || checkpoints != lineCount/logCursorCheckpoint || wireBytes > MaxLogStreamBytes || final.Event != "end" || final.Reason != "complete" || final.Cursor == "" {
+		t.Fatalf("lines=%d checkpoints=%d bytes=%d final=%+v err=%v", lines, checkpoints, wireBytes, final, err)
+	}
+	t.Logf("%d lines, %d line checkpoints, %d SSE bytes", lines, checkpoints, wireBytes)
+}
+
+func TestPodLogStreamCheckpointWireQuota(t *testing.T) {
+	const budget = 12000
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Write([]byte(strings.Repeat("2026-10-01T00:00:00Z repeated\n", 1000)))
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{})
+	service.SetScrubber(replacingScrubber{})
+	options := PodLogStreamOptions{Namespace: "default", Pod: "pod"}
+	lines, checkpoints, wireBytes := 0, 0, 0
+	var final, limit PodLogStreamEvent
+	err := service.streamPodLogs(context.Background(), options, func(event PodLogStreamEvent) error {
+		payload, _ := json.Marshal(event)
+		wireBytes += len(payload) + len(event.Event) + len("event: \ndata: \n\n")
+		if event.Event == "line" {
+			lines++
+			if event.Cursor != "" {
+				checkpoints++
+			}
+		}
+		if event.Event == "limit" {
+			limit = event
+		}
+		final = event
+		return nil
+	}, time.Second, time.Second, time.Second, budget)
+	options.Cursor = final.Cursor
+	cursor, cursorErr := service.logCursor(options)
+	if err != nil || cursorErr != nil || lines < 32 || lines >= 1000 || checkpoints == 0 || wireBytes > budget || final.Event != "end" || limit.Reason != "bytes" || limit.Cursor != final.Cursor || cursor.Ordinal != uint64(lines) {
+		t.Fatalf("lines=%d checkpoints=%d bytes=%d cursor=%+v limit=%+v final=%+v err=%v cursorErr=%v", lines, checkpoints, wireBytes, cursor, limit, final, err, cursorErr)
+	}
+}
+
+func TestPodLogStreamInterruptedCheckpointOccurrences(t *testing.T) {
+	const lineCount = 96
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		since, _ := time.Parse(time.RFC3339Nano, request.URL.Query().Get("sinceTime"))
+		for index := 0; index < lineCount; index++ {
+			timestamp := base.Add(time.Duration(index%2) * time.Second)
+			if !timestamp.Before(since) {
+				writer.Write([]byte(timestamp.Format(time.RFC3339Nano) + " repeated\n"))
+			}
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{})
+	service.SetScrubber(replacingScrubber{})
+	options := PodLogStreamOptions{Namespace: "default", Pod: "pod"}
+	seen := make(map[string]bool)
+	interrupted := errors.New("client interrupted between checkpoints")
+	lines := 0
+	err := service.StreamPodLogs(logStreamTestContext(), options, func(event PodLogStreamEvent) error {
+		if event.Event == "line" {
+			lines++
+			seen[event.Timestamp+"/"+strconv.FormatUint(event.Ordinal, 10)] = true
+			if event.Cursor != "" {
+				options.Cursor = event.Cursor
+			}
+			if lines == 39 {
+				return interrupted
+			}
+		}
+		return nil
+	})
+	if !errors.Is(err, interrupted) || options.Cursor == "" || len(seen) != 39 {
+		t.Fatalf("interruption lines=%d identities=%d err=%v", lines, len(seen), err)
+	}
+	resumed, overlap := 0, 0
+	err = service.StreamPodLogs(logStreamTestContext(), options, func(event PodLogStreamEvent) error {
+		if event.ReplayUncertain {
+			t.Fatalf("continuous replay marked uncertain: %+v", event)
+		}
+		if event.Event == "line" {
+			resumed++
+			if event.Ordinal != uint64(16+(resumed+1)/2) || event.Text != "repeated" || event.Sequence != uint64(resumed) {
+				t.Fatalf("reconstructed occurrence: %+v", event)
+			}
+			identity := event.Timestamp + "/" + strconv.FormatUint(event.Ordinal, 10)
+			if seen[identity] {
+				overlap++
+			}
+			seen[identity] = true
+		}
+		return nil
+	})
+	if err != nil || resumed != 64 || overlap != 7 || len(seen) != lineCount {
+		t.Fatalf("resume lines=%d overlap=%d distinct=%d err=%v", resumed, overlap, len(seen), err)
+	}
+}
+
+func TestPodLogStreamQuietCheckpointAndDiscontinuousReplay(t *testing.T) {
+	for _, discontinuous := range []bool{false, true} {
+		t.Run(strconv.FormatBool(discontinuous), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Write([]byte("2026-10-01T00:00:00Z repeated\n"))
+				writer.(http.Flusher).Flush()
+				if !discontinuous {
+					<-request.Context().Done()
+				}
+			}))
+			defer server.Close()
+			service := newTestService(t, server.URL, Scope{})
+			service.SetScrubber(replacingScrubber{})
+			options := PodLogStreamOptions{Namespace: "default", Pod: "pod"}
+			if discontinuous {
+				encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Ordinal: 2})
+				options.Cursor = base64.RawURLEncoding.EncodeToString(encoded)
+			}
+			var events []PodLogStreamEvent
+			err := service.streamPodLogs(context.Background(), options, func(event PodLogStreamEvent) error {
+				events = append(events, event)
+				return nil
+			}, 60*time.Millisecond, time.Second, 5*time.Millisecond, MaxLogStreamBytes)
+			if err != nil || len(events) == 0 {
+				t.Fatalf("events=%+v err=%v", events, err)
+			}
+			final := events[len(events)-1]
+			if final.Event != "end" || final.Cursor == "" || final.ReplayUncertain != discontinuous {
+				t.Fatalf("continuity verdict: %+v", events)
+			}
+			if !discontinuous {
+				checkpoints := 0
+				for _, event := range events {
+					if event.Event == "heartbeat" && event.Cursor != "" {
+						checkpoints++
+						if event.Cursor != final.Cursor {
+							t.Fatal("quiet checkpoint differs from final cursor")
+						}
+					}
+				}
+				if checkpoints != 1 || events[0].Event != "line" || events[0].Cursor != "" {
+					t.Fatalf("quiet checkpoint count=%d events=%+v", checkpoints, events)
+				}
+			}
+		})
+	}
+}
+
+func TestPodLogStreamCursorHistoryIsBounded(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+		for index := 0; index < 140; index++ {
+			writer.Write([]byte(base.Add(time.Duration(index)*time.Second).Format(time.RFC3339Nano) + " repeated\n"))
+		}
+		writer.Write([]byte(base.Format(time.RFC3339Nano) + " repeated\n" + base.Format(time.RFC3339Nano) + " repeated\n"))
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{})
+	service.SetScrubber(replacingScrubber{})
+	options := PodLogStreamOptions{Namespace: "default", Pod: "pod"}
+	var lines int
+	var uncertain bool
+	seen := make(map[string]bool)
+	err := service.StreamPodLogs(logStreamTestContext(), options, func(event PodLogStreamEvent) error {
+		if event.Event != "line" {
+			return nil
+		}
+		lines++
+		uncertain = event.ReplayUncertain
+		identity := event.Timestamp + "/" + strconv.FormatUint(event.Ordinal, 10)
+		if seen[identity] {
+			t.Fatalf("repeated line identity collapsed after eviction: %+v", event)
+		}
+		seen[identity] = true
+		if lines > 140 && event.Ordinal != uint64(lines-139) {
+			t.Fatalf("late repeated occurrence ordinal: %+v", event)
+		}
+		if event.Cursor == "" {
+			return nil
+		}
+		options.Cursor = event.Cursor
+		cursor, err := service.logCursor(options)
+		if err != nil || len(cursor.Occurrences) > maxLogCursorTimestamps {
+			t.Fatalf("invalid or unbounded emitted cursor: %v", err)
+		}
+		return nil
+	})
+	if err != nil || lines != 142 || !uncertain {
+		t.Fatalf("bounded cursor dropped lines: count=%d uncertainty=%v err=%v", lines, uncertain, err)
+	}
+}
+
+func TestPodLogStreamTimestampTextEncodedBudgetAndNames(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("container") == "encoded" {
+			writer.Write([]byte("2026-10-01T00:00:00Z " + strings.Repeat("\x00", 100) + "\n"))
+			return
+		}
+		writer.Write([]byte("2026-10-01T00:00:00Z secret\n"))
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{})
+	service.SetScrubber(replacingScrubber{})
+	for _, timestamps := range []bool{false, true} {
+		var events []PodLogStreamEvent
+		err := service.StreamPodLogs(logStreamTestContext(), PodLogStreamOptions{Namespace: "default", Pod: "pod", Timestamps: timestamps}, func(event PodLogStreamEvent) error { events = append(events, event); return nil })
+		if err != nil || len(events) != 2 || events[0].Timestamp != "2026-10-01T00:00:00Z" {
+			t.Fatalf("timestamp metadata: %v %+v", err, events)
+		}
+		want := "[redacted]"
+		if timestamps {
+			want = "2026-10-01T00:00:00Z " + want
+		}
+		if events[0].Text != want {
+			t.Fatal("timestamp text contract changed")
+		}
+	}
+	var events []PodLogStreamEvent
+	err := service.streamPodLogs(context.Background(), PodLogStreamOptions{Namespace: "default", Pod: "pod", Container: "encoded"}, func(event PodLogStreamEvent) error { events = append(events, event); return nil }, time.Second, time.Second, time.Second, 300)
+	if err != nil || len(events) != 2 || events[0].Event != "limit" || events[0].Reason != "bytes" {
+		t.Fatalf("encoded byte budget: %+v %v", events, err)
+	}
+	for _, name := range []string{"a%2fb", "a\x00b", "token:secret", ".pod", "pod..name", "Pod"} {
+		if err := service.ValidatePodLogStream(PodLogStreamOptions{Namespace: "default", Pod: name}); !errors.Is(err, ErrInvalidArguments) {
+			t.Fatalf("unsafe Pod name accepted: %q", name)
+		}
+	}
+}
+
+type logStreamTestTransport func(*http.Request) (*http.Response, error)
+
+func TestPodLogStreamBadRequestStatusDiagnosis(t *testing.T) {
+	for _, test := range []struct {
+		name, body, code string
+		previous         bool
+	}{
+		{"missing-previous", `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"BadRequest","code":400,"message":"previous terminated container \"app\" in pod \"pod\" not found"}`, "previous_unavailable", true},
+		{"invalid-container", `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"BadRequest","code":400,"message":"container private-provider-detail is not valid for pod"}`, "invalid_arguments", true},
+		{"container-required", `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"BadRequest","code":400,"message":"a container name must be specified"}`, "invalid_arguments", true},
+		{"raw-body", "private-provider-detail previous terminated container not found", "invalid_arguments", true},
+		{"untrusted-reason", `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"private-provider-detail","code":400,"message":"previous terminated container not found"}`, "invalid_arguments", true},
+		{"wrong-code", `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"BadRequest","code":403,"message":"previous terminated container not found"}`, "invalid_arguments", true},
+		{"oversized", `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"BadRequest","code":400,"message":"previous terminated container not found` + strings.Repeat("x", 4096) + `"}`, "invalid_arguments", true},
+		{"current", `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"BadRequest","code":400,"message":"previous terminated container not found"}`, "invalid_arguments", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := newTestService(t, "http://localhost", Scope{})
+			service.SetScrubber(replacingScrubber{})
+			service.client.streamHTTP.Transport = logStreamTestTransport(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(strings.NewReader(test.body))}, nil
+			})
+			events := 0
+			err := service.StreamPodLogs(logStreamTestContext(), PodLogStreamOptions{Namespace: "default", Pod: "pod", Container: "app", Previous: test.previous}, func(PodLogStreamEvent) error { events++; return nil })
+			detail := DiagnoseError(err)
+			if err == nil || detail.Code != test.code || detail.Retryable || events != 0 {
+				t.Fatalf("diagnosis=%+v events=%d", detail, events)
+			}
+			payload, _ := json.Marshal(detail)
+			if strings.Contains(err.Error()+string(payload), "private-provider-detail") {
+				t.Fatal("Status content escaped the diagnostic boundary")
+			}
+		})
+	}
+}
+
+func (transport logStreamTestTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+func TestPodLogStreamAcceptsNegotiatedLogResponse(t *testing.T) {
+	for _, previous := range []bool{false, true} {
+		t.Run(strconv.FormatBool(previous), func(t *testing.T) {
+			service := newTestService(t, "http://localhost", Scope{})
+			service.SetScrubber(replacingScrubber{})
+			service.client.streamHTTP.Transport = logStreamTestTransport(func(request *http.Request) (*http.Response, error) {
+				if request.Header.Get("Accept") != "*/*" {
+					return &http.Response{StatusCode: http.StatusNotAcceptable, Body: io.NopCloser(strings.NewReader("private-provider-detail"))}, nil
+				}
+				if request.URL.Query().Get("follow") != strconv.FormatBool(!previous) || request.URL.Query().Get("timestamps") != "true" {
+					t.Error("log stream options changed")
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("2026-10-08T00:00:00Z token=secret\n"))}, nil
+			})
+			var events []PodLogStreamEvent
+			err := service.StreamPodLogs(logStreamTestContext(), PodLogStreamOptions{Namespace: "default", Pod: "pod", Container: "app", Previous: previous}, func(event PodLogStreamEvent) error {
+				events = append(events, event)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("negotiated log stream failed: %v", err)
+			}
+			if len(events) != 2 || events[0].Event != "line" || strings.Contains(events[0].Text, "secret") || events[1].Event != "end" {
+				t.Fatal("expected one redacted line and completion")
+			}
+		})
+	}
+}
+
+func TestPodLogStreamConnectionErrorsPreserveSafeDiagnosis(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		cause     error
+		code      string
+		retryable bool
+	}{
+		{name: "TLS", cause: x509.UnknownAuthorityError{}, code: "tls_verification_failed"},
+		{name: "DNS", cause: &net.DNSError{Err: "private-provider-detail", Name: "private-endpoint.invalid"}, code: "dns_resolution_failed", retryable: true},
+		{name: "dial", cause: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("private-provider-detail")}, code: "connection_failed", retryable: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := newTestService(t, "http://localhost", Scope{})
+			service.client.streamHTTP = &http.Client{Transport: logStreamTestTransport(func(request *http.Request) (*http.Response, error) {
+				return nil, &url.Error{Op: "Get", URL: "https://private-endpoint.invalid/?token=private-provider-detail", Err: test.cause}
+			})}
+			_, err := service.client.openPodLogStream(context.Background(), "/api/v1/namespaces/default/pods/pod/log", false)
+			if !errors.Is(err, test.cause) {
+				t.Fatal("connection cause lost")
+			}
+			detail := DiagnoseError(err)
+			if detail.Code != test.code || detail.Retryable != test.retryable {
+				t.Fatalf("diagnosis = %+v", detail)
+			}
+			payload, _ := json.Marshal(detail)
+			for _, secret := range []string{"private-endpoint", "private-provider-detail", "token="} {
+				if strings.Contains(err.Error(), secret) || strings.Contains(string(payload), secret) {
+					t.Fatal("connection error exposed private data")
+				}
+			}
+		})
+	}
+}
+
+type logStreamFailureReader struct {
+	ready      chan struct{}
+	onClassify func()
+}
+
+func (reader *logStreamFailureReader) Read([]byte) (int, error) {
+	close(reader.ready)
+	return 0, reader
+}
+
+func (reader *logStreamFailureReader) Error() string {
+	return "upstream read failure"
+}
+
+func (reader *logStreamFailureReader) Is(target error) bool {
+	if target == io.EOF && reader.onClassify != nil {
+		reader.onClassify()
+	}
+	return false
+}
+
+func TestPodLogStreamReadErrorContextTermination(t *testing.T) {
+	for _, ending := range []string{"duration", "caller-cancel", "caller-deadline", "upstream"} {
+		for _, boundary := range []string{"emit", "classification"} {
+			t.Run(ending+"/"+boundary, func(t *testing.T) {
+				parent, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				duration := time.Hour
+				switch ending {
+				case "duration":
+					duration = time.Second
+				case "caller-deadline":
+					var cancelDeadline context.CancelFunc
+					parent, cancelDeadline = context.WithTimeout(parent, time.Second)
+					defer cancelDeadline()
+				}
+				failure := &logStreamFailureReader{ready: make(chan struct{})}
+				service := newTestService(t, "http://localhost", Scope{})
+				service.SetScrubber(replacingScrubber{})
+				var streamContext context.Context
+				service.client.streamHTTP = &http.Client{Transport: logStreamTestTransport(func(request *http.Request) (*http.Response, error) {
+					streamContext = request.Context()
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(io.MultiReader(strings.NewReader("2026-10-01T00:00:00Z secret\n"), failure))}, nil
+				})}
+				endContext := func() {
+					if ending == "caller-cancel" {
+						cancel()
+					}
+					if ending != "upstream" {
+						select {
+						case <-streamContext.Done():
+						case <-time.After(3 * time.Second):
+							t.Fatal("stream context did not terminate at the expected boundary")
+						}
+					}
+				}
+				classified := false
+				if boundary == "classification" {
+					failure.onClassify = func() {
+						classified = true
+						endContext()
+					}
+				}
+				var events []PodLogStreamEvent
+				err := service.streamPodLogs(parent, PodLogStreamOptions{Namespace: "default", Pod: "pod"}, func(event PodLogStreamEvent) error {
+					events = append(events, event)
+					if event.Event == "line" {
+						select {
+						case <-failure.ready:
+						case <-time.After(3 * time.Second):
+							t.Fatal("upstream failure reader did not reach its boundary")
+						}
+						if boundary == "emit" {
+							endContext()
+						}
+					}
+					return nil
+				}, duration, time.Hour, time.Hour, MaxLogStreamBytes)
+				if boundary == "classification" && !classified {
+					t.Fatal("read-error classification branch was not exercised")
+				}
+				if len(events) == 0 || events[0].Event != "line" || events[0].ReplayUncertain {
+					t.Fatalf("initial events=%+v err=%v", events, err)
+				}
+				switch ending {
+				case "duration":
+					if err != nil || len(events) != 3 || events[1].Event != "limit" || events[2].Event != "end" || events[1].Reason != "duration" || events[2].Reason != "duration" || events[1].Cursor == "" || events[1].Cursor != events[2].Cursor || events[1].ReplayUncertain || events[2].ReplayUncertain {
+						t.Fatalf("duration events=%+v err=%v", events, err)
+					}
+				case "caller-cancel", "caller-deadline":
+					if !errors.Is(err, parent.Err()) || len(events) != 1 {
+						t.Fatalf("canceled events=%+v err=%v parent=%v", events, err, parent.Err())
+					}
+				case "upstream":
+					if err == nil || err.Error() != "kubernetes: log stream read failed" || len(events) != 2 || events[1].Event != "heartbeat" || events[1].Cursor == "" || !events[1].ReplayUncertain {
+						t.Fatalf("upstream events=%+v err=%v", events, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestPodLogStreamCancellationAndAdmission(t *testing.T) {
+	closed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Write([]byte("2026-10-01T00:00:00Z secret\n"))
+		writer.(http.Flusher).Flush()
+		<-request.Context().Done()
+		close(closed)
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "cancel"})
+	service.SetScrubber(replacingScrubber{})
+	ctx, cancel := context.WithCancel(logStreamTestContext())
+	err := service.StreamPodLogs(ctx, PodLogStreamOptions{Namespace: "default", Pod: "pod"}, func(PodLogStreamEvent) error { cancel(); return context.Canceled })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("upstream not canceled")
+	}
+	if err := service.StreamPodLogs(context.Background(), PodLogStreamOptions{}, func(PodLogStreamEvent) error { return nil }); !errors.Is(err, ErrForbidden) {
+		t.Fatal("missing authorization accepted")
+	}
+	var releases []func()
+	defer func() {
+		for _, release := range releases {
+			release()
+			release()
+		}
+	}()
+	for org := 0; org < 5; org++ {
+		for stream := 0; stream < 4; stream++ {
+			release, err := acquireLogStream(strconv.Itoa(org))
+			if err != nil {
+				t.Fatal(err)
+			}
+			releases = append(releases, release)
+		}
+		if _, err := acquireLogStream(strconv.Itoa(org)); !errors.Is(err, ErrLogStreamBusy) {
+			t.Fatal("org cap not enforced")
+		}
+	}
+	if _, err := acquireLogStream("another"); !errors.Is(err, ErrLogStreamBusy) {
+		t.Fatal("process cap not enforced")
+	}
+}
 
 func (replacingScrubber) Scrub(value string) string {
 	return strings.ReplaceAll(value, "secret", "[redacted]")

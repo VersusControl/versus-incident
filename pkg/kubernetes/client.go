@@ -77,6 +77,7 @@ type Client struct {
 	timeout      time.Duration
 	maxBodyBytes int64
 	http         *http.Client
+	streamHTTP   *http.Client
 }
 
 // NewClient validates transport policy and constructs a read-only API client.
@@ -132,9 +133,15 @@ func NewClient(config Config) (*Client, error) {
 	transport.TLSClientConfig = tlsConfig
 	transport.Proxy = nil
 	transport.DialContext = guardedDialContext(&net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}, net.DefaultResolver, policy)
+	streamTransport := transport.Clone()
+	streamTransport.DialContext = guardedDialContext(&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}, net.DefaultResolver, policy)
+	streamTransport.TLSHandshakeTimeout = 10 * time.Second
+	streamTransport.ResponseHeaderTimeout = 10 * time.Second
+	streamTransport.MaxResponseHeaderBytes = 64 << 10
 	return &Client{
 		base: base, credentials: credentials, timeout: timeout, maxBodyBytes: maxBodyBytes,
-		http: &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrRedirect }},
+		http:       &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrRedirect }},
+		streamHTTP: &http.Client{Transport: streamTransport, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrRedirect }},
 	}, nil
 }
 
@@ -293,7 +300,10 @@ func guardedDialContext(dialer contextDialer, resolver ipResolver, policy endpoi
 		addresses := []net.IPAddr{{IP: net.ParseIP(host)}}
 		if addresses[0].IP == nil {
 			addresses, err = resolver.LookupIPAddr(ctx, host)
-			if err != nil || len(addresses) == 0 {
+			if err != nil {
+				return nil, &connectionError{cause: err}
+			}
+			if len(addresses) == 0 {
 				return nil, ErrInvalidEndpoint
 			}
 		}

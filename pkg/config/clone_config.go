@@ -19,6 +19,7 @@ func cloneConfig(src *Config) *Config {
 		Redis:         cloneRedisConfig(src.Redis),
 		Storage:       cloneStorageConfig(src.Storage),
 		Agent:         cloneAgentConfig(src.Agent),
+		Connectors:    cloneConnectorsConfig(src.Connectors),
 	}
 
 	return cloned
@@ -505,9 +506,12 @@ func cloneToolsConfig(src ToolsConfig) ToolsConfig {
 		}
 	}
 	out.FindRunbook = src.FindRunbook
-	out.Kubernetes = src.Kubernetes
+	return out
+}
+
+func cloneConnectorsConfig(src ConnectorsConfig) ConnectorsConfig {
+	out := src
 	out.Kubernetes.EndpointCIDRs = append([]string(nil), src.Kubernetes.EndpointCIDRs...)
-	out.Kubernetes.Actions = src.Kubernetes.Actions
 	return out
 }
 

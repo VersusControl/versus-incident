@@ -9,10 +9,10 @@ The AI SRE can use the same cluster context in Chat and Analyze. Start with the
 dashboard to understand a workload, then investigate it in chat with the
 resource already attached.
 
-## Kubernetes Harness Dashboard
+## Harness Dashboard
 
-Open **Tools > Kubernetes** after connecting your cluster. The dashboard has
-eight tabs; screenshots below use a synthetic cluster.
+Open **Connectors > Kubernetes** after connecting your cluster. The dashboard
+has nine tabs; screenshots below use a synthetic cluster.
 
 ### Overview
 
@@ -21,14 +21,16 @@ capacity. Usage and resource requests are shown separately, with the metrics
 source and sample time beside them. Missing metrics are labelled **Unavailable**
 rather than shown as zero.
 
-Grouped issues, top pod usage, recent changes, and release and traffic summaries
-help you choose what to inspect next. The topology preview loads independently
-across namespaces. **Full topology** opens the namespace explorer.
-
-The full-width **Workloads** list supports name, namespace, and kind filters.
-Select a node to inspect its scheduled pods.
-
 ![Kubernetes dashboard overview with cluster health, capacity, and grouped issues](../../docs/images/kubernetes-harness-overview.png)
+
+Grouped issues, top pod usage, recent changes, and release and traffic summaries
+help you choose what to inspect next. The Overview topology summary shows actual
+resource counts from inventory and overview metadata, with stale and partial
+counts labelled. Reported resources and unreported resources are grouped
+separately; unreported counts display **0** with count-availability context,
+rather than being treated as verified zero counts. Recent changes and Topology
+share an equal-height row with independently scrollable content; on narrow
+screens they stack. **Full topology** opens the namespace explorer.
 
 ### Issues
 
@@ -45,29 +47,30 @@ changes. Choose a time window and filter by namespace or resource kind. Select
 a change to open the resource's timeline in the details panel. Recorded history
 gaps remain visible so missing evidence is not mistaken for no activity.
 
-![Kubernetes Timeline tab with time-window, namespace, and resource-kind filters](../../docs/images/kubernetes-harness-timeline.png)
+![Kubernetes timeline showing multiple Deployment creation events for new resources, with time-window, namespace, and resource-kind filters](../../docs/images/kubernetes-harness-timeline.png)
 
 ### Topology
 
 Start with the namespace blocks. Search for a namespace and select it to explore
 its connected resources; this graph is not paginated.
 
-![Clickable namespace blocks in the Kubernetes topology explorer](../../docs/images/kubernetes-harness-namespaces.png)
+![Populated Kubernetes namespace explorer with clickable namespace blocks and header namespace selection and refresh controls](../../docs/images/kubernetes-harness-namespaces.png)
 
 The filter sidebar groups resource kinds and shows their counts. Ingress,
 Service, Deployment, and Pod are visible by default. Use the eye icons to show
-or hide other kinds, or reveal all kinds at once. Refresh the graph from the
-sidebar, and use pan, zoom, and **Fit to view** to navigate it.
+or hide other kinds, or reveal all kinds at once. Choose a namespace and refresh
+the graph in the header; **Namespaces** returns to the namespace blocks. Use
+pan, zoom, and **Fit to view** to navigate the graph.
 
 Connections show which resources manage, expose, route to, or configure others.
 Select a resource to open its details. Resources without relationships are not
-shown; use **Resources** to browse workloads outside the graph. If permissions
+shown; use **Workloads** to browse workloads outside the graph. If permissions
 or collection limits prevent a complete graph, the dashboard shows an error
 instead of presenting partial results as complete.
 
-![Namespace topology with grouped visibility filters and connected resources](../../docs/images/kubernetes-harness-topology.png)
+![Populated namespace topology with connected resources, grouped visibility filters, and header namespace and refresh controls](../../docs/images/kubernetes-harness-topology.png)
 
-### Resources
+### Workloads
 
 Search workloads and filter by kind, including Deployments, StatefulSets,
 DaemonSets, Jobs, CronJobs, and Pods. Select a row to open its details. The list
@@ -75,13 +78,18 @@ scrolls within the panel and loads additional pages as requested.
 
 ![Kubernetes resource inventory with name and kind filters](../../docs/images/kubernetes-harness-resources.png)
 
+### Nodes
+
+Browse cluster nodes, readiness, and capacity. Select a node to inspect its
+scheduled Pods across namespaces; both inventories use server pagination.
+
 ### Helm
 
 Inspect release status, health, namespace, and revision. Expand a release to
 view its revision history. This view shows release metadata, not chart values
 or rendered manifests, and does not run Helm operations.
 
-![Helm tab showing an empty release-metadata inventory](../../docs/images/kubernetes-harness-helm.png)
+![Populated Helm release inventory with status, health, namespace, and an expanded release showing two revisions](../../docs/images/kubernetes-harness-helm.png)
 
 ### GitOps
 
@@ -92,7 +100,7 @@ Rollouts and their strategy, progress, and canary weight.
 If the relevant APIs are not installed or cannot be read, the page explains
 what is unavailable instead of showing an empty successful result.
 
-![GitOps tab explaining that application APIs and the Argo Rollouts CRD are not discovered](../../docs/images/kubernetes-harness-gitops.png)
+![Populated GitOps applications with health and sync states, plus an Argo Rollout showing 50% canary weight and resource references](../../docs/images/kubernetes-harness-gitops.png)
 
 ### Traffic
 
@@ -102,18 +110,23 @@ See observed service-to-service request rates, error rates, latency, and
 bytes per second where the source provides them. Filter by namespace and time
 window; check the source and freshness before interpreting a flow. Without
 supported telemetry, the page shows an unavailable state rather than inventing
-connections.
+connections. Individual metrics remain **Unavailable** when unsupported by
+the source.
 
-![Kubernetes service traffic view with its source availability state](../../docs/images/kubernetes-harness-traffic.png)
+![Observed Istio service traffic with request rates, error rates, and p95 latency; unsupported Bytes/s metrics are unavailable](../../docs/images/kubernetes-harness-traffic.png)
 
 ## Configuration
 
-Configure in `tools.yaml` file.
+Configure `connectors.kubernetes` at the root of `config.yaml`, or in an optional
+`connectors.yaml` file beside it. The examples below use the same root
+`connectors:` wrapper in either file. Tool execution settings remain in
+`tools.yaml`. Reader credentials belong in `connectors.kubernetes.auth`; action
+credentials are configured separately in `connectors.kubernetes.actions.auth`.
 
 ### In-cluster ServiceAccount
 
 ```yaml
-tools:
+connectors:
   kubernetes:
     auth:
       mode: in_cluster
@@ -125,7 +138,7 @@ not require a restart. The projected cluster CA is used automatically.
 ### Rotating token file
 
 ```yaml
-tools:
+connectors:
   kubernetes:
     endpoint: https://api.example
     ca_data: ${KUBERNETES_CA_DATA}
@@ -139,7 +152,7 @@ The bounded token file is read on every request.
 ### Static token
 
 ```yaml
-tools:
+connectors:
   kubernetes:
     endpoint: https://api.example
     ca_data: ${KUBERNETES_CA_DATA}
@@ -153,7 +166,7 @@ Keep static tokens in an environment-backed Secret.
 ### Client certificate
 
 ```yaml
-tools:
+connectors:
   kubernetes:
     endpoint: https://api.example
     ca_data: ${KUBERNETES_CA_DATA}
@@ -170,7 +183,7 @@ and `key_data` are also supported; do not combine file and inline forms.
 ### Safe kubeconfig
 
 ```yaml
-tools:
+connectors:
   kubernetes:
     auth:
       mode: kubeconfig
@@ -187,7 +200,7 @@ instructions to use native `eks`, `aks`, or `gke` mode.
 ### EKS IAM
 
 ```yaml
-tools:
+connectors:
   kubernetes:
     endpoint: https://API_ID.eks.us-east-1.amazonaws.com
     ca_data: ${KUBERNETES_CA_DATA}
@@ -210,7 +223,7 @@ Kubernetes ClusterRole, and Helm values together, see
 ### AKS workload identity
 
 ```yaml
-tools:
+connectors:
   kubernetes:
     endpoint: https://cluster.example.azmk8s.io
     ca_data: ${KUBERNETES_CA_DATA}
@@ -233,7 +246,7 @@ refresh so projected-file rotation is observed. Projected read-only mode
 ### AKS client secret
 
 ```yaml
-tools:
+connectors:
   kubernetes:
     endpoint: https://cluster.example.azmk8s.io
     ca_data: ${KUBERNETES_CA_DATA}
@@ -251,7 +264,7 @@ tools:
 ### AKS managed identity
 
 ```yaml
-tools:
+connectors:
   kubernetes:
     endpoint: https://cluster.example.azmk8s.io
     ca_data: ${KUBERNETES_CA_DATA}
@@ -272,7 +285,7 @@ server audience. Grant the identity cluster access and Kubernetes RBAC.
 ### GKE credentials
 
 ```yaml
-tools:
+connectors:
   kubernetes:
     endpoint: https://api.gke.example
     ca_data: ${KUBERNETES_CA_DATA}
@@ -399,6 +412,10 @@ proxy inheritance, TLS verification, and fixed production endpoints.
 
 The admin API and Kubernetes page return a safe error code, explanation, and
 next action:
+
+Pod-log diagnostics use the same safe codes, including
+`tls_verification_failed`, `dns_resolution_failed`, and
+`cluster_permission_denied`, without exposing raw upstream responses or causes.
 
 | Code | What to check |
 | --- | --- |

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"strings"
+	"time"
 )
 
 const maxGeneratedPods = 50000
@@ -167,6 +169,39 @@ func SeedScenario(store *Store, name string, seed int64) error {
 		"limited-rbac": {},
 		"scale":        {},
 	}
+	if name == "populated" {
+		now := time.Now().UTC()
+		fixtures[name] = append(fixtures["triage"], fixtures["helm"]...)
+		fixtures[name] = append(fixtures[name], fixtures["gitops"]...)
+		fixtures[name] = append(fixtures[name], fixtures["graph"]...)
+		for _, namespace := range []string{"shop", "argocd", "flux-system"} {
+			if err := putObject(store, "namespaces", "", namespace, map[string]any{"kind": "Namespace"}); err != nil {
+				return err
+			}
+		}
+		for _, fixture := range fixtures[name] {
+			metadata, ok := fixture.object["metadata"].(map[string]any)
+			if !ok {
+				metadata = map[string]any{}
+				fixture.object["metadata"] = metadata
+			}
+			metadata["creationTimestamp"] = now.Add(-20 * time.Minute).Format(time.RFC3339)
+			if fixture.resource == "secrets" {
+				delete(fixture.object, "data")
+			}
+			if fixture.resource == "configmaps" {
+				fixture.object["data"] = map[string]string{"mode": "synthetic"}
+			}
+			if fixture.resource == "pods" && fixture.namespace == "payments" {
+				containers := fixture.object["spec"].(map[string]any)["containers"].([]any)
+				delete(containers[0].(map[string]any), "env")
+			}
+			if fixture.resource == "rollouts" {
+				fixture.object["spec"] = map[string]any{"replicas": 4, "strategy": map[string]any{"canary": map[string]any{"steps": []any{map[string]any{"setWeight": 25}, map[string]any{"setWeight": 50}}}}}
+				fixture.object["status"] = map[string]any{"phase": "Progressing", "currentStepIndex": 1, "stableRS": "checkout-stable", "canaryRS": "checkout-canary", "replicas": 4, "updatedReplicas": 2, "readyReplicas": 4, "availableReplicas": 4}
+			}
+		}
+	}
 	switch name {
 	case "fault-forbidden-secret", "fault-transient-pods", "fault-partial-pods":
 		name = "triage"
@@ -180,6 +215,16 @@ func SeedScenario(store *Store, name string, seed int64) error {
 	}
 	_ = rand.New(rand.NewSource(seed))
 	for _, fixture := range objects {
+		if fixture.resource == "pods" && (name == "triage" || name == "populated" && fixture.namespace == "payments") {
+			spec := fixture.object["spec"].(map[string]any)
+			spec["containers"] = append(spec["containers"].([]any), map[string]any{"name": "sidecar", "image": "example.invalid/synthetic-sidecar:v1"})
+			spec["initContainers"] = []any{map[string]any{"name": "setup", "image": "example.invalid/synthetic-setup:v1"}}
+			spec["ephemeralContainers"] = []any{map[string]any{"name": "debug", "image": "example.invalid/synthetic-debug:v1"}}
+			status := fixture.object["status"].(map[string]any)
+			status["containerStatuses"] = append(status["containerStatuses"].([]any), map[string]any{"name": "sidecar", "ready": true, "restartCount": 1, "state": map[string]any{"running": map[string]any{}}})
+			status["initContainerStatuses"] = []any{map[string]any{"name": "setup", "restartCount": 0, "state": map[string]any{"terminated": map[string]any{"exitCode": 0}}}}
+			status["ephemeralContainerStatuses"] = []any{map[string]any{"name": "debug", "restartCount": 0, "state": map[string]any{"running": map[string]any{}}}}
+		}
 		if err := putObject(store, fixture.resource, fixture.namespace, fixture.name, fixture.object); err != nil {
 			return err
 		}
@@ -189,4 +234,20 @@ func SeedScenario(store *Store, name string, seed int64) error {
 
 func putObject(store *Store, resource, namespace, name string, object map[string]any) error {
 	return store.upsertObject(resource, namespace, name, object)
+}
+
+func trafficMetrics(elapsed time.Duration) string {
+	seconds := max(1, elapsed.Seconds())
+	var output strings.Builder
+	labels := `reporter="destination",request_protocol="http",source_workload="checkout",source_workload_namespace="shop",destination_workload="checkout-api",destination_workload_namespace="payments"`
+	fmt.Fprintf(&output, "# TYPE istio_requests_total counter\nistio_requests_total{%s,response_code=\"200\"} %.3f\nistio_requests_total{%s,response_code=\"500\"} %.3f\n", labels, 196*seconds, labels, 4*seconds)
+	output.WriteString("# TYPE istio_request_duration_milliseconds histogram\n")
+	for _, bucket := range []struct {
+		bound string
+		rate  float64
+	}{{"50", 100}, {"100", 170}, {"250", 190}, {"500", 198}, {"+Inf", 200}} {
+		fmt.Fprintf(&output, "istio_request_duration_milliseconds_bucket{%s,le=\"%s\"} %.3f\n", labels, bucket.bound, bucket.rate*seconds)
+	}
+	fmt.Fprintf(&output, "istio_request_duration_milliseconds_sum{%s} %.3f\nistio_request_duration_milliseconds_count{%s} %.3f\n", labels, 24000*seconds, labels, 200*seconds)
+	return output.String()
 }

@@ -3,10 +3,78 @@ package fakekube
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
+
+func TestTrafficMetricsDeterministicCounters(t *testing.T) {
+	for _, elapsed := range []time.Duration{0, 30 * time.Second, 60 * time.Second} {
+		body := trafficMetrics(elapsed)
+		seconds := max(1, elapsed.Seconds())
+		for _, expected := range []string{
+			fmt.Sprintf("response_code=\"200\"} %.3f", 196*seconds),
+			fmt.Sprintf("response_code=\"500\"} %.3f", 4*seconds),
+			fmt.Sprintf("le=\"+Inf\"} %.3f", 200*seconds),
+			`source_workload_namespace="shop"`,
+			`destination_workload_namespace="payments"`,
+			"# TYPE istio_request_duration_milliseconds histogram",
+		} {
+			if !strings.Contains(body, expected) {
+				t.Fatalf("metric missing %q", expected)
+			}
+		}
+		if body != trafficMetrics(elapsed) {
+			t.Fatal("traffic counters are not deterministic")
+		}
+	}
+}
+
+func TestPopulatedScenarioMetadataAndDiscovery(t *testing.T) {
+	store := NewStore()
+	if err := SeedScenario(store, "populated", 1); err != nil {
+		t.Fatal(err)
+	}
+	for resource, count := range map[string]int{"namespaces": 5, "applications": 1, "kustomizations": 1, "rollouts": 1, "pods": 2, "ingresses": 1} {
+		if actual := store.Count(resource); actual != count {
+			t.Fatalf("%s count=%d want=%d", resource, actual, count)
+		}
+	}
+	for _, name := range []string{"sh.helm.release.v1.checkout.v1", "sh.helm.release.v1.checkout.v2"} {
+		body, found := store.Get("secrets", "shop", name)
+		var object map[string]any
+		if !found || json.Unmarshal(body, &object) != nil || object["data"] != nil {
+			t.Fatalf("release metadata missing or contains payload: %s", name)
+		}
+		labels := object["metadata"].(map[string]any)["labels"].(map[string]any)
+		if labels["owner"] != "helm" || labels["name"] != "checkout" || labels["version"] == "" || labels["status"] == "" {
+			t.Fatalf("release labels=%v", labels)
+		}
+	}
+	for _, path := range []string{"/apis/argoproj.io/v1alpha1", "/apis/kustomize.toolkit.fluxcd.io/v1"} {
+		if len(discoveryForPath(path, "populated")["resources"].([]map[string]any)) == 0 {
+			t.Fatalf("discovery empty for %s", path)
+		}
+	}
+	groups, err := json.Marshal(apiGroups("populated"))
+	if err != nil || !strings.Contains(string(groups), "argoproj.io") {
+		t.Fatal("GitOps group discovery missing")
+	}
+	for _, resource := range []string{"secrets", "configmaps", "pods"} {
+		page, err := store.List(resource, "", url.Values{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, body := range page.Items {
+			if strings.Contains(string(body), "secret-token") || strings.Contains(string(body), "must-not-cross") || strings.Contains(string(body), "canary-never-project") {
+				t.Fatalf("%s retained a payload canary", resource)
+			}
+		}
+	}
+}
 
 func TestGeneratedPodMatchesValidatedStoreInsertion(t *testing.T) {
 	for _, test := range []struct {

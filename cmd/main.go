@@ -209,12 +209,13 @@ func main() {
 	// flush interval, so racing it away drops everything learned since the last
 	// one.
 	var agentDone <-chan struct{}
-	toolAvailability := agent.NewToolAvailabilityService(cfg.Agent, store)
-	kubernetesService, kubernetesErr := agent.NewKubernetesService(cfg.Agent.Tools.Kubernetes, tenancy.DefaultOrgScope())
+	toolAvailability := agent.NewToolAvailabilityService(cfg.Agent, store, cfg.Connectors)
+	kubernetesService, kubernetesErr := agent.NewKubernetesService(cfg.Connectors.Kubernetes, tenancy.DefaultOrgScope())
 	if kubernetesErr != nil {
 		log.Printf("kubernetes: connector unavailable: %v", kubernetesErr)
 	}
 	if kubernetesService != nil {
+		kubernetesService.SetLogStreamContext(rootCtx)
 		kubernetesService.SetChangeStorage(store)
 	}
 	toolAvailability.BindIntegrationConstruction("kubernetes", kubernetesService != nil)
@@ -236,7 +237,7 @@ func main() {
 			}
 		}
 
-		cat, done, err := startAgent(rootCtx, app, cfg.Agent, cfg.GatewaySecret, store, rdb, toolAvailability, kubernetesService, healthManager)
+		cat, done, err := startAgent(rootCtx, app, cfg.Agent, cfg.Connectors, cfg.GatewaySecret, store, rdb, toolAvailability, kubernetesService, healthManager)
 		if err != nil {
 			log.Fatalf("agent: failed to start: %v", err)
 		}
@@ -301,7 +302,7 @@ func registerToolAvailabilityController(app *fiber.App, availability *agent.Tool
 // admin routes on the fiber app. It returns the catalog so the caller can
 // hold a reference (and so future hot-reload code has a handle to it), plus a
 // channel that closes when the worker has finished its shutdown flush.
-func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewaySecret string, store storage.Provider, rdb redis.UniversalClient, toolAvailability *agent.ToolAvailabilityService, kubernetesService *kubernetes.Service, healthManager *servicehealth.Manager) (*agent.Catalog, <-chan struct{}, error) {
+func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, connectors c.ConnectorsConfig, gatewaySecret string, store storage.Provider, rdb redis.UniversalClient, toolAvailability *agent.ToolAvailabilityService, kubernetesService *kubernetes.Service, healthManager *servicehealth.Manager) (*agent.Catalog, <-chan struct{}, error) {
 	// On the Postgres backend, install the typed signal-table
 	// catalog store so the log catalog reads/writes the explicit
 	// vs_patterns/vs_logs/vs_services tables (searchable, indexed) instead of
@@ -402,7 +403,7 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		log.Printf("agent: tailing dedup sets persisted through Redis for %d source(s)", n)
 	}
 
-	aiBundle := agent.BuildAIsWithKubernetes(cfg, catalog, store, nil, kubernetesService)
+	aiBundle := agent.BuildAIsWithKubernetes(cfg, catalog, store, nil, kubernetesService, connectors)
 	toolAvailability.BindLiveSnapshot(aiBundle.ToolSnapshot)
 	if aiBundle.Detect != nil {
 		log.Printf("agent: AI SRE enabled provider=%s model=%s rate_limit=%d/hr",

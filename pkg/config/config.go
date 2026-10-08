@@ -45,7 +45,8 @@ type Config struct {
 
 	Storage StorageConfig `mapstructure:"storage"`
 
-	Agent AgentConfig `mapstructure:"agent"`
+	Agent      AgentConfig      `mapstructure:"agent"`
+	Connectors ConnectorsConfig `mapstructure:"connectors"`
 }
 
 // StorageConfig is the durable-storage block. It is the single source of
@@ -318,6 +319,9 @@ func loadConfigFromPath(path string) (*Config, error) {
 	if rerr != nil {
 		return nil, fmt.Errorf("failed to read config: %w", rerr)
 	}
+	if err := rejectToolConnectors(userRaw); err != nil {
+		return nil, err
+	}
 	if err := v.MergeConfig(bytes.NewReader(userRaw)); err != nil {
 		return nil, fmt.Errorf("failed to merge config: %w", err)
 	}
@@ -334,9 +338,22 @@ func loadConfigFromPath(path string) (*Config, error) {
 	v.SetTypeByDefaultValue(true)
 
 	loaded := &Config{}
+	settings, err := rawConfigSettings(userRaw)
+	if err != nil {
+		return nil, err
+	}
+	connectorValue, present := configValue(settings, "connectors")
+	if present && connectorValue == nil {
+		return nil, fmt.Errorf("invalid connectors configuration")
+	}
+	connectors, err := decodeConnectors(connectorValue)
+	if err != nil {
+		return nil, err
+	}
 	if err := v.Unmarshal(loaded); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+	loaded.Connectors = connectors
 
 	// Normalize the auto-promotion threshold at the single load chokepoint so
 	// every downstream consumer (worker brain, controller readiness, the
@@ -463,6 +480,17 @@ func loadConfigFromPath(path string) (*Config, error) {
 		loaded.Agent.Tools = tools
 	}
 
+	connectorsPath := filepath.Join(filepath.Dir(path), "connectors.yaml")
+	if _, statErr := os.Stat(connectorsPath); statErr == nil {
+		connectors, err := loadConnectorsFile(connectorsPath)
+		if err != nil {
+			return nil, err
+		}
+		loaded.Connectors = connectors
+	} else if !os.IsNotExist(statErr) {
+		return nil, fmt.Errorf("cannot access connectors file")
+	}
+
 	if strings.TrimSpace(loaded.PublicHost) != "" {
 		normalized, err := weborigin.Normalize(loaded.PublicHost)
 		if err != nil {
@@ -516,6 +544,9 @@ func loadToolsFile(path string) (ToolsConfig, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return ToolsConfig{}, fmt.Errorf("read: %w", err)
+	}
+	if err := rejectToolConnectors(raw); err != nil {
+		return ToolsConfig{}, err
 	}
 
 	v := viper.New()

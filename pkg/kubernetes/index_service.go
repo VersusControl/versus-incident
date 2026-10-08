@@ -385,6 +385,7 @@ func (service *Service) SubscribeIndex(ctx context.Context, buffer int, kinds ..
 }
 
 func indexRecord(resource ProjectedResource) kubeindex.Record {
+	summary := safeIndexedSummary(resource.Summary)
 	uid := resource.UID
 	if uid == "" {
 		digest := sha256.Sum256([]byte(resource.Kind + "\x00" + resource.Namespace + "\x00" + resource.Name))
@@ -396,11 +397,11 @@ func indexRecord(resource ProjectedResource) kubeindex.Record {
 		EventType: summaryString(resource.Summary, "type"), NodeName: summaryString(resource.Summary, "node"),
 		Selector:           indexStringMap(resource.Summary["selector"]),
 		NodeReady:          conditionTrue(resource.Conditions, "Ready"),
-		Replicas:           summaryInt32(resource.Summary, "desired_replicas"),
-		Ready:              summaryInt32(resource.Summary, "ready_replicas"),
-		Available:          summaryInt32(resource.Summary, "available_replicas"),
-		ObservedGeneration: int64(summaryInt32(resource.Summary, "observed_generation")),
-		Summary:            safeIndexedSummary(resource.Summary),
+		Replicas:           summaryInt32(summary, "desired_replicas"),
+		Ready:              summaryInt32(summary, "ready_replicas"),
+		Available:          summaryInt32(summary, "available_replicas"),
+		ObservedGeneration: int64(summaryInt32(summary, "observed_generation")),
+		Summary:            summary,
 	}
 	for _, key := range []string{"services", "gateways", "config_maps", "secrets", "persistent_volume_claims", "pods"} {
 		if names := indexStringSlice(resource.Summary[key]); len(names) > 0 {
@@ -416,7 +417,7 @@ func indexRecord(resource ProjectedResource) kubeindex.Record {
 	if created := summaryString(resource.Summary, "created_at"); created != "" {
 		record.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	}
-	if generation := summaryString(resource.Summary, "generation"); generation != "" {
+	if generation := summary["generation"]; generation != "" {
 		record.Generation, _ = strconv.ParseInt(generation, 10, 64)
 	}
 	for _, owner := range resource.Owners {
@@ -426,7 +427,11 @@ func indexRecord(resource ProjectedResource) kubeindex.Record {
 		}
 		record.Owners = append(record.Owners, kubeindex.OwnerRef{Kind: owner.Kind, Namespace: namespace, Name: owner.Name, UID: owner.UID})
 	}
-	for _, container := range mapSlice(resource.Summary["containers"]) {
+	containers, typed := resource.Summary["containers"].([]map[string]any)
+	if !typed {
+		containers = mapSlice(resource.Summary["containers"])
+	}
+	for _, container := range containers {
 		if image := boundString(stringValue(container["image"])); image != "" && len(record.Images) < 32 {
 			record.Images = append(record.Images, image)
 		}
@@ -468,8 +473,8 @@ func safeIndexedSummary(summary map[string]any) map[string]string {
 	return result
 }
 
-func summaryInt32(summary map[string]any, key string) int32 {
-	value := summaryString(summary, key)
+func summaryInt32(summary map[string]string, key string) int32 {
+	value := summary[key]
 	parsed, err := strconv.ParseInt(value, 10, 32)
 	if err != nil || parsed < 0 {
 		return 0

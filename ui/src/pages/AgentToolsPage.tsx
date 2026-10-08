@@ -23,7 +23,7 @@ type CatalogToolset = Omit<AgentToolsetAvailability, "state"> & {
   shared_capability?: string;
 };
 
-function ToolIcon({ iconKey }: { iconKey: string }) {
+export function ToolIcon({ iconKey }: { iconKey: string }) {
   const logo = PROVIDER_LOGOS[iconKey];
   if (logo) {
     return <img src={logo} alt="" width="24" height="24" className="size-6 object-contain" aria-hidden="true" />;
@@ -177,11 +177,11 @@ export function AgentToolsPage() {
 
   return (
     <main className="min-w-0 flex-1 overflow-auto">
-      <TopBar title="Tools" />
+      <TopBar title="Connectors & Tools" />
       <div className="mx-auto max-w-6xl space-y-5 p-4 sm:p-6">
         <div className="flex flex-col justify-between gap-4 border-ink-700 pb-5 sm:flex-row sm:items-end">
           <div>
-            <h1 className="text-xl font-semibold text-ink-50">Tool Catalog</h1>
+            <h1 className="text-xl font-semibold text-ink-50">Connectors &amp; Tools</h1>
             <p className="mt-1 max-w-2xl text-sm text-ink-300">
               Set up and activate tools
             </p>
@@ -254,7 +254,7 @@ function ToolsetCard({ toolset, onDetails }: { toolset: CatalogToolset; onDetail
   );
 }
 
-function StateBadge({ state }: { state: CatalogToolState }) {
+export function StateBadge({ state }: { state: CatalogToolState }) {
   const labels: Record<CatalogToolState, string> = {
     available: "Ready",
     disabled_by_operator: "Off",

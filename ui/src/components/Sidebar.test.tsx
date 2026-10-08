@@ -86,14 +86,14 @@ afterEach(() => {
   }
 });
 
-function renderSidebar() {
+function renderSidebar(onNavigate?: () => void) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter
         future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
       >
-        <SidebarContent />
+        <SidebarContent onNavigate={onNavigate} />
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -130,15 +130,15 @@ describe("Sidebar — deployment-aware navigation groups", () => {
   it("moves only enterprise-only items into an OSS Enterprise group", async () => {
     await renderSettled();
 
-    expect(navSections()["Agent"]).toEqual([
+    expect(navSections()["Agent Learning"]).toEqual([
       "/agent",
       "/agent/services",
       "/agent/logs",
     ]);
     expect(navSections()["AI"]).toEqual([
-      "/agent/tools",
       "/agent/decisions",
       "/analyses",
+      "/agent/tools",
     ]);
     expect(navSections()["Enterprise"]).toEqual([
       "/agent/metrics",
@@ -148,7 +148,8 @@ describe("Sidebar — deployment-aware navigation groups", () => {
     ]);
     expect(Object.keys(navSections())).toEqual([
       "Respond",
-      "Agent",
+      "Connectors",
+      "Agent Learning",
       "AI",
       "Enterprise",
       "Manage",
@@ -163,12 +164,13 @@ describe("Sidebar — deployment-aware navigation groups", () => {
       "/now",
       "/incidents",
       "/agent/chat",
+      "/agent/kubernetes",
       "/agent",
       "/agent/services",
       "/agent/logs",
-      "/agent/tools",
       "/agent/decisions",
       "/analyses",
+      "/agent/tools",
       "/agent/metrics",
       "/agent/traces",
       "/agent/alert-fatigue",
@@ -189,7 +191,8 @@ describe("Sidebar — deployment-aware navigation groups", () => {
 
     expect(navSections()).toEqual({
       Respond: ["/now", "/incidents", "/agent/chat"],
-      Agent: [
+      Connectors: ["/agent/kubernetes"],
+      "Agent Learning": [
         "/agent",
         "/agent/services",
         "/agent/logs",
@@ -197,14 +200,18 @@ describe("Sidebar — deployment-aware navigation groups", () => {
         "/agent/traces",
       ],
       AI: [
-        "/agent/tools",
         "/agent/decisions",
         "/analyses",
         "/agent/alert-fatigue",
         "/agent/slo",
+        "/agent/tools",
       ],
       Manage: ["/people", "/admin", "/settings"],
     });
+    const links = within(screen.getByRole("navigation", { name: "Primary" })).getAllByRole("link");
+    const sloIndex = links.findIndex((link) => link.getAttribute("href") === "/agent/slo");
+    expect(links[sloIndex + 1].getAttribute("href")).toBe("/agent/tools");
+    expect(links[sloIndex + 1].textContent).toBe("Connectors & Tools");
   });
 
   it("preserves Enterprise-safe grouping after a transient deployment error", async () => {
@@ -213,16 +220,16 @@ describe("Sidebar — deployment-aware navigation groups", () => {
 
     await waitFor(() => expect(apiMocks.getSSODeployment).toHaveBeenCalledOnce());
     expect(navSections()["Enterprise"]).toBeUndefined();
-    expect(navSections()["Agent"]).toContain("/agent/metrics");
+    expect(navSections()["Agent Learning"]).toContain("/agent/metrics");
     expect(navSections()["AI"]).toContain("/agent/alert-fatigue");
   });
 
-  it("keeps Chat in Respond and Tool catalog in AI while omitting Runbooks", async () => {
+  it("keeps Chat in Respond and Connectors & Tools in AI while omitting Runbooks", async () => {
     await renderSettled();
 
     for (const [name, href] of [
       ["Chat", "/agent/chat"],
-      ["Tool catalog", "/agent/tools"],
+      ["Connectors & Tools", "/agent/tools"],
     ] as const) {
       const link = screen.getByRole("link", { name });
       expect(link.getAttribute("href")).toBe(href);
@@ -234,11 +241,11 @@ describe("Sidebar — deployment-aware navigation groups", () => {
     expect(navSections().AI).not.toContain("/agent/chat");
   });
 
-  it("locks execution pages but keeps Tool catalog readable when the agent is disabled", async () => {
+  it("locks execution pages but keeps connectors and tools readable when the agent is disabled", async () => {
     apiMocks.getAgentConfig.mockResolvedValue({ enable: false });
     await renderSettled();
 
-    for (const name of ["Chat", "Decisions", "Analyses"]) {
+    for (const name of ["Chat", "Overview", "Services", "Logs", "Metrics", "Traces", "Decisions", "Analyses", "Alert fatigue", "SLIs/SLOs"]) {
       const link = screen.getByRole("link", {
         name: `${name} Enterprise`,
       });
@@ -246,26 +253,38 @@ describe("Sidebar — deployment-aware navigation groups", () => {
       expect(within(link).getByLabelText("Enterprise")).toBeTruthy();
     }
 
-    const tools = screen.getByRole("link", { name: "Tool catalog" });
+    const tools = screen.getByRole("link", { name: "Connectors & Tools" });
     expect(tools.getAttribute("href")).toBe("/agent/tools");
     expect(tools.getAttribute("title")).toBeNull();
     expect(within(tools).queryByLabelText("Enterprise")).toBeNull();
+    const kubernetes = screen.getByRole("link", { name: "Kubernetes" });
+    expect(kubernetes.getAttribute("href")).toBe("/agent/kubernetes");
+    expect(kubernetes.getAttribute("title")).toBeNull();
+    expect(within(kubernetes).queryByLabelText("Enterprise")).toBeNull();
+    expect(navSections().Connectors).toEqual(["/agent/kubernetes"]);
   });
 
+  it("closes the mobile drawer when navigating to Kubernetes", async () => {
+    const onNavigate = vi.fn();
+    renderSidebar(onNavigate);
+    fireEvent.click(await screen.findByRole("link", { name: "Kubernetes" }));
+    expect(onNavigate).toHaveBeenCalledOnce();
+  });
 });
 
 describe("Sidebar — expanded row icons", () => {
-  const GROUPS = ["Respond", "Agent", "AI", "Enterprise", "Manage"];
+  const GROUPS = ["Respond", "Connectors", "Agent Learning", "AI", "Enterprise", "Manage"];
   const ITEMS = [
     "Now",
     "Incidents",
+    "Kubernetes",
     "Overview",
     "Services",
     "Logs",
     "Metrics",
     "Traces",
     "Chat",
-    "Tool catalog",
+    "Connectors & Tools",
     "Decisions",
     "Analyses",
     "Alert fatigue",
@@ -405,6 +424,24 @@ describe("Sidebar desktop rail — collapse / expand toggle", () => {
       expect(within(flyout).getByRole("link", { name: new RegExp(label) })).toBeTruthy();
     }
     expect(within(flyout).getByText("Enterprise").closest("div")?.querySelector("svg")).not.toBeNull();
+  });
+
+  it("opens connector and learning flyouts on keyboard focus with the agent disabled", async () => {
+    apiMocks.getAgentConfig.mockResolvedValue({ enable: false });
+    window.localStorage.setItem("versus.sidebar.collapsed", "1");
+    renderRail();
+    const connectors = await screen.findByRole("link", { name: "Connectors" });
+    expect(connectors.getAttribute("href")).toBe("/agent/kubernetes");
+    fireEvent.focus(connectors);
+    const link = within(screen.getByTestId("nav-flyout-connectors")).getByRole("link", { name: "Kubernetes" });
+    expect(link.getAttribute("href")).toBe("/agent/kubernetes");
+    expect(link.getAttribute("title")).toBeNull();
+    fireEvent.keyDown(connectors, { key: "Escape" });
+    expect(screen.queryByTestId("nav-flyout-connectors")).toBeNull();
+    const learning = screen.getByRole("link", { name: "Agent Learning" });
+    expect(learning.getAttribute("href")).toBe("/agent");
+    fireEvent.focus(learning);
+    expect(within(screen.getByTestId("nav-flyout-agent learning")).getByRole("link", { name: /Overview/ })).toBeTruthy();
   });
 });
 

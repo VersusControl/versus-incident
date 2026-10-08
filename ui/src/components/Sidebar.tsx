@@ -18,6 +18,7 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  ShipWheel,
   Siren,
   Sparkles,
   Target,
@@ -194,7 +195,6 @@ export function SidebarContent({
   // AI groups the agent's tools and reasoning surfaces. Enterprise and
   // runtime availability gates stay attached to their existing destinations.
   const ai: AgentSideItem[] = [
-    { to: "/agent/tools", label: "Tool catalog", icon: Wrench, zone: "AI" },
     { to: "/agent/decisions", label: "Decisions", icon: GitBranch, zone: "AI", requiresAgent: true },
     { to: "/analyses", label: "Analyses", icon: Search, zone: "AI", requiresAgent: true },
     {
@@ -223,6 +223,7 @@ export function SidebarContent({
       ? "Enterprise feature — requires an intelligence license"
       : undefined,
     },
+    { to: "/agent/tools", label: "Connectors & Tools", icon: Wrench, zone: "AI", requiresAgent: false },
   ];
 
   const manage: SideItem[] = [
@@ -253,7 +254,12 @@ export function SidebarContent({
   const zones: SideZone[] = [
     { title: "Respond", icon: Flame, items: applyAgentOff(respond) },
     {
-      title: "Agent",
+      title: "Connectors",
+      icon: ShipWheel,
+      items: [{ to: "/agent/kubernetes", label: "Kubernetes", icon: ShipWheel }],
+    },
+    {
+      title: "Agent Learning",
       icon: Activity,
       items: applyAgentOff(partitioned.Agent),
     },

@@ -23,16 +23,16 @@ func TestToolCatalogGETDoesNotConstructDisabledAgentDependencies(t *testing.T) {
 				Enable:  false,
 				AI:      config.AgentAIConfig{Enable: aiEnabled, Provider: "invalid-provider", Model: "invalid-model"},
 				Sources: []config.AgentSourceConfig{{Name: "broken", Type: "invalid-source", Enable: true}},
-				Tools: config.ToolsConfig{Kubernetes: config.KubernetesToolConfig{
-					Endpoint: "https://cluster.example",
-					Auth:     config.KubernetesAuthConfig{Mode: "invalid"},
-				}},
 			}
+			connectors := config.ConnectorsConfig{Kubernetes: config.KubernetesToolConfig{
+				Endpoint: "https://cluster.example",
+				Auth:     config.KubernetesAuthConfig{Mode: "invalid"},
+			}}
 			app := fiber.New()
 			app.Use(func(ctx *fiber.Ctx) error { middleware.MarkAuthorized(ctx); return ctx.Next() })
 			app.Use(middleware.OrgInjector())
-			availability := agent.NewToolAvailabilityService(cfg, storage.NewMemory())
-			service, constructionErr := agent.NewKubernetesService(cfg.Tools.Kubernetes, tenancy.DefaultOrgScope())
+			availability := agent.NewToolAvailabilityService(cfg, storage.NewMemory(), connectors)
+			service, constructionErr := agent.NewKubernetesService(connectors.Kubernetes, tenancy.DefaultOrgScope())
 			if constructionErr == nil {
 				t.Fatal("invalid Kubernetes authentication constructed")
 			}

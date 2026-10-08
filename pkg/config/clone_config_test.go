@@ -76,15 +76,6 @@ func TestCloneToolsConfig(t *testing.T) {
 				{Name: "api", DependsOn: []string{"database", "cache"}},
 			},
 		},
-		Kubernetes: KubernetesToolConfig{
-			Endpoint: "https://cluster.example",
-			Auth: KubernetesAuthConfig{
-				Mode: "eks",
-				EKS:  KubernetesEKSConfig{ClusterName: "production", Region: "us-east-1"},
-			},
-			EndpointCIDRs: []string{"10.20.0.0/16"},
-			Actions:       KubernetesActionsToolConfig{Enable: true, Auth: KubernetesAuthConfig{Mode: "token_file", TokenFile: "/run/secrets/kubernetes-actor/token"}, MaxReplicas: 12, Timeout: "15s"},
-		},
 	}
 	got := cloneToolsConfig(src)
 	if !reflect.DeepEqual(got, src) {
@@ -98,10 +89,6 @@ func TestCloneToolsConfig(t *testing.T) {
 	got.RecentChanges.Git.Repos[0].URL = "mutated"
 	if src.RecentChanges.Git.Repos[0].URL != "https://github.com/acme/api.git" {
 		t.Fatal("clone shares the underlying Repos slice with the source")
-	}
-	got.Kubernetes.EndpointCIDRs[0] = "mutated"
-	if src.Kubernetes.EndpointCIDRs[0] != "10.20.0.0/16" {
-		t.Fatal("clone shares the Kubernetes EndpointCIDRs slice with the source")
 	}
 }
 

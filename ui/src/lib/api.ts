@@ -45,6 +45,34 @@ function removeLegacySecret() {
   }
 }
 
+export interface KubernetesPodLogLine {
+  text: string;
+  container: string;
+  timestamp?: string;
+  sequence?: number;
+  ordinal?: number;
+  cursor?: string;
+}
+
+export type KubernetesPodLogEvent = KubernetesPodLogLine & {
+  event: "line" | "heartbeat" | "limit" | "error" | "end";
+  reason?: string;
+  code?: string;
+  message?: string;
+  action?: string;
+  retryable?: boolean;
+  replay_uncertain?: boolean;
+};
+
+export interface KubernetesPodLogOptions {
+  container?: string;
+  previous?: boolean;
+  since_seconds?: number;
+  tail_lines?: number;
+  timestamps?: boolean;
+  cursor?: string;
+}
+
 export class ApiError extends Error {
   status: number;
   body?: unknown;
@@ -2602,6 +2630,42 @@ export const api = {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
     return request<KubernetesPodLogs>(`/api/admin/kubernetes/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/logs?${query}`);
+  },
+  kubernetesPodLogStream: async (namespace: string, name: string, options: KubernetesPodLogOptions, onEvent: (event: KubernetesPodLogEvent) => void, signal: AbortSignal): Promise<void> => {
+    const query = new URLSearchParams({ timestamps: "true" });
+    for (const [key, value] of Object.entries(options)) {
+      if (options.cursor && (key === "since_seconds" || key === "tail_lines")) continue;
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    const headers = new Headers({ Accept: "text/event-stream" });
+    const secret = getSecret();
+    if (secret) headers.set("X-Gateway-Secret", secret);
+    const response = await fetch(`${API_BASE}/api/admin/kubernetes/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/logs/stream?${query}`, { headers, credentials: "same-origin", cache: "no-store", signal });
+    if (!response.ok || !response.body) {
+      await response.body?.cancel();
+      if (response.status === 401) notifyAuthExpired();
+      throw new ApiError(response.status, `Pod log stream failed (HTTP ${response.status}).`);
+    }
+    if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("text/event-stream")) {
+      await response.body.cancel();
+      throw new ApiError(502, "Pod log stream returned an invalid content type.");
+    }
+    await readEventStream(response.body, ({ event, data }) => {
+      if (!["line", "heartbeat", "limit", "error", "end"].includes(event)) return;
+      let value: unknown;
+      try { value = JSON.parse(data); } catch { throw new ApiError(502, "Invalid Pod log stream event."); }
+      if (!value || typeof value !== "object") throw new Error("Invalid Pod log stream event.");
+      const payload = value as Record<string, unknown>;
+      if (event === "line" && (typeof payload.text !== "string" || new TextEncoder().encode(payload.text).byteLength > 16 << 10 || typeof payload.container !== "string")) throw new ApiError(502, "Invalid Pod log line.");
+      for (const field of ["text", "container", "timestamp", "cursor", "reason", "code", "message", "action"]) {
+        if (payload[field] !== undefined && typeof payload[field] !== "string") throw new ApiError(502, "Invalid Pod log stream event.");
+      }
+      for (const field of ["sequence", "ordinal"]) {
+        if (payload[field] !== undefined && (typeof payload[field] !== "number" || !Number.isSafeInteger(payload[field]) || Number(payload[field]) < 1)) throw new ApiError(502, "Invalid Pod log ordering.");
+      }
+      if (typeof payload.cursor === "string" && payload.cursor.length > 16 << 10 || typeof payload.timestamp === "string" && payload.timestamp.length > 64 || ["retryable", "replay_uncertain"].some((field) => payload[field] !== undefined && typeof payload[field] !== "boolean")) throw new ApiError(502, "Invalid Pod log stream event.");
+      onEvent({ event, text: payload.text ?? "", container: payload.container ?? "", timestamp: payload.timestamp, sequence: payload.sequence, ordinal: payload.ordinal, cursor: payload.cursor, reason: payload.reason, code: payload.code, message: payload.message, action: payload.action, retryable: payload.retryable, replay_uncertain: payload.replay_uncertain ?? false } as KubernetesPodLogEvent);
+    }, { maxLineBytes: 128 << 10, maxFrameBytes: 132 << 10, maxTotalBytes: 128 << 20, maxEvents: 1_000_000, maxDurationMs: 31 * 60 * 1000 });
   },
   kubernetesDiagnose: (resourceId: string, namespace: string, name: string, logTail = 40) => {
     const query = new URLSearchParams({ namespace, log_tail: String(logTail) });

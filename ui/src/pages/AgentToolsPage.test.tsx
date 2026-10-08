@@ -95,6 +95,15 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 describe("AgentToolsPage", () => {
+  it("names the page Connectors & Tools and remains readable with the agent disabled", async () => {
+    vi.mocked(api.getAgentConfig).mockResolvedValueOnce({ ...config, enable: false });
+    renderPage();
+    expect(screen.getByRole("heading", { level: 1, name: "Connectors & Tools" })).toBeTruthy();
+    expect(screen.getByRole("banner").textContent).toBe("Connectors & Tools");
+    const kubernetes = await screen.findByRole("heading", { name: "Kubernetes" });
+    expect(within(kubernetes.closest("article")!).getByRole("link", { name: "Open Kubernetes" }).getAttribute("href")).toBe("/agent/kubernetes");
+  });
+
   it("renders one Elasticsearch datasource card with the dedicated asset", async () => {
     renderPage();
     const heading = await screen.findByRole("heading", { name: "Elasticsearch" });

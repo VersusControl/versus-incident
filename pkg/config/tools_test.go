@@ -72,8 +72,8 @@ func TestLoadToolsFile(t *testing.T) {
 }
 
 func TestLoadToolsFileKeepsKubernetesActorCredentialSeparate(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "tools.yaml")
-	content := `tools:
+	path := filepath.Join(t.TempDir(), "connectors.yaml")
+	content := `connectors:
   kubernetes:
     endpoint: https://cluster.example
     auth:
@@ -89,7 +89,7 @@ func TestLoadToolsFileKeepsKubernetesActorCredentialSeparate(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := loadToolsFile(path)
+	got, err := loadConnectorsFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,8 +176,8 @@ func TestLoadToolsFile_DescribeDependencies(t *testing.T) {
 }
 
 func TestLoadToolsFileKubernetesAuthentication(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "tools.yaml")
-	content := "tools:\n" +
+	path := filepath.Join(t.TempDir(), "connectors.yaml")
+	content := "connectors:\n" +
 		"  kubernetes:\n" +
 		"    endpoint: https://cluster.example\n" +
 		"    auth:\n" +
@@ -201,7 +201,7 @@ func TestLoadToolsFileKubernetesAuthentication(t *testing.T) {
 	clientSecret := "client: #secret\\value\nsecond line"
 	t.Setenv("KUBERNETES_TEST_TOKEN", token)
 	t.Setenv("AKS_TEST_SECRET", clientSecret)
-	got, err := loadToolsFile(path)
+	got, err := loadConnectorsFile(path)
 	if err != nil {
 		if strings.Contains(err.Error(), token) || strings.Contains(err.Error(), clientSecret) {
 			t.Fatal("configuration error exposed a secret")
@@ -236,22 +236,22 @@ func TestToolsEnvironmentScalarExpansionSemantics(t *testing.T) {
 }
 
 func TestLoadToolsFileRejectsUnknownKubernetesAuthenticationField(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "tools.yaml")
-	content := "tools:\n  kubernetes:\n    auth:\n      mode: aks\n      exec_timeout: 15s\n"
+	path := filepath.Join(t.TempDir(), "connectors.yaml")
+	content := "connectors:\n  kubernetes:\n    auth:\n      mode: aks\n      exec_timeout: 15s\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadToolsFile(path); err == nil {
+	if _, err := loadConnectorsFile(path); err == nil {
 		t.Fatal("unknown Kubernetes authentication field accepted")
 	}
 }
 
 func TestLoadToolsFileAcceptsCommaStringSlice(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "tools.yaml")
-	if err := os.WriteFile(path, []byte("tools:\n  kubernetes:\n    endpoint_cidrs: 10.0.0.0/8,192.168.0.0/16\n"), 0o600); err != nil {
+	path := filepath.Join(t.TempDir(), "connectors.yaml")
+	if err := os.WriteFile(path, []byte("connectors:\n  kubernetes:\n    endpoint_cidrs: [10.0.0.0/8,192.168.0.0/16]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	config, err := loadToolsFile(path)
+	config, err := loadConnectorsFile(path)
 	if err != nil || !reflect.DeepEqual(config.Kubernetes.EndpointCIDRs, []string{"10.0.0.0/8", "192.168.0.0/16"}) {
 		t.Fatalf("endpoint_cidrs = %#v, %v", config.Kubernetes.EndpointCIDRs, err)
 	}
@@ -260,7 +260,7 @@ func TestLoadToolsFileAcceptsCommaStringSlice(t *testing.T) {
 func TestCopiedAKSExamplesStrictlyDecode(t *testing.T) {
 	t.Setenv("KUBERNETES_AKS_CLIENT_SECRET", "fixture-client-secret")
 	for name, body := range map[string]string{
-		"client secret": `tools:
+		"client secret": `connectors:
   kubernetes:
     endpoint: https://production.example.azmk8s.io
     ca_file: /run/secrets/kubernetes/ca.crt
@@ -274,7 +274,7 @@ func TestCopiedAKSExamplesStrictlyDecode(t *testing.T) {
         client_id: CLIENT_ID
         client_secret: ${KUBERNETES_AKS_CLIENT_SECRET}
 `,
-		"managed identity": `tools:
+		"managed identity": `connectors:
   kubernetes:
     endpoint: https://production.example.azmk8s.io
     ca_file: /run/secrets/kubernetes/ca.crt
@@ -288,11 +288,11 @@ func TestCopiedAKSExamplesStrictlyDecode(t *testing.T) {
 `,
 	} {
 		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "tools.yaml")
+			path := filepath.Join(t.TempDir(), "connectors.yaml")
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			tools, err := loadToolsFile(path)
+			tools, err := loadConnectorsFile(path)
 			if err != nil {
 				t.Fatalf("strict decode: %v", err)
 			}

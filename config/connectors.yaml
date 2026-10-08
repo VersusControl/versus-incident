@@ -1,0 +1,8 @@
+connectors:
+  kubernetes:
+    auth:
+      mode: ""
+    actions:
+      enable: false
+      auth:
+        mode: ""

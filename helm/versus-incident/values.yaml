@@ -345,38 +345,6 @@ agent:
     # Shared tool-loop knobs applied to every analyze tool dispatch.
     toolTimeout: "20s"   # cap per tool dispatch; empty/"0"/invalid = 20s default
     parallelTools: false # run tool calls in one model turn concurrently
-    kubernetes:
-      endpoint: ""
-      caFile: ""
-      caData: ""       # stored in the chart Secret, not the ConfigMap
-      serverName: ""
-      clusterID: "default"
-      credentialID: ""
-      timeout: "10s"
-      discoveryTTL: "5m"
-      allowPrivateNetworks: false
-      endpointCIDRs: []
-      auth:
-        mode: ""
-        token: ""      # stored in the chart Secret, not the ConfigMap
-        tokenFile: ""
-        clientCertificate:
-          certificateFile: ""
-          keyFile: ""
-          certificateData: "" # stored in the chart Secret
-          keyData: ""         # stored in the chart Secret
-        kubeconfig: {path: "", context: ""}
-        eks: {clusterName: "", region: "", roleARN: "", profile: ""}
-        aks:
-          credentialMode: "" # workload_identity, client_secret, or managed_identity
-          serverID: ""
-          tenantID: ""
-          clientID: ""
-          clientSecret: "" # stored in the chart Secret
-          federatedTokenFile: ""
-          environment: "" # empty defaults to public; or government/china
-        gke:
-          credentialsFile: "" # empty uses fixed-host metadata Workload Identity; no gcloud ADC file
     # recent_changes — correlate an incident with recent deploys / config
     # changes pulled from one or more REMOTE git repositories' commit
     # histories (pure-Go go-git; no git binary required). An empty repos
@@ -439,6 +407,33 @@ agent:
   #         path: /var/log/app.log
   #         from_beginning: false
   sources: []
+
+connectors:
+  kubernetes:
+    endpoint: ""
+    caFile: ""
+    caData: ""
+    serverName: ""
+    clusterID: "default"
+    credentialID: ""
+    timeout: "10s"
+    discoveryTTL: "5m"
+    allowPrivateNetworks: false
+    endpointCIDRs: []
+    auth:
+      mode: ""
+      token: ""
+      tokenFile: ""
+      clientCertificate: {certificateFile: "", keyFile: "", certificateData: "", keyData: ""}
+      kubeconfig: {path: "", context: ""}
+      eks: {clusterName: "", region: "", roleARN: "", profile: ""}
+      aks: {credentialMode: "", serverID: "", tenantID: "", clientID: "", clientSecret: "", federatedTokenFile: "", environment: ""}
+      gke: {credentialsFile: ""}
+    actions:
+      enable: false
+      maxReplicas: 20
+      timeout: "15s"
+      auth: {mode: ""}
 
 # Extra environment variables for the container, appended after everything the
 # chart wires itself. Use these to supply values referenced as ${VAR} from

@@ -1,0 +1,293 @@
+package config
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"net/netip"
+	"os"
+	"reflect"
+	"strconv"
+	"strings"
+
+	"github.com/go-viper/mapstructure/v2"
+	"gopkg.in/yaml.v3"
+)
+
+type ConnectorsConfig struct {
+	Kubernetes KubernetesToolConfig `mapstructure:"kubernetes"`
+}
+
+type KubernetesToolConfig struct {
+	Endpoint             string                      `mapstructure:"endpoint"`
+	TokenFile            string                      `mapstructure:"token_file"`
+	CAFile               string                      `mapstructure:"ca_file"`
+	CAData               string                      `mapstructure:"ca_data"`
+	ServerName           string                      `mapstructure:"server_name"`
+	Auth                 KubernetesAuthConfig        `mapstructure:"auth"`
+	ClusterID            string                      `mapstructure:"cluster_id"`
+	CredentialID         string                      `mapstructure:"credential_id"`
+	Timeout              string                      `mapstructure:"timeout"`
+	DiscoveryTTL         string                      `mapstructure:"discovery_ttl"`
+	AllowLoopback        bool                        `mapstructure:"allow_loopback"`
+	AllowPrivateNetworks bool                        `mapstructure:"allow_private_networks"`
+	EndpointCIDRs        []string                    `mapstructure:"endpoint_cidrs"`
+	Actions              KubernetesActionsToolConfig `mapstructure:"actions"`
+}
+
+type KubernetesActionsToolConfig struct {
+	Enable      bool                 `mapstructure:"enable"`
+	Auth        KubernetesAuthConfig `mapstructure:"auth"`
+	MaxReplicas int                  `mapstructure:"max_replicas"`
+	Timeout     string               `mapstructure:"timeout"`
+}
+
+type KubernetesAuthConfig struct {
+	Mode              string                            `mapstructure:"mode"`
+	Token             string                            `mapstructure:"token"`
+	TokenFile         string                            `mapstructure:"token_file"`
+	ClientCertificate KubernetesClientCertificateConfig `mapstructure:"client_certificate"`
+	Kubeconfig        KubernetesKubeconfigConfig        `mapstructure:"kubeconfig"`
+	EKS               KubernetesEKSConfig               `mapstructure:"eks"`
+	AKS               KubernetesAKSConfig               `mapstructure:"aks"`
+	GKE               KubernetesGKEConfig               `mapstructure:"gke"`
+}
+
+type KubernetesClientCertificateConfig struct {
+	CertificateFile string `mapstructure:"certificate_file"`
+	KeyFile         string `mapstructure:"key_file"`
+	CertificateData string `mapstructure:"certificate_data"`
+	KeyData         string `mapstructure:"key_data"`
+}
+
+type KubernetesKubeconfigConfig struct {
+	Path    string `mapstructure:"path"`
+	Context string `mapstructure:"context"`
+}
+
+type KubernetesEKSConfig struct {
+	ClusterName string `mapstructure:"cluster_name"`
+	Region      string `mapstructure:"region"`
+	RoleARN     string `mapstructure:"role_arn"`
+	Profile     string `mapstructure:"profile"`
+}
+
+type KubernetesAKSConfig struct {
+	CredentialMode     string `mapstructure:"credential_mode"`
+	ServerID           string `mapstructure:"server_id"`
+	TenantID           string `mapstructure:"tenant_id"`
+	ClientID           string `mapstructure:"client_id"`
+	ClientSecret       string `mapstructure:"client_secret"`
+	FederatedTokenFile string `mapstructure:"federated_token_file"`
+	Environment        string `mapstructure:"environment"`
+}
+
+type KubernetesGKEConfig struct {
+	CredentialsFile string `mapstructure:"credentials_file"`
+}
+
+func decodeConnectors(value any) (ConnectorsConfig, error) {
+	var connectors ConnectorsConfig
+	if value == nil {
+		return connectors, nil
+	}
+	value = expandEnvironmentScalars(value)
+	if err := normalizeConnectorCIDRs(value); err != nil {
+		return connectors, err
+	}
+	if !validConnectorShape(value, reflect.TypeOf(connectors)) {
+		return connectors, errors.New("invalid connectors configuration")
+	}
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		Result: &connectors, TagName: "mapstructure", ErrorUnused: true,
+		DecodeHook: mapstructure.DecodeHookFuncType(connectorScalar),
+	})
+	if err != nil {
+		return connectors, errors.New("invalid connectors configuration")
+	}
+	if err := decoder.Decode(value); err != nil {
+		return ConnectorsConfig{}, errors.New("invalid connectors configuration")
+	}
+	return connectors, nil
+}
+
+func normalizeConnectorCIDRs(value any) error {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	for key, nested := range root {
+		if !strings.EqualFold(key, "kubernetes") {
+			continue
+		}
+		fields, ok := nested.(map[string]any)
+		if !ok {
+			continue
+		}
+		for name, raw := range fields {
+			if !strings.EqualFold(name, "endpoint_cidrs") {
+				continue
+			}
+			var items []any
+			switch typed := raw.(type) {
+			case string:
+				if strings.TrimSpace(typed) != "" {
+					for _, item := range strings.Split(typed, ",") {
+						items = append(items, item)
+					}
+				}
+			case []string:
+				for _, item := range typed {
+					items = append(items, item)
+				}
+			case []any:
+				items = typed
+			default:
+				return errors.New("invalid connectors endpoint CIDRs")
+			}
+			cidrs := make([]string, 0, len(items))
+			for _, item := range items {
+				text, ok := item.(string)
+				if !ok {
+					return errors.New("invalid connectors endpoint CIDRs")
+				}
+				text = strings.TrimSpace(text)
+				if _, err := netip.ParsePrefix(text); err != nil {
+					return errors.New("invalid connectors endpoint CIDRs")
+				}
+				cidrs = append(cidrs, text)
+			}
+			fields[name] = cidrs
+		}
+	}
+	return nil
+}
+
+func connectorScalar(source, target reflect.Type, value any) (any, error) {
+	if source.Kind() != reflect.String {
+		return value, nil
+	}
+	switch target.Kind() {
+	case reflect.Bool:
+		return strconv.ParseBool(value.(string))
+	case reflect.Int:
+		return strconv.Atoi(value.(string))
+	default:
+		return value, nil
+	}
+}
+
+func validConnectorShape(value any, target reflect.Type) bool {
+	if value == nil {
+		return false
+	}
+	if target.Kind() != reflect.Struct {
+		if reflect.TypeOf(value).AssignableTo(target) {
+			return true
+		}
+		if reflect.TypeOf(value).Kind() == reflect.String && (target.Kind() == reflect.Bool || target.Kind() == reflect.Int) {
+			_, err := connectorScalar(reflect.TypeOf(value), target, value)
+			return err == nil
+		}
+		return target.Kind() == reflect.Slice && validConnectorSlice(value, target)
+	}
+	fields, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	for key, nested := range fields {
+		found := false
+		for index := 0; index < target.NumField(); index++ {
+			field := target.Field(index)
+			if strings.EqualFold(key, field.Tag.Get("mapstructure")) {
+				found = validConnectorShape(nested, field.Type)
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func validConnectorSlice(value any, target reflect.Type) bool {
+	items, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		if !validConnectorShape(item, target.Elem()) {
+			return false
+		}
+	}
+	return true
+}
+
+func rawConfigSettings(raw []byte) (map[string]any, error) {
+	var settings map[string]any
+	decoder := yaml.NewDecoder(bytes.NewReader(raw))
+	err := decoder.Decode(&settings)
+	if errors.Is(err, io.EOF) {
+		return map[string]any{}, nil
+	}
+	if err != nil || settings == nil {
+		return nil, errors.New("invalid configuration YAML")
+	}
+	var extra any
+	if !errors.Is(decoder.Decode(&extra), io.EOF) {
+		return nil, errors.New("invalid configuration YAML")
+	}
+	return settings, nil
+}
+
+func configValue(settings map[string]any, path ...string) (any, bool) {
+	for key, value := range settings {
+		segments := strings.Split(key, ".")
+		if len(segments) <= len(path) && strings.EqualFold(key, strings.Join(path[:len(segments)], ".")) {
+			if len(segments) == len(path) {
+				return value, true
+			}
+			if nested, ok := value.(map[string]any); ok {
+				if found, present := configValue(nested, path[len(segments):]...); present {
+					return found, true
+				}
+			}
+		}
+	}
+	return nil, false
+}
+
+func rejectToolConnectors(raw []byte) error {
+	settings, err := rawConfigSettings(raw)
+	if err != nil {
+		return err
+	}
+	for _, path := range [][]string{{"tools", "kubernetes"}, {"agent", "tools", "kubernetes"}} {
+		if _, present := configValue(settings, path...); present {
+			return errors.New("Kubernetes configuration must use connectors.kubernetes")
+		}
+	}
+	return nil
+}
+
+func loadConnectorsFile(path string) (ConnectorsConfig, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ConnectorsConfig{}, errors.New("cannot read connectors file")
+	}
+	settings, err := rawConfigSettings(raw)
+	if err != nil {
+		return ConnectorsConfig{}, errors.New("invalid connectors YAML")
+	}
+	for key := range settings {
+		if !strings.EqualFold(key, "connectors") {
+			return ConnectorsConfig{}, errors.New("invalid connectors file key")
+		}
+	}
+	value, present := configValue(settings, "connectors")
+	if !present || value == nil {
+		return ConnectorsConfig{}, errors.New("invalid connectors configuration")
+	}
+	return decodeConnectors(value)
+}
