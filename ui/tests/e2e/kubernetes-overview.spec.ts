@@ -328,7 +328,40 @@ test.describe("Kubernetes documentation consumer", () => {
       const target = new URL(docsURL!);
       expect(["localhost", "127.0.0.1", "[::1]"]).toContain(target.hostname);
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
-      await page.goto(`${target.origin}/#/agent/tools/kubernetes`);
+      await page.goto(`${target.origin}/#/agent/connectors/kubernetes`);
+      await expect(page.getByRole("heading", { name: "Kubernetes Connector and Dashboard", exact: true })).toBeVisible();
+      const sidebar = page.locator(".sidebar-nav");
+      const groups = sidebar.locator(":scope > ul > li > .nav-section-toggle");
+      await expect.poll(() => groups.count()).toBeGreaterThan(1);
+      for (const group of await groups.all()) {
+        const open = ["AI SRE Agent", "Connectors"].includes((await group.innerText()).trim());
+        await expect(group).toHaveAttribute("aria-expanded", String(open));
+        expect(await group.evaluate((button) => button.parentElement!.querySelector<HTMLUListElement>(":scope > ul")!.hidden)).toBe(!open);
+      }
+      for (const nested of await sidebar.locator(".nav-sub-toggle").all()) await expect(nested).toHaveAttribute("aria-expanded", "false");
+      if (viewport.name === "mobile") await page.locator("#menuToggle").click();
+      const agent = sidebar.getByRole("button", { name: "AI SRE Agent", exact: true });
+      await agent.click();
+      await expect(agent).toHaveAttribute("aria-expanded", "false");
+      await agent.press("Enter");
+      await expect(agent).toHaveAttribute("aria-expanded", "true");
+      const connectors = sidebar.getByRole("button", { name: "Connectors", exact: true });
+      await connectors.click();
+      await expect(connectors).toHaveAttribute("aria-expanded", "false");
+      await sidebar.locator(":scope > ul > li").filter({ has: page.getByRole("button", { name: "AI SRE Agent", exact: true }) }).getByRole("link", { name: "Configuration", exact: true }).click();
+      await expect(page).toHaveURL(/#\/agent\/configuration$/);
+      await expect(page.locator(".markdown-section h1")).toContainText(/configuration/i);
+      await expect(sidebar.getByRole("button", { name: "Connectors", exact: true })).toHaveAttribute("aria-expanded", "false");
+      await page.goto(`${target.origin}/#/examples/eks-irsa-kubernetes-reader`);
+      await expect(sidebar.getByRole("button", { name: "Examples", exact: true })).toHaveAttribute("aria-expanded", "true");
+      await page.locator(".markdown-section").getByRole("link", { name: "Kubernetes connector reference", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Kubernetes Connector and Dashboard", exact: true })).toBeVisible();
+      await expect(sidebar.getByRole("button", { name: "Connectors", exact: true })).toHaveAttribute("aria-expanded", "true");
+      await page.goto(`${target.origin}/#/enterprise/sso/google`);
+      await expect(sidebar.locator('a.active[href="#/enterprise/sso/google"]')).toHaveCount(1);
+      await expect(sidebar.getByRole("button", { name: "Enterprise SRE Agent", exact: true })).toHaveAttribute("aria-expanded", "true");
+      await expect(sidebar.getByRole("button", { name: "Single Sign-On (SSO)", exact: true })).toHaveAttribute("aria-expanded", "true");
+      await page.goto(`${target.origin}/#/agent/connectors/kubernetes`);
       await expect(page.getByRole("heading", { name: "Kubernetes Connector and Dashboard", exact: true })).toBeVisible();
       for (const name of ["timeline", "helm", "gitops", "traffic", "namespaces", "topology"]) {
         const image = page.locator(`.markdown-section img[src$="kubernetes-harness-${name}.png"]`);
@@ -342,6 +375,57 @@ test.describe("Kubernetes documentation consumer", () => {
       expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
       fs.mkdirSync(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `docs-consumer-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+      await page.goto(`${target.origin}/#/agent/tools/kubernetes`);
+      await expect(page.getByRole("heading", { name: "Kubernetes Connector and Dashboard", exact: true })).toBeVisible();
+    });
+
+    test(`reveals active documentation item on navigation and reload ${viewport.name}`, async ({ page }) => {
+      const target = new URL(docsURL!);
+      expect(["localhost", "127.0.0.1", "[::1]"]).toContain(target.hostname);
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      const sidebar = page.locator(".sidebar-nav");
+      const expectCurrentVisible = async (route: string, groups: string[]) => {
+        const active = sidebar.locator(`a[href="#${route}"]`);
+        for (const group of groups) await expect(sidebar.getByRole("button", { name: group, exact: true })).toHaveAttribute("aria-expanded", "true");
+        await expect(active).toHaveClass(/active/);
+        await expect(active).toHaveAttribute("aria-current", "page");
+        await expect.poll(() => active.evaluate((link) => {
+          const menu = link.closest(".sidebar-nav")!;
+          const bounds = menu.getBoundingClientRect();
+          const item = link.getBoundingClientRect();
+          return item.top >= bounds.top - 1 && item.bottom <= bounds.bottom + 1;
+        })).toBe(true);
+        if (viewport.name === "mobile") {
+          await page.locator("#menuToggle").click();
+          await expect(active).toBeInViewport({ ratio: 1 });
+          await page.locator("#menuToggle").click();
+        } else await expect(active).toBeInViewport({ ratio: 1 });
+      };
+      await page.goto(`${target.origin}/#/introduction`);
+      await expect(page.locator(".markdown-section h1")).toBeVisible();
+      await page.evaluate(() => { location.hash = "/agent/regex"; });
+      await expect(page.getByRole("heading", { name: "Regex", exact: true })).toBeVisible();
+      await expectCurrentVisible("/agent/regex", ["Core Concept"]);
+      expect(await sidebar.evaluate((menu) => menu.scrollTop)).toBeGreaterThan(0);
+      await page.reload();
+      await expect(page.getByRole("heading", { name: "Regex", exact: true })).toBeVisible();
+      await expectCurrentVisible("/agent/regex", ["Core Concept"]);
+      expect(await page.locator(".content").evaluate((content) => content.scrollTop)).toBe(0);
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      if (viewport.name === "mobile") await page.locator("#menuToggle").click();
+      await page.screenshot({ path: path.join(screenshotDir, `docs-active-regex-reload-${viewport.name}.png`), animations: "disabled" });
+      await sidebar.getByRole("button", { name: "Core Concept", exact: true }).click();
+      await page.evaluate(() => { location.hash = "/agent/regex?id=regex"; });
+      await expect(sidebar.getByRole("button", { name: "Core Concept", exact: true })).toHaveAttribute("aria-expanded", "false");
+      await page.goto(`${target.origin}/#/enterprise/sso/google`);
+      await expect(page.locator(".markdown-section h1")).toBeVisible();
+      await expectCurrentVisible("/enterprise/sso/google", ["Enterprise SRE Agent", "Single Sign-On (SSO)"]);
+      await page.reload();
+      await expect(page.locator(".markdown-section h1")).toBeVisible();
+      await expectCurrentVisible("/enterprise/sso/google", ["Enterprise SRE Agent", "Single Sign-On (SSO)"]);
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      if (viewport.name === "mobile") await page.locator("#menuToggle").click();
+      await page.screenshot({ path: path.join(screenshotDir, `docs-active-sidebar-${viewport.name}.png`), animations: "disabled" });
     });
   }
 });

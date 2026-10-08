@@ -689,7 +689,7 @@ export function KubernetesPage() {
               <StateBadge state="needs_integration" />
               <p className="mt-3 text-sm text-ink-300">Kubernetes connector is not configured.</p>
               <div className="mt-4 flex flex-wrap gap-2">
-                <a className="btn" href="https://docs.versusincident.com/#/agent/tools/kubernetes" target="_blank" rel="noopener noreferrer">Documentation <ExternalLink size={13} aria-hidden="true" /></a>
+                <a className="btn" href="https://docs.versusincident.com/#/agent/connectors/kubernetes" target="_blank" rel="noopener noreferrer">Documentation <ExternalLink size={13} aria-hidden="true" /></a>
                 <button type="button" className="btn" onClick={() => overview.refetch()} disabled={overview.isFetching}><RefreshCw size={13} aria-hidden="true" className={overview.isFetching ? "animate-spin" : undefined} />Check connection</button>
               </div>
             </div>

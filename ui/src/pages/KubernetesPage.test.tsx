@@ -99,7 +99,7 @@ describe("KubernetesPage", () => {
 		expect(within(card).getByText("Connection needed")).toBeTruthy();
 		expect(card.querySelector(".tool-brand-kubernetes")).toBeTruthy();
 		const docs = within(card).getByRole("link", { name: "Documentation" });
-		expect(docs.getAttribute("href")).toBe("https://docs.versusincident.com/#/agent/tools/kubernetes");
+		expect(docs.getAttribute("href")).toBe("https://docs.versusincident.com/#/agent/connectors/kubernetes");
 		expect(docs.getAttribute("target")).toBe("_blank");
 		expect(docs.getAttribute("rel")).toBe("noopener noreferrer");
 		expect(screen.queryByRole("tablist")).toBeNull();

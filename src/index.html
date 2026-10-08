@@ -280,6 +280,10 @@
       display: none !important;
     }
 
+    .sidebar-toggle {
+      display: none !important;
+    }
+
     /* Sidebar nav */
     .sidebar .sidebar-nav {
       height: 100% !important;
@@ -765,6 +769,21 @@
     }
 
     @media (max-width: 768px) {
+      .topbar {
+        gap: 6px;
+        padding: 0 12px;
+      }
+
+      .topbar-brand img {
+        height: 38px;
+      }
+
+      .topbar-search {
+        flex: 1;
+        min-width: 0;
+        margin-left: 0;
+      }
+
       .menu-toggle {
         display: inline-flex;
       }
@@ -774,7 +793,8 @@
       }
 
       .topbar-search .search input {
-        width: 150px !important;
+        width: 100% !important;
+        min-width: 0;
       }
 
       .sidebar {
@@ -802,7 +822,9 @@
   <a href="#" class="skip-link">Skip to content</a>
 
   <header class="topbar">
-
+    <button class="menu-toggle" id="menuToggle" type="button" aria-label="Toggle documentation navigation" aria-expanded="false">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+    </button>
     <a class="topbar-brand" href="#/" aria-label="Versus Incident home">
       <img src="docs/images/versus-640-360-px.svg" alt="Versus Incident" />
     </a>
@@ -841,7 +863,10 @@
       auto2top: true,
       maxLevel: 0,
       subMaxLevel: 0,
-      alias: { "/.*/_sidebar.md": "/_sidebar.md" },
+      alias: {
+        "/.*/_sidebar.md": "/_sidebar.md",
+        "/agent/tools/kubernetes(?:\\.md)?$": "/agent/connectors/kubernetes.md"
+      },
       search: {
         maxAge: 86400000,
         paths: "auto",
@@ -887,6 +912,7 @@
           function routePath(raw) {
             var p = (raw || "").replace(/^#/, "").split("?")[0].replace(/\.md$/, "");
             if (p.length > 1) p = p.replace(/\/$/, "");
+            if (p === "/agent/tools/kubernetes") p = "/agent/connectors/kubernetes";
             if (p === "" || p === "/") {
               p = "/" + (window.$docsify.homepage || "").replace(/\.md$/, "");
             }
@@ -896,12 +922,14 @@
           // Docsify marks the active sidebar link itself, but that matching
           // does not survive relativePath combined with root-absolute sidebar
           // hrefs, so the current page never highlights. Decide it here after
-          // docsify has rendered, and before setupSidebar() reads a.active to
-          // work out which sections to expand.
+          // docsify has rendered without changing the user's expansion choices.
           function markActive() {
             var here = routePath(location.hash);
             document.querySelectorAll(".sidebar-nav a").forEach(function (a) {
-              a.classList.toggle("active", routePath(a.getAttribute("href")) === here);
+              var active = routePath(a.getAttribute("href")) === here;
+              a.classList.toggle("active", active);
+              if (active) a.setAttribute("aria-current", "page");
+              else a.removeAttribute("aria-current");
             });
           }
 
@@ -940,34 +968,37 @@
             return wrapper;
           }
 
+          var sidebarExpansion = Object.create(null);
+          var sidebarRoute = null;
+
           function setupSidebar() {
-            // Top-level sections: default EXPANDED
+            // AI SRE Agent is the only section initially expanded.
             document.querySelectorAll(".sidebar-nav > ul > li").forEach(function (li) {
               var sub = li.querySelector(":scope > ul");
               if (!sub) return;
               var titleEl = directSidebarLabel(li, ":scope > p, :scope > strong");
               if (!titleEl) return;
-              if (li.dataset.init) {
-                if (sub.querySelector("a.active")) {
-                  var b = li.querySelector(".nav-section-toggle");
-                  if (b) { b.setAttribute("aria-expanded", "true"); sub.hidden = false; }
-                }
-                return;
-              }
+              if (li.dataset.init) return;
               li.dataset.init = "1";
+              var sectionText = titleEl.textContent.trim();
+              var sectionKey = "section:" + sectionText;
+              var expanded = Object.prototype.hasOwnProperty.call(sidebarExpansion, sectionKey)
+                ? sidebarExpansion[sectionKey]
+                : sectionText === "AI SRE Agent";
               var btn = document.createElement("button");
               btn.className = "nav-section-toggle";
+              btn.dataset.expansionKey = sectionKey;
               btn.type = "button";
-              // Top-level defaults to EXPANDED
-              btn.setAttribute("aria-expanded", "true");
+              btn.setAttribute("aria-expanded", String(expanded));
               btn.appendChild(makeChevron());
               var sectionLabel = document.createElement("span");
               sectionLabel.textContent = titleEl.textContent;
               btn.appendChild(sectionLabel);
               sub.classList.add("nav-section-list");
-              sub.hidden = false;
+              sub.hidden = !expanded;
               btn.addEventListener("click", function () {
                 var open = btn.getAttribute("aria-expanded") === "true";
+                sidebarExpansion[sectionKey] = !open;
                 btn.setAttribute("aria-expanded", String(!open));
                 sub.hidden = open;
               });
@@ -987,16 +1018,21 @@
               var btn = document.createElement("button");
               btn.className = "nav-sub-toggle";
               btn.type = "button";
-              var hasActive = subUl.querySelector("a.active") || (link && link.classList.contains("active"));
+              var section = li.closest(".sidebar-nav > ul > li");
+              var sectionToggle = section && section.querySelector(":scope > .nav-section-toggle");
+              var submenuKey = "submenu:" + (sectionToggle ? sectionToggle.textContent.trim() : "") + ":" + text;
+              btn.dataset.expansionKey = submenuKey;
+              var expanded = sidebarExpansion[submenuKey] === true;
               var subId = subUl.id || "sidebar-submenu-" + index;
               subUl.id = subId;
-              btn.setAttribute("aria-expanded", hasActive ? "true" : "false");
+              btn.setAttribute("aria-expanded", String(expanded));
               btn.setAttribute("aria-controls", subId);
               btn.appendChild(makeChevron());
               subUl.classList.add("nav-sub-list");
-              subUl.hidden = !hasActive;
+              subUl.hidden = !expanded;
               btn.addEventListener("click", function () {
                 var open = btn.getAttribute("aria-expanded") === "true";
+                sidebarExpansion[submenuKey] = !open;
                 btn.setAttribute("aria-expanded", String(!open));
                 subUl.hidden = open;
               });
@@ -1013,6 +1049,34 @@
                 btn.appendChild(subLabel);
                 titleEl.replaceWith(btn);
               }
+            });
+          }
+
+          function expandActiveSidebar() {
+            var sidebar = document.querySelector(".sidebar-nav");
+            if (!sidebar || !sidebar.querySelector("a")) return;
+            var here = routePath(location.hash);
+            var changed = sidebarRoute !== here;
+            sidebarRoute = here;
+            if (!changed) return;
+            var active = sidebar.querySelector("a.active");
+            var item = active && active.closest("li");
+            while (item && sidebar.contains(item)) {
+              var list = item.querySelector(":scope > ul");
+              var toggle = item.querySelector(":scope > .nav-section-toggle, :scope > .nav-sub-toggle, :scope > .nav-sub-header > .nav-sub-toggle");
+              if (list && toggle) {
+                toggle.setAttribute("aria-expanded", "true");
+                list.hidden = false;
+                sidebarExpansion[toggle.dataset.expansionKey] = true;
+              }
+              item = item.parentElement.closest("li");
+            }
+            if (active) requestAnimationFrame(function () {
+              if (!sidebar.contains(active) || routePath(location.hash) !== here) return;
+              var bounds = sidebar.getBoundingClientRect();
+              var linkBounds = active.getBoundingClientRect();
+              if (linkBounds.top < bounds.top) sidebar.scrollTop += linkBounds.top - bounds.top - 8;
+              else if (linkBounds.bottom > bounds.bottom) sidebar.scrollTop += linkBounds.bottom - bounds.bottom + 8;
             });
           }
 
@@ -1059,6 +1123,7 @@
             buildToc();
             markActive();
             setupSidebar();
+            expandActiveSidebar();
             // Position AFTER the content is in the DOM and buildToc has filled
             // in any missing heading ids. Resetting scrollTop unconditionally
             // here is what used to cancel every ?id= jump.
@@ -1075,12 +1140,21 @@
             var bd = document.getElementById("backdrop");
             if (sb) sb.classList.remove("open");
             if (bd) bd.classList.remove("visible");
+            var menuToggle = document.getElementById("menuToggle");
+            if (menuToggle) menuToggle.setAttribute("aria-expanded", "false");
           });
 
           hook.mounted(function () {
             var tog = document.getElementById("menuToggle");
             var sb = document.querySelector(".sidebar");
             var bd = document.getElementById("backdrop");
+            if (sb && bd && sb.parentElement !== bd.parentElement) {
+              sb.parentElement.insertBefore(bd, sb);
+            }
+            if (tog && sb) {
+              if (!sb.id) sb.id = "docsSidebar";
+              tog.setAttribute("aria-controls", sb.id);
+            }
 
             // In-page section links. Markdown writes these as [text](#anchor),
             // but docsify's compiler rewrites them to #/<current-page>?id=anchor,

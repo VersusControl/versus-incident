@@ -4,39 +4,44 @@
   - [Introduction](/agent/agent-introduction)
   - [Getting Started](/agent/getting-started)
   - [Shadow Mode](/agent/shadow-mode)
-  - [Spike Detection](/agent/spike)
   - [AI Detect Mode](/agent/ai-detect-mode)
+  - [Spike Detection](/agent/spike)
+  - [AI Analyze](/agent/ai-analyze-mode)
+  - [DevOps Agent](/agent/devops-agent)
   - [Service Detection](/agent/service-detection)
   - [Service Heatmap](/agent/service-heatmap)
   - [Incidents Report](/agent/incident-report)
-  - [DevOps Agent](/agent/devops-agent)
-  - [AI Analyze](/agent/ai-analyze-mode)
   - [Configuration](/agent/configuration)
-  - Data Sources
-    - [Overview](/agent/data-sources)
-    - [File](/agent/data-sources/file)
-    - [Elasticsearch](/agent/data-sources/elasticsearch)
-    - [Loki](/agent/data-sources/loki)
-    - [CloudWatch Logs](/agent/data-sources/cloudwatch-logs)
-    - [Graylog](/agent/data-sources/graylog)
-    - [Splunk](/agent/data-sources/splunk)
-    - [SigNoz](/agent/data-sources/signoz)
-    - [Prometheus](/agent/data-sources/prometheus)
-    - [CloudWatch Metrics](/agent/data-sources/cloudwatch-metrics)
-    - [Traces](/agent/data-sources/traces)
-  - Tools
-    - [Tool Reference](/agent/tools/tools)
-    - [Kubernetes Connector](/agent/tools/kubernetes)
-    - [Recent Changes](/agent/tools/recent-changes)
-    - [Find Runbook](/agent/tools/find-runbook)
-  - Notification Channels
-    - [Overview](/agent/channels)
-    - [Slack](/agent/channels/slack)
-    - [Microsoft Teams](/agent/channels/msteams)
-    - [Telegram](/agent/channels/telegram)
-    - [Viber](/agent/channels/viber)
-    - [Email](/agent/channels/email)
-    - [Lark](/agent/channels/lark)
+
+- Connectors
+  - [Kubernetes](/agent/connectors/kubernetes)
+
+- Data Sources
+  - [Overview](/agent/data-sources)
+  - [File](/agent/data-sources/file)
+  - [Elasticsearch](/agent/data-sources/elasticsearch)
+  - [Loki](/agent/data-sources/loki)
+  - [CloudWatch Logs](/agent/data-sources/cloudwatch-logs)
+  - [Graylog](/agent/data-sources/graylog)
+  - [Splunk](/agent/data-sources/splunk)
+  - [SigNoz](/agent/data-sources/signoz)
+  - [Prometheus](/agent/data-sources/prometheus)
+  - [CloudWatch Metrics](/agent/data-sources/cloudwatch-metrics)
+  - [Traces](/agent/data-sources/traces)
+
+- Tools
+  - [Tool Reference](/agent/tools/overview)
+  - [Recent Changes](/agent/tools/recent-changes)
+  - [Find Runbook](/agent/tools/find-runbook)
+
+- Notification Channels
+  - [Overview](/agent/channels)
+  - [Slack](/agent/channels/slack)
+  - [Microsoft Teams](/agent/channels/msteams)
+  - [Telegram](/agent/channels/telegram)
+  - [Viber](/agent/channels/viber)
+  - [Email](/agent/channels/email)
+  - [Lark](/agent/channels/lark)
 
 - Enterprise SRE Agent
   - [Getting Started](/enterprise/getting-started)
@@ -64,7 +69,6 @@
     - [Fraud & abuse detection](/enterprise/security/fraud-detection)
 
 - Configuration
-  - [Overview](/configuration/admin-ui)
   - [Configuration](/configuration/configuration)
   - [PostgreSQL Storage](/configuration/postgres-storage)
   - [Deploy on Kubernetes](/configuration/kubernetes)

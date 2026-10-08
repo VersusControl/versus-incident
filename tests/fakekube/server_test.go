@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/agent"
-	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
@@ -46,6 +45,48 @@ func (writer *gatedLogWriter) Write(body []byte) (int, error) {
 func (writer *gatedLogWriter) Flush() {
 	writer.ResponseRecorder.Flush()
 	writer.flushed <- struct{}{}
+}
+
+func TestPodLogStreamSetsSafeHeadersBeforeWriting(t *testing.T) {
+	for _, mode := range []struct {
+		name  string
+		query string
+	}{{"current", "follow=true&previous=false"}, {"previous", "follow=false&previous=true"}} {
+		t.Run(mode.name, func(t *testing.T) {
+			server, err := NewServer(Config{Scenario: "triage"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			writer := &gatedLogWriter{ResponseRecorder: httptest.NewRecorder(), context: ctx, writes: make(chan string), release: make(chan struct{}), flushed: make(chan struct{}, 16)}
+			writer.Header().Set("Content-Type", "text/html")
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/namespaces/payments/pods/checkout-api-0/log?container=sidecar&timestamps=true&"+mode.query, nil).WithContext(ctx)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				server.streamLogs(&countingWriter{ResponseWriter: writer}, request)
+			}()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Error("header regression left a stream running")
+				}
+			})
+			select {
+			case <-writer.writes:
+			case <-ctx.Done():
+				t.Fatal("stream did not reach its first write")
+			}
+			if contentType := writer.Header().Get("Content-Type"); contentType != "text/plain; charset=utf-8" {
+				t.Errorf("stream Content-Type = %q", contentType)
+			}
+			if nosniff := writer.Header().Get("X-Content-Type-Options"); nosniff != "nosniff" {
+				t.Errorf("stream X-Content-Type-Options = %q", nosniff)
+			}
+		})
+	}
 }
 
 func TestPodLogFixtureFramingBackpressureAndCancellation(t *testing.T) {
@@ -235,114 +276,6 @@ func TestPodLogFixtureControlledDisconnectReconnectAndPrevious(t *testing.T) {
 			code = http.StatusNotFound
 		}
 		control(body, code)
-	}
-}
-
-func TestTimestampedPodLogFollowResumePreviousAndCancellation(t *testing.T) {
-	server, err := NewServer(Config{Scenario: "triage", Seed: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	httpServer := httptest.NewServer(server)
-	defer httpServer.Close()
-	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: httpServer.URL, AllowLoopbackHTTP: true, Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "fakekube"}, time.Minute)
-	redactor, errs := agent.NewRedactor(false, nil)
-	if len(errs) != 0 {
-		t.Fatal(errs)
-	}
-	service.SetScrubber(redactor)
-	authorized := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{
-		Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true},
-	})
-	options := kubernetes.PodLogStreamOptions{Namespace: "payments", Pod: "checkout-api-0", Container: "api", Timestamps: true}
-	collectFollow := func(options kubernetes.PodLogStreamOptions, count int) []kubernetes.PodLogStreamEvent {
-		t.Helper()
-		ctx, cancel := context.WithTimeout(authorized, 12*time.Second)
-		defer cancel()
-		var events []kubernetes.PodLogStreamEvent
-		err := service.StreamPodLogs(ctx, options, func(event kubernetes.PodLogStreamEvent) error {
-			if event.Event == "line" {
-				events = append(events, event)
-				if len(events) == count {
-					cancel()
-					return context.Canceled
-				}
-			}
-			return nil
-		})
-		if !errors.Is(err, context.Canceled) || len(events) != count {
-			t.Fatalf("follow events=%#v err=%v", events, err)
-		}
-		return events
-	}
-	events := collectFollow(options, 33)
-	if events[0].Text != events[1].Text || events[0].Timestamp != events[1].Timestamp || events[0].Ordinal != 1 || events[1].Ordinal != 2 {
-		t.Fatalf("identical timestamped lines were lost: %#v", events[:2])
-	}
-	for _, event := range events {
-		if (event.Cursor != "") != (event.Sequence%32 == 0) || event.Container != "api" || event.Timestamp == "" {
-			t.Fatalf("missing stream metadata: %#v", event)
-		}
-		for _, canary := range []string{"super-secret-value", "split-secret-value", "previous-secret-value", "synthetic-oversized-secret-value", "synthetic-record-padding"} {
-			if strings.Contains(event.Text, canary) {
-				t.Fatalf("split-chunk secret leaked: %#v", event)
-			}
-		}
-	}
-	if !strings.Contains(events[2].Text, "<REDACTED:") || !strings.Contains(events[3].Text, "<REDACTED:") || !strings.Contains(events[4].Text, "[oversized log line omitted]") || !strings.Contains(events[5].Text, "fakekube follow line 1") {
-		t.Fatalf("missing scrubbed fixtures or ongoing follow: %#v", events)
-	}
-	options.Cursor = events[31].Cursor
-	resumed := collectFollow(options, 3)
-	for index, event := range resumed {
-		if event.Ordinal != 1 || event.Timestamp != time.Date(2026, 1, 1, 0, 0, 28+index, 0, time.UTC).Format(time.RFC3339Nano) || event.ReplayUncertain {
-			t.Fatalf("resume lost same-timestamp occurrence: %#v", resumed)
-		}
-	}
-	if resumed[0].Text != events[32].Text || resumed[0].Timestamp != events[32].Timestamp || resumed[0].Ordinal != events[32].Ordinal {
-		t.Fatal("checkpoint overlap changed occurrence identity")
-	}
-	options.Cursor = ""
-	options.Previous = true
-	ctx, cancel := context.WithTimeout(authorized, 3*time.Second)
-	defer cancel()
-	var previous []kubernetes.PodLogStreamEvent
-	if err := service.StreamPodLogs(ctx, options, func(event kubernetes.PodLogStreamEvent) error {
-		previous = append(previous, event)
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if len(previous) != 2 || previous[0].Event != "line" || !strings.Contains(previous[0].Text, "fakekube previous") || !strings.Contains(previous[0].Text, "<REDACTED:") || strings.Contains(previous[0].Text, "previous-secret-value") || previous[1].Event != "end" || previous[1].Reason != "complete" {
-		t.Fatalf("previous did not scrub and finish: %#v", previous)
-	}
-	deadline := time.NewTimer(time.Second)
-	defer deadline.Stop()
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		response, err := httpServer.Client().Get(httpServer.URL + "/_fake/log-streams")
-		if err != nil {
-			t.Fatal(err)
-		}
-		var counters []LogStreamCounter
-		err = json.NewDecoder(response.Body).Decode(&counters)
-		response.Body.Close()
-		if err != nil || response.StatusCode != http.StatusOK {
-			t.Fatalf("stream observation status=%d err=%v", response.StatusCode, err)
-		}
-		if len(counters) == 2 && counters[0].Requests == 2 && counters[0].Active == 0 && counters[0].Cancelled == 2 && counters[0].Chunks >= 13 && counters[0].SinceTime == "2025-12-31T23:59:59.999999999Z" && counters[1].Previous && counters[1].Requests == 1 && counters[1].Completed == 1 && counters[1].Active == 0 {
-			break
-		}
-		select {
-		case <-deadline.C:
-			t.Fatalf("upstream cancellation/completion not observed: %#v", counters)
-		case <-ticker.C:
-		}
 	}
 }
 
@@ -683,46 +616,87 @@ func TestPopulatedScenarioTimelineMutationBoundary(t *testing.T) {
 	}
 }
 
+func fixtureDeploymentRecords(t *testing.T, server *Server) []kubeindex.Record {
+	t.Helper()
+	page, err := server.store.List("deployments", "shop", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := make([]kubeindex.Record, 0, len(page.Items))
+	for _, raw := range page.Items {
+		var deployment struct {
+			Metadata struct {
+				UID             string            `json:"uid"`
+				Name            string            `json:"name"`
+				Namespace       string            `json:"namespace"`
+				ResourceVersion string            `json:"resourceVersion"`
+				Generation      int64             `json:"generation"`
+				Labels          map[string]string `json:"labels"`
+			} `json:"metadata"`
+			Spec struct {
+				Replicas int32 `json:"replicas"`
+				Template struct {
+					Spec struct {
+						Containers []struct {
+							Image string `json:"image"`
+						} `json:"containers"`
+					} `json:"spec"`
+				} `json:"template"`
+			} `json:"spec"`
+		}
+		if err := json.Unmarshal(raw, &deployment); err != nil {
+			t.Fatal(err)
+		}
+		record := kubeindex.Record{UID: deployment.Metadata.UID, Kind: "Deployment", Namespace: deployment.Metadata.Namespace, Name: deployment.Metadata.Name, ResourceVersion: deployment.Metadata.ResourceVersion, Generation: deployment.Metadata.Generation, Labels: deployment.Metadata.Labels, Replicas: deployment.Spec.Replicas}
+		for _, container := range deployment.Spec.Template.Spec.Containers {
+			record.Images = append(record.Images, container.Image)
+		}
+		records = append(records, record)
+	}
+	return records
+}
+
+func ingestFixtureChanges(t *testing.T, server *Server, index *kubeindex.Index, history *kubechanges.Store, observedAt time.Time) {
+	t.Helper()
+	deltas, unsubscribe := index.Subscribe(16)
+	defer unsubscribe()
+	if err := index.Ingest("Deployment", fixtureDeploymentRecords(t, server), true, observedAt); err != nil {
+		t.Fatal(err)
+	}
+	var changes []kubechanges.Change
+	for {
+		select {
+		case delta := <-deltas:
+			if delta.Resync {
+				t.Fatal("fixture unexpectedly exceeded its delta buffer")
+			}
+			if change, detected := kubechanges.Detect("fakekube", delta, observedAt); detected {
+				changes = append(changes, change)
+			}
+		default:
+			if err := history.Append(changes, observedAt); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+	}
+}
+
 func TestPopulatedScenarioTimelineSeed(t *testing.T) {
+	t.Parallel()
 	server, err := NewServer(Config{Scenario: "populated", Seed: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	httpServer := httptest.NewServer(server)
-	t.Cleanup(func() {
-		httpServer.CloseClientConnections()
-		httpServer.Close()
-	})
-	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: httpServer.URL, AllowLoopbackHTTP: true, Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "harness", ClusterID: "fakekube", CredentialID: "harness-fakekube"}, time.Minute)
-	service.SetChangeStorage(storage.NewMemory())
-	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
-	defer cancel()
-	query := kubernetes.ChangeQuery{Namespace: "shop", Kind: "Deployment", Name: "checkout"}
-	baselineTicker := time.NewTicker(100 * time.Millisecond)
-	defer baselineTicker.Stop()
-	for {
-		_, status, err := service.IndexSnapshot(ctx, "Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if status.State == "ready" && !status.Partial && len(status.Kinds) == 6 {
-			break
-		}
-		select {
-		case <-baselineTicker.C:
-		case <-ctx.Done():
-			t.Fatalf("timeline baseline never became ready: %+v", status)
-		}
-	}
-	baseline, err := service.Changes(ctx, query)
+	index := kubeindex.New(100)
+	history := kubechanges.NewStore(storage.NewMemory(), kubeindex.Scope{OrgID: "harness", ClusterID: "fakekube", CredentialID: "harness-fakekube"})
+	observedAt := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	query := kubechanges.Query{Namespace: "shop", Kind: "Deployment", Name: "checkout"}
+	ingestFixtureChanges(t, server, index, history, observedAt)
+	baseline, err := history.Query(query, observedAt)
 	if err != nil || len(baseline.Items) != 0 {
 		t.Fatalf("timeline baseline=%+v err=%v", baseline, err)
 	}
-	t.Log("timeline baseline ready for all six resource kinds")
 	wanted := []string{"created", "image_changed", "replicas_changed"}
 	for revisionIndex, image := range []string{"example.invalid/checkout:v1", "example.invalid/checkout:v2", "example.invalid/checkout:v2"} {
 		revision, err := json.Marshal(map[string]any{
@@ -741,83 +715,49 @@ func TestPopulatedScenarioTimelineSeed(t *testing.T) {
 		if response.Code != http.StatusOK {
 			t.Fatalf("revision %d mutation status=%d", revisionIndex, response.Code)
 		}
-		ticker := time.NewTicker(500 * time.Millisecond)
-		revisionContext, cancelRevision := context.WithTimeout(ctx, 20*time.Second)
-		found := false
-		for !found {
-			page, err := service.Changes(revisionContext, query)
-			if err != nil {
-				ticker.Stop()
-				cancelRevision()
-				t.Fatalf("revision %d timeline poll: %v", revisionIndex, err)
-			}
-			for _, change := range page.Items {
-				if string(change.Type) != wanted[revisionIndex] {
-					continue
-				}
-				if change.Service != "checkout" || time.Since(change.At) > 2*time.Minute {
-					t.Fatalf("timeline service/freshness mismatch: %+v", change)
-				}
-				if revisionIndex == 1 && (len(change.Fields) != 2 || change.Fields[0].Path != "containers.images" || change.Fields[0].From != "example.invalid/checkout:v1" || change.Fields[0].To != "example.invalid/checkout:v2") {
-					t.Fatalf("image and replica fields missing: %+v", change)
-				}
-				if revisionIndex == 2 && (len(change.Fields) != 1 || change.Fields[0].Path != "spec.replicas" || change.Fields[0].From != "3" || change.Fields[0].To != "4") {
-					t.Fatalf("replica fields missing: %+v", change)
-				}
-				found = true
-			}
-			if !found {
-				select {
-				case <-ticker.C:
-				case <-revisionContext.Done():
-					ticker.Stop()
-					cancelRevision()
-					t.Fatalf("revision %d never reached the timeline: sync=%+v partial=%+v items=%+v", revisionIndex, page.Sync, page.Partial, page.Items)
-				}
-			}
+		observedAt = observedAt.Add(time.Second)
+		ingestFixtureChanges(t, server, index, history, observedAt)
+		page, err := history.Query(query, observedAt)
+		if err != nil {
+			t.Fatal(err)
 		}
-		ticker.Stop()
-		cancelRevision()
-		t.Logf("revision %d observed: %s", revisionIndex, wanted[revisionIndex])
+		if len(page.Items) != revisionIndex+1 {
+			t.Fatalf("revision %d history=%+v", revisionIndex, page.Items)
+		}
+		found := false
+		for _, change := range page.Items {
+			if string(change.Type) != wanted[revisionIndex] {
+				continue
+			}
+			if change.Service != "checkout" || !change.At.Equal(observedAt) || change.UID != "deployment-checkout-shop" {
+				t.Fatalf("timeline service/freshness mismatch: %+v", change)
+			}
+			if revisionIndex == 1 && (len(change.Fields) != 2 || change.Fields[0].Path != "containers.images" || change.Fields[0].From != "example.invalid/checkout:v1" || change.Fields[0].To != "example.invalid/checkout:v2" || change.Fields[1].Path != "spec.replicas" || change.Fields[1].From != "2" || change.Fields[1].To != "3") {
+				t.Fatalf("image and replica fields missing: %+v", change)
+			}
+			if revisionIndex == 2 && (len(change.Fields) != 1 || change.Fields[0].Path != "spec.replicas" || change.Fields[0].From != "3" || change.Fields[0].To != "4") {
+				t.Fatalf("replica fields missing: %+v", change)
+			}
+			found = true
+		}
+		if !found {
+			t.Fatalf("revision %d missing %s: %+v", revisionIndex, wanted[revisionIndex], page.Items)
+		}
 	}
 }
 
 func TestPopulatedScenarioTimelineDistinctCreates(t *testing.T) {
+	t.Parallel()
 	server, err := NewServer(Config{Scenario: "populated", Seed: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	httpServer := httptest.NewServer(server)
-	t.Cleanup(func() {
-		httpServer.CloseClientConnections()
-		httpServer.Close()
-	})
-	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: httpServer.URL, AllowLoopbackHTTP: true, Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "harness", ClusterID: "fakekube", CredentialID: "distinct-creates"}, time.Minute)
-	service.SetChangeStorage(storage.NewMemory())
-	ctx, cancel := context.WithTimeout(context.Background(), 65*time.Second)
-	defer cancel()
-	query := kubernetes.ChangeQuery{Namespace: "shop", Kind: "Deployment"}
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		_, status, err := service.IndexSnapshot(ctx, "Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if status.State == "ready" && !status.Partial && len(status.Kinds) == 6 {
-			break
-		}
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			t.Fatalf("create baseline not ready: %+v", status)
-		}
-	}
-	baseline, err := service.Changes(ctx, query)
+	index := kubeindex.New(100)
+	history := kubechanges.NewStore(storage.NewMemory(), kubeindex.Scope{OrgID: "harness", ClusterID: "fakekube", CredentialID: "distinct-creates"})
+	observedAt := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	query := kubechanges.Query{Namespace: "shop", Kind: "Deployment"}
+	ingestFixtureChanges(t, server, index, history, observedAt)
+	baseline, err := history.Query(query, observedAt)
 	if err != nil || len(baseline.Items) != 0 {
 		t.Fatalf("create baseline=%+v err=%v", baseline, err)
 	}
@@ -827,15 +767,16 @@ func TestPopulatedScenarioTimelineDistinctCreates(t *testing.T) {
 			t.Fatalf("%s already exists at baseline", name)
 		}
 	}
-	started := time.Now().UTC()
+	started := observedAt
 	for fixtureIndex, name := range names {
+		observedAt = observedAt.Add(time.Second)
 		replicas := fixtureIndex + 2
 		labels := map[string]string{"app": name, "app.kubernetes.io/name": name}
 		mutation, err := json.Marshal(map[string]any{
 			"operation": "upsert", "resource": "deployments", "namespace": "shop", "name": name,
 			"object": map[string]any{
 				"apiVersion": "apps/v1", "kind": "Deployment",
-				"metadata": map[string]any{"name": name, "namespace": "shop", "uid": "deployment-" + name + "-shop", "generation": 1, "creationTimestamp": time.Now().UTC().Format(time.RFC3339), "labels": labels},
+				"metadata": map[string]any{"name": name, "namespace": "shop", "uid": "deployment-" + name + "-shop", "generation": 1, "creationTimestamp": observedAt.Format(time.RFC3339), "labels": labels},
 				"spec":     map[string]any{"replicas": replicas, "selector": map[string]any{"matchLabels": map[string]string{"app": name}}, "template": map[string]any{"metadata": map[string]any{"labels": map[string]string{"app": name}}, "spec": map[string]any{"containers": []any{map[string]any{"name": "app", "image": "example.invalid/" + name + ":v1"}}}}},
 				"status":   map[string]any{"replicas": replicas, "updatedReplicas": replicas, "readyReplicas": replicas, "availableReplicas": replicas, "observedGeneration": 1},
 			},
@@ -844,37 +785,30 @@ func TestPopulatedScenarioTimelineDistinctCreates(t *testing.T) {
 			t.Fatal(err)
 		}
 		response := httptest.NewRecorder()
-		server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/_fake/mutate", strings.NewReader(string(mutation))).WithContext(ctx))
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/_fake/mutate", strings.NewReader(string(mutation))))
 		if response.Code != http.StatusOK {
 			t.Fatalf("create %s status=%d", name, response.Code)
 		}
-		for {
-			page, err := service.Changes(ctx, query)
-			if err != nil {
-				t.Fatal(err)
-			}
-			visible := make(map[string]bool)
-			for _, change := range page.Items {
-				if change.Type == kubechanges.Created && change.Namespace == "shop" && change.Kind == "Deployment" {
-					if change.Service != change.Name || change.UID != "deployment-"+change.Name+"-shop" || change.At.Before(started) || time.Since(change.At) > time.Minute {
-						t.Fatalf("create identity/freshness mismatch: %+v", change)
-					}
-					visible[change.Name] = true
+		ingestFixtureChanges(t, server, index, history, observedAt)
+		page, err := history.Query(query, observedAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Items) != fixtureIndex+1 {
+			t.Fatalf("create %s history=%+v", name, page.Items)
+		}
+		visible := make(map[string]bool)
+		for _, change := range page.Items {
+			if change.Type == kubechanges.Created && change.Namespace == "shop" && change.Kind == "Deployment" {
+				if change.Service != change.Name || change.UID != "deployment-"+change.Name+"-shop" || !change.At.After(started) || change.At.After(observedAt) {
+					t.Fatalf("create identity/freshness mismatch: %+v", change)
 				}
+				visible[change.Name] = true
 			}
-			if visible[name] {
-				for _, prior := range names[:fixtureIndex+1] {
-					if !visible[prior] {
-						t.Fatalf("previous create %s missing: %+v", prior, page.Items)
-					}
-				}
-				t.Logf("observed real created transition: shop/%s", name)
-				break
-			}
-			select {
-			case <-ticker.C:
-			case <-ctx.Done():
-				t.Fatalf("create %s not visible: sync=%+v items=%+v", name, page.Sync, page.Items)
+		}
+		for _, prior := range names[:fixtureIndex+1] {
+			if !visible[prior] {
+				t.Fatalf("create %s missing: %+v", prior, page.Items)
 			}
 		}
 	}

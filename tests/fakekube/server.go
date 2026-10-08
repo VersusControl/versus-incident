@@ -521,6 +521,8 @@ func (server *Server) logStreamCounters() []LogStreamCounter {
 }
 
 func (server *Server) streamLogs(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
 	container, previousAvailable, code := server.logContainer(request.URL.Path, request.URL.Query().Get("container"))
 	if code != http.StatusOK {
 		http.Error(writer, "unknown pod or container", code)

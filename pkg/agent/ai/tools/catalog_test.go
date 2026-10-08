@@ -87,9 +87,9 @@ func TestCatalogDestinationsAreExactAndSafe(t *testing.T) {
 
 func TestCatalogDocumentationRoutesAreCanonical(t *testing.T) {
 	want := map[string]string{
-		"all":        "https://docs.versusincident.com/#/agent/tools/tools",
-		"versus":     "https://docs.versusincident.com/#/agent/tools/tools?id=versus-tools",
-		"kubernetes": "https://docs.versusincident.com/#/agent/tools/kubernetes",
+		"all":        "https://docs.versusincident.com/#/agent/tools/overview",
+		"versus":     "https://docs.versusincident.com/#/agent/tools/overview?id=versus-tools",
+		"kubernetes": "https://docs.versusincident.com/#/agent/connectors/kubernetes",
 	}
 	got := map[string]string{
 		"all":        docsTools,
@@ -150,10 +150,10 @@ func TestCatalogDocumentationTargetsExist(t *testing.T) {
 
 func TestCatalogDestinationValidationRejectsUnsafeValues(t *testing.T) {
 	for _, value := range []string{
-		"http://docs.versusincident.com/#/agent/tools/tools",
-		"https://evil.example/#/agent/tools/tools",
-		"https://docs.versusincident.com/agent/tools/tools",
-		"https://docs.versusincident.com:443/#/agent/tools/tools",
+		"http://docs.versusincident.com/#/agent/tools/overview",
+		"https://evil.example/#/agent/tools/overview",
+		"https://docs.versusincident.com/agent/tools/overview",
+		"https://docs.versusincident.com:443/#/agent/tools/overview",
 		"https://docs.versusincident.com/#/%2f%2fevil.example",
 		"https://docs.versusincident.com/#/agent%0Atools",
 		"https://docs.versusincident.com/#/agent%5ctools",
