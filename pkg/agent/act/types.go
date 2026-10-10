@@ -74,6 +74,14 @@ type ProposalBinder interface {
 	Bind(context.Context, Proposal) (json.RawMessage, error)
 }
 
+type TargetResolver interface {
+	ResolveTarget(TargetRef) (TargetRef, error)
+}
+
+type ReadTargetResolver interface {
+	ResolveReadTarget(TargetRef) (TargetRef, error)
+}
+
 type Authorizer interface {
 	Authorize(context.Context, string, Proposal) error
 }

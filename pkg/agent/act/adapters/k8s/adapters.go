@@ -45,9 +45,130 @@ type Adapter struct {
 	action  act.ActionType
 }
 
+type clusterAdapter struct {
+	action   act.ActionType
+	children map[string]act.Adapter
+}
+
+func NewClusterAdapters(apis map[string]API, options Options) []act.Adapter {
+	perCluster := map[string]Options{}
+	for id := range apis {
+		perCluster[id] = options
+	}
+	return NewClusterAdaptersWithOptions(apis, perCluster)
+}
+
+func NewClusterAdaptersWithOptions(apis map[string]API, options map[string]Options) []act.Adapter {
+	byType := map[act.ActionType]map[string]act.Adapter{}
+	for id, api := range apis {
+		clusterOptions := options[id]
+		clusterOptions.Cluster = id
+		for _, child := range NewAdapters(api, clusterOptions) {
+			if byType[child.Type()] == nil {
+				byType[child.Type()] = map[string]act.Adapter{}
+			}
+			byType[child.Type()][id] = child
+		}
+	}
+	result := []act.Adapter{}
+	for _, action := range []act.ActionType{RolloutRestart, Scale, CronJobSuspend, CronJobResume, NodeCordon, NodeUncordon, CronJobTrigger} {
+		if children := byType[action]; len(children) > 0 {
+			result = append(result, clusterAdapter{action: action, children: children})
+		}
+	}
+	return result
+}
+
+func (adapter clusterAdapter) Type() act.ActionType { return adapter.action }
+func (adapter clusterAdapter) Destructive() bool    { return false }
+func (adapter clusterAdapter) Schema() map[string]any {
+	if adapter.action == Scale {
+		maximum := 0
+		for _, child := range adapter.children {
+			limit := child.Schema()["properties"].(map[string]any)["replicas"].(map[string]any)["maximum"].(int)
+			if limit > maximum {
+				maximum = limit
+			}
+		}
+		return map[string]any{"type": "object", "properties": map[string]any{"replicas": map[string]any{"type": "integer", "minimum": 1, "maximum": maximum}}, "required": []string{"replicas"}, "additionalProperties": false}
+	}
+	return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
+}
+func (adapter clusterAdapter) ResolveTarget(target act.TargetRef) (act.TargetRef, error) {
+	if target.Cluster == "" || adapter.children[target.Cluster] == nil {
+		return act.TargetRef{}, errors.New("Kubernetes action requires a configured target cluster")
+	}
+	return target, nil
+}
+func (adapter clusterAdapter) ResolveReadTarget(target act.TargetRef) (act.TargetRef, error) {
+	if target.Cluster == "" && len(adapter.children) == 1 {
+		for id := range adapter.children {
+			target.Cluster = id
+		}
+	}
+	return adapter.ResolveTarget(target)
+}
+func (adapter clusterAdapter) resolve(proposal act.Proposal) (act.Adapter, error) {
+	child := adapter.children[proposal.Target.Cluster]
+	if proposal.Type != adapter.action || proposal.Target.Cluster == "" || child == nil {
+		return nil, errors.New("Kubernetes action requires a configured target cluster")
+	}
+	return child, nil
+}
+func (adapter clusterAdapter) Validate(ctx context.Context, proposal act.Proposal) error {
+	child, err := adapter.resolve(proposal)
+	if err != nil {
+		return err
+	}
+	return child.Validate(ctx, proposal)
+}
+func (adapter clusterAdapter) Bind(ctx context.Context, proposal act.Proposal) (json.RawMessage, error) {
+	child, err := adapter.resolve(proposal)
+	if err != nil {
+		return nil, err
+	}
+	if binder, ok := child.(act.ProposalBinder); ok {
+		return binder.Bind(ctx, proposal)
+	}
+	return proposal.Params, nil
+}
+func (adapter clusterAdapter) DryRun(ctx context.Context, proposal act.Proposal) (string, error) {
+	child, err := adapter.resolve(proposal)
+	if err != nil {
+		return "", err
+	}
+	if err = child.Validate(ctx, proposal); err != nil {
+		return "", err
+	}
+	return child.DryRun(ctx, proposal)
+}
+func (adapter clusterAdapter) Execute(ctx context.Context, proposal act.Proposal) (act.Result, error) {
+	child, err := adapter.resolve(proposal)
+	if err != nil {
+		return act.Result{}, err
+	}
+	if err = child.Validate(ctx, proposal); err != nil {
+		return act.Result{}, err
+	}
+	return child.Execute(ctx, proposal)
+}
+func (adapter clusterAdapter) Verify(ctx context.Context, proposal act.Proposal, result act.Result) (act.Verification, error) {
+	child, err := adapter.resolve(proposal)
+	if err != nil {
+		return act.Verification{}, err
+	}
+	if err = child.Validate(ctx, proposal); err != nil {
+		return act.Verification{}, err
+	}
+	return child.Verify(ctx, proposal, result)
+}
+
 func NewAdapters(api API, options Options) []act.Adapter {
 	if api == nil {
 		return nil
+	}
+	if options.Cluster == "" {
+		options.Cluster = "default"
 	}
 	if options.MaxReplicas < 1 {
 		options.MaxReplicas = 100
@@ -71,6 +192,16 @@ func NewAdapters(api API, options Options) []act.Adapter {
 
 func (adapter Adapter) Type() act.ActionType { return adapter.action }
 func (Adapter) Destructive() bool            { return false }
+
+func (adapter Adapter) ResolveTarget(target act.TargetRef) (act.TargetRef, error) {
+	if target.Cluster == "" {
+		target.Cluster = adapter.options.Cluster
+	}
+	if target.Cluster != adapter.options.Cluster {
+		return act.TargetRef{}, errors.New("action cluster does not match configured actor")
+	}
+	return target, nil
+}
 
 func (adapter Adapter) Schema() map[string]any {
 	if adapter.action == Scale {

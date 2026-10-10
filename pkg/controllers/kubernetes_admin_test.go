@@ -26,6 +26,119 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+func TestClusterParamResolutionAndDeniedStreams(t *testing.T) {
+	var reads atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		reads.Add(1)
+		switch request.URL.Path {
+		case "/api":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"versions": []string{"v1"}})
+		case "/api/v1":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{}})
+		case "/apis":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"groups": []any{}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "one"}, 0)
+	entries := []kubernetes.ClusterEntry{{Info: kubernetes.ClusterInfo{ID: "one", Provider: "generic"}, Service: service}, {Info: kubernetes.ClusterInfo{ID: "denied", Provider: "generic"}, Service: service.Scoped(kubernetes.Scope{OrgID: "default", ClusterID: "denied"})}}
+	for _, multiple := range []bool{false, true} {
+		registry := kubernetes.NewClusterRegistry(multiple, entries[:1])
+		if multiple {
+			registry = kubernetes.NewClusterRegistry(true, entries)
+		}
+		app := fiber.New(fiber.Config{Immutable: true})
+		app.Use(func(ctx *fiber.Ctx) error {
+			middleware.MarkAuthorized(ctx)
+			middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+			ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}, Clusters: &core.ClusterScope{IDs: []string{"one"}}}))
+			return ctx.Next()
+		})
+		NewKubernetesAdminControllerWithRegistry(registry).Register(app.Group("/api"))
+		for _, test := range []struct {
+			path string
+			want int
+		}{{"/resources/discovery", map[bool]int{true: 400, false: 200}[multiple]}, {"/resources/discovery?cluster=one", 200}, {"/resources/discovery?cluster=unknown", 404}, {"/stream?cluster=denied", 404}, {"/pods/shop/pod/logs/stream?cluster=denied", 404}} {
+			before := reads.Load()
+			response, err := app.Test(httptest.NewRequest("GET", "/api/admin/kubernetes"+test.path, nil), -1)
+			if err != nil || response.StatusCode != test.want {
+				t.Fatalf("multiple=%v path=%s status=%v err=%v", multiple, test.path, response, err)
+			}
+			response.Body.Close()
+			if test.want != 200 && before != reads.Load() {
+				t.Fatal("rejected request fetched cluster")
+			}
+		}
+		response, err := app.Test(httptest.NewRequest("GET", "/api/admin/kubernetes/clusters", nil), -1)
+		if err != nil || response.StatusCode != 200 {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if strings.Contains(string(body), "denied") || strings.Contains(string(body), "org_id") || strings.Contains(string(body), upstream.URL) {
+			t.Fatalf("unsafe cluster list %s", body)
+		}
+	}
+}
+
+func TestClusterScopeSurvivesCallerContextsAndBootstrap(t *testing.T) {
+	registry := kubernetes.NewClusterRegistry(true, []kubernetes.ClusterEntry{{Info: kubernetes.ClusterInfo{ID: "one", Provider: "generic"}, Err: errors.New("safe-construction-error")}, {Info: kubernetes.ClusterInfo{ID: "denied", Provider: "generic"}, Err: errors.New("private-error")}})
+	SetChatKubernetesRegistry(registry)
+	t.Cleanup(func() { SetChatKubernetesRegistry(nil) })
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), core.CallerAuthorization{Authenticated: true, Clusters: &core.ClusterScope{IDs: []string{"one"}}}))
+		if core.CallerClusterAllowed(callerContext(ctx, context.Background()), "denied") || core.CallerClusterAllowed(approvalContext(ctx), "denied") {
+			t.Error("caller scope discarded")
+		}
+		return ctx.Next()
+	})
+	app.Get("/bootstrap", (&ChatAdminController{}).bootstrap)
+	response, err := app.Test(httptest.NewRequest("GET", "/bootstrap", nil), -1)
+	if err != nil || response.StatusCode != 200 {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if strings.Contains(string(body), "denied") || strings.Contains(string(body), "private-error") || !strings.Contains(string(body), `"id":"one"`) {
+		t.Fatalf("bootstrap not filtered %s", body)
+	}
+}
+
+func TestMultiClusterChatAttachmentRequiresVisibleClusterBeforeDiscovery(t *testing.T) {
+	var calls atomic.Int32
+	registry := kubernetes.NewClusterRegistry(true, []kubernetes.ClusterEntry{{Info: kubernetes.ClusterInfo{ID: "one"}}, {Info: kubernetes.ClusterInfo{ID: "denied"}}})
+	SetChatKubernetesRegistry(registry)
+	SetChatKubernetesServiceResolver(func(orgID, clusterID string) *kubernetes.Service { calls.Add(1); return nil })
+	t.Cleanup(func() { SetChatKubernetesRegistry(nil); SetChatKubernetesServiceResolver(nil) })
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Get("/", func(ctx *fiber.Ctx) error {
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), core.CallerAuthorization{Authenticated: true, Clusters: &core.ClusterScope{IDs: []string{"one"}}}))
+		return validateChatKubernetesAttachment(ctx, &core.ChatAttachment{Resource: &core.ChatResourceRef{Provider: "kubernetes", Cluster: ctx.Query("cluster"), ResourceID: "core~v1~pods", Namespace: "shop", Name: "pod"}})
+	})
+	for _, test := range []struct {
+		query string
+		want  int
+	}{{"", 400}, {"?cluster=denied", 404}, {"?cluster=unknown", 404}} {
+		response, err := app.Test(httptest.NewRequest("GET", "/"+test.query, nil), -1)
+		if err != nil || response.StatusCode != test.want {
+			t.Fatalf("attachment %s: %v %v", test.query, response, err)
+		}
+		response.Body.Close()
+	}
+	if calls.Load() != 0 {
+		t.Fatal("invisible attachment resolved cluster")
+	}
+}
+
 func TestKubernetesAdminAuthorizationAndDiscoveryAdapter(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/api" {
@@ -96,7 +209,7 @@ func TestKubernetesPodLogSSEDisconnectAndShutdown(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			service := kubernetes.NewService(client, kubernetes.Scope{}, 0)
+			service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "test"}, 0)
 			service.SetScrubber(streamTestScrubber{})
 			lifecycle, stop := context.WithCancel(context.Background())
 			defer stop()
@@ -117,7 +230,7 @@ func TestKubernetesPodLogSSEDisconnectAndShutdown(t *testing.T) {
 			defer func() { stop(); _ = app.ShutdownWithTimeout(time.Second); <-serverDone }()
 			requestContext, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 			defer cancel()
-			request, _ := http.NewRequestWithContext(requestContext, "GET", "http://"+listener.Addr().String()+"/api/admin/kubernetes/pods/default/pod/logs/stream", nil)
+			request, _ := http.NewRequestWithContext(requestContext, "GET", "http://"+listener.Addr().String()+"/api/admin/kubernetes/pods/default/pod/logs/stream?cluster=test", nil)
 			response, err := http.DefaultClient.Do(request)
 			if err != nil {
 				t.Fatal(err)
@@ -236,6 +349,96 @@ func TestKubernetesPodLogSSEContract(t *testing.T) {
 				t.Fatalf("missing error checkpoint or uncertainty: %s", body)
 			}
 		})
+	}
+}
+
+func TestKubernetesPodLogSSEClusterRouting(t *testing.T) {
+	var reads atomic.Int32
+	var entries []kubernetes.ClusterEntry
+	for _, cluster := range []string{"east", "west"} {
+		upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			reads.Add(1)
+			if request.URL.Path != "/api/v1/namespaces/shop/pods/pod/log" {
+				t.Errorf("upstream path = %q", request.URL.Path)
+			}
+			for key := range request.URL.Query() {
+				switch key {
+				case "container", "follow", "previous", "timestamps", "sinceSeconds", "tailLines", "sinceTime":
+				default:
+					t.Errorf("unexpected upstream query key = %q", key)
+				}
+			}
+			_, _ = io.WriteString(writer, "2026-10-01T00:00:00Z "+cluster+" secret\n")
+		}))
+		t.Cleanup(upstream.Close)
+		client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: cluster}, 0)
+		service.SetScrubber(streamTestScrubber{})
+		entries = append(entries, kubernetes.ClusterEntry{Info: kubernetes.ClusterInfo{ID: cluster, Provider: "generic"}, Service: service})
+	}
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}, Clusters: &core.ClusterScope{IDs: []string{"east", "west"}}}))
+		return ctx.Next()
+	})
+	NewKubernetesAdminControllerWithRegistry(kubernetes.NewClusterRegistry(true, entries)).Register(app.Group("/api"))
+	requestStream := func(query string, wantStatus int) []byte {
+		t.Helper()
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/pods/shop/pod/logs/stream?"+query, nil), -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != wantStatus || bytes.Contains(body, []byte("secret")) {
+			t.Fatalf("status=%d body=%s err=%v", response.StatusCode, body, err)
+		}
+		return body
+	}
+	var cursor string
+	for _, cluster := range []string{"east", "west"} {
+		before := reads.Load()
+		body := requestStream("cluster="+cluster+"&container=app&previous=false&timestamps=false&since_seconds=3600&tail_lines=500", http.StatusOK)
+		if reads.Load() != before+1 || !bytes.Contains(body, []byte(`"text":"`+cluster+` [redacted]"`)) || !bytes.Contains(body, []byte("event: end")) {
+			t.Fatalf("cluster stream = %s", body)
+		}
+		if cluster == "east" {
+			for _, line := range strings.Split(string(body), "\n") {
+				if strings.HasPrefix(line, "data: ") {
+					var event kubernetes.PodLogStreamEvent
+					if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+						t.Fatal(err)
+					}
+					if event.Cursor != "" {
+						cursor = event.Cursor
+					}
+				}
+			}
+		}
+	}
+	if cursor == "" {
+		t.Fatal("missing scoped cursor")
+	}
+	for _, query := range []string{"cluster=east&cluster=west", "cluster=east&follow=false", "cluster=west&container=app&cursor=" + cursor, "container=app"} {
+		before := reads.Load()
+		requestStream(query, http.StatusBadRequest)
+		if reads.Load() != before {
+			t.Fatal("invalid stream reached upstream")
+		}
+	}
+	before := reads.Load()
+	requestStream("cluster=unknown", http.StatusNotFound)
+	if reads.Load() != before {
+		t.Fatal("unknown cluster reached upstream")
+	}
+	requestStream("cluster=east&container=app&cursor="+cursor, http.StatusOK)
+	if reads.Load() != before+1 {
+		t.Fatal("same-cluster resume did not reach upstream")
 	}
 }
 
@@ -639,7 +842,10 @@ func TestChatKubernetesAttachmentRequiresScopedInfrastructurePermission(t *testi
 		t.Fatal(err)
 	}
 	registry := kubernetes.NewServiceRegistry(kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster-a"}, 0))
-	SetChatKubernetesServiceResolver(func(orgID string) *kubernetes.Service { return registry.ResolveOrg(orgID) })
+	SetChatKubernetesServiceResolver(func(orgID, clusterID string) *kubernetes.Service {
+		service, _ := registry.ResolveCluster(orgID, clusterID)
+		return service
+	})
 	t.Cleanup(func() { SetChatKubernetesServiceResolver(nil); middleware.SetOrgResolver(nil) })
 	middleware.SetOrgResolver(func(ctx *fiber.Ctx) string { return ctx.Get("X-Test-Org") })
 	app := fiber.New(fiber.Config{Immutable: true})
@@ -764,11 +970,12 @@ func TestKubernetesHTTPResolvesInjectedOrgThroughSharedServiceRegistry(t *testin
 	if err != nil || response.StatusCode != fiber.StatusOK {
 		t.Fatalf("status=%d err=%v", response.StatusCode, err)
 	}
-	resolved := controller.resolve("org-a")
-	if resolved != registry.ResolveOrg("org-a") || resolved.Scope() != (kubernetes.Scope{OrgID: "org-a", ClusterID: "cluster-a", CredentialID: "credential-a"}) {
+	resolved, resolveErr := controller.resolve("org-a", "")
+	if resolveErr != nil || resolved != registry.ResolveOrg("org-a") || resolved.Scope() != (kubernetes.Scope{OrgID: "org-a", ClusterID: "cluster-a", CredentialID: "credential-a"}) {
 		t.Fatalf("resolved scope = %#v", resolved.Scope())
 	}
-	if controller.resolve("org-b") == resolved {
+	other, _ := controller.resolve("org-b", "")
+	if other == resolved {
 		t.Fatal("distinct organizations shared one service instance")
 	}
 	for _, orgID := range []string{"org-a", "org-b"} {
@@ -779,8 +986,9 @@ func TestKubernetesHTTPResolvesInjectedOrgThroughSharedServiceRegistry(t *testin
 			t.Fatal(err)
 		}
 		response.Body.Close()
-		if response.StatusCode != fiber.StatusOK || controller.resolve(orgID).Scope().OrgID != orgID {
-			t.Fatalf("overview org=%q status=%d scope=%+v", orgID, response.StatusCode, controller.resolve(orgID).Scope())
+		service, resolveErr := controller.resolve(orgID, "")
+		if response.StatusCode != fiber.StatusOK || resolveErr != nil || service.Scope().OrgID != orgID {
+			t.Fatalf("overview org=%q status=%d scope=%+v", orgID, response.StatusCode, service.Scope())
 		}
 	}
 }

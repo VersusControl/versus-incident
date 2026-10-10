@@ -136,6 +136,8 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}
 	}
 	switch {
+	case request.Method == http.MethodGet && request.URL.Path == "/version":
+		writeJSON(counting, map[string]any{"gitVersion": "v1.30.4"})
 	case request.Method == http.MethodGet && request.URL.Path == "/api":
 		writeJSON(counting, map[string]any{"kind": "APIVersions", "versions": []string{"v1"}})
 	case request.Method == http.MethodGet && request.URL.Path == "/apis":
@@ -369,7 +371,7 @@ func (server *Server) logs(writer http.ResponseWriter, request *http.Request) {
 	defer update(func(counter *LogStreamCounter) { counter.Active-- })
 	if key.Previous && !previousAvailable {
 		update(func(counter *LogStreamCounter) { counter.Unavailable++ })
-		http.Error(writer, "previous terminated container instance unavailable", http.StatusBadRequest)
+		writePreviousUnavailable(writer, container, splitPath(request.URL.Path)[5])
 		return
 	}
 	line := "2026-01-01T00:00:00Z fakekube synthetic container=" + container + " finite log line\n"
@@ -567,7 +569,7 @@ func (server *Server) streamLogs(writer http.ResponseWriter, request *http.Reque
 		})
 	}()
 	if unavailable {
-		http.Error(writer, "previous terminated container instance unavailable", http.StatusBadRequest)
+		writePreviousUnavailable(writer, container, splitPath(request.URL.Path)[5])
 		return
 	}
 	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
@@ -748,6 +750,9 @@ func discoveryForPath(path, scenario string) map[string]any {
 	} else if strings.HasPrefix(path, "/apis/autoscaling/") {
 		group = "autoscaling"
 		resources = []map[string]any{{"name": "horizontalpodautoscalers", "kind": "HorizontalPodAutoscaler", "namespaced": true, "verbs": []string{"get", "list"}}}
+	} else if (scenario == "fleet-east" || scenario == "fleet-west") && strings.HasPrefix(path, "/apis/metrics.k8s.io/") {
+		group = "metrics.k8s.io"
+		resources = []map[string]any{{"name": "pods", "kind": "PodMetrics", "namespaced": true, "verbs": []string{"get", "list"}}, {"name": "nodes", "kind": "NodeMetrics", "namespaced": false, "verbs": []string{"get", "list"}}}
 	} else if (scenario == "gitops" || scenario == "populated") && strings.HasPrefix(path, "/apis/argoproj.io/") {
 		group = "argoproj.io"
 		resources = []map[string]any{
@@ -780,6 +785,9 @@ func discoveryForPath(path, scenario string) map[string]any {
 func apiGroups(scenario string) map[string]any {
 	groups := []map[string]any{}
 	groupVersions := map[string]string{"apps": "v1", "batch": "v1", "networking.k8s.io": "v1", "autoscaling": "v1"}
+	if scenario == "fleet-east" || scenario == "fleet-west" {
+		groupVersions["metrics.k8s.io"] = "v1beta1"
+	}
 	if scenario == "gitops" || scenario == "populated" {
 		groupVersions["argoproj.io"] = "v1alpha1"
 		groupVersions["kustomize.toolkit.fluxcd.io"] = "v1"
@@ -820,6 +828,27 @@ func tableResult(resource string, result ListResult) map[string]any {
 		rows = append(rows, map[string]any{"cells": []any{metadata["name"], metadata["namespace"], object["kind"]}, "object": object})
 	}
 	return map[string]any{"apiVersion": "meta.k8s.io/v1", "kind": "Table", "columnDefinitions": []any{map[string]any{"name": "Name"}, map[string]any{"name": "Namespace"}, map[string]any{"name": "Kind"}}, "rows": rows, "metadata": map[string]any{"resourceVersion": result.ResourceVersion, "continue": result.Continue}, "resource": resource}
+}
+
+func writePreviousUnavailable(writer http.ResponseWriter, container, pod string) {
+	safeName := func(name string) string {
+		if len(name) == 0 || len(name) > 253 {
+			return "unknown"
+		}
+		for _, character := range name {
+			if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-' || character == '.') {
+				return "unknown"
+			}
+		}
+		return name
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.WriteHeader(http.StatusBadRequest)
+	writeJSON(writer, map[string]any{
+		"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "BadRequest", "code": http.StatusBadRequest,
+		"message": fmt.Sprintf(`previous terminated container "%s" in pod "%s" not found`, safeName(container), safeName(pod)),
+	})
 }
 
 func writeJSON(writer http.ResponseWriter, value any) {

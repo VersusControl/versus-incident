@@ -68,7 +68,7 @@ func callerAuthorization(c *fiber.Ctx) core.CallerAuthorization {
 	if explicit {
 		permissions[core.PermissionAgentApprove] = allowed
 	}
-	return core.CallerAuthorization{Authenticated: true, Actor: requestActor(c), Permissions: permissions}
+	return core.CallerAuthorization{Authenticated: true, Actor: requestActor(c), Permissions: permissions, Clusters: core.CallerClusterScope(c.UserContext())}
 }
 
 func callerContext(c *fiber.Ctx, parent context.Context) context.Context {

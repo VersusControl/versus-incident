@@ -361,9 +361,10 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 		cloned.Sources = make([]AgentSourceConfig, len(src.Sources))
 		for i, s := range src.Sources {
 			c := AgentSourceConfig{
-				Name:   s.Name,
-				Type:   s.Type,
-				Enable: s.Enable,
+				Name:              s.Name,
+				Type:              s.Type,
+				Enable:            s.Enable,
+				KubernetesCluster: s.KubernetesCluster,
 				Elasticsearch: AgentElasticsearchSourceConfig{
 					Username:           s.Elasticsearch.Username,
 					Password:           s.Elasticsearch.Password,
@@ -512,6 +513,10 @@ func cloneToolsConfig(src ToolsConfig) ToolsConfig {
 func cloneConnectorsConfig(src ConnectorsConfig) ConnectorsConfig {
 	out := src
 	out.Kubernetes.EndpointCIDRs = append([]string(nil), src.Kubernetes.EndpointCIDRs...)
+	out.Kubernetes.Clusters = append([]KubernetesClusterConfig(nil), src.Kubernetes.Clusters...)
+	for index := range out.Kubernetes.Clusters {
+		out.Kubernetes.Clusters[index].EndpointCIDRs = append([]string(nil), src.Kubernetes.Clusters[index].EndpointCIDRs...)
+	}
 	return out
 }
 

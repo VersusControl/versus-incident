@@ -21,6 +21,38 @@ type CallerAuthorization struct {
 	Authenticated bool
 	Actor         string
 	Permissions   map[Permission]bool
+	Clusters      *ClusterScope
+}
+
+type ClusterScope struct{ IDs []string }
+
+func CallerAuthorizationPresent(ctx context.Context) bool {
+	_, ok := ctx.Value(callerAuthorizationKey{}).(CallerAuthorization)
+	return ok
+}
+
+func CallerClusterScope(ctx context.Context) *ClusterScope {
+	authorization, ok := ctx.Value(callerAuthorizationKey{}).(CallerAuthorization)
+	if !ok || authorization.Clusters == nil {
+		return nil
+	}
+	return &ClusterScope{IDs: append([]string{}, authorization.Clusters.IDs...)}
+}
+
+func CallerClusterAllowed(ctx context.Context, clusterID string) bool {
+	authorization, ok := ctx.Value(callerAuthorizationKey{}).(CallerAuthorization)
+	if !ok || !authorization.Authenticated {
+		return false
+	}
+	if authorization.Clusters == nil {
+		return true
+	}
+	for _, id := range authorization.Clusters.IDs {
+		if id == clusterID {
+			return true
+		}
+	}
+	return false
 }
 
 // WithCallerAuthorization carries one caller decision into HTTP and model tools.
@@ -31,6 +63,13 @@ func WithCallerAuthorization(ctx context.Context, authorization CallerAuthorizat
 	}
 	authorization.Actor = strings.Clone(strings.TrimSpace(authorization.Actor))
 	authorization.Permissions = copyPermissions
+	if authorization.Clusters != nil {
+		scope := &ClusterScope{IDs: make([]string, len(authorization.Clusters.IDs))}
+		for index, id := range authorization.Clusters.IDs {
+			scope.IDs[index] = strings.Clone(id)
+		}
+		authorization.Clusters = scope
+	}
 	return context.WithValue(ctx, callerAuthorizationKey{}, authorization)
 }
 

@@ -33,6 +33,24 @@ func TestTrafficMetricsDeterministicCounters(t *testing.T) {
 	}
 }
 
+func TestFleetScenariosHaveDistinctHealthyData(t *testing.T) {
+	for _, test := range []struct {
+		scenario, namespace string
+		nodes, pods         int
+	}{{"fleet-east", "east-shop", 1, 2}, {"fleet-west", "west-billing", 2, 3}} {
+		store := NewStore()
+		if err := SeedScenario(store, test.scenario, 1); err != nil {
+			t.Fatal(err)
+		}
+		if store.Count("nodes") != test.nodes || store.Count("pods") != test.pods || store.Count("events") != 0 {
+			t.Fatal("fleet counts drifted")
+		}
+		if _, found := store.Get("namespaces", "", test.namespace); !found {
+			t.Fatal("distinct namespace missing")
+		}
+	}
+}
+
 func TestPopulatedScenarioMetadataAndDiscovery(t *testing.T) {
 	store := NewStore()
 	if err := SeedScenario(store, "populated", 1); err != nil {

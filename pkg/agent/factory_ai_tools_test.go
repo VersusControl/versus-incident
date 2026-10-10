@@ -117,10 +117,10 @@ func TestProposalToolIsAddedOnlyToChatRuntime(t *testing.T) {
 }
 
 func TestKubernetesActionsRejectPodServiceAccountReuse(t *testing.T) {
-	_, err := buildKubernetesActionAdapters(config.KubernetesToolConfig{
+	_, err := buildKubernetesActionAdapters(config.KubernetesConnectorConfig{KubernetesToolConfig: config.KubernetesToolConfig{
 		Endpoint: "https://cluster.example",
 		Actions:  config.KubernetesActionsToolConfig{Enable: true, Auth: config.KubernetesAuthConfig{Mode: "in_cluster"}},
-	})
+	}})
 	if err == nil || !strings.Contains(err.Error(), "separate actor credential") {
 		t.Fatalf("in-cluster actor auth error=%v", err)
 	}

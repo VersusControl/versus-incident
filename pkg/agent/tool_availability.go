@@ -47,7 +47,7 @@ func (service *ToolAvailabilityService) BindLiveSnapshot(snapshot func(tenancy.O
 
 // BindIntegrationConstruction records whether a configured integration was
 // constructed successfully before a worker-side live snapshot is available.
-func (service *ToolAvailabilityService) BindIntegrationConstruction(name string, constructed bool) {
+func (service *ToolAvailabilityService) BindIntegrationConstruction(name string, constructed bool, health ...string) {
 	snapshot := service.Snapshot(tenancy.DefaultOrgScope())
 	status, ok := snapshot.Integrations[name]
 	if !ok {
@@ -61,6 +61,9 @@ func (service *ToolAvailabilityService) BindIntegrationConstruction(name string,
 	status.Healthy = status.Configured && constructed
 	if status.Configured && !constructed {
 		status.Health = "configuration"
+	}
+	if constructed && len(health) == 1 {
+		status.Health = health[0]
 	}
 	integrations[name] = status
 	snapshot.Integrations = integrations

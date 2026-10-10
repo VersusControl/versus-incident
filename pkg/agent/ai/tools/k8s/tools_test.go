@@ -18,7 +18,61 @@ import (
 	kubegraph "github.com/VersusControl/versus-incident/pkg/kubernetes/graph"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
+
+func TestRegistryToolsFilterEnumsAndPreserveClusterScope(t *testing.T) {
+	provider := storage.NewMemory()
+	entries := []kubernetes.ClusterEntry{}
+	now := time.Now().UTC()
+	for _, id := range []string{"one", "denied"} {
+		scope := kubernetes.Scope{OrgID: "licensed", ClusterID: id, CredentialID: "credential-" + id}
+		service := kubernetes.NewService(nil, scope, 0)
+		service.SetChangeStorage(provider)
+		entries = append(entries, kubernetes.ClusterEntry{Info: kubernetes.ClusterInfo{ID: id}, Service: service})
+		store := kubechanges.NewStore(provider, kubeindex.Scope{OrgID: scope.OrgID, ClusterID: scope.ClusterID, CredentialID: scope.CredentialID})
+		if err := store.Append([]kubechanges.Change{{ID: "change-" + id, Cluster: id, Kind: "Deployment", Name: "workload-" + id, Namespace: "shop", Type: kubechanges.Created, At: now}}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	registry := kubernetes.NewClusterRegistry(true, entries)
+	ctx := tenancy.WithOrgScope(core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}, Clusters: &core.ClusterScope{IDs: []string{"one"}}}), tenancy.NewOrgScope("licensed"))
+	tools := FilterAuthorized(ctx, NewForRegistry(registry))
+	for _, candidate := range tools {
+		encoded, _ := json.Marshal(candidate.ArgsSchema())
+		if strings.Contains(string(encoded), "denied") || !strings.Contains(string(encoded), `"enum":["one"]`) {
+			t.Fatalf("unfiltered schema: %s", encoded)
+		}
+		if candidate.Name() != "get_k8s_changes" {
+			continue
+		}
+		missing, err := candidate.Invoke(ctx, nil)
+		if err != nil || missing.IsAvailable() {
+			t.Fatalf("missing cluster available: %#v %v", missing, err)
+		}
+		result, err := candidate.Invoke(ctx, json.RawMessage(`{"cluster":"one"}`))
+		if err != nil || !result.Found {
+			t.Fatalf("result: %#v %v", result, err)
+		}
+		body, _ := json.Marshal(result.Data)
+		if !strings.Contains(string(body), "workload-one") || !strings.Contains(string(body), "cluster=one") || strings.Contains(string(body), "denied") || strings.Contains(string(body), "licensed") {
+			t.Fatalf("scoped result: %s", body)
+		}
+		denied, err := candidate.Invoke(ctx, json.RawMessage(`{"cluster":"denied"}`))
+		if err != nil || denied.IsAvailable() {
+			t.Fatal("denied invocation available")
+		}
+	}
+	empty := core.WithCallerAuthorization(ctx, core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}, Clusters: &core.ClusterScope{}})
+	if len(FilterAuthorized(empty, NewForRegistry(registry))) != 0 {
+		t.Fatal("explicit empty scope exposed tools")
+	}
+	for _, candidate := range New(entries[0].Service) {
+		if _, present := candidate.ArgsSchema()["properties"].(map[string]any)["cluster"]; present {
+			t.Fatal("single schema changed")
+		}
+	}
+}
 
 func TestNewReturnsSpecCatalogReadOnlyToolsAndAuthorizationFailsClosed(t *testing.T) {
 	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: "http://127.0.0.1", AllowLoopbackHTTP: true})

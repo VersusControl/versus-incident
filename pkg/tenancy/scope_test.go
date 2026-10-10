@@ -1,9 +1,25 @@
 package tenancy
 
 import (
+	"context"
 	"reflect"
 	"testing"
 )
+
+func TestTrustedContextOrgScopeCopiesReadScope(t *testing.T) {
+	scope := NewOrgScope("licensed", "default")
+	ctx := WithOrgScope(context.Background(), scope)
+	scope.Read[0] = "changed"
+	got, ok := ContextOrgScope(ctx)
+	if !ok || got.Write != "licensed" || got.Read[0] != "licensed" {
+		t.Fatal("trusted context scope drifted")
+	}
+	got.Read[0] = "changed"
+	second, _ := ContextOrgScope(ctx)
+	if second.Read[0] != "licensed" {
+		t.Fatal("returned context scope mutable")
+	}
+}
 
 func TestDefaultOrgScope(t *testing.T) {
 	got := DefaultOrgScope()

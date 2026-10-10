@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, clearSecret, setSecret } from "./api";
+import { api, clearSecret, createKubernetesApi, kubernetesClusterPath, setSecret } from "./api";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -8,6 +8,52 @@ afterEach(() => {
 });
 
 describe("Kubernetes resource API", () => {
+  it("preserves single URLs and encodes cluster scope without discarding filters", () => {
+    expect(kubernetesClusterPath("/api/admin/kubernetes/overview")).toBe("/api/admin/kubernetes/overview");
+    const url = new URL(kubernetesClusterPath("/api/admin/kubernetes/search?q=a%2Bb&cluster=old", "prod/eu+one"), "http://localhost");
+    expect(url.searchParams.get("q")).toBe("a+b");
+    expect(url.searchParams.getAll("cluster")).toEqual(["prod/eu+one"]);
+  });
+
+  it("scopes every Kubernetes JSON route including all namespace continuation pages", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = new URL(String(input), "http://localhost");
+      return Promise.resolve(new Response(JSON.stringify({ items: [], pods: [], lines: [], truncated: false, ...(url.searchParams.get("resource_id") === "core~v1~namespaces" && !url.searchParams.has("continue") ? { continue: "page-two" } : {}) })));
+    });
+    const scoped = createKubernetesApi("prod-eu");
+    await Promise.all([
+      scoped.kubernetesOverview(), scoped.kubernetesOverviewGraph(), scoped.kubernetesIssues(), scoped.kubernetesChanges(), scoped.kubernetesGraph(),
+      scoped.kubernetesNeighborhood({ kind: "Pod", name: "api" }), scoped.kubernetesTraffic(), scoped.kubernetesTop({ kind: "pod" }),
+      scoped.kubernetesNodes(), scoped.kubernetesNamespaces(), scoped.kubernetesNodePods("node-a"), scoped.kubernetesUsage(), scoped.kubernetesWorkloads(),
+      scoped.kubernetesWorkload("Pod", "shop", "api"), scoped.kubernetesWorkloadLogs("Pod", "shop", "api"), scoped.kubernetesPodLogs("shop", "api"),
+      scoped.kubernetesDiagnose("core~v1~pods", "shop", "api"), scoped.kubernetesReleases(), scoped.kubernetesRelease("shop", "api"), scoped.kubernetesGitOpsApps(),
+      scoped.kubernetesRollout("shop", "api"), scoped.kubernetesRollouts(), scoped.kubernetesSearch("shop", "api"), scoped.kubernetesEvents(), scoped.kubernetesDescribe("core~v1~pods", "shop", "api"),
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(26);
+    for (const [input] of fetchMock.mock.calls) expect(new URL(String(input), "http://localhost").searchParams.get("cluster")).toBe("prod-eu");
+  });
+
+  it("scopes both streams and retains each caller's abort signal", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(new Response('event: end\ndata: {}\n\n', { headers: { "Content-Type": "text/event-stream" } })));
+    const signal = new AbortController().signal;
+    const scoped = createKubernetesApi("staging");
+    await scoped.kubernetesStream(vi.fn(), signal);
+    await scoped.kubernetesPodLogStream("shop", "api", { cursor: "resume" }, vi.fn(), signal);
+    for (const [input, options] of fetchMock.mock.calls) {
+      expect(new URL(String(input), "http://localhost").searchParams.get("cluster")).toBe("staging");
+      expect(options?.signal).toBe(signal);
+    }
+  });
+
+  it("writes optional member and team scope while preserving legacy role payloads", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(new Response("{}")));
+    await api.setMemberRole("deployment", "alice", "responder", ["staging"]);
+    await api.setTeamRole("deployment", "operators", "admin", []);
+    await api.setMemberRole("deployment", "bob", "viewer");
+    await api.setMemberRole("deployment", "alice", "admin", []);
+    expect(fetchMock.mock.calls.map(([, options]) => JSON.parse(String(options?.body)))).toEqual([{ role: "responder", clusters: ["staging"] }, { role: "admin", clusters: [] }, { role: "viewer" }, { role: "admin", clusters: [] }]);
+  });
+
   it("streams Pod lines with gateway headers, cancellation, and cursor-only resume options", async () => {
     setSecret("test-gateway");
     const signal = new AbortController().signal;

@@ -5,6 +5,26 @@ import (
 	"testing"
 )
 
+func TestCallerClusterScope(t *testing.T) {
+	if CallerClusterAllowed(context.Background(), "one") {
+		t.Fatal("background authorized")
+	}
+	unrestricted := WithCallerAuthorization(context.Background(), CallerAuthorization{Authenticated: true})
+	if !CallerClusterAllowed(unrestricted, "any") {
+		t.Fatal("nil scope denied")
+	}
+	empty := WithCallerAuthorization(context.Background(), CallerAuthorization{Authenticated: true, Clusters: &ClusterScope{}})
+	if CallerClusterAllowed(empty, "one") {
+		t.Fatal("explicit empty scope authorized")
+	}
+	scope := &ClusterScope{IDs: []string{"one"}}
+	ctx := WithCallerAuthorization(context.Background(), CallerAuthorization{Authenticated: true, Clusters: scope})
+	scope.IDs[0] = "two"
+	if !CallerClusterAllowed(ctx, "one") || CallerClusterAllowed(ctx, "two") {
+		t.Fatal("scope not copied")
+	}
+}
+
 func TestCallerAuthorizationFailsClosedAndCopiesPermissions(t *testing.T) {
 	if CallerAuthorized(context.Background(), PermissionInfrastructureView) {
 		t.Fatal("background caller was authorized")

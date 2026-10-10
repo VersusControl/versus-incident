@@ -131,6 +131,9 @@ func SeedScenario(store *Store, name string, seed int64) error {
 	if store == nil {
 		return ErrInvalidRequest
 	}
+	if name == "fleet-east" || name == "fleet-west" {
+		return seedFleetScenario(store, name)
+	}
 	fixtures := map[string][]struct {
 		resource  string
 		namespace string
@@ -226,6 +229,32 @@ func SeedScenario(store *Store, name string, seed int64) error {
 			status["ephemeralContainerStatuses"] = []any{map[string]any{"name": "debug", "restartCount": 0, "state": map[string]any{"running": map[string]any{}}}}
 		}
 		if err := putObject(store, fixture.resource, fixture.namespace, fixture.name, fixture.object); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func seedFleetScenario(store *Store, scenario string) error {
+	namespace, workload, nodeCount, podCount := "east-shop", "east-api", 1, 2
+	if scenario == "fleet-west" {
+		namespace, workload, nodeCount, podCount = "west-billing", "west-worker", 2, 3
+	}
+	if err := putObject(store, "namespaces", "", namespace, map[string]any{"kind": "Namespace", "status": map[string]any{"phase": "Active"}}); err != nil {
+		return err
+	}
+	for index := 0; index < nodeCount; index++ {
+		if err := putObject(store, "nodes", "", fmt.Sprintf("%s-node-%d", scenario, index), map[string]any{"kind": "Node", "status": map[string]any{"nodeInfo": map[string]any{"kubeletVersion": "v1.30.4"}, "conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}); err != nil {
+			return err
+		}
+	}
+	labels := map[string]string{"app": workload}
+	if err := putObject(store, "deployments", namespace, workload, map[string]any{"kind": "Deployment", "metadata": map[string]any{"labels": labels}, "spec": map[string]any{"replicas": podCount, "selector": map[string]any{"matchLabels": labels}}, "status": map[string]any{"replicas": podCount, "readyReplicas": podCount, "availableReplicas": podCount, "observedGeneration": 1}}); err != nil {
+		return err
+	}
+	for index := 0; index < podCount; index++ {
+		pod := fmt.Sprintf("%s-%d", workload, index)
+		if err := putObject(store, "pods", namespace, pod, map[string]any{"kind": "Pod", "metadata": map[string]any{"labels": labels}, "spec": map[string]any{"nodeName": fmt.Sprintf("%s-node-%d", scenario, index%nodeCount), "containers": []any{map[string]any{"name": "app", "image": "example.invalid/" + workload + ":v1"}}}, "status": map[string]any{"phase": "Running", "containerStatuses": []any{map[string]any{"name": "app", "ready": true, "restartCount": 0, "state": map[string]any{"running": map[string]any{}}}}}}); err != nil {
 			return err
 		}
 	}

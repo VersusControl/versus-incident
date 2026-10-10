@@ -9,7 +9,10 @@ import {
   type ReactNode,
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useKubernetesCluster, useKubernetesQuery } from "@/lib/useKubernetesCluster";
+import { KubernetesClusterProvider } from "@/components/KubernetesClusterProvider";
+import { KubernetesFleet } from "./KubernetesFleet";
 import {
   Activity,
   AlertTriangle,
@@ -276,6 +279,30 @@ function usageAggregate(usage?: KubernetesUsage, overview?: KubernetesOverview) 
 }
 
 export function KubernetesPage() {
+  const [params, setParams] = useSearchParams();
+  const [notice, setNotice] = useState("");
+  const catalog = useQuery({ queryKey: ["kubernetes-clusters"], queryFn: api.kubernetesClusters, retry: false, refetchInterval: (query) => query.state.data?.multiple ? 30_000 : false, refetchIntervalInBackground: false });
+  const cluster = params.get("cluster") || undefined;
+  const missing = Boolean(catalog.data?.multiple && cluster && !catalog.data.clusters.some((entry) => entry.id === cluster));
+  useEffect(() => {
+    if (!missing) return;
+    setNotice("This cluster is no longer available.");
+    setParams({}, { replace: true });
+  }, [missing, setParams]);
+  if (catalog.isPending) return <main className="min-w-0 flex-1 p-4"><SkCard lines={5} /></main>;
+  if (catalog.isError) {
+    if (catalog.error instanceof ApiError && catalog.error.status === 503 && catalog.error.message === "Kubernetes connector is not configured") return <KubernetesDashboard />;
+    if (catalog.error instanceof ApiError && [401, 403].includes(catalog.error.status)) return <main className="min-w-0 flex-1"><TopBar title="Kubernetes" /><div className="p-4"><RetryableError error={catalog.error} onRetry={() => catalog.refetch()} retrying={catalog.isFetching} context="Couldn't load Kubernetes overview" /></div></main>;
+    return <main className="min-w-0 flex-1 p-4"><RetryableError error={catalog.error} onRetry={() => catalog.refetch()} retrying={catalog.isFetching} context="Couldn't load clusters" /></main>;
+  }
+  if (catalog.data.multiple && (!cluster || missing)) return <KubernetesFleet clusters={catalog.data.clusters} notice={notice || (params.get("notice") === "unavailable" ? "This cluster is no longer available." : undefined)} retry={() => void catalog.refetch()} retrying={catalog.isFetching} />;
+  const activeCluster = catalog.data.multiple ? cluster : undefined;
+  return <KubernetesClusterProvider catalog={catalog.data} cluster={activeCluster}><KubernetesDashboard key={activeCluster ?? "_"} /></KubernetesClusterProvider>;
+}
+
+function KubernetesDashboard() {
+  const { client: api, key, cluster, multiple, clusters } = useKubernetesCluster();
+  const useQuery = useKubernetesQuery;
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [view, setView] = useState<KubernetesExplorerTab>(() =>
@@ -294,7 +321,7 @@ export function KubernetesPage() {
   const [debouncedPaletteQuery, setDebouncedPaletteQuery] = useState("");
   const [recentResources, setRecentResources] = useState<string[]>(() => {
     try {
-      const value: unknown = JSON.parse(localStorage.getItem("versus.k8s.recent") ?? "[]");
+      const value: unknown = JSON.parse(localStorage.getItem(cluster ? `versus.k8s.recent.${cluster}` : "versus.k8s.recent") ?? "[]");
       return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").slice(0, 8) : [];
     } catch {
       return [];
@@ -322,7 +349,16 @@ export function KubernetesPage() {
     && overview.error.status === 503
     && overview.error.message === "Kubernetes connector is not configured";
   const overviewAccessDenied = overview.error instanceof ApiError && [401, 403].includes(overview.error.status);
-  const clusterQueriesEnabled = !overview.isPending && !connectorMissing;
+  const clusterUnavailable = multiple && overview.error instanceof ApiError && overview.error.status === 404;
+  const clusterQueriesEnabled = !overview.isPending && !connectorMissing && (!multiple || !overviewAccessDenied) && !clusterUnavailable;
+
+  useEffect(() => {
+    if (!clusterUnavailable) return;
+    void queryClient.cancelQueries({ queryKey: key() });
+    queryClient.removeQueries({ queryKey: key() });
+    void queryClient.invalidateQueries({ queryKey: ["kubernetes-clusters"] });
+    navigate("/agent/kubernetes?notice=unavailable", { replace: true });
+  }, [clusterUnavailable, navigate, queryClient, key]);
 
   const usage = useQuery({
     queryKey: ["kubernetes-usage"],
@@ -509,7 +545,7 @@ export function KubernetesPage() {
       invalidateTimer = window.setTimeout(() => {
         invalidateTimer = undefined;
         for (const queryKey of [["kubernetes-overview"], ["kubernetes-graph"], ["kubernetes-namespaces"], ["kubernetes-workloads"], ["kubernetes-nodes"], ["kubernetes-issues"], ["kubernetes-top"], ["kubernetes-diagnosis"], ["kubernetes-drawer-changes"], ["kubernetes-changes"]]) {
-          void queryClient.invalidateQueries({ queryKey });
+          void queryClient.invalidateQueries({ queryKey: key(...queryKey) });
         }
       }, 750);
     };
@@ -535,8 +571,15 @@ export function KubernetesPage() {
             }
           }, controller.signal);
           if (!disposed) setStreamState("reconnecting");
-        } catch {
+        } catch (failure) {
           if (disposed) return;
+          if (multiple && failure instanceof ApiError && failure.status === 404) {
+            void queryClient.cancelQueries({ queryKey: key() });
+            queryClient.removeQueries({ queryKey: key() });
+            void queryClient.invalidateQueries({ queryKey: ["kubernetes-clusters"] });
+            navigate("/agent/kubernetes?notice=unavailable", { replace: true });
+            return;
+          }
           setStreamState("reconnecting");
         }
         if (disposed) return;
@@ -553,7 +596,7 @@ export function KubernetesPage() {
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       if (invalidateTimer) window.clearTimeout(invalidateTimer);
     };
-  }, [queryClient, clusterQueriesEnabled]);
+  }, [queryClient, clusterQueriesEnabled, api, key, multiple, navigate]);
 
   const selectResource = (resource: KubernetesResource, initialTab?: "timeline") => {
     setSelected(resource);
@@ -562,7 +605,7 @@ export function KubernetesPage() {
     const recent = `${resource.kind}:${resource.namespace ? `${resource.namespace}/` : ""}${resource.name}`;
     setRecentResources((current) => {
       const next = [recent, ...current.filter((item) => item !== recent)].slice(0, 8);
-      try { localStorage.setItem("versus.k8s.recent", JSON.stringify(next)); } catch { /* storage is optional */ }
+      try { localStorage.setItem(cluster ? `versus.k8s.recent.${cluster}` : "versus.k8s.recent", JSON.stringify(next)); } catch { /* storage is optional */ }
       return next;
     });
     setPaletteOpen(false);
@@ -648,7 +691,7 @@ export function KubernetesPage() {
     nodes.refetch();
     if (selectedNode) nodePods.refetch();
     for (const queryKey of ["kubernetes-issues", "kubernetes-top", "kubernetes-graph", "kubernetes-namespaces", "kubernetes-releases", "kubernetes-traffic", "kubernetes-changes"]) {
-      void queryClient.invalidateQueries({ queryKey: [queryKey] });
+      void queryClient.invalidateQueries({ queryKey: key(queryKey) });
     }
   };
   const podsUnavailable = overview.data
@@ -677,6 +720,7 @@ export function KubernetesPage() {
           : []),
       ]
     : [];
+  if (clusterUnavailable) return <p role="status" className="p-4 text-sm text-sev-warning">This cluster is no longer available.</p>;
   if (connectorMissing) {
     return (
       <main className="min-w-0 flex-1 overflow-auto">
@@ -704,6 +748,12 @@ export function KubernetesPage() {
         title="Kubernetes"
         actions={
           <div className="flex items-center gap-1">
+            {multiple && <><Link to="/agent/kubernetes" className="btn">Clusters</Link><select aria-label="Cluster" className="input h-8 w-32 min-w-0 py-0 text-xs sm:w-48" value={cluster} onChange={(event) => {
+              const next = new URLSearchParams(window.location.search);
+              next.set("cluster", event.target.value);
+              for (const parameter of ["r", "tab", "namespace"]) next.delete(parameter);
+              navigate(`/agent/kubernetes?${next}`);
+            }}>{clusters.map((entry) => <option key={entry.id} value={entry.id}>{entry.display_name || entry.id}</option>)}</select></>}
             <span role="status" aria-live="polite" title={indexStatus ? `Index ${indexStatus.state}${indexStatus.partial ? ", partial" : ""}` : "Kubernetes index status unavailable"} className={`hidden text-2xs sm:inline ${streamState === "live" ? "text-sev-ok" : "text-ink-400"}`}>
               {streamState === "live" ? `Live${indexStatus ? ` (${Math.round(indexStatus.age_s)}s)` : ""}` : streamState === "resyncing" ? "Resyncing" : streamState === "connecting" ? "Connecting" : "Reconnecting"}
             </span>
@@ -727,6 +777,7 @@ export function KubernetesPage() {
         }
       />
       <div className="mx-auto min-w-0 max-w-7xl space-y-5 overflow-x-hidden p-4 sm:p-6">
+        {multiple && <nav aria-label="Cluster breadcrumb" className="flex min-w-0 items-center gap-2 text-xs text-ink-400"><Link to="/agent/kubernetes" className="text-link">Clusters</Link><ChevronRight size={12} className="shrink-0" /><span className="truncate text-ink-200">{clusters.find((entry) => entry.id === cluster)?.display_name || cluster}</span></nav>}
         <nav role="tablist" aria-label="Kubernetes views" className="flex min-w-0 gap-1 overflow-x-auto rounded-card border border-ink-500/60 bg-surface p-1 shadow-card" onKeyDown={(event) => {
           if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
           event.preventDefault();
@@ -1109,7 +1160,7 @@ export function KubernetesPage() {
         footer={selected && (
           <button type="button" className="btn btn-primary" onClick={() => {
             if (!selected) return;
-            const query = new URLSearchParams({ provider: "kubernetes", cluster: overview.data?.cluster_id ?? "", resource_id: selected.resource_id, name: selected.name });
+            const query = new URLSearchParams({ provider: "kubernetes", cluster: cluster ?? overview.data?.cluster_id ?? "", resource_id: selected.resource_id, name: selected.name });
             if (selected.namespace) query.set("namespace", selected.namespace);
             navigate(`/agent/chat?${query}`);
           }}>

@@ -23,25 +23,33 @@ const kubernetesServiceContextKey = "versus.kubernetes.service"
 
 // KubernetesAdminController adapts read-only HTTP requests to the shared service.
 type KubernetesAdminController struct {
-	resolve func(string) *kubernetes.Service
+	resolve  func(string, string) (*kubernetes.Service, error)
+	registry *kubernetes.ServiceRegistry
 }
 
 func NewKubernetesAdminController(service *kubernetes.Service) *KubernetesAdminController {
-	return &KubernetesAdminController{resolve: func(string) *kubernetes.Service { return service }}
+	controller := NewKubernetesAdminControllerWithRegistry(kubernetes.NewServiceRegistry(service))
+	controller.resolve = func(orgID, clusterID string) (*kubernetes.Service, error) {
+		if service == nil {
+			return nil, kubernetes.ErrClusterUnavailable
+		}
+		if clusterID != "" && clusterID != service.Scope().ClusterID {
+			return nil, kubernetes.ErrClusterNotFound
+		}
+		return service, nil
+	}
+	return controller
 }
 
 // NewKubernetesAdminControllerWithRegistry resolves an org-scoped service for every request.
 func NewKubernetesAdminControllerWithRegistry(registry *kubernetes.ServiceRegistry) *KubernetesAdminController {
-	return &KubernetesAdminController{resolve: func(orgID string) *kubernetes.Service {
-		if registry == nil {
-			return nil
-		}
-		return registry.ResolveOrg(orgID)
-	}}
+	return &KubernetesAdminController{resolve: registry.ResolveCluster, registry: registry}
 }
 
 func (controller *KubernetesAdminController) Register(router fiber.Router) {
-	group := router.Group("/admin/kubernetes", adminGatewayGuard, controller.requireInfrastructureView)
+	group := router.Group("/admin/kubernetes", adminGatewayGuard, controller.requirePermission)
+	group.Get("/clusters", controller.clusters)
+	group.Use(controller.requireInfrastructureView)
 	group.Get("/overview", controller.overview)
 	group.Get("/stream", controller.stream)
 	group.Get("/changes", controller.changes)
@@ -73,10 +81,33 @@ func (controller *KubernetesAdminController) Register(router fiber.Router) {
 
 func (controller *KubernetesAdminController) requireInfrastructureView(ctx *fiber.Ctx) error {
 	var service *kubernetes.Service
+	var err error
+	clusterID := strings.Clone(ctx.Query("cluster"))
+	if clusterID != "" && !core.CallerClusterAllowed(ctx.UserContext(), clusterID) {
+		return writeKubernetes(ctx, nil, kubernetes.ErrClusterNotFound)
+	}
 	if controller != nil && controller.resolve != nil {
-		service = controller.resolve(middleware.OrgFromContext(ctx))
+		service, err = controller.resolve(middleware.OrgFromContext(ctx), clusterID)
+	}
+	if err != nil {
+		return writeKubernetes(ctx, nil, err)
 	}
 	if service == nil {
+		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Kubernetes connector is not configured"})
+	}
+	if !core.CallerClusterAllowed(ctx.UserContext(), service.Scope().ClusterID) {
+		return writeKubernetes(ctx, nil, kubernetes.ErrClusterNotFound)
+	}
+	ctx.Locals(kubernetesServiceContextKey, service)
+	ctx.Locals("versus.kubernetes.multiple", controller.registry.Multiple())
+	return ctx.Next()
+}
+
+func (controller *KubernetesAdminController) requirePermission(ctx *fiber.Ctx) error {
+	if controller == nil || controller.registry == nil || len(controller.registry.Clusters()) == 0 {
+		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Kubernetes connector is not configured"})
+	}
+	if !controller.registry.Multiple() && controller.registry.ResolveOrg(middleware.OrgFromContext(ctx)) == nil {
 		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Kubernetes connector is not configured"})
 	}
 	allowed, explicit := middleware.RequestPermission(ctx, string(core.PermissionInfrastructureView))
@@ -84,9 +115,14 @@ func (controller *KubernetesAdminController) requireInfrastructureView(ctx *fibe
 		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "infrastructure:view permission is required"})
 	}
 	authorization := core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}}
-	ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), authorization))
-	ctx.Locals(kubernetesServiceContextKey, service)
+	if !core.CallerAuthorizationPresent(ctx.UserContext()) {
+		ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), authorization))
+	}
 	return ctx.Next()
+}
+
+func (controller *KubernetesAdminController) clusters(ctx *fiber.Ctx) error {
+	return ctx.JSON(fiber.Map{"multiple": controller.registry.Multiple(), "clusters": controller.registry.Summaries(ctx.UserContext(), middleware.OrgFromContext(ctx), func(id string) bool { return core.CallerClusterAllowed(ctx.UserContext(), id) })})
 }
 
 func requestKubernetesService(ctx *fiber.Ctx) *kubernetes.Service {
@@ -145,7 +181,13 @@ func (controller *KubernetesAdminController) graph(ctx *fiber.Ctx) error {
 }
 
 func (controller *KubernetesAdminController) overviewGraph(ctx *fiber.Ctx) error {
-	if ctx.Context().QueryArgs().Len() != 0 {
+	invalid := false
+	ctx.Context().QueryArgs().VisitAll(func(key, value []byte) {
+		if string(key) != "cluster" {
+			invalid = true
+		}
+	})
+	if invalid {
 		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
 	}
 	value, err := requestKubernetesService(ctx).OverviewGraph(ctx.UserContext())
@@ -384,19 +426,28 @@ func writeKubernetes(ctx *fiber.Ctx, value any, err error) error {
 	if err == nil {
 		return ctx.JSON(value)
 	}
-	detail := kubernetes.DiagnoseError(err)
+	multiple, _ := ctx.Locals("versus.kubernetes.multiple").(bool)
+	clusterID := ""
+	if service := requestKubernetesService(ctx); service != nil {
+		clusterID = service.Scope().ClusterID
+	}
+	detail := kubernetes.DiagnoseClusterError(err, multiple, clusterID)
 	log.Printf("kubernetes admin failure: code=%s retryable=%t", detail.Code, detail.Retryable)
 	status := fiber.StatusBadGateway
 	switch {
-	case errors.Is(err, kubernetes.ErrInvalidArguments), errors.Is(err, kubernetes.ErrInvalidEndpoint):
+	case errors.Is(err, kubernetes.ErrInvalidArguments), errors.Is(err, kubernetes.ErrInvalidEndpoint), errors.Is(err, kubernetes.ErrClusterRequired):
 		status = fiber.StatusBadRequest
 	case errors.Is(err, kubernetes.ErrCompleteGraphLimit):
 		status = fiber.StatusRequestEntityTooLarge
+	case errors.Is(err, kubernetes.ErrIndexStreamBusy):
+		status = fiber.StatusTooManyRequests
+	case errors.Is(err, kubernetes.ErrClusterUnavailable):
+		status = fiber.StatusServiceUnavailable
 	case errors.Is(err, kubernetes.ErrGraphIncomplete):
 		status = fiber.StatusServiceUnavailable
 	case errors.Is(err, kubernetes.ErrForbidden):
 		status = fiber.StatusForbidden
-	case errors.Is(err, kubernetes.ErrNotFound):
+	case errors.Is(err, kubernetes.ErrNotFound), errors.Is(err, kubernetes.ErrClusterNotFound):
 		status = fiber.StatusNotFound
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, kubernetes.ErrOperationBudget):
 		status = fiber.StatusGatewayTimeout

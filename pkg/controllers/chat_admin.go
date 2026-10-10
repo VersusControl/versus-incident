@@ -169,6 +169,7 @@ func approvalContext(c *fiber.Ctx) context.Context {
 		Actor:         requestActor(c),
 		Authenticated: true,
 		Permissions:   map[core.Permission]bool{core.PermissionAgentApprove: true},
+		Clusters:      core.CallerClusterScope(c.UserContext()),
 	})
 }
 
@@ -257,6 +258,18 @@ func (controller *ChatAdminController) create(c *fiber.Ctx) error {
 func (controller *ChatAdminController) bootstrap(c *fiber.Ctx) error {
 	approvalAllowed, explicit := middleware.RequestPermission(c, string(core.PermissionAgentApprove))
 	approvalsAvailable := currentAgentApprovalServiceFactory() != nil && explicit && approvalAllowed
+	var kubernetesCatalog *agentapi.KubernetesCatalog
+	chatKubernetesResolverMu.RLock()
+	registry := chatKubernetesRegistry
+	chatKubernetesResolverMu.RUnlock()
+	allowed, permissionSet := middleware.RequestPermission(c, string(core.PermissionInfrastructureView))
+	if registry != nil && registry.Multiple() && permissionSet && allowed {
+		ctx := c.UserContext()
+		if !core.CallerAuthorizationPresent(ctx) {
+			ctx = core.WithCallerAuthorization(ctx, core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
+		}
+		kubernetesCatalog = &agentapi.KubernetesCatalog{Multiple: true, Clusters: registry.Summaries(ctx, middleware.OrgFromContext(c), func(id string) bool { return core.CallerClusterAllowed(ctx, id) })}
+	}
 	return c.JSON(agentapi.Bootstrap{
 		APIVersion: agentapi.APIVersion,
 		MinClient:  agentapi.MinClient,
@@ -265,6 +278,7 @@ func (controller *ChatAdminController) bootstrap(c *fiber.Ctx) error {
 		Profiles:   []agentapi.Profile{{Name: "chat"}},
 		Toolsets:   []agentapi.Toolset{{Name: "chat"}},
 		Features:   agentapi.Features{Approvals: approvalsAvailable, Ledger: approvalsAvailable},
+		Kubernetes: kubernetesCatalog,
 	})
 }
 

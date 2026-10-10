@@ -109,6 +109,7 @@ func aiSettingsResolver() AISettingsResolver {
 // never from request bodies or client-selected headers.
 func DecorateAIContext(ctx context.Context, scope tenancy.OrgScope) context.Context {
 	scope = scope.Normalized()
+	ctx = tenancy.WithOrgScope(ctx, scope)
 	ctx = context.WithValue(ctx, aiScopeContextKey{}, scope)
 	resolver := aiSettingsResolver()
 	decorator, ok := resolver.(AIContextDecorator)

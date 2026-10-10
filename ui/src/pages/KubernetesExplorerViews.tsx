@@ -1,9 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
+import { useKubernetesCluster, useKubernetesQuery as useQuery } from "@/lib/useKubernetesCluster";
 import { Activity, AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Boxes, CircleCheck, Cpu, Eye, EyeOff, GitBranch, History, Layers3, Maximize2, Minus, Network, Plus, RotateCcw, Waypoints } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ApiError,
-  api,
   type KubernetesChange,
   type KubernetesHelmRelease,
   type KubernetesGraph,
@@ -304,6 +303,7 @@ function OverviewTopology({ overview, indexStatus, indexLive, unavailable, onFul
 }
 
 export function KubernetesOverviewInsights({ overview, indexStatus, indexLive, unavailable, onSelectResource, onSelectView }: { overview: KubernetesOverview; indexStatus: KubernetesIndexStatus | null; indexLive: boolean; unavailable: boolean; onSelectResource: ResourceSelection; onSelectView: (tab: KubernetesExplorerTab) => void }) {
+  const { client: api } = useKubernetesCluster();
   const [windowEnd, setWindowEnd] = useState(() => Date.now());
   const issues = useQuery({ queryKey: ["kubernetes-issues", "overview"], queryFn: () => api.kubernetesIssues({ limit: 5 }), retry: false });
   const top = useQuery({ queryKey: ["kubernetes-top", "pod", "cpu", 5], queryFn: () => api.kubernetesTop({ kind: "pod", sort: "cpu", limit: 5 }), retry: false });
@@ -532,6 +532,7 @@ function trafficMetric(value: number | null | undefined, maximumFractionDigits: 
 }
 
 function KubernetesTrafficView() {
+  const { client: api } = useKubernetesCluster();
   const [namespace, setNamespace] = useState("");
   const [window, setWindow] = useState<"5m" | "15m" | "1h">("15m");
   const traffic = useQuery({
@@ -634,6 +635,7 @@ const graphFilterGroups = [
 ];
 
 function KubernetesGraphView({ onSelectResource, preview = false, onFullTopology }: { onSelectResource: ResourceSelection; preview?: boolean; onFullTopology?: () => void }) {
+  const { client: api } = useKubernetesCluster();
   const [namespace, setNamespace] = useState("");
   const [namespaceSearch, setNamespaceSearch] = useState("");
   const [selectedKinds, setSelectedKinds] = useState<string[] | null>(defaultGraphKinds);
@@ -842,6 +844,7 @@ function KubernetesGraphView({ onSelectResource, preview = false, onFullTopology
 }
 
 function IssuesView({ onSelectResource }: { onSelectResource: ResourceSelection }) {
+  const { client: api } = useKubernetesCluster();
   const [severity, setSeverity] = useState("");
   const [namespace, setNamespace] = useState("");
   const paging = useCursorPagination(`issues:${namespace}:${severity}`);
@@ -883,6 +886,7 @@ function IssuesView({ onSelectResource }: { onSelectResource: ResourceSelection 
 }
 
 function ResourcesView({ onSelectResource }: { onSelectResource: ResourceSelection }) {
+  const { client: api } = useKubernetesCluster();
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState("All");
   const paging = useCursorPagination(`resources:${query}:${kind}`);
@@ -916,6 +920,7 @@ function VirtualList<T>({ ariaLabel, items, itemHeight, renderItem }: { ariaLabe
 }
 
 function ReleasesView() {
+  const { client: api } = useKubernetesCluster();
   const paging = useCursorPagination("helm-releases");
   const releases = useQuery({ queryKey: ["kubernetes-releases", paging.cursor], queryFn: () => api.kubernetesReleases({ limit: 20, cursor: paging.cursor }), retry: false });
   return <section className="card overflow-hidden transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Helm releases"><ExplorerHeader icon={<Layers3 size={15} />} title="Helm releases" trailing={<span className="text-xs text-ink-400">Label metadata only</span>} />
@@ -930,6 +935,7 @@ function ReleaseRow({ release }: { release: KubernetesHelmRelease }) {
 }
 
 function GitOpsView() {
+  const { client: api } = useKubernetesCluster();
   const appsPaging = useCursorPagination("gitops-apps");
   const apps = useQuery({ queryKey: ["kubernetes-gitops-apps", appsPaging.cursor], queryFn: () => api.kubernetesGitOpsApps({ limit: 20, cursor: appsPaging.cursor }), retry: false });
   const rolloutsPaging = useCursorPagination("gitops-rollouts");
@@ -943,6 +949,7 @@ function GitOpsView() {
 }
 
 function TimelineView({ onSelectResource }: { onSelectResource: ResourceSelection }) {
+  const { client: api } = useKubernetesCluster();
   const [minutes, setMinutes] = useState<15 | 60 | 360 | 1440>(60);
   const [namespace, setNamespace] = useState("");
   const [kind, setKind] = useState("");

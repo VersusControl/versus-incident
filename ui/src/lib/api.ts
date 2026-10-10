@@ -842,6 +842,7 @@ export interface ChatCitation {
 
 export interface ChatApprovalEvent {
   id: string;
+  cluster?: string;
   proposal_id: string;
   run_id: string;
   type: string;
@@ -1554,6 +1555,7 @@ export type MemberRole = "viewer" | "responder" | "admin" | "owner";
 // derived role). `role` is "" / absent for a member with no resolvable role.
 export interface MemberView {
   subject: string;
+  clusters?: string[] | null;
   email: string;
   name?: string;
   connection?: string;
@@ -1563,6 +1565,48 @@ export interface MemberView {
 export interface MembersEnvelope {
   org: string;
   members: MemberView[];
+}
+
+export interface RbacMe {
+  role: string;
+  permissions: string[];
+  clusters?: string[] | null;
+}
+
+export interface RoleAssignment {
+  subject: string;
+  role: MemberRole;
+  clusters?: string[];
+}
+
+export interface KubernetesClusterSummary {
+  id: string;
+  display_name?: string;
+  provider: string;
+  version?: string;
+  health: "healthy" | "attention" | "partial" | "unreachable" | "unknown";
+  nodes: number;
+  ready_nodes: number;
+  pods: number;
+  running_pods: number;
+  warnings: number;
+  issues?: number;
+  sync: { state: string };
+  observed_at: string;
+  error?: { code: string; message: string };
+}
+
+export interface KubernetesClusters {
+  multiple: boolean;
+  clusters: KubernetesClusterSummary[];
+}
+
+export function kubernetesClusterPath(path: string, cluster?: string): string {
+  if (!cluster) return path;
+  const [pathname, search = ""] = path.split("?");
+  const query = new URLSearchParams(search);
+  query.set("cluster", cluster);
+  return `${pathname}?${query}`;
 }
 
 // BootstrapAdminStatus is the deployment default-admin ("admin user") state.
@@ -2055,15 +2099,15 @@ export interface KubernetesResourcePage {
   partial_failures?: Array<{ resource_id?: string; class: string }> | null;
 }
 
-async function listKubernetesResources(resourceId: string, fields = "", continuation = ""): Promise<KubernetesResourcePage> {
+async function listKubernetesResources(resourceId: string, fields = "", continuation = "", cluster?: string): Promise<KubernetesResourcePage> {
   const query = new URLSearchParams({ resource_id: resourceId, limit: "20" });
   if (fields) query.set("fields", fields);
   if (continuation) query.set("continue", continuation);
-  const page = await request<KubernetesResourcePage>(`/api/admin/kubernetes/resources?${query}`);
+  const page = await request<KubernetesResourcePage>(kubernetesClusterPath(`/api/admin/kubernetes/resources?${query}`, cluster));
   return { ...page, items: page.items ?? [] };
 }
 
-async function listAllKubernetesNamespaces(): Promise<KubernetesResourcePage> {
+async function listAllKubernetesNamespaces(cluster?: string): Promise<KubernetesResourcePage> {
   const items: KubernetesResource[] = [];
   const partial_failures: NonNullable<KubernetesResourcePage["partial_failures"]> = [];
   const omitted_categories = new Set<string>();
@@ -2072,7 +2116,7 @@ async function listAllKubernetesNamespaces(): Promise<KubernetesResourcePage> {
   let truncated = false;
 
   do {
-    const page = await listKubernetesResources("core~v1~namespaces", "", continuation);
+    const page = await listKubernetesResources("core~v1~namespaces", "", continuation, cluster);
     items.push(...page.items ?? []);
     partial_failures.push(...page.partial_failures ?? []);
     page.omitted_categories?.forEach((category) => omitted_categories.add(category));
@@ -2534,7 +2578,7 @@ export interface ServiceTopology {
   omitted_edges?: number;
 }
 
-export const api = {
+const agentCapabilitiesApi = {
   listAgentTools: (agent: AgentToolKind) =>
     request<AgentToolAvailability[]>(`/api/admin/agent/tools?agent=${agent}`),
   setAgentToolEnabled: (agent: AgentToolKind, name: string, enabled: boolean) =>
@@ -2554,6 +2598,13 @@ export const api = {
       `/api/admin/agent/toolsets/${agent}/${encodeURIComponent(id)}`,
       { method: "PUT", body: JSON.stringify({ enabled }) },
     ),
+};
+
+const unscopedRequest = request;
+
+export function createKubernetesApi(cluster?: string) {
+  const request: typeof unscopedRequest = (path, options) => unscopedRequest(kubernetesClusterPath(path, cluster), options);
+  return {
   kubernetesOverview: () => request<KubernetesOverview>("/api/admin/kubernetes/overview"),
   kubernetesOverviewGraph: () => request<KubernetesGraph>("/api/admin/kubernetes/graph/overview"),
   kubernetesIssues: (options: { namespace?: string; severity?: string; kind?: string; limit?: number; cursor?: string } = {}) => {
@@ -2602,9 +2653,9 @@ export const api = {
         items_available: Array.isArray(page.items),
       }));
   },
-  kubernetesNodes: (cursor?: string) => listKubernetesResources("core~v1~nodes", "", cursor),
-  kubernetesNamespaces: () => listAllKubernetesNamespaces(),
-  kubernetesNodePods: (node: string, cursor?: string) => listKubernetesResources("core~v1~pods", "spec.nodeName=" + node, cursor),
+  kubernetesNodes: (cursor?: string) => listKubernetesResources("core~v1~nodes", "", cursor, cluster),
+  kubernetesNamespaces: () => listAllKubernetesNamespaces(cluster),
+  kubernetesNodePods: (node: string, cursor?: string) => listKubernetesResources("core~v1~pods", "spec.nodeName=" + node, cursor, cluster),
   kubernetesUsage: (namespace = "") => request<KubernetesUsage>(`/api/admin/kubernetes/usage?namespace=${encodeURIComponent(namespace)}`),
   kubernetesWorkloads: async (options: { namespace?: string; kind?: string; q?: string; limit?: number; cursor?: string } = {}) => {
     const query = new URLSearchParams();
@@ -2640,7 +2691,7 @@ export const api = {
     const headers = new Headers({ Accept: "text/event-stream" });
     const secret = getSecret();
     if (secret) headers.set("X-Gateway-Secret", secret);
-    const response = await fetch(`${API_BASE}/api/admin/kubernetes/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/logs/stream?${query}`, { headers, credentials: "same-origin", cache: "no-store", signal });
+    const response = await fetch(`${API_BASE}${kubernetesClusterPath(`/api/admin/kubernetes/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/logs/stream?${query}`, cluster)}`, { headers, credentials: "same-origin", cache: "no-store", signal });
     if (!response.ok || !response.body) {
       await response.body?.cancel();
       if (response.status === 401) notifyAuthExpired();
@@ -2691,7 +2742,7 @@ export const api = {
     const headers = new Headers({ Accept: "text/event-stream" });
     const secret = getSecret() ?? "";
     if (secret) headers.set("X-Gateway-Secret", secret);
-    const response = await fetch(`${API_BASE}/api/admin/kubernetes/stream?kinds=Node,Pod,Deployment`, {
+    const response = await fetch(`${API_BASE}${kubernetesClusterPath("/api/admin/kubernetes/stream?kinds=Node,Pod,Deployment", cluster)}`, {
       headers,
       credentials: "same-origin",
       cache: "no-store",
@@ -2733,6 +2784,13 @@ export const api = {
     request<{ resource: KubernetesResource; related_resources?: Array<{ kind: string; namespace?: string; name: string }>; events?: KubernetesResource[]; partial_failures?: Array<{ resource_id?: string; class: string }> }>(
       `/api/admin/kubernetes/resources/${encodeURIComponent(resourceId)}/${encodeURIComponent(name)}/describe?namespace=${encodeURIComponent(namespace)}`,
     ),
+  };
+}
+
+export const api = {
+  ...agentCapabilitiesApi,
+  ...createKubernetesApi(),
+  kubernetesClusters: () => request<KubernetesClusters>("/api/admin/kubernetes/clusters"),
   status: () => request<Status>("/api/agent/status"),
   listPatterns: () =>
     request<{ patterns: Pattern[] }>("/api/agent/patterns").then(
@@ -3211,10 +3269,17 @@ export const api = {
     sessionRequest<MembersEnvelope>(
       `/enterprise/api/rbac/${encodeURIComponent(org)}/members`,
     ),
-  setMemberRole: (org: string, subject: string, role: MemberRole) =>
-    sessionRequest<{ org: string; subject: string; role: string }>(
+  listMemberRoles: (org: string) => sessionRequest<{ assignments: RoleAssignment[] }>(`/enterprise/api/rbac/${encodeURIComponent(org)}/roles`),
+  rbacMe: () => sessionRequest<RbacMe>("/enterprise/api/rbac/me"),
+  setTeamRole: (org: string, team: string, role: MemberRole, clusters?: string[]) =>
+    sessionRequest<{ org: string; team: string; role: string; clusters?: string[] }>(
+      `/enterprise/api/rbac/${encodeURIComponent(org)}/team-roles/${encodeURIComponent(team)}`,
+      { method: "PUT", body: JSON.stringify({ role, ...(clusters === undefined ? {} : { clusters }) }) },
+    ),
+  setMemberRole: (org: string, subject: string, role: MemberRole, clusters?: string[]) =>
+    sessionRequest<{ org: string; subject: string; role: string; clusters?: string[] }>(
       `/enterprise/api/rbac/${encodeURIComponent(org)}/roles/${encodeURIComponent(subject)}`,
-      { method: "PUT", body: JSON.stringify({ role }) },
+      { method: "PUT", body: JSON.stringify({ role, ...(clusters === undefined ? {} : { clusters }) }) },
     ),
 
   // Deployment default-admin ("admin user") status + disable (roles:manage).

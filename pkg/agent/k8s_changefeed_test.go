@@ -186,7 +186,7 @@ func TestRecentChangesAvailableWithChangeFeedAndNoGitHub(t *testing.T) {
 
 func TestKubernetesOnlyChangeFeedIsVisibleToChatAndAnalyze(t *testing.T) {
 	cfg := config.AgentConfig{}
-	connectors := config.ConnectorsConfig{Kubernetes: config.KubernetesToolConfig{Endpoint: "https://cluster.example"}}
+	connectors := config.ConnectorsConfig{Kubernetes: config.KubernetesConnectorConfig{KubernetesToolConfig: config.KubernetesToolConfig{Endpoint: "https://cluster.example"}}}
 	configured := configuredToolAvailabilitySnapshot(cfg, storage.NewMemory(), connectors)
 	if !configured.Capabilities["change_feed"].Configured || configured.Integrations["github"].Configured {
 		t.Fatalf("Kubernetes-only configuration=%+v", configured)

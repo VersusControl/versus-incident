@@ -13,6 +13,7 @@ import (
 // sync.Once-guarded global load — the helper is the unguarded core that
 // LoadConfig wraps.
 func TestLoadFullSampleConfig(t *testing.T) {
+	t.Setenv("AGENT_AI_PROVIDER", "")
 	c, err := loadConfigFromPath("../../config/config.yaml")
 	if err != nil {
 		t.Fatalf("loadConfigFromPath(sample): %v", err)
@@ -159,6 +160,7 @@ func TestAgentAIProviderSelection(t *testing.T) {
 	}
 
 	t.Run("yaml provider round-trips", func(t *testing.T) {
+		t.Setenv("AGENT_AI_PROVIDER", "")
 		path := writeConfig(t, `
 agent:
   ai:
@@ -175,6 +177,7 @@ agent:
 	})
 
 	t.Run("omitted provider keeps openai default", func(t *testing.T) {
+		t.Setenv("AGENT_AI_PROVIDER", "")
 		// A sparse config that touches the agent block but not ai.provider must
 		// keep the embedded default of openai.
 		path := writeConfig(t, `

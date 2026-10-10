@@ -12,12 +12,19 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-type ChatKubernetesServiceResolver func(orgID string) *kubernetes.Service
+type ChatKubernetesServiceResolver func(orgID, clusterID string) *kubernetes.Service
 
 var (
 	chatKubernetesResolverMu sync.RWMutex
 	chatKubernetesResolver   ChatKubernetesServiceResolver
+	chatKubernetesRegistry   *kubernetes.ServiceRegistry
 )
+
+func SetChatKubernetesRegistry(registry *kubernetes.ServiceRegistry) {
+	chatKubernetesResolverMu.Lock()
+	chatKubernetesRegistry = registry
+	chatKubernetesResolverMu.Unlock()
+}
 
 // SetChatKubernetesServiceResolver installs the scoped service resolver used to validate resource attachments.
 func SetChatKubernetesServiceResolver(resolver ChatKubernetesServiceResolver) {
@@ -40,16 +47,29 @@ func validateChatKubernetesAttachment(ctx *fiber.Ctx, attachment *core.ChatAttac
 	}
 	chatKubernetesResolverMu.RLock()
 	resolver := chatKubernetesResolver
+	registry := chatKubernetesRegistry
 	chatKubernetesResolverMu.RUnlock()
 	if resolver == nil {
 		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Kubernetes connector is not configured"})
 	}
 	orgID := tenancy.NormalizeOrgID(middleware.OrgFromContext(ctx))
-	service := resolver(orgID)
+	if registry != nil && registry.Multiple() && resource.Cluster == "" {
+		return writeKubernetes(ctx, nil, kubernetes.ErrClusterRequired)
+	}
+	if resource.Cluster != "" && core.CallerAuthorizationPresent(ctx.UserContext()) && !core.CallerClusterAllowed(ctx.UserContext(), resource.Cluster) {
+		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Kubernetes cluster is unavailable"})
+	}
+	service := resolver(orgID, resource.Cluster)
 	if service == nil {
+		if registry != nil && registry.Multiple() {
+			return writeKubernetes(ctx, nil, kubernetes.ErrClusterNotFound)
+		}
 		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Kubernetes cluster is not available to this organization"})
 	}
 	scope := service.Scope()
+	if core.CallerAuthorizationPresent(ctx.UserContext()) && !core.CallerClusterAllowed(ctx.UserContext(), scope.ClusterID) {
+		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Kubernetes cluster is unavailable"})
+	}
 	if tenancy.NormalizeOrgID(scope.OrgID) != orgID {
 		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Kubernetes cluster is not available to this organization"})
 	}

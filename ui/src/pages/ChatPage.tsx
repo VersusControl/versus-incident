@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -32,6 +33,7 @@ import { RetryableError } from "@/components/RetryableError";
 import { MarkdownText } from "@/components/chat/MarkdownText";
 import {
   api,
+  createKubernetesApi,
   ApiError,
   type ChatCitation,
   type ChatEvent,
@@ -50,6 +52,8 @@ import { fmtRel, truncate } from "@/lib/format";
 import { capChatMessage } from "@/lib/markdownPolicy";
 import { useStickyBottom } from "@/lib/useStickyBottom";
 import { getStoredTheme, type Theme } from "@/lib/theme";
+import { kubernetesKey } from "@/lib/useKubernetesCluster";
+import { useEffectiveRole } from "@/lib/useEffectiveRole";
 
 const suggestions = [
   "What changed before the latest incident?",
@@ -114,8 +118,9 @@ function sessionTitle(summary: ChatSessionSummary, full?: ChatSession) {
   return firstUser ? truncate(firstUser, 54) : `Chat · ${fmtRel(summary.updated_at)}`;
 }
 
-function kubernetesResourceHref(resource: ChatResourceAttachment) {
+function kubernetesResourceHref(resource: ChatResourceAttachment, multiple: boolean) {
   const query = new URLSearchParams({ view: "topology", r: `${resource.resource_id}/${resource.namespace ?? ""}/${resource.name}` });
+  if (multiple && resource.cluster) query.set("cluster", resource.cluster);
   return `/agent/kubernetes?${query}`;
 }
 
@@ -200,6 +205,14 @@ function ToolPayload({ label, value }: { label: string; value: string }) {
 
 function ActionApprovalCard({ event }: { event: ChatEvent }) {
   const approval = event.approval;
+  const access = useEffectiveRole();
+  const queryClient = useQueryClient();
+  const permission = useQuery({ queryKey: ["rbac-me"], queryFn: api.rbacMe, enabled: access.enterprise && access.hasSession, retry: false });
+  const approvals = useQuery({ queryKey: ["agent-approvals", "permissions"], queryFn: () => api.listAgentApprovals(), enabled: access.enterprise && access.hasSession && Boolean(approval), retry: false });
+  const targetCluster = approval?.cluster ?? approvals.data?.approvals.find((item) => item.id === approval?.id)?.proposal.target.cluster;
+  const scope = permission.data?.clusters;
+  const [authorizationDenied, setAuthorizationDenied] = useState(false);
+  const canDecide = !authorizationDenied && !access.loading && (!access.enterprise || Boolean(permission.isSuccess && permission.data.permissions.includes("agent:approve") && (scope === null || targetCluster && scope?.includes(targetCluster))));
   const [state, setState] = useState(approval?.state ?? "pending");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -207,7 +220,7 @@ function ActionApprovalCard({ event }: { event: ChatEvent }) {
   if (!approval) return null;
 
   const decide = async (decision: "approve" | "reject") => {
-    if (!event.approval_nonce || busy) return;
+    if (!event.approval_nonce || busy || !canDecide) return;
     setBusy(true);
     setError("");
     try {
@@ -217,6 +230,11 @@ function ActionApprovalCard({ event }: { event: ChatEvent }) {
       setState(result.state);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "The approval request failed.");
+      if (failure instanceof ApiError && [401, 403, 404].includes(failure.status)) {
+        setAuthorizationDenied(true);
+        void queryClient.invalidateQueries({ queryKey: ["rbac-me"] });
+        void queryClient.invalidateQueries({ queryKey: ["agent-approvals"] });
+      }
     } finally {
       setBusy(false);
     }
@@ -235,7 +253,8 @@ function ActionApprovalCard({ event }: { event: ChatEvent }) {
       <dt className="text-ink-400">Dry run</dt><dd className="break-words text-ink-100">{approval.effect}</dd>
       {Number.isFinite(expiry) && <><dt className="text-ink-400">Expires</dt><dd><time dateTime={approval.expires_at} className="text-ink-200">{new Date(expiry).toLocaleString()}</time></dd></>}
     </dl>
-    {pending && <div className="space-y-3 border-t border-ink-500/40 px-4 py-3">
+    {pending && !canDecide && <p role="status" className="border-t border-ink-500/40 px-4 py-3 text-xs text-ink-400">Action approval permission is unavailable for this target.</p>}
+    {pending && canDecide && <div className="space-y-3 border-t border-ink-500/40 px-4 py-3">
       <label className="block text-xs text-ink-300">Rejection reason<input aria-label="Reason for rejection" className="input mt-1 w-full" value={reason} onChange={(change) => setReason(change.target.value)} disabled={busy} maxLength={512} /></label>
       <div className="flex flex-wrap gap-2">
         <button type="button" className="btn btn-primary" onClick={() => void decide("approve")} disabled={busy || !event.approval_nonce}>{busy ? "Submitting…" : "Approve action"}</button>
@@ -294,6 +313,12 @@ function CitationList({ citations, onOpen }: { citations?: ChatCitation[]; onOpe
   );
 }
 
+function KubernetesAttachmentLink({ resource }: { resource: ChatResourceAttachment }) {
+  const catalog = useQuery({ queryKey: ["kubernetes-clusters"], queryFn: api.kubernetesClusters, retry: false, staleTime: 30_000 });
+  if (!catalog.data) return <span className="truncate">{resource.namespace ? `${resource.namespace}/` : ""}{resource.name}</span>;
+  return <Link to={kubernetesResourceHref(resource, catalog.data.multiple)} className="flex min-w-0 items-center gap-2 text-left text-xs text-link hover:underline"><Paperclip size={13} aria-hidden="true"/><span className="min-w-0 truncate">{resource.namespace ? `${resource.namespace}/` : ""}{resource.name}</span><span className="shrink-0 text-2xs text-ink-300">Open in topology</span></Link>;
+}
+
 function TurnView({ turn, onEvidence }: { turn: ChatTurn; onEvidence: (value: EvidenceSelection) => void }) {
   if (turn.role === "compaction") {
     if (turn.content.trimStart().startsWith('{"kind":"session_discovery"')) return null;
@@ -307,7 +332,7 @@ function TurnView({ turn, onEvidence }: { turn: ChatTurn; onEvidence: (value: Ev
       <div className="my-4 flex justify-end">
         <div className="max-w-[85%] rounded-2xl bg-ink-700 px-4 py-2.5 text-sm leading-6 text-ink-50">
           {turn.content}
-          {turn.attachment?.resource && <Link to={kubernetesResourceHref(turn.attachment.resource)} className="mt-2 flex items-center gap-2 border-t border-ink-500/50 pt-2 text-left text-xs text-link hover:underline"><Paperclip size={13} aria-hidden="true"/><span className="min-w-0 truncate">{turn.attachment.resource.namespace ? `${turn.attachment.resource.namespace}/` : ""}{turn.attachment.resource.name}</span><span className="shrink-0 text-2xs text-ink-300">Open in topology</span></Link>}
+          {turn.attachment?.resource && <div className="mt-2 border-t border-ink-500/50 pt-2"><KubernetesAttachmentLink resource={turn.attachment.resource} /></div>}
         </div>
       </div>
     );
@@ -417,7 +442,7 @@ function Composer({ value, onChange, onSubmit, running, stopping, onStop, resour
   return (
     <form onSubmit={submit} className="flex items-end gap-2 rounded-[24px] border border-ink-500/70 bg-surface px-3 py-2 shadow-card">
       <div className="min-w-0 flex-1">
-        {resource && <div className="mb-1 flex min-w-0 items-center gap-2 px-2 text-2xs text-link"><Paperclip size={12} aria-hidden="true"/><span className="truncate">{resource.namespace ? `${resource.namespace}/` : ""}{resource.name}</span><button type="button" className="btn-icon ml-auto size-7 shrink-0" aria-label="Remove Kubernetes resource attachment" title="Remove attachment" onClick={onRemoveResource}><X size={13}/></button></div>}
+        {resource && <div className="mb-1 flex min-w-0 items-center gap-2 px-2 text-2xs text-link"><KubernetesAttachmentLink resource={resource} /><button type="button" className="btn-icon ml-auto size-7 shrink-0" aria-label="Remove Kubernetes resource attachment" title="Remove attachment" onClick={onRemoveResource}><X size={13}/></button></div>}
         <textarea
           value={value}
           onChange={(event) => onChange(capChatMessage(event.target.value))}
@@ -458,11 +483,16 @@ export function ChatPage() {
   const evidenceDialogRef = useRef<HTMLDivElement | null>(null);
   const conversationRef = useRef<HTMLDivElement | null>(null);
   const [isMobile, setIsMobile] = useState(false);
-  const resourceOverview = useQuery({ queryKey: ["kubernetes-overview"], queryFn: api.kubernetesOverview, enabled: resourcePickerOpen, retry: false });
+  const [resourceCluster, setResourceCluster] = useState("");
+  const clusterCatalog = useQuery({ queryKey: ["kubernetes-clusters"], queryFn: api.kubernetesClusters, enabled: resourcePickerOpen, retry: false });
+  const pickerCluster = clusterCatalog.data?.multiple ? resourceCluster : undefined;
+  const pickerReady = resourcePickerOpen && Boolean(clusterCatalog.data && (!clusterCatalog.data.multiple || clusterCatalog.data.clusters.some((entry) => entry.id === pickerCluster)));
+  const resourceClient = useMemo(() => pickerCluster ? createKubernetesApi(pickerCluster) : api, [pickerCluster]);
+  const resourceOverview = useQuery({ queryKey: kubernetesKey(pickerCluster, "kubernetes-overview"), queryFn: resourceClient.kubernetesOverview, enabled: pickerReady, retry: false });
   const resourceResults = useQuery({
-    queryKey: ["chat-kubernetes-search", debouncedResourceQuery],
-    queryFn: () => api.kubernetesSearch("", debouncedResourceQuery, 20),
-    enabled: resourcePickerOpen && debouncedResourceQuery.trim().length > 0,
+    queryKey: kubernetesKey(pickerCluster, "chat-search", debouncedResourceQuery),
+    queryFn: () => resourceClient.kubernetesSearch("", debouncedResourceQuery, 20),
+    enabled: pickerReady && debouncedResourceQuery.trim().length > 0,
     retry: false,
   });
 
@@ -698,7 +728,8 @@ export function ChatPage() {
     return next;
   })} />;
   const selectResourceAttachment = (resource: { resource_id: string; kind: string; namespace?: string; name: string }) => {
-    const cluster = resourceOverview.data?.cluster_id ?? "";
+    const cluster = pickerCluster ?? resourceOverview.data?.cluster_id ?? "";
+    if (!pickerReady || !cluster) return;
     setResourceAttachment({ provider: "kubernetes", cluster, resource_id: resource.resource_id, namespace: resource.namespace, name: resource.name });
     setResourcePickerOpen(false);
     setResourceQuery("");
@@ -710,12 +741,14 @@ export function ChatPage() {
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
         {historyOpen && <Modal title="Thread history" size="lg" onClose={() => setHistoryOpen(false)} footer={<button type="button" className="btn inline-flex items-center gap-2" onClick={newThread}><Plus size={14} />New thread</button>}>{history}</Modal>}
         {resourcePickerOpen && <Modal title="Attach Kubernetes resource" size="md" onClose={() => setResourcePickerOpen(false)} footer={<button type="button" className="btn" onClick={() => setResourcePickerOpen(false)}>Close</button>}>
+          {clusterCatalog.data?.multiple && <label className="mb-3 block text-xs text-ink-300">Cluster<select aria-label="Attachment cluster" className="input mt-1 w-full" value={resourceCluster} onChange={(event) => { setResourceCluster(event.target.value); setResourceQuery(""); setDebouncedResourceQuery(""); }}><option value="">Select cluster</option>{clusterCatalog.data.clusters.map((cluster) => <option key={cluster.id} value={cluster.id}>{cluster.display_name || cluster.id}</option>)}</select></label>}
+          {clusterCatalog.isError && <RetryableError error={clusterCatalog.error} onRetry={() => clusterCatalog.refetch()} retrying={clusterCatalog.isFetching} context="Couldn't load clusters" />}
           <label className="mb-3 flex items-center gap-2 text-xs text-ink-300"><Search size={14} aria-hidden="true"/><span className="sr-only">Search Kubernetes resources</span><input autoFocus role="combobox" aria-label="Search Kubernetes resources" aria-expanded="true" aria-controls="chat-kubernetes-results" className="input w-full" value={resourceQuery} onChange={(event) => setResourceQuery(event.target.value)} placeholder="Search names and namespaces" /></label>
           {resourceOverview.isError && <p role="status" className="mb-2 text-xs text-sev-warning">Kubernetes cluster context is unavailable.</p>}
           <div id="chat-kubernetes-results" role="listbox" aria-label="Kubernetes resource results" className="max-h-[min(50vh,24rem)] overflow-y-auto">
             {resourceResults.isFetching && <p role="status" className="p-3 text-xs text-ink-400">Searching projected resources.</p>}
             {resourceResults.isError && <p role="status" className="p-3 text-xs text-sev-warning">Resource search is unavailable.</p>}
-            {(resourceResults.data?.items ?? []).map((resource) => <button type="button" role="option" aria-selected="false" key={`${resource.resource_id}:${resource.namespace}:${resource.name}`} onClick={() => selectResourceAttachment(resource)} className="flex w-full items-center justify-between gap-3 border-b border-ink-700 px-3 py-3 text-left hover:bg-ink-800"><span className="min-w-0"><span className="block truncate text-sm text-ink-100">{resource.name}</span><span className="block truncate text-2xs text-ink-400">{resource.kind} · {resource.namespace || "Cluster scope"}</span></span><span className="pill">Attach</span></button>)}
+            {(pickerReady && !resourceResults.isError ? resourceResults.data?.items ?? [] : []).map((resource) => <button type="button" role="option" aria-selected="false" key={`${pickerCluster}:${resource.resource_id}:${resource.namespace}:${resource.name}`} onClick={() => selectResourceAttachment(resource)} className="flex w-full items-center justify-between gap-3 border-b border-ink-700 px-3 py-3 text-left hover:bg-ink-800"><span className="min-w-0"><span className="block truncate text-sm text-ink-100">{resource.name}</span><span className="block truncate text-2xs text-ink-400">{resource.kind} · {resource.namespace || "Cluster scope"}</span></span><span className="pill">Attach</span></button>)}
             {debouncedResourceQuery && !resourceResults.isFetching && !resourceResults.isError && !resourceResults.data?.items?.length && <p role="status" className="p-3 text-xs text-ink-400">No matching resources found.</p>}
           </div>
           {(resourceResults.data?.truncated || resourceResults.data?.partial_failures?.length) && <p role="status" className="mt-2 text-2xs text-sev-warning">Search results are bounded or partial.</p>}

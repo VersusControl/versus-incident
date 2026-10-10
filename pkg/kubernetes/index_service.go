@@ -23,6 +23,39 @@ const kubernetesIndexPageSize = 500
 const kubernetesIndexMaxPages = 100
 const kubernetesIndexMaxRecords = 50000
 
+const MaxOrgIndexStreams = 8
+const MaxProcessIndexStreams = 64
+
+var ErrIndexStreamBusy = errors.New("kubernetes: index stream concurrency limit reached")
+
+var indexStreamAdmissions = struct {
+	sync.Mutex
+	total int
+	orgs  map[string]int
+}{orgs: make(map[string]int)}
+
+func acquireIndexStream(orgID string) (func(), error) {
+	indexStreamAdmissions.Lock()
+	defer indexStreamAdmissions.Unlock()
+	if indexStreamAdmissions.total >= MaxProcessIndexStreams || indexStreamAdmissions.orgs[orgID] >= MaxOrgIndexStreams {
+		return nil, ErrIndexStreamBusy
+	}
+	indexStreamAdmissions.total++
+	indexStreamAdmissions.orgs[orgID]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			indexStreamAdmissions.Lock()
+			defer indexStreamAdmissions.Unlock()
+			indexStreamAdmissions.total--
+			indexStreamAdmissions.orgs[orgID]--
+			if indexStreamAdmissions.orgs[orgID] == 0 {
+				delete(indexStreamAdmissions.orgs, orgID)
+			}
+		})
+	}, nil
+}
+
 var metadataOnlyIndexKinds = map[string]bool{"Secret": true, "ConfigMap": true, "ServiceAccount": true}
 var streamIndexKinds = map[string]bool{
 	"Node": true, "Namespace": true, "Pod": true, "Deployment": true, "ReplicaSet": true,
@@ -367,21 +400,30 @@ func persistIndexDeltas(store *kubechanges.Store, cluster string, deltas <-chan 
 
 // SubscribeIndex primes the shared index, then subscribes to its bounded deltas.
 func (service *Service) SubscribeIndex(ctx context.Context, buffer int, kinds ...string) (<-chan kubeindex.Delta, func(), kubeindex.Status, error) {
+	if service == nil {
+		return nil, func() {}, kubeindex.Status{}, ErrInvalidArguments
+	}
 	for _, kind := range kinds {
 		if !streamIndexKinds[kind] {
 			return nil, func() {}, kubeindex.Status{State: "unavailable", Partial: true}, ErrInvalidArguments
 		}
 	}
+	release, admissionErr := acquireIndexStream(service.scope.OrgID)
+	if admissionErr != nil {
+		return nil, func() {}, kubeindex.Status{}, admissionErr
+	}
 	_, status, err := service.IndexSnapshot(ctx, kinds...)
 	if err != nil {
+		release()
 		return nil, func() {}, status, err
 	}
 	index, err := service.indexes.ForScope(kubeindex.Scope{OrgID: service.scope.OrgID, ClusterID: service.scope.ClusterID, CredentialID: service.scope.CredentialID})
 	if err != nil {
+		release()
 		return nil, func() {}, status, err
 	}
 	deltas, unsubscribe := index.Subscribe(buffer)
-	return deltas, unsubscribe, status, nil
+	return deltas, func() { unsubscribe(); release() }, status, nil
 }
 
 func indexRecord(resource ProjectedResource) kubeindex.Record {

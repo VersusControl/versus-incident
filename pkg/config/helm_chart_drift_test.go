@@ -180,6 +180,58 @@ func TestHelmConnectorsWithoutAgentAndSeparateActor(t *testing.T) {
 	}
 }
 
+func TestHelmMultiClusterConnectorsAndSecrets(t *testing.T) {
+	requireRenderableChart(t)
+	t.Setenv("KUBERNETES_CLUSTER_EAST_TOKEN", "reader-east")
+	t.Setenv("KUBERNETES_CLUSTER_EAST_ACTOR_TOKEN", "actor-east")
+	t.Setenv("KUBERNETES_CLUSTER_WEST_TOKEN", "reader-west")
+	clusters := `[{"clusterId":"east","displayName":"East","endpoint":"https://east.example","auth":{"mode":"token","token":"reader-east"},"actions":{"enable":true,"auth":{"mode":"token","token":"actor-east"}}},{"clusterId":"west","endpoint":"https://west.example","auth":{"mode":"token","token":"reader-west"}}]`
+	args := []string{"--set", "agent.enable=false", "--set", "connectors.kubernetes.multiple=true", "--set-json", "connectors.kubernetes.clusters=" + clusters}
+	files := renderChartFiles(t, chartScenario{name: "multi-cluster", args: args})
+	directory := t.TempDir()
+	for name, body := range files {
+		if strings.HasSuffix(name, ".yaml") {
+			if err := os.WriteFile(filepath.Join(directory, name), []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	loaded, err := loadConfigFromPath(filepath.Join(directory, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	connector := loaded.Connectors.Kubernetes
+	if !connector.Multiple || len(connector.Clusters) != 2 || connector.Clusters[0].Auth.Token != "reader-east" || connector.Clusters[0].Actions.Auth.Token != "actor-east" || connector.Clusters[1].Auth.Token != "reader-west" || connector.Clusters[1].Actions.Enable {
+		t.Fatalf("multi render credentials not isolated: %v", err)
+	}
+	if strings.Contains(files["connectors.yaml"], "reader-east") || strings.Contains(files["connectors.yaml"], "actor-east") {
+		t.Fatal("ConfigMap contains credential values")
+	}
+	command := exec.Command("helm", append([]string{"template", "fleet", chartDir}, args...)...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"kubernetes_cluster_east_token:", "kubernetes_cluster_west_token:", "kubernetes_cluster_east_actor_token:", "name: KUBERNETES_CLUSTER_EAST_TOKEN", "name: KUBERNETES_CLUSTER_WEST_TOKEN"} {
+		if !bytes.Contains(output, []byte(expected)) {
+			t.Fatalf("missing cluster credential binding %s", expected)
+		}
+	}
+	for _, invalid := range []string{`[]`, `[{"clusterId":"same"},{"clusterId":"same"}]`, `[{"clusterId":"BAD"}]`, `[{"clusterId":"one","endpoint":"https://same.example"},{"clusterId":"two","endpoint":"https://same.example"}]`} {
+		command := exec.Command("helm", "template", "fleet", chartDir, "--set", "connectors.kubernetes.multiple=true", "--set-json", "connectors.kubernetes.clusters="+invalid)
+		if err := command.Run(); err == nil {
+			t.Fatal("invalid Helm cluster catalog accepted")
+		}
+	}
+	for _, setting := range []string{"connectors.kubernetes.auth.token=sensitive-value", "connectors.kubernetes.actions.auth.token=sensitive-value", "connectors.kubernetes.timeout=20s", "connectors.kubernetes.allowPrivateNetworks=true"} {
+		command := exec.Command("helm", append(append([]string{"template", "fleet", chartDir}, args...), "--set", setting)...)
+		output, err := command.CombinedOutput()
+		if err == nil || bytes.Contains(output, []byte("sensitive-value")) || !bytes.Contains(output, []byte("configure each cluster under clusters")) {
+			t.Fatalf("multi-mode top-level setting was ignored: %v", err)
+		}
+	}
+}
+
 // renderChartFiles runs `helm template` for one scenario and returns the config
 // files the chart placed in its ConfigMap, keyed by filename.
 func renderChartFiles(t *testing.T, sc chartScenario) map[string]string {

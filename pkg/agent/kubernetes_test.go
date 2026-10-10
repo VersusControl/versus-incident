@@ -1,14 +1,41 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
+
+func TestNewKubernetesRegistryKeepsFailedEntriesAndOwnCredentials(t *testing.T) {
+	connector := config.KubernetesConnectorConfig{Multiple: true, Clusters: []config.KubernetesClusterConfig{
+		{DisplayName: "One", KubernetesToolConfig: config.KubernetesToolConfig{ClusterID: "one", CredentialID: "credential-one", Endpoint: "https://one.example", Auth: config.KubernetesAuthConfig{Mode: "token", Token: "reader-one"}}},
+		{KubernetesToolConfig: config.KubernetesToolConfig{ClusterID: "failed", Endpoint: "https://failed.example", Auth: config.KubernetesAuthConfig{Mode: "invalid"}}},
+	}}
+	registry, failures := NewKubernetesRegistry(connector, tenancy.NewOrgScope("licensed"))
+	if !registry.Multiple() || len(failures) != 1 || len(registry.Clusters()) != 2 {
+		t.Fatal("failed entry lost or blocked catalog")
+	}
+	service, err := registry.ResolveCluster("request-org", "one")
+	if err != nil || service.Scope().CredentialID != "credential-one" || service.Scope().OrgID != "request-org" {
+		t.Fatal("trusted scope drift")
+	}
+	summaries := registry.Summaries(context.Background(), "licensed", func(id string) bool { return id == "failed" })
+	if len(summaries) != 1 || summaries[0].Health != "unreachable" {
+		t.Fatal("failed construction not summarized")
+	}
+	count := 0
+	registry.Each(func(*kubernetes.Service) { count++ })
+	if count != 1 {
+		t.Fatal("Each visited failed entry")
+	}
+}
 
 func TestNewKubernetesServiceIsOptionalAndRejectsUnsafeConfiguration(t *testing.T) {
 	service, err := NewKubernetesService(config.KubernetesToolConfig{}, tenancy.DefaultOrgScope())
