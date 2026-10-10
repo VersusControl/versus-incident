@@ -10,7 +10,7 @@ require (
 	github.com/cloudwego/eino-ext/components/embedding/gemini v0.0.0-20260616080858-ab17b7308bf8
 	github.com/cloudwego/eino-ext/components/embedding/ollama v0.0.0-20260616080858-ab17b7308bf8
 	github.com/cloudwego/eino-ext/components/model/claude v0.1.22
-	github.com/cloudwego/eino-ext/components/model/deepseek v0.1.6
+	github.com/cloudwego/eino-ext/components/model/deepseek v0.1.7
 	github.com/cloudwego/eino-ext/components/model/gemini v0.1.33
 	github.com/cloudwego/eino-ext/components/model/ollama v0.1.9
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
