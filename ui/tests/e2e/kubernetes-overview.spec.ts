@@ -1,18 +1,453 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as https from "node:https";
 import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { openApp } from "./helpers";
-import type { KubernetesGraph, KubernetesOverview, KubernetesResourcePage, KubernetesTopPage, KubernetesTraffic, KubernetesUsage } from "../../src/lib/api";
+import type { KubernetesClusters, KubernetesGraph, KubernetesOverview, KubernetesResourcePage, KubernetesTopPage, KubernetesTraffic, KubernetesUsage, RbacMe, SSOSession } from "../../src/lib/api";
+
+type StreamCounter = { path: string; container: string; previous: boolean; follow: boolean; requests: number; active: number; cancelled: number; completed: number; disconnected: number; unavailable: number; chunks: number; since_time?: string };
+
+const streamCounters = (cluster?: string) => new Promise<StreamCounter[]>((resolve, reject) => {
+  const state = process.env.HARNESS_STATE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/.state");
+  const port = Number(process.env.HARNESS_FAKEKUBE_PORT || 19443);
+  const observerPort = cluster === "west" ? Number(process.env.HARNESS_FAKEKUBE_SECOND_PORT || port + 1) : port;
+  const ca = path.join(state, cluster ? `fakekube-multi/${cluster}/ca.crt` : "fakekube/ca.crt");
+  const request = https.get(`https://localhost:${observerPort}/_fake/log-streams`, { ca: fs.readFileSync(ca), timeout: 5000 }, (response) => {
+    let body = "";
+    response.on("data", (chunk) => { body += chunk; });
+    response.on("end", () => {
+      if (response.statusCode !== 200) return reject(new Error(`observer status ${response.statusCode}`));
+      try { resolve(JSON.parse(body)); } catch (failure) { reject(failure); }
+    });
+    response.on("error", reject);
+  });
+  request.on("timeout", () => request.destroy(new Error("observer timeout")));
+  request.on("error", reject);
+});
+
+async function expectStreamCancelled(before: StreamCounter, read: () => Promise<StreamCounter | undefined>) {
+  await expect.poll(async () => {
+    const after = await read();
+    if (!after) return false;
+    expect([after.path, after.container, after.previous, after.follow]).toEqual([before.path, before.container, before.previous, before.follow]);
+    return after.active === 0 && after.cancelled - before.cancelled >= before.active + after.requests - before.requests;
+  }, { timeout: 15_000, intervals: [100, 250, 500, 1000] }).toBe(true);
+}
+
+type LicensedIdentity = { id: string; subject: string; role: string; clusters: string[]; expected_mfa: boolean; login_url: string };
+type LicensedContract = { configured: boolean; base_url: string; org: string; identities: LicensedIdentity[] };
+type LicensedBrowserHelper = {
+  loadBrowserFixture: (file: string) => Promise<unknown>;
+  loginLicensedIdentity: (page: Page, contract: LicensedContract, fixture: unknown, id: string) => Promise<void>;
+};
+
+for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: "mobile", width: 390, height: 844 }]) {
+  test.describe(`Kubernetes licensed SSO acceptance ${viewport.name}`, () => {
+    test.skip(process.env.E2E_KUBERNETES_LICENSED !== "1", "requires the real licensed Keycloak browser fixture");
+    let contract: LicensedContract;
+    let helper: LicensedBrowserHelper;
+    let browserFixture: unknown;
+
+    test.beforeAll(async () => {
+      const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+      const state = process.env.HARNESS_STATE_DIR || path.join(root, "plans/harness-run/.state");
+      contract = JSON.parse(fs.readFileSync(path.join(state, "licensed-kubernetes.json"), "utf8"));
+      expect(contract.configured, "a completed real Enterprise bootstrap is required").toBe(true);
+      expect(contract.org).toBeTruthy();
+      expect(contract.identities.map((identity) => identity.id).sort()).toEqual(["all", "deny", "east", "non-mfa", "viewer", "west"]);
+      const browserFile = process.env.HARNESS_KUBERNETES_BROWSER_FILE;
+      if (!browserFile) throw new Error("HARNESS_KUBERNETES_BROWSER_FILE must point to the private mode-0600 browser fixture");
+      helper = await import(pathToFileURL(path.join(root, "plans/harness-run/tests/enterprise/licensed-keycloak-browser.mjs")).href) as LicensedBrowserHelper;
+      browserFixture = await helper.loadBrowserFixture(browserFile);
+    });
+
+    for (const id of ["east", "west", "all", "deny", "viewer", "non-mfa"]) {
+      test(`real ${id} session fleet, dashboard, and Pod stream authorization`, async ({ browser }, testInfo) => {
+        test.setTimeout(180_000);
+        const identity = contract.identities.find((candidate) => candidate.id === id)!;
+        const context = await browser.newContext({ baseURL: contract.base_url, viewport: { width: viewport.width, height: viewport.height } });
+        const page = await context.newPage();
+        const org = encodeURIComponent(contract.org);
+        const kubernetesRequests: URL[] = [];
+        page.on("request", (request) => {
+          const url = new URL(request.url());
+          if (url.pathname.startsWith("/api/admin/kubernetes/")) kubernetesRequests.push(url);
+        });
+        try {
+          await helper.loginLicensedIdentity(page, contract, browserFixture, id);
+          const sessionResponse = await context.request.get(`/enterprise/api/sso/${org}/session`);
+          expect(sessionResponse.status()).toBe(200);
+          const session: SSOSession = await sessionResponse.json();
+          expect(session.subject).toBe(identity.subject);
+          expect(session.org).toBe(contract.org);
+          expect(session.local ?? false).toBe(false);
+          expect(session.mfa).toBe(identity.expected_mfa);
+          expect([...(session.amr ?? [])].sort()).toEqual(identity.expected_mfa ? ["otp", "pwd"] : ["pwd"]);
+          await testInfo.attach(`session-${id}-${viewport.name}`, { body: JSON.stringify({ id, org: session.org, mfa: session.mfa, amr: session.amr }), contentType: "application/json" });
+          const meResponse = await context.request.get("/enterprise/api/rbac/me");
+          let me: RbacMe | undefined;
+          if (id === "non-mfa") {
+            expect(meResponse.status()).toBe(403);
+            expect(await meResponse.text()).toMatch(/mfa/i);
+          } else {
+            expect(meResponse.status()).toBe(200);
+            me = await meResponse.json();
+            expect(me!.role).toBe(identity.role);
+            expect([...(me!.clusters ?? [])].sort()).toEqual(identity.role === "viewer" ? [] : [...identity.clusters].sort());
+          }
+          const cookie = (await context.cookies(contract.base_url)).find((entry) => entry.name === "versus_enterprise_session");
+          expect(Boolean(cookie?.value)).toBe(true);
+          expect(cookie?.httpOnly).toBe(true);
+          const allowed = id === "east" ? ["east"] : id === "west" ? ["west"] : ["east", "west", "unreachable"];
+          const noInfrastructure = id === "deny" || id === "viewer";
+          const bootstrapResponse = await context.request.get("/api/v1/agent/bootstrap");
+          expect(bootstrapResponse.status()).toBe(200);
+          const bootstrap = await bootstrapResponse.json();
+          if (noInfrastructure || id === "non-mfa") {
+            expect(bootstrap.kubernetes).toBeUndefined();
+          } else {
+            expect(bootstrap.kubernetes.multiple).toBe(true);
+            expect(bootstrap.kubernetes.clusters.map((cluster: { id: string }) => cluster.id).sort()).toEqual([...allowed].sort());
+          }
+          for (const agent of ["chat", "analyze"]) {
+            const toolsetsResponse = await context.request.get(`/api/admin/agent/toolsets?agent=${agent}`);
+            expect(toolsetsResponse.status()).toBe(200);
+            const toolsets: { id: string; state: string }[] = await toolsetsResponse.json();
+            const kubernetes = toolsets.find((toolset) => toolset.id === "kubernetes");
+            expect(kubernetes).toBeTruthy();
+            expect(kubernetes!.state).toBe(noInfrastructure || id === "non-mfa" ? "needs_permission" : "available");
+          }
+          if (noInfrastructure) {
+            expect(me!.role).toBe("viewer");
+            expect(me!.permissions).not.toContain("infrastructure:view");
+          } else if (me) expect(me.permissions).toContain("infrastructure:view");
+          const catalogResponse = await context.request.get("/api/admin/kubernetes/clusters");
+          if (noInfrastructure || id === "non-mfa") {
+            expect(catalogResponse.status()).toBe(403);
+            if (id === "non-mfa") expect(await catalogResponse.text()).toMatch(/mfa/i);
+            for (const cluster of ["east", "west"]) {
+              expect((await context.request.get(`/api/admin/kubernetes/overview?cluster=${cluster}`)).status()).toBe(403);
+              const namespace = cluster === "east" ? "east-shop" : "west-billing";
+              const pod = cluster === "east" ? "east-api-0" : "west-worker-0";
+              const before = (await streamCounters(cluster)).filter((counter) => counter.path === `/api/v1/namespaces/${namespace}/pods/${pod}/log` && counter.container === "api" && counter.follow && !counter.previous);
+              const denied = await context.request.get(`/api/admin/kubernetes/pods/${namespace}/${pod}/logs/stream?cluster=${cluster}&container=api`);
+              expect(denied.status()).toBe(403);
+              if (id === "non-mfa") expect(await denied.text()).toMatch(/mfa/i);
+              expect((await streamCounters(cluster)).filter((counter) => counter.path === `/api/v1/namespaces/${namespace}/pods/${pod}/log` && counter.container === "api" && counter.follow && !counter.previous)).toEqual(before);
+            }
+            await page.goto("/agent/kubernetes?cluster=east");
+            await expect(page.getByRole("article", { name: /^Cluster / })).toHaveCount(0);
+            await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toHaveCount(0);
+            await expect(page.getByRole("region", { name: "Pod logs", exact: true })).toHaveCount(0);
+          } else {
+            expect(catalogResponse.status()).toBe(200);
+            const catalog: KubernetesClusters = await catalogResponse.json();
+            expect(catalog.clusters.map((cluster) => cluster.id).sort()).toEqual([...allowed].sort());
+            if (id === "all") expect(catalog.clusters.find((cluster) => cluster.id === "unreachable")?.health).toBe("unreachable");
+            await expect(page.getByRole("article", { name: /^Cluster / })).toHaveCount(allowed.length);
+            for (const cluster of catalog.clusters) await expect(page.getByRole("article", { name: `Cluster ${cluster.id}`, exact: true })).toBeVisible();
+            for (const cluster of ["east", "west"]) {
+              if (!allowed.includes(cluster)) {
+                expect((await context.request.get(`/api/admin/kubernetes/overview?cluster=${cluster}`)).status()).toBe(404);
+                const namespace = cluster === "east" ? "east-shop" : "west-billing";
+                const pod = cluster === "east" ? "east-api-0" : "west-worker-0";
+                const logPath = `/api/v1/namespaces/${namespace}/pods/${pod}/log`;
+                const before = (await streamCounters(cluster)).filter((counter) => counter.path === logPath && counter.container === "api" && counter.follow && !counter.previous);
+                expect((await context.request.get(`/api/admin/kubernetes/pods/${namespace}/${pod}/logs/stream?cluster=${cluster}&container=api`)).status()).toBe(404);
+                expect((await streamCounters(cluster)).filter((counter) => counter.path === logPath && counter.container === "api" && counter.follow && !counter.previous)).toEqual(before);
+                await page.goto(`/agent/kubernetes?cluster=${cluster}`);
+                await expect(page.getByText("This cluster is no longer available.", { exact: true })).toBeVisible();
+                await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toHaveCount(0);
+                await expect(page.getByRole("article", { name: `Cluster ${cluster}`, exact: true })).toHaveCount(0);
+                continue;
+              }
+              const overviewResponse = await context.request.get(`/api/admin/kubernetes/overview?cluster=${cluster}`);
+              expect(overviewResponse.status()).toBe(200);
+              const overview: KubernetesOverview = await overviewResponse.json();
+              expect(overview.cluster_id).toBe(cluster);
+              expect(overview.nodes).toBe(cluster === "east" ? 1 : 2);
+              expect(overview.pods).toBe(cluster === "east" ? 2 : 3);
+              await page.goto(`/agent/kubernetes?cluster=${cluster}`);
+              await expect(page.getByRole("combobox", { name: "Cluster", exact: true })).toHaveValue(cluster);
+              await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible();
+              const podsResponse = await context.request.get(`/api/admin/kubernetes/resources?resource_id=core~v1~pods&limit=20&cluster=${cluster}`);
+              expect(podsResponse.status()).toBe(200);
+              const pods: KubernetesResourcePage = await podsResponse.json();
+              const pod = pods.items?.find((item) => item.namespace);
+              expect(pod?.namespace).toBe(cluster === "east" ? "east-shop" : "west-billing");
+              expect(pod?.name).toMatch(cluster === "east" ? /^east-api/ : /^west-worker/);
+              const logPath = `/api/v1/namespaces/${pod!.namespace}/pods/${pod!.name}/log`;
+              const query = new URLSearchParams({ cluster, view: "resources", tab: "logs", r: `${pod!.resource_id}/${pod!.namespace}/${pod!.name}` });
+              const before = await streamCounters(cluster);
+              const streamed = page.waitForResponse((response) => {
+                const url = new URL(response.url());
+                return url.pathname === `/api/admin/kubernetes/pods/${pod!.namespace}/${pod!.name}/logs/stream` && url.searchParams.get("cluster") === cluster;
+              });
+              await page.goto(`/agent/kubernetes?${query}`);
+              const response = await streamed;
+              expect(response.status()).toBe(200);
+              expect(response.headers()["content-type"]).toMatch(/^text\/event-stream(?:;|$)/);
+              const container = new URL(response.url()).searchParams.get("container");
+              expect(container).toBeTruthy();
+              const current = async () => (await streamCounters(cluster)).find((counter) => counter.path === logPath && counter.container === container && counter.follow && !counter.previous);
+              const baseline = before.find((counter) => counter.path === logPath && counter.container === container && counter.follow && !counter.previous);
+              const logs = page.getByRole("region", { name: "Pod logs", exact: true });
+              await expect(logs.getByLabel("Log connection status")).toHaveText("live");
+              await expect(logs.getByLabel("Pod log output")).toContainText(`container=${container}`);
+              await expect(logs.getByLabel("Pod log output")).toContainText("REDACTED");
+              await expect(logs.getByLabel("Pod log output")).not.toContainText(/(?:super|split|previous|synthetic-oversized)-secret-value/);
+              await expect(logs.getByLabel("Pod log output")).toContainText("fakekube follow line 30");
+              await expect.poll(async () => (await current())?.active).toBe(1);
+              const opened = (await current())!;
+              expect(opened.requests).toBeGreaterThan(baseline?.requests ?? 0);
+              await logs.getByLabel("Pause logs").click();
+              await expect(logs.getByLabel("Log connection status")).toHaveText("paused");
+              await expectStreamCancelled(opened, current);
+              const paused = (await current())!;
+              const resumeResponse = page.waitForResponse((candidate) => {
+                const url = new URL(candidate.url());
+                return url.pathname === `/api/admin/kubernetes/pods/${pod!.namespace}/${pod!.name}/logs/stream` && url.searchParams.get("cluster") === cluster;
+              });
+              await logs.getByLabel("Resume logs").click();
+              const resumedResponse = await resumeResponse;
+              await testInfo.attach(`resume-${cluster}-${viewport.name}`, { body: JSON.stringify({ status: resumedResponse.status(), cluster, container, cursor_present: new URL(resumedResponse.url()).searchParams.has("cursor") }), contentType: "application/json" });
+              expect(resumedResponse.status()).toBe(200);
+              await expect.poll(async () => (await current())?.requests ?? 0).toBeGreaterThan(paused.requests);
+              await expect.poll(async () => (await current())?.active).toBe(1);
+              const resumed = (await current())!;
+              await page.getByRole("dialog", { name: "Details panel" }).getByRole("button", { name: "Close panel" }).click();
+              await expect(logs).toHaveCount(0);
+              await expectStreamCancelled(resumed, current);
+            }
+            expect(kubernetesRequests.filter((url) => !url.pathname.endsWith("/clusters")).every((url) => allowed.includes(url.searchParams.get("cluster") ?? ""))).toBe(true);
+          }
+          expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+          await testInfo.attach(`licensed-${id}-${viewport.name}`, { body: JSON.stringify({ id, org: session.org, role: me?.role, mfa: session.mfa, amr: session.amr, clusters: me?.clusters }), contentType: "application/json" });
+        } catch (failure) {
+          if (page.url().startsWith(contract.base_url)) {
+            await testInfo.attach(`licensed-failure-${id}-${viewport.name}`, { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
+            await testInfo.attach(`licensed-status-${id}-${viewport.name}`, { body: JSON.stringify({ status: await page.getByLabel("Log connection status").allTextContents(), alerts: await page.getByRole("alert").allTextContents() }), contentType: "application/json" });
+          }
+          throw failure;
+        } finally {
+          await page.goto("about:blank");
+          try { await context.request.post(`/enterprise/api/sso/${org}/logout`); } finally { await context.close(); }
+        }
+      });
+    }
+  });
+}
+
+for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: "mobile", width: 390, height: 844 }]) {
+  test.describe(`Kubernetes multi-cluster live ${viewport.name}`, () => {
+    test.use({ viewport: { width: viewport.width, height: viewport.height } });
+    test.skip(process.env.E2E_KUBERNETES_MULTIPLE !== "1", "requires the live multi-cluster harness fixture");
+
+    test("fleet cards, switching, deep links, and scoped reads", async ({ page }) => {
+      const requests: string[] = [];
+      page.on("request", (request) => {
+        if (new URL(request.url()).pathname.startsWith("/api/admin/kubernetes/")) requests.push(request.url());
+      });
+      await openApp(page, "/agent/kubernetes");
+      const catalogResponse = await page.request.get("/api/admin/kubernetes/clusters");
+      expect(catalogResponse.status()).toBe(200);
+      const catalog: KubernetesClusters = await catalogResponse.json();
+      expect(catalog.multiple).toBe(true);
+      expect(catalog.clusters.length).toBeGreaterThanOrEqual(3);
+      const reachable = catalog.clusters.filter((cluster) => cluster.health !== "unreachable");
+      expect(reachable.length).toBeGreaterThanOrEqual(2);
+      const [first, second] = reachable;
+      const offline = catalog.clusters.find((cluster) => cluster.health === "unreachable")!;
+      expect(offline).toBeTruthy();
+      for (const cluster of catalog.clusters) await expect(page.getByRole("article", { name: `Cluster ${cluster.id}`, exact: true })).toBeVisible();
+      await expect(page.getByRole("article", { name: `Cluster ${offline.id}`, exact: true }).getByRole("button", { name: "Retry" })).toBeVisible();
+      expect(requests.every((url) => new URL(url).pathname.endsWith("/clusters"))).toBe(true);
+      if (process.env.E2E_KUBERNETES_CAPTURE_DIR) {
+        expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+        const rows = page.getByRole("region", { name: "Cluster rows", exact: true });
+        await expect(rows).toHaveAttribute("tabindex", "0");
+        const geometry = await rows.evaluate((region) => {
+          const header = region.firstElementChild!.firstElementChild!;
+          const columns = Array.from(header.children).map((cell) => cell.getBoundingClientRect());
+          const articles = Array.from(region.querySelectorAll("article"));
+          return {
+            scrollable: region.scrollWidth > region.clientWidth,
+            overflow: getComputedStyle(region).overflowX,
+            minimumWidth: region.firstElementChild!.getBoundingClientRect().width,
+            aligned: articles.every((article) => {
+              const bounds = article.getBoundingClientRect();
+              const cells = Array.from(article.children).filter((cell) => getComputedStyle(cell).position !== "absolute");
+              return cells.length === 7 && cells.every((cell, index) => {
+                const rect = cell.getBoundingClientRect();
+                return Math.abs(rect.left - columns[index].left) <= 2 && rect.right <= bounds.right && rect.top >= bounds.top && rect.bottom <= bounds.bottom &&
+                  Array.from(cell.querySelectorAll("a, button, p, h2, meter")).every((content) => {
+                    const contentRect = content.getBoundingClientRect();
+                    return contentRect.left >= rect.left - 1 && contentRect.right <= rect.right + 1 && contentRect.top >= bounds.top && contentRect.bottom <= bounds.bottom;
+                  });
+              });
+            }),
+            stacked: articles.every((article, index) => {
+              const bounds = article.getBoundingClientRect();
+              const first = articles[0].getBoundingClientRect();
+              return bounds.left === first.left && bounds.width === first.width && (!index || bounds.top >= articles[index - 1].getBoundingClientRect().bottom);
+            }),
+          };
+        });
+        expect(geometry.minimumWidth).toBeGreaterThanOrEqual(1160);
+        expect(geometry.aligned).toBe(true);
+        expect(geometry.stacked).toBe(true);
+        expect(geometry.overflow).toBe("auto");
+        if (viewport.name === "mobile") {
+          expect(geometry.scrollable).toBe(true);
+          await rows.focus();
+          await expect(rows).toBeFocused();
+          await rows.evaluate((region) => { region.scrollLeft = region.scrollWidth; });
+          expect(await rows.evaluate((region) => region.scrollLeft)).toBeGreaterThan(0);
+          await rows.evaluate((region) => { region.scrollLeft = 0; });
+        }
+        fs.mkdirSync(screenshotDir, { recursive: true });
+        await page.screenshot({ path: path.join(screenshotDir, `fleet-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+        if (viewport.name === "desktop") {
+          await page.setViewportSize({ width: 1600, height: viewport.height });
+          expect(await rows.evaluate((region) => region.scrollWidth > region.clientWidth)).toBe(false);
+          await page.screenshot({ path: path.join(screenshotDir, "fleet-rows-wide-desktop.png"), fullPage: true, animations: "disabled" });
+          await page.setViewportSize({ width: viewport.width, height: viewport.height });
+        }
+      }
+      await page.getByRole("link", { name: `Open cluster ${first.display_name || first.id}`, exact: true }).click();
+      await expect(page.getByRole("combobox", { name: "Cluster", exact: true })).toHaveValue(first.id);
+      await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible();
+      if (process.env.E2E_KUBERNETES_CAPTURE_DIR) {
+        await expect(page.getByLabel("Cluster resource counts").locator("dd").filter({ hasText: /^[1-9]\d*$/ })).not.toHaveCount(0);
+        await expect(page.getByRole("status").filter({ hasText: /Loading/i })).toHaveCount(0);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+        await page.screenshot({ path: path.join(screenshotDir, `cluster-dashboard-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+      }
+      await page.getByRole("tab", { name: "Nodes", exact: true }).click();
+      const switched = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/overview") && new URL(response.url()).searchParams.get("cluster") === second.id);
+      await page.getByRole("combobox", { name: "Cluster", exact: true }).selectOption(second.id);
+      expect((await (await switched).json()).cluster_id).toBe(second.id);
+      await expect(page).toHaveURL(new RegExp(`cluster=${second.id}.*view=nodes`));
+      await expect(page.getByRole("region", { name: "Nodes", exact: true })).toBeVisible();
+      await page.reload();
+      await expect(page.getByRole("combobox", { name: "Cluster", exact: true })).toHaveValue(second.id);
+      await page.getByRole("navigation", { name: "Cluster breadcrumb" }).getByRole("link", { name: "Clusters", exact: true }).click();
+      await expect(page.getByRole("article", { name: `Cluster ${first.id}`, exact: true })).toBeVisible();
+      for (const request of requests.filter((url) => !new URL(url).pathname.endsWith("/clusters"))) expect([first.id, second.id]).toContain(new URL(request).searchParams.get("cluster"));
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+    });
+
+    test("Pod log streams stay cluster scoped and switch/close cancel upstream", async ({ page }, testInfo) => {
+      test.setTimeout(120_000);
+      await openApp(page, "/agent/kubernetes");
+      const catalog: KubernetesClusters = await (await page.request.get("/api/admin/kubernetes/clusters")).json();
+      const reachable = catalog.clusters.filter((entry) => entry.health !== "unreachable");
+      expect(reachable.length).toBeGreaterThanOrEqual(2);
+      const [first, second] = reachable;
+      for (const cluster of [first, second]) {
+        expect(["east", "west"]).toContain(cluster.id);
+        const response = await page.request.get(`/api/admin/kubernetes/resources?resource_id=core~v1~pods&limit=20&cluster=${encodeURIComponent(cluster.id)}`);
+        expect(response.status()).toBe(200);
+        const pods: KubernetesResourcePage = await response.json();
+        const pod = pods.items?.find((item) => item.namespace);
+        expect(pod, "each live cluster must have an attachable Pod").toBeTruthy();
+        const query = new URLSearchParams({ cluster: cluster.id, view: "resources", tab: "logs", r: `${pod!.resource_id}/${pod!.namespace}/${pod!.name}` });
+        const next = cluster.id === first.id ? second : first;
+        const logPath = `/api/v1/namespaces/${pod!.namespace}/pods/${pod!.name}/log`;
+        for (const action of ["switch", "close"] as const) {
+          const before = await streamCounters(cluster.id);
+          const otherBefore = await streamCounters(next.id);
+          const active = async () => (await streamCounters(cluster.id)).filter((counter) => counter.path === logPath).reduce((total, counter) => total + counter.active, 0);
+          expect(await active()).toBe(0);
+          try {
+            const stream = page.waitForResponse((response) => {
+              const url = new URL(response.url());
+              return url.pathname === `/api/admin/kubernetes/pods/${pod!.namespace}/${pod!.name}/logs/stream` && url.searchParams.get("cluster") === cluster.id;
+            });
+            await page.goto(`/agent/kubernetes?${query}`);
+            const streamed = await stream;
+            expect(streamed.status()).toBe(200);
+            expect(streamed.headers()["content-type"]).toMatch(/^text\/event-stream(?:;|$)/);
+            const container = new URL(streamed.url()).searchParams.get("container");
+            expect(container).toBeTruthy();
+            const current = async () => (await streamCounters(cluster.id)).find((counter) => counter.path === logPath && counter.container === container && counter.follow && !counter.previous);
+            const baseline = before.find((counter) => counter.path === logPath && counter.container === container && counter.follow && !counter.previous);
+            const logs = page.getByRole("region", { name: "Pod logs", exact: true });
+            await expect(logs).toBeVisible();
+            await expect(logs.getByLabel("Log connection status")).toHaveText("live");
+            const output = logs.getByLabel("Pod log output");
+            await expect(output).toContainText("fakekube follow line");
+            await expect(output).toContainText(`container=${container}`);
+            const lineCount = await output.locator("[data-log-key]").count();
+            await expect.poll(() => output.locator("[data-log-key]").count()).toBeGreaterThan(lineCount);
+            await expect(output).toContainText("REDACTED");
+            await expect(output).not.toContainText(/(?:super|split|previous|synthetic-oversized)-secret-value|synthetic-record-padding/);
+            await expect(logs.getByRole("alert")).toHaveCount(0);
+            await expect(logs.getByLabel("Log connection status")).toHaveText("live");
+            await expect.poll(active).toBe(1);
+            const opened = (await current())!;
+            expect(opened.requests).toBeGreaterThan(baseline?.requests ?? 0);
+            expect(opened.chunks).toBeGreaterThan(baseline?.chunks ?? 0);
+            expect(await streamCounters(next.id)).toEqual(otherBefore);
+            if (action === "switch") await page.getByRole("combobox", { name: "Cluster", exact: true }).selectOption(next.id);
+            else await page.getByRole("dialog", { name: "Details panel" }).getByRole("button", { name: "Close panel" }).click();
+            await expect(logs).toHaveCount(0);
+            await expect.poll(active).toBe(0);
+            await expect.poll(async () => (await current())?.cancelled ?? 0).toBeGreaterThan(opened.cancelled);
+            expect(await streamCounters(next.id)).toEqual(otherBefore);
+            const location = new URL(page.url());
+            expect(location.searchParams.get("cluster")).toBe(action === "switch" ? next.id : cluster.id);
+            expect(location.searchParams.has("r")).toBe(false);
+            expect(location.searchParams.has("tab")).toBe(false);
+            expect(location.searchParams.get("view")).toBe("resources");
+            await testInfo.attach(`upstream-${cluster.id}-${action}`, { body: JSON.stringify({ before, after: await streamCounters(cluster.id) }, null, 2), contentType: "application/json" });
+          } finally {
+            await page.goto("about:blank");
+            await expect.poll(active).toBe(0);
+          }
+        }
+      }
+    });
+
+    test("unknown clusters return to fleet and raw routes fail closed", async ({ page }) => {
+      await openApp(page, "/agent/kubernetes?cluster=unknown-cluster");
+      await expect(page.getByText("This cluster is no longer available.", { exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Clusters", exact: true })).toBeVisible();
+      await expect(page.getByRole("combobox", { name: "Cluster", exact: true })).toHaveCount(0);
+      expect((await page.request.get("/api/admin/kubernetes/overview")).status()).toBe(400);
+      expect((await page.request.get("/api/admin/kubernetes/overview?cluster=unknown-cluster")).status()).toBe(404);
+    });
+
+    test("chat selects a cluster before searching and keeps attachment backlinks scoped", async ({ page }) => {
+      await openApp(page, "/agent/chat");
+      const catalog: KubernetesClusters = await (await page.request.get("/api/admin/kubernetes/clusters")).json();
+      const cluster = catalog.clusters.find((entry) => entry.health !== "unreachable")!;
+      const resources: KubernetesResourcePage = await (await page.request.get(`/api/admin/kubernetes/workloads?cluster=${encodeURIComponent(cluster.id)}&limit=20`)).json();
+      const resource = resources.items?.[0];
+      expect(resource, "the live fixture must contain an attachable workload").toBeTruthy();
+      await page.getByRole("button", { name: "Attach Kubernetes resource", exact: true }).click();
+      const picker = page.getByRole("dialog", { name: "Attach Kubernetes resource", exact: true });
+      await picker.getByRole("combobox", { name: "Attachment cluster" }).selectOption(cluster.id);
+      const search = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/resources/search") && new URL(response.url()).searchParams.get("cluster") === cluster.id);
+      await picker.getByRole("combobox", { name: "Search Kubernetes resources" }).fill(resource!.name);
+      expect((await search).status()).toBe(200);
+      await picker.getByRole("option").filter({ hasText: resource!.name }).first().click();
+      const backlink = page.getByRole("link", { name: /Open in topology/ });
+      await expect(backlink).toHaveAttribute("href", new RegExp(`cluster=${cluster.id}`));
+      await backlink.click();
+      await expect(page.getByRole("combobox", { name: "Cluster", exact: true })).toHaveValue(cluster.id);
+    });
+  });
+}
 
 async function expectNoTopologyPagination(panel: Locator) {
   await expect(panel.getByRole("button", { name: /^(Prev|Previous|Next)( page)?$/i })).toHaveCount(0);
   await expect(panel.getByText(/Bounded graph omitted|projected index is partial|Next page/i)).toHaveCount(0);
 }
 
-const screenshotDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "screenshots", "kubernetes", "fakekube");
+const screenshotDir = process.env.E2E_KUBERNETES_CAPTURE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "screenshots", "kubernetes", "fakekube");
 const defaultKinds = ["Ingress", "Service", "Deployment", "Pod"];
 
 test.beforeEach(async ({ request }, testInfo) => {
@@ -598,7 +1033,13 @@ test.describe("Live Kubernetes explorer captures", () => {
             await expect(target).toBeInViewport();
             await page.screenshot({ path: path.join(screenshotDir, `overview-${capture}-${viewport.name}.png`), fullPage: true, animations: "disabled" });
           }
-          await page.getByRole("region", { name: "Nodes", exact: true }).scrollIntoViewIfNeeded();
+          const nodesTab = page.getByRole("tab", { name: "Nodes", exact: true });
+          await nodesTab.click();
+          await expect(nodesTab).toHaveAttribute("aria-selected", "true");
+          const nodes = panel.getByRole("region", { name: "Nodes", exact: true });
+          await expect(nodes).toBeVisible();
+          await expect(nodes.getByRole("heading", { name: "Nodes", exact: true })).toBeVisible();
+          await nodes.scrollIntoViewIfNeeded();
           await page.screenshot({ path: path.join(screenshotDir, `overview-lower-${viewport.name}.png`), fullPage: true, animations: "disabled" });
         }
         if (view.id === "topology") {
@@ -649,19 +1090,27 @@ test.describe("Live Kubernetes explorer captures", () => {
       await context.grantPermissions(["clipboard-read", "clipboard-write"]);
       await openApp(page, "/agent/kubernetes?view=overview");
       await expect(page.getByText("Nodes ready 0/1")).toBeVisible();
+      const workloadsTab = page.getByRole("tab", { name: "Workloads", exact: true });
+      await workloadsTab.click();
+      await expect(workloadsTab).toHaveAttribute("aria-selected", "true");
       await page.getByLabel("Workload namespace").fill("payments");
       await page.getByLabel("Resource name").fill("checkout-api-0");
       await page.getByRole("button", { name: "Select Pod payments/checkout-api-0", exact: true }).click();
       const detail = page.getByRole("dialog", { name: "Details panel" });
       await expect(detail).toBeVisible();
+      await expect(detail.getByRole("heading", { name: "Pod payments/checkout-api-0", exact: true })).toBeVisible();
       await detail.getByRole("tab", { name: "Events", exact: true }).click();
       await expect(detail.getByText("No object-scoped events were returned.", { exact: true })).toBeVisible();
       fs.mkdirSync(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `drawer-events-${viewport.name}.png`), fullPage: true, animations: "disabled" });
-      const streamRequest = page.waitForRequest((request) => new URL(request.url()).pathname.endsWith("/logs/stream"));
+      const streamResponse = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/logs/stream"));
       await detail.getByRole("tab", { name: "Logs", exact: true }).click();
-      expect(new URL((await streamRequest).url()).searchParams.get("timestamps")).toBe("false");
+      const streamed = await streamResponse;
+      expect(streamed.status()).toBe(200);
+      expect(streamed.headers()["content-type"]).toMatch(/^text\/event-stream(?:;|$)/);
+      expect(new URL(streamed.url()).searchParams.get("timestamps")).toBe("false");
       const output = detail.getByLabel("Pod log output");
+      await expect(detail.getByLabel("Log connection status")).toHaveText("live");
       await expect(output).toContainText("REDACTED");
       await expect(detail).not.toContainText("super-secret-value");
       await detail.getByLabel("Pause logs").click();
@@ -680,6 +1129,8 @@ test.describe("Live Kubernetes explorer captures", () => {
         expect(file.suggestedFilename()).toBe("checkout-api-0-logs.txt");
         expect(fs.readFileSync((await file.path())!, "utf8")).toBe(rendered);
       }
+      await expect(detail.getByLabel("Log connection status")).toHaveText("paused");
+      await expect(detail.getByRole("alert")).toHaveCount(0);
       fs.mkdirSync(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `logs-${viewport.name}.png`), fullPage: true, animations: "disabled" });
     });
@@ -844,12 +1295,13 @@ test.describe("Inventory overview acceptance", () => {
         let cursor = "";
         let count = 0;
         do {
-          const response = await page.request.get("/api/admin/kubernetes/resources", { params: { resource_id: resourceId, limit: "200", ...(cursor ? { cursor } : {}) } });
+          const response = await page.request.get("/api/admin/kubernetes/resources", { params: { resource_id: resourceId, limit: "200", ...(cursor ? { continue: cursor } : {}) } });
           expect(response.status()).toBe(200);
           const data: KubernetesResourcePage = await response.json();
-          expect(data.sync.partial).toBe(false);
-          count += data.items.length;
-          cursor = data.next || "";
+          expect(data.partial_failures ?? []).toEqual([]);
+          expect(data.truncated && !data.continue).toBe(false);
+          count += (data.items ?? []).length;
+          cursor = data.continue || "";
         } while (cursor);
         inventoryCounts[kind] = count;
         const term = panel.getByLabel("Cluster resource counts").locator("dt").filter({ hasText: new RegExp(`^${kind}$`) });
@@ -940,7 +1392,7 @@ test.describe("Kubernetes repaired snapshot delta", () => {
       expect(inventoryResponse.status()).toBe(200);
       const inventory: KubernetesResourcePage = await inventoryResponse.json();
       const blocks = topology.getByRole("group", { name: "Namespace blocks", exact: true });
-      expect(await blocks.getByRole("button").allTextContents()).toEqual([...new Set(inventory.items.map((item) => item.name))].sort());
+      expect(await blocks.getByRole("button").allTextContents()).toEqual([...new Set((inventory.items ?? []).map((item) => item.name))].sort());
       const search = topology.getByRole("textbox", { name: "Search topology namespaces", exact: true });
       await search.fill("PAYMENTS");
       await expect(blocks.getByRole("button")).toHaveCount(1);
@@ -1011,8 +1463,8 @@ test.describe("Kubernetes repaired snapshot delta", () => {
           ...(fresh ? [{ id: `${namespace}-config`, kind: "ConfigMap", namespace, name: "synthetic-fresh-config", group: namespace }] : []),
         ]);
         const edges = ["payments", "inventory-only"].flatMap((namespace) => [
-          { from: `${namespace}-deployment`, to: `${namespace}-pod`, type: "manages" },
-          ...(fresh ? [{ from: `${namespace}-pod`, to: `${namespace}-config`, type: "uses" }] : []),
+          { from: `${namespace}-deployment`, to: `${namespace}-pod`, type: "manages" as const },
+          ...(fresh ? [{ from: `${namespace}-pod`, to: `${namespace}-config`, type: "uses" as const }] : []),
         ]);
         return { nodes, edges, omitted: {}, sync: { state: "ready", age_s: 0, partial: false } };
       };
@@ -1337,27 +1789,15 @@ test.describe("Kubernetes repaired snapshot delta", () => {
 
 test.describe("Live Pod stream acceptance", () => {
   test.skip(process.env.E2E_KUBERNETES_BACKEND !== "fake", "requires the real harness fake Kubernetes backend");
-  type Counter = { path: string; container: string; previous: boolean; follow: boolean; requests: number; active: number; cancelled: number; completed: number; disconnected: number; unavailable: number; chunks: number; since_time?: string };
   const logPath = "/api/v1/namespaces/payments/pods/checkout-api-0/log";
-  const ca = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/.state/fakekube/ca.crt");
-  const counters = () => new Promise<Counter[]>((resolve, reject) => {
-    const request = https.get("https://localhost:19443/_fake/log-streams", { ca: fs.readFileSync(ca), timeout: 5000 }, (response) => {
-      let body = "";
-      response.on("data", (chunk) => { body += chunk; });
-      response.on("end", () => {
-        if (response.statusCode !== 200) return reject(new Error(`observer status ${response.statusCode}`));
-        try { resolve(JSON.parse(body)); } catch (failure) { reject(failure); }
-      });
-      response.on("error", reject);
-    });
-    request.on("timeout", () => request.destroy(new Error("observer timeout")));
-    request.on("error", reject);
-  });
+  const state = process.env.HARNESS_STATE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/.state");
+  const ca = path.join(state, "fakekube/ca.crt");
+  const counters = () => streamCounters();
   const current = async (container = "api", previous = false) => (await counters()).find((counter) => counter.path === logPath && counter.container === container && counter.previous === previous && counter.follow === !previous);
   const active = async () => (await counters()).filter((counter) => counter.path === logPath).reduce((total, counter) => total + counter.active, 0);
   const control = (container: string, options: { disconnect_after_chunks?: number; remaining?: number; previous_available?: boolean } = {}) => new Promise<void>((resolve, reject) => {
     const body = JSON.stringify({ path: logPath, container, ...options });
-    const request = https.request("https://localhost:19443/_fake/log-streams", { method: "POST", ca: fs.readFileSync(ca), timeout: 5000, headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } }, (response) => {
+    const request = https.request(`https://localhost:${Number(process.env.HARNESS_FAKEKUBE_PORT || 19443)}/_fake/log-streams`, { method: "POST", ca: fs.readFileSync(ca), timeout: 5000, headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } }, (response) => {
       response.resume();
       response.on("end", () => response.statusCode === 200 ? resolve() : reject(new Error(`observer control status ${response.statusCode}`)));
       response.on("error", reject);
@@ -1376,7 +1816,9 @@ test.describe("Live Pod stream acceptance", () => {
 
   for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: "mobile", width: 390, height: 844 }]) {
     test(`live arriving lines, checkpoints, exports, and upstream cancellation ${viewport.name}`, async ({ page, context }, testInfo) => {
-      test.setTimeout(90_000);
+      const stageBudgets = { streamAndExport: 120_000, lifecycle: 45_000, cleanup: 15_000 };
+      test.setTimeout(stageBudgets.streamAndExport + stageBudgets.lifecycle + stageBudgets.cleanup);
+      const caseStarted = Date.now();
       await page.setViewportSize(viewport);
       await context.grantPermissions(["clipboard-read", "clipboard-write"]);
       const requests: URL[] = [];
@@ -1396,8 +1838,7 @@ test.describe("Live Pod stream acceptance", () => {
       expect(beforePause!.chunks).toBeGreaterThan(35);
       await detail.getByLabel("Pause logs").click();
       await expect(detail.getByLabel("Log connection status")).toHaveText("paused");
-      await expect.poll(active).toBe(0);
-      expect((await current())!.cancelled).toBeGreaterThan(beforePause!.cancelled);
+      await expectStreamCancelled(beforePause!, () => current());
       const pausedKeys = await lines.evaluateAll((elements) => elements.map((element) => element.getAttribute("data-log-key")));
       for (const enabled of [false, true, false]) {
         await detail.getByLabel("Timestamps").setChecked(enabled);
@@ -1453,13 +1894,12 @@ test.describe("Live Pod stream acceptance", () => {
       expect(containers).toEqual(["api", "sidecar", "setup", "debug"]);
       await expect(detail.getByLabel("Log container").locator("option")).toHaveText(["api (regular)", "sidecar (regular)", "setup (init)", "debug (ephemeral)"]);
       await expect.poll(async () => (await current())?.active).toBe(1);
-      const switched = (await current())!.cancelled;
+      const switched = (await current())!;
       const alternative = "sidecar";
       const sidecarRequests = (await current(alternative))?.requests ?? 0;
       await detail.getByLabel("Log container").selectOption(alternative);
       await expect.poll(() => requests.at(-1)?.searchParams.get("container")).toBe(alternative);
-      await expect.poll(async () => (await current())!.active).toBe(0);
-      expect((await current())!.cancelled).toBeGreaterThan(switched);
+      await expectStreamCancelled(switched, () => current());
       await expect.poll(async () => (await current(alternative))?.requests ?? 0).toBeGreaterThan(sidecarRequests);
       await expect.poll(async () => (await current(alternative))?.active).toBe(1);
       await expect(output).toContainText("container=sidecar");
@@ -1471,8 +1911,9 @@ test.describe("Live Pod stream acceptance", () => {
       expect((await current(alternative, true))!.completed).toBeGreaterThan(0);
       await detail.getByLabel("Previous container logs").uncheck();
       await expect(output).toContainText("fakekube follow line 30");
+      const beforeSidecarPause = (await current(alternative))!;
       await detail.getByLabel("Pause logs").click();
-      await expect.poll(active).toBe(0);
+      await expectStreamCancelled(beforeSidecarPause, () => current(alternative));
       const beforeDisconnect = await current(alternative);
       const reconnectStart = requests.length;
       await control(alternative, { disconnect_after_chunks: 40, remaining: 1 });
@@ -1494,9 +1935,16 @@ test.describe("Live Pod stream acceptance", () => {
         await detail.getByLabel("Log container").selectOption(container);
         await expect(output).toContainText(`container=${container}`);
         const unavailable = (await current(container, true))?.unavailable ?? 0;
+        const previousRequestStart = requests.length;
         await detail.getByLabel("Previous container logs").check();
-        await expect(detail.getByRole("alert")).toContainText("no previous container instance");
+        await expect(detail.getByLabel("Log connection status")).toHaveText("error");
+        await expect(detail.getByRole("alert")).toContainText("previous_unavailable Previous container logs are unavailable. Select current container logs.");
+        const previousRequests = requests.slice(previousRequestStart);
+        expect(previousRequests).toHaveLength(1);
+        expect(previousRequests[0].searchParams.get("container")).toBe(container);
+        expect(previousRequests[0].searchParams.get("previous")).toBe("true");
         await expect.poll(async () => (await current(container, true))?.unavailable ?? 0).toBeGreaterThan(unavailable);
+        expect(await current(container, true)).toMatchObject({ previous: true, follow: false });
         await expect.poll(active).toBe(0);
         await detail.getByLabel("Previous container logs").uncheck();
         await expect(output).toContainText(`container=${container}`);
@@ -1513,8 +1961,9 @@ test.describe("Live Pod stream acceptance", () => {
       await detail.getByLabel("Previous container logs").uncheck();
       await expect(output).toContainText("[oversized log line omitted]");
       await expect(output).toContainText("fakekube follow line 30");
+      const beforeExportPause = (await current())!;
       await detail.getByLabel("Pause logs").click();
-      await expect.poll(active).toBe(0);
+      await expectStreamCancelled(beforeExportPause, () => current());
       const captured = (await lines.allTextContents()).map((line) => line.replace(/\n$/, "")).join("\n");
       expect(captured).not.toMatch(rawSecrets);
       await detail.getByLabel("Copy scrubbed logs").click();
@@ -1523,20 +1972,22 @@ test.describe("Live Pod stream acceptance", () => {
       await detail.getByLabel("Download scrubbed logs").click();
       expect(fs.readFileSync((await (await capturedDownload).path())!, "utf8")).toBe(captured);
       expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+      await expect(detail.getByLabel("Log connection status")).toHaveText("paused");
+      await expect(detail.getByRole("alert")).toHaveCount(0);
       fs.mkdirSync(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `live-pod-stream-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+      expect(Date.now() - caseStarted, "stream and export stage must preserve lifecycle and cleanup budgets").toBeLessThanOrEqual(stageBudgets.streamAndExport);
       await detail.getByLabel("Resume logs").click();
       await expect.poll(active).toBe(1);
-      const beforeClose = (await current())!.cancelled;
+      const beforeClose = (await current())!;
       await detail.getByRole("button", { name: "Close panel" }).click();
-      await expect.poll(active).toBe(0);
-      expect((await current())!.cancelled).toBeGreaterThan(beforeClose);
+      await expectStreamCancelled(beforeClose, () => current());
       await openApp(page, "/agent/kubernetes?r=core~v1~pods/payments/checkout-api-0&tab=logs");
       await expect.poll(active).toBe(1);
-      const beforeUnmount = (await current())!.cancelled;
+      const beforeUnmount = (await current())!;
       await page.goto("/now");
-      await expect.poll(active).toBe(0);
-      expect((await current())!.cancelled).toBeGreaterThan(beforeUnmount);
+      await expectStreamCancelled(beforeUnmount, () => current());
+      expect(Date.now() - caseStarted, "lifecycle checks must preserve the cleanup budget").toBeLessThanOrEqual(stageBudgets.streamAndExport + stageBudgets.lifecycle);
       await testInfo.attach("upstream-counters", { body: JSON.stringify(await counters(), null, 2), contentType: "application/json" });
     });
 

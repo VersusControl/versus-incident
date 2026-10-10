@@ -73,6 +73,19 @@ func (service *Service) Propose(ctx context.Context, input ProposalInput) (Propo
 	if service == nil || ctx == nil {
 		return ProposalResult{}, ErrActionDenied
 	}
+	adapter, ok := service.registry.Lookup(input.Type)
+	if ok {
+		if resolver, resolves := adapter.(TargetResolver); resolves {
+			target, err := resolver.ResolveTarget(input.Target)
+			if err != nil {
+				return ProposalResult{}, ErrActionDenied
+			}
+			input.Target = target
+		}
+	}
+	if input.Target.Cluster != "" && !core.CallerClusterAllowed(ctx, input.Target.Cluster) {
+		return ProposalResult{}, ErrActionDenied
+	}
 	if isForbiddenType(input.Type) || scaleToZero(input) {
 		return service.issueGuide(ctx, input)
 	}
@@ -83,7 +96,6 @@ func (service *Service) Propose(ctx context.Context, input ProposalInput) (Propo
 	if actor == "" {
 		return ProposalResult{}, ErrActionDenied
 	}
-	adapter, ok := service.registry.Lookup(input.Type)
 	if !ok {
 		return service.issueGuide(ctx, input)
 	}
@@ -170,7 +182,13 @@ func (service *Service) Approvals(ctx context.Context, pendingOnly bool) ([]Appr
 		if json.Unmarshal(blob.Data, &record) != nil {
 			return nil, ledger.ErrLedgerUnavailable
 		}
-		record = service.reconcileExecutionUnknown(record)
+		if !service.targetAllowed(ctx, record.Approval.Proposal) {
+			if !service.legacyTargetReadable(ctx, record.Approval.Proposal) {
+				continue
+			}
+		} else {
+			record = service.reconcileExecutionUnknown(record)
+		}
 		if pendingOnly && (record.Approval.State != "pending" || !service.now().Before(record.Approval.ExpiresAt)) {
 			continue
 		}
@@ -187,6 +205,9 @@ func (service *Service) Approve(ctx context.Context, approvalID, nonce, approver
 	record, err := service.load(approvalID)
 	if err != nil {
 		return Approval{}, err
+	}
+	if !service.targetAllowed(ctx, record.Approval.Proposal) {
+		return Approval{}, ErrActionDenied
 	}
 	record = service.reconcileExecutionUnknown(record)
 	bindingHash := proposalBindingHash(record.Approval.Proposal)
@@ -287,6 +308,9 @@ func (service *Service) Reject(ctx context.Context, approvalID, reason, approver
 	if err != nil || record.Approval.State != "pending" || !service.now().Before(record.Approval.ExpiresAt) {
 		return Approval{}, ErrActionDenied
 	}
+	if !service.targetAllowed(ctx, record.Approval.Proposal) {
+		return Approval{}, ErrActionDenied
+	}
 	if err := service.auth.Authorize(ctx, approver, record.Approval.Proposal); err != nil {
 		return Approval{}, err
 	}
@@ -321,6 +345,43 @@ func (service *Service) ensureRun(ctx context.Context) (ledger.Run, error) {
 		return ledger.Run{}, ledger.ErrLedgerUnavailable
 	}
 	return ledger.Run{Writer: service.writer, RunID: runID}, nil
+}
+
+func (service *Service) legacyTargetReadable(ctx context.Context, proposal Proposal) bool {
+	if ctx == nil || proposal.Target.Cluster != "" {
+		return false
+	}
+	adapter, ok := service.registry.Lookup(proposal.Type)
+	if !ok {
+		return false
+	}
+	var target TargetRef
+	var err error
+	if resolver, ok := adapter.(ReadTargetResolver); ok {
+		target, err = resolver.ResolveReadTarget(proposal.Target)
+	} else if resolver, ok := adapter.(TargetResolver); ok {
+		target, err = resolver.ResolveTarget(proposal.Target)
+	} else {
+		return false
+	}
+	if err != nil || target.Cluster == "" || !core.CallerClusterAllowed(ctx, target.Cluster) {
+		return false
+	}
+	target.Cluster = ""
+	return target == proposal.Target
+}
+
+func (service *Service) targetAllowed(ctx context.Context, proposal Proposal) bool {
+	if ctx == nil || !core.CallerClusterAllowed(ctx, proposal.Target.Cluster) {
+		return false
+	}
+	if adapter, ok := service.registry.Lookup(proposal.Type); ok {
+		if resolver, resolves := adapter.(TargetResolver); resolves {
+			target, err := resolver.ResolveTarget(proposal.Target)
+			return err == nil && target == proposal.Target
+		}
+	}
+	return true
 }
 
 func (service *Service) claimApproval(record proposalRecord, nonce string) error {

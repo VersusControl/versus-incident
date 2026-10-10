@@ -13,6 +13,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	kubegraph "github.com/VersusControl/versus-incident/pkg/kubernetes/graph"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 // New constructs all Kubernetes model tools over one shared application service.
@@ -27,14 +28,36 @@ func New(service *kubernetes.Service) []core.Tool {
 	return result
 }
 
+func NewForRegistry(registry *kubernetes.ServiceRegistry) []core.Tool {
+	if registry == nil || len(registry.Clusters()) == 0 {
+		return nil
+	}
+	result := make([]core.Tool, 0, len(toolNames))
+	for _, name := range toolNames {
+		result = append(result, &tool{name: name, registry: registry})
+	}
+	return result
+}
+
 // FilterAuthorized removes Kubernetes tools from unauthorized model catalogs.
 func FilterAuthorized(ctx context.Context, tools []core.Tool) []core.Tool {
-	if core.CallerAuthorized(ctx, core.PermissionInfrastructureView) {
-		return tools
-	}
 	result := make([]core.Tool, 0, len(tools))
 	for _, candidate := range tools {
 		if candidate == nil || !isKubernetesTool(candidate.Name()) {
+			result = append(result, candidate)
+			continue
+		}
+		if !core.CallerAuthorized(ctx, core.PermissionInfrastructureView) {
+			continue
+		}
+		if current, ok := candidate.(*tool); ok {
+			copyTool := *current
+			copyTool.visible = current.allowedClusters(ctx)
+			if len(copyTool.visible) == 0 {
+				continue
+			}
+			result = append(result, &copyTool)
+		} else {
 			result = append(result, candidate)
 		}
 	}
@@ -51,8 +74,24 @@ func isKubernetesTool(name string) bool {
 }
 
 type tool struct {
-	name    string
-	service *kubernetes.Service
+	name     string
+	service  *kubernetes.Service
+	registry *kubernetes.ServiceRegistry
+	visible  []string
+}
+
+func (tool *tool) allowedClusters(ctx context.Context) []string {
+	ids := []string{}
+	if tool.registry != nil {
+		for _, info := range tool.registry.Clusters() {
+			if core.CallerClusterAllowed(ctx, info.ID) {
+				ids = append(ids, info.ID)
+			}
+		}
+	} else if tool.service != nil && core.CallerClusterAllowed(ctx, tool.service.Scope().ClusterID) {
+		ids = append(ids, tool.service.Scope().ClusterID)
+	}
+	return ids
 }
 
 func (tool *tool) Name() string { return tool.name }
@@ -64,8 +103,21 @@ func (tool *tool) DisplayName() string {
 }
 func (tool *tool) Description() string { return descriptions[tool.name] }
 func (tool *tool) ArgsSchema() map[string]any {
-	schema := map[string]any{"type": "object", "properties": schemas[tool.name], "additionalProperties": false}
-	if required := requiredArguments[tool.name]; len(required) > 0 {
+	properties := make(map[string]any, len(schemas[tool.name])+1)
+	for name, value := range schemas[tool.name] {
+		properties[name] = value
+	}
+	required := append([]string(nil), requiredArguments[tool.name]...)
+	if tool.registry != nil && tool.registry.Multiple() {
+		ids := tool.visible
+		if ids == nil {
+			ids = []string{}
+		}
+		properties["cluster"] = map[string]any{"type": "string", "enum": append([]string{}, ids...)}
+		required = append(required, "cluster")
+	}
+	schema := map[string]any{"type": "object", "properties": properties, "additionalProperties": false}
+	if len(required) > 0 {
 		schema["required"] = required
 	}
 	return schema
@@ -81,6 +133,35 @@ func (tool *tool) Invoke(ctx context.Context, raw json.RawMessage) (*core.ToolRe
 			return nil, core.NewToolError(core.ToolErrorInvalidArguments, "invalid Kubernetes tool arguments", err)
 		}
 	}
+	service := tool.service
+	if tool.registry != nil {
+		if args.Cluster != "" && !core.CallerClusterAllowed(ctx, args.Cluster) {
+			return core.UnavailableToolResult(tool.name, "Kubernetes cluster is unavailable"), nil
+		}
+		orgID := tenancy.DefaultOrgID
+		if scope, ok := tenancy.ContextOrgScope(ctx); ok {
+			orgID = scope.Write
+		} else {
+			tool.registry.Each(func(base *kubernetes.Service) {
+				if orgID == tenancy.DefaultOrgID {
+					orgID = base.Scope().OrgID
+				}
+			})
+		}
+		var resolveErr error
+		service, resolveErr = tool.registry.ResolveCluster(orgID, args.Cluster)
+		if resolveErr != nil {
+			result := core.UnavailableToolResult(tool.name, kubernetes.DiagnoseError(resolveErr).Message)
+			result.Data = map[string]any{"available": false, "code": kubernetes.DiagnoseError(resolveErr).Code, "clusters": tool.allowedClusters(ctx)}
+			return result, nil
+		}
+	}
+	if service == nil || !core.CallerClusterAllowed(ctx, service.Scope().ClusterID) {
+		return core.UnavailableToolResult(tool.name, "Kubernetes cluster is unavailable"), nil
+	}
+	local := *tool
+	local.service = service
+	tool = &local
 	var data any
 	found := true
 	var err error
@@ -282,10 +363,46 @@ func (tool *tool) Invoke(ctx context.Context, raw json.RawMessage) (*core.ToolRe
 		return nil, safeToolError(err)
 	}
 	payload := compactModelView(data, args, tool.service.Scope())
+	if tool.registry != nil && tool.registry.Multiple() {
+		encoded, encodeErr := json.Marshal(payload)
+		if encodeErr != nil {
+			return nil, safeToolError(encodeErr)
+		}
+		var linked map[string]any
+		if decodeErr := json.Unmarshal(encoded, &linked); decodeErr != nil {
+			return nil, safeToolError(decodeErr)
+		}
+		appendClusterLinks(linked, service.Scope().ClusterID)
+		payload = linked
+	}
 	return &core.ToolResult{Tool: tool.name, Found: found, Data: payload}, nil
 }
 
+func appendClusterLinks(value any, clusterID string) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			if key == "ui" {
+				if link, ok := nested.(string); ok && strings.HasPrefix(link, "/agent/kubernetes") {
+					separator := "?"
+					if strings.Contains(link, "?") {
+						separator = "&"
+					}
+					typed[key] = link + separator + "cluster=" + url.QueryEscape(clusterID)
+				}
+			} else {
+				appendClusterLinks(nested, clusterID)
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			appendClusterLinks(nested, clusterID)
+		}
+	}
+}
+
 type arguments struct {
+	Cluster             string `json:"cluster"`
 	ResourceID          string `json:"resource_id"`
 	Namespace           string `json:"namespace"`
 	Name                string `json:"name"`

@@ -11,7 +11,42 @@ import (
 	kubernetes "github.com/VersusControl/versus-incident/pkg/kubernetes"
 )
 
-func buildKubernetesActionAdapters(cfg config.KubernetesToolConfig) ([]act.Adapter, error) {
+func buildKubernetesActionAdapters(cfg config.KubernetesConnectorConfig) ([]act.Adapter, error) {
+	if !cfg.Multiple {
+		return buildSingleKubernetesActionAdapters(cfg.KubernetesToolConfig)
+	}
+	apis := map[string]k8sactions.API{}
+	options := map[string]k8sactions.Options{}
+	for _, entry := range cfg.Resolved() {
+		if !entry.Actions.Enable {
+			continue
+		}
+		api, err := buildKubernetesActionAPI(entry.KubernetesToolConfig)
+		if err != nil {
+			return nil, err
+		}
+		apis[entry.ClusterID] = api
+		options[entry.ClusterID] = k8sactions.Options{MaxReplicas: entry.Actions.MaxReplicas}
+	}
+	return k8sactions.NewClusterAdaptersWithOptions(apis, options), nil
+}
+
+func buildSingleKubernetesActionAdapters(cfg config.KubernetesToolConfig) ([]act.Adapter, error) {
+	if !cfg.Actions.Enable {
+		return nil, nil
+	}
+	api, err := buildKubernetesActionAPI(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cluster := cfg.ClusterID
+	if cluster == "" {
+		cluster = "default"
+	}
+	return k8sactions.NewAdapters(api, k8sactions.Options{Cluster: cluster, MaxReplicas: cfg.Actions.MaxReplicas}), nil
+}
+
+func buildKubernetesActionAPI(cfg config.KubernetesToolConfig) (k8sactions.API, error) {
 	actions := cfg.Actions
 	if !actions.Enable {
 		return nil, nil
@@ -56,9 +91,5 @@ func buildKubernetesActionAdapters(cfg config.KubernetesToolConfig) ([]act.Adapt
 	if err != nil {
 		return nil, err
 	}
-	cluster := cfg.ClusterID
-	if cluster == "" {
-		cluster = "default"
-	}
-	return k8sactions.NewAdapters(api, k8sactions.Options{Cluster: cluster, MaxReplicas: actions.MaxReplicas}), nil
+	return api, nil
 }

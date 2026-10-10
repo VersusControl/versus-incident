@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -15,6 +16,34 @@ import (
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
+
+func TestIndexStreamAdmissionSpansClusters(t *testing.T) {
+	releases := []func(){}
+	for range MaxOrgIndexStreams {
+		release, err := acquireIndexStream("stream-scope")
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, release)
+	}
+	if _, err := acquireIndexStream("stream-scope"); !errors.Is(err, ErrIndexStreamBusy) {
+		t.Fatalf("aggregate admission: %v", err)
+	}
+	other, err := acquireIndexStream("other-scope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other()
+	for _, release := range releases {
+		release()
+		release()
+	}
+	release, err := acquireIndexStream("stream-scope")
+	if err != nil {
+		t.Fatal("admission not released")
+	}
+	release()
+}
 
 func TestIndexRecordRetainsProjectedWorkloadValues(t *testing.T) {
 	for _, numeric := range []struct {

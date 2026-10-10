@@ -332,6 +332,15 @@ data:
   connectors.yaml: |
     connectors:
       kubernetes:
+        {{- if $kubernetes.multiple }}
+        {{- include "versus-incident.validateClusters" $kubernetes }}
+        multiple: true
+        clusters:
+          {{- range $cluster := $kubernetes.clusters }}
+          - {{ include "versus-incident.clusterConnector" $cluster | trim | nindent 12 | trim }}
+          {{- end }}
+        {{- else }}
+        {{- if $kubernetes.clusters }}{{ fail "connectors.kubernetes.clusters requires multiple: true" }}{{ end }}
         {{- $kubernetesAuthMode := $kubernetesAuth.mode | default "" }}
         {{- if and (ne $kubernetesAuthMode "in_cluster") (ne $kubernetesAuthMode "kubeconfig") }}
         endpoint: {{ $kubernetes.endpoint | default "" | quote }}
@@ -394,6 +403,7 @@ data:
           timeout: {{ $actions.timeout | default "15s" | quote }}
           auth:
             {{- include "versus-incident.connectorAuth" (dict "auth" ($actions.auth | default dict) "prefix" "KUBERNETES_ACTOR") | nindent 12 }}
+          {{- end }}
   {{- if .Values.agent.enable }}
   {{- $tools := .Values.agent.tools | default dict }}
   {{- $recentChanges := $tools.recentChanges | default dict }}

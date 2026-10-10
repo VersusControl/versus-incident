@@ -15,7 +15,55 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/agent"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
+
+func TestMultiClusterFleetFixturesThroughSharedRegistry(t *testing.T) {
+	entries := []kubernetes.ClusterEntry{}
+	provider := storage.NewMemory()
+	for _, id := range []string{"east", "west"} {
+		server, err := NewServer(Config{Scenario: "fleet-" + id, Seed: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		httpServer := httptest.NewServer(server)
+		defer httpServer.Close()
+		client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: httpServer.URL, AllowLoopbackHTTP: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: id, CredentialID: "fixture-" + id}, 0)
+		service.SetChangeStorage(provider)
+		entries = append(entries, kubernetes.ClusterEntry{Info: kubernetes.ClusterInfo{ID: id, Provider: "generic"}, Service: service})
+	}
+	entries = append(entries, kubernetes.ClusterEntry{Info: kubernetes.ClusterInfo{ID: "unreachable", Provider: "generic"}, Err: errors.New("unreachable-fixture")})
+	registry := kubernetes.NewClusterRegistry(true, entries)
+	ctx := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
+	summaries := registry.Summaries(ctx, "default", nil)
+	if len(summaries) != 3 || summaries[0].Health != "healthy" || summaries[1].Health != "healthy" || summaries[2].Health != "unreachable" || summaries[0].Nodes != 1 || summaries[1].Nodes != 2 || summaries[0].Pods != 2 || summaries[1].Pods != 3 {
+		t.Fatalf("fleet summaries: %+v", summaries)
+	}
+	for _, id := range []string{"east", "west"} {
+		service, err := registry.ResolveCluster("default", id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		page, err := service.List(ctx, kubernetes.ListOptions{ResourceID: "core~v1~pods"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, pod := range page.Items {
+			if !strings.HasPrefix(pod.Name, id+"-") {
+				t.Fatal("cluster inventory crossed")
+			}
+		}
+		pod := page.Items[0]
+		logs, err := service.PodLogs(ctx, pod.Namespace, pod.Name, "app", false, 0, 10)
+		if err != nil || logs.ClusterID != id {
+			t.Fatalf("cluster log identity: %s %v", id, err)
+		}
+	}
+}
 
 func TestTimestampedPodLogFollowResumePreviousAndCancellation(t *testing.T) {
 	server, err := NewServer(Config{Scenario: "triage", Seed: 1})

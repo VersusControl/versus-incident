@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { api, ApiError, type KubernetesPodLogLine } from "@/lib/api";
+import { ApiError, type KubernetesPodLogLine } from "@/lib/api";
+import { useKubernetesCluster } from "@/lib/useKubernetesCluster";
 import { SSELimitError } from "@/lib/sse";
 
 export const POD_LOG_MAX_LINES = 10_000;
@@ -39,8 +40,9 @@ const emptySession = (identity: string) => ({
 });
 
 export function usePodLogStream(options: { namespace: string; pod: string; container: string; previous: boolean; since: number; tail: number; paused: boolean; restart: number }) {
+  const { client: api, cluster } = useKubernetesCluster();
   const { namespace, pod, container, previous, since, tail, paused, restart } = options;
-  const identity = JSON.stringify([namespace, pod, container, previous, since, tail, restart]);
+  const identity = JSON.stringify([cluster, namespace, pod, container, previous, since, tail, restart]);
   const session = useRef(emptySession(""));
   const [buffer, setBuffer] = useState(emptyBuffer);
   const [status, setStatus] = useState<StreamStatus>("connecting");
@@ -196,6 +198,6 @@ export function usePodLogStream(options: { namespace: string; pod: string; conta
       clearTimeout(retryTimer);
       flush();
     };
-  }, [identity, namespace, pod, container, previous, since, tail, paused]);
+  }, [identity, namespace, pod, container, previous, since, tail, paused, api]);
   return { buffer, status, message, replayUncertain };
 }

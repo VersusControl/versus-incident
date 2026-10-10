@@ -24,19 +24,19 @@ func TestToolCatalogGETDoesNotConstructDisabledAgentDependencies(t *testing.T) {
 				AI:      config.AgentAIConfig{Enable: aiEnabled, Provider: "invalid-provider", Model: "invalid-model"},
 				Sources: []config.AgentSourceConfig{{Name: "broken", Type: "invalid-source", Enable: true}},
 			}
-			connectors := config.ConnectorsConfig{Kubernetes: config.KubernetesToolConfig{
+			connectors := config.ConnectorsConfig{Kubernetes: config.KubernetesConnectorConfig{KubernetesToolConfig: config.KubernetesToolConfig{
 				Endpoint: "https://cluster.example",
 				Auth:     config.KubernetesAuthConfig{Mode: "invalid"},
-			}}
+			}}}
 			app := fiber.New()
 			app.Use(func(ctx *fiber.Ctx) error { middleware.MarkAuthorized(ctx); return ctx.Next() })
 			app.Use(middleware.OrgInjector())
 			availability := agent.NewToolAvailabilityService(cfg, storage.NewMemory(), connectors)
-			service, constructionErr := agent.NewKubernetesService(connectors.Kubernetes, tenancy.DefaultOrgScope())
-			if constructionErr == nil {
+			service, constructionErrors := agent.NewKubernetesRegistry(connectors.Kubernetes, tenancy.DefaultOrgScope())
+			if len(constructionErrors) == 0 {
 				t.Fatal("invalid Kubernetes authentication constructed")
 			}
-			availability.BindIntegrationConstruction("kubernetes", service != nil)
+			availability.BindIntegrationConstruction("kubernetes", len(constructionErrors) == 0)
 			registerToolAvailabilityController(app, availability, service)
 			response, err := app.Test(httptest.NewRequest("GET", "/api/admin/agent/tools?agent=chat", nil), -1)
 			if err != nil || response.StatusCode != fiber.StatusOK {

@@ -172,6 +172,19 @@ spec:
             {{- end }}
             {{- end }}
                 {{- end }}
+            {{- $kubernetes := (.Values.connectors | default dict).kubernetes | default dict }}
+            {{- if $kubernetes.multiple }}
+            {{- range $cluster := $kubernetes.clusters }}
+            {{- $id := $cluster.clusterId | default $cluster.clusterID }}
+            {{- range $key := list "token" "ca_data" "client_certificate_data" "client_key_data" "aks_client_secret" "actor_token" "actor_client_certificate_data" "actor_client_key_data" "actor_aks_client_secret" }}
+            - name: KUBERNETES_CLUSTER_{{ $id | upper | replace "-" "_" }}_{{ $key | upper }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.fullname" $ }}-secrets
+                  key: kubernetes_cluster_{{ $id }}_{{ $key }}
+            {{- end }}
+            {{- end }}
+            {{- else }}
             - name: KUBERNETES_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -204,6 +217,7 @@ spec:
                   name: {{ include "versus-incident.fullname" $ }}-secrets
                   key: kubernetes_actor_{{ $key }}
             {{- end }}
+                {{- end }}
 
             {{- if .Values.alert.slack.enable }}
             - name: SLACK_ENABLE

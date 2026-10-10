@@ -35,7 +35,7 @@ func TestToolAvailabilityServiceBindsLiveSnapshot(t *testing.T) {
 
 func TestToolAvailabilityServiceBindsIntegrationConstruction(t *testing.T) {
 	service := NewToolAvailabilityService(config.AgentConfig{}, storage.NewMemory(), config.ConnectorsConfig{
-		Kubernetes: config.KubernetesToolConfig{Auth: config.KubernetesAuthConfig{Mode: "invalid"}},
+		Kubernetes: config.KubernetesConnectorConfig{KubernetesToolConfig: config.KubernetesToolConfig{Auth: config.KubernetesAuthConfig{Mode: "invalid"}}},
 	})
 	service.BindIntegrationConstruction("kubernetes", false)
 	got := service.Snapshot(tenancy.DefaultOrgScope()).Integrations["kubernetes"]

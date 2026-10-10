@@ -26,6 +26,7 @@ func (controller *KubernetesAdminController) podLogStream(ctx *fiber.Ctx) error 
 		}
 		var err error
 		switch name {
+		case "cluster":
 		case "container":
 			options.Container = strings.Clone(string(value))
 		case "cursor":

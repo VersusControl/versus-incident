@@ -1,6 +1,19 @@
 // Package tenancy defines tier-neutral organization scoping primitives.
 package tenancy
 
+import "context"
+
+type orgScopeContextKey struct{}
+
+func WithOrgScope(ctx context.Context, scope OrgScope) context.Context {
+	return context.WithValue(ctx, orgScopeContextKey{}, scope.Normalized())
+}
+
+func ContextOrgScope(ctx context.Context) (OrgScope, bool) {
+	scope, ok := ctx.Value(orgScopeContextKey{}).(OrgScope)
+	return scope.Normalized(), ok
+}
+
 // DefaultOrgID is the organization used when no explicit organization is
 // supplied. It preserves the single-tenant OSS data layout.
 const DefaultOrgID = "default"
