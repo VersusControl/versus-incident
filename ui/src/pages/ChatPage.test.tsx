@@ -4,7 +4,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError, type ChatSession } from "@/lib/api";
+import * as apiModule from "@/lib/api";
 import { ChatPage } from "./ChatPage";
+
+const role = vi.hoisted(() => ({ enterprise: false, hasSession: false, loading: false }));
+vi.mock("@/lib/useEffectiveRole", () => ({ useEffectiveRole: () => role }));
 
 vi.mock("@/components/TopBar", () => ({
   TopBar: ({ title, actions }: { title: string; actions?: React.ReactNode }) => (
@@ -57,6 +61,9 @@ function renderPage(url = "/agent/chat") {
 }
 
 beforeEach(() => {
+  role.enterprise = false;
+  role.hasSession = false;
+  vi.spyOn(api, "kubernetesClusters").mockResolvedValue({ multiple: false, clusters: [] });
   document.documentElement.removeAttribute("data-theme");
   Object.defineProperty(window, "matchMedia", {
     value: vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })),
@@ -83,6 +90,62 @@ afterEach(() => {
 });
 
 describe("ChatPage", () => {
+  it("waits for a cluster selection before resource reads and keeps the attachment cluster", async () => {
+    const entry = { health: "healthy" as const, provider: "generic", nodes: 1, ready_nodes: 1, pods: 1, running_pods: 1, warnings: 0, sync: { state: "live" }, observed_at: "2026-10-09T12:00:00Z" };
+    vi.mocked(api.kubernetesClusters).mockResolvedValue({ multiple: true, clusters: [{ ...entry, id: "one" }, { ...entry, id: "two" }] });
+    const client = { ...api, kubernetesOverview: vi.fn().mockResolvedValue({ cluster_id: "two" }), kubernetesSearch: vi.fn().mockResolvedValue({ items: [{ resource_id: "core~v1~pods", kind: "Pod", namespace: "shop", name: "api" }], truncated: false }) };
+    const factory = vi.spyOn(apiModule, "createKubernetesApi").mockReturnValue(client);
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Attach Kubernetes resource" }));
+    const selector = await screen.findByRole("combobox", { name: "Attachment cluster" });
+    expect(client.kubernetesOverview).not.toHaveBeenCalled();
+    expect(api.kubernetesOverview).not.toHaveBeenCalled();
+    fireEvent.change(selector, { target: { value: "two" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Search Kubernetes resources" }), { target: { value: "api" } });
+    fireEvent.click(await screen.findByRole("option", { name: /api/ }));
+    expect(factory).toHaveBeenCalledWith("two");
+    expect((await screen.findByRole("link", { name: /Open in topology/ })).getAttribute("href")).toContain("cluster=two");
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Investigate" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.streamChatMessage).toHaveBeenCalledWith("session-1", "Investigate", { resource: { provider: "kubernetes", cluster: "two", resource_id: "core~v1~pods", namespace: "shop", name: "api" } }, expect.any(Function), expect.any(AbortSignal)));
+    factory.mockRestore();
+  });
+
+  it.each([
+    { permissions: [], clusters: [], allowed: false },
+    { permissions: [], clusters: null, allowed: false },
+    { permissions: ["agent:approve"], clusters: ["one"], allowed: false },
+    { permissions: ["agent:approve"], clusters: ["two"], allowed: true },
+    { permissions: ["agent:approve"], clusters: [], allowed: false },
+    { permissions: ["agent:approve"], clusters: null, allowed: true },
+    { permissions: ["agent:approve"], clusters: undefined, allowed: false },
+  ])("gates action decisions using effective permission and target scope: %j", async ({ permissions, clusters, allowed }) => {
+    role.enterprise = true;
+    role.hasSession = true;
+    const me = vi.spyOn(api, "rbacMe").mockResolvedValue({ role: "admin", permissions, clusters });
+    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
+      onEvent({ seq: 1, at: "", kind: "approval_required", approval: { id: "approval-1", cluster: "two", proposal_id: "proposal-1", run_id: "run-1", type: "restart", target: "Deployment/shop/api", effect: "Restart api", risk: "medium", state: "pending", expires_at: "2026-10-09T18:00:00Z" }, approval_nonce: "nonce" });
+      return { seq: 2, at: "", kind: "run_finished" };
+    });
+    renderPage();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart api" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("region", { name: "Action approval" });
+    await waitFor(() => expect(me).toHaveBeenCalled());
+    if (allowed) {
+      fireEvent.click(await screen.findByRole("button", { name: "Approve action" }));
+      await waitFor(() => expect(api.approveAgentApproval).toHaveBeenCalledWith("approval-1", "nonce"));
+    }
+    else {
+      await screen.findByText("Action approval permission is unavailable for this target.");
+      expect(screen.queryByRole("button", { name: "Approve action" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Reject action" })).toBeNull();
+      expect(api.approveAgentApproval).not.toHaveBeenCalled();
+      expect(api.rejectAgentApproval).not.toHaveBeenCalled();
+    }
+    me.mockRestore();
+  });
+
   it("hides scroll-to-bottom after starting a new empty thread", async () => {
     const populated = {
       ...baseSession,

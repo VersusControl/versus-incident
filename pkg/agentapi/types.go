@@ -1,6 +1,10 @@
 package agentapi
 
-import "time"
+import (
+	"time"
+
+	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+)
 
 const (
 	APIVersion = "v1"
@@ -8,13 +12,19 @@ const (
 )
 
 type Bootstrap struct {
-	APIVersion string     `json:"api_version"`
-	MinClient  string     `json:"min_client"`
-	Server     ServerInfo `json:"server"`
-	Principal  Principal  `json:"principal"`
-	Profiles   []Profile  `json:"profiles"`
-	Toolsets   []Toolset  `json:"toolsets"`
-	Features   Features   `json:"features"`
+	APIVersion string             `json:"api_version"`
+	MinClient  string             `json:"min_client"`
+	Server     ServerInfo         `json:"server"`
+	Principal  Principal          `json:"principal"`
+	Profiles   []Profile          `json:"profiles"`
+	Toolsets   []Toolset          `json:"toolsets"`
+	Features   Features           `json:"features"`
+	Kubernetes *KubernetesCatalog `json:"kubernetes,omitempty"`
+}
+
+type KubernetesCatalog struct {
+	Multiple bool                        `json:"multiple"`
+	Clusters []kubernetes.ClusterSummary `json:"clusters"`
 }
 
 type ServerInfo struct {

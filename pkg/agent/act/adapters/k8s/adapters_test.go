@@ -1,17 +1,228 @@
 package k8s
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"testing"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/agent/act"
+	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
+	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 type apiFunc func(context.Context, string, string, url.Values, []byte) ([]byte, error)
+
+func TestProposalClusterAuthorizationPrecedesActorRequests(t *testing.T) {
+	calls := 0
+	api := apiFunc(func(context.Context, string, string, url.Values, []byte) ([]byte, error) {
+		calls++
+		return []byte(`{}`), nil
+	})
+	provider := storage.NewMemory()
+	service, err := act.NewService(provider, "default", ledger.NewBlobWriter(provider, "default"), nil, NewAdapters(api, Options{Cluster: "one"})...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := act.ProposalInput{Type: RolloutRestart, Target: act.TargetRef{Kind: "Deployment", Name: "api", Namespace: "shop"}, Params: json.RawMessage(`{}`)}
+	authorization := core.CallerAuthorization{Authenticated: true, Actor: "operator", Permissions: map[core.Permission]bool{core.PermissionAgentApprove: true}, Clusters: &core.ClusterScope{IDs: []string{"two"}}}
+	if _, err := service.Propose(core.WithCallerAuthorization(context.Background(), authorization), input); !errors.Is(err, act.ErrActionDenied) || calls != 0 {
+		t.Fatalf("denied implicit cluster err=%v actor requests=%d", err, calls)
+	}
+	authorization.Clusters.IDs = []string{"one"}
+	result, err := service.Propose(core.WithCallerAuthorization(context.Background(), authorization), input)
+	if err != nil || result.Proposal.Target.Cluster != "one" || result.Approval.Proposal.Target.Cluster != "one" || calls != 1 {
+		t.Fatalf("bound proposal=%+v err=%v actor requests=%d", result, err, calls)
+	}
+	service, err = act.NewService(provider, "default", ledger.NewBlobWriter(provider, "default"), nil, NewClusterAdapters(map[string]API{"one": api, "two": api}, Options{})...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Propose(core.WithCallerAuthorization(context.Background(), authorization), input); !errors.Is(err, act.ErrActionDenied) || calls != 1 {
+		t.Fatalf("multi-cluster default err=%v actor requests=%d", err, calls)
+	}
+}
+
+func TestLegacyApprovalListingIsReadOnlyAndClusterScoped(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		clusters     []string
+		direct       bool
+		scope        *core.ClusterScope
+		unauthorized bool
+		visible      bool
+	}{
+		{name: "single OSS", clusters: []string{"one"}, direct: true, visible: true},
+		{name: "single registry", clusters: []string{"one"}, visible: true},
+		{name: "authorized restricted caller", clusters: []string{"one"}, scope: &core.ClusterScope{IDs: []string{"one"}}, visible: true},
+		{name: "restricted other cluster", clusters: []string{"one"}, scope: &core.ClusterScope{IDs: []string{"two"}}},
+		{name: "restricted empty scope", clusters: []string{"one"}, scope: &core.ClusterScope{}},
+		{name: "unauthenticated", clusters: []string{"one"}, unauthorized: true},
+		{name: "multiple unrestricted", clusters: []string{"one", "two"}},
+		{name: "multiple hidden", clusters: []string{"one", "two"}, scope: &core.ClusterScope{IDs: []string{"one"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, state := range []string{"executed", "rejected", "pending", "approving"} {
+				t.Run(state, func(t *testing.T) {
+					calls := 0
+					api := apiFunc(func(context.Context, string, string, url.Values, []byte) ([]byte, error) {
+						calls++
+						return []byte(`{}`), nil
+					})
+					apis := map[string]API{}
+					for _, id := range test.clusters {
+						apis[id] = api
+					}
+					adapters := NewClusterAdapters(apis, Options{})
+					if test.direct {
+						adapters = NewAdapters(api, Options{Cluster: "one"})
+					}
+					provider := storage.NewMemory()
+					service, err := act.NewService(provider, "default", ledger.NewBlobWriter(provider, "default"), nil, adapters...)
+					if err != nil {
+						t.Fatal(err)
+					}
+					authorization := core.CallerAuthorization{Authenticated: true, Actor: "operator", Permissions: map[core.Permission]bool{core.PermissionAgentApprove: true}}
+					mutationContext := core.WithCallerAuthorization(context.Background(), authorization)
+					result, err := service.Propose(mutationContext, act.ProposalInput{Type: RolloutRestart, Target: act.TargetRef{Cluster: "one", Kind: "Deployment", Name: "api", Namespace: "shop"}, Params: json.RawMessage(`{}`)})
+					if err != nil {
+						t.Fatal(err)
+					}
+					blobs, err := provider.ListBlobs("")
+					if err != nil {
+						t.Fatal(err)
+					}
+					key := ""
+					var legacy []byte
+					for _, blob := range blobs {
+						var record struct {
+							Approval  act.Approval `json:"approval"`
+							NonceHash string       `json:"nonce_hash"`
+						}
+						if json.Unmarshal(blob.Data, &record) != nil || record.Approval.ID != result.Approval.ID {
+							continue
+						}
+						record.Approval.Proposal.Target.Cluster = ""
+						record.Approval.State = state
+						legacy, err = json.Marshal(record)
+						if err != nil {
+							t.Fatal(err)
+						}
+						key = blob.Name
+						if err := provider.WriteBlob(key, legacy); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if key == "" {
+						t.Fatal("approval record not found")
+					}
+					authorization.Clusters = test.scope
+					authorization.Authenticated = !test.unauthorized
+					ctx := core.WithCallerAuthorization(context.Background(), authorization)
+					for _, pendingOnly := range []bool{false, true} {
+						listed, err := service.Approvals(ctx, pendingOnly)
+						want := 0
+						if test.visible && (!pendingOnly || state == "pending") {
+							want = 1
+						}
+						if err != nil || len(listed) != want {
+							t.Fatalf("pendingOnly=%v listing=%+v err=%v want=%d", pendingOnly, listed, err, want)
+						}
+						if want == 1 && (listed[0].Proposal.Target.Cluster != "" || listed[0].State != state || listed[0].Proposal.BindingHash != result.Proposal.BindingHash) {
+							t.Fatalf("listing changed legacy record=%+v", listed[0])
+						}
+					}
+					if _, err := service.Approve(mutationContext, result.Approval.ID, result.Nonce, "operator"); !errors.Is(err, act.ErrActionDenied) {
+						t.Fatalf("legacy approval error=%v", err)
+					}
+					if _, err := service.Reject(mutationContext, result.Approval.ID, "not needed", "operator"); !errors.Is(err, act.ErrActionDenied) {
+						t.Fatalf("legacy rejection error=%v", err)
+					}
+					after, err := provider.ReadBlob(key)
+					if err != nil || !bytes.Equal(after, legacy) || calls != 1 {
+						t.Fatalf("legacy record or actor changed: err=%v calls=%d", err, calls)
+					}
+					afterBlobs, err := provider.ListBlobs("")
+					if err != nil || len(afterBlobs) != len(blobs) {
+						t.Fatalf("durable entries changed: err=%v", err)
+					}
+					before := map[string][]byte{}
+					for _, blob := range blobs {
+						before[blob.Name] = blob.Data
+					}
+					for _, blob := range afterBlobs {
+						if blob.Name != key && !bytes.Equal(blob.Data, before[blob.Name]) {
+							t.Fatal("ledger changed during legacy read or denied mutation")
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestClusterActionDispatch(t *testing.T) {
+	calls := map[string]int{}
+	apis := map[string]API{}
+	for _, id := range []string{"one", "two"} {
+		apis[id] = apiFunc(func(context.Context, string, string, url.Values, []byte) ([]byte, error) {
+			calls[id]++
+			return []byte(`{}`), nil
+		})
+	}
+	var adapter act.Adapter
+	for _, candidate := range NewClusterAdaptersWithOptions(apis, map[string]Options{"one": {MaxReplicas: 2}, "two": {MaxReplicas: 5}}) {
+		if candidate.Type() == Scale {
+			adapter = candidate
+		}
+	}
+	proposal := act.Proposal{Type: Scale, Target: act.TargetRef{Cluster: "two", Namespace: "shop", Kind: "Deployment", Name: "api"}, Params: json.RawMessage(`{"replicas":3}`)}
+	if maximum := adapter.Schema()["properties"].(map[string]any)["replicas"].(map[string]any)["maximum"]; maximum != 5 {
+		t.Fatalf("shared replica maximum=%v", maximum)
+	}
+	if _, err := adapter.(act.TargetResolver).ResolveTarget(act.TargetRef{}); err == nil {
+		t.Fatal("multi-cluster resolver defaulted an empty target")
+	}
+	if _, err := adapter.DryRun(context.Background(), proposal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Execute(context.Background(), proposal); err != nil || calls["one"] != 0 || calls["two"] != 2 {
+		t.Fatalf("dispatch %v %v", calls, err)
+	}
+	for _, id := range []string{"", "unknown", "one"} {
+		proposal.Target.Cluster = id
+		if _, err := adapter.Execute(context.Background(), proposal); err == nil {
+			t.Fatalf("invalid cluster/limit %q accepted", id)
+		}
+	}
+	if calls["one"] != 0 || calls["two"] != 2 {
+		t.Fatal("invalid target reached actor")
+	}
+}
+
+func TestSingleClusterTargetResolution(t *testing.T) {
+	adapter := NewAdapters(apiFunc(func(context.Context, string, string, url.Values, []byte) ([]byte, error) {
+		t.Fatal("target resolution reached actor")
+		return nil, nil
+	}), Options{Cluster: "one"})[0].(act.TargetResolver)
+	target, err := adapter.ResolveTarget(act.TargetRef{Name: "api"})
+	if err != nil || target.Cluster != "one" || target.Name != "api" {
+		t.Fatalf("resolved target=%+v err=%v", target, err)
+	}
+	if _, err := adapter.ResolveTarget(act.TargetRef{Cluster: "two"}); err == nil {
+		t.Fatal("mismatched cluster accepted")
+	}
+	for _, candidate := range NewClusterAdapters(map[string]API{"one": apiFunc(func(context.Context, string, string, url.Values, []byte) ([]byte, error) { return nil, nil })}, Options{MaxReplicas: 7}) {
+		if candidate.Type() == Scale && candidate.Schema()["properties"].(map[string]any)["replicas"].(map[string]any)["maximum"] != 7 {
+			t.Fatal("uniform replica limit missing from cluster schema")
+		}
+	}
+}
 
 func (function apiFunc) Do(ctx context.Context, method, path string, query url.Values, body []byte) ([]byte, error) {
 	return function(ctx, method, path, query, body)

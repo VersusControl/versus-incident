@@ -93,7 +93,7 @@ func BuildAIs(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, 
 }
 
 // BuildAIsWithKubernetes reuses the connector service already registered for HTTP.
-func BuildAIsWithKubernetes(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, httpClient *http.Client, kubernetesService *kubernetes.Service, connectors ...config.ConnectorsConfig) AIBundle {
+func BuildAIsWithKubernetes(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, httpClient *http.Client, kubernetesService *kubernetes.ServiceRegistry, connectors ...config.ConnectorsConfig) AIBundle {
 	return buildAIs(cfg, connectorDependency(connectors), catalog, store, tenancy.DefaultOrgScope(), httpClient, nil, kubernetesService)
 }
 
@@ -114,7 +114,7 @@ func BuildAIsForScopeWithChatLocation(cfg config.AgentConfig, catalog *Catalog, 
 
 // BuildAIsForScopeWithChatLocationAndKubernetes reuses the connector service
 // already registered for HTTP while preserving scoped reads and chat time.
-func BuildAIsForScopeWithChatLocationAndKubernetes(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location, kubernetesService *kubernetes.Service, connectors ...config.ConnectorsConfig) AIBundle {
+func BuildAIsForScopeWithChatLocationAndKubernetes(cfg config.AgentConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location, kubernetesService *kubernetes.ServiceRegistry, connectors ...config.ConnectorsConfig) AIBundle {
 	return buildAIs(cfg, connectorDependency(connectors), catalog, store, scope.Normalized(), httpClient, locationProvider, kubernetesService)
 }
 
@@ -125,7 +125,7 @@ func connectorDependency(connectors []config.ConnectorsConfig) config.Connectors
 	return config.ConnectorsConfig{}
 }
 
-func buildAIs(cfg config.AgentConfig, connectors config.ConnectorsConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location, kubernetesService *kubernetes.Service) AIBundle {
+func buildAIs(cfg config.AgentConfig, connectors config.ConnectorsConfig, catalog *Catalog, store storage.Provider, scope tenancy.OrgScope, httpClient *http.Client, locationProvider func() *time.Location, kubernetesService *kubernetes.ServiceRegistry) AIBundle {
 	toolSettings := aitools.NewManager(store)
 	configuredToolSnapshot := configuredToolAvailabilitySnapshot(cfg, store, connectors)
 	elasticsearchSources, elasticsearchErrs := buildElasticsearchToolSources(cfg.Sources)
@@ -133,28 +133,35 @@ func buildAIs(cfg config.AgentConfig, connectors config.ConnectorsConfig, catalo
 		log.Printf("agent: Elasticsearch tool source warning: %v", err)
 	}
 	configuredToolSnapshot.DataSources["elasticsearch"] = elasticsearchConstructionStatus(configuredToolSnapshot.DataSources["elasticsearch"], elasticsearchSources, elasticsearchErrs)
-	var kubernetesErr error
 	if kubernetesService == nil {
-		kubernetesService, kubernetesErr = NewKubernetesService(connectors.Kubernetes, scope)
+		kubernetesService, _ = NewKubernetesRegistry(connectors.Kubernetes, scope)
 	}
-	if kubernetesErr != nil {
+	constructedClusters := 0
+	kubernetesService.Each(func(service *kubernetes.Service) { constructedClusters++; service.SetChangeStorage(store) })
+	if constructedClusters == 0 && len(kubernetesService.Clusters()) > 0 {
 		status := configuredToolSnapshot.Integrations["kubernetes"]
 		status.Constructed = false
 		status.Healthy = false
 		status.Health = "configuration"
 		configuredToolSnapshot.Integrations["kubernetes"] = status
-	} else if kubernetesService != nil {
-		kubernetesService.SetChangeStorage(store)
+	} else if constructedClusters > 0 {
 		status := configuredToolSnapshot.Integrations["kubernetes"]
 		status.Configured = true
 		status.Constructed = true
 		status.Healthy = true
+		if constructedClusters < len(kubernetesService.Clusters()) {
+			status.Health = "partial"
+		}
 		configuredToolSnapshot.Integrations["kubernetes"] = status
 	}
 	var actionService *act.Service
 	var actionServiceFactory func(tenancy.OrgScope) *act.Service
-	actionStatus := aitools.DependencyStatus{Configured: connectors.Kubernetes.Actions.Enable, Health: "configuration"}
-	if connectors.Kubernetes.Actions.Enable {
+	actionsEnabled := false
+	for _, entry := range connectors.Kubernetes.Resolved() {
+		actionsEnabled = actionsEnabled || entry.Actions.Enable
+	}
+	actionStatus := aitools.DependencyStatus{Configured: actionsEnabled, Health: "configuration"}
+	if actionsEnabled {
 		adapters, actionErr := buildKubernetesActionAdapters(connectors.Kubernetes)
 		if actionErr == nil && store != nil && len(adapters) > 0 {
 			actionService, actionErr = act.NewService(store, scope.Normalized().Write, ledger.NewBlobWriter(store, scope.Normalized().Write), nil, adapters...)
@@ -277,7 +284,7 @@ func buildAIs(cfg config.AgentConfig, connectors config.ConnectorsConfig, catalo
 			log.Printf("agent: baseline provider contributor warning: %v", e)
 		}
 		if kubernetesService != nil {
-			kubernetesService.SetScrubber(redactor)
+			kubernetesService.Each(func(service *kubernetes.Service) { service.SetScrubber(redactor) })
 		}
 		serviceMatcher, svcErrs := NewServiceMatcher(cfg.ServicePatterns)
 		for _, e := range svcErrs {
@@ -302,7 +309,7 @@ func buildAIs(cfg config.AgentConfig, connectors config.ConnectorsConfig, catalo
 		configuredToolSnapshot.Integrations["github"] = configuredGit
 		var kubernetesChanges commontools.ChangeFeed
 		if kubernetesService != nil && store != nil {
-			kubernetesChanges = newKubernetesChangeFeed(kubernetesService)
+			kubernetesChanges = newKubernetesRegistryChangeFeed(kubernetesService, scope)
 		}
 		changes := mergeChangeFeeds(gitChanges, kubernetesChanges, newActionChangeFeed(actionService))
 
@@ -335,7 +342,7 @@ func buildAIs(cfg config.AgentConfig, connectors config.ConnectorsConfig, catalo
 			runtimeTools = append(runtimeTools, baselineTool)
 		}
 		runtimeTools = append(runtimeTools, elasticsearchtools.New(elasticsearchSources)...)
-		runtimeTools = append(runtimeTools, k8stools.New(kubernetesService)...)
+		runtimeTools = append(runtimeTools, k8stools.NewForRegistry(kubernetesService)...)
 		var extensionLogTools, otherExtensions []core.Tool
 		for _, candidate := range extensionTools {
 			if candidate.Name() == "discover_log_fields" || candidate.Name() == "read_log_records" {
@@ -631,12 +638,21 @@ func configuredToolAvailabilitySnapshot(cfg config.AgentConfig, store storage.Pr
 			"metrics":       metrics,
 			"traces":        traces,
 		},
-		Integrations: map[string]aitools.DependencyStatus{"github": configured(hasGit, "GitHub"), "kubernetes": configured(strings.TrimSpace(connectors.Kubernetes.Endpoint) != "" || strings.TrimSpace(connectors.Kubernetes.Auth.Mode) != "", "Kubernetes cluster")},
+		Integrations: map[string]aitools.DependencyStatus{"github": configured(hasGit, "GitHub"), "kubernetes": configured(kubernetesConfigured(connectors.Kubernetes), "Kubernetes cluster")},
 		Capabilities: map[string]aitools.DependencyStatus{
 			"ai_embedder": configured(hasEmbedder, "AI embedder"), "runbook_index": configured(hasEmbedder && store != nil, "Runbook index"), "dependency_graph": configured(hasGraph, "Dependency graph"),
-			"change_feed": configured(hasGit || (store != nil && (strings.TrimSpace(connectors.Kubernetes.Endpoint) != "" || strings.TrimSpace(connectors.Kubernetes.Auth.Mode) != "")), "Change feed"),
+			"change_feed": configured(hasGit || (store != nil && kubernetesConfigured(connectors.Kubernetes)), "Change feed"),
 		},
 	}
+}
+
+func kubernetesConfigured(connector config.KubernetesConnectorConfig) bool {
+	for _, entry := range connector.Resolved() {
+		if strings.TrimSpace(entry.Endpoint) != "" || strings.TrimSpace(entry.Auth.Mode) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func buildToolAvailabilitySnapshot(configured aitools.Snapshot, reader commontools.SignalReader, graph *commontools.DependencyGraph, changes commontools.ChangeFeed, embedder core.Embedder, runbooks commontools.RunbookSearcher, health versustools.DetectionHealthSnapshot) aitools.Snapshot {

@@ -140,16 +140,17 @@ type AgentRegexConfig struct {
 }
 
 type AgentSourceConfig struct {
-	Name           string                          `mapstructure:"name"`
-	Type           string                          `mapstructure:"type"` // "elasticsearch" | "file" | "loki" | "cloudwatchlogs" | "graylog" | "splunk" | "signoz" | <registered type, e.g. "prometheus"/"traces" via Versus Enterprise>
-	Enable         bool                            `mapstructure:"enable"`
-	Elasticsearch  AgentElasticsearchSourceConfig  `mapstructure:"elasticsearch"`
-	File           AgentFileSourceConfig           `mapstructure:"file"`
-	Loki           AgentLokiSourceConfig           `mapstructure:"loki"`
-	CloudWatchLogs AgentCloudWatchLogsSourceConfig `mapstructure:"cloudwatchlogs"`
-	Graylog        AgentGraylogSourceConfig        `mapstructure:"graylog"`
-	Splunk         AgentSplunkSourceConfig         `mapstructure:"splunk"`
-	Signoz         AgentSignozSourceConfig         `mapstructure:"signoz"`
+	Name              string                          `mapstructure:"name"`
+	Type              string                          `mapstructure:"type"` // "elasticsearch" | "file" | "loki" | "cloudwatchlogs" | "graylog" | "splunk" | "signoz" | <registered type, e.g. "prometheus"/"traces" via Versus Enterprise>
+	Enable            bool                            `mapstructure:"enable"`
+	KubernetesCluster string                          `mapstructure:"kubernetes_cluster"`
+	Elasticsearch     AgentElasticsearchSourceConfig  `mapstructure:"elasticsearch"`
+	File              AgentFileSourceConfig           `mapstructure:"file"`
+	Loki              AgentLokiSourceConfig           `mapstructure:"loki"`
+	CloudWatchLogs    AgentCloudWatchLogsSourceConfig `mapstructure:"cloudwatchlogs"`
+	Graylog           AgentGraylogSourceConfig        `mapstructure:"graylog"`
+	Splunk            AgentSplunkSourceConfig         `mapstructure:"splunk"`
+	Signoz            AgentSignozSourceConfig         `mapstructure:"signoz"`
 	// Options is a generic per-source settings block consumed by source
 	// types resolved through the runtime registration hook
 	// (signalsources.Register) rather than built into OSS — e.g. the

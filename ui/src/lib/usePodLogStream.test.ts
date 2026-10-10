@@ -1,14 +1,40 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, type KubernetesPodLogEvent } from "@/lib/api";
 import { SSELimitError } from "@/lib/sse";
 import { appendPodLogLines, POD_LOG_MAX_BYTES, usePodLogStream } from "./usePodLogStream";
+import { KubernetesClusterContext, kubernetesKey } from "./useKubernetesCluster";
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
 const options = { namespace: "shop", pod: "api", container: "app", previous: false, since: 3600, tail: 500, paused: false, restart: 0 };
 
 describe("Pod log stream lifecycle", () => {
+  it("aborts and clears buffers and cursors when identical Pod targets switch clusters", async () => {
+    let emit: (event: KubernetesPodLogEvent) => void = () => undefined;
+    const stream = vi.fn<typeof api.kubernetesPodLogStream>((_namespace, _pod, _options, callback, signal) => {
+      emit = callback;
+      return new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    });
+    const client = { ...api, kubernetesPodLogStream: stream };
+    let cluster = "one";
+    const wrapper = ({ children }: { children: ReactNode }) => createElement(KubernetesClusterContext.Provider, { value: { multiple: true, cluster, clusters: [], client, key: (...parts) => kubernetesKey(cluster, ...parts) } }, children);
+    const { result, rerender, unmount } = renderHook(() => usePodLogStream(options), { wrapper });
+    act(() => emit({ event: "line", text: "from-one", container: "app", cursor: "one-cursor" }));
+    await act(async () => undefined);
+    const firstSignal = stream.mock.calls[0][4];
+    cluster = "two";
+    rerender();
+    expect(firstSignal.aborted).toBe(true);
+    expect(stream).toHaveBeenCalledTimes(2);
+    expect(stream.mock.calls[1][2]).not.toHaveProperty("cursor");
+    expect(result.current.buffer.lines).toHaveLength(0);
+    act(() => emit({ event: "line", text: "from-two", container: "app", cursor: "two-cursor" }));
+    unmount();
+    expect(stream.mock.calls[1][4].aborted).toBe(true);
+  });
+
   it("exhausts error-only checkpoints without losing the backend cause or restarting on resume", async () => {
     vi.useFakeTimers();
     const stream = vi.spyOn(api, "kubernetesPodLogStream").mockImplementation(async (_namespace, _pod, _options, emit) => {

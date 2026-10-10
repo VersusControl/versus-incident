@@ -11,10 +11,48 @@ import (
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 type kubernetesChangeFeed struct {
 	service *kubernetes.Service
+}
+
+type kubernetesRegistryChangeFeed struct {
+	registry *kubernetes.ServiceRegistry
+	scope    tenancy.OrgScope
+}
+
+func newKubernetesRegistryChangeFeed(registry *kubernetes.ServiceRegistry, scope tenancy.OrgScope) commontools.ChangeFeed {
+	if registry == nil || len(registry.Clusters()) == 0 {
+		return nil
+	}
+	return kubernetesRegistryChangeFeed{registry: registry, scope: scope.Normalized()}
+}
+
+func (feed kubernetesRegistryChangeFeed) Changes(ctx context.Context, since time.Time) ([]commontools.ChangeRecord, error) {
+	result := []commontools.ChangeRecord{}
+	if !core.CallerAuthorized(ctx, core.PermissionInfrastructureView) {
+		return result, nil
+	}
+	orgID := feed.scope.Write
+	if scope, ok := tenancy.ContextOrgScope(ctx); ok {
+		orgID = scope.Write
+	}
+	for _, info := range feed.registry.Clusters() {
+		if !core.CallerClusterAllowed(ctx, info.ID) {
+			continue
+		}
+		service, err := feed.registry.ResolveCluster(orgID, info.ID)
+		if err != nil {
+			continue
+		}
+		changes, err := (kubernetesChangeFeed{service: service}).Changes(ctx, since)
+		if err == nil {
+			result = append(result, changes...)
+		}
+	}
+	return result, nil
 }
 
 func newKubernetesChangeFeed(service *kubernetes.Service) commontools.ChangeFeed {
@@ -28,7 +66,7 @@ func (feed kubernetesChangeFeed) Changes(ctx context.Context, since time.Time) (
 	if !core.CallerAuthorized(ctx, core.PermissionInfrastructureView) {
 		return []commontools.ChangeRecord{}, nil
 	}
-	if feed.service == nil {
+	if feed.service == nil || !core.CallerClusterAllowed(ctx, feed.service.Scope().ClusterID) {
 		return nil, nil
 	}
 	page, err := feed.service.Changes(ctx, kubernetes.ChangeQuery{Since: since, Until: time.Now().UTC(), Limit: 500})

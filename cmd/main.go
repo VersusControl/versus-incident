@@ -210,19 +210,23 @@ func main() {
 	// one.
 	var agentDone <-chan struct{}
 	toolAvailability := agent.NewToolAvailabilityService(cfg.Agent, store, cfg.Connectors)
-	kubernetesService, kubernetesErr := agent.NewKubernetesService(cfg.Connectors.Kubernetes, tenancy.DefaultOrgScope())
-	if kubernetesErr != nil {
+	kubernetesService, kubernetesErrors := agent.NewKubernetesRegistry(cfg.Connectors.Kubernetes, tenancy.DefaultOrgScope())
+	for _, kubernetesErr := range kubernetesErrors {
 		log.Printf("kubernetes: connector unavailable: %v", kubernetesErr)
 	}
-	if kubernetesService != nil {
-		kubernetesService.SetLogStreamContext(rootCtx)
-		kubernetesService.SetChangeStorage(store)
+	constructed := 0
+	redactor, _ := agent.NewRedactor(cfg.Agent.Redaction.Enable && cfg.Agent.Redaction.RedactIPs, cfg.Agent.Redaction.ExtraPatterns)
+	kubernetesService.Each(func(service *kubernetes.Service) {
+		constructed++
+		service.SetLogStreamContext(rootCtx)
+		service.SetChangeStorage(store)
+		service.SetScrubber(redactor)
+	})
+	constructionHealth := ""
+	if constructed > 0 && constructed < len(kubernetesService.Clusters()) {
+		constructionHealth = "partial"
 	}
-	toolAvailability.BindIntegrationConstruction("kubernetes", kubernetesService != nil)
-	if kubernetesService != nil {
-		redactor, _ := agent.NewRedactor(cfg.Agent.Redaction.Enable && cfg.Agent.Redaction.RedactIPs, cfg.Agent.Redaction.ExtraPatterns)
-		kubernetesService.SetScrubber(redactor)
-	}
+	toolAvailability.BindIntegrationConstruction("kubernetes", constructed > 0, constructionHealth)
 	registerToolAvailabilityController(app, toolAvailability, kubernetesService)
 	if cfg.Agent.Enable {
 		// Try to attach to the existing Redis client; if on-call wasn't
@@ -287,14 +291,17 @@ func main() {
 // that follows it, short enough to stay inside a container stop's grace period.
 const agentFlushGrace = 15 * time.Second
 
-func registerToolAvailabilityController(app *fiber.App, availability *agent.ToolAvailabilityService, services ...*kubernetes.Service) {
+func registerToolAvailabilityController(app *fiber.App, availability *agent.ToolAvailabilityService, services ...*kubernetes.ServiceRegistry) {
 	controllers.NewAgentToolsAdminController(availability.Manager, availability.Snapshot).Register(app.Group("/api"))
-	var kubernetesService *kubernetes.Service
+	registry := kubernetes.NewServiceRegistry(nil)
 	if len(services) > 0 {
-		kubernetesService = services[0]
+		registry = services[0]
 	}
-	registry := kubernetes.NewServiceRegistry(kubernetesService)
-	controllers.SetChatKubernetesServiceResolver(func(orgID string) *kubernetes.Service { return registry.ResolveOrg(orgID) })
+	controllers.SetChatKubernetesServiceResolver(func(orgID, clusterID string) *kubernetes.Service {
+		service, _ := registry.ResolveCluster(orgID, clusterID)
+		return service
+	})
+	controllers.SetChatKubernetesRegistry(registry)
 	controllers.NewKubernetesAdminControllerWithRegistry(registry).Register(app.Group("/api"))
 }
 
@@ -302,7 +309,7 @@ func registerToolAvailabilityController(app *fiber.App, availability *agent.Tool
 // admin routes on the fiber app. It returns the catalog so the caller can
 // hold a reference (and so future hot-reload code has a handle to it), plus a
 // channel that closes when the worker has finished its shutdown flush.
-func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, connectors c.ConnectorsConfig, gatewaySecret string, store storage.Provider, rdb redis.UniversalClient, toolAvailability *agent.ToolAvailabilityService, kubernetesService *kubernetes.Service, healthManager *servicehealth.Manager) (*agent.Catalog, <-chan struct{}, error) {
+func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, connectors c.ConnectorsConfig, gatewaySecret string, store storage.Provider, rdb redis.UniversalClient, toolAvailability *agent.ToolAvailabilityService, kubernetesService *kubernetes.ServiceRegistry, healthManager *servicehealth.Manager) (*agent.Catalog, <-chan struct{}, error) {
 	// On the Postgres backend, install the typed signal-table
 	// catalog store so the log catalog reads/writes the explicit
 	// vs_patterns/vs_logs/vs_services tables (searchable, indexed) instead of

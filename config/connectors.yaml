@@ -6,3 +6,16 @@ connectors:
       enable: false
       auth:
         mode: ""
+
+# Multi-cluster form replaces the single connection block above.
+# connectors:
+#   kubernetes:
+#     multiple: true
+#     clusters:
+#       - cluster_id: production
+#         display_name: Production
+#         endpoint: https://production.example
+#         auth: {mode: token_file, token_file: /run/k8s/production/token}
+#       - cluster_id: staging
+#         endpoint: https://staging.example
+#         auth: {mode: token_file, token_file: /run/k8s/staging/token}

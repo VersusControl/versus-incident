@@ -254,42 +254,117 @@ func (service *Service) Scope() Scope {
 
 // ServiceRegistry resolves one shared service instance per org, cluster, and credential.
 type ServiceRegistry struct {
-	mu       sync.Mutex
-	base     *Service
-	services map[string]*Service
+	mu             sync.Mutex
+	base           *Service
+	services       map[string]*Service
+	multiple       bool
+	entries        []ClusterEntry
+	summaries      map[string]clusterSummaryCache
+	summarySlots   chan struct{}
+	summaryTimeout time.Duration
 }
 
 func NewServiceRegistry(base *Service) *ServiceRegistry {
-	registry := &ServiceRegistry{base: base, services: make(map[string]*Service)}
-	if base != nil {
-		registry.services[base.cacheKey()] = base
+	if base == nil {
+		return NewClusterRegistry(false, nil)
+	}
+	return NewClusterRegistry(false, []ClusterEntry{{Info: ClusterInfo{ID: base.Scope().ClusterID, Provider: "generic"}, Service: base}})
+}
+
+type ClusterInfo struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name,omitempty"`
+	Provider    string `json:"provider"`
+}
+
+type ClusterEntry struct {
+	Info    ClusterInfo
+	Service *Service
+	Err     error
+}
+
+func NewClusterRegistry(multiple bool, entries []ClusterEntry) *ServiceRegistry {
+	registry := &ServiceRegistry{multiple: multiple, entries: append([]ClusterEntry(nil), entries...), services: make(map[string]*Service), summaries: make(map[string]clusterSummaryCache), summarySlots: make(chan struct{}, 4), summaryTimeout: 5 * time.Second}
+	for index, entry := range registry.entries {
+		if entry.Info.ID == "" && entry.Service != nil {
+			registry.entries[index].Info.ID = entry.Service.Scope().ClusterID
+		}
+		if index == 0 {
+			registry.base = entry.Service
+		}
+		if entry.Service != nil {
+			registry.services[entry.Service.cacheKey()] = entry.Service
+		}
 	}
 	return registry
 }
 
+func (registry *ServiceRegistry) Multiple() bool { return registry != nil && registry.multiple }
+
+func (registry *ServiceRegistry) Clusters() []ClusterInfo {
+	result := []ClusterInfo{}
+	if registry != nil {
+		for _, entry := range registry.entries {
+			result = append(result, entry.Info)
+		}
+	}
+	return result
+}
+
+func (registry *ServiceRegistry) Each(visit func(*Service)) {
+	if registry != nil && visit != nil {
+		for _, entry := range registry.entries {
+			if entry.Service != nil {
+				visit(entry.Service)
+			}
+		}
+	}
+}
+
+func (registry *ServiceRegistry) ResolveCluster(orgID, clusterID string) (*Service, error) {
+	if registry == nil || len(registry.entries) == 0 {
+		return nil, ErrClusterNotFound
+	}
+	if clusterID == "" {
+		if registry.multiple {
+			return nil, ErrClusterRequired
+		}
+		clusterID = registry.entries[0].Info.ID
+	}
+	for _, entry := range registry.entries {
+		if entry.Info.ID != clusterID {
+			continue
+		}
+		if entry.Err != nil || entry.Service == nil {
+			return nil, ErrClusterUnavailable
+		}
+		scope := entry.Service.Scope()
+		scope.OrgID = orgID
+		registry.mu.Lock()
+		defer registry.mu.Unlock()
+		key := scope.OrgID + "\x00" + scope.ClusterID + "\x00" + scope.CredentialID
+		if service := registry.services[key]; service != nil {
+			return service, nil
+		}
+		service := entry.Service.Scoped(scope)
+		registry.services[key] = service
+		return service, nil
+	}
+	return nil, ErrClusterNotFound
+}
+
 func (registry *ServiceRegistry) Resolve(scope Scope) *Service {
-	if registry == nil || registry.base == nil {
-		return nil
-	}
-	registry.mu.Lock()
-	defer registry.mu.Unlock()
-	key := scope.OrgID + "\x00" + scope.ClusterID + "\x00" + scope.CredentialID
-	if service := registry.services[key]; service != nil {
-		return service
-	}
-	service := registry.base.Scoped(scope)
-	registry.services[key] = service
+	service, _ := registry.ResolveCluster(scope.OrgID, scope.ClusterID)
 	return service
 }
 
 // ResolveOrg inherits the configured cluster and credential while changing org scope.
 func (registry *ServiceRegistry) ResolveOrg(orgID string) *Service {
-	if registry == nil || registry.base == nil {
+	if registry == nil || len(registry.entries) == 0 {
 		return nil
 	}
-	scope := registry.base.Scope()
-	scope.OrgID = orgID
-	return registry.Resolve(scope)
+	service, _ := registry.ResolveCluster(orgID, registry.entries[0].Info.ID)
+	return service
 }
 
 // InvalidateDiscovery expires only this service's scoped discovery generation.

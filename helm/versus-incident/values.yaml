@@ -410,6 +410,8 @@ agent:
 
 connectors:
   kubernetes:
+    multiple: false
+    clusters: []
     endpoint: ""
     caFile: ""
     caData: ""

@@ -12,6 +12,32 @@ import (
 )
 
 // NewKubernetesService builds the shared read-only connector for one org scope.
+func NewKubernetesRegistry(cfg config.KubernetesConnectorConfig, scope tenancy.OrgScope) (*kubernetes.ServiceRegistry, []error) {
+	entries := []kubernetes.ClusterEntry{}
+	errorsFound := []error{}
+	for _, entry := range cfg.Resolved() {
+		service, err := NewKubernetesService(entry.KubernetesToolConfig, scope)
+		if service == nil && err == nil && !cfg.Multiple {
+			continue
+		}
+		id := entry.ClusterID
+		if id == "" {
+			id = "default"
+		}
+		provider := entry.Auth.Mode
+		switch provider {
+		case "eks", "aks", "gke", "in_cluster":
+		default:
+			provider = "generic"
+		}
+		if err != nil {
+			errorsFound = append(errorsFound, err)
+		}
+		entries = append(entries, kubernetes.ClusterEntry{Info: kubernetes.ClusterInfo{ID: id, DisplayName: entry.DisplayName, Provider: provider}, Service: service, Err: err})
+	}
+	return kubernetes.NewClusterRegistry(cfg.Multiple, entries), errorsFound
+}
+
 func NewKubernetesService(cfg config.KubernetesToolConfig, scope tenancy.OrgScope) (*kubernetes.Service, error) {
 	mode := strings.TrimSpace(cfg.Auth.Mode)
 	if mode == "" && !reflect.ValueOf(cfg.Auth).IsZero() {

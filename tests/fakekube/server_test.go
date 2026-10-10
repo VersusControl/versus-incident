@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/agent"
+	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
@@ -26,6 +27,29 @@ type gatedLogWriter struct {
 	writes  chan string
 	release chan struct{}
 	flushed chan struct{}
+}
+
+func TestFleetSummaryVersionAndIssues(t *testing.T) {
+	entries := []kubernetes.ClusterEntry{}
+	for _, id := range []string{"east", "west"} {
+		backend, err := NewServer(Config{Scenario: "fleet-" + id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := httptest.NewServer(backend)
+		t.Cleanup(server.Close)
+		client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, kubernetes.ClusterEntry{Info: kubernetes.ClusterInfo{ID: id, Provider: "generic"}, Service: kubernetes.NewService(client, kubernetes.Scope{ClusterID: id}, time.Minute)})
+	}
+	summaries := kubernetes.NewClusterRegistry(true, entries).Summaries(t.Context(), "default", nil)
+	for index, summary := range summaries {
+		if summary.Version != "v1.30.4" || summary.Issues == nil || *summary.Issues != 0 || summary.Nodes != index+1 || summary.Pods != index+2 {
+			t.Fatalf("fleet summary=%+v", summary)
+		}
+	}
 }
 
 func (writer *gatedLogWriter) Write(body []byte) (int, error) {
@@ -153,24 +177,34 @@ func TestPodLogFixtureContainersAndPreviousAvailability(t *testing.T) {
 	path := "/api/v1/namespaces/payments/pods/checkout-api-0/log"
 	for _, container := range []string{"api", "sidecar", "setup", "debug"} {
 		for _, previous := range []bool{false, true} {
-			response := httptest.NewRecorder()
-			query := "?container=" + container
-			if previous {
-				query += "&previous=true&follow=false&timestamps=true"
-			}
-			server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path+query, nil))
-			unavailable := previous && (container == "setup" || container == "debug")
-			if unavailable {
-				if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "previous terminated container instance unavailable") {
-					t.Fatalf("previous availability container=%s status=%d", container, response.Code)
+			for _, streaming := range []bool{false, true} {
+				response := httptest.NewRecorder()
+				query := "?container=" + container
+				if previous {
+					query += "&previous=true"
+					if streaming {
+						query += "&follow=false&timestamps=true"
+					}
 				}
-			} else if response.Code != http.StatusOK || container != "api" && !strings.Contains(response.Body.String(), "container="+container) || previous && !strings.Contains(response.Body.String(), "fakekube previous") {
-				t.Fatalf("selected log container=%s previous=%v status=%d", container, previous, response.Code)
+				server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path+query, nil))
+				unavailable := previous && (container == "setup" || container == "debug")
+				if unavailable {
+					var status map[string]any
+					if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+						t.Fatalf("previous Status container=%s: %v", container, err)
+					}
+					wantMessage := `previous terminated container "` + container + `" in pod "checkout-api-0" not found`
+					if response.Code != http.StatusBadRequest || response.Header().Get("Content-Type") != "application/json" || response.Header().Get("X-Content-Type-Options") != "nosniff" || response.Body.Len() > 4096 || status["kind"] != "Status" || status["apiVersion"] != "v1" || status["status"] != "Failure" || status["reason"] != "BadRequest" || status["code"] != float64(400) || status["message"] != wantMessage {
+						t.Fatalf("previous availability container=%s streaming=%v status=%d body=%s", container, streaming, response.Code, response.Body.String())
+					}
+				} else if response.Code != http.StatusOK || container != "api" && !strings.Contains(response.Body.String(), "container="+container) || previous && (streaming || container != "api") && !strings.Contains(response.Body.String(), "fakekube previous") {
+					t.Fatalf("selected log container=%s previous=%v status=%d", container, previous, response.Code)
+				}
 			}
 		}
 	}
 	for _, counter := range server.logStreamCounters() {
-		if counter.Active != 0 || counter.Requests != 1 || counter.Cancelled != 0 || counter.Previous && (counter.Container == "setup" || counter.Container == "debug") && counter.Unavailable != 1 || (!counter.Previous || counter.Container == "api" || counter.Container == "sidecar") && counter.Completed != 1 {
+		if counter.Active != 0 || counter.Requests != 2 || counter.Cancelled != 0 || counter.Previous && (counter.Container == "setup" || counter.Container == "debug") && counter.Unavailable != 2 || (!counter.Previous || counter.Container == "api" || counter.Container == "sidecar") && counter.Completed != 2 {
 			t.Fatalf("finite observer: %#v", counter)
 		}
 	}
@@ -188,6 +222,60 @@ func TestPodLogFixtureContainersAndPreviousAvailability(t *testing.T) {
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/namespaces/payments/pods/metadata-only/log", nil))
 	if response.Code != http.StatusOK || !strings.HasSuffix(response.Body.String(), " fakekube log line\n") {
 		t.Fatal("metadata-only finite compatibility changed")
+	}
+}
+
+func TestPodLogFixturePreviousUnavailableDiagnosis(t *testing.T) {
+	server, err := NewServer(Config{Scenario: "triage"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server)
+	t.Cleanup(httpServer.Close)
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: httpServer.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "fakekube"}, 0)
+	redactor, errs := agent.NewRedactor(false, nil)
+	if len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	service.SetScrubber(redactor)
+	ctx := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
+	for _, container := range []string{"setup", "debug", "missing"} {
+		events := 0
+		err := service.StreamPodLogs(ctx, kubernetes.PodLogStreamOptions{Namespace: "payments", Pod: "checkout-api-0", Container: container, Previous: true}, func(kubernetes.PodLogStreamEvent) error { events++; return nil })
+		detail := kubernetes.DiagnoseError(err)
+		want := "previous_unavailable"
+		if container == "missing" {
+			want = "invalid_arguments"
+		}
+		if err == nil || detail.Code != want || detail.Retryable || events != 0 {
+			t.Fatalf("container=%s diagnosis=%+v events=%d err=%v", container, detail, events, err)
+		}
+		if want == "previous_unavailable" && (detail.Message != "Previous container logs are unavailable." || detail.Action != "Select current container logs.") {
+			t.Fatalf("unsafe previous diagnosis: %+v", detail)
+		}
+	}
+}
+
+func TestPreviousUnavailableStatusBounds(t *testing.T) {
+	for _, name := range []string{"setup", strings.Repeat("a", 253), "", strings.Repeat("a", 254), "private\"\r\nprovider-detail", "private\\provider-detail"} {
+		response := httptest.NewRecorder()
+		writePreviousUnavailable(response, name, name)
+		var status map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+			t.Fatal(err)
+		}
+		wantName := "unknown"
+		if name == "setup" || name == strings.Repeat("a", 253) {
+			wantName = name
+		}
+		wantMessage := `previous terminated container "` + wantName + `" in pod "` + wantName + `" not found`
+		if response.Code != http.StatusBadRequest || response.Body.Len() > 4096 || status["message"] != wantMessage {
+			t.Fatalf("unbounded or unsafe Status: %s", response.Body.String())
+		}
 	}
 }
 

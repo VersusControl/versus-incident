@@ -3,10 +3,13 @@ package config
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net/netip"
+	"net/url"
 	"os"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -15,7 +18,25 @@ import (
 )
 
 type ConnectorsConfig struct {
-	Kubernetes KubernetesToolConfig `mapstructure:"kubernetes"`
+	Kubernetes KubernetesConnectorConfig `mapstructure:"kubernetes"`
+}
+
+type KubernetesConnectorConfig struct {
+	Multiple             bool `mapstructure:"multiple"`
+	KubernetesToolConfig `mapstructure:",squash"`
+	Clusters             []KubernetesClusterConfig `mapstructure:"clusters"`
+}
+
+type KubernetesClusterConfig struct {
+	DisplayName          string `mapstructure:"display_name"`
+	KubernetesToolConfig `mapstructure:",squash"`
+}
+
+func (connector KubernetesConnectorConfig) Resolved() []KubernetesClusterConfig {
+	if connector.Multiple {
+		return append([]KubernetesClusterConfig(nil), connector.Clusters...)
+	}
+	return []KubernetesClusterConfig{{KubernetesToolConfig: connector.KubernetesToolConfig}}
 }
 
 type KubernetesToolConfig struct {
@@ -92,8 +113,30 @@ func decodeConnectors(value any) (ConnectorsConfig, error) {
 		return connectors, nil
 	}
 	value = expandEnvironmentScalars(value)
+	if err := validateMultipleShape(value); err != nil {
+		return connectors, err
+	}
 	if err := normalizeConnectorCIDRs(value); err != nil {
 		return connectors, err
+	}
+	if root, ok := value.(map[string]any); ok {
+		for key, raw := range root {
+			if !strings.EqualFold(key, "kubernetes") {
+				continue
+			}
+			fields, _ := raw.(map[string]any)
+			for name, rawEntries := range fields {
+				if !strings.EqualFold(name, "clusters") {
+					continue
+				}
+				entries, _ := rawEntries.([]any)
+				for index, entry := range entries {
+					if !validConnectorShape(entry, reflect.TypeOf(KubernetesClusterConfig{})) {
+						return connectors, fmt.Errorf("connectors.kubernetes.clusters[%d]: invalid configuration", index)
+					}
+				}
+			}
+		}
 	}
 	if !validConnectorShape(value, reflect.TypeOf(connectors)) {
 		return connectors, errors.New("invalid connectors configuration")
@@ -108,7 +151,86 @@ func decodeConnectors(value any) (ConnectorsConfig, error) {
 	if err := decoder.Decode(value); err != nil {
 		return ConnectorsConfig{}, errors.New("invalid connectors configuration")
 	}
+	if err := validateKubernetesClusters(connectors.Kubernetes); err != nil {
+		return ConnectorsConfig{}, err
+	}
 	return connectors, nil
+}
+
+func validateMultipleShape(value any) error {
+	root, _ := value.(map[string]any)
+	for key, nested := range root {
+		if !strings.EqualFold(key, "kubernetes") {
+			continue
+		}
+		fields, _ := nested.(map[string]any)
+		multiple := false
+		for name, raw := range fields {
+			if strings.EqualFold(name, "multiple") {
+				switch typed := raw.(type) {
+				case bool:
+					multiple = typed
+				case string:
+					multiple, _ = strconv.ParseBool(typed)
+				}
+			}
+		}
+		for name := range fields {
+			if strings.EqualFold(name, "clusters") && !multiple {
+				return errors.New("connectors.kubernetes.clusters requires multiple: true")
+			}
+			if multiple && !strings.EqualFold(name, "multiple") && !strings.EqualFold(name, "clusters") {
+				return errors.New("connectors.kubernetes: configure each cluster under clusters")
+			}
+		}
+	}
+	return nil
+}
+
+func validateKubernetesClusters(connector KubernetesConnectorConfig) error {
+	if !connector.Multiple {
+		return nil
+	}
+	if len(connector.Clusters) == 0 || len(connector.Clusters) > 16 {
+		return errors.New("connectors.kubernetes.clusters must contain 1 to 16 entries")
+	}
+	ids, endpoints := map[string]bool{}, map[string]bool{}
+	inCluster := false
+	label := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+	for index, entry := range connector.Clusters {
+		fail := func() error {
+			return fmt.Errorf("connectors.kubernetes.clusters[%d]: invalid or duplicate cluster identity or endpoint", index)
+		}
+		if !label.MatchString(entry.ClusterID) || ids[entry.ClusterID] {
+			return fail()
+		}
+		ids[entry.ClusterID] = true
+		endpoint := strings.TrimRight(strings.TrimSpace(entry.Endpoint), "/")
+		if parsed, err := url.Parse(endpoint); err == nil && parsed.Host != "" {
+			parsed.Scheme = strings.ToLower(parsed.Scheme)
+			parsed.Host = strings.ToLower(parsed.Host)
+			if parsed.Scheme == "https" {
+				parsed.Host = strings.TrimSuffix(parsed.Host, ":443")
+			}
+			endpoint = parsed.String()
+		}
+		if endpoint != "" {
+			if endpoints[endpoint] {
+				return fail()
+			}
+			endpoints[endpoint] = true
+		}
+		if entry.Auth.Mode == "in_cluster" {
+			if inCluster {
+				return fail()
+			}
+			inCluster = true
+		}
+		if len(entry.DisplayName) > 128 {
+			return fmt.Errorf("connectors.kubernetes.clusters[%d]: display_name exceeds 128 bytes", index)
+		}
+	}
+	return nil
 }
 
 func normalizeConnectorCIDRs(value any) error {
@@ -124,41 +246,58 @@ func normalizeConnectorCIDRs(value any) error {
 		if !ok {
 			continue
 		}
-		for name, raw := range fields {
-			if !strings.EqualFold(name, "endpoint_cidrs") {
-				continue
-			}
-			var items []any
-			switch typed := raw.(type) {
-			case string:
-				if strings.TrimSpace(typed) != "" {
-					for _, item := range strings.Split(typed, ",") {
-						items = append(items, item)
+		if err := normalizeKubernetesCIDRs(fields); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeKubernetesCIDRs(fields map[string]any) error {
+	for name, raw := range fields {
+		if strings.EqualFold(name, "clusters") {
+			entries, _ := raw.([]any)
+			for index, entry := range entries {
+				if child, ok := entry.(map[string]any); ok {
+					if err := normalizeKubernetesCIDRs(child); err != nil {
+						return fmt.Errorf("connectors.kubernetes.clusters[%d]: invalid endpoint CIDRs", index)
 					}
 				}
-			case []string:
-				for _, item := range typed {
+			}
+		}
+		if !strings.EqualFold(name, "endpoint_cidrs") {
+			continue
+		}
+		var items []any
+		switch typed := raw.(type) {
+		case string:
+			if strings.TrimSpace(typed) != "" {
+				for _, item := range strings.Split(typed, ",") {
 					items = append(items, item)
 				}
-			case []any:
-				items = typed
-			default:
+			}
+		case []string:
+			for _, item := range typed {
+				items = append(items, item)
+			}
+		case []any:
+			items = typed
+		default:
+			return errors.New("invalid connectors endpoint CIDRs")
+		}
+		cidrs := make([]string, 0, len(items))
+		for _, item := range items {
+			text, ok := item.(string)
+			if !ok {
 				return errors.New("invalid connectors endpoint CIDRs")
 			}
-			cidrs := make([]string, 0, len(items))
-			for _, item := range items {
-				text, ok := item.(string)
-				if !ok {
-					return errors.New("invalid connectors endpoint CIDRs")
-				}
-				text = strings.TrimSpace(text)
-				if _, err := netip.ParsePrefix(text); err != nil {
-					return errors.New("invalid connectors endpoint CIDRs")
-				}
-				cidrs = append(cidrs, text)
+			text = strings.TrimSpace(text)
+			if _, err := netip.ParsePrefix(text); err != nil {
+				return errors.New("invalid connectors endpoint CIDRs")
 			}
-			fields[name] = cidrs
+			cidrs = append(cidrs, text)
 		}
+		fields[name] = cidrs
 	}
 	return nil
 }
@@ -196,19 +335,26 @@ func validConnectorShape(value any, target reflect.Type) bool {
 		return false
 	}
 	for key, nested := range fields {
-		found := false
-		for index := 0; index < target.NumField(); index++ {
-			field := target.Field(index)
-			if strings.EqualFold(key, field.Tag.Get("mapstructure")) {
-				found = validConnectorShape(nested, field.Type)
-				break
-			}
-		}
-		if !found {
+		fieldType, found := connectorFieldType(target, key)
+		if !found || !validConnectorShape(nested, fieldType) {
 			return false
 		}
 	}
 	return true
+}
+
+func connectorFieldType(target reflect.Type, key string) (reflect.Type, bool) {
+	for index := 0; index < target.NumField(); index++ {
+		field := target.Field(index)
+		if field.Tag.Get("mapstructure") == ",squash" {
+			if nested, found := connectorFieldType(field.Type, key); found {
+				return nested, true
+			}
+		} else if strings.EqualFold(key, field.Tag.Get("mapstructure")) {
+			return field.Type, true
+		}
+	}
+	return nil, false
 }
 
 func validConnectorSlice(value any, target reflect.Type) bool {

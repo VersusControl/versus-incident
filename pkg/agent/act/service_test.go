@@ -69,12 +69,124 @@ func TestProposeRequiresExplicitApprovalPermission(t *testing.T) {
 	}
 }
 
+func TestClusterScopeDeniesProposalAndApproval(t *testing.T) {
+	adapter := &fakeAdapter{}
+	service, _ := newTestService(t, adapter, nil)
+	input := ProposalInput{Type: adapter.Type(), Target: TargetRef{Cluster: "one", Kind: "Deployment", Name: "api", Namespace: "shop"}, Params: json.RawMessage(`{}`)}
+	denied := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Actor: "operator-1", Permissions: map[core.Permission]bool{core.PermissionAgentApprove: true}, Clusters: &core.ClusterScope{}})
+	if _, err := service.Propose(denied, input); !errors.Is(err, ErrActionDenied) {
+		t.Fatal("denied cluster proposed")
+	}
+	proposed, err := service.Propose(authorizedContext(true), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Approve(denied, proposed.Approval.ID, proposed.Nonce, "operator-1"); !errors.Is(err, ErrActionDenied) || adapter.executions != 0 {
+		t.Fatal("denied cluster approved or executed")
+	}
+}
+
 func authorizedContext(allowed bool) context.Context {
 	return core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{
 		Authenticated: true,
 		Actor:         "operator-1",
 		Permissions:   map[core.Permission]bool{core.PermissionAgentApprove: allowed},
 	})
+}
+
+func TestClusterScopeFiltersApprovalsAndDeniesRejection(t *testing.T) {
+	service, _ := newTestService(t, &fakeAdapter{}, nil)
+	approvals := map[string]Approval{}
+	for _, cluster := range []string{"one", "two"} {
+		result, err := service.Propose(authorizedContext(true), ProposalInput{Type: "k8s.rollout_restart", Target: TargetRef{Cluster: cluster, Kind: "Deployment", Name: "api", Namespace: "shop"}, Params: json.RawMessage(`{}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		approvals[cluster] = *result.Approval
+	}
+	ctx := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Actor: "operator-1", Permissions: map[core.Permission]bool{core.PermissionAgentApprove: true}, Clusters: &core.ClusterScope{IDs: []string{"one"}}})
+	for _, pending := range []bool{false, true} {
+		listed, err := service.Approvals(ctx, pending)
+		if err != nil || len(listed) != 1 || listed[0].ID != approvals["one"].ID {
+			t.Fatalf("visible approvals=%+v err=%v", listed, err)
+		}
+	}
+	if listed, err := service.Approvals(context.Background(), false); err != nil || len(listed) != 0 {
+		t.Fatalf("unauthenticated approvals=%+v err=%v", listed, err)
+	}
+	if _, err := service.Reject(ctx, approvals["two"].ID, "denied", "operator-1"); !errors.Is(err, ErrActionDenied) {
+		t.Fatalf("out-of-scope rejection error=%v", err)
+	}
+	stored, err := service.load(approvals["two"].ID)
+	if err != nil || stored.Approval.State != "pending" {
+		t.Fatalf("denied rejection mutated approval=%+v err=%v", stored, err)
+	}
+	if _, err := service.Reject(ctx, approvals["one"].ID, "not needed", "operator-1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type scopedAdapter struct {
+	fakeAdapter
+	bindings int
+}
+
+func (*scopedAdapter) ResolveTarget(target TargetRef) (TargetRef, error) {
+	if target.Cluster == "" {
+		target.Cluster = "one"
+	}
+	if target.Cluster != "one" {
+		return TargetRef{}, ErrActionDenied
+	}
+	return target, nil
+}
+
+func (adapter *scopedAdapter) Bind(_ context.Context, proposal Proposal) (json.RawMessage, error) {
+	adapter.bindings++
+	return proposal.Params, nil
+}
+
+func TestProposalNormalizesClusterBeforeAuthorizationAndBinding(t *testing.T) {
+	adapter := &scopedAdapter{}
+	service, _ := newTestService(t, adapter, nil)
+	input := ProposalInput{Type: adapter.Type(), Target: TargetRef{Kind: "Deployment", Name: "api", Namespace: "shop"}, Params: json.RawMessage(`{}`)}
+	denied := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Actor: "operator-1", Permissions: map[core.Permission]bool{core.PermissionAgentApprove: true}, Clusters: &core.ClusterScope{}})
+	if _, err := service.Propose(denied, input); !errors.Is(err, ErrActionDenied) || adapter.bindings != 0 || adapter.executions != 0 {
+		t.Fatalf("denied proposal err=%v bindings=%d executions=%d", err, adapter.bindings, adapter.executions)
+	}
+	result, err := service.Propose(authorizedContext(true), input)
+	if err != nil || result.Proposal.Target.Cluster != "one" {
+		t.Fatalf("normalized proposal=%+v err=%v", result, err)
+	}
+	stored, err := service.load(result.Approval.ID)
+	if err != nil || stored.Approval.Proposal.Target.Cluster != "one" || stored.Approval.Proposal.BindingHash != proposalBindingHash(stored.Approval.Proposal) {
+		t.Fatalf("stored target binding=%+v err=%v", stored, err)
+	}
+	if _, err := service.Approve(denied, result.Approval.ID, result.Nonce, "operator-1"); !errors.Is(err, ErrActionDenied) || adapter.executions != 0 {
+		t.Fatalf("denied normalized approval err=%v executions=%d", err, adapter.executions)
+	}
+	stored.Approval.Proposal.Target.Cluster = ""
+	stored.Approval.Proposal.BindingHash = proposalBindingHash(stored.Approval.Proposal)
+	stored.NonceHash = digest([]byte(result.Nonce + stored.Approval.Proposal.BindingHash))
+	if err := service.save(stored); err != nil {
+		t.Fatal(err)
+	}
+	if listed, err := service.Approvals(authorizedContext(true), false); err != nil || len(listed) != 1 || listed[0].Proposal.Target.Cluster != "" {
+		t.Fatalf("unbound legacy approval listed=%+v err=%v", listed, err)
+	}
+	if listed, err := service.Approvals(denied, false); err != nil || len(listed) != 0 {
+		t.Fatalf("restricted legacy approval listed=%+v err=%v", listed, err)
+	}
+	if _, err := service.Approve(authorizedContext(true), result.Approval.ID, result.Nonce, "operator-1"); !errors.Is(err, ErrActionDenied) || adapter.executions != 0 {
+		t.Fatalf("unbound legacy approval err=%v executions=%d", err, adapter.executions)
+	}
+	if _, err := service.Reject(authorizedContext(true), result.Approval.ID, "legacy", "operator-1"); !errors.Is(err, ErrActionDenied) {
+		t.Fatalf("unbound legacy rejection err=%v", err)
+	}
+	after, err := service.load(result.Approval.ID)
+	if err != nil || after.Approval.State != "pending" || after.Approval.Proposal.BindingHash != stored.Approval.Proposal.BindingHash || after.NonceHash != stored.NonceHash || after.Approval.Proposal.Target.Cluster != "" {
+		t.Fatalf("legacy record changed=%+v err=%v", after, err)
+	}
 }
 
 func TestRegistryRejectsDestructiveTypesAndScaleZeroSchemas(t *testing.T) {
@@ -390,7 +502,7 @@ func TestRejectLosesToApprovalClaimAcrossServices(t *testing.T) {
 	if err := <-rejection; !errors.Is(err, ErrActionDenied) {
 		t.Fatalf("stale rejection error=%v, want denied", err)
 	}
-	approvals, err := approver.Approvals(context.Background(), false)
+	approvals, err := approver.Approvals(authorizedContext(true), false)
 	if err != nil || len(approvals) != 1 || approvals[0].State != "verified" || adapter.executions != 1 {
 		t.Fatalf("approvals=%+v executions=%d err=%v", approvals, adapter.executions, err)
 	}
@@ -424,7 +536,7 @@ func TestStaleApprovalClaimRequiresReconciliationAndCannotExecuteAgain(t *testin
 		t.Fatal(err)
 	}
 
-	approvals, err := service.Approvals(context.Background(), false)
+	approvals, err := service.Approvals(authorizedContext(true), false)
 	if err != nil || len(approvals) != 1 || approvals[0].State != "execution_unknown" || !approvals[0].ReconciliationRequired {
 		t.Fatalf("approvals=%+v err=%v, want reconciliation-required unknown execution", approvals, err)
 	}
@@ -464,11 +576,11 @@ func TestPendingApprovalsExcludesExpiredRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = proposal.Approval.ExpiresAt
-	pending, err := service.Approvals(context.Background(), true)
+	pending, err := service.Approvals(authorizedContext(true), true)
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("pending approvals=%+v err=%v, want expired approval excluded", pending, err)
 	}
-	all, err := service.Approvals(context.Background(), false)
+	all, err := service.Approvals(authorizedContext(true), false)
 	if err != nil || len(all) != 1 || all[0].State != "pending" {
 		t.Fatalf("all approvals=%+v err=%v", all, err)
 	}

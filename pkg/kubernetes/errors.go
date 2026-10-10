@@ -5,7 +5,20 @@ import (
 	"crypto/x509"
 	"errors"
 	"net"
+	"strings"
 )
+
+var ErrClusterRequired = errors.New("kubernetes: cluster is required")
+var ErrClusterNotFound = errors.New("kubernetes: cluster not found")
+var ErrClusterUnavailable = errors.New("kubernetes: cluster unavailable")
+
+func DiagnoseClusterError(err error, multiple bool, clusterID string) ErrorDetail {
+	detail := DiagnoseError(err)
+	if multiple {
+		detail.Action = strings.ReplaceAll(detail.Action, "connectors.kubernetes.", "connectors.kubernetes.clusters["+clusterID+"].")
+	}
+	return detail
+}
 
 // ErrorDetail is a bounded operator-facing explanation of a Kubernetes error.
 // It never includes provider responses, credentials, endpoints, or raw causes.
@@ -35,6 +48,14 @@ func DiagnoseError(err error) ErrorDetail {
 	var hostnameError x509.HostnameError
 	var certificateError x509.CertificateInvalidError
 	switch {
+	case errors.Is(err, ErrIndexStreamBusy):
+		return ErrorDetail{Code: "stream_busy", Message: "The concurrent Kubernetes stream limit has been reached.", Action: "Close another stream and retry.", Retryable: true}
+	case errors.Is(err, ErrClusterRequired):
+		return ErrorDetail{Code: "cluster_required", Message: "Select a Kubernetes cluster.", Action: "Supply the cluster parameter."}
+	case errors.Is(err, ErrClusterNotFound):
+		return ErrorDetail{Code: "cluster_not_found", Message: "The Kubernetes cluster is unavailable.", Action: "Select a visible cluster."}
+	case errors.Is(err, ErrClusterUnavailable):
+		return ErrorDetail{Code: "connector_unreachable", Message: "The cluster did not respond.", Action: "Check the cluster connector configuration.", Retryable: true}
 	case errors.Is(err, ErrLogStreamBusy):
 		return ErrorDetail{Code: "log_stream_busy", Message: "The concurrent Pod log stream limit has been reached.", Action: "Close another log stream and retry with backoff.", Retryable: true}
 	case errors.Is(err, errPreviousUnavailable):

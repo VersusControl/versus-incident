@@ -4,13 +4,17 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "@/lib/api";
+import * as apiModule from "@/lib/api";
 import { KubernetesPage } from "./KubernetesPage";
 
 vi.mock("@/components/TopBar", () => ({ TopBar: ({ title, actions }: { title: string; actions?: React.ReactNode }) => <header><span>{title}</span>{actions}</header> }));
 vi.mock("@/lib/api", async (importActual) => { const actual = await importActual<typeof import("@/lib/api")>(); return { ...actual, api: { ...actual.api, listAgentToolsets: vi.fn(), proposeAgentAction: vi.fn(), approveAgentApproval: vi.fn(), rejectAgentApproval: vi.fn(), kubernetesOverview: vi.fn(), kubernetesOverviewGraph: vi.fn(), kubernetesIssues: vi.fn(), kubernetesChanges: vi.fn(), kubernetesGraph: vi.fn(), kubernetesNamespaces: vi.fn(), kubernetesNeighborhood: vi.fn(), kubernetesStream: vi.fn(), kubernetesTop: vi.fn(), kubernetesReleases: vi.fn(), kubernetesGitOpsApps: vi.fn(), kubernetesRollout: vi.fn(), kubernetesRollouts: vi.fn(), kubernetesTraffic: vi.fn(), kubernetesDiagnose: vi.fn(), kubernetesWorkloadLogs: vi.fn(), kubernetesPodLogs: vi.fn(), kubernetesUsage: vi.fn(), kubernetesWorkloads: vi.fn(), kubernetesWorkload: vi.fn(), kubernetesNodes: vi.fn(), kubernetesNodePods: vi.fn(), kubernetesSearch: vi.fn(), kubernetesEvents: vi.fn(), kubernetesDescribe: vi.fn() } }; });
 
 function LocationProbe() { const location = useLocation(); return <output aria-label="Current location">{location.pathname}{location.search}</output>; }
-function renderPage(client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) { return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/agent/kubernetes"]}><KubernetesPage /><LocationProbe /></MemoryRouter></QueryClientProvider>); }
+function renderPage(client = new QueryClient({ defaultOptions: { queries: { retry: false } } }), seedCatalog = true) {
+	if (seedCatalog && !client.getQueryData(["kubernetes-clusters"])) client.setQueryData(["kubernetes-clusters"], { multiple: false, clusters: [] });
+	return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[`/agent/kubernetes${window.location.search}`]}><KubernetesPage /><LocationProbe /></MemoryRouter></QueryClientProvider>);
+}
 function renderWorkloads(client?: QueryClient) {
 	const query = new URLSearchParams(window.location.search);
 	query.set("view", "resources");
@@ -24,6 +28,8 @@ function capacityCell(panelName: string, label: string) {
 }
 
 beforeEach(() => {
+	vi.spyOn(apiModule, "createKubernetesApi").mockReturnValue(api);
+	vi.spyOn(api, "kubernetesClusters").mockResolvedValue({ multiple: false, clusters: [] });
 	vi.spyOn(api, "kubernetesPodLogStream").mockImplementation(async (_namespace, _pod, _options, emit) => {
 		emit({ event: "end", text: "", container: "app" });
 	});
@@ -60,6 +66,76 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); window.history.replaceState(null, "", "/"); });
 
 describe("KubernetesPage", () => {
+	it.each([401, 403])("preserves the overview access-denied presentation for catalog HTTP %s without dashboard reads", async (status) => {
+		vi.mocked(api.kubernetesClusters).mockRejectedValue(new ApiError(status, "Access denied", { action: "Check RBAC" }));
+		renderPage(new QueryClient({ defaultOptions: { queries: { retry: false } } }), false);
+		const alert = await screen.findByRole("alert");
+		expect(within(alert).getByText("Couldn't load Kubernetes overview")).toBeTruthy();
+		expect(within(alert).getByText("Access denied")).toBeTruthy();
+		expect(within(alert).getByText("Check RBAC")).toBeTruthy();
+		expect(screen.queryByText("Couldn't load clusters")).toBeNull();
+		expect(api.kubernetesOverview).not.toHaveBeenCalled();
+		expect(api.kubernetesStream).not.toHaveBeenCalled();
+		vi.mocked(api.kubernetesClusters).mockResolvedValue({ multiple: false, clusters: [] });
+		fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
+	});
+
+	it.each([false, true])("polls the catalog only in multi mode: multiple=%s", async (multiple) => {
+		const catalog = { multiple, clusters: [] };
+		vi.mocked(api.kubernetesClusters).mockResolvedValue(catalog);
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+		client.setQueryData(["kubernetes-clusters"], catalog);
+		vi.useFakeTimers();
+		await act(async () => { renderPage(client); });
+		expect(api.kubernetesClusters).not.toHaveBeenCalled();
+		await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+		expect(api.kubernetesClusters).toHaveBeenCalledTimes(multiple ? 1 : 0);
+		cleanup();
+		client.clear();
+	});
+
+	it("uses fleet mode with one configured cluster and never starts dashboard streams", async () => {
+		const catalog = { multiple: true, clusters: [{ id: "one", health: "healthy" as const, provider: "generic", nodes: 1, ready_nodes: 1, pods: 1, running_pods: 1, warnings: 0, sync: { state: "live" }, observed_at: "2026-10-09T12:00:00Z" }] };
+		vi.mocked(api.kubernetesClusters).mockResolvedValue(catalog);
+		const client = new QueryClient();
+		client.setQueryData(["kubernetes-clusters"], catalog);
+		renderPage(client);
+		expect(await screen.findByRole("article", { name: "Cluster one" })).toBeTruthy();
+		expect(api.kubernetesOverview).not.toHaveBeenCalled();
+		expect(api.kubernetesStream).not.toHaveBeenCalled();
+	});
+
+	it("switches cluster caches and aborts the old dashboard stream while retaining the view", async () => {
+		const entry = { health: "healthy" as const, provider: "generic", nodes: 1, ready_nodes: 1, pods: 1, running_pods: 1, warnings: 0, sync: { state: "live" }, observed_at: "2026-10-09T12:00:00Z" };
+		const catalog = { multiple: true, clusters: [{ ...entry, id: "one" }, { ...entry, id: "two" }] };
+		vi.mocked(api.kubernetesClusters).mockResolvedValue(catalog);
+		const client = new QueryClient();
+		client.setQueryData(["kubernetes-clusters"], catalog);
+		window.history.replaceState(null, "", "/agent/kubernetes?cluster=one&view=nodes");
+		renderPage(client);
+		await waitFor(() => expect(api.kubernetesStream).toHaveBeenCalledOnce());
+		const signal = vi.mocked(api.kubernetesStream).mock.calls[0][1];
+		fireEvent.change(screen.getByRole("combobox", { name: "Cluster", exact: true }), { target: { value: "two" } });
+		await waitFor(() => expect(apiModule.createKubernetesApi).toHaveBeenCalledWith("two"));
+		expect(signal?.aborted).toBe(true);
+		expect(screen.getByLabelText("Current location").textContent).toBe("/agent/kubernetes?cluster=two&view=nodes");
+		await waitFor(() => expect(client.getQueryData(["kubernetes", "two", "kubernetes-overview"])).toBeTruthy());
+		expect(client.getQueryData(["kubernetes", "one", "kubernetes-overview"])).toBeTruthy();
+	});
+
+	it("returns unknown cluster deep links to the fleet with a notice", async () => {
+		const catalog = { multiple: true, clusters: [] };
+		vi.mocked(api.kubernetesClusters).mockResolvedValue(catalog);
+		const client = new QueryClient();
+		client.setQueryData(["kubernetes-clusters"], catalog);
+		window.history.replaceState(null, "", "/agent/kubernetes?cluster=hidden");
+		renderPage(client);
+		expect(await screen.findByText("This cluster is no longer available.")).toBeTruthy();
+		expect(api.kubernetesOverview).not.toHaveBeenCalled();
+		expect(api.kubernetesStream).not.toHaveBeenCalled();
+	});
+
 	it("moves workload and node inventories out of Overview into their own tabs", async () => {
 		renderPage();
 		await screen.findByRole("region", { name: "Overview topology" });
@@ -198,7 +274,7 @@ describe("KubernetesPage", () => {
 			await act(async () => { await vi.advanceTimersByTimeAsync(1); });
 			expect(invalidate.mock.calls.map(([options]) => options?.queryKey)).toEqual([
 				["kubernetes-overview"], ["kubernetes-graph"], ["kubernetes-namespaces"], ["kubernetes-workloads"], ["kubernetes-nodes"], ["kubernetes-issues"], ["kubernetes-top"], ["kubernetes-diagnosis"], ["kubernetes-drawer-changes"], ["kubernetes-changes"],
-			]);
+			].map((parts) => ["kubernetes", "_", ...parts]));
 			queries.forEach((query) => expect(query).toHaveBeenCalledTimes(index + 2));
 			expect(api.kubernetesOverviewGraph).not.toHaveBeenCalled();
 		}
@@ -270,7 +346,7 @@ describe("KubernetesPage", () => {
 		await waitFor(() => expect(client.isFetching()).toBe(0));
 		expect(within(inventory).getByText("137 total")).toBeTruthy();
 		vi.mocked(api.kubernetesWorkloads).mockRejectedValueOnce(new ApiError(status, "Access denied"));
-		await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes-workloads"] }); });
+		await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-workloads"] }); });
 		expect(await within(inventory).findByText("Inventory unavailable")).toBeTruthy();
 		expect(within(inventory).queryByText("137 total")).toBeNull();
 		expect(within(inventory).queryByText("137", { exact: true })).toBeNull();
@@ -287,7 +363,7 @@ describe("KubernetesPage", () => {
 		await waitFor(() => expect(client.isFetching()).toBe(0));
 		expect(within(card).getByText("1 changes")).toBeTruthy();
 		vi.mocked(api.kubernetesChanges).mockRejectedValueOnce(new ApiError(status, "Access denied"));
-		await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes-changes"] }); });
+		await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-changes"] }); });
 		expect(await within(card).findByText("Recent change history unavailable.")).toBeTruthy();
 		expect(within(card).queryByText("1 changes")).toBeNull();
 		expect(within(card).queryByText("Deployment shop/private-api")).toBeNull();
@@ -344,7 +420,7 @@ describe("KubernetesPage", () => {
 		expect(card.parentElement?.className).toContain("lg:grid-cols-2");
 		let completeRefresh!: (page: Awaited<ReturnType<typeof api.kubernetesChanges>>) => void;
 		vi.mocked(api.kubernetesChanges).mockImplementationOnce(() => new Promise((resolve) => { completeRefresh = resolve; }));
-		const refreshWindow = intervals.mock.calls.find(([, delay]) => delay === 30_000)?.[0];
+		const refreshWindow = intervals.mock.calls.filter(([, delay]) => delay === 30_000).at(-1)?.[0];
 		intervals.mockRestore();
 		if (typeof refreshWindow !== "function") throw new Error("Recent changes must register a 30-second refresh interval");
 		await act(async () => { refreshWindow(); });
@@ -353,7 +429,7 @@ describe("KubernetesPage", () => {
 		expect(Date.parse(options.until!) - Date.parse(options.since!)).toBe(60 * 60_000);
 		expect(within(card).getByText("Pod shop/recent-api")).toBeTruthy();
 		expect(within(card).queryByRole("status", { name: "Loading change history" })).toBeNull();
-		expect(client.getQueriesData({ queryKey: ["kubernetes-changes", "overview"] })).toHaveLength(1);
+		expect(client.getQueriesData({ queryKey: ["kubernetes", "_", "kubernetes-changes", "overview"] })).toHaveLength(1);
 		await act(async () => {
 			completeRefresh({ ...previous, items: [{ ...previous.items[0], id: "updated", name: "updated-api" }] });
 		});
