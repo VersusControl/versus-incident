@@ -164,7 +164,7 @@ func (store *SessionStore) getUnion(id string) (*Session, error) {
 }
 
 func mergeTurns(write, archive []Turn) []Turn {
-	merged := make([]Turn, 0, len(write)+len(archive))
+	merged := make([]Turn, 0, MaxTurnsPerSession)
 	seen := map[string]bool{}
 	for _, turns := range [][]Turn{write, archive} {
 		for _, turn := range turns {

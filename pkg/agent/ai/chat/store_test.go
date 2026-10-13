@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +30,77 @@ type observedProvider struct {
 	panicSessionRead  bool
 	readBlobErrorName string
 	readBlobError     error
+}
+
+func TestMergeTurns(t *testing.T) {
+	now := time.Date(2026, time.October, 13, 12, 0, 0, 0, time.UTC)
+	turn := func(id, content string, offset int) Turn {
+		return Turn{ID: id, Role: TurnUser, Content: content, CreatedAt: now.Add(time.Duration(offset) * time.Second)}
+	}
+	for _, test := range []struct {
+		name    string
+		write   []Turn
+		archive []Turn
+		want    []Turn
+	}{
+		{name: "nil inputs", want: []Turn{}},
+		{name: "empty inputs", write: []Turn{}, archive: []Turn{}, want: []Turn{}},
+		{name: "nil write empty archive", archive: []Turn{}, want: []Turn{}},
+		{name: "empty write nil archive", write: []Turn{}, want: []Turn{}},
+		{name: "write only", write: []Turn{turn("write", "new", 1)}, want: []Turn{turn("write", "new", 1)}},
+		{name: "archive only", archive: []Turn{turn("archive", "old", 0)}, want: []Turn{turn("archive", "old", 0)}},
+		{
+			name:    "chronological order",
+			write:   []Turn{turn("latest", "latest", 3), turn("middle", "middle", 1)},
+			archive: []Turn{turn("later", "later", 2), turn("earliest", "earliest", 0)},
+			want:    []Turn{turn("earliest", "earliest", 0), turn("middle", "middle", 1), turn("later", "later", 2), turn("latest", "latest", 3)},
+		},
+		{
+			name:    "write and first occurrence precedence",
+			write:   []Turn{turn("duplicate", "write first", 2), turn("duplicate", "write second", 0)},
+			archive: []Turn{turn("duplicate", "archive", 0), turn("archive", "archive first", 1), turn("archive", "archive second", 3)},
+			want:    []Turn{turn("archive", "archive first", 1), turn("duplicate", "write first", 2)},
+		},
+		{
+			name:    "timestamp ties and stable empty IDs",
+			write:   []Turn{turn("z", "write z", 0), turn("", "write first", 0), turn("", "write second", 0)},
+			archive: []Turn{turn("b", "archive b", 0), turn("", "archive first", 0), turn("a", "archive a", 0), turn("", "archive second", 0)},
+			want:    []Turn{turn("", "write first", 0), turn("", "write second", 0), turn("", "archive first", 0), turn("", "archive second", 0), turn("a", "archive a", 0), turn("b", "archive b", 0), turn("z", "write z", 0)},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := mergeTurns(test.write, test.archive)
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("mergeTurns() = %+v, want %+v", got, test.want)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name  string
+		count int
+	}{
+		{name: "both inputs at retention limit", count: MaxTurnsPerSession},
+		{name: "both inputs oversized", count: MaxTurnsPerSession + 5},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			write := make([]Turn, test.count)
+			archive := make([]Turn, test.count)
+			for position := 0; position < test.count; position++ {
+				write[position] = turn(fmt.Sprintf("write-%d", position), "write", 2*test.count-position-1)
+				archive[position] = turn(fmt.Sprintf("archive-%d", position), "archive", test.count-position-1)
+			}
+			got := mergeTurns(write, archive)
+			if len(got) != MaxTurnsPerSession {
+				t.Fatalf("retained turns = %d, want %d", len(got), MaxTurnsPerSession)
+			}
+			for position, retained := range got {
+				want := write[MaxTurnsPerSession-position-1]
+				if !reflect.DeepEqual(retained, want) {
+					t.Fatalf("retained turn %d = %+v, want %+v", position, retained, want)
+				}
+			}
+		})
+	}
 }
 
 func TestChatUnionDeleteChurnAndSuppressionBounds(t *testing.T) {
