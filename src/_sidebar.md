@@ -13,8 +13,10 @@
   - [Incidents Report](/agent/incident-report)
   - [Configuration](/agent/configuration)
 
-- Connectors
+- Kubernetes Connectors
   - [Kubernetes](/agent/connectors/kubernetes)
+  - [Configuration](/agent/kubernetes/configuration)
+  - [Multi-Cluster](/agent/kubernetes/multi-cluster)
 
 - Data Sources
   - [Overview](/agent/data-sources)

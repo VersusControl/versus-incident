@@ -1,6 +1,7 @@
 package act
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,7 +13,144 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
+
+func TestServiceAvailabilityRequiresActionAdapters(t *testing.T) {
+	provider := storage.NewMemory()
+	history, err := NewService(provider, "default", ledger.NewBlobWriter(provider, "default"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var absent *Service
+	if absent.Available() || history.Available() {
+		t.Fatal("history construction advertised action execution")
+	}
+	enabled, err := NewService(provider, "default", ledger.NewBlobWriter(provider, "default"), nil, &fakeAdapter{})
+	if err != nil || !enabled.Available() {
+		t.Fatalf("registered actions unavailable: %v", err)
+	}
+}
+
+func TestUpgradeApprovalsReadOnly(t *testing.T) {
+	provider := storage.NewMemory()
+	adapter := &fakeAdapter{verified: true}
+	legacy, err := NewService(provider, "default", ledger.NewBlobWriter(provider, "default"), nil, adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := ProposalInput{Type: adapter.Type(), Target: TargetRef{Cluster: "one", Kind: "Deployment", Name: "api"}, Params: json.RawMessage(`{}`)}
+	pending, err := legacy.Propose(authorizedContext(true), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executed, err := legacy.Propose(authorizedContext(true), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Approve(authorizedContext(true), executed.Approval.ID, executed.Nonce, "operator-1"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := provider.ListBlobs("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeBytes := make(map[string][]byte, len(before))
+	for _, blob := range before {
+		data, err := provider.ReadBlob(blob.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		beforeBytes[blob.Name] = data
+	}
+	licensed, err := NewServiceWithScope(provider, tenancy.NewOrgScope("licensed", "default"), ledger.NewBlobWriter(provider, "licensed"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := licensed.Approvals(authorizedContext(true), false)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("list=%+v err=%v", list, err)
+	}
+	for _, approval := range list {
+		if !approval.ReadOnly {
+			t.Fatal("archive not marked read-only")
+		}
+		if _, err := licensed.Approve(authorizedContext(true), approval.ID, "old-nonce", "operator-1"); !errors.Is(err, ErrReadOnlyApproval) {
+			t.Fatalf("approve=%v", err)
+		}
+		if _, err := licensed.Reject(authorizedContext(true), approval.ID, "reason", "operator-1"); !errors.Is(err, ErrReadOnlyApproval) {
+			t.Fatalf("reject=%v", err)
+		}
+	}
+	denied := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Actor: "operator-1", Permissions: map[core.Permission]bool{core.PermissionAgentApprove: true}, Clusters: &core.ClusterScope{IDs: []string{"two"}}})
+	if _, err := licensed.Approve(denied, pending.Approval.ID, pending.Nonce, "operator-1"); !errors.Is(err, ErrActionDenied) {
+		t.Fatalf("cluster existence leaked: %v", err)
+	}
+	if _, err := licensed.Reject(authorizedContext(false), pending.Approval.ID, "reason", "operator-1"); !errors.Is(err, ErrActionDenied) {
+		t.Fatal("permission existence leaked")
+	}
+	if adapter.executions != 1 {
+		t.Fatal("archive executed")
+	}
+	after, err := provider.ListBlobs("")
+	if err != nil || len(before) != len(after) {
+		t.Fatal("archive or ledger mutated")
+	}
+	for _, blob := range before {
+		current, err := provider.ReadBlob(blob.Name)
+		if err != nil || !bytes.Equal(beforeBytes[blob.Name], current) {
+			t.Fatal("archive bytes changed")
+		}
+	}
+	copyRecord, err := legacy.load(pending.Approval.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyRecord.Approval.State = "rejected"
+	if err := licensed.save(copyRecord); err != nil {
+		t.Fatal(err)
+	}
+	list, err = licensed.Approvals(authorizedContext(true), false)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("dedup=%+v %v", list, err)
+	}
+	for _, approval := range list {
+		if approval.ID == pending.Approval.ID && (approval.ReadOnly || approval.State != "rejected") {
+			t.Fatal("license precedence lost")
+		}
+	}
+}
+
+func TestHistoryWithoutActorsDoesNotMutateApprovals(t *testing.T) {
+	adapter := &fakeAdapter{verified: true}
+	active, provider := newTestService(t, adapter, nil)
+	ctx := authorizedContext(true)
+	pending, err := active.Propose(ctx, ProposalInput{Type: adapter.Type(), Target: TargetRef{Cluster: "one", Kind: "Deployment", Name: "api"}, Params: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := NewService(provider, "org-a", ledger.NewBlobWriter(provider, "org-a"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := provider.ReadBlob(active.key(pending.Approval.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed, err := history.Approvals(ctx, false); err != nil || len(listed) != 1 {
+		t.Fatalf("history=%+v err=%v", listed, err)
+	}
+	if _, err := history.Approve(ctx, pending.Approval.ID, pending.Nonce, "operator-1"); !errors.Is(err, ErrActionDenied) {
+		t.Fatalf("approve without actor=%v", err)
+	}
+	if _, err := history.Reject(ctx, pending.Approval.ID, "disabled actor", "operator-1"); !errors.Is(err, ErrActionDenied) {
+		t.Fatalf("reject without actor=%v", err)
+	}
+	after, err := provider.ReadBlob(active.key(pending.Approval.ID))
+	if err != nil || !bytes.Equal(before, after) || adapter.executions != 0 {
+		t.Fatal("history mutated an approval")
+	}
+}
 
 type fakeAdapter struct {
 	executions int

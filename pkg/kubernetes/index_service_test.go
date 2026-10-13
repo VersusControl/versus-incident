@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -15,7 +16,52 @@ import (
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
+
+func TestUpgradeRegistryReadScopeAndTimeline(t *testing.T) {
+	provider := storage.NewMemory()
+	base := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster", CredentialID: "credential"}, 0)
+	base.SetChangeStorage(provider)
+	now := time.Now().UTC()
+	old := Change{ID: "old", Cluster: "cluster", Kind: "Pod", Name: "pod", Type: kubechanges.Created, At: now}
+	if err := base.changeStore().Append([]Change{old}, now); err != nil {
+		t.Fatal(err)
+	}
+	before, err := provider.ListBlobs("kubernetes/changes/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	licensed := NewService(nil, Scope{OrgID: "licensed", ClusterID: "cluster", CredentialID: "credential"}, 0)
+	licensed.SetChangeStorage(provider)
+	registry := NewClusterRegistryWithScope(false, []ClusterEntry{{Info: ClusterInfo{ID: "cluster"}, Service: licensed}}, tenancy.NewOrgScope("licensed", "default"))
+	service := registry.ResolveOrg("licensed")
+	newer := old
+	newer.ID = "new"
+	if err := service.changeStore().Append([]Change{newer}, now); err != nil {
+		t.Fatal(err)
+	}
+	ctx := tenancy.WithOrgScope(context.Background(), tenancy.NewOrgScope("licensed", "foreign"))
+	page, err := service.Changes(ctx, ChangeQuery{})
+	if err != nil || len(page.Items) != 2 {
+		t.Fatalf("union=%+v %v", page, err)
+	}
+	page, err = registry.ResolveOrg("foreign").Changes(ctx, ChangeQuery{})
+	if err != nil || len(page.Items) != 0 {
+		t.Fatalf("foreign=%+v %v", page, err)
+	}
+	scoped := service.Scoped(service.Scope())
+	scoped.readOrgs[1] = "changed"
+	if service.readOrgs[1] != "default" {
+		t.Fatal("scope copy aliases")
+	}
+	for _, blob := range before {
+		after, err := provider.ReadBlob(blob.Name)
+		if err != nil || !bytes.Equal(blob.Data, after) {
+			t.Fatal("archive changed")
+		}
+	}
+}
 
 func TestIndexStreamAdmissionSpansClusters(t *testing.T) {
 	releases := []func(){}

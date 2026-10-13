@@ -35,7 +35,7 @@ func NewKubernetesRegistry(cfg config.KubernetesConnectorConfig, scope tenancy.O
 		}
 		entries = append(entries, kubernetes.ClusterEntry{Info: kubernetes.ClusterInfo{ID: id, DisplayName: entry.DisplayName, Provider: provider}, Service: service, Err: err})
 	}
-	return kubernetes.NewClusterRegistry(cfg.Multiple, entries), errorsFound
+	return kubernetes.NewClusterRegistryWithScope(cfg.Multiple, entries, scope), errorsFound
 }
 
 func NewKubernetesService(cfg config.KubernetesToolConfig, scope tenancy.OrgScope) (*kubernetes.Service, error) {

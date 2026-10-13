@@ -60,6 +60,23 @@ type Store struct {
 	provider  storage.Provider
 	key       string
 	retention time.Duration
+	archives  []*Store
+}
+
+func NewView(provider storage.Provider, scope index.Scope, archiveOrgs []string) (*Store, error) {
+	store := NewStore(provider, scope)
+	if store == nil || len(archiveOrgs) > 1 {
+		return nil, ErrStoreLimit
+	}
+	for _, org := range archiveOrgs {
+		if org == "" || org == scope.OrgID {
+			return nil, ErrInvalidQuery
+		}
+		archiveScope := scope
+		archiveScope.OrgID = org
+		store.archives = append(store.archives, NewStore(provider, archiveScope))
+	}
+	return store, nil
 }
 
 // NewStore creates a bounded timeline store isolated by the complete scope.
@@ -196,7 +213,7 @@ func (store *Store) Query(query Query, now time.Time) (Page, error) {
 	offset := 0
 	if query.Cursor != "" {
 		parsed, err := strconv.Atoi(query.Cursor)
-		if err != nil || parsed < 0 || parsed > maxChanges {
+		if err != nil || parsed < 0 || parsed > maxChanges*(1+len(store.archives)) {
 			return Page{}, ErrInvalidQuery
 		}
 		offset = parsed
@@ -207,6 +224,31 @@ func (store *Store) Query(query Query, now time.Time) (Page, error) {
 	if err != nil {
 		return Page{}, err
 	}
+	seen := make(map[string]bool, len(current.Changes))
+	merged := make([]Change, 0, len(current.Changes))
+	for _, source := range append([]*Store{store}, store.archives...) {
+		part := current
+		if source != store {
+			part, err = source.read()
+			if err != nil {
+				return Page{}, err
+			}
+			current.Gaps = append(current.Gaps, part.Gaps...)
+		}
+		for _, change := range part.Changes {
+			if !seen[change.ID] {
+				seen[change.ID] = true
+				merged = append(merged, cloneChange(change))
+			}
+		}
+	}
+	current.Changes = merged
+	sort.Slice(current.Gaps, func(left, right int) bool { return current.Gaps[left].From.Before(current.Gaps[right].From) })
+	combinedGaps := []Gap{}
+	for _, gap := range current.Gaps {
+		appendGap(&combinedGaps, gap)
+	}
+	current.Gaps = combinedGaps
 	filtered := make([]Change, 0, len(current.Changes))
 	for _, change := range current.Changes {
 		if change.At.Before(query.Since) || change.At.After(query.Until) || query.Namespace != "" && change.Namespace != query.Namespace || query.Kind != "" && change.Kind != query.Kind || query.Name != "" && change.Name != query.Name || query.Type != "" && change.Type != query.Type {
@@ -245,6 +287,16 @@ func (store *Store) read() (snapshot, error) {
 	var current snapshot
 	if err := json.Unmarshal(encoded, &current); err != nil || len(current.Changes) > maxChanges || len(current.Gaps) > 16 {
 		return snapshot{}, ErrStoreLimit
+	}
+	for _, change := range current.Changes {
+		if !validChange(change) {
+			return snapshot{}, ErrStoreLimit
+		}
+	}
+	for _, gap := range current.Gaps {
+		if gap.From.IsZero() || gap.To.Before(gap.From) {
+			return snapshot{}, ErrStoreLimit
+		}
 	}
 	return current, nil
 }

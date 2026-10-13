@@ -154,12 +154,12 @@ func (controller *ChatAdminController) approvalService(c *fiber.Ctx) *act.Servic
 }
 
 func (controller *ChatAdminController) requireAgentApproval(c *fiber.Ctx) error {
-	if controller.approvalService(c) == nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(agentapi.Error{Code: "unavailable", Message: "approval service not configured"})
-	}
 	allowed, explicit := middleware.RequestPermission(c, string(core.PermissionAgentApprove))
 	if !explicit || !allowed {
 		return c.Status(fiber.StatusForbidden).JSON(agentapi.Error{Code: "forbidden", Message: "agent:approve permission is required"})
+	}
+	if controller.approvalService(c) == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(agentapi.Error{Code: "unavailable", Message: "approval service not configured"})
 	}
 	return c.Next()
 }
@@ -230,6 +230,9 @@ func requestActor(c *fiber.Ctx) string {
 }
 
 func writeApprovalError(c *fiber.Ctx, err error) error {
+	if errors.Is(err, act.ErrReadOnlyApproval) {
+		return c.Status(fiber.StatusConflict).JSON(agentapi.Error{Code: "approval_read_only", Message: act.ErrReadOnlyApproval.Error()})
+	}
 	if errors.Is(err, act.ErrActionDenied) {
 		return c.Status(fiber.StatusConflict).JSON(agentapi.Error{Code: "approval_denied", Message: "approval is no longer available"})
 	}
@@ -257,7 +260,7 @@ func (controller *ChatAdminController) create(c *fiber.Ctx) error {
 
 func (controller *ChatAdminController) bootstrap(c *fiber.Ctx) error {
 	approvalAllowed, explicit := middleware.RequestPermission(c, string(core.PermissionAgentApprove))
-	approvalsAvailable := currentAgentApprovalServiceFactory() != nil && explicit && approvalAllowed
+	approvalsAvailable := explicit && approvalAllowed && controller.approvalService(c).Available()
 	var kubernetesCatalog *agentapi.KubernetesCatalog
 	chatKubernetesResolverMu.RLock()
 	registry := chatKubernetesRegistry
@@ -387,7 +390,7 @@ func (controller *ChatAdminController) delete(c *fiber.Ctx) error {
 	auditor := middleware.ChatAuditor(c)
 	target := chatAuditTarget(c.Params("id"))
 	service := controller.service(c)
-	if service == nil {
+	if service == nil || !service.Available() {
 		auditor(middleware.ChatAuditEvent{Action: chatAuditSessionDeleted, Target: target, Result: middleware.ChatAuditDenied})
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "chat not enabled"})
 	}
@@ -545,7 +548,7 @@ func (controller *ChatAdminController) cancel(c *fiber.Ctx) error {
 	auditor := middleware.ChatAuditor(c)
 	target := chatAuditTarget(c.Params("id"))
 	service := controller.service(c)
-	if service == nil {
+	if service == nil || !service.Available() {
 		auditor(middleware.ChatAuditEvent{Action: chatAuditRunCancelled, Target: target, Result: middleware.ChatAuditDenied})
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "chat not enabled"})
 	}

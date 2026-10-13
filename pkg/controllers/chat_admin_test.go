@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -29,6 +31,102 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 )
+
+func TestChatHistoryOnlyHTTPReadAndMutationContracts(t *testing.T) {
+	provider := storage.NewMemory()
+	store := chatagent.NewSessionStore(provider, tenancy.DefaultOrgScope(), time.Now)
+	if _, err := store.Create("existing"); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := chatTestApp(t, provider, nil, true)
+	for _, prefix := range []string{"/api/admin/chat", "/api/v1/agent"} {
+		for _, request := range []struct {
+			method string
+			path   string
+			want   int
+		}{
+			{http.MethodGet, "/sessions", fiber.StatusOK},
+			{http.MethodGet, "/sessions/existing", fiber.StatusOK},
+			{http.MethodPost, "/sessions", fiber.StatusServiceUnavailable},
+			{http.MethodDelete, "/sessions/existing", fiber.StatusServiceUnavailable},
+			{http.MethodPost, "/sessions/existing/cancel", fiber.StatusServiceUnavailable},
+		} {
+			response, err := app.Test(httptest.NewRequest(request.method, prefix+request.path, nil), -1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode != request.want {
+				t.Fatalf("%s %s%s status=%d want=%d", request.method, prefix, request.path, response.StatusCode, request.want)
+			}
+		}
+	}
+	if _, err := store.Get("existing"); err != nil {
+		t.Fatalf("history mutated: %v", err)
+	}
+}
+
+func TestChatCorruptIndexHTTPIsBackendFailure(t *testing.T) {
+	for _, corruptOrg := range []string{"licensed", "default"} {
+		for _, data := range []string{`{"sessions":[{"id":"../invalid"}]}`, `{broken`} {
+			t.Run(corruptOrg+data, func(t *testing.T) {
+				provider := storage.NewMemory()
+				hash := sha256.Sum256([]byte(corruptOrg))
+				if err := provider.WriteBlob(fmt.Sprintf("chat-sessions-%x/index", hash[:8]), []byte(data)); err != nil {
+					t.Fatal(err)
+				}
+				app := fiber.New(fiber.Config{Immutable: true})
+				app.Use(func(ctx *fiber.Ctx) error { middleware.MarkAuthorized(ctx); return ctx.Next() })
+				controller := NewChatAdminController(func(tenancy.OrgScope) *chatagent.Service {
+					return chatagent.NewService(chatagent.NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), time.Now), nil, nil, time.Now)
+				})
+				controller.Register(app.Group("/api"))
+				for _, prefix := range []string{"/api/admin/chat", "/api/v1/agent"} {
+					for _, path := range []string{"/sessions", "/sessions/missing"} {
+						response, err := app.Test(httptest.NewRequest(http.MethodGet, prefix+path, nil), -1)
+						if err != nil {
+							t.Fatal(err)
+						}
+						response.Body.Close()
+						if response.StatusCode != fiber.StatusInternalServerError {
+							t.Fatalf("corruption %s%s status=%d", prefix, path, response.StatusCode)
+						}
+					}
+				}
+			})
+		}
+	}
+	app, _ := chatTestApp(t, storage.NewMemory(), nil, true)
+	for _, prefix := range []string{"/api/admin/chat", "/api/v1/agent"} {
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, prefix+"/sessions/missing", nil), -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != fiber.StatusNotFound {
+			t.Fatalf("missing session status=%d", response.StatusCode)
+		}
+	}
+}
+
+func TestApprovalArchiveConflictContract(t *testing.T) {
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Post("/approval", func(ctx *fiber.Ctx) error {
+		return writeApprovalError(ctx, errors.Join(act.ErrReadOnlyApproval, errors.New("private detail")))
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/approval", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var body agentapi.Error
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != fiber.StatusConflict || body.Code != "approval_read_only" || body.Message != "created before the upgrade; propose again" {
+		t.Fatalf("status=%d body=%+v", response.StatusCode, body)
+	}
+}
 
 type apiChatRunner struct{}
 

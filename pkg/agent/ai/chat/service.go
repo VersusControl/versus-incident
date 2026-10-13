@@ -137,6 +137,9 @@ func (service *Service) Get(id string) (*Session, error) {
 }
 
 func (service *Service) Delete(id string) error {
+	if !service.Available() {
+		return router.ErrNoAgent
+	}
 	if _, err := service.store.Get(id); err != nil {
 		if !errors.Is(err, ErrSessionNotFound) {
 			return err
@@ -565,6 +568,9 @@ func seedEvidence(traces []core.ToolCallTrace) []byte {
 }
 
 func (service *Service) Cancel(id string) error {
+	if !service.Available() {
+		return router.ErrNoAgent
+	}
 	requested, err := service.store.RequestCancel(id)
 	if err != nil {
 		return err

@@ -22,6 +22,35 @@ type blockingRunner struct {
 	once    sync.Once
 }
 
+func TestServiceHistoryOnlyRejectsMutationsAndPreservesReads(t *testing.T) {
+	store := NewSessionStore(storage.NewMemory(), tenancy.DefaultOrgScope(), time.Now)
+	if _, err := store.Create("existing"); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store, nil, nil, time.Now)
+	if service.Available() {
+		t.Fatal("history-only service is available for execution")
+	}
+	if _, err := service.Get("existing"); err != nil {
+		t.Fatal(err)
+	}
+	if sessions, err := service.List(); err != nil || len(sessions) != 1 {
+		t.Fatalf("history list: %+v %v", sessions, err)
+	}
+	for _, unavailable := range []*Service{nil, service, NewService(nil, fixedRunner{}, nil, time.Now)} {
+		if err := unavailable.Delete("existing"); !errors.Is(err, router.ErrNoAgent) {
+			t.Fatalf("delete history-only: %v", err)
+		}
+		if err := unavailable.Cancel("existing"); !errors.Is(err, router.ErrNoAgent) {
+			t.Fatalf("cancel history-only: %v", err)
+		}
+	}
+	enabled := NewService(store, fixedRunner{}, nil, time.Now)
+	if err := enabled.Delete("existing"); err != nil {
+		t.Fatalf("enabled explicit delete: %v", err)
+	}
+}
+
 func TestEventRecorderRetainsApprovalWhenTraceBufferIsFull(t *testing.T) {
 	recorder := &eventRecorder{}
 	for sequence := 0; sequence < MaxEventsPerTurn*2; sequence++ {
