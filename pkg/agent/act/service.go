@@ -17,6 +17,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 	"github.com/google/uuid"
 )
 
@@ -25,6 +26,8 @@ const (
 	approvalExecutionTimeout = 3 * time.Minute
 	approvalUnknownGrace     = 30 * time.Second
 )
+
+var ErrReadOnlyApproval = errors.New("created before the upgrade; propose again")
 
 type PermissionAuthorizer struct{}
 
@@ -46,6 +49,7 @@ type proposalRecord struct {
 type Service struct {
 	provider storage.Provider
 	org      string
+	readOrgs []string
 	writer   ledger.Writer
 	registry *Registry
 	auth     Authorizer
@@ -54,6 +58,14 @@ type Service struct {
 }
 
 func NewService(provider storage.Provider, org string, writer ledger.Writer, authorizer Authorizer, adapters ...Adapter) (*Service, error) {
+	return NewServiceWithScope(provider, tenancy.NewOrgScope(org), writer, authorizer, adapters...)
+}
+
+func NewServiceWithScope(provider storage.Provider, scope tenancy.OrgScope, writer ledger.Writer, authorizer Authorizer, adapters ...Adapter) (*Service, error) {
+	scope = scope.Normalized()
+	if len(scope.Read) > 2 {
+		return nil, ErrActionDenied
+	}
 	if provider == nil || writer == nil {
 		return nil, ledger.ErrLedgerUnavailable
 	}
@@ -66,7 +78,11 @@ func NewService(provider storage.Provider, org string, writer ledger.Writer, aut
 			return nil, err
 		}
 	}
-	return &Service{provider: provider, org: storage.NormalizeOrgID(org), writer: writer, registry: registry, auth: authorizer, now: time.Now}, nil
+	return &Service{provider: provider, org: scope.Write, readOrgs: scope.OrgIDs(), writer: writer, registry: registry, auth: authorizer, now: time.Now}, nil
+}
+
+func (service *Service) Available() bool {
+	return service != nil && service.registry != nil && len(service.registry.byType) > 0
 }
 
 func (service *Service) Propose(ctx context.Context, input ProposalInput) (ProposalResult, error) {
@@ -169,35 +185,48 @@ func (service *Service) Approvals(ctx context.Context, pendingOnly bool) ([]Appr
 	if service == nil || service.provider == nil || ctx == nil {
 		return nil, ErrActionDenied
 	}
-	blobs, err := service.provider.ListBlobs(service.prefix())
-	if err != nil {
-		return nil, ledger.ErrLedgerUnavailable
-	}
-	result := make([]Approval, 0, len(blobs))
-	for _, blob := range blobs {
-		if ctx.Err() != nil || len(result) >= 1000 {
-			break
-		}
-		var record proposalRecord
-		if json.Unmarshal(blob.Data, &record) != nil {
+	result := make([]Approval, 0)
+	seen := map[string]bool{}
+	for _, org := range service.readOrgs {
+		blobs, err := service.provider.ListBlobs(proposalPrefix(org))
+		if err != nil {
 			return nil, ledger.ErrLedgerUnavailable
 		}
-		if !service.targetAllowed(ctx, record.Approval.Proposal) {
-			if !service.legacyTargetReadable(ctx, record.Approval.Proposal) {
+		for _, blob := range blobs {
+			if ctx.Err() != nil || len(result) >= 1000 {
+				break
+			}
+			var record proposalRecord
+			if len(blob.Data) > 16*1024 || json.Unmarshal(blob.Data, &record) != nil || record.Approval.ID == "" {
+				return nil, ledger.ErrLedgerUnavailable
+			}
+			if seen[record.Approval.ID] {
 				continue
 			}
-		} else {
-			record = service.reconcileExecutionUnknown(record)
+			seen[record.Approval.ID] = true
+			record.Approval.ReadOnly = org != service.org
+			if !service.targetAllowed(ctx, record.Approval.Proposal) {
+				if !service.legacyTargetReadable(ctx, record.Approval.Proposal) {
+					continue
+				}
+			} else if !record.Approval.ReadOnly {
+				if _, registered := service.registry.Lookup(record.Approval.Proposal.Type); registered {
+					record = service.reconcileExecutionUnknown(record)
+				}
+			}
+			if pendingOnly && (record.Approval.State != "pending" || !service.now().Before(record.Approval.ExpiresAt)) {
+				continue
+			}
+			result = append(result, record.Approval)
 		}
-		if pendingOnly && (record.Approval.State != "pending" || !service.now().Before(record.Approval.ExpiresAt)) {
-			continue
-		}
-		result = append(result, record.Approval)
 	}
 	return result, nil
 }
 
 func (service *Service) Approve(ctx context.Context, approvalID, nonce, approver string) (Approval, error) {
+	if service == nil || ctx == nil || !core.CallerAuthorized(ctx, core.PermissionAgentApprove) {
+		return Approval{}, ErrActionDenied
+	}
 	actor := core.CallerActor(ctx)
 	if actor == "" || approver != actor {
 		return Approval{}, ErrActionDenied
@@ -207,6 +236,16 @@ func (service *Service) Approve(ctx context.Context, approvalID, nonce, approver
 		return Approval{}, err
 	}
 	if !service.targetAllowed(ctx, record.Approval.Proposal) {
+		if record.Approval.ReadOnly && service.legacyTargetReadable(ctx, record.Approval.Proposal) {
+			return Approval{}, ErrReadOnlyApproval
+		}
+		return Approval{}, ErrActionDenied
+	}
+	if record.Approval.ReadOnly {
+		return Approval{}, ErrReadOnlyApproval
+	}
+	adapter, ok := service.registry.Lookup(record.Approval.Proposal.Type)
+	if !ok {
 		return Approval{}, ErrActionDenied
 	}
 	record = service.reconcileExecutionUnknown(record)
@@ -220,10 +259,6 @@ func (service *Service) Approve(ctx context.Context, approvalID, nonce, approver
 	}
 	if err := service.auth.Authorize(ctx, approver, record.Approval.Proposal); err != nil {
 		return Approval{}, err
-	}
-	adapter, ok := service.registry.Lookup(record.Approval.Proposal.Type)
-	if !ok {
-		return Approval{}, ErrActionDenied
 	}
 	if err := adapter.Validate(ctx, record.Approval.Proposal); err != nil {
 		return Approval{}, ErrActionDenied
@@ -301,14 +336,29 @@ func (service *Service) Approve(ctx context.Context, approvalID, nonce, approver
 }
 
 func (service *Service) Reject(ctx context.Context, approvalID, reason, approver string) (Approval, error) {
+	if service == nil || ctx == nil || !core.CallerAuthorized(ctx, core.PermissionAgentApprove) {
+		return Approval{}, ErrActionDenied
+	}
 	if core.CallerActor(ctx) == "" || approver != core.CallerActor(ctx) {
 		return Approval{}, ErrActionDenied
 	}
 	record, err := service.load(approvalID)
-	if err != nil || record.Approval.State != "pending" || !service.now().Before(record.Approval.ExpiresAt) {
-		return Approval{}, ErrActionDenied
+	if err != nil {
+		return Approval{}, err
 	}
 	if !service.targetAllowed(ctx, record.Approval.Proposal) {
+		if record.Approval.ReadOnly && service.legacyTargetReadable(ctx, record.Approval.Proposal) {
+			return Approval{}, ErrReadOnlyApproval
+		}
+		return Approval{}, ErrActionDenied
+	}
+	if record.Approval.ReadOnly {
+		return Approval{}, ErrReadOnlyApproval
+	}
+	if _, registered := service.registry.Lookup(record.Approval.Proposal.Type); !registered {
+		return Approval{}, ErrActionDenied
+	}
+	if record.Approval.State != "pending" || !service.now().Before(record.Approval.ExpiresAt) {
 		return Approval{}, ErrActionDenied
 	}
 	if err := service.auth.Authorize(ctx, approver, record.Approval.Proposal); err != nil {
@@ -389,6 +439,9 @@ func (service *Service) claimApproval(record proposalRecord, nonce string) error
 }
 
 func (service *Service) claimPending(record proposalRecord, nonce string) error {
+	if record.Approval.ReadOnly {
+		return ErrReadOnlyApproval
+	}
 	cas, ok := service.provider.(storage.BlobCAS)
 	if !ok {
 		return ledger.ErrLedgerUnavailable
@@ -428,6 +481,9 @@ func (service *Service) claimPending(record proposalRecord, nonce string) error 
 }
 
 func (service *Service) reconcileExecutionUnknown(record proposalRecord) proposalRecord {
+	if record.Approval.ReadOnly {
+		return record
+	}
 	approval := record.Approval
 	if approval.State != "approving" || (!approval.ClaimedAt.IsZero() && service.now().Sub(approval.ClaimedAt) <= approvalExecutionTimeout+approvalUnknownGrace) {
 		return record
@@ -502,18 +558,28 @@ func (service *Service) load(id string) (proposalRecord, error) {
 	if id == "" || strings.ContainsAny(id, "/\\") {
 		return proposalRecord{}, ErrActionDenied
 	}
-	data, err := service.provider.ReadBlob(service.key(id))
-	if err != nil || data == nil {
-		return proposalRecord{}, ErrActionDenied
+	for _, org := range service.readOrgs {
+		data, err := service.provider.ReadBlob(proposalPrefix(org) + id)
+		if err != nil {
+			return proposalRecord{}, ledger.ErrLedgerUnavailable
+		}
+		if len(data) == 0 {
+			continue
+		}
+		var record proposalRecord
+		if len(data) > 16*1024 || json.Unmarshal(data, &record) != nil || record.Approval.ID != id {
+			return proposalRecord{}, ledger.ErrLedgerUnavailable
+		}
+		record.Approval.ReadOnly = org != service.org
+		return record, nil
 	}
-	var record proposalRecord
-	if json.Unmarshal(data, &record) != nil {
-		return proposalRecord{}, ledger.ErrLedgerUnavailable
-	}
-	return record, nil
+	return proposalRecord{}, ErrActionDenied
 }
 
 func (service *Service) save(record proposalRecord) error {
+	if record.Approval.ReadOnly {
+		return ErrReadOnlyApproval
+	}
 	encoded, err := json.Marshal(record)
 	if err != nil || len(encoded) > 16*1024 || service.provider.WriteBlob(service.key(record.Approval.ID), encoded) != nil {
 		return ledger.ErrLedgerUnavailable
@@ -522,8 +588,9 @@ func (service *Service) save(record proposalRecord) error {
 }
 
 func (service *Service) prefix() string {
-	return "agent-actions/" + digest([]byte(service.org)) + "/proposals/"
+	return proposalPrefix(service.org)
 }
+func proposalPrefix(org string) string        { return "agent-actions/" + digest([]byte(org)) + "/proposals/" }
 func (service *Service) key(id string) string { return service.prefix() + id }
 
 func canonicalParams(raw json.RawMessage) (string, json.RawMessage, error) {

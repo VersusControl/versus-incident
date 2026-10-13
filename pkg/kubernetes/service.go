@@ -14,6 +14,7 @@ import (
 	"time"
 
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 const (
@@ -206,6 +207,7 @@ type Scrubber interface{ Scrub(string) string }
 type Service struct {
 	client           *Client
 	scope            Scope
+	readOrgs         []string
 	ttl              time.Duration
 	mu               *sync.Mutex
 	cache            map[string]discoveryCacheEntry
@@ -241,7 +243,11 @@ func (service *Service) Scoped(scope Scope) *Service {
 	if service == nil {
 		return nil
 	}
-	return &Service{client: service.client, scope: scope, ttl: service.ttl, mu: service.mu, cache: service.cache, scrubber: service.scrubber, indexes: service.indexes, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext}
+	readOrgs := []string{scope.OrgID}
+	if scope.OrgID == service.scope.OrgID {
+		readOrgs = append([]string(nil), service.readOrgs...)
+	}
+	return &Service{client: service.client, scope: scope, readOrgs: readOrgs, ttl: service.ttl, mu: service.mu, cache: service.cache, scrubber: service.scrubber, indexes: service.indexes, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext}
 }
 
 // Scope returns the immutable cache and request identity of this service.
@@ -254,6 +260,7 @@ func (service *Service) Scope() Scope {
 
 // ServiceRegistry resolves one shared service instance per org, cluster, and credential.
 type ServiceRegistry struct {
+	bootScope      tenancy.OrgScope
 	mu             sync.Mutex
 	base           *Service
 	services       map[string]*Service
@@ -284,7 +291,12 @@ type ClusterEntry struct {
 }
 
 func NewClusterRegistry(multiple bool, entries []ClusterEntry) *ServiceRegistry {
+	return NewClusterRegistryWithScope(multiple, entries, tenancy.DefaultOrgScope())
+}
+
+func NewClusterRegistryWithScope(multiple bool, entries []ClusterEntry, scope tenancy.OrgScope) *ServiceRegistry {
 	registry := &ServiceRegistry{multiple: multiple, entries: append([]ClusterEntry(nil), entries...), services: make(map[string]*Service), summaries: make(map[string]clusterSummaryCache), summarySlots: make(chan struct{}, 4), summaryTimeout: 5 * time.Second}
+	registry.bootScope = scope.Normalized()
 	for index, entry := range registry.entries {
 		if entry.Info.ID == "" && entry.Service != nil {
 			registry.entries[index].Info.ID = entry.Service.Scope().ClusterID
@@ -293,6 +305,7 @@ func NewClusterRegistry(multiple bool, entries []ClusterEntry) *ServiceRegistry 
 			registry.base = entry.Service
 		}
 		if entry.Service != nil {
+			entry.Service.readOrgs = tenancy.TrustedOrgScope(registry.bootScope, entry.Service.scope.OrgID).OrgIDs()
 			registry.services[entry.Service.cacheKey()] = entry.Service
 		}
 	}
@@ -347,6 +360,7 @@ func (registry *ServiceRegistry) ResolveCluster(orgID, clusterID string) (*Servi
 			return service, nil
 		}
 		service := entry.Service.Scoped(scope)
+		service.readOrgs = tenancy.TrustedOrgScope(registry.bootScope, orgID).OrgIDs()
 		registry.services[key] = service
 		return service, nil
 	}

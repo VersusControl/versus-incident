@@ -116,6 +116,30 @@ func TestProposalToolIsAddedOnlyToChatRuntime(t *testing.T) {
 	}
 }
 
+func TestActionHistoryFactoryWithoutActors(t *testing.T) {
+	scope := tenancy.NewOrgScope("licensed", "default")
+	for _, actionsEnabled := range []bool{false, true} {
+		connectors := config.ConnectorsConfig{Kubernetes: config.KubernetesConnectorConfig{KubernetesToolConfig: config.KubernetesToolConfig{
+			Endpoint: "https://cluster.example", Actions: config.KubernetesActionsToolConfig{Enable: actionsEnabled, Auth: config.KubernetesAuthConfig{Mode: "in_cluster"}},
+		}}}
+		bundle := BuildAIsForScope(config.AgentConfig{}, nil, storage.NewMemory(), scope, nil, connectors)
+		if bundle.ActionService == nil || bundle.ActionService(scope) == nil || bundle.ActionService(tenancy.NewOrgScope("licensed")) == nil {
+			t.Fatal("durable history unavailable without constructed actors")
+		}
+		status := bundle.ToolSnapshot(scope).Capabilities["kubernetes_actions"]
+		if status.Configured != actionsEnabled || status.Constructed || status.Healthy {
+			t.Fatalf("actor status changed: %+v", status)
+		}
+		if bundle.ActionService(tenancy.NewOrgScope("foreign", "default")) != nil {
+			t.Fatal("factory accepted another organization scope")
+		}
+	}
+	bundle := BuildAIsForScope(config.AgentConfig{}, nil, nil, scope, nil)
+	if bundle.ActionService != nil {
+		t.Fatal("history exposed without storage")
+	}
+}
+
 func TestKubernetesActionsRejectPodServiceAccountReuse(t *testing.T) {
 	_, err := buildKubernetesActionAdapters(config.KubernetesConnectorConfig{KubernetesToolConfig: config.KubernetesToolConfig{
 		Endpoint: "https://cluster.example",

@@ -100,6 +100,16 @@ func (service *Service) Changes(ctx context.Context, query ChangeQuery) (ChangeP
 	if store == nil {
 		return ChangePage{Items: []Change{}, Gaps: []kubechanges.Gap{}, Sync: SyncStatus{State: "warming", Partial: true}}, nil
 	}
+	if len(service.readOrgs) > 1 {
+		var err error
+		service.changes.mu.Lock()
+		provider := service.changes.provider
+		service.changes.mu.Unlock()
+		store, err = kubechanges.NewView(provider, kubeindex.Scope{OrgID: service.scope.OrgID, ClusterID: service.scope.ClusterID, CredentialID: service.scope.CredentialID}, service.readOrgs[1:])
+		if err != nil {
+			return ChangePage{}, err
+		}
+	}
 	var refreshed kubeindex.Status
 	var refreshErr error
 	if service.client == nil {

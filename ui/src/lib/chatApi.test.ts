@@ -131,6 +131,12 @@ describe("chat API", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual({ reason: "Not safe to apply" });
   });
 
+  it.each(["approve", "reject"] as const)("preserves the read-only conflict code for %s commands", async (decision) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ code: "approval_read_only", message: "created before the upgrade; propose again" }), { status: 409 }));
+    const command = decision === "approve" ? api.approveAgentApproval("archived", "nonce") : api.rejectAgentApproval("archived", "Not safe");
+    await expect(command).rejects.toMatchObject({ status: 409, body: { code: "approval_read_only" } });
+  });
+
   it("dispatches auth-expired and throws a safe ApiError on 401", async () => {
     setSecret("rotated");
     const expired = vi.fn();

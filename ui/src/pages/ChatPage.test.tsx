@@ -90,6 +90,105 @@ afterEach(() => {
 });
 
 describe("ChatPage", () => {
+  it.each(["pending", "executed", "rejected"])("shows archived %s approvals without decision commands", async (state) => {
+    const approval = await api.approveAgentApproval("fixture", "fixture");
+    vi.mocked(api.approveAgentApproval).mockClear();
+    vi.mocked(api.listAgentApprovals).mockResolvedValue({ approvals: [{ ...approval, state, read_only: true }] });
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Open action approvals" }));
+    const card = await screen.findByRole("region", { name: "Action approval" });
+    expect(within(card).getByText("Before upgrade")).toBeTruthy();
+    expect(within(card).getByText(new RegExp(state))).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Approve action" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reject action" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Reason for rejection" })).toBeNull();
+    expect(api.listAgentApprovals).toHaveBeenCalledWith("all");
+    expect(api.approveAgentApproval).not.toHaveBeenCalled();
+    expect(api.rejectAgentApproval).not.toHaveBeenCalled();
+  });
+
+  it("does not make a saved pending approval actionable through history UI state", async () => {
+    const approval = await api.approveAgentApproval("fixture", "fixture");
+    vi.mocked(api.approveAgentApproval).mockClear();
+    vi.mocked(api.listAgentApprovals).mockResolvedValue({ approvals: [{ ...approval, state: "pending" }] });
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Open action approvals" }));
+    await screen.findByRole("region", { name: "Action approval" });
+    expect(screen.queryByText("Before upgrade")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve action" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reject action" })).toBeNull();
+    expect(api.approveAgentApproval).not.toHaveBeenCalled();
+  });
+
+  it.each(["event", "list"] as const)("blocks nonce-bearing archive approvals using %s metadata", async (source) => {
+    role.enterprise = true;
+    role.hasSession = true;
+    const me = vi.spyOn(api, "rbacMe").mockResolvedValue({ role: "admin", permissions: ["agent:approve"], clusters: null });
+    const approval = await api.approveAgentApproval("fixture", "fixture");
+    vi.mocked(api.approveAgentApproval).mockClear();
+    vi.mocked(api.listAgentApprovals).mockResolvedValue({ approvals: source === "list" ? [{ ...approval, read_only: true }] : [] });
+    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
+      onEvent({ seq: 1, at: "", kind: "approval_required", approval: { id: "approval-1", read_only: source === "event", cluster: "two", proposal_id: "proposal-1", run_id: "run-1", type: "restart", target: "Deployment/shop/checkout", effect: "Restart checkout", risk: "medium", state: "pending", expires_at: "2026-10-11T18:00:00Z" }, approval_nonce: "old-nonce" });
+      return { seq: 2, at: "", kind: "run_finished" };
+    });
+    renderPage();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart checkout" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Before upgrade");
+    expect(screen.queryByRole("button", { name: "Approve action" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reject action" })).toBeNull();
+    expect(api.approveAgentApproval).not.toHaveBeenCalled();
+    expect(api.rejectAgentApproval).not.toHaveBeenCalled();
+    me.mockRestore();
+  });
+
+  it("turns a stale actionable card read-only after the server rejects its decision", async () => {
+    vi.mocked(api.approveAgentApproval).mockRejectedValueOnce(new ApiError(409, "created before the upgrade; propose again", { code: "approval_read_only" }));
+    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
+      onEvent({ seq: 1, at: "", kind: "approval_required", approval: { id: "approval-1", proposal_id: "proposal-1", run_id: "run-1", type: "restart", target: "Deployment/shop/checkout", effect: "Restart checkout", risk: "medium", state: "pending", expires_at: "2026-10-11T18:00:00Z" }, approval_nonce: "old-nonce" });
+      return { seq: 2, at: "", kind: "run_finished" };
+    });
+    renderPage();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart checkout" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Approve action" }));
+    await screen.findByText("Before upgrade");
+    expect(screen.queryByRole("button", { name: "Approve action" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reject action" })).toBeNull();
+    expect(api.approveAgentApproval).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues existing full history without resetting the thread and deletes it normally", async () => {
+    const archived: ChatSession = { ...baseSession, turns: [
+      { id: "old-user", role: "user", content: "Before upgrading", created_at: baseSession.created_at },
+      { id: "old-answer", role: "assistant", content: "Retained answer", created_at: baseSession.updated_at },
+    ] };
+    vi.mocked(api.listChatSessions).mockResolvedValue([archived]);
+    vi.mocked(api.getChatSession).mockResolvedValue(archived);
+    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
+      expect(screen.getByText("Retained answer")).toBeTruthy();
+      vi.mocked(api.getChatSession).mockResolvedValue({ ...archived, turns: [...archived.turns,
+        { id: "new-user", role: "user", content: "Continue investigation", created_at: new Date().toISOString() },
+        { id: "new-answer", role: "assistant", content: "Continuation answer", created_at: new Date().toISOString() },
+      ] });
+      onEvent({ seq: 1, at: "", kind: "model_delta", delta: "Continuation answer" });
+      return { seq: 2, at: "", kind: "run_finished" };
+    });
+    renderPage("/agent/chat?session=session-1");
+    await screen.findByText("Retained answer");
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Continue investigation" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(screen.getAllByText("Continuation answer")).toHaveLength(1));
+    expect(screen.getAllByText("Retained answer")).toHaveLength(1);
+    expect(api.createChatSession).not.toHaveBeenCalled();
+    expect(api.streamChatMessage).toHaveBeenCalledWith("session-1", "Continue investigation", undefined, expect.any(Function), expect.any(AbortSignal));
+    fireEvent.click(screen.getByRole("button", { name: "Open chat history" }));
+    vi.mocked(api.listChatSessions).mockResolvedValue([]);
+    fireEvent.click(screen.getByRole("button", { name: "Delete thread" }));
+    await waitFor(() => expect(api.deleteChatSession).toHaveBeenCalledWith("session-1"));
+    await waitFor(() => expect(screen.queryByText("Retained answer")).toBeNull());
+  });
+
   it("waits for a cluster selection before resource reads and keeps the attachment cluster", async () => {
     const entry = { health: "healthy" as const, provider: "generic", nodes: 1, ready_nodes: 1, pods: 1, running_pods: 1, warnings: 0, sync: { state: "live" }, observed_at: "2026-10-09T12:00:00Z" };
     vi.mocked(api.kubernetesClusters).mockResolvedValue({ multiple: true, clusters: [{ ...entry, id: "one" }, { ...entry, id: "two" }] });

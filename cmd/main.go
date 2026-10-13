@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/agent"
+	"github.com/VersusControl/versus-incident/pkg/agent/act"
+	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	c "github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/controllers"
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -228,6 +230,9 @@ func main() {
 	}
 	toolAvailability.BindIntegrationConstruction("kubernetes", constructed > 0, constructionHealth)
 	registerToolAvailabilityController(app, toolAvailability, kubernetesService)
+	if err := registerActionHistoryService(store); err != nil {
+		log.Fatalf("action history: failed to start: %v", err)
+	}
 	if cfg.Agent.Enable {
 		// Try to attach to the existing Redis client; if on-call wasn't
 		// enabled but agent is, open one now (best effort — fall back to
@@ -290,6 +295,22 @@ func main() {
 // finish its shutdown flush. Long enough for a catalog write plus the commit
 // that follows it, short enough to stay inside a container stop's grace period.
 const agentFlushGrace = 15 * time.Second
+
+func registerActionHistoryService(store storage.Provider) error {
+	scope := tenancy.DefaultOrgScope()
+	service, err := act.NewServiceWithScope(store, scope, ledger.NewBlobWriter(store, scope.Write), nil)
+	if err != nil {
+		return err
+	}
+	controllers.SetAgentApprovalServiceFactory(func(requestScope tenancy.OrgScope) *act.Service {
+		requestScope = requestScope.Normalized()
+		if requestScope.Write != scope.Write || len(requestScope.Read) != 1 || requestScope.Read[0] != scope.Write {
+			return nil
+		}
+		return service
+	})
+	return nil
+}
 
 func registerToolAvailabilityController(app *fiber.App, availability *agent.ToolAvailabilityService, services ...*kubernetes.ServiceRegistry) {
 	controllers.NewAgentToolsAdminController(availability.Manager, availability.Snapshot).Register(app.Group("/api"))

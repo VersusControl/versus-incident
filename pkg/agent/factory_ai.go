@@ -156,6 +156,16 @@ func buildAIs(cfg config.AgentConfig, connectors config.ConnectorsConfig, catalo
 	}
 	var actionService *act.Service
 	var actionServiceFactory func(tenancy.OrgScope) *act.Service
+	historyService, historyErr := act.NewServiceWithScope(store, scope, ledger.NewBlobWriter(store, scope.Normalized().Write), nil)
+	if historyErr == nil {
+		bootScope := scope.Normalized()
+		actionServiceFactory = func(requestScope tenancy.OrgScope) *act.Service {
+			if requestScope.Normalized().Write != bootScope.Write {
+				return nil
+			}
+			return historyService
+		}
+	}
 	actionsEnabled := false
 	for _, entry := range connectors.Kubernetes.Resolved() {
 		actionsEnabled = actionsEnabled || entry.Actions.Enable
@@ -164,7 +174,7 @@ func buildAIs(cfg config.AgentConfig, connectors config.ConnectorsConfig, catalo
 	if actionsEnabled {
 		adapters, actionErr := buildKubernetesActionAdapters(connectors.Kubernetes)
 		if actionErr == nil && store != nil && len(adapters) > 0 {
-			actionService, actionErr = act.NewService(store, scope.Normalized().Write, ledger.NewBlobWriter(store, scope.Normalized().Write), nil, adapters...)
+			actionService, actionErr = act.NewServiceWithScope(store, scope, ledger.NewBlobWriter(store, scope.Normalized().Write), nil, adapters...)
 		} else if actionErr == nil {
 			actionErr = errors.New("durable action storage is unavailable")
 		}
@@ -174,13 +184,7 @@ func buildAIs(cfg config.AgentConfig, connectors config.ConnectorsConfig, catalo
 			actionStatus.Constructed = true
 			actionStatus.Healthy = true
 			actionStatus.Health = ""
-			bootScope := scope.Normalized()
-			actionServiceFactory = func(requestScope tenancy.OrgScope) *act.Service {
-				if requestScope.Normalized().Write != bootScope.Write {
-					return nil
-				}
-				return actionService
-			}
+			historyService = actionService
 		}
 	}
 	if configuredToolSnapshot.Capabilities == nil {
@@ -459,6 +463,7 @@ func buildAIs(cfg config.AgentConfig, connectors config.ConnectorsConfig, catalo
 			if serviceScope.Normalized().Write != bootScope.Write {
 				return nil
 			}
+			serviceScope = tenancy.TrustedOrgScope(bootScope, serviceScope.Write)
 			return chatagent.NewServiceWithLocationProviderAndContextDecorator(
 				chatagent.NewSessionStore(store, serviceScope, time.Now), r, concreteChat, time.Now,
 				locationProvider,

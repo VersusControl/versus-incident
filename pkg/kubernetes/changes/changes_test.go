@@ -1,7 +1,9 @@
 package changes
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -10,6 +12,73 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
+
+func TestUpgradeTimelineVisible(t *testing.T) {
+	provider := storage.NewMemory()
+	now := time.Now().UTC()
+	scope := index.Scope{OrgID: "default", ClusterID: "cluster", CredentialID: "credential"}
+	archive := NewStore(provider, scope)
+	old := Change{ID: "shared", Cluster: "cluster", Kind: "Pod", Name: "before", Type: Created, At: now.Add(-time.Minute)}
+	if err := archive.Append([]Change{old}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.MarkGap(Gap{From: now.Add(-time.Hour), To: now.Add(-time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := provider.ReadBlob(archive.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope.OrgID = "licensed"
+	view, err := NewView(provider, scope, []string{"default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer := old
+	newer.Name = "after"
+	added := old
+	added.ID = "new"
+	added.Name = "new-pod"
+	added.At = now
+	if err := view.Append([]Change{newer, added}, now); err != nil {
+		t.Fatal(err)
+	}
+	page, err := view.Query(Query{Limit: 1}, now)
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != "new" || page.Next != "1" {
+		t.Fatalf("page=%+v err=%v", page, err)
+	}
+	page, err = view.Query(Query{Limit: 1, Cursor: page.Next}, now)
+	if err != nil || len(page.Items) != 1 || page.Items[0].Name != "after" || page.Next != "" || len(page.Gaps) != 1 {
+		t.Fatalf("deduplicated page=%+v err=%v", page, err)
+	}
+	page, err = view.Query(Query{Name: "before"}, now)
+	if err != nil || len(page.Items) != 0 {
+		t.Fatalf("filter before dedup: %+v %v", page, err)
+	}
+	after, err := provider.ReadBlob(archive.key)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("archive changed")
+	}
+	for _, changed := range []index.Scope{{OrgID: "licensed", ClusterID: "renamed", CredentialID: "credential"}, {OrgID: "licensed", ClusterID: "cluster", CredentialID: "different"}} {
+		isolated, err := NewView(provider, changed, []string{"default"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		page, err := isolated.Query(Query{}, now)
+		if err != nil || len(page.Items) != 0 {
+			t.Fatalf("identity isolation=%+v %v", page, err)
+		}
+	}
+	if _, err := NewView(provider, scope, []string{"default", "foreign"}); !errors.Is(err, ErrStoreLimit) {
+		t.Fatal("third scope accepted")
+	}
+	if err := provider.WriteBlob(archive.key, []byte("malformed")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := view.Query(Query{}, now); !errors.Is(err, ErrStoreLimit) {
+		t.Fatal("malformed archive was hidden")
+	}
+}
 
 func TestDetectProjectedChangesWithoutSensitiveFields(t *testing.T) {
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)

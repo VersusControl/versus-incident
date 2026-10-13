@@ -7,14 +7,55 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/agent"
 	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
+	"github.com/VersusControl/versus-incident/pkg/agentapi"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/controllers"
+	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
 
 	"github.com/gofiber/fiber/v2"
 )
+
+func TestActionHistoryGETWithoutAgent(t *testing.T) {
+	if err := registerActionHistoryService(storage.NewMemory()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { controllers.SetAgentApprovalServiceFactory(nil) })
+	for _, permission := range []bool{false, true} {
+		app := fiber.New(fiber.Config{Immutable: true})
+		app.Use(middleware.OrgInjector())
+		app.Use(func(ctx *fiber.Ctx) error {
+			middleware.MarkAuthorized(ctx)
+			middleware.SetRequestPermission(ctx, string(core.PermissionAgentApprove), permission)
+			return ctx.Next()
+		})
+		controllers.NewChatAdminController(nil).Register(app.Group("/api"))
+		response, err := app.Test(httptest.NewRequest("GET", "/api/v1/agent/approvals?state=all", nil), -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		want := fiber.StatusForbidden
+		if permission {
+			want = fiber.StatusOK
+		}
+		if response.StatusCode != want {
+			t.Fatalf("permission=%t status=%d want=%d", permission, response.StatusCode, want)
+		}
+		bootstrap, err := app.Test(httptest.NewRequest("GET", "/api/v1/agent/bootstrap", nil), -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload agentapi.Bootstrap
+		decodeErr := json.NewDecoder(bootstrap.Body).Decode(&payload)
+		bootstrap.Body.Close()
+		if bootstrap.StatusCode != fiber.StatusOK || decodeErr != nil || payload.Features.Approvals || payload.Features.Ledger {
+			t.Fatalf("history-only bootstrap status=%d features=%+v err=%v", bootstrap.StatusCode, payload.Features, decodeErr)
+		}
+	}
+}
 
 func TestToolCatalogGETDoesNotConstructDisabledAgentDependencies(t *testing.T) {
 	for _, aiEnabled := range []bool{false, true} {

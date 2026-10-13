@@ -10,6 +10,9 @@ func WithOrgScope(ctx context.Context, scope OrgScope) context.Context {
 }
 
 func ContextOrgScope(ctx context.Context) (OrgScope, bool) {
+	if ctx == nil {
+		return DefaultOrgScope(), false
+	}
 	scope, ok := ctx.Value(orgScopeContextKey{}).(OrgScope)
 	return scope.Normalized(), ok
 }
@@ -23,6 +26,15 @@ const DefaultOrgID = "default"
 type OrgScope struct {
 	Write string
 	Read  []string
+}
+
+func TrustedOrgScope(boot OrgScope, requestOrg string) OrgScope {
+	boot = boot.Normalized()
+	requestOrg = NormalizeOrgID(requestOrg)
+	if requestOrg != boot.Write {
+		return NewOrgScope(requestOrg)
+	}
+	return boot
 }
 
 // ScopeSource exposes a trusted organization scope computed by a storage or

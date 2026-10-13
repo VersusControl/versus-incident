@@ -15,6 +15,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
+	"github.com/google/uuid"
 )
 
 const (
@@ -34,6 +35,7 @@ const (
 
 var (
 	ErrSessionNotFound = errors.New("chat: session not found")
+	ErrSessionCorrupt  = errors.New("chat: corrupt session data")
 	ErrStoreConflict   = errors.New("chat: storage conflict")
 	ErrLeaseFenced     = errors.New("chat: lease fenced")
 	ErrSessionTooLarge = errors.New("chat: session exceeds storage limit")
@@ -81,6 +83,7 @@ type sessionDocument struct {
 }
 
 type sessionIndexEntry struct {
+	Deleted   bool          `json:"deleted,omitempty"`
 	ID        string        `json:"id"`
 	Status    SessionStatus `json:"status,omitempty"`
 	Seeded    bool          `json:"seeded,omitempty"`
@@ -89,8 +92,9 @@ type sessionIndexEntry struct {
 }
 
 type sessionIndex struct {
-	Version  int                 `json:"version"`
-	Sessions []sessionIndexEntry `json:"sessions"`
+	Version          int                 `json:"version"`
+	Sessions         []sessionIndexEntry `json:"sessions"`
+	retainedArchives map[string]sessionIndexEntry
 }
 
 type sessionLease struct {
@@ -102,6 +106,8 @@ type sessionLease struct {
 
 type SessionStore struct {
 	provider storage.Provider
+	archives []*SessionStore
+	readOnly bool
 	org      string
 	blobName string
 	now      func() time.Time
@@ -114,10 +120,20 @@ func NewSessionStore(provider storage.Provider, scope tenancy.OrgScope, now func
 	if now == nil {
 		now = time.Now
 	}
-	org := scope.Normalized().Write
+	scope = scope.Normalized()
+	if len(scope.Read) > 2 {
+		return nil
+	}
+	org := scope.Write
 	hash := sha256.Sum256([]byte(org))
 	blobName := chatSessionBlobPrefix + hex.EncodeToString(hash[:8])
-	return &SessionStore{provider: provider, org: org, blobName: blobName, now: now}
+	store := &SessionStore{provider: provider, org: org, blobName: blobName, now: now}
+	for _, archiveOrg := range scope.Read[1:] {
+		archive := NewSessionStore(provider, tenancy.NewOrgScope(archiveOrg), now)
+		archive.readOnly = true
+		store.archives = append(store.archives, archive)
+	}
+	return store
 }
 
 func (store *SessionStore) indexBlobName() string { return store.blobName + "/index" }
@@ -127,6 +143,16 @@ func (store *SessionStore) sessionBlobName(id string) string {
 func (store *SessionStore) leaseBlobName(id string) string { return store.blobName + "/leases/" + id }
 
 func (store *SessionStore) Create(id string) (*Session, error) {
+	if store.readOnly {
+		return nil, ErrStoreConflict
+	}
+	if len(store.archives) > 0 {
+		if _, err := store.Get(id); err == nil {
+			return nil, ErrStoreConflict
+		} else if !errors.Is(err, ErrSessionNotFound) {
+			return nil, err
+		}
+	}
 	if !validSessionID(id) {
 		return nil, fmt.Errorf("chat: invalid session id")
 	}
@@ -146,7 +172,11 @@ func (store *SessionStore) Create(id string) (*Session, error) {
 				return fmt.Errorf("chat: session already exists")
 			}
 		}
-		evicted = pruneIndex(index, now, 1)
+		var err error
+		evicted, err = store.pruneIndex(index, now, 1)
+		if err != nil {
+			return err
+		}
 		index.Sessions = append(index.Sessions, summaryEntry(created))
 		return nil
 	})
@@ -166,6 +196,13 @@ func (store *SessionStore) Create(id string) (*Session, error) {
 }
 
 func (store *SessionStore) List() ([]*Session, error) {
+	if len(store.archives) > 0 || store.readOnly {
+		return store.listUnion()
+	}
+	return store.listWrite()
+}
+
+func (store *SessionStore) listWrite() ([]*Session, error) {
 	index, _, err := store.readIndex()
 	if err != nil {
 		return nil, err
@@ -213,6 +250,9 @@ func (store *SessionStore) List() ([]*Session, error) {
 	out := make([]*Session, 0, len(index.Sessions))
 	staleRunning := make(map[string]struct{})
 	for _, entry := range index.Sessions {
+		if entry.Deleted {
+			continue
+		}
 		status := entry.Status
 		if status == SessionRunning && !activeLeases[entry.ID] {
 			status = SessionFailed
@@ -236,8 +276,18 @@ func (store *SessionStore) List() ([]*Session, error) {
 }
 
 func (store *SessionStore) Get(id string) (*Session, error) {
+	if len(store.archives) > 0 || store.readOnly {
+		return store.getUnion(id)
+	}
+	return store.getWrite(id)
+}
+
+func (store *SessionStore) getWrite(id string) (*Session, error) {
 	if !validSessionID(id) {
 		return nil, ErrSessionNotFound
+	}
+	if _, _, err := store.readIndex(); err != nil {
+		return nil, err
 	}
 	data, err := store.provider.ReadBlob(store.sessionBlobName(id))
 	if err != nil {
@@ -257,7 +307,10 @@ func (store *SessionStore) Get(id string) (*Session, error) {
 	}
 	var session Session
 	if err := json.Unmarshal(data, &session); err != nil {
-		return nil, fmt.Errorf("chat: decode session: %w", err)
+		return nil, fmt.Errorf("%w: decode session: %v", ErrSessionCorrupt, err)
+	}
+	if session.ID != id || !validSessionStatus(session.Status) {
+		return nil, ErrSessionCorrupt
 	}
 	if session.Status == SessionRunning {
 		active, leaseErr := store.LeaseActive(id)
@@ -277,6 +330,27 @@ func (store *SessionStore) Get(id string) (*Session, error) {
 func (store *SessionStore) Delete(id string) error {
 	if !validSessionID(id) {
 		return ErrSessionNotFound
+	}
+	if store.readOnly {
+		return ErrStoreConflict
+	}
+	if len(store.archives) > 0 {
+		if err := store.updateIndex(func(index *sessionIndex) error {
+			marker := suppressionMarker(index, id)
+			for position := range index.Sessions {
+				if index.Sessions[position].ID == id {
+					index.Sessions = append(index.Sessions[:position], index.Sessions[position+1:]...)
+					break
+				}
+			}
+			if marker != nil {
+				index.Sessions = append(index.Sessions, *marker)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		return store.deleteSessionArtifacts(id)
 	}
 	found := false
 	if err := store.updateIndex(func(index *sessionIndex) error {
@@ -317,12 +391,27 @@ func (store *SessionStore) Append(id string, turns ...Turn) (*Session, error) {
 	var updated *Session
 	err := store.updateSession(id, func(session *Session, now time.Time) error {
 		for _, turn := range turns {
+			if len(store.archives) > 0 && turn.ID == "" {
+				turn.ID = uuid.NewString()
+			}
 			turn.Content = capString(turn.Content, MaxMessageBytes)
 			turn.ToolCalls = boundToolCalls(turn.ToolCalls)
 			turn.Citations = boundCitations(turn.Citations)
 			turn.Events = boundEvents(turn.Events)
 			turn.Attachment = cloneAttachment(turn.Attachment)
-			session.Turns = append(session.Turns, turn)
+			found := false
+			if len(store.archives) > 0 {
+				for position := range session.Turns {
+					if session.Turns[position].ID == turn.ID {
+						session.Turns[position] = turn
+						found = true
+						break
+					}
+				}
+			}
+			if !found {
+				session.Turns = append(session.Turns, turn)
+			}
 		}
 		if len(session.Turns) > MaxTurnsPerSession {
 			dropped := len(session.Turns) - MaxTurnsPerSession + 1
@@ -334,6 +423,9 @@ func (store *SessionStore) Append(id string, turns ...Turn) (*Session, error) {
 		updated = session
 		return nil
 	})
+	if err == nil && len(store.archives) > 0 {
+		return store.Get(id)
+	}
 	return cloneSession(updated), err
 }
 
@@ -347,29 +439,62 @@ func (store *SessionStore) SetStatus(id string, status SessionStatus, seeded boo
 }
 
 func (store *SessionStore) updateSession(id string, change func(*Session, time.Time) error) error {
+	if store.readOnly {
+		return ErrStoreConflict
+	}
+	if !validSessionID(id) {
+		return ErrSessionNotFound
+	}
 	cas, ok := store.provider.(storage.BlobCAS)
 	if !ok {
 		return storage.ErrUnsupported
 	}
 	name := store.sessionBlobName(id)
 	for attempt := 0; attempt < maxCASAttempts; attempt++ {
+		if len(store.archives) > 0 {
+			deleted, err := store.isDeleted(id)
+			if err != nil {
+				return err
+			}
+			if deleted {
+				return ErrSessionNotFound
+			}
+		}
 		current, err := store.provider.ReadBlob(name)
 		if err != nil {
 			return fmt.Errorf("chat: read session: %w", err)
 		}
+		var record continuationRecord
 		if len(current) == 0 {
-			return ErrSessionNotFound
+			own, ownErr := store.readRecord(id)
+			if ownErr == nil {
+				record = *own
+			} else if !errors.Is(ownErr, ErrSessionNotFound) {
+				return ownErr
+			} else {
+				archive, err := store.archivedSession(id)
+				if err != nil {
+					return err
+				}
+				record = continuationRecord{Session: Session{ID: id, Status: SessionIdle, Seeded: archive.Seeded, CreatedAt: archive.CreatedAt, UpdatedAt: archive.UpdatedAt}, Continuation: true}
+			}
+		} else if len(current) > MaxSessionBlobBytes || json.Unmarshal(current, &record) != nil || record.ID != id {
+			return ErrSessionTooLarge
 		}
-		var session Session
-		if err := json.Unmarshal(current, &session); err != nil {
-			return fmt.Errorf("chat: decode session: %w", err)
-		}
+		session := record.Session
 		if err := change(&session, store.now().UTC()); err != nil {
 			return err
 		}
 		replacement, err := compactSessionDocument(&session, store.now().UTC())
 		if err != nil {
 			return err
+		}
+		if record.Continuation {
+			record.Session = session
+			replacement, err = json.Marshal(record)
+			if err != nil || len(replacement) > MaxSessionBlobBytes {
+				return ErrSessionTooLarge
+			}
 		}
 		swapped, err := cas.CompareAndSwapBlob(name, current, replacement)
 		if err != nil {
@@ -391,13 +516,27 @@ func (store *SessionStore) readIndex() (*sessionIndex, []byte, error) {
 		return nil, data, nil
 	}
 	var index sessionIndex
+	if len(data) > MaxSessionBlobBytes {
+		return nil, nil, ErrSessionTooLarge
+	}
 	if err := json.Unmarshal(data, &index); err != nil {
-		return nil, nil, fmt.Errorf("chat: decode session index: %w", err)
+		return nil, nil, fmt.Errorf("%w: decode session index: %v", ErrSessionCorrupt, err)
+	}
+	if len(index.Sessions) > 2*MaxSessions {
+		return nil, nil, ErrSessionTooLarge
+	}
+	for _, entry := range index.Sessions {
+		if !validSessionID(entry.ID) {
+			return nil, nil, ErrSessionCorrupt
+		}
 	}
 	return &index, data, nil
 }
 
 func (store *SessionStore) updateIndex(change func(*sessionIndex) error) error {
+	if store.readOnly {
+		return ErrStoreConflict
+	}
 	cas, ok := store.provider.(storage.BlobCAS)
 	if !ok {
 		return storage.ErrUnsupported
@@ -410,8 +549,23 @@ func (store *SessionStore) updateIndex(change func(*sessionIndex) error) error {
 		if index == nil {
 			index = &sessionIndex{Version: 1}
 		}
+		if err := store.pruneSuppressionMarkers(index); err != nil {
+			return err
+		}
 		if err := change(index); err != nil {
 			return err
+		}
+		if len(index.Sessions) > 2*MaxSessions {
+			return ErrSessionTooLarge
+		}
+		markers := 0
+		for _, entry := range index.Sessions {
+			if entry.Deleted {
+				markers++
+			}
+		}
+		if markers > MaxSessions {
+			return ErrSessionTooLarge
 		}
 		index.Version++
 		replacement, err := json.Marshal(index)
@@ -434,11 +588,18 @@ func (store *SessionStore) touchIndex(session *Session) error {
 	err := store.updateIndex(func(index *sessionIndex) error {
 		for position := range index.Sessions {
 			if index.Sessions[position].ID == session.ID {
+				if index.Sessions[position].Deleted {
+					return ErrSessionNotFound
+				}
 				index.Sessions[position] = summaryEntry(session)
 				return nil
 			}
 		}
-		evicted = pruneIndex(index, store.now().UTC(), 1)
+		var err error
+		evicted, err = store.pruneIndex(index, store.now().UTC(), 1)
+		if err != nil {
+			return err
+		}
 		index.Sessions = append(index.Sessions, summaryEntry(session))
 		return nil
 	})
@@ -592,7 +753,7 @@ func validSessionStatus(status SessionStatus) bool {
 
 func indexNeedsHydration(index *sessionIndex) bool {
 	for _, entry := range index.Sessions {
-		if !validSessionStatus(entry.Status) {
+		if !entry.Deleted && !validSessionStatus(entry.Status) {
 			return true
 		}
 	}
@@ -603,7 +764,7 @@ func (store *SessionStore) hydrateIndex() error {
 	return store.updateIndex(func(index *sessionIndex) error {
 		hydrated := make([]sessionIndexEntry, 0, len(index.Sessions))
 		for _, entry := range index.Sessions {
-			if validSessionStatus(entry.Status) {
+			if entry.Deleted || validSessionStatus(entry.Status) {
 				hydrated = append(hydrated, entry)
 				continue
 			}
@@ -628,8 +789,13 @@ func (store *SessionStore) hydrateIndex() error {
 func pruneIndex(index *sessionIndex, now time.Time, reserve int) []string {
 	cutoff := now.Add(-SessionRetention)
 	kept := index.Sessions[:0]
+	markers := []sessionIndexEntry{}
 	evicted := make([]string, 0)
 	for _, entry := range index.Sessions {
+		if entry.Deleted {
+			markers = append(markers, entry)
+			continue
+		}
 		if entry.UpdatedAt.Before(cutoff) {
 			evicted = append(evicted, entry.ID)
 			continue
@@ -646,11 +812,14 @@ func pruneIndex(index *sessionIndex, now time.Time, reserve int) []string {
 		evicted = append(evicted, kept[0].ID)
 		kept = kept[1:]
 	}
-	index.Sessions = kept
+	index.Sessions = append(kept, markers...)
 	return evicted
 }
 
 func (store *SessionStore) replaceBlob(name string, replacement []byte, requireMissing bool) error {
+	if store.readOnly {
+		return ErrStoreConflict
+	}
 	cas, ok := store.provider.(storage.BlobCAS)
 	if !ok {
 		return storage.ErrUnsupported
@@ -678,6 +847,9 @@ func (store *SessionStore) replaceBlob(name string, replacement []byte, requireM
 }
 
 func (store *SessionStore) migrateLegacy() error {
+	if store.readOnly {
+		return ErrStoreConflict
+	}
 	if index, _, err := store.readIndex(); err != nil || index != nil {
 		return err
 	}
@@ -716,6 +888,14 @@ func (store *SessionStore) migrateLegacy() error {
 }
 
 func (store *SessionStore) AcquireLease(id, owner string, ttl time.Duration) (uint64, bool, error) {
+	if store.readOnly || !validSessionID(id) {
+		return 0, false, ErrSessionNotFound
+	}
+	if len(store.archives) > 0 {
+		if _, err := store.Get(id); err != nil {
+			return 0, false, err
+		}
+	}
 	if owner == "" || ttl <= 0 {
 		return 0, false, fmt.Errorf("chat: invalid lease")
 	}
@@ -766,6 +946,9 @@ func (store *SessionStore) ReleaseLease(id, owner string, epoch uint64) error {
 }
 
 func (store *SessionStore) RequestCancel(id string) (bool, error) {
+	if store.readOnly || !validSessionID(id) {
+		return false, ErrSessionNotFound
+	}
 	cas, ok := store.provider.(storage.BlobCAS)
 	if !ok {
 		return false, storage.ErrUnsupported
@@ -794,6 +977,9 @@ func (store *SessionStore) RequestCancel(id string) (bool, error) {
 }
 
 func (store *SessionStore) mutateLease(id, owner string, epoch uint64, stopOnCancel bool, replacement func(sessionLease, time.Time) *sessionLease) (bool, bool, error) {
+	if store.readOnly || !validSessionID(id) {
+		return false, false, ErrSessionNotFound
+	}
 	cas, ok := store.provider.(storage.BlobCAS)
 	if !ok {
 		return false, false, storage.ErrUnsupported
@@ -831,6 +1017,9 @@ func (store *SessionStore) mutateLease(id, owner string, epoch uint64, stopOnCan
 }
 
 func (store *SessionStore) LeaseActive(id string) (bool, error) {
+	if store.readOnly || !validSessionID(id) {
+		return false, ErrSessionNotFound
+	}
 	data, err := store.provider.ReadBlob(store.leaseBlobName(id))
 	if err != nil || len(data) == 0 {
 		return false, err

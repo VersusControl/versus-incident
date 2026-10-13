@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -21,19 +22,737 @@ import (
 
 type observedProvider struct {
 	storage.Provider
-	mu               sync.Mutex
-	reads            int
-	lists            int
-	failIndexCAS     bool
-	failLeaseDelete  bool
-	panicSessionRead bool
+	mu                sync.Mutex
+	reads             int
+	lists             int
+	failIndexCAS      bool
+	failLeaseDelete   bool
+	panicSessionRead  bool
+	readBlobErrorName string
+	readBlobError     error
+}
+
+func TestMergeTurns(t *testing.T) {
+	now := time.Date(2026, time.October, 13, 12, 0, 0, 0, time.UTC)
+	turn := func(id, content string, offset int) Turn {
+		return Turn{ID: id, Role: TurnUser, Content: content, CreatedAt: now.Add(time.Duration(offset) * time.Second)}
+	}
+	for _, test := range []struct {
+		name    string
+		write   []Turn
+		archive []Turn
+		want    []Turn
+	}{
+		{name: "nil inputs", want: []Turn{}},
+		{name: "empty inputs", write: []Turn{}, archive: []Turn{}, want: []Turn{}},
+		{name: "nil write empty archive", archive: []Turn{}, want: []Turn{}},
+		{name: "empty write nil archive", write: []Turn{}, want: []Turn{}},
+		{name: "write only", write: []Turn{turn("write", "new", 1)}, want: []Turn{turn("write", "new", 1)}},
+		{name: "archive only", archive: []Turn{turn("archive", "old", 0)}, want: []Turn{turn("archive", "old", 0)}},
+		{
+			name:    "chronological order",
+			write:   []Turn{turn("latest", "latest", 3), turn("middle", "middle", 1)},
+			archive: []Turn{turn("later", "later", 2), turn("earliest", "earliest", 0)},
+			want:    []Turn{turn("earliest", "earliest", 0), turn("middle", "middle", 1), turn("later", "later", 2), turn("latest", "latest", 3)},
+		},
+		{
+			name:    "write and first occurrence precedence",
+			write:   []Turn{turn("duplicate", "write first", 2), turn("duplicate", "write second", 0)},
+			archive: []Turn{turn("duplicate", "archive", 0), turn("archive", "archive first", 1), turn("archive", "archive second", 3)},
+			want:    []Turn{turn("archive", "archive first", 1), turn("duplicate", "write first", 2)},
+		},
+		{
+			name:    "timestamp ties and stable empty IDs",
+			write:   []Turn{turn("z", "write z", 0), turn("", "write first", 0), turn("", "write second", 0)},
+			archive: []Turn{turn("b", "archive b", 0), turn("", "archive first", 0), turn("a", "archive a", 0), turn("", "archive second", 0)},
+			want:    []Turn{turn("", "write first", 0), turn("", "write second", 0), turn("", "archive first", 0), turn("", "archive second", 0), turn("a", "archive a", 0), turn("b", "archive b", 0), turn("z", "write z", 0)},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := mergeTurns(test.write, test.archive)
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("mergeTurns() = %+v, want %+v", got, test.want)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name  string
+		count int
+	}{
+		{name: "both inputs at retention limit", count: MaxTurnsPerSession},
+		{name: "both inputs oversized", count: MaxTurnsPerSession + 5},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			write := make([]Turn, test.count)
+			archive := make([]Turn, test.count)
+			for position := 0; position < test.count; position++ {
+				write[position] = turn(fmt.Sprintf("write-%d", position), "write", 2*test.count-position-1)
+				archive[position] = turn(fmt.Sprintf("archive-%d", position), "archive", test.count-position-1)
+			}
+			got := mergeTurns(write, archive)
+			if len(got) != MaxTurnsPerSession {
+				t.Fatalf("retained turns = %d, want %d", len(got), MaxTurnsPerSession)
+			}
+			for position, retained := range got {
+				want := write[MaxTurnsPerSession-position-1]
+				if !reflect.DeepEqual(retained, want) {
+					t.Fatalf("retained turn %d = %+v, want %+v", position, retained, want)
+				}
+			}
+		})
+	}
+}
+
+func TestChatUnionDeleteChurnAndSuppressionBounds(t *testing.T) {
+	now := time.Now().UTC()
+	provider := storage.NewMemory()
+	clock := func() time.Time { return now }
+	archive := NewSessionStore(provider, tenancy.DefaultOrgScope(), clock)
+	union := NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), clock)
+	for position := 0; position < MaxSessions; position++ {
+		id := fmt.Sprintf("archived-%d", position)
+		if _, err := archive.Create(id); err != nil {
+			t.Fatal(err)
+		}
+		if err := union.Delete(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for position := 0; position < 2*MaxSessions+50; position++ {
+		id := fmt.Sprintf("licensed-%d", position)
+		if _, err := union.Create(id); err != nil {
+			t.Fatalf("create cycle %d: %v", position, err)
+		}
+		if err := union.Delete(id); err != nil {
+			t.Fatalf("delete cycle %d: %v", position, err)
+		}
+		if err := union.Delete("missing-session"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	index, _, err := union.readIndex()
+	if err != nil || len(index.Sessions) != MaxSessions {
+		t.Fatalf("marker capacity: %+v %v", index, err)
+	}
+	union = NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), clock)
+	if _, err := union.Get("archived-0"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("deleted archive get: %v", err)
+	}
+	if list, err := union.List(); err != nil || len(list) != 0 {
+		t.Fatalf("deleted archive list: %+v %v", list, err)
+	}
+	archiveIndex, data, err := archive.readIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for position, entry := range archiveIndex.Sessions {
+		if entry.ID == "archived-0" {
+			archiveIndex.Sessions = append(archiveIndex.Sessions[:position], archiveIndex.Sessions[position+1:]...)
+			break
+		}
+	}
+	replacement, err := json.Marshal(archiveIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if swapped, err := provider.(storage.BlobCAS).CompareAndSwapBlob(archive.indexBlobName(), data, replacement); err != nil || !swapped {
+		t.Fatalf("remove missing archive fixture: %t %v", swapped, err)
+	}
+	if _, err := union.Create("prune-missing-marker"); err != nil {
+		t.Fatal(err)
+	}
+	index, _, err = union.readIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range index.Sessions {
+		if entry.ID == "archived-0" {
+			t.Fatal("missing archive marker retained")
+		}
+	}
+	now = now.Add(SessionRetention + time.Second)
+	if _, err := union.Create("prune-expired-markers"); err != nil {
+		t.Fatal(err)
+	}
+	index, _, err = union.readIndex()
+	if err != nil || len(index.Sessions) != 1 || index.Sessions[0].Deleted {
+		t.Fatalf("expired markers retained: %+v %v", index, err)
+	}
+	if _, err := union.Get("archived-1"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expired archive resurrected: %v", err)
+	}
+}
+
+func TestChatUnionContinuationEvictionSuppressesRetainedArchive(t *testing.T) {
+	now := time.Now().UTC()
+	provider := storage.NewMemory()
+	clock := func() time.Time { return now }
+	archive := NewSessionStore(provider, tenancy.DefaultOrgScope(), clock)
+	if _, err := archive.Create("continued"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := provider.ListBlobs(archive.blobName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	union := NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), clock)
+	if _, err := union.Append("continued", Turn{ID: "new-turn", Role: TurnUser, Content: "after", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	for position := 0; position < MaxSessions; position++ {
+		now = now.Add(time.Second)
+		if _, err := union.Create(fmt.Sprintf("new-%d", position)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	union = NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), clock)
+	if _, err := union.Get("continued"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("evicted continuation resurrected: %v", err)
+	}
+	list, err := union.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range list {
+		if session.ID == "continued" {
+			t.Fatal("evicted continuation listed")
+		}
+	}
+	index, _, err := union.readIndex()
+	if err != nil || len(index.Sessions) != MaxSessions+1 {
+		t.Fatalf("eviction marker missing: %+v %v", index, err)
+	}
+	for _, blob := range before {
+		data, err := provider.ReadBlob(blob.Name)
+		if err != nil || !bytes.Equal(blob.Data, data) {
+			t.Fatal("archive modified by eviction")
+		}
+	}
+}
+
+func TestChatUnionCanonicalArchiveMembership(t *testing.T) {
+	for _, disposition := range []string{"legacy", "deleted", "evicted", "orphan", "deleted-entry", "unindexed-orphan"} {
+		t.Run(disposition, func(t *testing.T) {
+			now := time.Now().UTC()
+			clock := func() time.Time { return now }
+			provider := storage.NewMemory()
+			archive := NewSessionStore(provider, tenancy.DefaultOrgScope(), clock)
+			session := &Session{ID: "old-session", Status: SessionIdle, CreatedAt: now, UpdatedAt: now,
+				Turns: []Turn{{ID: "history", Role: TurnUser, Content: "retained legacy history", CreatedAt: now}}}
+			legacy, err := json.Marshal(sessionDocument{Version: 1, Sessions: []*Session{session}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if disposition != "unindexed-orphan" {
+				if err := provider.WriteBlob(archive.blobName, legacy); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if disposition != "legacy" && disposition != "unindexed-orphan" {
+				if _, err := archive.List(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			switch disposition {
+			case "deleted":
+				if err := archive.Delete(session.ID); err != nil {
+					t.Fatal(err)
+				}
+			case "evicted":
+				for position := 0; position < MaxSessions; position++ {
+					now = now.Add(time.Second)
+					if _, err := archive.Create(fmt.Sprintf("replacement-%d", position)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "orphan", "deleted-entry":
+				index := sessionIndex{Version: 1}
+				if disposition == "deleted-entry" {
+					entry := summaryEntry(session)
+					entry.Deleted = true
+					index.Sessions = append(index.Sessions, entry)
+				}
+				encoded, err := json.Marshal(index)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := provider.WriteBlob(archive.indexBlobName(), encoded); err != nil {
+					t.Fatal(err)
+				}
+			case "unindexed-orphan":
+				encoded, err := json.Marshal(session)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := provider.WriteBlob(archive.sessionBlobName(session.ID), encoded); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := provider.ListBlobs(archive.blobName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			union := NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), clock)
+			for _, reader := range []*SessionStore{union, union.archives[0]} {
+				got, err := reader.Get(session.ID)
+				if disposition == "legacy" {
+					if err != nil || len(got.Turns) != 1 || got.Turns[0].ID != "history" {
+						t.Fatalf("legacy history unavailable: %+v %v", got, err)
+					}
+				} else if !errors.Is(err, ErrSessionNotFound) {
+					t.Fatalf("unretained history resurrected: %+v %v", got, err)
+				}
+				listed, err := reader.List()
+				if err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, entry := range listed {
+					found = found || entry.ID == session.ID
+				}
+				if found != (disposition == "legacy") {
+					t.Fatalf("Get/List membership mismatch: found=%t", found)
+				}
+			}
+			if disposition != "legacy" {
+				if _, err := union.Append(session.ID, Turn{ID: "new", Role: TurnUser}); !errors.Is(err, ErrSessionNotFound) {
+					t.Fatalf("unretained history continued: %v", err)
+				}
+			}
+			if err := union.Delete(session.ID); err != nil {
+				t.Fatal(err)
+			}
+			index, _, err := union.readIndex()
+			if err != nil || len(index.Sessions) != map[bool]int{true: 1, false: 0}[disposition == "legacy"] {
+				t.Fatalf("invalid suppression membership: %+v %v", index, err)
+			}
+			after, err := provider.ListBlobs(archive.blobName)
+			if err != nil || len(after) != len(before) {
+				t.Fatalf("archive artifact set changed: %v", err)
+			}
+			for _, blob := range before {
+				data, err := provider.ReadBlob(blob.Name)
+				if err != nil || !bytes.Equal(data, blob.Data) {
+					t.Fatal("archive bytes changed")
+				}
+			}
+		})
+	}
+}
+
+func TestChatUnionCanonicalMarkerCapacityAndReads(t *testing.T) {
+	now := time.Now().UTC()
+	clock := func() time.Time { return now }
+	provider := &observedProvider{Provider: storage.NewMemory()}
+	archive := NewSessionStore(provider, tenancy.DefaultOrgScope(), clock)
+	legacy := sessionDocument{Version: 1}
+	index := sessionIndex{Version: 1}
+	markers := sessionIndex{Version: 1}
+	for position := 0; position < MaxSessions; position++ {
+		legacy.Sessions = append(legacy.Sessions, &Session{ID: fmt.Sprintf("legacy-%d", position), Status: SessionIdle, CreatedAt: now, UpdatedAt: now})
+		id := fmt.Sprintf("indexed-%d", position)
+		index.Sessions = append(index.Sessions, sessionIndexEntry{ID: id, Status: SessionIdle, CreatedAt: now, UpdatedAt: now})
+		markers.Sessions = append(markers.Sessions, sessionIndexEntry{ID: id, Deleted: true, UpdatedAt: now})
+		markers.Sessions = append(markers.Sessions, sessionIndexEntry{ID: fmt.Sprintf("legacy-%d", position), Deleted: true, UpdatedAt: now})
+	}
+	union := NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), clock)
+	for name, value := range map[string]any{archive.blobName: legacy, archive.indexBlobName(): index, union.indexBlobName(): markers} {
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := provider.WriteBlob(name, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := provider.ListBlobs(archive.blobName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.panicSessionRead = true
+	provider.resetCounts()
+	if err := union.updateIndex(func(current *sessionIndex) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if reads, lists := provider.counts(); reads != 2 || lists != 0 {
+		t.Fatalf("prune reads=%d lists=%d, want one write index and one archive index read", reads, lists)
+	}
+	current, _, err := union.readIndex()
+	if err != nil || len(current.Sessions) != MaxSessions {
+		t.Fatalf("canonical marker cap: %+v %v", current, err)
+	}
+	for _, entry := range current.Sessions {
+		if !entry.Deleted || !strings.HasPrefix(entry.ID, "indexed-") || !entry.UpdatedAt.Equal(now) {
+			t.Fatalf("invalid marker: %+v", entry)
+		}
+	}
+	provider.panicSessionRead = false
+	for position := 0; position < MaxSessions; position++ {
+		if _, err := union.Get(fmt.Sprintf("legacy-%d", position)); !errors.Is(err, ErrSessionNotFound) {
+			t.Fatalf("legacy reachability: %v", err)
+		}
+		if _, err := union.Create(fmt.Sprintf("new-%d", position)); err != nil {
+			t.Fatalf("live capacity %d: %v", position, err)
+		}
+	}
+	if list, err := union.List(); err != nil || len(list) != MaxSessions {
+		t.Fatalf("live capacity list: %+v %v", list, err)
+	}
+	for _, blob := range before {
+		data, err := provider.ReadBlob(blob.Name)
+		if err != nil || !bytes.Equal(blob.Data, data) {
+			t.Fatal("archive bytes changed")
+		}
+	}
+}
+
+func TestChatUnionMarkerExpiryUsesCanonicalPruning(t *testing.T) {
+	now := time.Now().UTC()
+	clock := func() time.Time { return now }
+	provider := storage.NewMemory()
+	archive := NewSessionStore(provider, tenancy.DefaultOrgScope(), clock)
+	union := NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), clock)
+	if _, err := archive.Create("suppressed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := union.Delete("suppressed"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(SessionRetention + time.Second)
+	if err := archive.SetStatus("suppressed", SessionIdle, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, prune := range []bool{false, true} {
+		if prune {
+			if _, err := union.Create("prune"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := union.Get("suppressed"); !errors.Is(err, ErrSessionNotFound) {
+			t.Fatalf("stale marker self-expired: %v", err)
+		}
+		list, err := union.List()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, session := range list {
+			if session.ID == "suppressed" {
+				t.Fatal("suppressed archive listed")
+			}
+		}
+	}
+	index, _, err := union.readIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range index.Sessions {
+		if entry.ID == "suppressed" && !entry.UpdatedAt.Equal(now) {
+			t.Fatalf("marker metadata not refreshed: %+v", entry)
+		}
+	}
+}
+
+func TestChatUnionPrunesObsoleteDeletionMarkersBeforeCapacityCheck(t *testing.T) {
+	provider := storage.NewMemory()
+	union := NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), time.Now)
+	index := sessionIndex{Version: 1}
+	for position := 0; position < 2*MaxSessions; position++ {
+		index.Sessions = append(index.Sessions, sessionIndexEntry{ID: fmt.Sprintf("old-license-only-%d", position), Deleted: true, UpdatedAt: time.Now()})
+	}
+	data, err := json.Marshal(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.WriteBlob(union.indexBlobName(), data); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := union.Create("new-session"); err != nil {
+		t.Fatalf("old marker exhaustion not repaired: %v", err)
+	}
+	current, _, err := union.readIndex()
+	if err != nil || len(current.Sessions) != 1 || current.Sessions[0].Deleted {
+		t.Fatalf("obsolete markers retained: %+v %v", current, err)
+	}
+}
+
+func TestChatCorruptIndexesAreNotMissingSessions(t *testing.T) {
+	for _, corruptOrg := range []string{"licensed", "default"} {
+		for _, malformed := range []string{`{"sessions":[{"id":"../invalid"}]}`, `{broken`} {
+			t.Run(corruptOrg+malformed, func(t *testing.T) {
+				provider := storage.NewMemory()
+				corrupt := NewSessionStore(provider, tenancy.NewOrgScope(corruptOrg), time.Now)
+				if err := provider.WriteBlob(corrupt.indexBlobName(), []byte(malformed)); err != nil {
+					t.Fatal(err)
+				}
+				union := NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), time.Now)
+				for _, store := range []*SessionStore{union, corrupt} {
+					if _, err := store.List(); !errors.Is(err, ErrSessionCorrupt) || errors.Is(err, ErrSessionNotFound) {
+						t.Fatalf("list corruption: %v", err)
+					}
+					if _, err := store.Get("missing"); !errors.Is(err, ErrSessionCorrupt) || errors.Is(err, ErrSessionNotFound) {
+						t.Fatalf("get corruption: %v", err)
+					}
+				}
+			})
+		}
+	}
+	provider := storage.NewMemory()
+	union := NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), time.Now)
+	if _, err := union.Get("missing"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("missing session: %v", err)
+	}
+	if list, err := union.List(); err != nil || len(list) != 0 {
+		t.Fatalf("missing index: %+v %v", list, err)
+	}
+}
+
+func TestUpgradeChatSessionsVisible(t *testing.T) {
+	now := time.Now().UTC()
+	provider := storage.NewMemory()
+	legacy := NewSessionStore(provider, tenancy.DefaultOrgScope(), func() time.Time { return now })
+	if _, err := legacy.Create("before-upgrade"); err != nil {
+		t.Fatal(err)
+	}
+	old := Turn{ID: "old-turn", Role: TurnUser, Content: "before", CreatedAt: now.Add(-time.Minute)}
+	if _, err := legacy.Append("before-upgrade", old); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.SetStatus("before-upgrade", SessionRunning, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, acquired, err := legacy.AcquireLease("before-upgrade", "old-owner", time.Hour); err != nil || !acquired {
+		t.Fatal(err)
+	}
+	before, err := provider.ListBlobs(legacy.blobName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	licensed := NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), func() time.Time { return now })
+	list, err := licensed.List()
+	if err != nil || len(list) != 1 || list[0].Status != SessionFailed {
+		t.Fatalf("list=%+v err=%v", list, err)
+	}
+	got, err := licensed.Get("before-upgrade")
+	if err != nil || len(got.Turns) != 1 || got.Status != SessionFailed {
+		t.Fatalf("get=%+v %v", got, err)
+	}
+	if active, err := licensed.LeaseActive(got.ID); err != nil || active {
+		t.Fatal("archive lease resumed")
+	}
+	if cancelled, err := licensed.RequestCancel(got.ID); err != nil || cancelled {
+		t.Fatal("archive cancellation mutated")
+	}
+	turn := Turn{ID: "new-turn", Role: TurnAssistant, Content: "after", CreatedAt: now}
+	got, err = licensed.Append(got.ID, turn)
+	if err != nil || len(got.Turns) != 2 || got.Turns[0].ID != old.ID {
+		t.Fatalf("continue=%+v err=%v", got, err)
+	}
+	raw, err := provider.ReadBlob(licensed.sessionBlobName(got.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var overlay continuationRecord
+	if err := json.Unmarshal(raw, &overlay); err != nil || !overlay.Continuation || len(overlay.Turns) != 1 || overlay.Turns[0].ID != turn.ID {
+		t.Fatalf("copied archive: %+v %v", overlay, err)
+	}
+	licensed = NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), func() time.Time { return now })
+	if _, err := licensed.Append(got.ID, turn); err != nil {
+		t.Fatal(err)
+	}
+	got, err = licensed.Get(got.ID)
+	if err != nil || len(got.Turns) != 2 {
+		t.Fatalf("restart dedup=%+v %v", got, err)
+	}
+	old.Content = "write wins"
+	if _, err := licensed.Append(got.ID, old); err != nil {
+		t.Fatal(err)
+	}
+	got, err = licensed.Get(got.ID)
+	if err != nil || len(got.Turns) != 2 || got.Turns[0].Content != old.Content {
+		t.Fatalf("turn precedence=%+v %v", got, err)
+	}
+	if err := licensed.Delete(got.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := licensed.Get(got.ID); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("deleted direct get=%v", err)
+	}
+	if list, err := licensed.List(); err != nil || len(list) != 0 {
+		t.Fatalf("deleted list=%+v %v", list, err)
+	}
+	after, err := provider.ListBlobs(legacy.blobName)
+	if err != nil || len(before) != len(after) {
+		t.Fatal("archive artifacts changed")
+	}
+	for _, blob := range before {
+		current, err := provider.ReadBlob(blob.Name)
+		if err != nil || !bytes.Equal(blob.Data, current) {
+			t.Fatal("archive bytes changed")
+		}
+	}
+}
+
+func TestChatUnionContinuationSurvivesArchiveRetention(t *testing.T) {
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	provider := storage.NewMemory()
+	archive := NewSessionStore(provider, tenancy.DefaultOrgScope(), clock)
+	if _, err := archive.Create("continued"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := archive.Append("continued", Turn{ID: "expired-turn", Role: TurnUser, Content: "archive"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := provider.ListBlobs(archive.blobName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	union := NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), clock)
+	if _, err := union.Create("full-license"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := union.Append("full-license", Turn{ID: "full-turn", Role: TurnUser, Content: "license"}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(SessionRetention - time.Hour)
+	if got, err := union.Append("continued", Turn{ID: "recent-turn", Role: TurnAssistant, Content: "recent"}); err != nil || len(got.Turns) != 2 {
+		t.Fatalf("initial continuation=%+v err=%v", got, err)
+	}
+	now = now.Add(time.Hour + time.Second)
+	got, err := union.Get("continued")
+	if err != nil || len(got.Turns) != 1 || got.Turns[0].ID != "recent-turn" {
+		t.Fatalf("continuation after archive expiry=%+v err=%v", got, err)
+	}
+	got, err = union.Append("continued", Turn{ID: "fresh-turn", Role: TurnUser, Content: "fresh"})
+	if err != nil || len(got.Turns) != 2 || got.Turns[0].ID != "recent-turn" || got.Turns[1].ID != "fresh-turn" {
+		t.Fatalf("append after archive expiry=%+v err=%v", got, err)
+	}
+	if _, acquired, err := union.AcquireLease("continued", "new-owner", time.Hour); err != nil || !acquired {
+		t.Fatalf("continuation lease: acquired=%t err=%v", acquired, err)
+	}
+	if err := union.SetStatus("continued", SessionRunning, false); err != nil {
+		t.Fatal(err)
+	}
+	union = NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), clock)
+	got, err = union.Get("continued")
+	if err != nil || got.Status != SessionRunning || len(got.Turns) != 2 || got.Turns[0].ID != "recent-turn" || got.Turns[1].ID != "fresh-turn" {
+		t.Fatalf("restarted active continuation=%+v err=%v", got, err)
+	}
+	list, err := union.List()
+	if err != nil || len(list) != 1 || list[0].ID != got.ID || list[0].Status != got.Status || !list[0].UpdatedAt.Equal(got.UpdatedAt) {
+		t.Fatalf("list/get consistency: list=%+v get=%+v err=%v", list, got, err)
+	}
+	if _, err := union.Get("full-license"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expired full license session: %v", err)
+	}
+	if _, err := union.archives[0].Get("continued"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expired archive resurrected: %v", err)
+	}
+	raw, err := provider.ReadBlob(union.sessionBlobName("continued"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record continuationRecord
+	if err := json.Unmarshal(raw, &record); err != nil || !record.Continuation || len(record.Turns) != 2 || record.Turns[0].ID != "recent-turn" || record.Turns[1].ID != "fresh-turn" {
+		t.Fatalf("write-only continuation=%+v err=%v", record, err)
+	}
+	now = now.Add(SessionRetention + time.Second)
+	if _, err := union.Get("continued"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expired continuation resurrected: %v", err)
+	}
+	if list, err := union.List(); err != nil || len(list) != 0 {
+		t.Fatalf("expired sessions listed: %+v err=%v", list, err)
+	}
+	after, err := provider.ListBlobs(archive.blobName)
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("archive artifact set changed: %v", err)
+	}
+	for _, blob := range before {
+		current, err := provider.ReadBlob(blob.Name)
+		if err != nil || !bytes.Equal(blob.Data, current) {
+			t.Fatalf("archive bytes changed: %v", err)
+		}
+	}
+}
+
+func TestChatUnionContinuationPropagatesArchiveErrors(t *testing.T) {
+	storageErr := errors.New("injected archive read failure")
+	for _, test := range []struct {
+		name string
+		want error
+	}{
+		{name: "corrupt transcript", want: ErrSessionCorrupt},
+		{name: "storage failure", want: storageErr},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &observedProvider{Provider: storage.NewMemory()}
+			archive := NewSessionStore(provider, tenancy.DefaultOrgScope(), time.Now)
+			if _, err := archive.Create("continued"); err != nil {
+				t.Fatal(err)
+			}
+			union := NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), time.Now)
+			if _, err := union.Append("continued", Turn{ID: "new-turn", Role: TurnUser, Content: "new"}); err != nil {
+				t.Fatal(err)
+			}
+			if errors.Is(test.want, ErrSessionCorrupt) {
+				if err := provider.WriteBlob(archive.sessionBlobName("continued"), []byte("{broken")); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				provider.readBlobErrorName = archive.sessionBlobName("continued")
+				provider.readBlobError = storageErr
+			}
+			if _, err := union.Get("continued"); !errors.Is(err, test.want) {
+				t.Fatalf("archive error=%v want=%v", err, test.want)
+			}
+		})
+	}
+}
+
+func TestChatUnionFullSessionPrecedenceAndArchiveErrors(t *testing.T) {
+	provider := storage.NewMemory()
+	legacy := NewSessionStore(provider, tenancy.DefaultOrgScope(), time.Now)
+	write := NewSessionStore(provider, tenancy.NewOrgScope("licensed"), time.Now)
+	for _, store := range []*SessionStore{legacy, write} {
+		if _, err := store.Create("shared"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append("shared", Turn{ID: store.org, Role: TurnUser, Content: store.org}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	union := NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default"), time.Now)
+	got, err := union.Get("shared")
+	if err != nil || len(got.Turns) != 1 || got.Turns[0].ID != "licensed" {
+		t.Fatalf("full precedence=%+v %v", got, err)
+	}
+	if list, err := union.List(); err != nil || len(list) != 1 {
+		t.Fatalf("index dedup=%+v %v", list, err)
+	}
+	foreign := NewSessionStore(provider, tenancy.TrustedOrgScope(tenancy.NewOrgScope("licensed", "default"), "foreign"), time.Now)
+	if list, err := foreign.List(); err != nil || len(list) != 0 {
+		t.Fatalf("foreign union=%+v %v", list, err)
+	}
+	if err := provider.WriteBlob(legacy.indexBlobName(), []byte("bad")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := union.List(); err == nil {
+		t.Fatal("malformed archive silently ignored")
+	}
+	if NewSessionStore(provider, tenancy.NewOrgScope("licensed", "default", "foreign"), time.Now) != nil {
+		t.Fatal("unbounded read set")
+	}
 }
 
 func (provider *observedProvider) ReadBlob(name string) ([]byte, error) {
 	provider.mu.Lock()
 	panicSessionRead := provider.panicSessionRead
+	readBlobErrorName, readBlobError := provider.readBlobErrorName, provider.readBlobError
 	provider.reads++
 	provider.mu.Unlock()
+	if name == readBlobErrorName && readBlobError != nil {
+		return nil, readBlobError
+	}
 	if panicSessionRead && strings.Contains(name, "/sessions/") {
 		panic("List read a session transcript")
 	}

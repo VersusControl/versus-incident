@@ -19,7 +19,7 @@ Available evidence also depends on configured data sources, connected tools,
 permissions, and the **Chat** tool policy.
 
 The [Tool Reference](./tools/overview.md)
-explains what each read-only tool provides; the [Kubernetes Connector](./tools/kubernetes.md)
+explains what each read-only tool provides; [Kubernetes Configuration](/agent/kubernetes/configuration)
 explains its separate access and RBAC requirements. Tool policies for Chat and
 Analyze are independent.
 

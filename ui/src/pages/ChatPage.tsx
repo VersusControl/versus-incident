@@ -203,16 +203,19 @@ function ToolPayload({ label, value }: { label: string; value: string }) {
   );
 }
 
-function ActionApprovalCard({ event }: { event: ChatEvent }) {
+function ActionApprovalCard({ event, historical = false }: { event: ChatEvent; historical?: boolean }) {
   const approval = event.approval;
   const access = useEffectiveRole();
   const queryClient = useQueryClient();
   const permission = useQuery({ queryKey: ["rbac-me"], queryFn: api.rbacMe, enabled: access.enterprise && access.hasSession, retry: false });
-  const approvals = useQuery({ queryKey: ["agent-approvals", "permissions"], queryFn: () => api.listAgentApprovals(), enabled: access.enterprise && access.hasSession && Boolean(approval), retry: false });
-  const targetCluster = approval?.cluster ?? approvals.data?.approvals.find((item) => item.id === approval?.id)?.proposal.target.cluster;
+  const approvals = useQuery({ queryKey: ["agent-approvals", "all"], queryFn: () => api.listAgentApprovals("all"), enabled: access.enterprise && access.hasSession && Boolean(approval), retry: false });
+  const listedApproval = approvals.data?.approvals.find((item) => item.id === approval?.id);
+  const targetCluster = approval?.cluster ?? listedApproval?.proposal.target.cluster;
+  const [readOnlyConflict, setReadOnlyConflict] = useState(false);
+  const readOnly = Boolean(approval?.read_only || listedApproval?.read_only || readOnlyConflict);
   const scope = permission.data?.clusters;
   const [authorizationDenied, setAuthorizationDenied] = useState(false);
-  const canDecide = !authorizationDenied && !access.loading && (!access.enterprise || Boolean(permission.isSuccess && permission.data.permissions.includes("agent:approve") && (scope === null || targetCluster && scope?.includes(targetCluster))));
+  const canDecide = !historical && !readOnly && !authorizationDenied && !access.loading && (!access.enterprise || Boolean(approvals.isSuccess && permission.isSuccess && permission.data.permissions.includes("agent:approve") && (scope === null || targetCluster && scope?.includes(targetCluster))));
   const [state, setState] = useState(approval?.state ?? "pending");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -230,6 +233,10 @@ function ActionApprovalCard({ event }: { event: ChatEvent }) {
       setState(result.state);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "The approval request failed.");
+      if (failure instanceof ApiError && failure.status === 409 && typeof failure.body === "object" && failure.body !== null && "code" in failure.body && failure.body.code === "approval_read_only") {
+        setReadOnlyConflict(true);
+        void queryClient.invalidateQueries({ queryKey: ["agent-approvals"] });
+      }
       if (failure instanceof ApiError && [401, 403, 404].includes(failure.status)) {
         setAuthorizationDenied(true);
         void queryClient.invalidateQueries({ queryKey: ["rbac-me"] });
@@ -244,7 +251,8 @@ function ActionApprovalCard({ event }: { event: ChatEvent }) {
 
   return <section aria-label="Action approval" className="my-4 overflow-hidden rounded-card border border-sev-warning/40 bg-surface-raised">
     <header className="flex flex-wrap items-center justify-between gap-2 border-b border-ink-500/40 px-4 py-3">
-      <h3 className="flex items-center gap-2 text-sm font-semibold text-ink-50"><Clock3 size={15} className="text-sev-warning" />Action requires approval</h3>
+      <h3 className="flex items-center gap-2 text-sm font-semibold text-ink-50"><Clock3 size={15} className="text-sev-warning" />{historical || readOnly ? "Action approval" : "Action requires approval"}</h3>
+      {readOnly && <span className="text-xs text-ink-400">Before upgrade</span>}
       <span className="pill pill-warn">{approval.risk} risk · {state}</span>
     </header>
     <dl className="grid gap-x-4 gap-y-3 px-4 py-3 text-xs sm:grid-cols-[minmax(100px,140px)_1fr]">
@@ -253,7 +261,7 @@ function ActionApprovalCard({ event }: { event: ChatEvent }) {
       <dt className="text-ink-400">Dry run</dt><dd className="break-words text-ink-100">{approval.effect}</dd>
       {Number.isFinite(expiry) && <><dt className="text-ink-400">Expires</dt><dd><time dateTime={approval.expires_at} className="text-ink-200">{new Date(expiry).toLocaleString()}</time></dd></>}
     </dl>
-    {pending && !canDecide && <p role="status" className="border-t border-ink-500/40 px-4 py-3 text-xs text-ink-400">Action approval permission is unavailable for this target.</p>}
+    {pending && !canDecide && !readOnly && !historical && <p role="status" className="border-t border-ink-500/40 px-4 py-3 text-xs text-ink-400">Action approval permission is unavailable for this target.</p>}
     {pending && canDecide && <div className="space-y-3 border-t border-ink-500/40 px-4 py-3">
       <label className="block text-xs text-ink-300">Rejection reason<input aria-label="Reason for rejection" className="input mt-1 w-full" value={reason} onChange={(change) => setReason(change.target.value)} disabled={busy} maxLength={512} /></label>
       <div className="flex flex-wrap gap-2">
@@ -466,6 +474,8 @@ function Composer({ value, onChange, onSubmit, running, stopping, onStop, resour
 
 export function ChatPage() {
   const queryClient = useQueryClient();
+  const [approvalsOpen, setApprovalsOpen] = useState(false);
+  const approvalHistory = useQuery({ queryKey: ["agent-approvals", "all"], queryFn: () => api.listAgentApprovals("all"), enabled: approvalsOpen, retry: false });
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedId = searchParams.get("session");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -737,8 +747,14 @@ export function ChatPage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-surface-sunken">
-      <TopBar title="DevOps Agent" subtitle={sessionQ.data?.status === "running" ? "Running" : ""} actions={<><button type="button" onClick={() => setHistoryOpen(true)} aria-label="Open chat history" title="Open chat history" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><History size={16} /></button><Link to="/agent/tools" aria-label="Open Tool catalog" title="Open Tool catalog" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><Wrench size={16} /></Link></>} />
+      <TopBar title="DevOps Agent" subtitle={sessionQ.data?.status === "running" ? "Running" : ""} actions={<><button type="button" onClick={() => setHistoryOpen(true)} aria-label="Open chat history" title="Open chat history" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><History size={16} /></button><button type="button" onClick={() => setApprovalsOpen(true)} aria-label="Open action approvals" title="Open action approvals" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><CheckCircle2 size={16} /></button><Link to="/agent/tools" aria-label="Open Tool catalog" title="Open Tool catalog" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><Wrench size={16} /></Link></>} />
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        {approvalsOpen && <Modal title="Action approvals" size="lg" onClose={() => setApprovalsOpen(false)}>
+          {approvalHistory.isPending && <p role="status" className="text-xs text-ink-400">Loading approvals</p>}
+          {approvalHistory.isError && <RetryableError error={approvalHistory.error} onRetry={() => approvalHistory.refetch()} retrying={approvalHistory.isFetching} context="Couldn't load action approvals" />}
+          {approvalHistory.isSuccess && !approvalHistory.data.approvals.length && <p className="text-xs text-ink-400">No action approvals</p>}
+          {approvalHistory.data?.approvals.map((approval) => <ActionApprovalCard key={approval.id} historical event={{ seq: 0, at: "", kind: "approval_required", approval: { id: approval.id, read_only: approval.read_only, cluster: approval.proposal.target.cluster, proposal_id: approval.proposal.id, run_id: approval.proposal.run_id, type: approval.proposal.type, target: `${approval.proposal.target.kind}/${approval.proposal.target.namespace ? `${approval.proposal.target.namespace}/` : ""}${approval.proposal.target.name}`, effect: approval.proposal.dry_run, risk: approval.proposal.risk, state: approval.state, expires_at: approval.expires_at } }} />)}
+        </Modal>}
         {historyOpen && <Modal title="Thread history" size="lg" onClose={() => setHistoryOpen(false)} footer={<button type="button" className="btn inline-flex items-center gap-2" onClick={newThread}><Plus size={14} />New thread</button>}>{history}</Modal>}
         {resourcePickerOpen && <Modal title="Attach Kubernetes resource" size="md" onClose={() => setResourcePickerOpen(false)} footer={<button type="button" className="btn" onClick={() => setResourcePickerOpen(false)}>Close</button>}>
           {clusterCatalog.data?.multiple && <label className="mb-3 block text-xs text-ink-300">Cluster<select aria-label="Attachment cluster" className="input mt-1 w-full" value={resourceCluster} onChange={(event) => { setResourceCluster(event.target.value); setResourceQuery(""); setDebouncedResourceQuery(""); }}><option value="">Select cluster</option>{clusterCatalog.data.clusters.map((cluster) => <option key={cluster.id} value={cluster.id}>{cluster.display_name || cluster.id}</option>)}</select></label>}

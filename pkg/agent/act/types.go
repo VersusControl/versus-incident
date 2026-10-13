@@ -87,6 +87,7 @@ type Authorizer interface {
 }
 
 type Approval struct {
+	ReadOnly               bool          `json:"read_only,omitempty"`
 	ID                     string        `json:"id"`
 	Proposal               Proposal      `json:"proposal"`
 	State                  string        `json:"state"`

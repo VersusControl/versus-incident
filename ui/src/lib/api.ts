@@ -842,6 +842,7 @@ export interface ChatCitation {
 
 export interface ChatApprovalEvent {
   id: string;
+  read_only?: boolean;
   cluster?: string;
   proposal_id: string;
   run_id: string;
@@ -855,6 +856,7 @@ export interface ChatApprovalEvent {
 
 export interface AgentApproval {
   id: string;
+  read_only?: boolean;
   proposal: AgentProposal;
   state: string;
   approver?: string;

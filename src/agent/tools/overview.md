@@ -43,7 +43,7 @@ operator to connect.
 
 ## Kubernetes tools
 
-See the [Kubernetes Connector](kubernetes.md) guide for authentication modes,
+See [Kubernetes](/agent/connectors/kubernetes) for authentication modes,
 RBAC, private endpoint policy, refresh behavior, and troubleshooting.
 
 The Kubernetes connector provides one operator card and read-only

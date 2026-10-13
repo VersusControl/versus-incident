@@ -31,6 +31,27 @@ func TestDefaultOrgScope(t *testing.T) {
 	}
 }
 
+func TestTrustedOrgScopeForeignAndNilContext(t *testing.T) {
+	boot := NewOrgScope("licensed", "default")
+	if got := TrustedOrgScope(boot, "licensed"); !reflect.DeepEqual(got, boot) {
+		t.Fatalf("boot=%+v", got)
+	}
+	if got := TrustedOrgScope(boot, "foreign"); !reflect.DeepEqual(got, NewOrgScope("foreign")) {
+		t.Fatalf("foreign=%+v", got)
+	}
+	if got := TrustedOrgScope(NewOrgScope("cloud"), "cloud"); len(got.Read) != 1 {
+		t.Fatal("cloud union")
+	}
+	if got, ok := ContextOrgScope(context.TODO()); ok || !reflect.DeepEqual(got, DefaultOrgScope()) {
+		t.Fatalf("nil context=%+v %v", got, ok)
+	}
+	got := TrustedOrgScope(boot, "licensed")
+	got.Read[1] = "foreign"
+	if boot.Read[1] != "default" {
+		t.Fatal("scope aliases caller")
+	}
+}
+
 func TestNewOrgScopeWriteFirstAndDeduplicated(t *testing.T) {
 	got := NewOrgScope("licensed", DefaultOrgID, "licensed", "legacy", DefaultOrgID)
 	want := OrgScope{Write: "licensed", Read: []string{"licensed", DefaultOrgID, "legacy"}}

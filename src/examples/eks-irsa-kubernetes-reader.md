@@ -391,5 +391,6 @@ the Versus ServiceAccount. IRSA and an EKS access entry are unnecessary.
 
 ## Next
 
-- [Kubernetes connector reference](/agent/connectors/kubernetes)
+- [Kubernetes configuration reference](/agent/kubernetes/configuration)
+- [Connect multiple clusters](/agent/kubernetes/multi-cluster)
 - [Helm configuration](/configuration/helm)
