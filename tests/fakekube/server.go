@@ -1,6 +1,7 @@
 package fakekube
 
 import (
+	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,15 @@ type Fault struct {
 type requestCount struct {
 	Requests int64 `json:"requests"`
 	Bytes    int64 `json:"bytes_sent"`
+}
+
+type listHold struct {
+	Remaining int `json:"remaining"`
+	Active    int `json:"active"`
+	Completed int `json:"completed"`
+	Cancelled int `json:"cancelled"`
+	release   chan struct{}
+	released  bool
 }
 
 type Counter struct {
@@ -76,19 +86,22 @@ type logControl struct {
 }
 
 type Server struct {
-	store       *Store
-	scenario    string
-	startedAt   time.Time
-	mu          sync.Mutex
-	faults      map[string]Fault
-	counters    map[requestKey]requestCount
-	logStreams  map[logStreamKey]LogStreamCounter
-	logControls map[logStreamKey]logControl
+	store          *Store
+	scenario       string
+	startedAt      time.Time
+	mu             sync.Mutex
+	faults         map[string]Fault
+	counters       map[requestKey]requestCount
+	logStreams     map[logStreamKey]LogStreamCounter
+	logControls    map[logStreamKey]logControl
+	listHolds      map[string]*listHold
+	projectedKey   *ecdsa.PrivateKey
+	projectedKeyID string
 }
 
 func NewServer(config Config) (*Server, error) {
 	store := NewStore()
-	server := &Server{store: store, scenario: config.Scenario, startedAt: time.Now(), faults: make(map[string]Fault), counters: make(map[requestKey]requestCount), logStreams: make(map[logStreamKey]LogStreamCounter), logControls: make(map[logStreamKey]logControl)}
+	server := &Server{store: store, scenario: config.Scenario, startedAt: time.Now(), faults: make(map[string]Fault), counters: make(map[requestKey]requestCount), logStreams: make(map[logStreamKey]LogStreamCounter), logControls: make(map[logStreamKey]logControl), listHolds: make(map[string]*listHold)}
 	for resource, fault := range config.Faults {
 		server.faults[resource] = fault
 	}
@@ -126,6 +139,12 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	server.recordRequest(key, 0)
 	defer func() { server.recordBytes(key, counting.bytes) }()
 	resource := resourceForPath(request.URL.Path)
+	if request.URL.Path == "/.well-known/openid-configuration" || request.URL.Path == "/openid/v1/jwks" {
+		resource = request.URL.Path
+		if !server.awaitListRelease(request, resource) {
+			return
+		}
+	}
 	if resource != "" {
 		if fault, ok := server.takeFault(resource, request.URL.Query().Get("continue") != ""); ok {
 			if fault.RetryAfter > 0 {
@@ -136,6 +155,10 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		}
 	}
 	switch {
+	case request.Method == http.MethodGet && request.URL.Path == "/.well-known/openid-configuration":
+		writeJSON(counting, map[string]string{"issuer": projectedIssuer, "jwks_uri": projectedIssuer + "/openid/v1/jwks"})
+	case request.URL.Path == "/openid/v1/jwks" || request.URL.Path == "/_fake/projected-token":
+		server.projectedTokenControl(counting, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/version":
 		writeJSON(counting, map[string]any{"gitVersion": "v1.30.4"})
 	case request.Method == http.MethodGet && request.URL.Path == "/api":
@@ -155,6 +178,10 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		server.controlLogs(counting, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/_fake/mutate":
 		server.mutate(counting, request)
+	case request.URL.Path == "/_fake/list-holds":
+		server.controlListHolds(counting, request)
+	case request.URL.Path == "/_fake/verification-fault":
+		server.controlVerificationFault(counting, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/apis/metrics.k8s.io/"):
 		server.metrics(counting, request)
 	case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/log"):
@@ -255,10 +282,20 @@ func (server *Server) list(writer http.ResponseWriter, request *http.Request, re
 		http.Error(writer, "invalid list request", http.StatusBadRequest)
 		return
 	}
+	if !server.awaitListRelease(request, resource) {
+		return
+	}
 	accept := request.Header.Get("Accept")
 	items := any(result.Items)
 	kind := "List"
 	apiVersion := "v1"
+	if resource == "horizontalpodautoscalers" {
+		apiVersion = "autoscaling/" + splitPath(request.URL.Path)[2]
+		kind = "HorizontalPodAutoscalerList"
+		for index, object := range result.Items {
+			result.Items[index] = hpaForPath(object, request.URL.Path)
+		}
+	}
 	if strings.Contains(accept, "PartialObjectMetadataList") {
 		items = metadataItems(result.Items)
 		kind = "PartialObjectMetadataList"
@@ -273,6 +310,94 @@ func (server *Server) list(writer http.ResponseWriter, request *http.Request, re
 		"metadata": map[string]any{"resourceVersion": result.ResourceVersion, "continue": result.Continue},
 		"items":    items,
 	})
+}
+
+func (server *Server) controlVerificationFault(writer http.ResponseWriter, request *http.Request) {
+	defer request.Body.Close()
+	var input struct {
+		Path      string `json:"path"`
+		Status    int    `json:"status"`
+		Remaining int    `json:"remaining"`
+	}
+	if request.Method != http.MethodPost || json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096)).Decode(&input) != nil ||
+		(input.Path != "/.well-known/openid-configuration" && input.Path != "/openid/v1/jwks" && input.Path != "/api/v1/pods" && input.Path != "/api/v1/configmaps") ||
+		(input.Status != 401 && input.Status != 403 && input.Status != 429 && input.Status != 500 && input.Status != 503) || input.Remaining < 0 || input.Remaining > 100 {
+		http.Error(writer, "invalid verification fault", http.StatusBadRequest)
+		return
+	}
+	server.mu.Lock()
+	resource := input.Path
+	if resource == "/api/v1/pods" || resource == "/api/v1/configmaps" {
+		resource = resourceForPath(input.Path)
+	}
+	server.faults[resource] = Fault{StatusCode: input.Status, Remaining: input.Remaining, RetryAfter: time.Second}
+	server.mu.Unlock()
+	writeJSON(writer, input)
+}
+
+func (server *Server) controlListHolds(writer http.ResponseWriter, request *http.Request) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if request.Method == http.MethodPost {
+		defer request.Body.Close()
+		var input struct {
+			Resource  string `json:"resource"`
+			Hold      bool   `json:"hold"`
+			Remaining int    `json:"remaining"`
+		}
+		if json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096)).Decode(&input) != nil || input.Resource == "" || input.Remaining < 0 || input.Remaining > 10 {
+			http.Error(writer, "invalid list hold", http.StatusBadRequest)
+			return
+		}
+		previous := server.listHolds[input.Resource]
+		if !input.Hold {
+			if previous != nil && !previous.released {
+				close(previous.release)
+				previous.released = true
+				previous.Remaining = 0
+			}
+		} else {
+			if previous != nil && previous.Active > 0 {
+				http.Error(writer, "list hold active", http.StatusConflict)
+				return
+			}
+			server.listHolds[input.Resource] = &listHold{Remaining: input.Remaining, release: make(chan struct{})}
+		}
+	} else if request.Method != http.MethodGet {
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(writer, server.listHolds)
+}
+
+func (server *Server) awaitListRelease(request *http.Request, resource string) bool {
+	server.mu.Lock()
+	hold := server.listHolds[resource]
+	if hold == nil || hold.Remaining == 0 || hold.released {
+		server.mu.Unlock()
+		return true
+	}
+	hold.Remaining--
+	hold.Active++
+	server.mu.Unlock()
+	timer := time.NewTimer(3 * time.Minute)
+	defer timer.Stop()
+	completed := false
+	select {
+	case <-hold.release:
+		completed = true
+	case <-request.Context().Done():
+	case <-timer.C:
+	}
+	server.mu.Lock()
+	hold.Active--
+	if completed {
+		hold.Completed++
+	} else {
+		hold.Cancelled++
+	}
+	server.mu.Unlock()
+	return completed
 }
 
 func (server *Server) watch(writer http.ResponseWriter, request *http.Request, resource string) {
@@ -303,7 +428,20 @@ func (server *Server) get(writer http.ResponseWriter, request *http.Request, res
 		return
 	}
 	writer.Header().Set("Content-Type", "application/json")
+	if resource == "horizontalpodautoscalers" {
+		object = hpaForPath(object, request.URL.Path)
+	}
 	_, _ = writer.Write(object)
+}
+
+func hpaForPath(object json.RawMessage, path string) json.RawMessage {
+	var result map[string]json.RawMessage
+	if json.Unmarshal(object, &result) != nil {
+		return object
+	}
+	result["apiVersion"], _ = json.Marshal("autoscaling/" + splitPath(path)[2])
+	encoded, _ := json.Marshal(result)
+	return encoded
 }
 
 func (server *Server) mutate(writer http.ResponseWriter, request *http.Request) {
@@ -732,6 +870,7 @@ func discoveryForPath(path, scenario string) map[string]any {
 		resources = []map[string]any{
 			{"name": "deployments", "kind": "Deployment", "namespaced": true, "verbs": []string{"get", "list"}},
 			{"name": "replicasets", "kind": "ReplicaSet", "namespaced": true, "verbs": []string{"get", "list"}},
+			{"name": "controllerrevisions", "kind": "ControllerRevision", "namespaced": true, "verbs": []string{"get", "list"}},
 			{"name": "statefulsets", "kind": "StatefulSet", "namespaced": true, "verbs": []string{"get", "list"}},
 			{"name": "daemonsets", "kind": "DaemonSet", "namespaced": true, "verbs": []string{"get", "list"}},
 		}
@@ -784,7 +923,7 @@ func discoveryForPath(path, scenario string) map[string]any {
 
 func apiGroups(scenario string) map[string]any {
 	groups := []map[string]any{}
-	groupVersions := map[string]string{"apps": "v1", "batch": "v1", "networking.k8s.io": "v1", "autoscaling": "v1"}
+	groupVersions := map[string]string{"apps": "v1", "batch": "v1", "networking.k8s.io": "v1", "autoscaling": "v2"}
 	if scenario == "fleet-east" || scenario == "fleet-west" {
 		groupVersions["metrics.k8s.io"] = "v1beta1"
 	}
@@ -801,7 +940,11 @@ func apiGroups(scenario string) map[string]any {
 	for _, name := range names {
 		versionName := groupVersions[name]
 		version := map[string]any{"groupVersion": name + "/" + versionName, "version": versionName}
-		groups = append(groups, map[string]any{"name": name, "preferredVersion": version, "versions": []any{version}})
+		versions := []any{version}
+		if name == "autoscaling" {
+			versions = append(versions, map[string]any{"groupVersion": "autoscaling/v1", "version": "v1"})
+		}
+		groups = append(groups, map[string]any{"name": name, "preferredVersion": version, "versions": versions})
 	}
 	return map[string]any{"groups": groups}
 }

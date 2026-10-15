@@ -50,6 +50,7 @@ type KubernetesToolConfig struct {
 	CredentialID         string                      `mapstructure:"credential_id"`
 	Timeout              string                      `mapstructure:"timeout"`
 	DiscoveryTTL         string                      `mapstructure:"discovery_ttl"`
+	ChangeCapture        string                      `mapstructure:"change_capture"`
 	AllowLoopback        bool                        `mapstructure:"allow_loopback"`
 	AllowPrivateNetworks bool                        `mapstructure:"allow_private_networks"`
 	EndpointCIDRs        []string                    `mapstructure:"endpoint_cidrs"`
@@ -108,7 +109,7 @@ type KubernetesGKEConfig struct {
 }
 
 func decodeConnectors(value any) (ConnectorsConfig, error) {
-	var connectors ConnectorsConfig
+	connectors := ConnectorsConfig{Kubernetes: KubernetesConnectorConfig{KubernetesToolConfig: KubernetesToolConfig{ChangeCapture: "continuous"}}}
 	if value == nil {
 		return connectors, nil
 	}
@@ -151,6 +152,14 @@ func decodeConnectors(value any) (ConnectorsConfig, error) {
 	if err := decoder.Decode(value); err != nil {
 		return ConnectorsConfig{}, errors.New("invalid connectors configuration")
 	}
+	if !connectors.Kubernetes.Multiple && connectors.Kubernetes.ChangeCapture == "" {
+		connectors.Kubernetes.ChangeCapture = "continuous"
+	}
+	for position := range connectors.Kubernetes.Clusters {
+		if connectors.Kubernetes.Clusters[position].ChangeCapture == "" {
+			connectors.Kubernetes.Clusters[position].ChangeCapture = "continuous"
+		}
+	}
 	if err := validateKubernetesClusters(connectors.Kubernetes); err != nil {
 		return ConnectorsConfig{}, err
 	}
@@ -188,6 +197,11 @@ func validateMultipleShape(value any) error {
 }
 
 func validateKubernetesClusters(connector KubernetesConnectorConfig) error {
+	for _, entry := range connector.Resolved() {
+		if entry.ChangeCapture != "" && entry.ChangeCapture != "continuous" && entry.ChangeCapture != "demand" {
+			return errors.New("connectors.kubernetes.change_capture must be continuous or demand")
+		}
+	}
 	if !connector.Multiple {
 		return nil
 	}

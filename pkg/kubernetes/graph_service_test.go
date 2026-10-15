@@ -55,7 +55,7 @@ func TestGraphServiceUsesSharedIndexAndBoundsNeighborhood(t *testing.T) {
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, scope)
-	index, err := service.indexes.ForScope(kubeindex.Scope{OrgID: scope.OrgID, ClusterID: scope.ClusterID, CredentialID: scope.CredentialID})
+	index, err := service.indexes.ForScope(service.indexScope())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,14 +463,14 @@ func completeGraphTestServerMode(t *testing.T, connectedPairs, podCount int, for
 			if !strings.Contains(request.Header.Get("Accept"), "as=PartialObjectMetadataList") {
 				t.Errorf("overview requested full payload for %s", path)
 			}
-			writeJSON(writer, map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"name": "disconnected", "namespace": "shop", "uid": path}, "data": map[string]string{"value": "private-payload"}}}})
+			writeGraphFixtureList(writer, request, []any{map[string]any{"metadata": map[string]any{"name": "disconnected", "namespace": "shop", "uid": path}, "data": map[string]string{"value": "private-payload"}}})
 		case "/api/v1/namespaces/shop/pods":
 			writeJSON(writer, map[string]any{"items": pods})
 		case "/api/v1/namespaces/shop/configmaps":
-			writeJSON(writer, map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"name": "disconnected", "namespace": "shop", "uid": "configmap-disconnected"}}}})
+			writeGraphFixtureList(writer, request, []any{map[string]any{"metadata": map[string]any{"name": "disconnected", "namespace": "shop", "uid": "configmap-disconnected"}}})
 		default:
 			if request.Method == http.MethodGet {
-				writeJSON(writer, map[string]any{"items": []any{}})
+				writeGraphFixtureList(writer, request, []any{})
 				return
 			}
 			http.NotFound(writer, request)
@@ -497,6 +497,19 @@ func graphTestResources(names ...string) []map[string]any {
 		resources = append(resources, map[string]any{"name": name, "kind": kinds[name], "namespaced": name != "nodes" && name != "namespaces", "verbs": []string{"get", "list"}})
 	}
 	return resources
+}
+
+func writeGraphFixtureList(writer http.ResponseWriter, request *http.Request, items []any) {
+	if !strings.Contains(request.Header.Get("Accept"), "PartialObjectMetadataList") {
+		writeJSON(writer, map[string]any{"items": items})
+		return
+	}
+	metadata := []any{}
+	for _, value := range items {
+		item := value.(map[string]any)
+		metadata = append(metadata, map[string]any{"kind": "PartialObjectMetadata", "apiVersion": "meta.k8s.io/v1", "metadata": item["metadata"]})
+	}
+	writeJSON(writer, map[string]any{"kind": "PartialObjectMetadataList", "apiVersion": "meta.k8s.io/v1", "items": metadata})
 }
 
 type trafficContributorFunc func(context.Context, TrafficQuery) (Traffic, error)

@@ -177,6 +177,11 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 		if credentialErr != nil {
 			return nil, ErrCredentialUnavailable
 		}
+		if service, ok := ctx.Value(credentialEpochContextKey{}).(*Service); ok {
+			if err := service.acceptCredential(ctx, authorization); err != nil {
+				return nil, err
+			}
+		}
 		request.Header.Set("Authorization", authorization)
 	}
 	response, err := client.streamHTTP.Do(request)
@@ -191,6 +196,9 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 	}
 	if response.StatusCode != http.StatusOK {
 		defer response.Body.Close()
+		if response.StatusCode == http.StatusUnauthorized {
+			client.rejectCredential()
+		}
 		if previous && response.StatusCode == http.StatusBadRequest {
 			body, readErr := io.ReadAll(io.LimitReader(response.Body, 4097))
 			var status struct {
@@ -258,6 +266,11 @@ func (service *Service) StreamPodLogs(ctx context.Context, options PodLogStreamO
 }
 
 func (service *Service) streamPodLogs(parent context.Context, options PodLogStreamOptions, emit func(PodLogStreamEvent) error, duration, idleDuration, heartbeatDuration time.Duration, maxBytes int64) error {
+	if err := service.validateCredential(parent); err != nil {
+		return err
+	}
+	parent, cancelCredential := service.credentialContext(parent)
+	defer cancelCredential()
 	if options.Previous && duration > MaxPreviousLogDuration {
 		duration = MaxPreviousLogDuration
 	}

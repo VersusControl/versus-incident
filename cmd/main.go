@@ -224,6 +224,8 @@ func main() {
 		service.SetChangeStorage(store)
 		service.SetScrubber(redactor)
 	})
+	kubernetesService.StartCapture(rootCtx)
+	defer kubernetesService.Close()
 	constructionHealth := ""
 	if constructed > 0 && constructed < len(kubernetesService.Clusters()) {
 		constructionHealth = "partial"

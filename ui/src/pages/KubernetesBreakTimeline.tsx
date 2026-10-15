@@ -1,0 +1,287 @@
+import { useId, useLayoutEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { Activity, ArrowRight, ChevronDown, ChevronRight, Clock, History, X } from "lucide-react";
+import { ApiError, type KubernetesChange, type KubernetesChangesPage, type KubernetesIssue, type KubernetesResource } from "@/lib/api";
+import { useBrokenIssues, useKubernetesCluster, useKubernetesQuery } from "@/lib/useKubernetesCluster";
+import { KubernetesWarnings } from "./KubernetesWarnings";
+import { failureWarnings, issueWarnings, type KubernetesWarning } from "./kubernetesWarningItems";
+import "./KubernetesResourceTimeline.css";
+
+function breakRule(issue: KubernetesIssue) {
+  const names: Record<string, string> = { "pod.crash_loop": "CrashLoopBackOff", "pod.image_pull": "ImagePullBackOff", "pod.failed": "Pod failed", "workload.rollout_stalled": "Rollout stalled (ProgressDeadlineExceeded)", "workload.unavailable": "Pods unavailable", "job.failed": "Job failed", "node.not_ready": "NotReady" };
+  return names[issue.rule] ?? issue.rule.replaceAll(".", " ").replaceAll("_", " ");
+}
+
+function clock(value?: string) {
+  return value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleTimeString([], { hour12: false }) : "Time unavailable";
+}
+
+function range(from?: string, to?: string) {
+  return from && to ? `${clock(from)} – ${clock(to)}` : "Window unavailable";
+}
+
+function changeDescription(change: KubernetesChange) {
+  if (change.kind === "ConfigMap" || change.kind === "Secret") return "changed, content not shown";
+  return change.fields?.map((field) => `${field.from || "∅"} → ${field.to || "∅"}`).join(", ") || change.type.replaceAll("_", " ");
+}
+
+export function BreakTimelineLane({ issue, changes, since, until, onSelectChange, warningsOwned = false, scope }: { issue: KubernetesIssue; changes: KubernetesChange[]; since: string; until: string; onSelectChange: (change: KubernetesChange) => void; warningsOwned?: boolean; scope?: string }) {
+  const byID = new Map(changes.map((change) => [change.id, change]));
+  for (const linked of issue.changes ?? []) byID.set(linked.change.id, linked.change);
+  return <section aria-label={`Timeline lane ${issue.root.name}`}>
+    <ResourceTimelineChart scope={scope} issue={issue} changes={[...byID.values()]} since={since} until={until} onSelectChange={onSelectChange} />
+    {!warningsOwned && <KubernetesWarnings warnings={issueWarnings(issue)} scope={JSON.stringify([issue.root.uid, issue.root.kind, issue.root.namespace, issue.root.name, issue.rule, since, until])} />}
+  </section>;
+}
+
+type TimelineMarker = { id: string; at: string; label: string; detail: string; type: "change" | "crash"; change?: KubernetesChange };
+type TimelineResource = KubernetesIssue["root"];
+const timelineIdentity = (resource: TimelineResource) => JSON.stringify([resource.kind, resource.namespace ?? "", resource.uid || resource.name]);
+const axisClock = (timestamp: number) => new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+
+export function ResourceTimelineChart({ issue, issues = [], changes, since, until, onSelectChange, now = Date.now(), scope }: { issue?: KubernetesIssue; issues?: KubernetesIssue[]; changes: KubernetesChange[]; since: string; until: string; onSelectChange: (change: KubernetesChange) => void; now?: number; scope?: string }) {
+  const [selectedIDs, setSelectedIDs] = useState<string[] | null>(null);
+  const plotRef = useRef<HTMLDivElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const openerRef = useRef<HTMLButtonElement | null>(null);
+  const focusRef = useRef<HTMLElement | null>(null);
+  const [viewport, setViewport] = useState({ left: 0, width: 0, mobile: false });
+  const detailID = useId();
+  const start = Date.parse(since);
+  const end = Date.parse(until);
+  const valid = Number.isFinite(start) && Number.isFinite(end) && end > start;
+  const inWindow = (at: number) => valid && Number.isFinite(at) && at >= start && at <= end;
+  const position = (at: number) => (at - start) / (end - start) * 100;
+  const rows = new Map<string, { resource: TimelineResource; markers: TimelineMarker[] }>();
+  const roots = issue ? [issue] : issues;
+  for (const root of roots) rows.set(timelineIdentity(root.root), { resource: root.root, markers: [] });
+  for (const change of new Map(changes.map((item) => [item.id, item])).values()) {
+    if (!inWindow(Date.parse(change.at))) continue;
+    const key = timelineIdentity(change);
+    if (!rows.has(key)) rows.set(key, { resource: change, markers: [] });
+    const description = changeDescription(change);
+    const label = change.kind === "ConfigMap" || change.kind === "Secret" ? "changed (content not shown)" : change.fields?.map((field) => `${field.path.split(".").at(-1)} ${field.from || "∅"} → ${field.to || "∅"}`).join(", ") || description;
+    rows.get(key)!.markers.push({ id: change.id, at: change.at, label, detail: `${change.kind} ${change.name}: ${description}`, type: "change", change });
+  }
+  for (const root of roots) for (const termination of root.evidence?.terminations ?? []) {
+    if (!inWindow(Date.parse(termination.last))) continue;
+    const id = JSON.stringify(["termination", termination.reason, termination.exit_code, termination.last, termination.count]);
+    const markers = rows.get(timelineIdentity(root.root))!.markers;
+    if (!markers.some((marker) => marker.id === id)) markers.push({ id, at: termination.last, label: `${termination.reason} ×${termination.count}`, detail: `Crash: ${termination.reason} exit ${termination.exit_code} ×${termination.count} (last occurrence)`, type: "crash" });
+  }
+  const broke = Date.parse(issue?.broke_at ?? "");
+  const breakVisible = inWindow(broke);
+  const step = [60_000, 5 * 60_000, 10 * 60_000, 30 * 60_000, 60 * 60_000, 4 * 60 * 60_000].find((duration) => valid && (end - start) / duration <= 8) ?? (end - start) / 6;
+  const firstTick = Math.ceil(start / step) * step;
+  const ticks = valid ? Array.from({ length: Math.min(9, Math.max(0, Math.floor((end - firstTick) / step) + 1)) }, (_, index) => firstTick + index * step) : [];
+  const windowLeft = Math.max(start, broke - 30 * 60_000);
+  const windowRight = Math.min(end, broke + 2 * 60_000);
+  const breakRoots = [...new Map(roots.map((root) => [JSON.stringify([timelineIdentity(root.root), root.broke_at]), root])).values()];
+  const markersByID = new Map([...rows.values()].flatMap((row) => row.markers).map((marker) => [marker.id, marker]));
+  const selected = selectedIDs?.flatMap((id) => markersByID.has(id) ? [markersByID.get(id)!] : []) ?? null;
+  const resetScope = scope ?? JSON.stringify([issue && timelineIdentity(issue.root), end - start]);
+  const previousScope = useRef(resetScope);
+  const framedScope = useRef<string | null>(null);
+  const markerIDs = JSON.stringify([...markersByID.keys()]);
+  const restoreFocus = () => {
+    const opener = openerRef.current;
+    (opener?.isConnected ? opener : plotRef.current)?.focus({ preventScroll: true });
+  };
+  const closeDetails = () => { setSelectedIDs(null); restoreFocus(); };
+  const openDetails = (group: TimelineMarker[], opener: HTMLButtonElement) => {
+    openerRef.current = opener;
+    setSelectedIDs(group.map((marker) => marker.id));
+  };
+  useLayoutEffect(() => {
+    if (selectedIDs?.length && headingRef.current) headingRef.current.focus({ preventScroll: true });
+  }, [selectedIDs]);
+  useLayoutEffect(() => {
+    const active = document.activeElement;
+    const canRestore = !active || active === document.body || !active.isConnected || Boolean(plotRef.current?.parentElement?.contains(active));
+    if (previousScope.current !== resetScope) {
+      previousScope.current = resetScope;
+      if (selectedIDs) {
+        setSelectedIDs(null);
+        if (canRestore && focusRef.current?.closest(".resource-timeline-detail")) restoreFocus();
+      }
+    } else if (selectedIDs && !selected?.length) {
+      setSelectedIDs(null);
+      if (canRestore) restoreFocus();
+    }
+    if (canRestore && focusRef.current && !focusRef.current.isConnected) plotRef.current?.focus({ preventScroll: true });
+  }, [resetScope, selectedIDs, selected?.length, markerIDs]);
+  useLayoutEffect(() => {
+    const element = plotRef.current;
+    if (!element) return;
+    const mobile = window.matchMedia?.("(max-width: 640px)").matches ?? false;
+    const frame = framedScope.current !== resetScope;
+    framedScope.current = resetScope;
+    if (mobile && frame && Number.isFinite(broke)) {
+      const plotWidth = element.querySelector<HTMLElement>(".resource-timeline-overlay")?.getBoundingClientRect().width ?? 0;
+      element.scrollLeft = Math.max(0, (broke - start) / (end - start) * plotWidth - (element.clientWidth - 132) / 2);
+    }
+    const measure = () => setViewport({ left: element.scrollLeft, width: element.clientWidth, mobile: window.matchMedia?.("(max-width: 640px)").matches ?? false });
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
+    observer?.observe(element);
+    return () => observer?.disconnect();
+  }, [resetScope, broke, start, end]);
+  const mobilePlotWidth = viewport.width - 132;
+  const visibleBreak = !viewport.mobile || !viewport.width || position(broke) / 100 * 620 >= viewport.left && position(broke) / 100 * 620 <= viewport.left + mobilePlotWidth;
+  const closeCaptions = breakVisible && inWindow(now) && Math.abs(position(now) - position(broke)) * 6.2 < 74;
+  return <div className="resource-timeline" onFocusCapture={(event) => { focusRef.current = event.target; }} onBlurCapture={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) focusRef.current = null; }} onKeyDown={(event) => { if (event.key === "Escape" && selectedIDs) { event.preventDefault(); closeDetails(); } }}>
+    {!valid ? <p role="status" className="p-4 text-xs text-ink-400">Window unavailable.</p> : <>
+      <div ref={plotRef} className="resource-timeline-scroll" tabIndex={0} role="region" aria-label="Resource timeline chart" data-since={since} data-until={until} data-now={now} onScroll={(event) => { const left = event.currentTarget.scrollLeft; setViewport((current) => ({ ...current, left })); }}>
+        <div className="resource-timeline-grid">
+          <div className="resource-timeline-head" style={{ height: closeCaptions ? 44 : 34 }}><div className="resource-timeline-plot">
+            {breakVisible && <span className="resource-timeline-break-pill" style={{ left: viewport.mobile && viewport.width ? `clamp(${viewport.left + 44}px, ${position(broke)}%, ${viewport.left + Math.max(44, mobilePlotWidth - 44)}px)` : `clamp(44px, ${position(broke)}%, calc(100% - 44px))` }} title={`Break: ${breakRule(issue!)} ${clock(issue?.broke_at)}`}>{visibleBreak ? `break ${axisClock(broke)}` : position(broke) / 100 * 620 < viewport.left ? "← break" : "break →"}</span>}
+            {inWindow(now) && <span className="resource-timeline-now-label" style={{ left: `clamp(14px, ${position(now)}%, calc(100% - 14px))`, top: closeCaptions ? 18 : 0 }}>now</span>}
+          </div></div>
+          <div className="resource-timeline-body">
+            <div className="resource-timeline-overlay" aria-hidden="true">
+              {Number.isFinite(broke) && windowRight > windowLeft && <div className="resource-timeline-window" style={{ left: `${position(windowLeft)}%`, width: `${position(windowRight) - position(windowLeft)}%` }}><span>suspect window (break − 30 m … + 2 m)</span></div>}
+              {ticks.map((tick) => <span className="resource-timeline-gridline" key={tick} style={{ left: `${position(tick)}%` }} />)}
+              {breakRoots.filter((root) => inWindow(Date.parse(root.broke_at ?? ""))).map((root) => <span key={JSON.stringify([timelineIdentity(root.root), root.broke_at])} className="resource-timeline-break-line" data-at={root.broke_at} data-x={position(Date.parse(root.broke_at!))} style={{ left: `${position(Date.parse(root.broke_at!))}%` }} title={`${root.root.name}: break ${clock(root.broke_at)}`} />)}
+              {inWindow(now) && <span className="resource-timeline-now-line" style={{ left: `${position(now)}%` }} />}
+            </div>
+            {[...rows.entries()].sort(([left, leftRow], [right, rightRow]) => Number(roots.some((root) => timelineIdentity(root.root) === right)) - Number(roots.some((root) => timelineIdentity(root.root) === left)) || leftRow.resource.kind.localeCompare(rightRow.resource.kind) || left.localeCompare(right)).map(([key, row]) => {
+              const sorted = row.markers.sort((left, right) => Date.parse(left.at) - Date.parse(right.at) || left.id.localeCompare(right.id));
+              const groups: TimelineMarker[][] = [];
+              for (const marker of sorted) {
+                const last = groups.at(-1);
+                if (last && last[0].type === marker.type && position(Date.parse(marker.at)) - position(Date.parse(last[0].at)) < 5) last.push(marker);
+                else groups.push([marker]);
+              }
+              return <div className="resource-timeline-row" key={key} data-resource={key}>
+                <div className="resource-timeline-label" title={`${row.resource.kind} ${row.resource.name} · ${row.resource.namespace || "Cluster scope"}`}><strong>{row.resource.kind === "HorizontalPodAutoscaler" ? "HPA" : row.resource.kind} {row.resource.name}</strong><span>{row.resource.namespace || "Cluster scope"}</span></div>
+                <div className="resource-timeline-plot">
+                  {groups.map((group, groupIndex) => {
+                    const crash = group[0].type === "crash";
+                    const anchor = position(Date.parse(crash ? group.at(-1)!.at : group[0].at));
+                    const previous = groups[groupIndex - 1];
+                    const next = groups[groupIndex + 1];
+                    const previousAnchor = previous ? position(Date.parse(previous.at(-1)!.at)) : 0;
+                    const nextAnchor = next ? position(Date.parse(next[0].at)) : 100;
+                    const budget = crash ? (next?.[0].type === "change" ? (nextAnchor - anchor) / 2 : nextAnchor - anchor) : anchor - (previous?.[0].type === "crash" ? (previousAnchor + anchor) / 2 : previousAnchor);
+                    return <div key={group[0].id}>
+                      {group.map((marker, index) => <button key={marker.id} type="button" data-event-id={marker.id} data-at={marker.at} data-x={position(Date.parse(marker.at))} data-marker={marker.type} className={`resource-timeline-marker resource-timeline-${marker.type}`} style={{ left: `${position(Date.parse(marker.at))}%`, top: `${group.length >= 3 ? Math.min(index, 2) * 9 : 10 + index * 7}px`, display: index > 2 ? "none" : undefined }} aria-label={`${marker.detail} at ${clock(marker.at)}`} title={`${marker.detail} · ${clock(marker.at)}`} aria-expanded={selected?.some((item) => item.id === marker.id) ?? false} aria-controls={selected?.length ? detailID : undefined} onClick={(event) => openDetails(group, event.currentTarget)}><span aria-hidden="true">{marker.type === "crash" ? "×" : ""}</span></button>)}
+                      <button type="button" className={`resource-timeline-event-label ${crash ? "resource-timeline-crash-label text-sev-critical" : group[0].change?.kind === "ConfigMap" || group[0].change?.kind === "Secret" ? "resource-timeline-config-label text-ink-200" : "text-ink-200"}`} style={{ left: `${anchor}%`, maxWidth: `min(220px, max(0px, ${budget}% - 18px))` }} onClick={(event) => openDetails(group, event.currentTarget)} title={group.map((marker) => marker.detail).join("; ")} aria-label={group.length > 1 ? `${group.length} events: ${group.map((marker) => marker.detail).join("; ")}` : `Show event details: ${group[0].label}`}>{crash ? group.map((marker) => marker.label).join(" · ") : <>{group[0].label}{group.length > 1 && ` +${group.length - 1}`}</>}</button>
+                    </div>;
+                  })}
+                </div>
+              </div>;
+            })}
+            {rows.size === 0 && <p className="p-4 text-xs text-ink-400">No recorded markers in this window.</p>}
+          </div>
+          <div className="resource-timeline-axis"><div className="resource-timeline-plot">{ticks.map((tick) => <time key={tick} dateTime={new Date(tick).toISOString()} style={{ left: `${position(tick)}%` }}>{axisClock(tick)}</time>)}</div></div>
+        </div>
+      </div>
+      <div className="resource-timeline-legend" aria-label="Timeline legend"><span><i className="resource-timeline-dot" />change</span><span><i className="resource-timeline-break-key" />break</span><span><i className="resource-timeline-crash-key">×</i>crash (termination)</span><span><i className="resource-timeline-now-key" />now</span><span><i className="resource-timeline-window-key" />suspect window</span></div>
+      {breakRoots.map((root) => <span key={JSON.stringify([timelineIdentity(root.root), root.broke_at])} className="sr-only">Break: {breakRule(root)}{root.broke_at && <time dateTime={root.broke_at}>{clock(root.broke_at)}</time>}</span>)}
+      {!!selected?.length && <section id={detailID} aria-label="Timeline event details" className="resource-timeline-detail"><button type="button" className="btn-icon float-right" aria-label="Close event details" title="Close event details" onClick={closeDetails}><X size={14} aria-hidden="true" /></button><h3 ref={headingRef} tabIndex={-1} className="sr-only">Timeline event details</h3>{selected.map((marker) => <div key={marker.id} className="mb-2 break-words"><p>{marker.detail}</p><time dateTime={marker.at} className="font-mono text-ink-400">{clock(marker.at)}</time>{marker.change && <button type="button" className="ml-3 text-link" onClick={() => marker.change && onSelectChange(marker.change)}>Open resource</button>}</div>)}</section>}
+    </>}
+  </div>;
+}
+
+function lead(seconds: number) {
+  const duration = Math.abs(seconds) >= 60 ? `${Math.round(Math.abs(seconds) / 60)} m` : `${Math.abs(seconds)} s`;
+  return seconds === 0 ? "at break" : `${duration} ${seconds > 0 ? "before" : "after"}`;
+}
+
+export function BreakRow({ issue, resource, onSelectResource, collapsed = false, clusterId, warningScope = "", sourceSync }: { issue: KubernetesIssue; resource: KubernetesResource | null; onSelectResource: (resource: KubernetesResource) => void; collapsed?: boolean; clusterId?: string; warningScope?: string; sourceSync?: KubernetesChangesPage["sync"] }) {
+  const { client, cluster } = useKubernetesCluster();
+  const navigate = useNavigate();
+  const [expanded, setExpanded] = useState(!collapsed);
+  const enrichment = useKubernetesQuery({ queryKey: ["kubernetes-issues", "root", issue.root.namespace ?? "", issue.root.uid], queryFn: () => client.kubernetesIssues({ root_uid: issue.root.uid, include: "changes", namespace: issue.root.namespace }), enabled: collapsed && expanded && Boolean(issue.root.uid), staleTime: 30_000, retry: false });
+  const denied = enrichment.error instanceof ApiError && [401, 403, 404].includes(enrichment.error.status);
+  const detail = collapsed ? denied ? undefined : enrichment.data?.items.find((item) => item.root.uid === issue.root.uid && item.rule === issue.rule) ?? enrichment.data?.items.find((item) => item.root.uid === issue.root.uid) : issue;
+  const changes = [...(detail?.changes ?? [])].sort((left, right) => Date.parse(right.change.at) - Date.parse(left.change.at));
+  const timeline = () => {
+    const query = new URLSearchParams(window.location.search);
+    query.set("view", "timeline");
+    query.delete("r");
+    query.delete("tab");
+    if (issue.root.uid) query.set("root_uid", issue.root.uid);
+    if (issue.root.namespace) query.set("namespace", issue.root.namespace);
+    else query.delete("namespace");
+    if (issue.broke_at) query.set("center", issue.broke_at);
+    else query.delete("center");
+    navigate(`/agent/kubernetes?${query}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  };
+  const investigate = () => {
+    if (!resource) return;
+    const query = new URLSearchParams({ provider: "kubernetes", cluster: cluster ?? clusterId ?? changes[0]?.change.cluster ?? "", resource_id: resource.resource_id, name: resource.name, include_changes: "true" });
+    if (resource.namespace) query.set("namespace", resource.namespace);
+    if (issue.root.uid) query.set("uid", issue.root.uid);
+    navigate(`/agent/chat?${query}`);
+  };
+  const id = useId();
+  const warnings = issueWarnings(denied ? issue : detail ?? issue);
+  if (denied) warnings.push({ id: "root-history-unavailable", content: "Root history unavailable" });
+  const sync = collapsed ? enrichment.data?.sync : sourceSync;
+  const complete = sourceSync?.state === "ready" && !sourceSync.partial && sync?.state === "ready" && !sync.partial && !enrichment.isError && !enrichment.data?.truncated && !enrichment.data?.partial_failures?.length;
+  const more = Math.max(0, changes.length - 1) + (detail?.more_changes ?? 0);
+  const iconButton = "inline-flex size-8 shrink-0 items-center justify-center rounded-control focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent sm:btn sm:w-auto";
+  return <article aria-label={`${issue.root.kind} ${issue.root.name}`} className={`relative min-w-0 border-l-2 px-3 py-1 sm:px-4 sm:py-3 ${issue.severity === "critical" ? "border-l-sev-critical-solid" : "border-l-sev-warn-solid"}`}>
+    {collapsed && <button type="button" aria-expanded={expanded} aria-controls={id} aria-label={`${expanded ? "Collapse" : "Expand"} ${issue.root.name}`} title={`${expanded ? "Collapse" : "Expand"} issue`} className="btn-icon absolute left-1 top-2 shrink-0" onClick={() => setExpanded((value) => !value)}>{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>}
+    <div className={`grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 lg:grid-cols-[minmax(0,1fr)_auto_auto] ${collapsed ? "pl-7" : ""}`}>
+      <div className="col-span-2 min-w-0 lg:col-span-1">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1 text-xs sm:gap-x-2">
+          <span className={`pill ${issue.severity === "critical" ? "pill-bad" : issue.severity === "warning" ? "pill-warn" : "pill-accent"}`}>{issue.severity}</span>
+          <span className="pill text-2xs text-ink-300">{issue.root.kind}</span>
+          <button type="button" disabled={!resource} onClick={() => resource && onSelectResource(resource)} className="min-w-0 break-all text-left text-xs font-semibold text-link" aria-label={`Open resource ${issue.root.name}`}>{issue.root.namespace ? `${issue.root.namespace}/` : ""}{issue.root.name}</button>
+        </div>
+      </div>
+      <div className="col-start-1 row-start-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-300 lg:col-start-2 lg:row-start-1"><span title={breakRule(issue)} aria-label={breakRule(issue)}>{issue.rule === "workload.rollout_stalled" ? <><span className="sm:hidden">Rollout stalled</span><span className="hidden sm:inline">{breakRule(issue)}</span></> : breakRule(issue)}</span><span>{issue.count}{issue.of ? ` of ${issue.of}` : ""} {issue.broken ? `${issue.root.kind === "Node" ? "nodes" : "pods"} affected` : "affected"}</span><span className="inline-flex items-center gap-1 whitespace-nowrap font-mono text-ink-400"><Clock size={12} aria-hidden="true" />{issue.broken ? "Broke" : "First seen"} {clock(issue.broken ? issue.broke_at : issue.first_seen)}</span></div>
+      <div className="col-start-2 row-start-2 flex shrink-0 gap-1 lg:col-start-3 lg:row-start-1">
+        <button type="button" className={`${iconButton} hover:bg-ink-600`} aria-label={`Timeline for ${issue.root.name}`} title="Timeline" onClick={timeline}><History size={14} aria-hidden="true" /><span className="hidden sm:inline">Timeline</span></button>
+        <button type="button" className={`${iconButton} bg-accent text-white hover:bg-accent-hover sm:btn-primary`} aria-label={`Investigate ${issue.root.name}`} title="Investigate" disabled={!resource} onClick={investigate}><Activity size={14} aria-hidden="true" /><span className="hidden sm:inline">Investigate</span></button>
+      </div>
+    </div>
+    {expanded && <div id={id} className="mt-1 space-y-1 text-xs sm:mt-2 sm:pl-[4.5rem]">
+      {collapsed && issue.root.uid && enrichment.isPending && <p role="status" className="text-ink-400">Loading root history…</p>}
+      {collapsed && enrichment.isError && <p role="status" className="text-sev-warning">Root history unavailable.<button type="button" className="ml-2 text-link underline" onClick={() => void enrichment.refetch()}>Retry</button></p>}
+      {collapsed && !issue.root.uid && <p className="text-ink-400">Root history unavailable.</p>}
+      {changes.map((item, index) => <div key={item.change.id} className={`grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 sm:grid-cols-[minmax(0,1fr)_6rem_5rem] ${index > 0 ? "hidden sm:grid" : ""}`}><span className="min-w-0 break-words text-ink-200"><span className="text-ink-400">{item.change.kind} </span>{item.change.name} <span className="font-mono">{changeDescription(item.change)}</span></span><span className="col-span-2 col-start-1 row-start-2 flex flex-wrap items-center gap-x-3 text-ink-400 sm:col-span-1 sm:col-start-2 sm:row-start-1">{lead(item.lead_seconds)}{index === 0 && more > 0 && <button type="button" className="min-h-6 text-link sm:hidden" onClick={timeline}>+{more} more changes</button>}</span><time className="col-start-2 row-start-1 whitespace-nowrap text-right font-mono text-ink-400 sm:col-start-3" dateTime={item.change.at}>{clock(item.change.at)}</time></div>)}
+      {(detail?.more_changes ?? 0) > 0 && <button type="button" onClick={timeline} className={`${changes.length ? "hidden sm:block" : ""} text-link`}>+{detail?.more_changes} more changes</button>}
+      {detail && changes.length === 0 && <p className="text-ink-400">{complete && detail.history === "complete" && !detail.gaps?.length && !detail.partial ? detail.untracked?.length ? "No recorded change in tracked resources." : "No change on it, its config or its nodes" : "No recorded change in available evidence"}</p>}
+      {detail?.evidence && <div className="flex min-w-0 flex-wrap items-center gap-1.5">{detail.evidence.terminations?.map((item) => <span className="pill pill-bad" key={`${item.reason}:${item.exit_code}`}>{item.reason}{item.reason === "OOMKilled" ? "" : ` exit ${item.exit_code}`} ×{item.count}</span>)}{detail.evidence.waiting?.map((item) => <span className="pill pill-warn" key={item.reason}>{item.reason} ×{item.count}</span>)}<span className="text-ink-400">{detail.evidence.warning_events} warning events</span><span className="ml-auto hidden whitespace-nowrap text-right font-mono text-ink-400 sm:inline">{range(detail.evidence.from, detail.evidence.to)}</span></div>}
+      {collapsed && issue.examples?.length ? <p className="text-ink-400">Examples: {issue.examples.map((item) => item.name).join(", ")}</p> : null}
+    </div>}
+    <div className={`flex flex-wrap items-center justify-between gap-x-2 text-xs ${warnings.length || expanded && detail?.evidence ? "mt-1" : ""} ${warnings.length ? "" : "sm:hidden"} ${collapsed ? "pl-7" : "sm:pl-[4.5rem]"}`}><KubernetesWarnings warnings={warnings} scope={JSON.stringify([cluster ?? clusterId, issue.root.uid, issue.root.kind, issue.root.namespace, issue.root.name, issue.rule, warningScope, denied])} />{expanded && detail?.evidence && <span className="ml-auto whitespace-nowrap text-right font-mono text-ink-400 sm:hidden">{range(detail.evidence.from, detail.evidence.to)}</span>}</div>
+  </article>;
+}
+
+export function TimelineCard({ changes, windowEnd, clusterId, onSelectView, onSelectResource, resourceFor }: { changes?: KubernetesChangesPage; windowEnd: number; clusterId: string; onSelectView: (view: "issues" | "timeline") => void; onSelectResource: (resource: KubernetesResource) => void; resourceFor: (issue: KubernetesIssue) => KubernetesResource | null }) {
+  const issues = useBrokenIssues();
+  const blocked = issues.error instanceof ApiError && [401, 403].includes(issues.error.status);
+  const data = blocked ? undefined : issues.data;
+  const warnings: KubernetesWarning[] = failureWarnings(data?.partial_failures);
+  if (data?.truncated) warnings.push({ id: "break-cap", content: "Break evidence is bounded; additional roots may not be shown." });
+  if (data && (issues.isError || data.sync.state === "stale")) warnings.push({ id: "break-stale", content: "Break evidence is stale." });
+  if (data?.sync.partial && !data.partial_failures?.length && !data.truncated) warnings.push({ id: "break-partial", content: "Break evidence is partial." });
+  for (const gap of changes?.gaps ?? []) warnings.push({ id: `gap:${gap.from}:${gap.to}`, content: `Change history gap: ${range(gap.from, gap.to)}` });
+  if (changes?.truncated) warnings.push({ id: "changes-cap", content: "Change history scan is bounded; additional changes may not be shown." });
+  if (changes?.sync.state === "stale") warnings.push({ id: "changes-stale", content: "Change activity is stale." });
+  if (changes?.sync.partial && !changes.gaps?.length && !changes.partial_failures?.length) warnings.push({ id: "changes-partial", content: "Change activity reflects incomplete history." });
+  warnings.push(...failureWarnings(changes?.partial_failures));
+  const buckets = Array.from({ length: 12 }, () => 0);
+  for (const change of changes?.items ?? []) {
+    const offset = windowEnd - Date.parse(change.at);
+    const index = 11 - Math.floor(offset / 300_000);
+    if (offset >= 0 && index >= 0 && index < 12) buckets[index]++;
+  }
+  const peak = Math.max(1, ...buckets);
+  return <section aria-label="Break timeline" className="card min-w-0 overflow-hidden">
+    <header className="card-header !py-2 sm:!py-3"><h2 className="card-title flex items-center gap-2"><History size={15} aria-hidden="true" />Timeline</h2><button type="button" className="flex items-center gap-2 text-xs text-link" onClick={() => onSelectView("timeline")}>Full timeline<ArrowRight size={13} aria-hidden="true" /></button></header>
+    {issues.isPending && <div role="status" aria-label="Loading break timeline" className="space-y-2 p-4"><div className="sk h-14" /><div className="sk h-20" /></div>}
+    {issues.isError && <p role="status" className="p-4 text-xs text-ink-400">Break timeline unavailable.{data && " Showing earlier evidence."}<button type="button" className="ml-2 text-link underline" onClick={() => void issues.refetch()}>Retry</button></p>}
+    {data && <><div className="grid grid-cols-2 gap-2 border-b border-ink-700 p-2 sm:p-3 [&>button]:py-1.5 sm:[&>button]:py-2 [&_strong]:leading-none sm:[&_strong]:leading-7 [&_button>span:nth-child(2)]:mt-0 sm:[&_button>span:nth-child(2)]:mt-1">
+      <button type="button" className="min-w-0 rounded-control border border-ink-500/50 bg-surface-raised/60 px-3 py-2 text-left" onClick={() => onSelectView("issues")}><span className="flex items-center justify-between text-2xs text-ink-400 sm:block">Broken<strong className="text-xl tabular-nums text-ink-50 sm:hidden">{data.broken?.total ?? "Unknown"}</strong></span><span className="mt-1 flex flex-wrap items-center gap-1 sm:gap-2"><strong className="hidden text-xl tabular-nums text-ink-50 sm:inline">{data.broken?.total ?? "Unknown"}</strong>{Object.entries(data.broken?.by_severity ?? {}).filter(([, count]) => count > 0).map(([severity, count]) => <span key={severity} className={`pill ${severity === "critical" ? "pill-bad" : "pill-warn"}`}>{count} {severity}</span>)}</span>{data.broken?.total === 0 && <span className="text-xs text-ink-400">{data.sync.state === "stale" || data.sync.partial || data.truncated || data.partial_failures?.length || issues.isError ? "No broken workloads in available evidence" : "No broken workloads"}</span>}</button>
+      <button type="button" className="min-w-0 rounded-control border border-ink-500/50 bg-surface-raised/60 px-3 py-2 text-left" onClick={() => onSelectView("timeline")}><span className="block text-2xs text-ink-400">Changes in 60 min</span><span className="mt-1 flex items-end justify-between gap-2"><strong className="text-xl tabular-nums text-ink-50">{changes ? `${changes.items.length}${changes.next || changes.truncated ? "+" : ""}` : "Unknown"}</strong><span role="img" aria-label="Change activity in twelve five-minute intervals" className="flex h-7 w-1/2 items-end gap-1">{buckets.map((count, index) => <span key={index} className={`min-w-0 flex-1 rounded-t-sm ${count ? "bg-accent" : "bg-ink-600"}`} style={{ height: `${count ? Math.max(12, count / peak * 100) : 8}%` }} />)}</span></span></button>
+    </div><div className="divide-y divide-ink-700">{data.items.slice(0, 5).map((issue) => <BreakRow key={issue.root.uid ?? issue.root.name} issue={issue} resource={resourceFor(issue)} onSelectResource={onSelectResource} clusterId={clusterId} sourceSync={issues.isError ? undefined : data.sync} />)}</div>{(data.broken?.total ?? 0) > data.items.length && <button type="button" className="flex w-full items-center gap-2 border-t border-ink-700 px-4 py-2 text-xs text-link" onClick={() => onSelectView("issues")}>{data.broken!.total - data.items.length} more<ArrowRight size={12} aria-hidden="true" />Issues</button>}
+    </>}
+    {data && <div className="px-2"><KubernetesWarnings warnings={warnings} scope={JSON.stringify([clusterId, blocked])} /></div>}
+  </section>;
+}

@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,24 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
+
+func TestCaptureIndexStatusPreservesSafeVerification(t *testing.T) {
+	status := CaptureStatus{Mode: "demand", Reason: "stable_principal_unverified", Verification: &projectedVerificationStatus{Stage: "jwks_response", HTTPStatus: http.StatusNotAcceptable}}
+	encoded, err := json.Marshal(captureIndexStatus(status))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Verification projectedVerificationStatus `json:"verification"`
+	}
+	if json.Unmarshal(encoded, &decoded) != nil || decoded.Verification != *status.Verification {
+		t.Fatal("stream projection dropped the safe verifier stage/status")
+	}
+	encoded, err = json.Marshal(captureIndexStatus(CaptureStatus{Mode: "continuous"}))
+	if err != nil || bytes.Contains(encoded, []byte("verification")) {
+		t.Fatal("verification diagnostic must remain optional")
+	}
+}
 
 func TestUpgradeRegistryReadScopeAndTimeline(t *testing.T) {
 	provider := storage.NewMemory()
@@ -92,6 +111,13 @@ func TestIndexStreamAdmissionSpansClusters(t *testing.T) {
 }
 
 func TestIndexRecordRetainsProjectedWorkloadValues(t *testing.T) {
+	var metadata metadataIndexItem
+	metadata.Metadata.Name = "checkout-cfg"
+	metadata.Metadata.UID = "config-uid"
+	metadata.Metadata.ResourceVersion = "42"
+	if record := metadata.record("ConfigMap"); record.ResourceVersion != "42" {
+		t.Fatalf("metadata resource version lost: %+v", record)
+	}
 	for _, numeric := range []struct {
 		name  string
 		value any
@@ -117,6 +143,84 @@ func TestIndexRecordRetainsProjectedWorkloadValues(t *testing.T) {
 		if record.Replicas != 0 {
 			t.Fatalf("invalid replica count accepted: %v", invalid)
 		}
+	}
+}
+
+func TestControllerRevisionNamesImagesAndForbiddenFallback(t *testing.T) {
+	var denied atomic.Bool
+	now := time.Now().UTC()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{map[string]any{"name": "apps", "versions": []any{map[string]any{"groupVersion": "apps/v1", "version": "v1"}}}}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{}})
+		case "/apis/apps/v1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "controllerrevisions", "kind": "ControllerRevision", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		default:
+			if denied.Load() {
+				http.Error(writer, "CANARY_RBAC", http.StatusForbidden)
+				return
+			}
+			items := []any{}
+			for revision := 1; revision <= 2; revision++ {
+				items = append(items, map[string]any{"metadata": map[string]any{"uid": "revision-" + strconv.Itoa(revision), "name": "revision-" + strconv.Itoa(revision), "namespace": "shop", "creationTimestamp": now.Add(-time.Duration(3-revision) * time.Minute).Format(time.RFC3339), "ownerReferences": []any{map[string]any{"kind": "StatefulSet", "name": "db", "uid": "root"}}}, "revision": revision, "data": map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "app", "image": "db:v" + strconv.Itoa(revision), "env": []any{map[string]any{"value": "CANARY_ENV"}}}}}}}}})
+			}
+			containers := []any{}
+			for position := range 17 {
+				containers = append(containers, map[string]any{"name": "app-" + strconv.Itoa(position), "image": "db:v1"})
+			}
+			largeImages := []any{}
+			for position := range 16 {
+				largeImages = append(largeImages, map[string]any{"name": "app-" + strconv.Itoa(position), "image": strings.Repeat("a", 512)})
+			}
+			for _, bad := range []struct {
+				name  string
+				owner string
+				data  any
+			}{{"empty", "StatefulSet", map[string]any{"spec": map[string]any{}}}, {"large", "DaemonSet", map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": containers}}}}}, {"large-images", "StatefulSet", map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": largeImages}}}}}, {"unsupported", "CustomController", "CANARY_DATA"}} {
+				items = append(items, map[string]any{"metadata": map[string]any{"uid": bad.name, "name": bad.name, "namespace": "shop", "ownerReferences": []any{map[string]any{"kind": bad.owner, "name": bad.name, "uid": bad.name + "-root"}}}, "revision": 1, "data": bad.data})
+			}
+			writeJSON(writer, map[string]any{"items": items})
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster"})
+	items, complete, err := service.loadIndexKind(t.Context(), "ControllerRevision")
+	if err != nil || !complete || len(items) != 5 || items[1].Images[0] != "app=db:v2" {
+		t.Fatalf("revision loader: %+v %v", items, err)
+	}
+	for _, item := range items[2:] {
+		if item.Summary["revision_history_partial"] != "true" || len(item.Images) != 0 || len(item.Owners) != 1 {
+			t.Fatalf("revision omission not isolated to its owner: %+v", item)
+		}
+	}
+	if err := kubeindex.New(10).Ingest("ControllerRevision", items, true, now); err != nil {
+		t.Fatalf("oversized revision still poisoned kind ingestion: %v", err)
+	}
+	root := kubeindex.Record{Kind: "StatefulSet", Name: "db", UID: "root", Namespace: "shop", UpdateRevision: "db-new", CurrentRevision: "db-old"}
+	rebuilt := kubechanges.Reconstruct("cluster", append(items, root), now)
+	encoded, _ := json.Marshal(rebuilt)
+	if strings.Contains(string(encoded), "CANARY") {
+		t.Fatal("ControllerRevision values escaped")
+	}
+	if len(rebuilt) != 2 {
+		t.Fatalf("bad revision or fallback tainted valid reconstruction: %+v", rebuilt)
+	}
+	denied.Store(true)
+	if _, _, err := service.loadIndexKind(t.Context(), "ControllerRevision"); !errors.Is(err, ErrForbidden) {
+		t.Fatal("forbidden revision read not classified")
+	}
+	fallback := kubechanges.Reconstruct("cluster", []kubeindex.Record{root}, now)
+	if len(fallback) != 0 {
+		t.Fatalf("fallback invented image or historical time: %+v", fallback)
+	}
+	root.ProgressingTransitionAt = now.Add(-time.Minute)
+	fallback = kubechanges.Reconstruct("cluster", []kubeindex.Record{root}, now)
+	if len(fallback) != 1 || fallback[0].Type != kubechanges.RolloutStarted || !fallback[0].At.Equal(root.ProgressingTransitionAt) {
+		t.Fatalf("fallback lost actual transition time: %+v", fallback)
 	}
 }
 
@@ -198,7 +302,7 @@ func TestIndexLoaderPaginatesMetadataOnlyBeyondForegroundItemCap(t *testing.T) {
 			end := min(start+500, 10001)
 			items := make([]map[string]any, 0, end-start)
 			for position := start; position < end; position++ {
-				items = append(items, map[string]any{"metadata": map[string]any{
+				items = append(items, map[string]any{"kind": "PartialObjectMetadata", "apiVersion": "meta.k8s.io/v1", "metadata": map[string]any{
 					"name": "secret-" + strconv.Itoa(position), "namespace": "shop", "uid": "uid-" + strconv.Itoa(position),
 					"labels": map[string]string{"app": "checkout"},
 				}})
@@ -207,7 +311,7 @@ func TestIndexLoaderPaginatesMetadataOnlyBeyondForegroundItemCap(t *testing.T) {
 			if end < 10001 {
 				continuation = strconv.Itoa(end)
 			}
-			writeJSON(writer, map[string]any{"items": items, "metadata": map[string]any{"continue": continuation}})
+			writeJSON(writer, map[string]any{"kind": "PartialObjectMetadataList", "apiVersion": "meta.k8s.io/v1", "items": items, "metadata": map[string]any{"continue": continuation}})
 		default:
 			http.NotFound(writer, request)
 		}
@@ -294,7 +398,7 @@ func TestIndexLoaderDoesNotRetryForbiddenMetadataListAsFullObjects(t *testing.T)
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{OrgID: "org-a", ClusterID: "cluster-a"})
-	if _, _, err := service.loadIndexKind(context.Background(), "Secret"); err != ErrForbidden || listRequests.Load() != 1 {
+	if _, _, err := service.loadIndexKind(context.Background(), "Secret"); !errors.Is(err, ErrForbidden) || listRequests.Load() != 1 {
 		t.Fatalf("error=%v secret LIST requests=%d", err, listRequests.Load())
 	}
 }
@@ -447,7 +551,7 @@ func TestIndexSnapshotCoalescesConcurrentKindsPerScope(t *testing.T) {
 	deadline := time.After(time.Second)
 	for {
 		service.changes.mu.Lock()
-		call := service.changes.refreshes[kubeindex.Scope{OrgID: "org-a", ClusterID: "cluster-a"}]
+		call := service.changes.refreshes[indexRefreshKey{scope: service.indexScope()}]
 		queuedNode := call != nil
 		if queuedNode {
 			_, queuedNode = call.requested["Node"]

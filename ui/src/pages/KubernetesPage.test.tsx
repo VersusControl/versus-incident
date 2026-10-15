@@ -66,6 +66,22 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); window.history.replaceState(null, "", "/"); });
 
 describe("KubernetesPage", () => {
+	it("preserves bounded inventory alongside unrelated failures and keeps warning focus on snapshot refresh", async () => {
+		const overview = { connector: "kubernetes", cluster_id: "production", observed_at: "2026-10-14T12:00:00Z", nodes: 3, ready_nodes: 2, pods: 18, running_pods: 16, namespaces: 5, active_namespaces: 5, workloads: 7, warnings: 2, truncated: true, partial_failures: [{ resource_id: "ConfigMap", class: "forbidden" }] };
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(overview);
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		renderPage(client);
+		const health = await screen.findByRole("region", { name: "Cluster health", exact: true });
+		const toggle = within(health).getByRole("button", { name: "Warnings (2)" });
+		fireEvent.click(toggle);
+		toggle.focus();
+		expect(within(health).getByText("ConfigMap: forbidden")).toBeTruthy();
+		expect(within(health).getByText(/Overview inventory is bounded/)).toBeTruthy();
+		await act(async () => { client.setQueryData(["kubernetes", "_", "kubernetes-overview"], { ...overview, observed_at: "2026-10-14T12:00:30Z" }); });
+		expect(within(health).getByRole("button", { name: "Warnings (2)" })).toBe(toggle);
+		expect(toggle.getAttribute("aria-expanded")).toBe("true");
+		expect(document.activeElement).toBe(toggle);
+	});
 	it.each([401, 403])("preserves the overview access-denied presentation for catalog HTTP %s without dashboard reads", async (status) => {
 		vi.mocked(api.kubernetesClusters).mockRejectedValue(new ApiError(status, "Access denied", { action: "Check RBAC" }));
 		renderPage(new QueryClient({ defaultOptions: { queries: { retry: false } } }), false);
@@ -354,19 +370,18 @@ describe("KubernetesPage", () => {
 		expect(within(inventory).queryByText(/Some evidence could not be collected/)).toBeNull();
 	});
 
-	it.each([401, 403])("hides the cached Recent changes count and rows after HTTP %s", async (status) => {
+	 it.each([401, 403])("hides the cached change tile count after HTTP %s", async (status) => {
 		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 		vi.mocked(api.kubernetesChanges).mockResolvedValue({ items: [{ id: "private-change", cluster: "production", kind: "Deployment", namespace: "shop", name: "private-api", uid: "private-api", type: "created", at: new Date().toISOString() }], gaps: [], sync: { state: "ready", age_s: 0, partial: false } });
 		renderPage(client);
-		await screen.findByText("Deployment shop/private-api");
-		const card = screen.getByRole("heading", { name: "Recent changes (60m)" }).closest("article")!;
+		const card = await screen.findByRole("region", { name: "Break timeline" });
 		await waitFor(() => expect(client.isFetching()).toBe(0));
-		expect(within(card).getByText("1 changes")).toBeTruthy();
+		const tile = within(card).getByRole("button", { name: /Changes in 60 min/ });
+		expect(tile.textContent).toContain("1");
 		vi.mocked(api.kubernetesChanges).mockRejectedValueOnce(new ApiError(status, "Access denied"));
 		await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-changes"] }); });
-		expect(await within(card).findByText("Recent change history unavailable.")).toBeTruthy();
-		expect(within(card).queryByText("1 changes")).toBeNull();
-		expect(within(card).queryByText("Deployment shop/private-api")).toBeNull();
+		await waitFor(() => expect(tile.textContent).toContain("Unknown"));
+		expect(tile.textContent).not.toContain("1");
 	});
 
 	it("uses grouped eye filters, four default kinds, and resets them for each namespace", async () => {
@@ -397,44 +412,42 @@ describe("KubernetesPage", () => {
 	});
 	it("refreshes all overview summaries with the cluster snapshot", async () => {
 		renderPage();
-		await screen.findByRole("img", { name: /changes in the last 60 minutes/ });
+		await screen.findByRole("img", { name: /Change activity in twelve/ });
 		const queries = [api.kubernetesIssues, api.kubernetesTop, api.kubernetesReleases, api.kubernetesTraffic, api.kubernetesChanges];
 		const initialCalls = queries.map((query) => vi.mocked(query).mock.calls.length);
 		fireEvent.click(screen.getByRole("button", { name: "Refresh Kubernetes data" }));
 		await waitFor(() => queries.forEach((query, index) => expect(vi.mocked(query).mock.calls.length).toBeGreaterThan(initialCalls[index])));
 	});
 
-	it("pairs Recent changes and Topology with equal height while retaining rolling refresh data", async () => {
+	 it("places Timeline before capacity without paired heights and retains rolling counts", async () => {
 		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 		const intervals = vi.spyOn(window, "setInterval");
 		const previous = { items: [{ id: "recent", cluster: "production", kind: "Pod", namespace: "shop", name: "recent-api", uid: "recent-api", type: "created" as const, at: new Date().toISOString() }], gaps: [], sync: { state: "ready", age_s: 0, partial: false } };
 		vi.mocked(api.kubernetesChanges).mockResolvedValueOnce(previous);
 		renderPage(client);
-		await screen.findByText("Pod shop/recent-api");
+		await screen.findByRole("region", { name: "Break timeline" });
 		await waitFor(() => expect(client.isFetching()).toBe(0));
-		const card = screen.getByRole("heading", { name: "Recent changes (60m)" }).closest("article")!;
+		const card = screen.getByRole("region", { name: "Break timeline" });
 		const topologyCard = screen.getByRole("region", { name: "Overview topology" }).querySelector("article")!;
-		expect(card.className).toContain("h-[26rem] max-h-[26rem]");
-		expect(topologyCard.className).toContain("h-[26rem] max-h-[26rem]");
-		expect(card.parentElement).toBe(topologyCard.parentElement?.parentElement);
-		expect(card.parentElement?.className).toContain("lg:grid-cols-2");
+		expect(card.className).not.toContain("h-[26rem]");
+		expect(topologyCard.className).not.toContain("h-[26rem]");
+		expect(card.compareDocumentPosition(screen.getByRole("heading", { name: "CPU capacity" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 		let completeRefresh!: (page: Awaited<ReturnType<typeof api.kubernetesChanges>>) => void;
 		vi.mocked(api.kubernetesChanges).mockImplementationOnce(() => new Promise((resolve) => { completeRefresh = resolve; }));
-		const refreshWindow = intervals.mock.calls.filter(([, delay]) => delay === 30_000).at(-1)?.[0];
+		const refreshWindow = intervals.mock.calls.find(([callback, delay]) => delay === 30_000 && String(callback).includes("refetchChanges"))?.[0];
 		intervals.mockRestore();
-		if (typeof refreshWindow !== "function") throw new Error("Recent changes must register a 30-second refresh interval");
+		if (typeof refreshWindow !== "function") throw new Error("Change activity must register a 30-second refresh interval");
 		await act(async () => { refreshWindow(); });
 		await waitFor(() => expect(api.kubernetesChanges).toHaveBeenCalledTimes(2));
 		const options = vi.mocked(api.kubernetesChanges).mock.calls[1][0]!;
 		expect(Date.parse(options.until!) - Date.parse(options.since!)).toBe(60 * 60_000);
-		expect(within(card).getByText("Pod shop/recent-api")).toBeTruthy();
+		expect(within(card).getByRole("button", { name: /Changes in 60 min/ }).textContent).toContain("1");
 		expect(within(card).queryByRole("status", { name: "Loading change history" })).toBeNull();
 		expect(client.getQueriesData({ queryKey: ["kubernetes", "_", "kubernetes-changes", "overview"] })).toHaveLength(1);
 		await act(async () => {
-			completeRefresh({ ...previous, items: [{ ...previous.items[0], id: "updated", name: "updated-api" }] });
+			completeRefresh({ ...previous, items: [previous.items[0], { ...previous.items[0], id: "updated", name: "updated-api" }] });
 		});
-		expect(await within(card).findByText("Pod shop/updated-api")).toBeTruthy();
-		expect(within(card).queryByText("Pod shop/recent-api")).toBeNull();
+		await waitFor(() => expect(within(card).getByRole("button", { name: /Changes in 60 min/ }).textContent).toContain("2"));
 	});
 
 	it("keeps loaded Overview sections visible throughout a manual refresh", async () => {
@@ -443,13 +456,13 @@ describe("KubernetesPage", () => {
 		await screen.findByRole("region", { name: "Cluster health" });
 		await waitFor(() => expect(client.isFetching()).toBe(0));
 		const topology = screen.getByRole("region", { name: "Overview topology" });
-		const history = screen.getByRole("region", { name: "Recent change history" });
+		const history = screen.getByRole("region", { name: "Break timeline" });
 		const queries = [api.kubernetesOverview, api.kubernetesUsage, api.kubernetesWorkloads, api.kubernetesNodes, api.kubernetesIssues, api.kubernetesTop, api.kubernetesChanges, api.kubernetesReleases, api.kubernetesTraffic];
 		for (const query of queries) vi.mocked(query).mockImplementationOnce(() => new Promise(() => {}));
 		fireEvent.click(screen.getByRole("button", { name: "Refresh Kubernetes data" }));
 		await waitFor(() => expect(client.isFetching()).toBeGreaterThan(0));
 		expect(screen.getByRole("region", { name: "Overview topology" })).toBe(topology);
-		expect(screen.getByRole("region", { name: "Recent change history" })).toBe(history);
+		expect(screen.getByRole("region", { name: "Break timeline" })).toBe(history);
 		expect(screen.queryByRole("region", { name: "Nodes" })).toBeNull();
 		expect(screen.queryByLabelText("Loading Kubernetes overview")).toBeNull();
 		for (const label of ["Loading change history", "Loading issue summary", "Loading usage ranking", "Loading release summary", "Loading traffic summary"]) expect(screen.queryByRole("status", { name: label })).toBeNull();
@@ -480,7 +493,7 @@ describe("KubernetesPage", () => {
 		renderPage();
 		const health = await screen.findByRole("region", { name: "Cluster health" });
 		expect(within(health).queryByText("Healthy")).toBeNull();
-		expect(within(health).getByText(nodes > 0 ? "Node checks passing" : "No node evidence")).toBeTruthy();
+		expect(within(health).getByText("Sync unknown")).toBeTruthy();
 	});
 
 	it("does not present partial ranking metadata as an overview warning", async () => {
@@ -500,7 +513,9 @@ describe("KubernetesPage", () => {
 		expect(reserved.getAttribute("aria-valuetext")).toBe("150% of allocatable");
 		expect(screen.getByRole("meter", { name: "Memory reserved by requests" }).getAttribute("aria-valuenow")).toBe("25");
 		expect(screen.queryByRole("meter", { name: "Memory in use" })).toBeNull();
-		expect(within(screen.getByRole("region", { name: "Cluster health" })).getByText("Partial visibility")).toBeTruthy();
+		const health = within(screen.getByRole("region", { name: "Cluster health" }));
+		expect(health.queryByText("Partial visibility")).toBeNull();
+		expect(health.getByRole("button", { name: "Warnings (1)" }).getAttribute("aria-expanded")).toBe("false");
 	});
 
 	it("uses fresh usage aggregates when overview inventory metrics are unavailable", async () => {
@@ -572,7 +587,7 @@ describe("KubernetesPage", () => {
 	it("opens overview card destinations without bounded-activity warnings", async () => {
 		vi.mocked(api.kubernetesChanges).mockResolvedValue({ items: [], next: "next-page", sync: { state: "ready", age_s: 0, partial: true } });
 		renderPage();
-		await screen.findByRole("img", { name: /changes in the last 60 minutes/ });
+		await screen.findByRole("img", { name: /Change activity in twelve/ });
 		expect(screen.queryByText("Change activity reflects bounded history; view the timeline for more.")).toBeNull();
 		expect(screen.queryByText("The issue summary is bounded; view all issues for more results.")).toBeNull();
 		expect(screen.queryByText("Relationship summary is bounded or partially synchronized; view all relationships for details.")).toBeNull();
@@ -598,10 +613,10 @@ describe("KubernetesPage", () => {
 			: { items: [issue("checkout-a")], totals: { warning: 1 }, next: "issues-next", truncated: false, sync: { state: "direct", age_s: 0, partial: false } });
 		const view = renderPage();
 		fireEvent.click(screen.getByRole("tab", { name: "Issues" }));
-		expect(await screen.findByText("Deployment payments/checkout-a")).toBeTruthy();
+		expect(await screen.findByRole("button", { name: "Open resource checkout-a" })).toBeTruthy();
 		expect(screen.queryByText("Issue evidence is partial; the server returned bounded results.")).toBeNull();
 		fireEvent.click(screen.getByRole("button", { name: "Next page" }));
-		expect(await screen.findByText("Deployment payments/checkout-b")).toBeTruthy();
+		expect(await screen.findByRole("button", { name: "Open resource checkout-b" })).toBeTruthy();
 		expect(api.kubernetesIssues).toHaveBeenCalledWith({ namespace: "", severity: "", limit: 20, cursor: "issues-next" });
 		expect(view.container.textContent).not.toContain("·");
 	});
@@ -641,7 +656,7 @@ describe("KubernetesPage", () => {
 		vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ items: [], counts: {}, truncated: true, partial_failures: [{ resource_id: "batch~v1~cronjobs", class: "forbidden" }] });
 		renderWorkloads();
 		const workloads = await screen.findByRole("region", { name: "Workloads" });
-		const disclosure = await within(workloads).findByRole("button", { name: "Some evidence could not be collected (1 categories)" });
+		const disclosure = await within(workloads).findByRole("button", { name: "Warnings (1)" });
 		expect(disclosure.getAttribute("aria-expanded")).toBe("false");
 		fireEvent.click(disclosure);
 		expect(within(workloads).getByText("batch~v1~cronjobs: forbidden")).toBeTruthy();
@@ -672,12 +687,24 @@ describe("KubernetesPage", () => {
 		vi.mocked(api.kubernetesIssues).mockResolvedValue({ items: [{ root: { kind: "Deployment", namespace: "payments", name: "checkout", api_version: "apps/v1" }, rule: "workload.unavailable", severity: "critical", count: 2, examples: [{ kind: "Pod", namespace: "payments", name: "checkout-a" }] }], totals: { critical: 1 }, truncated: false, sync: { state: "direct", age_s: 0, partial: false } });
 		renderPage();
 		fireEvent.click(screen.getByRole("tab", { name: "Issues" }));
-		await screen.findByText("Deployment payments/checkout");
-		const openResourceButtons = await screen.findAllByRole("button", { name: "Open resource" });
-		fireEvent.click(openResourceButtons.at(-1)!);
+		fireEvent.click(await screen.findByRole("button", { name: "Open resource checkout" }));
 		const drawer = await screen.findByRole("dialog", { name: "Details panel" });
 		expect(within(drawer).getByRole("heading", { name: "Deployment payments/checkout" })).toBeTruthy();
 		expect(new URLSearchParams(window.location.search).get("r")).toBe("apps~v1~deployments/payments/checkout");
+	});
+
+	it.each([401, 403])("hides cached Issues roots and counts after HTTP %s", async (status) => {
+		window.history.replaceState(null, "", "/agent/kubernetes?view=issues");
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		vi.mocked(api.kubernetesIssues).mockResolvedValue({ items: [{ root: { kind: "Deployment", namespace: "shop", name: "private-root", uid: "private-uid" }, rule: "workload.unavailable", severity: "critical", count: 2 }], totals: { critical: 8 }, truncated: false, sync: { state: "ready", age_s: 0, partial: false } });
+		renderPage(client);
+		expect(await screen.findByRole("button", { name: "Open resource private-root" })).toBeTruthy();
+		await waitFor(() => expect(client.isFetching()).toBe(0));
+		vi.mocked(api.kubernetesIssues).mockRejectedValueOnce(new ApiError(status, "Access denied"));
+		await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-issues"] }); });
+		expect(await screen.findByText("Grouped issues are unavailable.")).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "Open resource private-root" })).toBeNull();
+		expect(screen.queryByLabelText("critical count")).toBeNull();
 	});
 
 	it.each(["Issues", "Overview"] as const)("keeps long issue details on a full-width mobile track in %s", async (view) => {
@@ -687,28 +714,17 @@ describe("KubernetesPage", () => {
 		vi.mocked(api.kubernetesIssues).mockResolvedValue({ items: [{ root: { kind: "Deployment", namespace: "payments", name, api_version: "apps/v1" }, rule: "workload.unavailable", severity: "critical", count: 2, last_seen: lastSeen, examples: [{ kind: "Pod", namespace: "payments", name: example }] }], totals: { critical: 1 }, truncated: false, sync: { state: "direct", age_s: 0, partial: false } });
 		renderPage();
 		fireEvent.click(screen.getByRole("tab", { name: view }));
-		const title = await screen.findByText(`Deployment payments/${name}`);
-		const details = title.parentElement!;
-		const row = details.parentElement!;
-		expect(row.classList.contains("grid")).toBe(true);
-		expect(row.classList.contains("grid-cols-[minmax(0,1fr)]")).toBe(true);
-		expect(details.classList.contains("min-w-0")).toBe(true);
-		expect(details.classList.contains("[overflow-wrap:anywhere]")).toBe(true);
-		expect(within(details).getByText("workload unavailable; 2 affected")).toBeTruthy();
-		expect(details.querySelector(".truncate, .overflow-hidden, .line-clamp-1")).toBeNull();
+		const title = await screen.findByRole("button", { name: `Open resource ${name}` });
+		const row = title.closest("article")!;
+		expect(title.className).toContain("break-all");
+		expect(row.className).toContain("min-w-0");
+		expect(within(row).getByText("Pods unavailable")).toBeTruthy();
+		expect(within(row).getByText("2 affected")).toBeTruthy();
 		if (view === "Issues") {
-			expect(within(details).getByText(`Examples: ${example}`)).toBeTruthy();
-			const timestamp = within(row).getByText(new Date(lastSeen).toLocaleString());
-			const metadata = timestamp.parentElement!;
-			expect(metadata.parentElement).toBe(row);
-			expect(metadata).not.toBe(details);
-			expect(details.contains(timestamp)).toBe(false);
-			expect(metadata.classList.contains("flex-wrap")).toBe(true);
-			expect(within(metadata).getByRole("button", { name: "Open resource" })).toBeTruthy();
-			expect(row.classList.contains("lg:grid-cols-[auto_minmax(0,1fr)_auto]")).toBe(true);
+		 expect(within(row).getByRole("button", { name: `Expand ${name}` }).getAttribute("aria-expanded")).toBe("false");
+		 expect(within(row).queryByText(`Examples: ${example}`)).toBeNull();
 		} else {
-			expect(row.tagName).toBe("BUTTON");
-			expect(row.classList.contains("sm:grid-cols-[auto_minmax(0,1fr)]")).toBe(true);
+		 expect(row.tagName).toBe("ARTICLE");
 		}
 	});
 
@@ -746,12 +762,15 @@ describe("KubernetesPage", () => {
 	});
 
 	it("renders projected timeline changes and gaps", async () => {
-		vi.mocked(api.kubernetesChanges).mockResolvedValue({ items: [{ id: "change-1", cluster: "production", kind: "Deployment", namespace: "payments", name: "checkout", uid: "uid-1", type: "image_changed", fields: [{ path: "containers.images", from: "checkout:v1", to: "checkout:v2" }], at: "2026-10-05T12:00:00Z" }], gaps: [{ from: "2026-10-05T11:00:00Z", to: "2026-10-05T11:05:00Z" }], sync: { state: "ready", age_s: 0, partial: false } });
+		vi.mocked(api.kubernetesChanges).mockResolvedValue({ items: [{ id: "change-1", cluster: "production", kind: "Deployment", namespace: "payments", name: "checkout", uid: "uid-1", type: "image_changed", fields: [{ path: "containers.images", from: "checkout:v1", to: "checkout:v2" }], at: new Date(Date.now() - 60_000).toISOString() }], gaps: [{ from: "2026-10-05T11:00:00Z", to: "2026-10-05T11:05:00Z" }], sync: { state: "ready", age_s: 0, partial: false } });
 		renderPage();
 		fireEvent.click(screen.getByRole("tab", { name: "Timeline" }));
-		expect(await screen.findByText(/containers.images: checkout:v1/)).toBeTruthy();
+		const marker = await screen.findByRole("button", { name: /Deployment checkout: checkout:v1.* at / });
+		fireEvent.click(screen.getByRole("button", { name: /Warnings/ }));
 		expect(screen.getByRole("region", { name: "Timeline history gaps" })).toBeTruthy();
-		fireEvent.click(screen.getByRole("button", { name: /Deployment checkout/ }));
+		fireEvent.click(marker);
+		expect(screen.getByRole("region", { name: "Timeline event details" }).textContent).toContain("checkout:v1 → checkout:v2");
+		fireEvent.click(screen.getByRole("button", { name: "Open resource" }));
 		const drawer = await screen.findByRole("dialog", { name: "Details panel" });
 		expect(within(drawer).getByRole("tab", { name: "Timeline" }).getAttribute("aria-selected")).toBe("true");
 		expect(await within(drawer).findByRole("region", { name: "Resource change history" })).toBeTruthy();
@@ -977,7 +996,7 @@ describe("KubernetesPage", () => {
 	});
 
 	it("opens shared chat with the selected Kubernetes resource attached", async () => {
-		vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "default", name: "checkout" }], truncated: false });
+		vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "default", name: "checkout", uid: "checkout-uid" }], truncated: false });
 		renderWorkloads();
 		fireEvent.click(await screen.findByRole("button", { name: "Select Deployment default/checkout" }));
 		fireEvent.click(screen.getByRole("button", { name: "Investigate" }));
@@ -988,6 +1007,8 @@ describe("KubernetesPage", () => {
 		expect(search.get("cluster")).toBe("production");
 		expect(search.get("resource_id")).toBe("apps~v1~deployments");
 		expect(search.get("name")).toBe("checkout");
+		expect(search.get("uid")).toBe("checkout-uid");
+		expect(search.get("include_changes")).toBe("true");
 	});
 
 	it("requests a bounded server page for the Workloads inventory", async () => {
@@ -1003,8 +1024,8 @@ describe("KubernetesPage", () => {
 		expect(screen.getByLabelText("Loading Kubernetes overview")).toBeTruthy();
 		await screen.findByText(/source unavailable/);
 		expect(screen.queryByText("Warnings", { exact: true })).toBeNull();
-		const nodeCount = screen.getByText("Nodes count unavailable");
-		expect(within(nodeCount.closest("article")!).getByText("Unavailable")).toBeTruthy();
+		expect(screen.queryByText("Nodes count unavailable")).toBeNull();
+		expect(screen.getByRole("region", { name: "Cluster health" }).querySelector("article")).toBeNull();
 		const warningButton = screen.getByRole("button", { name: "1 Kubernetes overview warning" });
 		expect(warningButton.getAttribute("aria-describedby")).toBe("kubernetes-overview-warnings");
 		expect(screen.getByRole("tooltip").textContent).toContain("Partial cluster visibility: forbidden");
@@ -1088,8 +1109,8 @@ describe("KubernetesPage", () => {
 		vi.mocked(api.kubernetesOverview).mockResolvedValue({ connector: "kubernetes", cluster_id: "production", observed_at: "2026-08-30T12:00:00Z", nodes: 3, ready_nodes: 3, pods: 0, running_pods: 0, namespaces: 2, active_namespaces: 2, workloads: 2, warnings: 0, requested_cpu: "1", limited_cpu: "2", allocatable_cpu: "4", usage_cpu: "500m", requested_memory: "1Gi", limited_memory: "2Gi", allocatable_memory: "8Gi", usage_memory: "512Mi", usage_source: "metrics_api", metrics_status: "available", metrics_fresh: true, truncated: true, omitted_categories: ["core~v1~pods"], partial_failures: [{ resource_id: "core~v1~pods", class: "response_too_large" }] });
 		vi.mocked(api.kubernetesUsage).mockResolvedValue({ observed_at: "2026-08-30T12:01:00Z", availability: "available", fresh: true, node_metrics: { availability: "available", fresh: true, complete: true, total: 3, cpu: "500m", memory: "512Mi" }, pod_metrics: { availability: "unavailable", fresh: false, complete: false, total: 0 }, truncated: false });
 		renderPage();
-		const podCount = await screen.findByText("Pods count unavailable");
-		expect(within(podCount.closest("article")!).getByText("Unavailable")).toBeTruthy();
+		await screen.findByRole("region", { name: "Cluster health" });
+		expect(screen.queryByText("Pods count unavailable")).toBeNull();
 		expect(screen.queryByText("Pods running 0/0")).toBeNull();
 		expect(within(capacityCell("CPU capacity", "Requested")).getByText("Unavailable")).toBeTruthy();
 		expect(within(capacityCell("CPU capacity", "Limited")).getByText("Unavailable")).toBeTruthy();
@@ -1105,8 +1126,8 @@ describe("KubernetesPage", () => {
 		vi.mocked(api.kubernetesOverview).mockResolvedValue({ connector: "kubernetes", cluster_id: "production", observed_at: "2026-08-30T12:00:00Z", nodes: 1, ready_nodes: 1, pods: 2, running_pods: 2, namespaces: 1, active_namespaces: 1, workloads: 1, warnings: 0, requested_cpu: "1", limited_cpu: "2", allocatable_cpu: "4", usage_cpu: "500m", requested_memory: "1Gi", limited_memory: "2Gi", allocatable_memory: "8Gi", usage_memory: "512Mi", usage_source: "metrics_api", metrics_status: "available", metrics_fresh: true, truncated: false, partial_failures: [{ resource_id: "core~v1~nodes", class: "forbidden" }] });
 		vi.mocked(api.kubernetesUsage).mockResolvedValue({ observed_at: "2026-08-30T12:01:00Z", availability: "available", fresh: true, node_metrics: { availability: "available", fresh: true, complete: true, total: 1, cpu: "500m", memory: "512Mi" }, pod_metrics: { availability: "unavailable", fresh: false, complete: false, total: 0 }, truncated: false });
 		renderPage();
-		const nodeCount = await screen.findByText("Nodes count unavailable");
-		expect(within(nodeCount.closest("article")!).getByText("Unavailable")).toBeTruthy();
+		await screen.findByRole("region", { name: "Cluster health" });
+		expect(screen.queryByText("Nodes count unavailable")).toBeNull();
 		expect(within(capacityCell("CPU capacity", "Requested")).getByText("1 core")).toBeTruthy();
 		expect(within(capacityCell("CPU capacity", "Allocatable")).getByText("Unavailable")).toBeTruthy();
 		expect(within(capacityCell("CPU capacity", "Usage")).getByText("500 mCPU")).toBeTruthy();
@@ -1118,8 +1139,8 @@ describe("KubernetesPage", () => {
 	it("shows the workload count as unavailable when any workload category is omitted", async () => {
 		vi.mocked(api.kubernetesOverview).mockResolvedValue({ connector: "kubernetes", cluster_id: "production", observed_at: "2026-08-30T12:00:00Z", nodes: 3, ready_nodes: 3, pods: 4, running_pods: 4, namespaces: 2, active_namespaces: 2, workloads: 6, warnings: 0, usage_source: "unavailable", metrics_status: "unavailable", metrics_fresh: false, truncated: true, omitted_categories: ["batch~v1~cronjobs"] });
 		renderPage();
-		const workloadCount = await screen.findByText("Workloads count unavailable");
-		expect(within(workloadCount.closest("article")!).getByText("Unavailable")).toBeTruthy();
+		await screen.findByRole("region", { name: "Overview topology" });
+		expect(screen.getByLabelText("Workloads (aggregate): count not reported, displayed as zero")).toBeTruthy();
 		expect(screen.queryByText("discovered resources")).toBeNull();
 	});
 

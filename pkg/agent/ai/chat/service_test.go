@@ -615,7 +615,7 @@ func TestServicePassesAndPersistsKubernetesResourceAttachment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resource := &core.ChatResourceRef{Provider: "kubernetes", Cluster: "cluster-a", ResourceID: "apps~v1~deployments", Namespace: "shop", Name: "checkout"}
+	resource := &core.ChatResourceRef{Provider: "kubernetes", Cluster: "cluster-a", ResourceID: "apps~v1~deployments", Namespace: "shop", Name: "checkout", UID: "deployment", IncludeChanges: true, Break: &core.ChatResourceBreak{Rule: "pod.crash_loop", Severity: "critical", History: "gap", Changes: []core.ChatResourceChange{{Kind: "Deployment", Name: "checkout", Type: "image_changed", Fields: []core.ChatResourceChangeField{{Path: "containers.images", From: "api:v1", To: "api:v2"}}}}}}
 	if _, err := service.Send(context.Background(), session.ID, "Investigate checkout", &core.ChatAttachment{Resource: resource}); err != nil {
 		t.Fatal(err)
 	}

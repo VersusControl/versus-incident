@@ -45,6 +45,7 @@ gke:
 {{- end -}}
 
 {{- define "versus-incident.clusterConnector" -}}
+{{- if and .changeCapture (not (has .changeCapture (list "continuous" "demand"))) }}{{ fail "connectors.kubernetes.changeCapture must be continuous or demand" }}{{ end -}}
 {{- $id := .clusterId | default .clusterID -}}
 {{- $prefix := printf "KUBERNETES_CLUSTER_%s" ($id | upper | replace "-" "_") -}}
 {{- $auth := .auth | default dict -}}
@@ -60,6 +61,7 @@ server_name: {{ .serverName | default "" | quote }}
 {{- end }}
 timeout: {{ .timeout | default "10s" | quote }}
 discovery_ttl: {{ .discoveryTTL | default "5m" | quote }}
+change_capture: {{ .changeCapture | default "continuous" | quote }}
 allow_loopback: {{ .allowLoopback | default false }}
 allow_private_networks: {{ .allowPrivateNetworks | default false }}
 endpoint_cidrs: {{ .endpointCIDRs | default list | toJson }}
@@ -75,6 +77,7 @@ actions:
 {{- end -}}
 
 {{- define "versus-incident.validateClusters" -}}
+{{- if and .changeCapture (ne .changeCapture "continuous") }}{{ fail "connectors.kubernetes: configure changeCapture for each cluster under clusters" }}{{ end -}}
 {{- if or (lt (len (.clusters | default list)) 1) (gt (len (.clusters | default list)) 16) }}{{ fail "connectors.kubernetes.clusters must contain 1 to 16 entries" }}{{ end -}}
 {{- if or .endpoint .tokenFile .caFile .caData .serverName .credentialID .credentialId .clusterId .allowLoopback .allowPrivateNetworks .endpointCIDRs (include "versus-incident.connectorHasValues" (.auth | default dict)) (include "versus-incident.connectorHasValues" ((.actions | default dict).auth | default dict)) (.actions | default dict).enable }}{{ fail "connectors.kubernetes: configure each cluster under clusters" }}{{ end -}}
 {{- if or (and .clusterID (ne .clusterID "default")) (and .timeout (ne .timeout "10s")) (and .discoveryTTL (ne .discoveryTTL "5m")) (and (.actions | default dict).timeout (ne (.actions | default dict).timeout "15s")) (and (.actions | default dict).maxReplicas (ne (int (.actions | default dict).maxReplicas) 20)) }}{{ fail "connectors.kubernetes: configure each cluster under clusters" }}{{ end -}}

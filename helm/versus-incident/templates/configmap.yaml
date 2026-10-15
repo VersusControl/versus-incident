@@ -352,6 +352,7 @@ data:
         credential_id: {{ $kubernetes.credentialID | default "" | quote }}
         timeout: {{ $kubernetes.timeout | default "10s" | quote }}
         discovery_ttl: {{ $kubernetes.discoveryTTL | default "5m" | quote }}
+        change_capture: {{ $kubernetes.changeCapture | default "continuous" | quote }}
         allow_private_networks: {{ dig "allowPrivateNetworks" false $kubernetes }}
         endpoint_cidrs: {{ $kubernetes.endpointCIDRs | default list | toJson }}
         auth:

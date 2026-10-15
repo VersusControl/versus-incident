@@ -10,7 +10,7 @@ import {
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { useKubernetesCluster, useKubernetesQuery } from "@/lib/useKubernetesCluster";
+import { useBrokenIssues, useKubernetesCluster, useKubernetesQuery } from "@/lib/useKubernetesCluster";
 import { KubernetesClusterProvider } from "@/components/KubernetesClusterProvider";
 import { KubernetesFleet } from "./KubernetesFleet";
 import {
@@ -44,11 +44,14 @@ import { useCursorPagination, usePagination, type CursorPaginationState } from "
 import { projectedResourceYaml } from "@/lib/kubernetesProjection";
 import {
   KubernetesOverviewInsights,
+  KubernetesOverviewTimeline,
   KubernetesExplorerTabContent,
   PartialFailuresDisclosure,
 } from "./KubernetesExplorerViews";
 import { kubernetesExplorerTabs, type KubernetesExplorerTab } from "./kubernetesExplorerTabs";
 import { StateBadge, ToolIcon } from "./AgentToolsPage";
+import { KubernetesWarnings } from "./KubernetesWarnings";
+import { failureWarnings, type KubernetesWarning } from "./kubernetesWarningItems";
 
 type KubernetesDrawerTab = "overview" | "events" | "logs" | "yaml" | "related" | "metrics" | "diagnosis" | "timeline";
 
@@ -100,6 +103,11 @@ function writeExplorerLocation(options: {
 }) {
   const query = new URLSearchParams(window.location.search);
   if (options.view) {
+    if (options.view !== "timeline" && query.has("root_uid")) {
+      query.delete("root_uid");
+      query.delete("center");
+      query.delete("namespace");
+    }
     if (options.view === "overview") query.delete("view");
     else query.set("view", options.view);
   }
@@ -131,25 +139,6 @@ const explorerTabIcons: Record<KubernetesExplorerTab, typeof Cpu> = {
   traffic: Waypoints,
 };
 
-const stats = [
-  ["Nodes", "nodes", Server],
-  ["Pods", "pods", Boxes],
-  ["Workloads", "workloads", ShipWheel],
-  ["Namespaces", "namespaces", Network],
-] as const;
-
-const statResourceIDs = {
-  nodes: ["core~v1~nodes"],
-  pods: ["core~v1~pods"],
-  workloads: [
-    "apps~v1~deployments",
-    "apps~v1~statefulsets",
-    "apps~v1~daemonsets",
-    "batch~v1~jobs",
-    "batch~v1~cronjobs",
-  ],
-  namespaces: ["core~v1~namespaces"],
-} satisfies Record<(typeof stats)[number][1], readonly string[]>;
 
 const workloadKinds = new Set([
   "Deployment",
@@ -351,6 +340,7 @@ function KubernetesDashboard() {
   const overviewAccessDenied = overview.error instanceof ApiError && [401, 403].includes(overview.error.status);
   const clusterUnavailable = multiple && overview.error instanceof ApiError && overview.error.status === 404;
   const clusterQueriesEnabled = !overview.isPending && !connectorMissing && (!multiple || !overviewAccessDenied) && !clusterUnavailable;
+  const brokenIssues = useBrokenIssues(view === "overview" && clusterQueriesEnabled && !overviewAccessDenied);
 
   useEffect(() => {
     if (!clusterUnavailable) return;
@@ -695,10 +685,10 @@ function KubernetesDashboard() {
     }
   };
   const podsUnavailable = overview.data
-    ? categoryUnavailable(overview.data, statResourceIDs.pods)
+    ? categoryUnavailable(overview.data, ["core~v1~pods"])
     : false;
   const nodesUnavailable = overview.data
-    ? categoryUnavailable(overview.data, statResourceIDs.nodes)
+    ? categoryUnavailable(overview.data, ["core~v1~nodes"])
     : false;
   const usageAccessDenied = usage.error instanceof ApiError && [401, 403].includes(usage.error.status);
   const workloadsAccessDenied = overviewAccessDenied || workloads.error instanceof ApiError && [401, 403].includes(workloads.error.status);
@@ -751,7 +741,7 @@ function KubernetesDashboard() {
             {multiple && <><Link to="/agent/kubernetes" className="btn">Clusters</Link><select aria-label="Cluster" className="input h-8 w-32 min-w-0 py-0 text-xs sm:w-48" value={cluster} onChange={(event) => {
               const next = new URLSearchParams(window.location.search);
               next.set("cluster", event.target.value);
-              for (const parameter of ["r", "tab", "namespace"]) next.delete(parameter);
+              for (const parameter of ["r", "tab", "namespace", "root_uid", "center"]) next.delete(parameter);
               navigate(`/agent/kubernetes?${next}`);
             }}>{clusters.map((entry) => <option key={entry.id} value={entry.id}>{entry.display_name || entry.id}</option>)}</select></>}
             <span role="status" aria-live="polite" title={indexStatus ? `Index ${indexStatus.state}${indexStatus.partial ? ", partial" : ""}` : "Kubernetes index status unavailable"} className={`hidden text-2xs sm:inline ${streamState === "live" ? "text-sev-ok" : "text-ink-400"}`}>
@@ -776,7 +766,7 @@ function KubernetesDashboard() {
           </div>
         }
       />
-      <div className="mx-auto min-w-0 max-w-7xl space-y-5 overflow-x-hidden p-4 sm:p-6">
+      <div className="mx-auto min-w-0 max-w-7xl space-y-3 overflow-x-hidden p-3 sm:space-y-5 sm:p-6">
         {multiple && <nav aria-label="Cluster breadcrumb" className="flex min-w-0 items-center gap-2 text-xs text-ink-400"><Link to="/agent/kubernetes" className="text-link">Clusters</Link><ChevronRight size={12} className="shrink-0" /><span className="truncate text-ink-200">{clusters.find((entry) => entry.id === cluster)?.display_name || cluster}</span></nav>}
         <nav role="tablist" aria-label="Kubernetes views" className="flex min-w-0 gap-1 overflow-x-auto rounded-card border border-ink-500/60 bg-surface p-1 shadow-card" onKeyDown={(event) => {
           if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
@@ -798,7 +788,7 @@ function KubernetesDashboard() {
             );
           })}
         </nav>
-        <div role="tabpanel" id="kubernetes-view-panel" aria-labelledby={`kubernetes-tab-${view}`} className="space-y-5">
+        <div role="tabpanel" id="kubernetes-view-panel" aria-labelledby={`kubernetes-tab-${view}`} className="space-y-3 sm:space-y-5">
         {view === "overview" && overview.isPending && !overview.data && (
           <div aria-label="Loading Kubernetes overview">
             <SkCard lines={4} />
@@ -822,67 +812,13 @@ function KubernetesDashboard() {
               <span aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r from-accent via-accent/40 to-transparent" />
               <ClusterHealthHeader
                 overview={overview.data}
+                broken={brokenIssues.error instanceof ApiError && [401, 403].includes(brokenIssues.error.status) ? undefined : brokenIssues.data?.broken?.total}
+                sync={brokenIssues.error instanceof ApiError && [401, 403].includes(brokenIssues.error.status) ? undefined : brokenIssues.data?.sync}
                 onOpenIssues={() => selectView("issues")}
               />
-              <div className="relative grid grid-cols-2 gap-3 p-4 md:grid-cols-3 sm:p-5 xl:grid-cols-4">
-              {stats.map(([label, key, Icon]) => {
-                const unavailable = categoryUnavailable(
-                  overview.data,
-                  statResourceIDs[key],
-                );
-                const ratio =
-                  key === "nodes"
-                    ? { part: overview.data.ready_nodes, noun: "nodes ready" }
-                    : key === "pods"
-                      ? { part: overview.data.running_pods, noun: "pods running" }
-                      : key === "namespaces"
-                        ? { part: overview.data.active_namespaces, noun: "namespaces active" }
-                        : null;
-                return (
-                  <article
-                    className="flex min-h-32 min-w-0 flex-col rounded-control border border-ink-500/50 bg-surface-raised/60 p-3.5 transition-colors duration-200 hover:border-ink-400/60"
-                    key={key}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-2xs font-medium uppercase tracking-wider text-ink-300">
-                        {label}
-                      </span>
-                      <span className="inline-flex size-6 items-center justify-center rounded-control bg-accent/10 text-link">
-                        <Icon size={13} aria-hidden="true" />
-                      </span>
-                    </div>
-                    <div className="mt-3 flex min-w-0 flex-1 items-center gap-3">
-                      {!unavailable && ratio && (
-                        <RatioRing
-                          part={ratio.part}
-                          total={overview.data[key]}
-                          label={`${ratio.part} of ${overview.data[key]} ${ratio.noun}`}
-                        />
-                      )}
-                      <div
-                        className={`${unavailable ? "text-lg" : "text-3xl"} min-w-0 font-semibold tabular-nums text-ink-50`}
-                      >
-                        {unavailable ? "Unavailable" : overview.data[key]}
-                      </div>
-                    </div>
-                    <p className="mt-2 text-2xs text-ink-400">
-                      {unavailable
-                        ? `${label} count unavailable`
-                        : key === "nodes"
-                          ? `Nodes ready ${overview.data.ready_nodes}/${overview.data.nodes}`
-                          : key === "pods"
-                            ? `Pods running ${overview.data.running_pods}/${overview.data.pods}`
-                            : key === "namespaces"
-                              ? `Namespaces active ${overview.data.active_namespaces}/${overview.data.namespaces}`
-                              : key === "workloads"
-                                ? "discovered resources"
-                                : "active namespaces"}
-                    </p>
-                  </article>
-                );
-              })}
-              </div>
             </section>
+
+            {clusterQueriesEnabled && <KubernetesOverviewTimeline overview={overview.data} onSelectResource={selectResource} onSelectView={selectView} />}
 
             <div className="grid gap-4 lg:grid-cols-2">
               <CapacityPanel
@@ -972,7 +908,7 @@ function KubernetesDashboard() {
         )}
 
         {view === "overview" && clusterQueriesEnabled && <>
-        {overview.data && <KubernetesOverviewInsights overview={overview.data} indexStatus={indexStatus} indexLive={streamState === "live" && !overview.isError} unavailable={overviewAccessDenied} onSelectResource={selectResource} onSelectView={selectView} />}
+        {overview.data && <KubernetesOverviewInsights overview={overview.data} indexStatus={indexStatus} indexLive={streamState === "live" && !overview.isError} unavailable={overviewAccessDenied} onSelectView={selectView} />}
         </>}
         {view === "resources" && clusterQueriesEnabled && (
         <div className="min-w-0 w-full">
@@ -1147,7 +1083,7 @@ function KubernetesDashboard() {
         </SectionFrame>
         )}
         {!["overview", "resources", "nodes"].includes(view) && clusterQueriesEnabled && (
-          <KubernetesExplorerTabContent tab={view} onSelectResource={selectResource} />
+          <KubernetesExplorerTabContent tab={view} onSelectResource={selectResource} clusterId={overview.data?.cluster_id} />
         )}
         </div>
       </div>
@@ -1160,8 +1096,9 @@ function KubernetesDashboard() {
         footer={selected && (
           <button type="button" className="btn btn-primary" onClick={() => {
             if (!selected) return;
-            const query = new URLSearchParams({ provider: "kubernetes", cluster: cluster ?? overview.data?.cluster_id ?? "", resource_id: selected.resource_id, name: selected.name });
+            const query = new URLSearchParams({ provider: "kubernetes", cluster: cluster ?? overview.data?.cluster_id ?? "", resource_id: selected.resource_id, name: selected.name, include_changes: "true" });
             if (selected.namespace) query.set("namespace", selected.namespace);
+            if (selected.uid) query.set("uid", selected.uid);
             navigate(`/agent/chat?${query}`);
           }}>
             <Activity size={14} aria-hidden="true" /> Investigate
@@ -1489,46 +1426,10 @@ function CapacityMeter({ meter }: { meter: CapacityMeterValue }) {
   );
 }
 
-function RatioRing({ part, total, label }: { part: number; total: number; label: string }) {
-  const radius = 18;
-  const circumference = 2 * Math.PI * radius;
-  const ratio = total > 0 ? Math.min(1, Math.max(0, part / total)) : 0;
-  const tone =
-    total === 0
-      ? "text-ink-500"
-      : ratio >= 1
-        ? "text-sev-ok"
-        : ratio >= 0.8
-          ? "text-sev-warning"
-          : "text-sev-critical";
-  return (
-    <div className="relative size-12 shrink-0">
-      <svg viewBox="0 0 44 44" className="size-12 -rotate-90" role="img" aria-label={label}>
-        <circle cx="22" cy="22" r={radius} fill="none" stroke="currentColor" strokeWidth="4" className="text-ink-600" />
-        {ratio > 0 && (
-          <circle
-            cx="22"
-            cy="22"
-            r={radius}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="4"
-            strokeLinecap="round"
-            strokeDasharray={circumference}
-            strokeDashoffset={circumference * (1 - ratio)}
-            className={`${tone} transition-[stroke-dashoffset] duration-700 ease-out`}
-          />
-        )}
-      </svg>
-      <span aria-hidden="true" className="absolute inset-0 grid place-items-center text-2xs font-semibold tabular-nums text-ink-100">
-        {total > 0 ? `${Math.round(ratio * 100)}%` : "–"}
-      </span>
-    </div>
-  );
-}
-
 function ClusterHealthHeader({
   overview,
+  broken,
+  sync,
   onOpenIssues,
 }: {
   overview: {
@@ -1538,46 +1439,51 @@ function ClusterHealthHeader({
     warnings: number;
     truncated: boolean;
     omitted_categories?: string[] | null;
-    partial_failures?: Array<{ resource_id?: string }> | null;
+    partial_failures?: Array<{ resource_id?: string; scope?: string; class: string }> | null;
   };
   onOpenIssues: () => void;
+  broken?: number;
+  sync?: { state: string; age_s: number; partial: boolean };
 }) {
-  const partial = overview.truncated || Boolean(overview.omitted_categories?.length) || Boolean(overview.partial_failures?.length);
-  const attention = overview.ready_nodes < overview.nodes || overview.warnings > 0;
-  const status = partial
-    ? { label: "Partial visibility", tone: "pill-warn", dot: "bg-sev-warn-solid" }
-    : attention
-      ? { label: "Needs attention", tone: "pill-warn", dot: "bg-sev-warn-solid" }
-      : overview.nodes > 0
-        ? { label: "Node checks passing", tone: "pill-good", dot: "bg-sev-ok-solid" }
-        : { label: "No node evidence", tone: "", dot: "bg-ink-400" };
+  const { cluster } = useKubernetesCluster();
+  const warnings: KubernetesWarning[] = failureWarnings(overview.partial_failures);
+  for (const category of [...new Set(overview.omitted_categories ?? [])].sort()) {
+    if (!overview.partial_failures?.some((failure) => failure.resource_id === category)) warnings.push({ id: `omitted:${category}`, content: `Coverage unavailable: ${category}.` });
+  }
+  if (overview.truncated) warnings.push({ id: "overview-cap", content: "Overview inventory is bounded; coverage is incomplete." });
+  const partial = overview.truncated || Boolean(warnings.length) || Boolean(sync?.partial);
+  const syncLabel = !partial && sync?.state === "ready" ? `Synced ${Math.round(sync.age_s)}s` : sync?.state === "ready" || sync?.state === "stale" ? `Snapshot ${Math.round(sync.age_s)}s ago` : "Sync unknown";
   const observed = Date.parse(overview.observed_at);
   return (
-    <header className="relative flex flex-wrap items-center justify-between gap-3 px-4 pt-4 sm:px-5 sm:pt-5">
+    <header className="relative grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 py-2 sm:flex sm:flex-wrap sm:justify-between sm:px-4 sm:py-3">
       <div className="flex min-w-0 items-center gap-3">
-        <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-card bg-accent/15 text-link ring-1 ring-inset ring-accent/30">
+        <span className="hidden size-9 shrink-0 items-center justify-center rounded-card bg-accent/15 text-link ring-1 ring-inset ring-accent/30 sm:inline-flex">
           <ShipWheel size={18} aria-hidden="true" />
         </span>
         <div className="min-w-0">
-          <h2 className="flex flex-wrap items-center gap-2 text-sm font-semibold text-ink-50">
+          <h2 className="flex flex-wrap items-center gap-1 text-xs font-semibold text-ink-50 sm:gap-2 sm:text-sm">
             Cluster health
-            <span className={`pill ${status.tone}`}>
-              <span aria-hidden="true" className={`size-1.5 rounded-full ${status.dot}`} />
-              {status.label}
+            <span className={`pill ${!partial && sync?.state === "ready" ? "pill-good" : "text-ink-300"}`}>
+              {syncLabel}
             </span>
           </h2>
           <p className="mt-0.5 text-2xs text-ink-400">
             {Number.isFinite(observed)
-              ? `Snapshot ${new Date(observed).toLocaleTimeString()}`
+              ? `Snapshot ${new Date(observed).toLocaleTimeString([], { hour12: false })}`
               : "Snapshot time not reported"}
           </p>
         </div>
       </div>
-      <button type="button" className="btn" onClick={onOpenIssues}>
+      <div className="grid grid-cols-[auto_auto] items-center gap-x-2 gap-y-1 sm:flex sm:flex-wrap sm:gap-2">
+      <button type="button" className={`pill ${broken ? "pill-bad" : ""}`} onClick={onOpenIssues}>{broken === undefined ? "Broken unknown" : `${broken} broken`}</button>
+      <button type="button" className="pill pill-warn col-start-1 row-start-2" onClick={onOpenIssues}>{overview.warnings} warnings</button>
+      <button type="button" className="col-start-2 row-span-2 row-start-1 inline-flex size-8 items-center justify-center rounded-control hover:bg-ink-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent sm:btn sm:w-auto" aria-label="Review issues" title="Review issues" onClick={onOpenIssues}>
         <AlertTriangle size={13} aria-hidden="true" className="text-sev-warning" />
-        Review issues
-        <ChevronRight size={13} aria-hidden="true" />
+        <span className="hidden sm:inline">Review issues</span>
+        <ChevronRight size={13} aria-hidden="true" className="hidden sm:block" />
       </button>
+      </div>
+      {warnings.length > 0 && <div className="col-span-2"><KubernetesWarnings warnings={warnings} scope={JSON.stringify([cluster])} /></div>}
     </header>
   );
 }

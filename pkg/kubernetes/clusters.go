@@ -32,17 +32,19 @@ func (service *Service) clusterVersion(ctx context.Context) string {
 
 type ClusterSummary struct {
 	ClusterInfo
-	Version     string       `json:"version,omitempty"`
-	Health      string       `json:"health"`
-	Nodes       int          `json:"nodes"`
-	ReadyNodes  int          `json:"ready_nodes"`
-	Pods        int          `json:"pods"`
-	RunningPods int          `json:"running_pods"`
-	Warnings    int          `json:"warnings"`
-	Issues      *int         `json:"issues,omitempty"`
-	Sync        SyncStatus   `json:"sync"`
-	ObservedAt  time.Time    `json:"observed_at"`
-	Error       *ErrorDetail `json:"error,omitempty"`
+	Version      string       `json:"version,omitempty"`
+	Health       string       `json:"health"`
+	Nodes        int          `json:"nodes"`
+	ReadyNodes   int          `json:"ready_nodes"`
+	Pods         int          `json:"pods"`
+	RunningPods  int          `json:"running_pods"`
+	Warnings     int          `json:"warnings"`
+	Issues       *int         `json:"issues,omitempty"`
+	Broken       *int         `json:"broken,omitempty"`
+	LastChangeAt *time.Time   `json:"last_change_at,omitempty"`
+	Sync         SyncStatus   `json:"sync"`
+	ObservedAt   time.Time    `json:"observed_at"`
+	Error        *ErrorDetail `json:"error,omitempty"`
 }
 
 type clusterSummaryCache struct {
@@ -92,33 +94,53 @@ func (registry *ServiceRegistry) Summaries(ctx context.Context, orgID string, al
 			}
 			readCtx, cancel := context.WithTimeout(ctx, registry.summaryTimeout)
 			defer cancel()
-			key := orgID + "\x00" + info.ID
+			service, err := registry.ResolveCluster(orgID, info.ID)
+			if err != nil {
+				result[index] = unreachable
+				return
+			}
+			readCtx, cancelIdentity := service.credentialContext(readCtx)
+			defer cancelIdentity()
+			key := orgID + "\x00" + info.ID + "\x00" + service.scope.CredentialID
 			registry.mu.Lock()
 			cached, ok := registry.summaries[key]
 			registry.mu.Unlock()
 			if ok && time.Now().Before(cached.expires) {
+				if err := service.validateCredential(readCtx); err != nil {
+					result[index] = unreachable
+					return
+				}
 				result[index] = cached.value
 				return
 			}
 			value := unreachable
-			service, err := registry.ResolveCluster(orgID, info.ID)
-			if err == nil {
-				overview, readErr := service.Overview(readCtx)
-				if readErr == nil && readCtx.Err() == nil {
-					value = ClusterSummary{ClusterInfo: info, Health: ClusterHealth(overview), Nodes: overview.Nodes, ReadyNodes: overview.ReadyNodes, Pods: overview.Pods, RunningPods: overview.RunningPods, Warnings: overview.Warnings, Sync: overview.Sync, ObservedAt: overview.ObservedAt}
-					value.Version = service.clusterVersion(readCtx)
-					issues, issueErr := service.Issues(readCtx, IssueOptions{Limit: minimumPageSize})
-					if issueErr == nil && readCtx.Err() == nil && !issues.Sync.Partial && len(issues.Partial) == 0 {
-						count := 0
-						for _, total := range issues.Totals {
-							count += total
-						}
-						value.Issues = &count
-						if count > 0 && (value.Health == "healthy" || value.Health == "unknown") {
-							value.Health = "attention"
-						}
+			overview, readErr := service.Overview(readCtx)
+			if readErr == nil && readCtx.Err() == nil {
+				value = ClusterSummary{ClusterInfo: info, Health: ClusterHealth(overview), Nodes: overview.Nodes, ReadyNodes: overview.ReadyNodes, Pods: overview.Pods, RunningPods: overview.RunningPods, Warnings: overview.Warnings, Sync: overview.Sync, ObservedAt: overview.ObservedAt}
+				value.Version = service.clusterVersion(readCtx)
+				issues, issueErr := service.Issues(readCtx, IssueOptions{Limit: minimumPageSize})
+				if issueErr == nil && readCtx.Err() == nil && !issues.Sync.Partial && len(issues.Partial) == 0 {
+					count := 0
+					for _, total := range issues.Totals {
+						count += total
+					}
+					value.Issues = &count
+					broken := issues.Broken.Total
+					value.Broken = &broken
+					if count > 0 && (value.Health == "healthy" || value.Health == "unknown") {
+						value.Health = "attention"
 					}
 				}
+				if store := service.changeStore(); store != nil {
+					if latest, err := store.Query(ChangeQuery{Limit: 1}, time.Now().UTC()); err == nil && len(latest.Items) > 0 {
+						at := latest.Items[0].At
+						value.LastChangeAt = &at
+					}
+				}
+			}
+			if err := service.validateCredential(readCtx); err != nil {
+				result[index] = unreachable
+				return
 			}
 			if ctx.Err() == nil && value.Error == nil {
 				registry.mu.Lock()

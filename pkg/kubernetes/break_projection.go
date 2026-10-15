@@ -1,0 +1,166 @@
+package kubernetes
+
+import (
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+)
+
+var breakReasonPattern = regexp.MustCompile(`^[A-Za-z]{1,64}$`)
+var revisionPattern = regexp.MustCompile(`^[0-9]{1,20}$`)
+
+func safeBreakReason(value string) string {
+	if breakReasonPattern.MatchString(value) {
+		return value
+	}
+	return ""
+}
+
+func breakTimestamp(value any) time.Time {
+	parsed, _ := time.Parse(time.RFC3339Nano, stringValue(value))
+	return parsed.UTC()
+}
+
+func projectBreakSummary(kind string, metadata, status, summary map[string]any) {
+	if kind == "Node" {
+		pressure := []string{}
+		for _, condition := range mapSlice(status["conditions"]) {
+			name := stringValue(condition["type"])
+			if strings.HasSuffix(name, "Pressure") && stringValue(condition["status"]) == "True" {
+				pressure = append(pressure, boundString(name))
+			}
+		}
+		summary["node_pressure"] = strings.Join(pressure, ",")
+	}
+	for _, condition := range mapSlice(status["conditions"]) {
+		var prefix string
+		switch stringValue(condition["type"]) {
+		case "Ready":
+			prefix = "ready"
+		case "Progressing":
+			prefix = "progressing"
+		case "Available":
+			prefix = "available"
+		default:
+			continue
+		}
+		summary[prefix+"_status"] = boundString(stringValue(condition["status"]))
+		summary[prefix+"_reason"] = safeBreakReason(stringValue(condition["reason"]))
+		if at := breakTimestamp(condition["lastTransitionTime"]); !at.IsZero() {
+			summary[prefix+"_transition_at"] = at.Format(time.RFC3339Nano)
+		}
+	}
+	for _, field := range []string{"updateRevision", "currentRevision"} {
+		if value := stringValue(status[field]); safeSegment(value) && len(value) <= 253 {
+			summary[camelToSnake(field)] = value
+		}
+	}
+	annotations, _ := metadata["annotations"].(map[string]any)
+	if value := stringValue(annotations["deployment.kubernetes.io/revision"]); revisionPattern.MatchString(value) {
+		summary["revision"] = value
+	}
+	if kind != "Pod" {
+		return
+	}
+	containers := []kubeindex.ContainerState{}
+	if len(mapSlice(status["containerStatuses"]))+len(mapSlice(status["initContainerStatuses"])) > 8 {
+		summary["break_evidence_partial"] = true
+	}
+	for _, field := range []string{"containerStatuses", "initContainerStatuses"} {
+		for _, container := range mapSlice(status[field]) {
+			name := stringValue(container["name"])
+			if !validPodLogName(name, 63, false) {
+				continue
+			}
+			item := kubeindex.ContainerState{Name: name}
+			if value, ok := container["restartCount"].(float64); ok && value >= 0 && value <= 2147483647 {
+				item.RestartCount = int32(value)
+			}
+			state, _ := container["state"].(map[string]any)
+			waiting, _ := state["waiting"].(map[string]any)
+			item.WaitingReason = safeBreakReason(stringValue(waiting["reason"]))
+			last, _ := container["lastState"].(map[string]any)
+			terminated, _ := last["terminated"].(map[string]any)
+			if current, ok := state["terminated"].(map[string]any); ok {
+				terminated = current
+			}
+			item.TerminatedReason = safeBreakReason(stringValue(terminated["reason"]))
+			if value, ok := terminated["exitCode"].(float64); ok && value >= -2147483648 && value <= 2147483647 {
+				item.ExitCode = int32(value)
+			}
+			item.TerminatedAt = breakTimestamp(terminated["finishedAt"])
+			containers = append(containers, item)
+		}
+	}
+	sort.SliceStable(containers, func(left, right int) bool {
+		return containerEvidenceRank(containers[left]) < containerEvidenceRank(containers[right])
+	})
+	if len(containers) > 8 {
+		containers = containers[:8]
+	}
+	summary["container_states"] = containers
+}
+
+func containerEvidenceRank(item kubeindex.ContainerState) int {
+	switch item.WaitingReason {
+	case "CrashLoopBackOff":
+		return 0
+	case "ImagePullBackOff", "ErrImagePull":
+		return 1
+	}
+	if item.TerminatedReason != "" {
+		return 2
+	}
+	return 3
+}
+
+func indexedTimestamp(summary map[string]string, key string) time.Time {
+	parsed, _ := time.Parse(time.RFC3339Nano, summary[key])
+	return parsed
+}
+
+func indexedContainers(value any) []kubeindex.ContainerState {
+	if values, ok := value.([]kubeindex.ContainerState); ok {
+		return append([]kubeindex.ContainerState(nil), values...)
+	}
+	var result []kubeindex.ContainerState
+	for _, item := range mapSlice(value) {
+		if len(result) == 8 {
+			break
+		}
+		result = append(result, kubeindex.ContainerState{Name: stringValue(item["name"]), WaitingReason: safeBreakReason(stringValue(item["waiting_reason"])), TerminatedReason: safeBreakReason(stringValue(item["last_terminated_reason"])), ExitCode: int32(triageSummaryIntValue(item, "last_terminated_exit_code")), RestartCount: int32(triageSummaryIntValue(item, "restart_count")), TerminatedAt: breakTimestamp(item["last_terminated_at"])})
+	}
+	return result
+}
+
+func recordProjection(record kubeindex.Record) ProjectedResource {
+	summary := make(map[string]any, len(record.Summary))
+	for key, value := range record.Summary {
+		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
+			summary[key] = parsed
+		} else {
+			summary[key] = value
+		}
+	}
+	summary["container_states"] = record.Containers
+	if record.EventType != "" && record.Target != nil {
+		summary["involved_object"] = ObjectRef{Kind: record.Target.Kind, Namespace: record.Target.Namespace, Name: record.Target.Name, UID: record.Target.UID}
+	}
+	result := ProjectedResource{APIVersion: record.APIVersion, Kind: record.Kind, Name: record.Name, Namespace: record.Namespace, UID: record.UID, Summary: summary, Labels: record.Labels}
+	for _, owner := range record.Owners {
+		result.Owners = append(result.Owners, ObjectRef{APIVersion: owner.APIVersion, Kind: owner.Kind, Namespace: owner.Namespace, Name: owner.Name, UID: owner.UID})
+	}
+	if record.Kind == "Node" {
+		result.Conditions = []Condition{{Type: "Ready", Status: record.ReadyStatus, TransitionAt: record.ReadyTransitionAt}}
+		for _, name := range strings.Split(record.Summary["node_pressure"], ",") {
+			if name != "" {
+				result.Conditions = append(result.Conditions, Condition{Type: name, Status: "True"})
+			}
+		}
+	}
+	return result
+}

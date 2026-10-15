@@ -47,7 +47,10 @@ func DiagnoseError(err error) ErrorDetail {
 	var unknownAuthority x509.UnknownAuthorityError
 	var hostnameError x509.HostnameError
 	var certificateError x509.CertificateInvalidError
+	var throttled *ErrThrottled
 	switch {
+	case errors.As(err, &throttled):
+		return ErrorDetail{Code: "cluster_throttled", Message: "The Kubernetes API throttled this read.", Action: "Retry after the server-requested delay.", Retryable: true}
 	case errors.Is(err, ErrIndexStreamBusy):
 		return ErrorDetail{Code: "stream_busy", Message: "The concurrent Kubernetes stream limit has been reached.", Action: "Close another stream and retry.", Retryable: true}
 	case errors.Is(err, ErrClusterRequired):

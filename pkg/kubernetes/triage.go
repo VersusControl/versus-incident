@@ -6,6 +6,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
+	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 )
 
 type SyncStatus struct {
@@ -15,21 +18,42 @@ type SyncStatus struct {
 }
 
 type IssueOptions struct {
-	Namespace string
-	Severity  string
-	Kind      string
-	Limit     int
-	Cursor    string
+	Namespace      string
+	Severity       string
+	Kind           string
+	Limit          int
+	Cursor         string
+	Broken         bool
+	IncludeChanges bool
+	RootUID        string
+	targetObject   *ObjectRef
 }
 
 type Issue struct {
-	Root      ObjectRef   `json:"root"`
-	Rule      string      `json:"rule"`
-	Severity  string      `json:"severity"`
-	Count     int         `json:"count"`
-	Examples  []ObjectRef `json:"examples,omitempty"`
-	FirstSeen time.Time   `json:"first_seen,omitempty"`
-	LastSeen  time.Time   `json:"last_seen,omitempty"`
+	Root          ObjectRef                 `json:"root"`
+	Rule          string                    `json:"rule"`
+	Severity      string                    `json:"severity"`
+	Count         int                       `json:"count"`
+	Examples      []ObjectRef               `json:"examples,omitempty"`
+	FirstSeen     time.Time                 `json:"first_seen,omitempty"`
+	LastSeen      time.Time                 `json:"last_seen,omitempty"`
+	Broken        bool                      `json:"broken,omitempty"`
+	Of            int                       `json:"of,omitempty"`
+	BrokeAt       *time.Time                `json:"broke_at,omitempty"`
+	BrokeAtSource string                    `json:"broke_at_source,omitempty"`
+	Evidence      *kubebreaks.Evidence      `json:"evidence,omitempty"`
+	Changes       []kubebreaks.LinkedChange `json:"changes,omitempty"`
+	MoreChanges   int                       `json:"more_changes,omitempty"`
+	History       string                    `json:"history,omitempty"`
+	Gaps          []kubechanges.Gap         `json:"gaps,omitempty"`
+	Rebuilt       []string                  `json:"rebuilt,omitempty"`
+	Untracked     []string                  `json:"untracked,omitempty"`
+	Partial       bool                      `json:"partial,omitempty"`
+}
+
+type BrokenTotals struct {
+	Total      int            `json:"total"`
+	BySeverity map[string]int `json:"by_severity"`
 }
 
 type IssuePage struct {
@@ -39,6 +63,7 @@ type IssuePage struct {
 	Next      string           `json:"next,omitempty"`
 	Partial   []PartialFailure `json:"partial_failures,omitempty"`
 	Sync      SyncStatus       `json:"sync"`
+	Broken    BrokenTotals     `json:"broken"`
 }
 
 type TopOptions struct {
@@ -72,83 +97,7 @@ var issueResourceIDs = []string{
 
 // Issues returns bounded findings from projected cluster resources.
 func (service *Service) Issues(ctx context.Context, options IssueOptions) (IssuePage, error) {
-	if options.Namespace != "" && !safeSegment(options.Namespace) || options.Severity != "" && options.Severity != "critical" && options.Severity != "warning" && options.Severity != "info" || options.Kind != "" && !safeSegment(options.Kind) {
-		return IssuePage{}, ErrInvalidArguments
-	}
-	options.Limit = normalizePageLimit(options.Limit)
-	ctx, cancel := ensureOperationBudgetRequests(ctx, overviewOperationRequests)
-	defer cancel()
-	page := IssuePage{Items: []Issue{}, Totals: map[string]int{}, Sync: SyncStatus{State: "direct"}}
-	groups := make(map[string]*Issue)
-	for _, resourceID := range issueResourceIDs {
-		namespace := options.Namespace
-		if resourceID == "core~v1~nodes" {
-			namespace = ""
-		}
-		resources, err := service.listAll(ctx, ListOptions{ResourceID: resourceID, Namespace: namespace})
-		if err != nil {
-			page.Truncated = true
-			page.Sync.Partial = true
-			page.Partial = append(page.Partial, PartialFailure{ResourceID: resourceID, Class: errorClass(err)})
-			continue
-		}
-		page.Partial = append(page.Partial, resources.Partial...)
-		page.Truncated = page.Truncated || resources.Truncated
-		page.Sync.Partial = page.Sync.Partial || resources.Truncated || len(resources.Partial) > 0
-		for _, resource := range resources.Items {
-			for _, finding := range classifyIssue(resource) {
-				if options.Kind != "" && finding.root.Kind != options.Kind || options.Severity != "" && finding.severity != options.Severity {
-					continue
-				}
-				key := finding.root.UID + "\x00" + finding.root.Kind + "\x00" + finding.root.Namespace + "\x00" + finding.root.Name + "\x00" + finding.rule
-				issue := groups[key]
-				if issue == nil {
-					issue = &Issue{Root: finding.root, Rule: finding.rule, Severity: finding.severity, Examples: []ObjectRef{}}
-					groups[key] = issue
-				}
-				issue.Count += finding.count
-				if len(issue.Examples) < 5 {
-					issue.Examples = append(issue.Examples, finding.example)
-				}
-				if !finding.at.IsZero() {
-					if issue.FirstSeen.IsZero() || finding.at.Before(issue.FirstSeen) {
-						issue.FirstSeen = finding.at
-					}
-					if issue.LastSeen.IsZero() || finding.at.After(issue.LastSeen) {
-						issue.LastSeen = finding.at
-					}
-				}
-			}
-		}
-	}
-	for _, issue := range groups {
-		page.Totals[issue.Severity]++
-		page.Items = append(page.Items, *issue)
-	}
-	sort.Slice(page.Items, func(i, j int) bool {
-		left, right := severityRank(page.Items[i].Severity), severityRank(page.Items[j].Severity)
-		if left != right {
-			return left < right
-		}
-		if page.Items[i].Count != page.Items[j].Count {
-			return page.Items[i].Count > page.Items[j].Count
-		}
-		if page.Items[i].Root.Namespace != page.Items[j].Root.Namespace {
-			return page.Items[i].Root.Namespace < page.Items[j].Root.Namespace
-		}
-		if page.Items[i].Root.Name != page.Items[j].Root.Name {
-			return page.Items[i].Root.Name < page.Items[j].Root.Name
-		}
-		return page.Items[i].Rule < page.Items[j].Rule
-	})
-	start, end, next, err := pageWindow(options.Cursor, options.Limit, len(page.Items))
-	if err != nil {
-		return IssuePage{}, err
-	}
-	page.Next = next
-	page.Truncated = page.Truncated || next != ""
-	page.Items = page.Items[start:end]
-	return page, nil
+	return service.issuesSnapshot(ctx, options)
 }
 
 // Top returns the highest-usage pods or nodes from the Metrics API.

@@ -135,6 +135,8 @@ function resourceAttachmentFromSearch(params: URLSearchParams): ChatResourceAtta
     resource_id,
     namespace: params.get("namespace") || undefined,
     name,
+    uid: params.get("uid") || undefined,
+    include_changes: params.get("include_changes") === "true" || undefined,
   };
 }
 

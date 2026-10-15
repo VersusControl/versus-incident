@@ -85,11 +85,63 @@ type ChatIncidentContext struct {
 }
 
 type ChatResourceRef struct {
-	Provider   string `json:"provider"`
-	Cluster    string `json:"cluster"`
-	ResourceID string `json:"resource_id"`
-	Namespace  string `json:"namespace,omitempty"`
-	Name       string `json:"name"`
+	Provider       string             `json:"provider"`
+	Cluster        string             `json:"cluster"`
+	ResourceID     string             `json:"resource_id"`
+	Namespace      string             `json:"namespace,omitempty"`
+	Name           string             `json:"name"`
+	UID            string             `json:"uid,omitempty"`
+	IncludeChanges bool               `json:"include_changes,omitempty"`
+	Break          *ChatResourceBreak `json:"break,omitempty"`
+}
+
+type ChatResourceChange struct {
+	Kind        string                    `json:"kind"`
+	Namespace   string                    `json:"namespace,omitempty"`
+	Name        string                    `json:"name"`
+	Type        string                    `json:"type"`
+	At          time.Time                 `json:"at"`
+	Relation    string                    `json:"relation"`
+	LeadSeconds int64                     `json:"lead_seconds"`
+	Fields      []ChatResourceChangeField `json:"fields,omitempty"`
+}
+
+type ChatResourceChangeField struct {
+	Path string `json:"path"`
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+type ChatResourceTermination struct {
+	Reason   string    `json:"reason"`
+	ExitCode int32     `json:"exit_code"`
+	Count    int       `json:"count"`
+	Last     time.Time `json:"last"`
+}
+type ChatResourceWaiting struct {
+	Reason string `json:"reason"`
+	Count  int    `json:"count"`
+}
+type ChatResourceEvidence struct {
+	Terminations []ChatResourceTermination `json:"terminations,omitempty"`
+	Waiting      []ChatResourceWaiting     `json:"waiting,omitempty"`
+	Warnings     int                       `json:"warning_events"`
+	From         time.Time                 `json:"from"`
+	To           time.Time                 `json:"to"`
+}
+type ChatResourceBreak struct {
+	BrokeAtSource string                `json:"broke_at_source,omitempty"`
+	Rule          string                `json:"rule"`
+	Severity      string                `json:"severity"`
+	BrokeAt       *time.Time            `json:"broke_at,omitempty"`
+	Count         int                   `json:"count"`
+	Of            int                   `json:"of,omitempty"`
+	Changes       []ChatResourceChange  `json:"changes"`
+	MoreChanges   int                   `json:"more_changes,omitempty"`
+	Evidence      *ChatResourceEvidence `json:"evidence,omitempty"`
+	History       string                `json:"history"`
+	Rebuilt       []string              `json:"rebuilt,omitempty"`
+	Untracked     []string              `json:"untracked,omitempty"`
+	Partial       bool                  `json:"partial,omitempty"`
 }
 
 // ChatAttachment grounds a turn without restricting the conversation to that

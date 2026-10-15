@@ -102,6 +102,31 @@ func TestClusterListFiltersBeforeReadsAndCachesByOrg(t *testing.T) {
 	}
 }
 
+func TestClusterSummaryCacheRetiresCredentialEpoch(t *testing.T) {
+	var token atomic.Value
+	token.Store("Bearer first")
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Error(writer, "CANARY_DENIAL", http.StatusForbidden)
+	}))
+	defer server.Close()
+	base := newTestService(t, server.URL, Scope{ClusterID: "cluster"})
+	base.client.credentials = &credentialSource{authorization: func(context.Context) (string, error) { return token.Load().(string), nil }}
+	registry := NewServiceRegistry(base)
+	service, err := registry.ResolveCluster("org", "cluster")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := clusterSummaryCache{value: ClusterSummary{ClusterInfo: ClusterInfo{ID: "cluster"}, Nodes: 777}, expires: time.Now().Add(time.Minute)}
+	registry.summaries["org\x00cluster"] = value
+	registry.summaries["org\x00cluster\x00"+service.scope.CredentialID] = value
+	token.Store("Bearer replacement")
+	for _, summary := range registry.Summaries(t.Context(), "org", nil) {
+		if summary.Nodes == 777 {
+			t.Fatal("summary cache returned old credential data")
+		}
+	}
+}
+
 func TestClusterListBoundedFanOutAcrossConcurrentRequests(t *testing.T) {
 	var active, maximum atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -207,7 +232,7 @@ func TestClusterSummaryIncludesActualVersionAndIssueTotals(t *testing.T) {
 			resources := []any{}
 			for _, resource := range []struct{ path, name, kind string }{
 				{"/api/v1", "nodes", "Node"}, {"/api/v1", "pods", "Pod"}, {"/api/v1", "events", "Event"}, {"/api/v1", "namespaces", "Namespace"},
-				{"/apis/apps/v1", "deployments", "Deployment"}, {"/apis/apps/v1", "statefulsets", "StatefulSet"}, {"/apis/apps/v1", "daemonsets", "DaemonSet"},
+				{"/apis/apps/v1", "deployments", "Deployment"}, {"/apis/apps/v1", "statefulsets", "StatefulSet"}, {"/apis/apps/v1", "daemonsets", "DaemonSet"}, {"/apis/apps/v1", "replicasets", "ReplicaSet"},
 				{"/apis/batch/v1", "jobs", "Job"}, {"/apis/batch/v1", "cronjobs", "CronJob"},
 			} {
 				if resource.path == request.URL.Path {
@@ -243,7 +268,7 @@ func TestClusterSummaryIncludesActualVersionAndIssueTotals(t *testing.T) {
 	}
 	denyIssues.Store(true)
 	version.Store("v1.33.2\nprivate-token")
-	result = NewServiceRegistry(base).Summaries(context.Background(), "default", nil)
+	result = NewServiceRegistry(newTestService(t, server.URL, Scope{ClusterID: "one"})).Summaries(context.Background(), "default", nil)
 	if result[0].Version != "" || result[0].Issues != nil {
 		t.Fatalf("unsafe version or incomplete issues exposed: %+v", result)
 	}

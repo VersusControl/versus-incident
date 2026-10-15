@@ -19,13 +19,15 @@ import (
 var (
 	ErrInvalidQuery = errors.New("kubernetes changes: invalid query")
 	ErrStoreLimit   = errors.New("kubernetes changes: stored snapshot exceeds limit")
+	ErrLeaseLost    = errors.New("kubernetes changes: capture lease lost")
 )
 
 const (
-	defaultRetention = 24 * time.Hour
-	maxChanges       = 5000
-	maxStoreBytes    = 4 << 20
-	maxChangeFields  = 16
+	defaultRetention    = 24 * time.Hour
+	maxChanges          = 5000
+	maxStoreBytes       = 4 << 20
+	maxChangeFields     = 16
+	maxLifecycleSamples = 256
 )
 
 type Gap struct {
@@ -45,14 +47,29 @@ type Query struct {
 }
 
 type Page struct {
-	Items []Change `json:"items"`
-	Next  string   `json:"next,omitempty"`
-	Gaps  []Gap    `json:"gaps,omitempty"`
+	Items    []Change       `json:"items"`
+	Next     string         `json:"next,omitempty"`
+	Gaps     []Gap          `json:"gaps,omitempty"`
+	Coverage map[string]Gap `json:"coverage,omitempty"`
 }
 
 type snapshot struct {
-	Changes []Change `json:"changes"`
-	Gaps    []Gap    `json:"gaps,omitempty"`
+	Changes        []Change                     `json:"changes"`
+	Gaps           []Gap                        `json:"gaps,omitempty"`
+	Coverage       map[string]Gap               `json:"coverage,omitempty"`
+	Lease          *Lease                       `json:"lease,omitempty"`
+	WarningEvents  map[string]warningCheckpoint `json:"warning_events,omitempty"`
+	WarningWindows map[string]warningCheckpoint `json:"warning_windows,omitempty"`
+}
+
+type warningCheckpoint struct {
+	Count int64     `json:"count"`
+	At    time.Time `json:"at"`
+}
+
+type Lease struct {
+	Owner   string    `json:"owner"`
+	Expires time.Time `json:"expires"`
 }
 
 type Store struct {
@@ -90,9 +107,15 @@ func NewStore(provider storage.Provider, scope index.Scope) *Store {
 
 // Append adds projected changes and evicts only the oldest records as required by bounds.
 func (store *Store) Append(changes []Change, now time.Time) error {
-	if store == nil || store.provider == nil {
-		return ErrStoreLimit
-	}
+	return store.Commit(changes, nil, nil, "", now)
+}
+
+// MarkGap records a bounded interval for which the timeline cannot guarantee completeness.
+func (store *Store) MarkGap(gap Gap) error {
+	return store.Commit(nil, []Gap{gap}, nil, "", time.Now().UTC())
+}
+
+func (store *Store) Commit(changes []Change, gaps []Gap, coverage map[string]Gap, owner string, now time.Time) error {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -101,93 +124,304 @@ func (store *Store) Append(changes []Change, now time.Time) error {
 			return ErrInvalidQuery
 		}
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	current, err := store.read()
-	if err != nil {
-		return err
-	}
-	before, err := json.Marshal(current)
-	if err != nil {
-		return ErrStoreLimit
-	}
-	cutoff := now.Add(-store.retention)
-	kept := current.Changes[:0]
-	for _, existing := range current.Changes {
-		if !existing.At.Before(cutoff) {
-			kept = append(kept, existing)
+	for _, gap := range gaps {
+		if gap.From.IsZero() || gap.To.Before(gap.From) {
+			return ErrInvalidQuery
 		}
 	}
-	current.Changes = kept
-	seen := make(map[string]bool, len(current.Changes)+len(changes))
-	for _, existing := range current.Changes {
-		seen[existing.ID] = true
-	}
-	for _, change := range changes {
-		if !seen[change.ID] {
-			current.Changes = append(current.Changes, cloneChange(change))
-			seen[change.ID] = true
+	for kind, interval := range coverage {
+		if !safeFilter(kind) || interval.From.IsZero() || interval.To.Before(interval.From) {
+			return ErrInvalidQuery
 		}
 	}
-	sort.Slice(current.Changes, func(left, right int) bool {
-		if current.Changes[left].At.Equal(current.Changes[right].At) {
-			return current.Changes[left].ID < current.Changes[right].ID
+	return store.commitSnapshot(func(current *snapshot) error {
+		if owner == "" && current.Lease != nil {
+			if current.Lease.Expires.After(time.Now().UTC()) {
+				return ErrLeaseLost
+			}
+			current.Lease = nil
 		}
-		return current.Changes[left].At.Before(current.Changes[right].At)
-	})
-	for len(current.Changes) > maxChanges || encodedSize(current) > maxStoreBytes {
-		if len(current.Changes) == 0 {
-			return ErrStoreLimit
+		if owner != "" && (current.Lease == nil || current.Lease.Owner != owner || !current.Lease.Expires.After(time.Now().UTC())) {
+			return ErrLeaseLost
 		}
-		dropped := current.Changes[0]
-		current.Changes = current.Changes[1:]
-		appendGap(&current.Gaps, Gap{From: dropped.At, To: dropped.At})
-	}
-	if len(current.Gaps) > 16 {
-		current.Gaps = append([]Gap(nil), current.Gaps[len(current.Gaps)-16:]...)
-	}
-	encoded, err := json.Marshal(current)
-	if err != nil || len(encoded) > maxStoreBytes {
-		return ErrStoreLimit
-	}
-	if bytes.Equal(before, encoded) {
+		cutoff := now.Add(-store.retention)
+		pruneWarningCheckpoints(current, now)
+		kept := []Change{}
+		seen := map[string]int{}
+		for _, change := range current.Changes {
+			if !change.At.Before(cutoff) {
+				seen[change.ID] = len(kept)
+				kept = append(kept, change)
+			}
+		}
+		for _, change := range changes {
+			if change.At.Before(cutoff) {
+				continue
+			}
+			if change.warning != nil {
+				var emit bool
+				change, emit = accumulateWarning(current, change, now)
+				if !emit {
+					continue
+				}
+			}
+			if position, exists := seen[change.ID]; exists {
+				if change.Type == WarningBurst {
+					previous := kept[position]
+					updated := cloneChange(change)
+					if previous.At.After(updated.At) {
+						updated.At = previous.At
+					}
+					if previous.Source == "observed" {
+						updated.Source = "observed"
+					}
+					if warningCount(previous) > warningCount(updated) {
+						updated.Fields = append([]FieldChange(nil), previous.Fields...)
+					}
+					kept[position] = updated
+				} else if change.Source == "observed" && kept[position].Source == "reconstructed" {
+					kept[position] = cloneChange(change)
+				}
+				continue
+			}
+			seen[change.ID] = len(kept)
+			kept = append(kept, cloneChange(change))
+		}
+		sort.Slice(kept, func(left, right int) bool {
+			if kept[left].At.Equal(kept[right].At) {
+				return kept[left].ID < kept[right].ID
+			}
+			return kept[left].At.Before(kept[right].At)
+		})
+		current.Changes = kept
+		samples := 0
+		for _, change := range kept {
+			if change.Coalesced {
+				samples++
+			}
+		}
+		if samples > maxLifecycleSamples {
+			bounded := make([]Change, 0, len(kept))
+			for _, change := range kept {
+				if change.Coalesced && samples > maxLifecycleSamples {
+					samples--
+					continue
+				}
+				bounded = append(bounded, change)
+			}
+			current.Changes = bounded
+		}
+		for _, gap := range gaps {
+			current.Gaps = append(current.Gaps, gap)
+		}
+		if current.Coverage == nil && len(coverage) > 0 {
+			current.Coverage = map[string]Gap{}
+		}
+		for kind, interval := range coverage {
+			old, exists := current.Coverage[kind]
+			if exists && !interval.From.After(old.To) {
+				if interval.From.Before(old.From) {
+					old.From = interval.From
+				}
+				if interval.To.After(old.To) {
+					old.To = interval.To
+				}
+				interval = old
+			}
+			current.Coverage[kind] = interval
+		}
+		for kind, interval := range current.Coverage {
+			if interval.To.Before(cutoff) {
+				delete(current.Coverage, kind)
+			} else if interval.From.Before(cutoff) {
+				interval.From = cutoff
+				current.Coverage[kind] = interval
+			}
+		}
+		compactGaps(current)
+		for len(current.Changes) > maxChanges || encodedSize(*current) > maxStoreBytes {
+			if len(current.Changes) == 0 {
+				return ErrStoreLimit
+			}
+			position := 0
+			for candidate, change := range current.Changes {
+				if change.Coalesced {
+					position = candidate
+					break
+				}
+			}
+			dropped := current.Changes[position]
+			current.Changes = append(current.Changes[:position], current.Changes[position+1:]...)
+			if !dropped.Coalesced {
+				current.Gaps = append(current.Gaps, Gap{From: dropped.At, To: dropped.At})
+			}
+			compactGaps(current)
+		}
 		return nil
-	}
-	return store.provider.WriteBlob(store.key, encoded)
+	})
 }
 
-// MarkGap records a bounded interval for which the timeline cannot guarantee completeness.
-func (store *Store) MarkGap(gap Gap) error {
-	if store == nil || store.provider == nil || gap.From.IsZero() || gap.To.Before(gap.From) {
-		return ErrInvalidQuery
+func compactGaps(current *snapshot) {
+	sort.Slice(current.Gaps, func(left, right int) bool { return current.Gaps[left].From.Before(current.Gaps[right].From) })
+	combined := []Gap{}
+	for _, gap := range current.Gaps {
+		appendGap(&combined, gap)
+	}
+	for len(combined) > 16 {
+		combined[1].From = combined[0].From
+		combined = combined[1:]
+	}
+	current.Gaps = combined
+}
+
+func warningCount(change Change) int {
+	for _, field := range change.Fields {
+		if field.Path == "events.warning_count" {
+			count, _ := strconv.Atoi(field.To)
+			return count
+		}
+	}
+	return 0
+}
+
+func pruneWarningCheckpoints(current *snapshot, now time.Time) {
+	for _, checkpoints := range []map[string]warningCheckpoint{current.WarningEvents, current.WarningWindows} {
+		for key, checkpoint := range checkpoints {
+			if checkpoint.At.Before(now.Add(-10 * time.Minute)) {
+				delete(checkpoints, key)
+			}
+		}
+	}
+}
+
+func accumulateWarning(current *snapshot, change Change, now time.Time) (Change, bool) {
+	observation := change.warning
+	if change.At.After(now) || change.At.Before(now.Add(-5*time.Minute)) {
+		return change, false
+	}
+	if current.WarningEvents == nil {
+		current.WarningEvents = map[string]warningCheckpoint{}
+	}
+	if current.WarningWindows == nil {
+		current.WarningWindows = map[string]warningCheckpoint{}
+	}
+	digest := sha256.Sum256([]byte(observation.UID))
+	eventKey := hex.EncodeToString(digest[:])
+	previous, exists := current.WarningEvents[eventKey]
+	if exists && (observation.Count <= previous.Count || change.At.Before(previous.At)) {
+		return change, false
+	}
+	baseline := observation.Count
+	baselineAt := change.At
+	if exists {
+		baseline, baselineAt = previous.Count, previous.At
+	} else if observation.HasPrevious {
+		baseline, baselineAt = observation.Previous, observation.PreviousAt
+	} else if observation.First.UTC().Truncate(5 * time.Minute).Equal(change.At.UTC().Truncate(5 * time.Minute)) {
+		baseline, baselineAt = 0, observation.First
+	}
+	if !exists && len(current.WarningEvents) >= maxChanges {
+		return change, false
+	}
+	current.WarningEvents[eventKey] = warningCheckpoint{Count: observation.Count, At: change.At}
+	delta := observation.Count - baseline
+	if delta <= 0 || change.At.Sub(baselineAt) > 5*time.Minute || baselineAt.After(change.At) {
+		return change, false
+	}
+	window, exists := current.WarningWindows[change.ID]
+	if !exists && len(current.WarningWindows) >= maxChanges {
+		return change, false
+	}
+	window.Count += delta
+	if change.At.After(window.At) {
+		window.At = change.At
+	}
+	current.WarningWindows[change.ID] = window
+	change.warning = nil
+	change.Fields = []FieldChange{{Path: "events.warning_count", To: strconv.FormatInt(window.Count, 10)}}
+	return change, window.Count >= 5
+}
+
+func (store *Store) commitSnapshot(update func(*snapshot) error) error {
+	if store == nil || store.provider == nil {
+		return ErrStoreLimit
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	current, err := store.read()
-	if err != nil {
-		return err
+	for attempt := 0; attempt < 64; attempt++ {
+		expected, err := store.provider.ReadBlob(store.key)
+		if err != nil {
+			return err
+		}
+		current, err := decodeSnapshot(expected)
+		if err != nil {
+			return err
+		}
+		before, err := json.Marshal(current)
+		if err != nil {
+			return ErrStoreLimit
+		}
+		if err := update(&current); err != nil {
+			return err
+		}
+		replacement, err := json.Marshal(current)
+		if err != nil || len(replacement) > maxStoreBytes {
+			return ErrStoreLimit
+		}
+		if bytes.Equal(before, replacement) || bytes.Equal(expected, replacement) {
+			return nil
+		}
+		if cas, ok := store.provider.(storage.BlobCAS); ok {
+			swapped, err := cas.CompareAndSwapBlob(store.key, expected, replacement)
+			if err != nil {
+				return err
+			}
+			if swapped {
+				return nil
+			}
+			continue
+		}
+		return store.provider.WriteBlob(store.key, replacement)
 	}
-	before, err := json.Marshal(current)
-	if err != nil {
+	return ErrStoreLimit
+}
+
+func (store *Store) ClaimLease(owner string, now time.Time, ttl time.Duration) error {
+	if owner == "" || len(owner) > 128 || ttl <= 0 || ttl > 5*time.Minute {
+		return ErrInvalidQuery
+	}
+	if store == nil {
 		return ErrStoreLimit
 	}
-	appendGap(&current.Gaps, gap)
-	if len(current.Gaps) > 16 {
-		current.Gaps = append([]Gap(nil), current.Gaps[len(current.Gaps)-16:]...)
+	if _, ok := store.provider.(storage.BlobCAS); !ok {
+		return ErrLeaseLost
 	}
-	for encodedSize(current) > maxStoreBytes && len(current.Changes) > 0 {
-		dropped := current.Changes[0]
-		current.Changes = current.Changes[1:]
-		appendGap(&current.Gaps, Gap{From: dropped.At, To: dropped.At})
-	}
-	encoded, err := json.Marshal(current)
-	if err != nil || len(encoded) > maxStoreBytes {
-		return ErrStoreLimit
-	}
-	if bytes.Equal(before, encoded) {
+	return store.commitSnapshot(func(current *snapshot) error {
+		if current.Lease != nil && current.Lease.Owner != owner && current.Lease.Expires.After(now) {
+			return ErrLeaseLost
+		}
+		current.Lease = &Lease{Owner: owner, Expires: now.Add(ttl)}
 		return nil
-	}
-	return store.provider.WriteBlob(store.key, encoded)
+	})
+}
+
+func (store *Store) RenewLease(owner string, now time.Time, ttl time.Duration) error {
+	return store.commitSnapshot(func(current *snapshot) error {
+		if current.Lease == nil || current.Lease.Owner != owner || !current.Lease.Expires.After(now) {
+			return ErrLeaseLost
+		}
+		current.Lease.Expires = now.Add(ttl)
+		return nil
+	})
+}
+
+func (store *Store) ReleaseLease(owner string) error {
+	return store.commitSnapshot(func(current *snapshot) error {
+		if current.Lease != nil && current.Lease.Owner == owner {
+			current.Lease = nil
+		}
+		return nil
+	})
 }
 
 // Query returns at most 500 newest matching changes and a numeric offset cursor.
@@ -266,7 +500,7 @@ func (store *Store) Query(query Query, now time.Time) (Page, error) {
 		return Page{}, ErrInvalidQuery
 	}
 	end := min(offset+query.Limit, len(filtered))
-	page := Page{Items: append([]Change(nil), filtered[offset:end]...), Gaps: gapsInWindow(current.Gaps, query.Since, query.Until)}
+	page := Page{Items: append([]Change(nil), filtered[offset:end]...), Gaps: gapsInWindow(current.Gaps, query.Since, query.Until), Coverage: current.Coverage}
 	if end < len(filtered) {
 		page.Next = strconv.Itoa(end)
 	}
@@ -278,6 +512,26 @@ func (store *Store) read() (snapshot, error) {
 	if err != nil {
 		return snapshot{}, err
 	}
+	return decodeSnapshot(encoded)
+}
+
+func (store *Store) ReadWindow(from, to, now time.Time) (Page, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	current, err := store.read()
+	if err != nil {
+		return Page{}, err
+	}
+	page := Page{Items: []Change{}, Coverage: current.Coverage, Gaps: gapsInWindow(current.Gaps, from, to)}
+	for _, change := range current.Changes {
+		if !change.At.Before(from) && !change.At.After(to) && !change.At.Before(now.Add(-store.retention)) {
+			page.Items = append(page.Items, cloneChange(change))
+		}
+	}
+	return page, nil
+}
+
+func decodeSnapshot(encoded []byte) (snapshot, error) {
 	if len(encoded) == 0 {
 		return snapshot{Changes: []Change{}, Gaps: []Gap{}}, nil
 	}
@@ -285,8 +539,15 @@ func (store *Store) read() (snapshot, error) {
 		return snapshot{}, ErrStoreLimit
 	}
 	var current snapshot
-	if err := json.Unmarshal(encoded, &current); err != nil || len(current.Changes) > maxChanges || len(current.Gaps) > 16 {
+	if err := json.Unmarshal(encoded, &current); err != nil || len(current.Changes) > maxChanges || len(current.Gaps) > 16 || len(current.WarningEvents) > maxChanges || len(current.WarningWindows) > maxChanges {
 		return snapshot{}, ErrStoreLimit
+	}
+	for _, checkpoints := range []map[string]warningCheckpoint{current.WarningEvents, current.WarningWindows} {
+		for key, checkpoint := range checkpoints {
+			if len(key) > 128 || key == "" || checkpoint.Count < 0 || checkpoint.At.IsZero() {
+				return snapshot{}, ErrStoreLimit
+			}
+		}
 	}
 	for _, change := range current.Changes {
 		if !validChange(change) {
@@ -298,10 +559,27 @@ func (store *Store) read() (snapshot, error) {
 			return snapshot{}, ErrStoreLimit
 		}
 	}
+	if len(current.Coverage) > 32 {
+		return snapshot{}, ErrStoreLimit
+	}
+	for kind, interval := range current.Coverage {
+		if !safeFilter(kind) || interval.From.IsZero() || interval.To.Before(interval.From) {
+			return snapshot{}, ErrStoreLimit
+		}
+	}
+	if current.Lease != nil && (current.Lease.Owner == "" || len(current.Lease.Owner) > 128 || current.Lease.Expires.IsZero()) {
+		return snapshot{}, ErrStoreLimit
+	}
 	return current, nil
 }
 
 func validChange(change Change) bool {
+	if change.Coalesced && (change.Kind != "Pod" || change.Type != Created && change.Type != Deleted) {
+		return false
+	}
+	if change.Source != "" && change.Source != "observed" && change.Source != "reconstructed" || len(change.Revision) > 256 {
+		return false
+	}
 	if change.ID == "" || len(change.ID) > 128 || change.Cluster == "" || len(change.Cluster) > 256 || change.Kind == "" || len(change.Kind) > 128 || change.Name == "" || len(change.Name) > 253 || len(change.Namespace) > 253 || len(change.UID) > 256 || change.At.IsZero() || !validType(change.Type) || len(change.Fields) > maxChangeFields || len(change.Service) > 253 {
 		return false
 	}
@@ -315,7 +593,7 @@ func validChange(change Change) bool {
 
 func validType(value Type) bool {
 	switch value {
-	case Created, Deleted, ImageChanged, ReplicasChanged, SpecChanged:
+	case Created, Deleted, ImageChanged, ReplicasChanged, SpecChanged, RolloutStarted, RolloutCompleted, RolloutStalled, ConfigRefChanged, ConfigChanged, WarningBurst:
 		return true
 	default:
 		return false

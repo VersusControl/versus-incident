@@ -23,6 +23,7 @@ import (
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/tests/fakekube"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -84,6 +85,56 @@ func TestClusterParamResolutionAndDeniedStreams(t *testing.T) {
 		if strings.Contains(string(body), "denied") || strings.Contains(string(body), "org_id") || strings.Contains(string(body), upstream.URL) {
 			t.Fatalf("unsafe cluster list %s", body)
 		}
+	}
+}
+
+func TestKubernetesIssuesQueryValidationAndInvestigate(t *testing.T) {
+	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "bad-rollout"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(fixture)
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service.SetChangeStorage(storage.NewMemory())
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	for _, test := range []struct {
+		query string
+		want  int
+	}{{"?include=other", 400}, {"?include=", 400}, {"?broken=maybe", 400}, {"?include=changes&root_uid=bad%2Fuid", 400}, {"?root_uid=deployment-checkout", 400}, {"?include=changes&root_uid=", 400}, {"?include=changes&include=changes", 400}, {"?include=changes&root_uid=deployment-checkout&namespace=payments", 404}, {"?include=changes&root_uid=deployment-checkout&namespace=shop", 200}, {"?broken=true&include=changes&limit=1", 200}} {
+		response, err := app.Test(httptest.NewRequest("GET", "/api/admin/kubernetes/issues"+test.query, nil), -1)
+		if err != nil || response.StatusCode != test.want {
+			t.Fatalf("query %s: %+v %v", test.query, response, err)
+		}
+		response.Body.Close()
+	}
+	SetChatKubernetesServiceResolver(func(orgID, clusterID string) *kubernetes.Service { return service })
+	t.Cleanup(func() { SetChatKubernetesServiceResolver(nil) })
+	app.Get("/investigate", func(ctx *fiber.Ctx) error {
+		attachment := &core.ChatAttachment{Resource: &core.ChatResourceRef{Provider: "kubernetes", Cluster: "cluster", ResourceID: "apps~v1~deployments", Namespace: "shop", Name: "checkout", UID: "deployment-checkout", IncludeChanges: true, Break: &core.ChatResourceBreak{Rule: "CANARY_CLIENT_CONTEXT"}}}
+		if err := validateChatKubernetesAttachment(ctx, attachment); err != nil {
+			return err
+		}
+		return ctx.JSON(attachment)
+	})
+	response, err := app.Test(httptest.NewRequest("GET", "/investigate", nil), -1)
+	if err != nil || response.StatusCode != 200 {
+		t.Fatalf("investigate: %+v %v", response, err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if strings.Contains(string(body), "CANARY") || strings.Contains(string(body), `"source"`) || !strings.Contains(string(body), `"image_changed"`) || !strings.Contains(string(body), `"pod.crash_loop"`) {
+		t.Fatalf("investigate grounding: %s", body)
 	}
 }
 
@@ -457,7 +508,7 @@ func TestKubernetesPodLogSSEOverlapResumeContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "org-a"}, 0)
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "org-a", ClusterID: "cluster-a"}, 0)
 	service.SetScrubber(streamTestScrubber{})
 	app := fiber.New(fiber.Config{Immutable: true})
 	app.Use(func(ctx *fiber.Ctx) error {

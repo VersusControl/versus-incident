@@ -364,6 +364,14 @@ For a complete `Deployment` + `Service` + `PersistentVolumeClaim`
 manifest (with the persistent data volume the admin dashboard needs),
 see [Deploy on Kubernetes](https://docs.versusincident.com/#/configuration/kubernetes).
 
+Kubernetes continuous change capture across replicas requires shared PostgreSQL
+and a verified stable principal (including projected ServiceAccount tokens) or
+identical static credential material. Unverified rotating identities explicitly
+use demand mode; replica count is not a blanket capture HA guarantee. Upgrading
+from UUID-key capture requires stopping **all old capture before starting new
+continuous replicas**: mixed keys can hold dual leases, and history is not
+automatically imported. See the [connector identity and upgrade guide](src/agent/kubernetes/configuration.md#continuous-capture-and-replica-identity).
+
 ## Helm Chart
 
 For the packaged install, see [Helm Chart](https://docs.versusincident.com/#/configuration/helm)

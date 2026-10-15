@@ -606,6 +606,15 @@ func validateAttachment(attachment *core.ChatAttachment) error {
 		if resource.Provider != "kubernetes" || !validAttachmentText(resource.Cluster, 256) || !validAttachmentText(resource.ResourceID, 256) || !validAttachmentText(resource.Name, 253) || !validOptionalAttachmentText(resource.Namespace, 253) {
 			return ErrInvalidAttachment
 		}
+		if !validOptionalAttachmentText(resource.UID, 256) {
+			return ErrInvalidAttachment
+		}
+		if resource.Break != nil {
+			encoded, err := json.Marshal(resource.Break)
+			if err != nil || len(encoded) > 6<<10 || len(resource.Break.Changes) > 3 {
+				return ErrInvalidAttachment
+			}
+		}
 	}
 	return nil
 }

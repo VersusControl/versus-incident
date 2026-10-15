@@ -16,38 +16,36 @@ has nine tabs; screenshots below use a synthetic cluster.
 
 ### Overview
 
-See ready nodes, running pods, workload and namespace counts, and CPU and memory
-capacity. Usage and resource requests are shown separately, with the metrics
-source and sample time beside them. Missing metrics are labelled **Unavailable**
-rather than shown as zero.
+The compact cluster header identifies the cluster and its **Snapshot**, broken
+workloads, and warnings. Start with **Timeline** to review breaks and related
+changes; CPU and memory capacity, inventory, and topology summaries appear below.
+Usage and requests are separate; missing metrics are **Unavailable**.
 
-![Kubernetes dashboard overview with cluster health, capacity, and grouped issues](../../docs/images/kubernetes-harness-overview.png)
-
-Grouped issues, top pod usage, recent changes, and release and traffic summaries
-help you choose what to inspect next. The Overview topology summary shows actual
-resource counts from inventory and overview metadata, with stale and partial
-counts labelled. Reported resources and unreported resources are grouped
-separately; unreported counts display **0** with count-availability context,
-rather than being treated as verified zero counts. Recent changes and Topology
-share an equal-height row with independently scrollable content; on narrow
-screens they stack. **Full topology** opens the namespace explorer.
+![Full dark Overview with populated synthetic cluster health, three broken workloads, CPU and memory, top Pods, Helm releases, resource counts, and Enterprise Traffic](../../docs/images/kubernetes-harness-overview.png)
 
 ### Issues
 
-Problems are grouped by resource and severity. Filter by severity or namespace,
-then select **Open resource** to inspect the affected workload. Pagination loads
-the next page without expanding the whole dashboard.
+Issues use the same workload rows as Overview, collapsed by default. Expand a
+row to load its related changes and crash evidence. Filter by severity or
+namespace and use pagination to browse more results. Select a workload name to
+open details. **Timeline** focuses on that workload's break, and **Investigate**
+opens Chat with its cluster and resource context. Expand **Warnings (N)** before
+interpreting incomplete history as an absence of changes.
 
-![Grouped Kubernetes issues with severity and namespace filters](../../docs/images/kubernetes-harness-issues.png)
+![Dark synthetic UI fixture Issues with checkout expanded, OOMKilled x6 and Error exit 1 x1, severity and namespace filters](../../docs/images/kubernetes-harness-issues.png)
 
 ### Timeline
 
-Follow resource creation and deletion, image updates, replica changes, and spec
-changes. Choose a time window and filter by namespace or resource kind. Select
-a change to open the resource's timeline in the details panel. Recorded history
-gaps remain visible so missing evidence is not mistaken for no activity.
+Choose a time window, namespace, or resource kind to browse changes. From an
+issue's **Timeline** action, the view focuses on that workload around its break.
+Resource rows share a horizontal time axis with projected change labels, a red
+**Break** line, and **Crash** groups at their actual last recorded termination
+timestamps. Counts do not imply distinct crash times. The shaded suspect window
+spans break minus 30 minutes through plus 2 minutes; **now** appears only when in
+view. Select a marker, then **Open resource** to inspect a change. History warnings remain available through
+**Warnings (N)**, including when no markers are recorded in the selected window.
 
-![Kubernetes timeline showing multiple Deployment creation events for new resources, with time-window, namespace, and resource-kind filters](../../docs/images/kubernetes-harness-timeline.png)
+![Dark synthetic UI fixture checkout Timeline with Deployment, ConfigMap checkout-cfg and HPA checkout lanes, changes, break and last-termination markers](../../docs/images/kubernetes-harness-timeline.png)
 
 ### Topology
 

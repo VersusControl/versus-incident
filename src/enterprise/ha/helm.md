@@ -118,6 +118,22 @@ shared pod spec is identical.
 
 ## Troubleshooting
 
+### Kubernetes change capture
+
+Projected `in_cluster` tokens from different Pods share capture only after
+cryptographic ServiceAccount-principal verification against the configured TLS
+API server. Check both replicas' effective `sync.capture.mode` and `reason`:
+unverified token-file or unsupported provider identities use demand mode, not
+continuous HA. This feature requires shared PostgreSQL; replica count alone is
+not proof of coordinated capture. See the connector's
+[capture identity and limitations](../../agent/kubernetes/configuration.md#continuous-capture-and-replica-identity).
+
+When moving from the old UUID-key capture version, do **not** use an overlapping
+rolling rollout: old and new key schemes can hold separate leases. Stop all old
+capture first, verify no old owner remains, then start the new continuous
+replicas and verify one key/owner. History is not automatically imported.
+Follow the [coordinated upgrade procedure](../../agent/kubernetes/configuration.md#coordinated-capture-key-upgrade).
+
 | Symptom | Likely cause |
 |---|---|
 | `helm install` / template fails complaining about a license | HA requires a license. Set `enterprise.licenseKey` or `enterprise.existingSecret`. |

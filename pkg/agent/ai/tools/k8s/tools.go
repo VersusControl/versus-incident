@@ -234,7 +234,7 @@ func (tool *tool) Invoke(ctx context.Context, raw json.RawMessage) (*core.ToolRe
 		}
 	case "list_k8s_issues":
 		var result kubernetes.IssuePage
-		result, err = tool.service.Issues(ctx, kubernetes.IssueOptions{Namespace: args.Namespace, Severity: args.Severity, Kind: args.Kind, Limit: args.Limit, Cursor: args.Cursor})
+		result, err = tool.service.Issues(ctx, kubernetes.IssueOptions{Namespace: args.Namespace, Severity: args.Severity, Kind: args.Kind, Limit: args.Limit, Cursor: args.Cursor, Broken: args.Broken, IncludeChanges: args.Broken})
 		if err == nil {
 			data = compactIssues(result, tool.service.Scope(), args.Cursor)
 			found = len(result.Items) > 0
@@ -402,6 +402,7 @@ func appendClusterLinks(value any, clusterID string) {
 }
 
 type arguments struct {
+	Broken              bool   `json:"broken"`
 	Cluster             string `json:"cluster"`
 	ResourceID          string `json:"resource_id"`
 	Namespace           string `json:"namespace"`
@@ -576,6 +577,10 @@ func compactIssues(result kubernetes.IssuePage, scope kubernetes.Scope, cursor s
 	if len(items) > 15 {
 		items = items[:15]
 	}
+	if len(items) > 3 && items[0].History != "" {
+		items = items[:3]
+		truncated = true
+	}
 	for index := range items {
 		if len(items[index].Examples) > 2 {
 			items[index].Examples = items[index].Examples[:2]
@@ -585,11 +590,26 @@ func compactIssues(result kubernetes.IssuePage, scope kubernetes.Scope, cursor s
 		modelItems := make([]map[string]any, 0, len(items))
 		for _, issue := range items {
 			ref := "k8s://" + scope.ClusterID + "/" + issue.Root.Namespace + "/" + issue.Root.Kind + "/" + issue.Root.Name
-			modelItems = append(modelItems, map[string]any{
+			modelItem := map[string]any{
 				"root": issue.Root, "rule": issue.Rule, "severity": issue.Severity, "count": issue.Count,
 				"examples": issue.Examples, "first_seen": issue.FirstSeen, "last_seen": issue.LastSeen,
 				"ref": ref, "links": map[string]string{"ui": "/agent/kubernetes?r=" + url.QueryEscape(issue.Root.Kind+"/"+issue.Root.Namespace+"/"+issue.Root.Name)},
-			})
+			}
+			if issue.Broken {
+				modelItem["broken"] = true
+				modelItem["broke_at"] = issue.BrokeAt
+				modelItem["broke_at_source"] = issue.BrokeAtSource
+				modelItem["of"] = issue.Of
+				modelItem["evidence"] = issue.Evidence
+			}
+			if issue.History != "" {
+				modelItem["history"] = issue.History
+				modelItem["partial"] = issue.Partial
+				modelItem["rebuilt"] = issue.Rebuilt
+				modelItem["untracked"] = issue.Untracked
+				modelItem["changes"] = modelBreakChanges(issue)
+			}
+			modelItems = append(modelItems, modelItem)
 		}
 		next := result.Next
 		if len(items) < len(result.Items) {
@@ -597,7 +617,7 @@ func compactIssues(result kubernetes.IssuePage, scope kubernetes.Scope, cursor s
 			next = strconv.Itoa(start + len(items))
 		}
 		data := map[string]any{
-			"items": modelItems, "totals": result.Totals, "truncated": truncated,
+			"items": modelItems, "totals": result.Totals, "broken": result.Broken, "truncated": truncated,
 			"partial_failures": result.Partial, "sync": result.Sync,
 			"hint": "Use diagnose_k8s_workload to inspect one root workload.",
 		}
@@ -621,6 +641,19 @@ func compactIssues(result kubernetes.IssuePage, scope kubernetes.Scope, cursor s
 			truncated = true
 		}
 	}
+}
+
+func modelBreakChanges(issue kubernetes.Issue) []map[string]any {
+	result := []map[string]any{}
+	for _, linked := range issue.Changes[:min(3, len(issue.Changes))] {
+		change := linked.Change
+		result = append(result, map[string]any{"kind": change.Kind, "namespace": change.Namespace, "name": change.Name, "type": change.Type, "fields": change.Fields, "at": change.At, "relation": linked.Relation, "lead_seconds": linked.LeadSec})
+	}
+	return result
+}
+
+func modelBreak(issue kubernetes.Issue) map[string]any {
+	return map[string]any{"root": issue.Root, "rule": issue.Rule, "severity": issue.Severity, "count": issue.Count, "of": issue.Of, "broke_at": issue.BrokeAt, "broke_at_source": issue.BrokeAtSource, "changes": modelBreakChanges(issue), "more_changes": issue.MoreChanges, "evidence": issue.Evidence, "history": issue.History, "rebuilt": issue.Rebuilt, "untracked": issue.Untracked, "partial": issue.Partial}
 }
 
 func compactChanges(result kubernetes.ChangePage, scope kubernetes.Scope, cursor string) map[string]any {
@@ -1147,6 +1180,7 @@ func compactDiagnosis(result kubernetes.Diagnosis, scope kubernetes.Scope) map[s
 		changes = changes[:3]
 	}
 	for index := range changes {
+		changes[index].Source = ""
 		if len(changes[index].Fields) > 1 {
 			changes[index].Fields = changes[index].Fields[:1]
 		}
@@ -1185,6 +1219,9 @@ func compactDiagnosis(result kubernetes.Diagnosis, scope kubernetes.Scope) map[s
 			"ref":   "k8s://" + scope.ClusterID + "/" + result.Workload.Namespace + "/" + result.Workload.Kind + "/" + result.Workload.Name,
 			"links": map[string]string{"ui": "/agent/kubernetes?r=" + url.QueryEscape(result.Workload.Kind+"/"+result.Workload.Namespace+"/"+result.Workload.Name)},
 			"hint":  "Use get_workload_logs for more log lines; this bundle contains evidence only.",
+		}
+		if result.Break != nil {
+			data["break"] = modelBreak(*result.Break)
 		}
 		encoded, _ := json.Marshal(data)
 		if len(encoded) <= 6<<10 || len(logs) == 0 && len(events) == 0 && len(pods) == 0 && len(changes) == 0 && len(neighborhoodNodes) == 0 {

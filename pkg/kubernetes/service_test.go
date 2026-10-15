@@ -22,6 +22,29 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
 
+func TestServiceActiveScopePreservesCredentialEpoch(t *testing.T) {
+	configured := Scope{OrgID: "org-a", ClusterID: "cluster-a", CredentialID: "cred-a"}
+	service := NewService(&Client{}, configured, 0)
+	active := service.ActiveScope()
+	if service.Scope() != configured || active.OrgID != configured.OrgID || active.ClusterID != configured.ClusterID || active.CredentialID == "" || active.CredentialID == configured.CredentialID {
+		t.Fatal("active epoch must be distinct from the unchanged configured identity")
+	}
+	if service.indexScope().CredentialID != active.CredentialID {
+		t.Fatal("active scope must identify the service's actual storage epoch")
+	}
+	active.CredentialID = "other-credential"
+	if service.ActiveScope().CredentialID == active.CredentialID {
+		t.Fatal("changing the returned scope mutated the service")
+	}
+	scoped := service.Scoped(Scope{OrgID: "org-b", ClusterID: configured.ClusterID, CredentialID: configured.CredentialID})
+	if scoped.ActiveScope().OrgID != "org-b" || scoped.ActiveScope().CredentialID != service.ActiveScope().CredentialID || scoped.Scope().CredentialID != configured.CredentialID {
+		t.Fatal("org scoping did not preserve the active credential epoch")
+	}
+	if NewService(nil, configured, 0).ActiveScope() != configured || (*Service)(nil).ActiveScope() != (Scope{}) {
+		t.Fatal("clientless and nil scopes changed")
+	}
+}
+
 func TestOperationBudgetBoundsSlowPaginationWithoutLeakingGoroutines(t *testing.T) {
 	var pageRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -149,6 +172,35 @@ func TestServiceDiscoveryFallbackPaginationAndCache(t *testing.T) {
 	page, err := service.List(context.Background(), ListOptions{ResourceID: "core~v1~pods", Namespace: "default", Limit: 1})
 	if err != nil || !page.Truncated || page.Continue != "next" || len(page.Items) != 1 {
 		t.Fatalf("page = %#v err=%v", page, err)
+	}
+}
+
+func TestDiscoveryCleanupPreservesLiveCredentialContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{ClusterID: "test"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for attempt := 0; attempt < 2; attempt++ {
+		discovery, err := service.Discover(ctx)
+		if err != nil || len(discovery.Resources) != 1 || ctx.Err() != nil {
+			t.Fatalf("attempt=%d discovery=%#v parent=%v err=%v", attempt, discovery, ctx.Err(), err)
+		}
+	}
+	cancel()
+	if discovery, err := service.Discover(ctx); !errors.Is(err, context.Canceled) || len(discovery.Resources) != 0 {
+		t.Fatalf("canceled discovery=%#v err=%v", discovery, err)
 	}
 }
 
@@ -1485,7 +1537,8 @@ func podFixture(name string) map[string]any {
 			}},
 		},
 		"spec": map[string]any{
-			"nodeName": "node-a",
+			"nodeName":           "node-a",
+			"serviceAccountName": "default",
 			"containers": []any{map[string]any{
 				"name": "api", "env": []any{map[string]any{"name": "TOKEN", "value": "secret"}},
 			}},

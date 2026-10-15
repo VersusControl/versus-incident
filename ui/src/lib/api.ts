@@ -825,6 +825,8 @@ export interface ChatResourceAttachment {
   resource_id: string;
   namespace?: string;
   name: string;
+  uid?: string;
+  include_changes?: boolean;
 }
 
 export interface ChatAttachment {
@@ -1593,6 +1595,8 @@ export interface KubernetesClusterSummary {
   running_pods: number;
   warnings: number;
   issues?: number;
+  broken?: number;
+  last_change_at?: string;
   sync: { state: string };
   observed_at: string;
   error?: { code: string; message: string };
@@ -2214,18 +2218,37 @@ export interface KubernetesIssue {
   examples?: KubernetesObjectRef[];
   first_seen?: string;
   last_seen?: string;
+  broken?: boolean;
+  of?: number;
+  broke_at?: string;
+  broke_at_source?: string;
+  evidence?: {
+    terminations?: Array<{ reason: string; exit_code: number; count: number; last: string }>;
+    waiting?: Array<{ reason: string; count: number }>;
+    warning_events: number;
+    from: string;
+    to: string;
+  };
+  changes?: Array<{ change: KubernetesChange; relation: string; lead_seconds: number }>;
+  more_changes?: number;
+  history?: "complete" | "gap" | "reconstructed";
+  gaps?: Array<{ from: string; to: string }>;
+  rebuilt?: string[];
+  untracked?: string[];
+  partial?: boolean;
 }
 
 export interface KubernetesIssuePage {
   items: KubernetesIssue[];
   totals: Record<string, number>;
+  broken?: { total: number; by_severity: Record<string, number> };
   truncated: boolean;
   next?: string;
   partial_failures?: Array<{ resource_id?: string; class: string }>;
   sync: { state: string; age_s: number; partial: boolean };
 }
 
-export type KubernetesChangeType = "created" | "deleted" | "image_changed" | "replicas_changed" | "spec_changed";
+export type KubernetesChangeType = "created" | "deleted" | "image_changed" | "replicas_changed" | "spec_changed" | "rollout_started" | "rollout_completed" | "rollout_stalled" | "config_ref_changed" | "config_changed" | "warning_burst";
 
 export interface KubernetesChange {
   id: string;
@@ -2238,6 +2261,7 @@ export interface KubernetesChange {
   fields?: Array<{ path: string; from: string; to: string }>;
   at: string;
   service?: string;
+  source?: "observed" | "reconstructed";
 }
 
 export interface KubernetesChangesPage {
@@ -2609,7 +2633,7 @@ export function createKubernetesApi(cluster?: string) {
   return {
   kubernetesOverview: () => request<KubernetesOverview>("/api/admin/kubernetes/overview"),
   kubernetesOverviewGraph: () => request<KubernetesGraph>("/api/admin/kubernetes/graph/overview"),
-  kubernetesIssues: (options: { namespace?: string; severity?: string; kind?: string; limit?: number; cursor?: string } = {}) => {
+  kubernetesIssues: (options: { namespace?: string; severity?: string; kind?: string; limit?: number; cursor?: string; broken?: boolean; include?: "changes"; root_uid?: string } = {}) => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(options)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
