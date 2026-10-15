@@ -29,19 +29,35 @@ type changeStoreState struct {
 	provider     storage.Provider
 	stores       map[kubeindex.Scope]*kubechanges.Store
 	captureLocks map[kubeindex.Scope]*sync.Mutex
-	refreshes    map[kubeindex.Scope]*indexRefreshCall
+	refreshes    map[indexRefreshKey]*indexRefreshCall
+	fallbacks    map[kubeindex.Scope]map[*indexRefreshCall]struct{}
+	stopped      map[kubeindex.Scope]bool
+	captures     map[kubeindex.Scope]*captureLoop
+	lifecycle    context.Context
+	firstSeen    map[kubeindex.Scope]map[string]time.Time
+}
+
+type indexRefreshKey struct {
+	scope      kubeindex.Scope
+	background bool
 }
 
 type indexRefreshCall struct {
 	done      chan struct{}
 	requested map[string]struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
 func newChangeStoreState() *changeStoreState {
 	return &changeStoreState{
 		stores:       make(map[kubeindex.Scope]*kubechanges.Store),
 		captureLocks: make(map[kubeindex.Scope]*sync.Mutex),
-		refreshes:    make(map[kubeindex.Scope]*indexRefreshCall),
+		refreshes:    make(map[indexRefreshKey]*indexRefreshCall),
+		fallbacks:    make(map[kubeindex.Scope]map[*indexRefreshCall]struct{}),
+		stopped:      make(map[kubeindex.Scope]bool),
+		captures:     make(map[kubeindex.Scope]*captureLoop),
+		firstSeen:    map[kubeindex.Scope]map[string]time.Time{},
 	}
 }
 
@@ -51,6 +67,10 @@ func (service *Service) SetChangeStorage(provider storage.Provider) {
 		return
 	}
 	service.changes.mu.Lock()
+	if service.changes.provider == provider {
+		service.changes.mu.Unlock()
+		return
+	}
 	service.changes.provider = provider
 	service.changes.stores = make(map[kubeindex.Scope]*kubechanges.Store)
 	service.changes.captureLocks = make(map[kubeindex.Scope]*sync.Mutex)
@@ -87,6 +107,9 @@ func (service *Service) changeStore() *kubechanges.Store {
 
 // Changes returns the bounded timeline for the service's org/cluster scope.
 func (service *Service) Changes(ctx context.Context, query ChangeQuery) (ChangePage, error) {
+	if err := service.validateCredential(ctx); err != nil {
+		return ChangePage{}, err
+	}
 	if service == nil {
 		return ChangePage{}, ErrInvalidArguments
 	}
@@ -119,6 +142,9 @@ func (service *Service) Changes(ctx context.Context, query ChangeQuery) (ChangeP
 	}
 	page, err := store.Query(query, time.Now().UTC())
 	if err != nil {
+		return ChangePage{}, err
+	}
+	if err := service.validateCredential(ctx); err != nil {
 		return ChangePage{}, err
 	}
 	if refreshed.State == "" {

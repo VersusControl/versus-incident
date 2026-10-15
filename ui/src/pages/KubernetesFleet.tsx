@@ -41,7 +41,7 @@ export function KubernetesFleet({ clusters, notice, retry, retrying }: { cluster
             <div className="pointer-events-none relative"><FleetRatio label="Ready nodes" part={cluster.ready_nodes} total={cluster.nodes} unavailable={cluster.health === "unreachable"} /></div>
             <div className="pointer-events-none relative"><FleetRatio label="Running pods" part={cluster.running_pods} total={cluster.pods} unavailable={cluster.health === "unreachable"} /></div>
             <div className="pointer-events-none relative space-y-1 text-xs text-ink-300">
-              {cluster.health === "unreachable" ? <span>Unavailable</span> : <><p className={cluster.warnings > 0 ? "text-sev-warning" : undefined}>{cluster.warnings} warnings</p><p>{cluster.issues === undefined ? "Issues unavailable" : `${cluster.issues} issues`}</p></>}
+              {cluster.health === "unreachable" ? <span>Unavailable</span> : <><p className={cluster.warnings > 0 ? "text-sev-warning" : undefined}>{cluster.warnings} warnings</p>{typeof cluster.broken === "number" && cluster.broken > 0 && <p className="text-sev-critical">{cluster.broken} broken</p>}{cluster.last_change_at && Number.isFinite(Date.parse(cluster.last_change_at)) && <p>Last change {Math.max(0, Math.floor((Date.now() - Date.parse(cluster.last_change_at)) / 60_000))} min ago</p>}</>}
             </div>
             <div className="pointer-events-none relative min-w-0 space-y-1 text-2xs text-ink-300">
               <p className="break-words capitalize">{cluster.sync.state}</p>

@@ -420,6 +420,7 @@ connectors:
     credentialID: ""
     timeout: "10s"
     discoveryTTL: "5m"
+    changeCapture: "continuous"
     allowPrivateNetworks: false
     endpointCIDRs: []
     auth:

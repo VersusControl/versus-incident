@@ -2,10 +2,11 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as https from "node:https";
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { openApp } from "./helpers";
-import type { KubernetesClusters, KubernetesGraph, KubernetesOverview, KubernetesResourcePage, KubernetesTopPage, KubernetesTraffic, KubernetesUsage, RbacMe, SSOSession } from "../../src/lib/api";
+import type { KubernetesClusters, KubernetesGraph, KubernetesIssue, KubernetesOverview, KubernetesResourcePage, KubernetesTopPage, KubernetesTraffic, KubernetesUsage, RbacMe, SSOSession } from "../../src/lib/api";
 
 type StreamCounter = { path: string; container: string; previous: boolean; follow: boolean; requests: number; active: number; cancelled: number; completed: number; disconnected: number; unavailable: number; chunks: number; since_time?: string };
 
@@ -240,10 +241,15 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
   });
 }
 
-for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: "mobile", width: 390, height: 844 }]) {
-  test.describe(`Kubernetes multi-cluster live ${viewport.name}`, () => {
+for (const viewport of [{ name: "desktop", width: 1440, height: 900 }, { name: "mobile", width: 390, height: 844 }].flatMap((size) =>
+  (["light", "dark"] as const).map((theme) => ({ ...size, theme })))) {
+  test.describe(`Kubernetes multi-cluster live ${viewport.name} ${viewport.theme}`, () => {
     test.use({ viewport: { width: viewport.width, height: viewport.height } });
     test.skip(process.env.E2E_KUBERNETES_MULTIPLE !== "1", "requires the live multi-cluster harness fixture");
+    test.beforeEach(async ({ page }) => {
+      await page.emulateMedia({ colorScheme: viewport.theme });
+      await page.addInitScript((theme) => localStorage.setItem("versus.theme", theme), viewport.theme);
+    });
 
     test("fleet cards, switching, deep links, and scoped reads", async ({ page }) => {
       const requests: string[] = [];
@@ -251,6 +257,7 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
         if (new URL(request.url()).pathname.startsWith("/api/admin/kubernetes/")) requests.push(request.url());
       });
       await openApp(page, "/agent/kubernetes");
+      await expect.poll(() => page.locator("html").getAttribute("data-theme")).toBe(viewport.theme === "light" ? "light" : null);
       const catalogResponse = await page.request.get("/api/admin/kubernetes/clusters");
       expect(catalogResponse.status()).toBe(200);
       const catalog: KubernetesClusters = await catalogResponse.json();
@@ -308,11 +315,11 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
           await rows.evaluate((region) => { region.scrollLeft = 0; });
         }
         fs.mkdirSync(screenshotDir, { recursive: true });
-        await page.screenshot({ path: path.join(screenshotDir, `fleet-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+        await page.screenshot({ path: path.join(screenshotDir, `fleet-${viewport.name}-${viewport.theme}.png`), fullPage: true, animations: "disabled" });
         if (viewport.name === "desktop") {
           await page.setViewportSize({ width: 1600, height: viewport.height });
           expect(await rows.evaluate((region) => region.scrollWidth > region.clientWidth)).toBe(false);
-          await page.screenshot({ path: path.join(screenshotDir, "fleet-rows-wide-desktop.png"), fullPage: true, animations: "disabled" });
+          await page.screenshot({ path: path.join(screenshotDir, `fleet-rows-wide-desktop-${viewport.theme}.png`), fullPage: true, animations: "disabled" });
           await page.setViewportSize({ width: viewport.width, height: viewport.height });
         }
       }
@@ -320,14 +327,26 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
       await expect(page.getByRole("combobox", { name: "Cluster", exact: true })).toHaveValue(first.id);
       await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible();
       if (process.env.E2E_KUBERNETES_CAPTURE_DIR) {
-        await expect(page.getByLabel("Cluster resource counts").locator("dd").filter({ hasText: /^[1-9]\d*$/ })).not.toHaveCount(0);
+        await expect(page.getByRole("region", { name: "Break timeline", exact: true }).getByRole("button", { name: /^Broken / })).toBeVisible();
         await expect(page.getByRole("status").filter({ hasText: /Loading/i })).toHaveCount(0);
         expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
-        await page.screenshot({ path: path.join(screenshotDir, `cluster-dashboard-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+        await page.screenshot({ path: path.join(screenshotDir, `cluster-dashboard-${viewport.name}-${viewport.theme}.png`), fullPage: true, animations: "disabled" });
       }
+      const diagnostics = page.getByRole("region", { name: "Break timeline", exact: true });
+      const firstWarnings = diagnostics.getByRole("button", { name: /^Warnings \(\d+\)$/ });
+      await expect(firstWarnings).toHaveAttribute("aria-expanded", "false");
+      await firstWarnings.click();
+      await expect(firstWarnings).toHaveAttribute("aria-expanded", "true");
+      await page.getByRole("combobox", { name: "Cluster", exact: true }).selectOption(second.id);
+      await expect(page.getByRole("combobox", { name: "Cluster", exact: true })).toHaveValue(second.id);
+      await expect(diagnostics.getByRole("button", { name: /^Warnings \(\d+\)$/ })).toHaveAttribute("aria-expanded", "false");
+      await page.getByRole("combobox", { name: "Cluster", exact: true }).selectOption(first.id);
+      await expect(page.getByRole("combobox", { name: "Cluster", exact: true })).toHaveValue(first.id);
+      await expect(diagnostics.getByRole("button", { name: /^Warnings \(\d+\)$/ })).toHaveAttribute("aria-expanded", "false");
       await page.getByRole("tab", { name: "Nodes", exact: true }).click();
       const switched = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/overview") && new URL(response.url()).searchParams.get("cluster") === second.id);
       await page.getByRole("combobox", { name: "Cluster", exact: true }).selectOption(second.id);
+      await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
       expect((await (await switched).json()).cluster_id).toBe(second.id);
       await expect(page).toHaveURL(new RegExp(`cluster=${second.id}.*view=nodes`));
       await expect(page.getByRole("region", { name: "Nodes", exact: true })).toBeVisible();
@@ -448,6 +467,40 @@ async function expectNoTopologyPagination(panel: Locator) {
 }
 
 const screenshotDir = process.env.E2E_KUBERNETES_CAPTURE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "screenshots", "kubernetes", "fakekube");
+
+async function fitOverviewCapture(page: Page) {
+  const measurements = [];
+  while (true) {
+    const size = await page.locator("main").evaluate((main) => ({ height: innerHeight, scrollHeight: main.scrollHeight, clientHeight: main.clientHeight, chrome: innerHeight - main.clientHeight }));
+    measurements.push(size);
+    if (size.scrollHeight <= size.clientHeight + 1) break;
+    const requiredHeight = Math.ceil(size.scrollHeight + size.chrome + 2);
+    expect(requiredHeight).toBeGreaterThan(size.height);
+    await page.setViewportSize({ width: 1440, height: requiredHeight });
+  }
+  await page.locator("main").evaluate((main) => { main.scrollTop = 0; });
+  return measurements;
+}
+
+async function captureBreakState(page: Page, filename: string, theme: "dark" | "light") {
+  const proof = await page.evaluate((expected) => {
+    const background = getComputedStyle(document.body).backgroundColor;
+    const storedTheme = localStorage.getItem("versus.theme");
+    if (expected === "dark" && storedTheme === "dark" && background === "rgb(13, 17, 24)") document.documentElement.setAttribute("data-theme", "dark");
+    return { storedTheme, theme: document.documentElement.getAttribute("data-theme"), background, font: getComputedStyle(document.body).fontFamily, viewport: { width: innerWidth, height: innerHeight } };
+  }, theme);
+  expect(proof.storedTheme).toBe(theme);
+  expect(proof.theme).toBe(theme);
+  if (theme === "dark") expect(proof.background).toBe("rgb(13, 17, 24)");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  fs.mkdirSync(screenshotDir, { recursive: true });
+  const image = await page.screenshot({ path: path.join(screenshotDir, filename), animations: "disabled" });
+  const manifestPath = path.join(screenshotDir, "manifest.json");
+  const manifest = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { images: Record<string, unknown> } : { images: {} };
+  manifest.images[filename] = { classification: "F: synthetic API-intercepted UI fixture, not live-cluster acceptance", spec: "tests/e2e/kubernetes-overview.spec.ts", config: "tests/e2e/playwright.config.ts", sha256: createHash("sha256").update(image).digest("hex"), ...proof };
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  return proof;
+}
 const defaultKinds = ["Ingress", "Service", "Deployment", "Pod"];
 
 test.beforeEach(async ({ request }, testInfo) => {
@@ -814,20 +867,53 @@ test.describe("Kubernetes documentation consumer", () => {
       await expect(page.getByRole("heading", { name: "Kubernetes Connector and Dashboard", exact: true })).toBeVisible();
       for (const name of ["overview", "issues", "resources", "timeline", "helm", "gitops", "traffic", "namespaces", "topology"]) {
         const image = page.locator(`.markdown-section img[src$="kubernetes-harness-${name}.png"]`);
+        expect((await page.request.get(new URL(await image.getAttribute("src") as string, page.url()).href)).status()).toBe(200);
         await image.scrollIntoViewIfNeeded();
         await expect(image).toBeVisible();
         await expect.poll(() => image.evaluate((element) => {
           const bitmap = element as HTMLImageElement;
           return bitmap.complete && bitmap.naturalWidth > 0 && bitmap.naturalHeight > 0;
         })).toBe(true);
+        if (name === "overview") {
+          await expect(image).toHaveAttribute("alt", /Full dark Overview.*populated synthetic/);
+          const bitmap = await image.evaluate((element) => {
+            const image = element as HTMLImageElement;
+            const bounds = image.getBoundingClientRect();
+            return { width: image.naturalWidth, height: image.naturalHeight, left: bounds.left, right: bounds.right, viewport: innerWidth };
+          });
+          expect(bitmap.width).toBe(1440);
+          expect(bitmap.height).toBeGreaterThan(900);
+          expect(bitmap.left).toBeGreaterThanOrEqual(0);
+          expect(bitmap.right).toBeLessThanOrEqual(bitmap.viewport);
+        }
+        if (["overview", "issues", "timeline"].includes(name)) {
+          fs.mkdirSync(screenshotDir, { recursive: true });
+          await page.screenshot({ path: path.join(screenshotDir, `docs-consumer-${name}-${viewport.name}.png`), animations: "disabled" });
+        }
       }
       const nodes = await page.request.get(`${target.origin}/docs/images/kubernetes-harness-nodes.png`);
       expect(nodes.ok(), "new node illustration must be available for the documentation owner").toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
       fs.mkdirSync(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `docs-consumer-${viewport.name}.png`), fullPage: true, animations: "disabled" });
-      await page.goto(`${target.origin}/#/agent/tools/kubernetes`);
-      await expect(page.getByRole("heading", { name: "Kubernetes Connector and Dashboard", exact: true })).toBeVisible();
+      await page.locator(".markdown-section").getByRole("link", { name: "Configuration", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Kubernetes Configuration", exact: true })).toBeVisible();
+      await expect(page).toHaveURL(/agent\/kubernetes\/configuration$/);
+      await page.goto(`${target.origin}/#/agent/kubernetes/multi-cluster`);
+      await expect(page.getByRole("heading", { name: "Kubernetes Multi-Cluster", exact: true })).toBeVisible();
+      const fleet = page.locator('.markdown-section img[src$="kubernetes-multi-cluster.png"]');
+      await fleet.scrollIntoViewIfNeeded();
+      expect((await page.request.get(new URL(await fleet.getAttribute("src") as string, page.url()).href)).status()).toBe(200);
+      await expect.poll(() => fleet.evaluate((element) => (element as HTMLImageElement).complete && (element as HTMLImageElement).naturalWidth > 0)).toBe(true);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+      await page.screenshot({ path: path.join(screenshotDir, `docs-consumer-fleet-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+      await page.goto(`${target.origin}/#/agent/kubernetes/configuration?id=change-capture`);
+      await expect(page.getByRole("heading", { name: "Kubernetes Configuration", exact: true })).toBeAttached();
+      await expect(page.getByRole("heading", { name: "Change capture", exact: true })).toBeInViewport();
+      await expect(page.locator(".markdown-section")).toContainText("change_capture");
+      await expect(page.locator(".markdown-section")).toContainText("changeCapture");
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+      await page.screenshot({ path: path.join(screenshotDir, `docs-consumer-capture-${viewport.name}.png`), animations: "disabled" });
     });
 
     test(`reveals active documentation item on navigation and reload ${viewport.name}`, async ({ page }) => {
@@ -2060,15 +2146,59 @@ test.describe("Live Pod stream acceptance", () => {
 test.describe("Pod log streaming fixtures", () => {
   test.beforeEach(async ({ page }, testInfo) => {
     const overviewRefresh = testInfo.title.startsWith("Overview refresh");
+    const breakTimeline = testInfo.title.startsWith("Break timeline");
+    const fullOverview = testInfo.title === "Break timeline full populated dark Overview documentation";
+    const overviewCounts = { Namespace: 3, Node: 12, Ingress: 2, Gateway: 1, HTTPRoute: 3, Service: 9, Deployment: 3, ReplicaSet: 6, StatefulSet: 1, DaemonSet: 1, Job: 2, CronJob: 1, Pod: 28, HorizontalPodAutoscaler: 2, ConfigMap: 12, Secret: 8, PersistentVolumeClaim: 4, Event: 26 };
+    if (breakTimeline) await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+    const fullRootHistory = testInfo.title.startsWith("Break timeline full related history");
+    const diagnostics = testInfo.title.includes("secondary diagnostics");
+    const coldHistory = testInfo.title.includes("collapsed issue uncertainty");
+    const denialEdge = testInfo.title.match(/final edge (initial|cached) denial (401|403|404)/);
+    const syncEdge = testInfo.title.match(/final edge (overview|enrichment) SourceSync (stale|partial|unknown)/);
+    let edgeRootReads = 0;
+    const failures = diagnostics ? [{ resource_id: "ConfigMap", class: "forbidden" }, { resource_id: "ConfigMap", class: "forbidden" }] : [];
+    const multiClusterBreak = breakTimeline && testInfo.title.includes("multi-cluster");
     const changeAt = new Date(Date.now() - 60_000).toISOString();
+    const at = (minutes: number) => new Date((fullOverview ? Date.parse("2026-10-15T12:00:00Z") : Date.now()) - minutes * 60_000).toISOString();
+    const roots: KubernetesIssue[] = [
+      { root: { kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout-uid" }, rule: "pod.crash_loop", severity: "critical", count: 7, of: 7, broken: true, broke_at: at(5), history: "complete", changes: [
+        { change: { id: "scale", cluster: "fixture", kind: "HorizontalPodAutoscaler", namespace: "shop", name: "checkout-hpa", uid: "hpa-uid", type: "replicas_changed", fields: [{ path: "replicas", from: "6", to: "7" }], at: at(7) }, relation: "scaled_by", lead_seconds: 120 },
+        { change: { id: "config", cluster: "fixture", kind: "ConfigMap", namespace: "shop", name: "checkout-cfg", uid: "cfg-uid", type: "config_changed", at: at(8) }, relation: "used_by", lead_seconds: 180 },
+        { change: { id: "image", cluster: "fixture", kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout-uid", type: "image_changed", fields: [{ path: "image", from: "v41", to: "v42" }], at: at(9) }, relation: "same_object", lead_seconds: 240 },
+      ], evidence: { terminations: [{ reason: "OOMKilled", exit_code: 137, count: 6, last: at(2) }, { reason: "Error", exit_code: 1, count: 1, last: at(1) }], warning_events: 18, from: at(35), to: at(3) } },
+      { root: { kind: "Deployment", namespace: "payments", name: "ledger-api", uid: "ledger-uid" }, rule: "workload.rollout_stalled", severity: "warning", count: 2, of: 4, broken: true, broke_at: at(4), history: "reconstructed", rebuilt: ["image"], gaps: [{ from: at(34), to: at(8) }], changes: [{ change: { id: "ledger-image", cluster: "fixture", kind: "Deployment", namespace: "payments", name: "ledger-api", uid: "ledger-uid", type: "image_changed", fields: [{ path: "image", from: "v17", to: "v18" }], source: "reconstructed", at: at(10) }, relation: "same_object", lead_seconds: 360 }], evidence: { waiting: [{ reason: "ImagePullBackOff", count: 2 }], warning_events: 8, from: at(34), to: at(2) } },
+      { root: { kind: "DaemonSet", namespace: "kube-system", name: "node-agent", uid: "node-agent-uid" }, rule: "workload.unavailable", severity: "critical", count: 7, of: 12, broken: true, broke_at: at(3), history: "complete", untracked: ["Secret"], evidence: { warning_events: 0, from: at(33), to: at(1) } },
+    ];
+    const linkedHistory = Array.from({ length: 24 }, (_, index) => ({ id: `linked-${index}`, cluster: "fixture", kind: "ConfigMap", namespace: "shop", name: `checkout-settings-${index}`, uid: `config-${index}`, type: "config_changed" as const, at: at(7 + index / 10) }));
+    if (testInfo.title.includes("label and stack geometry")) {
+      const image = roots[0].changes!.find((item) => item.change.id === "image")!;
+      roots[0].changes!.push(...[1, 2].map((index) => ({ ...image, change: { ...image.change, id: `image-stack-${index}` } })), { ...image, change: { ...image.change, id: "rollback", at: at(-11), fields: [{ path: "image", from: "v42", to: "v41" }] } });
+    }
+    if (denialEdge) {
+      roots[0].history = "reconstructed";
+      roots[0].rebuilt = ["image"];
+      roots[0].untracked = ["Secret"];
+    }
+    if (syncEdge) roots[0] = { ...roots[0], changes: [], history: "complete", evidence: undefined };
+    if (fullRootHistory) {
+      roots[0].changes = linkedHistory.slice(0, 3).map((change) => ({ change, relation: "used_by", lead_seconds: 120 }));
+      roots[0].more_changes = 21;
+    }
     const pod = { resource_id: "core~v1~pods", kind: "Pod", namespace: "payments", name: "checkout-api-0", summary: { phase: "Running", log_containers: [{ name: "app", type: "regular" }, { name: "setup", type: "init" }, { name: "debug", type: "ephemeral" }] } };
     const deployment = { resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "payments", name: "checkout-api", summary: { ready_replicas: 1, desired_replicas: 1 } };
-    await page.addInitScript(() => {
+    await page.addInitScript((counts) => {
       const signals: Array<{ url: string; aborted: boolean }> = [];
       Object.defineProperty(window, "podStreamSignals", { value: signals });
       const original = window.fetch;
       window.fetch = (input, init) => {
         const url = String(input);
+        if (counts && url.includes("/kubernetes/stream?")) {
+          const sync = { state: "ready", age_s: 0, partial: false, kinds: Object.fromEntries(Object.entries(counts).map(([kind, records]) => [kind, { state: "ready", observed_at: "2026-10-15T12:00:00Z", records, partial: false }])) };
+          return Promise.resolve(new Response(new ReadableStream({ start(controller) {
+            controller.enqueue(new TextEncoder().encode(`event: sync\ndata: ${JSON.stringify(sync)}\n\n`));
+            init?.signal?.addEventListener("abort", () => controller.close(), { once: true });
+          } }), { headers: { "Content-Type": "text/event-stream" } }));
+        }
         if (url.includes("/logs/stream")) {
           const entry = { url, aborted: false };
           signals.push(entry);
@@ -2076,17 +2206,70 @@ test.describe("Pod log streaming fixtures", () => {
         }
         return original(input, init);
       };
-    });
+    }, fullOverview ? overviewCounts : null);
     await page.route("**/api/**", async (route) => {
       const url = new URL(route.request().url());
       const pathname = url.pathname;
+      if (fullOverview) {
+        const observedAt = "2026-10-15T12:00:00Z";
+        const counts = overviewCounts;
+        const sync = { state: "ready", age_s: 0, partial: false, kinds: Object.fromEntries(Object.entries(counts).map(([kind, records]) => [kind, { state: "ready", observed_at: observedAt, records, partial: false }])) };
+        const pods = [
+          { kind: "Pod" as const, namespace: "shop", name: "checkout-7f8c9-2kx4m", cpu: "1850m", memory: "1536Mi", request_cpu: "2", request_memory: "2Gi", window: "30s" },
+          { kind: "Pod" as const, namespace: "payments", name: "ledger-api-6b7d9-p8n2q", cpu: "1240m", memory: "1024Mi", request_cpu: "1500m", request_memory: "2Gi", window: "30s" },
+          { kind: "Pod" as const, namespace: "shop", name: "cart-58c9f-v6j3r", cpu: "820m", memory: "768Mi", request_cpu: "1", request_memory: "1Gi", window: "30s" },
+          { kind: "Pod" as const, namespace: "kube-system", name: "node-agent-l4w7s", cpu: "430m", memory: "384Mi", request_cpu: "500m", request_memory: "512Mi", window: "30s" },
+          { kind: "Pod" as const, namespace: "payments", name: "redis-0", cpu: "260m", memory: "512Mi", request_cpu: "500m", request_memory: "1Gi", window: "30s" },
+        ];
+        if (pathname === "/api/admin/kubernetes/overview") return route.fulfill({ json: { connector: "kubernetes", cluster_id: "fixture", observed_at: observedAt, nodes: 12, ready_nodes: 12, pods: 28, running_pods: 19, namespaces: 3, active_namespaces: 3, workloads: 9, warnings: 26, requested_cpu: "24", limited_cpu: "48", allocatable_cpu: "46", requested_memory: "64Gi", limited_memory: "128Gi", allocatable_memory: "180Gi", metrics_fresh: true, truncated: false } satisfies KubernetesOverview });
+        if (pathname === "/api/admin/kubernetes/usage") return route.fulfill({ json: { observed_at: observedAt, availability: "available", fresh: true, truncated: false, pods, nodes: [], node_metrics: { availability: "available", fresh: true, complete: true, total: 12, cpu: "18400m", memory: "72Gi", observed_at: observedAt }, pod_metrics: { availability: "available", fresh: true, complete: true, total: 28, cpu: "14600m", memory: "48Gi", observed_at: observedAt } } satisfies KubernetesUsage });
+        if (pathname === "/api/admin/kubernetes/top") return route.fulfill({ json: { items: pods, total: 28, availability: "available", fresh: true, truncated: false, sync } satisfies KubernetesTopPage });
+        if (pathname === "/api/admin/kubernetes/releases") return route.fulfill({ json: { items: [{ namespace: "shop", name: "checkout", health: "degraded", current: { revision: 42, status: "failed" }, history: [] }, { namespace: "payments", name: "ledger-api", health: "degraded", current: { revision: 18, status: "pending-upgrade" }, history: [] }, { namespace: "kube-system", name: "observability", health: "healthy", current: { revision: 12, status: "deployed" }, history: [] }], truncated: false } });
+        if (pathname === "/api/admin/kubernetes/traffic") return route.fulfill({ json: { available: true, source: "synthetic-enterprise-istio", window: "15m", observed_at: observedAt, unmapped: 0, truncated: false, edges: [
+          { from: { namespace: "shop", kind: "Service", name: "gateway" }, to: { namespace: "shop", kind: "Service", name: "checkout" }, rate_per_sec: 428.6, error_rate: 0.034, p95_ms: 186, bytes_per_sec: 245760 },
+          { from: { namespace: "shop", kind: "Service", name: "checkout" }, to: { namespace: "payments", kind: "Service", name: "ledger-api" }, rate_per_sec: 216.4, error_rate: 0.012, p95_ms: 84, bytes_per_sec: 131072 },
+          { from: { namespace: "shop", kind: "Service", name: "cart" }, to: { namespace: "payments", kind: "Service", name: "redis" }, rate_per_sec: 128.8, error_rate: 0.002, p95_ms: 12, bytes_per_sec: 65536 },
+        ] } satisfies KubernetesTraffic });
+        if (pathname === "/api/admin/kubernetes/stream") return route.fulfill({ contentType: "text/event-stream", body: `event: sync\ndata: ${JSON.stringify(sync)}\n\nevent: heartbeat\ndata: {}\n\n` });
+        if (pathname === "/api/admin/kubernetes/index/status") return route.fulfill({ json: sync });
+      }
       if (pathname.endsWith("/logs/stream")) {
         if (url.searchParams.get("previous") === "true") return route.fulfill({ contentType: "text/event-stream", body: 'event: error\ndata: {"code":"previous_unavailable","message":"Previous logs unavailable"}\n\nevent: end\ndata: {"reason":"error"}\n\n' });
         const prefix = url.searchParams.get("timestamps") === "false" ? "" : "2026-10-07T12:00:00Z ";
         const lines = Array.from({ length: 300 }, (_, index) => `event: line\ndata: ${JSON.stringify({ text: prefix + (index % 2 ? "repeated token=[REDACTED] a.b" : "repeated axb"), container: url.searchParams.get("container") || "app", timestamp: "2026-10-07T12:00:00Z", sequence: index + 1, ordinal: index + 1, ...((index + 1) % 32 === 0 ? { cursor: `cursor-${index + 1}` } : {}) })}\n\n`).join("");
         return route.fulfill({ contentType: "text/event-stream", body: `event: heartbeat\ndata: {}\n\n${lines}event: heartbeat\ndata: {"cursor":"cursor-300"}\n\nevent: end\ndata: {"reason":"complete","cursor":"cursor-300"}\n\n` });
       }
-      if (pathname === "/api/admin/config/agent") return route.fulfill({ json: { enable: false, mode: "shadow", sources: [], ai: { enable: false }, catalog: {}, miner: {}, regex: { rules: [] }, redaction: {}, service_patterns: [] } });
+      if (pathname === "/api/admin/config/agent") return route.fulfill({ json: { enable: breakTimeline, mode: "shadow", sources: [], ai: { enable: breakTimeline }, catalog: {}, miner: {}, regex: { rules: [] }, redaction: {}, service_patterns: [] } });
+      if (multiClusterBreak && pathname === "/api/admin/kubernetes/clusters") return route.fulfill({ json: { multiple: true, clusters: ["east", "west"].map((id) => ({ id, provider: "generic", health: "attention", nodes: 12, ready_nodes: 12, pods: 28, running_pods: 19, warnings: 26, broken: 3, ...(testInfo.title.includes("fleet documentation") ? { last_change_at: id === "east" ? at(9) : "invalid-timestamp" } : {}), sync: { state: "ready" }, observed_at: new Date().toISOString() })) } });
+      if (breakTimeline && pathname === "/api/admin/kubernetes/overview") return route.fulfill({ json: { connector: "kubernetes", cluster_id: "fixture", observed_at: new Date().toISOString(), nodes: 12, ready_nodes: 12, pods: 28, running_pods: 19, namespaces: 3, active_namespaces: 3, workloads: 4, warnings: 26, truncated: diagnostics, omitted_categories: diagnostics ? ["ConfigMap"] : [], partial_failures: failures } });
+      if (breakTimeline && pathname === "/api/admin/kubernetes/issues") {
+        const rootLookup = url.searchParams.has("root_uid");
+        if (denialEdge && rootLookup && (++edgeRootReads > 1 || denialEdge[1] === "initial")) return route.fulfill({ status: Number(denialEdge[2]), json: { error: "Synthetic root lookup denied" } });
+        const cart: KubernetesIssue = { root: { kind: "Deployment", namespace: "shop", name: "cart", uid: "cart-uid" }, rule: "event.warning", severity: "warning", count: 1, first_seen: at(1), history: "gap" };
+        let items = url.searchParams.has("root_uid") ? [...roots, cart].filter((issue) => issue.root.uid === url.searchParams.get("root_uid") && issue.root.namespace === url.searchParams.get("namespace")) : url.searchParams.get("broken") === "true" ? roots : [...roots, cart];
+        if (url.searchParams.get("severity")) items = items.filter((issue) => issue.severity === url.searchParams.get("severity"));
+        if (url.searchParams.get("namespace")) items = items.filter((issue) => issue.root.namespace === url.searchParams.get("namespace"));
+        const paged = !url.searchParams.has("root_uid") && !url.searchParams.has("broken") && !url.searchParams.get("severity") && !url.searchParams.get("namespace");
+        if (url.searchParams.get("cursor")) items = [cart];
+        items = items.map((issue) => ({ ...issue, changes: issue.changes?.map((item) => ({ ...item, change: { ...item.change, cluster: url.searchParams.get("cluster") || "fixture" } })) }));
+        if (coldHistory && !url.searchParams.has("root_uid") && !url.searchParams.has("broken")) items = items.map((issue) => issue.root.uid === "checkout-uid" ? { ...issue, history: undefined, changes: undefined, evidence: undefined } : issue);
+        if (denialEdge && !rootLookup) items = items.map((issue) => issue.root.uid === "checkout-uid" ? { ...issue, history: undefined, rebuilt: undefined, changes: undefined, evidence: undefined } : issue);
+        const adverseSync = syncEdge && (syncEdge[1] === "overview" ? !rootLookup : rootLookup);
+        const sync = adverseSync ? { state: syncEdge[2] === "partial" ? "ready" : syncEdge[2], age_s: 4, partial: syncEdge[2] === "partial" } : { state: "ready", age_s: 4, partial: diagnostics };
+        return route.fulfill({ json: { items, totals: { critical: 2, warning: 2 }, broken: { total: 3, by_severity: { critical: 2, warning: 1 } }, ...(paged && !url.searchParams.get("cursor") ? { next: "issues-next" } : {}), truncated: false, partial_failures: failures, sync } });
+      }
+      if (breakTimeline && pathname === "/api/admin/kubernetes/changes") {
+        const cursor = url.searchParams.get("cursor");
+        const scoped = Boolean(url.searchParams.get("namespace"));
+        const unrelated = Array.from({ length: 20 }, (_, index) => ({ ...linkedHistory[0], id: `unrelated-${cursor}-${index}`, uid: `unrelated-${index}`, name: `unrelated-${index}`, at: at(1) }));
+        const items = fullRootHistory && scoped ? !cursor || cursor === "unrelated" ? unrelated : cursor === "linked" ? linkedHistory.slice(0, 20) : linkedHistory.slice(20) : roots.flatMap((issue) => issue.changes?.map((item) => item.change) ?? []);
+        const next = fullRootHistory && scoped ? !cursor ? "unrelated" : cursor === "unrelated" ? "linked" : cursor === "linked" ? "last" : undefined : undefined;
+        return route.fulfill({ json: { items: items.map((change) => ({ ...change, cluster: url.searchParams.get("cluster") || "fixture" })), next, gaps: diagnostics ? [{ from: at(30), to: at(20) }] : [], partial_failures: failures, sync: { state: "ready", age_s: 4, partial: diagnostics } } });
+      }
+      if (breakTimeline && pathname === "/api/admin/kubernetes/graph") {
+        const changes = fullRootHistory ? linkedHistory : roots[0].changes!.map((item) => item.change);
+        return route.fulfill({ json: { nodes: [{ id: "checkout-uid", kind: "Deployment", namespace: "shop", name: "checkout", group: "shop" }, ...changes.filter((change) => change.uid !== "checkout-uid").map((change) => ({ id: change.uid, kind: change.kind, namespace: change.namespace, name: change.name, group: "shop" }))], edges: changes.filter((change) => change.uid !== "checkout-uid").map((change) => ({ from: change.uid, to: "checkout-uid", type: change.kind === "HorizontalPodAutoscaler" ? "scales" : "configures" })), omitted: {}, sync: { state: "ready", age_s: 0, partial: false } } });
+      }
       if (pathname === "/api/admin/kubernetes/overview") return route.fulfill({ json: { connector: "kubernetes", cluster_id: "fixture", observed_at: "2026-10-07T12:00:00Z", nodes: 1, ready_nodes: 1, pods: 1, running_pods: 1, namespaces: 1, active_namespaces: 1, workloads: 1, warnings: 0, truncated: false } });
       if (pathname === "/api/admin/kubernetes/usage") return route.fulfill({ json: { observed_at: "2026-10-07T12:00:00Z", availability: "unavailable", fresh: false, pods: [], nodes: [], truncated: false } });
       if (pathname === "/api/admin/kubernetes/top") return route.fulfill({ json: { items: [], total: 0, truncated: false, availability: "unavailable", fresh: false, sync: { state: "ready", partial: false, age_s: 0 } } });
@@ -2103,7 +2286,535 @@ test.describe("Pod log streaming fixtures", () => {
     });
   });
 
+  test("Break timeline full populated dark Overview documentation", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.clock.install({ time: new Date("2026-10-15T12:00:00Z") });
+    await page.emulateMedia({ colorScheme: "dark" });
+    await openApp(page, "/agent/kubernetes?view=overview");
+    await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Expand sidebar", exact: true })).toBeVisible();
+    const timeline = page.getByRole("region", { name: "Break timeline", exact: true });
+    await expect(timeline.getByRole("article")).toHaveCount(3);
+    await expect(timeline).toContainText("OOMKilled ×6");
+    await expect(timeline).toContainText("v41 → v42");
+    await expect(timeline).toContainText("ledger-api");
+    await expect(timeline).toContainText("node-agent");
+    const names = ["Cluster health", "Break timeline", "CPU capacity", "Memory capacity", "Triage summary", "Top pod usage", "Helm releases", "Overview topology", "Service traffic"];
+    const cardFor = (name: string) => ["Cluster health", "Break timeline", "Triage summary", "Overview topology"].includes(name) ? page.getByRole("region", { name, exact: true }) : page.getByRole("heading", { name, exact: true }).locator("..").locator("..");
+    const cards = names.map(cardFor);
+    for (const card of cards) await expect(card).toBeVisible();
+    await expect(page.getByText("Metrics available", { exact: true })).toBeVisible();
+    await expect(cardFor("Top pod usage")).toContainText("shop/checkout-7f8c9-2kx4m");
+    await expect(cardFor("Helm releases")).toContainText("Revision 42");
+    await expect(cardFor("Helm releases").getByRole("listitem")).toHaveCount(3);
+    await expect(cardFor("Service traffic")).toContainText("428.6 req/s");
+    await expect(cardFor("Service traffic").getByRole("listitem")).toHaveCount(3);
+    await expect(cardFor("CPU capacity")).toContainText("18.4 cores");
+    await expect(cardFor("Memory capacity")).toContainText("72 GiB");
+    await expect(cardFor("Service traffic")).not.toContainText("Stale");
+    await expect(cardFor("Overview topology").getByRole("heading", { name: "Not reported", exact: true })).toHaveCount(0);
+    await expect(cardFor("Overview topology").getByRole("definition")).toHaveCount(18);
+    await expect(cardFor("Overview topology")).not.toContainText(/stale|partial|Workloads \(aggregate\)/i);
+    await expect(page.getByRole("region", { name: "Triage summary", exact: true })).not.toContainText(/unavailable|not connected|No Helm|No service flows|Loading/i);
+    const measurements = await fitOverviewCapture(page);
+    await page.clock.runFor(1000);
+    const resourceGeometry = await cardFor("Overview topology").locator("dl > div").evaluateAll((rows) => rows.map((row) => {
+      const label = row.querySelector("dt")!;
+      const value = row.querySelector("dd")!;
+      const text = document.createRange();
+      text.selectNodeContents(label);
+      return { label: label.textContent, textRight: text.getBoundingClientRect().right, valueLeft: value.getBoundingClientRect().left };
+    }));
+    for (const resource of resourceGeometry) expect(resource.textRight, resource.label ?? "resource count").toBeLessThanOrEqual(resource.valueLeft - 1);
+    const geometry = [];
+    for (const [index, card] of cards.entries()) {
+      const bounds = await card.boundingBox();
+      expect(bounds).not.toBeNull();
+      expect(bounds!.y).toBeGreaterThanOrEqual(0);
+      expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+      geometry.push({ name: names[index], ...bounds });
+    }
+    await expect(page.getByRole("tab", { name: "Overview", exact: true })).toBeInViewport({ ratio: 1 });
+    const proof = await captureBreakState(page, "overview-full-page-dark-20261015.png", "dark");
+    const bitmap = fs.readFileSync(path.join(screenshotDir, "overview-full-page-dark-20261015.png"));
+    expect(bitmap.readUInt32BE(16)).toBe(1440);
+    expect(bitmap.readUInt32BE(20)).toBe(page.viewportSize()!.height);
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+    const sourceHashes = Object.fromEntries(["versus-incident/ui/tests/e2e/kubernetes-overview.spec.ts", "versus-incident/ui/tests/e2e/playwright.config.ts", "versus-incident/ui/src/pages/KubernetesPage.tsx", "versus-incident/ui/src/pages/KubernetesExplorerViews.tsx"].map((file) => [file, createHash("sha256").update(fs.readFileSync(path.join(root, file))).digest("hex")]));
+    fs.writeFileSync(path.join(screenshotDir, "overview-full-page-dark-20261015.provenance.json"), JSON.stringify({ classification: "F: deterministic synthetic API-intercepted Enterprise-tier UI fixture; not live-cluster or license acceptance", spec: "tests/e2e/kubernetes-overview.spec.ts", config: "tests/e2e/playwright.config.ts", dimensions: page.viewportSize(), ...proof, sidebar: "collapsed using the existing Collapse sidebar control; unchanged CSS and fonts", sha256: createHash("sha256").update(bitmap).digest("hex"), sourceHashes, measurements, geometry, resourceGeometry, data: { brokenWorkloads: 3, checkoutImage: "v41 -> v42", oomKilled: 6, errorExit1: 1, nodes: 12, pods: 28, nodeMetrics: 12, podMetrics: 28, cpuUsage: "18.4 cores", memoryUsage: "72 GiB", topPods: 5, helmReleases: 3, indexedResourceKinds: 18, trafficRows: 3, trafficTier: "Enterprise synthetic fixture" } }, null, 2));
+  });
+
+  for (const status of [401, 403, 404]) {
+    for (const phase of ["initial", "cached"] as const) {
+      test(`Break timeline final edge ${phase} denial ${status} multi-cluster`, async ({ page }, testInfo) => {
+        const reads: URL[] = [];
+        page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname.endsWith("/kubernetes/issues") && url.searchParams.has("root_uid")) reads.push(url); });
+        await openApp(page, "/agent/kubernetes?view=issues&cluster=east");
+        const row = page.getByRole("region", { name: "Kubernetes issues", exact: true }).getByRole("article", { name: "Deployment checkout", exact: true });
+        const warnings = row.getByRole("button", { name: /^Warnings \(\d+\)$/ });
+        await expect(warnings).toHaveText("Warnings (2)");
+        await warnings.click();
+        await expect(row.getByText("Secrets are not tracked.", { exact: true })).toBeVisible();
+        expect(reads).toHaveLength(0);
+        await row.getByRole("button", { name: "Expand checkout", exact: true }).click();
+        if (phase === "cached") {
+          await expect(row.getByText("v41 → v42", { exact: true })).toBeVisible();
+          await expect(row.getByText(/History incomplete/)).toBeVisible();
+          await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+        }
+        await expect(row.getByRole("status")).toContainText("Root history unavailable.");
+        if (status === 401) {
+          await expect(page.getByRole("dialog", { name: "Session expired", exact: true })).toBeVisible();
+          await page.keyboard.press("Escape");
+          await expect(page.getByRole("dialog", { name: "Session expired", exact: true })).toHaveCount(0);
+        }
+        await row.getByRole("button", { name: "Collapse checkout", exact: true }).click();
+        await expect(warnings).toHaveText("Warnings (3)");
+        await expect(warnings).toHaveAttribute("aria-expanded", "false");
+        if (status === 403 && phase === "cached") {
+          fs.mkdirSync(screenshotDir, { recursive: true });
+          await page.screenshot({ path: path.join(screenshotDir, "fixture-edge-cached-403-collapsed.png"), animations: "disabled" });
+        }
+        await warnings.click();
+        await expect(row.getByText("Root history unavailable", { exact: true })).toBeVisible();
+        await expect(row.getByText("Secrets are not tracked.", { exact: true })).toBeVisible();
+        await expect(row).not.toContainText(/v41|v42|History incomplete|Rebuilt|Synthetic root lookup denied/);
+        await expect(row.getByRole("button", { name: "Expand checkout", exact: true })).toHaveAttribute("aria-expanded", "false");
+        if (status === 403 && phase === "cached") await page.screenshot({ path: path.join(screenshotDir, "fixture-edge-cached-403-expanded.png"), animations: "disabled" });
+        await warnings.click();
+        await expect(warnings).toHaveAttribute("aria-expanded", "false");
+        expect(reads.every((url) => url.searchParams.get("cluster") === "east")).toBe(true);
+        await page.getByRole("combobox", { name: "Cluster", exact: true }).selectOption("west");
+        await page.getByRole("tab", { name: "Issues", exact: true }).click();
+        await expect(row).not.toContainText(/v41|v42|History incomplete|Rebuilt/);
+        await expect(warnings).toHaveAttribute("aria-expanded", "false");
+        await row.getByRole("button", { name: "Expand checkout", exact: true }).click();
+        await expect(row.getByRole("status")).toContainText("Root history unavailable.");
+        if (status === 401) await page.keyboard.press("Escape");
+        await expect(row).not.toContainText(/v41|v42|History incomplete|Rebuilt/);
+        expect(reads.at(-1)?.searchParams.get("cluster")).toBe("west");
+        await page.getByRole("combobox", { name: "Cluster", exact: true }).selectOption("east");
+        await page.getByRole("tab", { name: "Issues", exact: true }).click();
+        await expect(row).not.toContainText(/v41|v42|History incomplete|Rebuilt/);
+        await expect(warnings).toHaveAttribute("aria-expanded", "false");
+        await testInfo.attach("synthetic-denial-control", { body: JSON.stringify({ classification: "F", status, phase, root_reads: reads.map((url) => ({ cluster: url.searchParams.get("cluster"), root: url.searchParams.get("root_uid") })) }), contentType: "application/json" });
+      });
+    }
+  }
+
+  for (const scope of ["overview", "enrichment"] as const) {
+    for (const state of ["stale", "partial", "unknown"] as const) {
+      test(`Break timeline final edge ${scope} SourceSync ${state}`, async ({ page }, testInfo) => {
+        await openApp(page, `/agent/kubernetes${scope === "enrichment" ? "?view=issues" : ""}`);
+        const region = page.getByRole("region", { name: scope === "overview" ? "Break timeline" : "Kubernetes issues", exact: true });
+        const row = region.getByRole("article", { name: "Deployment checkout", exact: true });
+        if (scope === "enrichment") await row.getByRole("button", { name: "Expand checkout", exact: true }).click();
+        await expect(row.getByText("No recorded change in available evidence", { exact: true })).toBeVisible();
+        await expect(row).not.toContainText("No change on it, its config or its nodes");
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        fs.mkdirSync(screenshotDir, { recursive: true });
+        await row.scrollIntoViewIfNeeded();
+        await page.screenshot({ path: path.join(screenshotDir, `fixture-edge-${scope}-${state}.png`), animations: "disabled" });
+        await testInfo.attach("synthetic-source-state", { body: JSON.stringify({ classification: "F", scope, state, history: "complete", changes: 0 }), contentType: "application/json" });
+      });
+    }
+  }
+
+  for (const viewport of [{ name: "desktop", width: 1440, height: 900 }, { name: "mobile", width: 390, height: 844 }]) {
+    test(`Break timeline selected marker removal restores chart focus ${viewport.name} dark`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await openApp(page, "/agent/kubernetes?view=timeline");
+      const chart = page.getByRole("region", { name: "Resource timeline chart", exact: true });
+      const marker = chart.locator('[data-marker="change"]').first();
+      await marker.focus();
+      await page.keyboard.press("Enter");
+      const details = page.getByRole("region", { name: "Timeline event details", exact: true });
+      await expect(details.getByRole("heading", { name: "Timeline event details", exact: true })).toBeFocused();
+      for (const endpoint of ["changes", "issues"]) {
+        await page.route(`**/api/admin/kubernetes/${endpoint}*`, (route) => route.fulfill({ json: { items: [], totals: {}, sync: { state: "ready", partial: false, age_s: 0 } } }));
+      }
+      await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+      await expect(details).toHaveCount(0);
+      await expect(chart.locator('[data-marker="change"]')).toHaveCount(0);
+      await expect(chart).toBeFocused();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    });
+    test(`Break timeline external controls retain focus across filters and polling ${viewport.name} dark`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.clock.install({ time: new Date() });
+      await page.route("**/api/admin/kubernetes/issues*", (route) => route.fulfill({ json: { items: [], totals: {}, sync: { state: "ready", partial: false, age_s: 0 } } }));
+      await openApp(page, "/agent/kubernetes?view=timeline");
+      const chart = page.getByRole("region", { name: "Resource timeline chart", exact: true });
+      const marker = chart.locator('[data-marker="change"]').first();
+      const details = page.getByRole("region", { name: "Timeline event details", exact: true });
+      const namespace = page.getByRole("textbox", { name: "Timeline namespace", exact: true });
+      const kind = page.getByRole("combobox", { name: "Timeline kind", exact: true });
+      await marker.focus();
+      await page.keyboard.press("Enter");
+      await expect(details.getByRole("heading", { name: "Timeline event details", exact: true })).toBeFocused();
+      await namespace.focus();
+      await namespace.pressSequentially("missing");
+      await expect(namespace).toHaveValue("missing");
+      await expect(namespace).toBeFocused();
+      await expect(chart.locator('[data-marker="change"]')).toHaveCount(0);
+      await expect(details).toHaveCount(0);
+      await namespace.fill("");
+      await marker.focus();
+      await page.keyboard.press("Enter");
+      await kind.focus();
+      await kind.selectOption("Deployment");
+      await expect(details).toHaveCount(0);
+      await expect(kind).toBeFocused();
+      await marker.focus();
+      await page.keyboard.press("Enter");
+      await namespace.focus();
+      const previousUntil = await chart.getAttribute("data-until");
+      for (const endpoint of ["changes", "issues"]) {
+        await page.route(`**/api/admin/kubernetes/${endpoint}*`, (route) => route.fulfill({ json: { items: [], totals: {}, sync: { state: "ready", partial: false, age_s: 0 } } }));
+      }
+      await page.clock.fastForward(30_000);
+      await expect(chart).not.toHaveAttribute("data-until", previousUntil!);
+      await expect(chart.locator('[data-marker="change"]')).toHaveCount(0);
+      await expect(details).toHaveCount(0);
+      await expect(namespace).toBeFocused();
+    });
+    test(`Break timeline label and stack geometry ${viewport.name} dark`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.emulateMedia({ colorScheme: "dark" });
+      await openApp(page, "/agent/kubernetes");
+      await page.getByRole("button", { name: "Timeline for checkout", exact: true }).click();
+      const chart = page.getByRole("region", { name: "Resource timeline chart", exact: true });
+      await expect(chart.locator('[data-event-id="rollback"]')).toBeAttached();
+      const geometry = await chart.evaluate((element) => {
+        const row = element.querySelector<HTMLElement>('[data-resource*=checkout-uid]')!;
+        const rowBounds = row.getBoundingClientRect();
+        const crash = row.querySelector<HTMLElement>(".resource-timeline-crash-label")!;
+        const rollback = [...row.querySelectorAll<HTMLElement>(".resource-timeline-event-label")].find((label) => label.textContent?.includes("v42 → v41"))!;
+        const crashBounds = crash.getBoundingClientRect();
+        const rollbackBounds = rollback.getBoundingClientRect();
+        return { crash: { left: crashBounds.left, right: crashBounds.right, width: crashBounds.width, text: crash.textContent, title: crash.title }, rollback: { left: rollbackBounds.left, width: rollbackBounds.width }, markers: [...row.querySelectorAll<HTMLElement>('[data-event-id^="image"]')].map((marker) => { const bounds = marker.getBoundingClientRect(); return { top: bounds.top - rowBounds.top, bottom: bounds.bottom - rowBounds.top, outline: getComputedStyle(marker).outlineOffset }; }), height: rowBounds.height };
+      });
+      expect(geometry.crash.width).toBeGreaterThan(0);
+      expect(geometry.rollback.width).toBeGreaterThan(0);
+      expect(geometry.crash.right).toBeLessThanOrEqual(geometry.rollback.left);
+      expect(geometry.crash.text).toContain("OOMKilled ×6");
+      expect(geometry.crash.title).toContain("last occurrence");
+      expect(geometry.height).toBe(40);
+      expect(geometry.markers).toHaveLength(3);
+      for (const marker of geometry.markers) { expect(marker.top).toBeGreaterThanOrEqual(0); expect(marker.bottom).toBeLessThanOrEqual(40); }
+      const third = chart.locator('[data-event-id="image-stack-2"]');
+      await page.keyboard.press("Tab");
+      await third.focus();
+      await expect(third).toBeFocused();
+      expect(await third.evaluate((element) => getComputedStyle(element).outlineOffset)).toBe("-2px");
+      await third.click();
+      await expect(page.getByRole("region", { name: "Timeline event details", exact: true }).getByRole("button", { name: "Open resource", exact: true })).toHaveCount(3);
+      await page.keyboard.press("Escape");
+      await expect(third).toBeFocused();
+      await captureBreakState(page, `break-label-stack-${viewport.name}-dark.png`, "dark");
+    });
+    test(`Break timeline fleet documentation ${viewport.name} dark multi-cluster`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+      await openApp(page, "/agent/kubernetes");
+      const rows = page.getByRole("region", { name: "Cluster rows", exact: true });
+      await expect(rows.getByRole("article")).toHaveCount(2);
+      const east = rows.getByRole("article", { name: "Cluster east", exact: true });
+      const west = rows.getByRole("article", { name: "Cluster west", exact: true });
+      await expect(east).toContainText("Last change 9 min ago");
+      await expect(west).not.toContainText(/Last change|Unknown/);
+      await expect(east).toContainText("26 warnings");
+      await expect(east).toContainText("3 broken");
+      await expect(east.getByRole("meter", { name: "Ready nodes", exact: true })).toHaveAttribute("value", "12");
+      await expect(east.getByRole("meter", { name: "Running pods", exact: true })).toHaveAttribute("value", "19");
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      expect(await rows.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(viewport.name === "mobile");
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      await captureBreakState(page, `break-fleet-${viewport.name}-dark.png`, "dark");
+      if (viewport.name === "mobile") {
+        await rows.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+        await expect(east.getByRole("link", { name: "Review issues", exact: true })).toBeInViewport();
+        await captureBreakState(page, "break-fleet-mobile-signals-dark.png", "dark");
+      }
+    });
+    for (const theme of ["dark", "light"] as const) {
+      for (const cluster of [undefined, "east"] as const) {
+      test(`Break timeline overview and scoped interactions ${viewport.name} ${theme}${cluster ? " multi-cluster" : ""}`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        await page.clock.install();
+        await page.addInitScript((value) => localStorage.setItem("versus.theme", value), theme);
+        const reads: URL[] = [];
+        const errors: string[] = [];
+        page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname.startsWith("/api/admin/kubernetes/")) reads.push(url); });
+        page.on("pageerror", (error) => errors.push(error.message));
+        await openApp(page, `/agent/kubernetes${cluster ? `?cluster=${cluster}` : ""}`);
+        const timeline = page.getByRole("region", { name: "Break timeline", exact: true });
+        await expect(timeline.getByRole("article")).toHaveCount(3);
+        await expect(timeline).toContainText("OOMKilled ×6");
+        await expect(timeline.getByText(/History incomplete/)).not.toBeVisible();
+        await expect(timeline.getByText("Secrets are not tracked.", { exact: true })).not.toBeVisible();
+        for (const toggle of await timeline.getByRole("button", { name: /Warnings/ }).all()) await expect(toggle).toHaveAttribute("aria-expanded", "false");
+        await expect(page.getByRole("heading", { name: "Recent changes (60m)", exact: true })).toHaveCount(0);
+        await expect(page.getByRole("region", { name: "Cluster health", exact: true }).getByRole("article")).toHaveCount(0);
+        await expect(timeline).not.toContainText(/same_object|scaled_by|used_by|observed|reconstructed|·/);
+        for (const row of await timeline.getByRole("article").all()) {
+          const box = await row.boundingBox();
+          expect(box).not.toBeNull();
+          expect(box!.y + box!.height, "all three complete root rows fit without scrolling").toBeLessThanOrEqual(viewport.height);
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        const checkout = timeline.getByRole("article", { name: "Deployment checkout", exact: true });
+        await expect(checkout).toContainText("6 → 7");
+        if (viewport.name === "mobile") {
+          await expect(checkout.locator("time").first()).toBeVisible();
+          await expect(checkout.getByText("v41 → v42", { exact: true })).not.toBeVisible();
+          await expect(checkout.getByRole("button", { name: "+2 more changes", exact: true })).toBeVisible();
+        } else await expect(checkout.getByText("v41 → v42", { exact: true })).toBeVisible();
+        fs.mkdirSync(screenshotDir, { recursive: true });
+        await captureBreakState(page, `break-timeline-${viewport.name}-${theme}.png`, theme);
+        const ledger = timeline.getByRole("article", { name: "Deployment ledger-api", exact: true });
+        const warningToggle = ledger.getByRole("button", { name: "Warnings (1)", exact: true });
+        await warningToggle.focus();
+        await page.keyboard.press("Enter");
+        await expect(warningToggle).toHaveAttribute("aria-expanded", "true");
+        await expect(ledger.getByText(/History incomplete/)).toBeVisible();
+        await page.keyboard.press("Space");
+        await expect(warningToggle).toHaveAttribute("aria-expanded", "false");
+        await checkout.getByRole("button", { name: "Timeline for checkout", exact: true }).click();
+        await expect(page.getByRole("region", { name: "Timeline lane checkout", exact: true })).toBeVisible();
+        await expect(page).toHaveURL(/root_uid=checkout-uid/);
+        const focused = new URL(page.url());
+        const center = Date.parse(focused.searchParams.get("center")!);
+        const lane = page.getByRole("region", { name: "Timeline lane checkout", exact: true });
+        await expect(lane.locator(".resource-timeline-label")).toHaveText(["Deployment checkoutshop", "ConfigMap checkout-cfgshop", "HPA checkout-hpashop"]);
+        await expect(lane.getByRole("button", { name: /HorizontalPodAutoscaler checkout-hpa: 6 → 7 at/ })).toHaveCount(1);
+        await expect(lane.getByRole("button", { name: /ConfigMap checkout-cfg:.* at/ })).toHaveCount(1);
+        await expect(lane).toContainText("Break: CrashLoopBackOff");
+        await expect(lane.getByRole("button", { name: /Crash: OOMKilled exit 137 ×6 \(last occurrence\) at/ })).toHaveCount(1);
+        await expect(lane.locator('[data-marker="crash"]')).toHaveCount(2);
+        await expect.poll(() => reads.some((url) => url.pathname.endsWith("/changes") && Date.parse(url.searchParams.get("since") ?? "") === center - 30 * 60_000 && Date.parse(url.searchParams.get("until") ?? "") === center + 30 * 60_000)).toBe(true);
+        const markers = await lane.locator("[data-marker]").evaluateAll((elements) => elements.map((element) => ({ at: element.getAttribute("data-at"), x: Number(element.getAttribute("data-x")) })));
+        for (const marker of markers) expect(marker.x).toBeCloseTo((Date.parse(marker.at!) - (center - 30 * 60_000)) / (60 * 60_000) * 100, 6);
+        const chart = lane.getByRole("region", { name: "Resource timeline chart", exact: true });
+        expect(await chart.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(viewport.name === "mobile");
+        await expect(lane.locator(".resource-timeline-break-pill")).toContainText("break");
+        if (viewport.name === "mobile") {
+          const framing = await chart.evaluate((element) => {
+            const viewport = element.getBoundingClientRect();
+            const label = element.querySelector<HTMLElement>(".resource-timeline-label")!.getBoundingClientRect();
+            const pill = element.querySelector<HTMLElement>(".resource-timeline-break-pill")!.getBoundingClientRect();
+            const line = element.querySelector<HTMLElement>(".resource-timeline-break-line")!.getBoundingClientRect();
+            const markers = [...element.querySelectorAll<HTMLElement>('[data-marker="change"]')].map((marker) => marker.getBoundingClientRect());
+            return { labelWidth: label.width, breakVisible: line.left >= label.right && line.left <= viewport.right, blueVisible: markers.some((marker) => marker.left >= label.right && marker.right <= viewport.right), pillVisible: pill.left >= label.right && pill.right <= viewport.right, left: element.scrollLeft };
+          });
+          expect(framing.labelWidth).toBe(132);
+          expect(framing.breakVisible).toBe(true);
+          expect(framing.blueVisible).toBe(true);
+          expect(framing.pillVisible).toBe(true);
+          expect(framing.left).toBeGreaterThan(0);
+        }
+        await captureBreakState(page, `break-timeline-focus-${viewport.name}-${theme}.png`, theme);
+        const crash = lane.getByRole("button", { name: /Crash: OOMKilled exit 137 ×6 \(last occurrence\) at/ });
+        await crash.focus();
+        await page.keyboard.press("Enter");
+        const details = lane.getByRole("region", { name: "Timeline event details", exact: true });
+        await expect(details.getByRole("heading", { name: "Timeline event details", exact: true })).toBeFocused();
+        await expect(details).toContainText("Crash: OOMKilled exit 137 ×6 (last occurrence)");
+        await expect(details).toContainText("Crash: Error exit 1 ×1 (last occurrence)");
+        await page.keyboard.press("Escape");
+        await expect(details).toHaveCount(0);
+        await expect(crash).toBeFocused();
+        await page.keyboard.press("Space");
+        await details.getByRole("button", { name: "Close event details", exact: true }).click();
+        await expect(crash).toBeFocused();
+        if (viewport.name === "mobile") {
+          const panBefore = await chart.evaluate((element) => element.scrollLeft);
+          await chart.evaluate((element) => { element.scrollLeft = 0; });
+          await expect.poll(() => chart.evaluate((element) => element.scrollLeft)).toBe(0);
+          await expect(lane.getByText("ConfigMap checkout-cfg", { exact: true })).toBeInViewport();
+          expect(panBefore).toBeGreaterThan(0);
+          expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        }
+        await page.getByRole("link", { name: "Clear root filter", exact: true }).click();
+        await expect(page).not.toHaveURL(/root_uid=/);
+        await expect(lane).toHaveCount(0);
+        const unfocused = page.getByRole("region", { name: "Kubernetes change timeline", exact: true });
+        await expect(unfocused.getByRole("heading", { name: "Kubernetes changes", exact: true })).toBeVisible();
+        await expect(unfocused.getByRole("region", { name: "Resource timeline chart", exact: true })).toHaveCount(1);
+        await expect(unfocused.getByRole("status", { name: "Loading projected change history", exact: true })).toHaveCount(0);
+        const liveChart = unfocused.getByRole("region", { name: "Resource timeline chart", exact: true });
+        if (viewport.name === "mobile") {
+          await liveChart.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+          await expect(liveChart.locator(".resource-timeline-break-line")).toBeInViewport();
+          await expect(liveChart.locator('[data-marker="change"]').first()).toBeInViewport();
+        }
+        await captureBreakState(page, `break-timeline-general-${viewport.name}-${theme}.png`, theme);
+        const liveMarker = liveChart.locator('[data-marker="change"]').first();
+        await liveMarker.focus();
+        await liveChart.evaluate((element) => { element.scrollLeft = 80; });
+        const livePan = await liveChart.evaluate((element) => element.scrollLeft);
+        const initialWindow = await liveChart.getAttribute("data-since");
+        await page.clock.fastForward(30_000);
+        await expect(liveChart).not.toHaveAttribute("data-since", initialWindow!);
+        await expect(liveMarker).toBeFocused();
+        expect(await liveChart.evaluate((element) => element.scrollLeft)).toBe(livePan);
+        await expect(liveChart.locator(".resource-timeline-now-line")).toHaveCount(1);
+        await page.keyboard.press("Enter");
+        const liveHeading = unfocused.getByRole("heading", { name: "Timeline event details", exact: true });
+        await expect(liveHeading).toBeFocused();
+        const selectedWindow = await liveChart.getAttribute("data-since");
+        const selectedPan = await liveChart.evaluate((element) => element.scrollLeft);
+        await page.clock.fastForward(30_000);
+        await expect(liveChart).not.toHaveAttribute("data-since", selectedWindow!);
+        await expect(liveHeading).toBeFocused();
+        expect(await liveChart.evaluate((element) => element.scrollLeft)).toBe(selectedPan);
+        await page.keyboard.press("Escape");
+        await expect(liveMarker).toBeFocused();
+        await unfocused.getByRole("textbox", { name: "Timeline namespace", exact: true }).fill("shop");
+        const filteredRead = page.waitForRequest((request) => {
+          const url = new URL(request.url());
+          return url.pathname.endsWith("/kubernetes/changes") && url.searchParams.get("kind") === "Deployment" && url.searchParams.get("namespace") === "shop";
+        });
+        await unfocused.getByRole("combobox", { name: "Timeline kind", exact: true }).selectOption("Deployment");
+        await filteredRead;
+        await expect(unfocused.getByRole("combobox", { name: "Timeline kind", exact: true })).toHaveValue("Deployment");
+        await page.getByRole("tab", { name: "Issues", exact: true }).click();
+        const issues = page.getByRole("region", { name: "Kubernetes issues", exact: true });
+        const expanded = issues.getByRole("button", { name: "Expand checkout", exact: true });
+        await expect(expanded).toHaveAttribute("aria-expanded", "false");
+        await expect(issues.getByRole("article", { name: "Deployment checkout", exact: true }).getByRole("button", { name: /Warnings/ })).toHaveCount(0);
+        const prior = reads.filter((url) => url.searchParams.get("root_uid") === "checkout-uid").length;
+        await expanded.focus();
+        await page.keyboard.press("Enter");
+        await expect(issues.getByText("OOMKilled ×6", { exact: true })).toBeVisible();
+        if (viewport.name === "mobile") await expect(issues.getByText("v41 → v42", { exact: true })).not.toBeVisible();
+        else await expect(issues.getByText("v41 → v42", { exact: true })).toBeVisible();
+        await expect.poll(() => reads.filter((url) => url.searchParams.get("root_uid") === "checkout-uid").length).toBe(prior + 1);
+        const rootRead = reads.filter((url) => url.searchParams.get("root_uid") === "checkout-uid").at(-1)!;
+        expect(rootRead.searchParams.get("namespace")).toBe("shop");
+        expect(rootRead.searchParams.get("include")).toBe("changes");
+        await issues.getByRole("button", { name: "Collapse checkout", exact: true }).click();
+        await issues.getByRole("button", { name: "Expand checkout", exact: true }).click();
+        await expect(issues.getByText("OOMKilled ×6", { exact: true })).toBeVisible();
+        expect(reads.filter((url) => url.searchParams.get("root_uid") === "checkout-uid")).toHaveLength(prior + 1);
+        await captureBreakState(page, `break-issues-expanded-${viewport.name}-${theme}.png`, theme);
+        await issues.getByRole("button", { name: "Open resource checkout", exact: true }).click();
+        await expect(page.getByRole("dialog", { name: "Details panel", exact: true })).toBeVisible();
+        await page.getByRole("button", { name: "Close panel", exact: true }).click();
+        await issues.getByLabel("Issue severity", { exact: true }).selectOption("critical");
+        await expect(issues.getByRole("article")).toHaveCount(2);
+        await issues.getByLabel("Issue severity", { exact: true }).selectOption("");
+        await issues.getByRole("button", { name: "Next page", exact: true }).click();
+        await expect(issues.getByRole("article")).toHaveCount(1);
+        await expect(issues).toContainText("cart");
+        if (cluster) expect(reads.filter((url) => url.pathname.endsWith("/issues")).every((url) => url.searchParams.get("cluster") === cluster)).toBe(true);
+        await issues.getByRole("button", { name: "Investigate cart", exact: true }).click();
+        await expect(page).toHaveURL(/\/agent\/chat\?/);
+        const attachment = new URL(page.url()).searchParams;
+        expect(attachment.get("uid")).toBe("cart-uid");
+        expect(attachment.get("include_changes")).toBe("true");
+        expect(attachment.get("cluster")).toBe(cluster ?? "fixture");
+        expect(errors).toEqual([]);
+      });
+      }
+      test(`Break timeline collapsed issue uncertainty ${viewport.name} ${theme}`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        await page.addInitScript((value) => localStorage.setItem("versus.theme", value), theme);
+        const rootReads: URL[] = [];
+        page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname.endsWith("/kubernetes/issues") && url.searchParams.has("root_uid")) rootReads.push(url); });
+        await openApp(page, "/agent/kubernetes?view=issues");
+        const issues = page.getByRole("region", { name: "Kubernetes issues", exact: true });
+        const checkout = issues.getByRole("article", { name: "Deployment checkout", exact: true });
+        const toggle = checkout.getByRole("button", { name: "Warnings (1)", exact: true });
+        await expect(toggle).toBeVisible();
+        expect(rootReads).toHaveLength(0);
+        await toggle.focus();
+        await page.keyboard.press("Enter");
+        await expect(checkout.getByText("History completeness not yet loaded.", { exact: true })).toBeVisible();
+        const warningBounds = await toggle.boundingBox();
+        const timestampBounds = await checkout.locator("span.font-mono").filter({ hasText: "Broke" }).boundingBox();
+        expect(warningBounds).not.toBeNull();
+        expect(timestampBounds).not.toBeNull();
+        expect(warningBounds!.y - (timestampBounds!.y + timestampBounds!.height), "warning focus outline clears the timestamp").toBeGreaterThanOrEqual(2);
+        await expect(checkout.getByRole("button", { name: "Expand checkout", exact: true })).toHaveAttribute("aria-expanded", "false");
+        expect(rootReads).toHaveLength(0);
+        const ledger = issues.getByRole("article", { name: "Deployment ledger-api", exact: true });
+        await expect(ledger.getByRole("button", { name: "Warnings (1)", exact: true })).toBeVisible();
+        await expect(ledger.getByRole("button", { name: "Expand ledger-api", exact: true })).toHaveAttribute("aria-expanded", "false");
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        fs.mkdirSync(screenshotDir, { recursive: true });
+        await page.screenshot({ path: path.join(screenshotDir, `break-issues-collapsed-uncertainty-${viewport.name}-${theme}.png`), animations: "disabled" });
+        await checkout.getByRole("button", { name: "Expand checkout", exact: true }).click();
+        await expect(checkout.getByText("OOMKilled ×6", { exact: true })).toBeVisible();
+        await expect(checkout.getByRole("button", { name: /Warnings/ })).toHaveCount(0);
+        expect(rootReads).toHaveLength(1);
+      });
+      test(`Break timeline secondary diagnostics ${viewport.name} ${theme}`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        await page.addInitScript((value) => localStorage.setItem("versus.theme", value), theme);
+        await openApp(page, "/agent/kubernetes");
+        const health = page.getByRole("region", { name: "Cluster health", exact: true });
+        const timeline = page.getByRole("region", { name: "Break timeline", exact: true });
+        await expect(health).toContainText("Snapshot 4s ago");
+        await expect(health).not.toContainText(/Partial visibility|Synced/);
+        await expect(health.getByRole("button", { name: "Warnings (2)", exact: true })).toHaveAttribute("aria-expanded", "false");
+        const aggregate = timeline.getByRole("button", { name: "Warnings (2)", exact: true });
+        await expect(aggregate).toHaveAttribute("aria-expanded", "false");
+        await expect(timeline.getByText("OOMKilled ×6", { exact: true })).toBeVisible();
+        const controls = await page.getByRole("button", { name: /Warnings \(/ }).evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-controls")));
+        expect(new Set(controls).size).toBe(controls.length);
+        fs.mkdirSync(screenshotDir, { recursive: true });
+        await page.screenshot({ path: path.join(screenshotDir, `break-diagnostics-collapsed-${viewport.name}-${theme}.png`), animations: "disabled" });
+        await aggregate.click();
+        await expect(aggregate).toHaveAttribute("aria-expanded", "true");
+        await expect(timeline.getByText("ConfigMap: forbidden", { exact: true })).toBeVisible();
+        await expect(timeline.getByText(/Change history gap:/)).toBeVisible();
+        await timeline.getByText(/Change history gap:/).scrollIntoViewIfNeeded();
+        await page.screenshot({ path: path.join(screenshotDir, `break-diagnostics-expanded-${viewport.name}-${theme}.png`), animations: "disabled" });
+        await timeline.getByRole("button", { name: "Timeline for checkout", exact: true }).click();
+        const focused = page.getByRole("region", { name: "Kubernetes change timeline", exact: true });
+        const toggle = focused.getByRole("button", { name: "Warnings (4)", exact: true });
+        await expect(toggle).toHaveAttribute("aria-expanded", "false");
+        await toggle.click();
+        await expect(focused.getByText("ConfigMap: forbidden", { exact: true })).toBeVisible();
+        await focused.getByRole("combobox", { name: "Timeline kind", exact: true }).selectOption("Deployment");
+        await expect(focused.getByRole("button", { name: "Warnings (4)", exact: true })).toHaveAttribute("aria-expanded", "false");
+        await expect(page.getByRole("region", { name: "Timeline lane checkout", exact: true })).toBeVisible();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      });
+    }
+  }
+
   for (const viewport of [{ name: "desktop", width: 1440, height: 1100 }, { name: "mobile", width: 390, height: 844 }]) {
+    test(`Break timeline full related history ${viewport.name} multi-cluster`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      const reads: URL[] = [];
+      page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname.startsWith("/api/admin/kubernetes/")) reads.push(url); });
+      await openApp(page, "/agent/kubernetes?cluster=east");
+      const checkout = page.getByRole("region", { name: "Break timeline", exact: true }).getByRole("article", { name: "Deployment checkout", exact: true });
+      await checkout.getByRole("button", { name: /more changes/ }).click();
+      const lane = page.getByRole("region", { name: "Timeline lane checkout", exact: true });
+      await expect(lane.getByRole("button", { name: /ConfigMap checkout-settings-19:.* at/ })).toHaveCount(1);
+      await expect(lane).not.toContainText("unrelated-");
+      await expect(lane.locator('[data-marker="change"]')).toHaveCount(20);
+      const location = new URL(page.url());
+      expect(location.searchParams.get("cluster")).toBe("east");
+      expect(location.searchParams.get("namespace")).toBe("shop");
+      expect(location.searchParams.get("root_uid")).toBe("checkout-uid");
+      expect(location.searchParams.has("center")).toBe(true);
+      const scopedChanges = reads.filter((url) => url.pathname.endsWith("/changes") && url.searchParams.get("namespace") === "shop");
+      const cursors = scopedChanges.map((url) => url.searchParams.get("cursor"));
+      expect(cursors.filter((cursor, index) => index === 0 || cursor !== cursors[index - 1])).toEqual([null, "unrelated", "linked"]);
+      await page.getByRole("button", { name: "Next page", exact: true }).click();
+      await expect(lane.getByRole("button", { name: /ConfigMap checkout-settings-23:.* at/ })).toHaveCount(1);
+      await expect(lane.locator('[data-marker="change"]')).toHaveCount(4);
+      await expect(page.getByRole("button", { name: "Next page", exact: true })).toBeDisabled();
+      expect(reads.filter((url) => /\/(issues|changes|graph)$/.test(url.pathname)).every((url) => url.searchParams.get("cluster") === "east")).toBe(true);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      await captureBreakState(page, `break-timeline-related-${viewport.name}.png`, "dark");
+    });
+
     test(`Overview refresh keeps paired count cards and inventory tabs ${viewport.name}`, async ({ page }, testInfo) => {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
       await page.clock.install();

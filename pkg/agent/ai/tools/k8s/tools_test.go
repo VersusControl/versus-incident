@@ -19,6 +19,7 @@ import (
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
+	"github.com/VersusControl/versus-incident/tests/fakekube"
 )
 
 func TestRegistryToolsFilterEnumsAndPreserveClusterScope(t *testing.T) {
@@ -72,6 +73,37 @@ func TestRegistryToolsFilterEnumsAndPreserveClusterScope(t *testing.T) {
 			t.Fatal("single schema changed")
 		}
 	}
+}
+
+func TestListK8sIssuesBrokenView(t *testing.T) {
+	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "bad-rollout"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(fixture)
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service.SetChangeStorage(storage.NewMemory())
+	ctx := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
+	for _, tool := range NewForRegistry(kubernetes.NewServiceRegistry(service)) {
+		if tool.Name() != "list_k8s_issues" {
+			continue
+		}
+		result, err := tool.Invoke(ctx, json.RawMessage(`{"broken":true}`))
+		if err != nil || !result.Found {
+			t.Fatalf("broken tool: %+v %v", result, err)
+		}
+		encoded, _ := json.Marshal(result.Data)
+		if len(encoded) > 6<<10 || strings.Contains(string(encoded), `"source"`) || strings.Contains(string(encoded), "CANARY") || !strings.Contains(string(encoded), `"image_changed"`) || !strings.Contains(string(encoded), `"history"`) {
+			t.Fatalf("bounded broken view: %s", encoded)
+		}
+		return
+	}
+	t.Fatal("issue tool missing")
 }
 
 func TestNewReturnsSpecCatalogReadOnlyToolsAndAuthorizationFailsClosed(t *testing.T) {

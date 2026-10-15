@@ -14,6 +14,10 @@ func TestKubernetesReaderRBACTemplateIsReadOnly(t *testing.T) {
 	content := string(template)
 	verbs := quotedTemplateFieldValues(t, content, "verbs")
 	resources := quotedTemplateFieldValues(t, content, "resources")
+	discoveryURLs := quotedTemplateFieldValues(t, content, "nonResourceURLs")
+	if len(discoveryURLs) != 2 || !containsString(discoveryURLs, "/.well-known/openid-configuration") || !containsString(discoveryURLs, "/openid/v1/jwks") || !regexp.MustCompile(`(?m)nonResourceURLs: \["/\.well-known/openid-configuration", "/openid/v1/jwks"\]\s*\n\s*verbs: \["get"\]`).MatchString(content) {
+		t.Error("projected service account discovery must have only fixed get-only URLs")
+	}
 
 	for _, forbidden := range []string{"create", "update", "patch", "delete", "watch"} {
 		if containsString(verbs, forbidden) {
@@ -27,6 +31,9 @@ func TestKubernetesReaderRBACTemplateIsReadOnly(t *testing.T) {
 	}
 	if !containsString(verbs, "get") || !containsString(verbs, "list") {
 		t.Errorf("Kubernetes reader RBAC must preserve get/list access: %v", verbs)
+	}
+	if !regexp.MustCompile(`(?m)resources: \["deployments", "statefulsets", "daemonsets", "replicasets", "controllerrevisions"\]\s*\n\s*verbs: \["get", "list"\]`).MatchString(content) {
+		t.Error("controller revision reads missing or not read-only")
 	}
 	if !regexp.MustCompile(`(?m)resources: \["pods/log"\]\s*\n\s*verbs: \["get"\]`).MatchString(content) {
 		t.Error("Kubernetes reader RBAC must preserve get-only access to pods/log")
@@ -74,7 +81,7 @@ func TestKubernetesActorRBACTemplateUsesExplicitNonDestructiveVerbs(t *testing.T
 
 func quotedTemplateFieldValues(t *testing.T, content, field string) []string {
 	t.Helper()
-	fieldPattern := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(field) + `:\s*\[([^]]*)\]`)
+	fieldPattern := regexp.MustCompile(`(?m)^\s*(?:-\s*)?` + regexp.QuoteMeta(field) + `:\s*\[([^]]*)\]`)
 	valuePattern := regexp.MustCompile(`"([^"]+)"`)
 	var values []string
 	for _, fieldMatch := range fieldPattern.FindAllStringSubmatch(content, -1) {

@@ -90,6 +90,13 @@ afterEach(() => {
 });
 
 describe("ChatPage", () => {
+  it("sends investigation identity and asks the server for bounded changes", async () => {
+    renderPage("/agent/chat?provider=kubernetes&cluster=east&resource_id=apps~v1~deployments&namespace=shop&name=checkout&uid=checkout-uid&include_changes=true");
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "What changed?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.streamChatMessage).toHaveBeenCalledWith("session-1", "What changed?", { resource: { provider: "kubernetes", cluster: "east", resource_id: "apps~v1~deployments", namespace: "shop", name: "checkout", uid: "checkout-uid", include_changes: true } }, expect.any(Function), expect.any(AbortSignal)));
+  });
+
   it.each(["pending", "executed", "rejected"])("shows archived %s approvals without decision commands", async (state) => {
     const approval = await api.approveAgentApproval("fixture", "fixture");
     vi.mocked(api.approveAgentApproval).mockClear();

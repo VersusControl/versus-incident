@@ -307,8 +307,31 @@ func deltaMatchesNamespace(delta kubernetesindex.Delta, namespace string) bool {
 	return false
 }
 func (controller *KubernetesAdminController) issues(ctx *fiber.Ctx) error {
+	args := ctx.Context().QueryArgs()
+	for _, key := range []string{"broken", "include", "root_uid"} {
+		if len(args.PeekMulti(key)) > 1 {
+			return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+		}
+	}
+	include := strings.Clone(ctx.Query("include"))
+	if args.Has("include") && include != "changes" {
+		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+	}
+	broken := false
+	if args.Has("broken") {
+		parsed, err := strconv.ParseBool(ctx.Query("broken"))
+		if err != nil {
+			return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+		}
+		broken = parsed
+	}
+	root := strings.Clone(ctx.Query("root_uid"))
+	if args.Has("root_uid") && (root == "" || include != "changes") {
+		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+	}
 	value, err := requestKubernetesService(ctx).Issues(ctx.UserContext(), kubernetes.IssueOptions{
 		Namespace: ctx.Query("namespace"), Severity: ctx.Query("severity"), Kind: ctx.Query("kind"), Limit: queryInt(ctx, "limit"), Cursor: ctx.Query("cursor"),
+		Broken: broken, IncludeChanges: include == "changes", RootUID: root,
 	})
 	return writeKubernetes(ctx, value, err)
 }
@@ -434,7 +457,11 @@ func writeKubernetes(ctx *fiber.Ctx, value any, err error) error {
 	detail := kubernetes.DiagnoseClusterError(err, multiple, clusterID)
 	log.Printf("kubernetes admin failure: code=%s retryable=%t", detail.Code, detail.Retryable)
 	status := fiber.StatusBadGateway
+	var throttled *kubernetes.ErrThrottled
 	switch {
+	case errors.As(err, &throttled):
+		status = fiber.StatusTooManyRequests
+		ctx.Set(fiber.HeaderRetryAfter, strconv.Itoa(max(1, int(throttled.RetryAfter.Seconds()))))
 	case errors.Is(err, kubernetes.ErrInvalidArguments), errors.Is(err, kubernetes.ErrInvalidEndpoint), errors.Is(err, kubernetes.ErrClusterRequired):
 		status = fiber.StatusBadRequest
 	case errors.Is(err, kubernetes.ErrCompleteGraphLimit):

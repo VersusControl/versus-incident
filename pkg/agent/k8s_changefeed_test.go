@@ -88,14 +88,10 @@ func TestChangeFeedsRequireInfrastructurePermissionBeforeReading(t *testing.T) {
 	provider := storage.NewMemory()
 	scope := kubeindex.Scope{OrgID: "org-a", ClusterID: "cluster-a", CredentialID: "cred-a"}
 	now := time.Now().UTC()
-	store := kubechanges.NewStore(provider, scope)
 	record := kubeindex.Record{UID: "uid-a", Kind: "Deployment", Namespace: "shop", Name: "checkout", Labels: map[string]string{"app.kubernetes.io/name": "checkout"}}
 	change, ok := kubechanges.Detect(scope.ClusterID, kubeindex.Delta{Kind: "Deployment", Op: "upsert", New: &record}, now)
 	if !ok {
 		t.Fatal("expected the labeled Kubernetes record to produce a change")
-	}
-	if err := store.Append([]kubechanges.Change{change}, now); err != nil {
-		t.Fatal(err)
 	}
 
 	var requests atomic.Int32
@@ -110,6 +106,14 @@ func TestChangeFeedsRequireInfrastructurePermissionBeforeReading(t *testing.T) {
 	}
 	kubeService := kubernetes.NewService(client, kubernetes.Scope{OrgID: scope.OrgID, ClusterID: scope.ClusterID, CredentialID: scope.CredentialID}, 0)
 	kubeService.SetChangeStorage(provider)
+	activeScope := kubeService.ActiveScope()
+	if activeScope.OrgID != scope.OrgID || activeScope.ClusterID != scope.ClusterID || activeScope.CredentialID == "" || activeScope.CredentialID == scope.CredentialID || kubeService.Scope().CredentialID != scope.CredentialID {
+		t.Fatal("service did not preserve configured identity and isolate its active credential epoch")
+	}
+	store := kubechanges.NewStore(provider, kubeindex.Scope{OrgID: activeScope.OrgID, ClusterID: activeScope.ClusterID, CredentialID: activeScope.CredentialID})
+	if err := store.Append([]kubechanges.Change{change}, now); err != nil {
+		t.Fatal(err)
+	}
 	kubeFeed := newKubernetesChangeFeed(kubeService)
 	actionSource := &countingActionApprovals{approvals: []act.Approval{{
 		State: "verified", ExecutedAt: now, Proposal: act.Proposal{ID: "proposal-a", Type: "k8s.scale", Target: act.TargetRef{Name: "checkout"}, DryRun: "replicas changed"},

@@ -19,6 +19,7 @@ var (
 const (
 	defaultMaxScopes  = 8
 	defaultMaxRecords = 50000
+	maxScopeRecords   = 60000
 	maxRecordBytes    = 4 << 10
 	maxLabels         = 64
 	maxSummaryFields  = 64
@@ -33,40 +34,68 @@ type Scope struct {
 }
 
 type OwnerRef struct {
-	Kind      string
-	Namespace string
-	Name      string
-	UID       string
+	APIVersion      string
+	Controller      bool
+	ControllerKnown bool
+	Kind            string
+	Namespace       string
+	Name            string
+	UID             string
+}
+
+type ContainerState struct {
+	Name             string    `json:"name"`
+	WaitingReason    string    `json:"waiting_reason,omitempty"`
+	TerminatedReason string    `json:"last_terminated_reason,omitempty"`
+	ExitCode         int32     `json:"last_terminated_exit_code,omitempty"`
+	TerminatedAt     time.Time `json:"last_terminated_at,omitempty"`
+	RestartCount     int32     `json:"restart_count"`
 }
 
 type Record struct {
-	UID                 string
-	Kind                string
-	Namespace           string
-	Name                string
-	ResourceVersion     string
-	Generation          int64
-	Labels              map[string]string
-	Selector            map[string]string
-	References          map[string][]string
-	Owners              []OwnerRef
-	Target              *OwnerRef
-	CreatedAt           time.Time
-	Phase               string
-	EventType           string
-	NodeName            string
-	NodeReady           bool
-	Images              []string
-	Summary             map[string]string
-	Replicas            int32
-	Ready               int32
-	Available           int32
-	ObservedGeneration  int64
-	RequestedCPUMilli   int64
-	RequestedMemoryByte int64
-	AllocatableCPUMilli int64
-	AllocatableMemory   int64
-	Health              string
+	APIVersion              string
+	UID                     string
+	Kind                    string
+	Namespace               string
+	Name                    string
+	ResourceVersion         string
+	Generation              int64
+	Labels                  map[string]string
+	Selector                map[string]string
+	References              map[string][]string
+	Owners                  []OwnerRef
+	Target                  *OwnerRef
+	CreatedAt               time.Time
+	Phase                   string
+	EventType               string
+	NodeName                string
+	NodeReady               bool
+	Images                  []string
+	Summary                 map[string]string
+	Replicas                int32
+	Ready                   int32
+	Available               int32
+	ObservedGeneration      int64
+	RequestedCPUMilli       int64
+	RequestedMemoryByte     int64
+	AllocatableCPUMilli     int64
+	AllocatableMemory       int64
+	Health                  string
+	Containers              []ContainerState
+	ReadyStatus             string
+	ReadyTransitionAt       time.Time
+	ProgressingStatus       string
+	ProgressingReason       string
+	ProgressingTransitionAt time.Time
+	AvailableStatus         string
+	AvailableTransitionAt   time.Time
+	UpdateRevision          string
+	CurrentRevision         string
+	Revision                string
+	Updated                 int32
+	EventFirstAt            time.Time
+	EventLastAt             time.Time
+	EventCount              int32
 }
 
 type KindStatus struct {
@@ -114,6 +143,20 @@ type Status struct {
 	AgeSeconds float64               `json:"age_s"`
 	Partial    bool                  `json:"partial"`
 	Kinds      map[string]KindStatus `json:"kinds"`
+	Capture    *CaptureStatus        `json:"capture,omitempty"`
+}
+
+type CaptureStatus struct {
+	Mode         string                     `json:"mode"`
+	Reason       string                     `json:"reason,omitempty"`
+	LastCycleAt  *time.Time                 `json:"last_cycle_at,omitempty"`
+	Behind       bool                       `json:"behind"`
+	Verification *CaptureVerificationStatus `json:"verification,omitempty"`
+}
+
+type CaptureVerificationStatus struct {
+	Stage      string `json:"stage"`
+	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
 type Registry struct {
@@ -124,7 +167,7 @@ type Registry struct {
 }
 
 func New(maxRecords int) *Index {
-	if maxRecords <= 0 || maxRecords > defaultMaxRecords {
+	if maxRecords <= 0 || maxRecords > maxScopeRecords {
 		maxRecords = defaultMaxRecords
 	}
 	return &Index{records: make(map[string]Record), kinds: make(map[string]KindStatus), refreshes: make(map[string]*refreshCall), subscribers: make(map[uint64]chan Delta), maxRecords: maxRecords}
@@ -134,7 +177,7 @@ func NewRegistry(maxScopes, maxRecords int) *Registry {
 	if maxScopes <= 0 || maxScopes > defaultMaxScopes {
 		maxScopes = defaultMaxScopes
 	}
-	if maxRecords <= 0 || maxRecords > defaultMaxRecords {
+	if maxRecords <= 0 || maxRecords > maxScopeRecords {
 		maxRecords = defaultMaxRecords
 	}
 	return &Registry{indexes: make(map[Scope]*Index), maxScopes: maxScopes, maxRecords: maxRecords}
@@ -289,6 +332,10 @@ func (index *Index) publishLocked(delta Delta) {
 // Refresh loads one kind at most once per interval. Concurrent readers wait
 // for the same bounded load instead of issuing duplicate cluster requests.
 func (index *Index) Refresh(ctx context.Context, kind string, interval time.Duration, now time.Time, load Loader) error {
+	return index.RefreshGuarded(ctx, kind, interval, now, load, nil)
+}
+
+func (index *Index) RefreshGuarded(ctx context.Context, kind string, interval time.Duration, now time.Time, load Loader, guard func(func() error) error) error {
 	if index == nil || !validText(kind, 128) || interval < 0 || load == nil {
 		return ErrInvalidRecord
 	}
@@ -307,6 +354,9 @@ func (index *Index) Refresh(ctx context.Context, kind string, interval time.Dura
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-running.done:
+			if errors.Is(running.err, context.Canceled) && ctx.Err() == nil {
+				return index.RefreshGuarded(ctx, kind, interval, now, load, guard)
+			}
 			return running.err
 		}
 	}
@@ -315,16 +365,34 @@ func (index *Index) Refresh(ctx context.Context, kind string, interval time.Dura
 	index.mu.Unlock()
 
 	records, complete, err := load(ctx)
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
 	if err == nil {
-		err = index.Ingest(kind, records, complete, now)
+		commit := func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return index.Ingest(kind, records, complete, now)
+		}
+		if guard == nil {
+			err = commit()
+		} else {
+			err = guard(commit)
+		}
 	}
 	index.mu.Lock()
-	if err != nil {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		status = index.kinds[kind]
 		status.State = "error"
 		status.LastAttemptAt = now.UTC()
 		status.Partial = true
 		status.Error = "sync_failed"
+		if classified, ok := err.(interface{ Class() string }); ok {
+			if value := classified.Class(); validText(value, 64) {
+				status.Error = value
+			}
+		}
 		status.Records = kindRecordCount(index.records, kind)
 		index.kinds[kind] = status
 	}
@@ -404,11 +472,27 @@ func (index *Index) KindStatus(kind string) (KindStatus, bool) {
 }
 
 func validRecord(record Record) bool {
+	if !validOptionalText(record.APIVersion, 256) {
+		return false
+	}
 	if !validText(record.UID, 256) || !validText(record.Kind, 128) || !validText(record.Name, 253) || !validOptionalText(record.Namespace, 253) || !validOptionalText(record.ResourceVersion, 256) || !validOptionalText(record.Phase, 128) || !validOptionalText(record.EventType, 128) || !validOptionalText(record.NodeName, 253) || !validOptionalText(record.Health, 128) {
 		return false
 	}
 	if len(record.Labels) > maxLabels || len(record.Selector) > maxLabels || len(record.References) > 8 || len(record.Summary) > maxSummaryFields || len(record.Owners) > maxOwners || len(record.Images) > maxImages {
 		return false
+	}
+	if len(record.Containers) > 8 {
+		return false
+	}
+	for _, container := range record.Containers {
+		if !validText(container.Name, 63) || !validOptionalText(container.WaitingReason, 64) || !validOptionalText(container.TerminatedReason, 64) || container.RestartCount < 0 {
+			return false
+		}
+	}
+	for _, value := range []string{record.ReadyStatus, record.ProgressingStatus, record.ProgressingReason, record.AvailableStatus, record.UpdateRevision, record.CurrentRevision, record.Revision} {
+		if !validOptionalText(value, 253) {
+			return false
+		}
 	}
 	for key, value := range record.Labels {
 		if !validText(key, 253) || len(value) > 256 {
@@ -436,6 +520,9 @@ func validRecord(record Record) bool {
 		}
 	}
 	for _, owner := range record.Owners {
+		if !validOptionalText(owner.APIVersion, 256) {
+			return false
+		}
 		if !validText(owner.Kind, 128) || !validOptionalText(owner.Namespace, 253) || !validText(owner.Name, 253) || !validOptionalText(owner.UID, 256) {
 			return false
 		}
@@ -452,7 +539,11 @@ func validRecord(record Record) bool {
 }
 
 func estimatedRecordBytes(record Record) int {
-	size := len(record.UID) + len(record.Kind) + len(record.Namespace) + len(record.Name) + len(record.ResourceVersion) + len(record.Phase) + len(record.EventType) + len(record.NodeName) + len(record.Health) + 128
+	size := len(record.APIVersion) + len(record.UID) + len(record.Kind) + len(record.Namespace) + len(record.Name) + len(record.ResourceVersion) + len(record.Phase) + len(record.EventType) + len(record.NodeName) + len(record.Health) + 128
+	size += len(record.UpdateRevision) + len(record.CurrentRevision) + len(record.Revision) + len(record.ProgressingReason) + 128
+	for _, container := range record.Containers {
+		size += len(container.Name) + len(container.WaitingReason) + len(container.TerminatedReason) + 64
+	}
 	for key, value := range record.Labels {
 		size += len(key) + len(value) + 64
 	}
@@ -469,7 +560,7 @@ func estimatedRecordBytes(record Record) int {
 		}
 	}
 	for _, owner := range record.Owners {
-		size += len(owner.Kind) + len(owner.Namespace) + len(owner.Name) + len(owner.UID) + 64
+		size += len(owner.APIVersion) + len(owner.Kind) + len(owner.Namespace) + len(owner.Name) + len(owner.UID) + 64
 	}
 	for _, image := range record.Images {
 		size += len(image) + 32
@@ -491,6 +582,7 @@ func kindRecordCount(records map[string]Record, kind string) int {
 }
 
 func cloneRecord(record Record) Record {
+	record.Containers = append([]ContainerState(nil), record.Containers...)
 	if record.Labels != nil {
 		labels := make(map[string]string, len(record.Labels))
 		for key, value := range record.Labels {

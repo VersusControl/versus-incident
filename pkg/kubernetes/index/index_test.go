@@ -52,9 +52,12 @@ func TestSnapshotsAreDefensiveCopiesAndBounded(t *testing.T) {
 }
 
 func TestIndexDefaultsAndRecordSizeAreBounded(t *testing.T) {
-	index := New(defaultMaxRecords + 1)
+	index := New(maxScopeRecords + 1)
 	if index.maxRecords != defaultMaxRecords {
 		t.Fatalf("record cap=%d, want %d", index.maxRecords, defaultMaxRecords)
+	}
+	if large := New(maxScopeRecords); large.maxRecords != 60000 {
+		t.Fatal("scope cannot retain fifty thousand Pods and their controllers")
 	}
 	registry := NewRegistry(0, 0)
 	if registry.maxScopes != defaultMaxScopes || registry.maxRecords != defaultMaxRecords {
@@ -157,6 +160,25 @@ func TestRefreshPartialDoesNotDeleteUnseenRecords(t *testing.T) {
 	snapshot := index.Snapshot()
 	if len(snapshot.Records) != 2 || snapshot.Kinds["Pod"].State != "partial" || !snapshot.Kinds["Pod"].Partial {
 		t.Fatalf("partial refresh altered last-good membership: %#v", snapshot)
+	}
+}
+
+func TestRefreshGuardRejectsRetiredCommit(t *testing.T) {
+	index := New(10)
+	deltas, unsubscribe := index.Subscribe(1)
+	defer unsubscribe()
+	err := index.RefreshGuarded(t.Context(), "Pod", 0, time.Now(), func(context.Context) ([]Record, bool, error) {
+		return []Record{pod("old", "old")}, true, nil
+	}, func(commit func() error) error {
+		return context.Canceled
+	})
+	if !errors.Is(err, context.Canceled) || len(index.Snapshot().Records) != 0 || len(deltas) != 0 {
+		t.Fatal("retired load published records or deltas")
+	}
+	if err := index.Refresh(t.Context(), "Pod", time.Minute, time.Now(), func(context.Context) ([]Record, bool, error) {
+		return []Record{pod("live", "live")}, true, nil
+	}); err != nil || index.Snapshot().Records[0].UID != "live" {
+		t.Fatal("retirement cancellation suppressed live retry")
 	}
 }
 

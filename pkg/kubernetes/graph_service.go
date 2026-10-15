@@ -95,7 +95,7 @@ func (service *Service) Graph(ctx context.Context, query GraphQuery) (kubegraph.
 			result.Nodes[position].Group = result.Nodes[position].Namespace
 		}
 	}
-	result.Sync = kubegraph.SyncStatus{State: status.State, AgeSeconds: status.AgeSeconds, Partial: status.Partial}
+	result.Sync = kubegraph.SyncStatus{State: status.State, AgeSeconds: status.AgeSeconds, Partial: status.Partial || result.Sync.Partial}
 	return result, nil
 }
 
@@ -107,6 +107,9 @@ func (service *Service) completeGraph(ctx context.Context, query GraphQuery) (ku
 	result, withinEdgeLimit := kubegraph.BuildComplete(view, maxCompleteGraphEdges)
 	if !withinEdgeLimit {
 		return kubegraph.Graph{}, ErrCompleteGraphLimit
+	}
+	if result.Omitted["references"] > 0 {
+		return kubegraph.Graph{}, ErrGraphIncomplete
 	}
 	if query.ConnectedOnly {
 		filterGraphConnectedWithoutOmitted(&result)

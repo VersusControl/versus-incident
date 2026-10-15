@@ -15,6 +15,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/agent"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
@@ -61,6 +62,154 @@ func TestMultiClusterFleetFixturesThroughSharedRegistry(t *testing.T) {
 		logs, err := service.PodLogs(ctx, pod.Namespace, pod.Name, "app", false, 0, 10)
 		if err != nil || logs.ClusterID != id {
 			t.Fatalf("cluster log identity: %s %v", id, err)
+		}
+	}
+}
+
+func TestBadRolloutBackendContract(t *testing.T) {
+	server, err := NewServer(Config{Scenario: "bad-rollout"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(server)
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "cluster"}, 0)
+	service.SetChangeStorage(storage.NewMemory())
+	page, err := service.Issues(t.Context(), kubernetes.IssueOptions{Broken: true, IncludeChanges: true, Limit: 2})
+	if err != nil || page.Broken.Total != 3 || len(page.Items) != 2 || page.Next == "" {
+		t.Fatalf("page totals: %+v %v", page, err)
+	}
+	root, err := service.Issues(t.Context(), kubernetes.IssueOptions{RootUID: "deployment-checkout", IncludeChanges: true, Namespace: "shop"})
+	if err != nil || len(root.Items) != 1 {
+		t.Fatalf("root query: %+v %v", root, err)
+	}
+	checkout := root.Items[0]
+	if checkout.Root.Kind != "Deployment" || checkout.Rule != "pod.crash_loop" || checkout.Count != 7 || checkout.Of != 7 || checkout.History != "reconstructed" || checkout.Evidence == nil || len(checkout.Evidence.Terminations) != 2 {
+		t.Fatalf("checkout contract: %+v", checkout)
+	}
+	for _, termination := range checkout.Evidence.Terminations {
+		if termination.Reason == "OOMKilled" && termination.Count != 6 {
+			t.Fatalf("OOM evidence: %+v", termination)
+		}
+	}
+	image := false
+	for _, linked := range checkout.Changes {
+		if linked.Change.Type == kubechanges.ImageChanged {
+			image = true
+			if linked.LeadSec != 240 || len(linked.Change.Fields) != 1 || linked.Change.Fields[0].From != "example.invalid/checkout:v41" || linked.Change.Fields[0].To != "example.invalid/checkout:v42" {
+				t.Fatalf("reconstructed image: %+v", linked)
+			}
+		}
+	}
+	if !image {
+		t.Fatal("no reconstructed image change")
+	}
+	if _, err := service.Issues(t.Context(), kubernetes.IssueOptions{RootUID: "deployment-checkout", IncludeChanges: true, Namespace: "payments"}); !errors.Is(err, kubernetes.ErrNotFound) {
+		t.Fatal("out-of-scope root disclosed")
+	}
+	quiet, err := service.Issues(t.Context(), kubernetes.IssueOptions{RootUID: "node-agent", IncludeChanges: true})
+	if err != nil || len(quiet.Items) != 1 || quiet.Items[0].History != "gap" || quiet.Items[0].BrokeAtSource != "first_seen" {
+		t.Fatalf("cold quiet workload falsely complete: %+v %v", quiet, err)
+	}
+	ordinary, err := service.Issues(t.Context(), kubernetes.IssueOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	warning := false
+	for _, item := range ordinary.Items {
+		if item.Root.Name == "cart" && item.Rule == "event.warning" && !item.Broken {
+			warning = true
+		}
+	}
+	if !warning {
+		t.Fatal("ordinary warning lost")
+	}
+	encoded, _ := json.Marshal([]any{page, root, quiet, ordinary})
+	if strings.Contains(string(encoded), "CANARY") {
+		t.Fatal("status or template canary escaped backend response")
+	}
+}
+
+func TestContinuousCaptureIdleBreakAndShutdown(t *testing.T) {
+	server, err := NewServer(Config{Scenario: "bad-rollout-before"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(server)
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "cluster", CredentialID: "fixture"}, 0)
+	service.SetChangeStorage(storage.NewMemory())
+	registry := kubernetes.NewServiceRegistry(service)
+	ctx, cancel := context.WithTimeout(t.Context(), 80*time.Second)
+	defer cancel()
+	defer registry.Close()
+	registry.StartCapture(ctx)
+	poll := time.NewTicker(50 * time.Millisecond)
+	defer poll.Stop()
+	var baseline time.Time
+	for baseline.IsZero() {
+		if status := service.CaptureStatus(); status.LastCycleAt != nil {
+			baseline = *status.LastCycleAt
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("capture did not initialize")
+		case <-poll.C:
+		}
+	}
+	if err := seedBadRollout(server.store, time.Now().UTC().Truncate(time.Second).Add(4*time.Minute), true); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		status := service.CaptureStatus()
+		if status.LastCycleAt != nil && status.LastCycleAt.Sub(baseline) >= 20*time.Second {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("idle capture did not record the next cycle")
+		case <-poll.C:
+		}
+	}
+	page, err := service.Issues(ctx, kubernetes.IssueOptions{Broken: true, IncludeChanges: true, RootUID: "deployment-checkout", Namespace: "shop"})
+	if err != nil || len(page.Items) != 1 || !page.Items[0].Broken || page.Items[0].History == "complete" {
+		t.Fatalf("idle break: %+v %v", page, err)
+	}
+	changes, err := service.Changes(ctx, kubernetes.ChangeQuery{Since: baseline, Limit: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedConfig, observedImage := false, false
+	for _, change := range changes.Items {
+		if change.Source != "observed" {
+			continue
+		}
+		if change.Type == kubechanges.ConfigChanged && change.Name == "checkout-cfg" {
+			observedConfig = true
+		}
+		if change.Type == kubechanges.ImageChanged && change.Name == "checkout" {
+			observedImage = true
+		}
+	}
+	if !observedConfig || !observedImage {
+		t.Fatalf("idle observed config=%v image=%v", observedConfig, observedImage)
+	}
+	registry.Close()
+	if _, err := registry.ResolveCluster("default", "cluster"); !errors.Is(err, kubernetes.ErrClusterUnavailable) {
+		t.Fatal("closed capture registry resolved credentials")
+	}
+	for _, counter := range server.requestCounters() {
+		if strings.HasSuffix(counter.Path, "/secrets") && !strings.Contains(counter.Accept, "PartialObjectMetadataList") {
+			t.Fatal("capture transferred full Secret objects")
 		}
 	}
 }

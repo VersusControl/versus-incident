@@ -18,12 +18,13 @@ const (
 )
 
 type Node struct {
-	ID        string `json:"id"`
-	Kind      string `json:"kind"`
-	Namespace string `json:"namespace,omitempty"`
-	Name      string `json:"name"`
-	Health    string `json:"health,omitempty"`
-	Group     string `json:"group"`
+	ID                string `json:"id"`
+	Kind              string `json:"kind"`
+	Namespace         string `json:"namespace,omitempty"`
+	Name              string `json:"name"`
+	Health            string `json:"health,omitempty"`
+	Group             string `json:"group"`
+	ReferencesPartial bool   `json:"references_partial,omitempty"`
 }
 
 type Edge struct {
@@ -103,8 +104,13 @@ func build(snapshot index.Snapshot, maxNodes, maxEdges int) (Graph, bool) {
 			group += "/" + app
 		}
 		selected[record.UID] = record
+		if record.Summary["references_partial"] == "true" {
+			result.Omitted["references"]++
+			result.Truncated = true
+			result.Sync.Partial = true
+		}
 		byName[record.Kind+"\x00"+record.Namespace+"\x00"+record.Name] = record.UID
-		result.Nodes = append(result.Nodes, Node{ID: record.UID, Kind: record.Kind, Namespace: record.Namespace, Name: record.Name, Health: record.Health, Group: group})
+		result.Nodes = append(result.Nodes, Node{ID: record.UID, Kind: record.Kind, Namespace: record.Namespace, Name: record.Name, Health: record.Health, Group: group, ReferencesPartial: record.Summary["references_partial"] == "true"})
 	}
 	edges := make(map[string]Edge)
 	limited := false
@@ -247,6 +253,10 @@ func Neighborhood(graph Graph, ref Ref, hops, maxNodes int) Graph {
 	}
 	for id := range selected {
 		result.Nodes = append(result.Nodes, nodes[id])
+		if nodes[id].ReferencesPartial {
+			result.Omitted["references"]++
+			result.Truncated, result.Sync.Partial = true, true
+		}
 	}
 	for _, edge := range graph.Edges {
 		if selected[edge.From] && selected[edge.To] {
@@ -254,7 +264,9 @@ func Neighborhood(graph Graph, ref Ref, hops, maxNodes int) Graph {
 		}
 	}
 	for kind, count := range graph.Omitted {
-		result.Omitted[kind] += count
+		if kind != "references" {
+			result.Omitted[kind] += count
+		}
 	}
 	sort.Slice(result.Nodes, func(left, right int) bool { return result.Nodes[left].ID < result.Nodes[right].ID })
 	sort.Slice(result.Edges, func(left, right int) bool {

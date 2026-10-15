@@ -26,6 +26,7 @@ type Diagnosis struct {
 	Omitted       []string            `json:"omitted_categories,omitempty"`
 	Truncated     bool                `json:"truncated"`
 	Sync          SyncStatus          `json:"sync"`
+	Break         *Issue              `json:"break,omitempty"`
 }
 
 // DiagnoseWorkload combines bounded workload, warning-event and scrubbed log evidence.
@@ -115,5 +116,16 @@ func (service *Service) DiagnoseWorkload(ctx context.Context, options DiagnoseOp
 		result.Sync.Partial = result.Sync.Partial || neighborhood.Sync.Partial || len(neighborhood.Omitted) > 0
 	}
 	result.Sync.Partial = result.Sync.Partial || result.Truncated || len(result.Partial) > 0
+	issues, issuesErr := service.Issues(ctx, IssueOptions{Namespace: options.Namespace, Broken: true, IncludeChanges: true, targetObject: &ObjectRef{UID: workload.UID, Kind: options.Kind, Namespace: options.Namespace, Name: options.Name}})
+	if issuesErr != nil {
+		result.Partial = append(result.Partial, PartialFailure{Scope: "break", Class: errorClass(issuesErr)})
+		result.Sync.Partial = true
+	} else {
+		if len(issues.Items) > 0 {
+			item := issues.Items[0]
+			result.Break = &item
+		}
+		result.Sync.Partial = result.Sync.Partial || issues.Sync.Partial
+	}
 	return result, nil
 }

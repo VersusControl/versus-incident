@@ -39,6 +39,9 @@ func NewKubernetesRegistry(cfg config.KubernetesConnectorConfig, scope tenancy.O
 }
 
 func NewKubernetesService(cfg config.KubernetesToolConfig, scope tenancy.OrgScope) (*kubernetes.Service, error) {
+	if cfg.ChangeCapture != "" && cfg.ChangeCapture != "continuous" && cfg.ChangeCapture != "demand" {
+		return nil, errors.New("kubernetes: invalid change capture configuration")
+	}
 	mode := strings.TrimSpace(cfg.Auth.Mode)
 	if mode == "" && !reflect.ValueOf(cfg.Auth).IsZero() {
 		return nil, errors.New("kubernetes: auth.mode is required when auth.* is configured")
@@ -96,5 +99,9 @@ func NewKubernetesService(cfg config.KubernetesToolConfig, scope tenancy.OrgScop
 		clusterID = "default"
 	}
 	normalized := scope.Normalized()
-	return kubernetes.NewService(client, kubernetes.Scope{OrgID: normalized.Write, ClusterID: clusterID, CredentialID: cfg.CredentialID}, ttl), nil
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: normalized.Write, ClusterID: clusterID, CredentialID: cfg.CredentialID}, ttl)
+	if err := service.SetCaptureMode(cfg.ChangeCapture); err != nil {
+		return nil, err
+	}
+	return service, nil
 }

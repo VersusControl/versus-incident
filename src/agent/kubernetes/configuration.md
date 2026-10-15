@@ -208,6 +208,40 @@ this mode does not perform cluster discovery. Grant only the Google IAM needed
 to access the cluster endpoint, then bind the principal through Kubernetes
 RBAC.
 
+### Change capture
+
+`change_capture` defaults to `continuous`: Versus records supported changes
+while running, even when nobody has the dashboard open. To opt out, set
+`change_capture: demand` to collect on reads instead; idle periods and a cold
+start can leave history gaps.
+
+Add the setting to your existing single-cluster configuration:
+
+```yaml
+connectors:
+  kubernetes:
+    change_capture: continuous
+```
+
+With `multiple: true`, only `multiple` and `clusters` belong directly under
+`kubernetes`. Each cluster entry owns its `change_capture`; there is no inherited
+top-level setting. See the [per-cluster example](/agent/kubernetes/multi-cluster#setup)
+for continuous capture in east and demand capture in west. Helm values use
+`connectors.kubernetes.changeCapture` for a single cluster and `changeCapture`
+inside each `connectors.kubernetes.clusters` entry for multiple clusters.
+Restart Versus after configuration changes.
+
+History is retained for up to 24 hours; gaps may remain. Related changes are
+investigation clues, not proof of the cause. Configuration-change records do
+not expose Secret contents.
+
+| Symptom | What to check |
+| --- | --- |
+| Configured continuous capture reports effective Demand | Check the reported reason. Projected ServiceAccount tokens must be verifiable against the cluster API server. Unverified rotating or cloud identities, and unsupported storage, fall back to demand; selecting continuous alone does not guarantee coverage. |
+| History has gaps or is unavailable | Check capture mode, runtime uptime, reader permissions, and the 24-hour retention window. Revoked credentials stop capture; missing permissions leave incomplete history. Expand the history warnings rather than assuming nothing changed. |
+| Multiple replicas need continuous history | Use shared PostgreSQL storage and the same connector configuration on current versions. Duplicate-free capture is verified for static readers and verified projected ServiceAccount readers, not every cloud identity. Confirm effective continuous capture on each replica. Stop all old capture instances before upgrading; do not run old and new capture together. |
+| A large cluster responds slowly | Large inventories, including around 50,000 resources, can still be slow. Retry the read. Temporarily switching to demand may help reduce background work, but is not a guaranteed fix and can leave idle history gaps. |
+
 ## Kubernetes RBAC
 
 Versus Enterprise `infrastructure:view` controls access to the Versus UI/API.
@@ -234,7 +268,7 @@ rules:
   resources: [pods/log]
   verbs: [get]
 - apiGroups: [apps]
-  resources: [deployments, statefulsets, daemonsets, replicasets]
+  resources: [deployments, statefulsets, daemonsets, replicasets, controllerrevisions]
   verbs: [get, list]
 - apiGroups: [batch]
   resources: [jobs, cronjobs]

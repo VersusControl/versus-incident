@@ -16,6 +16,22 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const summary = (id: string, health: KubernetesClusterSummary["health"]): KubernetesClusterSummary => ({ id, health, provider: "generic", nodes: 2, ready_nodes: 2, pods: 4, running_pods: 4, warnings: 0, sync: { state: "live" }, observed_at: "2026-10-09T12:00:00Z" });
 
 describe("Kubernetes fleet", () => {
+  it("shows only positive broken counts and observed change times", () => {
+    render(<MemoryRouter><KubernetesFleet clusters={[summary("unknown", "healthy"), { ...summary("known", "attention"), broken: 3, last_change_at: new Date(Date.now() - 240_000).toISOString() }, { ...summary("quiet", "healthy"), broken: 0 }]} retry={vi.fn()} retrying={false} /></MemoryRouter>);
+    expect(screen.queryByText("Broken unknown")).toBeNull();
+    expect(screen.queryByText("0 broken")).toBeNull();
+    expect(screen.getByText("3 broken").className).toContain("text-sev-critical");
+    expect(screen.getByText("Last change 4 min ago")).toBeTruthy();
+    expect(screen.queryByText("Last change unknown")).toBeNull();
+    expect(screen.getAllByText(/^Last change/)).toHaveLength(1);
+  });
+
+  it.each([undefined, "", "not-a-date"])("hides unobserved change time %s", (lastChangeAt) => {
+    render(<MemoryRouter><KubernetesFleet clusters={[{ ...summary("cluster", "healthy"), last_change_at: lastChangeAt }]} retry={vi.fn()} retrying={false} /></MemoryRouter>);
+    expect(screen.queryByText(/^Last change/)).toBeNull();
+    expect(screen.getByText("0 warnings")).toBeTruthy();
+  });
+
   it("orders unhealthy cards first, preserves missing evidence, and scopes links", () => {
     const retry = vi.fn();
     render(<MemoryRouter><KubernetesFleet clusters={[summary("healthy", "healthy"), summary("offline", "unreachable"), summary("partial", "partial")]} retry={retry} retrying={false} /></MemoryRouter>);

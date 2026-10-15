@@ -9,7 +9,7 @@ Multi-cluster connections are available in OSS and Enterprise. Enterprise
 adds per-member cluster permissions within the deployment's single
 organization; clusters are not assigned to separate organizations.
 
-![Kubernetes multi-cluster view](../../docs/images/kubernetes-multi-cluster.png)
+![Synthetic east and west fleet rows: each has 12 of 12 ready nodes, 19 of 28 running Pods, 26 warnings, and 3 broken workloads; only east shows Last change 9 min ago](../../docs/images/kubernetes-multi-cluster.png)
 
 ## Setup
 
@@ -26,6 +26,7 @@ connectors:
         display_name: Production East
         endpoint: https://east.api.example
         ca_data: ${KUBERNETES_EAST_CA_DATA}
+        change_capture: continuous
         auth:
           mode: token_file
           token_file: /run/secrets/kubernetes-east-reader-token
@@ -33,6 +34,7 @@ connectors:
         display_name: Production West
         endpoint: https://west.api.example
         ca_data: ${KUBERNETES_WEST_CA_DATA}
+        change_capture: demand
         auth:
           mode: token_file
           token_file: /run/secrets/kubernetes-west-reader-token
@@ -51,6 +53,11 @@ actions block. Auth modes may differ across clusters. Actions remain disabled
 unless enabled on that entry and require separate actor credentials; never
 reuse reader credentials for writes.
 
+Each entry also owns its `change_capture`: east above records continuously,
+while west opts out with `change_capture: demand` and collects on reads. See
+[Change capture](/agent/kubernetes/configuration#change-capture) for history gaps
+and effective capture modes.
+
 See [Configuration](/agent/kubernetes/configuration) for authentication modes,
 reader and actor RBAC, network restrictions, safety controls, and error codes.
 The [EKS with IRSA example](/examples/eks-irsa-kubernetes-reader) shows how to
@@ -58,8 +65,10 @@ prepare an IAM-authenticated reader for an EKS entry.
 
 For Helm, use the same `multiple`/`clusters` structure with chart keys such as
 `clusterID`, `displayName`, `caData`, and `auth.tokenFile` inside each entry.
-Do not place single-cluster fields beside `clusters`. Restart Versus after
-changing connector configuration.
+Set `changeCapture` inside each `connectors.kubernetes.clusters` entry; for a
+single cluster, use `connectors.kubernetes.changeCapture`. Do not place
+single-cluster fields beside `clusters`. Restart Versus after changing connector
+configuration.
 
 ### Existing single-cluster setups
 
@@ -84,9 +93,13 @@ URL parameter.
 ## Fleet Health
 
 Open **Connectors > Kubernetes** to see the fleet. Each cluster row shows its
-display name, ID, provider, available Kubernetes version, ready/total nodes,
-running/total Pods, warnings, issues, and snapshot state and time. Missing issue
-or version evidence is labelled unavailable.
+display name, ID, provider, Kubernetes version, and snapshot state and time.
+Ready/total nodes and running/total Pods have readiness meters. Signals show
+warnings, a broken count only when positive, and **Last change** only when a
+valid recorded timestamp is available. An absent Last change line does not
+mean no changes occurred. Unreachable counts and missing versions are
+unavailable. On phones, scroll the cluster rows horizontally to reach the
+remaining columns and actions; they do not become cards.
 
 Health is a bounded cluster check, not a claim that every workload is healthy:
 

@@ -6,6 +6,8 @@ metadata:
   labels:
     {{- include "versus-incident.labels" . | nindent 4 }}
 rules:
+  - nonResourceURLs: ["/.well-known/openid-configuration", "/openid/v1/jwks"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["nodes", "namespaces", "pods", "services", "events", "configmaps", "persistentvolumeclaims", "persistentvolumes"]
     verbs: ["get", "list"]
@@ -13,7 +15,7 @@ rules:
     resources: ["pods/log"]
     verbs: ["get"]
   - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets", "controllerrevisions"]
     verbs: ["get", "list"]
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]

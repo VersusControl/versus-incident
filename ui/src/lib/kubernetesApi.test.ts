@@ -8,6 +8,16 @@ afterEach(() => {
 });
 
 describe("Kubernetes resource API", () => {
+  it("scopes enriched broken roots and namespace-bound expansion", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(new Response("{}")));
+    const client = createKubernetesApi("prod-eu");
+    await client.kubernetesIssues({ broken: true, include: "changes", limit: 5 });
+    await client.kubernetesIssues({ root_uid: "root-uid", include: "changes", namespace: "shop" });
+    const urls = fetchMock.mock.calls.map(([input]) => new URL(String(input), "http://localhost"));
+    expect(Object.fromEntries(urls[0].searchParams)).toEqual({ broken: "true", include: "changes", limit: "5", cluster: "prod-eu" });
+    expect(Object.fromEntries(urls[1].searchParams)).toEqual({ root_uid: "root-uid", include: "changes", namespace: "shop", cluster: "prod-eu" });
+  });
+
   it("preserves single URLs and encodes cluster scope without discarding filters", () => {
     expect(kubernetesClusterPath("/api/admin/kubernetes/overview")).toBe("/api/admin/kubernetes/overview");
     const url = new URL(kubernetesClusterPath("/api/admin/kubernetes/search?q=a%2Bb&cluster=old", "prod/eu+one"), "http://localhost");

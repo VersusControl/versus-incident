@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +21,103 @@ import (
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 )
+
+func TestProjectedTokenControlsSignRotateAndRejectInvalidInput(t *testing.T) {
+	server, err := NewServer(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mint := func(body string) string {
+		t.Helper()
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/_fake/projected-token", strings.NewReader(body)))
+		var result struct {
+			Token string `json:"token"`
+		}
+		if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &result) != nil || result.Token == "" {
+			t.Fatal("token control failed")
+		}
+		return result.Token
+	}
+	first, second := mint(`{"id":"pod-a"}`), mint(`{"id":"pod-b"}`)
+	if first == second {
+		t.Fatal("independent Pod tokens identical")
+	}
+	keys := func() jose.JSONWebKeySet {
+		t.Helper()
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/openid/v1/jwks", nil))
+		var result jose.JSONWebKeySet
+		if json.Unmarshal(response.Body.Bytes(), &result) != nil || len(result.Keys) != 1 || result.Keys[0].IsPublic() == false {
+			t.Fatal("JWKS must contain only public key")
+		}
+		return result
+	}
+	verify := func(token string, public jose.JSONWebKey) error {
+		parsed, err := jwt.ParseSigned(token, []jose.SignatureAlgorithm{jose.ES256})
+		if err != nil {
+			return err
+		}
+		var claims jwt.Claims
+		return parsed.Claims(public.Key, &claims)
+	}
+	old := keys().Keys[0]
+	longLived, err := jwt.ParseSigned(mint(`{"id":"long-lived","lifetime_seconds":31622400}`), []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var longClaims jwt.Claims
+	if err := longLived.Claims(old.Key, &longClaims); err != nil || longClaims.Expiry.Time().Before(time.Now().Add(365*24*time.Hour)) {
+		t.Fatal("long-lived fixture token not signed or lifetime too short")
+	}
+	if verify(first, old) != nil || verify(second, old) != nil || verify(mint(`{"id":"bad","mismatch":"signature"}`), old) == nil {
+		t.Fatal("signature discriminator failed")
+	}
+	rotated := mint(`{"id":"rotated","rotate":true}`)
+	current := keys().Keys[0]
+	if current.KeyID == old.KeyID || verify(rotated, current) != nil || verify(first, current) == nil {
+		t.Fatal("key rotation discriminator failed")
+	}
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/_fake/projected-token", strings.NewReader(`{"mismatch":"unsupported"}`)))
+	if response.Code != http.StatusBadRequest {
+		t.Fatal("unknown control accepted")
+	}
+}
+
+func TestAuthenticationAndKindPermissionFaultControls(t *testing.T) {
+	server, err := NewServer(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		path   string
+		status int
+	}{
+		{"/.well-known/openid-configuration", 401},
+		{"/api/v1/pods", 401},
+		{"/api/v1/configmaps", 403},
+	} {
+		control := httptest.NewRecorder()
+		server.ServeHTTP(control, httptest.NewRequest(http.MethodPost, "/_fake/verification-fault", strings.NewReader(fmt.Sprintf(`{"path":%q,"status":%d,"remaining":1}`, test.path, test.status))))
+		if control.Code != 200 {
+			t.Fatal("fault control rejected")
+		}
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, test.path, nil))
+		if response.Code != test.status {
+			t.Fatalf("fault status = %d, want %d", response.Code, test.status)
+		}
+		recovered := httptest.NewRecorder()
+		server.ServeHTTP(recovered, httptest.NewRequest(http.MethodGet, test.path, nil))
+		if recovered.Code != 200 {
+			t.Fatal("one-shot fault did not recover")
+		}
+	}
+}
 
 type gatedLogWriter struct {
 	*httptest.ResponseRecorder
@@ -27,6 +125,149 @@ type gatedLogWriter struct {
 	writes  chan string
 	release chan struct{}
 	flushed chan struct{}
+}
+
+func TestListHoldPreservesSnapshotAndCancellation(t *testing.T) {
+	server, err := NewServer(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	post := func(path, body string) {
+		t.Helper()
+		response, err := http.Post(httpServer.URL+path, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("control HTTP %d", response.StatusCode)
+		}
+	}
+	post("/_fake/mutate", `{"operation":"upsert","resource":"nodes","name":"held","object":{"apiVersion":"v1","kind":"Node","metadata":{"name":"held","uid":"held","labels":{"phase":"before"}}}}`)
+	waitActive := func() {
+		t.Helper()
+		deadline := time.NewTimer(2 * time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			server.mu.Lock()
+			active := server.listHolds["nodes"].Active
+			server.mu.Unlock()
+			if active == 1 {
+				return
+			}
+			select {
+			case <-deadline.C:
+				t.Fatal("held list not observed")
+			case <-ticker.C:
+			}
+		}
+	}
+	post("/_fake/list-holds", `{"resource":"nodes","hold":true,"remaining":1}`)
+	result := make(chan string, 1)
+	go func() {
+		response, err := http.Get(httpServer.URL + "/api/v1/nodes")
+		if err != nil {
+			result <- err.Error()
+			return
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		result <- string(body)
+	}()
+	waitActive()
+	post("/_fake/mutate", `{"operation":"upsert","resource":"nodes","name":"held","object":{"apiVersion":"v1","kind":"Node","metadata":{"name":"held","uid":"held","labels":{"phase":"after"}}}}`)
+	post("/_fake/list-holds", `{"resource":"nodes","hold":false}`)
+	select {
+	case body := <-result:
+		if !strings.Contains(body, `"phase":"before"`) || strings.Contains(body, `"phase":"after"`) {
+			t.Fatal("held response did not preserve old snapshot")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("held response not released")
+	}
+	post("/_fake/list-holds", `{"resource":"nodes","hold":true,"remaining":1}`)
+	ctx, cancel := context.WithCancel(t.Context())
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL+"/api/v1/nodes", nil)
+	finished := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if response != nil {
+			response.Body.Close()
+		}
+		finished <- err
+	}()
+	waitActive()
+	cancel()
+	select {
+	case err := <-finished:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal("held response did not honor cancellation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("held response cancellation not bounded")
+	}
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		server.mu.Lock()
+		active, cancelled := server.listHolds["nodes"].Active, server.listHolds["nodes"].Cancelled
+		server.mu.Unlock()
+		if active == 0 && cancelled == 1 {
+			break
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("cancelled hold counters did not settle")
+		case <-ticker.C:
+		}
+	}
+	post("/_fake/list-holds", `{"resource":"nodes","hold":false}`)
+}
+
+func TestVerificationFaultRecoveryAndCancellation(t *testing.T) {
+	for _, statusCode := range []int{429, 500, 503} {
+		t.Run(strconv.Itoa(statusCode), func(t *testing.T) {
+			server, err := NewServer(Config{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			control := httptest.NewRecorder()
+			server.ServeHTTP(control, httptest.NewRequest(http.MethodPost, "/_fake/verification-fault", strings.NewReader(fmt.Sprintf(`{"path":"/.well-known/openid-configuration","status":%d,"remaining":1}`, statusCode))))
+			if control.Code != http.StatusOK {
+				t.Fatalf("control HTTP %d", control.Code)
+			}
+			for _, expected := range []int{statusCode, http.StatusOK} {
+				response := httptest.NewRecorder()
+				server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil))
+				if response.Code != expected {
+					t.Fatalf("verification HTTP %d, want %d", response.Code, expected)
+				}
+			}
+		})
+	}
+	t.Run("cancel", func(t *testing.T) {
+		server, err := NewServer(Config{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		control := httptest.NewRecorder()
+		server.ServeHTTP(control, httptest.NewRequest(http.MethodPost, "/_fake/list-holds", strings.NewReader(`{"resource":"/.well-known/openid-configuration","hold":true,"remaining":1}`)))
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		server.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil).WithContext(ctx))
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		hold := server.listHolds["/.well-known/openid-configuration"]
+		if hold.Active != 0 || hold.Cancelled != 1 || hold.Completed != 0 {
+			t.Fatalf("cancellation counters: %+v", hold)
+		}
+	})
 }
 
 func TestFleetSummaryVersionAndIssues(t *testing.T) {
@@ -525,6 +766,121 @@ func TestServerResourcePathRouting(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAutoscalingDiscoveryAndBadRolloutIndex(t *testing.T) {
+	server, err := NewServer(Config{Scenario: "bad-rollout"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(server)
+	defer upstream.Close()
+	get := func(t *testing.T, path string, result any) {
+		t.Helper()
+		response, err := upstream.Client().Get(upstream.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s status=%d", path, response.StatusCode)
+		}
+		if err := json.NewDecoder(response.Body).Decode(result); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("discovery", func(t *testing.T) {
+		var groups struct {
+			Groups []struct {
+				Name             string `json:"name"`
+				PreferredVersion struct {
+					GroupVersion string `json:"groupVersion"`
+					Version      string `json:"version"`
+				} `json:"preferredVersion"`
+				Versions []struct {
+					GroupVersion string `json:"groupVersion"`
+					Version      string `json:"version"`
+				} `json:"versions"`
+			} `json:"groups"`
+		}
+		get(t, "/apis", &groups)
+		for _, group := range groups.Groups {
+			if group.Name != "autoscaling" {
+				continue
+			}
+			if group.PreferredVersion.GroupVersion != "autoscaling/v2" || group.PreferredVersion.Version != "v2" {
+				t.Fatalf("preferred autoscaling version=%+v", group.PreferredVersion)
+			}
+			for _, version := range []string{"v2", "v1"} {
+				found := false
+				for _, advertised := range group.Versions {
+					found = found || advertised.Version == version && advertised.GroupVersion == "autoscaling/"+version
+				}
+				if !found {
+					t.Fatalf("autoscaling/%s not advertised", version)
+				}
+			}
+			return
+		}
+		t.Fatal("autoscaling group missing")
+	})
+	for _, version := range []string{"v2", "v1"} {
+		t.Run(version, func(t *testing.T) {
+			var discovery struct {
+				GroupVersion string `json:"groupVersion"`
+				Resources    []struct {
+					Name       string   `json:"name"`
+					Kind       string   `json:"kind"`
+					Namespaced bool     `json:"namespaced"`
+					Verbs      []string `json:"verbs"`
+				} `json:"resources"`
+			}
+			path := "/apis/autoscaling/" + version
+			get(t, path, &discovery)
+			if discovery.GroupVersion != "autoscaling/"+version || len(discovery.Resources) != 1 {
+				t.Fatalf("discovery=%+v", discovery)
+			}
+			resource := discovery.Resources[0]
+			if resource.Name != "horizontalpodautoscalers" || resource.Kind != "HorizontalPodAutoscaler" || !resource.Namespaced || strings.Join(resource.Verbs, ",") != "get,list" {
+				t.Fatalf("HPA resource=%+v", resource)
+			}
+			var object struct {
+				APIVersion string `json:"apiVersion"`
+				Kind       string `json:"kind"`
+			}
+			get(t, path+"/namespaces/shop/horizontalpodautoscalers/checkout", &object)
+			if object.APIVersion != discovery.GroupVersion || object.Kind != resource.Kind {
+				t.Fatalf("HPA object=%+v", object)
+			}
+			var list struct {
+				APIVersion string `json:"apiVersion"`
+				Kind       string `json:"kind"`
+				Items      []struct {
+					APIVersion string `json:"apiVersion"`
+				} `json:"items"`
+			}
+			get(t, path+"/namespaces/shop/horizontalpodautoscalers", &list)
+			if list.APIVersion != discovery.GroupVersion || list.Kind != "HorizontalPodAutoscalerList" || len(list.Items) != 1 || list.Items[0].APIVersion != discovery.GroupVersion {
+				t.Fatalf("HPA list=%+v", list)
+			}
+		})
+	}
+	t.Run("index and root query", func(t *testing.T) {
+		client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "fakekube"}, 0)
+		service.SetChangeStorage(storage.NewMemory())
+		snapshot, status, err := service.IndexSnapshot(t.Context(), "HorizontalPodAutoscaler")
+		if err != nil || status.Partial || len(snapshot.Records) != 1 || snapshot.Records[0].UID != "checkout-hpa" || snapshot.Records[0].Kind != "HorizontalPodAutoscaler" {
+			t.Fatalf("HPA snapshot=%+v status=%+v err=%v", snapshot, status, err)
+		}
+		root, err := service.Issues(t.Context(), kubernetes.IssueOptions{RootUID: "deployment-checkout", IncludeChanges: true, Namespace: "shop"})
+		if err != nil || len(root.Items) != 1 || len(root.Partial) != 0 {
+			t.Fatalf("root query=%+v err=%v", root, err)
+		}
+	})
 }
 
 func TestServerDiscoveryMetadataAndFaultCounters(t *testing.T) {

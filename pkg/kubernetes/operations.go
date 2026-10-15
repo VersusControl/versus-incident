@@ -82,6 +82,7 @@ type WorkloadPod struct {
 
 // WorkloadDetail is a dedicated bounded SRE view, not a generic resource projection.
 type WorkloadDetail struct {
+	UID                string              `json:"uid,omitempty"`
 	ResourceID         string              `json:"resource_id"`
 	Kind               string              `json:"kind"`
 	Namespace          string              `json:"namespace,omitempty"`
@@ -201,6 +202,7 @@ func projectResourceReferences(kind string, metadata, spec, summary map[string]a
 			sort.Strings(names)
 			if len(names) > maxProjectionItems {
 				names = names[:maxProjectionItems]
+				summary["references_partial"] = true
 			}
 			summary[key] = names
 		}
@@ -215,6 +217,13 @@ func projectResourceReferences(kind string, metadata, spec, summary map[string]a
 	addNames("config_maps", configMaps...)
 	addNames("secrets", secrets...)
 	addNames("persistent_volume_claims", claims...)
+	podSpec := spec
+	if template, ok := spec["template"].(map[string]any); ok {
+		if nested, ok := template["spec"].(map[string]any); ok {
+			podSpec = nested
+		}
+	}
+	addNames("service_accounts", stringValue(podSpec["serviceAccountName"]))
 	switch kind {
 	case "EndpointSlice":
 		labels := stringMap(metadata["labels"])
@@ -235,7 +244,7 @@ func projectResourceReferences(kind string, metadata, spec, summary map[string]a
 		addNames("services", routeServices(spec)...)
 	case "HorizontalPodAutoscaler":
 		if target, ok := spec["scaleTargetRef"].(map[string]any); ok {
-			summary["target"] = ObjectRef{Kind: boundString(stringValue(target["kind"])), Name: boundString(stringValue(target["name"]))}
+			summary["target"] = ObjectRef{Kind: boundString(stringValue(target["kind"])), Name: boundString(stringValue(target["name"])), Namespace: boundString(stringValue(metadata["namespace"]))}
 		}
 	case "PersistentVolumeClaim":
 		addNames("persistent_volumes", stringValue(spec["volumeName"]))
@@ -817,6 +826,7 @@ func (service *Service) GetWorkload(ctx context.Context, namespace, kind, name s
 		return WorkloadDetail{}, err
 	}
 	result := WorkloadDetail{
+		UID:        resource.UID,
 		ResourceID: resource.ResourceID, Kind: resource.Kind, Namespace: resource.Namespace, Name: resource.Name,
 		Desired:   summaryInt(resource.Summary, "desired_replicas", "replicas", "desired_number_scheduled", "completions"),
 		Current:   summaryInt(resource.Summary, "current_replicas", "current_number_scheduled"),

@@ -6,12 +6,45 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
+	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
+
+func TestIndependentKubernetesRegistryConfigurationSharesCaptureLease(t *testing.T) {
+	cfg := config.KubernetesConnectorConfig{KubernetesToolConfig: config.KubernetesToolConfig{Endpoint: "https://cluster.example", ClusterID: "cluster", CredentialID: "configured", ChangeCapture: "demand", Auth: config.KubernetesAuthConfig{Mode: "token", Token: "bootstrap-credential-canary"}}}
+	provider := storage.NewMemory()
+	var firstScope kubernetes.Scope
+	for position := range 2 {
+		registry, errs := NewKubernetesRegistry(cfg, tenancy.NewOrgScope("org"))
+		defer registry.Close()
+		if len(errs) != 0 {
+			t.Fatal("configured registry did not construct")
+		}
+		service, err := registry.ResolveCluster("org", "cluster")
+		if err != nil {
+			t.Fatal(err)
+		}
+		service.SetChangeStorage(provider)
+		active := service.ActiveScope()
+		if position == 0 {
+			firstScope = active
+		} else if active != firstScope {
+			t.Fatal("independent config bootstraps changed capture identity")
+		}
+		store := kubechanges.NewStore(provider, kubeindex.Scope{OrgID: active.OrgID, ClusterID: active.ClusterID, CredentialID: active.CredentialID})
+		err = store.ClaimLease("owner-"+string(rune('a'+position)), time.Now().UTC(), time.Minute)
+		if position == 0 && err != nil || position == 1 && err != kubechanges.ErrLeaseLost {
+			t.Fatal("configured replicas did not compete for one lease")
+		}
+	}
+}
 
 func TestNewKubernetesRegistryKeepsFailedEntriesAndOwnCredentials(t *testing.T) {
 	connector := config.KubernetesConnectorConfig{Multiple: true, Clusters: []config.KubernetesClusterConfig{

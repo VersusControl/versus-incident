@@ -9,6 +9,25 @@ import (
 	"testing"
 )
 
+func TestChangeCaptureConfig(t *testing.T) {
+	for _, mode := range []string{"continuous", "demand", "invalid"} {
+		connector, err := decodeConnectors(map[string]any{"kubernetes": map[string]any{"change_capture": mode}})
+		if mode == "invalid" {
+			if err == nil {
+				t.Fatal("invalid mode accepted")
+			}
+			continue
+		}
+		if err != nil || connector.Kubernetes.ChangeCapture != mode || cloneConnectorsConfig(connector).Kubernetes.ChangeCapture != mode {
+			t.Fatalf("capture mode clone: %+v %v", connector, err)
+		}
+	}
+	connector, err := decodeConnectors(nil)
+	if err != nil || connector.Kubernetes.ChangeCapture != "continuous" {
+		t.Fatalf("capture default: %+v %v", connector, err)
+	}
+}
+
 func TestKubernetesMultipleValidation(t *testing.T) {
 	entry := func(id, endpoint string) map[string]any {
 		return map[string]any{"cluster_id": id, "endpoint": endpoint}

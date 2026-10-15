@@ -1,9 +1,12 @@
 import { useKubernetesCluster, useKubernetesQuery as useQuery } from "@/lib/useKubernetesCluster";
-import { Activity, AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Boxes, CircleCheck, Cpu, Eye, EyeOff, GitBranch, History, Layers3, Maximize2, Minus, Network, Plus, RotateCcw, Waypoints } from "lucide-react";
+import { Activity, AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Boxes, Cpu, Eye, EyeOff, GitBranch, History, Layers3, Maximize2, Minus, Network, Plus, RotateCcw, Waypoints, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Link, useLocation } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ApiError,
   type KubernetesChange,
+  type KubernetesChangesPage,
   type KubernetesHelmRelease,
   type KubernetesGraph,
   type KubernetesGraphNode,
@@ -18,10 +21,15 @@ import {
 import { CursorPagination } from "@/components/Pagination";
 import { useCursorPagination } from "@/lib/pagination";
 import { type KubernetesExplorerTab } from "./kubernetesExplorerTabs";
+import { BreakRow, BreakTimelineLane, ResourceTimelineChart, TimelineCard } from "./KubernetesBreakTimeline";
+import { KubernetesWarnings } from "./KubernetesWarnings";
+import { failureWarnings, issueWarnings } from "./kubernetesWarningItems";
 
 const virtualViewportHeight = 440;
 const resourceRowHeight = 58;
 const virtualOverscan = 6;
+const rootScanPageLimit = 5;
+type RootTimelinePage = KubernetesChangesPage & { scanBounded?: boolean };
 type ResourceSelection = (resource: KubernetesResource, drawerTab?: "timeline") => void;
 
 function resourceIdForKind(kind: string): string | null {
@@ -88,11 +96,6 @@ const overviewTones = {
   ok: { rail: "from-sev-ok-solid/80", chip: "bg-sev-ok/10 text-sev-ok" },
 } as const;
 
-const severityBar: Record<string, string> = {
-  critical: "bg-sev-critical-solid",
-  warning: "bg-sev-warn-solid",
-  info: "bg-sev-info-solid",
-};
 
 const quantityFactors: Record<string, number> = { "": 1, n: 1e-9, u: 1e-6, µ: 1e-6, m: 1e-3, k: 1e3, K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18, Ki: 2 ** 10, Mi: 2 ** 20, Gi: 2 ** 30, Ti: 2 ** 40, Pi: 2 ** 50, Ei: 2 ** 60 };
 
@@ -120,16 +123,10 @@ function formatUsageWindow(value?: string): string {
 }
 
 export function PartialFailuresDisclosure({ failures }: { failures?: Array<{ resource_id?: string; scope?: string; class: string }> | null }) {
-  const [open, setOpen] = useState(false);
-  if (!failures?.length) return null;
-  const kinds = [...new Set(failures.map((failure) => failure.resource_id || failure.scope || failure.class))];
-  return <div className="border-t border-ink-700 px-4 py-2 text-2xs text-sev-warning">
-    <button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)} className="underline underline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">Some evidence could not be collected ({kinds.length} categories)</button>
-    {open && <ul className="mt-2 list-disc space-y-1 pl-5">{failures.map((failure, index) => <li key={`${failure.resource_id}:${failure.scope}:${failure.class}:${index}`}>{failure.resource_id || failure.scope || "Kubernetes resources"}: {failure.class.replaceAll("_", " ")}</li>)}</ul>}
-  </div>;
+  const { cluster } = useKubernetesCluster();
+  return <KubernetesWarnings warnings={failureWarnings(failures)} scope={JSON.stringify([cluster])} />;
 }
 
-const overviewPairHeight = "h-[26rem] max-h-[26rem]";
 
 function OverviewCard({ title, icon, tone = "accent", meta, action, className = "", bodyClassName = "", scrollLabel, delay = 0, children }: {
   title: string;
@@ -199,14 +196,6 @@ function severityTone(value: string): string {
   return value === "critical" ? "pill-bad" : value === "warning" ? "pill-warn" : "pill-accent";
 }
 
-function changeTone(value: string): string {
-  const normalized = value.toLowerCase().replaceAll("_", " ");
-  if (/failed|deleted|removed|unavailable|error|rolled back/.test(normalized)) return "pill-bad";
-  if (/created|ready|healthy|resumed/.test(normalized)) return "pill-good";
-  if (/warning|suspend|pending/.test(normalized)) return "pill-warn";
-  return "pill-accent";
-}
-
 function resourceKindTone(kind: string): string {
   if (["Ingress", "HTTPRoute", "Gateway"].includes(kind)) return "text-link";
   if (kind === "Service") return "text-sev-info";
@@ -229,29 +218,6 @@ function relationshipTone(type: string): string {
   return "text-sev-warning";
 }
 
-const changeBucketCount = 12;
-const changeBucketMilliseconds = 5 * 60_000;
-
-function ChangeActivity({ changes, windowEnd }: { changes: KubernetesChange[]; windowEnd: number }) {
-  const buckets = Array.from({ length: changeBucketCount }, () => 0);
-  for (const change of changes) {
-    const offset = windowEnd - Date.parse(change.at);
-    if (!Number.isFinite(offset) || offset < 0) continue;
-    const index = changeBucketCount - 1 - Math.floor(offset / changeBucketMilliseconds);
-    if (index >= 0) buckets[index] += 1;
-  }
-  const peak = Math.max(...buckets);
-  return (
-    <div className="px-4 pt-3">
-      <div role="img" aria-label={`${changes.length} changes in the last 60 minutes; busiest five minutes had ${peak}`} className="flex h-14 items-end gap-1">
-        {buckets.map((count, index) => (
-          <span key={index} className={`flex-1 rounded-t-sm transition-[height] duration-500 ease-out ${count > 0 ? "bg-gradient-to-t from-accent/60 to-link" : "bg-ink-600/70"}`} style={{ height: count > 0 ? `${Math.max(14, (count / peak) * 100)}%` : "3px" }} />
-        ))}
-      </div>
-      <div aria-hidden="true" className="mt-1 flex justify-between text-2xs text-ink-400"><span>60m ago</span><span>30m</span><span>now</span></div>
-    </div>
-  );
-}
 
 function OverviewTopology({ overview, indexStatus, indexLive, unavailable, onFullTopology }: { overview: KubernetesOverview; indexStatus: KubernetesIndexStatus | null; indexLive: boolean; unavailable: boolean; onFullTopology: () => void }) {
   const overviewFields = { Node: "nodes", Pod: "pods", Namespace: "namespaces" } as const;
@@ -280,7 +246,7 @@ function OverviewTopology({ overview, indexStatus, indexLive, unavailable, onFul
   if (showWorkloads) counts.push({ kind: "Workloads (aggregate)", display: workloadUnavailable ? "0" : `${overview.workloads.toLocaleString()}${overview.truncated ? " (partial)" : ""}`, reported: !workloadUnavailable });
   const resourceColor = (kind: string) => kind === "Ingress" || kind === "Gateway" || kind === "HTTPRoute" ? "text-accent" : kind === "Service" || kind === "Node" ? "text-sev-info" : kind === "ConfigMap" || kind === "Secret" || kind === "PersistentVolumeClaim" ? "text-sev-warning" : "text-sev-ok";
   return <section aria-label="Overview topology" className="min-w-0">
-    <OverviewCard title="Topology" icon={<Network size={15} aria-hidden="true" />} tone="ok" className={overviewPairHeight} bodyClassName="dark-scroll overflow-y-auto overscroll-contain" scrollLabel="Topology resource counts" meta={<button type="button" className="btn shrink-0" aria-label="View all relationships" onClick={onFullTopology}><Network size={14} aria-hidden="true" />Full topology</button>}>
+    <OverviewCard title="Topology" icon={<Network size={15} aria-hidden="true" />} tone="ok" bodyClassName="dark-scroll max-h-[26rem] overflow-y-auto overscroll-contain" scrollLabel="Topology resource counts" meta={<button type="button" className="btn shrink-0" aria-label="View all relationships" onClick={onFullTopology}><Network size={14} aria-hidden="true" />Full topology</button>}>
       <div className="min-w-0 p-4 sm:p-5">
         <div aria-label="Cluster resource counts" className="min-w-0 space-y-4">
           {[true, false].map((reported) => {
@@ -302,23 +268,15 @@ function OverviewTopology({ overview, indexStatus, indexLive, unavailable, onFul
   </section>;
 }
 
-export function KubernetesOverviewInsights({ overview, indexStatus, indexLive, unavailable, onSelectResource, onSelectView }: { overview: KubernetesOverview; indexStatus: KubernetesIndexStatus | null; indexLive: boolean; unavailable: boolean; onSelectResource: ResourceSelection; onSelectView: (tab: KubernetesExplorerTab) => void }) {
+export function KubernetesOverviewTimeline({ overview, onSelectResource, onSelectView }: { overview: KubernetesOverview; onSelectResource: ResourceSelection; onSelectView: (tab: KubernetesExplorerTab) => void }) {
   const { client: api } = useKubernetesCluster();
   const [windowEnd, setWindowEnd] = useState(() => Date.now());
-  const issues = useQuery({ queryKey: ["kubernetes-issues", "overview"], queryFn: () => api.kubernetesIssues({ limit: 5 }), retry: false });
-  const top = useQuery({ queryKey: ["kubernetes-top", "pod", "cpu", 5], queryFn: () => api.kubernetesTop({ kind: "pod", sort: "cpu", limit: 5 }), retry: false });
   const changes = useQuery({
     queryKey: ["kubernetes-changes", "overview", overview.cluster_id],
     queryFn: () => {
       const until = Date.now();
       return api.kubernetesChanges({ since: new Date(until - 60 * 60_000).toISOString(), until: new Date(until).toISOString(), limit: 100 });
     },
-    retry: false,
-  });
-  const releases = useQuery({ queryKey: ["kubernetes-releases", "overview"], queryFn: () => api.kubernetesReleases({ limit: 5 }), retry: false });
-  const traffic = useQuery({
-    queryKey: ["kubernetes-traffic", "", "15m"],
-    queryFn: () => api.kubernetesTraffic({ namespace: undefined, window: "15m" }),
     retry: false,
   });
   const { refetch: refetchChanges } = changes;
@@ -330,58 +288,21 @@ export function KubernetesOverviewInsights({ overview, indexStatus, indexLive, u
     return () => window.clearInterval(timer);
   }, [refetchChanges]);
 
-  const issueTotals = issues.data?.totals ?? {};
-  const issueTotal = Object.values(issueTotals).reduce((sum, count) => sum + count, 0);
+  const denied = changes.error instanceof ApiError && [401, 403].includes(changes.error.status);
+  return <><TimelineCard changes={denied ? undefined : changes.data} windowEnd={windowEnd} clusterId={overview.cluster_id} onSelectResource={onSelectResource} onSelectView={onSelectView} resourceFor={issueResource} />{changes.isError && <p role="status" className="text-xs text-sev-warning">Recent change history unavailable.<button type="button" className="ml-2 text-link underline" onClick={() => void changes.refetch()}>Retry</button></p>}</>;
+}
+
+export function KubernetesOverviewInsights({ overview, indexStatus, indexLive, unavailable, onSelectView }: { overview: KubernetesOverview; indexStatus: KubernetesIndexStatus | null; indexLive: boolean; unavailable: boolean; onSelectView: (tab: KubernetesExplorerTab) => void }) {
+  const { client: api } = useKubernetesCluster();
+  const top = useQuery({ queryKey: ["kubernetes-top", "pod", "cpu", 5], queryFn: () => api.kubernetesTop({ kind: "pod", sort: "cpu", limit: 5 }), retry: false });
+  const releases = useQuery({ queryKey: ["kubernetes-releases", "overview"], queryFn: () => api.kubernetesReleases({ limit: 5 }), retry: false });
+  const traffic = useQuery({ queryKey: ["kubernetes-traffic", "", "15m"], queryFn: () => api.kubernetesTraffic({ window: "15m" }), retry: false });
   const releaseList = asArray(releases.data?.items);
   const unhealthyReleases = releaseList.filter((release) => release.health !== "healthy");
   const trafficEdges = traffic.data?.available ? [...asArray(traffic.data.edges)].sort((left, right) => (right.rate_per_sec ?? 0) - (left.rate_per_sec ?? 0)) : [];
 
   return (
     <section aria-label="Triage summary" className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-3">
-      <OverviewCard
-        title="Grouped issues"
-        icon={<AlertTriangle size={14} aria-hidden="true" />}
-        tone={issueTotals.critical ? "critical" : issueTotal > 0 ? "warn" : "ok"}
-        meta={issues.data && <span className={`pill ${issueTotals.critical ? "pill-bad" : issueTotal > 0 ? "pill-warn" : "pill-good"}`}>{issueTotal} total</span>}
-        action={{ label: "View all issues", onClick: () => onSelectView("issues") }}
-        className="xl:col-span-2"
-      >
-        {issues.isPending && !issues.data && <CardSkeleton label="Loading issue summary" />}
-        {issues.isError && (!issues.data || issues.error instanceof ApiError && [401, 403].includes(issues.error.status)) && <CardNote>Issue summary unavailable.</CardNote>}
-        {issues.data && !(issues.error instanceof ApiError && [401, 403].includes(issues.error.status)) && (
-          <>
-            {issueTotal > 0 && (
-              <div className="border-b border-ink-500/40 px-4 py-3">
-                <div aria-hidden="true" className="flex h-2 overflow-hidden rounded-full bg-ink-600">
-                  {(["critical", "warning", "info"] as const).map((key) => issueTotals[key] ? <span key={key} className={`${severityBar[key]} transition-[width] duration-500`} style={{ width: `${(issueTotals[key] / issueTotal) * 100}%` }} /> : null)}
-                </div>
-                <ul aria-label="Issue severity totals" className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-2xs text-ink-300">
-                  {(["critical", "warning", "info"] as const).map((key) => <li key={key} className="inline-flex items-center gap-1.5"><span aria-hidden="true" className={`size-2 rounded-full ${severityBar[key]}`} />{key} {issueTotals[key] ?? 0}</li>)}
-                </ul>
-              </div>
-            )}
-            <div className="divide-y divide-ink-700">
-              {issues.data.items.slice(0, 5).map((issue, index) => {
-                const resource = issueResource(issue);
-                return (
-                  <button type="button" key={`${issue.rule}:${issue.root.uid ?? issue.root.name}:${index}`} disabled={!resource} onClick={() => resource && onSelectResource(resource)} className={`grid w-full grid-cols-[minmax(0,1fr)] items-start gap-3 border-l-2 px-4 py-3 text-left transition-colors duration-150 hover:bg-ink-600/30 disabled:cursor-default sm:grid-cols-[auto_minmax(0,1fr)] ${issue.severity === "critical" ? "border-l-sev-critical-solid" : issue.severity === "warning" ? "border-l-sev-warn-solid" : "border-l-sev-info-solid"}`}>
-                    <span className={`pill justify-self-start ${issue.severity === "critical" ? "pill-bad" : issue.severity === "warning" ? "pill-warn" : "pill-accent"}`}>{issue.severity}</span>
-                    <span className="min-w-0 [overflow-wrap:anywhere]">
-                      <span className="block text-xs font-medium text-ink-100">{issue.root.kind} {issue.root.namespace ? `${issue.root.namespace}/` : ""}{issue.root.name}</span>
-                      <span className="mt-1 block text-2xs text-ink-400">{issue.rule.replaceAll(".", " ")}; {issue.count} affected</span>
-                    </span>
-                  </button>
-                );
-              })}
-              {issues.data.items.length === 0 && (
-                <p className="flex items-center gap-2 p-4 text-xs text-ink-300"><CircleCheck size={15} aria-hidden="true" className="text-sev-ok" />No grouped issues reported.</p>
-              )}
-            </div>
-          </>
-        )}
-        <PartialFailuresDisclosure failures={issues.data?.partial_failures} />
-      </OverviewCard>
-
       <OverviewCard
         title="Top pod usage"
         icon={<Cpu size={14} aria-hidden="true" />}
@@ -392,31 +313,6 @@ export function KubernetesOverviewInsights({ overview, indexStatus, indexLive, u
         {top.isError && (!top.data || top.error instanceof ApiError && [401, 403].includes(top.error.status)) && <CardNote>Usage ranking unavailable.</CardNote>}
         {top.data && !(top.error instanceof ApiError && [401, 403].includes(top.error.status)) && <TopUsageRows data={top.data} compact onRefresh={() => void top.refetch()} />}
       </OverviewCard>
-
-      <div className="grid min-w-0 gap-4 md:col-span-2 xl:col-span-3 lg:grid-cols-2">
-      <OverviewCard
-        title="Recent changes (60m)"
-        icon={<History size={14} aria-hidden="true" />}
-        meta={!unavailable && changes.data && !(changes.error instanceof ApiError && [401, 403].includes(changes.error.status)) && <span className="text-xs tabular-nums text-ink-400">{changes.data.items.length}{changes.data.next ? "+" : ""} changes</span>}
-        action={{ label: "View all changes", onClick: () => onSelectView("timeline") }}
-        className={overviewPairHeight}
-        bodyClassName="dark-scroll overflow-y-auto overscroll-contain"
-        scrollLabel="Recent change history"
-      >
-        {changes.isPending && !changes.data && <CardSkeleton label="Loading change history" />}
-        {changes.isError && (!changes.data || changes.error instanceof ApiError && [401, 403].includes(changes.error.status)) && <CardNote>Recent change history unavailable.</CardNote>}
-        {changes.data && !(changes.error instanceof ApiError && [401, 403].includes(changes.error.status)) && <>
-          <ChangeActivity changes={changes.data.items} windowEnd={windowEnd} />
-          {changes.data.items.length === 0 ? <CardNote>No projected changes were recorded in the last hour.</CardNote> : <ol className="mt-2 divide-y divide-ink-700 border-t border-ink-500/40">{changes.data.items.slice(0, 4).map((change) => {
-            const resource_id = resourceIdForKind(change.kind);
-            return <li key={change.id}><button type="button" disabled={!resource_id} onClick={() => resource_id && onSelectResource({ resource_id, kind: change.kind, namespace: change.namespace, name: change.name }, "timeline")} className="flex w-full flex-wrap items-center gap-3 px-4 py-2.5 text-left transition-colors duration-150 hover:bg-ink-600/30 disabled:cursor-default"><span className="pill pill-accent">{change.type.replaceAll("_", " ")}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium text-ink-100">{change.kind} {change.namespace ? `${change.namespace}/` : ""}{change.name}</span><span className="block truncate text-2xs text-ink-400">{change.fields?.map((field) => `${field.from || "∅"} → ${field.to || "∅"}`).join(", ") || "Object changed"}</span></span><time className="text-2xs tabular-nums text-ink-400">{new Date(change.at).toLocaleTimeString()}</time></button></li>;
-          })}</ol>}
-          {changes.data.gaps?.length ? <p role="status" className="border-t border-ink-700 px-4 py-2 text-2xs text-sev-warning">Change history contains {changes.data.gaps.length} recorded gap(s).</p> : null}
-        </>}
-      </OverviewCard>
-
-      <OverviewTopology overview={overview} indexStatus={indexStatus} indexLive={indexLive} unavailable={unavailable} onFullTopology={() => onSelectView("topology")} />
-      </div>
 
       <OverviewCard
         title="Helm releases"
@@ -442,12 +338,14 @@ export function KubernetesOverviewInsights({ overview, indexStatus, indexLive, u
         <PartialFailuresDisclosure failures={releases.data?.partial_failures} />
       </OverviewCard>
 
+      <OverviewTopology overview={overview} indexStatus={indexStatus} indexLive={indexLive} unavailable={unavailable} onFullTopology={() => onSelectView("topology")} />
+
       <OverviewCard
         title="Service traffic"
         icon={<Waypoints size={14} aria-hidden="true" />}
         meta={traffic.data?.available ? <span className="pill">{trafficFreshness(traffic.data).label}</span> : traffic.data ? <span className="pill">{trafficUnavailableLabel(traffic.data.reason) === "License required" ? "License required" : "Not connected"}</span> : undefined}
         action={{ label: "View all traffic", onClick: () => onSelectView("traffic") }}
-        className="md:col-span-2 xl:col-span-2"
+        className="md:col-span-2 xl:col-span-3"
         delay={200}
       >
         {traffic.isPending && !traffic.data && <CardSkeleton label="Loading traffic summary" />}
@@ -491,11 +389,11 @@ function TopUsageRows({ data, compact = false, onRefresh }: { data: KubernetesTo
   );
 }
 
-export function KubernetesExplorerTabContent({ tab, onSelectResource }: { tab: KubernetesExplorerTab; onSelectResource: ResourceSelection }) {
+export function KubernetesExplorerTabContent({ tab, onSelectResource, clusterId }: { tab: KubernetesExplorerTab; onSelectResource: ResourceSelection; clusterId?: string }) {
   switch (tab) {
     case "overview": return null;
     case "nodes": return null;
-    case "issues": return <IssuesView onSelectResource={onSelectResource} />;
+    case "issues": return <IssuesView onSelectResource={onSelectResource} clusterId={clusterId} />;
     case "resources": return <ResourcesView onSelectResource={onSelectResource} />;
     case "releases": return <ReleasesView />;
     case "gitops": return <GitOpsView />;
@@ -843,39 +741,26 @@ function KubernetesGraphView({ onSelectResource, preview = false, onFullTopology
   </section>;
 }
 
-function IssuesView({ onSelectResource }: { onSelectResource: ResourceSelection }) {
+function IssuesView({ onSelectResource, clusterId }: { onSelectResource: ResourceSelection; clusterId?: string }) {
   const { client: api } = useKubernetesCluster();
   const [severity, setSeverity] = useState("");
   const [namespace, setNamespace] = useState("");
   const paging = useCursorPagination(`issues:${namespace}:${severity}`);
   const issues = useQuery({ queryKey: ["kubernetes-issues", namespace, severity, paging.cursor], queryFn: () => api.kubernetesIssues({ namespace, severity, limit: 20, cursor: paging.cursor }), retry: false });
+  const denied = issues.error instanceof ApiError && [401, 403].includes(issues.error.status);
   const totals = issues.data?.totals ?? {};
   return (
     <section className="card overflow-hidden transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Kubernetes issues">
-      <ExplorerHeader icon={<AlertTriangle size={15} />} title="Grouped issues" trailing={issues.data && <span className={`pill ${statusTone(issues.data.sync.state)}`}>{issues.data.sync.state}</span>} />
+      <ExplorerHeader icon={<AlertTriangle size={15} />} title="Issues" trailing={!denied && issues.data && <span className={`pill ${statusTone(issues.data.sync.state)}`}>{issues.data.sync.state}</span>} />
       <div className="grid gap-2 border-b border-ink-700 p-3 sm:grid-cols-2">
         <label className="text-2xs text-ink-400">Severity<select aria-label="Issue severity" className="input mt-1 w-full" value={severity} onChange={(event) => setSeverity(event.target.value)}><option value="">All severities</option><option value="critical">Critical</option><option value="warning">Warning</option><option value="info">Info</option></select></label>
         <label className="text-2xs text-ink-400">Namespace<input aria-label="Issue namespace" className="input mt-1 w-full" value={namespace} onChange={(event) => setNamespace(event.target.value)} placeholder="All namespaces" /></label>
       </div>
       {issues.isPending && <CardSkeleton label="Loading grouped issues" rows={5} />}
       {issues.isError && <p role="status" className="p-4 text-sm text-ink-400">Grouped issues are unavailable.</p>}
-      {issues.data && <>
+      {!denied && issues.data && <>
         <div className="flex flex-wrap gap-2 border-b border-ink-700 px-4 py-3">{["critical", "warning", "info"].map((key) => <span className={`pill inline-flex gap-1.5 ${severityTone(key)}`} key={key}><span>{key}</span><span aria-label={`${key} count`}>{totals[key] ?? 0}</span></span>)}</div>
-        <div className="max-h-[min(55vh,36rem)] divide-y divide-ink-700 overflow-y-auto">{issues.data.items.map((issue, index) => {
-          const resource = issueResource(issue);
-          return <article key={`${issue.rule}:${issue.root.uid ?? issue.root.name}:${index}`} className={`grid grid-cols-[minmax(0,1fr)] items-start gap-3 border-l-2 px-4 py-3 sm:grid-cols-[auto_minmax(0,1fr)] lg:grid-cols-[auto_minmax(0,1fr)_auto] ${issue.severity === "critical" ? "border-l-sev-critical-solid" : issue.severity === "warning" ? "border-l-sev-warn-solid" : "border-l-sev-info-solid"}`}>
-            <span className={`pill justify-self-start ${severityTone(issue.severity)}`}>{issue.severity}</span>
-            <div className="min-w-0 [overflow-wrap:anywhere]">
-              <h3 className="text-sm font-medium text-ink-100">{issue.root.kind} {issue.root.namespace ? `${issue.root.namespace}/` : ""}{issue.root.name}</h3>
-              <p className="mt-1 text-xs text-ink-400">{issue.rule.replaceAll(".", " ")}; {issue.count} affected</p>
-              {issue.examples?.length ? <p className="mt-1 text-2xs text-ink-400">Examples: {issue.examples.map((item) => item.name).join(", ")}</p> : null}
-            </div>
-            <div className="flex min-w-0 flex-wrap items-center gap-3 sm:col-start-2 lg:col-start-auto">
-              <span className="min-w-0 text-2xs text-ink-400 [overflow-wrap:anywhere]">{issue.last_seen ? new Date(issue.last_seen).toLocaleString() : "Time unavailable"}</span>
-              {resource && <button type="button" className="btn" onClick={() => onSelectResource(resource)}>Open resource</button>}
-            </div>
-          </article>;
-        })}</div>
+        <div className="max-h-[min(55vh,36rem)] divide-y divide-ink-700 overflow-y-auto">{issues.data.items.map((issue, index) => <BreakRow key={`${issue.rule}:${issue.root.uid ?? issue.root.name}:${index}`} issue={issue} resource={issueResource(issue)} onSelectResource={onSelectResource} clusterId={clusterId} warningScope={JSON.stringify([namespace, severity, paging.cursor])} sourceSync={issues.isError ? undefined : issues.data.sync} collapsed />)}</div>
         {issues.data.items.length === 0 && <p className="p-6 text-center text-sm text-ink-400">No issues match these filters.</p>}
         {issues.data.truncated && <p role="status" className="border-t border-ink-700 px-4 py-2 text-xs text-sev-warning">Issue evidence is bounded; additional results may not be available.</p>}
         <PartialFailuresDisclosure failures={issues.data.partial_failures} />
@@ -949,48 +834,221 @@ function GitOpsView() {
 }
 
 function TimelineView({ onSelectResource }: { onSelectResource: ResourceSelection }) {
-  const { client: api } = useKubernetesCluster();
+  const { cluster } = useKubernetesCluster();
+  const { search } = useLocation();
+  const focus = new URLSearchParams(search);
+  const rootUID = focus.get("root_uid");
+  return rootUID ? <RootTimelineView key={`${cluster}:${focus}`} rootUID={rootUID} focus={focus} onSelectResource={onSelectResource} /> : <UnfocusedTimelineView onSelectResource={onSelectResource} />;
+}
+
+function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: string; focus: URLSearchParams; onSelectResource: ResourceSelection }) {
+  const { client: api, cluster, key } = useKubernetesCluster();
+  const queryClient = useQueryClient();
+  const center = focus.get("center");
+  const centerTime = center ? Date.parse(center) : NaN;
+  const centered = Number.isFinite(centerTime);
   const [minutes, setMinutes] = useState<15 | 60 | 360 | 1440>(60);
-  const [namespace, setNamespace] = useState("");
-  const [kind, setKind] = useState("");
-  const [windowEnd, setWindowEnd] = useState(() => Date.now());
-  const since = new Date(windowEnd - minutes * 60_000).toISOString();
-  const until = new Date(windowEnd).toISOString();
+  const [namespace, setNamespace] = useState(focus.get("namespace") ?? "");
+  const [kind, setKind] = useState(focus.get("kind") ?? "");
+  const [windowEnd] = useState(() => centered ? centerTime : Date.now());
+  const since = new Date(windowEnd - minutes * 60_000 * (centered ? 0.5 : 1)).toISOString();
+  const until = new Date(windowEnd + (centered ? minutes * 30_000 : 0)).toISOString();
+  const breaks = useQuery({ queryKey: ["kubernetes-issues", "timeline-root", rootUID, namespace], queryFn: () => api.kubernetesIssues({ root_uid: rootUID, include: "changes", namespace: namespace || undefined }), retry: false });
+  const issue = !breaks.isError ? breaks.data?.items.find((item) => item.root.uid === rootUID && (!namespace || item.root.namespace === namespace)) : undefined;
+  const rootNamespace = issue?.root.namespace;
+  const graph = useQuery({
+    queryKey: ["kubernetes-graph", "timeline-root", rootUID, rootNamespace],
+    enabled: Boolean(issue),
+    retry: false,
+    queryFn: async ({ signal }) => {
+      signal.throwIfAborted();
+      if (rootNamespace) {
+        const result = await api.kubernetesGraph({ namespace: rootNamespace, complete: true });
+        signal.throwIfAborted();
+        return result;
+      }
+      const result: KubernetesGraph = { nodes: [], edges: [], omitted: {}, sync: { state: "ready", age_s: 0, partial: false } };
+      const seen = new Set<string>();
+      let cursor: string | undefined;
+      for (let pageCount = 0; pageCount < rootScanPageLimit; pageCount++) {
+        signal.throwIfAborted();
+        const page = await api.kubernetesGraph({ limit: 100, cursor });
+        signal.throwIfAborted();
+        result.nodes.push(...page.nodes);
+        result.edges.push(...page.edges);
+        Object.assign(result.omitted, page.omitted);
+        result.partial_failures = [...(result.partial_failures ?? []), ...(page.partial_failures ?? [])];
+        result.truncated ||= page.truncated;
+        result.sync.partial ||= page.sync.partial;
+        cursor = page.next;
+        if (cursor && seen.has(cursor)) throw new Error("Repeated graph continuation.");
+        if (cursor) seen.add(cursor);
+        else break;
+      }
+      result.next = cursor;
+      if (cursor) {
+        result.truncated = true;
+        result.omitted.continuations = (result.omitted.continuations ?? 0) + 1;
+      }
+      return result;
+    },
+  });
+  const topology = !graph.isError ? graph.data : undefined;
+  const family = new Set([rootUID]);
+  const nodes = new Map((topology?.nodes ?? []).map((node) => [node.id, node]));
+  const inScope = (uid: string) => {
+    const node = nodes.get(uid);
+    return Boolean(node && (!rootNamespace || node.namespace === rootNamespace));
+  };
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const edge of topology?.edges ?? []) {
+      if (edge.type === "manages" && family.has(edge.from) && inScope(edge.to) && !family.has(edge.to)) {
+        family.add(edge.to);
+        expanded = true;
+      }
+    }
+  }
+  const related = new Set(family);
+  for (const edge of topology?.edges ?? []) {
+    if ((edge.type === "configures" || edge.type === "scales") && family.has(edge.to) && inScope(edge.from)) related.add(edge.from);
+    if (edge.type === "uses" && family.has(edge.from) && inScope(edge.to)) related.add(edge.to);
+  }
+  const seeds = (issue?.changes ?? []).map((item) => item.change).filter((change) => (!cluster || change.cluster === cluster) && (!rootNamespace || change.namespace === rootNamespace || change.kind === "Node"));
+  seeds.forEach((change) => related.add(change.uid));
+  const identities = [...related].sort();
+  const paging = useCursorPagination(`root-timeline:${rootUID}:${since}:${until}:${namespace}:${kind}:${JSON.stringify(identities)}`);
+  const changes = useQuery({
+    queryKey: ["kubernetes-changes", "timeline-root", rootUID, rootNamespace, since, until, kind, identities, paging.cursor],
+    enabled: Boolean(issue) && (graph.isSuccess || graph.isError),
+    retry: false,
+    queryFn: async ({ signal }) => {
+      const result: RootTimelinePage = { items: [], gaps: [], partial_failures: [], sync: { state: "ready", age_s: 0, partial: false } };
+      const matches = new Map<string, KubernetesChange>();
+      const include = (change: KubernetesChange) => related.has(change.uid) && (!cluster || change.cluster === cluster) && (!rootNamespace || change.namespace === rootNamespace || change.kind === "Node") && (!kind || change.kind === kind) && Date.parse(change.at) >= Date.parse(since) && Date.parse(change.at) <= Date.parse(until);
+      if (!paging.cursor) seeds.filter(include).forEach((change) => matches.set(change.id, change));
+      const seen = new Set<string>();
+      let cursor = paging.cursor;
+      if (cursor) seen.add(cursor);
+      for (let pageCount = 0; pageCount < rootScanPageLimit; pageCount++) {
+        signal.throwIfAborted();
+        const page = await api.kubernetesChanges({ since, until, namespace: rootNamespace, kind: kind || undefined, limit: 200, cursor });
+        signal.throwIfAborted();
+        page.items.filter(include).forEach((change) => matches.set(change.id, change));
+        result.gaps!.push(...(page.gaps ?? []));
+        result.partial_failures!.push(...(page.partial_failures ?? []));
+        result.truncated ||= page.truncated;
+        result.sync.partial ||= page.sync.partial;
+        result.sync.state = page.sync.state;
+        result.sync.age_s = Math.max(result.sync.age_s, page.sync.age_s);
+        cursor = page.next;
+        if (cursor && seen.has(cursor)) throw new Error("Repeated change continuation.");
+        if (cursor) seen.add(cursor);
+        if (!cursor || matches.size >= 20) break;
+      }
+      result.scanBounded = Boolean(cursor && matches.size < 20);
+      result.items = [...matches.values()];
+      result.next = cursor;
+      return result;
+    },
+  });
+  const data = !breaks.isError && !changes.isError ? changes.data : undefined;
+  const visitedPages = data ? queryClient.getQueriesData<KubernetesChangesPage>({ queryKey: key("kubernetes-changes", "timeline-root", rootUID, rootNamespace, since, until, kind, identities) }).flatMap(([, page]) => page ? [page] : []) : [];
+  const gaps = [...new Map([...visitedPages.flatMap((page) => page.gaps ?? []), ...(issue?.gaps ?? [])].map((gap) => [`${gap.from}:${gap.to}`, gap])).values()];
+  const historyPartial = visitedPages.some((page) => page.sync.partial || page.truncated || page.partial_failures?.length);
+  const recoveredCount = new Set(visitedPages.flatMap((page) => page.items.map((change) => change.id))).size;
+  const breakTime = Date.parse(issue?.broke_at ?? "");
+  const missingLinked = data && !data.next && !kind && Date.parse(since) <= breakTime - 30 * 60_000 && Date.parse(until) >= breakTime + 2 * 60_000 && recoveredCount < (issue?.changes?.length ?? 0) + (issue?.more_changes ?? 0);
+  const incomplete = missingLinked || breaks.data?.sync.partial || breaks.data?.truncated || breaks.data?.next || breaks.data?.partial_failures?.length || issue?.partial || graph.isError || topology?.sync.partial || topology?.truncated || topology?.partial_failures?.length || Object.values(topology?.omitted ?? {}).some((count) => count > 0) || topology && !nodes.has(rootUID);
+  const failures = breaks.isError ? [] : [...(breaks.data?.partial_failures ?? []), ...(topology?.partial_failures ?? []), ...visitedPages.flatMap((page) => page.partial_failures ?? [])];
+  const warnings: Array<{ id: string; content: ReactNode }> = [...issueWarnings(issue ? { ...issue, gaps: [] } : undefined), ...failureWarnings(failures)];
+  if (topology?.omitted.continuations) warnings.push({ id: "graph-cap", content: "Related-resource graph scan stopped after 5 pages; additional graph pages were omitted." });
+  if (data?.scanBounded) warnings.push({ id: "change-cap", content: "Related change scan is incomplete after 5 pages (up to 1,000 records). More linked changes may remain; continue with Next page." });
+  if ([breaks.data?.sync.state, topology?.sync.state, data?.sync.state].includes("stale")) warnings.push({ id: "snapshot-stale", content: "Timeline evidence includes stale snapshots." });
+  if (historyPartial && !failures.length && !data?.scanBounded && !gaps.length) warnings.push({ id: "history-partial", content: "Change history is bounded or partially synchronized." });
+  if (incomplete && !graph.isError) warnings.push({ id: "links-incomplete", content: "Related-resource evidence is incomplete; additional linked changes may be unavailable." });
+  if (graph.isError) warnings.push({ id: "graph-unavailable", content: <>Related-resource graph unavailable; linked evidence is incomplete.<button type="button" className="ml-2 text-link underline" onClick={() => void graph.refetch()}>Retry</button></> });
+  if (issue) warnings.push({ id: "node-links", content: "Node and removed-resource links may be incomplete." });
+  if (gaps.length) warnings.push({ id: "history-gaps", content: <section aria-label="Timeline history gaps"><h3>History gaps ({gaps.length})</h3><ul>{gaps.map((gap) => <li key={`${gap.from}:${gap.to}`}>History gap: {new Date(gap.from).toLocaleString()} - {new Date(gap.to).toLocaleString()}</li>)}</ul></section> });
+  const unfocusedQuery = new URLSearchParams(focus);
+  for (const name of ["root_uid", "center", "namespace", "kind"]) unfocusedQuery.delete(name);
+  if (namespace) unfocusedQuery.set("namespace", namespace);
+  if (kind) unfocusedQuery.set("kind", kind);
+  return <section className="card overflow-hidden" aria-label="Kubernetes change timeline">
+    <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-b border-ink-700 px-4 py-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs"><span className="text-ink-300">Filtered</span><span className="pill max-w-full"><span className="truncate" title={rootUID}>{issue ? `${issue.root.kind} ${issue.root.namespace ? `${issue.root.namespace}/` : ""}${issue.root.name}` : rootUID}</span><Link to={`?${unfocusedQuery}`} className="ml-2" aria-label="Clear root filter" title="Clear root filter"><X size={12} aria-hidden="true" /></Link></span>{centered && <time className="pill pill-accent font-mono" dateTime={new Date(centerTime).toISOString()}>centred {new Date(centerTime).toLocaleTimeString([], { hour12: false })}</time>}</div>
+      <div role="group" aria-label="Timeline window" className="flex rounded-control border border-ink-500 bg-surface">{([[15, "15m"], [60, "1h"], [360, "6h"], [1440, "24h"]] as const).map(([value, label]) => <button type="button" aria-pressed={minutes === value} onClick={() => setMinutes(value)} className={`rounded-control px-3 py-1 text-xs ${minutes === value ? "bg-accent-subtle text-ink-50" : "text-ink-300 hover:bg-ink-800"}`} key={value}>{label}</button>)}</div>
+      <div className="grid min-w-0 grid-cols-2 gap-2"><label className="sr-only" htmlFor="root-timeline-namespace">Namespace</label><input id="root-timeline-namespace" aria-label="Timeline namespace" className="input !h-7 w-32 max-w-full !py-1" value={namespace} onChange={(event) => setNamespace(event.target.value)} placeholder="All namespaces" /><select aria-label="Timeline kind" className="input !h-7 w-36 max-w-full !py-1" value={kind} onChange={(event) => setKind(event.target.value)}><option value="">All kinds</option>{["Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "Node", "ConfigMap", "PersistentVolumeClaim", "HorizontalPodAutoscaler"].map((value) => <option key={value}>{value}</option>)}</select></div>
+    </div>
+    {(breaks.isPending || issue && (graph.isPending || changes.isPending)) && <CardSkeleton label="Loading related root change history" rows={5} />}
+    {breaks.isError && <p role="status" className="p-4 text-sm text-sev-warning">Root history unavailable.</p>}
+    {breaks.isSuccess && !issue && <p role="status" className="p-4 text-sm text-ink-400">Root not found in this namespace.</p>}
+    {changes.isError && <p role="status" className="p-4 text-sm text-sev-warning">Related change history is unavailable.<button type="button" className="ml-2 text-link" onClick={() => void changes.refetch()}>Retry</button></p>}
+    {data && issue && <>
+      <BreakTimelineLane scope={JSON.stringify([cluster, rootUID, minutes, namespace, kind, paging.cursor])} warningsOwned issue={{ ...issue, changes: [] }} changes={data.items} since={since} until={until} onSelectChange={(change) => { const resource_id = resourceIdForKind(change.kind); if (resource_id) onSelectResource({ resource_id, kind: change.kind, namespace: change.namespace, name: change.name, uid: change.uid }, "timeline"); }} />
+      <CursorPagination state={paging} next={data.next} />
+    </>}
+    <div className="px-2"><KubernetesWarnings warnings={breaks.isError ? [] : warnings} scope={JSON.stringify([cluster, rootUID, namespace, kind, since, until, paging.cursor, breaks.isError, graph.isError, changes.isError])} /></div>
+  </section>;
+}
+
+function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: ResourceSelection }) {
+  const { client: api, cluster } = useKubernetesCluster();
+  const focus = new URLSearchParams(window.location.search);
+  const rootUID = focus.get("root_uid") || undefined;
+  const center = focus.get("center");
+  const centerTime = center ? Date.parse(center) : NaN;
+  const [minutes, setMinutes] = useState<15 | 60 | 360 | 1440>(60);
+  const [namespace, setNamespace] = useState(focus.get("namespace") ?? "");
+  const [kind, setKind] = useState(focus.get("kind") ?? "");
+  const centered = Number.isFinite(centerTime);
+  const [windowEnd, setWindowEnd] = useState(() => centered ? centerTime : Date.now());
+  const since = new Date(windowEnd - minutes * 60_000 * (centered ? 0.5 : 1)).toISOString();
+  const until = new Date(windowEnd + (centered ? minutes * 30_000 : 0)).toISOString();
   const paging = useCursorPagination(`timeline:${since}:${namespace}:${kind}`);
   const changes = useQuery({
     queryKey: ["kubernetes-changes", since, namespace, kind, paging.cursor],
     queryFn: () => api.kubernetesChanges({ since, until, namespace, kind, limit: 20, cursor: paging.cursor }),
+    placeholderData: (previous) => previous,
     retry: false,
   });
+  const breaks = useQuery({ queryKey: ["kubernetes-issues", "timeline", rootUID, namespace, kind], queryFn: () => api.kubernetesIssues(rootUID ? { root_uid: rootUID, include: "changes", namespace: namespace || undefined } : { broken: true, namespace: namespace || undefined, kind: kind || undefined, limit: 20 }), retry: false });
+  const denied = breaks.error instanceof ApiError && [401, 403, 404].includes(breaks.error.status);
+  const changesDenied = changes.error instanceof ApiError && [401, 403, 404].includes(changes.error.status);
+  const brokenRoots = denied ? [] : (breaks.data?.items ?? []).filter((issue) => issue.broken || rootUID);
   useEffect(() => {
+    if (centered) return;
     const timer = window.setInterval(() => setWindowEnd(Date.now()), 30_000);
     return () => window.clearInterval(timer);
-  }, []);
-  const lanes = new Map<string, KubernetesChange[]>();
-  for (const change of changes.data?.items ?? []) {
-    const key = `${change.namespace ?? ""}\u0000${change.kind}\u0000${change.name}`;
-    lanes.set(key, [...(lanes.get(key) ?? []), change]);
-  }
+  }, [centered]);
+  const availableChanges = changesDenied ? undefined : changes.data;
+  const warnings: Array<{ id: string; content: ReactNode }> = [...brokenRoots.flatMap((issue) => issueWarnings(issue)), ...failureWarnings(denied ? undefined : breaks.data?.partial_failures), ...failureWarnings(availableChanges?.partial_failures)];
+  if (!denied && (breaks.data?.sync.partial || breaks.data?.next || breaks.data?.truncated)) warnings.push({ id: "break-partial", content: "Break markers are bounded or partially synchronized." });
+  if (availableChanges?.truncated || availableChanges?.sync.partial) warnings.push({ id: "change-partial", content: "Change history is bounded or partially synchronized." });
+  if (availableChanges?.sync.state === "stale" || !denied && breaks.data?.sync.state === "stale") warnings.push({ id: "timeline-stale", content: "Timeline evidence includes stale snapshots." });
+  if (availableChanges?.gaps?.length) warnings.push({ id: "history-gaps", content: <section aria-label="Timeline history gaps"><h3>History gaps</h3><ul>{availableChanges.gaps.map((gap, index) => <li key={`${gap.from}:${gap.to}:${index}`}>{new Date(gap.from).toLocaleString()} – {new Date(gap.to).toLocaleString()}</li>)}</ul></section> });
+  warnings.push({ id: "excluded-lanes", content: "Incident and agent-action lanes are not included in the current changes response." });
   const openChange = (change: KubernetesChange) => {
     const resource_id = resourceIdForKind(change.kind);
     if (!resource_id) return;
-    onSelectResource({ resource_id, kind: change.kind, namespace: change.namespace, name: change.name }, "timeline");
+    onSelectResource({ resource_id, kind: change.kind, namespace: change.namespace, name: change.name, uid: change.uid }, "timeline");
   };
   return <section className="card overflow-hidden transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Kubernetes change timeline">
     <ExplorerHeader icon={<History size={15} />} title="Kubernetes changes" trailing={changes.data && <span className="pill">{changes.data.items.length} in window</span>} />
+    {rootUID && <p className="border-b border-ink-700 px-4 py-2 text-xs text-ink-300">Root focus {brokenRoots[0]?.root.name ?? "loading"}{center && Number.isFinite(centerTime) ? `; centered ${new Date(centerTime).toLocaleString()}` : ""}</p>}
     <div className="flex flex-wrap items-end justify-between gap-3 border-b border-ink-700 p-3">
       <div role="group" aria-label="Timeline window" className="flex flex-wrap gap-1">{([[15, "15m"], [60, "1h"], [360, "6h"], [1440, "24h"]] as const).map(([value, label]) => <button type="button" aria-pressed={minutes === value} onClick={() => setMinutes(value)} className={`rounded-control px-3 py-1.5 text-xs transition-colors duration-150 motion-reduce:transition-none ${minutes === value ? "bg-accent-subtle text-ink-50" : "text-ink-300 hover:bg-ink-800"}`} key={value}>{label}</button>)}</div>
       <div className="grid min-w-0 grid-cols-2 gap-2"><label className="text-2xs text-ink-400">Namespace<input aria-label="Timeline namespace" className="input mt-1 w-full" value={namespace} onChange={(event) => setNamespace(event.target.value)} placeholder="All namespaces" /></label><label className="text-2xs text-ink-400">Kind<select aria-label="Timeline kind" className="input mt-1 w-full" value={kind} onChange={(event) => setKind(event.target.value)}><option value="">All kinds</option>{["Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "Node"].map((value) => <option key={value}>{value}</option>)}</select></label></div>
     </div>
     {changes.isPending && <CardSkeleton label="Loading projected change history" rows={5} />}
     {changes.isError && <p role="status" className="p-4 text-sm text-sev-warning">Change history is unavailable.</p>}
-    {changes.data && <>
-      {changes.data.gaps?.length ? <section aria-label="Timeline history gaps" className="border-b border-sev-warning/30 bg-sev-warning/5 px-4 py-3"><h3 className="text-xs font-semibold text-sev-warning">History gaps</h3><ul className="mt-2 space-y-1">{changes.data.gaps.map((gap, index) => <li className="text-xs text-ink-200" key={`${gap.from}:${gap.to}:${index}`}>{new Date(gap.from).toLocaleString()} – {new Date(gap.to).toLocaleString()}</li>)}</ul></section> : null}
-      {changes.data.items.length === 0 ? <p role="status" className="p-6 text-center text-sm text-ink-400">No projected changes were recorded in this window.</p> : <div className="max-h-[min(55vh,36rem)] divide-y divide-ink-700 overflow-y-auto">{[...lanes.entries()].map(([key, lane]) => <section className="grid gap-2 p-4 md:grid-cols-[minmax(10rem,0.6fr)_minmax(0,1fr)]" key={key}><div className="min-w-0"><h3 className="truncate text-xs font-semibold text-ink-100">{lane[0].kind} {lane[0].name}</h3><p className="mt-1 flex flex-wrap gap-x-2 text-2xs text-ink-400"><span>{lane[0].namespace || "Cluster scope"}</span>{lane[0].service && <span>{lane[0].service}</span>}</p></div><ol className="space-y-2 border-l border-ink-600 pl-3">{lane.map((change) => <li key={change.id}><button type="button" aria-label={`${change.kind} ${change.name}${change.namespace ? ` in ${change.namespace}` : ""}: ${change.type.replaceAll("_", " ")}`} className="block w-full rounded-control border border-ink-700 bg-ink-900/40 p-3 text-left transition-colors duration-150 motion-reduce:transition-none hover:border-ink-500 hover:bg-ink-800" onClick={() => openChange(change)} disabled={!resourceIdForKind(change.kind)}><span className="flex flex-wrap items-center justify-between gap-2"><span className={`pill ${changeTone(change.type)}`}>{change.type.replaceAll("_", " ")}</span><time className="text-2xs text-ink-400">{new Date(change.at).toLocaleString()}</time></span>{change.fields?.map((field) => <span className="mt-2 block break-words font-mono text-2xs text-ink-300" key={`${change.id}:${field.path}`}>{field.path}: {field.from || "∅"} → {field.to || "∅"}</span>)}</button></li>)}</ol></section>)}</div>}
-      <CursorPagination state={paging} next={changes.data.next}/>
-      {(changes.data.truncated || changes.data.sync.partial) && <p role="status" className="border-t border-ink-700 px-4 py-2 text-xs text-sev-warning">Change history is bounded or partially synchronized.</p>}
-      <PartialFailuresDisclosure failures={changes.data.partial_failures}/>
-      <p className="border-t border-ink-700 px-4 py-2 text-2xs text-ink-400">Incident and agent-action lanes are not included in the current changes response.</p>
+    {breaks.isError && <p role="status" className="p-4 text-sm text-sev-warning">Break markers unavailable.</p>}
+    {availableChanges && <>
+      <ResourceTimelineChart scope={JSON.stringify([cluster, rootUID, center, minutes, namespace, kind, paging.cursor])} issues={brokenRoots} changes={[...availableChanges.items, ...brokenRoots.flatMap((issue) => issue.changes?.map((item) => item.change) ?? [])].filter((change) => (!cluster || change.cluster === cluster) && (!namespace || change.namespace === namespace) && (!kind || change.kind === kind))} since={since} until={until} now={centered ? undefined : windowEnd} onSelectChange={openChange} />
+      {availableChanges.items.length === 0 && <p role="status" className="px-4 py-2 text-xs text-ink-400">No projected changes were recorded in this window.</p>}
+      <CursorPagination state={paging} next={availableChanges.next}/>
     </>}
+    <div className="px-2"><KubernetesWarnings warnings={warnings} scope={JSON.stringify([cluster, namespace, kind, since, until, paging.cursor, denied, changesDenied])} /></div>
   </section>;
 }

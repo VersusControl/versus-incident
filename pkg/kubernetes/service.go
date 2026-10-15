@@ -82,17 +82,20 @@ type ProjectedResource struct {
 }
 
 type ObjectRef struct {
-	APIVersion string `json:"api_version,omitempty"`
-	Kind       string `json:"kind"`
-	Namespace  string `json:"namespace,omitempty"`
-	Name       string `json:"name"`
-	UID        string `json:"uid,omitempty"`
+	APIVersion      string `json:"api_version,omitempty"`
+	Kind            string `json:"kind"`
+	Namespace       string `json:"namespace,omitempty"`
+	Name            string `json:"name"`
+	UID             string `json:"uid,omitempty"`
+	controller      bool
+	controllerKnown bool
 }
 
 type Condition struct {
-	Type   string `json:"type"`
-	Status string `json:"status"`
-	Reason string `json:"reason,omitempty"`
+	Type         string    `json:"type"`
+	Status       string    `json:"status"`
+	Reason       string    `json:"reason,omitempty"`
+	TransitionAt time.Time `json:"last_transition_at,omitempty"`
 }
 
 type ListOptions struct {
@@ -196,6 +199,12 @@ type discoveryCacheEntry struct {
 	expires   time.Time
 }
 
+type discoveryCall struct {
+	done   chan struct{}
+	result Discovery
+	err    error
+}
+
 type discoveryContextKey struct{}
 
 const partialDiscoveryTTL = 5 * time.Second
@@ -205,17 +214,21 @@ type Scrubber interface{ Scrub(string) string }
 
 // Service owns all Kubernetes path construction, decoding, projection, and relationships.
 type Service struct {
-	client           *Client
-	scope            Scope
-	readOrgs         []string
-	ttl              time.Duration
-	mu               *sync.Mutex
-	cache            map[string]discoveryCacheEntry
-	scrubber         Scrubber
-	indexes          *kubeindex.Registry
-	changes          *changeStoreState
-	traffic          *trafficProviderState
-	logStreamContext context.Context
+	client                 *Client
+	scope                  Scope
+	readOrgs               []string
+	ttl                    time.Duration
+	mu                     *sync.Mutex
+	cache                  map[string]discoveryCacheEntry
+	discoveryCalls         map[string]*discoveryCall
+	scrubber               Scrubber
+	indexes                *kubeindex.Registry
+	changes                *changeStoreState
+	traffic                *trafficProviderState
+	logStreamContext       context.Context
+	captureMode            string
+	identity               *credentialEpoch
+	configuredCredentialID string
 }
 
 func (service *Service) SetLogStreamContext(ctx context.Context) {
@@ -231,10 +244,35 @@ func (service *Service) SetScrubber(scrubber Scrubber) {
 
 // NewService constructs a scoped read-only Kubernetes application service.
 func NewService(client *Client, scope Scope, discoveryTTL time.Duration) *Service {
+	return newService(context.Background(), client, scope, discoveryTTL)
+}
+
+func newService(parent context.Context, client *Client, scope Scope, discoveryTTL time.Duration) *Service {
 	if discoveryTTL <= 0 || discoveryTTL > time.Hour {
 		discoveryTTL = 5 * time.Minute
 	}
-	return &Service{client: client, scope: scope, ttl: discoveryTTL, mu: &sync.Mutex{}, cache: make(map[string]discoveryCacheEntry), indexes: kubeindex.NewRegistry(16, 250000), changes: newChangeStoreState(), traffic: &trafficProviderState{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	if client != nil {
+		cancel()
+		ctx, cancel = client.credentialEpochContext()
+	}
+	configured := scope.CredentialID
+	service := &Service{client: client, scope: scope, configuredCredentialID: configured, identity: &credentialEpoch{ctx: ctx, cancel: cancel}, ttl: discoveryTTL, mu: &sync.Mutex{}, cache: make(map[string]discoveryCacheEntry), discoveryCalls: map[string]*discoveryCall{}, indexes: kubeindex.NewRegistry(16, 60000), changes: newChangeStoreState(), traffic: &trafficProviderState{}}
+	if client != nil && client.credentials != nil {
+		initialization, stop := context.WithTimeout(parent, 10*time.Second)
+		if service.validateCredential(initialization) == nil {
+			service.scope.CredentialID = service.captureCredentialID()
+		} else {
+			service.identity.mu.Lock()
+			service.identity.retired = true
+			service.identity.cancel()
+			service.identity.mu.Unlock()
+		}
+		stop()
+	} else if client != nil {
+		service.scope.CredentialID = service.captureCredentialID()
+	}
+	return service
 }
 
 // Scoped returns a service for another org/cluster/credential that shares the
@@ -247,11 +285,29 @@ func (service *Service) Scoped(scope Scope) *Service {
 	if scope.OrgID == service.scope.OrgID {
 		readOrgs = append([]string(nil), service.readOrgs...)
 	}
-	return &Service{client: service.client, scope: scope, readOrgs: readOrgs, ttl: service.ttl, mu: service.mu, cache: service.cache, scrubber: service.scrubber, indexes: service.indexes, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext}
+	configured := scope.CredentialID
+	if configured == service.configuredCredentialID || configured == service.scope.CredentialID {
+		configured = service.configuredCredentialID
+		scope.CredentialID = service.scope.CredentialID
+	}
+	scoped := &Service{client: service.client, scope: scope, identity: service.identity, configuredCredentialID: configured, readOrgs: readOrgs, ttl: service.ttl, mu: service.mu, cache: service.cache, discoveryCalls: service.discoveryCalls, scrubber: service.scrubber, indexes: service.indexes, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext, captureMode: service.captureMode}
+	if configured != service.configuredCredentialID && service.client != nil {
+		scoped.scope.CredentialID = scoped.captureCredentialID()
+	}
+	return scoped
 }
 
 // Scope returns the immutable cache and request identity of this service.
 func (service *Service) Scope() Scope {
+	if service == nil {
+		return Scope{}
+	}
+	scope := service.scope
+	scope.CredentialID = service.configuredCredentialID
+	return scope
+}
+
+func (service *Service) ActiveScope() Scope {
 	if service == nil {
 		return Scope{}
 	}
@@ -269,6 +325,10 @@ type ServiceRegistry struct {
 	summaries      map[string]clusterSummaryCache
 	summarySlots   chan struct{}
 	summaryTimeout time.Duration
+	captureContext context.Context
+	closed         bool
+	closeDone      chan struct{}
+	resolveLocks   sync.Map
 }
 
 func NewServiceRegistry(base *Service) *ServiceRegistry {
@@ -317,6 +377,8 @@ func (registry *ServiceRegistry) Multiple() bool { return registry != nil && reg
 func (registry *ServiceRegistry) Clusters() []ClusterInfo {
 	result := []ClusterInfo{}
 	if registry != nil {
+		registry.mu.Lock()
+		defer registry.mu.Unlock()
 		for _, entry := range registry.entries {
 			result = append(result, entry.Info)
 		}
@@ -326,7 +388,10 @@ func (registry *ServiceRegistry) Clusters() []ClusterInfo {
 
 func (registry *ServiceRegistry) Each(visit func(*Service)) {
 	if registry != nil && visit != nil {
-		for _, entry := range registry.entries {
+		registry.mu.Lock()
+		entries := append([]ClusterEntry(nil), registry.entries...)
+		registry.mu.Unlock()
+		for _, entry := range entries {
 			if entry.Service != nil {
 				visit(entry.Service)
 			}
@@ -335,36 +400,161 @@ func (registry *ServiceRegistry) Each(visit func(*Service)) {
 }
 
 func (registry *ServiceRegistry) ResolveCluster(orgID, clusterID string) (*Service, error) {
-	if registry == nil || len(registry.entries) == 0 {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return registry.resolveCluster(ctx, orgID, clusterID)
+}
+
+func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clusterID string) (*Service, error) {
+	if registry == nil {
+		return nil, ErrClusterNotFound
+	}
+	registry.mu.Lock()
+	if registry.closed {
+		registry.mu.Unlock()
+		return nil, ErrClusterUnavailable
+	}
+	if len(registry.entries) == 0 {
+		registry.mu.Unlock()
 		return nil, ErrClusterNotFound
 	}
 	if clusterID == "" {
 		if registry.multiple {
+			registry.mu.Unlock()
 			return nil, ErrClusterRequired
 		}
 		clusterID = registry.entries[0].Info.ID
 	}
+	found := false
 	for _, entry := range registry.entries {
-		if entry.Info.ID != clusterID {
-			continue
+		if entry.Info.ID == clusterID {
+			found = true
+			break
 		}
-		if entry.Err != nil || entry.Service == nil {
-			return nil, ErrClusterUnavailable
+	}
+	if !found {
+		registry.mu.Unlock()
+		return nil, ErrClusterNotFound
+	}
+	registry.mu.Unlock()
+	value, _ := registry.resolveLocks.LoadOrStore(clusterID, make(chan struct{}, 1))
+	gate := value.(chan struct{})
+	select {
+	case gate <- struct{}{}:
+		defer func() { <-gate }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	registry.mu.Lock()
+	var previous *Service
+	for _, entry := range registry.entries {
+		if entry.Info.ID == clusterID && entry.Err == nil {
+			previous = entry.Service
+			break
 		}
-		scope := entry.Service.Scope()
-		scope.OrgID = orgID
+	}
+	closed := registry.closed
+	registry.mu.Unlock()
+	if closed || previous == nil {
+		return nil, ErrClusterUnavailable
+	}
+	fresh := previous
+	if err := previous.validateCredential(ctx); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		previous.identity.mu.Lock()
+		retired := previous.identity.retired
+		previous.identity.mu.Unlock()
+		if !retired {
+			return nil, err
+		}
+		scope := previous.Scope()
+		fresh = newService(ctx, previous.client, scope, previous.ttl)
+		if err := fresh.validateCredential(ctx); err != nil {
+			fresh.identity.cancel()
+			return nil, err
+		}
+		fresh.scrubber, fresh.captureMode, fresh.logStreamContext = previous.scrubber, previous.captureMode, previous.logStreamContext
+		previous.changes.mu.Lock()
+		provider := previous.changes.provider
+		previous.changes.mu.Unlock()
+		fresh.SetChangeStorage(provider)
 		registry.mu.Lock()
-		defer registry.mu.Unlock()
-		key := scope.OrgID + "\x00" + scope.ClusterID + "\x00" + scope.CredentialID
-		if service := registry.services[key]; service != nil {
-			return service, nil
+		oldServices := []*Service{}
+		for _, old := range registry.services {
+			if old.identity == previous.identity {
+				oldServices = append(oldServices, old)
+			}
 		}
-		service := entry.Service.Scoped(scope)
+		registry.mu.Unlock()
+		drained := make(chan struct{})
+		go func() {
+			var workers sync.WaitGroup
+			for _, old := range oldServices {
+				workers.Add(1)
+				go func(old *Service) { defer workers.Done(); old.StopCapture() }(old)
+			}
+			workers.Wait()
+			close(drained)
+		}()
+		select {
+		case <-drained:
+		case <-ctx.Done():
+			fresh.identity.cancel()
+			return nil, ctx.Err()
+		}
+		previous.client.metadataMu.Lock()
+		clear(previous.client.metadataDenied)
+		previous.client.metadataMu.Unlock()
+	}
+	registry.mu.Lock()
+	current := false
+	for _, entry := range registry.entries {
+		if entry.Info.ID == clusterID && entry.Service == previous {
+			current = true
+			break
+		}
+	}
+	if registry.closed || !current || ctx.Err() != nil {
+		registry.mu.Unlock()
+		if fresh != previous {
+			fresh.identity.cancel()
+		}
+		return nil, ErrClusterUnavailable
+	}
+	if fresh != previous {
+		for key, old := range registry.services {
+			if old.identity == previous.identity {
+				delete(registry.services, key)
+			}
+		}
+		for position := range registry.entries {
+			old := registry.entries[position].Service
+			if old != nil && old.identity == previous.identity {
+				registry.entries[position].Service = fresh.Scoped(old.Scope())
+			}
+		}
+		clear(registry.summaries)
+		if registry.base != nil && registry.base.identity == previous.identity {
+			registry.base = fresh
+		}
+	}
+	scope := fresh.scope
+	scope.OrgID = orgID
+	key := scope.OrgID + "\x00" + scope.ClusterID + "\x00" + scope.CredentialID
+	service := registry.services[key]
+	if service == nil {
+		service = fresh.Scoped(scope)
 		service.readOrgs = tenancy.TrustedOrgScope(registry.bootScope, orgID).OrgIDs()
 		registry.services[key] = service
-		return service, nil
 	}
-	return nil, ErrClusterNotFound
+	captureContext := registry.captureContext
+	registry.mu.Unlock()
+	if captureContext != nil {
+		service.StartCapture(captureContext)
+	}
+	return service, nil
 }
 
 func (registry *ServiceRegistry) Resolve(scope Scope) *Service {
@@ -374,10 +564,20 @@ func (registry *ServiceRegistry) Resolve(scope Scope) *Service {
 
 // ResolveOrg inherits the configured cluster and credential while changing org scope.
 func (registry *ServiceRegistry) ResolveOrg(orgID string) *Service {
-	if registry == nil || len(registry.entries) == 0 {
+	if registry == nil {
 		return nil
 	}
-	service, _ := registry.ResolveCluster(orgID, registry.entries[0].Info.ID)
+	registry.mu.Lock()
+	clusterID := ""
+	hasEntry := len(registry.entries) > 0
+	if hasEntry {
+		clusterID = registry.entries[0].Info.ID
+	}
+	registry.mu.Unlock()
+	if !hasEntry {
+		return nil
+	}
+	service, _ := registry.ResolveCluster(orgID, clusterID)
 	return service
 }
 
@@ -389,7 +589,18 @@ func (service *Service) InvalidateDiscovery() {
 }
 
 // Discover builds a preferred-version resource registry with partial failures.
-func (service *Service) Discover(ctx context.Context) (Discovery, error) {
+func (service *Service) Discover(ctx context.Context) (result Discovery, resultErr error) {
+	if err := service.validateCredential(ctx); err != nil {
+		return Discovery{}, err
+	}
+	ctx, cancelIdentity := service.credentialContext(ctx)
+	defer cancelIdentity()
+	credentialCtx := ctx
+	defer func() {
+		if err := service.validateCredential(credentialCtx); err != nil {
+			result, resultErr = Discovery{}, err
+		}
+	}()
 	ctx, cancel := withOperationBudget(ctx, defaultOperationTimeout, discoveryRequests, defaultOperationBytes, defaultOperationItems)
 	defer cancel()
 	key := service.cacheKey()
@@ -398,7 +609,28 @@ func (service *Service) Discover(ctx context.Context) (Discovery, error) {
 		service.mu.Unlock()
 		return cloneDiscovery(cached.discovery), nil
 	}
+	if running := service.discoveryCalls[key]; running != nil {
+		service.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return Discovery{}, ctx.Err()
+		case <-running.done:
+			return cloneDiscovery(running.result), running.err
+		}
+	}
+	if service.discoveryCalls == nil {
+		service.discoveryCalls = map[string]*discoveryCall{}
+	}
+	call := &discoveryCall{done: make(chan struct{})}
+	service.discoveryCalls[key] = call
 	service.mu.Unlock()
+	defer func() {
+		service.mu.Lock()
+		call.result, call.err = cloneDiscovery(result), resultErr
+		delete(service.discoveryCalls, key)
+		close(call.done)
+		service.mu.Unlock()
+	}()
 	discovery := Discovery{ObservedAt: time.Now().UTC()}
 	type apiVersions struct {
 		Versions []string `json:"versions"`
@@ -761,7 +993,11 @@ func projectedIndexRecord(record kubeindex.Record) ProjectedResource {
 		}
 		conditions = append(conditions, Condition{Type: "Ready", Status: status})
 	}
-	return ProjectedResource{Kind: record.Kind, Summary: summary, Conditions: conditions}
+	result := ProjectedResource{Kind: record.Kind, Summary: summary, Conditions: conditions}
+	if record.Summary["references_partial"] == "true" {
+		result.ProjectionTruncated = []string{"references"}
+	}
+	return result
 }
 
 func projectedWorkloadIndexRecord(record kubeindex.Record) ProjectedResource {
@@ -1042,6 +1278,10 @@ func (service *Service) resolve(ctx context.Context, id string) (ResourceDefinit
 }
 
 func (service *Service) withDiscovery(ctx context.Context) (context.Context, Discovery, error) {
+	if err := service.validateCredential(ctx); err != nil {
+		return ctx, Discovery{}, err
+	}
+	ctx = context.WithValue(ctx, credentialEpochContextKey{}, service)
 	if discovery, ok := ctx.Value(discoveryContextKey{}).(Discovery); ok {
 		return ctx, discovery, nil
 	}
@@ -1092,7 +1332,8 @@ func (service *Service) projectResource(definition ResourceDefinition, raw map[s
 		result.ProjectionTruncated = append(result.ProjectionTruncated, "owners")
 	}
 	for _, owner := range owners {
-		result.Owners = append(result.Owners, ObjectRef{APIVersion: boundString(stringValue(owner["apiVersion"])), Kind: boundString(stringValue(owner["kind"])), Name: boundString(stringValue(owner["name"])), UID: boundString(stringValue(owner["uid"]))})
+		controller, known := owner["controller"].(bool)
+		result.Owners = append(result.Owners, ObjectRef{APIVersion: boundString(stringValue(owner["apiVersion"])), Kind: boundString(stringValue(owner["kind"])), Name: boundString(stringValue(owner["name"])), UID: boundString(stringValue(owner["uid"])), controller: controller, controllerKnown: known})
 	}
 	status, _ := raw["status"].(map[string]any)
 	conditions := mapSlice(status["conditions"])
@@ -1101,9 +1342,12 @@ func (service *Service) projectResource(definition ResourceDefinition, raw map[s
 		result.ProjectionTruncated = append(result.ProjectionTruncated, "conditions")
 	}
 	for _, condition := range conditions {
-		result.Conditions = append(result.Conditions, Condition{Type: boundString(stringValue(condition["type"])), Status: boundString(stringValue(condition["status"])), Reason: boundString(stringValue(condition["reason"]))})
+		result.Conditions = append(result.Conditions, Condition{Type: boundString(stringValue(condition["type"])), Status: boundString(stringValue(condition["status"])), Reason: safeBreakReason(stringValue(condition["reason"])), TransitionAt: breakTimestamp(condition["lastTransitionTime"])})
 	}
 	result.Summary = safeSummary(definition.Kind, raw, service.scrubber)
+	if result.Summary["references_partial"] == true {
+		result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "references")
+	}
 	if definition.Kind == "Secret" && mapLength(raw["data"]) > maxProjectionItems {
 		result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "data_keys")
 	}
@@ -1145,6 +1389,7 @@ func enforceProjectionSize(result ProjectedResource) ProjectedResource {
 	for _, key := range keys {
 		delete(result.Summary, key)
 		result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "summary")
+		result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "references")
 		if encodedSize() <= maxProjectionBytes {
 			return result
 		}
@@ -1184,6 +1429,7 @@ func appendUnique(values []string, value string) []string {
 func safeSummary(kind string, raw map[string]any, scrubber Scrubber) map[string]any {
 	summary := make(map[string]any)
 	metadata, _ := raw["metadata"].(map[string]any)
+	summary["resource_version"] = boundString(stringValue(metadata["resourceVersion"]))
 	if kind == "Secret" {
 		summary["type"] = boundString(stringValue(raw["type"]))
 		summary["keys"] = sortedKeys(raw["data"])
@@ -1196,6 +1442,12 @@ func safeSummary(kind string, raw map[string]any, scrubber Scrubber) map[string]
 	}
 	status, _ := raw["status"].(map[string]any)
 	spec, _ := raw["spec"].(map[string]any)
+	projectBreakSummary(kind, metadata, status, summary)
+	if kind == "HorizontalPodAutoscaler" {
+		if value, exists := status["desiredReplicas"]; exists {
+			summary["desired_replicas"] = safeScalar(value)
+		}
+	}
 	if generation, ok := metadata["generation"]; ok {
 		summary["generation"] = safeScalar(generation)
 	}
@@ -1203,6 +1455,18 @@ func safeSummary(kind string, raw map[string]any, scrubber Scrubber) map[string]
 		summary["observed_generation"] = safeScalar(observedGeneration)
 	}
 	if kind == "Event" {
+		if at := stringValue(raw["eventTime"]); at != "" {
+			summary["firstTimestamp"] = boundString(at)
+			summary["lastTimestamp"] = boundString(at)
+		}
+		if series, ok := raw["series"].(map[string]any); ok {
+			if at := stringValue(series["lastObservedTime"]); at != "" {
+				summary["lastTimestamp"] = boundString(at)
+			}
+			if count, exists := series["count"]; exists {
+				summary["count"] = safeScalar(count)
+			}
+		}
 		for _, key := range []string{"type", "reason", "action", "count", "firstTimestamp", "lastTimestamp"} {
 			if value, ok := raw[key]; ok {
 				summary[key] = safeScalar(value)
@@ -1319,7 +1583,7 @@ func safeSummary(kind string, raw map[string]any, scrubber Scrubber) map[string]
 
 func isWorkloadKind(kind string) bool {
 	switch kind {
-	case "Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob":
+	case "Pod", "Deployment", "ReplicaSet", "StatefulSet", "DaemonSet", "Job", "CronJob":
 		return true
 	}
 	return false
@@ -1544,6 +1808,10 @@ func cloneDiscovery(value Discovery) Discovery {
 	return value
 }
 func errorClass(err error) string {
+	var throttled *ErrThrottled
+	if errors.As(err, &throttled) {
+		return "throttled"
+	}
 	switch {
 	case errors.Is(err, ErrOperationBudget):
 		return "budget_exhausted"

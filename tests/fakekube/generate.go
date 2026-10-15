@@ -134,6 +134,9 @@ func SeedScenario(store *Store, name string, seed int64) error {
 	if name == "fleet-east" || name == "fleet-west" {
 		return seedFleetScenario(store, name)
 	}
+	if name == "bad-rollout" || name == "bad-rollout-before" {
+		return seedBadRollout(store, time.Now().UTC().Truncate(time.Second), name == "bad-rollout")
+	}
 	fixtures := map[string][]struct {
 		resource  string
 		namespace string
@@ -263,6 +266,108 @@ func seedFleetScenario(store *Store, scenario string) error {
 
 func putObject(store *Store, resource, namespace, name string, object map[string]any) error {
 	return store.upsertObject(resource, namespace, name, object)
+}
+
+func seedBadRollout(store *Store, now time.Time, broken bool) error {
+	for _, namespace := range []string{"shop", "payments", "kube-system"} {
+		if err := putObject(store, "namespaces", "", namespace, map[string]any{"kind": "Namespace"}); err != nil {
+			return err
+		}
+	}
+	if err := putObject(store, "nodes", "", "node-a", map[string]any{"kind": "Node", "metadata": map[string]any{"uid": "node-a"}, "status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}); err != nil {
+		return err
+	}
+	for _, workload := range []struct {
+		namespace, name    string
+		desired, available int
+		image              string
+	}{{"shop", "checkout", 7, 0, "v42"}, {"payments", "ledger-api", 4, 2, "v2"}, {"shop", "cart", 1, 1, "v1"}} {
+		if !broken && workload.name == "checkout" {
+			workload.desired, workload.available, workload.image = 6, 6, "v41"
+		}
+		if !broken && workload.name == "ledger-api" {
+			workload.available, workload.image = 4, "v1"
+		}
+		labels := map[string]string{"app": workload.name}
+		condition := []any{}
+		if broken && workload.name != "cart" {
+			condition = append(condition, map[string]any{"type": "Available", "status": "False", "lastTransitionTime": now.Add(-4 * time.Minute).Format(time.RFC3339)})
+			if workload.name == "ledger-api" {
+				condition = append(condition, map[string]any{"type": "Progressing", "status": "False", "reason": "ProgressDeadlineExceeded", "lastTransitionTime": now.Add(-4 * time.Minute).Format(time.RFC3339)})
+			}
+		}
+		if err := putObject(store, "deployments", workload.namespace, workload.name, map[string]any{"kind": "Deployment", "metadata": map[string]any{"uid": "deployment-" + workload.name, "labels": labels, "generation": 2}, "spec": map[string]any{"replicas": workload.desired, "selector": map[string]any{"matchLabels": labels}, "template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "app", "image": "example.invalid/" + workload.name + ":" + workload.image, "envFrom": []any{map[string]any{"configMapRef": map[string]any{"name": "checkout-cfg"}}}}}}}}, "status": map[string]any{"replicas": workload.desired, "readyReplicas": workload.available, "availableReplicas": workload.available, "updatedReplicas": workload.desired, "observedGeneration": 2, "conditions": condition}}); err != nil {
+			return err
+		}
+		current := workload.name + "-current"
+		if workload.name == "checkout" {
+			current = "checkout-v41"
+			if broken {
+				current = "checkout-v42"
+			}
+			for _, revision := range []struct {
+				name, version, image string
+				minutes              int
+			}{{"checkout-v41", "41", "v41", 12}, {"checkout-v42", "42", "v42", 8}} {
+				if !broken && revision.version == "42" {
+					continue
+				}
+				if err := putObject(store, "replicasets", workload.namespace, revision.name, map[string]any{"kind": "ReplicaSet", "metadata": map[string]any{"uid": revision.name, "annotations": map[string]any{"deployment.kubernetes.io/revision": revision.version}, "creationTimestamp": now.Add(-time.Duration(revision.minutes) * time.Minute).Format(time.RFC3339), "ownerReferences": []any{map[string]any{"kind": "Deployment", "name": "checkout", "uid": "deployment-checkout", "controller": true}}}, "spec": map[string]any{"replicas": workload.desired, "template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "app", "image": "example.invalid/checkout:" + revision.image, "env": []any{map[string]any{"name": "PRIVATE", "value": "CANARY_REVISION_ENV"}}}}}}}}); err != nil {
+					return err
+				}
+			}
+		} else {
+			if err := putObject(store, "replicasets", workload.namespace, current, map[string]any{"kind": "ReplicaSet", "metadata": map[string]any{"uid": current, "ownerReferences": []any{map[string]any{"kind": "Deployment", "name": workload.name, "uid": "deployment-" + workload.name, "controller": true}}}}); err != nil {
+				return err
+			}
+		}
+		for position := 0; position < workload.desired; position++ {
+			name := fmt.Sprintf("%s-%d", workload.name, position)
+			state := map[string]any{"running": map[string]any{}}
+			phase, ready := "Running", true
+			last := map[string]any{}
+			if broken && workload.name == "checkout" {
+				ready = false
+				state = map[string]any{"waiting": map[string]any{"reason": "CrashLoopBackOff", "message": "CANARY_WAITING"}}
+				if position < 6 {
+					last = map[string]any{"terminated": map[string]any{"reason": "OOMKilled", "exitCode": 137, "finishedAt": now.Add(-4 * time.Minute).Format(time.RFC3339), "message": "CANARY_TERMINATION"}}
+				} else {
+					phase = "Failed"
+					state = map[string]any{"terminated": map[string]any{"reason": "Error", "exitCode": 1, "finishedAt": now.Add(-4 * time.Minute).Format(time.RFC3339)}}
+				}
+			}
+			if broken && workload.name == "ledger-api" && position < 2 {
+				ready = false
+				phase = "Pending"
+				state = map[string]any{"waiting": map[string]any{"reason": "ImagePullBackOff"}}
+			}
+			readyStatus := "True"
+			if !ready {
+				readyStatus = "False"
+			}
+			if err := putObject(store, "pods", workload.namespace, name, map[string]any{"kind": "Pod", "metadata": map[string]any{"uid": "pod-" + name, "labels": labels, "ownerReferences": []any{map[string]any{"kind": "ReplicaSet", "name": current, "uid": current, "controller": true}}}, "spec": map[string]any{"nodeName": "node-a", "containers": []any{map[string]any{"name": "app", "image": "example.invalid/" + workload.name + ":" + workload.image}}}, "status": map[string]any{"phase": phase, "conditions": []any{map[string]any{"type": "Ready", "status": readyStatus, "lastTransitionTime": now.Add(-4 * time.Minute).Format(time.RFC3339)}}, "containerStatuses": []any{map[string]any{"name": "app", "ready": ready, "restartCount": 6, "state": state, "lastState": last}}}}); err != nil {
+				return err
+			}
+		}
+	}
+	if err := putObject(store, "configmaps", "shop", "checkout-cfg", map[string]any{"kind": "ConfigMap", "metadata": map[string]any{"uid": "checkout-cfg"}, "data": map[string]any{"private": "CANARY_CONFIG_VALUE"}}); err != nil {
+		return err
+	}
+	desired := 6
+	if broken {
+		desired = 7
+	}
+	if err := putObject(store, "horizontalpodautoscalers", "shop", "checkout", map[string]any{"kind": "HorizontalPodAutoscaler", "metadata": map[string]any{"uid": "checkout-hpa"}, "spec": map[string]any{"scaleTargetRef": map[string]any{"kind": "Deployment", "name": "checkout"}, "minReplicas": 6, "maxReplicas": 7}, "status": map[string]any{"desiredReplicas": desired}}); err != nil {
+		return err
+	}
+	nodeReady := 12
+	if broken {
+		nodeReady = 5
+	}
+	if err := putObject(store, "daemonsets", "kube-system", "node-agent", map[string]any{"kind": "DaemonSet", "metadata": map[string]any{"uid": "node-agent"}, "status": map[string]any{"desiredNumberScheduled": 12, "numberReady": nodeReady}}); err != nil {
+		return err
+	}
+	return putObject(store, "events", "shop", "cart-warning", map[string]any{"kind": "Event", "type": "Warning", "count": 1, "firstTimestamp": now.Add(-time.Minute).Format(time.RFC3339), "lastTimestamp": now.Add(-time.Minute).Format(time.RFC3339), "involvedObject": map[string]any{"kind": "Deployment", "name": "cart", "namespace": "shop", "uid": "deployment-cart"}})
 }
 
 func trafficMetrics(elapsed time.Duration) string {
