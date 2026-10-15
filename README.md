@@ -16,26 +16,37 @@
   You don't have to monitor your systems alone. Versus Incident will keep track of your services, applications, and systems, detect new or unexpected problems, and provide your team with the evidence needed to investigate.
 </p>
 
-![Versus](src/docs/images/versus-dashboard.svg)
+<p align="center">
+  <i>Auto-detecting incident in System</i>
+  <img alt="Versus Dashboard" src="src/docs/images/versus-dashboard.svg">
+</p>
+
+<p align="center">
+  <i>Auto-detecting issues in Kubernetes</i>
+  </br></br>
+  <img alt="Versus Dashboard" src="src/docs/images/kubernetes-harness-overview.png">
+</p>
+
 
 ## How Versus Creates Incidents
 
 Incidents reach Versus two ways, and both are handled by the same notification, templating, and on-call logic:
 
-- **AI SRE Agent (auto-detect)** — point the agent at your logs and it learns your normal patterns, then automatically raises an incident when a brand-new error or anomaly appears. No alert rules to maintain.
+- **AI SRE Agent (auto-detect)** — point the agent at your logs, metrics, traces, and kubernetes, then it learns your normal patterns, then automatically raises an incident when a brand-new error or anomaly appears. No alert rules to maintain.
 - **Webhook alerts (you define)** — any tool that can POST a webhook (Alertmanager, Grafana, Sentry, CloudWatch SNS, FluentBit, or your own scripts) sends incidents straight to Versus, formatted with your own templates.
 
 Whichever source raises it, an incident is templated, fanned out to every channel you enable, and escalated to on-call if it isn't acknowledged in time.
 
 ## Features
 
-- 🤖 **AI SRE Agent**: An AI agent that reads your logs, learns what normal looks like, and automatically opens an incident only when something new and unexpected appears.
-- 🌐 **Webhook Alerts**: Receive incidents from any tool that can POST a webhook — Alertmanager, Grafana, Sentry, CloudWatch SNS, FluentBit, and more.
+- 🤖 **AI SRE Agent**: An AI agent that reads your logs, metrics and traces, learns what normal looks like, and automatically opens an incident only when something new and unexpected appears.
+- 💬 **DevOps Agent Chat**: The DevOps Agent's shipped web experience is Chat in the Versus UI. This agent is designed to effectively enhance your understanding of your connection system.
+- 📊 **Kubernetes Harness Dashboard**: Explore your Kubernetes environment in one place: cluster health and capacity, workloads, resource relationships, recent changes, Helm releases, and GitOps status.
 - 🚨 **Multi-channel Notifications**: Fan out every incident to Slack, Microsoft Teams, Telegram, Viber, Email, and Lark (more channels coming!)
-- 📝 **Custom Templates**: Define your own alert messages using Go templates
-- 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
-- 📡 **REST API**: Simple HTTP interface to receive alerts
 - 📞 **On-Call**: On-Call integrations (PagerDuty, Opsgenie, incident.io, ServiceNow)
+- 🔧 **Easy Configuration**: YAML-based configuration with environment variables support.
+- 🌐 **Webhook Alerts**: Receive incidents from any tool that can POST a webhook — Alertmanager, Grafana, Sentry, CloudWatch SNS, FluentBit, and more.
+- 📝 **Custom Templates**: Define your own alert messages using Go templates.
 
 ![Versus](src/docs/images/versus-architecture.png)
 
@@ -363,14 +374,6 @@ For the custom templates, see [Development Custom Templates](https://docs.versus
 For a complete `Deployment` + `Service` + `PersistentVolumeClaim`
 manifest (with the persistent data volume the admin dashboard needs),
 see [Deploy on Kubernetes](https://docs.versusincident.com/#/configuration/kubernetes).
-
-Kubernetes continuous change capture across replicas requires shared PostgreSQL
-and a verified stable principal (including projected ServiceAccount tokens) or
-identical static credential material. Unverified rotating identities explicitly
-use demand mode; replica count is not a blanket capture HA guarantee. Upgrading
-from UUID-key capture requires stopping **all old capture before starting new
-continuous replicas**: mixed keys can hold dual leases, and history is not
-automatically imported. See the [connector identity and upgrade guide](src/agent/kubernetes/configuration.md#continuous-capture-and-replica-identity).
 
 ## Helm Chart
 
