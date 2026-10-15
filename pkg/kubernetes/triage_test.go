@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -45,6 +46,89 @@ func TestClassifyIssueUnavailableWorkloadCountsReplicas(t *testing.T) {
 	})
 	if len(findings) != 1 || findings[0].rule != "workload.unavailable" || findings[0].count != 3 || findings[0].root.Name != "api" {
 		t.Fatalf("findings = %#v", findings)
+	}
+}
+
+func TestClassifyIssueCountBounds(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{name: "negative", value: "-1", want: 0},
+		{name: "zero", value: "0", want: 0},
+		{name: "positive", value: "3", want: 3},
+		{name: "platform maximum", value: strconv.FormatInt(int64(math.MaxInt), 10), want: math.MaxInt},
+		{name: "signed maximum", value: "9223372036854775807", want: math.MaxInt},
+	}
+	if strconv.IntSize == 32 {
+		tests = append(tests, struct {
+			name  string
+			value string
+			want  int
+		}{name: "above platform maximum", value: "2147483648", want: math.MaxInt})
+	}
+	for _, kind := range []string{"Job", "Event"} {
+		for _, test := range tests {
+			t.Run(kind+"/"+test.name, func(t *testing.T) {
+				value, err := strconv.ParseInt(test.value, 10, 64)
+				if err != nil {
+					t.Fatal(err)
+				}
+				summary := map[string]any{"failed": value}
+				want := test.want
+				if kind == "Event" {
+					summary = map[string]any{"type": "Warning", "count": value}
+					if want == 0 {
+						want = 1
+					}
+				}
+				findings := classifyIssue(ProjectedResource{Kind: kind, Name: "bounded", Summary: summary})
+				if want == 0 {
+					if len(findings) != 0 {
+						t.Fatalf("unexpected findings: %#v", findings)
+					}
+					return
+				}
+				if len(findings) != 1 || findings[0].count != want {
+					t.Fatalf("findings = %#v, want count %d", findings, want)
+				}
+			})
+		}
+	}
+}
+
+func TestClassifyIssueReplicaCountBounds(t *testing.T) {
+	for _, kind := range []string{"Deployment", "StatefulSet", "DaemonSet"} {
+		for _, test := range []struct {
+			name      string
+			desired   int64
+			available int64
+			want      int
+		}{
+			{name: "large deficit", desired: math.MaxInt64, available: 0, want: math.MaxInt},
+			{name: "small deficit at maximum", desired: math.MaxInt64, available: math.MaxInt64 - 1, want: 1},
+			{name: "negative available", desired: 5, available: -1},
+			{name: "subtraction overflow", desired: math.MaxInt64, available: math.MinInt64},
+			{name: "negative desired", desired: -1, available: math.MinInt64},
+		} {
+			t.Run(kind+"/"+test.name, func(t *testing.T) {
+				desiredKey := "desired_replicas"
+				if kind == "DaemonSet" {
+					desiredKey = "desiredNumberScheduled"
+				}
+				findings := classifyIssue(ProjectedResource{Kind: kind, Name: "bounded", Summary: map[string]any{desiredKey: test.desired, "availableReplicas": test.available}})
+				if test.want == 0 {
+					if len(findings) != 0 {
+						t.Fatalf("unexpected findings: %#v", findings)
+					}
+					return
+				}
+				if len(findings) != 1 || findings[0].count != test.want {
+					t.Fatalf("findings = %#v, want count %d", findings, test.want)
+				}
+			})
+		}
 	}
 }
 

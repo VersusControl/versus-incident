@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"math"
 	"math/big"
 	"sort"
 	"strings"
@@ -228,12 +229,12 @@ func classifyIssue(resource ProjectedResource) []issueFinding {
 		}
 		desired, desiredKnown := triageSummaryInt(resource.Summary, desiredKeys...)
 		available, availableKnown := triageSummaryInt(resource.Summary, "availableReplicas", "available_replicas", "numberReady", "number_ready", "readyReplicas", "ready_replicas")
-		if desiredKnown && availableKnown && available < desired {
-			add("workload.unavailable", "warning", int(desired-available), resourceTime(resource.Summary))
+		if desiredKnown && availableKnown && available >= 0 && available < desired {
+			add("workload.unavailable", "warning", triageIssueCount(desired-available), resourceTime(resource.Summary))
 		}
 	case "Job":
-		if triageSummaryIntValue(resource.Summary, "failed") > 0 {
-			add("job.failed", "critical", int(triageSummaryIntValue(resource.Summary, "failed")), resourceTime(resource.Summary))
+		if failed := triageSummaryIntValue(resource.Summary, "failed"); failed > 0 {
+			add("job.failed", "critical", triageIssueCount(failed), resourceTime(resource.Summary))
 		}
 	case "Node":
 		ready := false
@@ -256,7 +257,7 @@ func classifyIssue(resource ProjectedResource) []issueFinding {
 					root.Namespace = resource.Namespace
 				}
 			}
-			count := int(triageSummaryIntValue(resource.Summary, "count"))
+			count := triageIssueCount(triageSummaryIntValue(resource.Summary, "count"))
 			if count <= 0 {
 				count = 1
 			}
@@ -267,6 +268,16 @@ func classifyIssue(resource ProjectedResource) []issueFinding {
 		findings[index].root = root
 	}
 	return findings
+}
+
+func triageIssueCount(value int64) int {
+	if value <= 0 {
+		return 0
+	}
+	if value > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(value)
 }
 
 func triageSummaryIntValue(summary map[string]any, keys ...string) int64 {
