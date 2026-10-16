@@ -121,7 +121,7 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 		groups := map[string]*Issue{}
 		for _, record := range records {
 			findings := classifyIssue(recordProjection(record))
-			if rule := kubebreaks.Rule(record); rule == "pod.crash_loop" || rule == "pod.image_pull" || rule == "workload.rollout_stalled" {
+			if rule := kubebreaks.Rule(record, now); rule == "pod.crash_loop" || rule == "pod.image_pull" || rule == "pod.config_error" || rule == "pod.evicted" || rule == "pod.unschedulable" || rule == "workload.rollout_stalled" {
 				findings = append(findings, issueFinding{rule: rule, count: 1, severity: "warning", example: objectRef(kubebreaks.Ref(record))})
 			}
 			for _, finding := range findings {

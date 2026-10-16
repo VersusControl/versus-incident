@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 )
 
@@ -30,7 +31,7 @@ func projectBreakSummary(kind string, metadata, status, summary map[string]any) 
 		pressure := []string{}
 		for _, condition := range mapSlice(status["conditions"]) {
 			name := stringValue(condition["type"])
-			if strings.HasSuffix(name, "Pressure") && stringValue(condition["status"]) == "True" {
+			if (name == "MemoryPressure" || name == "DiskPressure" || name == "PIDPressure") && stringValue(condition["status"]) == "True" {
 				pressure = append(pressure, boundString(name))
 			}
 		}
@@ -45,6 +46,21 @@ func projectBreakSummary(kind string, metadata, status, summary map[string]any) 
 			prefix = "progressing"
 		case "Available":
 			prefix = "available"
+		case "PodScheduled":
+			if kind != "Pod" {
+				continue
+			}
+			prefix = "scheduled"
+		case "DisruptionTarget":
+			if kind != "Pod" {
+				continue
+			}
+			prefix = "disruption"
+		case "Failed":
+			if kind != "Job" {
+				continue
+			}
+			prefix = "job_failed"
 		default:
 			continue
 		}
@@ -59,6 +75,15 @@ func projectBreakSummary(kind string, metadata, status, summary map[string]any) 
 			summary[camelToSnake(field)] = value
 		}
 	}
+	if kind == "Deployment" && summary["available_status"] == "False" {
+		replicas, replicasKnown := status["replicas"].(float64)
+		unavailable, unavailableKnown := status["unavailableReplicas"].(float64)
+		_, availablePresent := status["availableReplicas"]
+		_, readyPresent := status["readyReplicas"]
+		if !availablePresent && !readyPresent && replicasKnown && unavailableKnown && replicas > 0 && replicas <= 2147483647 && replicas == float64(int32(replicas)) && unavailable == replicas {
+			summary["available_replicas"] = float64(0)
+		}
+	}
 	annotations, _ := metadata["annotations"].(map[string]any)
 	if value := stringValue(annotations["deployment.kubernetes.io/revision"]); revisionPattern.MatchString(value) {
 		summary["revision"] = value
@@ -66,35 +91,10 @@ func projectBreakSummary(kind string, metadata, status, summary map[string]any) 
 	if kind != "Pod" {
 		return
 	}
-	containers := []kubeindex.ContainerState{}
+	summary["pod_reason"] = podStatusReason(stringValue(status["reason"]))
+	containers := projectCrashContainers(status)
 	if len(mapSlice(status["containerStatuses"]))+len(mapSlice(status["initContainerStatuses"])) > 8 {
 		summary["break_evidence_partial"] = true
-	}
-	for _, field := range []string{"containerStatuses", "initContainerStatuses"} {
-		for _, container := range mapSlice(status[field]) {
-			name := stringValue(container["name"])
-			if !validPodLogName(name, 63, false) {
-				continue
-			}
-			item := kubeindex.ContainerState{Name: name}
-			if value, ok := container["restartCount"].(float64); ok && value >= 0 && value <= 2147483647 {
-				item.RestartCount = int32(value)
-			}
-			state, _ := container["state"].(map[string]any)
-			waiting, _ := state["waiting"].(map[string]any)
-			item.WaitingReason = safeBreakReason(stringValue(waiting["reason"]))
-			last, _ := container["lastState"].(map[string]any)
-			terminated, _ := last["terminated"].(map[string]any)
-			if current, ok := state["terminated"].(map[string]any); ok {
-				terminated = current
-			}
-			item.TerminatedReason = safeBreakReason(stringValue(terminated["reason"]))
-			if value, ok := terminated["exitCode"].(float64); ok && value >= -2147483648 && value <= 2147483647 {
-				item.ExitCode = int32(value)
-			}
-			item.TerminatedAt = breakTimestamp(terminated["finishedAt"])
-			containers = append(containers, item)
-		}
 	}
 	sort.SliceStable(containers, func(left, right int) bool {
 		return containerEvidenceRank(containers[left]) < containerEvidenceRank(containers[right])
@@ -105,17 +105,67 @@ func projectBreakSummary(kind string, metadata, status, summary map[string]any) 
 	summary["container_states"] = containers
 }
 
+func projectCrashContainers(status map[string]any) []kubeindex.ContainerState {
+	containers := []kubeindex.ContainerState{}
+	for _, field := range []string{"containerStatuses", "initContainerStatuses"} {
+		for _, container := range mapSlice(status[field]) {
+			name := stringValue(container["name"])
+			if !validPodLogName(name, 63, false) {
+				continue
+			}
+			item := kubeindex.ContainerState{Name: name, Init: field == "initContainerStatuses"}
+			if value, ok := container["restartCount"].(float64); ok && value >= 0 && value <= 2147483647 {
+				item.RestartCount = int32(value)
+			}
+			state, _ := container["state"].(map[string]any)
+			waiting, _ := state["waiting"].(map[string]any)
+			item.WaitingReason = safeBreakReason(stringValue(waiting["reason"]))
+			last, _ := container["lastState"].(map[string]any)
+			terminated, _ := last["terminated"].(map[string]any)
+			if current, ok := state["terminated"].(map[string]any); ok {
+				terminated = current
+				item.CurrentTermination = true
+			}
+			item.TerminatedReason = safeBreakReason(stringValue(terminated["reason"]))
+			if value, ok := terminated["exitCode"].(float64); ok && value >= -2147483648 && value <= 2147483647 {
+				item.ExitCode = int32(value)
+			}
+			if value, ok := terminated["signal"].(float64); ok && value >= 1 && value <= 64 && value == float64(int32(value)) {
+				item.Signal = int32(value)
+			}
+			item.TerminatedAt = breakTimestamp(terminated["finishedAt"])
+			containers = append(containers, item)
+		}
+	}
+	return containers
+}
+
 func containerEvidenceRank(item kubeindex.ContainerState) int {
-	switch item.WaitingReason {
-	case "CrashLoopBackOff":
+	switch {
+	case item.WaitingReason == "CrashLoopBackOff":
 		return 0
-	case "ImagePullBackOff", "ErrImagePull":
+	case kubebreaks.IsImagePullReason(item.WaitingReason), kubebreaks.IsConfigErrorReason(item.WaitingReason):
 		return 1
 	}
 	if item.TerminatedReason != "" {
 		return 2
 	}
 	return 3
+}
+
+func podStatusReason(value string) string {
+	if strings.HasPrefix(value, "OutOf") && len(value) <= 253 && !strings.ContainsAny(value, " \t\r\n") {
+		switch value {
+		case "OutOfcpu", "OutOfmemory", "OutOfpods":
+			return value
+		default:
+			return "OutOfResource"
+		}
+	}
+	if reason := safeBreakReason(value); reason != "" {
+		return reason
+	}
+	return ""
 }
 
 func indexedTimestamp(summary map[string]string, key string) time.Time {
@@ -132,7 +182,9 @@ func indexedContainers(value any) []kubeindex.ContainerState {
 		if len(result) == 8 {
 			break
 		}
-		result = append(result, kubeindex.ContainerState{Name: stringValue(item["name"]), WaitingReason: safeBreakReason(stringValue(item["waiting_reason"])), TerminatedReason: safeBreakReason(stringValue(item["last_terminated_reason"])), ExitCode: int32(triageSummaryIntValue(item, "last_terminated_exit_code")), RestartCount: int32(triageSummaryIntValue(item, "restart_count")), TerminatedAt: breakTimestamp(item["last_terminated_at"])})
+		init, _ := item["init"].(bool)
+		current, _ := item["current_termination"].(bool)
+		result = append(result, kubeindex.ContainerState{Name: stringValue(item["name"]), Init: init, CurrentTermination: current, WaitingReason: safeBreakReason(stringValue(item["waiting_reason"])), TerminatedReason: safeBreakReason(stringValue(item["last_terminated_reason"])), ExitCode: int32(triageSummaryIntValue(item, "last_terminated_exit_code")), Signal: int32(triageSummaryIntValue(item, "last_terminated_signal")), RestartCount: int32(triageSummaryIntValue(item, "restart_count")), TerminatedAt: breakTimestamp(item["last_terminated_at"])})
 	}
 	return result
 }

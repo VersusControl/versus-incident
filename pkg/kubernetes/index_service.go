@@ -247,6 +247,8 @@ func (service *Service) runIndexRefresh(requestContext context.Context, key inde
 			loop.mu.Unlock()
 		}
 		started := time.Now().UTC()
+		crashes := &crashCaptureBatch{}
+		refreshContext = context.WithValue(refreshContext, crashCaptureContextKey{}, crashes)
 		var deltas <-chan kubeindex.Delta
 		unsubscribe := func() {}
 		var captureLock *sync.Mutex
@@ -296,9 +298,22 @@ func (service *Service) runIndexRefresh(requestContext context.Context, key inde
 			captureLock.Lock()
 		}
 		if changeStore != nil && refreshContext.Err() == nil && service.validateCredential(refreshContext) == nil {
-			if err := service.commitCredential(refreshContext, func() error {
-				return service.captureCycle(changeStore, deltas, index.Snapshot(), kinds, started, refreshOwner)
-			}); err != nil {
+			service.changes.mu.Lock()
+			crashes.omitted = crashes.omitted || service.changes.journalFailed[key.scope]
+			service.changes.mu.Unlock()
+			commitErr := service.commitCredential(refreshContext, func() error {
+				return service.captureCycleWithCrashes(changeStore, deltas, index.Snapshot(), kinds, started, crashes, refreshOwner)
+			})
+			if !errors.Is(commitErr, kubechanges.ErrLeaseLost) {
+				service.changes.mu.Lock()
+				if commitErr != nil {
+					service.changes.journalFailed[key.scope] = true
+				} else {
+					delete(service.changes.journalFailed, key.scope)
+				}
+				service.changes.mu.Unlock()
+			}
+			if commitErr != nil {
 				if loop := service.captureState(); loop != nil {
 					loop.mu.Lock()
 					loop.status.Behind = true
@@ -354,6 +369,11 @@ func scopedIndexStatus(status kubeindex.Status, requested []string) kubeindex.St
 }
 
 func (service *Service) loadIndexKind(ctx context.Context, kind string, namespaces ...string) (recordsResult []kubeindex.Record, completeResult bool, resultErr error) {
+	if kind == "Pod" {
+		if batch, ok := ctx.Value(crashCaptureContextKey{}).(*crashCaptureBatch); ok {
+			batch.attempted = true
+		}
+	}
 	if err := service.validateCredential(ctx); err != nil {
 		return nil, false, err
 	}
@@ -501,8 +521,20 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 				}
 				return nil, false, err
 			}
+			if kind == "Pod" {
+				if batch, ok := ctx.Value(crashCaptureContextKey{}).(*crashCaptureBatch); ok {
+					batch.read = true
+				}
+			}
 			for _, item := range page.Items {
-				records = append(records, indexRecord(service.projectResource(definition, item)))
+				record := indexRecord(service.projectResource(definition, item))
+				if kind == "Pod" {
+					if batch, ok := ctx.Value(crashCaptureContextKey{}).(*crashCaptureBatch); ok {
+						status, _ := item["status"].(map[string]any)
+						batch.add(service.scope.ClusterID, record, status, time.Now().UTC())
+					}
+				}
+				records = append(records, record)
 			}
 			continueToken = page.Metadata.Continue
 		}
@@ -803,10 +835,13 @@ func safeIndexedSummary(summary map[string]any) map[string]string {
 	allowed := map[string]bool{
 		"phase": true, "type": true, "reason": true, "generation": true,
 		"observed_generation": true, "desired_replicas": true, "replicas": true,
-		"ready_replicas": true, "available_replicas": true, "updated_replicas": true,
+		"ready_replicas": true, "available_replicas": true, "unavailable_replicas": true, "updated_replicas": true,
 		"restart_count": true, "allocatable_cpu": true, "allocatable_memory": true,
 		"requested_cpu": true, "requested_memory": true, "limited_cpu": true, "limited_memory": true, "created_at": true,
-		"ready_status": true, "ready_transition_at": true, "progressing_status": true, "progressing_reason": true, "progressing_transition_at": true,
+		"ready_status": true, "ready_reason": true, "ready_transition_at": true, "progressing_status": true, "progressing_reason": true, "progressing_transition_at": true,
+		"pod_reason": true, "scheduled_status": true, "scheduled_reason": true, "scheduled_transition_at": true,
+		"disruption_status": true, "disruption_reason": true, "disruption_transition_at": true,
+		"job_failed_status": true, "job_failed_reason": true, "job_failed_transition_at": true,
 		"available_status": true, "available_transition_at": true, "update_revision": true, "current_revision": true, "revision": true,
 		"desired_number_scheduled": true, "number_ready": true, "failed": true, "count": true, "firstTimestamp": true, "lastTimestamp": true,
 		"node_pressure":          true,

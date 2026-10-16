@@ -91,11 +91,6 @@ type TopPage struct {
 	Sync         SyncStatus       `json:"sync"`
 }
 
-var issueResourceIDs = []string{
-	"core~v1~pods", "apps~v1~deployments", "apps~v1~statefulsets",
-	"apps~v1~daemonsets", "batch~v1~jobs", "core~v1~nodes", "core~v1~events",
-}
-
 // Issues returns bounded findings from projected cluster resources.
 func (service *Service) Issues(ctx context.Context, options IssueOptions) (IssuePage, error) {
 	return service.issuesSnapshot(ctx, options)

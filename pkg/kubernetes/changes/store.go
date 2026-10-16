@@ -60,6 +60,10 @@ type snapshot struct {
 	Lease          *Lease                       `json:"lease,omitempty"`
 	WarningEvents  map[string]warningCheckpoint `json:"warning_events,omitempty"`
 	WarningWindows map[string]warningCheckpoint `json:"warning_windows,omitempty"`
+	Crashes        []CrashEvent                 `json:"crashes,omitempty"`
+	CrashSequence  uint64                       `json:"crash_sequence,omitempty"`
+	CrashStartedAt time.Time                    `json:"crash_started_at,omitempty"`
+	CrashGaps      []Gap                        `json:"crash_gaps,omitempty"`
 }
 
 type warningCheckpoint struct {
@@ -116,6 +120,10 @@ func (store *Store) MarkGap(gap Gap) error {
 }
 
 func (store *Store) Commit(changes []Change, gaps []Gap, coverage map[string]Gap, owner string, now time.Time) error {
+	return store.CommitCapture(changes, gaps, coverage, owner, now, nil, nil, false)
+}
+
+func (store *Store) CommitCapture(changes []Change, gaps []Gap, coverage map[string]Gap, owner string, now time.Time, crashes []CrashEvent, crashGaps []Gap, podRead bool) error {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -134,6 +142,16 @@ func (store *Store) Commit(changes []Change, gaps []Gap, coverage map[string]Gap
 			return ErrInvalidQuery
 		}
 	}
+	for _, event := range crashes {
+		if !validCrash(event) || event.ObservedAt.After(now) {
+			return ErrInvalidQuery
+		}
+	}
+	for _, gap := range crashGaps {
+		if gap.From.IsZero() || gap.To.Before(gap.From) {
+			return ErrInvalidQuery
+		}
+	}
 	return store.commitSnapshot(func(current *snapshot) error {
 		if owner == "" && current.Lease != nil {
 			if current.Lease.Expires.After(time.Now().UTC()) {
@@ -143,6 +161,9 @@ func (store *Store) Commit(changes []Change, gaps []Gap, coverage map[string]Gap
 		}
 		if owner != "" && (current.Lease == nil || current.Lease.Owner != owner || !current.Lease.Expires.After(time.Now().UTC())) {
 			return ErrLeaseLost
+		}
+		if err := mergeCrashes(current, crashes, crashGaps, podRead, now, store.retention); err != nil {
+			return err
 		}
 		cutoff := now.Add(-store.retention)
 		pruneWarningCheckpoints(current, now)
@@ -239,6 +260,14 @@ func (store *Store) Commit(changes []Change, gaps []Gap, coverage map[string]Gap
 			}
 		}
 		compactGaps(current)
+		for size := encodedSize(*current); size > maxStoreBytes && len(current.Crashes) > 0; size = encodedSize(*current) {
+			removed := 0
+			for removed < size-maxStoreBytes && len(current.Crashes) > 0 {
+				encoded, _ := json.Marshal(current.Crashes[0])
+				removed += len(encoded) + 1
+				dropCrash(current)
+			}
+		}
 		for len(current.Changes) > maxChanges || encodedSize(*current) > maxStoreBytes {
 			if len(current.Changes) == 0 {
 				return ErrStoreLimit
@@ -541,6 +570,19 @@ func decodeSnapshot(encoded []byte) (snapshot, error) {
 	var current snapshot
 	if err := json.Unmarshal(encoded, &current); err != nil || len(current.Changes) > maxChanges || len(current.Gaps) > 16 || len(current.WarningEvents) > maxChanges || len(current.WarningWindows) > maxChanges {
 		return snapshot{}, ErrStoreLimit
+	}
+	if len(current.Crashes) > maxCrashEvents || len(current.CrashGaps) > 16 {
+		return snapshot{}, ErrStoreLimit
+	}
+	for _, event := range current.Crashes {
+		if !validCrash(event) || event.Sequence == 0 || event.Sequence > current.CrashSequence {
+			return snapshot{}, ErrStoreLimit
+		}
+	}
+	for _, gap := range current.CrashGaps {
+		if gap.From.IsZero() || gap.To.Before(gap.From) {
+			return snapshot{}, ErrStoreLimit
+		}
 	}
 	for _, checkpoints := range []map[string]warningCheckpoint{current.WarningEvents, current.WarningWindows} {
 		for key, checkpoint := range checkpoints {

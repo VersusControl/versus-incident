@@ -8,6 +8,17 @@ afterEach(() => {
 });
 
 describe("Kubernetes resource API", () => {
+  it("scopes crash journal filters and requests only one retained page", async () => {
+    const page = { items: [], next: "next-page", retention_basis: "observed_at" };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(page)));
+    const result = await createKubernetesApi("prod-eu").kubernetesCrashes({ namespace: "shop", root_uid: "root/one", since: "2026-10-16T10:00:00Z", until: "2026-10-16T11:00:00Z", limit: 100, cursor: "opaque+cursor" });
+    const url = new URL(String(fetchMock.mock.calls[0][0]), "http://localhost");
+    expect(url.pathname).toBe("/api/admin/kubernetes/crashes");
+    expect(Object.fromEntries(url.searchParams)).toEqual({ cluster: "prod-eu", namespace: "shop", root_uid: "root/one", since: "2026-10-16T10:00:00Z", until: "2026-10-16T11:00:00Z", limit: "100", cursor: "opaque+cursor" });
+    expect(result).toEqual(page);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("scopes enriched broken roots and namespace-bound expansion", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(new Response("{}")));
     const client = createKubernetesApi("prod-eu");
@@ -32,14 +43,14 @@ describe("Kubernetes resource API", () => {
     });
     const scoped = createKubernetesApi("prod-eu");
     await Promise.all([
-      scoped.kubernetesOverview(), scoped.kubernetesOverviewGraph(), scoped.kubernetesIssues(), scoped.kubernetesChanges(), scoped.kubernetesGraph(),
+      scoped.kubernetesOverview(), scoped.kubernetesOverviewGraph(), scoped.kubernetesIssues(), scoped.kubernetesChanges(), scoped.kubernetesCrashes(), scoped.kubernetesGraph(),
       scoped.kubernetesNeighborhood({ kind: "Pod", name: "api" }), scoped.kubernetesTraffic(), scoped.kubernetesTop({ kind: "pod" }),
       scoped.kubernetesNodes(), scoped.kubernetesNamespaces(), scoped.kubernetesNodePods("node-a"), scoped.kubernetesUsage(), scoped.kubernetesWorkloads(),
       scoped.kubernetesWorkload("Pod", "shop", "api"), scoped.kubernetesWorkloadLogs("Pod", "shop", "api"), scoped.kubernetesPodLogs("shop", "api"),
       scoped.kubernetesDiagnose("core~v1~pods", "shop", "api"), scoped.kubernetesReleases(), scoped.kubernetesRelease("shop", "api"), scoped.kubernetesGitOpsApps(),
       scoped.kubernetesRollout("shop", "api"), scoped.kubernetesRollouts(), scoped.kubernetesSearch("shop", "api"), scoped.kubernetesEvents(), scoped.kubernetesDescribe("core~v1~pods", "shop", "api"),
     ]);
-    expect(fetchMock).toHaveBeenCalledTimes(26);
+    expect(fetchMock).toHaveBeenCalledTimes(27);
     for (const [input] of fetchMock.mock.calls) expect(new URL(String(input), "http://localhost").searchParams.get("cluster")).toBe("prod-eu");
   });
 

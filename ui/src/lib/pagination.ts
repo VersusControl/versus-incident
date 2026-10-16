@@ -104,7 +104,7 @@ export function useCursorPagination(resetKey: string): CursorPaginationState {
     nextPage: (next) => {
       if (!next) return;
       setState((value) => value.resetKey === resetKey
-        ? { ...value, cursors: [...value.cursors.slice(0, value.page), next], page: value.page + 1 }
+        ? { ...value, cursors: [...value.cursors.slice(0, value.page - 1), next], page: value.page + 1 }
         : value);
     },
   };

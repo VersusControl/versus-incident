@@ -14,6 +14,7 @@ import (
 	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubegraph "github.com/VersusControl/versus-incident/pkg/kubernetes/graph"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
@@ -100,6 +101,43 @@ func TestListK8sIssuesBrokenView(t *testing.T) {
 		encoded, _ := json.Marshal(result.Data)
 		if len(encoded) > 6<<10 || strings.Contains(string(encoded), `"source"`) || strings.Contains(string(encoded), "CANARY") || !strings.Contains(string(encoded), `"image_changed"`) || !strings.Contains(string(encoded), `"history"`) {
 			t.Fatalf("bounded broken view: %s", encoded)
+		}
+		return
+	}
+	t.Fatal("issue tool missing")
+}
+
+func TestListK8sIssuesCrashEvidence(t *testing.T) {
+	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "crash-evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(fixture)
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service.SetChangeStorage(storage.NewMemory())
+	ctx := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
+	for _, tool := range New(service) {
+		if tool.Name() != "list_k8s_issues" {
+			continue
+		}
+		if !strings.Contains(tool.Description(), "lifetime") || !strings.Contains(tool.Description(), "exit_hint") || !strings.Contains(tool.Description(), "pod.unschedulable") {
+			t.Fatal("tool semantics missing")
+		}
+		for namespace, reason := range map[string]string{"config": "CreateContainerConfigError", "sched": "Unschedulable", "evict": "Evicted", "batch": "BackoffLimitExceeded", "probe": "Unhealthy", "nodes": "MemoryPressure"} {
+			args, _ := json.Marshal(map[string]any{"broken": true, "namespace": namespace})
+			result, err := tool.Invoke(ctx, args)
+			if err != nil || result == nil || !result.Found {
+				t.Fatalf("%s tool result: %+v %v", namespace, result, err)
+			}
+			encoded, err := json.Marshal(result.Data)
+			if err != nil || len(encoded) > 6<<10 || strings.Contains(string(encoded), "CANARY_") || !strings.Contains(string(encoded), reason) {
+				t.Fatalf("%s evidence lost: %s %v", namespace, encoded, err)
+			}
 		}
 		return
 	}
@@ -241,6 +279,57 @@ func TestSpecMatchesKubernetesCatalogAndToolsetOrder(t *testing.T) {
 		}
 	}
 	t.Fatal("Kubernetes toolset is missing")
+}
+
+func TestCrashEvidenceModelBudgetsKeepRoot(t *testing.T) {
+	now := time.Now().UTC()
+	evidence := &kubebreaks.Evidence{Warnings: 16, Restarts: 2147483647, From: now, To: now}
+	for range 16 {
+		evidence.Terminations = append(evidence.Terminations, kubebreaks.Termination{Reason: strings.Repeat("A", 64), ExitCode: 137, ExitHint: "SIGKILL", Restarts: 2147483647, Count: 50000, Last: now})
+		evidence.Waiting = append(evidence.Waiting, kubebreaks.WaitingCount{Reason: strings.Repeat("B", 64), Count: 50000})
+		evidence.PodReasons = append(evidence.PodReasons, kubebreaks.ReasonCount{Reason: strings.Repeat("C", 64), Count: 50000})
+		evidence.Nodes = append(evidence.Nodes, kubebreaks.ReasonCount{Reason: "MemoryPressure", Count: 50000})
+		evidence.WarningReasons = append(evidence.WarningReasons, kubebreaks.ReasonCount{Reason: "Unhealthy", Count: 1})
+	}
+	issue := kubernetes.Issue{Root: kubernetes.ObjectRef{Kind: "Deployment", Namespace: "shop", Name: "api", UID: "root"}, Rule: "pod.crash_loop", Broken: true, Evidence: evidence}
+	views := map[string]map[string]any{
+		"issues":   compactIssues(kubernetes.IssuePage{Items: []kubernetes.Issue{issue}}, kubernetes.Scope{ClusterID: "cluster"}, ""),
+		"diagnose": compactDiagnosis(kubernetes.Diagnosis{Break: &issue}, kubernetes.Scope{ClusterID: "cluster"}),
+	}
+	for name, view := range views {
+		encoded, err := json.Marshal(view)
+		if err != nil || len(encoded) > 6<<10 || !strings.Contains(string(encoded), `"uid":"root"`) || !strings.Contains(string(encoded), `"partial":true`) {
+			t.Fatalf("%s root dropped or oversized: %d %s %v", name, len(encoded), encoded, err)
+		}
+		var decoded struct {
+			Items []struct {
+				Evidence kubebreaks.Evidence `json:"evidence"`
+			} `json:"items"`
+			Break struct {
+				Evidence kubebreaks.Evidence `json:"evidence"`
+			} `json:"break"`
+		}
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		trimmed := decoded.Break.Evidence
+		if name == "issues" {
+			if len(decoded.Items) != 1 {
+				t.Fatal("lost issue")
+			}
+			trimmed = decoded.Items[0].Evidence
+		}
+		total := 0
+		for _, bucket := range trimmed.WarningReasons {
+			total += bucket.Count
+		}
+		if total != trimmed.Warnings || trimmed.Restarts != evidence.Restarts {
+			t.Fatal("model trim changed totals")
+		}
+	}
+	if evidence.Partial || len(evidence.WarningReasons) != 16 || len(evidence.Nodes) != 16 || len(evidence.Terminations) != 16 {
+		t.Fatal("model trim mutated shared issue")
+	}
 }
 
 func TestKubernetesModelViewsStayWithinBudget(t *testing.T) {

@@ -15,6 +15,340 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
+func crashFixture(position int, at time.Time) CrashEvent {
+	event := CrashEvent{Cluster: "cluster", Namespace: "shop", Pod: "api", PodUID: "pod-" + strconv.Itoa(position), RootUID: "root", RootKind: "Deployment", RootName: "api", Container: "app", Type: "termination", Reason: "Error", ExitCode: 1, At: at, ObservedAt: at, TimeSource: "finished_at"}
+	event.ID = CrashID(event)
+	return event
+}
+
+func TestCrashJournalPagingDedupAndIsolation(t *testing.T) {
+	provider := storage.NewMemory()
+	scope := index.Scope{OrgID: "org", ClusterID: "cluster", CredentialID: "principal"}
+	store := NewStore(provider, scope)
+	now := time.Now().UTC()
+	var events []CrashEvent
+	for position := range 50 {
+		events = append(events, crashFixture(position, now.Add(-time.Minute)))
+	}
+	coverage := map[string]Gap{"Pod": {From: now.Add(-time.Hour), To: now}}
+	if err := store.CommitCapture(nil, nil, coverage, "", now, events, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	store = NewStore(provider, scope)
+	query := CrashQuery{RootUID: "root", Namespace: "shop", Limit: 7}
+	first, err := store.QueryCrashes(query, now)
+	if err != nil || len(first.Items) != 7 || first.Next == "" {
+		t.Fatalf("first page: %+v %v", first, err)
+	}
+	added := crashFixture(99, now.Add(-30*time.Second))
+	if err := store.CommitCapture(nil, nil, nil, "", now, append(events, added), nil, true); err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	page := first
+	for {
+		encoded, _ := json.Marshal(page)
+		if len(encoded) > maxCrashPageBytes || page.Items == nil || page.Gaps == nil || page.CaptureGaps == nil {
+			t.Fatal("unbounded or null page")
+		}
+		for _, event := range page.Items {
+			if ids[event.ID] || event.ID == added.ID {
+				t.Fatalf("duplicate or post-snapshot row: %+v", event)
+			}
+			ids[event.ID] = true
+		}
+		if page.Next == "" {
+			break
+		}
+		query.Cursor = page.Next
+		page, err = store.QueryCrashes(query, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(ids) != 50 {
+		t.Fatalf("retained %d rows", len(ids))
+	}
+	for _, changed := range []index.Scope{{OrgID: "other", ClusterID: "cluster", CredentialID: "principal"}, {OrgID: "org", ClusterID: "other", CredentialID: "principal"}, {OrgID: "org", ClusterID: "cluster", CredentialID: "other"}} {
+		other := NewStore(provider, changed)
+		if _, err := other.QueryCrashes(CrashQuery{Namespace: "shop", RootUID: "root", Cursor: first.Next}, now); !errors.Is(err, ErrInvalidQuery) {
+			t.Fatal("cross-scope cursor accepted")
+		}
+		page, err := other.QueryCrashes(CrashQuery{}, now)
+		if err != nil || len(page.Items) != 0 {
+			t.Fatal("cross-scope history exposed")
+		}
+	}
+	for _, query := range []CrashQuery{{RootUID: "wrong"}, {Namespace: "wrong"}} {
+		page, err := store.QueryCrashes(query, now)
+		if err != nil || len(page.Items) != 0 {
+			t.Fatal("filter bypass")
+		}
+	}
+	for _, query := range []CrashQuery{{RootUID: "wrong", Namespace: "shop", Cursor: first.Next}, {Cursor: "garbage"}, {Limit: 101}, {Since: now, Until: now.Add(-time.Hour)}, {Since: now.Add(-25 * time.Hour), Until: now}} {
+		if _, err := store.QueryCrashes(query, now); !errors.Is(err, ErrInvalidQuery) {
+			t.Fatalf("invalid query accepted: %+v %v", query, err)
+		}
+	}
+}
+
+func TestCrashJournalFutureUntilClampsAndPinsCursor(t *testing.T) {
+	now := time.Now().UTC()
+	store := NewStore(storage.NewMemory(), index.Scope{ClusterID: "cluster"})
+	if err := store.CommitCapture(nil, nil, nil, "", now, []CrashEvent{crashFixture(1, now.Add(-time.Minute)), crashFixture(2, now.Add(-2*time.Minute))}, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	future := now.Add(5 * time.Minute)
+	first, err := store.QueryCrashes(CrashQuery{Until: future, Limit: 1}, now)
+	if err != nil || !first.Until.Equal(now) || !first.Since.Equal(now.Add(-store.retention)) || len(first.Items) != 1 || first.Next == "" {
+		t.Fatalf("future until not clamped: %+v %v", first, err)
+	}
+	if err := store.CommitCapture(nil, nil, nil, "", now, []CrashEvent{crashFixture(3, now.Add(-30*time.Second))}, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, until := range []time.Time{{}, future, first.Until} {
+		page, err := store.QueryCrashes(CrashQuery{Until: until, Cursor: first.Next, Limit: 1}, now.Add(time.Minute))
+		if err != nil || !page.Until.Equal(first.Until) || !page.Since.Equal(first.Since) || len(page.Items) != 1 || page.Items[0].PodUID != "pod-2" || page.Next != "" {
+			t.Fatalf("cursor bounds/snapshot changed: %+v %v", page, err)
+		}
+	}
+	page, err := store.QueryCrashes(CrashQuery{Since: future.Add(-store.retention), Until: future}, now)
+	if err != nil || !page.Until.Equal(now) || !page.Since.Equal(future.Add(-store.retention)) {
+		t.Fatalf("explicit browser window rejected: %+v %v", page, err)
+	}
+	for _, query := range []CrashQuery{{Since: now.Add(time.Second), Until: future}, {Since: now.Add(-store.retention - time.Second), Until: future}, {Until: future.Add(time.Second), Cursor: first.Next}} {
+		if _, err := store.QueryCrashes(query, now); !errors.Is(err, ErrInvalidQuery) {
+			t.Fatalf("invalid clamped window accepted: %+v %v", query, err)
+		}
+	}
+}
+
+func TestCrashJournalObservationWindowAndCursorPreserveEventTime(t *testing.T) {
+	now := time.Now().UTC()
+	store := NewStore(storage.NewMemory(), index.Scope{ClusterID: "cluster"})
+	var events []CrashEvent
+	for position := range 3 {
+		event := crashFixture(position, now.Add(-48*time.Hour-time.Duration(position)*time.Minute))
+		event.ObservedAt = now.Add(time.Duration(position-2) * time.Minute)
+		events = append(events, event)
+	}
+	if err := store.CommitCapture(nil, nil, nil, "", now, events, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	query := CrashQuery{Since: now.Add(-time.Minute), Until: now, Namespace: "shop", RootUID: "root", Limit: 1}
+	first, err := store.QueryCrashes(query, now)
+	if err != nil || len(first.Items) != 1 || first.Items[0].ID != events[2].ID || !first.Items[0].At.Equal(events[2].At) || first.Items[0].TimeSource != "finished_at" || !first.Items[0].ObservedAt.Equal(now) || first.RetentionBasis != "observed_at" || first.Next == "" {
+		t.Fatalf("retained old termination hidden or event time changed: %+v %v", first, err)
+	}
+	added := crashFixture(99, now.Add(-48*time.Hour))
+	added.ObservedAt = now.Add(-30 * time.Second)
+	if err := store.CommitCapture(nil, nil, nil, "", now, []CrashEvent{added}, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	query.Cursor = first.Next
+	second, err := store.QueryCrashes(query, now.Add(time.Minute))
+	if err != nil || len(second.Items) != 1 || second.Items[0].ID != events[1].ID || !second.Items[0].At.Equal(events[1].At) || second.Next != "" || !second.Since.Equal(first.Since) || !second.Until.Equal(first.Until) {
+		t.Fatalf("observation cursor lost bounds or admitted post-snapshot row: %+v %v", second, err)
+	}
+	for _, changed := range []CrashQuery{
+		{Since: query.Since.Add(-time.Second), Until: query.Until, Namespace: query.Namespace, RootUID: query.RootUID, Cursor: query.Cursor},
+		{Since: query.Since, Until: query.Until.Add(time.Second), Namespace: query.Namespace, RootUID: query.RootUID, Cursor: query.Cursor},
+	} {
+		if _, err := store.QueryCrashes(changed, now.Add(time.Minute)); !errors.Is(err, ErrInvalidQuery) {
+			t.Fatalf("changed observation cursor bounds accepted: %+v %v", changed, err)
+		}
+	}
+	page, err := store.QueryCrashes(CrashQuery{Since: now.Add(-2 * time.Minute), Until: now.Add(-time.Minute - time.Nanosecond)}, now)
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != events[0].ID {
+		t.Fatalf("observation since/until filtering failed: %+v %v", page, err)
+	}
+	page, err = store.QueryCrashes(CrashQuery{}, now.Add(25*time.Hour))
+	if err != nil || len(page.Items) != 0 {
+		t.Fatalf("expired observation returned: %+v %v", page, err)
+	}
+	if err := store.CommitCapture(nil, nil, nil, "", now.Add(25*time.Hour), nil, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.read()
+	if err != nil || len(current.Crashes) != 0 {
+		t.Fatalf("expired observations retained after commit: %+v %v", current, err)
+	}
+}
+
+func TestCrashJournalArchivePaginationAndUnknownTerminationIdentity(t *testing.T) {
+	provider := storage.NewMemory()
+	scope := index.Scope{OrgID: "default", ClusterID: "cluster"}
+	archive := NewStore(provider, scope)
+	now := time.Now().UTC()
+	first, second := crashFixture(0, now.Add(-time.Minute)), crashFixture(1, now.Add(-2*time.Minute))
+	if err := archive.CommitCapture(nil, nil, nil, "", now, []CrashEvent{first, second}, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	scope.OrgID = "licensed"
+	view, err := NewView(provider, scope, []string{"default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := view.QueryCrashes(CrashQuery{Limit: 1}, now)
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != first.ID || page.Next == "" {
+		t.Fatalf("archive first: %+v %v", page, err)
+	}
+	if err := view.CommitCapture(nil, nil, nil, "", now, []CrashEvent{second}, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	page, err = view.QueryCrashes(CrashQuery{Limit: 1, Cursor: page.Next}, now)
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != second.ID || page.Next != "" {
+		t.Fatalf("new primary shadowed snapshot archive: %+v %v", page, err)
+	}
+	unknown := crashFixture(99, now)
+	unknown.TimeSource, unknown.TerminationSlot = "observed_at", "current"
+	currentID := CrashID(unknown)
+	unknown.TerminationSlot = "previous"
+	if CrashID(unknown) == currentID {
+		t.Fatal("unknown current/previous termination conflated")
+	}
+	unknown.TimeSource = "finished_at"
+	previousID := CrashID(unknown)
+	unknown.TerminationSlot = "current"
+	unknown.RestartCount = 9
+	if CrashID(unknown) != previousID {
+		t.Fatal("known termination duplicated by slot or lifetime counter")
+	}
+}
+
+func TestCrashJournalAtomicFencingAndRetention(t *testing.T) {
+	provider := storage.NewMemory()
+	scope := index.Scope{ClusterID: "cluster"}
+	first, second := NewStore(provider, scope), NewStore(provider, scope)
+	now := time.Now().UTC()
+	if err := first.ClaimLease("leader", now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	event := crashFixture(0, now)
+	coverage := map[string]Gap{"Pod": {From: now, To: now}}
+	if err := second.CommitCapture(nil, nil, coverage, "stale", now, []CrashEvent{event}, nil, true); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("stale write: %v", err)
+	}
+	page, err := second.QueryCrashes(CrashQuery{}, now)
+	if err != nil || len(page.Items) != 0 || len(page.Coverage) != 0 || !page.StartedAt.IsZero() {
+		t.Fatalf("non-atomic stale commit: %+v %v", page, err)
+	}
+	var workers sync.WaitGroup
+	errorsFound := make(chan error, 2)
+	for _, writer := range []*Store{first, second} {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			errorsFound <- writer.CommitCapture(nil, nil, coverage, "leader", now, []CrashEvent{event}, nil, true)
+		}()
+	}
+	workers.Wait()
+	for range 2 {
+		if err := <-errorsFound; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := first.ReleaseLease("leader"); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.ClaimLease("successor", now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.CommitCapture(nil, nil, coverage, "successor", now, []CrashEvent{event}, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	page, err = second.QueryCrashes(CrashQuery{}, now)
+	if err != nil || len(page.Items) != 1 || page.Items[0].Sequence != 1 {
+		t.Fatalf("HA duplicate: %+v %v", page, err)
+	}
+	page, err = second.QueryCrashes(CrashQuery{}, now.Add(25*time.Hour))
+	if err != nil || len(page.Items) != 0 {
+		t.Fatal("expired observations returned")
+	}
+}
+
+func TestCrashJournalPageByteBudget(t *testing.T) {
+	store := NewStore(storage.NewMemory(), index.Scope{ClusterID: "cluster"})
+	now := time.Now().UTC()
+	var events []CrashEvent
+	for position := range 100 {
+		event := crashFixture(position, now)
+		event.RootName = strings.Repeat("r", 253)
+		event.RootUID = strings.Repeat("u", 256)
+		event.Pod = strings.Repeat("p", 253)
+		event.Container = strings.Repeat("c", 63)
+		event.ID = CrashID(event)
+		events = append(events, event)
+	}
+	if err := store.CommitCapture(nil, nil, nil, "", now, events, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	query := CrashQuery{Limit: 100}
+	seen := map[string]bool{}
+	for {
+		page, err := store.QueryCrashes(query, now)
+		encoded, _ := json.Marshal(page)
+		if err != nil || len(encoded) > maxCrashPageBytes || len(page.Items) == 0 || len(page.Items) >= 100 {
+			t.Fatalf("byte page rows=%d bytes=%d err=%v", len(page.Items), len(encoded), err)
+		}
+		for _, event := range page.Items {
+			if seen[event.ID] {
+				t.Fatal("byte paging duplicated row")
+			}
+			seen[event.ID] = true
+		}
+		if page.Next == "" {
+			break
+		}
+		query.Cursor = page.Next
+	}
+	if len(seen) != 100 {
+		t.Fatal("byte paging lost rows")
+	}
+}
+
+func TestCrashJournalBoundsAndSafeFields(t *testing.T) {
+	store := NewStore(storage.NewMemory(), index.Scope{ClusterID: "cluster"})
+	now := time.Now().UTC()
+	var history []Change
+	for position := range 2500 {
+		history = append(history, Change{ID: "change-" + strconv.Itoa(position), Cluster: "cluster", Kind: "Deployment", Name: "api", Type: ImageChanged, At: now, Fields: []FieldChange{{Path: "image", To: strings.Repeat("i", 1024)}}})
+	}
+	if err := store.Append(history, now); err != nil {
+		t.Fatal(err)
+	}
+	var events []CrashEvent
+	for position := range maxCrashEvents + 1 {
+		event := crashFixture(position, now.Add(-48*time.Hour))
+		event.ObservedAt = now
+		events = append(events, event)
+	}
+	if err := store.CommitCapture(nil, nil, nil, "", now, events, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.read()
+	if err != nil || len(current.Crashes) == 0 || len(current.Crashes) >= len(events) || len(current.CrashGaps) == 0 || encodedSize(current) > maxStoreBytes || len(current.Changes) != len(history) {
+		t.Fatalf("missing bounds/disclosure: retained=%d gaps=%+v %v", len(current.Crashes), current.CrashGaps, err)
+	}
+	page, err := store.QueryCrashes(CrashQuery{Since: now.Add(-time.Minute), Until: now}, now)
+	if err != nil || len(page.Items) == 0 || len(page.Gaps) == 0 {
+		t.Fatalf("observation-window overflow falsely complete: %+v %v", page, err)
+	}
+	for _, gap := range page.Gaps {
+		if !gap.From.Equal(now) || !gap.To.Equal(now) {
+			t.Fatalf("overflow gap used event time instead of observation: %+v", gap)
+		}
+	}
+	for _, mutate := range []func(*CrashEvent){func(event *CrashEvent) { event.Reason = "CANARY raw message" }, func(event *CrashEvent) { event.Signal = 65 }, func(event *CrashEvent) { event.RestartCount = -1 }, func(event *CrashEvent) { event.At = now.Add(time.Second) }} {
+		event := crashFixture(99, now)
+		mutate(&event)
+		event.ID = CrashID(event)
+		if err := store.CommitCapture(nil, nil, nil, "", now, []CrashEvent{event}, nil, true); !errors.Is(err, ErrInvalidQuery) {
+			t.Fatal("unsafe crash accepted")
+		}
+	}
+}
+
 func TestUpgradeTimelineVisible(t *testing.T) {
 	provider := storage.NewMemory()
 	now := time.Now().UTC()

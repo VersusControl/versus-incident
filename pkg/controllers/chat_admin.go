@@ -442,11 +442,11 @@ func (controller *ChatAdminController) message(c *fiber.Ctx) error {
 		auditor(middleware.ChatAuditEvent{Action: chatAuditMessageSent, Target: target, Result: middleware.ChatAuditDenied})
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
 	}
-	if err := hydrateIncidentAttachment(c, request.Attachment); err != nil {
+	if err := hydrateIncidentAttachment(c, request.Attachment); err != nil || c.Response().StatusCode() >= fiber.StatusBadRequest {
 		auditor(middleware.ChatAuditEvent{Action: chatAuditMessageSent, Target: target, Result: middleware.ChatAuditDenied})
 		return err
 	}
-	if err := validateChatKubernetesAttachment(c, request.Attachment); err != nil {
+	if err := validateChatKubernetesAttachment(c, request.Attachment); err != nil || c.Response().StatusCode() >= fiber.StatusBadRequest {
 		auditor(middleware.ChatAuditEvent{Action: chatAuditMessageSent, Target: target, Result: middleware.ChatAuditDenied})
 		return err
 	}

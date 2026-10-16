@@ -1,4 +1,4 @@
-import { useKubernetesCluster, useKubernetesQuery as useQuery } from "@/lib/useKubernetesCluster";
+import { useKubernetesCluster, useKubernetesCrashes, useKubernetesQuery as useQuery } from "@/lib/useKubernetesCluster";
 import { Activity, AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Boxes, Cpu, Eye, EyeOff, GitBranch, History, Layers3, Maximize2, Minus, Network, Plus, RotateCcw, Waypoints, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
@@ -21,7 +21,7 @@ import {
 import { CursorPagination } from "@/components/Pagination";
 import { useCursorPagination } from "@/lib/pagination";
 import { type KubernetesExplorerTab } from "./kubernetesExplorerTabs";
-import { BreakRow, BreakTimelineLane, ResourceTimelineChart, TimelineCard } from "./KubernetesBreakTimeline";
+import { BreakRow, BreakTimelineLane, CrashJournal, ResourceTimelineChart, TimelineCard } from "./KubernetesBreakTimeline";
 import { KubernetesWarnings } from "./KubernetesWarnings";
 import { failureWarnings, issueWarnings } from "./kubernetesWarningItems";
 
@@ -851,8 +851,10 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
   const [namespace, setNamespace] = useState(focus.get("namespace") ?? "");
   const [kind, setKind] = useState(focus.get("kind") ?? "");
   const [windowEnd] = useState(() => centered ? centerTime : Date.now());
+  const [journalCeiling] = useState(Date.now);
   const since = new Date(windowEnd - minutes * 60_000 * (centered ? 0.5 : 1)).toISOString();
   const until = new Date(windowEnd + (centered ? minutes * 30_000 : 0)).toISOString();
+  const crashes = useKubernetesCrashes({ root_uid: rootUID, namespace: namespace || undefined, since, until: new Date(Math.min(journalCeiling, Date.parse(until))).toISOString() });
   const breaks = useQuery({ queryKey: ["kubernetes-issues", "timeline-root", rootUID, namespace], queryFn: () => api.kubernetesIssues({ root_uid: rootUID, include: "changes", namespace: namespace || undefined }), retry: false });
   const issue = !breaks.isError ? breaks.data?.items.find((item) => item.root.uid === rootUID && (!namespace || item.root.namespace === namespace)) : undefined;
   const rootNamespace = issue?.root.namespace;
@@ -986,9 +988,11 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
     {breaks.isSuccess && !issue && <p role="status" className="p-4 text-sm text-ink-400">Root not found in this namespace.</p>}
     {changes.isError && <p role="status" className="p-4 text-sm text-sev-warning">Related change history is unavailable.<button type="button" className="ml-2 text-link" onClick={() => void changes.refetch()}>Retry</button></p>}
     {data && issue && <>
-      <BreakTimelineLane scope={JSON.stringify([cluster, rootUID, minutes, namespace, kind, paging.cursor])} warningsOwned issue={{ ...issue, changes: [] }} changes={data.items} since={since} until={until} onSelectChange={(change) => { const resource_id = resourceIdForKind(change.kind); if (resource_id) onSelectResource({ resource_id, kind: change.kind, namespace: change.namespace, name: change.name, uid: change.uid }, "timeline"); }} />
+      <BreakTimelineLane scope={JSON.stringify([cluster, rootUID, minutes, namespace, kind, paging.cursor, crashes.paging.cursor])} warningsOwned issue={{ ...issue, changes: [] }} crashes={crashes.isError ? [] : crashes.data?.items ?? []} changes={data.items} since={since} until={until} onSelectChange={(change) => { const resource_id = resourceIdForKind(change.kind); if (resource_id) onSelectResource({ resource_id, kind: change.kind, namespace: change.namespace, name: change.name, uid: change.uid }, "timeline"); }} />
       <CursorPagination state={paging} next={data.next} />
     </>}
+    {(!data || !issue) && crashes.data && !crashes.isError && <ResourceTimelineChart crashes={crashes.data.items} changes={[]} since={since} until={until} onSelectChange={() => undefined} />}
+    <CrashJournal journal={crashes} />
     <div className="px-2"><KubernetesWarnings warnings={breaks.isError ? [] : warnings} scope={JSON.stringify([cluster, rootUID, namespace, kind, since, until, paging.cursor, breaks.isError, graph.isError, changes.isError])} /></div>
   </section>;
 }
@@ -1004,8 +1008,10 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
   const [kind, setKind] = useState(focus.get("kind") ?? "");
   const centered = Number.isFinite(centerTime);
   const [windowEnd, setWindowEnd] = useState(() => centered ? centerTime : Date.now());
+  const [journalCeiling] = useState(Date.now);
   const since = new Date(windowEnd - minutes * 60_000 * (centered ? 0.5 : 1)).toISOString();
   const until = new Date(windowEnd + (centered ? minutes * 30_000 : 0)).toISOString();
+  const crashes = useKubernetesCrashes({ namespace: namespace || undefined, since, until: centered ? new Date(Math.min(journalCeiling, Date.parse(until))).toISOString() : until });
   const paging = useCursorPagination(`timeline:${since}:${namespace}:${kind}`);
   const changes = useQuery({
     queryKey: ["kubernetes-changes", since, namespace, kind, paging.cursor],
@@ -1018,10 +1024,10 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
   const changesDenied = changes.error instanceof ApiError && [401, 403, 404].includes(changes.error.status);
   const brokenRoots = denied ? [] : (breaks.data?.items ?? []).filter((issue) => issue.broken || rootUID);
   useEffect(() => {
-    if (centered) return;
+    if (centered || crashes.paging.page > 1) return;
     const timer = window.setInterval(() => setWindowEnd(Date.now()), 30_000);
     return () => window.clearInterval(timer);
-  }, [centered]);
+  }, [centered, crashes.paging.page]);
   const availableChanges = changesDenied ? undefined : changes.data;
   const warnings: Array<{ id: string; content: ReactNode }> = [...brokenRoots.flatMap((issue) => issueWarnings(issue)), ...failureWarnings(denied ? undefined : breaks.data?.partial_failures), ...failureWarnings(availableChanges?.partial_failures)];
   if (!denied && (breaks.data?.sync.partial || breaks.data?.next || breaks.data?.truncated)) warnings.push({ id: "break-partial", content: "Break markers are bounded or partially synchronized." });
@@ -1045,10 +1051,12 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
     {changes.isError && <p role="status" className="p-4 text-sm text-sev-warning">Change history is unavailable.</p>}
     {breaks.isError && <p role="status" className="p-4 text-sm text-sev-warning">Break markers unavailable.</p>}
     {availableChanges && <>
-      <ResourceTimelineChart scope={JSON.stringify([cluster, rootUID, center, minutes, namespace, kind, paging.cursor])} issues={brokenRoots} changes={[...availableChanges.items, ...brokenRoots.flatMap((issue) => issue.changes?.map((item) => item.change) ?? [])].filter((change) => (!cluster || change.cluster === cluster) && (!namespace || change.namespace === namespace) && (!kind || change.kind === kind))} since={since} until={until} now={centered ? undefined : windowEnd} onSelectChange={openChange} />
+      <ResourceTimelineChart scope={JSON.stringify([cluster, rootUID, center, minutes, namespace, kind, paging.cursor, crashes.paging.cursor])} crashes={crashes.isError ? [] : crashes.data?.items ?? []} issues={brokenRoots} changes={[...availableChanges.items, ...brokenRoots.flatMap((issue) => issue.changes?.map((item) => item.change) ?? [])].filter((change) => (!cluster || change.cluster === cluster) && (!namespace || change.namespace === namespace) && (!kind || change.kind === kind))} since={since} until={until} now={centered ? undefined : windowEnd} onSelectChange={openChange} />
       {availableChanges.items.length === 0 && <p role="status" className="px-4 py-2 text-xs text-ink-400">No projected changes were recorded in this window.</p>}
       <CursorPagination state={paging} next={availableChanges.next}/>
     </>}
+    {!availableChanges && crashes.data && !crashes.isError && <ResourceTimelineChart crashes={crashes.data.items} changes={[]} since={since} until={until} onSelectChange={openChange} />}
+    <CrashJournal journal={crashes} />
     <div className="px-2"><KubernetesWarnings warnings={warnings} scope={JSON.stringify([cluster, namespace, kind, since, until, paging.cursor, denied, changesDenied])} /></div>
   </section>;
 }

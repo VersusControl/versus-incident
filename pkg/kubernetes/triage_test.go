@@ -230,9 +230,11 @@ func TestIssuesEvidencePartialIsRootLocalAndTotalsRemainKnown(t *testing.T) {
 	root := kubeindex.Record{UID: "wide-root", Name: "wide-root", Kind: "Deployment", Namespace: "shop", Replicas: 1, Available: 1, Summary: map[string]string{"available_replicas": "1"}}
 	otherRoot := root
 	otherRoot.UID, otherRoot.Name, otherRoot.Namespace = "other-root", "other-root", "payments"
+	otherRoot.Available, otherRoot.Summary = 0, map[string]string{"available_replicas": "0"}
 	otherPod := kubeindex.Record{UID: "other-pod", Name: "other-pod", Kind: "Pod", Namespace: "payments", Phase: "Failed", Owners: []kubeindex.OwnerRef{{UID: "other-root", Name: "other-root", Kind: "Deployment", Namespace: "payments"}}}
 	thirdRoot := root
 	thirdRoot.UID, thirdRoot.Name = "third-root", "third-root"
+	thirdRoot.Available, thirdRoot.Summary = 0, map[string]string{"available_replicas": "0"}
 	thirdPod := otherPod
 	thirdPod.UID, thirdPod.Name, thirdPod.Namespace = "third-pod", "third-pod", "shop"
 	thirdPod.Owners = []kubeindex.OwnerRef{{UID: "third-root", Name: "third-root", Kind: "Deployment", Namespace: "shop"}}
@@ -255,9 +257,10 @@ func TestIssuesEvidencePartialIsRootLocalAndTotalsRemainKnown(t *testing.T) {
 	for _, namespace := range []string{"", "shop", "payments"} {
 		page, err := service.Issues(t.Context(), IssueOptions{Broken: true, Namespace: namespace, Limit: 1})
 		want := 3
-		if namespace == "shop" {
+		switch namespace {
+		case "shop":
 			want = 2
-		} else if namespace == "payments" {
+		case "payments":
 			want = 1
 		}
 		if err != nil || page.Sync.Partial || page.Broken.Total != want || len(page.Items) != 1 || page.Items[0].Partial != (page.Items[0].Root.UID == "wide-root") {

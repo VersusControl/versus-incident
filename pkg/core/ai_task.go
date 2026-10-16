@@ -114,19 +114,38 @@ type ChatResourceChangeField struct {
 type ChatResourceTermination struct {
 	Reason   string    `json:"reason"`
 	ExitCode int32     `json:"exit_code"`
+	Signal   string    `json:"signal,omitempty"`
+	ExitHint string    `json:"exit_hint,omitempty"`
 	Count    int       `json:"count"`
+	Restarts int       `json:"restarts,omitempty"`
+	Init     bool      `json:"init,omitempty"`
 	Last     time.Time `json:"last"`
 }
 type ChatResourceWaiting struct {
 	Reason string `json:"reason"`
 	Count  int    `json:"count"`
+	Init   bool   `json:"init,omitempty"`
+}
+type ChatResourceReasonCount struct {
+	Reason string `json:"reason"`
+	Count  int    `json:"count"`
+}
+type ChatResourceConditionReason struct {
+	Type   string `json:"type"`
+	Reason string `json:"reason"`
 }
 type ChatResourceEvidence struct {
-	Terminations []ChatResourceTermination `json:"terminations,omitempty"`
-	Waiting      []ChatResourceWaiting     `json:"waiting,omitempty"`
-	Warnings     int                       `json:"warning_events"`
-	From         time.Time                 `json:"from"`
-	To           time.Time                 `json:"to"`
+	Terminations   []ChatResourceTermination     `json:"terminations,omitempty"`
+	Waiting        []ChatResourceWaiting         `json:"waiting,omitempty"`
+	PodReasons     []ChatResourceReasonCount     `json:"pod_reasons,omitempty"`
+	Nodes          []ChatResourceReasonCount     `json:"nodes,omitempty"`
+	Conditions     []ChatResourceConditionReason `json:"conditions,omitempty"`
+	WarningReasons []ChatResourceReasonCount     `json:"warning_reasons,omitempty"`
+	Warnings       int                           `json:"warning_events"`
+	Restarts       int                           `json:"restarts,omitempty"`
+	Partial        bool                          `json:"partial,omitempty"`
+	From           time.Time                     `json:"from"`
+	To             time.Time                     `json:"to"`
 }
 type ChatResourceBreak struct {
 	BrokeAtSource string                `json:"broke_at_source,omitempty"`

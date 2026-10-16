@@ -12,6 +12,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
 	kubegraph "github.com/VersusControl/versus-incident/pkg/kubernetes/graph"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
@@ -637,10 +638,61 @@ func compactIssues(result kubernetes.IssuePage, scope kubernetes.Scope, cursor s
 			}
 		}
 		if !removedExample {
+			if trimModelBreak(&items[len(items)-1]) {
+				truncated = true
+				continue
+			}
 			items = items[:len(items)-1]
 			truncated = true
 		}
 	}
+}
+
+func trimModelBreak(issue *kubernetes.Issue) bool {
+	if issue.Evidence != nil {
+		evidence := *issue.Evidence
+		trimmed := true
+		switch {
+		case len(evidence.WarningReasons) > 1 || len(evidence.WarningReasons) == 1 && evidence.WarningReasons[0].Reason != "Other":
+			evidence.WarningReasons = evidence.WarningReasons[:0:0]
+			evidence.WarningReasons = append(evidence.WarningReasons, kubebreaks.ReasonCount{Reason: "Other", Count: evidence.Warnings})
+		case len(evidence.Nodes) > 0:
+			evidence.Nodes = nil
+		case len(evidence.PodReasons) > 0:
+			evidence.PodReasons = evidence.PodReasons[:len(evidence.PodReasons)-1]
+		case len(evidence.Waiting) > 0:
+			evidence.Waiting = evidence.Waiting[:len(evidence.Waiting)-1]
+		case len(evidence.Terminations) > 0:
+			evidence.Terminations = evidence.Terminations[:len(evidence.Terminations)-1]
+		case len(evidence.Conditions) > 0:
+			evidence.Conditions = evidence.Conditions[:len(evidence.Conditions)-1]
+		default:
+			trimmed = false
+		}
+		if trimmed {
+			evidence.Partial = true
+			issue.Evidence = &evidence
+			issue.Partial = true
+			return true
+		}
+	}
+	if len(issue.Changes) > 0 {
+		issue.Changes = issue.Changes[:len(issue.Changes)-1]
+		issue.MoreChanges++
+		issue.Partial = true
+		return true
+	}
+	if len(issue.Rebuilt) > 0 {
+		issue.Rebuilt = issue.Rebuilt[:len(issue.Rebuilt)-1]
+		issue.Partial = true
+		return true
+	}
+	if len(issue.Untracked) > 0 {
+		issue.Untracked = issue.Untracked[:len(issue.Untracked)-1]
+		issue.Partial = true
+		return true
+	}
+	return false
 }
 
 func modelBreakChanges(issue kubernetes.Issue) []map[string]any {
@@ -1155,6 +1207,10 @@ func helmReleaseModel(release kubernetes.HelmRelease, scope kubernetes.Scope) ma
 }
 
 func compactDiagnosis(result kubernetes.Diagnosis, scope kubernetes.Scope) map[string]any {
+	if result.Break != nil {
+		item := *result.Break
+		result.Break = &item
+	}
 	logs := []string{}
 	if result.WorstPodLogs != nil {
 		logs = strings.Split(strings.TrimSpace(result.WorstPodLogs.Text), "\n")
@@ -1224,7 +1280,14 @@ func compactDiagnosis(result kubernetes.Diagnosis, scope kubernetes.Scope) map[s
 			data["break"] = modelBreak(*result.Break)
 		}
 		encoded, _ := json.Marshal(data)
-		if len(encoded) <= 6<<10 || len(logs) == 0 && len(events) == 0 && len(pods) == 0 && len(changes) == 0 && len(neighborhoodNodes) == 0 {
+		if len(encoded) <= 6<<10 {
+			return data
+		}
+		if result.Break != nil && trimModelBreak(result.Break) {
+			truncated, syncPartial = true, true
+			continue
+		}
+		if len(logs) == 0 && len(events) == 0 && len(pods) == 0 && len(changes) == 0 && len(neighborhoodNodes) == 0 {
 			return data
 		}
 		if len(logs) > 0 {

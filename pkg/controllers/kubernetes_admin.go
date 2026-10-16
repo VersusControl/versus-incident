@@ -13,6 +13,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+	kuberneteschanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubernetesindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 
@@ -53,6 +54,7 @@ func (controller *KubernetesAdminController) Register(router fiber.Router) {
 	group.Get("/overview", controller.overview)
 	group.Get("/stream", controller.stream)
 	group.Get("/changes", controller.changes)
+	group.Get("/crashes", controller.crashes)
 	group.Get("/graph", controller.graph)
 	group.Get("/graph/overview", controller.overviewGraph)
 	group.Get("/graph/neighborhood", controller.neighborhood)
@@ -148,6 +150,29 @@ func (controller *KubernetesAdminController) changes(ctx *fiber.Ctx) error {
 		Since: since, Until: until, Namespace: ctx.Query("namespace"), Kind: ctx.Query("kind"), Name: ctx.Query("name"),
 		Type: kubernetes.ChangeType(ctx.Query("type")), Limit: queryInt(ctx, "limit"), Cursor: ctx.Query("cursor"),
 	})
+	return writeKubernetes(ctx, value, err)
+}
+
+func (controller *KubernetesAdminController) crashes(ctx *fiber.Ctx) error {
+	since, err := parseKubernetesTime(ctx.Query("since"))
+	if err != nil {
+		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+	}
+	until, err := parseKubernetesTime(ctx.Query("until"))
+	if err != nil {
+		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+	}
+	limit := 0
+	if value := ctx.Query("limit"); value != "" {
+		limit, err = strconv.Atoi(value)
+		if err != nil || limit < 1 || limit > 100 {
+			return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+		}
+	}
+	value, err := requestKubernetesService(ctx).Crashes(ctx.UserContext(), kuberneteschanges.CrashQuery{Since: since, Until: until, Namespace: strings.Clone(ctx.Query("namespace")), RootUID: strings.Clone(ctx.Query("root_uid")), Limit: limit, Cursor: strings.Clone(ctx.Query("cursor"))})
+	if errors.Is(err, kuberneteschanges.ErrInvalidQuery) {
+		err = kubernetes.ErrInvalidArguments
+	}
 	return writeKubernetes(ctx, value, err)
 }
 

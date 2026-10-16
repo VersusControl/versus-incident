@@ -44,12 +44,15 @@ type OwnerRef struct {
 }
 
 type ContainerState struct {
-	Name             string    `json:"name"`
-	WaitingReason    string    `json:"waiting_reason,omitempty"`
-	TerminatedReason string    `json:"last_terminated_reason,omitempty"`
-	ExitCode         int32     `json:"last_terminated_exit_code,omitempty"`
-	TerminatedAt     time.Time `json:"last_terminated_at,omitempty"`
-	RestartCount     int32     `json:"restart_count"`
+	Name               string    `json:"name"`
+	Init               bool      `json:"init,omitempty"`
+	CurrentTermination bool      `json:"current_termination,omitempty"`
+	WaitingReason      string    `json:"waiting_reason,omitempty"`
+	TerminatedReason   string    `json:"last_terminated_reason,omitempty"`
+	ExitCode           int32     `json:"last_terminated_exit_code,omitempty"`
+	Signal             int32     `json:"last_terminated_signal,omitempty"`
+	TerminatedAt       time.Time `json:"last_terminated_at,omitempty"`
+	RestartCount       int32     `json:"restart_count"`
 }
 
 type Record struct {
@@ -485,7 +488,7 @@ func validRecord(record Record) bool {
 		return false
 	}
 	for _, container := range record.Containers {
-		if !validText(container.Name, 63) || !validOptionalText(container.WaitingReason, 64) || !validOptionalText(container.TerminatedReason, 64) || container.RestartCount < 0 {
+		if !validText(container.Name, 63) || !validOptionalText(container.WaitingReason, 64) || !validOptionalText(container.TerminatedReason, 64) || container.RestartCount < 0 || container.Signal < 0 || container.Signal > 64 {
 			return false
 		}
 	}
@@ -542,7 +545,7 @@ func estimatedRecordBytes(record Record) int {
 	size := len(record.APIVersion) + len(record.UID) + len(record.Kind) + len(record.Namespace) + len(record.Name) + len(record.ResourceVersion) + len(record.Phase) + len(record.EventType) + len(record.NodeName) + len(record.Health) + 128
 	size += len(record.UpdateRevision) + len(record.CurrentRevision) + len(record.Revision) + len(record.ProgressingReason) + 128
 	for _, container := range record.Containers {
-		size += len(container.Name) + len(container.WaitingReason) + len(container.TerminatedReason) + 64
+		size += len(container.Name) + len(container.WaitingReason) + len(container.TerminatedReason) + 72
 	}
 	for key, value := range record.Labels {
 		size += len(key) + len(value) + 64

@@ -137,6 +137,9 @@ func SeedScenario(store *Store, name string, seed int64) error {
 	if name == "bad-rollout" || name == "bad-rollout-before" {
 		return seedBadRollout(store, time.Now().UTC().Truncate(time.Second), name == "bad-rollout")
 	}
+	if name == "crash-evidence" {
+		return seedCrashEvidence(store, time.Now().UTC().Truncate(time.Second))
+	}
 	fixtures := map[string][]struct {
 		resource  string
 		namespace string
@@ -232,6 +235,121 @@ func SeedScenario(store *Store, name string, seed int64) error {
 			status["ephemeralContainerStatuses"] = []any{map[string]any{"name": "debug", "restartCount": 0, "state": map[string]any{"running": map[string]any{}}}}
 		}
 		if err := putObject(store, fixture.resource, fixture.namespace, fixture.name, fixture.object); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func seedCrashEvidence(store *Store, now time.Time) error {
+	transition := now.Add(-4 * time.Minute).Format(time.RFC3339)
+	finished := now.Add(-3 * time.Minute).Format(time.RFC3339)
+	condition := func(kind, status, reason string) map[string]any {
+		return map[string]any{"type": kind, "status": status, "reason": reason, "lastTransitionTime": transition, "message": "CANARY_CONDITION"}
+	}
+	for _, namespace := range []string{"config", "sched", "evict", "batch", "probe", "nodes"} {
+		if err := putObject(store, "namespaces", "", namespace, map[string]any{"kind": "Namespace"}); err != nil {
+			return err
+		}
+	}
+	if err := putObject(store, "secrets", "config", "missing-key", map[string]any{"kind": "Secret", "type": "Opaque", "data": map[string]string{"present": "c3ludGhldGlj"}}); err != nil {
+		return err
+	}
+	if err := putObject(store, "nodes", "", "pressure-node", map[string]any{"kind": "Node", "status": map[string]any{"conditions": []any{condition("Ready", "True", "KubeletReady"), condition("MemoryPressure", "True", "KubeletHasInsufficientMemory")}}}); err != nil {
+		return err
+	}
+	for _, fixture := range []struct {
+		namespace, name, waiting, phase, podReason, event string
+		healthy                                           bool
+	}{
+		{"config", "config-api", "CreateContainerConfigError", "Pending", "", "Failed", false},
+		{"sched", "sched-api", "", "Pending", "", "FailedScheduling", false},
+		{"evict", "evict-api", "", "Failed", "Evicted", "Evicted", false},
+		{"evict", "healthy-api", "", "Failed", "Evicted", "Evicted", true},
+		{"batch", "batch-job", "", "Failed", "", "BackoffLimitExceeded", false},
+		{"probe", "probe-api", "", "Running", "", "Unhealthy", false},
+		{"nodes", "nodes-api", "CrashLoopBackOff", "Running", "", "BackOff", false},
+	} {
+		uid := "deployment-" + fixture.name
+		kind, resource, apiVersion := "Deployment", "deployments", "apps/v1"
+		replicas, available := 1, 0
+		if fixture.healthy {
+			available = 1
+		}
+		if fixture.namespace == "nodes" {
+			replicas = 3
+		}
+		status := map[string]any{"replicas": replicas, "availableReplicas": available, "readyReplicas": available, "conditions": []any{condition("Available", "False", "MinimumReplicasUnavailable")}}
+		if fixture.healthy {
+			status["conditions"] = []any{condition("Available", "True", "MinimumReplicasAvailable")}
+		}
+		if fixture.namespace == "batch" {
+			kind, resource, apiVersion, uid = "Job", "jobs", "batch/v1", "job-"+fixture.name
+			status = map[string]any{"failed": 1, "conditions": []any{condition("Failed", "True", "BackoffLimitExceeded")}}
+		}
+		labels := map[string]string{"app": fixture.name}
+		spec := map[string]any{"replicas": replicas, "selector": map[string]any{"matchLabels": labels}, "template": map[string]any{"metadata": map[string]any{"labels": labels}, "spec": map[string]any{"containers": []any{map[string]any{"name": "app", "image": "example.invalid/fixture:v1"}}}}}
+		owner := map[string]any{"apiVersion": apiVersion, "kind": kind, "name": fixture.name, "uid": uid, "controller": true}
+		if kind == "Deployment" {
+			rsName, rsUID := fixture.name+"-rs", "rs-"+fixture.name
+			if err := putObject(store, "replicasets", fixture.namespace, rsName, map[string]any{"kind": "ReplicaSet", "metadata": map[string]any{"uid": rsUID, "ownerReferences": []any{owner}}, "spec": map[string]any{"replicas": replicas}, "status": map[string]any{"replicas": replicas, "availableReplicas": available, "readyReplicas": available}}); err != nil {
+				return err
+			}
+			owner = map[string]any{"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": rsName, "uid": rsUID, "controller": true}
+		}
+		podUID := "pod-" + fixture.name
+		container := map[string]any{"name": "app", "restartCount": 0, "ready": false, "state": map[string]any{"running": map[string]any{}}}
+		if fixture.phase == "Failed" {
+			container["state"] = map[string]any{"terminated": map[string]any{"reason": "Error", "exitCode": 1, "finishedAt": finished, "message": "CANARY_TERMINATION"}}
+		}
+		if fixture.waiting != "" {
+			container["state"] = map[string]any{"waiting": map[string]any{"reason": fixture.waiting, "message": "CANARY_WAITING"}}
+		}
+		podStatus := map[string]any{"phase": fixture.phase, "reason": fixture.podReason, "message": "CANARY_POD", "conditions": []any{condition("Ready", "False", "ContainersNotReady")}, "containerStatuses": []any{container}}
+		podSpec := map[string]any{"containers": []any{map[string]any{"name": "app", "image": "example.invalid/fixture:v1"}}}
+		if fixture.namespace == "sched" {
+			podStatus["conditions"] = []any{condition("PodScheduled", "False", "Unschedulable")}
+		}
+		if fixture.namespace == "config" {
+			podSpec["containers"] = []any{map[string]any{"name": "app", "image": "example.invalid/fixture:v1", "env": []any{map[string]any{"name": "CONFIG", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": "missing-key", "key": "missing"}}}}}}
+		}
+		if fixture.namespace == "probe" {
+			podSpec["containers"] = []any{map[string]any{"name": "app", "image": "example.invalid/fixture:v1", "readinessProbe": map[string]any{"exec": map[string]any{"command": []string{"false"}}}}}
+		}
+		if fixture.namespace == "nodes" {
+			podSpec["nodeName"] = "pressure-node"
+			container["restartCount"] = 6
+			container["lastState"] = map[string]any{"terminated": map[string]any{"reason": "OOMKilled", "exitCode": 137, "signal": 9, "finishedAt": finished, "message": "CANARY_TERMINATION"}}
+		}
+		if fixture.namespace == "batch" {
+			podSpec["restartPolicy"] = "Never"
+			spec = map[string]any{"backoffLimit": 1, "template": map[string]any{"spec": podSpec}}
+		} else {
+			spec["template"].(map[string]any)["spec"] = podSpec
+		}
+		if err := putObject(store, resource, fixture.namespace, fixture.name, map[string]any{"apiVersion": apiVersion, "kind": kind, "metadata": map[string]any{"uid": uid, "labels": labels, "creationTimestamp": now.Add(-time.Hour).Format(time.RFC3339)}, "spec": spec, "status": status}); err != nil {
+			return err
+		}
+		if err := putObject(store, "pods", fixture.namespace, fixture.name+"-0", map[string]any{"kind": "Pod", "metadata": map[string]any{"uid": podUID, "labels": labels, "ownerReferences": []any{owner}}, "spec": podSpec, "status": podStatus}); err != nil {
+			return err
+		}
+		if fixture.namespace == "nodes" {
+			runningStatus := map[string]any{"phase": "Running", "conditions": []any{condition("Ready", "False", "ContainersNotReady")}, "containerStatuses": []any{map[string]any{"name": "app", "restartCount": 8, "state": map[string]any{"running": map[string]any{}}, "lastState": container["lastState"]}}}
+			if err := putObject(store, "pods", fixture.namespace, fixture.name+"-between", map[string]any{"kind": "Pod", "metadata": map[string]any{"uid": podUID + "-between", "labels": labels, "ownerReferences": []any{owner}}, "spec": podSpec, "status": runningStatus}); err != nil {
+				return err
+			}
+			initStatus := map[string]any{"phase": "Pending", "conditions": []any{condition("Ready", "False", "ContainersNotReady")}, "containerStatuses": []any{map[string]any{"name": "app", "restartCount": 0, "state": map[string]any{"waiting": map[string]any{"reason": "PodInitializing"}}}}, "initContainerStatuses": []any{map[string]any{"name": "setup", "restartCount": 3, "state": map[string]any{"waiting": map[string]any{"reason": "CrashLoopBackOff", "message": "CANARY_INIT"}}, "lastState": map[string]any{"terminated": map[string]any{"reason": "Error", "exitCode": 1, "finishedAt": finished, "message": "CANARY_INIT_EXIT"}}}}}
+			initSpec := map[string]any{"nodeName": "pressure-node", "containers": podSpec["containers"], "initContainers": []any{map[string]any{"name": "setup", "image": "example.invalid/setup:v1"}}}
+			if err := putObject(store, "pods", fixture.namespace, fixture.name+"-init", map[string]any{"kind": "Pod", "metadata": map[string]any{"uid": podUID + "-init", "labels": labels, "ownerReferences": []any{owner}}, "spec": initSpec, "status": initStatus}); err != nil {
+				return err
+			}
+		}
+		if fixture.healthy {
+			if err := putObject(store, "pods", fixture.namespace, fixture.name+"-ready", map[string]any{"kind": "Pod", "metadata": map[string]any{"uid": podUID + "-ready", "labels": labels, "ownerReferences": []any{owner}}, "spec": podSpec, "status": map[string]any{"phase": "Running", "conditions": []any{condition("Ready", "True", "ContainersReady")}, "containerStatuses": []any{map[string]any{"name": "app", "ready": true, "restartCount": 0, "state": map[string]any{"running": map[string]any{}}}}}}); err != nil {
+				return err
+			}
+		}
+		if err := putObject(store, "events", fixture.namespace, fixture.name+"-warning", map[string]any{"kind": "Event", "type": "Warning", "reason": fixture.event, "message": "CANARY_EVENT", "count": 4, "firstTimestamp": now.Add(-2 * time.Minute).Format(time.RFC3339), "lastTimestamp": now.Format(time.RFC3339), "involvedObject": map[string]any{"kind": "Pod", "name": fixture.name + "-0", "namespace": fixture.namespace, "uid": podUID}}); err != nil {
 			return err
 		}
 	}

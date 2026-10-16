@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { openApp } from "./helpers";
-import type { KubernetesClusters, KubernetesGraph, KubernetesIssue, KubernetesOverview, KubernetesResourcePage, KubernetesTopPage, KubernetesTraffic, KubernetesUsage, RbacMe, SSOSession } from "../../src/lib/api";
+import type { KubernetesClusters, KubernetesCrashEvent, KubernetesCrashPage, KubernetesGraph, KubernetesIssue, KubernetesOverview, KubernetesResourcePage, KubernetesTopPage, KubernetesTraffic, KubernetesUsage, RbacMe, SSOSession } from "../../src/lib/api";
 
 type StreamCounter = { path: string; container: string; previous: boolean; follow: boolean; requests: number; active: number; cancelled: number; completed: number; disconnected: number; unavailable: number; chunks: number; since_time?: string };
 
@@ -487,7 +487,7 @@ async function captureBreakState(page: Page, filename: string, theme: "dark" | "
     const background = getComputedStyle(document.body).backgroundColor;
     const storedTheme = localStorage.getItem("versus.theme");
     if (expected === "dark" && storedTheme === "dark" && background === "rgb(13, 17, 24)") document.documentElement.setAttribute("data-theme", "dark");
-    return { storedTheme, theme: document.documentElement.getAttribute("data-theme"), background, font: getComputedStyle(document.body).fontFamily, viewport: { width: innerWidth, height: innerHeight } };
+    return { storedTheme, theme: document.documentElement.getAttribute("data-theme"), background, font: getComputedStyle(document.body).fontFamily, viewport: { width: innerWidth, height: innerHeight }, deviceScaleFactor: devicePixelRatio };
   }, theme);
   expect(proof.storedTheme).toBe(theme);
   expect(proof.theme).toBe(theme);
@@ -495,6 +495,8 @@ async function captureBreakState(page: Page, filename: string, theme: "dark" | "
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   fs.mkdirSync(screenshotDir, { recursive: true });
   const image = await page.screenshot({ path: path.join(screenshotDir, filename), animations: "disabled" });
+  expect(image.readUInt32BE(16)).toBe(proof.viewport.width * proof.deviceScaleFactor);
+  expect(image.readUInt32BE(20)).toBe(proof.viewport.height * proof.deviceScaleFactor);
   const manifestPath = path.join(screenshotDir, "manifest.json");
   const manifest = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { images: Record<string, unknown> } : { images: {} };
   manifest.images[filename] = { classification: "F: synthetic API-intercepted UI fixture, not live-cluster acceptance", spec: "tests/e2e/kubernetes-overview.spec.ts", config: "tests/e2e/playwright.config.ts", sha256: createHash("sha256").update(image).digest("hex"), ...proof };
@@ -2144,6 +2146,8 @@ test.describe("Live Pod stream acceptance", () => {
 });
 
 test.describe("Pod log streaming fixtures", () => {
+  test.use({ deviceScaleFactor: Number(process.env.E2E_KUBERNETES_CAPTURE_SCALE || "1") });
+
   test.beforeEach(async ({ page }, testInfo) => {
     const overviewRefresh = testInfo.title.startsWith("Overview refresh");
     const breakTimeline = testInfo.title.startsWith("Break timeline");
@@ -2170,6 +2174,62 @@ test.describe("Pod log streaming fixtures", () => {
       { root: { kind: "DaemonSet", namespace: "kube-system", name: "node-agent", uid: "node-agent-uid" }, rule: "workload.unavailable", severity: "critical", count: 7, of: 12, broken: true, broke_at: at(3), history: "complete", untracked: ["Secret"], evidence: { warning_events: 0, from: at(33), to: at(1) } },
     ];
     const linkedHistory = Array.from({ length: 24 }, (_, index) => ({ id: `linked-${index}`, cluster: "fixture", kind: "ConfigMap", namespace: "shop", name: `checkout-settings-${index}`, uid: `config-${index}`, type: "config_changed" as const, at: at(7 + index / 10) }));
+    if (testInfo.title.startsWith("Break timeline crash evidence")) {
+      roots[0].evidence = { ...roots[0].evidence!, partial: true, restarts: 44,
+        terminations: [{ reason: "Error", exit_code: 137, exit_hint: "SIGKILL", count: 2, restarts: 41, last: at(2) }, { reason: "Error", exit_code: 1, init: true, count: 1, last: at(1) }, { reason: "Error", exit_code: 137, signal: "SIGKILL", count: 1, last: at(1) }],
+        waiting: [{ reason: "CreateContainerConfigError", count: 1, init: true }],
+        pod_reasons: [{ reason: "Evicted", count: 4 }, { reason: "Unschedulable", count: 2 }],
+        conditions: [{ type: "Failed", reason: "BackoffLimitExceeded" }],
+        nodes: [{ reason: "MemoryPressure", count: 3 }], warning_events: 12,
+        warning_reasons: [{ reason: "FailedScheduling", count: 8 }, { reason: "Other", count: 4 }],
+      };
+    }
+    const k12aMatrix = testInfo.title.startsWith("Break timeline K12a crash evidence");
+    const journalFixture = testInfo.title.startsWith("Break timeline captured journal fixture");
+    let journalContinuationFailed = false;
+    if (journalFixture) roots[0].evidence!.partial = true;
+    if (k12aMatrix) {
+      roots.splice(0, roots.length,
+        { ...roots[0], root: { kind: "Deployment", namespace: "nodes", name: "nodes-api", uid: "checkout-uid" }, rule: "pod.crash_loop", severity: "critical", count: 2, of: 3, changes: [{ change: { id: "nodes-cfg", cluster: "fixture", kind: "ConfigMap", namespace: "nodes", name: "nodes-cfg", uid: "nodes-cfg-uid", type: "config_changed", at: at(7) }, relation: "used_by", lead_seconds: 120 }], evidence: {
+          partial: true, restarts: 44, from: at(35), to: at(1),
+          terminations: [
+            { reason: "OOMKilled", exit_code: 137, signal: "SIGKILL", count: 2, restarts: 38, last: at(2) },
+            { reason: "Error", exit_code: 137, exit_hint: "SIGKILL", count: 1, restarts: 3, last: at(2) },
+            { reason: "Error", exit_code: 1, init: true, signal: "31", exit_hint: "SIGKILL", count: 1, restarts: 3, last: at(1) },
+          ],
+          waiting: [{ reason: "CrashLoopBackOff", count: 1 }, { reason: "CrashLoopBackOff", count: 1, init: true }],
+          nodes: [{ reason: "MemoryPressure", count: 3 }],
+          warning_events: 12, warning_reasons: [{ reason: "BackOff", count: 8 }, { reason: "Other", count: 4 }],
+        } },
+        { root: { kind: "Deployment", namespace: "config", name: "config-api", uid: "config-uid" }, rule: "pod.config_error", severity: "critical", count: 3, of: 3, broken: true, broke_at: at(4), history: "complete", changes: [], evidence: {
+          waiting: [{ reason: "CreateContainerConfigError", count: 2 }, { reason: "PostStartHookError", count: 1, init: true }],
+          warning_events: 4, warning_reasons: [{ reason: "Failed", count: 4 }], from: at(34), to: at(2),
+        } },
+        { root: { kind: "Deployment", namespace: "sched", name: "sched-api", uid: "sched-uid" }, rule: "pod.unschedulable", severity: "warning", count: 2, of: 2, broken: true, broke_at: at(4), history: "complete", changes: [], evidence: {
+          pod_reasons: [{ reason: "Unschedulable", count: 2 }],
+          warning_events: 8, warning_reasons: [{ reason: "FailedScheduling", count: 8 }], from: at(34), to: at(2),
+        } },
+        { root: { kind: "Deployment", namespace: "evict", name: "evict-api", uid: "evict-uid" }, rule: "pod.evicted", severity: "critical", count: 4, of: 4, broken: true, broke_at: at(3), history: "complete", changes: [], evidence: {
+          restarts: 3,
+          terminations: [
+            { reason: "Error", exit_code: 126, exit_hint: "not_executable", count: 1, restarts: 2, last: at(2) },
+            { reason: "Error", exit_code: 127, exit_hint: "not_found", count: 1, init: true, restarts: 1, last: at(1) },
+          ],
+          pod_reasons: [{ reason: "Evicted", count: 3 }, { reason: "OutOfResource", count: 1 }],
+          warning_events: 5, warning_reasons: [{ reason: "Evicted", count: 4 }, { reason: "Other", count: 1 }], from: at(33), to: at(1),
+        } },
+        { root: { kind: "Job", namespace: "batch", name: "batch-job", uid: "batch-uid" }, rule: "job.failed", severity: "critical", count: 1, of: 1, broken: true, broke_at: at(3), history: "complete", changes: [], evidence: {
+          restarts: 3,
+          terminations: [
+            { reason: "Error", exit_code: 134, exit_hint: "SIGABRT", count: 1, restarts: 1, last: at(3) },
+            { reason: "Error", exit_code: 139, exit_hint: "SIGSEGV", count: 1, restarts: 1, last: at(2) },
+            { reason: "Error", exit_code: 143, exit_hint: "SIGTERM", count: 1, restarts: 1, last: at(1) },
+          ],
+          conditions: [{ type: "Failed", reason: "BackoffLimitExceeded" }],
+          warning_events: 4, warning_reasons: [{ reason: "BackoffLimitExceeded", count: 4 }], from: at(33), to: at(1),
+        } },
+      );
+    }
     if (testInfo.title.includes("label and stack geometry")) {
       const image = roots[0].changes!.find((item) => item.change.id === "image")!;
       roots[0].changes!.push(...[1, 2].map((index) => ({ ...image, change: { ...image.change, id: `image-stack-${index}` } })), { ...image, change: { ...image.change, id: "rollback", at: at(-11), fields: [{ path: "image", from: "v42", to: "v41" }] } });
@@ -2242,6 +2302,19 @@ test.describe("Pod log streaming fixtures", () => {
       if (pathname === "/api/admin/config/agent") return route.fulfill({ json: { enable: breakTimeline, mode: "shadow", sources: [], ai: { enable: breakTimeline }, catalog: {}, miner: {}, regex: { rules: [] }, redaction: {}, service_patterns: [] } });
       if (multiClusterBreak && pathname === "/api/admin/kubernetes/clusters") return route.fulfill({ json: { multiple: true, clusters: ["east", "west"].map((id) => ({ id, provider: "generic", health: "attention", nodes: 12, ready_nodes: 12, pods: 28, running_pods: 19, warnings: 26, broken: 3, ...(testInfo.title.includes("fleet documentation") ? { last_change_at: id === "east" ? at(9) : "invalid-timestamp" } : {}), sync: { state: "ready" }, observed_at: new Date().toISOString() })) } });
       if (breakTimeline && pathname === "/api/admin/kubernetes/overview") return route.fulfill({ json: { connector: "kubernetes", cluster_id: "fixture", observed_at: new Date().toISOString(), nodes: 12, ready_nodes: 12, pods: 28, running_pods: 19, namespaces: 3, active_namespaces: 3, workloads: 4, warnings: 26, truncated: diagnostics, omitted_categories: diagnostics ? ["ConfigMap"] : [], partial_failures: failures } });
+      if (breakTimeline && pathname === "/api/admin/kubernetes/crashes") {
+        const cursor = url.searchParams.get("cursor");
+        if (journalFixture && cursor === "journal-50" && !journalContinuationFailed) {
+          journalContinuationFailed = true;
+          return route.fulfill({ status: 503, json: { error: "Synthetic continuation unavailable" } });
+        }
+        const base = (root: KubernetesIssue, index: number): KubernetesCrashEvent => ({ id: `${root.root.uid}-${index}`, sequence: index + 1, cluster: url.searchParams.get("cluster") || "fixture", namespace: root.root.namespace || "", pod: `${root.root.name}-removed-pod-${index}`, pod_uid: `removed-pod-uid-${index}`, root_uid: root.root.uid!, root_kind: root.root.kind, root_name: root.root.name, container: "api", type: "termination", termination_slot: "previous", exit_code: 137, reason: "Error", restart_count: 41, at: at(2), time_source: "finished_at", observed_at: at(1) });
+        const events: KubernetesCrashEvent[] = journalFixture ? Array.from({ length: 105 }, (_, index) => ({ ...base(roots[0], index), ...(index % 5 === 0 ? { type: "status" as const, waiting_reason: "CrashLoopBackOff", time_source: "observed_at" as const } : {}), ...(index % 7 === 0 ? { init: true, container: "setup", signal: 9 } : {}) })) : roots.flatMap((root) => (root.evidence?.terminations ?? []).map((termination, index) => ({ ...base(root, index), reason: termination.reason, exit_code: termination.exit_code, signal: termination.signal === "SIGKILL" ? 9 : Number(termination.signal) || undefined, restart_count: termination.restarts ?? 0, init: termination.init, at: termination.last })));
+        const filtered = events.filter((event) => (!url.searchParams.get("namespace") || event.namespace === url.searchParams.get("namespace")) && (!url.searchParams.get("root_uid") || event.root_uid === url.searchParams.get("root_uid")));
+        const offset = Number(cursor?.replace("journal-", "") || 0);
+        const limit = Number(url.searchParams.get("limit") || 50);
+        return route.fulfill({ json: { items: filtered.slice(offset, offset + limit), ...(offset + limit < filtered.length ? { next: `journal-${offset + limit}` } : {}), since: url.searchParams.get("since")!, until: url.searchParams.get("until")!, retention_from: at(1440), retention_basis: "observed_at", started_at: at(30), gaps: journalFixture ? [{ from: at(50), to: at(45) }] : [], capture_gaps: journalFixture ? [{ from: at(20), to: at(19) }] : [], coverage: { Pod: { from: at(30), to: at(1) } }, limitations: ["polling_observations_only", "journal_not_started_for_full_window", "summary_caps_do_not_limit_journal"], capture: { mode: "continuous", behind: false, last_cycle_at: at(1) }, sync: { state: "ready", age_s: 4, partial: false } } satisfies KubernetesCrashPage });
+      }
       if (breakTimeline && pathname === "/api/admin/kubernetes/issues") {
         const rootLookup = url.searchParams.has("root_uid");
         if (denialEdge && rootLookup && (++edgeRootReads > 1 || denialEdge[1] === "initial")) return route.fulfill({ status: Number(denialEdge[2]), json: { error: "Synthetic root lookup denied" } });
@@ -2256,7 +2329,7 @@ test.describe("Pod log streaming fixtures", () => {
         if (denialEdge && !rootLookup) items = items.map((issue) => issue.root.uid === "checkout-uid" ? { ...issue, history: undefined, rebuilt: undefined, changes: undefined, evidence: undefined } : issue);
         const adverseSync = syncEdge && (syncEdge[1] === "overview" ? !rootLookup : rootLookup);
         const sync = adverseSync ? { state: syncEdge[2] === "partial" ? "ready" : syncEdge[2], age_s: 4, partial: syncEdge[2] === "partial" } : { state: "ready", age_s: 4, partial: diagnostics };
-        return route.fulfill({ json: { items, totals: { critical: 2, warning: 2 }, broken: { total: 3, by_severity: { critical: 2, warning: 1 } }, ...(paged && !url.searchParams.get("cursor") ? { next: "issues-next" } : {}), truncated: false, partial_failures: failures, sync } });
+        return route.fulfill({ json: { items, totals: k12aMatrix ? { critical: 4, warning: 2 } : { critical: 2, warning: 2 }, broken: k12aMatrix ? { total: 5, by_severity: { critical: 4, warning: 1 } } : { total: 3, by_severity: { critical: 2, warning: 1 } }, ...(paged && !url.searchParams.get("cursor") ? { next: "issues-next" } : {}), truncated: false, partial_failures: failures, sync } });
       }
       if (breakTimeline && pathname === "/api/admin/kubernetes/changes") {
         const cursor = url.searchParams.get("cursor");
@@ -2268,7 +2341,8 @@ test.describe("Pod log streaming fixtures", () => {
       }
       if (breakTimeline && pathname === "/api/admin/kubernetes/graph") {
         const changes = fullRootHistory ? linkedHistory : roots[0].changes!.map((item) => item.change);
-        return route.fulfill({ json: { nodes: [{ id: "checkout-uid", kind: "Deployment", namespace: "shop", name: "checkout", group: "shop" }, ...changes.filter((change) => change.uid !== "checkout-uid").map((change) => ({ id: change.uid, kind: change.kind, namespace: change.namespace, name: change.name, group: "shop" }))], edges: changes.filter((change) => change.uid !== "checkout-uid").map((change) => ({ from: change.uid, to: "checkout-uid", type: change.kind === "HorizontalPodAutoscaler" ? "scales" : "configures" })), omitted: {}, sync: { state: "ready", age_s: 0, partial: false } } });
+        const primary = roots[0].root;
+        return route.fulfill({ json: { nodes: [{ id: primary.uid!, kind: primary.kind, namespace: primary.namespace, name: primary.name, group: primary.namespace ?? "shop" }, ...changes.filter((change) => change.uid !== primary.uid).map((change) => ({ id: change.uid, kind: change.kind, namespace: change.namespace, name: change.name, group: change.namespace ?? "shop" }))], edges: changes.filter((change) => change.uid !== primary.uid).map((change) => ({ from: change.uid, to: primary.uid!, type: change.kind === "HorizontalPodAutoscaler" ? "scales" : "configures" })), omitted: {}, sync: { state: "ready", age_s: 0, partial: false } } });
       }
       if (pathname === "/api/admin/kubernetes/overview") return route.fulfill({ json: { connector: "kubernetes", cluster_id: "fixture", observed_at: "2026-10-07T12:00:00Z", nodes: 1, ready_nodes: 1, pods: 1, running_pods: 1, namespaces: 1, active_namespaces: 1, workloads: 1, warnings: 0, truncated: false } });
       if (pathname === "/api/admin/kubernetes/usage") return route.fulfill({ json: { observed_at: "2026-10-07T12:00:00Z", availability: "unavailable", fresh: false, pods: [], nodes: [], truncated: false } });
@@ -2295,7 +2369,7 @@ test.describe("Pod log streaming fixtures", () => {
     await expect(page.getByRole("button", { name: "Expand sidebar", exact: true })).toBeVisible();
     const timeline = page.getByRole("region", { name: "Break timeline", exact: true });
     await expect(timeline.getByRole("article")).toHaveCount(3);
-    await expect(timeline).toContainText("OOMKilled ×6");
+    await expect(timeline).toContainText("OOMKilled on 6 pods");
     await expect(timeline).toContainText("v41 → v42");
     await expect(timeline).toContainText("ledger-api");
     await expect(timeline).toContainText("node-agent");
@@ -2421,6 +2495,250 @@ test.describe("Pod log streaming fixtures", () => {
   }
 
   for (const viewport of [{ name: "desktop", width: 1440, height: 900 }, { name: "mobile", width: 390, height: 844 }]) {
+    test(`Break timeline crash evidence responsive disclosure ${viewport.name}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await openApp(page, "/agent/kubernetes?view=overview");
+      const timeline = page.getByRole("region", { name: "Break timeline", exact: true });
+      const row = timeline.getByRole("article", { name: "Deployment checkout", exact: true });
+      await expect(row.getByText("Error exit 137 (exit hint: SIGKILL) on 2 pods", { exact: true })).toBeVisible();
+      await expect(row.getByText("Error exit 137 signal SIGKILL on 1 pod", { exact: true })).toBeVisible();
+      await expect(row.getByText("44 lifetime restarts", { exact: true })).toBeVisible();
+      await expect(row.getByText("12 warning events: FailedScheduling 8, Other 4", { exact: true })).toBeVisible();
+      await expect(row.getByRole("status")).toHaveText("Partial crash evidence");
+      const node = row.getByText("Node MemoryPressure on 3 pods", { exact: true });
+      if (viewport.name === "mobile") {
+        await expect(node).not.toBeVisible();
+        const toggle = row.getByRole("button", { name: /^(?:\+5 more|Show less) evidence for checkout$/ });
+        await toggle.focus();
+        await page.keyboard.press("Enter");
+        await expect(toggle).toHaveAttribute("aria-expanded", "true");
+        await expect(toggle).toBeFocused();
+      }
+      await expect(node).toBeVisible();
+      await expect(row).not.toContainText("·");
+      expect(await row.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await captureBreakState(page, `crash-evidence-overview-${viewport.name}.png`, "dark");
+      await page.getByRole("tab", { name: "Issues", exact: true }).click();
+      const issues = page.getByRole("region", { name: "Kubernetes issues", exact: true });
+      const issueRow = issues.getByRole("article", { name: "Deployment checkout", exact: true });
+      await expect(issueRow.getByRole("button", { name: "Expand checkout", exact: true })).toHaveAttribute("aria-expanded", "false");
+      if (viewport.name === "mobile") {
+        const more = issueRow.getByRole("button", { name: /^(?:\+5 more|Show less) evidence for checkout$/ });
+        await more.focus();
+        await page.keyboard.press("Enter");
+        await expect(more).toHaveAttribute("aria-expanded", "true");
+        await expect(more).toBeFocused();
+      } else await issueRow.getByRole("button", { name: "Expand checkout", exact: true }).click();
+      await expect(issueRow.getByRole("button", { name: "Collapse checkout", exact: true })).toHaveAttribute("aria-expanded", "true");
+      await expect(issueRow.getByText("Node MemoryPressure on 3 pods", { exact: true })).toBeVisible();
+      expect(await issueRow.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await captureBreakState(page, `crash-evidence-issues-${viewport.name}.png`, "dark");
+      expect(errors).toEqual([]);
+    });
+
+    test(`Break timeline captured journal fixture all retained observations ${viewport.name} dark`, async ({ page }, testInfo) => {
+      await page.setViewportSize(viewport);
+      await page.emulateMedia({ colorScheme: "dark" });
+      const reads: URL[] = [];
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      page.on("request", (request) => { const url = new URL(request.url()); if (url.pathname.endsWith("/kubernetes/crashes")) reads.push(url); });
+      await openApp(page, "/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop");
+      const journal = page.getByRole("region", { name: "Captured crash evidence", exact: true });
+      const list = journal.getByRole("list", { name: "Crash observations", exact: true });
+      await expect(list.getByRole("listitem")).toHaveCount(50);
+      expect(reads).toHaveLength(1);
+      expect(Object.fromEntries(reads[0].searchParams)).toMatchObject({ root_uid: "checkout-uid", namespace: "shop", limit: "50" });
+      await expect(page.getByText("Partial crash evidence", { exact: true })).toHaveCount(0);
+      await expect(journal).toContainText("Events between polls may be unseen");
+      await expect(journal).toContainText("Journal retention/capture gap:");
+      await expect(journal).toContainText("Capture gap:");
+      const chart = page.getByRole("region", { name: "Resource timeline chart", exact: true });
+      await expect(chart.locator('[data-marker="crash"]')).toHaveCount(40);
+      const marker = chart.locator('[data-marker="crash"]').first();
+      await marker.focus();
+      await page.keyboard.press("Enter");
+      const details = page.getByRole("region", { name: "Timeline event details", exact: true });
+      await expect(details).toContainText("removed-pod-49");
+      await expect(details).toContainText("41 lifetime restarts");
+      await page.keyboard.press("Escape");
+      await expect(marker).toBeFocused();
+      const disclosure = list.getByRole("listitem").nth(1).locator("summary");
+      await disclosure.focus();
+      await page.keyboard.press("Enter");
+      await expect(list.getByRole("listitem").nth(1)).toContainText("not proof of SIGKILL");
+      await expect(list.getByRole("listitem").nth(1)).toContainText("Pod UID: removed-pod-uid-1");
+      await expect(list.getByRole("listitem").nth(1)).not.toContainText(", signal 9");
+      await journal.scrollIntoViewIfNeeded();
+      await disclosure.scrollIntoViewIfNeeded();
+      expect(await journal.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await captureBreakState(page, `crash-journal-fixture-details-${viewport.name}-dark.png`, "dark");
+      await journal.getByRole("button", { name: "Next crash page", exact: true }).click();
+      await expect(journal.getByRole("alert")).toContainText("Crash journal unavailable");
+      await expect(list).toHaveCount(0);
+      await expect(chart.locator('[data-marker="crash"]')).toHaveCount(0);
+      await journal.getByRole("button", { name: "Retry crash journal", exact: true }).click();
+      await expect(list.getByRole("listitem")).toHaveCount(50);
+      await expect(list).toContainText("removed-pod-99");
+      await journal.getByRole("button", { name: "Next crash page", exact: true }).click();
+      await expect(list.getByRole("listitem")).toHaveCount(5);
+      await expect(list).toContainText("removed-pod-104");
+      await expect(journal.getByRole("button", { name: "Next crash page", exact: true })).toBeDisabled();
+      await list.getByRole("listitem").last().locator("summary").click();
+      await expect(list.getByRole("listitem").last()).toContainText("Root UID: checkout-uid");
+      await journal.scrollIntoViewIfNeeded();
+      await captureBreakState(page, `crash-journal-fixture-last-page-${viewport.name}-dark.png`, "dark");
+      await journal.getByRole("button", { name: "Previous crash page", exact: true }).click();
+      await expect(list.getByRole("listitem")).toHaveCount(50);
+      await expect(list).toContainText("removed-pod-50");
+      await journal.getByRole("button", { name: "Previous crash page", exact: true }).click();
+      await expect(list).toContainText("removed-pod-0");
+      await journal.getByRole("button", { name: "Next crash page", exact: true }).click();
+      await expect(list).toContainText("removed-pod-50");
+      await journal.getByRole("button", { name: "Next crash page", exact: true }).click();
+      await expect(list.getByRole("listitem")).toHaveCount(5);
+      await expect(list).toContainText("removed-pod-104");
+      expect(reads.map((url) => url.searchParams.get("cursor"))).toEqual([null, "journal-50", "journal-50", "journal-100"]);
+      await page.getByRole("textbox", { name: "Timeline namespace", exact: true }).fill("other");
+      await expect(journal).toContainText("No captured observations on this page");
+      await expect(journal.getByRole("button", { name: "Previous crash page", exact: true })).toBeDisabled();
+      expect(reads.at(-1)!.searchParams.get("cursor")).toBeNull();
+      expect(errors).toEqual([]);
+      await testInfo.attach("journal-fixture-provenance", { body: JSON.stringify({ classification: "F: synthetic API-intercepted UI fixture; not live backend integration", viewport, pages: [50, 50, 5], continuationRetry: true }), contentType: "application/json" });
+    });
+
+    test(`Break timeline K12a crash evidence five-break matrix and markers ${viewport.name}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.emulateMedia({ colorScheme: "dark" });
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await openApp(page, "/agent/kubernetes?view=overview");
+      const timeline = page.getByRole("region", { name: "Break timeline", exact: true });
+      await expect(timeline.getByRole("article")).toHaveCount(5);
+      await expect(timeline.getByRole("button", { name: /^Broken / })).toContainText("5");
+      await expect(timeline.getByRole("button", { name: /^Broken / })).toContainText("4 critical");
+      await expect(timeline.getByRole("button", { name: /^Broken / })).toContainText("1 warning");
+      await expect(timeline).not.toContainText("·");
+
+      const nodesRow = timeline.getByRole("article", { name: "Deployment nodes-api", exact: true });
+      const configRow = timeline.getByRole("article", { name: "Deployment config-api", exact: true });
+      const schedRow = timeline.getByRole("article", { name: "Deployment sched-api", exact: true });
+      const evictRow = timeline.getByRole("article", { name: "Deployment evict-api", exact: true });
+      const batchRow = timeline.getByRole("article", { name: "Job batch-job", exact: true });
+
+      await expect(nodesRow.getByLabel("CrashLoopBackOff", { exact: true })).toBeVisible();
+      await expect(nodesRow).toContainText("2 of 3 pods affected");
+      await expect(nodesRow.getByText("OOMKilled signal SIGKILL on 2 pods", { exact: true })).toBeVisible();
+      await expect(nodesRow.getByText("Error exit 137 (exit hint: SIGKILL) on 1 pod", { exact: true })).toBeVisible();
+      await expect(nodesRow.getByText("Init Error exit 1 signal 31 on 1 pod", { exact: true })).toBeVisible();
+      await expect(nodesRow.getByText("44 lifetime restarts", { exact: true })).toBeVisible();
+      await expect(nodesRow.getByText("12 warning events: BackOff 8, Other 4", { exact: true })).toBeVisible();
+      await expect(nodesRow.getByRole("status")).toHaveText("Partial crash evidence");
+
+      await expect(configRow.getByLabel("Container config error", { exact: true })).toBeVisible();
+      await expect(configRow.getByText("CreateContainerConfigError on 2 pods", { exact: true })).toBeVisible();
+      await expect(configRow.getByText("Init PostStartHookError on 1 pod", { exact: true })).toBeVisible();
+      await expect(configRow.getByText("4 warning events: Failed 4", { exact: true })).toBeVisible();
+
+      await expect(schedRow.getByLabel("Unschedulable", { exact: true })).toBeVisible();
+      const unschedPill = schedRow.getByText("Unschedulable on 2 pods", { exact: true });
+      await expect(unschedPill).toBeVisible();
+      await expect(unschedPill).toHaveClass(/pill-warn/);
+      await expect(schedRow.getByText("8 warning events: FailedScheduling 8", { exact: true })).toBeVisible();
+
+      await expect(evictRow.getByLabel("Evicted", { exact: true })).toBeVisible();
+      await expect(evictRow.getByText("Error exit 126 (exit hint: not executable) on 1 pod", { exact: true })).toBeVisible();
+      await expect(evictRow.getByText("Init Error exit 127 (exit hint: command not found) on 1 pod", { exact: true })).toBeVisible();
+      await expect(evictRow.getByText("Evicted on 3 pods", { exact: true })).toBeVisible();
+      await expect(evictRow.getByText("3 lifetime restarts", { exact: true })).toBeVisible();
+      await expect(evictRow.getByText("5 warning events: Evicted 4, Other 1", { exact: true })).toBeVisible();
+
+      await expect(batchRow.getByLabel("Job failed", { exact: true })).toBeVisible();
+      await expect(batchRow.getByText("Error exit 134 (exit hint: SIGABRT) on 1 pod", { exact: true })).toBeVisible();
+      await expect(batchRow.getByText("Error exit 139 (exit hint: SIGSEGV) on 1 pod", { exact: true })).toBeVisible();
+      await expect(batchRow.getByText("Error exit 143 (exit hint: SIGTERM) on 1 pod", { exact: true })).toBeVisible();
+      await expect(batchRow.getByText("4 warning events: BackoffLimitExceeded 4", { exact: true })).toBeVisible();
+
+      if (viewport.name === "mobile") {
+        await expect(nodesRow.getByText("Node MemoryPressure on 3 pods", { exact: true })).not.toBeVisible();
+        await expect(evictRow.getByText("OutOfResource on 1 pod", { exact: true })).not.toBeVisible();
+        await expect(batchRow.getByText("BackoffLimitExceeded", { exact: true })).not.toBeVisible();
+        const toggle = nodesRow.getByRole("button", { name: "+3 more evidence for nodes-api", exact: true });
+        await toggle.focus();
+        await page.keyboard.press("Enter");
+        const less = nodesRow.getByRole("button", { name: "Show less evidence for nodes-api", exact: true });
+        await expect(less).toHaveAttribute("aria-expanded", "true");
+        await expect(less).toBeFocused();
+        await expect(nodesRow.getByText("CrashLoopBackOff on 1 pod", { exact: true })).toBeVisible();
+        await expect(nodesRow.getByText("Init CrashLoopBackOff on 1 pod", { exact: true })).toBeVisible();
+        await expect(nodesRow.getByText("Node MemoryPressure on 3 pods", { exact: true })).toBeVisible();
+        await captureBreakState(page, "k12a-fixture-overview-mobile-expanded.png", "dark");
+        await page.keyboard.press("Space");
+        await expect(nodesRow.getByRole("button", { name: "+3 more evidence for nodes-api", exact: true })).toHaveAttribute("aria-expanded", "false");
+        await expect(nodesRow.getByText("Node MemoryPressure on 3 pods", { exact: true })).not.toBeVisible();
+      } else {
+        await expect(nodesRow.getByText("CrashLoopBackOff on 1 pod", { exact: true })).toBeVisible();
+        await expect(nodesRow.getByText("Init CrashLoopBackOff on 1 pod", { exact: true })).toBeVisible();
+        await expect(nodesRow.getByText("Node MemoryPressure on 3 pods", { exact: true })).toBeVisible();
+        await expect(evictRow.getByText("OutOfResource on 1 pod", { exact: true })).toBeVisible();
+        await expect(batchRow.getByText("BackoffLimitExceeded", { exact: true })).toBeVisible();
+      }
+      for (const row of [nodesRow, configRow, schedRow, evictRow, batchRow]) {
+        expect(await row.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      }
+      await captureBreakState(page, `k12a-fixture-overview-${viewport.name}.png`, "dark");
+
+      await page.getByRole("tab", { name: "Issues", exact: true }).click();
+      const issues = page.getByRole("region", { name: "Kubernetes issues", exact: true });
+      const issueNodes = issues.getByRole("article", { name: "Deployment nodes-api", exact: true });
+      await expect(issueNodes.getByRole("button", { name: "Expand nodes-api", exact: true })).toHaveAttribute("aria-expanded", "false");
+      if (viewport.name === "mobile") {
+        const more = issueNodes.getByRole("button", { name: "+3 more evidence for nodes-api", exact: true });
+        await more.focus();
+        await page.keyboard.press("Enter");
+        await expect(issueNodes.getByRole("button", { name: "Show less evidence for nodes-api", exact: true })).toHaveAttribute("aria-expanded", "true");
+        await expect(issueNodes.getByRole("button", { name: "Show less evidence for nodes-api", exact: true })).toBeFocused();
+      } else {
+        await issueNodes.getByRole("button", { name: "Expand nodes-api", exact: true }).click();
+      }
+      await expect(issueNodes.getByRole("button", { name: "Collapse nodes-api", exact: true })).toHaveAttribute("aria-expanded", "true");
+      await expect(issueNodes.getByText("Node MemoryPressure on 3 pods", { exact: true })).toBeVisible();
+      expect(await issueNodes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await captureBreakState(page, `k12a-fixture-issues-${viewport.name}.png`, "dark");
+      if (viewport.name === "mobile") {
+        await issues.getByRole("combobox", { name: "Issue severity", exact: true }).selectOption("critical");
+        await expect(issueNodes.getByRole("button", { name: "+3 more evidence for nodes-api", exact: true })).toHaveAttribute("aria-expanded", "false");
+        await issues.getByRole("combobox", { name: "Issue severity", exact: true }).selectOption("");
+      }
+
+      await issueNodes.getByRole("button", { name: "Timeline for nodes-api", exact: true }).click();
+      const lane = page.getByRole("region", { name: "Timeline lane nodes-api", exact: true });
+      await expect(lane).toBeVisible();
+      const chart = lane.getByRole("region", { name: "Resource timeline chart", exact: true });
+      await expect(chart.locator('[data-marker="crash"]')).toHaveCount(3);
+      const markerIDs = await chart.locator('[data-marker="crash"]').evaluateAll((elements) => elements.map((element) => element.getAttribute("data-event-id")));
+      expect(new Set(markerIDs).size).toBe(3);
+      await expect(lane.getByText("Partial crash evidence", { exact: true })).toHaveCount(0);
+      const crashLabel = chart.locator(".resource-timeline-crash-label").first();
+      await expect(crashLabel).toContainText("api: OOMKilled");
+      await expect(crashLabel).toHaveAttribute("title", /exit 137, signal 9/);
+      await crashLabel.focus();
+      await page.keyboard.press("Enter");
+      const details = lane.getByRole("region", { name: "Timeline event details", exact: true });
+      await expect(details.getByRole("heading", { name: "Timeline event details", exact: true })).toBeFocused();
+      await expect(details).toContainText("OOMKilled, exit 137, signal 9");
+      await expect(details).toContainText("not proof of SIGKILL");
+      await expect(details).toContainText("Init container api: Error, exit 1, signal 31");
+      await expect(details).not.toContainText("·");
+      await captureBreakState(page, `k12a-fixture-timeline-${viewport.name}.png`, "dark");
+      await page.keyboard.press("Escape");
+      await expect(details).toHaveCount(0);
+      await expect(crashLabel).toBeFocused();
+      expect(errors).toEqual([]);
+    });
+
     test(`Break timeline selected marker removal restores chart focus ${viewport.name} dark`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await openApp(page, "/agent/kubernetes?view=timeline");
@@ -2497,8 +2815,8 @@ test.describe("Pod log streaming fixtures", () => {
       expect(geometry.crash.width).toBeGreaterThan(0);
       expect(geometry.rollback.width).toBeGreaterThan(0);
       expect(geometry.crash.right).toBeLessThanOrEqual(geometry.rollback.left);
-      expect(geometry.crash.text).toContain("OOMKilled ×6");
-      expect(geometry.crash.title).toContain("last occurrence");
+      expect(geometry.crash.text).toContain("api: OOMKilled");
+      expect(geometry.crash.title).toContain("previous termination");
       expect(geometry.height).toBe(40);
       expect(geometry.markers).toHaveLength(3);
       for (const marker of geometry.markers) { expect(marker.top).toBeGreaterThanOrEqual(0); expect(marker.bottom).toBeLessThanOrEqual(40); }
@@ -2550,7 +2868,7 @@ test.describe("Pod log streaming fixtures", () => {
         await openApp(page, `/agent/kubernetes${cluster ? `?cluster=${cluster}` : ""}`);
         const timeline = page.getByRole("region", { name: "Break timeline", exact: true });
         await expect(timeline.getByRole("article")).toHaveCount(3);
-        await expect(timeline).toContainText("OOMKilled ×6");
+        await expect(timeline).toContainText("OOMKilled on 6 pods");
         await expect(timeline.getByText(/History incomplete/)).not.toBeVisible();
         await expect(timeline.getByText("Secrets are not tracked.", { exact: true })).not.toBeVisible();
         for (const toggle of await timeline.getByRole("button", { name: /Warnings/ }).all()) await expect(toggle).toHaveAttribute("aria-expanded", "false");
@@ -2590,8 +2908,12 @@ test.describe("Pod log streaming fixtures", () => {
         await expect(lane.getByRole("button", { name: /HorizontalPodAutoscaler checkout-hpa: 6 → 7 at/ })).toHaveCount(1);
         await expect(lane.getByRole("button", { name: /ConfigMap checkout-cfg:.* at/ })).toHaveCount(1);
         await expect(lane).toContainText("Break: CrashLoopBackOff");
-        await expect(lane.getByRole("button", { name: /Crash: OOMKilled exit 137 ×6 \(last occurrence\) at/ })).toHaveCount(1);
+        await expect(lane.locator('[data-marker="crash"]').filter({ hasText: "×" }).first()).toHaveAttribute("aria-label", /container api: OOMKilled, exit 137/);
         await expect(lane.locator('[data-marker="crash"]')).toHaveCount(2);
+        const journal = page.getByRole("region", { name: "Captured crash evidence", exact: true });
+        await expect(journal.getByRole("list", { name: "Crash observations", exact: true }).getByRole("listitem")).toHaveCount(2);
+        await expect(journal.getByRole("button", { name: "Next crash page", exact: true })).toBeDisabled();
+        await expect(lane.getByText("Partial crash evidence", { exact: true })).toHaveCount(0);
         await expect.poll(() => reads.some((url) => url.pathname.endsWith("/changes") && Date.parse(url.searchParams.get("since") ?? "") === center - 30 * 60_000 && Date.parse(url.searchParams.get("until") ?? "") === center + 30 * 60_000)).toBe(true);
         const markers = await lane.locator("[data-marker]").evaluateAll((elements) => elements.map((element) => ({ at: element.getAttribute("data-at"), x: Number(element.getAttribute("data-x")) })));
         for (const marker of markers) expect(marker.x).toBeCloseTo((Date.parse(marker.at!) - (center - 30 * 60_000)) / (60 * 60_000) * 100, 6);
@@ -2614,13 +2936,13 @@ test.describe("Pod log streaming fixtures", () => {
           expect(framing.left).toBeGreaterThan(0);
         }
         await captureBreakState(page, `break-timeline-focus-${viewport.name}-${theme}.png`, theme);
-        const crash = lane.getByRole("button", { name: /Crash: OOMKilled exit 137 ×6 \(last occurrence\) at/ });
+        const crash = lane.locator('[data-marker="crash"]').first();
         await crash.focus();
         await page.keyboard.press("Enter");
         const details = lane.getByRole("region", { name: "Timeline event details", exact: true });
         await expect(details.getByRole("heading", { name: "Timeline event details", exact: true })).toBeFocused();
-        await expect(details).toContainText("Crash: OOMKilled exit 137 ×6 (last occurrence)");
-        await expect(details).toContainText("Crash: Error exit 1 ×1 (last occurrence)");
+        await expect(details).toContainText("container api: OOMKilled, exit 137");
+        await expect(details).toContainText("container api: Error, exit 1");
         await page.keyboard.press("Escape");
         await expect(details).toHaveCount(0);
         await expect(crash).toBeFocused();
@@ -2686,7 +3008,7 @@ test.describe("Pod log streaming fixtures", () => {
         const prior = reads.filter((url) => url.searchParams.get("root_uid") === "checkout-uid").length;
         await expanded.focus();
         await page.keyboard.press("Enter");
-        await expect(issues.getByText("OOMKilled ×6", { exact: true })).toBeVisible();
+        await expect(issues.getByText("OOMKilled on 6 pods", { exact: true })).toBeVisible();
         if (viewport.name === "mobile") await expect(issues.getByText("v41 → v42", { exact: true })).not.toBeVisible();
         else await expect(issues.getByText("v41 → v42", { exact: true })).toBeVisible();
         await expect.poll(() => reads.filter((url) => url.searchParams.get("root_uid") === "checkout-uid").length).toBe(prior + 1);
@@ -2695,7 +3017,7 @@ test.describe("Pod log streaming fixtures", () => {
         expect(rootRead.searchParams.get("include")).toBe("changes");
         await issues.getByRole("button", { name: "Collapse checkout", exact: true }).click();
         await issues.getByRole("button", { name: "Expand checkout", exact: true }).click();
-        await expect(issues.getByText("OOMKilled ×6", { exact: true })).toBeVisible();
+        await expect(issues.getByText("OOMKilled on 6 pods", { exact: true })).toBeVisible();
         expect(reads.filter((url) => url.searchParams.get("root_uid") === "checkout-uid")).toHaveLength(prior + 1);
         await captureBreakState(page, `break-issues-expanded-${viewport.name}-${theme}.png`, theme);
         await issues.getByRole("button", { name: "Open resource checkout", exact: true }).click();
@@ -2745,7 +3067,7 @@ test.describe("Pod log streaming fixtures", () => {
         fs.mkdirSync(screenshotDir, { recursive: true });
         await page.screenshot({ path: path.join(screenshotDir, `break-issues-collapsed-uncertainty-${viewport.name}-${theme}.png`), animations: "disabled" });
         await checkout.getByRole("button", { name: "Expand checkout", exact: true }).click();
-        await expect(checkout.getByText("OOMKilled ×6", { exact: true })).toBeVisible();
+        await expect(checkout.getByText("OOMKilled on 6 pods", { exact: true })).toBeVisible();
         await expect(checkout.getByRole("button", { name: /Warnings/ })).toHaveCount(0);
         expect(rootReads).toHaveLength(1);
       });
@@ -2760,7 +3082,7 @@ test.describe("Pod log streaming fixtures", () => {
         await expect(health.getByRole("button", { name: "Warnings (2)", exact: true })).toHaveAttribute("aria-expanded", "false");
         const aggregate = timeline.getByRole("button", { name: "Warnings (2)", exact: true });
         await expect(aggregate).toHaveAttribute("aria-expanded", "false");
-        await expect(timeline.getByText("OOMKilled ×6", { exact: true })).toBeVisible();
+        await expect(timeline.getByText("OOMKilled on 6 pods", { exact: true })).toBeVisible();
         const controls = await page.getByRole("button", { name: /Warnings \(/ }).evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-controls")));
         expect(new Set(controls).size).toBe(controls.length);
         fs.mkdirSync(screenshotDir, { recursive: true });
@@ -3135,4 +3457,173 @@ test.describe("Kubernetes overview", () => {
     fs.mkdirSync(screenshotDir, { recursive: true });
     await page.screenshot({ path: path.join(screenshotDir, "coherence-mobile.png"), fullPage: true, animations: "disabled" });
   });
+});
+
+test.describe("Live K12a crash evidence acceptance", () => {
+  test.skip(process.env.E2E_CRASH_EVIDENCE !== "1", "requires the live crash-evidence fakekube scenario");
+
+  for (const viewport of [{ name: "desktop", width: 1440, height: 900 }, { name: "mobile", width: 390, height: 844 }]) {
+    test(`renders six-namespace crash evidence, mobile disclosure, and timeline markers ${viewport.name}`, async ({ page }, testInfo) => {
+      await page.setViewportSize(viewport);
+      await page.emulateMedia({ colorScheme: "dark" });
+      await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      const captureLive = async (filename: string) => {
+        const proof = await page.evaluate(() => {
+          const background = getComputedStyle(document.body).backgroundColor;
+          const storedTheme = localStorage.getItem("versus.theme");
+          if (storedTheme === "dark" && background === "rgb(13, 17, 24)") document.documentElement.setAttribute("data-theme", "dark");
+          return { storedTheme, theme: document.documentElement.getAttribute("data-theme"), background, viewport: { width: innerWidth, height: innerHeight } };
+        });
+        expect(proof.storedTheme).toBe("dark");
+        expect(proof.theme).toBe("dark");
+        expect(proof.background).toBe("rgb(13, 17, 24)");
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        fs.mkdirSync(screenshotDir, { recursive: true });
+        const image = await page.screenshot({ path: path.join(screenshotDir, filename), animations: "disabled" });
+        const manifestPath = path.join(screenshotDir, "manifest-live.json");
+        const manifest = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { images: Record<string, unknown> } : { images: {} };
+        manifest.images[filename] = { classification: "L: built OSS app against live TLS fakekube crash-evidence scenario", spec: "tests/e2e/kubernetes-overview.spec.ts", config: "tests/e2e/playwright.config.ts", sha256: createHash("sha256").update(image).digest("hex"), ...proof };
+        fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+      };
+
+      await openApp(page, "/agent/kubernetes?view=overview");
+      const apiBroken = await page.evaluate(async () => {
+        const response = await fetch("/api/admin/kubernetes/issues?broken=true&include=changes&limit=20");
+        return { status: response.status, text: await response.text() };
+      });
+      expect(apiBroken.status).toBe(200);
+      expect(apiBroken.text).not.toContain("CANARY_");
+      const brokenPage = JSON.parse(apiBroken.text) as { items: KubernetesIssue[]; broken: { total: number; by_severity: Record<string, number> } };
+      expect(brokenPage.broken.total).toBe(6);
+      expect(brokenPage.items.map((item) => `${item.root.namespace}/${item.root.name}`)).toEqual([
+        "nodes/nodes-api", "batch/batch-job", "config/config-api", "evict/evict-api", "probe/probe-api", "sched/sched-api",
+      ]);
+      expect(brokenPage.items.some((item) => item.root.name === "healthy-api")).toBe(false);
+
+      const timeline = page.getByRole("region", { name: "Break timeline", exact: true });
+      await expect(timeline.getByRole("article")).toHaveCount(5);
+      await expect(timeline.getByRole("button", { name: /^Broken / })).toContainText("6");
+      await expect(timeline.getByRole("button", { name: /^Broken / })).toContainText("6 critical");
+      await expect(timeline.getByRole("button", { name: /1 more/ })).toBeVisible();
+      await expect(timeline).not.toContainText("·");
+      await expect(timeline).not.toContainText("CANARY_");
+
+      const nodesRow = timeline.getByRole("article", { name: "Deployment nodes-api", exact: true });
+      const batchRow = timeline.getByRole("article", { name: "Job batch-job", exact: true });
+      const configRow = timeline.getByRole("article", { name: "Deployment config-api", exact: true });
+      const evictRow = timeline.getByRole("article", { name: "Deployment evict-api", exact: true });
+      const probeRow = timeline.getByRole("article", { name: "Deployment probe-api", exact: true });
+
+      await expect(nodesRow.getByLabel("CrashLoopBackOff", { exact: true })).toBeVisible();
+      await expect(nodesRow).toContainText("2 of 3 pods affected");
+      await expect(nodesRow.getByText("OOMKilled signal SIGKILL on 2 pods", { exact: true })).toBeVisible();
+      await expect(nodesRow.getByText("Init Error exit 1 on 1 pod", { exact: true })).toBeVisible();
+      await expect(nodesRow.getByText("CrashLoopBackOff on 1 pod", { exact: true })).toBeVisible();
+      await expect(nodesRow.getByText("17 lifetime restarts", { exact: true })).toBeVisible();
+      await expect(nodesRow.getByText("4 warning events: BackOff 4", { exact: true })).toBeVisible();
+
+      await expect(batchRow.getByLabel("Pod failed", { exact: true })).toBeVisible();
+      await expect(batchRow.getByText("Error exit 1 on 1 pod", { exact: true })).toBeVisible();
+      await expect(batchRow.getByText("BackoffLimitExceeded", { exact: true })).toBeVisible();
+      await expect(batchRow.getByText("4 warning events: BackoffLimitExceeded 4", { exact: true })).toBeVisible();
+
+      await expect(configRow.getByLabel("Container config error", { exact: true })).toBeVisible();
+      await expect(configRow.getByText("CreateContainerConfigError on 1 pod", { exact: true })).toBeVisible();
+      await expect(configRow.getByText("4 warning events: Failed 4", { exact: true })).toBeVisible();
+
+      await expect(evictRow.getByLabel("Evicted", { exact: true })).toBeVisible();
+      await expect(evictRow.getByText("Error exit 1 on 1 pod", { exact: true })).toBeVisible();
+      await expect(evictRow.getByText("Evicted on 1 pod", { exact: true })).toBeVisible();
+      await expect(evictRow.getByText("4 warning events: Evicted 4", { exact: true })).toBeVisible();
+
+      await expect(probeRow.getByLabel("Pods unavailable", { exact: true })).toBeVisible();
+      await expect(probeRow.getByText("4 warning events: Unhealthy 4", { exact: true })).toBeVisible();
+
+      if (viewport.name === "mobile") {
+        await expect(nodesRow.getByText("Init CrashLoopBackOff on 1 pod", { exact: true })).not.toBeVisible();
+        await expect(nodesRow.getByText("Node MemoryPressure on 3 pods", { exact: true })).not.toBeVisible();
+        const toggle = nodesRow.getByRole("button", { name: "+2 more evidence for nodes-api", exact: true });
+        await toggle.focus();
+        await page.keyboard.press("Enter");
+        const less = nodesRow.getByRole("button", { name: "Show less evidence for nodes-api", exact: true });
+        await expect(less).toHaveAttribute("aria-expanded", "true");
+        await expect(less).toBeFocused();
+        await expect(nodesRow.getByText("Init CrashLoopBackOff on 1 pod", { exact: true })).toBeVisible();
+        await expect(nodesRow.getByText("Node MemoryPressure on 3 pods", { exact: true })).toBeVisible();
+      } else {
+        await expect(nodesRow.getByText("Init CrashLoopBackOff on 1 pod", { exact: true })).toBeVisible();
+        await expect(nodesRow.getByText("Node MemoryPressure on 3 pods", { exact: true })).toBeVisible();
+      }
+      for (const row of [nodesRow, batchRow, configRow, evictRow, probeRow]) {
+        expect(await row.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      }
+      await captureLive(`live-k12a-overview-${viewport.name}.png`);
+
+      await timeline.getByRole("button", { name: /1 more/ }).click();
+      const issues = page.getByRole("region", { name: "Kubernetes issues", exact: true });
+      await expect(issues).toBeVisible();
+      await expect(issues.getByRole("article", { name: "Deployment healthy-api", exact: true })).toHaveCount(0);
+      const issueNodes = issues.getByRole("article", { name: "Deployment nodes-api", exact: true });
+      const issueSched = issues.getByRole("article", { name: "Deployment sched-api", exact: true });
+      await expect(issueSched.getByLabel("Unschedulable", { exact: true })).toBeVisible();
+      if (viewport.name === "mobile") {
+        const more = issueNodes.getByRole("button", { name: "+2 more evidence for nodes-api", exact: true });
+        await more.focus();
+        await page.keyboard.press("Enter");
+        await expect(issueNodes.getByRole("button", { name: "Show less evidence for nodes-api", exact: true })).toHaveAttribute("aria-expanded", "true");
+        await expect(issueNodes.getByRole("button", { name: "Show less evidence for nodes-api", exact: true })).toBeFocused();
+      } else {
+        await issueNodes.getByRole("button", { name: "Expand nodes-api", exact: true }).click();
+      }
+      await expect(issueNodes.getByRole("button", { name: "Collapse nodes-api", exact: true })).toHaveAttribute("aria-expanded", "true");
+      await expect(issueNodes.getByText("Node MemoryPressure on 3 pods", { exact: true })).toBeVisible();
+      await issueSched.getByRole("button", { name: "Expand sched-api", exact: true }).click();
+      await expect(issueSched.getByText("Unschedulable on 1 pod", { exact: true })).toBeVisible();
+      await expect(issueSched.getByText("Unschedulable on 1 pod", { exact: true })).toHaveClass(/pill-warn/);
+      await expect(issueSched.getByText("4 warning events: FailedScheduling 4", { exact: true })).toBeVisible();
+      await expect(issues).not.toContainText("·");
+      expect(await issueNodes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      expect(await issueSched.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await captureLive(`live-k12a-issues-${viewport.name}.png`);
+
+      const journalResponse = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return url.pathname === "/api/admin/kubernetes/crashes" && url.searchParams.has("root_uid");
+      });
+      await issueNodes.getByRole("button", { name: "Timeline for nodes-api", exact: true }).click();
+      const response = await journalResponse;
+      expect(response.status()).toBe(200);
+      const journalPage: KubernetesCrashPage = await response.json();
+      const terminations = journalPage.items.filter((event) => event.type === "termination");
+      expect(terminations.length).toBeGreaterThan(0);
+      const lane = page.getByRole("region", { name: "Timeline lane nodes-api", exact: true });
+      await expect(lane).toBeVisible();
+      const chart = lane.getByRole("region", { name: "Resource timeline chart", exact: true });
+      await expect(chart.locator('[data-marker="crash"]')).toHaveCount(terminations.length);
+      expect((await chart.locator('[data-marker="crash"]').evaluateAll((elements) => elements.map((element) => element.getAttribute("data-event-id")))).sort()).toEqual(terminations.map((event) => event.id).sort());
+      await expect(lane.getByText("Partial crash evidence", { exact: true })).toHaveCount(0);
+      const journal = page.getByRole("region", { name: "Captured crash evidence", exact: true });
+      await expect(journal.getByRole("list", { name: "Crash observations", exact: true }).getByRole("listitem")).toHaveCount(journalPage.items.length);
+      for (const event of [terminations.find((item) => item.reason === "OOMKilled"), terminations.find((item) => item.init)]) {
+        expect(event).toBeTruthy();
+        const marker = chart.locator(`[data-event-id="${event!.id}"]`);
+        await marker.focus();
+        await page.keyboard.press("Enter");
+        const details = lane.getByRole("region", { name: "Timeline event details", exact: true });
+        await expect(details.getByRole("heading", { name: "Timeline event details", exact: true })).toBeFocused();
+        await expect(details).toContainText(`Pod ${event!.pod} / ${event!.init ? "Init " : ""}container ${event!.container}: ${event!.reason}, exit ${event!.exit_code}`);
+        if (event!.signal) await expect(details).toContainText(`signal ${event!.signal}`);
+        await expect(details).toContainText(`${event!.restart_count} lifetime restarts`);
+        await expect(details).not.toContainText("·");
+        await captureLive(`live-k12a-timeline-${event!.init ? "init" : "oom"}-${viewport.name}.png`);
+        await page.keyboard.press("Escape");
+        await expect(details).toHaveCount(0);
+        await expect(marker).toBeFocused();
+      }
+      expect(errors).toEqual([]);
+      await testInfo.attach("k12a-live-broken-roots", { body: JSON.stringify(brokenPage.items.map((item) => ({ root: `${item.root.namespace}/${item.root.name}`, rule: item.rule, count: item.count, of: item.of, broke_at_source: item.broke_at_source, evidence: item.evidence }))), contentType: "application/json" });
+    });
+  }
 });

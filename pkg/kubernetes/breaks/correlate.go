@@ -89,7 +89,7 @@ func Correlate(item Break, records []index.Record, edges graph.Graph, history ch
 				}
 			}
 		}
-		if record.Kind == "Pod" && Rule(record) != "" && record.NodeName != "" {
+		if record.Kind == "Pod" && record.NodeName != "" && Rule(record, item.Evidence.To) != "" {
 			needed["Node"] = true
 			if node, exists := byName["Node\x00\x00"+record.NodeName]; exists {
 				relations[node.UID] = "on_node"

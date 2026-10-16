@@ -5,9 +5,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, type KubernetesChangesPage, type KubernetesGraph, type KubernetesIssue } from "@/lib/api";
-import { KubernetesClusterContext, kubernetesKey } from "@/lib/useKubernetesCluster";
-import { BreakRow, BreakTimelineLane, ResourceTimelineChart, TimelineCard } from "./KubernetesBreakTimeline";
+import { api, ApiError, type KubernetesChangesPage, type KubernetesCrashEvent, type KubernetesCrashPage, type KubernetesGraph, type KubernetesIssue } from "@/lib/api";
+import { KubernetesClusterContext, kubernetesKey, useKubernetesCrashes } from "@/lib/useKubernetesCluster";
+import { BreakRow, BreakTimelineLane, CrashJournal, ResourceTimelineChart, TimelineCard } from "./KubernetesBreakTimeline";
 import { KubernetesExplorerTabContent } from "./KubernetesExplorerViews";
 import { KubernetesWarnings } from "./KubernetesWarnings";
 
@@ -22,6 +22,221 @@ function mount(element: React.ReactNode, cluster = "east") {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); window.history.replaceState(null, "", "/"); });
 
 describe("Break timeline", () => {
+  const observation: KubernetesCrashEvent = { id: "journal-event", sequence: 1, cluster: "east", namespace: "shop", pod: "checkout-old", pod_uid: "old-pod-uid", root_uid: "checkout-uid", root_kind: "Deployment", root_name: "checkout", container: "api", type: "termination", termination_slot: "previous", reason: "Error", exit_code: 137, restart_count: 41, at: "2026-10-14T12:05:00Z", time_source: "finished_at", observed_at: "2026-10-14T12:06:00Z" };
+  const journalPage: KubernetesCrashPage = { items: [observation], since: "2026-10-14T11:30:00Z", until: "2026-10-14T12:30:00Z", retention_from: "2026-10-13T12:30:00Z", retention_basis: "observed_at", started_at: "2026-10-14T11:45:00Z", gaps: [{ from: "2026-10-14T11:30:00Z", to: "2026-10-14T11:45:00Z" }], capture_gaps: [{ from: "2026-10-14T12:00:00Z", to: "2026-10-14T12:01:00Z" }], coverage: {}, limitations: ["journal_not_started_for_full_window"], capture: { mode: "continuous", behind: true }, sync: { state: "ready", age_s: 0, partial: true } };
+
+  function JournalScenario() {
+    const [namespace, setNamespace] = useState("shop");
+    const journal = useKubernetesCrashes({ namespace, root_uid: "checkout-uid", since: journalPage.since, until: journalPage.until });
+    return <><button onClick={() => setNamespace("other")}>Other namespace</button><ResourceTimelineChart issues={[{ ...issue, evidence: { ...issue.evidence!, partial: true } }]} changes={[]} crashes={journal.isError ? [] : journal.data?.items ?? []} since={journalPage.since} until={journalPage.until} onSelectChange={vi.fn()} /><CrashJournal journal={journal} /></>;
+  }
+
+  it("pages all journal observations without accumulating rendered rows and resets filters", async () => {
+    const lookup = vi.spyOn(api, "kubernetesCrashes").mockImplementation(async (options) => ({ ...journalPage, items: options?.cursor ? [{ ...observation, id: options.cursor, pod: options.cursor === "final-page" ? "final-pod" : "last-pod", init: true, signal: 9 }] : Array.from({ length: 50 }, (_, index) => ({ ...observation, id: `event-${index}`, pod: `old-pod-${index}` })), next: options?.cursor === "final-page" ? undefined : options?.cursor ? "final-page" : "next-page" }));
+    const { container } = mount(<JournalScenario />);
+    const journal = screen.getByRole("region", { name: "Captured crash evidence" });
+    await waitFor(() => expect(within(within(journal).getByRole("list", { name: "Crash observations" })).getAllByRole("listitem")).toHaveLength(50));
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(lookup.mock.calls[0][0]).toMatchObject({ namespace: "shop", root_uid: "checkout-uid", limit: 50, since: journalPage.since, until: journalPage.until });
+    expect(lookup.mock.calls[0][1]).toBeInstanceOf(AbortSignal);
+    expect(container.querySelectorAll('[data-marker="crash"]')).toHaveLength(50);
+    expect(screen.queryByText("Partial crash evidence")).toBeNull();
+    const opener = screen.getByRole("button", { name: /^50 events:/ });
+    fireEvent.click(opener);
+    expect(screen.getByRole("region", { name: "Timeline event details" }).textContent).toContain("old-pod-49");
+    fireEvent.keyDown(opener, { key: "Escape" });
+    fireEvent.click(within(journal).getByRole("button", { name: "Next crash page" }));
+    await waitFor(() => expect(journal.textContent).toContain("last-pod"));
+    expect(within(journal).getByRole("button", { name: "Next crash page" }).hasAttribute("disabled")).toBe(false);
+    expect(container.querySelectorAll('[data-marker="crash"]')).toHaveLength(1);
+    const summary = within(journal).getByRole("list", { name: "Crash observations" }).querySelector("summary")!;
+    fireEvent.click(summary);
+    expect(journal.textContent).toContain("signal 9");
+    expect(journal.textContent).toContain("41 lifetime restarts");
+    expect(journal.textContent).toContain("Root UID: checkout-uid; Pod UID: old-pod-uid");
+    fireEvent.click(within(journal).getByRole("button", { name: "Previous crash page" }));
+    await waitFor(() => expect(journal.textContent).toContain("old-pod-49"));
+    expect(lookup).toHaveBeenCalledTimes(2);
+    fireEvent.click(within(journal).getByRole("button", { name: "Next crash page" }));
+    await waitFor(() => expect(journal.textContent).toContain("last-pod"));
+    fireEvent.click(within(journal).getByRole("button", { name: "Next crash page" }));
+    await waitFor(() => expect(journal.textContent).toContain("final-pod"));
+    expect(within(journal).getByRole("button", { name: "Next crash page" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Other namespace" }));
+    await waitFor(() => expect(lookup).toHaveBeenCalledTimes(4));
+    expect(lookup.mock.calls[3][0]).toMatchObject({ namespace: "other", cursor: undefined });
+  });
+
+  it("keeps safe status observations, actual signals, time provenance and explicit capture gaps", async () => {
+    vi.spyOn(api, "kubernetesCrashes").mockResolvedValue({ ...journalPage, items: [observation, { ...observation, id: "status", type: "status", waiting_reason: "CrashLoopBackOff", time_source: "observed_at", ancestry_partial: true }] });
+    const { container } = mount(<JournalScenario />);
+    await screen.findByText("CrashLoopBackOff", { exact: true });
+    const journal = screen.getByRole("region", { name: "Captured crash evidence" });
+    expect(container.querySelectorAll('[data-marker="crash"]')).toHaveLength(1);
+    expect(journal.textContent).toContain("not proof of SIGKILL");
+    expect(journal.textContent).not.toContain(", signal 9");
+    expect(journal.textContent).toContain("observation time; finish time unknown");
+    expect(journal.textContent).toContain("Capture-time ancestry is incomplete");
+    expect(journal.textContent).toContain("Journal retention/capture gap:");
+    expect(journal.textContent).toContain("Capture gap:");
+    expect(journal.textContent).toContain("Pod capture coverage unavailable");
+    expect(journal.textContent).toContain("retention basis: observed_at");
+    expect(journal.textContent).toContain("Events between polls may be unseen");
+  });
+
+  it("keeps newly observed terminations with finishes 48 hours earlier visible without implying a chart marker", async () => {
+    const oldTermination = { ...observation, id: "old-finish", pod: "old-finish-pod", at: "2026-10-12T12:06:00Z" };
+    vi.spyOn(api, "kubernetesCrashes").mockResolvedValue({ ...journalPage, items: [oldTermination, observation] });
+    const { container } = mount(<JournalScenario />);
+    const journal = screen.getByRole("region", { name: "Captured crash evidence" });
+    await waitFor(() => expect(within(within(journal).getByRole("list", { name: "Crash observations" })).getAllByRole("listitem")).toHaveLength(2));
+    expect(within(journal).getByText(/^Observed window:/)).toBeTruthy();
+    const summary = within(journal).getByText("Reported finish outside observed window").closest("summary")!;
+    expect(summary.textContent).toContain("shop/old-finish-pod");
+    expect(summary.textContent).toContain("Observed:");
+    expect(summary.querySelector("time")?.dateTime).toBe(oldTermination.observed_at);
+    expect(container.querySelectorAll('[data-marker="crash"]')).toHaveLength(1);
+    expect(container.querySelector('[data-event-id="old-finish"]')).toBeNull();
+    expect(container.querySelector('[data-event-id="journal-event"]')?.getAttribute("data-at")).toBe(observation.at);
+    expect(journal.textContent).toContain("Crash markers show only this page's terminations with event times inside the chart window.");
+    fireEvent.click(summary);
+    const details = summary.closest("details")!;
+    expect(within(details).getByText(/^Event time:/).querySelector("time")?.dateTime).toBe(oldTermination.at);
+    expect(within(details).getByText(/^Event time:/).textContent).toContain("reported finish time");
+    expect(within(details).getByText(/^Observed:/, { selector: "p" }).querySelector("time")?.dateTime).toBe(oldTermination.observed_at);
+  });
+
+  it("offers retry without aggregate fallback or stale journal rows on failure", async () => {
+    const lookup = vi.spyOn(api, "kubernetesCrashes").mockRejectedValueOnce(new ApiError(403, "private upstream body")).mockResolvedValue(journalPage);
+    const { container } = mount(<JournalScenario />);
+    await screen.findByRole("alert");
+    expect(container.querySelectorAll('[data-marker="crash"]')).toHaveLength(0);
+    expect(screen.queryByText(/private upstream body/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retry crash journal" }));
+    await waitFor(() => expect(screen.getByRole("region", { name: "Captured crash evidence" }).textContent).toContain("shop/checkout-old"));
+    expect(lookup).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([true, false])("shows retained journal evidence without current issue or change data, root focus=%s", async (focused) => {
+    window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&center=${issue.broke_at}${focused ? "&root_uid=checkout-uid&namespace=shop" : ""}`);
+    vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(journalPage);
+    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [], totals: {}, truncated: false, sync: journalPage.sync });
+    vi.spyOn(api, "kubernetesChanges").mockRejectedValue(new Error("Unavailable"));
+    const graph = vi.spyOn(api, "kubernetesGraph");
+    const { container } = mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("region", { name: "Captured crash evidence" }).textContent).toContain("checkout-old"));
+    expect(container.querySelectorAll('[data-marker="crash"]')).toHaveLength(1);
+    expect(graph).not.toHaveBeenCalled();
+  });
+
+  it("clamps centered journal requests to now without changing the change-chart window", async () => {
+    const now = Date.parse("2026-10-16T12:00:00Z");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const center = "2026-10-16T11:55:00Z";
+    window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${center}`);
+    const lookup = vi.spyOn(api, "kubernetesCrashes").mockResolvedValue({ ...journalPage, items: [] });
+    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [{ ...issue, broke_at: center }], totals: {}, truncated: false, sync: journalPage.sync });
+    vi.spyOn(api, "kubernetesGraph").mockResolvedValue({ nodes: [], edges: [], omitted: {}, sync: journalPage.sync });
+    const changes = vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [], sync: journalPage.sync });
+    mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    await waitFor(() => expect(changes).toHaveBeenCalled());
+    expect(lookup.mock.calls[0][0]?.until).toBe(new Date(now).toISOString());
+    expect(changes.mock.calls[0][0]?.until).toBe("2026-10-16T12:25:00.000Z");
+    expect(screen.getByRole("region", { name: "Resource timeline chart" }).getAttribute("data-until")).toBe("2026-10-16T12:25:00.000Z");
+  });
+
+  it.each([["pod.config_error", "Container config error"], ["pod.evicted", "Evicted"], ["pod.unschedulable", "Unschedulable"]])("names rule %s and singular affected Pods", (rule, label) => {
+    mount(<BreakRow issue={{ ...issue, rule, count: 1, of: 1, evidence: undefined }} resource={resource} onSelectResource={vi.fn()} />);
+    expect(screen.getByLabelText(label)).toBeTruthy();
+    expect(screen.getByText("1 of 1 pod affected")).toBeTruthy();
+    expect(screen.queryByLabelText("Crash evidence")).toBeNull();
+  });
+
+  it.each([false, true])("reveals mobile evidence with keyboard and expands the existing row, collapsed=%s", async (collapsed) => {
+    const user = userEvent.setup();
+    const enriched: KubernetesIssue = { ...issue, evidence: { ...issue.evidence!, restarts: 44, partial: true,
+      terminations: [{ ...issue.evidence!.terminations![0], restarts: 41 }],
+      waiting: [{ reason: "CreateContainerConfigError", count: 1, init: true }],
+      pod_reasons: [{ reason: "Evicted", count: 2 }], conditions: [{ type: "Failed", reason: "BackoffLimitExceeded" }],
+      nodes: [{ reason: "MemoryPressure", count: 3 }], warning_events: 12,
+      warning_reasons: [{ reason: "FailedScheduling", count: 8 }, { reason: "Other", count: 4 }],
+    } };
+    const lookup = vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [enriched], totals: {}, truncated: false, sync: { state: "ready", age_s: 0, partial: false } });
+    const { container } = mount(<BreakRow issue={enriched} resource={resource} onSelectResource={vi.fn()} collapsed={collapsed} />);
+    const toggle = screen.getByRole("button", { name: "+2 more evidence for checkout" });
+    const extra = document.getElementById(toggle.getAttribute("aria-controls")!)!;
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(extra.className).toBe("hidden sm:contents");
+    expect(screen.getByText("OOMKilled on 6 pods")).toBeTruthy();
+    expect(screen.getByText("Init CreateContainerConfigError on 1 pod")).toBeTruthy();
+    expect(screen.getByText("Evicted on 2 pods")).toBeTruthy();
+    expect(screen.getByText("Partial crash evidence")).toBeTruthy();
+    expect(screen.getByText("44 lifetime restarts")).toBeTruthy();
+    expect(screen.getByText("12 warning events: FailedScheduling 8, Other 4")).toBeTruthy();
+    expect(lookup).not.toHaveBeenCalled();
+    toggle.focus();
+    await user.keyboard("{Enter}");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(extra.className).toBe("contents");
+    expect(extra.textContent).toContain("BackoffLimitExceeded");
+    expect(extra.textContent).toContain("Node MemoryPressure on 3 pods");
+    expect(document.activeElement).toBe(toggle);
+    if (collapsed) {
+      expect(screen.getByRole("button", { name: "Collapse checkout" }).getAttribute("aria-expanded")).toBe("true");
+      await waitFor(() => expect(lookup).toHaveBeenCalledOnce());
+    }
+    await user.keyboard("{Enter}");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(extra.className).toBe("hidden sm:contents");
+    expect(container.textContent).not.toContain("·");
+  });
+
+  it("resets evidence disclosure when scope changes and does not restore a previous scope", () => {
+    const enriched = { ...issue, evidence: { ...issue.evidence!, waiting: ["CreateContainerConfigError", "CrashLoopBackOff", "ImagePullBackOff"].map((reason) => ({ reason, count: 1 })) } };
+    function Scenario() {
+      const [scope, setScope] = useState("east");
+      return <><button onClick={() => setScope(scope === "east" ? "west" : "east")}>Change evidence scope</button><BreakRow issue={enriched} resource={resource} onSelectResource={vi.fn()} warningScope={scope} /></>;
+    }
+    mount(<Scenario />);
+    fireEvent.click(screen.getByRole("button", { name: "+1 more evidence for checkout" }));
+    expect(screen.getByRole("button", { name: "Show less evidence for checkout" }).getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Change evidence scope" }));
+    expect(screen.getByRole("button", { name: "+1 more evidence for checkout" }).getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: "Change evidence scope" }));
+    expect(screen.getByRole("button", { name: "+1 more evidence for checkout" }).getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps marker buckets and roots distinct with actual timestamps and keyboard details", async () => {
+    const user = userEvent.setup();
+    const termination = { reason: "Error", exit_code: 137, count: 1, last: "2026-10-14T12:05:00Z" };
+    const enriched = { ...issue, evidence: { ...issue.evidence!, partial: true, terminations: [termination, { ...termination, init: true }, { ...termination, signal: "SIGKILL", restarts: 1 }, { ...termination, exit_hint: "SIGKILL" }] } };
+    const second = { ...issue, root: { ...issue.root, name: "other", uid: "other" }, evidence: { ...issue.evidence!, terminations: [termination] } };
+    const { container } = mount(<ResourceTimelineChart issues={[enriched, second]} changes={[]} since="2026-10-14T11:30:00Z" until="2026-10-14T12:30:00Z" onSelectChange={vi.fn()} />);
+    const markers = [...container.querySelectorAll<HTMLElement>('[data-marker="crash"]')];
+    expect(markers).toHaveLength(5);
+    expect(new Set(markers.map((marker) => marker.dataset.eventId)).size).toBe(5);
+    expect(markers.every((marker) => marker.dataset.at === termination.last)).toBe(true);
+    expect(screen.getByText("Partial crash evidence")).toBeTruthy();
+    const opener = screen.getByRole("button", { name: /^4 events:/ });
+    opener.focus();
+    await user.keyboard("{Enter}");
+    const details = screen.getByRole("region", { name: "Timeline event details" });
+    expect(details.textContent).toContain("signal SIGKILL on 1 pod, 1 lifetime restart (last occurrence)");
+    expect(details.textContent).toContain("exit hint: SIGKILL");
+    expect(details.textContent).toContain("Init Error exit 137 on 1 pod");
+    expect(details.textContent).not.toContain("·");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("region", { name: "Timeline event details" })).toBeNull();
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it("omits unknown lifetime restarts while keeping singular warning events", () => {
+    mount(<BreakRow issue={{ ...issue, evidence: { ...issue.evidence!, warning_events: 1 } }} resource={resource} onSelectResource={vi.fn()} />);
+    expect(screen.getByText("1 warning event")).toBeTruthy();
+    expect(screen.queryByText(/lifetime restart/)).toBeNull();
+    expect(screen.queryByText("Partial crash evidence")).toBeNull();
+  });
+
   it("collapses deduplicated warnings without hiding primary break evidence and resets scope", () => {
     const warnings = [{ id: "history:gap", content: "History incomplete." }, { id: "history:gap", content: "History incomplete." }, { id: "untracked:Secret", content: "Secrets are not tracked." }];
     const { rerender } = render(<><strong>CrashLoopBackOff 7 of 7</strong><KubernetesWarnings warnings={warnings} scope="east:checkout" /></>);
@@ -262,7 +477,7 @@ describe("Break timeline", () => {
   it("names untracked dependencies and bounded evidence without provenance pills", () => {
     mount(<BreakRow issue={{ ...issue, untracked: ["Secret"] }} resource={resource} onSelectResource={vi.fn()} />);
     expect(screen.getByText(/Secrets are not tracked/)).toBeTruthy();
-    expect(screen.getByText("OOMKilled ×6")).toBeTruthy();
+    expect(screen.getByText("OOMKilled on 6 pods")).toBeTruthy();
     expect(screen.queryByText("complete")).toBeNull();
   });
 
@@ -297,7 +512,7 @@ describe("Break timeline", () => {
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(toggle);
     expect(screen.getByText(/History incomplete/)).toBeTruthy();
-    expect(screen.getByText("OOMKilled ×6")).toBeTruthy();
+    expect(screen.getByText("OOMKilled on 6 pods")).toBeTruthy();
   });
 
   it("assigns unique controls to repeated root disclosures", () => {
@@ -335,9 +550,10 @@ describe("Break timeline", () => {
     const lookup = vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [issue], totals: {}, broken: { total: 1, by_severity: { critical: 1 } }, truncated: false, sync: { state: "ready", age_s: 0, partial: false } });
     const { client } = mount(<BreakRow issue={issue} resource={resource} onSelectResource={vi.fn()} collapsed />);
     expect(lookup).not.toHaveBeenCalled();
-    expect(screen.queryByText("OOMKilled ×6")).toBeNull();
+    expect(screen.getByText("OOMKilled on 6 pods")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Expand checkout" }));
-    expect(await screen.findByText("OOMKilled ×6")).toBeTruthy();
+    await waitFor(() => expect(client.getQueryData(kubernetesKey("east", "kubernetes-issues", "root", "shop", "checkout-uid"))).toBeTruthy());
+    expect(screen.getByText("OOMKilled on 6 pods")).toBeTruthy();
     expect(lookup).toHaveBeenCalledWith({ root_uid: "checkout-uid", include: "changes", namespace: "shop" });
     expect(client.getQueryData(kubernetesKey("east", "kubernetes-issues", "root", "shop", "checkout-uid"))).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Collapse checkout" }));
@@ -359,7 +575,7 @@ describe("Break timeline", () => {
       expect(lookup).not.toHaveBeenCalled();
     }
     fireEvent.click(screen.getByRole("button", { name: "Expand checkout" }));
-    expect(await screen.findByText("OOMKilled ×6")).toBeTruthy();
+    expect(await screen.findByText("OOMKilled on 6 pods")).toBeTruthy();
     const toggle = screen.getByRole("button", { name: "Warnings (2)" });
     if (toggle.getAttribute("aria-expanded") !== "true") fireEvent.click(toggle);
     expect(screen.getByText(/Image history rebuilt from ReplicaSets/)).toBeTruthy();
@@ -420,7 +636,7 @@ describe("Break timeline", () => {
     const { client } = mount(<Scenario />);
     expect(lookup).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Expand checkout" }));
-    expect(await screen.findByText("OOMKilled ×6")).toBeTruthy();
+    expect(await screen.findByText("OOMKilled on 6 pods")).toBeTruthy();
     expect(screen.getByText(/cached-east-config/)).toBeTruthy();
     lookup.mockRejectedValue(new ApiError(status, "Denied"));
     await act(async () => { await client.invalidateQueries({ queryKey: kubernetesKey("east", "kubernetes-issues", "root", "shop", "checkout-uid") }); });
@@ -434,7 +650,7 @@ describe("Break timeline", () => {
     expect(screen.getByText("Secrets are not tracked.")).toBeTruthy();
     expect(screen.getByText("Some changes could not be linked.")).toBeTruthy();
     expect(screen.queryByText(/cached-east-config|Private history|CachedKind/)).toBeNull();
-    expect(screen.queryByText("OOMKilled ×6")).toBeNull();
+    expect(screen.queryByText("OOMKilled on 6 pods")).toBeNull();
     expect(screen.getByText("CrashLoopBackOff")).toBeTruthy();
     expect(lookup).toHaveBeenCalledTimes(2);
     await act(async () => { client.setQueryData(kubernetesKey("west", "kubernetes-issues", "root", "shop", "checkout-uid"), { ...page, items: [{ ...cached, changes: [{ ...cached.changes[0], change: { ...change, cluster: "west", name: "cached-west-config" } }] }] }, { updatedAt: 1 }); });
@@ -462,7 +678,8 @@ describe("Break timeline", () => {
     vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [issue], totals: {}, truncated: false, sync });
     mount(<BreakRow issue={issue} resource={resource} onSelectResource={vi.fn()} sourceSync={ready} collapsed />);
     fireEvent.click(screen.getByRole("button", { name: "Expand checkout" }));
-    expect(await screen.findByText("OOMKilled ×6")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText("Loading root history…")).toBeNull());
+    expect(screen.getByText("OOMKilled on 6 pods")).toBeTruthy();
     const complete = sync.state === "ready" && !sync.partial;
     expect(screen.getByText(complete ? "No change on it, its config or its nodes" : "No recorded change in available evidence")).toBeTruthy();
     if (!complete) expect(screen.queryByText("No change on it, its config or its nodes")).toBeNull();
@@ -506,7 +723,7 @@ describe("Break timeline", () => {
     const crashes = container.querySelectorAll('[data-marker="crash"]');
     expect(crashes).toHaveLength(1);
     expect(crashes[0].getAttribute("data-at")).toBe(issue.evidence!.terminations![0].last);
-    fireEvent.click(screen.getByRole("button", { name: /Crash: OOMKilled exit 137 ×6.*last occurrence.*at/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Crash: OOMKilled exit 137 on 6 pods.*last occurrence.*at/ }));
     expect(screen.getByRole("region", { name: "Timeline event details" }).textContent).toContain("last occurrence");
     fireEvent.click(screen.getByRole("button", { name: /Deployment checkout: v41.*at/ }));
     fireEvent.click(screen.getByRole("button", { name: "Open resource" }));
@@ -682,7 +899,7 @@ describe("Break timeline", () => {
     const rollbackLabel = screen.getByRole("button", { name: /Show event details: image v42/ });
     expect(crashLabel.style.maxWidth).toContain("0.83333");
     expect(rollbackLabel.style.maxWidth).toContain("0.83333");
-    expect(crashLabel.title).toContain("×6 (last occurrence)");
+    expect(crashLabel.title).toContain("on 6 pods (last occurrence)");
     expect(container.querySelector('[data-marker="crash"]')?.getAttribute("data-at")).toBe(issue.evidence!.terminations![0].last);
   });
 
@@ -732,7 +949,7 @@ describe("Break timeline", () => {
     const toggle = await screen.findByRole("button", { name: "Warnings (3)" });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(screen.getByText("CrashLoopBackOff")).toBeTruthy();
-    expect(screen.getByText("OOMKilled ×6")).toBeTruthy();
+    expect(screen.getByText("OOMKilled on 6 pods")).toBeTruthy();
     fireEvent.click(toggle);
     expect(screen.getAllByText("ConfigMap: forbidden")).toHaveLength(1);
     expect(screen.getByText("Change activity is stale.")).toBeTruthy();

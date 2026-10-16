@@ -125,12 +125,24 @@ func chatBreakContext(issue kubernetes.Issue) *core.ChatResourceBreak {
 		context.Changes = append(context.Changes, change)
 	}
 	if issue.Evidence != nil {
-		context.Evidence = &core.ChatResourceEvidence{Warnings: issue.Evidence.Warnings, From: issue.Evidence.From, To: issue.Evidence.To}
+		context.Evidence = &core.ChatResourceEvidence{Warnings: issue.Evidence.Warnings, Restarts: issue.Evidence.Restarts, Partial: issue.Evidence.Partial, From: issue.Evidence.From, To: issue.Evidence.To}
 		for _, item := range issue.Evidence.Terminations {
-			context.Evidence.Terminations = append(context.Evidence.Terminations, core.ChatResourceTermination{Reason: item.Reason, ExitCode: item.ExitCode, Count: item.Count, Last: item.Last})
+			context.Evidence.Terminations = append(context.Evidence.Terminations, core.ChatResourceTermination{Reason: item.Reason, ExitCode: item.ExitCode, Signal: item.Signal, ExitHint: item.ExitHint, Count: item.Count, Restarts: item.Restarts, Init: item.Init, Last: item.Last})
 		}
 		for _, item := range issue.Evidence.Waiting {
-			context.Evidence.Waiting = append(context.Evidence.Waiting, core.ChatResourceWaiting{Reason: item.Reason, Count: item.Count})
+			context.Evidence.Waiting = append(context.Evidence.Waiting, core.ChatResourceWaiting{Reason: item.Reason, Count: item.Count, Init: item.Init})
+		}
+		for _, item := range issue.Evidence.PodReasons {
+			context.Evidence.PodReasons = append(context.Evidence.PodReasons, core.ChatResourceReasonCount{Reason: item.Reason, Count: item.Count})
+		}
+		for _, item := range issue.Evidence.Nodes {
+			context.Evidence.Nodes = append(context.Evidence.Nodes, core.ChatResourceReasonCount{Reason: item.Reason, Count: item.Count})
+		}
+		for _, item := range issue.Evidence.WarningReasons {
+			context.Evidence.WarningReasons = append(context.Evidence.WarningReasons, core.ChatResourceReasonCount{Reason: item.Reason, Count: item.Count})
+		}
+		for _, item := range issue.Evidence.Conditions {
+			context.Evidence.Conditions = append(context.Evidence.Conditions, core.ChatResourceConditionReason{Type: item.Type, Reason: item.Reason})
 		}
 	}
 	for {
@@ -139,12 +151,55 @@ func chatBreakContext(issue kubernetes.Issue) *core.ChatResourceBreak {
 			return context
 		}
 		context.Partial = true
+		if evidence := context.Evidence; evidence != nil {
+			if len(evidence.WarningReasons) > 1 || len(evidence.WarningReasons) == 1 && evidence.WarningReasons[0].Reason != "Other" {
+				evidence.Partial = true
+				evidence.WarningReasons = []core.ChatResourceReasonCount{{Reason: "Other", Count: evidence.Warnings}}
+				continue
+			}
+			if len(evidence.Nodes) > 0 {
+				evidence.Partial = true
+				evidence.Nodes = nil
+				continue
+			}
+		}
 		if len(context.Changes) > 0 {
 			context.Changes = context.Changes[:len(context.Changes)-1]
 			context.MoreChanges++
 			continue
 		}
-		context.Evidence = nil
+		if evidence := context.Evidence; evidence != nil {
+			if len(evidence.PodReasons) > 0 {
+				evidence.Partial = true
+				evidence.PodReasons = evidence.PodReasons[:len(evidence.PodReasons)-1]
+				continue
+			}
+			if len(evidence.Waiting) > 0 {
+				evidence.Partial = true
+				evidence.Waiting = evidence.Waiting[:len(evidence.Waiting)-1]
+				continue
+			}
+			if len(evidence.Terminations) > 0 {
+				evidence.Partial = true
+				evidence.Terminations = evidence.Terminations[:len(evidence.Terminations)-1]
+				continue
+			}
+			if len(evidence.Conditions) > 0 {
+				evidence.Partial = true
+				evidence.Conditions = evidence.Conditions[:len(evidence.Conditions)-1]
+				continue
+			}
+			context.Evidence = nil
+			continue
+		}
+		if len(context.Rebuilt) > 0 {
+			context.Rebuilt = context.Rebuilt[:len(context.Rebuilt)-1]
+			continue
+		}
+		if len(context.Untracked) > 0 {
+			context.Untracked = context.Untracked[:len(context.Untracked)-1]
+			continue
+		}
 		return context
 	}
 }
