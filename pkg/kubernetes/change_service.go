@@ -25,16 +25,17 @@ type ChangePage struct {
 }
 
 type changeStoreState struct {
-	mu           sync.Mutex
-	provider     storage.Provider
-	stores       map[kubeindex.Scope]*kubechanges.Store
-	captureLocks map[kubeindex.Scope]*sync.Mutex
-	refreshes    map[indexRefreshKey]*indexRefreshCall
-	fallbacks    map[kubeindex.Scope]map[*indexRefreshCall]struct{}
-	stopped      map[kubeindex.Scope]bool
-	captures     map[kubeindex.Scope]*captureLoop
-	lifecycle    context.Context
-	firstSeen    map[kubeindex.Scope]map[string]time.Time
+	mu            sync.Mutex
+	provider      storage.Provider
+	stores        map[kubeindex.Scope]*kubechanges.Store
+	captureLocks  map[kubeindex.Scope]*sync.Mutex
+	refreshes     map[indexRefreshKey]*indexRefreshCall
+	fallbacks     map[kubeindex.Scope]map[*indexRefreshCall]struct{}
+	stopped       map[kubeindex.Scope]bool
+	captures      map[kubeindex.Scope]*captureLoop
+	lifecycle     context.Context
+	firstSeen     map[kubeindex.Scope]map[string]time.Time
+	journalFailed map[kubeindex.Scope]bool
 }
 
 type indexRefreshKey struct {
@@ -51,13 +52,14 @@ type indexRefreshCall struct {
 
 func newChangeStoreState() *changeStoreState {
 	return &changeStoreState{
-		stores:       make(map[kubeindex.Scope]*kubechanges.Store),
-		captureLocks: make(map[kubeindex.Scope]*sync.Mutex),
-		refreshes:    make(map[indexRefreshKey]*indexRefreshCall),
-		fallbacks:    make(map[kubeindex.Scope]map[*indexRefreshCall]struct{}),
-		stopped:      make(map[kubeindex.Scope]bool),
-		captures:     make(map[kubeindex.Scope]*captureLoop),
-		firstSeen:    map[kubeindex.Scope]map[string]time.Time{},
+		stores:        make(map[kubeindex.Scope]*kubechanges.Store),
+		captureLocks:  make(map[kubeindex.Scope]*sync.Mutex),
+		refreshes:     make(map[indexRefreshKey]*indexRefreshCall),
+		fallbacks:     make(map[kubeindex.Scope]map[*indexRefreshCall]struct{}),
+		stopped:       make(map[kubeindex.Scope]bool),
+		captures:      make(map[kubeindex.Scope]*captureLoop),
+		firstSeen:     map[kubeindex.Scope]map[string]time.Time{},
+		journalFailed: map[kubeindex.Scope]bool{},
 	}
 }
 
@@ -74,6 +76,7 @@ func (service *Service) SetChangeStorage(provider storage.Provider) {
 	service.changes.provider = provider
 	service.changes.stores = make(map[kubeindex.Scope]*kubechanges.Store)
 	service.changes.captureLocks = make(map[kubeindex.Scope]*sync.Mutex)
+	service.changes.journalFailed = make(map[kubeindex.Scope]bool)
 	service.changes.mu.Unlock()
 }
 

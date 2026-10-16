@@ -22,6 +22,368 @@ import (
 	"golang.org/x/time/rate"
 )
 
+type journalFaultProvider struct {
+	storage.Provider
+	fail atomic.Bool
+}
+
+func (provider *journalFaultProvider) CompareAndSwapBlob(name string, expected, replacement []byte) (bool, error) {
+	if provider.fail.Load() {
+		return false, errors.New("storage unavailable")
+	}
+	return provider.Provider.(storage.BlobCAS).CompareAndSwapBlob(name, expected, replacement)
+}
+
+func TestCrashJournalRawCaptureRestartAndDeletion(t *testing.T) {
+	now := time.Now().UTC().Add(-time.Minute)
+	var deleted atomic.Bool
+	var restarts atomic.Int32
+	restarts.Store(2)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{map[string]any{"name": "apps", "preferredVersion": map[string]any{"version": "v1"}, "versions": []any{map[string]any{"version": "v1"}}}}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/apis/apps/v1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "statefulsets", "kind": "StatefulSet", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/apis/apps/v1/statefulsets":
+			if deleted.Load() {
+				writeJSON(writer, map[string]any{"items": []any{}})
+				return
+			}
+			writeJSON(writer, map[string]any{"items": []any{map[string]any{"apiVersion": "apps/v1", "kind": "StatefulSet", "metadata": map[string]any{"name": "api", "namespace": "shop", "uid": "root"}}}})
+		case "/api/v1/pods":
+			if deleted.Load() {
+				writeJSON(writer, map[string]any{"items": []any{}})
+				return
+			}
+			var statuses []any
+			for position := range 20 {
+				statuses = append(statuses, map[string]any{"name": "app-" + strconv.Itoa(position), "restartCount": restarts.Load(), "state": map[string]any{"terminated": map[string]any{"reason": "Reason" + string(rune('A'+position)), "exitCode": 1, "finishedAt": now.Format(time.RFC3339Nano), "message": "CANARY_CURRENT"}}, "lastState": map[string]any{"terminated": map[string]any{"reason": "OOMKilled", "exitCode": 137, "signal": 9, "finishedAt": now.Add(-time.Second).Format(time.RFC3339Nano), "message": "CANARY_PREVIOUS"}}})
+			}
+			writeJSON(writer, map[string]any{"items": []any{map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": map[string]any{"name": "api-0", "namespace": "shop", "uid": "pod", "ownerReferences": []any{map[string]any{"apiVersion": "apps/v1", "kind": "StatefulSet", "name": "api", "uid": "root", "controller": true}}}, "spec": map[string]any{"containers": []any{map[string]any{"name": "app", "env": []any{map[string]any{"name": "TOKEN", "value": "CANARY_SECRET"}}}}}, "status": map[string]any{"containerStatuses": statuses, "initContainerStatuses": statuses}}}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	provider := &journalFaultProvider{Provider: storage.NewMemory()}
+	construct := func() *Service {
+		service := newTestService(t, server.URL, Scope{OrgID: "org", ClusterID: "cluster"})
+		service.SetChangeStorage(provider)
+		if _, _, err := service.IndexSnapshot(t.Context(), "Pod", "StatefulSet"); err != nil {
+			t.Fatal(err)
+		}
+		return service
+	}
+	service := construct()
+	assertRows := func(service *Service, want int) {
+		t.Helper()
+		query := kubechanges.CrashQuery{RootUID: "root", Namespace: "shop", Limit: 13}
+		ids := map[string]bool{}
+		for {
+			page, err := service.changeStore().QueryCrashes(query, time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, _ := json.Marshal(page)
+			if strings.Contains(string(encoded), "CANARY") || len(page.Gaps) != 0 || len(encoded) > 64<<10 {
+				t.Fatalf("unsafe/incomplete page: %s", encoded)
+			}
+			for _, event := range page.Items {
+				if ids[event.ID] || event.AncestryPartial || event.RootKind != "StatefulSet" {
+					t.Fatalf("duplicate or lost ancestry: %+v", event)
+				}
+				ids[event.ID] = true
+			}
+			if page.Next == "" {
+				break
+			}
+			query.Cursor = page.Next
+		}
+		if len(ids) != want {
+			t.Fatalf("journal rows=%d want=%d", len(ids), want)
+		}
+	}
+	assertRows(service, 120)
+	assertRows(construct(), 120)
+	provider.fail.Store(true)
+	restarts.Store(9)
+	failed := construct()
+	page, err := failed.Crashes(t.Context(), kubechanges.CrashQuery{RootUID: "root"})
+	if err != nil || !page.Sync.Partial || !page.Capture.Behind || !containsString(page.Limitations, "journal_commit_failed") {
+		t.Fatalf("failed commit hidden: %+v %v", page, err)
+	}
+	provider.fail.Store(false)
+	if _, _, err := failed.IndexSnapshot(t.Context(), "Pod"); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := failed.changeStore().QueryCrashes(kubechanges.CrashQuery{RootUID: "root"}, time.Now().UTC())
+	if err != nil || len(retained.Gaps) == 0 {
+		t.Fatalf("recovered commit loss hidden: %+v %v", retained, err)
+	}
+	recovered := construct()
+	retained, err = recovered.changeStore().QueryCrashes(kubechanges.CrashQuery{RootUID: "root", Limit: 100}, time.Now().UTC())
+	if err != nil || retained.Next == "" {
+		t.Fatalf("recovered retained history: %+v %v", retained, err)
+	}
+	deleted.Store(true)
+	deletedService := construct()
+	query := kubechanges.CrashQuery{RootUID: "root", Limit: 100}
+	count := 0
+	for {
+		page, err := deletedService.changeStore().QueryCrashes(query, time.Now().UTC())
+		if err != nil || len(page.Gaps) == 0 {
+			t.Fatalf("deletion lost disclosure: %+v %v", page, err)
+		}
+		count += len(page.Items)
+		if page.Next == "" {
+			break
+		}
+		query.Cursor = page.Next
+	}
+	if count != 160 {
+		t.Fatalf("deletion lost rows: %d", count)
+	}
+}
+
+func TestCrashJournalObservationGapsAndUnknownTimes(t *testing.T) {
+	now := time.Now().UTC()
+	pod := kubeindex.Record{UID: "pod", Kind: "Pod", Name: "api", Namespace: "shop", Owners: []kubeindex.OwnerRef{{Kind: "ReplicaSet", UID: "missing", Name: "rs", ControllerKnown: true, Controller: true}}}
+	batch := &crashCaptureBatch{}
+	batch.add("cluster", pod, map[string]any{"initContainerStatuses": []any{map[string]any{"name": "setup", "restartCount": float64(7), "lastState": map[string]any{"terminated": map[string]any{"reason": "Error", "exitCode": float64(1), "finishedAt": "invalid"}}}}}, now)
+	events, gaps, read := batch.resolve(kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "ready"}}}, now)
+	if !read || len(gaps) != 0 || len(events) != 2 || events[0].Type != "termination" || !events[0].Init || !events[0].AncestryPartial || events[0].TimeSource != "observed_at" || !events[0].At.Equal(now) {
+		t.Fatalf("unknown time/ancestry hidden: %+v %+v", events, gaps)
+	}
+	batch.bytes = 1 << 20
+	batch.add("cluster", pod, map[string]any{"containerStatuses": []any{map[string]any{"name": "extra", "restartCount": float64(1)}}}, now)
+	_, gaps, _ = batch.resolve(kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "ready"}}}, now)
+	if len(gaps) != 1 || gaps[0].From.After(now.Add(-24*time.Hour)) {
+		t.Fatal("capture budget omission hidden")
+	}
+	batch.omitted = false
+	_, gaps, _ = batch.resolve(kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "partial", Partial: true}}}, now)
+	if len(gaps) == 0 {
+		t.Fatal("partial Pod read hidden")
+	}
+	failed := &crashCaptureBatch{attempted: true}
+	_, gaps, _ = failed.resolve(kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "error", Partial: true}}}, now)
+	if len(gaps) == 0 {
+		t.Fatal("failed Pod poll hidden")
+	}
+}
+
+func TestCrashJournalHealthyPollsDoNotStarveLateCrashes(t *testing.T) {
+	for _, healthy := range []int{2101, 5001} {
+		t.Run(strconv.Itoa(healthy), func(t *testing.T) {
+			now := time.Now().UTC()
+			store := kubechanges.NewStore(storage.NewMemory(), kubeindex.Scope{ClusterID: "cluster"})
+			pod := kubeindex.Record{UID: "crashed", Kind: "Pod", Name: "crashed", Namespace: "shop"}
+			snapshot := kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "ready"}}}
+			for poll := range 4 {
+				observed := now.Add(time.Duration(poll) * time.Second)
+				batch := &crashCaptureBatch{}
+				for position := range healthy {
+					name := "healthy-" + strconv.Itoa(position)
+					batch.add("cluster", kubeindex.Record{UID: name, Kind: "Pod", Name: name, Namespace: "shop"}, map[string]any{"containerStatuses": []any{map[string]any{"name": "app", "state": map[string]any{"running": map[string]any{}}}}, "initContainerStatuses": []any{map[string]any{"name": "setup"}}}, observed)
+				}
+				if len(batch.events) != 0 || len(batch.pods) != 0 || batch.bytes != 0 || batch.omitted {
+					t.Fatal("healthy containers consumed capture budget")
+				}
+				batch.add("cluster", pod, map[string]any{"containerStatuses": []any{map[string]any{"name": "app", "restartCount": float64(poll + 1), "state": map[string]any{"waiting": map[string]any{"reason": "CrashLoopBackOff"}}, "lastState": map[string]any{"terminated": map[string]any{"reason": "Error", "exitCode": float64(1), "finishedAt": observed.Format(time.RFC3339Nano)}}}}}, observed)
+				events, gaps, read := batch.resolve(snapshot, observed)
+				if len(events) != 2 || len(gaps) != 0 || !read || events[0].Type != "termination" {
+					t.Fatalf("late crash lost: %+v %+v", events, gaps)
+				}
+				if err := store.CommitCapture(nil, nil, nil, "", observed, events, gaps, read); err != nil {
+					t.Fatal(err)
+				}
+			}
+			page, err := store.QueryCrashes(kubechanges.CrashQuery{}, now.Add(4*time.Second))
+			if err != nil || len(page.Items) != 8 || len(page.Gaps) != 0 {
+				t.Fatalf("healthy churn evicted crashes: rows=%d gaps=%+v err=%v", len(page.Items), page.Gaps, err)
+			}
+		})
+	}
+}
+
+func TestCrashJournalCompletedInitPollsDoNotStarveLateCrash(t *testing.T) {
+	for _, reason := range []string{"Completed", ""} {
+		t.Run("reason="+reason, func(t *testing.T) {
+			now := time.Now().UTC()
+			store := kubechanges.NewStore(storage.NewMemory(), kubeindex.Scope{ClusterID: "cluster"})
+			snapshot := kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "ready"}}}
+			var crashID string
+			for poll := range 4 {
+				observed := now.Add(time.Duration(poll) * time.Second)
+				batch := &crashCaptureBatch{}
+				for position := range 5001 {
+					name := "healthy-" + strconv.Itoa(position)
+					batch.add("cluster", kubeindex.Record{UID: name, Kind: "Pod", Name: name, Namespace: "shop"}, map[string]any{"containerStatuses": []any{map[string]any{"name": "app", "state": map[string]any{"running": map[string]any{}}}}, "initContainerStatuses": []any{map[string]any{"name": "setup", "state": map[string]any{"terminated": map[string]any{"reason": reason, "exitCode": float64(0), "signal": float64(0), "finishedAt": now.Add(-time.Minute).Format(time.RFC3339Nano)}}}}}, observed)
+				}
+				if len(batch.events) != 0 || len(batch.pods) != 0 || batch.bytes != 0 || batch.omitted {
+					t.Fatal("successful init terminations consumed capture budget")
+				}
+				batch.add("cluster", kubeindex.Record{UID: "late", Kind: "Pod", Name: "late", Namespace: "shop"}, map[string]any{"containerStatuses": []any{map[string]any{"name": "app", "state": map[string]any{"terminated": map[string]any{"reason": "Error", "exitCode": float64(1), "finishedAt": now.Format(time.RFC3339Nano)}}}}}, observed)
+				events, gaps, read := batch.resolve(snapshot, observed)
+				if len(events) != 1 || len(gaps) != 0 || !read || events[0].Type != "termination" || events[0].PodUID != "late" {
+					t.Fatalf("late crash starved: %+v %+v", events, gaps)
+				}
+				if poll == 0 {
+					crashID = events[0].ID
+				}
+				if err := store.CommitCapture(nil, nil, nil, "", observed, events, gaps, read); err != nil {
+					t.Fatal(err)
+				}
+				page, err := store.QueryCrashes(kubechanges.CrashQuery{}, observed)
+				if err != nil || len(page.Items) != 1 || page.Items[0].ID != crashID || page.Items[0].Sequence != 1 || !page.Items[0].ObservedAt.Equal(now) || len(page.Gaps) != 0 || page.Next != "" {
+					t.Fatalf("repeat poll churned journal: %+v %v", page, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCrashJournalSuccessfulTerminationKeepsOnlyLifetimeStatus(t *testing.T) {
+	now := time.Now().UTC()
+	for _, field := range []string{"containerStatuses", "initContainerStatuses"} {
+		for _, source := range []string{"state", "lastState"} {
+			for _, reason := range []string{"Completed", ""} {
+				for _, restarts := range []int{0, 3} {
+					t.Run(field+"/"+source+"/reason="+reason+"/restarts="+strconv.Itoa(restarts), func(t *testing.T) {
+						batch := &crashCaptureBatch{}
+						batch.add("cluster", kubeindex.Record{UID: "pod", Kind: "Pod", Name: "pod"}, map[string]any{field: []any{map[string]any{"name": "app", "restartCount": float64(restarts), source: map[string]any{"terminated": map[string]any{"reason": reason, "exitCode": float64(0), "signal": float64(0)}}}}}, now)
+						events, gaps, read := batch.resolve(kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "ready"}}}, now)
+						want := 0
+						if restarts > 0 {
+							want = 1
+						}
+						if !read || len(gaps) != 0 || len(events) != want || want == 1 && (events[0].Type != "status" || events[0].RestartCount != int32(restarts)) {
+							t.Fatalf("successful termination duplicated or lifetime count lost: %+v %+v", events, gaps)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestCrashJournalAbnormalTerminationIsNotSuccessful(t *testing.T) {
+	now := time.Now().UTC()
+	for _, test := range []struct {
+		name     string
+		reason   string
+		exitCode int
+		signal   int
+	}{
+		{name: "nonzero exit", exitCode: 1},
+		{name: "signal only", signal: 9},
+		{name: "abnormal reason", reason: "Error"},
+		{name: "completed with nonzero exit", reason: "Completed", exitCode: 1},
+		{name: "completed with signal", reason: "Completed", signal: 9},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			batch := &crashCaptureBatch{}
+			batch.add("cluster", kubeindex.Record{UID: "pod", Kind: "Pod", Name: "pod"}, map[string]any{"initContainerStatuses": []any{map[string]any{"name": "setup", "state": map[string]any{"terminated": map[string]any{"reason": test.reason, "exitCode": float64(test.exitCode), "signal": float64(test.signal)}}}}}, now)
+			events, gaps, read := batch.resolve(kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "ready"}}}, now)
+			if !read || len(gaps) != 0 || len(events) != 1 || events[0].Type != "termination" || events[0].Reason != test.reason || events[0].ExitCode != int32(test.exitCode) || events[0].Signal != int32(test.signal) {
+				t.Fatalf("abnormal termination suppressed: %+v %+v", events, gaps)
+			}
+		})
+	}
+}
+
+func TestCrashJournalTerminationPriorityAndBounds(t *testing.T) {
+	now := time.Now().UTC()
+	batch := &crashCaptureBatch{}
+	for position := range 6000 {
+		name := "waiting-" + strconv.Itoa(position)
+		batch.add("cluster", kubeindex.Record{UID: name, Kind: "Pod", Name: name}, map[string]any{"containerStatuses": []any{map[string]any{"name": "app", "state": map[string]any{"waiting": map[string]any{"reason": "ContainerCreating"}}}}}, now)
+	}
+	pod := kubeindex.Record{UID: "late", Kind: "Pod", Name: "late"}
+	batch.add("cluster", pod, map[string]any{"containerStatuses": []any{map[string]any{"name": "app", "restartCount": float64(1), "state": map[string]any{"terminated": map[string]any{"reason": "Error"}}, "lastState": map[string]any{"terminated": map[string]any{"reason": "OOMKilled"}}}}}, now)
+	events, gaps, _ := batch.resolve(kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "ready"}}}, now)
+	terminations := 0
+	for _, event := range events {
+		if event.PodUID == "late" && event.Type == "termination" {
+			terminations++
+		}
+	}
+	if terminations != 2 || len(gaps) != 1 || len(events) > 5000 || batch.bytes > 1<<20 || len(batch.pods) > len(events) {
+		t.Fatalf("priority/bounds: terminations=%d events=%d pods=%d bytes=%d gaps=%+v", terminations, len(events), len(batch.pods), batch.bytes, gaps)
+	}
+}
+
+func TestCrashJournalInvalidResolvedEventDoesNotAbortChanges(t *testing.T) {
+	now := time.Now().UTC()
+	service := NewService(nil, Scope{ClusterID: "cluster"}, 0)
+	store := kubechanges.NewStore(storage.NewMemory(), kubeindex.Scope{ClusterID: "cluster"})
+	batch := &crashCaptureBatch{}
+	for _, name := range []string{"invalid", "valid"} {
+		pod := kubeindex.Record{UID: name, Kind: "Pod", Name: name, Namespace: "shop"}
+		if name == "invalid" {
+			pod.Owners = []kubeindex.OwnerRef{{UID: "root", Kind: "StatefulSet", ControllerKnown: true, Controller: true}}
+		}
+		batch.add("cluster", pod, map[string]any{"containerStatuses": []any{map[string]any{"name": "app", "restartCount": float64(1)}}}, now)
+	}
+	deltas := make(chan kubeindex.Delta, 1)
+	close(deltas)
+	snapshot := kubeindex.Snapshot{Records: []kubeindex.Record{{UID: "root", Kind: "StatefulSet", Name: "api", Namespace: "shop", ProgressingTransitionAt: now, CurrentRevision: "old", UpdateRevision: "new"}}, Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "ready"}}}
+	if err := service.captureCycleWithCrashes(store, deltas, snapshot, []string{"Pod"}, now, batch); err != nil {
+		t.Fatalf("invalid crash aborted shared commit: %v", err)
+	}
+	page, err := store.QueryCrashes(kubechanges.CrashQuery{}, time.Now().UTC())
+	if err != nil || len(page.Items) != 1 || page.Items[0].PodUID != "valid" || len(page.Gaps) != 1 || page.Gaps[0].From.After(page.StartedAt.Add(-24*time.Hour)) {
+		t.Fatalf("invalid crash not skipped/disclosed: %+v %v", page, err)
+	}
+	changes, err := store.Query(kubechanges.Query{}, time.Now().UTC())
+	if err != nil || len(changes.Items) == 0 {
+		t.Fatalf("shared resource change lost: %+v %v", changes, err)
+	}
+}
+
+func TestCrashJournalCapturedSourceAncestryRemainsPartial(t *testing.T) {
+	now := time.Now().UTC()
+	for _, test := range []struct {
+		name         string
+		podPartial   bool
+		ownerMissing bool
+		ownerPartial bool
+		wantPartial  bool
+	}{
+		{name: "complete chain"},
+		{name: "captured Pod partial", podPartial: true, wantPartial: true},
+		{name: "missing owner", ownerMissing: true, wantPartial: true},
+		{name: "partial owner", ownerPartial: true, wantPartial: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pod := kubeindex.Record{UID: "pod", Kind: "Pod", Name: "api-0", Namespace: "shop", Summary: map[string]string{}, Owners: []kubeindex.OwnerRef{{UID: "root", Kind: "StatefulSet", Name: "api", ControllerKnown: true, Controller: true}}}
+			if test.podPartial {
+				pod.Summary["references_partial"] = "true"
+			}
+			batch := &crashCaptureBatch{}
+			batch.add("cluster", pod, map[string]any{"containerStatuses": []any{map[string]any{"name": "app", "restartCount": float64(1)}}}, now)
+			pod.Summary = nil
+			snapshot := kubeindex.Snapshot{Records: []kubeindex.Record{pod}, Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "ready"}}}
+			if !test.ownerMissing {
+				owner := kubeindex.Record{UID: "root", Kind: "StatefulSet", Name: "api", Namespace: "shop", Summary: map[string]string{}}
+				if test.ownerPartial {
+					owner.Summary["references_partial"] = "true"
+				}
+				snapshot.Records = append(snapshot.Records, owner)
+			}
+			events, gaps, _ := batch.resolve(snapshot, now)
+			if len(events) != 1 || events[0].RootUID != "root" || events[0].AncestryPartial != test.wantPartial || len(gaps) != 0 {
+				t.Fatalf("capture-time ancestry misrepresented: %+v %+v", events, gaps)
+			}
+		})
+	}
+}
+
 func TestIndependentCaptureServicesShareIdentityAndLease(t *testing.T) {
 	provider := storage.NewMemory()
 	scope := Scope{OrgID: "org", ClusterID: "cluster", CredentialID: "configured"}

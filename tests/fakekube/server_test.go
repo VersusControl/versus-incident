@@ -25,6 +25,68 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 )
 
+func TestCrashEvidenceScenarioConsumers(t *testing.T) {
+	server, err := NewServer(Config{Scenario: "crash-evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(server)
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service.SetChangeStorage(storage.NewMemory())
+	page, err := service.Issues(t.Context(), kubernetes.IssueOptions{Broken: true, IncludeChanges: true})
+	if err != nil || len(page.Items) != 6 {
+		t.Fatalf("six fixture roots: %+v %v", page, err)
+	}
+	rules := map[string]string{"config": "pod.config_error", "sched": "pod.unschedulable", "evict": "pod.evicted", "batch": "pod.failed", "probe": "workload.unavailable", "nodes": "pod.crash_loop"}
+	for _, issue := range page.Items {
+		if issue.Root.Name == "healthy-api" || issue.Rule != rules[issue.Root.Namespace] || issue.Evidence == nil || issue.Evidence.Warnings != 4 {
+			t.Fatalf("fixture issue: %+v", issue)
+		}
+		if issue.BrokeAtSource == "first_seen" {
+			t.Fatalf("fixture lost condition time: %+v", issue)
+		}
+		if issue.Root.Namespace == "batch" && (len(issue.Evidence.Conditions) != 1 || issue.Evidence.Conditions[0].Reason != "BackoffLimitExceeded") {
+			t.Fatal("Job condition lost behind higher-priority Pod rule")
+		}
+		if issue.Root.Namespace == "nodes" {
+			if len(issue.Evidence.Nodes) != 1 || issue.Evidence.Nodes[0].Reason != "MemoryPressure" || issue.Evidence.Nodes[0].Count != 3 || issue.Evidence.Restarts != 17 || len(issue.Evidence.Terminations) != 2 {
+				t.Fatalf("node evidence: %+v", issue.Evidence)
+			}
+			if issue.Evidence.Terminations[0].Reason != "OOMKilled" || issue.Evidence.Terminations[0].Count != 2 || issue.Evidence.Terminations[0].Restarts != 14 || issue.Evidence.Terminations[0].Signal != "SIGKILL" {
+				t.Fatalf("running Pod evidence: %+v", issue.Evidence)
+			}
+		}
+	}
+	ordinary, err := service.Issues(t.Context(), kubernetes.IssueOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for namespace, rule := range map[string]string{"config": "pod.config_error", "sched": "pod.unschedulable", "evict": "pod.evicted"} {
+		found := false
+		for _, issue := range ordinary.Items {
+			if issue.Root.Namespace == namespace && issue.Rule == rule && issue.Broken && issue.Evidence != nil {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("ordinary issues missing promoted rule %s", rule)
+		}
+	}
+	diagnosis, err := service.DiagnoseWorkload(t.Context(), kubernetes.DiagnoseOptions{Namespace: "config", Kind: "Deployment", Name: "config-api"})
+	if err != nil || diagnosis.Break == nil || diagnosis.Break.Evidence == nil || diagnosis.Break.Evidence.Waiting[0].Reason != "CreateContainerConfigError" {
+		t.Fatalf("diagnose evidence: %+v %v", diagnosis.Break, err)
+	}
+	encoded, err := json.Marshal([]any{page, ordinary, diagnosis})
+	if err != nil || strings.Contains(string(encoded), "CANARY_") {
+		t.Fatal("fixture message leaked through shared consumer")
+	}
+}
+
 func TestProjectedTokenControlsSignRotateAndRejectInvalidInput(t *testing.T) {
 	server, err := NewServer(Config{})
 	if err != nil {

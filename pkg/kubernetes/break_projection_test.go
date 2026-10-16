@@ -13,6 +13,73 @@ import (
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 )
 
+func TestNativeDeploymentOmittedZeroAvailability(t *testing.T) {
+	service := NewService(nil, Scope{ClusterID: "cluster"}, 0)
+	for _, test := range []struct {
+		name   string
+		status map[string]any
+		broken bool
+	}{
+		{"native unavailable", map[string]any{"replicas": float64(1), "unavailableReplicas": float64(1), "conditions": []any{map[string]any{"type": "Available", "status": "False"}}}, true},
+		{"absent status", nil, false},
+		{"condition only", map[string]any{"conditions": []any{map[string]any{"type": "Available", "status": "False"}}}, false},
+		{"counters only", map[string]any{"replicas": float64(1), "unavailableReplicas": float64(1)}, false},
+		{"partial unavailable", map[string]any{"replicas": float64(2), "unavailableReplicas": float64(1), "conditions": []any{map[string]any{"type": "Available", "status": "False"}}}, false},
+		{"inconsistent totals", map[string]any{"replicas": float64(1), "unavailableReplicas": float64(2), "conditions": []any{map[string]any{"type": "Available", "status": "False"}}}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": "api", "uid": "root"}, "spec": map[string]any{"replicas": float64(1)}, "status": test.status}
+			projected := service.projectResource(ResourceDefinition{Kind: "Deployment"}, raw)
+			record := indexRecord(projected)
+			for _, view := range []ProjectedResource{projected, recordProjection(record)} {
+				findings := classifyIssue(view)
+				if (len(findings) == 1) != test.broken || test.broken && findings[0].rule != "workload.unavailable" {
+					t.Fatalf("ordinary findings: %+v summary=%+v", findings, view.Summary)
+				}
+			}
+			items := kubebreaks.Classify([]kubeindex.Record{record}, time.Now().UTC())
+			if (len(items) == 1) != test.broken {
+				t.Fatalf("broken roots: %+v record=%+v", items, record)
+			}
+			if test.broken && (items[0].Rule != "workload.unavailable" || items[0].Count != 1 || items[0].Of != 1 || record.Summary["unavailable_replicas"] != "1") {
+				t.Fatalf("native availability lost: %+v record=%+v", items, record)
+			}
+		})
+	}
+}
+
+func TestNativeFailedJobPodCurrentTerminationBeforeReady(t *testing.T) {
+	now := time.Date(2026, 10, 16, 8, 3, 0, 0, time.UTC)
+	service := NewService(nil, Scope{ClusterID: "cluster"}, 0)
+	for _, current := range []bool{false, true} {
+		for _, phase := range []string{"Failed", "Running"} {
+			for _, finished := range []time.Time{now.Add(-43 * time.Second), {}, now.Add(time.Second), now.Add(-25 * time.Hour)} {
+				state := map[string]any{"terminated": map[string]any{"reason": "Error", "exitCode": float64(1), "finishedAt": finished.Format(time.RFC3339Nano)}}
+				container := map[string]any{"name": "app", "state": map[string]any{}, "lastState": state}
+				if current {
+					container["state"], container["lastState"] = state, map[string]any{}
+				}
+				raw := map[string]any{"kind": "Pod", "metadata": map[string]any{"name": "job-pod", "uid": "pod", "ownerReferences": []any{map[string]any{"kind": "Job", "name": "job", "uid": "job", "controller": true}}}, "status": map[string]any{"phase": phase, "conditions": []any{map[string]any{"type": "Ready", "status": "False", "reason": "PodFailed", "lastTransitionTime": now.Add(-42 * time.Second).Format(time.RFC3339Nano)}}, "containerStatuses": []any{container}}}
+				projected := service.projectResource(ResourceDefinition{Kind: "Pod"}, raw)
+				encoded, _ := json.Marshal(projected)
+				if err := json.Unmarshal(encoded, &projected); err != nil {
+					t.Fatal(err)
+				}
+				record := indexRecord(projected)
+				job := kubeindex.Record{Kind: "Job", UID: "job", Summary: map[string]string{"job_failed_status": "True", "job_failed_reason": "BackoffLimitExceeded"}}
+				items := kubebreaks.Classify([]kubeindex.Record{job, record}, now)
+				want := current && phase == "Failed" && finished.Equal(now.Add(-43*time.Second))
+				if len(items) != 1 || (len(items[0].Evidence.Terminations) == 1) != want {
+					t.Fatalf("current=%v phase=%s finished=%v: %+v", current, phase, finished, items)
+				}
+				if want && (items[0].Rule != "pod.failed" || items[0].Evidence.Terminations[0].ExitCode != 1 || !items[0].BrokeAt.Equal(finished)) {
+					t.Fatalf("terminal exit lost: %+v", items[0])
+				}
+			}
+		}
+	}
+}
+
 func TestProjectPodBreakFieldsNoMessages(t *testing.T) {
 	at := time.Now().UTC().Truncate(time.Second)
 	raw := map[string]any{"kind": "Pod", "metadata": map[string]any{"name": "api", "uid": "pod"}, "status": map[string]any{
@@ -31,6 +98,71 @@ func TestProjectPodBreakFieldsNoMessages(t *testing.T) {
 	}
 	if safeBreakReason("Error output") != "" || safeBreakReason("OOMKilled") != "OOMKilled" {
 		t.Fatal("reason allowlist")
+	}
+}
+
+func TestProjectCrashEvidenceRoundTrip(t *testing.T) {
+	at := time.Now().UTC().Truncate(time.Second)
+	summary := map[string]any{}
+	conditions := []any{}
+	for _, kind := range []string{"PodScheduled", "DisruptionTarget", "Failed", "Ready"} {
+		conditions = append(conditions, map[string]any{"type": kind, "status": "True", "reason": "Evicted", "lastTransitionTime": at.Format(time.RFC3339), "message": "CANARY_CONDITION"})
+	}
+	projectBreakSummary("Pod", nil, map[string]any{"reason": "OutOfnvidia.com/gpu", "message": "CANARY_STATUS", "conditions": conditions,
+		"initContainerStatuses": []any{map[string]any{"name": "init", "restartCount": float64(9), "state": map[string]any{"terminated": map[string]any{"reason": "Error", "exitCode": float64(137), "signal": float64(9), "finishedAt": at.Format(time.RFC3339), "message": "CANARY_EXIT"}}}},
+	}, summary)
+	encoded, _ := json.Marshal(summary)
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	record := indexRecord(ProjectedResource{Kind: "Pod", Name: "pod", UID: "pod", Summary: decoded})
+	if record.Summary["pod_reason"] != "OutOfResource" || record.Summary["scheduled_reason"] != "Evicted" || record.Summary["disruption_transition_at"] != at.Format(time.RFC3339) || record.Summary["ready_reason"] != "Evicted" || record.Summary["job_failed_reason"] != "" || len(record.Containers) != 1 || !record.Containers[0].Init || record.Containers[0].Signal != 9 || record.Containers[0].RestartCount != 9 {
+		t.Fatalf("round trip lost evidence: %+v", record)
+	}
+	if strings.Contains(string(encoded), "CANARY") {
+		t.Fatal("message leaked")
+	}
+	job := map[string]any{}
+	projectBreakSummary("Job", nil, map[string]any{"conditions": conditions}, job)
+	if safeIndexedSummary(job)["job_failed_reason"] != "Evicted" {
+		t.Fatal("job condition lost")
+	}
+	if podStatusReason("OutOf secret value") != "" {
+		t.Fatal("unsafe admission reason")
+	}
+}
+
+func TestProjectCrashJournalAllStatuses(t *testing.T) {
+	statuses := []any{}
+	for position := range 25 {
+		statuses = append(statuses, map[string]any{"name": "app-" + strconv.Itoa(position), "restartCount": float64(position), "state": map[string]any{"waiting": map[string]any{"reason": "CrashLoopBackOff", "message": "CANARY_WAIT"}}, "lastState": map[string]any{"terminated": map[string]any{"reason": "Error", "exitCode": float64(1), "message": "CANARY_EXIT"}}})
+	}
+	items := projectCrashContainers(map[string]any{"containerStatuses": statuses, "initContainerStatuses": statuses})
+	if len(items) != 50 || items[24].Init || !items[25].Init || items[49].RestartCount != 24 {
+		t.Fatalf("statuses lost: %+v", items)
+	}
+	encoded, err := json.Marshal(items)
+	if err != nil || strings.Contains(string(encoded), "CANARY") {
+		t.Fatalf("unsafe projection: %s %v", encoded, err)
+	}
+}
+
+func TestProjectCrashEvidenceContainerBudget(t *testing.T) {
+	statuses := []any{}
+	for position := range 9 {
+		statuses = append(statuses, map[string]any{"name": "app-" + strconv.Itoa(position), "state": map[string]any{"waiting": map[string]any{"reason": "ContainerCreating", "message": "CANARY_WAIT"}}})
+	}
+	summary := map[string]any{}
+	projectBreakSummary("Pod", nil, map[string]any{"containerStatuses": statuses, "initContainerStatuses": []any{map[string]any{"name": "setup", "state": map[string]any{"waiting": map[string]any{"reason": "CreateContainerConfigError", "message": "CANARY_CONFIG"}}}}}, summary)
+	record := indexRecord(ProjectedResource{Kind: "Pod", Name: "pod", UID: "pod", Summary: summary})
+	if record.Summary["break_evidence_partial"] != "true" || len(record.Containers) != 8 || !record.Containers[0].Init || record.Containers[0].WaitingReason != "CreateContainerConfigError" {
+		t.Fatalf("failure lost to cap: %+v", record)
+	}
+	for _, reason := range []string{"OutOfnvidia.com/gpu", "OutOfCustom"} {
+		if podStatusReason(reason) != "OutOfResource" {
+			t.Fatal("unbounded admission vocabulary")
+		}
 	}
 }
 

@@ -128,7 +128,7 @@ describe("providerKeyNotice", () => {
     expect(n.requireKey).toBe(true);
     expect(n.tone).toBe("warn");
     expect(n.message).toMatch(/new API key/);
-    expect(n.message).toMatch(/cannot be reused/);
+    expect(n.message).toMatch(/switch providers/);
   });
 
   it("requires a new key for every keyed provider authentication style", () => {

@@ -2223,9 +2223,15 @@ export interface KubernetesIssue {
   broke_at?: string;
   broke_at_source?: string;
   evidence?: {
-    terminations?: Array<{ reason: string; exit_code: number; count: number; last: string }>;
-    waiting?: Array<{ reason: string; count: number }>;
+    terminations?: Array<{ reason: string; exit_code: number; signal?: string; exit_hint?: string; count: number; restarts?: number; init?: boolean; last: string }>;
+    waiting?: Array<{ reason: string; count: number; init?: boolean }>;
+    pod_reasons?: Array<{ reason: string; count: number }>;
+    nodes?: Array<{ reason: string; count: number }>;
+    conditions?: Array<{ type: string; reason: string }>;
+    warning_reasons?: Array<{ reason: string; count: number }>;
     warning_events: number;
+    restarts?: number;
+    partial?: boolean;
     from: string;
     to: string;
   };
@@ -2262,6 +2268,56 @@ export interface KubernetesChange {
   at: string;
   service?: string;
   source?: "observed" | "reconstructed";
+}
+
+export interface KubernetesCrashEvent {
+  id: string;
+  sequence: number;
+  cluster: string;
+  namespace: string;
+  pod: string;
+  pod_uid: string;
+  root_uid: string;
+  root_kind: string;
+  root_name: string;
+  ancestry_partial?: boolean;
+  container: string;
+  init?: boolean;
+  type: "status" | "termination";
+  termination_slot?: "current" | "previous";
+  waiting_reason?: string;
+  reason?: string;
+  exit_code: number;
+  signal?: number;
+  restart_count: number;
+  at: string;
+  time_source: "observed_at" | "finished_at";
+  observed_at: string;
+}
+
+export interface KubernetesCrashQuery {
+  namespace?: string;
+  root_uid?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface KubernetesCrashPage {
+  items: KubernetesCrashEvent[];
+  next?: string;
+  since: string;
+  until: string;
+  retention_from: string;
+  retention_basis: string;
+  started_at: string;
+  gaps: Array<{ from: string; to: string }>;
+  capture_gaps: Array<{ from: string; to: string }>;
+  coverage: Record<string, { from: string; to: string }>;
+  limitations: string[];
+  capture: { mode: string; reason?: string; last_cycle_at?: string; behind: boolean; verification?: { stage: string; http_status?: number } };
+  sync: { state: string; age_s: number; partial: boolean };
 }
 
 export interface KubernetesChangesPage {
@@ -2646,6 +2702,13 @@ export function createKubernetesApi(cluster?: string) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
     return request<KubernetesChangesPage>(`/api/admin/kubernetes/changes?${query}`);
+  },
+  kubernetesCrashes: (options: KubernetesCrashQuery = {}, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesCrashPage>(`/api/admin/kubernetes/crashes?${query}`, { signal });
   },
   kubernetesGraph: (options: { namespace?: string; group_by?: "namespace" | "app"; max_nodes?: number; connected_only?: boolean; complete?: boolean; limit?: number; cursor?: string } = {}) => {
     const query = new URLSearchParams();

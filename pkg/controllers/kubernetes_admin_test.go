@@ -19,6 +19,7 @@ import (
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
@@ -26,6 +27,102 @@ import (
 	"github.com/VersusControl/versus-incident/tests/fakekube"
 	"github.com/gofiber/fiber/v2"
 )
+
+func TestChatChangesOnlyTrimmingKeepsEvidenceComplete(t *testing.T) {
+	now := time.Now().UTC()
+	evidence := &kubebreaks.Evidence{Warnings: 0, Restarts: 4, From: now, To: now, Terminations: []kubebreaks.Termination{{Reason: "Error", ExitCode: 1, Count: 1, Restarts: 4, Last: now}}}
+	issue := kubernetes.Issue{Evidence: evidence, Changes: []kubebreaks.LinkedChange{{Change: kubechanges.Change{Kind: "Deployment", Name: strings.Repeat("x", 7<<10)}}}}
+	result := chatBreakContext(issue)
+	want, _ := json.Marshal(evidence)
+	got, _ := json.Marshal(result.Evidence)
+	if !result.Partial || result.MoreChanges != 1 || len(result.Changes) != 0 || !bytes.Equal(want, got) {
+		t.Fatalf("change-only trimming changed evidence: %+v evidence=%s want=%s", result, got, want)
+	}
+}
+
+func TestChatCrashEvidenceMirroringAndTrimming(t *testing.T) {
+	now := time.Now().UTC()
+	evidence := &kubebreaks.Evidence{Warnings: 8, Restarts: 41, Partial: true, From: now, To: now,
+		Terminations: []kubebreaks.Termination{{Reason: "Error", ExitCode: 137, Signal: "SIGTERM", Count: 2, Restarts: 41, Init: true, Last: now}, {Reason: "OOMKilled", ExitCode: 137, ExitHint: "SIGKILL", Count: 1, Last: now}},
+		Waiting:      []kubebreaks.WaitingCount{{Reason: "CreateContainerConfigError", Count: 2, Init: true}},
+		PodReasons:   []kubebreaks.ReasonCount{{Reason: "Evicted", Count: 2}}, Nodes: []kubebreaks.ReasonCount{{Reason: "MemoryPressure", Count: 2}},
+		Conditions: []kubebreaks.ConditionReason{{Type: "Failed", Reason: "BackoffLimitExceeded"}}, WarningReasons: []kubebreaks.ReasonCount{{Reason: "FailedMount", Count: 8}},
+	}
+	issue := kubernetes.Issue{Rule: "pod.config_error", Evidence: evidence}
+	result := chatBreakContext(issue)
+	want, _ := json.Marshal(evidence)
+	got, _ := json.Marshal(result.Evidence)
+	if !bytes.Equal(want, got) {
+		t.Fatalf("mirror mismatch: %s != %s", want, got)
+	}
+	result.Evidence.PodReasons[0].Count = 99
+	if evidence.PodReasons[0].Count != 2 {
+		t.Fatal("chat aliases source evidence")
+	}
+	var legacy core.ChatResourceBreak
+	if err := json.Unmarshal([]byte(`{"rule":"pod.failed","evidence":{"warning_events":0,"terminations":[{"reason":"Error","exit_code":1,"count":1}]}}`), &legacy); err != nil || legacy.Evidence.Terminations[0].Init {
+		t.Fatal("old chat JSON no longer decodes")
+	}
+	for range 16 {
+		evidence.Terminations = append(evidence.Terminations, kubebreaks.Termination{Reason: strings.Repeat("A", 64), Count: 1, Restarts: 2147483647, Last: now})
+		evidence.Waiting = append(evidence.Waiting, kubebreaks.WaitingCount{Reason: strings.Repeat("B", 64), Count: 1})
+		evidence.PodReasons = append(evidence.PodReasons, kubebreaks.ReasonCount{Reason: strings.Repeat("C", 64), Count: 1})
+		evidence.Nodes = append(evidence.Nodes, kubebreaks.ReasonCount{Reason: strings.Repeat("D", 64), Count: 1})
+		evidence.WarningReasons = append(evidence.WarningReasons, kubebreaks.ReasonCount{Reason: "Unhealthy", Count: 1})
+		evidence.Warnings++
+	}
+	result = chatBreakContext(issue)
+	encoded, err := json.Marshal(result)
+	if err != nil || len(encoded) > 6<<10 || !result.Partial || result.Evidence == nil || !result.Evidence.Partial || len(result.Evidence.Terminations) == 0 || len(result.Evidence.Nodes) != 0 {
+		t.Fatalf("trim failed: %d %+v %v", len(encoded), result, err)
+	}
+	total := 0
+	for _, bucket := range result.Evidence.WarningReasons {
+		total += bucket.Count
+	}
+	if total != result.Evidence.Warnings || result.Evidence.WarningReasons[0].Reason != "Other" {
+		t.Fatal("trim lost warning arithmetic")
+	}
+}
+
+func TestChatCrashEvidenceServerDerivedAttachment(t *testing.T) {
+	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "crash-evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(fixture)
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service.SetChangeStorage(storage.NewMemory())
+	SetChatKubernetesServiceResolver(func(orgID, clusterID string) *kubernetes.Service { return service })
+	t.Cleanup(func() { SetChatKubernetesServiceResolver(nil) })
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	app.Get("/investigate", func(ctx *fiber.Ctx) error {
+		attachment := &core.ChatAttachment{Resource: &core.ChatResourceRef{Provider: "kubernetes", Cluster: "cluster", ResourceID: "apps~v1~deployments", Namespace: "config", Name: "config-api", UID: "deployment-config-api", IncludeChanges: true, Break: &core.ChatResourceBreak{Rule: "CANARY_CLIENT_CONTEXT"}}}
+		if err := validateChatKubernetesAttachment(ctx, attachment); err != nil {
+			return err
+		}
+		return ctx.JSON(attachment)
+	})
+	response, err := app.Test(httptest.NewRequest("GET", "/investigate", nil), -1)
+	if err != nil || response.StatusCode != 200 {
+		t.Fatalf("attachment response: %+v %v", response, err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || strings.Contains(string(body), "CANARY") || !strings.Contains(string(body), "CreateContainerConfigError") || !strings.Contains(string(body), `"warning_reasons"`) {
+		t.Fatalf("server-derived evidence missing or unsafe: %s %v", body, err)
+	}
+}
 
 func TestClusterParamResolutionAndDeniedStreams(t *testing.T) {
 	var reads atomic.Int32
@@ -701,6 +798,53 @@ func TestKubernetesStreamRequiresInfrastructureView(t *testing.T) {
 	if err != nil || response.StatusCode != fiber.StatusForbidden || clusterRequests.Load() != 0 {
 		t.Fatalf("stream status=%d cluster requests=%d err=%v", response.StatusCode, clusterRequests.Load(), err)
 	}
+}
+
+func TestKubernetesCrashJournalRoute(t *testing.T) {
+	service := kubernetes.NewService(nil, kubernetes.Scope{ClusterID: "cluster-a"}, 0)
+	provider := storage.NewMemory()
+	service.SetChangeStorage(provider)
+	store := kubechanges.NewStore(provider, kubeindex.Scope{ClusterID: "cluster-a"})
+	now := time.Now().UTC().Add(-time.Second)
+	var events []kubechanges.CrashEvent
+	for _, name := range []string{"first", "second", "third"} {
+		event := kubechanges.CrashEvent{Cluster: "cluster-a", Namespace: "shop", Pod: name, PodUID: name, RootUID: "root", RootKind: "Deployment", RootName: "api", Container: "app", Type: "status", WaitingReason: "CrashLoopBackOff", At: now, ObservedAt: now, TimeSource: "observed_at"}
+		event.ID = kubechanges.CrashID(event)
+		events = append(events, event)
+	}
+	if err := store.CommitCapture(nil, nil, nil, "", now, events, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	allowed := true
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), allowed)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/crashes?cluster=cluster-a&namespace=shop&root_uid=root&limit=1", nil), -1)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("crashes response: %+v %v", response, err)
+	}
+	var page kubernetes.CrashPage
+	if err := json.NewDecoder(response.Body).Decode(&page); err != nil || len(page.Items) != 1 || page.Next == "" || page.Gaps == nil || len(page.Limitations) == 0 {
+		t.Fatalf("crash contract: %+v %v", page, err)
+	}
+	response.Body.Close()
+	for _, suffix := range []string{"?since=invalid", "?limit=101", "?limit=garbage", "?cursor=bad", "?namespace=wrong&root_uid=root&cursor=" + page.Next, "?since=2026-10-16T12:00:00Z&until=2026-10-15T12:00:00Z"} {
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/crashes"+suffix, nil), -1)
+		if err != nil || response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("invalid query %s: %+v %v", suffix, response, err)
+		}
+		response.Body.Close()
+	}
+	allowed = false
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/crashes", nil), -1)
+	if err != nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("permission bypass: %+v %v", response, err)
+	}
+	response.Body.Close()
 }
 
 func TestKubernetesChangesRouteReturnsBoundedDTOAndRejectsInvalidTime(t *testing.T) {

@@ -404,6 +404,10 @@ func (service *Service) captureState() *captureLoop {
 }
 
 func (service *Service) captureCycle(store *kubechanges.Store, deltas <-chan kubeindex.Delta, snapshot kubeindex.Snapshot, kinds []string, started time.Time, expectedOwner ...string) error {
+	return service.captureCycleWithCrashes(store, deltas, snapshot, kinds, started, nil, expectedOwner...)
+}
+
+func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas <-chan kubeindex.Delta, snapshot kubeindex.Snapshot, kinds []string, started time.Time, crashes *crashCaptureBatch, expectedOwner ...string) error {
 	now := time.Now().UTC()
 	loop := service.captureState()
 	continuous := loop != nil && loop.status.Mode == "continuous"
@@ -423,8 +427,9 @@ func (service *Service) captureCycle(store *kubechanges.Store, deltas <-chan kub
 			partial = true
 		}
 	}
+	events, crashGaps, podRead := crashes.resolve(snapshot, now)
 	if loop == nil || loop.status.Mode == "demand" {
-		if err := store.Commit(collected, gaps, nil, "", now); err != nil {
+		if err := store.CommitCapture(collected, gaps, nil, "", now, events, crashGaps, podRead); err != nil {
 			return err
 		}
 		service.rememberBreaks(kubebreaks.Classify(snapshot.Records, now), "", now, partial)
@@ -478,7 +483,7 @@ func (service *Service) captureCycle(store *kubechanges.Store, deltas <-chan kub
 		}
 		success[kind] = observed
 	}
-	if err := store.Commit(collected, gaps, coverage, loop.owner, now); err != nil {
+	if err := store.CommitCapture(collected, gaps, coverage, loop.owner, now, events, crashGaps, podRead); err != nil {
 		loop.status.Behind = true
 		return err
 	}

@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <i>Auto-detecting incident in System</i>
+  <i>Auto-detecting incident in your system</i>
   <img alt="Versus Dashboard" src="src/docs/images/versus-dashboard.svg">
 </p>
 

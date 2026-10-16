@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -829,6 +830,59 @@ func TestHydrateIncidentAttachmentHandlesNilAndLegacyDefaultRecords(t *testing.T
 			t.Fatalf("status = %d attachment = %+v", response.StatusCode, attachment.Incident)
 		}
 	})
+}
+
+type rejectedAttachmentRunner struct {
+	calls atomic.Int32
+}
+
+func (runner *rejectedAttachmentRunner) RunChat(context.Context, core.ChatTask) (*core.ChatTurnResult, error) {
+	runner.calls.Add(1)
+	return &core.ChatTurnResult{Markdown: "unexpected run"}, nil
+}
+
+func TestRejectedChatAttachmentsDoNotPersistTurnsOrStartRuns(t *testing.T) {
+	provider := storage.NewMemory()
+	services.SetStorage(provider)
+	t.Cleanup(func() { services.SetStorage(nil) })
+	runner := &rejectedAttachmentRunner{}
+	app, _ := chatTestApp(t, provider, runner, true)
+	id := createChatSession(t, app)
+	store := chatagent.NewSessionStore(provider, tenancy.DefaultOrgScope(), time.Now)
+	before, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := json.Marshal(before)
+	for _, test := range []struct {
+		name, attachment string
+		status           int
+	}{
+		{"incident not found", `{"incident":{"id":"missing"}}`, fiber.StatusNotFound},
+		{"invalid resource", `{"resource":{"provider":"other","resource_id":"core~v1~pods","name":"pod"}}`, fiber.StatusBadRequest},
+		{"resource permission denied", `{"resource":{"provider":"kubernetes","resource_id":"core~v1~pods","name":"pod"}}`, fiber.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/admin/chat/sessions/"+id+"/messages", strings.NewReader(`{"message":"investigate","attachment":`+test.attachment+`}`))
+			request.Header.Set("Content-Type", "application/json")
+			response, err := app.Test(request, -1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode != test.status {
+				t.Fatalf("status=%d want=%d", response.StatusCode, test.status)
+			}
+			after, err := store.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, _ := json.Marshal(after)
+			if !bytes.Equal(want, got) || runner.calls.Load() != 0 {
+				t.Fatalf("rejected attachment mutated session or started run: before=%s after=%s calls=%d", want, got, runner.calls.Load())
+			}
+		})
+	}
 }
 
 func TestChatAdminFailureStatuses(t *testing.T) {

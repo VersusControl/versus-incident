@@ -76,6 +76,33 @@ func TestIndexDefaultsAndRecordSizeAreBounded(t *testing.T) {
 	}
 }
 
+func TestContainerEvidenceSignalBoundsAndCopies(t *testing.T) {
+	for _, signal := range []int32{-1, 0, 9, 64, 65} {
+		store := New(10)
+		record := pod("pod", "pod")
+		record.Containers = []ContainerState{{Name: "setup", Init: true, Signal: signal, TerminatedReason: "Error", RestartCount: 3}}
+		err := store.Ingest("Pod", []Record{record}, true, time.Now())
+		if signal < 0 || signal > 64 {
+			if !errors.Is(err, ErrInvalidRecord) {
+				t.Fatalf("accepted signal %d", signal)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		record.Containers[0].Signal = 1
+		snapshot := store.Snapshot()
+		if snapshot.Records[0].Containers[0].Signal != signal || !snapshot.Records[0].Containers[0].Init {
+			t.Fatal("input aliases index or init lost")
+		}
+		snapshot.Records[0].Containers[0].Signal = 2
+		if store.Snapshot().Records[0].Containers[0].Signal != signal {
+			t.Fatal("snapshot aliases index")
+		}
+	}
+}
+
 func TestRegistrySharesOnlyExactScope(t *testing.T) {
 	registry := NewRegistry(2, 10)
 	scope := Scope{OrgID: "org-a", ClusterID: "cluster-a", CredentialID: "credential-a"}
