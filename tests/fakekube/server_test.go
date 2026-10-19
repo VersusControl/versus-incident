@@ -670,6 +670,78 @@ func TestPodLogFixtureControlledDisconnectReconnectAndPrevious(t *testing.T) {
 	}
 }
 
+func TestConfiguredLogFixtureServesBoundedLinesStatusAndReset(t *testing.T) {
+	server, err := NewServer(Config{Scenario: "triage"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v1/namespaces/payments/pods/checkout-api-0/log"
+	base := time.Date(2026, time.October, 17, 10, 0, 0, 0, time.UTC)
+	post := func(body string) int {
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/_fake/log-fixtures", strings.NewReader(body)))
+		return response.Code
+	}
+	get := func(query string) *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path+"?"+query, nil))
+		return response
+	}
+	lines := []string{}
+	for offset := range 4 {
+		lines = append(lines, fmt.Sprintf(`{"at":%q,"text":"line %d"}`, base.Add(time.Duration(offset)*time.Minute).Format(time.RFC3339), offset))
+	}
+	if code := post(`{"path":"` + path + `","container":"api","previous":true,"lines":[` + strings.Join(lines, ",") + `]}`); code != http.StatusOK {
+		t.Fatalf("fixture status=%d", code)
+	}
+	previous := get("container=api&previous=true&timestamps=true&tailLines=500")
+	if previous.Code != http.StatusOK || strings.Count(previous.Body.String(), "\n") != 4 || !strings.HasPrefix(previous.Body.String(), "2026-10-17T10:00:00Z line 0\n") {
+		t.Fatalf("previous fixture status=%d body=%q", previous.Code, previous.Body.String())
+	}
+	if current := get("container=api&timestamps=true"); current.Code != http.StatusOK || strings.Contains(current.Body.String(), "line 0") {
+		t.Fatal("previous fixture leaked into the current container")
+	}
+	bounded := get("container=api&previous=true&timestamps=true&sinceTime=2026-10-17T10:01:00Z&tailLines=2&limitBytes=30")
+	if bounded.Body.String() != "2026-10-17T10:02:00Z line 2\n20" {
+		t.Fatalf("since/tail/limit body=%q", bounded.Body.String())
+	}
+	if code := post(`{"path":"` + path + `","container":"sidecar","status":403}`); code != http.StatusOK {
+		t.Fatalf("status fixture=%d", code)
+	}
+	if forbidden := get("container=sidecar&timestamps=true"); forbidden.Code != http.StatusForbidden {
+		t.Fatalf("forbidden fixture status=%d", forbidden.Code)
+	}
+	if list := get("container=api&timestamps=true&previous=true"); list.Code != http.StatusOK {
+		t.Fatal("container status fixture affected another container")
+	}
+	if code := post(`{"path":"` + path + `","container":"sidecar","status":429}`); code != http.StatusOK {
+		t.Fatalf("throttle fixture=%d", code)
+	}
+	if throttled := get("container=sidecar&timestamps=true"); throttled.Code != http.StatusTooManyRequests || throttled.Header().Get("Retry-After") != "1" {
+		t.Fatalf("throttle fixture status=%d retry=%q", throttled.Code, throttled.Header().Get("Retry-After"))
+	}
+	for _, body := range []string{`{"path":"` + path + `","container":"missing","status":403}`, `{"path":"` + path + `","status":401}`, `{"path":"` + path + `","lines":[{"text":"no time"}]}`, `{"path":"` + path + `","lines":[{"at":"2026-10-17T10:00:00Z","text":"a\nb"}]}`, `{"path":"` + path + `","unknown":1}`} {
+		if code := post(body); code != http.StatusBadRequest && code != http.StatusNotFound {
+			t.Fatalf("invalid fixture admitted body=%s code=%d", body, code)
+		}
+	}
+	if code := post(`{"path":"` + path + `","container":"sidecar"}`); code != http.StatusOK {
+		t.Fatal("reset failed")
+	}
+	if restored := get("container=sidecar"); restored.Code != http.StatusOK || !strings.Contains(restored.Body.String(), "container=sidecar") {
+		t.Fatal("reset did not restore the default container log")
+	}
+	counted := false
+	for _, counter := range server.logStreamCounters() {
+		if counter.Container == "sidecar" && !counter.Previous && counter.Unavailable == 2 {
+			counted = true
+		}
+	}
+	if !counted {
+		t.Fatalf("status fixture not counted: %#v", server.logStreamCounters())
+	}
+}
+
 func TestTimestampedPodLogFixtureGuardsAndFiniteCompatibility(t *testing.T) {
 	server, err := NewServer(Config{Scenario: "triage"})
 	if err != nil {

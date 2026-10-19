@@ -48,13 +48,17 @@ func NewKubernetesAdminControllerWithRegistry(registry *kubernetes.ServiceRegist
 }
 
 func (controller *KubernetesAdminController) Register(router fiber.Router) {
-	group := router.Group("/admin/kubernetes", adminGatewayGuard, controller.requirePermission)
+	group := router.Group("/admin/kubernetes", auditKubernetesSettings, adminGatewayGuard, controller.requirePermission)
 	group.Get("/clusters", controller.clusters)
 	group.Use(controller.requireInfrastructureView)
 	group.Get("/overview", controller.overview)
 	group.Get("/stream", controller.stream)
 	group.Get("/changes", controller.changes)
 	group.Get("/crashes", controller.crashes)
+	group.Get("/break-logs", controller.breakLogs)
+	group.Get("/agent-settings", controller.agentSettings)
+	group.Put("/agent-settings", controller.requireSettingsWrite, controller.saveAgentSettings)
+	group.Post("/agent-settings/test-link", controller.requireSettingsWrite, controller.testLogLink)
 	group.Get("/graph", controller.graph)
 	group.Get("/graph/overview", controller.overviewGraph)
 	group.Get("/graph/neighborhood", controller.neighborhood)

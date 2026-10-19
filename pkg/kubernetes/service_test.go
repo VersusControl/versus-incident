@@ -1281,6 +1281,32 @@ func TestServiceSafeProjectionPartialOverviewAndLogs(t *testing.T) {
 	}
 }
 
+func TestPodLogsCaptureBounds(t *testing.T) {
+	requests := 0
+	since := time.Now().UTC().Add(-5 * time.Minute).Truncate(time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		query := request.URL.Query()
+		if query.Has("sinceSeconds") || query.Get("sinceTime") != since.Format(time.RFC3339Nano) || query.Get("limitBytes") != "65536" || query.Get("timestamps") != "true" || query.Get("tailLines") != "500" {
+			t.Errorf("capture query = %v", query)
+		}
+		_, _ = writer.Write([]byte("log line"))
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	if _, err := service.podLogs(t.Context(), "default", "api-1", "api", false, 0, 500, true, podLogBounds{SinceTime: since, LimitBytes: 64 << 10}); err != nil {
+		t.Fatal(err)
+	}
+	for _, options := range []podLogBounds{{LimitBytes: -1}, {LimitBytes: maxPodLogBytes + 1}, {SinceTime: time.Now().Add(time.Hour)}, {SinceTime: time.Now().Add(-25 * time.Hour)}} {
+		if _, err := service.podLogs(t.Context(), "default", "api-1", "api", false, 0, 500, true, options); !errors.Is(err, ErrInvalidArguments) {
+			t.Fatalf("bounds accepted: %v", err)
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("invalid bounds reached transport: %d", requests)
+	}
+}
+
 func TestPodLogsOmitsEmptyContainerAndPreservesPreviousAndExplicitContainer(t *testing.T) {
 	var requests []url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

@@ -174,7 +174,9 @@ func (service *Service) Discover(ctx context.Context, request DiscoveryRequest) 
 }
 
 type ReadRequest struct {
+	PrefixFilters map[string]string
 	Filters       map[string]string
+	StringFields  []string
 	Search        string
 	Lookback      time.Duration
 	Offset, Limit int
@@ -198,8 +200,18 @@ type ReadResult struct {
 }
 
 func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResult, error) {
-	if request.Offset < 0 || request.Offset > MaximumOffset || request.Limit < 0 || request.Limit > MaximumLimit || request.Lookback < 0 || len(request.Filters) > 12 || (request.Search != "" && !exactValue.MatchString(request.Search)) {
+	if request.Offset < 0 || request.Offset > MaximumOffset || request.Limit < 0 || request.Limit > MaximumLimit || request.Lookback < 0 || len(request.Filters)+len(request.PrefixFilters) > 12 || (request.Search != "" && !exactValue.MatchString(request.Search)) {
 		return ReadResult{}, ErrInvalidArgument
+	}
+	if len(request.StringFields) > 12 {
+		return ReadResult{}, ErrInvalidArgument
+	}
+	stringFields := make(map[string]bool, len(request.StringFields))
+	for _, field := range request.StringFields {
+		if !fieldName.MatchString(field) {
+			return ReadResult{}, ErrInvalidArgument
+		}
+		stringFields[field] = true
 	}
 	if request.Limit == 0 {
 		request.Limit = 25
@@ -214,6 +226,12 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResu
 		request.Lookback = service.policy.MaxLookback
 	}
 	filters := make([]clause, 0, len(request.Filters)+1)
+	for field, value := range request.PrefixFilters {
+		if !fieldName.MatchString(field) || !exactValue.MatchString(value) {
+			return ReadResult{}, ErrInvalidArgument
+		}
+		filters = append(filters, clause{field: field, value: value + "-*"})
+	}
 	for field, value := range request.Filters {
 		if !fieldName.MatchString(field) || !exactValue.MatchString(value) {
 			return ReadResult{}, ErrInvalidArgument
@@ -223,6 +241,7 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResu
 	if request.Search != "" {
 		filters = append(filters, clause{field: "message", value: request.Search})
 	}
+	sort.Slice(filters, func(left, right int) bool { return filters[left].field < filters[right].field })
 	result := ReadResult{Offset: request.Offset, Limit: request.Limit}
 	unsupportedField := false
 	fieldLimited := false
@@ -291,7 +310,9 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResu
 			sort.Strings(names)
 			for _, name := range names {
 				if !service.visibleField(name) {
-					unsupportedField = true
+					if name != "_id" {
+						unsupportedField = true
+					}
 					continue
 				}
 				var text string
@@ -299,6 +320,10 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResu
 				case string:
 					text = value
 				case float64, bool:
+					if stringFields[name] {
+						unsupportedField = true
+						continue
+					}
 					text = fmt.Sprint(value)
 				default:
 					unsupportedField = true
@@ -390,7 +415,11 @@ func (service *Service) search(ctx context.Context, filters []clause, lookback t
 	if len(clauses) > 0 {
 		parts := make([]string, 0, len(clauses))
 		for _, item := range clauses {
-			parts = append(parts, item.field+":"+strconv.Quote(item.value))
+			if strings.HasSuffix(item.value, "-*") {
+				parts = append(parts, item.field+":"+strings.NewReplacer("-", `\-`, "/", `\/`).Replace(strings.TrimSuffix(item.value, "*"))+"*")
+			} else {
+				parts = append(parts, item.field+":"+strconv.Quote(item.value))
+			}
 		}
 		query = strings.Join(parts, " AND ")
 	}

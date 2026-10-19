@@ -7,7 +7,8 @@ export type KubernetesExplorerTab =
   | "nodes"
   | "releases"
   | "gitops"
-  | "traffic";
+  | "traffic"
+  | "agent";
 
 export const kubernetesExplorerTabs: Array<{ id: KubernetesExplorerTab; label: string }> = [
   { id: "overview", label: "Overview" },
@@ -19,4 +20,5 @@ export const kubernetesExplorerTabs: Array<{ id: KubernetesExplorerTab; label: s
   { id: "releases", label: "Helm" },
   { id: "gitops", label: "GitOps" },
   { id: "traffic", label: "Traffic" },
+  { id: "agent", label: "Agent" },
 ];

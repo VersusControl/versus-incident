@@ -2684,10 +2684,51 @@ const agentCapabilitiesApi = {
 
 const unscopedRequest = request;
 
+export type KubernetesLogSourceType = "loki" | "elasticsearch" | "cloudwatchlogs" | "graylog" | "splunk" | "signoz";
+export interface KubernetesLogFields { namespace: string; pod: string; container: string; time?: string; message?: string }
+export interface KubernetesAgentSettingsInput {
+  learning: { logs: boolean; metrics: boolean; traces: boolean; scope: { include: string[]; exclude: string[] } };
+  break_logs: { linked_source: string; fields: Record<KubernetesLogSourceType, KubernetesLogFields> };
+}
+export interface KubernetesAgentSettings extends KubernetesAgentSettingsInput {
+  sources: Array<{ name: string; type: KubernetesLogSourceType; scope: string; health: "healthy" | "slow" | "failing" | "not_checked"; checked_at?: string }>;
+  detected: { metrics_server: boolean; traces: { kind: string; namespace: string } | null; workloads: number; namespaces: number };
+  linked_source_missing: boolean;
+  can_write: boolean;
+}
+export interface KubernetesTestLinkResult { lines: number; namespace: string; workload: string; duration_ms: number; preview: string; truncated: boolean }
+export interface KubernetesBreakLogQuery {
+  namespace: string; root_uid: string; since: string; until: string; pods?: string[];
+  mode?: "merged" | "previous" | "current"; level?: "error" | "warning" | "info" | "debug"; q?: string; cursor?: string; limit?: number;
+}
+export interface KubernetesBreakLogPage {
+  window: { from: string; to: string };
+  pods: Array<{ name: string; uid: string; state: string; short: string }>;
+  lines: Array<{ at: string; pod?: string; pod_uid: string; container: string; init: boolean; slot: string; level: string; text: string; source: string }>;
+  markers: Array<{ type: string; at: string; label: string }>;
+  counts: { errors: number; warnings: number; all: number };
+  rate: Array<{ minute: string; total: number; errors: number }>;
+  patterns: Array<{ template: string; level: string; count: number }>;
+  sources: Array<{ kind: string; name: string; type?: string; at: string }>;
+  coverage: { state: "complete" | "partial" | "none"; gaps: Array<{ from: string; to: string }>; reason: string; tip: boolean };
+  next?: string;
+}
+
 export function createKubernetesApi(cluster?: string) {
   const request: typeof unscopedRequest = (path, options) => unscopedRequest(kubernetesClusterPath(path, cluster), options);
   return {
   kubernetesOverview: () => request<KubernetesOverview>("/api/admin/kubernetes/overview"),
+  kubernetesBreakLogs: (options: KubernetesBreakLogQuery, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (Array.isArray(value)) value.forEach((pod) => query.append("pods[]", pod));
+      else if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesBreakLogPage>(`/api/admin/kubernetes/break-logs?${query}`, { signal });
+  },
+  kubernetesAgentSettings: () => request<KubernetesAgentSettings>("/api/admin/kubernetes/agent-settings"),
+  kubernetesSaveAgentSettings: (settings: KubernetesAgentSettingsInput) => request<KubernetesAgentSettings>("/api/admin/kubernetes/agent-settings", { method: "PUT", body: JSON.stringify({ learning: settings.learning, break_logs: settings.break_logs }) }),
+  kubernetesTestLink: (source: string, fields: KubernetesLogFields) => request<KubernetesTestLinkResult>("/api/admin/kubernetes/agent-settings/test-link", { method: "POST", body: JSON.stringify({ source, fields }) }),
   kubernetesOverviewGraph: () => request<KubernetesGraph>("/api/admin/kubernetes/graph/overview"),
   kubernetesIssues: (options: { namespace?: string; severity?: string; kind?: string; limit?: number; cursor?: string; broken?: boolean; include?: "changes"; root_uid?: string } = {}) => {
     const query = new URLSearchParams();

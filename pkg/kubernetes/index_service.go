@@ -763,6 +763,7 @@ func indexRecord(resource ProjectedResource) kubeindex.Record {
 	}
 	record := kubeindex.Record{
 		APIVersion: resource.APIVersion,
+		CreatedAt:  resource.CreatedAt,
 		UID:        uid, Kind: resource.Kind, Namespace: resource.Namespace, Name: resource.Name,
 		ResourceVersion: summaryString(resource.Summary, "resource_version"),
 		Labels:          resource.Labels, Phase: summaryString(resource.Summary, "phase"),
@@ -806,7 +807,7 @@ func indexRecord(resource ProjectedResource) kubeindex.Record {
 		record.Ready = summaryInt32(summary, "number_ready")
 		record.Available = record.Ready
 	}
-	if created := summaryString(resource.Summary, "created_at"); created != "" {
+	if created := summaryString(resource.Summary, "created_at"); record.CreatedAt.IsZero() && created != "" {
 		record.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	}
 	if generation := summary["generation"]; generation != "" {

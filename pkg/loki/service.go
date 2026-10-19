@@ -220,6 +220,7 @@ func (service *Service) Discover(ctx context.Context, request DiscoveryRequest) 
 }
 
 type ReadRequest struct {
+	PrefixLabels    map[string]string
 	Labels          map[string]string
 	Service, Search string
 	Lookback        time.Duration
@@ -243,7 +244,7 @@ type ReadResult struct {
 }
 
 func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResult, error) {
-	if request.Offset < 0 || request.Offset >= service.policy.MaxRows || request.Limit < 0 || request.Limit > MaximumLimit || request.Lookback < 0 || len(request.Labels) > 12 || !validLiteral(request.Service) || !validLiteral(request.Search) {
+	if request.Offset < 0 || request.Offset >= service.policy.MaxRows || request.Limit < 0 || request.Limit > MaximumLimit || request.Lookback < 0 || len(request.Labels)+len(request.PrefixLabels) > 12 || !validLiteral(request.Service) || !validLiteral(request.Search) {
 		return ReadResult{}, ErrInvalidArgument
 	}
 	if request.Limit == 0 {
@@ -257,6 +258,12 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResu
 		request.Lookback = service.policy.MaxLookback
 	}
 	matchers := slices.Clone(service.scope)
+	for label, value := range request.PrefixLabels {
+		if !labelName.MatchString(label) || !validLiteral(value) || value == "" {
+			return ReadResult{}, ErrInvalidArgument
+		}
+		matchers = append(matchers, matcher{label, "=~", strconv.Quote(regexp.QuoteMeta(value) + "-.*")})
+	}
 	for label, value := range request.Labels {
 		if !labelName.MatchString(label) || !validLiteral(value) || value == "" {
 			return ReadResult{}, ErrInvalidArgument

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -431,6 +432,28 @@ func TestClientUsesOneDeadlineAcrossFailoverAndStopsOnCancellation(t *testing.T)
 	err = client.readJSON(ctx, client.toolPolicy, http.MethodGet, "/_cat/indices", nil, nil, &[]any{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("parent cancellation error = %v", err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
+func TestClientPrefersCancellationAfterCompletedResponse(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client, err := NewClient(config.AgentElasticsearchSourceConfig{Addresses: []string{"http://127.0.0.1:9200"}, AllowLoopback: true, Index: "logs-*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.setTestBounds(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		cancel()
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`[]`)), Request: request}, nil
+	})}, 0, 0)
+	if err := client.readJSON(ctx, client.toolPolicy, http.MethodGet, "/_cat/indices", nil, nil, &[]any{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("completed response after cancellation error = %v", err)
 	}
 }
 

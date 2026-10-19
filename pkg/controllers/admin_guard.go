@@ -50,7 +50,7 @@ func grantCommunityPermissions(c *fiber.Ctx) {
 	if middleware.RequestActor(c) == "" {
 		middleware.SetRequestActor(c, communityRequestActor)
 	}
-	for _, permission := range []core.Permission{core.PermissionInfrastructureView, core.PermissionServiceHealthSettingsWrite, core.PermissionAgentApprove} {
+	for _, permission := range []core.Permission{core.PermissionInfrastructureView, core.PermissionInfrastructureSettingsWrite, core.PermissionServiceHealthSettingsWrite, core.PermissionAgentApprove} {
 		name := string(permission)
 		if _, explicit := middleware.RequestPermission(c, name); !explicit {
 			middleware.SetRequestPermission(c, name, true)

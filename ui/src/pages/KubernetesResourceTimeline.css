@@ -47,10 +47,30 @@
 .resource-timeline-window-key { width: 14px; height: 12px; background: rgb(var(--accent) / .18); }
 .resource-timeline-detail { max-height: 220px; overflow: auto; margin-top: 12px; padding: 12px; border: 1px solid rgb(var(--ink-500)); border-radius: 6px; background: rgb(var(--surface-raised)); color: rgb(var(--ink-100)); }
 .resource-timeline-axis::before { content: ""; position: sticky; left: 0; z-index: 3; display: block; width: 200px; height: 30px; margin-left: -200px; margin-bottom: -30px; background: rgb(var(--surface)); }
+.break-log-bracket-plot { position: absolute; inset: 0 0 0 200px; pointer-events: none; }
+.resource-timeline, #kubernetes-break-logs { --break-log-tone: 45 212 191; }
+:root[data-theme="light"] .resource-timeline, :root[data-theme="light"] #kubernetes-break-logs { --break-log-tone: 15 118 110; }
+.break-log-bracket { position: absolute; inset-block: 0; border: 1px dashed rgb(var(--break-log-tone)); background: rgb(var(--break-log-tone) / .08); }
+.break-log-window-caption { position: absolute; top: -24px; right: 0; max-width: 220px; padding: 2px 6px; white-space: nowrap; border: 1px solid rgb(var(--break-log-tone)); border-radius: 6px; background: rgb(var(--surface)); color: rgb(var(--break-log-tone)); }
+.break-log-handle { position: absolute; bottom: -5px; z-index: 4; width: 24px; height: 30px; transform: translateX(-50%); pointer-events: auto; cursor: ew-resize; touch-action: none; }
+.break-log-handle::after { content: ""; display: block; width: 6px; height: 20px; margin: auto; border-radius: 3px; background: rgb(var(--break-log-tone)); }
+.break-log-handle:focus-visible { outline: 2px solid rgb(var(--link)); outline-offset: 2px; }
+.break-log-window-chip { border: 1px solid rgb(var(--break-log-tone)); border-radius: 6px; padding: 2px 6px; color: rgb(var(--break-log-tone)); }
+.break-log-rate { height: 48px; }
+.break-log-rate-bar { position: absolute; bottom: 0; min-width: 1px; background: rgb(var(--accent) / .45); }
+.break-log-rate-bar > span { position: absolute; inset-inline: 0; bottom: 0; background: rgb(var(--sev-critical)); }
+section[aria-label="Kubernetes Agent"] input[role="switch"] { appearance: none; width: 34px; height: 20px; flex-shrink: 0; border: 1px solid rgb(var(--ink-400)); border-radius: 12px; background: rgb(var(--ink-600)); cursor: pointer; }
+section[aria-label="Kubernetes Agent"] input[role="switch"]::before { content: ""; display: block; width: 14px; height: 14px; margin: 2px; border-radius: 50%; background: rgb(var(--ink-100)); transition: transform 120ms ease; }
+section[aria-label="Kubernetes Agent"] input[role="switch"]:checked { background: rgb(var(--accent)); border-color: rgb(var(--accent)); }
+section[aria-label="Kubernetes Agent"] input[role="switch"]:checked::before { transform: translateX(14px); background: white; }
+section[aria-label="Kubernetes Agent"] input[role="switch"]:focus-visible { outline: 2px solid rgb(var(--link)); outline-offset: 3px; }
+section[aria-label="Kubernetes Agent"] input[role="switch"]:disabled { cursor: default; opacity: .6; }
+@media (prefers-reduced-motion: reduce) { section[aria-label="Kubernetes Agent"] input[role="switch"]::before { transition: none; } }
 @media (max-width: 640px) {
   .resource-timeline-grid { min-width: 752px; }
   .resource-timeline-row { grid-template-columns: 132px minmax(0, 1fr); }
   .resource-timeline-head, .resource-timeline-axis { padding-left: 132px; }
   .resource-timeline-overlay { left: 132px; }
+  .break-log-bracket-plot { left: 132px; }
   .resource-timeline-axis::before { width: 132px; margin-left: -132px; }
 }

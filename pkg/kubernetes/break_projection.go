@@ -118,6 +118,9 @@ func projectCrashContainers(status map[string]any) []kubeindex.ContainerState {
 				item.RestartCount = int32(value)
 			}
 			state, _ := container["state"].(map[string]any)
+			item.Ready, _ = container["ready"].(bool)
+			_, item.Running = state["running"]
+			item.StateKnown = len(state) > 0
 			waiting, _ := state["waiting"].(map[string]any)
 			item.WaitingReason = safeBreakReason(stringValue(waiting["reason"]))
 			last, _ := container["lastState"].(map[string]any)
@@ -184,7 +187,10 @@ func indexedContainers(value any) []kubeindex.ContainerState {
 		}
 		init, _ := item["init"].(bool)
 		current, _ := item["current_termination"].(bool)
-		result = append(result, kubeindex.ContainerState{Name: stringValue(item["name"]), Init: init, CurrentTermination: current, WaitingReason: safeBreakReason(stringValue(item["waiting_reason"])), TerminatedReason: safeBreakReason(stringValue(item["last_terminated_reason"])), ExitCode: int32(triageSummaryIntValue(item, "last_terminated_exit_code")), Signal: int32(triageSummaryIntValue(item, "last_terminated_signal")), RestartCount: int32(triageSummaryIntValue(item, "restart_count")), TerminatedAt: breakTimestamp(item["last_terminated_at"])})
+		ready, _ := item["ready"].(bool)
+		running, _ := item["running"].(bool)
+		known, _ := item["state_known"].(bool)
+		result = append(result, kubeindex.ContainerState{Name: stringValue(item["name"]), Init: init, Ready: ready, Running: running, StateKnown: known, CurrentTermination: current, WaitingReason: safeBreakReason(stringValue(item["waiting_reason"])), TerminatedReason: safeBreakReason(stringValue(item["last_terminated_reason"])), ExitCode: int32(triageSummaryIntValue(item, "last_terminated_exit_code")), Signal: int32(triageSummaryIntValue(item, "last_terminated_signal")), RestartCount: int32(triageSummaryIntValue(item, "restart_count")), TerminatedAt: breakTimestamp(item["last_terminated_at"])})
 	}
 	return result
 }
@@ -203,6 +209,7 @@ func recordProjection(record kubeindex.Record) ProjectedResource {
 		summary["involved_object"] = ObjectRef{Kind: record.Target.Kind, Namespace: record.Target.Namespace, Name: record.Target.Name, UID: record.Target.UID}
 	}
 	result := ProjectedResource{APIVersion: record.APIVersion, Kind: record.Kind, Name: record.Name, Namespace: record.Namespace, UID: record.UID, Summary: summary, Labels: record.Labels}
+	result.CreatedAt = record.CreatedAt
 	for _, owner := range record.Owners {
 		result.Owners = append(result.Owners, ObjectRef{APIVersion: owner.APIVersion, Kind: owner.Kind, Namespace: owner.Namespace, Name: owner.Name, UID: owner.UID})
 	}

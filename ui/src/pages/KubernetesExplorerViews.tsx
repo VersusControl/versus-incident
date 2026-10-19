@@ -24,13 +24,15 @@ import { type KubernetesExplorerTab } from "./kubernetesExplorerTabs";
 import { BreakRow, BreakTimelineLane, CrashJournal, ResourceTimelineChart, TimelineCard } from "./KubernetesBreakTimeline";
 import { KubernetesWarnings } from "./KubernetesWarnings";
 import { failureWarnings, issueWarnings } from "./kubernetesWarningItems";
+import { KubernetesAgentTab } from "./KubernetesAgentTab";
+import { KubernetesBreakLogs, KubernetesBreakLogsProvider } from "./KubernetesBreakLogs";
 
 const virtualViewportHeight = 440;
 const resourceRowHeight = 58;
 const virtualOverscan = 6;
 const rootScanPageLimit = 5;
 type RootTimelinePage = KubernetesChangesPage & { scanBounded?: boolean };
-type ResourceSelection = (resource: KubernetesResource, drawerTab?: "timeline") => void;
+type ResourceSelection = (resource: KubernetesResource, drawerTab?: "timeline" | "logs") => void;
 
 function resourceIdForKind(kind: string): string | null {
   const ids: Record<string, string> = {
@@ -400,6 +402,7 @@ export function KubernetesExplorerTabContent({ tab, onSelectResource, clusterId 
     case "timeline": return <TimelineView onSelectResource={onSelectResource} />;
     case "topology": return <KubernetesGraphView onSelectResource={onSelectResource} />;
     case "traffic": return <KubernetesTrafficView />;
+    case "agent": return <KubernetesAgentTab clusterName={clusterId} />;
   }
 }
 
@@ -838,7 +841,7 @@ function TimelineView({ onSelectResource }: { onSelectResource: ResourceSelectio
   const { search } = useLocation();
   const focus = new URLSearchParams(search);
   const rootUID = focus.get("root_uid");
-  return rootUID ? <RootTimelineView key={`${cluster}:${focus}`} rootUID={rootUID} focus={focus} onSelectResource={onSelectResource} /> : <UnfocusedTimelineView onSelectResource={onSelectResource} />;
+  return rootUID ? <RootTimelineView key={JSON.stringify([cluster, rootUID, focus.get("center"), focus.get("namespace"), focus.get("kind")])} rootUID={rootUID} focus={focus} onSelectResource={onSelectResource} /> : <UnfocusedTimelineView onSelectResource={onSelectResource} />;
 }
 
 function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: string; focus: URLSearchParams; onSelectResource: ResourceSelection }) {
@@ -977,7 +980,8 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
   for (const name of ["root_uid", "center", "namespace", "kind"]) unfocusedQuery.delete(name);
   if (namespace) unfocusedQuery.set("namespace", namespace);
   if (kind) unfocusedQuery.set("kind", kind);
-  return <section className="card overflow-hidden" aria-label="Kubernetes change timeline">
+  for (const name of ["logs_from", "logs_to", "logs_mode", "logs_pod"]) unfocusedQuery.delete(name);
+  return <KubernetesBreakLogsProvider issue={issue} onSelectResource={onSelectResource}><section className="card overflow-clip" aria-label="Kubernetes change timeline">
     <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-b border-ink-700 px-4 py-2">
       <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs"><span className="text-ink-300">Filtered</span><span className="pill max-w-full"><span className="truncate" title={rootUID}>{issue ? `${issue.root.kind} ${issue.root.namespace ? `${issue.root.namespace}/` : ""}${issue.root.name}` : rootUID}</span><Link to={`?${unfocusedQuery}`} className="ml-2" aria-label="Clear root filter" title="Clear root filter"><X size={12} aria-hidden="true" /></Link></span>{centered && <time className="pill pill-accent font-mono" dateTime={new Date(centerTime).toISOString()}>centred {new Date(centerTime).toLocaleTimeString([], { hour12: false })}</time>}</div>
       <div role="group" aria-label="Timeline window" className="flex rounded-control border border-ink-500 bg-surface">{([[15, "15m"], [60, "1h"], [360, "6h"], [1440, "24h"]] as const).map(([value, label]) => <button type="button" aria-pressed={minutes === value} onClick={() => setMinutes(value)} className={`rounded-control px-3 py-1 text-xs ${minutes === value ? "bg-accent-subtle text-ink-50" : "text-ink-300 hover:bg-ink-800"}`} key={value}>{label}</button>)}</div>
@@ -992,9 +996,10 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
       <CursorPagination state={paging} next={data.next} />
     </>}
     {(!data || !issue) && crashes.data && !crashes.isError && <ResourceTimelineChart crashes={crashes.data.items} changes={[]} since={since} until={until} onSelectChange={() => undefined} />}
+    <KubernetesBreakLogs />
     <CrashJournal journal={crashes} />
     <div className="px-2"><KubernetesWarnings warnings={breaks.isError ? [] : warnings} scope={JSON.stringify([cluster, rootUID, namespace, kind, since, until, paging.cursor, breaks.isError, graph.isError, changes.isError])} /></div>
-  </section>;
+  </section></KubernetesBreakLogsProvider>;
 }
 
 function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: ResourceSelection }) {
@@ -1040,7 +1045,7 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
     if (!resource_id) return;
     onSelectResource({ resource_id, kind: change.kind, namespace: change.namespace, name: change.name, uid: change.uid }, "timeline");
   };
-  return <section className="card overflow-hidden transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Kubernetes change timeline">
+  return <KubernetesBreakLogsProvider issue={brokenRoots[0]} onSelectResource={onSelectResource}><section className="card overflow-clip transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Kubernetes change timeline">
     <ExplorerHeader icon={<History size={15} />} title="Kubernetes changes" trailing={changes.data && <span className="pill">{changes.data.items.length} in window</span>} />
     {rootUID && <p className="border-b border-ink-700 px-4 py-2 text-xs text-ink-300">Root focus {brokenRoots[0]?.root.name ?? "loading"}{center && Number.isFinite(centerTime) ? `; centered ${new Date(centerTime).toLocaleString()}` : ""}</p>}
     <div className="flex flex-wrap items-end justify-between gap-3 border-b border-ink-700 p-3">
@@ -1056,7 +1061,8 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
       <CursorPagination state={paging} next={availableChanges.next}/>
     </>}
     {!availableChanges && crashes.data && !crashes.isError && <ResourceTimelineChart crashes={crashes.data.items} changes={[]} since={since} until={until} onSelectChange={openChange} />}
+    <KubernetesBreakLogs />
     <CrashJournal journal={crashes} />
     <div className="px-2"><KubernetesWarnings warnings={warnings} scope={JSON.stringify([cluster, namespace, kind, since, until, paging.cursor, denied, changesDenied])} /></div>
-  </section>;
+  </section></KubernetesBreakLogsProvider>;
 }

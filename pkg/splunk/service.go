@@ -40,14 +40,16 @@ var namespacePattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$`)
 var outputFieldPattern = regexp.MustCompile(`^[_A-Za-z][_A-Za-z0-9.]{0,63}$`)
 
 type Service struct {
-	client   *http.Client
-	address  string
-	path     string
-	config   config.AgentSplunkSourceConfig
-	scope    []clause
-	index    string
-	scrubber core.Scrubber
-	now      func() time.Time
+	extraProjection []string
+	stringFields    []string
+	client          *http.Client
+	address         string
+	path            string
+	config          config.AgentSplunkSourceConfig
+	scope           []clause
+	index           string
+	scrubber        core.Scrubber
+	now             func() time.Time
 }
 
 func NewService(cfg config.AgentSplunkSourceConfig, scrubber core.Scrubber) (*Service, error) {
@@ -200,6 +202,43 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResu
 	}
 	result := ReadResult{}
 	for _, row := range rows {
+		var raw map[string]any
+		if len(service.stringFields) > 0 {
+			_ = json.Unmarshal([]byte(stringValue(row["_raw"])), &raw)
+		}
+		invalidIdentity := false
+		for _, field := range service.stringFields {
+			value, ok := row[field].(string)
+			if !ok || value == "" || len(value) > 253 {
+				invalidIdentity = true
+				break
+			}
+			if raw != nil {
+				object := raw
+				rawValue, exists := object[field]
+				if !exists {
+					parts := strings.Split(field, ".")
+					for position, part := range parts {
+						rawValue, exists = object[part]
+						if !exists {
+							break
+						}
+						if position < len(parts)-1 {
+							object, _ = rawValue.(map[string]any)
+						}
+					}
+				}
+				text, isString := rawValue.(string)
+				if exists && (!isString || text != value) {
+					invalidIdentity = true
+					break
+				}
+			}
+		}
+		if invalidIdentity {
+			result.Truncation = appendUnique(result.Truncation, "invalid_identity")
+			continue
+		}
 		record := Record{Fields: map[string]string{}}
 		keys := make([]string, 0, len(row))
 		for key := range row {
@@ -262,6 +301,10 @@ func (service *Service) query(ctx context.Context, filters []clause, lookback ti
 	}
 	end := service.now().UTC()
 	form := url.Values{"search": {"search " + strings.Join(parts, " AND ")}, "earliest_time": {strconv.FormatInt(end.Add(-lookback).Unix(), 10)}, "latest_time": {strconv.FormatInt(end.Unix(), 10)}, "output_mode": {"json"}, "exec_mode": {"normal"}, "max_count": {strconv.Itoa(limit)}, "max_time": {"8"}, "ttl": {"10"}, "auto_cancel": {"10"}}
+	projection := append(append([]string(nil), resultFields...), service.extraProjection...)
+	for _, field := range projection {
+		form.Add("rf", field)
+	}
 	total := 0
 	data, err := service.request(ctx, http.MethodPost, service.path, form, &total)
 	if err != nil {
@@ -323,7 +366,7 @@ func (service *Service) query(ctx context.Context, filters []clause, lookback ti
 		return nil, ErrRead
 	}
 	resultsPath := strings.TrimSuffix(service.path, "/jobs") + "/v2/jobs/" + url.PathEscape(created.SID) + "/results"
-	query := url.Values{"output_mode": {"json"}, "count": {strconv.Itoa(limit)}, "f": resultFields}
+	query := url.Values{"output_mode": {"json"}, "count": {strconv.Itoa(limit)}, "f": projection}
 	data, err = service.request(ctx, http.MethodGet, resultsPath+"?"+query.Encode(), nil, &total)
 	if err != nil {
 		return nil, err

@@ -434,7 +434,7 @@ function HistoryList({ sessions, selected, selectedFull, loading, deleteErrors, 
   );
 }
 
-function Composer({ value, onChange, onSubmit, running, stopping, onStop, resource, onOpenResourcePicker, onRemoveResource }: {
+function Composer({ value, onChange, onSubmit, running, stopping, onStop, resource, timeRange, onOpenResourcePicker, onRemoveResource }: {
   value: string;
   onChange: (value: string) => void;
   onSubmit: () => void;
@@ -442,6 +442,7 @@ function Composer({ value, onChange, onSubmit, running, stopping, onStop, resour
   stopping: boolean;
   onStop: () => void;
   resource: ChatResourceAttachment | null;
+  timeRange?: { start: string; end: string };
   onOpenResourcePicker: () => void;
   onRemoveResource: () => void;
 }) {
@@ -453,6 +454,7 @@ function Composer({ value, onChange, onSubmit, running, stopping, onStop, resour
     <form onSubmit={submit} className="flex items-end gap-2 rounded-[24px] border border-ink-500/70 bg-surface px-3 py-2 shadow-card">
       <div className="min-w-0 flex-1">
         {resource && <div className="mb-1 flex min-w-0 items-center gap-2 px-2 text-2xs text-link"><KubernetesAttachmentLink resource={resource} /><button type="button" className="btn-icon ml-auto size-7 shrink-0" aria-label="Remove Kubernetes resource attachment" title="Remove attachment" onClick={onRemoveResource}><X size={13}/></button></div>}
+        {resource && timeRange && <p className="mb-1 px-2 text-2xs text-ink-300">Log window {new Date(timeRange.start).toLocaleString()} - {new Date(timeRange.end).toLocaleString()}</p>}
         <textarea
           value={value}
           onChange={(event) => onChange(capChatMessage(event.target.value))}
@@ -484,6 +486,11 @@ export function ChatPage() {
   const [evidence, setEvidence] = useState<EvidenceSelection | null>(null);
   const [draft, setDraft] = useState("");
   const [resourceAttachment, setResourceAttachment] = useState<ChatResourceAttachment | null>(() => resourceAttachmentFromSearch(searchParams));
+  const [resourceTimeRange, setResourceTimeRange] = useState(() => {
+    const start = searchParams.get("logs_from");
+    const end = searchParams.get("logs_to");
+    return start && end && Number.isFinite(Date.parse(start)) && Number.isFinite(Date.parse(end)) && Date.parse(end) > Date.parse(start) && Date.parse(end) - Date.parse(start) <= 2 * 60 * 60_000 ? { start, end } : undefined;
+  });
   const [resourcePickerOpen, setResourcePickerOpen] = useState(false);
   const [resourceQuery, setResourceQuery] = useState("");
   const [debouncedResourceQuery, setDebouncedResourceQuery] = useState("");
@@ -563,9 +570,9 @@ export function ChatPage() {
   }, []);
 
   const newThread = () => {
-    setSearchParams({}); setDraft(""); setEvidence(null); setHistoryOpen(false); setResourceAttachment(null);
+    setSearchParams({}); setDraft(""); setEvidence(null); setHistoryOpen(false); setResourceAttachment(null); setResourceTimeRange(undefined);
   };
-  const selectThread = (id: string) => { setSearchParams({ session: id }); setHistoryOpen(false); setEvidence(null); setResourceAttachment(null); };
+  const selectThread = (id: string) => { setSearchParams({ session: id }); setHistoryOpen(false); setEvidence(null); setResourceAttachment(null); setResourceTimeRange(undefined); };
   const openEvidence = (value: EvidenceSelection) => {
     evidenceTriggerRef.current = document.activeElement as HTMLElement | null;
     setEvidence(value);
@@ -601,10 +608,11 @@ export function ChatPage() {
   const send = async () => {
     const message = draft.trim();
     if (!message || active || submittingRef.current) return;
-    const attachment = resourceAttachment ? { resource: resourceAttachment } : undefined;
+    const attachment = resourceAttachment ? { resource: resourceAttachment, ...(resourceTimeRange ? { time_range: resourceTimeRange } : {}) } : undefined;
     submittingRef.current = true;
     setDraft("");
     setResourceAttachment(null);
+    setResourceTimeRange(undefined);
     let id = selectedId;
     try {
       if (!id) {
@@ -743,6 +751,7 @@ export function ChatPage() {
     const cluster = pickerCluster ?? resourceOverview.data?.cluster_id ?? "";
     if (!pickerReady || !cluster) return;
     setResourceAttachment({ provider: "kubernetes", cluster, resource_id: resource.resource_id, namespace: resource.namespace, name: resource.name });
+    setResourceTimeRange(undefined);
     setResourcePickerOpen(false);
     setResourceQuery("");
   };
@@ -804,7 +813,7 @@ export function ChatPage() {
                   </div>
                 </div>
                 {conversationStarted && !scroll.following && <button type="button" onClick={scroll.scrollToBottom} className="absolute bottom-44 left-1/2 z-sticky flex -translate-x-1/2 items-center gap-2 rounded-full border border-ink-500/60 bg-surface px-3 py-2 text-xs text-ink-200 shadow-overlay"><ArrowDown size={14} />Scroll to bottom</button>}
-                <div className={clsx("absolute left-0 right-0 z-sticky mx-auto max-w-3xl px-4 transition-[bottom,transform] duration-300", conversationStarted ? "bottom-4" : "bottom-[20vh]")}><Composer value={draft} onChange={setDraft} onSubmit={send} running={active} stopping={selectedRun?.stopping ?? false} onStop={stop} resource={resourceAttachment} onOpenResourcePicker={() => setResourcePickerOpen(true)} onRemoveResource={() => setResourceAttachment(null)} /></div>
+                <div className={clsx("absolute left-0 right-0 z-sticky mx-auto max-w-3xl px-4 transition-[bottom,transform] duration-300", conversationStarted ? "bottom-4" : "bottom-[20vh]")}><Composer value={draft} onChange={setDraft} onSubmit={send} running={active} stopping={selectedRun?.stopping ?? false} onStop={stop} resource={resourceAttachment} timeRange={resourceTimeRange} onOpenResourcePicker={() => setResourcePickerOpen(true)} onRemoveResource={() => { setResourceAttachment(null); setResourceTimeRange(undefined); }} /></div>
               </>
             )}
           </main>

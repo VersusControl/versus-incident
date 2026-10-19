@@ -286,6 +286,9 @@ func (client *Client) readJSONOn(ctx context.Context, policy operationPolicy, me
 		}
 		data, readErr := io.ReadAll(io.LimitReader(response.Body, policy.maxBytes+1))
 		_ = response.Body.Close()
+		if err := operationCtx.Err(); err != nil {
+			return "", err
+		}
 		if readErr != nil {
 			if operationCtx.Err() != nil {
 				return "", operationCtx.Err()

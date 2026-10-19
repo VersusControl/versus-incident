@@ -26,6 +26,7 @@ const (
 
 // Service provides provider-neutral, bounded reads for one configured source.
 type Service struct {
+	allowPrefix   bool
 	client        *Client
 	configured    config.AgentElasticsearchSourceConfig
 	allowedFields map[string]struct{}
@@ -285,6 +286,19 @@ func (service *Service) Shards(ctx context.Context, limit int) (ShardResult, err
 }
 
 // Search executes sanitized Query DSL and projects only configured source fields.
+func (service *Service) SearchWithPrefix(ctx context.Context, options SearchOptions) (SearchResult, error) {
+	copy := *service
+	copy.allowPrefix = true
+	return copy.Search(ctx, options)
+}
+
+func (service *Service) PreviewSearch(options SearchOptions) (json.RawMessage, error) {
+	copy := *service
+	copy.allowPrefix = true
+	body, _, _, err := copy.searchBody(options, boundedLimit(options.Limit))
+	return json.RawMessage(body), err
+}
+
 func (service *Service) Search(ctx context.Context, options SearchOptions) (SearchResult, error) {
 	limit := boundedLimit(options.Limit)
 	body, fields, projectionTruncated, err := service.searchBody(options, limit)
@@ -449,7 +463,10 @@ func (service *Service) safeQuery(value any, depth int) bool {
 					return false
 				}
 			}
-		case "term":
+		case "term", "prefix":
+			if strings.EqualFold(operator, "prefix") && !service.allowPrefix {
+				return false
+			}
 			fields, ok := child.(map[string]any)
 			if !ok || len(fields) != 1 {
 				return false

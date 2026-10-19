@@ -66,6 +66,29 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); window.history.replaceState(null, "", "/"); });
 
 describe("KubernetesPage", () => {
+	it("follows the coverage tip router link into the Agent tab without reloading", async () => {
+		window.history.replaceState(null, "", "/agent/kubernetes?view=timeline&root_uid=root&namespace=shop");
+		vi.mocked(api.kubernetesIssues).mockResolvedValue({ items: [{ root: { kind: "Deployment", name: "checkout", namespace: "shop", uid: "root" }, rule: "pod.crash_loop", severity: "critical", count: 1, broken: true, broke_at: "2026-10-17T12:00:00Z" }], totals: {}, truncated: false, sync: { state: "ready", age_s: 0, partial: false } });
+		vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue({ window: { from: "2026-10-17T11:55:00Z", to: "2026-10-17T12:02:00Z" }, pods: [], lines: [], markers: [], counts: { all: 0, errors: 0, warnings: 0 }, rate: [], patterns: [], sources: [], coverage: { state: "none", tip: true, reason: "pod_deleted", gaps: [] } });
+		const fields = { namespace: "namespace", pod: "pod", container: "container" };
+		vi.spyOn(api, "kubernetesAgentSettings").mockResolvedValue({ learning: { logs: false, metrics: false, traces: false, scope: { include: [], exclude: [] } }, break_logs: { linked_source: "", fields: { loki: fields, elasticsearch: fields, cloudwatchlogs: fields, graylog: fields, splunk: fields, signoz: fields } }, can_write: false, linked_source_missing: false, sources: [], detected: { workloads: 1, namespaces: 1, metrics_server: false, traces: null } });
+		renderPage();
+		fireEvent.click(await screen.findByRole("button", { name: "Log coverage tip" }));
+		fireEvent.click(screen.getByRole("link", { name: "Link a source in Agent tab" }));
+		await screen.findByRole("region", { name: "Kubernetes Agent" });
+		expect(screen.getByRole("tab", { name: "Agent", exact: true }).getAttribute("aria-selected")).toBe("true");
+	});
+	it("opens bounded workload logs directly in the resource drawer and retains partial evidence", async () => {
+		window.history.replaceState(null, "", "/agent/kubernetes?view=timeline&r=apps~v1~deployments/shop/checkout&tab=logs");
+		vi.mocked(api.kubernetesWorkloadLogs).mockResolvedValue({ pods: ["api-old"], lines: [{ pod: "api-old", container: "api", text: "workload log line" }], truncated: true, omitted_pods: ["api-other"], partial_failures: [{ scope: "logs", class: "forbidden" }] });
+		renderPage();
+		await screen.findByText("workload log line");
+		expect(api.kubernetesWorkloadLogs).toHaveBeenCalledWith("Deployment", "shop", "checkout", expect.objectContaining({ previous: false, since_seconds: 3600, tail_lines: 500 }));
+		expect(screen.getByText("Workload logs are truncated.")).toBeTruthy();
+		expect(screen.getByText("Omitted pods: api-other")).toBeTruthy();
+		fireEvent.click(screen.getByLabelText("Previous container"));
+		await waitFor(() => expect(api.kubernetesWorkloadLogs).toHaveBeenLastCalledWith("Deployment", "shop", "checkout", expect.objectContaining({ previous: true })));
+	});
 	it("preserves bounded inventory alongside unrelated failures and keeps warning focus on snapshot refresh", async () => {
 		const overview = { connector: "kubernetes", cluster_id: "production", observed_at: "2026-10-14T12:00:00Z", nodes: 3, ready_nodes: 2, pods: 18, running_pods: 16, namespaces: 5, active_namespaces: 5, workloads: 7, warnings: 2, truncated: true, partial_failures: [{ resource_id: "ConfigMap", class: "forbidden" }] };
 		vi.mocked(api.kubernetesOverview).mockResolvedValue(overview);
@@ -740,13 +763,13 @@ describe("KubernetesPage", () => {
 		expect(new URLSearchParams(window.location.search).get("r")).toBe("apps~v1~deployments/payments/checkout-api");
 	});
 
-	it("keeps non-Pod logs hidden while preserving safe projected YAML and diagnosis", async () => {
+	it("offers workload logs while preserving safe projected YAML and diagnosis", async () => {
 		vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "default", name: "checkout" }], truncated: false });
 		vi.mocked(api.kubernetesDescribe).mockResolvedValue({ resource: { resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "default", name: "checkout", summary: { ready: 2, data: "secret-canary", nested: { token: "secret-canary", safe: "projected" } } } });
 		vi.mocked(api.kubernetesDiagnose).mockResolvedValue({ workload: { resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "default", name: "checkout", ready: 2, desired: 3, truncated: false }, warning_events: [], changes: [{ id: "change-diagnosis", cluster: "production", kind: "Deployment", namespace: "default", name: "checkout", uid: "uid-checkout", type: "image_changed", at: "2026-10-05T12:00:00Z" }], neighborhood: { nodes: [{ id: "uid-checkout", kind: "Deployment", namespace: "default", name: "checkout", group: "default" }, { id: "uid-service", kind: "Service", namespace: "default", name: "checkout", group: "default" }], edges: [{ from: "uid-service", to: "uid-checkout", type: "exposes" }], omitted: {}, sync: { state: "ready", age_s: 0, partial: false } }, truncated: false, sync: { state: "direct", age_s: 0, partial: false } });
 		renderWorkloads();
 		fireEvent.click(await screen.findByRole("button", { name: "Select Deployment default/checkout" }));
-		expect(screen.queryByRole("tab", { name: "Logs" })).toBeNull();
+		expect(screen.getByRole("tab", { name: "Logs" })).toBeTruthy();
 		expect(screen.queryByRole("tab", { name: "Actions" })).toBeNull();
 		expect(api.kubernetesWorkloadLogs).not.toHaveBeenCalled();
 		fireEvent.click(screen.getByRole("tab", { name: "YAML" }));
@@ -959,21 +982,21 @@ describe("KubernetesPage", () => {
 		expect(within(traffic).queryByText("0 req/s")).toBeNull();
 	});
 
-	it.each(["actions", "logs"])("normalizes obsolete non-Pod %s deep links and popstate", async (tab) => {
+	it.each(["actions"])("normalizes obsolete non-Pod %s deep links and popstate", async (tab) => {
 		window.history.replaceState(null, "", `/agent/kubernetes?r=apps~v1~deployments/default/checkout&tab=${tab}`);
 		renderPage();
 		const tabs = await screen.findByRole("tablist", { name: "Resource detail views" });
 		expect(within(tabs).getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
-		expect(within(tabs).queryByRole("tab", { name: "Logs" })).toBeNull();
+		expect(within(tabs).getByRole("tab", { name: "Logs" })).toBeTruthy();
 		expect(within(tabs).queryByRole("tab", { name: "Actions" })).toBeNull();
 		await waitFor(() => expect(new URLSearchParams(window.location.search).has("tab")).toBe(false));
 		fireEvent.keyDown(within(tabs).getByRole("tab", { name: "Events" }), { key: "ArrowRight" });
-		expect(within(tabs).getByRole("tab", { name: "YAML" }).getAttribute("aria-selected")).toBe("true");
+		expect(within(tabs).getByRole("tab", { name: "Logs" }).getAttribute("aria-selected")).toBe("true");
 		act(() => { window.history.pushState(null, "", `/agent/kubernetes?r=apps~v1~deployments/default/checkout&tab=${tab}`); window.dispatchEvent(new PopStateEvent("popstate")); });
 		expect(within(tabs).getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
 		expect(new URLSearchParams(window.location.search).has("tab")).toBe(false);
 		expect(api.proposeAgentAction).not.toHaveBeenCalled();
-		expect(api.kubernetesWorkloadLogs).not.toHaveBeenCalled();
+		expect(api.kubernetesWorkloadLogs).toHaveBeenCalled();
 	});
 
 	it("streams Pod-only logs and aborts on tab changes and drawer close", async () => {

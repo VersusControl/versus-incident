@@ -44,6 +44,9 @@ type OwnerRef struct {
 }
 
 type ContainerState struct {
+	Ready              bool      `json:"ready"`
+	Running            bool      `json:"running"`
+	StateKnown         bool      `json:"state_known,omitempty"`
 	Name               string    `json:"name"`
 	Init               bool      `json:"init,omitempty"`
 	CurrentTermination bool      `json:"current_termination,omitempty"`

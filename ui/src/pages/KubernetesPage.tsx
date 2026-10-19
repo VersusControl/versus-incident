@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useBrokenIssues, useKubernetesCluster, useKubernetesQuery } from "@/lib/useKubernetesCluster";
 import { KubernetesClusterProvider } from "@/components/KubernetesClusterProvider";
 import { KubernetesFleet } from "./KubernetesFleet";
@@ -66,6 +66,15 @@ const drawerTabs: Array<{ id: KubernetesDrawerTab; label: string }> = [
   { id: "timeline", label: "Timeline" },
 ];
 
+export function WorkloadLiveLogs({ resource }: { resource: KubernetesResource }) {
+  const { client } = useKubernetesCluster();
+  const [previous, setPrevious] = useState(false);
+  const [container, setContainer] = useState("");
+  const [grep, setGrep] = useState("");
+  const logs = useKubernetesQuery({ queryKey: ["kubernetes-workload-logs", resource.kind, resource.namespace, resource.name, previous, container, grep], queryFn: () => client.kubernetesWorkloadLogs(resource.kind, resource.namespace ?? "", resource.name, { previous, container, grep, since_seconds: 3600, tail_lines: 500 }), retry: false, refetchInterval: false });
+  return <section aria-label="Workload live logs" className="space-y-3 text-xs"><div className="flex flex-wrap items-center gap-3"><label className="flex items-center gap-2"><input type="checkbox" checked={previous} onChange={(event) => setPrevious(event.target.checked)} />Previous container</label><label>Container<input className="input ml-2" value={container} onChange={(event) => setContainer(event.target.value)} placeholder="All containers" /></label><label>Search<input className="input ml-2" value={grep} onChange={(event) => setGrep(event.target.value)} /></label><button type="button" className="btn" disabled={logs.isFetching} onClick={() => void logs.refetch()}><RefreshCw size={14} />Refresh logs</button></div><p className="text-ink-300">Last hour, up to 500 lines per Pod. Snapshot read, not a continuous stream.</p>{logs.isPending && <p role="status">Loading workload logs...</p>}{logs.isError && <p role="alert" className="text-sev-warning">Workload logs unavailable.</p>}{logs.data && !logs.isError && <><div role="log" aria-label="Live workload log lines" className="max-h-[55vh] overflow-auto bg-surface-sunken p-3 font-mono text-2xs">{logs.data.lines.map((line, index) => <p key={index} className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]"><span className="text-ink-300">{line.at} {line.pod} {line.container} </span>{line.text}</p>)}{!logs.data.lines.length && <p>No matching log lines.</p>}</div>{logs.data.truncated && <p role="status" className="text-sev-warning">Workload logs are truncated.</p>}{!!logs.data.omitted_pods?.length && <p role="status" className="break-all text-sev-warning">Omitted pods: {logs.data.omitted_pods.join(", ")}</p>}<PartialFailuresDisclosure failures={logs.data.partial_failures} /></>}</section>;
+}
+
 function parseExplorerTab(value: string | null): KubernetesExplorerTab {
   return kubernetesExplorerTabs.some((item) => item.id === value)
     ? (value as KubernetesExplorerTab)
@@ -73,7 +82,7 @@ function parseExplorerTab(value: string | null): KubernetesExplorerTab {
 }
 
 function parseDrawerTab(value: string | null, resource: KubernetesResource | null): KubernetesDrawerTab {
-  if (value === "logs" && resource?.kind !== "Pod") return "overview";
+  if (value === "logs" && !workloadKinds.has(resource?.kind ?? "")) return "overview";
   return drawerTabs.some((item) => item.id === value)
     ? (value as KubernetesDrawerTab)
     : "overview";
@@ -103,6 +112,10 @@ function writeExplorerLocation(options: {
 }) {
   const query = new URLSearchParams(window.location.search);
   if (options.view) {
+    if (options.view !== "timeline") {
+      query.delete("logs_from"); query.delete("logs_to");
+      query.delete("logs_mode"); query.delete("logs_pod");
+    }
     if (options.view !== "timeline" && query.has("root_uid")) {
       query.delete("root_uid");
       query.delete("center");
@@ -137,6 +150,7 @@ const explorerTabIcons: Record<KubernetesExplorerTab, typeof Cpu> = {
   releases: Layers3,
   gitops: GitBranch,
   traffic: Waypoints,
+  agent: Activity,
 };
 
 
@@ -293,6 +307,7 @@ function KubernetesDashboard() {
   const { client: api, key, cluster, multiple, clusters } = useKubernetesCluster();
   const useQuery = useKubernetesQuery;
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
   const [view, setView] = useState<KubernetesExplorerTab>(() =>
     parseExplorerTab(new URLSearchParams(window.location.search).get("view")),
@@ -463,6 +478,14 @@ function KubernetesDashboard() {
   }, []);
 
   useEffect(() => {
+    const query = new URLSearchParams(location.search);
+    const resource = parseResourceSelection(location.search);
+    setView(parseExplorerTab(query.get("view")));
+    setSelected(resource);
+    setDrawerTab(parseDrawerTab(query.get("tab"), resource));
+  }, [location.search]);
+
+  useEffect(() => {
     const query = new URLSearchParams(window.location.search);
     const requested = query.get("tab");
     if (requested && parseDrawerTab(requested, selected) === "overview") {
@@ -588,7 +611,7 @@ function KubernetesDashboard() {
     };
   }, [queryClient, clusterQueriesEnabled, api, key, multiple, navigate]);
 
-  const selectResource = (resource: KubernetesResource, initialTab?: "timeline") => {
+  const selectResource = (resource: KubernetesResource, initialTab?: "timeline" | "logs") => {
     setSelected(resource);
     setDrawerTab(initialTab ?? "overview");
     writeExplorerLocation({ resource, drawerTab: initialTab ?? "overview" });
@@ -614,7 +637,7 @@ function KubernetesDashboard() {
     setDrawerTab(available);
     if (selected) writeExplorerLocation({ resource: selected, drawerTab: available });
   };
-  const visibleDrawerTabs = drawerTabs.filter((item) => item.id !== "logs" || selected?.kind === "Pod");
+  const visibleDrawerTabs = drawerTabs.filter((item) => item.id !== "logs" || workloadKinds.has(selected?.kind ?? ""));
   const visibleResources = asArray(workloads.data?.items);
   const nodeItems = asArray(nodes.data?.items);
   const selectedNodePods = asArray(nodePods.data?.items);
@@ -1132,6 +1155,7 @@ function KubernetesDashboard() {
           </>}
           {drawerTab === "events" && <DrawerEvents events={detail.data?.events ?? []} loading={detail.isPending} />}
           {drawerTab === "logs" && selected.kind === "Pod" && detail.data && !detail.isError && <PodLogViewer key={`${selected.namespace}/${selected.name}`} resource={detail.data.resource} />}
+          {drawerTab === "logs" && selected.kind !== "Pod" && workloadKinds.has(selected.kind) && <WorkloadLiveLogs key={`${selected.kind}/${selected.namespace}/${selected.name}`} resource={selected} />}
           {drawerTab === "yaml" && detail.data && <section aria-label="Projected YAML"><p className="mb-2 text-2xs uppercase text-ink-400">Projected view, read-only</p><pre className="max-h-[65vh] overflow-auto whitespace-pre-wrap break-words rounded-control border border-ink-700 bg-ink-950 p-3 font-mono text-xs leading-5 text-ink-200">{projectedResourceYaml(detail.data.resource)}</pre></section>}
           {drawerTab === "related" && detail.data && <ResourceRelated related={detail.data.related_resources} />}
           {drawerTab === "metrics" && (workloadDetail.data ? <><LiveMetricsSection samples={liveMetrics}/><WorkloadSnapshot workload={workloadDetail.data} metricsStatus={overview.data?.metrics_status}/></> : <p role="status" className="text-sm text-ink-400">Metrics snapshots are not available for this resource kind.</p>)}
