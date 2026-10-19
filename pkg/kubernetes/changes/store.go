@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
@@ -25,7 +26,7 @@ var (
 const (
 	defaultRetention    = 24 * time.Hour
 	maxChanges          = 5000
-	maxStoreBytes       = 4 << 20
+	maxStoreBytes       = (4 << 20) + breaklogs.MaxBytes
 	maxChangeFields     = 16
 	maxLifecycleSamples = 256
 )
@@ -54,6 +55,7 @@ type Page struct {
 }
 
 type snapshot struct {
+	BreakLogs      breaklogs.State              `json:"break_logs,omitempty"`
 	Changes        []Change                     `json:"changes"`
 	Gaps           []Gap                        `json:"gaps,omitempty"`
 	Coverage       map[string]Gap               `json:"coverage,omitempty"`
@@ -165,6 +167,9 @@ func (store *Store) CommitCapture(changes []Change, gaps []Gap, coverage map[str
 		if err := mergeCrashes(current, crashes, crashGaps, podRead, now, store.retention); err != nil {
 			return err
 		}
+		if err := breaklogs.Merge(&current.BreakLogs, nil, nil, "", now); err != nil {
+			return err
+		}
 		cutoff := now.Add(-store.retention)
 		pruneWarningCheckpoints(current, now)
 		kept := []Change{}
@@ -260,15 +265,15 @@ func (store *Store) CommitCapture(changes []Change, gaps []Gap, coverage map[str
 			}
 		}
 		compactGaps(current)
-		for size := encodedSize(*current); size > maxStoreBytes && len(current.Crashes) > 0; size = encodedSize(*current) {
+		for size := historySize(*current); size > 4<<20 && len(current.Crashes) > 0; size = historySize(*current) {
 			removed := 0
-			for removed < size-maxStoreBytes && len(current.Crashes) > 0 {
+			for removed < size-(4<<20) && len(current.Crashes) > 0 {
 				encoded, _ := json.Marshal(current.Crashes[0])
 				removed += len(encoded) + 1
 				dropCrash(current)
 			}
 		}
-		for len(current.Changes) > maxChanges || encodedSize(*current) > maxStoreBytes {
+		for len(current.Changes) > maxChanges || historySize(*current) > 4<<20 {
 			if len(current.Changes) == 0 {
 				return ErrStoreLimit
 			}
@@ -369,6 +374,11 @@ func accumulateWarning(current *snapshot, change Change, now time.Time) (Change,
 	change.warning = nil
 	change.Fields = []FieldChange{{Path: "events.warning_count", To: strconv.FormatInt(window.Count, 10)}}
 	return change, window.Count >= 5
+}
+
+func historySize(current snapshot) int {
+	current.BreakLogs = breaklogs.State{}
+	return encodedSize(current)
 }
 
 func (store *Store) commitSnapshot(update func(*snapshot) error) error {

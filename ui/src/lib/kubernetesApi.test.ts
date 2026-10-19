@@ -8,6 +8,33 @@ afterEach(() => {
 });
 
 describe("Kubernetes resource API", () => {
+  it("scopes Agent settings writes and tests without sending server-owned metadata", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(new Response("{}")));
+    const client = createKubernetesApi("east");
+    const fields = { namespace: "namespace", pod: "pod", container: "container" };
+    const input = { learning: { logs: true, metrics: false, traces: false, scope: { include: ["shop"], exclude: [] } }, break_logs: { linked_source: "loki-prod", fields: { loki: fields, elasticsearch: fields, cloudwatchlogs: fields, graylog: fields, splunk: fields, signoz: fields } }, can_write: true, sources: [], detected: {} };
+    await client.kubernetesAgentSettings();
+    await client.kubernetesSaveAgentSettings(input);
+    await client.kubernetesTestLink("loki-prod", fields);
+    for (const [url] of fetchMock.mock.calls) expect(new URL(String(url), "http://localhost").searchParams.get("cluster")).toBe("east");
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({ learning: input.learning, break_logs: input.break_logs });
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual({ source: "loki-prod", fields });
+  });
+
+  it("preserves break-log filters, deleted Pod names and opaque paging within the cluster", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ lines: [{ pod: "deleted-api", pod_uid: "" }], next: "opaque+next" })));
+    const signal = new AbortController().signal;
+    const result = await createKubernetesApi("prod").kubernetesBreakLogs({ namespace: "shop", root_uid: "root", since: "2026-10-17T10:00:00Z", until: "2026-10-17T10:07:00Z", pods: ["deleted-api", "uid-two"], mode: "previous", level: "error", q: "timeout + retry", cursor: "opaque+next", limit: 500 }, signal);
+    const url = new URL(String(fetchMock.mock.calls[0][0]), "http://localhost");
+    expect(url.pathname).toBe("/api/admin/kubernetes/break-logs");
+    expect(url.searchParams.getAll("pods[]")).toEqual(["deleted-api", "uid-two"]);
+    expect(url.searchParams.get("cluster")).toBe("prod");
+    expect(url.searchParams.get("cursor")).toBe("opaque+next");
+    expect(url.searchParams.get("q")).toBe("timeout + retry");
+    expect(fetchMock.mock.calls[0][1]?.signal).toBe(signal);
+    expect(result.lines[0]).toEqual({ pod: "deleted-api", pod_uid: "" });
+  });
+
   it("scopes crash journal filters and requests only one retained page", async () => {
     const page = { items: [], next: "next-page", retention_basis: "observed_at" };
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(page)));

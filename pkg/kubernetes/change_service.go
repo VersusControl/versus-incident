@@ -36,6 +36,9 @@ type changeStoreState struct {
 	lifecycle     context.Context
 	firstSeen     map[kubeindex.Scope]map[string]time.Time
 	journalFailed map[kubeindex.Scope]bool
+	logActive     map[kubeindex.Scope]bool
+	logDone       map[kubeindex.Scope]chan struct{}
+	logCancel     map[kubeindex.Scope]context.CancelFunc
 }
 
 type indexRefreshKey struct {
@@ -60,6 +63,9 @@ func newChangeStoreState() *changeStoreState {
 		captures:      make(map[kubeindex.Scope]*captureLoop),
 		firstSeen:     map[kubeindex.Scope]map[string]time.Time{},
 		journalFailed: map[kubeindex.Scope]bool{},
+		logActive:     map[kubeindex.Scope]bool{},
+		logDone:       map[kubeindex.Scope]chan struct{}{},
+		logCancel:     map[kubeindex.Scope]context.CancelFunc{},
 	}
 }
 

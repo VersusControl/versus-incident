@@ -165,6 +165,10 @@ func (service *Service) StopCapture() {
 	scope := service.indexScope()
 	service.changes.stopped[scope] = true
 	loop := service.changes.captures[scope]
+	logDone := service.changes.logDone[scope]
+	if cancel := service.changes.logCancel[scope]; cancel != nil {
+		cancel()
+	}
 	refreshes := []*indexRefreshCall{}
 	for key, call := range service.changes.refreshes {
 		if key.scope == scope {
@@ -183,6 +187,9 @@ func (service *Service) StopCapture() {
 	}
 	for _, refresh := range refreshes {
 		<-refresh.done
+	}
+	if logDone != nil {
+		<-logDone
 	}
 }
 
@@ -433,6 +440,7 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 			return err
 		}
 		service.rememberBreaks(kubebreaks.Classify(snapshot.Records, now), "", now, partial)
+		service.enqueueBreakLogs(snapshot, "", nil)
 		return nil
 	}
 	loop.mu.Lock()
@@ -488,6 +496,7 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 		return err
 	}
 	service.rememberBreaks(kubebreaks.Classify(snapshot.Records, now), "", now, partial)
+	service.enqueueBreakLogs(snapshot, loop.owner, loop.ownedContext)
 	for kind, at := range success {
 		loop.success[kind] = at
 	}

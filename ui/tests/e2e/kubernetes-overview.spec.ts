@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { openApp } from "./helpers";
-import type { KubernetesClusters, KubernetesCrashEvent, KubernetesCrashPage, KubernetesGraph, KubernetesIssue, KubernetesOverview, KubernetesResourcePage, KubernetesTopPage, KubernetesTraffic, KubernetesUsage, RbacMe, SSOSession } from "../../src/lib/api";
+import type { KubernetesAgentSettings, KubernetesBreakLogPage, KubernetesClusters, KubernetesCrashEvent, KubernetesCrashPage, KubernetesGraph, KubernetesIssue, KubernetesOverview, KubernetesResourcePage, KubernetesTopPage, KubernetesTraffic, KubernetesUsage, RbacMe, SSOSession } from "../../src/lib/api";
 
 type StreamCounter = { path: string; container: string; previous: boolean; follow: boolean; requests: number; active: number; cancelled: number; completed: number; disconnected: number; unavailable: number; chunks: number; since_time?: string };
 
@@ -482,7 +482,23 @@ async function fitOverviewCapture(page: Page) {
   return measurements;
 }
 
-async function captureBreakState(page: Page, filename: string, theme: "dark" | "light") {
+async function captureBreakState(page: Page, filename: string, theme: "dark" | "light", classification = "F: synthetic API-intercepted UI fixture, not live-cluster acceptance") {
+  if (process.env.E2E_KUBERNETES_AUTO_DETECT_DOCS === "1") {
+    const selected: Record<string, string> = {
+      "auto-detect-issues-overview.png": "issues-overview",
+      "break-issues-expanded-desktop-dark.png": "issues-details",
+      "break-timeline-general-desktop-dark.png": "timeline-overview",
+      "break-timeline-focus-desktop-dark.png": "timeline-focus",
+      "auto-detect-change-compare.png": "change-compare",
+      "break-crash-popover-desktop.png": "crash-actions",
+      "break-logs-desktop.png": "break-logs",
+      "auto-detect-log-filters.png": "log-filters",
+      "auto-detect-live-logs.png": "live-logs",
+      "break-agent-desktop.png": "agent-link",
+    };
+    if (!selected[filename]) return;
+    filename = `kubernetes-auto-detect-${selected[filename]}.png`;
+  }
   const proof = await page.evaluate((expected) => {
     const background = getComputedStyle(document.body).backgroundColor;
     const storedTheme = localStorage.getItem("versus.theme");
@@ -492,14 +508,20 @@ async function captureBreakState(page: Page, filename: string, theme: "dark" | "
   expect(proof.storedTheme).toBe(theme);
   expect(proof.theme).toBe(theme);
   if (theme === "dark") expect(proof.background).toBe("rgb(13, 17, 24)");
+  else expect(proof.background).toBe("rgb(238, 241, 246)");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   fs.mkdirSync(screenshotDir, { recursive: true });
-  const image = await page.screenshot({ path: path.join(screenshotDir, filename), animations: "disabled" });
-  expect(image.readUInt32BE(16)).toBe(proof.viewport.width * proof.deviceScaleFactor);
-  expect(image.readUInt32BE(20)).toBe(proof.viewport.height * proof.deviceScaleFactor);
+  const panel = process.env.E2E_KUBERNETES_AUTO_DETECT_DOCS === "1" && filename.endsWith("-break-logs.png") ? page.getByRole("region", { name: "Logs at break", exact: true }) : undefined;
+  const image = panel
+    ? await panel.screenshot({ path: path.join(screenshotDir, filename), animations: "disabled" })
+    : await page.screenshot({ path: path.join(screenshotDir, filename), animations: "disabled" });
+  if (!panel) {
+    expect(image.readUInt32BE(16)).toBe(proof.viewport.width * proof.deviceScaleFactor);
+    expect(image.readUInt32BE(20)).toBe(proof.viewport.height * proof.deviceScaleFactor);
+  }
   const manifestPath = path.join(screenshotDir, "manifest.json");
   const manifest = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { images: Record<string, unknown> } : { images: {} };
-  manifest.images[filename] = { classification: "F: synthetic API-intercepted UI fixture, not live-cluster acceptance", spec: "tests/e2e/kubernetes-overview.spec.ts", config: "tests/e2e/playwright.config.ts", sha256: createHash("sha256").update(image).digest("hex"), ...proof };
+  manifest.images[filename] = { classification, spec: "tests/e2e/kubernetes-overview.spec.ts", config: "tests/e2e/playwright.config.ts", sha256: createHash("sha256").update(image).digest("hex"), ...proof, dimensions: { width: image.readUInt32BE(16), height: image.readUInt32BE(20) } };
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
   return proof;
 }
@@ -2151,9 +2173,13 @@ test.describe("Pod log streaming fixtures", () => {
   test.beforeEach(async ({ page }, testInfo) => {
     const overviewRefresh = testInfo.title.startsWith("Overview refresh");
     const breakTimeline = testInfo.title.startsWith("Break timeline");
+    const lightTheme = testInfo.title.includes("light theme");
     const fullOverview = testInfo.title === "Break timeline full populated dark Overview documentation";
     const overviewCounts = { Namespace: 3, Node: 12, Ingress: 2, Gateway: 1, HTTPRoute: 3, Service: 9, Deployment: 3, ReplicaSet: 6, StatefulSet: 1, DaemonSet: 1, Job: 2, CronJob: 1, Pod: 28, HorizontalPodAutoscaler: 2, ConfigMap: 12, Secret: 8, PersistentVolumeClaim: 4, Event: 26 };
-    if (breakTimeline) await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+    if (breakTimeline) {
+      await page.emulateMedia({ colorScheme: lightTheme ? "light" : "dark" });
+      await page.addInitScript((theme) => localStorage.setItem("versus.theme", theme), lightTheme ? "light" : "dark");
+    }
     const fullRootHistory = testInfo.title.startsWith("Break timeline full related history");
     const diagnostics = testInfo.title.includes("secondary diagnostics");
     const coldHistory = testInfo.title.includes("collapsed issue uncertainty");
@@ -2174,6 +2200,7 @@ test.describe("Pod log streaming fixtures", () => {
       { root: { kind: "DaemonSet", namespace: "kube-system", name: "node-agent", uid: "node-agent-uid" }, rule: "workload.unavailable", severity: "critical", count: 7, of: 12, broken: true, broke_at: at(3), history: "complete", untracked: ["Secret"], evidence: { warning_events: 0, from: at(33), to: at(1) } },
     ];
     const linkedHistory = Array.from({ length: 24 }, (_, index) => ({ id: `linked-${index}`, cluster: "fixture", kind: "ConfigMap", namespace: "shop", name: `checkout-settings-${index}`, uid: `config-${index}`, type: "config_changed" as const, at: at(7 + index / 10) }));
+    if (process.env.E2E_KUBERNETES_AUTO_DETECT_DOCS === "1") roots[0].evidence = { ...roots[0].evidence!, restarts: 44, warning_reasons: [{ reason: "BackOff", count: 18 }] };
     if (testInfo.title.startsWith("Break timeline crash evidence")) {
       roots[0].evidence = { ...roots[0].evidence!, partial: true, restarts: 44,
         terminations: [{ reason: "Error", exit_code: 137, exit_hint: "SIGKILL", count: 2, restarts: 41, last: at(2) }, { reason: "Error", exit_code: 1, init: true, count: 1, last: at(1) }, { reason: "Error", exit_code: 137, signal: "SIGKILL", count: 1, last: at(1) }],
@@ -2315,6 +2342,18 @@ test.describe("Pod log streaming fixtures", () => {
         const limit = Number(url.searchParams.get("limit") || 50);
         return route.fulfill({ json: { items: filtered.slice(offset, offset + limit), ...(offset + limit < filtered.length ? { next: `journal-${offset + limit}` } : {}), since: url.searchParams.get("since")!, until: url.searchParams.get("until")!, retention_from: at(1440), retention_basis: "observed_at", started_at: at(30), gaps: journalFixture ? [{ from: at(50), to: at(45) }] : [], capture_gaps: journalFixture ? [{ from: at(20), to: at(19) }] : [], coverage: { Pod: { from: at(30), to: at(1) } }, limitations: ["polling_observations_only", "journal_not_started_for_full_window", "summary_caps_do_not_limit_journal"], capture: { mode: "continuous", behind: false, last_cycle_at: at(1) }, sync: { state: "ready", age_s: 4, partial: false } } satisfies KubernetesCrashPage });
       }
+      if (breakTimeline && pathname === "/api/admin/kubernetes/break-logs") {
+        const query = url.searchParams;
+        const result: KubernetesBreakLogPage = {
+          window: { from: query.get("since")!, to: query.get("until")! },
+          pods: [{ name: "checkout-removed-pod-0", uid: "removed-pod-uid-0", short: "pod-0", state: "unknown" }, { name: "checkout-7d9f8c-p9m1z", uid: "pod-live", short: "p9m1z", state: "running" }],
+          lines: Array.from({ length: 12 }, (_, index) => ({ at: at(6 - index / 10), pod: index % 2 ? "checkout-7d9f8c-p9m1z" : "checkout-removed-pod-0", pod_uid: index % 2 ? "pod-live" : "removed-pod-uid-0", container: "api", init: false, slot: index > 7 ? "current" : "previous", level: index > 3 && index < 8 ? "error" : "info", text: index > 3 && index < 8 ? "payment client timeout after 5 s (ledger)" : "starting worker pool size=64", source: "captured" })),
+          markers: [{ type: "break", at: at(5), label: "Deployment checkout unavailable" }, { type: "crash", at: at(2), label: "api OOMKilled exit 137" }],
+          counts: { all: 12, errors: 4, warnings: 0 }, rate: Array.from({ length: 7 }, (_, index) => ({ minute: at(10 - index), total: index + 3, errors: index > 3 ? index : 0 })),
+          patterns: [{ template: "payment client timeout", level: "error", count: 4 }, { template: "starting worker pool size=<n>", level: "info", count: 8 }], sources: [{ kind: "captured", name: "fixture", at: at(4) }], coverage: { state: "partial", reason: "restarted_since", tip: true, gaps: [{ from: at(10), to: at(8) }] },
+        };
+        return route.fulfill({ json: result });
+      }
       if (breakTimeline && pathname === "/api/admin/kubernetes/issues") {
         const rootLookup = url.searchParams.has("root_uid");
         if (denialEdge && rootLookup && (++edgeRootReads > 1 || denialEdge[1] === "initial")) return route.fulfill({ status: Number(denialEdge[2]), json: { error: "Synthetic root lookup denied" } });
@@ -2349,7 +2388,12 @@ test.describe("Pod log streaming fixtures", () => {
       if (pathname === "/api/admin/kubernetes/top") return route.fulfill({ json: { items: [], total: 0, truncated: false, availability: "unavailable", fresh: false, sync: { state: "ready", partial: false, age_s: 0 } } });
       if (pathname === "/api/admin/kubernetes/workloads") return route.fulfill({ json: { items: [pod, deployment], counts: { Pod: 1, Deployment: 1 }, truncated: false } });
       if (overviewRefresh && pathname === "/api/admin/kubernetes/changes") return route.fulfill({ json: { items: [{ id: "synthetic-creation", cluster: "fixture", kind: "Pod", namespace: pod.namespace, name: pod.name, type: "created", at: changeAt }], gaps: [], sync: { state: "ready", partial: false, age_s: 0 } } });
-      if (pathname.endsWith("/describe")) return route.fulfill({ json: { resource: pathname.includes("deployments") ? deployment : pod, events: [] } });
+      if (pathname.endsWith("/describe")) {
+        if (pathname.includes("checkout-removed-pod-0")) return route.fulfill({ json: { resource: { resource_id: "core~v1~pods", kind: "Pod", namespace: "shop", name: "checkout-removed-pod-0", summary: { phase: "Failed" } }, events: [] } });
+        if (pathname.includes("/deployments/checkout/")) return route.fulfill({ json: { resource: { resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "checkout", summary: { ready_replicas: 0, desired_replicas: 7 } }, events: [] } });
+        return route.fulfill({ json: { resource: pathname.includes("deployments") ? deployment : pod, events: [] } });
+      }
+      if (pathname.startsWith("/api/admin/kubernetes/workloads/") && pathname.endsWith("/logs")) return route.fulfill({ json: { lines: [{ at: at(1), pod: "checkout-7d9f8c-p9m1z", container: "api", text: "live workload snapshot line" }], truncated: false } });
       if (pathname.startsWith("/api/admin/kubernetes/workloads/")) return route.fulfill({ json: { ...pod, truncated: false } });
       if (pathname === "/api/admin/kubernetes/resources") return route.fulfill({ json: { items: url.searchParams.get("resource_id") === "core~v1~namespaces" ? [{ resource_id: "core~v1~namespaces", kind: "Namespace", name: "payments" }] : [], truncated: false } });
       if (pathname.includes("/graph")) return route.fulfill({ json: { nodes: [{ id: "deployment", kind: "Deployment", namespace: "payments", name: "checkout-api", group: "payments" }, { id: "pod", kind: "Pod", namespace: "payments", name: "checkout-api-0", group: "payments" }], edges: [{ from: "deployment", to: "pod", type: "manages" }], omitted: {}, sync: { state: "ready", partial: false, age_s: 0 } } });
@@ -2358,6 +2402,368 @@ test.describe("Pod log streaming fixtures", () => {
       if (pathname.includes("/enterprise/")) return route.fulfill({ status: 404, json: { error: "Community deployment" } });
       return route.fulfill({ json: { items: [], totals: {}, gaps: [], truncated: false, sync: { state: "ready", partial: false, age_s: 0 } } });
     });
+  });
+
+  for (const viewport of [{ name: "desktop", width: 1440, height: 900 }, { name: "mobile", width: 390, height: 844 }]) {
+    test(`Break timeline logs at break and Agent mappings ${viewport.name}`, async ({ page }) => {
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await page.setViewportSize(viewport);
+      const now = Date.now();
+      const at = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
+      const settings: KubernetesAgentSettings = {
+        learning: { logs: true, metrics: true, traces: false, scope: { include: [], exclude: ["sandbox"] } },
+        break_logs: { linked_source: "loki-prod", fields: {
+          loki: { namespace: "namespace", pod: "pod", container: "container" },
+          elasticsearch: { namespace: "kubernetes.namespace_name", pod: "kubernetes.pod_name", container: "kubernetes.container_name", time: "@timestamp", message: "message" },
+          cloudwatchlogs: { namespace: "kubernetes.namespace_name", pod: "kubernetes.pod_name", container: "kubernetes.container_name", message: "log" },
+          graylog: { namespace: "kubernetes_namespace_name", pod: "kubernetes_pod_name", container: "kubernetes_container_name" },
+          splunk: { namespace: "namespace", pod: "pod", container: "container_name" },
+          signoz: { namespace: "k8s.namespace.name", pod: "k8s.pod.name", container: "k8s.container.name" },
+        } },
+        sources: [
+          { type: "loki", name: "loki-prod", scope: '{cluster="fixture"}', health: "healthy" },
+          { type: "elasticsearch", name: "es-logs", scope: "logs-*", health: "not_checked" },
+          { type: "cloudwatchlogs", name: "cw-east", scope: "/kubernetes/fixture", health: "healthy" },
+          { type: "graylog", name: "graylog-main", scope: "kubernetes", health: "slow" },
+          { type: "splunk", name: "splunk-cloud", scope: "index=prod sourcetype=kube", health: "failing" },
+          { type: "signoz", name: "signoz-otel", scope: "k8s.cluster.name=fixture", health: "healthy" },
+        ], detected: { workloads: 8, namespaces: 2, metrics_server: true, traces: { kind: "tempo", namespace: "telemetry" } }, can_write: true, linked_source_missing: false,
+      };
+      await page.route("**/api/admin/kubernetes/agent-settings*", async (route) => {
+        if (route.request().method() === "PUT") Object.assign(settings, route.request().postDataJSON());
+        await route.fulfill({ json: settings });
+      });
+      await page.route("**/api/admin/kubernetes/agent-settings/test-link*", async (route) => {
+        const source = settings.sources.find((item) => item.name === route.request().postDataJSON().source)!;
+        if (source.type === "splunk") return route.fulfill({ status: 502, json: { error: "unauthorized" } });
+        return route.fulfill({ json: { lines: source.type === "cloudwatchlogs" ? 0 : 18, namespace: "shop", workload: "checkout", duration_ms: source.type === "graylog" ? 4800 : 220, truncated: source.type === "signoz", preview: JSON.stringify([{ type: source.type, scope: source.scope, query: source.type === "cloudwatchlogs" ? { operation: "FilterLogEvents", filter_pattern: '{ $.cluster = "fixture" }', fields: route.request().postDataJSON().fields } : { bounded_read: true, fields: route.request().postDataJSON().fields }, from: at(15), to: at(0), limit: 500 }], null, 2) } });
+      });
+      await openApp(page, `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${at(5)}`);
+      const lane = page.getByRole("region", { name: "Timeline lane checkout", exact: true });
+      await expect(lane).toBeVisible();
+      const logs = page.getByRole("region", { name: "Logs at break", exact: true });
+      await expect(logs.getByRole("log")).toContainText("payment client timeout");
+      const handle = lane.getByRole("slider", { name: "Log window start" });
+      await handle.evaluate((element) => { (element as HTMLElement).dataset.handleIdentity = "start"; });
+      await handle.focus(); await page.keyboard.press("ArrowRight");
+      await expect(page).toHaveURL(/logs_from=/);
+      await expect(handle).toBeFocused();
+      expect(await handle.evaluate((element) => (element as HTMLElement).dataset.handleIdentity)).toBe("start");
+      const endHandle = lane.getByRole("slider", { name: "Log window end" });
+      await endHandle.evaluate((element) => { (element as HTMLElement).dataset.handleIdentity = "end"; });
+      const beforeDragURL = page.url();
+      const dragRead = page.waitForRequest((request) => new URL(request.url()).pathname.endsWith("/break-logs"));
+      await endHandle.evaluate((element) => {
+        const plot = element.closest(".break-log-bracket-plot")!;
+        const rect = plot.getBoundingClientRect();
+        const targetX = rect.left + rect.width * 0.6;
+        element.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 1, clientX: rect.left + rect.width * 0.5 }));
+        element.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1, clientX: targetX }));
+        element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1, clientX: targetX }));
+      });
+      await dragRead;
+      expect(page.url()).not.toBe(beforeDragURL);
+      expect(await endHandle.evaluate((element) => (element as HTMLElement).dataset.handleIdentity)).toBe("end");
+      await page.locator('[data-marker="crash"]').last().click();
+      const crashDetails = page.getByRole("region", { name: "Timeline event details", exact: true });
+      await expect(crashDetails.getByRole("button", { name: "Logs before crash" }).first()).toBeVisible();
+      await expect(crashDetails.getByRole("button", { name: "Open pod" }).first()).toBeVisible();
+      await expect(crashDetails).toBeInViewport();
+      await captureBreakState(page, `break-crash-popover-${viewport.name}.png`, "dark");
+      await crashDetails.getByRole("button", { name: "Open pod" }).first().click();
+      const detail = page.getByRole("dialog", { name: "Details panel" });
+      await expect(detail.getByRole("heading", { name: "Pod shop/checkout-removed-pod-0", exact: true })).toBeVisible();
+      await detail.getByRole("button", { name: "Close panel" }).click();
+      await expect(detail).toHaveCount(0);
+      await page.locator('[data-marker="crash"]').last().click();
+      const previousRead = page.waitForRequest((request) => { const url = new URL(request.url()); return url.pathname.endsWith("/break-logs") && url.searchParams.get("mode") === "previous" && url.searchParams.get("root_uid") === "checkout-uid"; });
+      await crashDetails.getByRole("button", { name: "Logs before crash" }).first().click();
+      expect(new URL((await previousRead).url()).searchParams.getAll("pods[]")).toHaveLength(1);
+      await expect(page).toHaveURL(/logs_mode=previous/);
+      const liveLogsButton = viewport.name === "mobile" ? page.getByRole("toolbar", { name: "Break log actions" }).getByRole("button", { name: "Open live logs" }) : logs.getByRole("button", { name: "Open live logs" });
+      await liveLogsButton.click();
+      await expect(detail.getByRole("region", { name: "Workload live logs" })).toContainText("live workload snapshot line");
+      if (process.env.E2E_KUBERNETES_AUTO_DETECT_DOCS === "1") await captureBreakState(page, "auto-detect-live-logs.png", "dark");
+      await detail.getByRole("button", { name: "Close panel" }).click();
+      await expect(detail).toHaveCount(0);
+      await logs.scrollIntoViewIfNeeded();
+      await logs.getByRole("button", { name: "Log coverage tip" }).click();
+      await expect(logs.getByRole("link", { name: "Link a source in Agent tab" })).toBeVisible();
+      const tip = logs.getByRole("region", { name: "Log coverage tip", exact: true });
+      const bounds = await tip.boundingBox();
+      expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
+      if (viewport.name === "mobile") await expect(page.getByRole("toolbar", { name: "Break log actions" })).toBeInViewport();
+      await captureBreakState(page, `break-logs-${viewport.name}.png`, "dark");
+      if (process.env.E2E_KUBERNETES_AUTO_DETECT_DOCS === "1" && viewport.name === "desktop") {
+        await logs.getByRole("button", { name: "Log coverage tip" }).click();
+        await expect(tip).toBeHidden();
+        for (const mode of ["Merged", "Previous container", "Current"]) {
+          await expect(logs.getByRole("button", { name: mode, exact: true })).toBeVisible();
+        }
+        await expect(logs.getByRole("group", { name: "Log pods", exact: true })).toBeVisible();
+        await expect(logs.getByPlaceholder(/search/i)).toBeVisible();
+        await expect(logs.getByRole("button", { name: /errors/i })).toBeVisible();
+        await expect(logs.getByRole("button", { name: /warnings/i })).toBeVisible();
+        await expect(logs.getByRole("log")).toContainText("payment client timeout");
+        await expect(logs.getByRole("heading", { name: "Top messages in window", exact: true })).toBeVisible();
+        await captureBreakState(page, "auto-detect-log-filters.png", "dark");
+        await logs.getByRole("button", { name: "Log coverage tip" }).click();
+      }
+      await logs.getByRole("link", { name: "Link a source in Agent tab" }).click();
+      const agent = page.getByRole("region", { name: "Kubernetes Agent" });
+      await expect(agent.getByText("Preview", { exact: true })).toBeVisible();
+      await expect(agent.getByRole("switch", { name: "Logs learning" })).toBeChecked();
+      await agent.getByRole("button", { name: "Edit scope" }).click();
+      const scopeModal = page.getByRole("dialog", { name: "Log learning scope" });
+      await scopeModal.getByLabel("Include namespaces").fill("shop, payments");
+      await scopeModal.getByRole("button", { name: "Apply scope" }).click();
+      await expect(agent).toContainText("Include: shop, payments; exclude: sandbox");
+      await agent.scrollIntoViewIfNeeded();
+      await captureBreakState(page, `break-agent-${viewport.name}.png`, "dark");
+      const picker = page.getByLabel("Configured log sources");
+      for (const source of settings.sources) {
+        await agent.getByRole("button", { name: /^(loki-prod|es-logs|cw-east|graylog-main|splunk-cloud|signoz-otel)$/ }).click();
+        await expect(picker).toBeVisible();
+        await expect(picker).toBeInViewport();
+        expect(await picker.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+        if (source.type === "loki") await captureBreakState(page, `break-source-picker-${viewport.name}.png`, "dark");
+        await picker.getByRole("button", { name: new RegExp(`^${source.name}`) }).click();
+        const form = agent.getByRole("region", { name: / mapping$/ });
+        await form.getByRole("button", { name: "Test link" }).click();
+        if (source.type === "splunk") await expect(form.getByRole("alert")).toContainText("Source refused the read");
+        else await expect(form).toContainText(source.type === "cloudwatchlogs" ? "Found 0 lines" : "Found 18 lines");
+        if (source.type === "cloudwatchlogs") await expect(form.locator("pre")).toContainText("FilterLogEvents");
+        if (source.type === "signoz") await expect(form).toContainText("results truncated");
+        await form.scrollIntoViewIfNeeded();
+        expect(await form.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+        await captureBreakState(page, `break-mapping-${source.type}-${viewport.name}.png`, "dark");
+        const saved = page.waitForResponse((response) => response.request().method() === "PUT" && new URL(response.url()).pathname.endsWith("/agent-settings"));
+        await form.getByRole("button", { name: /^(Save|Use this source)$/ }).click();
+        expect((await saved).status()).toBe(200);
+        await expect(form.getByText("Linked", { exact: true })).toBeVisible();
+      }
+      expect(errors).toEqual([]);
+    });
+
+    test(`Break timeline logs at break and Agent light theme, read-only, no-source and polling continuity ${viewport.name}`, async ({ page }) => {
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await page.setViewportSize(viewport);
+      const now = Date.now();
+      await page.clock.install({ time: new Date(now) });
+      const at = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
+      let settingsMode: "writable" | "readonly" | "missinglinked" | "nosources" = "writable";
+      const settings: KubernetesAgentSettings = {
+        learning: { logs: true, metrics: true, traces: false, scope: { include: ["shop"], exclude: ["sandbox"] } },
+        break_logs: { linked_source: "loki-prod", fields: {
+          loki: { namespace: "namespace", pod: "pod", container: "container" },
+          elasticsearch: { namespace: "kubernetes.namespace_name", pod: "kubernetes.pod_name", container: "kubernetes.container_name", time: "@timestamp", message: "message" },
+          cloudwatchlogs: { namespace: "kubernetes.namespace_name", pod: "kubernetes.pod_name", container: "kubernetes.container_name", message: "log" },
+          graylog: { namespace: "kubernetes_namespace_name", pod: "kubernetes_pod_name", container: "kubernetes_container_name" },
+          splunk: { namespace: "namespace", pod: "pod", container: "container_name" },
+          signoz: { namespace: "k8s.namespace.name", pod: "k8s.pod.name", container: "k8s.container.name" },
+        } },
+        sources: [
+          { type: "loki", name: "loki-prod", scope: '{cluster="fixture"}', health: "healthy" },
+          { type: "elasticsearch", name: "es-logs", scope: "logs-*", health: "not_checked" },
+          { type: "cloudwatchlogs", name: "cw-east", scope: "/kubernetes/fixture", health: "healthy" },
+          { type: "graylog", name: "graylog-main", scope: "kubernetes", health: "slow" },
+          { type: "splunk", name: "splunk-cloud", scope: "index=prod sourcetype=kube", health: "failing" },
+          { type: "signoz", name: "signoz-otel", scope: "k8s.cluster.name=fixture", health: "healthy" },
+        ], detected: { workloads: 8, namespaces: 2, metrics_server: true, traces: { kind: "tempo", namespace: "telemetry" } }, can_write: true, linked_source_missing: false,
+      };
+      await page.route("**/api/admin/kubernetes/agent-settings*", async (route) => {
+        if (route.request().method() === "PUT") Object.assign(settings, route.request().postDataJSON());
+        if (settingsMode === "readonly") return route.fulfill({ json: { ...settings, can_write: false } });
+        if (settingsMode === "missinglinked") return route.fulfill({ json: { ...settings, linked_source_missing: true } });
+        if (settingsMode === "nosources") return route.fulfill({ json: { ...settings, break_logs: { ...settings.break_logs, linked_source: "" }, sources: [], linked_source_missing: false } });
+        return route.fulfill({ json: settings });
+      });
+      await page.route("**/api/admin/kubernetes/agent-settings/test-link*", async (route) => {
+        const source = settings.sources.find((item) => item.name === route.request().postDataJSON().source)!;
+        return route.fulfill({ json: { lines: 18, namespace: "shop", workload: "checkout", duration_ms: 220, truncated: false, preview: JSON.stringify([{ type: source.type, scope: source.scope, query: { bounded_read: true, fields: route.request().postDataJSON().fields }, from: at(15), to: at(0), limit: 500 }], null, 2) } });
+      });
+      let revision = 0;
+      let holdRefresh = false;
+      const releaseRefresh: { current: (() => void) | null } = { current: null };
+      const breakLogQueries: Array<{ cursor: string | null; since: string; until: string }> = [];
+      await page.route("**/api/admin/kubernetes/break-logs*", async (route) => {
+        const query = new URL(route.request().url()).searchParams;
+        const cursor = query.get("cursor");
+        breakLogQueries.push({ cursor, since: query.get("since")!, until: query.get("until")! });
+        if (!cursor) revision++;
+        if (holdRefresh && !cursor) {
+          await new Promise<void>((resolve) => { releaseRefresh.current = resolve; });
+        }
+        const currentRevision = revision;
+        const lines = cursor
+          ? [{ at: at(4), pod: "checkout-removed-x2k4q", pod_uid: "", container: "api", init: false, slot: "previous" as const, level: "warn" as const, text: `older cursor page ${cursor}`, source: "captured" as const }]
+          : Array.from({ length: 30 }, (_, index) => ({ at: at(6 - index / 30), pod: index % 2 ? "checkout-7d9f8c-p9m1z" : "checkout-removed-x2k4q", pod_uid: index % 2 ? "pod-live" : "", container: "api", init: false, slot: (index > 12 ? "current" : "previous") as "current" | "previous", level: (index > 3 && index < 8 ? "error" : "info") as "error" | "info", text: `capture ${currentRevision} line ${index} payment client timeout`, source: "captured" as const }));
+        const result: KubernetesBreakLogPage = {
+          window: { from: query.get("since")!, to: query.get("until")! },
+          pods: [{ name: "checkout-removed-x2k4q", uid: "", short: "x2k4q", state: "unknown" }, { name: "checkout-7d9f8c-p9m1z", uid: "pod-live", short: "p9m1z", state: "running" }],
+          lines,
+          markers: [{ type: "break", at: at(5), label: "Deployment checkout unavailable" }, { type: "crash", at: at(4.5), label: "api OOMKilled exit 137" }],
+          counts: { all: 30, errors: 4, warnings: 1 }, rate: Array.from({ length: 7 }, (_, index) => ({ minute: at(10 - index), total: index + 3, errors: index > 3 ? index : 0 })),
+          patterns: [{ template: "payment client timeout", level: "error", count: 4 }],
+          sources: [{ kind: "captured", name: "fixture", at: at(4) }],
+          coverage: { state: "partial", reason: "restarted_since", tip: true, gaps: [{ from: at(10), to: at(8) }] },
+          next: cursor ? undefined : `cursor-${currentRevision}`,
+        };
+        await route.fulfill({ json: result });
+      });
+      await openApp(page, `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${at(5)}&logs_from=${at(6)}&logs_to=${at(-2)}`);
+      const logs = page.getByRole("region", { name: "Logs at break", exact: true });
+      const viewer = logs.getByRole("log");
+      await expect(viewer).toContainText("capture 1 line 0 payment client timeout");
+      await logs.getByRole("button", { name: "Load more logs" }).click();
+      await expect(viewer).toContainText("older cursor page cursor-1");
+      expect(breakLogQueries.at(-1)?.cursor).toBe("cursor-1");
+      await viewer.evaluate((element) => {
+        (element as HTMLElement).dataset.viewerInstance = "preserved";
+        element.scrollTop = 64;
+      });
+      expect(await viewer.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+      const scrollBeforePoll = await viewer.evaluate((element) => element.scrollTop);
+      holdRefresh = true;
+      await page.clock.runFor(10_000);
+      await expect.poll(() => breakLogQueries.length).toBe(3);
+      expect(breakLogQueries[2].cursor).toBeNull();
+      await expect(viewer).toContainText("capture 1 line 0 payment client timeout");
+      await expect(viewer).not.toContainText("older cursor page cursor-1");
+      expect(await viewer.evaluate((element) => ({ id: (element as HTMLElement).dataset.viewerInstance, scrollTop: element.scrollTop }))).toEqual({ id: "preserved", scrollTop: scrollBeforePoll });
+      holdRefresh = false;
+      releaseRefresh.current?.();
+      await expect(viewer).toContainText("capture 2 line 0 payment client timeout");
+      expect(await viewer.evaluate((element) => ({ id: (element as HTMLElement).dataset.viewerInstance, scrollTop: element.scrollTop }))).toEqual({ id: "preserved", scrollTop: scrollBeforePoll });
+      await logs.getByRole("button", { name: "Load more logs" }).click();
+      await expect(viewer).toContainText("older cursor page cursor-2");
+      expect(breakLogQueries.at(-1)?.cursor).toBe("cursor-2");
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      const countWhileHidden = breakLogQueries.length;
+      await page.clock.runFor(60_000);
+      expect(breakLogQueries.length).toBe(countWhileHidden);
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await expect(viewer).toContainText("capture 3 line 0 payment client timeout");
+      await expect(viewer).not.toContainText("older cursor page cursor-2");
+      expect(breakLogQueries.at(-1)?.cursor).toBeNull();
+      await page.clock.runFor(240_000);
+      const settledLength = breakLogQueries.length;
+      await page.clock.runFor(60_000);
+      expect(breakLogQueries.length).toBe(settledLength);
+
+      await logs.scrollIntoViewIfNeeded();
+      await logs.getByRole("button", { name: "Log coverage tip" }).click();
+      await expect(logs.getByRole("link", { name: "Link a source in Agent tab" })).toBeVisible();
+      await captureBreakState(page, `break-logs-light-${viewport.name}.png`, "light");
+      await logs.getByRole("link", { name: "Link a source in Agent tab" }).click();
+      const agent = page.getByRole("region", { name: "Kubernetes Agent" });
+      await expect(agent.getByText("Preview", { exact: true })).toBeVisible();
+      await agent.scrollIntoViewIfNeeded();
+      await captureBreakState(page, `break-agent-light-${viewport.name}.png`, "light");
+      await agent.getByRole("button", { name: "loki-prod" }).click();
+      const picker = page.getByLabel("Configured log sources");
+      await expect(picker).toBeVisible();
+      await captureBreakState(page, `break-source-picker-light-${viewport.name}.png`, "light");
+      await picker.getByRole("button", { name: /^loki-prod/ }).click();
+      const form = agent.getByRole("region", { name: /Loki mapping$/ });
+      await form.getByRole("button", { name: "Test link" }).click();
+      await expect(form).toContainText("Found 18 lines");
+      await form.scrollIntoViewIfNeeded();
+      await captureBreakState(page, `break-mapping-loki-light-${viewport.name}.png`, "light");
+
+      settingsMode = "readonly";
+      await page.clock.runFor(60_000);
+      await page.getByRole("tab", { name: "Timeline", exact: true }).click();
+      await page.getByRole("tab", { name: "Agent", exact: true }).click();
+      await expect(agent.getByText("Read only. An administrator can change these settings.", { exact: true })).toBeVisible();
+      await expect(agent.getByRole("switch")).toHaveCount(0);
+      await expect(agent.getByRole("textbox")).toHaveCount(0);
+      await expect(agent.getByRole("button", { name: /^(Edit scope|Test link|Save|Use this source|Save settings)$/ })).toHaveCount(0);
+      await agent.scrollIntoViewIfNeeded();
+      await captureBreakState(page, `break-agent-readonly-${viewport.name}.png`, "light");
+
+      settingsMode = "missinglinked";
+      await page.clock.runFor(60_000);
+      await page.getByRole("tab", { name: "Timeline", exact: true }).click();
+      await page.getByRole("tab", { name: "Agent", exact: true }).click();
+      await expect(agent.getByText("The saved source loki-prod is no longer available. It is not being read.", { exact: true })).toBeVisible();
+
+      settingsMode = "nosources";
+      await page.clock.runFor(60_000);
+      await page.getByRole("tab", { name: "Timeline", exact: true }).click();
+      await page.getByRole("tab", { name: "Agent", exact: true }).click();
+      await expect(agent.getByText("No log data source is configured", { exact: true })).toBeVisible();
+      await expect(agent.getByRole("button", { name: "None available" })).toBeDisabled();
+      await expect(agent.getByRole("link", { name: "Read the data sources guide" })).toHaveAttribute("href", "https://docs.versusincident.com/#/agent/data-sources");
+      await expect(agent.getByRole("link", { name: "Data sources settings" })).toHaveAttribute("href", "/settings?tab=agent-sources");
+      await agent.scrollIntoViewIfNeeded();
+      await captureBreakState(page, `break-agent-nosources-${viewport.name}.png`, "light");
+
+      await page.goto(`/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${at(5)}`);
+      await expect(logs.getByRole("log")).toBeVisible();
+      const askChat = viewport.name === "mobile" ? page.getByRole("toolbar", { name: "Break log actions" }).getByRole("button", { name: "Ask chat" }) : logs.getByRole("button", { name: "Ask chat" });
+      await askChat.click();
+      await expect(page).toHaveURL(/\/agent\/chat\?.*provider=kubernetes.*resource_id=apps(?:~|%7E)v1(?:~|%7E)deployments.*namespace=shop.*name=checkout.*uid=checkout-uid.*logs_from=.*logs_to=/);
+      expect(errors).toEqual([]);
+    });
+  }
+
+  test("Break timeline auto-detect guide desktop dark", async ({ page }) => {
+    test.skip(process.env.E2E_KUBERNETES_AUTO_DETECT_DOCS !== "1", "opt-in documentation capture");
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    await openApp(page, "/agent/kubernetes?view=issues");
+    const issues = page.getByRole("region", { name: "Kubernetes issues", exact: true });
+    await expect(issues.getByRole("article")).toHaveCount(4);
+    await expect(issues.getByLabel("Issue severity", { exact: true })).toBeVisible();
+    await captureBreakState(page, "auto-detect-issues-overview.png", "dark");
+    const checkout = issues.getByRole("article", { name: "Deployment checkout", exact: true });
+    await checkout.getByRole("button", { name: "Expand checkout", exact: true }).click();
+    await expect(checkout).toContainText("44 lifetime restarts");
+    await expect(checkout).toContainText("OOMKilled on 6 pods");
+    await expect(checkout).toContainText("v41 → v42");
+    await captureBreakState(page, "break-issues-expanded-desktop-dark.png", "dark");
+    await checkout.getByRole("button", { name: "Open resource checkout", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Details panel", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Close panel", exact: true }).click();
+    await issues.getByLabel("Issue severity", { exact: true }).selectOption("critical");
+    await expect(issues.getByRole("article")).toHaveCount(2);
+    await issues.getByLabel("Issue severity", { exact: true }).selectOption("");
+    await checkout.getByRole("button", { name: "Timeline for checkout", exact: true }).click();
+    const lane = page.getByRole("region", { name: "Timeline lane checkout", exact: true });
+    await expect(lane).toBeVisible();
+    await expect(lane.locator('[data-marker="crash"]')).toHaveCount(2);
+    await expect(lane.locator('[data-event-id="image"]')).toBeVisible();
+    await expect(page.getByRole("region", { name: "Logs at break", exact: true }).getByRole("log")).toContainText("payment client timeout");
+    await captureBreakState(page, "break-timeline-focus-desktop-dark.png", "dark");
+    await page.getByRole("link", { name: "Clear root filter", exact: true }).click();
+    const timeline = page.getByRole("region", { name: "Kubernetes change timeline", exact: true });
+    await expect(timeline.getByRole("heading", { name: "Kubernetes changes", exact: true })).toBeVisible();
+    await expect(timeline.getByRole("status", { name: "Loading projected change history", exact: true })).toHaveCount(0);
+    await expect(timeline.locator('[data-event-id="image"]')).toBeVisible();
+    await captureBreakState(page, "break-timeline-general-desktop-dark.png", "dark");
+    await timeline.locator('[data-event-id="image"]').click();
+    const comparison = timeline.getByRole("region", { name: "Timeline event details", exact: true });
+    await expect(comparison).toContainText("v41");
+    await expect(comparison).toContainText("v42");
+    await captureBreakState(page, "auto-detect-change-compare.png", "dark");
+    await page.keyboard.press("Escape");
+    await page.getByRole("tab", { name: "Issues", exact: true }).click();
+    await expect(checkout).toBeVisible();
+    await checkout.getByRole("button", { name: "Investigate checkout", exact: true }).click();
+    await expect(page).toHaveURL(/\/agent\/chat\?/);
+    expect(new URL(page.url()).searchParams.get("uid")).toBe("checkout-uid");
+    expect(errors).toEqual([]);
   });
 
   test("Break timeline full populated dark Overview documentation", async ({ page }) => {
@@ -2904,7 +3310,7 @@ test.describe("Pod log streaming fixtures", () => {
         const focused = new URL(page.url());
         const center = Date.parse(focused.searchParams.get("center")!);
         const lane = page.getByRole("region", { name: "Timeline lane checkout", exact: true });
-        await expect(lane.locator(".resource-timeline-label")).toHaveText(["Deployment checkoutshop", "ConfigMap checkout-cfgshop", "HPA checkout-hpashop"]);
+        await expect(lane.locator(".resource-timeline-label")).toHaveText(["Deployment checkoutshop", "ConfigMap checkout-cfgshop", "HPA checkout-hpashop", "Log linesper minute, errors in red"]);
         await expect(lane.getByRole("button", { name: /HorizontalPodAutoscaler checkout-hpa: 6 → 7 at/ })).toHaveCount(1);
         await expect(lane.getByRole("button", { name: /ConfigMap checkout-cfg:.* at/ })).toHaveCount(1);
         await expect(lane).toContainText("Break: CrashLoopBackOff");
@@ -3318,14 +3724,15 @@ test.describe("Pod log streaming fixtures", () => {
       const detail = page.getByRole("dialog", { name: "Details panel" });
       const tabs = detail.getByRole("tablist", { name: "Resource detail views" });
       await expect(tabs.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
-      await expect(tabs.getByRole("tab", { name: /^(Logs|Actions)$/ })).toHaveCount(0);
+      await expect(tabs.getByRole("tab", { name: "Actions", exact: true })).toHaveCount(0);
+      await expect(tabs.getByRole("tab", { name: "Logs", exact: true })).toHaveCount(1);
       await expect(page).not.toHaveURL(/tab=actions/);
       await tabs.getByRole("tab", { name: "Events", exact: true }).focus();
       await page.keyboard.press("ArrowRight");
-      await expect(tabs.getByRole("tab", { name: "YAML", exact: true })).toBeFocused();
+      await expect(tabs.getByRole("tab", { name: "Logs", exact: true })).toBeFocused();
       await page.evaluate(() => { window.history.pushState(null, "", "/agent/kubernetes?r=apps~v1~deployments/payments/checkout-api&tab=logs"); window.dispatchEvent(new PopStateEvent("popstate")); });
-      await expect(tabs.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
-      await expect(page).not.toHaveURL(/tab=logs/);
+      await expect(tabs.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
+      await expect(page).toHaveURL(/tab=logs/);
       await detail.getByRole("button", { name: "Close panel" }).click();
       await page.getByRole("tab", { name: "Topology", exact: true }).click();
       await page.getByRole("button", { name: "Open namespace payments topology" }).click();
@@ -3624,6 +4031,171 @@ test.describe("Live K12a crash evidence acceptance", () => {
       }
       expect(errors).toEqual([]);
       await testInfo.attach("k12a-live-broken-roots", { body: JSON.stringify(brokenPage.items.map((item) => ({ root: `${item.root.namespace}/${item.root.name}`, rule: item.rule, count: item.count, of: item.of, broke_at_source: item.broke_at_source, evidence: item.evidence }))), contentType: "application/json" });
+    });
+  }
+});
+
+test.describe("Live Break timeline logs and Agent tab acceptance", () => {
+  test.skip(process.env.E2E_KUBERNETES_BREAK_LOGS_LIVE !== "1", "requires the live break-logs harness stack");
+  const namespace = "k13vis";
+  const rootUID = "k13vis-checkout";
+  const rsUID = "k13vis-checkout-rs";
+  const podUID = "k13vis-checkout-pod";
+  const podName = "vis-checkout-6c8d4-x2k4q";
+  const logPath = `/api/v1/namespaces/${namespace}/pods/${podName}/log`;
+  let brokeAt = "";
+  let windowFrom = "";
+  let windowTo = "";
+
+  test.beforeAll(async () => {
+    const state = process.env.HARNESS_STATE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/.state");
+    const fakePort = Number(process.env.HARNESS_FAKEKUBE_PORT || 19443);
+    const lokiPort = Number(process.env.HARNESS_LOKI_PORT || 13100);
+    const baseURL = process.env.E2E_BASE_URL || "http://127.0.0.1:18080";
+    const secret = process.env.E2E_GATEWAY_SECRET || "";
+    const ca = fs.readFileSync(path.join(state, "fakekube/ca.crt"));
+    const upstream = (endpoint: string, body?: unknown) => new Promise<unknown>((resolve, reject) => {
+      const encoded = body === undefined ? undefined : JSON.stringify(body);
+      const call = https.request(`https://localhost:${fakePort}${endpoint}`, { ca, method: encoded ? "POST" : "GET", headers: encoded ? { "Content-Type": "application/json" } : {} }, (response) => {
+        let text = "";
+        response.on("data", (chunk) => { text += chunk; });
+        response.on("end", () => response.statusCode === 200 ? resolve(JSON.parse(text)) : reject(new Error(`fakekube ${endpoint} HTTP ${response.statusCode} ${text}`)));
+      });
+      call.on("error", reject);
+      call.end(encoded);
+    });
+    const backend = async (endpoint: string, method = "GET", body?: unknown) => {
+      const response = await fetch(`${baseURL}${endpoint}`, {
+        method,
+        headers: { "X-Gateway-Secret": secret, Origin: baseURL, ...(body ? { "Content-Type": "application/json" } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      return { status: response.status, json: await response.json() };
+    };
+    const second = (ms: number) => Math.floor(ms / 1000) * 1000;
+    const iso = (ms: number) => new Date(ms).toISOString().replace(".000Z", "Z");
+    const start = second(Date.now());
+    const brokeMs = start - 240_000;
+    const firstTermMs = start - 40_000;
+    brokeAt = iso(brokeMs);
+    windowFrom = iso(firstTermMs - 200_000);
+    const firstLines = Array.from({ length: 12 }, (_, index) => ({
+      at: iso(firstTermMs - 200_000 + index * 10_000),
+      text: index === 2 ? "ERROR payment client timeout password=k13-capture-canary-value" : index % 3 === 0 ? `ERROR payment client timeout attempt ${index}` : `INFO starting worker pool ${index}`,
+    }));
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "namespaces", namespace: "", name: namespace, object: { kind: "Namespace", metadata: {} } });
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "deployments", namespace, name: "vis-checkout",
+      object: { apiVersion: "apps/v1", kind: "Deployment", metadata: { name: "vis-checkout", namespace, uid: rootUID, generation: 1, creationTimestamp: iso(start - 1_800_000), labels: { app: "vis-checkout" } }, spec: { replicas: 1, selector: { matchLabels: { app: "vis-checkout" } }, template: { spec: { containers: [{ name: "api", image: "example.invalid/k13:v1" }] } } }, status: { observedGeneration: 1, replicas: 1, readyReplicas: 1, availableReplicas: 1, updatedReplicas: 1 } },
+    });
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "replicasets", namespace, name: "vis-checkout-6c8d4",
+      object: { apiVersion: "apps/v1", kind: "ReplicaSet", metadata: { name: "vis-checkout-6c8d4", namespace, uid: rsUID, creationTimestamp: iso(start - 1_800_000), labels: { app: "vis-checkout" }, annotations: { "deployment.kubernetes.io/revision": "1" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "vis-checkout", uid: rootUID, controller: true }] }, spec: { replicas: 1, template: { spec: { containers: [{ name: "api", image: "example.invalid/k13:v1" }] } } }, status: { replicas: 1, readyReplicas: 1 } },
+    });
+    const podObject = (restarts: number, terminatedAt: number | null) => ({
+      apiVersion: "v1", kind: "Pod", metadata: { name: podName, namespace, uid: podUID, creationTimestamp: iso(start - 1_800_000), labels: { app: "vis-checkout" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: "vis-checkout-6c8d4", uid: rsUID, controller: true }] },
+      spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/k13:v1" }] },
+      status: { phase: "Running", conditions: [{ type: "Ready", status: "False", lastTransitionTime: brokeAt }], containerStatuses: [{ name: "api", ready: false, restartCount: restarts, state: { waiting: { reason: "CrashLoopBackOff" } }, ...(terminatedAt ? { lastState: { terminated: { reason: "OOMKilled", exitCode: 137, finishedAt: iso(terminatedAt) } } } : {}) }] },
+    });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace, name: podName, object: podObject(0, null) });
+    await upstream("/_fake/log-fixtures", { path: logPath, container: "api", previous: true, lines: firstLines });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace, name: podName, object: podObject(1, firstTermMs) });
+    await expect.poll(async () => {
+      const res = await backend(`/api/admin/kubernetes/break-logs?namespace=${namespace}&root_uid=${rootUID}&since=${encodeURIComponent(windowFrom)}&until=${encodeURIComponent(iso(firstTermMs))}&limit=500`);
+      return res.status === 200 && (res.json.lines ?? []).filter((line: { source: string }) => line.source === "captured").length === firstLines.length;
+    }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(true);
+
+    const secondTermMs = second(Date.now()) - 5000;
+    windowTo = iso(secondTermMs);
+    const secondLines = Array.from({ length: 6 }, (_, index) => ({ at: iso(secondTermMs - 25_000 + index * 4000), text: `INFO second restart line ${index}` }));
+    await upstream("/_fake/log-fixtures", { path: logPath, container: "api", previous: true, lines: secondLines });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace, name: podName, object: podObject(3, secondTermMs) });
+    await expect.poll(async () => {
+      const res = await backend(`/api/admin/kubernetes/break-logs?namespace=${namespace}&root_uid=${rootUID}&since=${encodeURIComponent(windowFrom)}&until=${encodeURIComponent(windowTo)}&limit=500`);
+      return res.status === 200 && res.json.coverage?.state === "partial" && res.json.coverage?.reason === "restarted_since" && res.json.coverage?.tip === true;
+    }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(true);
+
+    const lokiEntries = [
+      ...Array.from({ length: 6 }, (_, index) => ({ at: iso(firstTermMs + 3000 + index * 3000), text: `WARN loki between restarts ${index}` })),
+      ...Array.from({ length: 4 }, (_, index) => ({ at: iso(second(Date.now()) - 30_000 + index * 5000), text: `INFO loki recent test link ${index}` })),
+    ];
+    const pushRes = await fetch(`http://127.0.0.1:${lokiPort}/loki/api/v1/push`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ streams: [{ stream: { job: "k8s-break-logs", namespace, pod: podName, container: "api" }, values: lokiEntries.map((entry) => [`${Date.parse(entry.at)}000000`, entry.text]) }] }),
+    });
+    expect(pushRes.status).toBeGreaterThanOrEqual(200);
+    expect(pushRes.status).toBeLessThan(300);
+    await expect.poll(async () => {
+      const query = encodeURIComponent(`{job="k8s-break-logs",pod="${podName}"}`);
+      const res = await fetch(`http://127.0.0.1:${lokiPort}/loki/api/v1/query_range?query=${query}&start=${(firstTermMs - 600_000) * 1e6}&end=${Date.now() * 1e6}&limit=100`);
+      const data = await res.json();
+      return data.data.result.reduce((sum: number, stream: { values: unknown[] }) => sum + stream.values.length, 0) === lokiEntries.length;
+    }, { timeout: 60_000, intervals: [1000, 2000] }).toBe(true);
+  });
+
+  for (const viewport of [{ name: "desktop", width: 1440, height: 900 }, { name: "mobile", width: 390, height: 844 }]) {
+    test(`drives live break logs, coverage tip, Agent test-link and Loki gap fill ${viewport.name}`, async ({ page }) => {
+      test.setTimeout(120_000);
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await page.setViewportSize(viewport);
+      await page.emulateMedia({ colorScheme: "dark" });
+      await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+      const baseURL = process.env.E2E_BASE_URL || "http://127.0.0.1:18080";
+      const secret = process.env.E2E_GATEWAY_SECRET || "";
+      const resetRes = await fetch(`${baseURL}/api/admin/kubernetes/agent-settings`, {
+        method: "PUT",
+        headers: { "X-Gateway-Secret": secret, Origin: baseURL, "Content-Type": "application/json" },
+        body: JSON.stringify({ learning: { logs: true, metrics: false, traces: true, scope: { include: [namespace], exclude: [] } }, break_logs: { linked_source: "", fields: {} } }),
+      });
+      expect(resetRes.status).toBe(200);
+
+      const timelineURL = `/agent/kubernetes?view=timeline&root_uid=${rootUID}&namespace=${namespace}&center=${encodeURIComponent(brokeAt)}&logs_from=${encodeURIComponent(windowFrom)}&logs_to=${encodeURIComponent(windowTo)}`;
+      await openApp(page, timelineURL);
+      const logs = page.getByRole("region", { name: "Logs at break", exact: true });
+      const viewer = logs.getByRole("log");
+      await expect(viewer).toContainText("payment client timeout");
+      await expect(viewer).toContainText("<REDACTED:password>");
+      await expect(viewer).not.toContainText("k13-capture-canary-value");
+      await expect(logs.getByText("Captured at break").first()).toBeVisible();
+      await logs.scrollIntoViewIfNeeded();
+      await logs.getByRole("button", { name: "Log coverage tip" }).click();
+      await expect(logs.getByText(/The container restarted more than once since the break/)).toBeVisible();
+      await expect(logs.getByRole("link", { name: "Link a source in Agent tab" })).toBeVisible();
+      await captureBreakState(page, `live-break-logs-${viewport.name}.png`, "dark", "L/F: live OSS + Postgres + Loki + Elasticsearch stack with fakekube cluster");
+
+      await logs.getByRole("link", { name: "Link a source in Agent tab" }).click();
+      const agent = page.getByRole("region", { name: "Kubernetes Agent" });
+      await expect(agent.getByText("Preview", { exact: true })).toBeVisible();
+      await agent.getByRole("button", { name: "None" }).click();
+      const picker = page.getByLabel("Configured log sources");
+      await expect(picker).toBeVisible();
+      await picker.getByRole("button", { name: /^qa-break-elasticsearch-missing/ }).click();
+      const esForm = agent.getByRole("region", { name: /Elasticsearch mapping$/ });
+      await esForm.getByRole("button", { name: "Test link" }).click();
+      await expect(esForm.getByRole("alert")).toContainText("Source or workload not found. Check the source and cluster.");
+      await expect(esForm.getByRole("button", { name: "Retry" })).toBeVisible();
+
+      await agent.getByRole("button", { name: "qa-break-elasticsearch-missing" }).click();
+      await picker.getByRole("button", { name: /^qa-break-loki/ }).click();
+      const lokiForm = agent.getByRole("region", { name: /Loki mapping$/ });
+      await lokiForm.getByRole("button", { name: "Test link" }).click();
+      await expect(lokiForm).toContainText(/Found \d+ lines/);
+      await expect(lokiForm.locator("pre")).toContainText("vis-checkout-6c8d4-x2k4q");
+      await lokiForm.scrollIntoViewIfNeeded();
+      await captureBreakState(page, `live-break-agent-${viewport.name}.png`, "dark", "L/F: live OSS + Postgres + Loki + Elasticsearch stack with fakekube cluster");
+      const saved = page.waitForResponse((response) => response.request().method() === "PUT" && new URL(response.url()).pathname.endsWith("/agent-settings"));
+      await lokiForm.getByRole("button", { name: "Use this source" }).click();
+      expect((await saved).status()).toBe(200);
+      await expect(lokiForm.getByText("Linked", { exact: true })).toBeVisible();
+
+      await page.goto(timelineURL);
+      await expect(viewer).toContainText("loki between restarts 0");
+      await expect(logs.getByText("qa-break-loki").first()).toBeVisible();
+      await expect(logs.getByText("Coverage: complete")).toBeVisible();
+      await expect(logs.getByRole("button", { name: "Log coverage tip" })).toHaveCount(0);
+      expect(errors).toEqual([]);
     });
   }
 });

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
@@ -915,6 +916,9 @@ func TestCredentialReplacementRetiresAliasesAndHistory(t *testing.T) {
 	}
 	service := NewService(client, Scope{ClusterID: "cluster", CredentialID: "configured"}, 0)
 	service.SetChangeStorage(storage.NewMemory())
+	service.SetBreakLogSources(func(org string) []breaklogs.Source {
+		return []breaklogs.Source{{Name: "logs-" + org, Type: "loki"}}
+	})
 	_ = service.SetCaptureMode("demand")
 	registry := NewServiceRegistry(service)
 	registry.StartCapture(t.Context())
@@ -955,6 +959,9 @@ func TestCredentialReplacementRetiresAliasesAndHistory(t *testing.T) {
 	replacement, err := registry.ResolveCluster("first", "cluster")
 	if err != nil || replacement == first || replacement.indexScope() == first.indexScope() {
 		t.Fatal("configured credential ID reused old identity epoch")
+	}
+	if sources := replacement.configuredLogSources(); len(sources) != 1 || sources[0].Name != "logs-first" {
+		t.Fatalf("replacement lost scoped log sources: %+v", sources)
 	}
 	select {
 	case <-canceled:

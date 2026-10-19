@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
+
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
@@ -73,6 +75,7 @@ type ProjectedResource struct {
 	Namespace           string            `json:"namespace,omitempty"`
 	Name                string            `json:"name"`
 	UID                 string            `json:"uid,omitempty"`
+	CreatedAt           time.Time         `json:"created_at,omitempty"`
 	Labels              map[string]string `json:"labels,omitempty"`
 	Owners              []ObjectRef       `json:"owners,omitempty"`
 	Summary             map[string]any    `json:"summary,omitempty"`
@@ -229,6 +232,7 @@ type Service struct {
 	captureMode            string
 	identity               *credentialEpoch
 	configuredCredentialID string
+	logSources             func(string) []breaklogs.Source
 }
 
 func (service *Service) SetLogStreamContext(ctx context.Context) {
@@ -290,7 +294,7 @@ func (service *Service) Scoped(scope Scope) *Service {
 		configured = service.configuredCredentialID
 		scope.CredentialID = service.scope.CredentialID
 	}
-	scoped := &Service{client: service.client, scope: scope, identity: service.identity, configuredCredentialID: configured, readOrgs: readOrgs, ttl: service.ttl, mu: service.mu, cache: service.cache, discoveryCalls: service.discoveryCalls, scrubber: service.scrubber, indexes: service.indexes, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext, captureMode: service.captureMode}
+	scoped := &Service{client: service.client, scope: scope, identity: service.identity, configuredCredentialID: configured, readOrgs: readOrgs, ttl: service.ttl, mu: service.mu, cache: service.cache, discoveryCalls: service.discoveryCalls, scrubber: service.scrubber, indexes: service.indexes, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext, captureMode: service.captureMode, logSources: service.logSources}
 	if configured != service.configuredCredentialID && service.client != nil {
 		scoped.scope.CredentialID = scoped.captureCredentialID()
 	}
@@ -476,6 +480,7 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 			return nil, err
 		}
 		fresh.scrubber, fresh.captureMode, fresh.logStreamContext = previous.scrubber, previous.captureMode, previous.logStreamContext
+		fresh.logSources = previous.logSources
 		previous.changes.mu.Lock()
 		provider := previous.changes.provider
 		previous.changes.mu.Unlock()
@@ -1157,9 +1162,24 @@ func (service *Service) PodLogs(ctx context.Context, namespace, pod, container s
 	return service.podLogs(ctx, namespace, pod, container, previous, sinceSeconds, tailLines, false)
 }
 
-func (service *Service) podLogs(ctx context.Context, namespace, pod, container string, previous bool, sinceSeconds, tailLines int, timestamps bool) (PodLogs, error) {
+type podLogBounds struct {
+	SinceTime  time.Time
+	LimitBytes int
+}
+
+func (service *Service) podLogs(ctx context.Context, namespace, pod, container string, previous bool, sinceSeconds, tailLines int, timestamps bool, bounds ...podLogBounds) (PodLogs, error) {
 	ctx, cancel := ensureOperationBudget(ctx)
 	defer cancel()
+	options := podLogBounds{}
+	if len(bounds) > 1 {
+		return PodLogs{}, ErrInvalidArguments
+	}
+	if len(bounds) == 1 {
+		options = bounds[0]
+	}
+	if options.LimitBytes < 0 || options.LimitBytes > maxPodLogBytes || !options.SinceTime.IsZero() && (sinceSeconds != 0 || options.SinceTime.After(time.Now()) || time.Since(options.SinceTime) > 24*time.Hour) {
+		return PodLogs{}, ErrInvalidArguments
+	}
 	for _, value := range []string{namespace, pod} {
 		if !safeSegment(value) {
 			return PodLogs{}, ErrInvalidEndpoint
@@ -1181,13 +1201,25 @@ func (service *Service) podLogs(ctx context.Context, namespace, pod, container s
 		tailLines = 500
 	}
 	query := url.Values{"previous": {strconv.FormatBool(previous)}, "sinceSeconds": {strconv.Itoa(sinceSeconds)}, "tailLines": {strconv.Itoa(tailLines)}}
+	if previous && len(bounds) == 1 {
+		query.Del("sinceSeconds")
+	}
+	if !options.SinceTime.IsZero() {
+		query.Del("sinceSeconds")
+		query.Set("sinceTime", options.SinceTime.UTC().Format(time.RFC3339Nano))
+	}
+	byteLimit := maxPodLogBytes
+	if options.LimitBytes > 0 {
+		byteLimit = options.LimitBytes
+		query.Set("limitBytes", strconv.Itoa(byteLimit))
+	}
 	if timestamps {
 		query.Set("timestamps", "true")
 	}
 	if container != "" {
 		query.Set("container", container)
 	}
-	payload, truncated, err := service.client.getBounded(ctx, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/pods/"+url.PathEscape(pod)+"/log?"+query.Encode(), "*/*", maxPodLogBytes)
+	payload, truncated, err := service.client.getBounded(ctx, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/pods/"+url.PathEscape(pod)+"/log?"+query.Encode(), "*/*", int64(byteLimit))
 	if err != nil {
 		return PodLogs{}, err
 	}
@@ -1320,6 +1352,7 @@ func (service *Service) projectResource(definition ResourceDefinition, raw map[s
 	metadata, _ := raw["metadata"].(map[string]any)
 	labels, labelsTruncated := boundedStringMap(metadata["labels"], maxProjectionItems)
 	result := ProjectedResource{ResourceID: definition.ID, APIVersion: boundString(stringValue(raw["apiVersion"])), Kind: boundString(stringValue(raw["kind"])), Namespace: boundString(stringValue(metadata["namespace"])), Name: boundString(stringValue(metadata["name"])), UID: boundString(stringValue(metadata["uid"])), Labels: labels}
+	result.CreatedAt, _ = time.Parse(time.RFC3339Nano, stringValue(metadata["creationTimestamp"]))
 	if definition.Kind == "PodMetrics" || definition.Kind == "NodeMetrics" {
 		result.metricsValid = validMetricsSample(definition.Kind, raw)
 	}

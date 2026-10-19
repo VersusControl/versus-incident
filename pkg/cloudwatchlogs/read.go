@@ -40,6 +40,7 @@ type Scope struct {
 }
 
 type Request struct {
+	Start, End      time.Time
 	Search          string
 	LookbackMinutes int
 	Limit           int
@@ -223,6 +224,12 @@ func (reader *Reader) scan(ctx context.Context, request Request, discovery bool)
 	defer cancel()
 	end := reader.now().UTC().UnixMilli()
 	start := end - int64(request.LookbackMinutes)*int64(time.Minute/time.Millisecond)
+	if !request.Start.IsZero() || !request.End.IsZero() {
+		if request.Start.IsZero() || !request.End.After(request.Start) || request.End.Sub(request.Start) > 2*time.Hour || request.End.After(reader.now().Add(time.Minute)) {
+			return Result{}, ErrScope
+		}
+		start, end = request.Start.UnixMilli(), request.End.UnixMilli()
+	}
 	limit := int32(pageSize)
 	input := &cloudwatchlogs.FilterLogEventsInput{
 		LogGroupName: &reader.scope.LogGroupName, LogStreamNamePrefix: nil,

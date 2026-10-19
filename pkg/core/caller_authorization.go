@@ -9,9 +9,10 @@ import (
 type Permission string
 
 const (
-	PermissionInfrastructureView         Permission = "infrastructure:view"
-	PermissionServiceHealthSettingsWrite Permission = "service-health:settings:write"
-	PermissionAgentApprove               Permission = "agent:approve"
+	PermissionInfrastructureView          Permission = "infrastructure:view"
+	PermissionInfrastructureSettingsWrite Permission = "infrastructure:settings:write"
+	PermissionServiceHealthSettingsWrite  Permission = "service-health:settings:write"
+	PermissionAgentApprove                Permission = "agent:approve"
 )
 
 type callerAuthorizationKey struct{}

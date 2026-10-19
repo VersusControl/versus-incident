@@ -60,6 +60,30 @@ func TestScopedSampleAndRead(t *testing.T) {
 	}
 }
 
+func TestReadWindowEscapesPodPrefix(t *testing.T) {
+	prefix := "api-worker"
+	expected := `pod:api\-worker\-*`
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got := request.URL.Query().Get("query"); got != expected {
+			t.Errorf("prefix query = %q", got)
+		}
+		fmt.Fprint(writer, `{"total_results":0,"messages":[]}`)
+	}))
+	defer server.Close()
+	service, err := NewService(config.AgentGraylogSourceConfig{Address: server.URL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := service.ReadWindow(context.Background(), ReadRequest{PrefixFilters: map[string]string{"pod": prefix}}, now.Add(-time.Minute), now); err != nil {
+		t.Fatal(err)
+	}
+	prefix, expected = "api/worker", `pod:api\/worker\-*`
+	if _, err := service.ReadWindow(context.Background(), ReadRequest{PrefixFilters: map[string]string{"pod": prefix}}, now.Add(-time.Minute), now); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRejectUnsafeInputsBeforeNetwork(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
@@ -410,6 +434,41 @@ func TestFieldProjectionScrubbingAndReasons(t *testing.T) {
 	}
 }
 
+func TestReadStringFieldsRejectScalarCoercion(t *testing.T) {
+	for _, value := range []any{42, true} {
+		t.Run(fmt.Sprint(value), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				json.NewEncoder(writer).Encode(map[string]any{"total_results": 2, "messages": []any{
+					map[string]any{"message": map[string]any{"message": "good", "service": "api"}},
+					map[string]any{"message": map[string]any{"message": "invalid identity", "service": value}},
+				}})
+			}))
+			defer server.Close()
+			service, err := NewService(config.AgentGraylogSourceConfig{Address: server.URL, Fields: []string{"service"}}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ordinary, err := service.Read(t.Context(), ReadRequest{Limit: 10})
+			if err != nil || ordinary.Count != 2 || ordinary.Truncated || ordinary.Records[1].Fields["service"] != fmt.Sprint(value) {
+				t.Fatalf("ordinary scalar projection changed: %+v err=%v", ordinary, err)
+			}
+			strict, err := service.Read(t.Context(), ReadRequest{Limit: 10, StringFields: []string{"service"}})
+			if err != nil || strict.Count != 2 || !strict.Truncated || strict.Records[0].Fields["service"] != "api" {
+				t.Fatalf("strict scalar projection: %+v err=%v", strict, err)
+			}
+			if _, exists := strict.Records[1].Fields["service"]; exists {
+				t.Fatal("non-string identity survived projection")
+			}
+			if _, err := service.Read(t.Context(), ReadRequest{StringFields: []string{"unsafe field"}}); !errors.Is(err, ErrInvalidArgument) {
+				t.Fatalf("invalid string field: %v", err)
+			}
+			if _, err := service.Read(t.Context(), ReadRequest{StringFields: make([]string, 13)}); !errors.Is(err, ErrInvalidArgument) {
+				t.Fatalf("unbounded string fields: %v", err)
+			}
+		})
+	}
+}
+
 func TestDiscoveryReportsFieldLimitOnce(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		json.NewEncoder(writer).Encode(map[string]any{"total_results": 2, "messages": []any{
@@ -435,5 +494,23 @@ func TestDiscoveryReportsFieldLimitOnce(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("field_limit occurred %d times: %+v", count, result)
+	}
+}
+
+func TestMandatoryMessageIDDoesNotTruncateProjection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		fmt.Fprint(writer, `{"total_results":1,"messages":[{"message":{"_id":"native-id","message":"safe","timestamp":"2026-01-01T00:00:00Z","service":"api"}}]}`)
+	}))
+	defer server.Close()
+	service, err := NewService(config.AgentGraylogSourceConfig{Address: server.URL, Fields: []string{"service"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Read(t.Context(), ReadRequest{Limit: 10})
+	if err != nil || result.Count != 1 || result.Truncated || result.Partial {
+		t.Fatalf("mandatory ID reported truncation: %+v err=%v", result, err)
+	}
+	if _, exposed := result.Records[0].Fields["_id"]; exposed {
+		t.Fatal("unrequested ID exposed")
 	}
 }

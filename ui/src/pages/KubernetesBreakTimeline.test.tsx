@@ -5,11 +5,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, type KubernetesChangesPage, type KubernetesCrashEvent, type KubernetesCrashPage, type KubernetesGraph, type KubernetesIssue } from "@/lib/api";
+import { api, ApiError, type KubernetesBreakLogPage, type KubernetesChangesPage, type KubernetesCrashEvent, type KubernetesCrashPage, type KubernetesGraph, type KubernetesIssue } from "@/lib/api";
 import { KubernetesClusterContext, kubernetesKey, useKubernetesCrashes } from "@/lib/useKubernetesCluster";
 import { BreakRow, BreakTimelineLane, CrashJournal, ResourceTimelineChart, TimelineCard } from "./KubernetesBreakTimeline";
 import { KubernetesExplorerTabContent } from "./KubernetesExplorerViews";
 import { KubernetesWarnings } from "./KubernetesWarnings";
+import { KubernetesBreakLogs, KubernetesBreakLogsProvider } from "./KubernetesBreakLogs";
+import { breakLogWindow } from "@/lib/useKubernetesBreakLogs";
 
 const issue: KubernetesIssue = { root: { kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout-uid" }, rule: "pod.crash_loop", severity: "critical", count: 7, of: 7, broken: true, broke_at: "2026-10-14T12:04:00Z", history: "complete", evidence: { terminations: [{ reason: "OOMKilled", exit_code: 137, count: 6, last: "2026-10-14T12:05:00Z" }], warning_events: 3, from: "2026-10-14T11:34:00Z", to: "2026-10-14T12:06:00Z" } };
 const resource = { resource_id: "apps~v1~deployments", ...issue.root };
@@ -19,7 +21,324 @@ function mount(element: React.ReactNode, cluster = "east") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return { client, ...render(<QueryClientProvider client={client}><KubernetesClusterContext.Provider value={{ client: api, cluster, multiple: true, clusters: [], key: (...parts) => kubernetesKey(cluster, ...parts) }}><MemoryRouter initialEntries={[`${window.location.pathname}${window.location.search}`]}>{element}<Location /></MemoryRouter></KubernetesClusterContext.Provider></QueryClientProvider>) };
 }
-afterEach(() => { cleanup(); vi.restoreAllMocks(); window.history.replaceState(null, "", "/"); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); window.history.replaceState(null, "", "/"); });
+
+describe("Logs at break", () => {
+  const page: KubernetesBreakLogPage = {
+    window: { from: "2026-10-14T11:59:00Z", to: "2026-10-14T12:06:00Z" },
+    pods: [{ name: "checkout-deleted", uid: "", short: "deleted", state: "unknown" }, { name: "checkout-live", uid: "pod-live", short: "live", state: "running" }],
+    lines: [{ at: "2026-10-14T12:03:00Z", pod: "checkout-deleted", pod_uid: "", container: "api", init: false, slot: "previous", level: "error", text: "timeout <script>not markup</script>", source: "linked" }],
+    markers: [{ at: issue.broke_at!, type: "break", label: "Deployment checkout unavailable" }, { at: "2026-10-14T12:05:00Z", type: "crash", label: "api Error exit 1" }],
+    counts: { all: 3, errors: 2, warnings: 1 }, rate: [{ minute: "2026-10-14T12:03:00Z", total: 3, errors: 2 }],
+    patterns: [{ template: "timeout <value>", level: "error", count: 2 }], sources: [{ kind: "linked", name: "loki-prod", type: "loki", at: "2026-10-14T12:06:00Z" }],
+    coverage: { state: "partial", gaps: [{ from: "2026-10-14T11:59:00Z", to: "2026-10-14T12:01:00Z" }], reason: "restarted_since", tip: true }, next: "opaque-next",
+  };
+  function scenario(onSelect = vi.fn(), crashes: KubernetesCrashEvent[] = []) {
+    return <KubernetesBreakLogsProvider issue={issue} onSelectResource={onSelect}><ResourceTimelineChart issue={issue} changes={[]} crashes={crashes} since="2026-10-14T11:30:00Z" until="2026-10-14T12:30:00Z" onSelectChange={vi.fn()} /><KubernetesBreakLogs /></KubernetesBreakLogsProvider>;
+  }
+
+  async function advance(milliseconds = 0) {
+    let remaining = milliseconds;
+    do {
+      const step = Math.min(1_000, remaining);
+      await act(async () => { await vi.advanceTimersByTimeAsync(step); });
+      remaining -= step;
+    } while (remaining > 0);
+  }
+
+  it("refreshes a future window from page one with fresh cursors and stops after settlement", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date(issue.broke_at!));
+    let revision = 0;
+    const lookup = vi.spyOn(api, "kubernetesBreakLogs").mockImplementation(async (options) => {
+      if (!options.cursor) revision++;
+      return { ...page, lines: [{ ...page.lines[0], text: options.cursor ? `older page ${revision}` : `capture ${revision}` }], next: options.cursor ? undefined : `cursor-${revision}` };
+    });
+    const { client } = mount(scenario()); await advance();
+    fireEvent.click(screen.getByRole("button", { name: "Load more logs" })); await advance();
+    expect(lookup.mock.calls.at(-1)?.[0].cursor).toBe("cursor-1");
+    expect(screen.getByText("older page 1")).toBeTruthy();
+    await advance(10_000);
+    expect(lookup.mock.calls.at(-1)?.[0].cursor).toBeUndefined();
+    expect(client.getQueryCache().findAll().find((query) => query.queryKey.includes("kubernetes-break-logs"))?.state.data).toMatchObject({ pages: [{ lines: [{ text: "capture 2" }] }], pageParams: [undefined] });
+    await advance(1);
+    expect(screen.queryByText("older page 1")).toBeNull();
+    expect(screen.getByText("capture 2")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Load more logs" })); await advance();
+    expect(lookup.mock.calls.at(-1)?.[0].cursor).toBe("cursor-2");
+    await advance(180_000);
+    const settledCalls = lookup.mock.calls.length;
+    expect(settledCalls).toBeGreaterThan(4);
+    await advance(60_000);
+    expect(lookup).toHaveBeenCalledTimes(settledCalls);
+  });
+
+  it("collects the scheduled capture for an active break even when the requested end is past", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-14T12:05:10Z"));
+    window.history.replaceState(null, "", "/?logs_from=2026-10-14T11:59:00Z&logs_to=2026-10-14T12:04:00Z");
+    const lookup = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(page);
+    mount(scenario()); await advance();
+    await advance(10_000);
+    expect(lookup).toHaveBeenCalledTimes(2);
+    await advance(120_000);
+    const settledCalls = lookup.mock.calls.length;
+    await advance(60_000);
+    expect(lookup).toHaveBeenCalledTimes(settledCalls);
+  });
+
+  it("keeps the first page and scroll position visible while refreshing from its original page parameter", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date(issue.broke_at!));
+    let finishRefresh: (value: KubernetesBreakLogPage) => void = () => undefined;
+    const lookup = vi.spyOn(api, "kubernetesBreakLogs")
+      .mockResolvedValueOnce(page)
+      .mockResolvedValueOnce({ ...page, lines: [{ ...page.lines[0], text: "older cursor line" }], next: undefined })
+      .mockImplementationOnce(() => new Promise<KubernetesBreakLogPage>((resolve) => { finishRefresh = resolve; }))
+      .mockResolvedValue({ ...page, next: undefined });
+    const { client } = mount(scenario()); await advance();
+    fireEvent.click(screen.getByRole("button", { name: "Load more logs" })); await advance();
+    const viewer = screen.getByRole("log");
+    viewer.scrollTop = 80;
+    await advance(10_000);
+    expect(lookup).toHaveBeenCalledTimes(3);
+    expect(lookup.mock.calls[2][0].cursor).toBeUndefined();
+    expect(client.getQueryCache().findAll().find((query) => query.queryKey.includes("kubernetes-break-logs"))?.state.data).toMatchObject({ pages: [page], pageParams: [undefined] });
+    await advance(1);
+    expect(screen.getByText("timeout <script>not markup</script>")).toBeTruthy();
+    expect(screen.queryByText("older cursor line")).toBeNull();
+    expect(screen.getByRole("log")).toBe(viewer);
+    expect(viewer.scrollTop).toBe(80);
+    expect(client.getQueryCache().findAll().find((query) => query.queryKey.includes("kubernetes-break-logs"))?.state.data).toMatchObject({ pageParams: [undefined] });
+    await act(async () => finishRefresh({ ...page, lines: [{ ...page.lines[0], text: "refreshed first page" }], next: "fresh-cursor" }));
+    await advance();
+    expect(screen.getByText("refreshed first page")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Load more logs" })); await advance();
+    expect(lookup.mock.calls.at(-1)?.[0].cursor).toBe("fresh-cursor");
+  });
+
+  it("does not poll a historical settled window", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-14T13:00:00Z"));
+    const lookup = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(page);
+    mount(scenario()); await advance();
+    await advance(180_000);
+    expect(lookup).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes a hidden historical initial load immediately without periodic polling", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-14T13:00:00Z"));
+    const timers = vi.spyOn(globalThis, "setTimeout");
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    let finishLoad: (value: KubernetesBreakLogPage) => void = () => undefined;
+    const lookup = vi.spyOn(api, "kubernetesBreakLogs").mockImplementation(() => new Promise<KubernetesBreakLogPage>((resolve) => { finishLoad = resolve; }));
+    mount(scenario()); await advance();
+    await advance(30_000);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(timers).not.toHaveBeenCalledWith(expect.any(Function), 10_000);
+    const initialSignal = lookup.mock.calls[0][1];
+    visibility.mockReturnValue("hidden"); fireEvent(document, new Event("visibilitychange")); await advance();
+    expect(initialSignal?.aborted).toBe(true);
+    await advance(60_000);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    visibility.mockReturnValue("visible"); fireEvent(document, new Event("visibilitychange")); await advance();
+    expect(lookup).toHaveBeenCalledTimes(2);
+    expect(lookup.mock.calls[1][0].cursor).toBeUndefined();
+    await advance(60_000);
+    expect(lookup).toHaveBeenCalledTimes(2);
+    expect(timers).not.toHaveBeenCalledWith(expect.any(Function), 10_000);
+    await act(async () => finishLoad(page)); await advance();
+    expect(screen.getByText("timeout <script>not markup</script>")).toBeTruthy();
+    await advance(60_000);
+    expect(lookup).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not postpone polling when the parent rerenders with the same query scope", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date(issue.broke_at!));
+    const lookup = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(page);
+    function Parent() {
+      const [, update] = useState(0);
+      return <><button onClick={() => update((count) => count + 1)}>Refresh parent</button>{scenario()}</>;
+    }
+    mount(<Parent />); await advance(); await advance(9_000);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh parent" }));
+    await advance(1_000);
+    expect(lookup).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits for paging and still refreshes page one when a cursor response crosses settlement", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date(issue.broke_at!));
+    let finishPage: (value: KubernetesBreakLogPage) => void = () => undefined;
+    const lookup = vi.spyOn(api, "kubernetesBreakLogs").mockImplementation(async (options) => {
+      if (options.cursor) return new Promise<KubernetesBreakLogPage>((resolve) => { finishPage = resolve; });
+      return page;
+    });
+    mount(scenario()); await advance(); await advance(170_000);
+    fireEvent.click(screen.getByRole("button", { name: "Load more logs" })); await advance();
+    const pagingCalls = lookup.mock.calls.length;
+    await advance(20_000);
+    expect(lookup).toHaveBeenCalledTimes(pagingCalls);
+    await act(async () => finishPage({ ...page, lines: [{ ...page.lines[0], text: "old cursor page" }], next: undefined }));
+    await advance(20_000);
+    expect(lookup).toHaveBeenCalledTimes(pagingCalls + 1);
+    expect(lookup.mock.calls.at(-1)?.[0].cursor).toBeUndefined();
+    expect(screen.queryByText("old cursor page")).toBeNull();
+    await advance(30_000);
+    expect(lookup).toHaveBeenCalledTimes(pagingCalls + 1);
+  });
+
+  it("pauses while hidden, cancels in-flight reads and settles on return without stale pages", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date(issue.broke_at!));
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const lookup = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValueOnce(page).mockImplementation((_options, signal) => new Promise((resolve) => {
+      signal?.addEventListener("abort", () => resolve({ ...page, lines: [{ ...page.lines[0], text: "stale cancelled result" }] }), { once: true });
+    }));
+    mount(scenario()); await advance();
+    await advance(10_000);
+    const signal = lookup.mock.calls.at(-1)?.[1];
+    expect(signal?.aborted).toBe(false);
+    expect(screen.getByText("timeout <script>not markup</script>")).toBeTruthy();
+    visibility.mockReturnValue("hidden"); fireEvent(document, new Event("visibilitychange")); await advance();
+    expect(signal?.aborted).toBe(true);
+    expect(screen.getByText("timeout <script>not markup</script>")).toBeTruthy();
+    await advance(240_000);
+    expect(lookup).toHaveBeenCalledTimes(2);
+    lookup.mockResolvedValue({ ...page, lines: [{ ...page.lines[0], text: "settled capture" }] });
+    visibility.mockReturnValue("visible"); fireEvent(document, new Event("visibilitychange"));
+    await advance();
+    expect(lookup).toHaveBeenCalledTimes(3);
+    expect(screen.getByText("settled capture")).toBeTruthy();
+    expect(screen.queryByText("stale cancelled result")).toBeNull();
+    await advance(60_000);
+    expect(lookup).toHaveBeenCalledTimes(3);
+  });
+
+  it("cancels an in-flight refresh and its polling timer on unmount", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date(issue.broke_at!));
+    const lookup = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValueOnce(page).mockImplementation((_options, signal) => new Promise((resolve) => {
+      signal?.addEventListener("abort", () => resolve(page), { once: true });
+    }));
+    const { unmount } = mount(scenario()); await advance(); await advance(10_000);
+    const signal = lookup.mock.calls.at(-1)?.[1];
+    unmount(); await advance(60_000);
+    expect(signal?.aborted).toBe(true);
+    expect(lookup).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([401, 403, 404])("stops polling and removes stale evidence after cursor HTTP %s", async (status) => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date(issue.broke_at!));
+    const lookup = vi.spyOn(api, "kubernetesBreakLogs").mockImplementation(async (options) => {
+      if (options.cursor) throw new ApiError(status, "private provider text");
+      return page;
+    });
+    mount(scenario()); await advance();
+    fireEvent.click(screen.getByRole("button", { name: "Load more logs" })); await advance();
+    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(screen.queryByText("timeout <script>not markup</script>")).toBeNull();
+    await advance(180_000);
+    expect(lookup).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["", "logs_from=bad&logs_to=bad", "logs_from=2026-10-14T12:06:00Z&logs_to=2026-10-14T11:59:00Z", "logs_from=2026-10-14T08:00:00Z&logs_to=2026-10-14T12:00:00Z"])("falls back to the default bounded window for %s", (query) => {
+    expect(breakLogWindow(new URLSearchParams(query), issue.broke_at!)).toEqual({ from: "2026-10-14T11:59:00.000Z", to: "2026-10-14T12:06:00.000Z" });
+  });
+
+  it("moves the URL-backed window by keyboard and pointer without remounting handles", async () => {
+    const lookup = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(page);
+    const { container } = mount(scenario());
+    await screen.findByText("timeout <value>");
+    const handle = screen.getByRole("slider", { name: "Log window start" });
+    handle.focus(); fireEvent.keyDown(handle, { key: "ArrowRight" });
+    await waitFor(() => expect(screen.getByLabelText("Location").textContent).toContain("logs_from=2026-10-14T11%3A59%3A30.000Z"));
+    expect(screen.getByRole("slider", { name: "Log window start" })).toBe(handle);
+    expect(document.activeElement).toBe(handle);
+    expect(lookup.mock.calls.at(-1)?.[0].since).toBe("2026-10-14T11:59:30.000Z");
+    const plot = container.querySelector<HTMLElement>(".break-log-bracket-plot")!;
+    vi.spyOn(plot, "getBoundingClientRect").mockReturnValue({ left: 0, width: 600, right: 600, top: 0, bottom: 100, height: 100, x: 0, y: 0, toJSON: () => ({}) });
+    const original = window.PointerEvent;
+    window.PointerEvent = MouseEvent as typeof PointerEvent;
+    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 295 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 300 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    window.PointerEvent = original;
+    await waitFor(() => expect(lookup.mock.calls.at(-1)?.[0].since).toBe("2026-10-14T12:00:00.000Z"));
+  });
+
+  it("renders literal lines, dividers, rates and patterns and preserves original filters while paging", async () => {
+    const lookup = vi.spyOn(api, "kubernetesBreakLogs").mockImplementation(async (options) => ({ ...page, lines: options.cursor ? [{ ...page.lines[0], text: "later page line" }] : page.lines, next: options.cursor ? undefined : page.next }));
+    const { container } = mount(scenario());
+    await screen.findByText("timeout <script>not markup</script>");
+    expect(container.querySelector("script")).toBeNull();
+    expect(screen.getByRole("log").textContent).toContain("Deployment checkout unavailable");
+    expect(screen.getByRole("log").textContent).toContain("api Error exit 1");
+    expect(screen.getByRole("img", { name: "Log lines per minute, errors stacked in red" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /checkout-deleted/ }));
+    await waitFor(() => expect(lookup.mock.calls.at(-1)?.[0].pods).toEqual(["checkout-deleted"]));
+    fireEvent.click(screen.getByRole("button", { name: "Previous container" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Errors 2" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Search in log window" }), { target: { value: "timeout + retry" } });
+    await waitFor(() => expect(lookup.mock.calls.at(-1)?.[0]).toMatchObject({ mode: "previous", level: "error", q: "timeout + retry", cursor: undefined }));
+    fireEvent.click(await screen.findByRole("button", { name: "Load more logs" }));
+    await screen.findByText("later page line");
+    expect(lookup.mock.calls.at(-1)?.[0]).toMatchObject({ pods: ["checkout-deleted"], mode: "previous", level: "error", q: "timeout + retry", cursor: "opaque-next" });
+    fireEvent.click(screen.getByRole("button", { name: "Current" }));
+    await waitFor(() => expect(lookup.mock.calls.at(-1)?.[0]).toMatchObject({ mode: "current", cursor: undefined }));
+    expect(screen.queryByText("later page line")).toBeNull();
+  });
+
+  it.each([{ state: "complete" as const, tip: true, visible: false }, { state: "partial" as const, tip: false, visible: false }, { state: "none" as const, tip: true, visible: true }])("honors coverage $state with backend tip=$tip", async ({ state, tip, visible }) => {
+    vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue({ ...page, coverage: { ...page.coverage, state, tip } });
+    mount(scenario()); await screen.findByText("timeout <value>");
+    expect(Boolean(screen.queryByRole("button", { name: "Log coverage tip" }))).toBe(visible);
+    if (visible) {
+      fireEvent.click(screen.getByRole("button", { name: "Log coverage tip" }));
+      expect(screen.getByText(/The container restarted more than once/)).toBeTruthy();
+      expect(screen.getByRole("link", { name: "Link a source in Agent tab" }).getAttribute("href")).toBe("/agent/kubernetes?view=agent&cluster=east");
+    }
+  });
+
+  it("selects previous Pod logs ending at the crash and opens the real Pod/workload", async () => {
+    const lookup = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(page);
+    const select = vi.fn();
+    const crash: KubernetesCrashEvent = { id: "crash", sequence: 1, cluster: "east", namespace: "shop", pod: "checkout-old", pod_uid: "old-uid", root_uid: "checkout-uid", root_kind: "Deployment", root_name: "checkout", container: "api", type: "termination", termination_slot: "previous", reason: "OOMKilled", exit_code: 137, restart_count: 2, at: "2026-10-14T12:05:00Z", time_source: "finished_at", observed_at: "2026-10-14T12:05:05Z" };
+    const { container } = mount(scenario(select, [crash]));
+    await screen.findByText("timeout <value>");
+    fireEvent.click(container.querySelector('[data-event-id="crash"]')!);
+    fireEvent.click(screen.getByRole("button", { name: "Open pod" }));
+    expect(select).toHaveBeenLastCalledWith(expect.objectContaining({ name: "checkout-old", uid: "old-uid", kind: "Pod" }), undefined);
+    fireEvent.click(screen.getByRole("button", { name: "Logs before crash" }));
+    await waitFor(() => expect(lookup.mock.calls.at(-1)?.[0]).toMatchObject({ pods: ["old-uid"], mode: "previous", since: "2026-10-14T12:00:00.000Z", until: "2026-10-14T12:05:00.000Z" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Open live logs" })[0]);
+    expect(select).toHaveBeenLastCalledWith(expect.objectContaining({ name: "checkout", resource_id: "apps~v1~deployments" }), "logs");
+    fireEvent.click(screen.getAllByRole("button", { name: "Ask chat" })[0]);
+    expect(screen.getByLabelText("Location").textContent).toContain("/agent/chat?");
+    expect(screen.getByLabelText("Location").textContent).toContain("logs_to=2026-10-14T12%3A05%3A00.000Z");
+  });
+
+  it.each([400, 403])("handles cursor HTTP %s without exposing provider text", async (status) => {
+    const lookup = vi.spyOn(api, "kubernetesBreakLogs").mockImplementation(async (options) => {
+      if (options.cursor) throw new ApiError(status, "private provider text");
+      return page;
+    });
+    mount(scenario()); await screen.findByText("timeout <value>");
+    fireEvent.click(screen.getByRole("button", { name: "Load more logs" }));
+    await screen.findByRole("alert");
+    expect(document.body.textContent).not.toContain("private provider text");
+    if (status === 403) expect(screen.queryByText("timeout <script>not markup</script>")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Reload logs" }));
+    await waitFor(() => expect(lookup.mock.calls.at(-1)?.[0].cursor).toBeUndefined());
+  });
+
+  it("opens another root's crash with that root, namespace and actual Pod identity", async () => {
+    vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(page);
+    const crash: KubernetesCrashEvent = { id: "other-crash", sequence: 1, cluster: "east", namespace: "payments", pod: "ledger-old", pod_uid: "ledger-pod", root_uid: "ledger-root", root_kind: "Deployment", root_name: "ledger", container: "api", type: "termination", termination_slot: "previous", reason: "Error", exit_code: 1, restart_count: 1, at: "2026-10-14T12:05:00Z", time_source: "finished_at", observed_at: "2026-10-14T12:05:05Z" };
+    const { container } = mount(scenario(vi.fn(), [crash]));
+    await screen.findByText("timeout <value>");
+    fireEvent.click(container.querySelector('[data-event-id="other-crash"]')!);
+    fireEvent.click(screen.getByRole("button", { name: "Logs before crash" }));
+    const location = screen.getByLabelText("Location").textContent!;
+    expect(location).toContain("root_uid=ledger-root");
+    expect(location).toContain("namespace=payments");
+    expect(location).toContain("logs_pod=ledger-pod");
+    expect(location).toContain("logs_mode=previous");
+  });
+});
 
 describe("Break timeline", () => {
   const observation: KubernetesCrashEvent = { id: "journal-event", sequence: 1, cluster: "east", namespace: "shop", pod: "checkout-old", pod_uid: "old-pod-uid", root_uid: "checkout-uid", root_kind: "Deployment", root_name: "checkout", container: "api", type: "termination", termination_slot: "previous", reason: "Error", exit_code: 137, restart_count: 41, at: "2026-10-14T12:05:00Z", time_source: "finished_at", observed_at: "2026-10-14T12:06:00Z" };

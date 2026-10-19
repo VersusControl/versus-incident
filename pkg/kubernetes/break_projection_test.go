@@ -13,6 +13,21 @@ import (
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 )
 
+func TestProjectedCreatedAtSurvivesSummaryLoss(t *testing.T) {
+	created := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	service := NewService(nil, Scope{ClusterID: "cluster"}, 0)
+	projected := service.projectResource(ResourceDefinition{Kind: "Pod"}, map[string]any{"kind": "Pod", "metadata": map[string]any{"name": "api", "uid": "pod", "creationTimestamp": created.Format(time.RFC3339Nano)}})
+	projected.Summary = nil
+	encoded, err := json.Marshal(projected)
+	if err != nil || json.Unmarshal(encoded, &projected) != nil {
+		t.Fatal("projection round trip failed", err)
+	}
+	record := indexRecord(projected)
+	if !record.CreatedAt.Equal(created) || !recordProjection(record).CreatedAt.Equal(created) {
+		t.Fatalf("typed creation provenance lost: %+v", record)
+	}
+}
+
 func TestNativeDeploymentOmittedZeroAvailability(t *testing.T) {
 	service := NewService(nil, Scope{ClusterID: "cluster"}, 0)
 	for _, test := range []struct {

@@ -90,6 +90,17 @@ afterEach(() => {
 });
 
 describe("ChatPage", () => {
+  it.each([true, false])("attaches only a valid bounded break-log time window, valid=%s", async (valid) => {
+    const from = "2026-10-17T12:00:00Z", to = valid ? "2026-10-17T12:07:00Z" : "2026-10-17T15:00:00Z";
+    renderPage(`/agent/chat?provider=kubernetes&cluster=east&resource_id=apps~v1~deployments&namespace=shop&name=checkout&logs_from=${from}&logs_to=${to}`);
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Explain the break" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.streamChatMessage).toHaveBeenCalled());
+    const attachment = vi.mocked(api.streamChatMessage).mock.calls.at(-1)?.[2];
+    expect(attachment?.resource).toMatchObject({ cluster: "east", namespace: "shop", name: "checkout" });
+    expect(attachment?.time_range).toEqual(valid ? { start: from, end: to } : undefined);
+  });
+
   it("sends investigation identity and asks the server for bounded changes", async () => {
     renderPage("/agent/chat?provider=kubernetes&cluster=east&resource_id=apps~v1~deployments&namespace=shop&name=checkout&uid=checkout-uid&include_changes=true");
     fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "What changed?" } });

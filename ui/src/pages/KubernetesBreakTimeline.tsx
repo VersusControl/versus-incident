@@ -1,4 +1,5 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import { Activity, ArrowRight, ChevronDown, ChevronLeft, ChevronRight, Clock, History, TriangleAlert, X } from "lucide-react";
 import { ApiError, type KubernetesChange, type KubernetesChangesPage, type KubernetesCrashEvent, type KubernetesIssue, type KubernetesResource } from "@/lib/api";
@@ -7,6 +8,8 @@ import { useBrokenIssues, useKubernetesCluster, useKubernetesCrashes, useKuberne
 import { KubernetesWarnings } from "./KubernetesWarnings";
 import { failureWarnings, issueWarnings, type KubernetesWarning } from "./kubernetesWarningItems";
 import "./KubernetesResourceTimeline.css";
+import { BreakLogRateStrip, LogWindowBracket } from "./KubernetesBreakLogs";
+import { useBreakLogs } from "@/lib/useKubernetesBreakLogs";
 
 function breakRule(issue: KubernetesIssue) {
   const names: Record<string, string> = { "pod.crash_loop": "CrashLoopBackOff", "pod.image_pull": "ImagePullBackOff", "pod.config_error": "Container config error", "pod.evicted": "Evicted", "pod.unschedulable": "Unschedulable", "pod.failed": "Pod failed", "workload.rollout_stalled": "Rollout stalled (ProgressDeadlineExceeded)", "workload.unavailable": "Pods unavailable", "job.failed": "Job failed", "node.not_ready": "NotReady" };
@@ -35,12 +38,13 @@ export function BreakTimelineLane({ issue, changes, crashes, since, until, onSel
   </section>;
 }
 
-type TimelineMarker = { id: string; at: string; label: string; detail: string; type: "change" | "crash"; change?: KubernetesChange };
+type TimelineMarker = { id: string; at: string; label: string; detail: string; type: "change" | "crash"; change?: KubernetesChange; crash?: KubernetesCrashEvent };
 type TimelineResource = KubernetesIssue["root"];
 const timelineIdentity = (resource: TimelineResource) => JSON.stringify([resource.kind, resource.namespace ?? "", resource.uid || resource.name]);
 const axisClock = (timestamp: number) => new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 
 export function ResourceTimelineChart({ issue, issues = [], changes, crashes, since, until, onSelectChange, now = Date.now(), scope }: { issue?: KubernetesIssue; issues?: KubernetesIssue[]; changes: KubernetesChange[]; crashes?: KubernetesCrashEvent[]; since: string; until: string; onSelectChange: (change: KubernetesChange) => void; now?: number; scope?: string }) {
+  const logs = useBreakLogs();
   const [selectedIDs, setSelectedIDs] = useState<string[] | null>(null);
   const plotRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -69,7 +73,7 @@ export function ResourceTimelineChart({ issue, issues = [], changes, crashes, si
     const resource = { kind: event.root_kind, namespace: event.namespace, name: event.root_name, uid: event.root_uid };
     const key = timelineIdentity(resource);
     if (!rows.has(key)) rows.set(key, { resource, markers: [] });
-    rows.get(key)!.markers.push({ id: event.id, at: event.at, label: `${event.init ? "Init " : ""}${event.container}: ${event.reason || "Terminated"}`, detail: crashObservationDetail(event), type: "crash" });
+    rows.get(key)!.markers.push({ id: event.id, at: event.at, label: `${event.init ? "Init " : ""}${event.container}: ${event.reason || "Terminated"}`, detail: crashObservationDetail(event), type: "crash", crash: event });
   }
   for (const root of crashes === undefined ? roots : []) for (const termination of root.evidence?.terminations ?? []) {
     if (!inWindow(Date.parse(termination.last))) continue;
@@ -87,6 +91,8 @@ export function ResourceTimelineChart({ issue, issues = [], changes, crashes, si
   const breakRoots = [...new Map(roots.map((root) => [JSON.stringify([timelineIdentity(root.root), root.broke_at]), root])).values()];
   const markersByID = new Map([...rows.values()].flatMap((row) => row.markers).map((marker) => [marker.id, marker]));
   const selected = selectedIDs?.flatMap((id) => markersByID.has(id) ? [markersByID.get(id)!] : []) ?? null;
+  const crashPopover = logs?.validIssue && selected?.some((marker) => marker.crash);
+  const anchor = openerRef.current?.getBoundingClientRect();
   const resetScope = scope ?? JSON.stringify([issue && timelineIdentity(issue.root), end - start]);
   const previousScope = useRef(resetScope);
   const framedScope = useRef<string | null>(null);
@@ -105,7 +111,7 @@ export function ResourceTimelineChart({ issue, issues = [], changes, crashes, si
   }, [selectedIDs]);
   useLayoutEffect(() => {
     const active = document.activeElement;
-    const canRestore = !active || active === document.body || !active.isConnected || Boolean(plotRef.current?.parentElement?.contains(active));
+    const canRestore = !active || active === document.body || !active.isConnected || Boolean(plotRef.current?.parentElement?.contains(active)) || Boolean(headingRef.current?.closest(".resource-timeline-detail")?.contains(active));
     if (previousScope.current !== resetScope) {
       previousScope.current = resetScope;
       if (selectedIDs) {
@@ -141,7 +147,7 @@ export function ResourceTimelineChart({ issue, issues = [], changes, crashes, si
     {!valid ? <p role="status" className="p-4 text-xs text-ink-400">Window unavailable.</p> : <>
       <div ref={plotRef} className="resource-timeline-scroll" tabIndex={0} role="region" aria-label="Resource timeline chart" data-since={since} data-until={until} data-now={now} onScroll={(event) => { const left = event.currentTarget.scrollLeft; setViewport((current) => ({ ...current, left })); }}>
         <div className="resource-timeline-grid">
-          <div className="resource-timeline-head" style={{ height: closeCaptions ? 44 : 34 }}><div className="resource-timeline-plot">
+          <div className="resource-timeline-head" style={{ height: (closeCaptions ? 44 : 34) + (logs?.window ? 24 : 0) }}><div className="resource-timeline-plot">
             {breakVisible && <span className="resource-timeline-break-pill" style={{ left: viewport.mobile && viewport.width ? `clamp(${viewport.left + 44}px, ${position(broke)}%, ${viewport.left + Math.max(44, mobilePlotWidth - 44)}px)` : `clamp(44px, ${position(broke)}%, calc(100% - 44px))` }} title={`Break: ${breakRule(issue!)} ${clock(issue?.broke_at)}`}>{visibleBreak ? `break ${axisClock(broke)}` : position(broke) / 100 * 620 < viewport.left ? "← break" : "break →"}</span>}
             {inWindow(now) && <span className="resource-timeline-now-label" style={{ left: `clamp(14px, ${position(now)}%, calc(100% - 14px))`, top: closeCaptions ? 18 : 0 }}>now</span>}
           </div></div>
@@ -180,6 +186,8 @@ export function ResourceTimelineChart({ issue, issues = [], changes, crashes, si
               </div>;
             })}
             {rows.size === 0 && <p className="p-4 text-xs text-ink-400">No recorded markers in this window.</p>}
+            <BreakLogRateStrip since={since} until={until} />
+            <LogWindowBracket since={since} until={until} />
           </div>
           <div className="resource-timeline-axis"><div className="resource-timeline-plot">{ticks.map((tick) => <time key={tick} dateTime={new Date(tick).toISOString()} style={{ left: `${position(tick)}%` }}>{axisClock(tick)}</time>)}</div></div>
         </div>
@@ -187,7 +195,8 @@ export function ResourceTimelineChart({ issue, issues = [], changes, crashes, si
       <div className="resource-timeline-legend" aria-label="Timeline legend"><span><i className="resource-timeline-dot" />change</span><span><i className="resource-timeline-break-key" />break</span><span><i className="resource-timeline-crash-key">×</i>crash (termination)</span><span><i className="resource-timeline-now-key" />now</span><span><i className="resource-timeline-window-key" />suspect window</span></div>
       {crashes === undefined && roots.some((root) => root.evidence?.partial) && <p role="status" className="flex items-center gap-1 px-3 text-xs text-sev-warning"><TriangleAlert size={12} aria-hidden="true" />Partial crash evidence</p>}
       {breakRoots.map((root) => <span key={JSON.stringify([timelineIdentity(root.root), root.broke_at])} className="sr-only">Break: {breakRule(root)}{root.broke_at && <time dateTime={root.broke_at}>{clock(root.broke_at)}</time>}</span>)}
-      {!!selected?.length && <section id={detailID} aria-label="Timeline event details" className="resource-timeline-detail"><button type="button" className="btn-icon float-right" aria-label="Close event details" title="Close event details" onClick={closeDetails}><X size={14} aria-hidden="true" /></button><h3 ref={headingRef} tabIndex={-1} className="sr-only">Timeline event details</h3>{selected.map((marker) => <div key={marker.id} className="mb-2 break-words"><p>{marker.detail}</p><time dateTime={marker.at} className="font-mono text-ink-400">{clock(marker.at)}</time>{marker.change && <button type="button" className="ml-3 text-link" onClick={() => marker.change && onSelectChange(marker.change)}>Open resource</button>}</div>)}</section>}
+      {!!selected?.length && !crashPopover && <section id={detailID} aria-label="Timeline event details" className="resource-timeline-detail"><button type="button" className="btn-icon float-right" aria-label="Close event details" title="Close event details" onClick={closeDetails}><X size={14} aria-hidden="true" /></button><h3 ref={headingRef} tabIndex={-1} className="sr-only">Timeline event details</h3>{selected.map((marker) => <div key={marker.id} className="mb-2 break-words"><p>{marker.detail}</p><time dateTime={marker.at} className="font-mono text-ink-400">{clock(marker.at)}</time>{marker.change && <button type="button" className="ml-3 text-link" onClick={() => marker.change && onSelectChange(marker.change)}>Open resource</button>}</div>)}</section>}
+      {crashPopover && createPortal(<section id={detailID} aria-label="Timeline event details" className="resource-timeline-detail fixed z-overlay !mt-0 w-80 max-w-[calc(100vw-1.5rem)] shadow-overlay" style={{ left: Math.max(12, Math.min(anchor?.left ?? 12, window.innerWidth - 332)), top: Math.max(12, Math.min((anchor?.bottom ?? 0) + 8, window.innerHeight - 260)) }}><button type="button" className="btn-icon float-right" aria-label="Close event details" title="Close event details" onClick={closeDetails}><X size={14} /></button><h3 ref={headingRef} tabIndex={-1} className="sr-only">Timeline event details</h3>{selected?.map((marker) => marker.crash && <section aria-label="Crash log actions" key={marker.id} className="mb-3 space-y-2 text-xs"><p className="font-semibold text-ink-50">{marker.crash.container} {marker.crash.reason || "Terminated"}, exit {marker.crash.exit_code}</p><span className="pill max-w-full break-all whitespace-normal font-mono">{marker.crash.pod}</span><time dateTime={marker.at} className="block font-mono text-ink-300">{clock(marker.at)}</time><p className="text-ink-300">Previous container logs end at this crash</p><div className="flex flex-wrap gap-3"><button type="button" className="btn btn-primary" onClick={() => { logs.beforeCrash(marker.crash!); closeDetails(); }}>Logs before crash</button><button type="button" className="text-link" onClick={() => logs.openPod(marker.crash!.pod, marker.crash!.pod_uid, undefined, marker.crash!.namespace)}>Open pod</button></div></section>)}</section>, document.body)}
     </>}
   </div>;
 }
@@ -247,6 +256,10 @@ export function BreakRow({ issue, resource, onSelectResource, collapsed = false,
   const timeline = () => {
     const query = new URLSearchParams(window.location.search);
     query.set("view", "timeline");
+    query.delete("logs_from");
+    query.delete("logs_to");
+    query.delete("logs_mode");
+    query.delete("logs_pod");
     query.delete("r");
     query.delete("tab");
     if (issue.root.uid) query.set("root_uid", issue.root.uid);

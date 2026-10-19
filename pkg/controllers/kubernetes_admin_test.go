@@ -19,6 +19,7 @@ import (
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
 	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
@@ -27,6 +28,136 @@ import (
 	"github.com/VersusControl/versus-incident/tests/fakekube"
 	"github.com/gofiber/fiber/v2"
 )
+
+func TestKubernetesBreakLogHTTPStoredPagesSettingsAndPermissions(t *testing.T) {
+	gatewayAuth := middleware.GatewayAuthEnabled()
+	middleware.SetGatewayAuthEnabled(false)
+	t.Cleanup(func() { middleware.SetGatewayAuthEnabled(gatewayAuth) })
+	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "crash-evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	provider := storage.NewMemory()
+	service.SetChangeStorage(provider)
+	service.SetScrubber(streamTestScrubber{})
+	defer service.StopCapture()
+	scope := service.ActiveScope()
+	store := kubechanges.NewStore(provider, kubeindex.Scope{OrgID: scope.OrgID, ClusterID: scope.ClusterID, CredentialID: scope.CredentialID})
+	now := time.Now().UTC().Truncate(time.Second)
+	from := now.Add(-5 * time.Minute)
+	item := breaklogs.Snapshot{Cluster: "cluster", Namespace: "deleted", RootUID: "deleted-root", Pod: "api-deleted", PodUID: "deleted-pod", Container: "app", Slot: "previous", CapturedAt: now, From: from, To: now, Lines: []breaklogs.Line{{At: from, Text: "ERROR failure one"}, {At: from.Add(time.Second), Text: "WARN warning"}, {At: now, Text: "info final"}}}
+	item.ID = breaklogs.Identity(item)
+	if err := store.CommitBreakLogs([]breaklogs.Snapshot{item}, nil, "job", "", now); err != nil {
+		t.Fatal(err)
+	}
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		if ctx.Get("X-View") == "unauthenticated" {
+			return ctx.Next()
+		}
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), ctx.Get("X-View") != "deny")
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureSettingsWrite), ctx.Get("X-Write") == "allow")
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	var auditEvents []middleware.AdminAuditEvent
+	middleware.SetAdminAuditHook(func(_ *fiber.Ctx, event middleware.AdminAuditEvent) {
+		auditEvents = append(auditEvents, event)
+	})
+	t.Cleanup(func() { middleware.SetAdminAuditHook(nil) })
+	base := "/api/admin/kubernetes/break-logs?cluster=cluster&namespace=deleted&root_uid=deleted-root&since=" + from.Format(time.RFC3339) + "&until=" + now.Format(time.RFC3339) + "&limit=1"
+	request := httptest.NewRequest(http.MethodGet, base, nil)
+	response, err := app.Test(request, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var page kubernetes.BreakLogPage
+	if json.NewDecoder(response.Body).Decode(&page) != nil || response.StatusCode != 200 || len(page.Lines) != 1 || page.Next == "" || page.Counts.All != 3 || page.Counts.Errors != 1 || page.Counts.Warnings != 1 || len(page.Patterns) == 0 {
+		t.Fatalf("page=%+v status=%d", page, response.StatusCode)
+	}
+	request = httptest.NewRequest(http.MethodGet, base+"&cursor="+page.Next, nil)
+	response, err = app.Test(request, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var second kubernetes.BreakLogPage
+	json.NewDecoder(response.Body).Decode(&second)
+	if response.StatusCode != 200 || len(second.Lines) != 1 || second.Lines[0].Text == page.Lines[0].Text {
+		t.Fatal("cursor page", response.StatusCode)
+	}
+	if len(auditEvents) != 0 {
+		t.Fatalf("successful passive break-log reads audited: %+v", auditEvents)
+	}
+	for _, test := range []struct {
+		method, path, body, view, write string
+		status                          int
+	}{
+		{http.MethodGet, base, "", "deny", "", 403},
+		{http.MethodGet, base + "&mode=invalid", "", "", "", 400},
+		{http.MethodGet, base + "&limit=501", "", "", "", 400},
+		{http.MethodGet, "/api/admin/kubernetes/agent-settings?cluster=cluster", "", "", "", 200},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"learning":{"logs":true},"break_logs":{"linked_source":""}}`, "", "", 403},
+		{http.MethodPost, "/api/admin/kubernetes/agent-settings/test-link?cluster=cluster", `{"source":"unknown","fields":{}}`, "", "", 403},
+		{http.MethodPost, "/api/admin/kubernetes/agent-settings/test-link?cluster=cluster", `{"source":"unknown","fields":{}}`, "", "allow", 404},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"learning":{"logs":true},"break_logs":{"linked_source":""}}`, "", "allow", 200},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"learning":{},"break_logs":{},"sources":[]}`, "", "allow", 400},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=missing", `{}`, "", "allow", 404},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"break_logs":{"linked_source":"SECRET_SOURCE"}}`, "", "allow", 400},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{}`, "deny", "allow", 403},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{}`, "unauthenticated", "", 401},
+		{http.MethodPost, "/api/admin/kubernetes/agent-settings/test-link?cluster=cluster", `{}`, "unauthenticated", "", 401},
+	} {
+		auditEvents = nil
+		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-View", test.view)
+		request.Header.Set("X-Write", test.write)
+		response, err := app.Test(request, 10000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var value map[string]any
+		json.NewDecoder(response.Body).Decode(&value)
+		response.Body.Close()
+		if response.StatusCode != test.status {
+			t.Errorf("%s %s: %d want %d body=%v", test.method, test.path, response.StatusCode, test.status, value)
+		}
+		if test.method == http.MethodGet && strings.Contains(test.path, "agent-settings") && value["can_write"] != false {
+			t.Error("read-only visibility")
+		}
+		wantAudit := test.method == http.MethodPut || test.method == http.MethodPost && (test.status == 401 || test.status == 403)
+		if !wantAudit {
+			if len(auditEvents) != 0 {
+				t.Errorf("passive request audited: %+v", auditEvents)
+			}
+			continue
+		}
+		result, action := middleware.AdminAuditDenied, "kubernetes.agent-settings.changed"
+		if test.status == 200 {
+			result = middleware.AdminAuditSuccess
+		}
+		if test.status == 401 || test.status == 403 {
+			action = "rbac.denied"
+		}
+		if len(auditEvents) != 1 || auditEvents[0].Action != action || auditEvents[0].Result != result {
+			t.Errorf("%s %s audit=%+v want exactly one %s/%s", test.method, test.path, auditEvents, action, result)
+		}
+		encoded, _ := json.Marshal(auditEvents)
+		if strings.Contains(string(encoded), "SECRET_SOURCE") || strings.Contains(string(encoded), "learning") {
+			t.Errorf("audit contains payload: %s", encoded)
+		}
+	}
+}
 
 func TestChatChangesOnlyTrimmingKeepsEvidenceComplete(t *testing.T) {
 	now := time.Now().UTC()

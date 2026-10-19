@@ -85,6 +85,20 @@ type logControl struct {
 	PreviousAvailable     *bool  `json:"previous_available,omitempty"`
 }
 
+type logFixtureLine struct {
+	At   time.Time `json:"at"`
+	Text string    `json:"text"`
+}
+
+// logFixture replaces one finite container log read with exact timestamped lines or an API status.
+type logFixture struct {
+	Path      string           `json:"path"`
+	Container string           `json:"container"`
+	Previous  bool             `json:"previous"`
+	Status    int              `json:"status,omitempty"`
+	Lines     []logFixtureLine `json:"lines,omitempty"`
+}
+
 type Server struct {
 	store          *Store
 	scenario       string
@@ -94,6 +108,7 @@ type Server struct {
 	counters       map[requestKey]requestCount
 	logStreams     map[logStreamKey]LogStreamCounter
 	logControls    map[logStreamKey]logControl
+	logFixtures    map[logStreamKey]logFixture
 	listHolds      map[string]*listHold
 	projectedKey   *ecdsa.PrivateKey
 	projectedKeyID string
@@ -101,7 +116,7 @@ type Server struct {
 
 func NewServer(config Config) (*Server, error) {
 	store := NewStore()
-	server := &Server{store: store, scenario: config.Scenario, startedAt: time.Now(), faults: make(map[string]Fault), counters: make(map[requestKey]requestCount), logStreams: make(map[logStreamKey]LogStreamCounter), logControls: make(map[logStreamKey]logControl), listHolds: make(map[string]*listHold)}
+	server := &Server{store: store, scenario: config.Scenario, startedAt: time.Now(), faults: make(map[string]Fault), counters: make(map[requestKey]requestCount), logStreams: make(map[logStreamKey]LogStreamCounter), logControls: make(map[logStreamKey]logControl), logFixtures: make(map[logStreamKey]logFixture), listHolds: make(map[string]*listHold)}
 	for resource, fault := range config.Faults {
 		server.faults[resource] = fault
 	}
@@ -176,6 +191,8 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		writeJSON(counting, server.logStreamCounters())
 	case request.Method == http.MethodPost && request.URL.Path == "/_fake/log-streams":
 		server.controlLogs(counting, request)
+	case request.Method == http.MethodPost && request.URL.Path == "/_fake/log-fixtures":
+		server.controlLogFixtures(counting, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/_fake/mutate":
 		server.mutate(counting, request)
 	case request.URL.Path == "/_fake/list-holds":
@@ -491,6 +508,9 @@ func (server *Server) metrics(writer http.ResponseWriter, request *http.Request)
 func (server *Server) logs(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	query := request.URL.Query()
+	if query.Get("follow") != "true" && server.serveLogFixture(writer, request) {
+		return
+	}
 	if query.Get("timestamps") == "true" && (query.Get("follow") == "true" || query.Get("follow") == "false" && query.Get("previous") == "true") {
 		server.streamLogs(writer, request)
 		return
@@ -607,6 +627,96 @@ func (server *Server) controlLogs(writer http.ResponseWriter, request *http.Requ
 	server.logControls[logStreamKey{Path: control.Path, Container: container}] = control
 	server.mu.Unlock()
 	writeJSON(writer, control)
+}
+
+func (server *Server) controlLogFixtures(writer http.ResponseWriter, request *http.Request) {
+	defer request.Body.Close()
+	request.Body = http.MaxBytesReader(writer, request.Body, 1<<20)
+	var fixture logFixture
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&fixture); err != nil || decoder.Decode(&struct{}{}) != io.EOF || len(fixture.Lines) > 1000 ||
+		(fixture.Status != 0 && fixture.Status != http.StatusForbidden && fixture.Status != http.StatusNotFound && fixture.Status != http.StatusTooManyRequests && fixture.Status != http.StatusInternalServerError) {
+		http.Error(writer, "invalid log fixture", http.StatusBadRequest)
+		return
+	}
+	for _, line := range fixture.Lines {
+		if line.At.IsZero() || len(line.Text) > 8192 || strings.ContainsAny(line.Text, "\r\n") {
+			http.Error(writer, "invalid log fixture", http.StatusBadRequest)
+			return
+		}
+	}
+	container, _, code := server.logContainer(fixture.Path, fixture.Container)
+	if code != http.StatusOK {
+		http.Error(writer, "unknown pod or container", code)
+		return
+	}
+	fixture.Container = container
+	key := logStreamKey{Path: fixture.Path, Container: container, Previous: fixture.Previous}
+	server.mu.Lock()
+	if fixture.Status == 0 && fixture.Lines == nil {
+		delete(server.logFixtures, key)
+	} else {
+		server.logFixtures[key] = fixture
+	}
+	server.mu.Unlock()
+	writeJSON(writer, map[string]any{"path": fixture.Path, "container": container, "previous": fixture.Previous, "status": fixture.Status, "lines": len(fixture.Lines)})
+}
+
+// serveLogFixture answers a finite read from a configured fixture, honoring sinceTime, tailLines and limitBytes.
+func (server *Server) serveLogFixture(writer http.ResponseWriter, request *http.Request) bool {
+	query := request.URL.Query()
+	container, _, code := server.logContainer(request.URL.Path, query.Get("container"))
+	if code != http.StatusOK {
+		return false
+	}
+	key := logStreamKey{Path: request.URL.Path, Container: container, Previous: query.Get("previous") == "true"}
+	server.mu.Lock()
+	fixture, exists := server.logFixtures[key]
+	server.mu.Unlock()
+	if !exists {
+		return false
+	}
+	update := server.observeLog(key, query.Get("sinceTime"))
+	defer update(func(counter *LogStreamCounter) { counter.Active-- })
+	if fixture.Status != 0 {
+		update(func(counter *LogStreamCounter) { counter.Unavailable++ })
+		writer.Header().Set("Content-Type", "application/json")
+		if fixture.Status == http.StatusTooManyRequests {
+			writer.Header().Set("Retry-After", "1")
+		}
+		writer.WriteHeader(fixture.Status)
+		_ = json.NewEncoder(writer).Encode(map[string]any{"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": http.StatusText(fixture.Status), "code": fixture.Status})
+		return true
+	}
+	var since time.Time
+	if value := query.Get("sinceTime"); value != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			http.Error(writer, "invalid sinceTime", http.StatusBadRequest)
+			return true
+		}
+		since = parsed
+	}
+	lines := []string{}
+	for _, line := range fixture.Lines {
+		if !line.At.Before(since) {
+			lines = append(lines, line.At.UTC().Format(time.RFC3339Nano)+" "+line.Text+"\n")
+		}
+	}
+	if tail, err := strconv.Atoi(query.Get("tailLines")); err == nil && tail > 0 && tail < len(lines) {
+		lines = lines[len(lines)-tail:]
+	}
+	body := strings.Join(lines, "")
+	if limit, err := strconv.Atoi(query.Get("limitBytes")); err == nil && limit > 0 && limit < len(body) {
+		body = body[:limit]
+	}
+	if _, err := io.WriteString(writer, body); err != nil {
+		update(func(counter *LogStreamCounter) { counter.Cancelled++ })
+		return true
+	}
+	update(func(counter *LogStreamCounter) { counter.Chunks++; counter.Completed++ })
+	return true
 }
 
 func (server *Server) takeLogControl(key logStreamKey) logControl {

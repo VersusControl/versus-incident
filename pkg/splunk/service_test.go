@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +53,117 @@ func (trace *liveJobTrace) RoundTrip(request *http.Request) (*http.Response, err
 		trace.cancel()
 	}
 	return response, nil
+}
+
+func TestReadWindowProjectionRetainsExtrasAndRejectsUnsafeFields(t *testing.T) {
+	now := time.Now().UTC()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		switch {
+		case request.Method == http.MethodPost:
+			fmt.Fprint(writer, `{"sid":"safe-job"}`)
+		case request.Method == http.MethodDelete:
+			fmt.Fprint(writer, `{}`)
+		case strings.Contains(request.URL.Path, "/results"):
+			projected := map[string]string{}
+			row := map[string]string{"index": "main", "_time": now.Add(-time.Second).Format(time.RFC3339Nano), "_raw": "safe", "existing_field": "retained", "mapped_container": "app"}
+			for _, field := range request.URL.Query()["f"] {
+				if value, ok := row[field]; ok {
+					projected[field] = value
+				}
+			}
+			json.NewEncoder(writer).Encode(map[string]any{"results": []any{projected}})
+		default:
+			fmt.Fprint(writer, `{"entry":[{"content":{"isDone":true}}]}`)
+		}
+	}))
+	defer server.Close()
+	service, err := NewService(config.AgentSplunkSourceConfig{Address: server.URL, Search: "search index=main"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.extraProjection = []string{"existing_field"}
+	result, err := service.ReadWindowWithFields(t.Context(), map[string]string{"namespace": "shop", "pod": "api-1"}, now.Add(-time.Minute), now, 50, []string{"mapped_container"})
+	if err != nil || len(result.Records) != 1 || result.Records[0].Fields["existing_field"] != "retained" || result.Records[0].Fields["mapped_container"] != "app" {
+		t.Fatalf("lost projected evidence: %+v err=%v", result, err)
+	}
+	before := requests
+	if _, err := service.ReadWindowWithFields(t.Context(), nil, now.Add(-time.Minute), now, 50, []string{"container | delete"}); !errors.Is(err, ErrInvalidArgument) || requests != before {
+		t.Fatalf("unsafe projection reached backend: requests=%d err=%v", requests, err)
+	}
+	for _, field := range []string{"@container", "kube-container", "kube/container", "kube@container", strings.Repeat("a", 65), strings.Repeat("a", 128)} {
+		for _, mode := range []string{"projection", "filter", "prefix"} {
+			var filters, prefix map[string]string
+			var fields []string
+			switch mode {
+			case "projection":
+				fields = []string{field}
+			case "filter":
+				filters = map[string]string{field: "app"}
+			case "prefix":
+				prefix = map[string]string{field: "app"}
+			}
+			_, err := service.ReadWindowWithFields(t.Context(), filters, now.Add(-time.Minute), now, 50, fields, prefix)
+			if !errors.Is(err, ErrInvalidArgument) || requests != before {
+				t.Fatalf("unprojectable %s %q reached backend: requests=%d want=%d err=%v", mode, field, requests, before, err)
+			}
+		}
+	}
+}
+
+func TestReadWindowRequiresFieldsAtJobCreation(t *testing.T) {
+	for _, containerField := range []string{"container_name", "k8s_ctr"} {
+		t.Run(containerField, func(t *testing.T) {
+			now := time.Now().UTC()
+			retained := map[string]bool{"index": true, "_time": true, "_raw": true, "pod": true}
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				switch {
+				case request.Method == http.MethodPost:
+					if err := request.ParseForm(); err != nil {
+						t.Error(err)
+					}
+					if strings.Contains(request.Form.Get("search"), containerField+"=") {
+						t.Error("container unexpectedly constrained by search")
+					}
+					wantFields := []string{"index", "_time", "_raw", "source", "sourcetype", "host", "service", "severity", "level", "environment", containerField, "namespace", "pod"}
+					if !slices.Equal(request.Form["rf"], wantFields) {
+						t.Errorf("job projection: got %q, want repeated rf values %q", request.Form["rf"], wantFields)
+					}
+					for _, field := range request.Form["rf"] {
+						if strings.Contains(field, ",") {
+							t.Error("comma-joined rf is not a field projection")
+							continue
+						}
+						retained[field] = true
+					}
+					fmt.Fprint(writer, `{"sid":"projected-job"}`)
+				case request.Method == http.MethodDelete:
+					fmt.Fprint(writer, `{}`)
+				case strings.HasSuffix(request.URL.Path, "/results"):
+					row := map[string]string{"index": "main", "_time": now.Add(-time.Second).Format(time.RFC3339Nano), "_raw": "native message", "pod": "api-1", containerField: "api"}
+					projected := map[string]string{}
+					for _, field := range request.URL.Query()["f"] {
+						if value, exists := row[field]; exists && retained[field] {
+							projected[field] = value
+						}
+					}
+					json.NewEncoder(writer).Encode(map[string]any{"results": []any{projected}})
+				default:
+					fmt.Fprint(writer, `{"entry":[{"content":{"isDone":true}}]}`)
+				}
+			}))
+			defer server.Close()
+			service, err := NewService(config.AgentSplunkSourceConfig{Address: server.URL, Search: "search index=main AND sourcetype=_json"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := service.ReadWindowWithFields(t.Context(), map[string]string{"namespace": "shop", "pod": "api-1"}, now.Add(-time.Minute), now, 50, []string{containerField})
+			if err != nil || len(result.Records) != 1 || result.Records[0].Fields[containerField] != "api" || result.Records[0].Fields["pod"] != "api-1" || result.Truncated {
+				t.Fatalf("job lost requested identity: %+v err=%v", result, err)
+			}
+		})
+	}
 }
 
 func TestLiveSplunkJobLifecycle(t *testing.T) {

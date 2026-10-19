@@ -3,11 +3,15 @@ package kubernetes
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -324,10 +328,12 @@ func TestClientCertificateCredentialReloadsRotatedFiles(t *testing.T) {
 }
 
 func TestClientTLSDeadlineBodyCapAndBoundedForbidden(t *testing.T) {
+	slowCanceled := make(chan struct{})
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/slow":
 			<-request.Context().Done()
+			close(slowCanceled)
 		case "/large":
 			_, _ = writer.Write([]byte(`{"value":"` + strings.Repeat("x", 256) + `"}`))
 		case "/forbidden":
@@ -345,13 +351,34 @@ func TestClientTLSDeadlineBodyCapAndBoundedForbidden(t *testing.T) {
 	if err := os.WriteFile(caFile, []byte(pem), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	client, err := NewClient(Config{Endpoint: server.URL, CAFile: caFile, Timeout: 25 * time.Millisecond, MaxBodyBytes: 64, AllowLoopbackHTTP: true})
+	client, err := NewClient(Config{Endpoint: server.URL, CAFile: caFile, Timeout: 5 * time.Second, MaxBodyBytes: 64, AllowLoopbackHTTP: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var output map[string]any
 	if err := client.GetJSON(context.Background(), "/ok", &output); err != nil {
 		t.Fatalf("verified TLS request: %v", err)
+	}
+	wrongKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongCA := &x509.Certificate{SerialNumber: big.NewInt(42), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	wrongDER, err := x509.CreateCertificate(rand.Reader, wrongCA, wrongCA, &wrongKey.PublicKey, wrongKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongCAFile := filepath.Join(t.TempDir(), "wrong-ca.pem")
+	if err := os.WriteFile(wrongCAFile, []byte("-----BEGIN CERTIFICATE-----\n"+encodeBase64Lines(wrongDER)+"\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	untrusted, err := NewClient(Config{Endpoint: server.URL, CAFile: wrongCAFile, Timeout: 5 * time.Second, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unknownCA x509.UnknownAuthorityError
+	if err := untrusted.GetJSON(t.Context(), "/ok", &output); !errors.As(err, &unknownCA) {
+		t.Fatalf("wrong CA must reject server certificate: %v", err)
 	}
 	if err := client.GetJSON(context.Background(), "/large", &output); !errors.Is(err, ErrResponseTooLarge) {
 		t.Fatalf("large response error = %v", err)
@@ -362,8 +389,19 @@ func TestClientTLSDeadlineBodyCapAndBoundedForbidden(t *testing.T) {
 	if err := client.GetJSON(context.Background(), "/invalid", &output); !errors.Is(err, ErrInvalidArguments) || strings.Contains(err.Error(), "secret-token") {
 		t.Fatalf("invalid arguments error = %v", err)
 	}
-	if err := client.GetJSON(context.Background(), "/slow", &output); err == nil || !strings.Contains(err.Error(), "deadline") {
+	slowContext, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	started := time.Now()
+	if err := client.GetJSON(slowContext, "/slow", &output); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("deadline error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 4*time.Second {
+		t.Fatalf("caller deadline took %s; must finish before the five-second client timeout", elapsed)
+	}
+	select {
+	case <-slowCanceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("deadline did not cancel the upstream request")
 	}
 }
 
