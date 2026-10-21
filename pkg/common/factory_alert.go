@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
@@ -10,7 +11,11 @@ import (
 // Alert Provider
 type AlertProviderFactory struct {
 	cfg *config.Config
+	ctx context.Context
 }
+
+// SetContext binds all network delivery to the caller's budget and cancellation.
+func (f *AlertProviderFactory) SetContext(ctx context.Context) { f.ctx = ctx }
 
 func NewAlertProviderFactory(cfg *config.Config) *AlertProviderFactory {
 	return &AlertProviderFactory{cfg: cfg}
@@ -67,6 +72,11 @@ func (f *AlertProviderFactory) CreateProviders() ([]core.AlertProvider, error) {
 		providers = append(providers, larkProvider)
 	}
 
+	if f.ctx != nil {
+		for _, provider := range providers {
+			bindProviderContext(provider, f.ctx)
+		}
+	}
 	return providers, nil
 }
 
@@ -76,12 +86,15 @@ func (f *AlertProviderFactory) createSlackProvider() (core.AlertProvider, error)
 		return nil, fmt.Errorf("missing required Slack configuration")
 	}
 
-	return NewSlackProvider(config.SlackConfig{
-		Token:             sc.Token,
-		ChannelID:         sc.ChannelID,
-		TemplatePath:      sc.TemplatePath,
-		MessageProperties: sc.MessageProperties,
-	}), nil
+	provider := NewSlackProvider(config.SlackConfig{
+		KubernetesIssueTemplatePath: sc.KubernetesIssueTemplatePath,
+		Token:                       sc.Token,
+		ChannelID:                   sc.ChannelID,
+		TemplatePath:                sc.TemplatePath,
+		MessageProperties:           sc.MessageProperties,
+	})
+	provider.publicHost = f.cfg.PublicHost
+	return provider, nil
 }
 
 func (f *AlertProviderFactory) createTelegramProvider() (core.AlertProvider, error) {
@@ -91,10 +104,11 @@ func (f *AlertProviderFactory) createTelegramProvider() (core.AlertProvider, err
 	}
 
 	return NewTelegramProvider(config.TelegramConfig{
-		BotToken:     tc.BotToken,
-		ChatID:       tc.ChatID,
-		TemplatePath: tc.TemplatePath,
-		UseProxy:     tc.UseProxy,
+		KubernetesIssueTemplatePath: tc.KubernetesIssueTemplatePath,
+		BotToken:                    tc.BotToken,
+		ChatID:                      tc.ChatID,
+		TemplatePath:                tc.TemplatePath,
+		UseProxy:                    tc.UseProxy,
 	}, f.cfg.Proxy), nil
 }
 
@@ -121,12 +135,13 @@ func (f *AlertProviderFactory) createViberProvider() (core.AlertProvider, error)
 	}
 
 	return NewViberProvider(config.ViberConfig{
-		BotToken:     vc.BotToken,
-		UserID:       vc.UserID,
-		ChannelID:    vc.ChannelID,
-		TemplatePath: vc.TemplatePath,
-		APIType:      apiType,
-		UseProxy:     vc.UseProxy,
+		KubernetesIssueTemplatePath: vc.KubernetesIssueTemplatePath,
+		BotToken:                    vc.BotToken,
+		UserID:                      vc.UserID,
+		ChannelID:                   vc.ChannelID,
+		TemplatePath:                vc.TemplatePath,
+		APIType:                     apiType,
+		UseProxy:                    vc.UseProxy,
 	}, f.cfg.Proxy), nil
 }
 
@@ -137,13 +152,14 @@ func (f *AlertProviderFactory) createEmailProvider() (core.AlertProvider, error)
 	}
 
 	return NewEmailProvider(config.EmailConfig{
-		SMTPHost:     ec.SMTPHost,
-		SMTPPort:     ec.SMTPPort,
-		Username:     ec.Username,
-		Password:     ec.Password,
-		To:           ec.To,
-		Subject:      ec.Subject,
-		TemplatePath: ec.TemplatePath,
+		KubernetesIssueTemplatePath: ec.KubernetesIssueTemplatePath,
+		SMTPHost:                    ec.SMTPHost,
+		SMTPPort:                    ec.SMTPPort,
+		Username:                    ec.Username,
+		Password:                    ec.Password,
+		To:                          ec.To,
+		Subject:                     ec.Subject,
+		TemplatePath:                ec.TemplatePath,
 	}), nil
 }
 
@@ -155,8 +171,9 @@ func (f *AlertProviderFactory) createMSTeamsProvider() (core.AlertProvider, erro
 	}
 
 	return NewMSTeamsProvider(config.MSTeamsConfig{
-		PowerAutomateURL: msc.PowerAutomateURL,
-		TemplatePath:     msc.TemplatePath,
+		KubernetesIssueTemplatePath: msc.KubernetesIssueTemplatePath,
+		PowerAutomateURL:            msc.PowerAutomateURL,
+		TemplatePath:                msc.TemplatePath,
 	}), nil
 }
 
@@ -168,8 +185,9 @@ func (f *AlertProviderFactory) createLarkProvider() (core.AlertProvider, error) 
 	}
 
 	return NewLarkProvider(config.LarkConfig{
-		WebhookURL:   lc.WebhookURL,
-		TemplatePath: lc.TemplatePath,
-		UseProxy:     lc.UseProxy,
+		KubernetesIssueTemplatePath: lc.KubernetesIssueTemplatePath,
+		WebhookURL:                  lc.WebhookURL,
+		TemplatePath:                lc.TemplatePath,
+		UseProxy:                    lc.UseProxy,
 	}, f.cfg.Proxy), nil
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Eye, EyeOff, Loader2 } from "lucide-react";
+import { ssoLoginWithReturn } from "@/lib/ssoReturn";
 import {
   AUTH_EXPIRED_EVENT,
   ApiError,
@@ -289,16 +290,15 @@ function SecretForm({
   // When the deployment has SSO configured, offer the IdP connection button(s).
   // On enterprise the built-in admin form sits above them; on OSS the
   // gateway-secret form drops below an "or" divider. The SSO flow round-trips to
-  // the IdP and returns to "/" with the enterprise session cookie set. SSO is
+  // the IdP and returns to the current page with the enterprise session cookie set. SSO is
   // offered SOLELY through named multi-IdP connections — one button per enabled
   // connection.
-  const returnTo = `?return_to=${encodeURIComponent("/")}`;
   const ssoButtons: { key: string; label: string; url: string }[] =
     sso?.enabled && sso.connections
       ? sso.connections.map((c) => ({
           key: c.id,
           label: c.display_name || "SSO",
-          url: `${c.login_url}${returnTo}`,
+          url: ssoLoginWithReturn(c.login_url, window.location),
         }))
       : [];
   const hasSso = ssoButtons.length > 0;

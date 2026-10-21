@@ -1,0 +1,17 @@
+{{ if eq .Severity "critical" }}🔴{{ else }}🟡{{ end }} Kubernetes issue {{ or .AlertName "Detected issue" }}
+Severity: {{ or .KubernetesSeverity .Severity "warning" }}
+Cluster: {{ or .Cluster "" }}
+Namespace: {{ or .Namespace "" }}
+Workload: {{ or .WorkloadKind "" }} {{ or .Workload "" }}
+Affected: {{ or .Affected "" }}
+Broke at: {{ or .BrokeAt "" }}{{ if .BrokeAgo }}, {{ .BrokeAgo }}{{ end }}
+
+What we saw
+{{ range .Evidence }}- {{ . }}
+{{ end }}{{ if or .Changes .HistoryIncomplete }}
+Changes before the break
+{{ range .Changes }}- {{ . }}
+{{ end }}{{ if .HistoryIncomplete }}Change history is incomplete
+{{ end }}{{ end }}{{ if .AckURL }}Acknowledge: {{ .AckURL }}
+{{ end }}{{ range .Links }}{{ .label }}: {{ .url }}
+{{ end }}

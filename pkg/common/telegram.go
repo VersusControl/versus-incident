@@ -17,10 +17,11 @@ import (
 )
 
 type TelegramProvider struct {
-	botToken     string
-	chatID       string
-	templatePath string
-	client       *http.Client
+	kubernetesIssueTemplatePath string
+	botToken                    string
+	chatID                      string
+	templatePath                string
+	client                      *http.Client
 }
 
 type TelegramMessage struct {
@@ -33,10 +34,11 @@ func NewTelegramProvider(cfg config.TelegramConfig, proxyConfig config.ProxyConf
 	client := utils.CreateHTTPClient(proxyConfig, cfg.UseProxy)
 
 	return &TelegramProvider{
-		botToken:     cfg.BotToken,
-		chatID:       cfg.ChatID,
-		templatePath: cfg.TemplatePath,
-		client:       client,
+		kubernetesIssueTemplatePath: cfg.KubernetesIssueTemplatePath,
+		botToken:                    cfg.BotToken,
+		chatID:                      cfg.ChatID,
+		templatePath:                cfg.TemplatePath,
+		client:                      client,
 	}
 }
 
@@ -94,7 +96,9 @@ func (t *TelegramProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 
 	tplPath := t.templatePath
-	if i.Content != nil && utils.IsAgentIncident(*i.Content) {
+	if i.Content != nil && utils.IsKubernetesIssueIncident(*i.Content) {
+		tplPath = utils.KubernetesIssueTemplatePath(t.kubernetesIssueTemplatePath, utils.KubernetesIssueTelegramTemplatePath)
+	} else if i.Content != nil && utils.IsAgentIncident(*i.Content) {
 		tplPath = utils.AgentTelegramTemplatePath
 	}
 

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "@/lib/api";
 import * as apiModule from "@/lib/api";
 import { KubernetesPage } from "./KubernetesPage";
+import { ToastProvider } from "@/components/Toast";
 
 vi.mock("@/components/TopBar", () => ({ TopBar: ({ title, actions }: { title: string; actions?: React.ReactNode }) => <header><span>{title}</span>{actions}</header> }));
 vi.mock("@/lib/api", async (importActual) => { const actual = await importActual<typeof import("@/lib/api")>(); return { ...actual, api: { ...actual.api, listAgentToolsets: vi.fn(), proposeAgentAction: vi.fn(), approveAgentApproval: vi.fn(), rejectAgentApproval: vi.fn(), kubernetesOverview: vi.fn(), kubernetesOverviewGraph: vi.fn(), kubernetesIssues: vi.fn(), kubernetesChanges: vi.fn(), kubernetesGraph: vi.fn(), kubernetesNamespaces: vi.fn(), kubernetesNeighborhood: vi.fn(), kubernetesStream: vi.fn(), kubernetesTop: vi.fn(), kubernetesReleases: vi.fn(), kubernetesGitOpsApps: vi.fn(), kubernetesRollout: vi.fn(), kubernetesRollouts: vi.fn(), kubernetesTraffic: vi.fn(), kubernetesDiagnose: vi.fn(), kubernetesWorkloadLogs: vi.fn(), kubernetesPodLogs: vi.fn(), kubernetesUsage: vi.fn(), kubernetesWorkloads: vi.fn(), kubernetesWorkload: vi.fn(), kubernetesNodes: vi.fn(), kubernetesNodePods: vi.fn(), kubernetesSearch: vi.fn(), kubernetesEvents: vi.fn(), kubernetesDescribe: vi.fn() } }; });
@@ -13,7 +14,7 @@ vi.mock("@/lib/api", async (importActual) => { const actual = await importActual
 function LocationProbe() { const location = useLocation(); return <output aria-label="Current location">{location.pathname}{location.search}</output>; }
 function renderPage(client = new QueryClient({ defaultOptions: { queries: { retry: false } } }), seedCatalog = true) {
 	if (seedCatalog && !client.getQueryData(["kubernetes-clusters"])) client.setQueryData(["kubernetes-clusters"], { multiple: false, clusters: [] });
-	return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[`/agent/kubernetes${window.location.search}`]}><KubernetesPage /><LocationProbe /></MemoryRouter></QueryClientProvider>);
+	return render(<QueryClientProvider client={client}><ToastProvider><MemoryRouter initialEntries={[`/agent/kubernetes${window.location.search}`]}><KubernetesPage /><LocationProbe /></MemoryRouter></ToastProvider></QueryClientProvider>);
 }
 function renderWorkloads(client?: QueryClient) {
 	const query = new URLSearchParams(window.location.search);
@@ -28,6 +29,7 @@ function capacityCell(panelName: string, label: string) {
 }
 
 beforeEach(() => {
+	vi.spyOn(api, "kubernetesIssueAlerts").mockResolvedValue({ enabled: false, level: "critical", can_write: true, available: true, reason: "", links_ready: true, channels_enabled: true });
 	vi.spyOn(apiModule, "createKubernetesApi").mockReturnValue(api);
 	vi.spyOn(api, "kubernetesClusters").mockResolvedValue({ multiple: false, clusters: [] });
 	vi.spyOn(api, "kubernetesPodLogStream").mockImplementation(async (_namespace, _pod, _options, emit) => {

@@ -487,6 +487,7 @@ async function captureBreakState(page: Page, filename: string, theme: "dark" | "
     const selected: Record<string, string> = {
       "auto-detect-issues-overview.png": "issues-overview",
       "break-issues-expanded-desktop-dark.png": "issues-details",
+      "auto-detect-issue-alerts.png": "issue-alerts",
       "break-timeline-general-desktop-dark.png": "timeline-overview",
       "break-timeline-focus-desktop-dark.png": "timeline-focus",
       "auto-detect-change-compare.png": "change-compare",
@@ -883,6 +884,44 @@ test.describe("Kubernetes documentation consumer", () => {
     { name: "desktop", width: 1440, height: 1000 },
     { name: "mobile", width: 390, height: 844 },
   ]) {
+    test(`verifies refreshed issue-alert documentation assets ${viewport.name}`, async ({ page }) => {
+      const target = new URL(docsURL!);
+      expect(["localhost", "127.0.0.1", "[::1]"]).toContain(target.hostname);
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto(`${target.origin}/#/agent/kubernetes/auto-detect-issue`);
+      await expect(page.getByRole("heading", { name: "Automatically Detect Kubernetes Issues", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Alerts", exact: true })).toBeVisible();
+      const alerts = page.locator('.markdown-section img[src$="kubernetes-auto-detect-issue-alerts.png"]');
+      await expect(alerts).toHaveAttribute("alt", /alerts enabled and Critical selected.*synthetic demonstration data/);
+      for (const image of await page.locator(".markdown-section img").all()) {
+        const response = await page.request.get(new URL((await image.getAttribute("src"))!, page.url()).href);
+        expect(response.status()).toBe(200);
+        await image.scrollIntoViewIfNeeded();
+        await expect(image).toBeVisible();
+        await expect.poll(() => image.evaluate((element) => {
+          const bitmap = element as HTMLImageElement;
+          const bounds = bitmap.getBoundingClientRect();
+          return bitmap.complete && bitmap.naturalWidth > 0 && bitmap.naturalHeight > 0 && bounds.left >= 0 && bounds.right <= innerWidth;
+        })).toBe(true);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      for (const filename of [
+        "kubernetes-auto-detect-issues-overview.png",
+        "kubernetes-auto-detect-issues-details.png",
+        "kubernetes-auto-detect-issue-alerts.png",
+      ]) {
+        // Confirm the embedded captures still match the inspected published assets.
+        const response = await page.request.get(`${target.origin}/docs/images/${filename}`);
+        expect(response.status()).toBe(200);
+        expect(response.headers()["content-type"]).toContain("image/png");
+        const image = await response.body();
+        expect(image.readUInt32BE(16)).toBe(1440);
+        expect(image.readUInt32BE(20)).toBe(1000);
+        const published = fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../src/docs/images", filename));
+        expect(createHash("sha256").update(image).digest("hex")).toBe(createHash("sha256").update(published).digest("hex"));
+      }
+    });
+
     test(`loads published Kubernetes images ${viewport.name}`, async ({ page }) => {
       const target = new URL(docsURL!);
       expect(["localhost", "127.0.0.1", "[::1]"]).toContain(target.hostname);
@@ -938,6 +977,64 @@ test.describe("Kubernetes documentation consumer", () => {
       await expect(page.locator(".markdown-section")).toContainText("changeCapture");
       expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
       await page.screenshot({ path: path.join(screenshotDir, `docs-consumer-capture-${viewport.name}.png`), animations: "disabled" });
+    });
+
+    test(`verifies rewritten auto-detect-issue documentation page ${viewport.name}`, async ({ page }) => {
+      const target = new URL(docsURL!);
+      expect(["localhost", "127.0.0.1", "[::1]"]).toContain(target.hostname);
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto(`${target.origin}/#/agent/kubernetes/auto-detect-issue`);
+      for (const heading of [
+        "Automatically Detect Kubernetes Issues",
+        "Automatically Detected, Grouped Issues",
+        "Timeline Changes and Crashes",
+        "Captured Logs",
+        "Alerts",
+        "Investigate with DevOps Agent",
+      ]) {
+        await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
+      }
+      const expectedImages = [
+        "kubernetes-auto-detect-issues-overview.png",
+        "kubernetes-auto-detect-break-logs.png",
+        "kubernetes-issue-alert-flow.svg",
+      ];
+      const images = page.locator(".markdown-section img");
+      await expect(images).toHaveCount(expectedImages.length);
+      for (const filename of expectedImages) {
+        const img = page.locator(`.markdown-section img[src$="${filename}"]`);
+        const src = await img.getAttribute("src");
+        expect(src).toBeTruthy();
+        const response = await page.request.get(new URL(src!, page.url()).href);
+        expect(response.status()).toBe(200);
+        await img.scrollIntoViewIfNeeded();
+        await expect(img).toBeVisible();
+        await expect.poll(() => img.evaluate((element) => {
+          const bitmap = element as HTMLImageElement;
+          const box = bitmap.getBoundingClientRect();
+          return bitmap.complete && bitmap.naturalWidth > 0 && bitmap.naturalHeight > 0 && box.left >= 0 && box.right <= window.innerWidth;
+        })).toBe(true);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      await page.screenshot({ path: path.join(screenshotDir, `docs-consumer-auto-detect-issue-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+
+      await page.locator(".markdown-section").getByRole("link", { name: "Configuration", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Kubernetes Configuration", exact: true })).toBeVisible();
+      await expect(page).toHaveURL(/agent\/kubernetes\/configuration$/);
+
+      await page.goto(`${target.origin}/#/agent/kubernetes/auto-detect-issue`);
+      await expect(page.getByRole("heading", { name: "Automatically Detect Kubernetes Issues", exact: true })).toBeVisible();
+      await page.locator(".markdown-section").getByRole("link", { name: "Kubernetes connector guide", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Kubernetes Connector and Dashboard", exact: true })).toBeVisible();
+      await expect(page).toHaveURL(/agent\/connectors\/kubernetes$/);
+
+      await page.goto(`${target.origin}/#/agent/kubernetes/auto-detect-issue?id=alerts`);
+      await expect(page.getByRole("heading", { name: "Alerts", exact: true })).toBeInViewport();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+      expect(errors).toEqual([]);
     });
 
     test(`reveals active documentation item on navigation and reload ${viewport.name}`, async ({ page }) => {
@@ -2170,11 +2267,81 @@ test.describe("Live Pod stream acceptance", () => {
 test.describe("Pod log streaming fixtures", () => {
   test.use({ deviceScaleFactor: Number(process.env.E2E_KUBERNETES_CAPTURE_SCALE || "1") });
 
+  for (const width of [390, 320]) for (const theme of ["dark", "light"] as const) {
+    test(`Break timeline log caption bounds ${width} ${theme} theme`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 844 });
+      await openApp(page, `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${new Date(Date.now() - 5 * 60_000).toISOString()}`);
+      const chart = page.getByRole("region", { name: "Resource timeline chart", exact: true });
+      await expect(page.getByRole("region", { name: "Logs at break", exact: true }).getByRole("log")).toContainText("payment client timeout");
+      await expect(chart.locator(".break-log-window-caption")).toBeVisible();
+      const start = Date.parse((await chart.getAttribute("data-since"))!);
+      const end = Date.parse((await chart.getAttribute("data-until"))!);
+      const measurements = [];
+      for (const edge of ["left", "right"] as const) for (const duration of [240_000, 30_000]) {
+        const from = edge === "left" ? start + 30_000 : end - duration - 30_000;
+        const url = new URL(page.url());
+        url.searchParams.set("logs_from", new Date(from).toISOString());
+        url.searchParams.set("logs_to", new Date(from + duration).toISOString());
+        await page.goto(url.href);
+        await expect(page.getByRole("region", { name: "Logs at break", exact: true }).getByRole("log")).toContainText("payment client timeout");
+        await expect(chart).toHaveAttribute("data-since", new Date(start).toISOString());
+        const caption = chart.locator(".break-log-window-caption");
+        await expect(caption).toBeVisible();
+        await chart.evaluate((element, edge) => { element.scrollLeft = edge === "left" ? 0 : element.scrollWidth - element.clientWidth; }, edge);
+        await expect.poll(async () => caption.evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          const scroll = element.closest(".resource-timeline-scroll")!.getBoundingClientRect();
+          return rect.left >= scroll.left + 132 - 1 && rect.right <= scroll.right + 1;
+        })).toBe(true);
+        const bounds = await caption.evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          const plot = element.closest(".break-log-bracket-plot")!.getBoundingClientRect();
+          const scroll = element.closest(".resource-timeline-scroll")!.getBoundingClientRect();
+          const range = document.createRange(); range.selectNodeContents(element);
+          const text = Array.from(range.getClientRects()).map((line) => ({ left: line.left, right: line.right, top: line.top, bottom: line.bottom }));
+          return {
+            caption: { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom },
+            plot: { left: plot.left, right: plot.right }, visible: { left: scroll.left + 132, right: scroll.right },
+            text, captionOverflow: element.scrollWidth > element.clientWidth,
+            pageOverflow: document.documentElement.scrollWidth > window.innerWidth,
+            controlsOverlap: Array.from(document.querySelectorAll(".resource-timeline-break-pill, .resource-timeline-now-label, .break-log-handle")).some((control) => {
+              const other = control.getBoundingClientRect();
+              return rect.left < other.right && rect.right > other.left && rect.top < other.bottom && rect.bottom > other.top;
+            }),
+          };
+        });
+        expect(bounds.caption.left).toBeGreaterThanOrEqual(bounds.plot.left - 1);
+        expect(bounds.caption.right).toBeLessThanOrEqual(bounds.plot.right + 1);
+        expect(bounds.captionOverflow).toBe(false);
+        expect(bounds.pageOverflow).toBe(false);
+        expect(bounds.controlsOverlap).toBe(false);
+        expect(bounds.text.length).toBeGreaterThan(0);
+        for (const line of bounds.text) {
+          expect(line.left).toBeGreaterThanOrEqual(bounds.caption.left);
+          expect(line.right).toBeLessThanOrEqual(bounds.caption.right);
+          expect(line.top).toBeGreaterThanOrEqual(bounds.caption.top);
+          expect(line.bottom).toBeLessThanOrEqual(bounds.caption.bottom);
+        }
+        const handle = chart.getByRole("slider", { name: "Log window end" });
+        await expect(handle).toBeInViewport();
+        await handle.focus();
+        await expect(handle).toBeFocused();
+        const previous = await handle.getAttribute("aria-valuenow");
+        await page.keyboard.press("ArrowLeft");
+        if (duration > 30_000) await expect(handle).not.toHaveAttribute("aria-valuenow", previous!);
+        measurements.push({ edge, duration, ...bounds });
+      }
+      await testInfo.attach("caption-bounds", { body: JSON.stringify({ classification: "synthetic API fixture", width, theme, measurements }), contentType: "application/json" });
+      await testInfo.attach("caption-mobile", { body: await page.screenshot(), contentType: "image/png" });
+    });
+  }
+
   test.beforeEach(async ({ page }, testInfo) => {
     const overviewRefresh = testInfo.title.startsWith("Overview refresh");
     const breakTimeline = testInfo.title.startsWith("Break timeline");
     const lightTheme = testInfo.title.includes("light theme");
     const fullOverview = testInfo.title === "Break timeline full populated dark Overview documentation";
+    const guideAlerts = { enabled: false, level: "critical", enabled_at: "", can_write: true, available: true, reason: "", links_ready: true, channels_enabled: true };
     const overviewCounts = { Namespace: 3, Node: 12, Ingress: 2, Gateway: 1, HTTPRoute: 3, Service: 9, Deployment: 3, ReplicaSet: 6, StatefulSet: 1, DaemonSet: 1, Job: 2, CronJob: 1, Pod: 28, HorizontalPodAutoscaler: 2, ConfigMap: 12, Secret: 8, PersistentVolumeClaim: 4, Event: 26 };
     if (breakTimeline) {
       await page.emulateMedia({ colorScheme: lightTheme ? "light" : "dark" });
@@ -2398,6 +2565,15 @@ test.describe("Pod log streaming fixtures", () => {
       if (pathname === "/api/admin/kubernetes/resources") return route.fulfill({ json: { items: url.searchParams.get("resource_id") === "core~v1~namespaces" ? [{ resource_id: "core~v1~namespaces", kind: "Namespace", name: "payments" }] : [], truncated: false } });
       if (pathname.includes("/graph")) return route.fulfill({ json: { nodes: [{ id: "deployment", kind: "Deployment", namespace: "payments", name: "checkout-api", group: "payments" }, { id: "pod", kind: "Pod", namespace: "payments", name: "checkout-api-0", group: "payments" }], edges: [{ from: "deployment", to: "pod", type: "manages" }], omitted: {}, sync: { state: "ready", partial: false, age_s: 0 } } });
       if (pathname === "/api/admin/kubernetes/stream") return route.fulfill({ contentType: "text/event-stream", body: "event: heartbeat\ndata: {}\n\n" });
+      if (pathname === "/api/admin/kubernetes/issue-alerts") {
+        if (testInfo.title === "Break timeline auto-detect guide desktop dark" && route.request().method() === "PUT") {
+          const body = route.request().postDataJSON() as { enabled: boolean; level: string };
+          guideAlerts.enabled = body.enabled;
+          guideAlerts.level = body.level;
+          guideAlerts.enabled_at = body.enabled ? "2026-10-20T10:00:00Z" : "";
+        }
+        return route.fulfill({ json: guideAlerts });
+      }
       if (pathname === "/api/admin/kubernetes/traffic") return route.fulfill({ json: { available: false, reason: "No traffic source", window: "15m", unmapped: 0, truncated: false } });
       if (pathname.includes("/enterprise/")) return route.fulfill({ status: 404, json: { error: "Community deployment" } });
       return route.fulfill({ json: { items: [], totals: {}, gaps: [], truncated: false, sync: { state: "ready", partial: false, age_s: 0 } } });
@@ -2715,6 +2891,370 @@ test.describe("Pod log streaming fixtures", () => {
       await expect(page).toHaveURL(/\/agent\/chat\?.*provider=kubernetes.*resource_id=apps(?:~|%7E)v1(?:~|%7E)deployments.*namespace=shop.*name=checkout.*uid=checkout-uid.*logs_from=.*logs_to=/);
       expect(errors).toEqual([]);
     });
+
+    test(`Break timeline issue alerts control, states, rollback, chat prefill, login return and channel mocks ${viewport.name}`, async ({ page }) => {
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await page.setViewportSize(viewport);
+      const alertState = {
+        enabled: false,
+        level: "critical" as "critical" | "warning",
+        enabled_at: "",
+        can_write: true,
+        available: true,
+        reason: "",
+        links_ready: true,
+        channels_enabled: true,
+      };
+      let failSave = false;
+      let holdSave: Promise<void> | null = null;
+      let releaseSave: (() => void) | null = null;
+      const puts: Array<{ enabled: boolean; level: string }> = [];
+
+      await page.route("**/api/admin/kubernetes/issue-alerts*", async (route) => {
+        if (route.request().method() === "PUT") {
+          const body = route.request().postDataJSON() as { enabled: boolean; level: "critical" | "warning" };
+          puts.push(body);
+          if (holdSave) await holdSave;
+          if (failSave) {
+            return route.fulfill({ status: 500, json: { error: "Save refused by policy" } });
+          }
+          alertState.enabled = body.enabled;
+          alertState.level = body.level;
+          if (body.enabled && !alertState.enabled_at) alertState.enabled_at = "2026-10-19T12:04:00Z";
+        }
+        return route.fulfill({ json: alertState });
+      });
+
+      await openApp(page, "/agent/kubernetes?view=issues");
+      const issues = page.getByRole("region", { name: "Kubernetes issues", exact: true });
+      await expect(issues).toBeVisible();
+      const toggle = issues.getByRole("switch", { name: "Alert on new issues", exact: true });
+      await expect(toggle).toBeVisible();
+      await expect(toggle).toBeEnabled();
+      await expect(toggle).toHaveAttribute("aria-checked", "false");
+      const describedBy = await toggle.getAttribute("aria-describedby");
+      expect(describedBy).toBeTruthy();
+      await expect(issues.locator(`[id="${describedBy}"]`)).toBeAttached();
+      await expect(issues.getByRole("group", { name: "Issue alert level", exact: true })).toHaveCount(0);
+      await expect(issues.getByText("Sends through your alert channels", { exact: true })).toBeVisible();
+      const docsLink = issues.getByRole("link", { name: "Channel settings", exact: true });
+      await expect(docsLink).toHaveAttribute("href", "https://docs.versusincident.com/#/agent/channels");
+      await expect(docsLink).toHaveAttribute("target", "_blank");
+      await expect(docsLink).toHaveAttribute("rel", "noopener noreferrer");
+      await expect(issues).not.toContainText(/last alert/i);
+      await captureBreakState(page, `issue-alerts-off-${viewport.name}-dark.png`, "dark");
+
+      await toggle.focus();
+      await expect(toggle).toBeFocused();
+      await page.keyboard.press("Space");
+      await expect(toggle).toHaveAttribute("aria-checked", "true");
+      expect(puts.at(-1)).toEqual({ enabled: true, level: "critical" });
+      const levelGroup = issues.getByRole("group", { name: "Issue alert level", exact: true });
+      await expect(levelGroup).toBeVisible();
+      const criticalBtn = levelGroup.getByRole("button", { name: "Critical", exact: true });
+      const warningBtn = levelGroup.getByRole("button", { name: "Warning", exact: true });
+      await expect(criticalBtn).toHaveAttribute("aria-pressed", "true");
+      await expect(warningBtn).toHaveAttribute("aria-pressed", "false");
+      await expect(issues.locator(`[id="${describedBy}"]`)).toContainText("Critical sends critical issues only");
+      await expect(page.getByText("Alerts on. Issues that break from now on will alert.", { exact: true })).toBeVisible();
+      const layoutGeometry = await issues.evaluate((_, isMobile) => {
+        const switchEl = document.querySelector<HTMLElement>('[role="switch"][aria-label="Alert on new issues"]')!;
+        const switchRow = switchEl.parentElement!;
+        const groupEl = document.querySelector<HTMLElement>('[role="group"][aria-label="Issue alert level"]')!;
+        const buttons = [...groupEl.querySelectorAll<HTMLElement>("button")];
+        const rowRect = switchRow.getBoundingClientRect();
+        const switchRect = switchEl.getBoundingClientRect();
+        const groupRect = groupEl.getBoundingClientRect();
+        const btnWidths = buttons.map((b) => b.getBoundingClientRect().width);
+        return {
+          isMobile,
+          sameLineDesktop: Math.abs(rowRect.top - groupRect.top) < 12 && groupRect.left >= switchRect.right,
+          wrappedMobile: groupRect.top >= rowRect.bottom - 1 && Math.abs(groupRect.width - rowRect.width) <= 2,
+          equalButtons: Math.abs(btnWidths[0] - btnWidths[1]) <= 2,
+        };
+      }, viewport.name === "mobile");
+      if (viewport.name === "mobile") {
+        expect(layoutGeometry.wrappedMobile).toBe(true);
+        expect(layoutGeometry.equalButtons).toBe(true);
+      } else {
+        expect(layoutGeometry.sameLineDesktop).toBe(true);
+      }
+      await captureBreakState(page, `issue-alerts-on-critical-${viewport.name}-dark.png`, "dark");
+
+      await warningBtn.focus();
+      await expect(warningBtn).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(warningBtn).toHaveAttribute("aria-pressed", "true");
+      await expect(criticalBtn).toHaveAttribute("aria-pressed", "false");
+      expect(puts.at(-1)).toEqual({ enabled: true, level: "warning" });
+      await expect(issues.locator(`[id="${describedBy}"]`)).toContainText("Warning sends warning and critical issues");
+      await expect(page.getByText("Alert level saved.", { exact: true })).toBeVisible();
+      await captureBreakState(page, `issue-alerts-on-warning-${viewport.name}-dark.png`, "dark");
+
+      failSave = true;
+      holdSave = new Promise<void>((resolve) => { releaseSave = resolve; });
+      await criticalBtn.click();
+      await expect(criticalBtn).toHaveAttribute("aria-pressed", "true");
+      await expect(issues.getByRole("status").filter({ hasText: "Saving…" })).toBeVisible();
+      await expect(toggle).toBeDisabled();
+      await expect(criticalBtn).toBeDisabled();
+      await expect(warningBtn).toBeDisabled();
+      holdSave = null;
+      releaseSave!();
+      await expect(warningBtn).toHaveAttribute("aria-pressed", "true");
+      await expect(criticalBtn).toHaveAttribute("aria-pressed", "false");
+      await expect(toggle).toHaveAttribute("aria-checked", "true");
+      await expect(page.getByText("Couldn't save issue alerts.", { exact: true })).toBeVisible();
+      await expect(page.getByText("Save refused by policy", { exact: true })).toBeVisible();
+      await captureBreakState(page, `issue-alerts-rollback-${viewport.name}-dark.png`, "dark");
+      failSave = false;
+
+      const refreshAlerts = async (patch: Partial<typeof alertState>) => {
+        Object.assign(alertState, {
+          enabled: true,
+          level: "warning",
+          can_write: true,
+          available: true,
+          reason: "",
+          links_ready: true,
+          channels_enabled: true,
+          ...patch,
+        });
+        await page.reload();
+        await expect(issues).toBeVisible();
+      };
+
+      await refreshAlerts({ enabled: true, level: "warning", can_write: false });
+      await expect(issues.getByText("Ask an admin to change alerts", { exact: true })).toBeVisible();
+      await expect(toggle).toBeDisabled();
+      await expect(criticalBtn).toBeDisabled();
+      await expect(warningBtn).toBeDisabled();
+      await captureBreakState(page, `issue-alerts-readonly-${viewport.name}-dark.png`, "dark");
+
+      await refreshAlerts({ enabled: false, level: "critical", available: false, reason: "demand_capture" });
+      await expect(issues.getByText("Alerts need continuous change capture", { exact: true })).toBeVisible();
+      await expect(toggle).toBeDisabled();
+      await expect(issues.getByRole("group", { name: "Issue alert level", exact: true })).toHaveCount(0);
+      await captureBreakState(page, `issue-alerts-demand-${viewport.name}-dark.png`, "dark");
+
+      await refreshAlerts({ enabled: true, level: "critical", channels_enabled: false });
+      await expect(issues.getByText("No alert channel is on", { exact: true })).toBeVisible();
+      await expect(toggle).toBeEnabled();
+      await expect(docsLink).toBeVisible();
+      await captureBreakState(page, `issue-alerts-no-channel-${viewport.name}-dark.png`, "dark");
+
+      await refreshAlerts({ enabled: true, level: "critical", links_ready: false });
+      await expect(issues.getByText("Set public_host to add Timeline and agent links", { exact: true })).toBeVisible();
+      await expect(toggle).toBeEnabled();
+      await expect(issues).not.toContainText(/last alert/i);
+      await captureBreakState(page, `issue-alerts-no-host-${viewport.name}-dark.png`, "dark");
+
+      let enterpriseAuthed = false;
+      const chatCreates: unknown[] = [];
+      const chatMessages: unknown[] = [];
+      await page.route("**/api/admin/config/agent", async (route) => {
+        if (!enterpriseAuthed) return route.fulfill({ status: 401, json: { error: "unauthorized" } });
+        return route.fulfill({ json: { enable: true, mode: "shadow", sources: [], ai: { enable: true }, catalog: {}, miner: {}, regex: { rules: [] }, redaction: {}, service_patterns: [] } });
+      });
+      await page.route("**/enterprise/api/**", async (route) => {
+        const pathname = new URL(route.request().url()).pathname;
+        if (pathname.endsWith("/deployment")) return route.fulfill({ json: { org: "acme" } });
+        if (pathname.endsWith("/session")) {
+          return enterpriseAuthed
+            ? route.fulfill({ json: { org: "acme", subject: "admin@acme.test", role: "owner", mfa: true, amr: ["pwd", "otp"], local: true } })
+            : route.fulfill({ status: 401, json: { error: "no active session" } });
+        }
+        if (pathname.endsWith("/status")) {
+          return route.fulfill({
+            json: {
+              enabled: true,
+              connections: [{ id: "work", type: "oidc", display_name: "Okta SSO", login_url: "/enterprise/api/sso/acme/login?connection=work" }],
+            },
+          });
+        }
+        if (pathname.endsWith("/auth/local/login") && route.request().method() === "POST") {
+          enterpriseAuthed = true;
+          return route.fulfill({ status: 204, body: "" });
+        }
+        if (pathname.endsWith("/rbac/me")) {
+          return route.fulfill({ json: { org: "acme", subject: "admin@acme.test", role: "owner", permissions: ["infrastructure:view", "infrastructure:settings:write", "agent:approve"], clusters: null } });
+        }
+        return route.fulfill({ status: 404, json: { error: "not found" } });
+      });
+      await page.route("**/api/admin/chat/**", async (route) => {
+        const pathname = new URL(route.request().url()).pathname;
+        const method = route.request().method();
+        if (pathname === "/api/admin/chat/sessions" && method === "GET") return route.fulfill({ json: { sessions: [] } });
+        if (pathname === "/api/admin/chat/sessions" && method === "POST") {
+          chatCreates.push(route.request().postDataJSON());
+          return route.fulfill({ status: 201, json: { id: "session-1", status: "idle", seeded: false, created_at: "2026-10-19T12:05:00Z", updated_at: "2026-10-19T12:05:00Z", turns: [] } });
+        }
+        if (pathname.endsWith("/messages") && method === "POST") {
+          chatMessages.push(route.request().postDataJSON());
+          return route.fulfill({ status: 200, contentType: "text/event-stream", body: 'event: run_finished\ndata: {"seq":1,"at":"2026-10-19T12:05:01Z","kind":"run_finished"}\n\n' });
+        }
+        return route.fulfill({ json: {} });
+      });
+
+      const timelineHref = `/agent/kubernetes?cluster=east&view=timeline&root_uid=checkout-uid&namespace=shop&center=${encodeURIComponent(new Date(Date.now() - 5 * 60_000).toISOString())}`;
+      const chatTarget = "/agent/chat?provider=kubernetes&cluster=east&resource_id=apps~v1~deployments&name=checkout&namespace=shop&uid=checkout-uid&include_changes=true&issue=pod.crash_loop";
+      const ackHref = "/api/incidents/inc-checkout-1/ack?token=ack-token-fixture";
+
+      let ssoRedirectURL = "";
+      await page.route("**/enterprise/api/sso/acme/login*", async (route) => {
+        ssoRedirectURL = route.request().url();
+        enterpriseAuthed = true;
+        const returnTo = new URL(ssoRedirectURL).searchParams.get("return_to") || "/";
+        await route.fulfill({ status: 302, headers: { Location: returnTo }, body: "" });
+      });
+
+      await page.goto(timelineHref);
+      await expect(page.getByTestId("local-login-form")).toBeVisible();
+      const ssoButton = page.getByRole("button", { name: "Sign in with Okta SSO", exact: true });
+      await expect(ssoButton).toBeVisible();
+      await ssoButton.click();
+      await expect.poll(() => ssoRedirectURL).not.toBe("");
+      expect(new URL(ssoRedirectURL).searchParams.get("return_to")).toBe(timelineHref);
+      await expect(page.getByRole("region", { name: "Timeline lane checkout", exact: true })).toBeVisible();
+      expect(new URL(page.url()).pathname + new URL(page.url()).search).toBe(timelineHref);
+
+      enterpriseAuthed = false;
+      ssoRedirectURL = "";
+      await page.goto(chatTarget);
+      await expect(page.getByTestId("local-login-form")).toBeVisible();
+      await expect(ssoButton).toBeVisible();
+      await captureBreakState(page, `issue-alerts-login-return-${viewport.name}-dark.png`, "dark");
+
+      await page.getByTestId("local-login-username").fill("admin");
+      await page.getByTestId("local-login-password").fill("fixture-admin-password");
+      await page.getByTestId("local-login-submit").click();
+      await expect(page.getByTestId("app-authenticated")).toBeVisible();
+      expect(new URL(page.url()).pathname + new URL(page.url()).search).toBe(chatTarget);
+      const composer = page.getByRole("textbox", { name: "Message", exact: true });
+      await expect(composer).toHaveValue("Why is Deployment checkout crash looping?");
+      await expect(page.getByText("shop/checkout", { exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+      expect(chatCreates).toHaveLength(0);
+      expect(chatMessages).toHaveLength(0);
+      await captureBreakState(page, `issue-alerts-chat-prefill-${viewport.name}-dark.png`, "dark");
+
+      const emailTemplatePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../config/kubernetes_issue_email.tmpl");
+      const rawEmailTemplate = fs.readFileSync(emailTemplatePath, "utf8");
+      expect(rawEmailTemplate).not.toContain("escapeHTML .url");
+      expect(rawEmailTemplate).not.toContain("escapeHTML .AckURL");
+      expect(rawEmailTemplate.indexOf("{{ if .AckURL }}")).toBeGreaterThan(0);
+      expect(rawEmailTemplate.indexOf("{{ if .AckURL }}")).toBeLessThan(rawEmailTemplate.indexOf("{{ range .Links }}"));
+      const renderedEmailBody = rawEmailTemplate
+        .replace(/^[\s\S]*?<body[^>]*>/i, "")
+        .replace(/<\/body>[\s\S]*$/i, "")
+        .replace('{{ if eq .Severity "critical" }}🔴{{ else }}🟡{{ end }}', "🔴")
+        .replace('{{ or .AlertName "Detected issue" }}', "Deployment checkout-api is crash looping")
+        .replace('{{ or .KubernetesSeverity .Severity "warning" }}', "critical")
+        .replace('{{ or .Cluster "" }}', "prod-eu")
+        .replace('{{ or .Namespace "" }}', "shop")
+        .replace('{{ or .WorkloadKind "" }}', "Deployment")
+        .replace('{{ or .Workload "" }}', "checkout-api")
+        .replace('{{ or .Affected "" }}', "3 of 3 pods")
+        .replace('{{ or .BrokeAt "" }}', "2026-10-19T12:03:00Z")
+        .replace('{{ if .BrokeAgo }}, {{ .BrokeAgo }}{{ end }}', ", 1m0s ago")
+        .replace("{{ range .Evidence }}<li>{{ . }}</li>{{ end }}", ["Exit 137 OOMKilled 4 times", "12 restarts", "9 warning events"].map((line) => `<li>${line}</li>`).join(""))
+        .replace(/\{\{\s*if or \.Changes \.HistoryIncomplete\s*\}\}[\s\S]*?\{\{\s*end\s*\}\}\s*\{\{\s*end\s*\}\}/, "<h3>Changes before the break</h3><ul><li>Image changed 4m0s before break</li></ul>")
+        .replace("{{ if .AckURL }}<a href=\"{{ .AckURL }}\">Acknowledge</a>{{ end }}", `<a href="${ackHref}">Acknowledge</a>`)
+        .replace(/\{\{\s*range \.Links\s*\}\}<a[^>]*href="\{\{\s*\.url\s*\}\}">\{\{\s*\.label\s*\}\}<\/a>\s*\{\{\s*end\s*\}\}/, [
+          { label: "Open timeline", url: timelineHref },
+          { label: "Investigate with DevOps Agent", url: chatTarget },
+        ].map((link) => `<a href="${link.url}">${link.label}</a>`).join(""));
+
+      await page.route("**/__mock_channel_preview/*", async (route) => {
+        const kind = new URL(route.request().url()).pathname.endsWith("/slack") ? "slack" : "email";
+        const html = kind === "slack" ? `<!DOCTYPE html>
+<html data-theme="dark"><head><meta charset="utf-8"><style>
+  body { margin: 0; background: rgb(13, 17, 24); color: #E4E8EF; font-family: Inter, system-ui, sans-serif; padding: 16px; box-sizing: border-box; }
+  .shell { max-width: 680px; margin: 0 auto; background: #1A1D21; border: 1px solid #2A3142; border-radius: 12px; padding: 16px; }
+  .hdr { display: flex; align-items: center; gap: 8px; padding-bottom: 12px; border-bottom: 1px solid #2A2D31; margin-bottom: 14px; font-weight: 600; font-size: 14px; color: #F5F7FA; }
+  .badge { font-size: 10px; background: #2A344A; color: #A3ACBD; padding: 2px 6px; border-radius: 4px; }
+  .att { border-left: 4px solid #F87171; padding-left: 12px; margin-bottom: 16px; }
+  .att.warn { border-left-color: #FBBF24; margin-bottom: 0; }
+  .title { font-weight: 600; font-size: 14px; color: #F5F7FA; margin-bottom: 8px; }
+  .facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; font-size: 12px; margin-bottom: 10px; }
+  .facts b { color: #A3ACBD; }
+  .sec { font-weight: 600; font-size: 12px; color: #F5F7FA; margin: 8px 0 4px; }
+  ul { margin: 0 0 8px 0; padding-left: 16px; font-size: 12px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .btn { display: inline-flex; align-items: center; padding: 6px 12px; border-radius: 4px; border: 1px solid #565C66; background: #1A1D21; color: #E4E8EF; font-size: 12px; font-weight: 600; text-decoration: none; }
+</style></head><body>
+  <main class="shell" aria-label="Slack issue alert mock">
+    <div class="hdr"># alerts-prod <span class="badge">Versus APP · Synthetic Slack payload fixture</span></div>
+    <section class="att" aria-label="Critical Slack alert">
+      <div class="title">🔴 Kubernetes issue Deployment checkout-api is crash looping</div>
+      <div class="facts">
+        <div><b>Severity:</b> critical</div><div><b>Cluster:</b> prod-eu</div>
+        <div><b>Namespace:</b> shop</div><div><b>Workload:</b> Deployment checkout-api</div>
+        <div><b>Affected:</b> 3 of 3 pods</div><div><b>Broke at:</b> 2026-10-19T12:03:00Z, 1m0s ago</div>
+      </div>
+      <div class="sec">What we saw</div>
+      <ul><li>Exit 137 OOMKilled 4 times</li><li>12 restarts</li><li>9 warning events</li></ul>
+      <div class="sec">Changes before the break</div>
+      <ul><li>Image changed 4m0s before break</li></ul>
+      <div class="actions" role="group" aria-label="Critical Slack actions">
+        <a class="btn" href="${ackHref}">Acknowledge</a>
+        <a class="btn" href="${timelineHref}">Open timeline</a>
+        <a class="btn" href="${chatTarget}">Investigate with DevOps Agent</a>
+      </div>
+    </section>
+    <section class="att warn" aria-label="Warning Slack alert">
+      <div class="title">🟡 Kubernetes issue Deployment payments-worker has a stalled rollout</div>
+      <div class="facts">
+        <div><b>Severity:</b> warning</div><div><b>Cluster:</b> prod-eu</div>
+        <div><b>Namespace:</b> shop</div><div><b>Workload:</b> Deployment payments-worker</div>
+        <div><b>Affected:</b> 1 of 2 pods</div><div><b>Broke at:</b> 2026-10-19T11:52:00Z, 12m0s ago</div>
+      </div>
+      <div class="sec">What we saw</div>
+      <ul><li>ProgressDeadlineExceeded 1 times</li><li>2 warning events</li></ul>
+      <div class="actions" role="group" aria-label="Warning Slack actions">
+        <a class="btn" href="${timelineHref}">Open timeline</a>
+        <a class="btn" href="${chatTarget}">Investigate with DevOps Agent</a>
+      </div>
+    </section>
+  </main>
+</body></html>` : `<!DOCTYPE html>
+<html data-theme="dark"><head><meta charset="utf-8"><style>
+  body { margin: 0; background: rgb(13, 17, 24); color: #E4E8EF; font-family: Inter, system-ui, sans-serif; padding: 16px; box-sizing: border-box; }
+  .card { max-width: 680px; margin: 0 auto; background: #1E2638; border: 1px solid #2A3142; border-radius: 10px; padding: 16px; }
+  .meta { font-size: 11px; color: #A3ACBD; text-transform: uppercase; letter-spacing: 0.06em; padding-bottom: 10px; border-bottom: 1px solid #2A3142; margin-bottom: 12px; }
+  h2 { font-size: 16px; color: #F5F7FA; margin: 0 0 12px; }
+  p { font-size: 13px; line-height: 1.5; margin: 0 0 12px; background: #161C28; padding: 12px; border-radius: 6px; }
+  h3 { font-size: 13px; color: #F5F7FA; margin: 12px 0 6px; }
+  ul { margin: 0 0 12px; padding-left: 18px; font-size: 13px; }
+  .card a { display: inline-block !important; padding: 8px 12px !important; margin: 4px 8px 0 0 !important; background: #262E42 !important; border: 1px solid #4C566E !important; color: #7DB2FC !important; border-radius: 6px !important; font-size: 12px !important; font-weight: 500 !important; text-decoration: none !important; }
+</style></head><body>
+  <main class="card" aria-label="Email issue alert mock">
+    <div class="meta">Email · From Versus Incident · Settled template render fixture</div>
+    ${renderedEmailBody}
+  </main>
+</body></html>`;
+        await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: html });
+      });
+
+      await page.goto("/__mock_channel_preview/slack");
+      const criticalActions = page.getByRole("group", { name: "Critical Slack actions", exact: true }).getByRole("link");
+      await expect(criticalActions).toHaveText(["Acknowledge", "Open timeline", "Investigate with DevOps Agent"]);
+      const warningActions = page.getByRole("group", { name: "Warning Slack actions", exact: true }).getByRole("link");
+      await expect(warningActions).toHaveText(["Open timeline", "Investigate with DevOps Agent"]);
+      await captureBreakState(page, `issue-alerts-slack-mock-${viewport.name}-dark.png`, "dark", "F: synthetic Slack attachment/action-block fixture, not live Slack API delivery");
+
+      await page.goto("/__mock_channel_preview/email");
+      const emailLinks = page.getByRole("main", { name: "Email issue alert mock", exact: true }).getByRole("link");
+      await expect(emailLinks).toHaveText(["Acknowledge", "Open timeline", "Investigate with DevOps Agent"]);
+      await expect(emailLinks.nth(0)).toHaveAttribute("href", ackHref);
+      await expect(emailLinks.nth(1)).toHaveAttribute("href", timelineHref);
+      await expect(emailLinks.nth(2)).toHaveAttribute("href", chatTarget);
+      expect(await emailLinks.nth(1).getAttribute("href")).not.toContain("&amp;");
+      expect(await emailLinks.nth(2).getAttribute("href")).not.toContain("&amp;");
+      await captureBreakState(page, `issue-alerts-email-mock-${viewport.name}-dark.png`, "dark", "F: synthetic Email template fixture, not live SMTP delivery");
+      expect(errors).toEqual([]);
+    });
   }
 
   test("Break timeline auto-detect guide desktop dark", async ({ page }) => {
@@ -2726,13 +3266,39 @@ test.describe("Pod log streaming fixtures", () => {
     const issues = page.getByRole("region", { name: "Kubernetes issues", exact: true });
     await expect(issues.getByRole("article")).toHaveCount(4);
     await expect(issues.getByLabel("Issue severity", { exact: true })).toBeVisible();
+    const alertToggle = issues.getByRole("switch", { name: "Alert on new issues", exact: true });
+    await expect(alertToggle).toBeInViewport({ ratio: 1 });
+    await expect(alertToggle).toHaveAttribute("aria-checked", "false");
+    await expect(issues.getByRole("group", { name: "Issue alert level", exact: true })).toHaveCount(0);
     await captureBreakState(page, "auto-detect-issues-overview.png", "dark");
     const checkout = issues.getByRole("article", { name: "Deployment checkout", exact: true });
     await checkout.getByRole("button", { name: "Expand checkout", exact: true }).click();
     await expect(checkout).toContainText("44 lifetime restarts");
     await expect(checkout).toContainText("OOMKilled on 6 pods");
     await expect(checkout).toContainText("v41 → v42");
+    await expect(alertToggle).toBeInViewport({ ratio: 1 });
+    await expect(alertToggle).toHaveAttribute("aria-checked", "false");
     await captureBreakState(page, "break-issues-expanded-desktop-dark.png", "dark");
+    if (process.env.E2E_KUBERNETES_ALERT_DOCS === "1") {
+      await checkout.getByRole("button", { name: "Collapse checkout", exact: true }).click();
+      const saved = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/admin/kubernetes/issue-alerts" && response.request().method() === "PUT");
+      await alertToggle.click();
+      const response = await saved;
+      expect(response.ok()).toBe(true);
+      expect(response.request().postDataJSON()).toEqual({ enabled: true, level: "critical" });
+      await expect(alertToggle).toHaveAttribute("aria-checked", "true");
+      const levels = issues.getByRole("group", { name: "Issue alert level", exact: true });
+      await expect(levels.getByRole("button", { name: "Critical", exact: true })).toHaveAttribute("aria-pressed", "true");
+      await expect(levels.getByRole("button", { name: "Warning", exact: true })).toHaveAttribute("aria-pressed", "false");
+      await expect(levels).toBeInViewport({ ratio: 1 });
+      await expect(issues.getByRole("article")).toHaveCount(4);
+      await expect(page.getByText("Alerts on. Issues that break from now on will alert.", { exact: true })).toBeVisible();
+      // Keep transient save feedback out of the reusable documentation bitmap.
+      await expect(page.getByText("Alerts on. Issues that break from now on will alert.", { exact: true })).toBeHidden();
+      await captureBreakState(page, "auto-detect-issue-alerts.png", "dark");
+      expect(errors).toEqual([]);
+      return;
+    }
     await checkout.getByRole("button", { name: "Open resource checkout", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Details panel", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Close panel", exact: true }).click();
@@ -4198,4 +4764,1359 @@ test.describe("Live Break timeline logs and Agent tab acceptance", () => {
       expect(errors).toEqual([]);
     });
   }
+});
+
+test.describe("Live K13 and K15 worst-case user acceptance", () => {
+  test.skip(process.env.E2E_K13_K15_LIVE !== "1", "requires the live K13/K15 user-acceptance stack and local receiver");
+
+  test("executes 100% real-user UI journey: default off, Warning enable, HA handoff, crash/restarts/deleted Pod/gaps, Timeline/Agent failure & Loki fill, incident/Ack/partial/on-call outcomes, deep links, disable, reload and mobile", async ({ page }, testInfo) => {
+    test.setTimeout(480_000);
+    const errors: string[] = [];
+    const chatPostRequests: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("request", (req) => {
+      const url = new URL(req.url());
+      if (req.method() === "POST" && url.pathname.startsWith("/api/admin/chat/")) {
+        chatPostRequests.push(`${req.method()} ${url.pathname}`);
+      }
+    });
+
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+
+    const state = process.env.HARNESS_STATE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/.state");
+    const fakePort = Number(process.env.HARNESS_FAKEKUBE_PORT || 28643);
+    const lokiPort = Number(process.env.HARNESS_LOKI_PORT || 28610);
+    const receiverPort = Number(process.env.HARNESS_RECEIVER_HTTP_PORT || 28690);
+    const haScript = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/tests/kubernetes-ha.sh");
+    const ca = fs.readFileSync(path.join(state, "fakekube/ca.crt"));
+
+    const upstream = (endpoint: string, body?: unknown) => new Promise<unknown>((resolve, reject) => {
+      const encoded = body === undefined ? undefined : JSON.stringify(body);
+      const call = https.request(`https://localhost:${fakePort}${endpoint}`, {
+        ca,
+        method: encoded ? "POST" : "GET",
+        headers: encoded ? { "Content-Type": "application/json" } : {},
+      }, (response) => {
+        let text = "";
+        response.on("data", (chunk) => { text += chunk; });
+        response.on("end", () => response.statusCode === 200 ? resolve(JSON.parse(text)) : reject(new Error(`fakekube ${endpoint} HTTP ${response.statusCode} ${text}`)));
+      });
+      call.on("error", reject);
+      call.end(encoded);
+    });
+
+    type ReceiverState = {
+      emails: Array<{ mailFrom: string; rcptTo: string[]; headers: string; body: string; links: Array<{ label: string; url: string }> }>;
+      lark: Array<{ text: string; links: Array<{ label: string; url: string }> }>;
+      divertLark: Array<{ text: string; links: Array<{ label: string; url: string }> }>;
+      msteams: Array<{ text: string; links: Array<{ label: string; url: string }> }>;
+      servicenow: Array<{ table: string; hasBasicAuth: boolean; payload: { short_description?: string; correlation_id?: string } }>;
+    };
+
+    const receiver = async (endpoint = "/_receipts", method = "GET", body?: unknown): Promise<ReceiverState> => {
+      const res = await fetch(`http://127.0.0.1:${receiverPort}${endpoint}`, {
+        method,
+        headers: body ? { "Content-Type": "application/json" } : {},
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      expect(res.status).toBe(200);
+      return res.json() as Promise<ReceiverState>;
+    };
+
+    const haControl = (op: string, svc?: string) => {
+      const args = [haScript, "--control", op, ...(svc ? [svc] : [])];
+      return execFileSync("bash", args, { env: process.env as NodeJS.ProcessEnv, encoding: "utf8", timeout: 90_000 }).trim();
+    };
+
+    const second = (ms: number) => Math.floor(ms / 1000) * 1000;
+    const iso = (ms: number) => new Date(ms).toISOString().replace(".000Z", "Z");
+    const ns = "k13k15";
+
+    await receiver("/_clear", "POST");
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "namespaces", namespace: "", name: ns, object: { kind: "Namespace", metadata: {} } });
+
+    // Seed a pre-existing broken workload BEFORE alerts are enabled to verify no-backfill.
+    const preBreakMs = second(Date.now()) - 120_000;
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "deployments", namespace: ns, name: "preexisting-api",
+      object: {
+        apiVersion: "apps/v1", kind: "Deployment",
+        metadata: { name: "preexisting-api", namespace: ns, uid: "preexisting-root", generation: 1, creationTimestamp: iso(preBreakMs - 600_000), labels: { app: "preexisting-api" } },
+        spec: { replicas: 2, selector: { matchLabels: { app: "preexisting-api" } }, template: { spec: { containers: [{ name: "api", image: "example.invalid/pre:v1" }] } } },
+        status: { observedGeneration: 1, replicas: 2, readyReplicas: 1, availableReplicas: 1, updatedReplicas: 2 },
+      },
+    });
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "pods", namespace: ns, name: "preexisting-api-pod-0",
+      object: {
+        apiVersion: "v1", kind: "Pod",
+        metadata: { name: "preexisting-api-pod-0", namespace: ns, uid: "preexisting-pod-0", creationTimestamp: iso(preBreakMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "preexisting-api", uid: "preexisting-root", controller: true }] },
+        spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/pre:v1" }] },
+        status: { phase: "Running", conditions: [{ type: "Ready", status: "False", lastTransitionTime: iso(preBreakMs) }], containerStatuses: [{ name: "api", ready: false, restartCount: 4, state: { waiting: { reason: "CrashLoopBackOff", message: "preexisting-canary-msg" } } }] },
+      },
+    });
+
+    // 1. Open Issues tab as a real user at desktop 1440x1000 and verify alerts default off.
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await openApp(page, "/agent/kubernetes?view=issues");
+    const issues = page.getByRole("region", { name: "Kubernetes issues", exact: true });
+    await expect(issues).toBeVisible();
+    await expect(issues.getByRole("article", { name: "Deployment preexisting-api", exact: true }).first()).toBeVisible({ timeout: 60_000 });
+
+    const alertSwitch = issues.getByRole("switch", { name: "Alert on new issues", exact: true });
+    await expect(alertSwitch).toBeVisible();
+    await expect(alertSwitch).toBeEnabled();
+    await expect(alertSwitch).toHaveAttribute("aria-checked", "false");
+    await expect(issues.getByRole("group", { name: "Issue alert level", exact: true })).toHaveCount(0);
+    await expect(issues.getByText("Sends through your alert channels", { exact: true })).toBeVisible();
+    const channelDocs = issues.getByRole("link", { name: "Channel settings", exact: true });
+    await expect(channelDocs).toHaveAttribute("href", "https://docs.versusincident.com/#/agent/channels");
+    await expect(channelDocs).toHaveAttribute("target", "_blank");
+    await expect(channelDocs).toHaveAttribute("rel", "noopener noreferrer");
+    await expect(issues.getByText("No alert channel is on", { exact: true })).toHaveCount(0);
+    await expect(issues.getByText("Set public_host to add Timeline and agent links", { exact: true })).toHaveCount(0);
+    await captureBreakState(page, "live-k15-alerts-off-desktop.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await captureBreakState(page, "live-k15-alerts-off-mobile.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    // Confirm zero notifications while off.
+    const initialReceipts = await receiver();
+    expect(initialReceipts.emails).toHaveLength(0);
+    expect(initialReceipts.lark).toHaveLength(0);
+    expect(initialReceipts.msteams).toHaveLength(0);
+    expect(initialReceipts.servicenow).toHaveLength(0);
+
+    // 2. Enable alerts in the UI -> defaults to Critical -> switch to Warning -> reload & verify persistence.
+    await alertSwitch.click();
+    await expect(page.getByText("Alerts on. Issues that break from now on will alert.", { exact: true })).toBeVisible();
+    await expect(alertSwitch).toHaveAttribute("aria-checked", "true");
+    const levelGroup = issues.getByRole("group", { name: "Issue alert level", exact: true });
+    await expect(levelGroup).toBeVisible();
+    const criticalBtn = levelGroup.getByRole("button", { name: "Critical", exact: true });
+    const warningBtn = levelGroup.getByRole("button", { name: "Warning", exact: true });
+    await expect(criticalBtn).toHaveAttribute("aria-pressed", "true");
+    await expect(warningBtn).toHaveAttribute("aria-pressed", "false");
+    await expect(issues.getByText("Critical sends critical issues only", { exact: true })).toBeVisible();
+    await captureBreakState(page, "live-k15-alerts-critical-desktop.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
+
+    await warningBtn.click();
+    await expect(page.getByText("Alert level saved.", { exact: true })).toBeVisible();
+    await expect(warningBtn).toHaveAttribute("aria-pressed", "true");
+    await expect(criticalBtn).toHaveAttribute("aria-pressed", "false");
+    await expect(issues.getByText("Warning sends warning and critical issues", { exact: true })).toBeVisible();
+    await captureBreakState(page, "live-k15-alerts-warning-desktop.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    const mobileAlertGeometry = await issues.evaluate(() => {
+      const sw = document.querySelector<HTMLElement>('[role="switch"][aria-label="Alert on new issues"]')!;
+      const row = sw.parentElement!;
+      const grp = document.querySelector<HTMLElement>('[role="group"][aria-label="Issue alert level"]')!;
+      const btns = [...grp.querySelectorAll<HTMLElement>("button")];
+      const rBox = row.getBoundingClientRect();
+      const gBox = grp.getBoundingClientRect();
+      return {
+        wrapped: gBox.top >= rBox.bottom - 1 && Math.abs(gBox.width - rBox.width) <= 2,
+        equalButtons: Math.abs(btns[0].getBoundingClientRect().width - btns[1].getBoundingClientRect().width) <= 2,
+        noOverflow: document.documentElement.scrollWidth <= window.innerWidth,
+      };
+    });
+    expect(mobileAlertGeometry).toEqual({ wrapped: true, equalButtons: true, noOverflow: true });
+    await captureBreakState(page, "live-k15-alerts-warning-mobile.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    // Reload to prove persistence.
+    await page.reload();
+    await expect(issues).toBeVisible();
+    await expect(alertSwitch).toHaveAttribute("aria-checked", "true");
+    await expect(warningBtn).toHaveAttribute("aria-pressed", "true");
+
+    // 3. Edit Agent tab settings in UI and verify saving Agent settings does NOT clobber issue alerts.
+    await page.getByRole("tab", { name: "Agent", exact: true }).click();
+    const agentRegion = page.getByRole("region", { name: "Kubernetes Agent", exact: true });
+    await expect(agentRegion.getByText("Preview", { exact: true })).toBeVisible();
+    await agentRegion.getByRole("button", { name: "Edit scope", exact: true }).click();
+    const scopeDialog = page.getByRole("dialog", { name: "Log learning scope", exact: true });
+    await scopeDialog.getByLabel("Include namespaces").fill(`${ns}, shop`);
+    await scopeDialog.getByRole("button", { name: "Apply scope", exact: true }).click();
+    await agentRegion.getByRole("button", { name: "Save settings", exact: true }).click();
+    await expect(agentRegion.getByText("Agent settings saved.", { exact: true })).toBeVisible();
+
+    await page.getByRole("tab", { name: "Issues", exact: true }).click();
+    await page.reload();
+    await expect(alertSwitch).toHaveAttribute("aria-checked", "true");
+    await expect(warningBtn).toHaveAttribute("aria-pressed", "true");
+
+    // Seed healthy Deployment checkout + ReplicaSets + Pods BEFORE enabling alerts so their owner chain is indexed.
+    const rootUID = "k13k15-checkout";
+    const rsV41UID = "k13k15-checkout-rs-v41";
+    const rsV42UID = "k13k15-checkout-rs-v42";
+    const crashPodName = "checkout-6c8d4-x2k4q";
+    const crashPodUID = "k13k15-checkout-crash-pod";
+    const delPodName = "checkout-6c8d4-d3e4f";
+    const delPodUID = "k13k15-checkout-del-pod";
+    const crashLogPath = `/api/v1/namespaces/${ns}/pods/${crashPodName}/log`;
+    const delLogPath = `/api/v1/namespaces/${ns}/pods/${delPodName}/log`;
+    const seedMs = second(Date.now());
+    const checkoutDeployment = (availableReplicas: number, createdMs = seedMs - 1_800_000) => ({
+      apiVersion: "apps/v1", kind: "Deployment",
+      metadata: { name: "checkout", namespace: ns, uid: rootUID, generation: 2, creationTimestamp: iso(createdMs), labels: { app: "checkout" } },
+      spec: { replicas: 4, selector: { matchLabels: { app: "checkout" } }, template: { metadata: { labels: { app: "checkout" } }, spec: { containers: [{ name: "api", image: "example.invalid/checkout:v42" }] } } },
+      status: { observedGeneration: 2, replicas: 4, readyReplicas: availableReplicas, availableReplicas, updatedReplicas: 4 },
+    });
+    const makeCheckoutPod = (name: string, uid: string, restarts: number, termMs: number | null, brokeAtStr: string, reason = "OOMKilled", exitCode = 137) => ({
+      apiVersion: "v1", kind: "Pod",
+      metadata: { name, namespace: ns, uid, creationTimestamp: iso(seedMs - 240_000), labels: { app: "checkout" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: "checkout-6c8d4", uid: rsV42UID, controller: true }] },
+      spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/checkout:v42" }] },
+      status: {
+        phase: "Running",
+        conditions: [{ type: "Ready", status: restarts > 0 ? "False" : "True", lastTransitionTime: brokeAtStr }],
+        containerStatuses: [{
+          name: "api", ready: restarts === 0, restartCount: restarts,
+          state: restarts > 0 ? { waiting: { reason: "CrashLoopBackOff", message: "raw-termination-canary-msg" } } : { running: { startedAt: brokeAtStr } },
+          ...(termMs ? { lastState: { terminated: { reason, exitCode, finishedAt: iso(termMs), message: "raw-termination-canary-msg" } } } : {}),
+        }],
+      },
+    });
+
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "deployments", namespace: ns, name: "checkout", object: checkoutDeployment(4) });
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "replicasets", namespace: ns, name: "checkout-v41",
+      object: {
+        apiVersion: "apps/v1", kind: "ReplicaSet",
+        metadata: { name: "checkout-v41", namespace: ns, uid: rsV41UID, creationTimestamp: iso(seedMs - 900_000), labels: { app: "checkout" }, annotations: { "deployment.kubernetes.io/revision": "1" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "checkout", uid: rootUID, controller: true }] },
+        spec: { replicas: 0, template: { spec: { containers: [{ name: "api", image: "example.invalid/checkout:v41" }] } } },
+        status: { replicas: 0, readyReplicas: 0 },
+      },
+    });
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "replicasets", namespace: ns, name: "checkout-6c8d4",
+      object: {
+        apiVersion: "apps/v1", kind: "ReplicaSet",
+        metadata: { name: "checkout-6c8d4", namespace: ns, uid: rsV42UID, creationTimestamp: iso(seedMs - 240_000), labels: { app: "checkout" }, annotations: { "deployment.kubernetes.io/revision": "2" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "checkout", uid: rootUID, controller: true }] },
+        spec: { replicas: 4, template: { spec: { containers: [{ name: "api", image: "example.invalid/checkout:v42" }] } } },
+        status: { replicas: 4, readyReplicas: 4 },
+      },
+    });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace: ns, name: crashPodName, object: makeCheckoutPod(crashPodName, crashPodUID, 0, null, iso(seedMs - 240_000)) });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace: ns, name: delPodName, object: makeCheckoutPod(delPodName, delPodUID, 0, null, iso(seedMs - 240_000)) });
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "deployments", namespace: ns, name: "payments-worker",
+      object: {
+        apiVersion: "apps/v1", kind: "Deployment",
+        metadata: { name: "payments-worker", namespace: ns, uid: "k13k15-payments-worker", generation: 1, creationTimestamp: iso(seedMs - 600_000), labels: { app: "payments-worker" } },
+        spec: { replicas: 2, selector: { matchLabels: { app: "payments-worker" } }, template: { spec: { containers: [{ name: "worker", image: "example.invalid/payments:v1" }] } } },
+        status: { observedGeneration: 1, replicas: 2, readyReplicas: 2, availableReplicas: 2, updatedReplicas: 2 },
+      },
+    });
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "pods", namespace: ns, name: "payments-worker-pod-0",
+      object: {
+        apiVersion: "v1", kind: "Pod",
+        metadata: { name: "payments-worker-pod-0", namespace: ns, uid: "k13k15-payments-pod-0", creationTimestamp: iso(seedMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "payments-worker", uid: "k13k15-payments-worker", controller: true }] },
+        spec: { nodeName: "k13-node", containers: [{ name: "worker", image: "example.invalid/payments:v1" }] },
+        status: { phase: "Running", conditions: [{ type: "Ready", status: "True", lastTransitionTime: iso(seedMs - 600_000) }], containerStatuses: [{ name: "worker", ready: true, restartCount: 0, state: { running: { startedAt: iso(seedMs - 600_000) } } }] },
+      },
+    });
+
+    // Wait until the healthy owner chain is indexed in the continuous capture store.
+    const indexedAfter = new Date().toISOString();
+    await expect.poll(() => {
+      const rows = JSON.parse(haControl("rows")) as Array<{ snapshot: { coverage?: { Pod?: { to?: string }; Deployment?: { to?: string }; ReplicaSet?: { to?: string } } } }>;
+      return rows.some((r) => (r.snapshot.coverage?.Pod?.to ?? "") > indexedAfter && (r.snapshot.coverage?.Deployment?.to ?? "") > indexedAfter && (r.snapshot.coverage?.ReplicaSet?.to ?? "") > indexedAfter);
+    }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(true);
+
+    // Wait a moment so any new break timestamp is strictly after enabled_at and <= server now.
+    await page.waitForTimeout(3000);
+    const afterEnableReceipts = await receiver();
+    expect(afterEnableReceipts.emails).toHaveLength(0);
+
+    const nowMs = second(Date.now());
+    const brokeMs = nowMs - 2000;
+    const firstTermMs = nowMs - 1000;
+    const brokeAtISO = iso(brokeMs);
+    const windowFromISO = iso(brokeMs - 200_000);
+
+    const crashFirstLines = Array.from({ length: 12 }, (_, index) => ({
+      at: iso(firstTermMs - 180_000 + index * 10_000),
+      text: index === 2
+        ? "ERROR payment client timeout Authorization: Bearer k13-live-secret-canary"
+        : index % 3 === 0
+          ? `ERROR payment client timeout attempt ${index}`
+          : `INFO starting checkout worker pool ${index}`,
+    }));
+    const delLines = Array.from({ length: 8 }, (_, index) => ({
+      at: iso(firstTermMs - 140_000 + index * 10_000),
+      text: index % 2 === 0 ? `WARN deleted replica retry ${index}` : `INFO deleted pod request ${index}`,
+    }));
+
+    await upstream("/_fake/log-fixtures", { path: crashLogPath, container: "api", previous: true, lines: crashFirstLines });
+    await upstream("/_fake/log-fixtures", { path: delLogPath, container: "api", previous: true, lines: delLines });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace: ns, name: crashPodName, object: makeCheckoutPod(crashPodName, crashPodUID, 1, firstTermMs, brokeAtISO, "OOMKilled", 137) });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace: ns, name: delPodName, object: makeCheckoutPod(delPodName, delPodUID, 1, firstTermMs, brokeAtISO, "Error", 1) });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "deployments", namespace: ns, name: "checkout", object: checkoutDeployment(3) });
+
+    // Wait for continuous capture to emit the Warning alert to Email (SMTP), Lark, and MS Teams AND capture break logs.
+    await expect.poll(async () => {
+      const r = await receiver();
+      return r.emails.length === 1 && r.lark.length === 1 && r.msteams.length === 1;
+    }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(true);
+
+    const warningReceipts = await receiver();
+    expect(warningReceipts.servicenow).toHaveLength(0);
+    const warningEmail = warningReceipts.emails[0];
+    expect(warningEmail.body).toContain("🟡");
+    expect(warningEmail.body).toContain("Kubernetes issue");
+    expect(warningEmail.body).toContain("Deployment checkout is crash looping");
+    expect(warningEmail.body).toContain("<b>Severity:</b> warning");
+    expect(warningEmail.body).toContain("<b>Cluster:</b> fakekube");
+    expect(warningEmail.body).toContain(`<b>Namespace:</b> ${ns}`);
+    expect(warningEmail.body).toContain("What we saw");
+    expect(warningEmail.body).toContain("Exit 137 OOMKilled");
+    expect(warningEmail.body).toContain("Changes before the break");
+    expect(warningEmail.body).toContain("Image changed");
+    expect(warningEmail.body).not.toContain("k13-live-secret-canary");
+    expect(warningEmail.body).not.toContain("raw-termination-canary-msg");
+    expect(warningEmail.body).not.toContain("payment client timeout");
+    expect(warningEmail.body).not.toContain("&amp;amp;");
+    expect(warningEmail.links.map((l) => l.label)).toEqual(["Open timeline", "Investigate with DevOps Agent"]);
+    expect(warningReceipts.lark[0].links.map((l) => l.label)).toEqual(["Open timeline", "Investigate with DevOps Agent"]);
+    expect(warningReceipts.msteams[0].links.map((l) => l.label)).toEqual(["Open timeline", "Investigate with DevOps Agent"]);
+
+    // 5. Forced two-replica capture-owner handoff: verify zero duplicate notifications across handoff.
+    haControl("recreate", "oss-peer");
+    const rowsBeforeHandoff = JSON.parse(haControl("rows")) as Array<{ key: string; snapshot: { lease?: { owner?: string }; coverage?: { Pod?: { to?: string } } } }>;
+    const leaseBefore = rowsBeforeHandoff.find((r) => r.snapshot.lease?.owner);
+    expect(leaseBefore?.snapshot.lease?.owner).toBeTruthy();
+    const ownerBefore = leaseBefore!.snapshot.lease!.owner!;
+
+    // Stop oss-peer first; if oss-peer was owner, oss takes over. If oss was owner, stop oss so oss-peer takes over, then start oss back.
+    haControl("stop", "oss-peer");
+    await page.waitForTimeout(2000);
+    const currentRows = JSON.parse(haControl("rows")) as typeof rowsBeforeHandoff;
+    const currentOwner = currentRows.find((r) => r.key === leaseBefore!.key)?.snapshot.lease?.owner;
+    if (currentOwner === ownerBefore) {
+      // oss owned the lease; start oss-peer, stop oss so oss-peer takes over and advances coverage, then start oss.
+      haControl("start", "oss-peer");
+      haControl("stop", "oss");
+      await expect.poll(() => {
+        const rows = JSON.parse(haControl("rows")) as typeof rowsBeforeHandoff;
+        const row = rows.find((r) => r.key === leaseBefore!.key);
+        const owner = row?.snapshot.lease?.owner;
+        const podTo = row?.snapshot.coverage?.Pod?.to ?? "";
+        return Boolean(owner && owner !== ownerBefore && podTo > (leaseBefore!.snapshot.coverage?.Pod?.to ?? ""));
+      }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(true);
+      haControl("start", "oss");
+    } else {
+      await expect.poll(() => {
+        const rows = JSON.parse(haControl("rows")) as typeof rowsBeforeHandoff;
+        const row = rows.find((r) => r.key === leaseBefore!.key);
+        const owner = row?.snapshot.lease?.owner;
+        const podTo = row?.snapshot.coverage?.Pod?.to ?? "";
+        return Boolean(owner && owner !== ownerBefore && podTo > (leaseBefore!.snapshot.coverage?.Pod?.to ?? ""));
+      }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(true);
+      haControl("start", "oss-peer");
+    }
+    await expect.poll(async () => {
+      try {
+        const res = await fetch(`${process.env.E2E_BASE_URL || "http://127.0.0.1:28680"}/healthz`);
+        return res.status === 200;
+      } catch { return false; }
+    }, { timeout: 30_000, intervals: [500, 1000] }).toBe(true);
+
+    const handoffReceipts = await receiver();
+    expect(handoffReceipts.emails).toHaveLength(1);
+    expect(handoffReceipts.lark).toHaveLength(1);
+    expect(handoffReceipts.msteams).toHaveLength(1);
+
+    // 6. Delete checkout-del-pod, trigger second restart on checkout-crash-pod, and escalate checkout to Critical (0 of 3 ready).
+    // Wait until initial break-log snapshots for both Pods are persisted before deleting/restarting.
+    await expect.poll(() => {
+      const rows = JSON.parse(haControl("rows")) as Array<{ snapshot: { break_logs?: { snapshots?: Array<{ pod_uid: string }> } } }>;
+      const snaps = rows.flatMap((r) => r.snapshot.break_logs?.snapshots ?? []);
+      return snaps.some((s) => s.pod_uid === crashPodUID) && snaps.some((s) => s.pod_uid === delPodUID);
+    }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(true);
+
+    await upstream("/_fake/mutate", { operation: "delete", resource: "pods", namespace: ns, name: delPodName });
+    const secondTermMs = second(Date.now()) - 2000;
+    const windowToISO = iso(secondTermMs);
+    const secondLines = Array.from({ length: 6 }, (_, index) => ({
+      at: iso(secondTermMs - 25_000 + index * 4000),
+      text: `INFO second restart line ${index}`,
+    }));
+    await upstream("/_fake/log-fixtures", { path: crashLogPath, container: "api", previous: true, lines: secondLines });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace: ns, name: crashPodName, object: makeCheckoutPod(crashPodName, crashPodUID, 3, secondTermMs, brokeAtISO, "OOMKilled", 137) });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "deployments", namespace: ns, name: "checkout", object: checkoutDeployment(0) });
+
+    // Wait for Critical escalation notification on the same episode AND second termination break-log snapshot.
+    await expect.poll(async () => {
+      const r = await receiver();
+      return r.emails.length === 2 && r.lark.length === 2 && r.msteams.length === 2;
+    }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(true);
+
+    const criticalReceipts = await receiver();
+    const criticalEmail = criticalReceipts.emails[1];
+    expect(criticalEmail.body).toContain("🔴");
+    expect(criticalEmail.body).toContain("<b>Severity:</b> critical");
+    expect(criticalEmail.links.map((l) => l.label)).toEqual(["Acknowledge", "Open timeline", "Investigate with DevOps Agent"]);
+    expect(criticalReceipts.lark[1].links.map((l) => l.label)).toEqual(["Acknowledge", "Open timeline", "Investigate with DevOps Agent"]);
+    expect(criticalReceipts.msteams[1].links.map((l) => l.label)).toEqual(["Acknowledge", "Open timeline", "Investigate with DevOps Agent"]);
+
+    const ackURL = criticalEmail.links[0].url;
+    const timelineURL = criticalEmail.links[1].url;
+    const agentURL = criticalEmail.links[2].url;
+    expect(ackURL).toContain("/api/ack/");
+    expect(timelineURL).toContain("view=timeline");
+    expect(agentURL).toContain("/agent/chat?");
+    expect(agentURL).toContain("issue=pod.crash_loop");
+
+    // Visit AckURL in the real browser to acknowledge the critical incident before the 1-minute on-call wait expires.
+    await page.goto(ackURL);
+    await expect(page.locator("body")).toContainText('"status":"success"');
+
+    // Open /incidents?status=acked in the real UI and inspect the persisted, acknowledged incident.
+    await openApp(page, "/incidents?status=acked");
+    const checkoutIncidentLink = page.getByRole("link", { name: /Deployment checkout is crash looping/i }).first();
+    await expect(checkoutIncidentLink).toBeVisible();
+    await checkoutIncidentLink.click();
+    await expect(page.getByText("acknowledged", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("notified email", { exact: true })).toBeVisible();
+    await expect(page.getByText("notified lark", { exact: true })).toBeVisible();
+    await expect(page.getByText("notified msteams", { exact: true })).toBeVisible();
+    await expect(page.getByText("No summary provided.", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("checkout", { exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Evidence", exact: true })).toContainText("Exit 137 OOMKilled");
+    await expect(page.getByRole("navigation", { name: "Kubernetes issue links", exact: true }).getByRole("link", { name: "Timeline", exact: true })).toBeVisible();
+    await expect(page.getByText("kubernetes:pod.crash_loop", { exact: true })).toBeVisible();
+    await expect(page.locator('a[href^="/agent/logs/"]')).toHaveCount(0);
+
+    // 7. Worst-case partial channel failure (MS Teams 500) + unacknowledged critical on-call paging to ServiceNow.
+    await receiver("/_control/fault", "POST", { target: "msteams", status: 500 });
+    await page.waitForTimeout(2000);
+    const partialBreakMs = second(Date.now()) - 1000;
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "pods", namespace: ns, name: "payments-worker-pod-0",
+      object: {
+        apiVersion: "v1", kind: "Pod",
+        metadata: { name: "payments-worker-pod-0", namespace: ns, uid: "k13k15-payments-pod-0", creationTimestamp: iso(partialBreakMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "payments-worker", uid: "k13k15-payments-worker", controller: true }] },
+        spec: { nodeName: "k13-node", containers: [{ name: "worker", image: "example.invalid/payments:v1" }] },
+        status: { phase: "Running", conditions: [{ type: "Ready", status: "False", lastTransitionTime: iso(partialBreakMs) }], containerStatuses: [{ name: "worker", ready: false, restartCount: 5, state: { waiting: { reason: "CrashLoopBackOff" } }, lastState: { terminated: { reason: "Error", exitCode: 1, finishedAt: iso(partialBreakMs) } } }] },
+      },
+    });
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "deployments", namespace: ns, name: "payments-worker",
+      object: {
+        apiVersion: "apps/v1", kind: "Deployment",
+        metadata: { name: "payments-worker", namespace: ns, uid: "k13k15-payments-worker", generation: 1, creationTimestamp: iso(partialBreakMs - 600_000), labels: { app: "payments-worker" } },
+        spec: { replicas: 2, selector: { matchLabels: { app: "payments-worker" } }, template: { spec: { containers: [{ name: "worker", image: "example.invalid/payments:v1" }] } } },
+        status: { observedGeneration: 1, replicas: 2, readyReplicas: 0, availableReplicas: 0, updatedReplicas: 2 },
+      },
+    });
+
+    await expect.poll(async () => {
+      const r = await receiver();
+      return r.emails.length === 3 && r.lark.length === 3;
+    }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(true);
+    const partialReceipts = await receiver();
+    expect(partialReceipts.msteams).toHaveLength(2);
+    await receiver("/_control/fault", "POST", { target: "msteams", status: 0 });
+
+    await page.goto("/incidents?status=open");
+    const paymentsIncidentLink = page.getByRole("link", { name: /Deployment payments-worker is crash looping/i }).first();
+    await expect(paymentsIncidentLink).toBeVisible();
+    await page.getByRole("button", { name: "Show notification failure detail", exact: true }).first().click();
+    await expect(page.getByText(/Partial delivery:.*MS Teams API returned 500/i)).toBeVisible();
+    await paymentsIncidentLink.click();
+    await expect(page.getByText("partial", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("notified email", { exact: true })).toBeVisible();
+    await expect(page.getByText("notified lark", { exact: true })).toBeVisible();
+    await expect(page.getByText(/MS Teams API returned 500/i).first()).toBeVisible();
+    const paymentsIncidentID = new URL(page.url()).pathname.split("/").pop()!;
+    const paymentsDetailRes = await page.request.get(`/api/admin/incidents/${paymentsIncidentID}`);
+    expect(paymentsDetailRes.status()).toBe(200);
+    const paymentsDetail = await paymentsDetailRes.json();
+    expect(paymentsDetail.notify_status).toBe("partial");
+    expect(paymentsDetail.notify_error).toMatch(/MS Teams API returned 500/i);
+
+    // 8. Navigate via the delivered TimelineURL deep link and drive K13 Timeline + Logs at break + Agent tab in the UI.
+    await expect.poll(() => {
+      const rows = JSON.parse(haControl("rows")) as Array<{ snapshot: { break_logs?: { snapshots?: Array<{ pod_uid: string }> } } }>;
+      const snaps = rows.flatMap((r) => r.snapshot.break_logs?.snapshots ?? []);
+      return snaps.filter((s) => s.pod_uid === crashPodUID).length;
+    }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(2);
+
+    const timelineTarget = new URL(timelineURL);
+    timelineTarget.searchParams.set("logs_from", windowFromISO);
+    timelineTarget.searchParams.set("logs_to", windowToISO);
+    await page.goto(timelineTarget.pathname + timelineTarget.search);
+
+    const lane = page.getByRole("region", { name: "Timeline lane checkout", exact: true });
+    await expect(lane).toBeVisible();
+    const chart = lane.getByRole("region", { name: "Resource timeline chart", exact: true });
+    await expect(chart.locator('[data-marker="change"]').first()).toBeVisible();
+    await expect(chart.locator('[data-marker="crash"]').first()).toBeVisible();
+
+    const logs = page.getByRole("region", { name: "Logs at break", exact: true });
+    const viewer = logs.getByRole("log");
+    await expect(viewer).toContainText("payment client timeout");
+    await expect(viewer).toContainText("deleted replica retry");
+    await expect(viewer).toContainText("<REDACTED");
+    await expect(viewer).not.toContainText("k13-live-secret-canary");
+    await expect(logs.getByText("Captured at break").first()).toBeVisible();
+
+    await logs.scrollIntoViewIfNeeded();
+    await logs.getByRole("button", { name: "Log coverage tip" }).click();
+    await expect(logs.getByText(/The container restarted more than once since the break/)).toBeVisible();
+    await expect(logs.getByRole("link", { name: "Link a source in Agent tab" })).toBeVisible();
+    await captureBreakState(page, "live-k13-k15-timeline-desktop.png", "dark", "L: live OSS + fakekube + Postgres + Loki + Elasticsearch stack");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await expect(page.getByRole("toolbar", { name: "Break log actions" })).toBeInViewport();
+    await captureBreakState(page, "live-k13-k15-timeline-mobile.png", "dark", "L: live OSS + fakekube + Postgres + Loki + Elasticsearch stack");
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    // Exercise crash marker popover -> Logs before crash & Open live logs drawer in UI.
+    await chart.locator('[data-marker="crash"]').last().click();
+    const crashPopover = page.getByRole("region", { name: "Timeline event details", exact: true });
+    await expect(crashPopover.getByRole("button", { name: "Logs before crash" }).first()).toBeVisible();
+    await crashPopover.getByRole("button", { name: "Logs before crash" }).first().click();
+    await expect(page).toHaveURL(/logs_mode=previous/);
+    await logs.getByRole("button", { name: "Open live logs" }).click();
+    const drawer = page.getByRole("dialog", { name: "Details panel" });
+    await expect(drawer.getByRole("region", { name: "Workload live logs" })).toBeVisible();
+    await drawer.getByRole("button", { name: "Close panel" }).click();
+    await expect(drawer).toHaveCount(0);
+
+    // Return to full break window and follow "Link a source in Agent tab".
+    await page.goto(timelineTarget.pathname + timelineTarget.search);
+    await logs.getByRole("button", { name: "Log coverage tip" }).click();
+    await logs.getByRole("link", { name: "Link a source in Agent tab" }).click();
+
+    const agent = page.getByRole("region", { name: "Kubernetes Agent", exact: true });
+    await expect(agent).toBeVisible();
+    await agent.getByRole("button", { name: "None" }).click();
+    const picker = page.getByLabel("Configured log sources");
+    await expect(picker).toBeVisible();
+    await picker.getByRole("button", { name: /^qa-break-elasticsearch-missing/ }).click();
+    const esForm = agent.getByRole("region", { name: /Elasticsearch mapping$/ });
+    await esForm.getByRole("button", { name: "Test link" }).click();
+    await expect(esForm.getByRole("alert")).toContainText("Source or workload not found. Check the source and cluster.");
+
+    // Test invalid mapping field validation in UI.
+    const nsFieldInput = esForm.getByLabel(/Namespace field/i);
+    await nsFieldInput.fill("bad field!");
+    await expect(esForm.getByRole("alert").first()).toContainText("Use distinct namespace, pod and container names");
+    await expect(esForm.getByRole("button", { name: "Use this source" })).toBeDisabled();
+    await nsFieldInput.fill("kubernetes.namespace_name");
+
+    // Save the failing Elasticsearch source and verify Timeline keeps partial coverage and tip.
+    await esForm.getByRole("button", { name: "Use this source" }).click();
+    await expect(esForm.getByText("Linked", { exact: true })).toBeVisible();
+    await page.goto(timelineTarget.pathname + timelineTarget.search);
+    await expect(logs.getByText("Coverage: partial")).toBeVisible();
+    await expect(logs.getByRole("button", { name: "Log coverage tip" })).toBeVisible();
+
+    // Seed between-restarts gap lines into real Loki, link qa-break-loki in UI, and verify gap closes.
+    const lokiEntries = [
+      ...Array.from({ length: 6 }, (_, index) => ({ at: iso(firstTermMs + 3000 + index * 3000), text: `WARN loki between restarts ${index}` })),
+      ...Array.from({ length: 4 }, (_, index) => ({ at: iso(second(Date.now()) - 20_000 + index * 3000), text: `INFO loki recent test link ${index}` })),
+    ];
+    const pushRes = await fetch(`http://127.0.0.1:${lokiPort}/loki/api/v1/push`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ streams: [{ stream: { job: "k8s-break-logs", namespace: ns, pod: crashPodName, container: "api" }, values: lokiEntries.map((entry) => [`${Date.parse(entry.at)}000000`, entry.text]) }] }),
+    });
+    expect(pushRes.status).toBeGreaterThanOrEqual(200);
+    expect(pushRes.status).toBeLessThan(300);
+    await expect.poll(async () => {
+      const q = encodeURIComponent(`{job="k8s-break-logs",pod="${crashPodName}"}`);
+      const res = await fetch(`http://127.0.0.1:${lokiPort}/loki/api/v1/query_range?query=${q}&start=${(firstTermMs - 600_000) * 1e6}&end=${Date.now() * 1e6}&limit=100`);
+      const data = await res.json();
+      return data.data.result.reduce((sum: number, s: { values: unknown[] }) => sum + s.values.length, 0) === lokiEntries.length;
+    }, { timeout: 60_000, intervals: [1000, 2000] }).toBe(true);
+
+    await logs.getByRole("button", { name: "Log coverage tip" }).click();
+    await logs.getByRole("link", { name: "Link a source in Agent tab" }).click();
+    await agent.getByRole("button", { name: "qa-break-elasticsearch-missing" }).click();
+    await expect(picker.getByRole("button", { name: /^qa-break-elasticsearch-missing/ })).toContainText("failing");
+    await picker.getByRole("button", { name: /^qa-break-loki/ }).click();
+    const lokiForm = agent.getByRole("region", { name: /Loki mapping$/ });
+    await lokiForm.getByRole("button", { name: "Test link" }).click();
+    await expect(lokiForm).toContainText(/Found \d+ lines/);
+    await lokiForm.getByRole("button", { name: "Use this source" }).click();
+    await expect(lokiForm.getByText("Linked", { exact: true })).toBeVisible();
+
+    await page.goto(timelineTarget.pathname + timelineTarget.search);
+    await expect(viewer).toContainText("loki between restarts 0");
+    await expect(viewer).toContainText("deleted replica retry");
+    await expect(logs.getByText("qa-break-loki").first()).toBeVisible();
+    await expect(logs.getByText("Coverage: complete")).toBeVisible();
+    await expect(logs.getByRole("button", { name: "Log coverage tip" })).toHaveCount(0);
+
+    // 9. Follow delivered AgentURL deep link into Chat (verify prefill and NO auto-send).
+    const agentTarget = new URL(agentURL);
+    await page.goto(agentTarget.pathname + agentTarget.search);
+    const composer = page.getByRole("textbox", { name: "Message", exact: true });
+    await expect(composer).toHaveValue("Why is Deployment checkout crash looping?");
+    await expect(page.getByText(`${ns}/checkout`, { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+    expect(chatPostRequests).toEqual([]);
+
+    // 10. Disable alerts in UI, reload/persistence, and verify new break does not alert.
+    await page.goto("/agent/kubernetes?view=issues");
+    await expect(alertSwitch).toHaveAttribute("aria-checked", "true");
+    await alertSwitch.click();
+    await expect(page.getByText("Alerts off.", { exact: true })).toBeVisible();
+    await expect(alertSwitch).toHaveAttribute("aria-checked", "false");
+    await page.reload();
+    await expect(alertSwitch).toHaveAttribute("aria-checked", "false");
+    await expect(issues.getByRole("group", { name: "Issue alert level", exact: true })).toHaveCount(0);
+
+    const postDisableMs = second(Date.now()) - 1000;
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "deployments", namespace: ns, name: "post-disable-api",
+      object: {
+        apiVersion: "apps/v1", kind: "Deployment",
+        metadata: { name: "post-disable-api", namespace: ns, uid: "k13k15-post-disable", generation: 1, creationTimestamp: iso(postDisableMs - 600_000), labels: { app: "post-disable-api" } },
+        spec: { replicas: 2, selector: { matchLabels: { app: "post-disable-api" } }, template: { spec: { containers: [{ name: "api", image: "example.invalid/post:v1" }] } } },
+        status: { observedGeneration: 1, replicas: 2, readyReplicas: 0, availableReplicas: 0, updatedReplicas: 2 },
+      },
+    });
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "pods", namespace: ns, name: "post-disable-pod-0",
+      object: {
+        apiVersion: "v1", kind: "Pod",
+        metadata: { name: "post-disable-pod-0", namespace: ns, uid: "k13k15-post-disable-pod-0", creationTimestamp: iso(postDisableMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "post-disable-api", uid: "k13k15-post-disable", controller: true }] },
+        spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/post:v1" }] },
+        status: { phase: "Running", conditions: [{ type: "Ready", status: "False", lastTransitionTime: iso(postDisableMs) }], containerStatuses: [{ name: "api", ready: false, restartCount: 3, state: { waiting: { reason: "CrashLoopBackOff" } }, lastState: { terminated: { reason: "Error", exitCode: 1, finishedAt: iso(postDisableMs) } } }] },
+      },
+    });
+    await expect(issues.getByRole("article", { name: "Deployment post-disable-api", exact: true }).first()).toBeVisible({ timeout: 60_000 });
+
+    // Also wait for the 1-minute on-call wait window on the unacknowledged payments-worker critical incident to page ServiceNow.
+    await expect.poll(async () => {
+      const r = await receiver();
+      return r.servicenow.length;
+    }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(1);
+
+    const finalReceipts = await receiver();
+    expect(finalReceipts.emails).toHaveLength(3);
+    expect(finalReceipts.lark).toHaveLength(3);
+    expect(finalReceipts.msteams).toHaveLength(2);
+    expect(finalReceipts.servicenow).toHaveLength(1);
+    expect(finalReceipts.servicenow[0].hasBasicAuth).toBe(true);
+    expect(finalReceipts.servicenow[0].table).toBe("incident");
+    expect(errors).toEqual([]);
+    await testInfo.attach("live-k13-k15-receipts", { body: JSON.stringify(finalReceipts, null, 2), contentType: "application/json" });
+  });
+
+  test("verifies concurrent partial and stale-ready owner chain, partial channel delivery UI, Kubernetes vs log-pattern incident detail, and mobile timeline caption and handles", async ({ page }, testInfo) => {
+    test.setTimeout(360_000);
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+
+    const state = process.env.HARNESS_STATE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/.state");
+    const fakePort = Number(process.env.HARNESS_FAKEKUBE_PORT || 28643);
+    const receiverPort = Number(process.env.HARNESS_RECEIVER_HTTP_PORT || 28690);
+    const haScript = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/tests/kubernetes-ha.sh");
+    const ca = fs.readFileSync(path.join(state, "fakekube/ca.crt"));
+
+    const upstream = (endpoint: string, body?: unknown) => new Promise<unknown>((resolve, reject) => {
+      const encoded = body === undefined ? undefined : JSON.stringify(body);
+      const call = https.request(`https://localhost:${fakePort}${endpoint}`, {
+        ca,
+        method: encoded ? "POST" : "GET",
+        headers: encoded ? { "Content-Type": "application/json" } : {},
+      }, (response) => {
+        let text = "";
+        response.on("data", (chunk) => { text += chunk; });
+        response.on("end", () => response.statusCode === 200 ? resolve(JSON.parse(text)) : reject(new Error(`fakekube ${endpoint} HTTP ${response.statusCode} ${text}`)));
+      });
+      call.on("error", reject);
+      call.end(encoded);
+    });
+
+    type ReceiverState = {
+      emails: Array<{ mailFrom: string; rcptTo: string[]; headers: string; body: string; links: Array<{ label: string; url: string }> }>;
+      lark: Array<{ text: string; links: Array<{ label: string; url: string }> }>;
+      msteams: Array<{ text: string; links: Array<{ label: string; url: string }> }>;
+      servicenow: Array<{ table: string; hasBasicAuth: boolean; payload: { short_description?: string; correlation_id?: string } }>;
+    };
+
+    const receiver = async (endpoint = "/_receipts", method = "GET", body?: unknown): Promise<ReceiverState> => {
+      const res = await fetch(`http://127.0.0.1:${receiverPort}${endpoint}`, {
+        method,
+        headers: body ? { "Content-Type": "application/json" } : {},
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      expect(res.status).toBe(200);
+      return res.json() as Promise<ReceiverState>;
+    };
+
+    const haControl = (op: string, svc?: string) => {
+      const args = [haScript, "--control", op, ...(svc ? [svc] : [])];
+      return execFileSync("bash", args, { env: process.env as NodeJS.ProcessEnv, encoding: "utf8", timeout: 90_000 }).trim();
+    };
+
+    const second = (ms: number) => Math.floor(ms / 1000) * 1000;
+    const iso = (ms: number) => new Date(ms).toISOString().replace(".000Z", "Z");
+    const ns = "k13k15";
+
+    await receiver("/_clear", "POST");
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "namespaces", namespace: "", name: ns, object: { kind: "Namespace", metadata: {} } });
+
+    const preBreakMs = second(Date.now()) - 120_000;
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "deployments", namespace: ns, name: "preexisting-api",
+      object: {
+        apiVersion: "apps/v1", kind: "Deployment",
+        metadata: { name: "preexisting-api", namespace: ns, uid: "preexisting-root", generation: 1, creationTimestamp: iso(preBreakMs - 600_000), labels: { app: "preexisting-api" } },
+        spec: { replicas: 2, selector: { matchLabels: { app: "preexisting-api" } }, template: { spec: { containers: [{ name: "api", image: "example.invalid/pre:v1" }] } } },
+        status: { observedGeneration: 1, replicas: 2, readyReplicas: 1, availableReplicas: 1, updatedReplicas: 2 },
+      },
+    });
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "pods", namespace: ns, name: "preexisting-api-pod-0",
+      object: {
+        apiVersion: "v1", kind: "Pod",
+        metadata: { name: "preexisting-api-pod-0", namespace: ns, uid: "preexisting-pod-0", creationTimestamp: iso(preBreakMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "preexisting-api", uid: "preexisting-root", controller: true }] },
+        spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/pre:v1" }] },
+        status: { phase: "Running", conditions: [{ type: "Ready", status: "False", lastTransitionTime: iso(preBreakMs) }], containerStatuses: [{ name: "api", ready: false, restartCount: 4, state: { waiting: { reason: "CrashLoopBackOff", message: "preexisting-canary-msg" } } }] },
+      },
+    });
+
+    // 1. Open Issues tab in the real browser, ensure Pod/ReplicaSet/Deployment are indexed (ready+complete), and enable Warning alerts.
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await openApp(page, "/agent/kubernetes?view=issues");
+    const issues = page.getByRole("region", { name: "Kubernetes issues", exact: true });
+    await expect(issues).toBeVisible();
+    await expect(issues.getByRole("article", { name: "Deployment preexisting-api", exact: true }).first()).toBeVisible({ timeout: 60_000 });
+
+    const alertSwitch = issues.getByRole("switch", { name: "Alert on new issues", exact: true });
+    await expect(alertSwitch).toHaveAttribute("aria-checked", "false");
+    await alertSwitch.click();
+    await expect(page.getByText("Alerts on. Issues that break from now on will alert.", { exact: true })).toBeVisible();
+    const warningBtn = issues.getByRole("group", { name: "Issue alert level", exact: true }).getByRole("button", { name: "Warning", exact: true });
+    await warningBtn.click();
+    await expect(page.getByText("Alert level saved.", { exact: true })).toBeVisible();
+
+    // Ensure at least one complete continuous capture cycle has established the owned baseline and Pod/ReplicaSet/Deployment coverage.
+    await expect.poll(() => {
+      const rows = JSON.parse(haControl("rows")) as Array<{ snapshot: { coverage?: { Pod?: { to?: string }; Deployment?: { to?: string }; ReplicaSet?: { to?: string } } } }>;
+      return rows.some((r) => Boolean(r.snapshot.coverage?.Pod?.to && r.snapshot.coverage?.Deployment?.to && r.snapshot.coverage?.ReplicaSet?.to));
+    }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(true);
+
+    // Wait past the 15s index refresh interval so Pod can refresh immediately while ReplicaSet remains in its older ready+complete state.
+    await page.waitForTimeout(16_000);
+
+    // 2. Concurrent partial owner chain + ready-but-stale owner snapshot:
+    // Hold ReplicaSet list reads in fakekube while creating Deployment checkout, ReplicaSets, and crashing Pods (ownerReferences -> ReplicaSet checkout-6c8d4).
+    const rootUID = "k13k15-checkout";
+    const rsV41UID = "k13k15-checkout-rs-v41";
+    const rsV42UID = "k13k15-checkout-rs-v42";
+    const crashPodName = "checkout-6c8d4-x2k4q";
+    const crashPodUID = "k13k15-checkout-crash-pod";
+    const delPodName = "checkout-6c8d4-d3e4f";
+    const delPodUID = "k13k15-checkout-del-pod";
+    const crashLogPath = `/api/v1/namespaces/${ns}/pods/${crashPodName}/log`;
+    const delLogPath = `/api/v1/namespaces/${ns}/pods/${delPodName}/log`;
+
+    const nowMs = second(Date.now());
+    const seedMs = nowMs;
+    const brokeMs = nowMs - 2000;
+    const firstTermMs = nowMs - 1000;
+    const brokeAtISO = iso(brokeMs);
+    const windowFromISO = iso(brokeMs - 200_000);
+
+    const checkoutDeployment = (availableReplicas: number, createdMs = seedMs - 1_800_000) => ({
+      apiVersion: "apps/v1", kind: "Deployment",
+      metadata: { name: "checkout", namespace: ns, uid: rootUID, generation: 2, creationTimestamp: iso(createdMs), labels: { app: "checkout" } },
+      spec: { replicas: 4, selector: { matchLabels: { app: "checkout" } }, template: { metadata: { labels: { app: "checkout" } }, spec: { containers: [{ name: "api", image: "example.invalid/checkout:v42" }] } } },
+      status: { observedGeneration: 2, replicas: 4, readyReplicas: availableReplicas, availableReplicas, updatedReplicas: 4 },
+    });
+    const makeCheckoutPod = (name: string, uid: string, restarts: number, termMs: number | null, brokeAtStr: string, reason = "OOMKilled", exitCode = 137) => ({
+      apiVersion: "v1", kind: "Pod",
+      metadata: { name, namespace: ns, uid, creationTimestamp: iso(seedMs - 240_000), labels: { app: "checkout" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: "checkout-6c8d4", uid: rsV42UID, controller: true }] },
+      spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/checkout:v42" }] },
+      status: {
+        phase: "Running",
+        conditions: [{ type: "Ready", status: restarts > 0 ? "False" : "True", lastTransitionTime: brokeAtStr }],
+        containerStatuses: [{
+          name: "api", ready: restarts === 0, restartCount: restarts,
+          state: restarts > 0 ? { waiting: { reason: "CrashLoopBackOff", message: "raw-termination-canary-msg" } } : { running: { startedAt: brokeAtStr } },
+          ...(termMs ? { lastState: { terminated: { reason, exitCode, finishedAt: iso(termMs), message: "raw-termination-canary-msg" } } } : {}),
+        }],
+      },
+    });
+
+    const crashFirstLines = Array.from({ length: 12 }, (_, index) => ({
+      at: iso(firstTermMs - 180_000 + index * 10_000),
+      text: index === 2
+        ? "ERROR payment client timeout Authorization: ******"
+        : index % 3 === 0
+          ? `ERROR payment client timeout attempt ${index}`
+          : `INFO starting checkout worker pool ${index}`,
+    }));
+    const delLines = Array.from({ length: 8 }, (_, index) => ({
+      at: iso(firstTermMs - 140_000 + index * 10_000),
+      text: index % 2 === 0 ? `WARN deleted replica retry ${index}` : `INFO deleted pod request ${index}`,
+    }));
+
+    await upstream("/_fake/list-holds", { resource: "replicasets", hold: true, remaining: 2 });
+    await upstream("/_fake/list-holds", { resource: "deployments", hold: true, remaining: 2 });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "deployments", namespace: ns, name: "checkout", object: checkoutDeployment(3) });
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "replicasets", namespace: ns, name: "checkout-v41",
+      object: {
+        apiVersion: "apps/v1", kind: "ReplicaSet",
+        metadata: { name: "checkout-v41", namespace: ns, uid: rsV41UID, creationTimestamp: iso(seedMs - 900_000), labels: { app: "checkout" }, annotations: { "deployment.kubernetes.io/revision": "1" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "checkout", uid: rootUID, controller: true }] },
+        spec: { replicas: 0, template: { spec: { containers: [{ name: "api", image: "example.invalid/checkout:v41" }] } } },
+        status: { replicas: 0, readyReplicas: 0 },
+      },
+    });
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "replicasets", namespace: ns, name: "checkout-6c8d4",
+      object: {
+        apiVersion: "apps/v1", kind: "ReplicaSet",
+        metadata: { name: "checkout-6c8d4", namespace: ns, uid: rsV42UID, creationTimestamp: iso(seedMs - 240_000), labels: { app: "checkout" }, annotations: { "deployment.kubernetes.io/revision": "2" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "checkout", uid: rootUID, controller: true }] },
+        spec: { replicas: 4, template: { spec: { containers: [{ name: "api", image: "example.invalid/checkout:v42" }] } } },
+        status: { replicas: 4, readyReplicas: 3 },
+      },
+    });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace: ns, name: crashPodName, object: makeCheckoutPod(crashPodName, crashPodUID, 1, firstTermMs, brokeAtISO, "OOMKilled", 137) });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace: ns, name: delPodName, object: makeCheckoutPod(delPodName, delPodUID, 1, firstTermMs, brokeAtISO, "Error", 1) });
+    await upstream("/_fake/log-fixtures", { path: crashLogPath, container: "api", previous: true, lines: crashFirstLines });
+    await upstream("/_fake/log-fixtures", { path: delLogPath, container: "api", previous: true, lines: delLines });
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "pods", namespace: ns, name: "orphan-rs-pod-0",
+      object: {
+        apiVersion: "v1", kind: "Pod",
+        metadata: { name: "orphan-rs-pod-0", namespace: ns, uid: "k13k15-orphan-rs-pod-0", creationTimestamp: iso(seedMs - 240_000), labels: { app: "orphan-rs" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: "missing-rs", uid: "k13k15-missing-rs", controller: true }] },
+        spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/orphan:v1" }] },
+        status: {
+          phase: "Running",
+          conditions: [{ type: "Ready", status: "False", lastTransitionTime: brokeAtISO }],
+          containerStatuses: [{ name: "api", ready: false, restartCount: 2, state: { waiting: { reason: "CrashLoopBackOff" } }, lastState: { terminated: { reason: "Error", exitCode: 1, finishedAt: iso(firstTermMs) } } }],
+        },
+      },
+    });
+
+    // Trigger a Pod-only refresh while ReplicaSet and Deployment remain in their older ready+complete snapshot (and held if any concurrent list starts).
+    const podOnlyRes = await page.request.get("/api/admin/kubernetes/resources?resource_id=core~v1~pods&limit=200");
+    expect(podOnlyRes.status()).toBe(200);
+    const podOnlyData = await podOnlyRes.json() as { items?: Array<{ name: string }> };
+    expect((podOnlyData.items ?? []).some((item) => item.name === crashPodName)).toBe(true);
+    await page.waitForTimeout(4000);
+
+    // Assert zero transient ReplicaSet 2-of-0 alert (and zero premature missing-owner alert) was emitted during the ready-but-stale-owner snapshot.
+    const staleOwnerReceipts = await receiver();
+    expect(staleOwnerReceipts.emails).toHaveLength(0);
+    expect(staleOwnerReceipts.lark).toHaveLength(0);
+    expect(staleOwnerReceipts.msteams).toHaveLength(0);
+
+    // Wait past the 15s refresh interval so Pod, ReplicaSet, and Deployment all re-list in the same refresh cycle (testing stable initial OwnerObservedAt boundary).
+    await page.waitForTimeout(16_000);
+    await upstream("/_fake/list-holds", { resource: "replicasets", hold: false, remaining: 0 });
+    await upstream("/_fake/list-holds", { resource: "deployments", hold: false, remaining: 0 });
+    await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+
+    await expect.poll(async () => {
+      const r = await receiver();
+      return r.emails.length === 2 && r.lark.length === 2 && r.msteams.length === 2;
+    }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(true);
+
+    const warningReceipts = await receiver();
+    for (const msg of [...warningReceipts.emails.map((e) => e.body), ...warningReceipts.lark.map((l) => l.text), ...warningReceipts.msteams.map((m) => m.text)]) {
+      expect(msg).not.toContain("ReplicaSet checkout-6c8d4");
+      expect(msg).not.toContain("2 of 0 pods");
+    }
+    const warningEmail = warningReceipts.emails.find((e) => e.body.includes("Deployment checkout is crash looping"))!;
+    expect(warningEmail).toBeTruthy();
+    expect(warningEmail.body).toContain("🟡");
+    expect(warningEmail.body).toContain("<b>Affected:</b> 2 of 4 pods");
+    expect(warningEmail.body).toContain("Exit 137 OOMKilled");
+    expect(warningEmail.body).toContain("Image changed");
+    expect(warningEmail.links.map((l) => l.label)).toEqual(["Open timeline", "Investigate with DevOps Agent"]);
+    const orphanEmail = warningReceipts.emails.find((e) => e.body.includes("ReplicaSet missing-rs is crash looping"))!;
+    expect(orphanEmail).toBeTruthy();
+    expect(orphanEmail.body).toContain("<b>Affected:</b> 1 of 0 pods");
+    const timelineURL = warningEmail.links[0].url;
+
+    // Wait until initial break-log snapshots for both Pods are persisted before deleting/restarting for the Timeline view.
+    await expect.poll(() => {
+      const rows = JSON.parse(haControl("rows")) as Array<{ snapshot: { break_logs?: { snapshots?: Array<{ pod_uid: string }> } } }>;
+      const snaps = rows.flatMap((r) => r.snapshot.break_logs?.snapshots ?? []);
+      return snaps.some((s) => s.pod_uid === crashPodUID) && snaps.some((s) => s.pod_uid === delPodUID);
+    }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(true);
+
+    // 3. Inspect Kubernetes issue incident detail in real UI (facts, evidence, changes, deep links, and no broken /agent/logs/ link).
+    await page.goto("/incidents?status=open");
+    const checkoutLink = page.getByRole("link", { name: /Deployment checkout is crash looping/i }).first();
+    await expect(checkoutLink).toBeVisible();
+    await checkoutLink.click();
+
+    await expect(page.getByText("No summary provided.", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("fakekube", { exact: true })).toBeVisible();
+    await expect(page.getByText(ns, { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("checkout", { exact: true })).toBeVisible();
+    await expect(page.getByText("2 of 4 pods", { exact: true })).toBeVisible();
+    const evidenceSection = page.getByRole("region", { name: "Evidence", exact: true });
+    await expect(evidenceSection).toContainText("Exit 137 OOMKilled");
+    await expect(evidenceSection).toContainText("Exit 1 Error");
+    const changesSection = page.getByRole("region", { name: "Changes", exact: true });
+    await expect(changesSection).toContainText("Image changed");
+    const k8sLinksNav = page.getByRole("navigation", { name: "Kubernetes issue links", exact: true });
+    const detailTimelineLink = k8sLinksNav.getByRole("link", { name: "Timeline", exact: true });
+    const detailAgentLink = k8sLinksNav.getByRole("link", { name: "Agent", exact: true });
+    await expect(detailTimelineLink).toHaveAttribute("href", /\/agent\/kubernetes\?.*root_uid=k13k15-checkout.*view=timeline/);
+    await expect(detailAgentLink).toHaveAttribute("href", /\/agent\/chat\?.*issue=pod\.crash_loop.*provider=kubernetes/);
+    await expect(page.getByText("Rule", { exact: true })).toBeVisible();
+    await expect(page.getByText("kubernetes:pod.crash_loop", { exact: true })).toBeVisible();
+    await expect(page.locator('a[href^="/agent/logs/"]')).toHaveCount(0);
+    await captureBreakState(page, "live-repaired-k8s-incident-detail-desktop.png", "dark", "L: live OSS Kubernetes issue incident detail");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await captureBreakState(page, "live-repaired-k8s-incident-detail-mobile.png", "dark", "L: live OSS Kubernetes issue incident detail mobile");
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    // 4. Critical partial channel failure: MS Teams HTTP 500 while Email + Lark succeed -> list, peek drawer, and detail UI.
+    await receiver("/_control/fault", "POST", { target: "msteams", status: 500 });
+    await page.waitForTimeout(16_000);
+    const partialBreakMs = second(Date.now()) - 1000;
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "deployments", namespace: ns, name: "payments-worker",
+      object: {
+        apiVersion: "apps/v1", kind: "Deployment",
+        metadata: { name: "payments-worker", namespace: ns, uid: "k13k15-payments-worker", generation: 1, creationTimestamp: iso(partialBreakMs - 600_000), labels: { app: "payments-worker" } },
+        spec: { replicas: 2, selector: { matchLabels: { app: "payments-worker" } }, template: { spec: { containers: [{ name: "worker", image: "example.invalid/payments:v1" }] } } },
+        status: { observedGeneration: 1, replicas: 2, readyReplicas: 0, availableReplicas: 0, updatedReplicas: 2 },
+      },
+    });
+    await upstream("/_fake/mutate", {
+      operation: "upsert", resource: "pods", namespace: ns, name: "payments-worker-pod-0",
+      object: {
+        apiVersion: "v1", kind: "Pod",
+        metadata: { name: "payments-worker-pod-0", namespace: ns, uid: "k13k15-payments-pod-0", creationTimestamp: iso(partialBreakMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "payments-worker", uid: "k13k15-payments-worker", controller: true }] },
+        spec: { nodeName: "k13-node", containers: [{ name: "worker", image: "example.invalid/payments:v1" }] },
+        status: { phase: "Running", conditions: [{ type: "Ready", status: "False", lastTransitionTime: iso(partialBreakMs) }], containerStatuses: [{ name: "worker", ready: false, restartCount: 5, state: { waiting: { reason: "CrashLoopBackOff" } }, lastState: { terminated: { reason: "Error", exitCode: 1, finishedAt: iso(partialBreakMs) } } }] },
+      },
+    });
+
+    await page.goto("/agent/kubernetes?view=issues");
+    await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+    await expect.poll(async () => {
+      const r = await receiver();
+      return r.emails.length === 3 && r.lark.length === 3;
+    }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(true);
+    expect((await receiver()).msteams).toHaveLength(2);
+    await receiver("/_control/fault", "POST", { target: "msteams", status: 0 });
+
+    await page.goto("/incidents?status=open");
+    const paymentsLink = page.getByRole("link", { name: /Deployment payments-worker is crash looping/i }).first();
+    await expect(paymentsLink).toBeVisible();
+    const paymentsRow = paymentsLink.locator("xpath=ancestor::tr[1]");
+
+    // Expand inline partial-delivery failure detail in the table row.
+    const notifyExpandBtn = paymentsRow.getByRole("button", { name: "Show notification failure detail", exact: true });
+    await expect(notifyExpandBtn).toBeVisible();
+    await expect(notifyExpandBtn).toContainText("partial");
+    await notifyExpandBtn.click();
+    await expect(page.getByText(/Partial delivery:.*MS Teams API returned 500 status code/i)).toBeVisible();
+
+    // Open Peek drawer on the same row and verify Partial delivery error banner is visible.
+    await paymentsRow.getByRole("button", { name: /^View incident / }).click();
+    const peekDialog = page.getByRole("dialog");
+    await expect(peekDialog).toBeVisible();
+    await expect(peekDialog).toContainText("partial");
+    await expect(peekDialog.getByText(/Partial delivery:.*MS Teams API returned 500 status code/i)).toBeVisible();
+    await captureBreakState(page, "live-repaired-incidents-list-peek-partial-desktop.png", "dark", "L: live OSS incidents list + peek drawer partial channel failure");
+
+    await page.keyboard.press("Escape");
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await captureBreakState(page, "live-repaired-incidents-list-partial-mobile.png", "dark", "L: live OSS incidents list partial channel failure mobile");
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    // Open IncidentDetailPage for the partial-delivery incident and verify sent badges on succeeded channels + inline error + Timeline row.
+    await paymentsLink.click();
+    const notifiedCard = page.locator(".card", { has: page.locator(".card-title", { hasText: "Notified" }) });
+    await expect(notifiedCard.locator("li", { hasText: "email" })).toContainText("sent");
+    await expect(notifiedCard.locator("li", { hasText: "lark" })).toContainText("sent");
+    await expect(notifiedCard.getByText(/MS Teams API returned 500 status code/i)).toBeVisible();
+    const timelineCard = page.locator(".card", { has: page.locator(".card-title", { hasText: "Timeline" }) });
+    await expect(timelineCard).toContainText("notified email");
+    await expect(timelineCard).toContainText("notified lark");
+    await expect(timelineCard).toContainText("Partial delivery");
+    await expect(timelineCard.getByText(/MS Teams API returned 500 status code/i)).toBeVisible();
+    await captureBreakState(page, "live-repaired-incident-detail-partial-desktop.png", "dark", "L: live OSS incident detail partial channel failure");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await captureBreakState(page, "live-repaired-incident-detail-partial-mobile.png", "dark", "L: live OSS incident detail partial channel failure mobile");
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    // 5. Ordinary log-pattern incident UI preserved.
+    const createOrdinaryRes = await page.request.post("/api/incidents", {
+      headers: { Origin: new URL(page.url()).origin },
+      data: {
+        AlertName: "Spike in payment gateway timeouts",
+        Severity: "warning",
+        ServiceName: "payments-api",
+        Summary: "Ordinary log-miner pattern summary preserved.",
+        PatternID: "pat-ordinary-log-01",
+        PatternTemplate: "ERROR timeout waiting for upstream <*> after <*>ms",
+        Logs: "2026-10-20T12:00:00Z ERROR timeout waiting for upstream ledger after 5000ms",
+      },
+    });
+    expect(createOrdinaryRes.status()).toBe(201);
+
+    await page.goto("/incidents?status=open");
+    const ordinaryLink = page.getByRole("link", { name: "Spike in payment gateway timeouts", exact: true }).first();
+    await expect(ordinaryLink).toBeVisible();
+    await ordinaryLink.click();
+    await expect(page.getByText("Ordinary log-miner pattern summary preserved.", { exact: true })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Kubernetes issue links", exact: true })).toHaveCount(0);
+    await expect(page.getByText("Pattern", { exact: true }).first()).toBeVisible();
+    const patternLink = page.getByRole("link", { name: "pat-ordinary", exact: true });
+    await expect(patternLink).toHaveAttribute("href", "/agent/logs/pat-ordinary-log-01");
+    await captureBreakState(page, "live-repaired-ordinary-log-incident-desktop.png", "dark", "L: live OSS ordinary log-pattern incident detail preserved");
+
+    // 6. Trigger 2nd restart + deleted Pod on checkout and verify mobile 390 Timeline log-window caption & handles (including right edge).
+    await upstream("/_fake/mutate", { operation: "delete", resource: "pods", namespace: ns, name: delPodName });
+    const secondTermMs = second(Date.now()) - 2000;
+    const windowToISO = iso(secondTermMs);
+    const secondLines = Array.from({ length: 6 }, (_, index) => ({
+      at: iso(secondTermMs - 25_000 + index * 4000),
+      text: `INFO second restart line ${index}`,
+    }));
+    await upstream("/_fake/log-fixtures", { path: crashLogPath, container: "api", previous: true, lines: secondLines });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace: ns, name: crashPodName, object: makeCheckoutPod(crashPodName, crashPodUID, 3, secondTermMs, brokeAtISO, "OOMKilled", 137) });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "deployments", namespace: ns, name: "checkout", object: checkoutDeployment(0) });
+
+    await page.waitForTimeout(16_000);
+    await page.goto("/agent/kubernetes?view=issues");
+    await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+    await expect.poll(() => {
+      const rows = JSON.parse(haControl("rows")) as Array<{ snapshot: { break_logs?: { snapshots?: Array<{ pod_uid: string }> } } }>;
+      const snaps = rows.flatMap((r) => r.snapshot.break_logs?.snapshots ?? []);
+      return snaps.filter((s) => s.pod_uid === crashPodUID).length;
+    }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(2);
+
+    const timelineTarget = new URL(timelineURL);
+    timelineTarget.searchParams.set("logs_from", windowFromISO);
+    timelineTarget.searchParams.set("logs_to", windowToISO);
+    await page.goto(timelineTarget.pathname + timelineTarget.search);
+
+    const lane = page.getByRole("region", { name: "Timeline lane checkout", exact: true });
+    await expect(lane).toBeVisible();
+    const chart = lane.getByRole("region", { name: "Resource timeline chart", exact: true });
+    const logs = page.getByRole("region", { name: "Logs at break", exact: true });
+    const viewer = logs.getByRole("log");
+    await expect(viewer).toContainText("payment client timeout");
+    await expect(viewer).toContainText("deleted replica retry");
+    await expect(logs.getByText("Captured at break").first()).toBeVisible();
+
+    await logs.scrollIntoViewIfNeeded();
+    await logs.getByRole("button", { name: "Log coverage tip" }).click();
+    await expect(logs.getByText(/The container restarted more than once since the break/)).toBeVisible();
+    await captureBreakState(page, "live-k13-k15-timeline-desktop.png", "dark", "L: live OSS + fakekube + Postgres + Loki + Elasticsearch stack");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await expect(page.getByRole("toolbar", { name: "Break log actions" })).toBeInViewport();
+    const caption = chart.locator(".break-log-window-caption");
+    await expect(caption).toBeVisible();
+    await expect(caption).toHaveText(/^log window [+-]?\d+(?:\.\d+)? m \.\.\. [+-]?\d+(?:\.\d+)? m$/);
+
+    const verifyMobileCaptionBounds = async () => {
+      const bounds = await caption.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const plot = element.closest(".break-log-bracket-plot")!.getBoundingClientRect();
+        const scroll = element.closest(".resource-timeline-scroll")!.getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        const text = Array.from(range.getClientRects()).map((line) => ({ left: line.left, right: line.right, top: line.top, bottom: line.bottom }));
+        return {
+          textContent: element.textContent,
+          caption: { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom },
+          plot: { left: plot.left, right: plot.right },
+          visible: { left: scroll.left + 132, right: scroll.right },
+          text,
+          captionOverflow: element.scrollWidth > element.clientWidth,
+          pageOverflow: document.documentElement.scrollWidth > window.innerWidth,
+          controlsOverlap: Array.from(document.querySelectorAll(".resource-timeline-break-pill, .resource-timeline-now-label, .break-log-handle")).some((control) => {
+            const other = control.getBoundingClientRect();
+            return rect.left < other.right && rect.right > other.left && rect.top < other.bottom && rect.bottom > other.top;
+          }),
+        };
+      });
+      expect(bounds.caption.left).toBeGreaterThanOrEqual(bounds.plot.left - 1);
+      expect(bounds.caption.right).toBeLessThanOrEqual(bounds.plot.right + 1);
+      expect(bounds.caption.left).toBeGreaterThanOrEqual(bounds.visible.left - 1);
+      expect(bounds.caption.right).toBeLessThanOrEqual(bounds.visible.right + 1);
+      expect(bounds.captionOverflow).toBe(false);
+      expect(bounds.pageOverflow).toBe(false);
+      expect(bounds.controlsOverlap).toBe(false);
+      expect(bounds.text.length).toBeGreaterThan(0);
+      for (const line of bounds.text) {
+        expect(line.left).toBeGreaterThanOrEqual(bounds.caption.left - 1);
+        expect(line.right).toBeLessThanOrEqual(bounds.caption.right + 1);
+        expect(line.top).toBeGreaterThanOrEqual(bounds.caption.top - 1);
+        expect(line.bottom).toBeLessThanOrEqual(bounds.caption.bottom + 1);
+      }
+      return bounds;
+    };
+
+    const centeredBounds = await verifyMobileCaptionBounds();
+    await captureBreakState(page, "live-k13-k15-timeline-mobile.png", "dark", "L: live OSS + fakekube + Postgres + Loki + Elasticsearch stack");
+
+    // Push log window bracket to the right edge of the chart on mobile 390x844 and verify caption + both slider handles remain accessible.
+    const chartUntil = Date.parse((await chart.getAttribute("data-until"))!);
+    const rightEdgeURL = new URL(page.url());
+    rightEdgeURL.searchParams.set("logs_from", new Date(chartUntil - 180_000).toISOString());
+    rightEdgeURL.searchParams.set("logs_to", new Date(chartUntil - 30_000).toISOString());
+    await page.goto(rightEdgeURL.pathname + rightEdgeURL.search);
+    await expect(caption).toBeVisible();
+    await chart.evaluate((element) => { element.scrollLeft = element.scrollWidth - element.clientWidth; });
+    await expect.poll(async () => {
+      const b = await verifyMobileCaptionBounds();
+      return b.captionOverflow === false;
+    }).toBe(true);
+    const rightEdgeBounds = await verifyMobileCaptionBounds();
+
+    const startHandle = chart.getByRole("slider", { name: "Log window start", exact: true });
+    const endHandle = chart.getByRole("slider", { name: "Log window end", exact: true });
+    await expect(startHandle).toBeInViewport();
+    await expect(endHandle).toBeInViewport();
+    await endHandle.focus();
+    await expect(endHandle).toBeFocused();
+    const prevEndVal = await endHandle.getAttribute("aria-valuenow");
+    await page.keyboard.press("ArrowLeft");
+    await expect(endHandle).not.toHaveAttribute("aria-valuenow", prevEndVal!);
+    await startHandle.focus();
+    await expect(startHandle).toBeFocused();
+    const prevStartVal = await startHandle.getAttribute("aria-valuenow");
+    await page.keyboard.press("ArrowRight");
+    await expect(startHandle).not.toHaveAttribute("aria-valuenow", prevStartVal!);
+    await captureBreakState(page, "live-repaired-timeline-right-edge-mobile.png", "dark", "L: live OSS mobile 390 timeline right-edge caption and handles");
+
+    expect(errors).toEqual([]);
+    await testInfo.attach("repaired-flows-evidence", {
+      body: JSON.stringify({ centeredBounds, rightEdgeBounds, receipts: await receiver() }, null, 2),
+      contentType: "application/json",
+    });
+  });
+});
+
+test.describe("Live Enterprise K15 user and receiver acceptance", () => {
+  test.skip(process.env.E2E_K15_ENTERPRISE_LIVE !== "1", "requires the live licensed Enterprise fakekube stack and local receiver");
+
+  test("verifies unauthenticated deep-link login return, UI alert enable, custom-channel diversion, critical priority floor and on-call paging", async ({ page }, testInfo) => {
+    test.setTimeout(480_000);
+    const errors: string[] = [];
+    const chatPostRequests: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("request", (req) => {
+      const url = new URL(req.url());
+      if (req.method() === "POST" && url.pathname.startsWith("/api/admin/chat/")) {
+        chatPostRequests.push(`${req.method()} ${url.pathname}`);
+      }
+    });
+
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+
+    const state = process.env.HARNESS_STATE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/.state");
+    const fakePort = Number(process.env.HARNESS_FAKEKUBE_PORT || 28743);
+    const receiverPort = Number(process.env.HARNESS_RECEIVER_HTTP_PORT || 28690);
+    const ca = fs.readFileSync(path.join(state, "fakekube/ca.crt"));
+
+    const upstream = (endpoint: string, body?: unknown) => new Promise<unknown>((resolve, reject) => {
+      const encoded = body === undefined ? undefined : JSON.stringify(body);
+      const call = https.request(`https://localhost:${fakePort}${endpoint}`, {
+        ca,
+        method: encoded ? "POST" : "GET",
+        headers: encoded ? { "Content-Type": "application/json" } : {},
+      }, (response) => {
+        let text = "";
+        response.on("data", (chunk) => { text += chunk; });
+        response.on("end", () => response.statusCode === 200 ? resolve(JSON.parse(text)) : reject(new Error(`fakekube ${endpoint} HTTP ${response.statusCode} ${text}`)));
+      });
+      call.on("error", reject);
+      call.end(encoded);
+    });
+
+    type ReceiverState = {
+      emails: Array<{ body: string; links: Array<{ label: string; url: string }> }>;
+      lark: Array<{ text: string; links: Array<{ label: string; url: string }> }>;
+      divertLark: Array<{ text: string; links: Array<{ label: string; url: string }> }>;
+      msteams: Array<{ text: string; links: Array<{ label: string; url: string }> }>;
+      servicenow: Array<{ table: string; hasBasicAuth: boolean; payload: { correlation_id?: string } }>;
+    };
+
+    const receiver = async (endpoint = "/_receipts", method = "GET", body?: unknown): Promise<ReceiverState> => {
+      const res = await fetch(`http://127.0.0.1:${receiverPort}${endpoint}`, {
+        method,
+        headers: body ? { "Content-Type": "application/json" } : {},
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      expect(res.status).toBe(200);
+      return res.json() as Promise<ReceiverState>;
+    };
+
+    await receiver("/_clear", "POST");
+
+    // 1. Unauthenticated deep link to Chat -> real local-admin login in UI -> preserves deep link and prefills without auto-send.
+    const deepChatPath = "/agent/chat?provider=kubernetes&cluster=fakekube&resource_id=apps~v1~deployments&name=ent-checkout&namespace=shop&uid=ent-checkout-root&include_changes=true&issue=pod.crash_loop";
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto(deepChatPath);
+    await expect(page.getByTestId("local-login-form")).toBeVisible();
+    await page.getByTestId("local-login-username").fill(process.env.E2E_ADMIN_USERNAME || "admin");
+    await page.getByTestId("local-login-password").fill(process.env.E2E_ADMIN_PASSWORD || "");
+    await page.getByTestId("local-login-submit").click();
+    await expect(page.getByTestId("app-authenticated")).toBeVisible();
+    expect(new URL(page.url()).pathname + new URL(page.url()).search).toBe(deepChatPath);
+    await expect(page.getByRole("textbox", { name: "Message", exact: true })).toHaveValue("Why is Deployment ent-checkout crash looping?");
+    await expect(page.getByText("shop/ent-checkout", { exact: true })).toBeVisible();
+    expect(chatPostRequests).toEqual([]);
+
+    // 2. Enable issue alerts at Warning in the real Enterprise UI.
+    await page.goto("/agent/kubernetes?view=issues");
+    const issues = page.getByRole("region", { name: "Kubernetes issues", exact: true });
+    await expect(issues).toBeVisible();
+    const alertSwitch = issues.getByRole("switch", { name: "Alert on new issues", exact: true });
+    await expect(alertSwitch).toHaveAttribute("aria-checked", "false");
+    await alertSwitch.click();
+    await expect(alertSwitch).toHaveAttribute("aria-checked", "true");
+    const warningBtn = issues.getByRole("group", { name: "Issue alert level", exact: true }).getByRole("button", { name: "Warning", exact: true });
+    await warningBtn.click();
+    await expect(warningBtn).toHaveAttribute("aria-pressed", "true");
+
+    // Configure custom fatigue channel to /divert-lark through the authenticated session.
+    const origin = new URL(page.url()).origin;
+    const setCustomRes = await page.request.put("/enterprise/api/alert-fatigue/custom-channel", {
+      headers: { Origin: origin },
+      data: {
+        channel_type: "lark",
+        enabled: true,
+        config: { webhook_url: `http://host.docker.internal:${receiverPort}/divert-lark`, use_proxy: "false" },
+      },
+    });
+    expect(setCustomRes.status()).toBe(200);
+
+    // Ensure alert fatigue starts OFF by default.
+    const fatigueCfgRes = await page.request.get("/enterprise/api/alert-fatigue/config");
+    expect(fatigueCfgRes.status()).toBe(200);
+    expect((await fatigueCfgRes.json()).enabled).toBe(false);
+
+    const second = (ms: number) => Math.floor(ms / 1000) * 1000;
+    const iso = (ms: number) => new Date(ms).toISOString().replace(".000Z", "Z");
+    const ns = "shop";
+    const wName = "ent-checkout";
+    const rootUID = "ent-checkout-root";
+    const podName = "ent-checkout-pod-0";
+
+    const deployObj = (avail: number) => ({
+      apiVersion: "apps/v1", kind: "Deployment",
+      metadata: { name: wName, namespace: ns, uid: rootUID, generation: 1, creationTimestamp: iso(Date.now() - 600_000), labels: { app: wName } },
+      spec: { replicas: 3, selector: { matchLabels: { app: wName } }, template: { metadata: { labels: { app: wName } }, spec: { containers: [{ name: "api", image: "example.invalid/ent:v1" }] } } },
+      status: { observedGeneration: 1, replicas: 3, readyReplicas: avail, availableReplicas: avail, updatedReplicas: 3 },
+    });
+    const podObj = (broken: boolean, brokeMs: number) => ({
+      apiVersion: "v1", kind: "Pod",
+      metadata: { name: podName, namespace: ns, uid: "ent-checkout-pod-uid", creationTimestamp: iso(Date.now() - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: wName, uid: rootUID, controller: true }] },
+      spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/ent:v1" }] },
+      status: {
+        phase: "Running",
+        conditions: [{ type: "Ready", status: broken ? "False" : "True", lastTransitionTime: iso(brokeMs) }],
+        containerStatuses: [{
+          name: "api", ready: !broken, restartCount: broken ? 6 : 0,
+          state: broken ? { waiting: { reason: "CrashLoopBackOff" } } : { running: { startedAt: iso(brokeMs) } },
+          ...(broken ? { lastState: { terminated: { reason: "Error", exitCode: 1, finishedAt: iso(brokeMs) } } } : {}),
+        }],
+      },
+    });
+
+    const waitHealthy = async () => {
+      const t = second(Date.now());
+      await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace: ns, name: podName, object: podObj(false, t) });
+      await upstream("/_fake/mutate", { operation: "upsert", resource: "deployments", namespace: ns, name: wName, object: deployObj(3) });
+      await expect.poll(async () => {
+        const res = await page.request.get(`/api/admin/kubernetes/issues?cluster=fakekube&broken=true&limit=200`);
+        const body = await res.json();
+        return !(body.items ?? []).some((item: { root?: { name?: string } }) => item.root?.name === wName);
+      }, { timeout: 90_000, intervals: [1000, 2000] }).toBe(true);
+    };
+
+    const resolveOpenIncidents = async () => {
+      const res = await page.request.get("/api/admin/incidents?status=open&limit=50");
+      const list = (await res.json()).incidents ?? [];
+      for (const inc of list) {
+        if ((inc.service ?? "").includes(wName)) {
+          const r = await page.request.post(`/api/admin/incidents/${inc.id}/resolve`, { headers: { Origin: origin }, data: {} });
+          expect(r.status()).toBe(200);
+        }
+      }
+    };
+
+    // Enable Alert Fatigue (enabled: true, pending_review: false) via API/UI.
+    const enableFatigueRes = await page.request.put("/enterprise/api/alert-fatigue/config", {
+      headers: { Origin: origin },
+      data: { enabled: true, pending_review: false },
+    });
+    expect(enableFatigueRes.status()).toBe(200);
+
+    // 1st Warning episode under Alert Fatigue ON -> proceeds to primary /lark.
+    await waitHealthy();
+    await page.waitForTimeout(3000);
+    const firstBrokeMs = second(Date.now()) - 1000;
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace: ns, name: podName, object: podObj(true, firstBrokeMs) });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "deployments", namespace: ns, name: wName, object: deployObj(2) });
+    await expect.poll(async () => (await receiver()).lark.length, { timeout: 90_000, intervals: [1000, 2000] }).toBe(1);
+    expect((await receiver()).divertLark).toHaveLength(0);
+
+    // Recover and resolve 1st episode, then trigger 2nd Warning episode -> DIVERTED to /divert-lark!
+    await waitHealthy();
+    await resolveOpenIncidents();
+    await page.waitForTimeout(3000);
+    const secondBrokeMs = second(Date.now()) - 1000;
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace: ns, name: podName, object: podObj(true, secondBrokeMs) });
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "deployments", namespace: ns, name: wName, object: deployObj(2) });
+    await expect.poll(async () => (await receiver()).divertLark.length, { timeout: 90_000, intervals: [1000, 2000] }).toBe(1);
+    const afterDivert = await receiver();
+    expect(afterDivert.lark).toHaveLength(1);
+    expect(afterDivert.divertLark[0].text).toContain("Deployment ent-checkout is crash looping");
+    expect(afterDivert.divertLark[0].links.map((l) => l.label)).toEqual(["Open timeline", "Investigate with DevOps Agent"]);
+
+    // Verify fingerprint review table stamps status="fatigued" and routed_channel="custom:lark".
+    const fpRes = await page.request.get("/enterprise/api/alert-fatigue/fingerprints");
+    expect(fpRes.status()).toBe(200);
+    const fpItems = (await fpRes.json()).fingerprints ?? [];
+    expect(fpItems.some((item: { status: string; routed_channel: string }) => item.status === "fatigued" && item.routed_channel === "custom:lark")).toBe(true);
+
+    // Escalate 2nd episode to Critical (0 of 3 ready) -> priority floor overrides fatigue and delivers to primary /lark + pages ServiceNow!
+    await upstream("/_fake/mutate", { operation: "upsert", resource: "deployments", namespace: ns, name: wName, object: deployObj(0) });
+    await expect.poll(async () => (await receiver()).lark.length, { timeout: 90_000, intervals: [1000, 2000] }).toBe(2);
+    expect((await receiver()).divertLark).toHaveLength(1);
+
+    // Wait for the 1-minute on-call wait window to page ServiceNow on the critical escalation.
+    await expect.poll(async () => (await receiver()).servicenow.length, { timeout: 90_000, intervals: [1000, 2000] }).toBe(1);
+    const entFinal = await receiver();
+    expect(entFinal.servicenow[0].hasBasicAuth).toBe(true);
+
+    // Cleanup Enterprise settings.
+    await page.request.delete("/enterprise/api/alert-fatigue/custom-channel", { headers: { Origin: origin } });
+    await page.request.put("/enterprise/api/alert-fatigue/config", { headers: { Origin: origin }, data: { enabled: false, pending_review: false } });
+    await page.request.put("/api/admin/kubernetes/issue-alerts?cluster=fakekube", { headers: { Origin: origin }, data: { enabled: false, level: "critical" } });
+    expect(errors).toEqual([]);
+    await testInfo.attach("live-enterprise-k15-receipts", { body: JSON.stringify(entFinal, null, 2), contentType: "application/json" });
+  });
 });

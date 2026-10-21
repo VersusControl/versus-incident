@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Kubernetes issue</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:720px;margin:auto;padding:16px">
+<h2>{{ if eq .Severity "critical" }}🔴{{ else }}🟡{{ end }} Kubernetes issue {{ or .AlertName "Detected issue" }}</h2>
+<p><b>Severity:</b> {{ or .KubernetesSeverity .Severity "warning" }}<br>
+<b>Cluster:</b> {{ or .Cluster "" }}<br>
+<b>Namespace:</b> {{ or .Namespace "" }}<br>
+<b>Workload:</b> {{ or .WorkloadKind "" }} {{ or .Workload "" }}<br>
+<b>Affected:</b> {{ or .Affected "" }}<br>
+<b>Broke at:</b> {{ or .BrokeAt "" }}{{ if .BrokeAgo }}, {{ .BrokeAgo }}{{ end }}</p>
+<h3>What we saw</h3><ul>{{ range .Evidence }}<li>{{ . }}</li>{{ end }}</ul>
+{{ if or .Changes .HistoryIncomplete }}<h3>Changes before the break</h3><ul>{{ range .Changes }}<li>{{ . }}</li>{{ end }}</ul>
+{{ if .HistoryIncomplete }}<p>Change history is incomplete</p>{{ end }}{{ end }}
+{{ if .AckURL }}<a href="{{ .AckURL }}">Acknowledge</a>{{ end }}
+{{ range .Links }}<a style="display:inline-block;padding:10px;margin:4px;background:#eef2ff;border-radius:6px" href="{{ .url }}">{{ .label }}</a>
+{{ end }}
+</body></html>

@@ -50,7 +50,7 @@ export function ResourceTimelineChart({ issue, issues = [], changes, crashes, si
   const headingRef = useRef<HTMLHeadingElement>(null);
   const openerRef = useRef<HTMLButtonElement | null>(null);
   const focusRef = useRef<HTMLElement | null>(null);
-  const [viewport, setViewport] = useState({ left: 0, width: 0, mobile: false });
+  const [viewport, setViewport] = useState({ left: 0, width: 0, plotWidth: 0, mobile: false });
   const detailID = useId();
   const start = Date.parse(since);
   const end = Date.parse(until);
@@ -134,7 +134,7 @@ export function ResourceTimelineChart({ issue, issues = [], changes, crashes, si
       const plotWidth = element.querySelector<HTMLElement>(".resource-timeline-overlay")?.getBoundingClientRect().width ?? 0;
       element.scrollLeft = Math.max(0, (broke - start) / (end - start) * plotWidth - (element.clientWidth - 132) / 2);
     }
-    const measure = () => setViewport({ left: element.scrollLeft, width: element.clientWidth, mobile: window.matchMedia?.("(max-width: 640px)").matches ?? false });
+    const measure = () => setViewport({ left: element.scrollLeft, width: element.clientWidth, plotWidth: element.querySelector<HTMLElement>(".resource-timeline-overlay")?.getBoundingClientRect().width ?? 0, mobile: window.matchMedia?.("(max-width: 640px)").matches ?? false });
     measure();
     const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
     observer?.observe(element);
@@ -147,7 +147,7 @@ export function ResourceTimelineChart({ issue, issues = [], changes, crashes, si
     {!valid ? <p role="status" className="p-4 text-xs text-ink-400">Window unavailable.</p> : <>
       <div ref={plotRef} className="resource-timeline-scroll" tabIndex={0} role="region" aria-label="Resource timeline chart" data-since={since} data-until={until} data-now={now} onScroll={(event) => { const left = event.currentTarget.scrollLeft; setViewport((current) => ({ ...current, left })); }}>
         <div className="resource-timeline-grid">
-          <div className="resource-timeline-head" style={{ height: (closeCaptions ? 44 : 34) + (logs?.window ? 24 : 0) }}><div className="resource-timeline-plot">
+          <div className="resource-timeline-head" style={{ height: (closeCaptions ? 44 : 34) + (logs?.window ? viewport.mobile ? 56 : 24 : 0) }}><div className="resource-timeline-plot">
             {breakVisible && <span className="resource-timeline-break-pill" style={{ left: viewport.mobile && viewport.width ? `clamp(${viewport.left + 44}px, ${position(broke)}%, ${viewport.left + Math.max(44, mobilePlotWidth - 44)}px)` : `clamp(44px, ${position(broke)}%, calc(100% - 44px))` }} title={`Break: ${breakRule(issue!)} ${clock(issue?.broke_at)}`}>{visibleBreak ? `break ${axisClock(broke)}` : position(broke) / 100 * 620 < viewport.left ? "← break" : "break →"}</span>}
             {inWindow(now) && <span className="resource-timeline-now-label" style={{ left: `clamp(14px, ${position(now)}%, calc(100% - 14px))`, top: closeCaptions ? 18 : 0 }}>now</span>}
           </div></div>
@@ -187,7 +187,7 @@ export function ResourceTimelineChart({ issue, issues = [], changes, crashes, si
             })}
             {rows.size === 0 && <p className="p-4 text-xs text-ink-400">No recorded markers in this window.</p>}
             <BreakLogRateStrip since={since} until={until} />
-            <LogWindowBracket since={since} until={until} />
+            <LogWindowBracket since={since} until={until} captionViewport={viewport.mobile && viewport.width ? { left: viewport.left, width: Math.min(mobilePlotWidth, Math.max(0, viewport.plotWidth - viewport.left)) } : undefined} />
           </div>
           <div className="resource-timeline-axis"><div className="resource-timeline-plot">{ticks.map((tick) => <time key={tick} dateTime={new Date(tick).toISOString()} style={{ left: `${position(tick)}%` }}>{axisClock(tick)}</time>)}</div></div>
         </div>

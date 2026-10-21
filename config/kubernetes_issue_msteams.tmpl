@@ -1,0 +1,18 @@
+{{ if eq .Severity "critical" }}🔴{{ else }}🟡{{ end }} **Kubernetes issue** {{ escapeHTML (or .AlertName "Detected issue") }}
+
+**Severity:** {{ escapeHTML (or .KubernetesSeverity .Severity "warning") }}
+**Cluster:** {{ escapeHTML (or .Cluster "") }}
+**Namespace:** {{ escapeHTML (or .Namespace "") }}
+**Workload:** {{ escapeHTML (or .WorkloadKind "") }} {{ escapeHTML (or .Workload "") }}
+**Affected:** {{ escapeHTML (or .Affected "") }}
+**Broke at:** {{ escapeHTML (or .BrokeAt "") }}{{ if .BrokeAgo }}, {{ escapeHTML .BrokeAgo }}{{ end }}
+
+**What we saw**
+{{ range .Evidence }}- {{ escapeHTML . }}
+{{ end }}{{ if or .Changes .HistoryIncomplete }}
+**Changes before the break**
+{{ range .Changes }}- {{ escapeHTML . }}
+{{ end }}{{ if .HistoryIncomplete }}Change history is incomplete
+{{ end }}{{ end }}{{ if .AckURL }}[Acknowledge]({{ .AckURL }})
+{{ end }}{{ range .Links }}[{{ escapeHTML .label }}]({{ .url }})
+{{ end }}

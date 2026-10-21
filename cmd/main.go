@@ -225,6 +225,7 @@ func main() {
 		service.SetScrubber(redactor)
 	})
 	agent.ConfigureKubernetesBreakLogs(kubernetesService, cfg.Agent.Sources, redactor, tenancy.DefaultOrgScope().Write)
+	services.ConfigureKubernetesIssueAlerts(kubernetesService)
 	kubernetesService.StartCapture(rootCtx)
 	defer kubernetesService.Close()
 	constructionHealth := ""

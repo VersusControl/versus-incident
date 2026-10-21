@@ -31,6 +31,90 @@ func TestPartialSyncNeverDeletesUnseenRecords(t *testing.T) {
 	}
 }
 
+func TestRefreshCompletionBoundsChildEvidence(t *testing.T) {
+	index := New(10)
+	started := time.Now().UTC().Add(-time.Minute)
+	var loadedAt time.Time
+	if err := index.Refresh(t.Context(), "Pod", 0, started, func(context.Context) ([]Record, bool, error) {
+		loadedAt = time.Now().UTC()
+		return []Record{pod("uid-a", "a")}, true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	first := index.Snapshot().Kinds["Pod"]
+	if !first.ObservedAt.Equal(started) || first.CompletedAt.Before(loadedAt) || first.CompletedAt.After(time.Now().UTC()) {
+		t.Fatalf("LIST start and completion must bound evidence: %+v", first)
+	}
+	// Failed loads publish no new evidence and must not advance completion.
+	if err := index.Refresh(t.Context(), "Pod", 0, time.Now().UTC(), func(context.Context) ([]Record, bool, error) {
+		return nil, false, errors.New("unavailable")
+	}); err == nil {
+		t.Fatal("failed refresh succeeded")
+	}
+	if got := index.Snapshot().Kinds["Pod"]; !got.CompletedAt.Equal(first.CompletedAt) {
+		t.Fatalf("failed refresh advanced evidence: %+v", got)
+	}
+	// Partial loads can publish new child records even though ObservedAt
+	// continues to describe the last complete observation.
+	partialAt := time.Now().UTC()
+	if err := index.Ingest("Pod", []Record{pod("uid-b", "b")}, false, partialAt); err != nil {
+		t.Fatal(err)
+	}
+	got := index.Snapshot().Kinds["Pod"]
+	if !got.Partial || !got.ObservedAt.Equal(started) || got.CompletedAt.Before(partialAt) || !got.CompletedAt.After(first.CompletedAt) {
+		t.Fatalf("partial load lost current evidence bound: %+v", got)
+	}
+}
+
+func TestOwnerObservationBoundarySurvivesRelistsAndResetsWithIdentity(t *testing.T) {
+	index := New(1)
+	record := pod("uid-a", "a")
+	record.Owners = []OwnerRef{{Kind: "ReplicaSet", UID: "owner-a", Name: "owner-a", Controller: true, ControllerKnown: true}}
+	ingest := func(complete bool) Record {
+		t.Helper()
+		if err := index.Ingest("Pod", []Record{record}, complete, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		return index.Snapshot().Records[0]
+	}
+	first := ingest(true)
+	if first.OwnerObservedAt.IsZero() {
+		t.Fatal("missing initial boundary")
+	}
+	// Neither caller stamps nor refreshed status can reset an unchanged owner.
+	record.OwnerObservedAt = first.OwnerObservedAt.Add(-time.Hour)
+	record.Phase = "Failed"
+	for _, complete := range []bool{false, true, true} {
+		if got := ingest(complete); !got.OwnerObservedAt.Equal(first.OwnerObservedAt) {
+			t.Fatalf("re-list moved boundary: %+v", got)
+		}
+	}
+	copy := index.Snapshot()
+	copy.Records[0].OwnerObservedAt = time.Time{}
+	if index.Snapshot().Records[0].OwnerObservedAt.IsZero() {
+		t.Fatal("snapshot mutated indexed boundary")
+	}
+	record.Owners[0].UID, record.Owners[0].Name = "owner-b", "owner-b"
+	changed := ingest(true)
+	if !changed.OwnerObservedAt.After(first.OwnerObservedAt) {
+		t.Fatal("changed owner retained old boundary")
+	}
+	if err := index.Ingest("Pod", nil, true, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if len(index.Snapshot().Records) != 0 {
+		t.Fatal("complete deletion retained record or boundary")
+	}
+	recreated := ingest(true)
+	if !recreated.OwnerObservedAt.After(changed.OwnerObservedAt) {
+		t.Fatal("recreated record inherited deleted boundary")
+	}
+	record.UID = "uid-b"
+	if got := ingest(true); !got.OwnerObservedAt.After(recreated.OwnerObservedAt) {
+		t.Fatal("new UID inherited previous record boundary")
+	}
+}
+
 func TestSnapshotsAreDefensiveCopiesAndBounded(t *testing.T) {
 	index := New(1)
 	input := pod("uid-a", "a")

@@ -12,6 +12,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 	"github.com/VersusControl/versus-incident/pkg/utils"
 
 	m "github.com/VersusControl/versus-incident/pkg/models"
@@ -22,6 +23,8 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 }
 
 type incidentCreateOptions struct {
+	Context    context.Context
+	OrgID      string
 	IncidentID string
 	Detection  *storage.DetectionEpisodeDecision
 	SkipOnCall bool
@@ -36,6 +39,17 @@ type incidentCreateResult struct {
 
 func createIncident(teamID string, content *map[string]interface{}, options incidentCreateOptions, params ...*map[string]string) incidentCreateResult {
 	result := incidentCreateResult{}
+	ctx := options.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if options.OrgID != "" {
+		ctx = tenancy.WithOrgScope(ctx, tenancy.NewOrgScope(options.OrgID))
+	}
+	if err := ctx.Err(); err != nil {
+		result.Err = err
+		return result
+	}
 	// Emit interception — the alert-fatigue choke point. It runs FIRST so a
 	// held-back finding never touches config or provider building. A nil
 	// interceptor (community mode) or a panic fails open to EmitProceed, so an
@@ -79,10 +93,11 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 	if len(params) > 0 {
 		p = params[0]
 	}
-	cfg = config.GetConfigForAlert(context.Background(), p)
+	cfg = config.GetConfigForAlert(ctx, p)
 
 	// Initialization of providers and alert
 	factory := common.NewAlertProviderFactory(cfg)
+	factory.SetContext(ctx)
 	providers, err := factory.CreateProviders()
 	if err != nil {
 		result.Err = fmt.Errorf("failed to create providers: %v", err)
@@ -134,7 +149,7 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 	// applied during config resolution above). When that window is zero on-call
 	// triggers immediately, so an ack can never forestall escalation — a
 	// dead/instantly-expired link is worse than none, so we emit no AckURL.
-	if !resolved && cfg.OnCall.Enable && !options.SkipOnCall && cfg.OnCall.WaitMinutes > 0 {
+	if !resolved && cfg.OnCall.Enable && !options.SkipOnCall && cfg.OnCall.WaitMinutes > 0 && (!utils.IsKubernetesIssueIncident(contentClone) || cfg.PublicHost != "") {
 		ttl := time.Duration(cfg.OnCall.WaitMinutes) * time.Minute
 		ackURL := AckURL(cfg, incident.ID, ttl)
 		contentClone["AckURL"] = ackURL
@@ -148,8 +163,10 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 	// webhook auto-resolve is applied as a follow-up write AFTER fan-out and
 	// on-call, so it never gates them.
 	var rec *storage.IncidentRecord
+	var persistErr error
 	if store != nil {
 		rec = buildIncidentRecord(incident, cfg, contentClone, resolved, hint)
+		rec.OrgID = storage.NormalizeOrgID(options.OrgID)
 		if options.Detection != nil {
 			if existing, err := store.GetIncident(incident.ID); err == nil {
 				rec = existing
@@ -172,6 +189,10 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 		}
 		rec.NotifyStatus = "pending"
 		if err := saveIncidentRecord(rec, options.Detection != nil); err != nil {
+			if utils.IsKubernetesIssueIncident(contentClone) {
+				result.Err = fmt.Errorf("persist detection incident: %w", err)
+				return result
+			}
 			log.Printf("incident: persist warning: %v", err)
 		}
 		result.NotifyStatus = rec.NotifyStatus
@@ -206,6 +227,9 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 			rec.NotifyError = sendErr.Error()
 		}
 		if err := saveIncidentRecord(rec, options.Detection != nil); err != nil {
+			if utils.IsKubernetesIssueIncident(contentClone) {
+				persistErr = err
+			}
 			log.Printf("incident: persist status warning: %v", err)
 		}
 		result.NotifyStatus = rec.NotifyStatus
@@ -232,7 +256,7 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 			}
 		} else {
 			workflow := core.GetOnCallWorkflow()
-			if err := workflow.Start(incident.ID, cfg.OnCall); err != nil {
+			if err := workflow.StartContext(ctx, incident.ID, cfg.OnCall); err != nil {
 				oncallErr = err
 				// Walk back the optimistic OnCallTriggered flag set at
 				// build time so the UI does not lie. Best-effort
@@ -271,6 +295,7 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 	case oncallErr != nil:
 		result.Err = oncallErr
 	}
+	result.Err = errors.Join(result.Err, persistErr)
 	return result
 }
 
@@ -321,7 +346,7 @@ func buildHandledDetectionIncident(teamID string, content map[string]interface{}
 	}
 	if rec == nil {
 		rec = &storage.IncidentRecord{
-			ID: options.IncidentID, OrgID: storage.DefaultOrgID, TeamID: teamID,
+			ID: options.IncidentID, OrgID: storage.NormalizeOrgID(options.OrgID), TeamID: teamID,
 			Origin: storage.OriginAIDetect, CreatedAt: time.Now().UTC(),
 			Content: make(map[string]interface{}),
 		}

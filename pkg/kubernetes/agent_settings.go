@@ -176,7 +176,11 @@ func (service *Service) SaveAgentSettings(ctx context.Context, settings breaklog
 	}
 	provider, key := service.logSettingsStore()
 	return service.commitCredential(ctx, func() error {
-		return breaklogs.UpdateSettings(provider, key, func(state *breaklogs.SettingsState) error { state.Settings = settings; return nil })
+		return breaklogs.UpdateSettings(provider, key, func(state *breaklogs.SettingsState) error {
+			settings.Alerts = state.Settings.Alerts
+			state.Settings = settings
+			return nil
+		})
 	})
 }
 

@@ -213,6 +213,21 @@ function renderPage() {
   );
 }
 
+describe("partial notification delivery", () => {
+  it("exposes the failed channel in both the list expansion and peek drawer", async () => {
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue(index([incident({
+      notify_status: "partial", notify_error: "msteams: API returned 500",
+    })]));
+    renderPage();
+    const expand = await screen.findByRole("button", { name: "Show notification failure detail" });
+    expect(within(expand).getByText("partial")).toBeTruthy();
+    fireEvent.click(expand);
+    expect(await screen.findByText("msteams: API returned 500")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText(/View incident/));
+    expect((await screen.findAllByText(/msteams: API returned 500/)).length).toBe(2);
+  });
+});
+
 // renderPageAt renders the page at a specific URL so the origin tab under test
 // (?origin=webhook vs the default ai_detect) is active from first paint.
 function renderPageAt(entry: string) {
@@ -554,4 +569,3 @@ describe("IncidentsPage — per-row Run analysis", () => {
     expect(api.runAnalysis).not.toHaveBeenCalled();
   });
 });
-

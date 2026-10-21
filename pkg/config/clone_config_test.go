@@ -6,6 +6,25 @@ import (
 	"testing"
 )
 
+func TestCloneKubernetesIssueTemplateOverrides(t *testing.T) {
+	src := Config{Alert: AlertConfig{
+		Slack:    SlackConfig{KubernetesIssueTemplatePath: "slack"},
+		Telegram: TelegramConfig{KubernetesIssueTemplatePath: "telegram"},
+		Viber:    ViberConfig{KubernetesIssueTemplatePath: "viber"},
+		Email:    EmailConfig{KubernetesIssueTemplatePath: "email"},
+		MSTeams:  MSTeamsConfig{KubernetesIssueTemplatePath: "teams"},
+		Lark:     LarkConfig{KubernetesIssueTemplatePath: "lark"},
+	}}
+	got := cloneConfig(&src)
+	if !reflect.DeepEqual(got.Alert, src.Alert) {
+		t.Fatalf("%+v", got.Alert)
+	}
+	got.Alert.Slack.KubernetesIssueTemplatePath = "changed"
+	if src.Alert.Slack.KubernetesIssueTemplatePath != "slack" {
+		t.Fatal("source mutated")
+	}
+}
+
 // TestCloneAgentAIAnalyzeConfig asserts the analyze model override is
 // carried into the cloned config so per-request overrides never lose the
 // operator's analyze model. (The tool-loop knobs tool_timeout and

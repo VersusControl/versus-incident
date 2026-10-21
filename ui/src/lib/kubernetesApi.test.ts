@@ -8,6 +8,21 @@ afterEach(() => {
 });
 
 describe("Kubernetes resource API", () => {
+  it("scopes issue alert reads and writes and sends only editable fields", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(new Response("{}")));
+    const client = createKubernetesApi("prod/eu+one");
+    const signal = new AbortController().signal;
+    await client.kubernetesIssueAlerts(signal);
+    await client.kubernetesSaveIssueAlerts({ enabled: true, level: "warning", can_write: true, enabled_at: "server-owned" } as Parameters<typeof client.kubernetesSaveIssueAlerts>[0]);
+    for (const [input] of fetchMock.mock.calls) {
+      const url = new URL(String(input), "http://localhost");
+      expect(url.pathname).toBe("/api/admin/kubernetes/issue-alerts");
+      expect(url.searchParams.get("cluster")).toBe("prod/eu+one");
+    }
+    expect(fetchMock.mock.calls[0][1]?.signal).toBe(signal);
+    expect(fetchMock.mock.calls[1][1]?.method).toBe("PUT");
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({ enabled: true, level: "warning" });
+  });
   it("scopes Agent settings writes and tests without sending server-owned metadata", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(new Response("{}")));
     const client = createKubernetesApi("east");

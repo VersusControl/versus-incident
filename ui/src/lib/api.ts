@@ -2697,6 +2697,18 @@ export interface KubernetesAgentSettings extends KubernetesAgentSettingsInput {
   can_write: boolean;
 }
 export interface KubernetesTestLinkResult { lines: number; namespace: string; workload: string; duration_ms: number; preview: string; truncated: boolean }
+export interface KubernetesIssueAlertsInput {
+  enabled: boolean;
+  level: "critical" | "warning";
+}
+export interface KubernetesIssueAlertsSettings extends KubernetesIssueAlertsInput {
+  enabled_at?: string;
+  can_write: boolean;
+  available: boolean;
+  reason: "" | "demand_capture";
+  links_ready: boolean;
+  channels_enabled: boolean;
+}
 export interface KubernetesBreakLogQuery {
   namespace: string; root_uid: string; since: string; until: string; pods?: string[];
   mode?: "merged" | "previous" | "current"; level?: "error" | "warning" | "info" | "debug"; q?: string; cursor?: string; limit?: number;
@@ -2727,6 +2739,8 @@ export function createKubernetesApi(cluster?: string) {
     return request<KubernetesBreakLogPage>(`/api/admin/kubernetes/break-logs?${query}`, { signal });
   },
   kubernetesAgentSettings: () => request<KubernetesAgentSettings>("/api/admin/kubernetes/agent-settings"),
+  kubernetesIssueAlerts: (signal?: AbortSignal) => request<KubernetesIssueAlertsSettings>("/api/admin/kubernetes/issue-alerts", { signal }),
+  kubernetesSaveIssueAlerts: (settings: KubernetesIssueAlertsInput) => request<KubernetesIssueAlertsSettings>("/api/admin/kubernetes/issue-alerts", { method: "PUT", body: JSON.stringify({ enabled: settings.enabled, level: settings.level }) }),
   kubernetesSaveAgentSettings: (settings: KubernetesAgentSettingsInput) => request<KubernetesAgentSettings>("/api/admin/kubernetes/agent-settings", { method: "PUT", body: JSON.stringify({ learning: settings.learning, break_logs: settings.break_logs }) }),
   kubernetesTestLink: (source: string, fields: KubernetesLogFields) => request<KubernetesTestLinkResult>("/api/admin/kubernetes/agent-settings/test-link", { method: "POST", body: JSON.stringify({ source, fields }) }),
   kubernetesOverviewGraph: () => request<KubernetesGraph>("/api/admin/kubernetes/graph/overview"),

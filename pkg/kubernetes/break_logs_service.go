@@ -112,19 +112,8 @@ func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex
 	if err := service.commitCredential(ctx, func() error { return store.CheckCaptureLease(owner) }); err != nil {
 		return
 	}
-	byUID := map[string]kubeindex.Record{}
-	for _, record := range snapshot.Records {
-		byUID[record.UID] = record
-	}
-	for _, root := range kubebreaks.Classify(snapshot.Records, now) {
-		if _, exists := byUID[root.Root.UID]; !exists {
-			if _, indexed := indexedResourceIDs[root.Root.Kind]; indexed {
-				status := snapshot.Kinds[root.Root.Kind]
-				if !(status.State == "ready" && !status.Partial) && !(status.State == "error" && status.Error == "forbidden") {
-					continue
-				}
-			}
-		}
+	roots, _ := classifyReadyBreaks(snapshot, now)
+	for _, root := range roots {
 		if root.Source == "first_seen" {
 			service.changes.mu.Lock()
 			first := service.changes.firstSeen[service.indexScope()][root.Root.Namespace+"\x00"+root.Root.UID]

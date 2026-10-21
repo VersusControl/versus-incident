@@ -14,14 +14,18 @@ import (
 )
 
 type MSTeamsProvider struct {
-	powerAutomateURL string
-	templatePath     string
+	client                      *http.Client
+	kubernetesIssueTemplatePath string
+	powerAutomateURL            string
+	templatePath                string
 }
 
 func NewMSTeamsProvider(cfg config.MSTeamsConfig) *MSTeamsProvider {
 	return &MSTeamsProvider{
-		powerAutomateURL: cfg.PowerAutomateURL,
-		templatePath:     cfg.TemplatePath,
+		client:                      http.DefaultClient,
+		kubernetesIssueTemplatePath: cfg.KubernetesIssueTemplatePath,
+		powerAutomateURL:            cfg.PowerAutomateURL,
+		templatePath:                cfg.TemplatePath,
 	}
 }
 
@@ -32,7 +36,9 @@ func (m *MSTeamsProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 
 	tplPath := m.templatePath
-	if i.Content != nil && utils.IsAgentIncident(*i.Content) {
+	if i.Content != nil && utils.IsKubernetesIssueIncident(*i.Content) {
+		tplPath = utils.KubernetesIssueTemplatePath(m.kubernetesIssueTemplatePath, utils.KubernetesIssueMSTeamsTemplatePath)
+	} else if i.Content != nil && utils.IsAgentIncident(*i.Content) {
 		tplPath = utils.AgentMSTeamsTemplatePath
 	}
 
@@ -54,7 +60,11 @@ func (m *MSTeamsProvider) SendAlert(i *m.Incident) error {
 	}
 
 	// Send to Power Automate
-	resp, err := http.Post(m.powerAutomateURL, "application/json", bytes.NewBuffer(jsonData))
+	client := m.client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Post(m.powerAutomateURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}
@@ -78,7 +88,11 @@ func (m *MSTeamsProvider) SendText(i *m.Incident, text string) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare text payload: %w", err)
 	}
-	resp, err := http.Post(m.powerAutomateURL, "application/json", bytes.NewBuffer(payload))
+	client := m.client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Post(m.powerAutomateURL, "application/json", bytes.NewBuffer(payload))
 	if err != nil {
 		return fmt.Errorf("failed to send text: %w", err)
 	}

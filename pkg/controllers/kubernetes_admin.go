@@ -57,6 +57,8 @@ func (controller *KubernetesAdminController) Register(router fiber.Router) {
 	group.Get("/crashes", controller.crashes)
 	group.Get("/break-logs", controller.breakLogs)
 	group.Get("/agent-settings", controller.agentSettings)
+	group.Get("/issue-alerts", controller.issueAlerts)
+	group.Put("/issue-alerts", controller.requireSettingsWrite, controller.saveIssueAlerts)
 	group.Put("/agent-settings", controller.requireSettingsWrite, controller.saveAgentSettings)
 	group.Post("/agent-settings/test-link", controller.requireSettingsWrite, controller.testLogLink)
 	group.Get("/graph", controller.graph)

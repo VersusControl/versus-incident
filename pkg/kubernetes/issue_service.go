@@ -268,7 +268,58 @@ func breakIssue(item kubebreaks.Break, observed time.Time) Issue {
 	return issue
 }
 
-func (service *Service) rememberBreaks(items []kubebreaks.Break, namespace string, observed time.Time, partial bool) {
+// classifyReadyBreaks defers unresolved indexed roots until a complete owner
+// LIST started after a child's first observation of that owner completed. A cached ready
+// state or overlapping LIST cannot prove absence. Forbidden reads and roots
+// already present in the index (including standalone Pods) remain usable.
+func classifyReadyBreaks(snapshot kubeindex.Snapshot, observed time.Time) ([]kubebreaks.Break, []kubebreaks.Break) {
+	byUID := make(map[string]kubeindex.Record, len(snapshot.Records))
+	for _, record := range snapshot.Records {
+		byUID[record.UID] = record
+	}
+	childBoundary := map[string]time.Time{}
+	for _, record := range snapshot.Records {
+		root := kubebreaks.Root(record, byUID)
+		if _, exists := byUID[root.UID]; exists {
+			continue
+		}
+		// Only the direct reference to the missing root proves when that
+		// owner became known. Earlier Pods cannot date a newly indexed
+		// ReplicaSet's reference to a still-missing Deployment.
+		for _, owner := range record.Owners {
+			if owner.UID != root.UID || owner.Kind != root.Kind || owner.ControllerKnown && !owner.Controller {
+				continue
+			}
+			boundary := record.OwnerObservedAt
+			if boundary.IsZero() {
+				continue
+			}
+			if first := childBoundary[root.UID]; first.IsZero() || boundary.Before(first) {
+				childBoundary[root.UID] = boundary
+			}
+		}
+	}
+	items := kubebreaks.Classify(snapshot.Records, observed)
+	ready := items[:0]
+	var deferred []kubebreaks.Break
+	for _, item := range items {
+		if _, exists := byUID[item.Root.UID]; !exists {
+			if _, indexed := indexedResourceIDs[item.Root.Kind]; indexed {
+				status := snapshot.Kinds[item.Root.Kind]
+				boundary := childBoundary[item.Root.UID]
+				current := status.State == "ready" && !status.Partial && !boundary.IsZero() && status.ObservedAt.After(boundary)
+				if !current && !(status.State == "error" && status.Error == "forbidden") {
+					deferred = append(deferred, item)
+					continue
+				}
+			}
+		}
+		ready = append(ready, item)
+	}
+	return ready, deferred
+}
+
+func (service *Service) rememberBreaks(items []kubebreaks.Break, namespace string, observed time.Time, partial bool, deferred ...kubebreaks.Break) {
 	service.changes.mu.Lock()
 	defer service.changes.mu.Unlock()
 	scope := service.indexScope()
@@ -278,6 +329,9 @@ func (service *Service) rememberBreaks(items []kubebreaks.Break, namespace strin
 		service.changes.firstSeen[scope] = seen
 	}
 	active := map[string]bool{}
+	for _, item := range deferred {
+		active[item.Root.Namespace+"\x00"+item.Root.UID] = true
+	}
 	for position := range items {
 		item := &items[position]
 		key := item.Root.Namespace + "\x00" + item.Root.UID

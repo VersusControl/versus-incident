@@ -193,6 +193,8 @@ func allowedLocalSettingsRoute(name string, call *ast.CallExpr) bool {
 	switch {
 	case selector.Sel.Name == "Put" && route == "/agent-settings":
 		handler = "saveAgentSettings"
+	case selector.Sel.Name == "Put" && route == "/issue-alerts":
+		handler = "saveIssueAlerts"
 	case selector.Sel.Name == "Post" && route == "/agent-settings/test-link":
 		handler = "testLogLink"
 	default:
@@ -217,6 +219,11 @@ func TestLocalSettingsRouteExceptionsStayNarrow(t *testing.T) {
 		allowed    bool
 	}{
 		{`group.Put("/agent-settings", controller.requireSettingsWrite, controller.saveAgentSettings)`, true},
+		{`group.Put("/issue-alerts", controller.requireSettingsWrite, controller.saveIssueAlerts)`, true},
+		{`group.Put("/issue-alerts", controller.saveIssueAlerts)`, false},
+		{`group.Put("/issue-alerts", controller.requireInfrastructureView, controller.saveIssueAlerts)`, false},
+		{`group.Put("/issue-alerts", controller.requireSettingsWrite, controller.saveAgentSettings)`, false},
+		{`client.Put("/issue-alerts", controller.requireSettingsWrite, controller.saveIssueAlerts)`, false},
 		{`group.Post("/agent-settings/test-link", controller.requireSettingsWrite, controller.testLogLink)`, true},
 		{`group.Put("/pods", controller.requireSettingsWrite, controller.saveAgentSettings)`, false},
 		{`group.Put("/agent-settings", controller.saveAgentSettings)`, false},

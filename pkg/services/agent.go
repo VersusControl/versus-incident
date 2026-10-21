@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -87,10 +88,6 @@ func createIncidentFromFindingWithLease(f *core.AIFinding, r core.AgentResult, s
 		params["oncall_enable"] = "false"
 	}
 
-	episodeStore, episodeCapable := store.(storage.DetectionEpisodeStore)
-	if !episodeCapable || strings.TrimSpace(r.PatternID) == "" || r.Frequency <= 0 {
-		return CreateIncident("", &content, &params)
-	}
 	agentKind := strings.TrimSpace(r.AgentKind)
 	if agentKind == "" {
 		agentKind = "detect"
@@ -99,29 +96,56 @@ func createIncidentFromFindingWithLease(f *core.AIFinding, r core.AgentResult, s
 	if signalKind == "" {
 		signalKind = "logs"
 	}
+	return emitDetection(content, storage.DetectionIdentity{
+		AgentKind: agentKind, Source: source, Service: service, SignalKind: signalKind, ConditionKey: r.PatternID,
+	}, f.Severity, params, "", r.Frequency, r.DetectionEmission, claimLease)
+}
+
+// emitDetection is the single episode claim, heartbeat and completion path for detectors.
+func emitDetection(content map[string]interface{}, identity storage.DetectionIdentity, severity string, params map[string]string, org string, frequency int, emission *core.DetectionEmissionResult, claimLease time.Duration, contexts ...context.Context) error {
+	ctx := context.Background()
+	if len(contexts) > 0 && contexts[0] != nil {
+		ctx = contexts[0]
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	episodeStore, episodeCapable := store.(storage.DetectionEpisodeStore)
+	if scoped, ok := store.(storage.ScopedDetectionEpisodeStore); ok && org != "" {
+		episodeStore, episodeCapable = scopedEpisodeStore{scoped, storage.NormalizeOrgID(org)}, true
+	} else if storage.NormalizeOrgID(org) != storage.DefaultOrgID {
+		identity.OrgID = storage.NormalizeOrgID(org)
+	}
+	if !episodeCapable || strings.TrimSpace(identity.ConditionKey) == "" || frequency <= 0 {
+		if content["AlertKind"] == "kubernetes_issue" {
+			return storage.ErrUnsupported
+		}
+		return createIncident("", &content, incidentCreateOptions{OrgID: org, Context: ctx}, &params).Err
+	}
 	decision, err := episodeStore.RecordDetectionOccurrence(storage.DetectionOccurrence{
-		Identity: storage.DetectionIdentity{
-			AgentKind: agentKind, Source: source, Service: service,
-			SignalKind: signalKind, ConditionKey: r.PatternID,
-		},
-		Frequency: int64(r.Frequency), Severity: f.Severity, ReceivedAt: time.Now().UTC(), ClaimLease: claimLease,
+		Identity:  identity,
+		Frequency: int64(frequency), Severity: severity, ReceivedAt: time.Now().UTC(), ClaimLease: claimLease,
 	})
 	if err != nil {
+		if content["AlertKind"] == "kubernetes_issue" {
+			setDetectionEmissionError(emission, err)
+			return err
+		}
 		if !errors.Is(err, storage.ErrUnsupported) {
-			setDetectionEmissionError(r.DetectionEmission, err)
+			setDetectionEmissionError(emission, err)
 			logBoundedEpisodeError("record", err)
 		}
-		result := createIncident("", &content, incidentCreateOptions{}, &params)
-		if r.DetectionEmission != nil {
-			r.DetectionEmission.NotificationOutcome = detectionNotificationOutcome(result)
+		result := createIncident("", &content, incidentCreateOptions{OrgID: org, Context: ctx}, &params)
+		if emission != nil {
+			emission.NotificationOutcome = detectionNotificationOutcome(result)
 		}
 		return result.Err
 	}
-	setDetectionEmissionDecision(r.DetectionEmission, decision)
+	setDetectionEmissionDecision(emission, decision)
 	content["Frequency"] = decision.OccurrenceCount
 	if !decision.NotificationClaimed {
-		if r.DetectionEmission != nil {
-			r.DetectionEmission.NotificationOutcome = "not_applicable"
+		if emission != nil {
+			emission.NotificationOutcome = "not_applicable"
 		}
 		return updateCoalescedDetectionIncident(decision, content)
 	}
@@ -135,8 +159,8 @@ func createIncidentFromFindingWithLease(f *core.AIFinding, r core.AgentResult, s
 			skipOnCall = existing.OnCallTriggered
 		case errors.Is(getErr, storage.ErrNotFound):
 		default:
-			if r.DetectionEmission != nil {
-				r.DetectionEmission.NotificationOutcome = "failed"
+			if emission != nil {
+				emission.NotificationOutcome = "failed"
 			}
 			renewalErr := heartbeat.stop()
 			completionErr := episodeStore.CompleteDetectionNotification(storage.DetectionNotificationCompletion{
@@ -147,13 +171,15 @@ func createIncidentFromFindingWithLease(f *core.AIFinding, r core.AgentResult, s
 		}
 	}
 	result := createIncident("", &content, incidentCreateOptions{
+		OrgID:      org,
+		Context:    ctx,
 		IncidentID: decision.IncidentID,
 		Detection:  &decision,
 		SkipOnCall: skipOnCall,
 	}, &params)
 	outcome := detectionNotificationOutcome(result)
-	if r.DetectionEmission != nil {
-		r.DetectionEmission.NotificationOutcome = outcome
+	if emission != nil {
+		emission.NotificationOutcome = outcome
 	}
 	renewalErr := heartbeat.stop()
 	if renewalErr != nil {

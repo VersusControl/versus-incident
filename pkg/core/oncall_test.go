@@ -1,6 +1,33 @@
 package core
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/redis/go-redis/v9"
+	"testing"
+	"time"
+)
+
+type budgetOnCallProvider struct{}
+
+func (budgetOnCallProvider) TriggerOnCall(ctx context.Context, _ string, _ *config.OnCallConfig) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+func TestOnCallStartContextHonorsBudget(t *testing.T) {
+	redisClient := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	defer redisClient.Close()
+	w := NewOnCallWorkflow(redisClient, budgetOnCallProvider{})
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+	defer cancel()
+	if err := w.StartContext(ctx, "incident", config.OnCallConfig{}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	if err := w.StartContext(ctx, "incident", config.OnCallConfig{}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+}
 
 // TestIsOnCallWorkflowInitialized verifies the initialization probe so the
 // emit path can skip on-call instead of panicking when the singleton was

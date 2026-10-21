@@ -64,10 +64,11 @@ func cloneAlertConfig(src AlertConfig) AlertConfig {
 // Helper function to deep clone the SlackConfig struct
 func cloneSlackConfig(src SlackConfig) SlackConfig {
 	return SlackConfig{
-		Enable:       src.Enable,
-		Token:        src.Token,
-		ChannelID:    src.ChannelID,
-		TemplatePath: src.TemplatePath,
+		KubernetesIssueTemplatePath: src.KubernetesIssueTemplatePath,
+		Enable:                      src.Enable,
+		Token:                       src.Token,
+		ChannelID:                   src.ChannelID,
+		TemplatePath:                src.TemplatePath,
 		MessageProperties: SlackMessageProperties{
 			DisableButton: src.MessageProperties.DisableButton,
 			ButtonText:    src.MessageProperties.ButtonText,
@@ -79,38 +80,41 @@ func cloneSlackConfig(src SlackConfig) SlackConfig {
 // Helper function to deep clone the TelegramConfig struct
 func cloneTelegramConfig(src TelegramConfig) TelegramConfig {
 	return TelegramConfig{
-		Enable:       src.Enable,
-		BotToken:     src.BotToken,
-		ChatID:       src.ChatID,
-		TemplatePath: src.TemplatePath,
-		UseProxy:     src.UseProxy,
+		KubernetesIssueTemplatePath: src.KubernetesIssueTemplatePath,
+		Enable:                      src.Enable,
+		BotToken:                    src.BotToken,
+		ChatID:                      src.ChatID,
+		TemplatePath:                src.TemplatePath,
+		UseProxy:                    src.UseProxy,
 	}
 }
 
 // Helper function to deep clone the ViberConfig struct
 func cloneViberConfig(src ViberConfig) ViberConfig {
 	return ViberConfig{
-		Enable:       src.Enable,
-		APIType:      src.APIType,
-		BotToken:     src.BotToken,
-		UserID:       src.UserID,
-		TemplatePath: src.TemplatePath,
-		ChannelID:    src.ChannelID,
-		UseProxy:     src.UseProxy,
+		KubernetesIssueTemplatePath: src.KubernetesIssueTemplatePath,
+		Enable:                      src.Enable,
+		APIType:                     src.APIType,
+		BotToken:                    src.BotToken,
+		UserID:                      src.UserID,
+		TemplatePath:                src.TemplatePath,
+		ChannelID:                   src.ChannelID,
+		UseProxy:                    src.UseProxy,
 	}
 }
 
 // Helper function to deep clone the EmailConfig struct
 func cloneEmailConfig(src EmailConfig) EmailConfig {
 	return EmailConfig{
-		Enable:       src.Enable,
-		SMTPHost:     src.SMTPHost,
-		SMTPPort:     src.SMTPPort,
-		Username:     src.Username,
-		Password:     src.Password,
-		To:           src.To,
-		Subject:      src.Subject,
-		TemplatePath: src.TemplatePath,
+		KubernetesIssueTemplatePath: src.KubernetesIssueTemplatePath,
+		Enable:                      src.Enable,
+		SMTPHost:                    src.SMTPHost,
+		SMTPPort:                    src.SMTPPort,
+		Username:                    src.Username,
+		Password:                    src.Password,
+		To:                          src.To,
+		Subject:                     src.Subject,
+		TemplatePath:                src.TemplatePath,
 	}
 }
 
@@ -126,10 +130,11 @@ func cloneMSTeamsConfig(src MSTeamsConfig) MSTeamsConfig {
 	}
 
 	return MSTeamsConfig{
-		Enable:           src.Enable,
-		TemplatePath:     src.TemplatePath,
-		PowerAutomateURL: src.PowerAutomateURL,
-		OtherPowerURLs:   otherPowerURLsCopy,
+		KubernetesIssueTemplatePath: src.KubernetesIssueTemplatePath,
+		Enable:                      src.Enable,
+		TemplatePath:                src.TemplatePath,
+		PowerAutomateURL:            src.PowerAutomateURL,
+		OtherPowerURLs:              otherPowerURLsCopy,
 	}
 }
 
@@ -145,11 +150,12 @@ func cloneLarkConfig(src LarkConfig) LarkConfig {
 	}
 
 	return LarkConfig{
-		Enable:           src.Enable,
-		WebhookURL:       src.WebhookURL,
-		TemplatePath:     src.TemplatePath,
-		OtherWebhookURLs: otherWebhookURLsCopy,
-		UseProxy:         src.UseProxy,
+		KubernetesIssueTemplatePath: src.KubernetesIssueTemplatePath,
+		Enable:                      src.Enable,
+		WebhookURL:                  src.WebhookURL,
+		TemplatePath:                src.TemplatePath,
+		OtherWebhookURLs:            otherWebhookURLsCopy,
+		UseProxy:                    src.UseProxy,
 	}
 }
 

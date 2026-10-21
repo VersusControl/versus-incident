@@ -15,17 +15,19 @@ import (
 )
 
 type LarkProvider struct {
-	webhookURL   string
-	templatePath string
-	client       *http.Client
+	kubernetesIssueTemplatePath string
+	webhookURL                  string
+	templatePath                string
+	client                      *http.Client
 }
 
 func NewLarkProvider(cfg config.LarkConfig, proxyConfig config.ProxyConfig) *LarkProvider {
 	client := utils.CreateHTTPClient(proxyConfig, cfg.UseProxy)
 	return &LarkProvider{
-		webhookURL:   cfg.WebhookURL,
-		templatePath: cfg.TemplatePath,
-		client:       client,
+		kubernetesIssueTemplatePath: cfg.KubernetesIssueTemplatePath,
+		webhookURL:                  cfg.WebhookURL,
+		templatePath:                cfg.TemplatePath,
+		client:                      client,
 	}
 }
 
@@ -36,7 +38,9 @@ func (l *LarkProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 
 	tplPath := l.templatePath
-	if i.Content != nil && utils.IsAgentIncident(*i.Content) {
+	if i.Content != nil && utils.IsKubernetesIssueIncident(*i.Content) {
+		tplPath = utils.KubernetesIssueTemplatePath(l.kubernetesIssueTemplatePath, utils.KubernetesIssueLarkTemplatePath)
+	} else if i.Content != nil && utils.IsAgentIncident(*i.Content) {
 		tplPath = utils.AgentLarkTemplatePath
 	}
 

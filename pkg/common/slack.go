@@ -3,8 +3,10 @@ package common
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"text/template"
@@ -18,18 +20,23 @@ import (
 )
 
 type SlackProvider struct {
-	client       *slack.Client
-	channelID    string
-	templatePath string
-	msgProps     config.SlackMessageProperties
+	token                       string
+	publicHost                  string
+	kubernetesIssueTemplatePath string
+	client                      *slack.Client
+	channelID                   string
+	templatePath                string
+	msgProps                    config.SlackMessageProperties
 }
 
 func NewSlackProvider(cfg config.SlackConfig) *SlackProvider {
 	return &SlackProvider{
-		client:       slack.New(cfg.Token),
-		channelID:    cfg.ChannelID,
-		templatePath: cfg.TemplatePath,
-		msgProps:     cfg.MessageProperties,
+		token:                       cfg.Token,
+		kubernetesIssueTemplatePath: cfg.KubernetesIssueTemplatePath,
+		client:                      slack.New(cfg.Token),
+		channelID:                   cfg.ChannelID,
+		templatePath:                cfg.TemplatePath,
+		msgProps:                    cfg.MessageProperties,
 	}
 }
 
@@ -120,6 +127,64 @@ func (s *SlackProvider) sendResolvedAlert(i *m.Incident) error {
 func (s *SlackProvider) sendUnresolvedAlert(i *m.Incident) error {
 	// Extract and remove AckURL from content if button acknowledgment is enabled
 	contentToUse, ackURL := s.processAckURL(i)
+	validLinks := []slackURLAction{}
+	if i.Content != nil {
+		validLinks = validIssueActions((*i.Content)["Links"], s.publicHost)
+	}
+	safeContent := make(map[string]interface{}, len(contentToUse))
+	for key, value := range contentToUse {
+		safeContent[key] = value
+	}
+	if i.Content != nil && (*i.Content)["Links"] != nil {
+		links := []map[string]string{}
+		for _, link := range validLinks {
+			links = append(links, map[string]string{"id": link.ID, "label": link.Label, "url": link.URL})
+		}
+		safeContent["Links"] = links
+		for _, key := range []string{"TimelineURL", "AgentURL"} {
+			value, _ := safeContent[key].(string)
+			valid := false
+			for _, link := range validLinks {
+				if value == link.URL {
+					valid = true
+				}
+			}
+			if !valid {
+				delete(safeContent, key)
+			}
+		}
+	}
+	if utils.IsKubernetesIssueIncident(safeContent) && ackURL != "" {
+		if len(validIssueActions([]map[string]string{{"id": "ack_incident", "label": "Acknowledge", "url": ackURL}}, s.publicHost)) == 0 {
+			ackURL = ""
+			delete(safeContent, "AckURL")
+		}
+	}
+	contentToUse = safeContent
+	actions := []slackURLAction{}
+	if !s.msgProps.DisableButton {
+		if ackURL != "" {
+			label := s.msgProps.ButtonText
+			if label == "" {
+				label = "Acknowledge Alert"
+			}
+			actions = append(actions, slackURLAction{"ack_incident", label, ackURL})
+		}
+		actions = append(actions, validLinks...)
+		if len(actions) > 3 {
+			actions = actions[:3]
+		}
+		if len(actions) > 0 {
+			copyContent := make(map[string]interface{}, len(contentToUse))
+			for k, v := range contentToUse {
+				copyContent[k] = v
+			}
+			for _, k := range []string{"Links", "TimelineURL", "AgentURL", "AckURL"} {
+				delete(copyContent, k)
+			}
+			contentToUse = copyContent
+		}
+	}
 
 	// Render the template with the processed content
 	messageText, err := s.renderTemplateWithContent(contentToUse)
@@ -129,11 +194,14 @@ func (s *SlackProvider) sendUnresolvedAlert(i *m.Incident) error {
 
 	// Red color for unresolved incidents
 	color := "#C70039"
+	if utils.IsKubernetesIssueIncident(contentToUse) && contentToUse["Severity"] != "critical" {
+		color = "#D99A00"
+	}
 
 	// Determine whether to use button or standard message format
-	if !s.msgProps.DisableButton && ackURL != "" {
+	if !s.msgProps.DisableButton && len(actions) > 0 {
 		// Send message with interactive button
-		return s.sendMessageWithButton(messageText, color, ackURL, i.ID)
+		return s.sendMessageWithActions(messageText, color, actions, i.ID)
 	} else {
 		// Send standard message
 		return s.sendStandardMessage(messageText, color)
@@ -186,7 +254,9 @@ func (s *SlackProvider) renderTemplateWithContent(content map[string]interface{}
 	funcMaps := utils.GetTemplateFuncMaps()
 
 	tplPath := s.templatePath
-	if utils.IsAgentIncident(content) {
+	if utils.IsKubernetesIssueIncident(content) {
+		tplPath = utils.KubernetesIssueTemplatePath(s.kubernetesIssueTemplatePath, utils.KubernetesIssueSlackTemplatePath)
+	} else if utils.IsAgentIncident(content) {
 		tplPath = utils.AgentSlackTemplatePath
 	}
 
@@ -205,30 +275,66 @@ func (s *SlackProvider) renderTemplateWithContent(content map[string]interface{}
 
 // sendMessageWithButton sends a message with an interactive button for acknowledgment
 func (s *SlackProvider) sendMessageWithButton(messageText, color, ackURL, incidentID string) error {
+	label := s.msgProps.ButtonText
+	if label == "" {
+		label = "Acknowledge Alert"
+	}
+	return s.sendMessageWithActions(messageText, color, []slackURLAction{{"ack_incident", label, ackURL}}, incidentID)
+}
+
+type slackURLAction struct{ ID, Label, URL string }
+
+func validIssueActions(value interface{}, publicHost string) []slackURLAction {
+	origin, err := url.Parse(publicHost)
+	if err != nil || origin.Host == "" || origin.User != nil || (origin.Scheme != "http" && origin.Scheme != "https") {
+		return nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var links []struct {
+		ID    string `json:"id"`
+		Label string `json:"label"`
+		URL   string `json:"url"`
+	}
+	if json.Unmarshal(encoded, &links) != nil {
+		return nil
+	}
+	actions := []slackURLAction{}
+	seen := map[string]bool{}
+	for _, link := range links {
+		u, err := url.Parse(link.URL)
+		if err != nil || len(link.URL) > 3000 || len(link.Label) == 0 || len(link.Label) > 75 || len(link.ID) == 0 || len(link.ID) > 100 || seen[link.ID] || u.User != nil || !strings.EqualFold(u.Scheme, origin.Scheme) || !strings.EqualFold(u.Host, origin.Host) || strings.ContainsAny(link.URL, "\\\r\n") {
+			continue
+		}
+		actions = append(actions, slackURLAction{link.ID, link.Label, link.URL})
+		seen[link.ID] = true
+		if len(actions) == 3 {
+			break
+		}
+	}
+	return actions
+}
+
+func (s *SlackProvider) sendMessageWithActions(messageText, color string, actions []slackURLAction, incidentID string) error {
 	// Create text block for the main message content
 	headerText := slack.NewTextBlockObject("mrkdwn", messageText, false, false)
 	headerSection := slack.NewSectionBlock(headerText, nil, nil)
 
-	// Get button text from config or use default
-	buttonText := s.msgProps.ButtonText
-	if buttonText == "" {
-		buttonText = "Acknowledge Alert"
+	elements := []slack.BlockElement{}
+	for _, action := range actions {
+		btn := slack.NewButtonBlockElement(action.ID, incidentID, slack.NewTextBlockObject("plain_text", action.Label, false, false))
+		btn.URL = action.URL
+		if action.ID == "ack_incident" {
+			btn.Style = slack.Style(s.msgProps.ButtonStyle)
+			if btn.Style == "" {
+				btn.Style = "primary"
+			}
+		}
+		elements = append(elements, btn)
 	}
-
-	// Create button for acknowledgment
-	btnText := slack.NewTextBlockObject("plain_text", buttonText, false, false)
-	btnElement := slack.NewButtonBlockElement("ack_incident", incidentID, btnText)
-	btnElement.URL = ackURL // Use URL for direct navigation on click
-
-	// Set button style if specified in config
-	buttonStyle := s.msgProps.ButtonStyle
-	if buttonStyle != "" {
-		btnElement.Style = slack.Style(buttonStyle)
-	} else {
-		btnElement.Style = "primary" // Default to primary style
-	}
-
-	actionBlock := slack.NewActionBlock("incident_actions", btnElement)
+	actionBlock := slack.NewActionBlock("incident_actions", elements...)
 
 	// Build the message with blocks
 	_, _, err := s.client.PostMessage(

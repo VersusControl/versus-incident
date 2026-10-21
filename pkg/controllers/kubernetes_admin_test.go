@@ -106,6 +106,13 @@ func TestKubernetesBreakLogHTTPStoredPagesSettingsAndPermissions(t *testing.T) {
 		{http.MethodGet, base + "&mode=invalid", "", "", "", 400},
 		{http.MethodGet, base + "&limit=501", "", "", "", 400},
 		{http.MethodGet, "/api/admin/kubernetes/agent-settings?cluster=cluster", "", "", "", 200},
+		{http.MethodGet, "/api/admin/kubernetes/issue-alerts?cluster=cluster", "", "", "", 200},
+		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":true,"level":"warning"}`, "", "", 403},
+		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":true,"level":"invalid"}`, "", "allow", 400},
+		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":true,"level":"warning","extra":true}`, "", "allow", 400},
+		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":true,"level":"warning"}`, "", "allow", 200},
+		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":false,"level":"critical"}`, "deny", "allow", 403},
+		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":false,"level":"critical"}`, "unauthenticated", "allow", 401},
 		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"learning":{"logs":true},"break_logs":{"linked_source":""}}`, "", "", 403},
 		{http.MethodPost, "/api/admin/kubernetes/agent-settings/test-link?cluster=cluster", `{"source":"unknown","fields":{}}`, "", "", 403},
 		{http.MethodPost, "/api/admin/kubernetes/agent-settings/test-link?cluster=cluster", `{"source":"unknown","fields":{}}`, "", "allow", 404},
@@ -135,7 +142,7 @@ func TestKubernetesBreakLogHTTPStoredPagesSettingsAndPermissions(t *testing.T) {
 		if test.method == http.MethodGet && strings.Contains(test.path, "agent-settings") && value["can_write"] != false {
 			t.Error("read-only visibility")
 		}
-		wantAudit := test.method == http.MethodPut || test.method == http.MethodPost && (test.status == 401 || test.status == 403)
+		wantAudit := !strings.Contains(test.path, "issue-alerts") && (test.method == http.MethodPut || test.method == http.MethodPost && (test.status == 401 || test.status == 403))
 		if !wantAudit {
 			if len(auditEvents) != 0 {
 				t.Errorf("passive request audited: %+v", auditEvents)
