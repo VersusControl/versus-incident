@@ -237,6 +237,20 @@ or trace read tools.
 
 ## Notification Channel Configuration
 
+All six channels (`slack`, `telegram`, `viber`, `email`, `msteams`, `lark`)
+support `alert.<channel>.kubernetesIssueTemplatePath`. It renders the
+application's `kubernetes_issue_template_path` for Kubernetes issue alerts
+only. The default empty value uses the shipped
+`config/kubernetes_issue_<channel>.tmpl`; a custom path must exist inside every
+pod, for example through a custom image or an operator-managed volume mount.
+Setting a path does not enable the channel or per-cluster issue alerts.
+
+```yaml
+alert:
+  slack:
+    kubernetesIssueTemplatePath: "/app/custom/kubernetes_issue_slack.tmpl"
+```
+
 ### Slack
 
 ```yaml

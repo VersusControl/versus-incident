@@ -110,6 +110,46 @@ var chartScenarios = []chartScenario{
 	{name: "tools-secrets", args: []string{"-f", chartDir + "/tests/14-tools-secrets.yaml"}},
 }
 
+func TestHelmChartKubernetesIssueTemplateOverrides(t *testing.T) {
+	requireRenderableChart(t)
+	channels := []string{"slack", "telegram", "viber", "email", "msteams", "lark"}
+	for _, override := range []bool{false, true} {
+		name := "defaults"
+		args := []string{}
+		want := map[string]string{}
+		for _, channel := range channels {
+			path := ""
+			if override {
+				name = "overrides"
+				path = "/app/custom/" + channel + ` issue "quoted":template.tmpl`
+				args = append(args, "--set-string", "alert."+channel+".kubernetesIssueTemplatePath="+path)
+			}
+			want[channel] = path
+		}
+		t.Run(name, func(t *testing.T) {
+			raw := parseRawYAML(t, []byte(renderChartConfig(t, chartScenario{name: name, args: args})))
+			var loaded AlertConfig
+			if err := raw.Sub("alert").Unmarshal(&loaded); err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]string{
+				"slack":    loaded.Slack.KubernetesIssueTemplatePath,
+				"telegram": loaded.Telegram.KubernetesIssueTemplatePath,
+				"viber":    loaded.Viber.KubernetesIssueTemplatePath,
+				"email":    loaded.Email.KubernetesIssueTemplatePath,
+				"msteams":  loaded.MSTeams.KubernetesIssueTemplatePath,
+				"lark":     loaded.Lark.KubernetesIssueTemplatePath,
+			}
+			for _, channel := range channels {
+				key := "alert." + channel + ".kubernetes_issue_template_path"
+				if !raw.IsSet(key) || raw.GetString(key) != want[channel] || got[channel] != want[channel] {
+					t.Errorf("%s rendered=%q decoded=%q want=%q", key, raw.GetString(key), got[channel], want[channel])
+				}
+			}
+		})
+	}
+}
+
 func kubernetesModeArgs(mode string, overrides ...string) []string {
 	values := []string{
 		"connectors.kubernetes.auth.mode=" + mode,

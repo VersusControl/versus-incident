@@ -217,6 +217,7 @@ type Scrubber interface{ Scrub(string) string }
 
 // Service owns all Kubernetes path construction, decoding, projection, and relationships.
 type Service struct {
+	issueAlertSink         func(context.Context, IssueAlert) (Outcome, error)
 	client                 *Client
 	scope                  Scope
 	readOrgs               []string
@@ -295,6 +296,7 @@ func (service *Service) Scoped(scope Scope) *Service {
 		scope.CredentialID = service.scope.CredentialID
 	}
 	scoped := &Service{client: service.client, scope: scope, identity: service.identity, configuredCredentialID: configured, readOrgs: readOrgs, ttl: service.ttl, mu: service.mu, cache: service.cache, discoveryCalls: service.discoveryCalls, scrubber: service.scrubber, indexes: service.indexes, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext, captureMode: service.captureMode, logSources: service.logSources}
+	scoped.issueAlertSink = service.issueAlertSink
 	if configured != service.configuredCredentialID && service.client != nil {
 		scoped.scope.CredentialID = scoped.captureCredentialID()
 	}
@@ -480,6 +482,7 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 			return nil, err
 		}
 		fresh.scrubber, fresh.captureMode, fresh.logStreamContext = previous.scrubber, previous.captureMode, previous.logStreamContext
+		fresh.issueAlertSink = previous.issueAlertSink
 		fresh.logSources = previous.logSources
 		previous.changes.mu.Lock()
 		provider := previous.changes.provider

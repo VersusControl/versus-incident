@@ -1,3 +1,4 @@
+import { kubernetesIssuePrompt } from "@/lib/kubernetesIssuePrompt";
 import {
   useEffect,
   useMemo,
@@ -484,7 +485,7 @@ export function ChatPage() {
   const selectedId = searchParams.get("session");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [evidence, setEvidence] = useState<EvidenceSelection | null>(null);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(() => kubernetesIssuePrompt(searchParams));
   const [resourceAttachment, setResourceAttachment] = useState<ChatResourceAttachment | null>(() => resourceAttachmentFromSearch(searchParams));
   const [resourceTimeRange, setResourceTimeRange] = useState(() => {
     const start = searchParams.get("logs_from");

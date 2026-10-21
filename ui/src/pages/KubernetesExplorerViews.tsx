@@ -1,4 +1,5 @@
 import { useKubernetesCluster, useKubernetesCrashes, useKubernetesQuery as useQuery } from "@/lib/useKubernetesCluster";
+import { KubernetesIssueAlerts } from "@/pages/KubernetesIssueAlerts";
 import { Activity, AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Boxes, Cpu, Eye, EyeOff, GitBranch, History, Layers3, Maximize2, Minus, Network, Plus, RotateCcw, Waypoints, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
@@ -755,6 +756,7 @@ function IssuesView({ onSelectResource, clusterId }: { onSelectResource: Resourc
   return (
     <section className="card overflow-hidden transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Kubernetes issues">
       <ExplorerHeader icon={<AlertTriangle size={15} />} title="Issues" trailing={!denied && issues.data && <span className={`pill ${statusTone(issues.data.sync.state)}`}>{issues.data.sync.state}</span>} />
+      <KubernetesIssueAlerts />
       <div className="grid gap-2 border-b border-ink-700 p-3 sm:grid-cols-2">
         <label className="text-2xs text-ink-400">Severity<select aria-label="Issue severity" className="input mt-1 w-full" value={severity} onChange={(event) => setSeverity(event.target.value)}><option value="">All severities</option><option value="critical">Critical</option><option value="warning">Warning</option><option value="info">Info</option></select></label>
         <label className="text-2xs text-ink-400">Namespace<input aria-label="Issue namespace" className="input mt-1 w-full" value={namespace} onChange={(event) => setNamespace(event.target.value)} placeholder="All namespaces" /></label>

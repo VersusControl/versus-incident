@@ -48,6 +48,8 @@ type DetectionIncidentStore interface {
 }
 
 type DetectionIdentity struct {
+	// OrgID isolates optional single-namespace backends without changing default identities.
+	OrgID        string `json:"org_id,omitempty"`
 	Version      string `json:"version"`
 	AgentKind    string `json:"agent_kind"`
 	Source       string `json:"source"`
@@ -128,6 +130,9 @@ func DetectionIdentityFingerprint(identity DetectionIdentity) (string, error) {
 }
 
 func normalizeDetectionIdentity(identity DetectionIdentity) DetectionIdentity {
+	if identity.OrgID == DefaultOrgID {
+		identity.OrgID = ""
+	}
 	if strings.TrimSpace(identity.Version) == "" {
 		identity.Version = DetectionIdentityVersion
 	}

@@ -90,6 +90,18 @@ afterEach(() => {
 });
 
 describe("ChatPage", () => {
+  it("prefills an issue investigation without creating a session or sending until requested", async () => {
+    renderPage("/agent/chat?provider=kubernetes&cluster=east&resource_id=apps~v1~deployments&namespace=shop&name=checkout&uid=root-uid&include_changes=true&issue=pod.crash_loop");
+    const composer = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+    expect(composer.value).toBe("Why is Deployment checkout crash looping?");
+    await waitFor(() => expect(api.listChatSessions).toHaveBeenCalled());
+    expect(api.createChatSession).not.toHaveBeenCalled();
+    expect(api.streamChatMessage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.streamChatMessage).toHaveBeenCalledWith("session-1", "Why is Deployment checkout crash looping?", {
+      resource: { provider: "kubernetes", cluster: "east", resource_id: "apps~v1~deployments", namespace: "shop", name: "checkout", uid: "root-uid", include_changes: true },
+    }, expect.any(Function), expect.any(AbortSignal)));
+  });
   it.each([true, false])("attaches only a valid bounded break-log time window, valid=%s", async (valid) => {
     const from = "2026-10-17T12:00:00Z", to = valid ? "2026-10-17T12:07:00Z" : "2026-10-17T15:00:00Z";
     renderPage(`/agent/chat?provider=kubernetes&cluster=east&resource_id=apps~v1~deployments&namespace=shop&name=checkout&logs_from=${from}&logs_to=${to}`);

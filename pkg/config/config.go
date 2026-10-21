@@ -108,11 +108,12 @@ type AlertConfig struct {
 }
 
 type SlackConfig struct {
-	Enable            bool
-	Token             string
-	ChannelID         string                 `mapstructure:"channel_id"`
-	TemplatePath      string                 `mapstructure:"template_path"`
-	MessageProperties SlackMessageProperties `mapstructure:"message_properties"`
+	KubernetesIssueTemplatePath string `mapstructure:"kubernetes_issue_template_path"`
+	Enable                      bool
+	Token                       string
+	ChannelID                   string                 `mapstructure:"channel_id"`
+	TemplatePath                string                 `mapstructure:"template_path"`
+	MessageProperties           SlackMessageProperties `mapstructure:"message_properties"`
 }
 
 type SlackMessageProperties struct {
@@ -122,16 +123,18 @@ type SlackMessageProperties struct {
 }
 
 type TelegramConfig struct {
-	Enable       bool
-	BotToken     string `mapstructure:"bot_token"`
-	ChatID       string `mapstructure:"chat_id"`
-	TemplatePath string `mapstructure:"template_path"`
-	UseProxy     bool   `mapstructure:"use_proxy"`
+	KubernetesIssueTemplatePath string `mapstructure:"kubernetes_issue_template_path"`
+	Enable                      bool
+	BotToken                    string `mapstructure:"bot_token"`
+	ChatID                      string `mapstructure:"chat_id"`
+	TemplatePath                string `mapstructure:"template_path"`
+	UseProxy                    bool   `mapstructure:"use_proxy"`
 }
 
 type ViberConfig struct {
-	Enable  bool
-	APIType string `mapstructure:"api_type"` // "bot" or "channel" - defaults to "channel"
+	KubernetesIssueTemplatePath string `mapstructure:"kubernetes_issue_template_path"`
+	Enable                      bool
+	APIType                     string `mapstructure:"api_type"` // "bot" or "channel" - defaults to "channel"
 	// Bot API configuration
 	BotToken     string `mapstructure:"bot_token"`
 	UserID       string `mapstructure:"user_id"`
@@ -142,30 +145,33 @@ type ViberConfig struct {
 }
 
 type EmailConfig struct {
-	Enable       bool
-	SMTPHost     string `mapstructure:"smtp_host"`
-	SMTPPort     string `mapstructure:"smtp_port"`
-	Username     string
-	Password     string
-	To           string
-	Subject      string
-	TemplatePath string `mapstructure:"template_path"`
+	KubernetesIssueTemplatePath string `mapstructure:"kubernetes_issue_template_path"`
+	Enable                      bool
+	SMTPHost                    string `mapstructure:"smtp_host"`
+	SMTPPort                    string `mapstructure:"smtp_port"`
+	Username                    string
+	Password                    string
+	To                          string
+	Subject                     string
+	TemplatePath                string `mapstructure:"template_path"`
 }
 
 type MSTeamsConfig struct {
-	Enable         bool
-	TemplatePath   string            `mapstructure:"template_path"`
-	OtherPowerURLs map[string]string `mapstructure:"other_power_urls"` // Optional alternative Power Automate URLs
+	KubernetesIssueTemplatePath string `mapstructure:"kubernetes_issue_template_path"`
+	Enable                      bool
+	TemplatePath                string            `mapstructure:"template_path"`
+	OtherPowerURLs              map[string]string `mapstructure:"other_power_urls"` // Optional alternative Power Automate URLs
 	// Power Automate Workflow URL for Teams integration
 	PowerAutomateURL string `mapstructure:"power_automate_url"`
 }
 
 type LarkConfig struct {
-	Enable           bool
-	WebhookURL       string            `mapstructure:"webhook_url"`
-	TemplatePath     string            `mapstructure:"template_path"`
-	OtherWebhookURLs map[string]string `mapstructure:"other_webhook_urls"`
-	UseProxy         bool              `mapstructure:"use_proxy"`
+	KubernetesIssueTemplatePath string `mapstructure:"kubernetes_issue_template_path"`
+	Enable                      bool
+	WebhookURL                  string            `mapstructure:"webhook_url"`
+	TemplatePath                string            `mapstructure:"template_path"`
+	OtherWebhookURLs            map[string]string `mapstructure:"other_webhook_urls"`
+	UseProxy                    bool              `mapstructure:"use_proxy"`
 }
 
 type QueueConfig struct {

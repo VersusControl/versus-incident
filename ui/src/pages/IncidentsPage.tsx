@@ -16,6 +16,7 @@ import {
   UserPlus,
 } from "lucide-react";
 import { api, type IncidentIndex, type IncidentSummary, type IntakeSettings, type OriginCounts } from "@/lib/api";
+import { deliveryErrorLabel, hasDeliveryError } from "@/lib/incidentPresentation";
 import { countWindowLabel } from "@/lib/countWindow";
 import { fmtAbs, fmtRel, incidentTitle, truncate } from "@/lib/format";
 import { incidentSeverity } from "@/lib/severity";
@@ -879,9 +880,9 @@ function IncidentPeekBody({
         </PeekField>
       </dl>
 
-      {i.notify_status === "failed" && i.notify_error && (
+      {hasDeliveryError(i) && i.notify_error && (
         <div className="rounded-control border border-sev-critical/40 bg-sev-critical/5 p-2 text-2xs text-sev-critical">
-          <span className="font-semibold">Notify failed:</span> {i.notify_error}
+          <span className="font-semibold">{deliveryErrorLabel(i.notify_status)}:</span> {i.notify_error}
         </div>
       )}
 
@@ -946,7 +947,7 @@ function IncidentRow({
   );
   const hasAssignment =
     !!i.assigned_team_id || (i.assigned_member_ids ?? []).length > 0;
-  const notifyFailed = i.notify_status === "failed";
+  const notifyFailed = hasDeliveryError(i);
 
   return (
     <>
@@ -1033,11 +1034,7 @@ function IncidentRow({
           )}
         </td>
         <td>
-          {!i.notify_status ? (
-            <EmptyValue />
-          ) : i.notify_status === "sent" ? (
-            <Pill tone="good">sent</Pill>
-          ) : notifyFailed ? (
+          {notifyFailed ? (
             <button
               aria-expanded={notifyExpanded}
               aria-controls={`notify-err-${i.id}`}
@@ -1050,9 +1047,13 @@ function IncidentRow({
               onClick={onToggleNotify}
             >
               <Pill tone="bad" className="gap-0.5">
-                failed
+                {i.notify_status || "failed"}
                 {notifyExpanded ? (
                   <ChevronUp size={10} aria-hidden />
+                ) : !i.notify_status ? (
+                  <EmptyValue />
+                ) : i.notify_status === "sent" ? (
+                  <Pill tone="good">sent</Pill>
                 ) : (
                   <ChevronDown size={10} aria-hidden />
                 )}
@@ -1075,7 +1076,7 @@ function IncidentRow({
             colSpan={COLS}
             className="bg-sev-critical/5 px-3 py-2 text-2xs text-sev-critical"
           >
-            <span className="font-semibold">Notify failed:</span>{" "}
+            <span className="font-semibold">{deliveryErrorLabel(i.notify_status)}:</span>{" "}
             {i.notify_error || "No error detail was recorded for this send."}
           </td>
         </tr>

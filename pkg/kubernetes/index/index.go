@@ -59,17 +59,20 @@ type ContainerState struct {
 }
 
 type Record struct {
-	APIVersion              string
-	UID                     string
-	Kind                    string
-	Namespace               string
-	Name                    string
-	ResourceVersion         string
-	Generation              int64
-	Labels                  map[string]string
-	Selector                map[string]string
-	References              map[string][]string
-	Owners                  []OwnerRef
+	APIVersion      string
+	UID             string
+	Kind            string
+	Namespace       string
+	Name            string
+	ResourceVersion string
+	Generation      int64
+	Labels          map[string]string
+	Selector        map[string]string
+	References      map[string][]string
+	Owners          []OwnerRef
+	// OwnerObservedAt is the first load completion for these owner references.
+	// Re-lists preserve it; a new UID or changed owner references reset it.
+	OwnerObservedAt         time.Time
 	Target                  *OwnerRef
 	CreatedAt               time.Time
 	Phase                   string
@@ -105,8 +108,11 @@ type Record struct {
 }
 
 type KindStatus struct {
-	State           string    `json:"state"`
-	ObservedAt      time.Time `json:"observed_at,omitempty"`
+	State      string    `json:"state"`
+	ObservedAt time.Time `json:"observed_at,omitempty"`
+	// CompletedAt bounds when records from the latest successful (possibly
+	// partial) load became visible. ObservedAt is the LIST start, not its end.
+	CompletedAt     time.Time `json:"completed_at,omitempty"`
 	LastAttemptAt   time.Time `json:"last_attempt_at,omitempty"`
 	Records         int       `json:"records"`
 	Partial         bool      `json:"partial"`
@@ -263,8 +269,16 @@ func (index *Index) Ingest(kind string, records []Record, complete bool, observe
 			}
 		}
 	}
+	completedAt := time.Now().UTC()
 	for uid, record := range prepared {
 		current, exists := index.records[uid]
+		record.OwnerObservedAt = time.Time{}
+		if len(record.Owners) > 0 {
+			record.OwnerObservedAt = completedAt
+			if exists && !current.OwnerObservedAt.IsZero() && reflect.DeepEqual(current.Owners, record.Owners) {
+				record.OwnerObservedAt = current.OwnerObservedAt
+			}
+		}
 		index.records[uid] = record
 		if emitDeltas && (!exists || !reflect.DeepEqual(current, record)) {
 			var previous *Record
@@ -279,6 +293,7 @@ func (index *Index) Ingest(kind string, records []Record, complete bool, observe
 	status := index.kinds[kind]
 	status.State = map[bool]string{true: "ready", false: "partial"}[complete]
 	status.LastAttemptAt = observedAt.UTC()
+	status.CompletedAt = completedAt
 	if complete || status.ObservedAt.IsZero() {
 		status.ObservedAt = observedAt.UTC()
 	}

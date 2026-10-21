@@ -2,14 +2,17 @@ package common
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"html"
 	"html/template"
+	"net"
 	"net/smtp"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -18,13 +21,15 @@ import (
 )
 
 type EmailProvider struct {
-	smtpHost     string
-	smtpPort     string
-	username     string
-	password     string
-	to           string
-	subject      string
-	templatePath string
+	context                     context.Context
+	kubernetesIssueTemplatePath string
+	smtpHost                    string
+	smtpPort                    string
+	username                    string
+	password                    string
+	to                          string
+	subject                     string
+	templatePath                string
 }
 
 // loginAuth implements smtp.Auth for Office365's LOGIN authentication
@@ -56,13 +61,14 @@ func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 
 func NewEmailProvider(cfg config.EmailConfig) *EmailProvider {
 	return &EmailProvider{
-		smtpHost:     cfg.SMTPHost,
-		smtpPort:     cfg.SMTPPort,
-		username:     cfg.Username,
-		password:     cfg.Password,
-		to:           cfg.To,
-		subject:      cfg.Subject,
-		templatePath: cfg.TemplatePath,
+		kubernetesIssueTemplatePath: cfg.KubernetesIssueTemplatePath,
+		smtpHost:                    cfg.SMTPHost,
+		smtpPort:                    cfg.SMTPPort,
+		username:                    cfg.Username,
+		password:                    cfg.Password,
+		to:                          cfg.To,
+		subject:                     cfg.Subject,
+		templatePath:                cfg.TemplatePath,
 	}
 }
 
@@ -80,26 +86,35 @@ func (e *EmailProvider) getAuth() smtp.Auth {
 // Name implements core.AlertProvider.
 func (e *EmailProvider) Name() string { return "email" }
 
-func (e *EmailProvider) SendAlert(i *m.Incident) error {
+func (e *EmailProvider) renderAlertTemplate(i *m.Incident) (string, error) {
 	funcMaps := utils.GetTemplateFuncMaps()
 
 	tplPath := e.templatePath
-	if i.Content != nil && utils.IsAgentIncident(*i.Content) {
+	if i.Content != nil && utils.IsKubernetesIssueIncident(*i.Content) {
+		tplPath = utils.KubernetesIssueTemplatePath(e.kubernetesIssueTemplatePath, utils.KubernetesIssueEmailTemplatePath)
+	} else if i.Content != nil && utils.IsAgentIncident(*i.Content) {
 		tplPath = utils.AgentEmailTemplatePath
 	}
 
 	// Parse template
 	tmpl, err := template.New(filepath.Base(tplPath)).Funcs(funcMaps).ParseFiles(tplPath)
 	if err != nil {
-		return fmt.Errorf("failed to parse template: %w", err)
+		return "", fmt.Errorf("failed to parse template: %w", err)
 	}
 
 	// Execute template
 	var body bytes.Buffer
 	if err := tmpl.Execute(&body, i.Content); err != nil {
-		return fmt.Errorf("failed to execute template: %w", err)
+		return "", fmt.Errorf("failed to execute template: %w", err)
 	}
+	return body.String(), nil
+}
 
+func (e *EmailProvider) SendAlert(i *m.Incident) error {
+	body, err := e.renderAlertTemplate(i)
+	if err != nil {
+		return err
+	}
 	// Parse recipients (support multiple comma-separated email addresses)
 	recipients := parseRecipients(e.to)
 	if len(recipients) == 0 {
@@ -120,7 +135,7 @@ func (e *EmailProvider) SendAlert(i *m.Incident) error {
 		message.WriteString(fmt.Sprintf("%s: %s\r\n", key, value))
 	}
 	message.WriteString("\r\n")
-	message.Write(body.Bytes())
+	message.WriteString(body)
 
 	return e.sendMessage(message.Bytes(), recipients)
 }
@@ -134,7 +149,23 @@ func (e *EmailProvider) sendMessage(message []byte, recipients []string) error {
 
 	// Create a custom SMTP client with TLS
 	addr := fmt.Sprintf("%s:%s", e.smtpHost, e.smtpPort)
-	conn, err := smtp.Dial(addr)
+	ctx := e.context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	raw, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to dial SMTP server: %w", err)
+	}
+	defer raw.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = raw.SetDeadline(deadline)
+	} else {
+		_ = raw.SetDeadline(time.Now().Add(30 * time.Second))
+	}
+	stop := context.AfterFunc(ctx, func() { _ = raw.Close() })
+	defer stop()
+	conn, err := smtp.NewClient(raw, e.smtpHost)
 	if err != nil {
 		return fmt.Errorf("failed to dial SMTP server: %w", err)
 	}

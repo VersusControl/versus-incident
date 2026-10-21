@@ -15,7 +15,7 @@ export function KubernetesBreakLogsProvider({ issue, onSelectResource, children 
   return <BreakLogsContext.Provider value={state}>{children}</BreakLogsContext.Provider>;
 }
 
-export function LogWindowBracket({ since, until }: { since: string; until: string }) {
+export function LogWindowBracket({ since, until, captionViewport }: { since: string; until: string; captionViewport?: { left: number; width: number } }) {
   const state = useBreakLogs();
   const dragging = useRef<"from" | "to" | null>(null);
   const plot = useRef<HTMLDivElement>(null);
@@ -29,8 +29,16 @@ export function LogWindowBracket({ since, until }: { since: string; until: strin
     else state.setWindow(from, Math.min(from + maximumWindow, Math.max(from + minimumWindow, value)));
   };
   const relative = (value: number) => { const offset = Math.round((value - Date.parse(state.issue!.broke_at!)) / 30_000) / 2; return `${offset > 0 ? "+" : ""}${offset} m`; };
+  const captionWidth = captionViewport ? Math.min(220, Math.max(0, captionViewport.width)) : 220;
+  const captionLeft = captionViewport?.left ?? 0;
+  const plotMax = `max(0px, calc(100% - ${captionWidth}px))`;
+  const captionMin = `min(${captionLeft}px, ${plotMax})`;
+  const captionMax = captionViewport ? `min(${captionLeft + Math.max(0, captionViewport.width - captionWidth)}px, ${plotMax})` : plotMax;
   return <div ref={plot} className="break-log-bracket-plot" aria-label="Log window">
-    {to >= start && from <= end && <div className="break-log-bracket" style={{ left: `${Math.max(0, position(from))}%`, right: `${100 - Math.min(100, position(to))}%` }}><span className="break-log-window-caption">log window {relative(from)} ... {relative(to)}</span></div>}
+    {to >= start && from <= end && <>
+      <div className="break-log-bracket" style={{ left: `${Math.max(0, position(from))}%`, right: `${100 - Math.min(100, position(to))}%` }} />
+      <span className="break-log-window-caption" style={{ width: captionWidth, left: `clamp(${captionMin}, calc(${(Math.max(0, position(from)) + Math.min(100, position(to))) / 2}% - ${captionWidth / 2}px), ${captionMax})` }}>log window {relative(from)} ... {relative(to)}</span>
+    </>}
     {(["from", "to"] as const).map((edge) => { const value = edge === "from" ? from : to; return value >= start && value <= end ? <button key={edge} type="button" role="slider" aria-label={`Log window ${edge === "from" ? "start" : "end"}`} aria-valuemin={edge === "from" ? to - maximumWindow : from + minimumWindow} aria-valuemax={edge === "from" ? to - minimumWindow : from + maximumWindow} aria-valuenow={value} aria-valuetext={time(new Date(value).toISOString())} className="break-log-handle" style={{ left: `${position(value)}%` }} onKeyDown={(event) => {
       const delta = event.key === "ArrowRight" || event.key === "ArrowUp" ? 30_000 : event.key === "ArrowLeft" || event.key === "ArrowDown" ? -30_000 : 0;
       if (delta) { event.preventDefault(); change(edge, value + delta); }

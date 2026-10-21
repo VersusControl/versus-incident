@@ -738,6 +738,31 @@ func TestPostgresDetectionEpisodeConcurrentExistingOnly(t *testing.T) {
 	}
 }
 
+func TestDetectionIdentityOrganizationNamespace(t *testing.T) {
+	id := storage.DetectionIdentity{AgentKind: "kubernetes", Source: "kubernetes:prod", Service: "shop/Deployment/api", SignalKind: "kubernetes_issue", ConditionKey: "pod.failed"}
+	defaultHash, err := storage.DetectionIdentityFingerprint(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id.OrgID = storage.DefaultOrgID
+	explicitDefault, _ := storage.DetectionIdentityFingerprint(id)
+	if explicitDefault != defaultHash {
+		t.Fatal("default compatibility changed")
+	}
+	id.OrgID = "org-a"
+	a, _ := storage.DetectionIdentityFingerprint(id)
+	id.OrgID = "org-a "
+	distinctWhitespace, _ := storage.DetectionIdentityFingerprint(id)
+	if a == distinctWhitespace {
+		t.Fatal("distinct organization IDs collapsed")
+	}
+	id.OrgID = "org-b"
+	b, _ := storage.DetectionIdentityFingerprint(id)
+	if a == b || a == defaultHash || b == defaultHash {
+		t.Fatal("organization collision")
+	}
+}
+
 func TestDetectionIdentityFingerprintRejectsPayloadShapedInput(t *testing.T) {
 	_, err := storage.DetectionIdentityFingerprint(storage.DetectionIdentity{
 		AgentKind: "detect", Source: "source", Service: "service", SignalKind: "logs",

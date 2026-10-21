@@ -31,6 +31,14 @@ type CaptureSettings struct {
 type Settings struct {
 	Learning  Learning        `json:"learning"`
 	BreakLogs CaptureSettings `json:"break_logs"`
+	Alerts    Alerts          `json:"alerts"`
+}
+
+type Alerts struct {
+	Enabled   bool      `json:"enabled"`
+	Level     string    `json:"level"`
+	EnabledAt time.Time `json:"enabled_at"`
+	UpdatedBy string    `json:"updated_by"`
 }
 
 type Health struct {
@@ -50,6 +58,7 @@ func SettingsKey(org, cluster string) string {
 
 func LoadSettings(provider storage.Provider, key string) (SettingsState, error) {
 	state := SettingsState{Settings: Settings{Learning: Learning{Scope: Scope{Include: []string{}, Exclude: []string{}}}, BreakLogs: CaptureSettings{Fields: map[string]Fields{}}}, Health: map[string]Health{}}
+	state.Settings.Alerts.Level = "critical"
 	if provider == nil {
 		return state, ErrInvalid
 	}
@@ -86,6 +95,7 @@ func UpdateSettings(provider storage.Provider, key string, update func(*Settings
 			encoded = nil
 		}
 		state := SettingsState{Settings: Settings{Learning: Learning{Scope: Scope{Include: []string{}, Exclude: []string{}}}, BreakLogs: CaptureSettings{Fields: map[string]Fields{}}}, Health: map[string]Health{}}
+		state.Settings.Alerts.Level = "critical"
 		if len(encoded) > 64<<10 || len(encoded) > 0 && json.Unmarshal(encoded, &state) != nil {
 			return ErrInvalid
 		}

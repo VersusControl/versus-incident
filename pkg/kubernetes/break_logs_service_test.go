@@ -147,7 +147,9 @@ func TestBreakLogCaptureOwnerKindCoverage(t *testing.T) {
 		{name: "operator stateful set", kind: "Database", intermediate: "StatefulSet", capture: true},
 		{name: "cloud native postgres", kind: "Cluster", capture: true},
 		{name: "forbidden owner list", kind: "StatefulSet", status: kubeindex.KindStatus{State: "error", Error: "forbidden", Partial: true}, capture: true},
-		{name: "complete absent owner", kind: "ReplicaSet", status: kubeindex.KindStatus{State: "ready"}, capture: true},
+		{name: "complete absent owner", kind: "ReplicaSet", status: kubeindex.KindStatus{State: "ready", ObservedAt: time.Now().UTC()}, capture: true},
+		{name: "complete stale owner list", kind: "ReplicaSet", status: kubeindex.KindStatus{State: "ready", ObservedAt: time.Now().UTC().Add(-time.Hour)}},
+		{name: "complete owner list unknown freshness", kind: "ReplicaSet", status: kubeindex.KindStatus{State: "ready"}},
 		{name: "unstarted owner list", kind: "ReplicaSet"},
 		{name: "warming owner list", kind: "ReplicaSet", status: kubeindex.KindStatus{State: "warming"}},
 		{name: "incomplete owner list", kind: "ReplicaSet", status: kubeindex.KindStatus{State: "partial", Partial: true}},
@@ -172,6 +174,8 @@ func TestBreakLogCaptureOwnerKindCoverage(t *testing.T) {
 			defer service.StopCapture()
 			snapshot := breakLogFixture(now, 1, 1)
 			snapshot.Records = snapshot.Records[1:]
+			snapshot.Kinds["Pod"] = kubeindex.KindStatus{State: "ready", CompletedAt: now}
+			snapshot.Records[0].OwnerObservedAt = now
 			owner := kubeindex.OwnerRef{Kind: test.kind, UID: "root", Name: "api", Namespace: "shop", Controller: true, ControllerKnown: true}
 			snapshot.Records[0].Owners = []kubeindex.OwnerRef{owner}
 			if test.intermediate != "" {
@@ -180,6 +184,9 @@ func TestBreakLogCaptureOwnerKindCoverage(t *testing.T) {
 				snapshot.Kinds[test.intermediate] = kubeindex.KindStatus{State: "ready"}
 			}
 			if test.status.State != "" {
+				if test.capture && test.status.State == "ready" {
+					test.status.ObservedAt = now.Add(time.Second)
+				}
 				snapshot.Kinds[test.kind] = test.status
 			}
 			service.captureBreakLogs(t.Context(), snapshot, "")
@@ -188,7 +195,7 @@ func TestBreakLogCaptureOwnerKindCoverage(t *testing.T) {
 				if err != nil || reads.Load() != 0 || len(state.Jobs) != 0 || len(state.Snapshots) != 0 || len(state.Gaps) != 0 {
 					t.Fatalf("incomplete warmup captured evidence: reads=%d state=%+v err=%v", reads.Load(), state, err)
 				}
-				snapshot.Kinds[test.kind] = kubeindex.KindStatus{State: "ready"}
+				snapshot.Kinds[test.kind] = kubeindex.KindStatus{State: "ready", ObservedAt: now.Add(time.Second)}
 				service.captureBreakLogs(t.Context(), snapshot, "")
 			}
 			service.captureBreakLogs(t.Context(), snapshot, "")

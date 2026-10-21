@@ -7,8 +7,6 @@ import (
 	"sync"
 	"time"
 
-	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
-
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
@@ -166,6 +164,13 @@ func (service *Service) StopCapture() {
 	service.changes.stopped[scope] = true
 	loop := service.changes.captures[scope]
 	logDone := service.changes.logDone[scope]
+	var alertDone chan struct{}
+	if window := service.changes.issueAlerts[scope]; window != nil && window.active {
+		alertDone = window.done
+		if window.cancel != nil {
+			window.cancel()
+		}
+	}
 	if cancel := service.changes.logCancel[scope]; cancel != nil {
 		cancel()
 	}
@@ -190,6 +195,9 @@ func (service *Service) StopCapture() {
 	}
 	if logDone != nil {
 		<-logDone
+	}
+	if alertDone != nil {
+		<-alertDone
 	}
 }
 
@@ -435,11 +443,12 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 		}
 	}
 	events, crashGaps, podRead := crashes.resolve(snapshot, now)
+	broken, deferredRoots := classifyReadyBreaks(snapshot, now)
 	if loop == nil || loop.status.Mode == "demand" {
 		if err := store.CommitCapture(collected, gaps, nil, "", now, events, crashGaps, podRead); err != nil {
 			return err
 		}
-		service.rememberBreaks(kubebreaks.Classify(snapshot.Records, now), "", now, partial)
+		service.rememberBreaks(broken, "", now, partial, deferredRoots...)
 		service.enqueueBreakLogs(snapshot, "", nil)
 		return nil
 	}
@@ -495,7 +504,8 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 		loop.status.Behind = true
 		return err
 	}
-	service.rememberBreaks(kubebreaks.Classify(snapshot.Records, now), "", now, partial)
+	service.rememberBreaks(broken, "", now, partial, deferredRoots...)
+	service.evaluateIssueAlertsWithDeferred(broken, deferredRoots, loop.owner, now, partial)
 	service.enqueueBreakLogs(snapshot, loop.owner, loop.ownedContext)
 	for kind, at := range success {
 		loop.success[kind] = at

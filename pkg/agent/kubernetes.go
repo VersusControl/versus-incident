@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"strings"
@@ -10,6 +11,19 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
+
+// ConfigureKubernetesIssueAlerts installs an org-aware emission bridge on every cluster.
+// The callback belongs to the host; this package never imports services.
+func ConfigureKubernetesIssueAlerts(registry *kubernetes.ServiceRegistry, sink func(context.Context, string, kubernetes.IssueAlert) (kubernetes.Outcome, error)) {
+	if registry == nil || sink == nil {
+		return
+	}
+	registry.Each(func(service *kubernetes.Service) {
+		service.SetIssueAlertSink(func(ctx context.Context, a kubernetes.IssueAlert) (kubernetes.Outcome, error) {
+			return sink(ctx, a.OrgID, a)
+		})
+	})
+}
 
 // NewKubernetesService builds the shared read-only connector for one org scope.
 func NewKubernetesRegistry(cfg config.KubernetesConnectorConfig, scope tenancy.OrgScope) (*kubernetes.ServiceRegistry, []error) {

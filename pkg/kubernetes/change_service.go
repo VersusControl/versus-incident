@@ -25,6 +25,7 @@ type ChangePage struct {
 }
 
 type changeStoreState struct {
+	issueAlerts   map[kubeindex.Scope]*issueAlertWindow
 	mu            sync.Mutex
 	provider      storage.Provider
 	stores        map[kubeindex.Scope]*kubechanges.Store
