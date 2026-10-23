@@ -1,7 +1,7 @@
 import { test, expect, type Response } from "@playwright/test";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { openApp } from "./helpers";
+import { captureDir } from "./support/capture";
 
 // ---------------------------------------------------------------------------
 // Agent catalog server-side pagination browser e2e. Drives the REAL running OSS
@@ -21,8 +21,7 @@ import { openApp } from "./helpers";
 // `plans/harness-run/harness.sh e2e ui catalog-pager-perf`.
 // ---------------------------------------------------------------------------
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SHOTS = path.resolve(__dirname, "screenshots", "catalog-pager");
+const SHOTS = captureDir();
 
 // The server's default page size for the catalog list endpoints — the first
 // page is bounded to this, never the whole catalog.

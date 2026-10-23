@@ -105,6 +105,45 @@ func projectBreakSummary(kind string, metadata, status, summary map[string]any) 
 	summary["container_states"] = containers
 }
 
+func projectLogContainerSummary(metadata, spec, status, summary map[string]any) {
+	containers := projectCrashContainers(status)
+	annotations, _ := metadata["annotations"].(map[string]any)
+	states := make(map[string]kubeindex.ContainerState, len(containers))
+	for _, container := range containers {
+		states[container.Name] = container
+	}
+	logContainers := []kubeindex.ContainerState{}
+	for _, group := range []struct {
+		field string
+		init  bool
+	}{{"containers", false}, {"initContainers", true}} {
+		for _, raw := range mapSlice(spec[group.field]) {
+			name := stringValue(raw["name"])
+			if !validPodLogName(name, 63, false) {
+				continue
+			}
+			if len(logContainers) >= 64 {
+				summary["log_container_states_partial"] = true
+				break
+			}
+			state := states[name]
+			state.Name, state.Init = name, group.init
+			logContainers = append(logContainers, state)
+			if !group.init && summary["main_container"] == nil {
+				summary["main_container"] = name
+			}
+		}
+	}
+	if preferred := stringValue(annotations["kubectl.kubernetes.io/default-container"]); preferred != "" {
+		for _, container := range logContainers {
+			if !container.Init && container.Name == preferred {
+				summary["main_container"] = preferred
+			}
+		}
+	}
+	summary["log_container_states"] = logContainers
+}
+
 func projectCrashContainers(status map[string]any) []kubeindex.ContainerState {
 	containers := []kubeindex.ContainerState{}
 	for _, field := range []string{"containerStatuses", "initContainerStatuses"} {
@@ -120,6 +159,8 @@ func projectCrashContainers(status map[string]any) []kubeindex.ContainerState {
 			state, _ := container["state"].(map[string]any)
 			item.Ready, _ = container["ready"].(bool)
 			_, item.Running = state["running"]
+			running, _ := state["running"].(map[string]any)
+			item.StartedAt = breakTimestamp(running["startedAt"])
 			item.StateKnown = len(state) > 0
 			waiting, _ := state["waiting"].(map[string]any)
 			item.WaitingReason = safeBreakReason(stringValue(waiting["reason"]))
@@ -177,12 +218,20 @@ func indexedTimestamp(summary map[string]string, key string) time.Time {
 }
 
 func indexedContainers(value any) []kubeindex.ContainerState {
+	return indexedContainerLimit(value, 8)
+}
+
+func indexedLogContainers(value any) []kubeindex.ContainerState {
+	return indexedContainerLimit(value, 64)
+}
+
+func indexedContainerLimit(value any, limit int) []kubeindex.ContainerState {
 	if values, ok := value.([]kubeindex.ContainerState); ok {
-		return append([]kubeindex.ContainerState(nil), values...)
+		return append([]kubeindex.ContainerState(nil), values[:min(len(values), limit)]...)
 	}
 	var result []kubeindex.ContainerState
 	for _, item := range mapSlice(value) {
-		if len(result) == 8 {
+		if len(result) == limit {
 			break
 		}
 		init, _ := item["init"].(bool)
@@ -190,7 +239,7 @@ func indexedContainers(value any) []kubeindex.ContainerState {
 		ready, _ := item["ready"].(bool)
 		running, _ := item["running"].(bool)
 		known, _ := item["state_known"].(bool)
-		result = append(result, kubeindex.ContainerState{Name: stringValue(item["name"]), Init: init, Ready: ready, Running: running, StateKnown: known, CurrentTermination: current, WaitingReason: safeBreakReason(stringValue(item["waiting_reason"])), TerminatedReason: safeBreakReason(stringValue(item["last_terminated_reason"])), ExitCode: int32(triageSummaryIntValue(item, "last_terminated_exit_code")), Signal: int32(triageSummaryIntValue(item, "last_terminated_signal")), RestartCount: int32(triageSummaryIntValue(item, "restart_count")), TerminatedAt: breakTimestamp(item["last_terminated_at"])})
+		result = append(result, kubeindex.ContainerState{Name: stringValue(item["name"]), Init: init, Ready: ready, Running: running, StartedAt: breakTimestamp(item["started_at"]), StateKnown: known, CurrentTermination: current, WaitingReason: safeBreakReason(stringValue(item["waiting_reason"])), TerminatedReason: safeBreakReason(stringValue(item["last_terminated_reason"])), ExitCode: int32(triageSummaryIntValue(item, "last_terminated_exit_code")), Signal: int32(triageSummaryIntValue(item, "last_terminated_signal")), RestartCount: int32(triageSummaryIntValue(item, "restart_count")), TerminatedAt: breakTimestamp(item["last_terminated_at"])})
 	}
 	return result
 }
@@ -205,6 +254,13 @@ func recordProjection(record kubeindex.Record) ProjectedResource {
 		}
 	}
 	summary["container_states"] = record.Containers
+	summary["log_container_states"] = record.LogContainers
+	if record.MainContainer != "" {
+		summary["main_container"] = record.MainContainer
+	}
+	if record.LogContainersPartial {
+		summary["log_container_states_partial"] = true
+	}
 	if record.EventType != "" && record.Target != nil {
 		summary["involved_object"] = ObjectRef{Kind: record.Target.Kind, Namespace: record.Target.Namespace, Name: record.Target.Name, UID: record.Target.UID}
 	}

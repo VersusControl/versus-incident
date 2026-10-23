@@ -32,22 +32,27 @@ function mount(value = settings) {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("Kubernetes Agent settings", () => {
-  it("saves preview preferences and namespace scope without submitting server-only fields", async () => {
+  it("locks learning and scope while preserving persisted values on log-source saves", async () => {
+    const persisted = { ...settings, learning: { ...settings.learning, scope: { include: ["shop"], exclude: ["sandbox"] } } };
     const save = vi.spyOn(api, "kubernetesSaveAgentSettings").mockImplementation(async (input) => ({ ...settings, ...input }));
-    mount();
+    mount(persisted);
     await screen.findByText("8 workloads in 2 namespaces");
-    expect(screen.getByText("Preview")).toBeTruthy();
+    expect(screen.getByText("Not available yet.")).toBeTruthy();
     expect(screen.getByText("metrics-server found")).toBeTruthy();
     expect(screen.getByText("tempo found in telemetry")).toBeTruthy();
-    fireEvent.click(screen.getByRole("switch", { name: "Metrics learning" }));
-    fireEvent.click(screen.getByRole("button", { name: "Edit scope" }));
-    fireEvent.change(screen.getByLabelText("Include namespaces"), { target: { value: "shop, payments, shop" } });
-    fireEvent.change(screen.getByLabelText("Exclude namespaces"), { target: { value: "sandbox" } });
-    fireEvent.click(screen.getByRole("button", { name: "Apply scope" }));
+    for (const control of screen.getAllByRole("switch")) expect((control as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Edit scope" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Save settings" }) as HTMLButtonElement).disabled).toBe(true);
+    const learning = screen.getByRole("region", { name: "Agent learning" });
+    const capture = screen.getByRole("region", { name: "Log capture at break" });
+    expect(capture.compareDocumentPosition(learning) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(capture.textContent).not.toMatch(/KiB|MiB|500 lines|containers per pod/);
+    fireEvent.change(screen.getByLabelText("Namespace label"), { target: { value: "custom_namespace" } });
     fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
     await screen.findByText("Agent settings saved.");
-    expect(save.mock.calls[0][0].learning).toEqual({ ...settings.learning, metrics: true, scope: { include: ["shop", "payments"], exclude: ["sandbox"] } });
-    expect(save.mock.calls[0][0].break_logs.fields).toEqual(settings.break_logs.fields);
+    expect(save.mock.calls[0][0].learning).toEqual(persisted.learning);
+    expect(save.mock.calls[0][0]).not.toHaveProperty("sources");
+    expect(save.mock.calls[0][0].break_logs.fields.loki.namespace).toBe("custom_namespace");
   });
 
   it("shows saved values without inputs or write/test requests for a read-only caller", async () => {
@@ -55,7 +60,7 @@ describe("Kubernetes Agent settings", () => {
     const test = vi.spyOn(api, "kubernetesTestLink");
     mount({ ...settings, can_write: false });
     await screen.findByText("Read only. An administrator can change these settings.");
-    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.getAllByRole("switch").every((control) => (control as HTMLInputElement).disabled)).toBe(true);
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.queryByRole("button", { name: "Test link" })).toBeNull();
     expect(save).not.toHaveBeenCalled(); expect(test).not.toHaveBeenCalled();
@@ -110,13 +115,13 @@ describe("Kubernetes Agent settings", () => {
     await waitFor(() => expect(save.mock.calls[0][0].break_logs.linked_source).toBe(""));
   });
 
-  it("renders the no-source state and rejects malformed namespace scope", async () => {
+  it("renders the no-source state without exposing an editable learning scope", async () => {
     mount({ ...settings, sources: [], break_logs: { ...settings.break_logs, linked_source: "" } });
     await screen.findByText("No log data source is configured");
     expect(screen.getByRole("button", { name: "None available" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("link", { name: "Read the data sources guide" }).getAttribute("target")).toBe("_blank");
     fireEvent.click(screen.getByRole("button", { name: "Edit scope" }));
-    fireEvent.change(screen.getByLabelText("Include namespaces"), { target: { value: "INVALID namespace" } });
-    expect(screen.getByRole("button", { name: "Apply scope" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByLabelText("Include namespaces")).toBeNull();
   });
 });

@@ -188,6 +188,9 @@ func (service *Service) StopCapture() {
 	service.changes.mu.Unlock()
 	if loop != nil {
 		loop.cancel()
+	}
+	service.stopUsageInterestWorker()
+	if loop != nil {
 		<-loop.done
 	}
 	for _, refresh := range refreshes {
@@ -376,9 +379,12 @@ func (service *Service) captureOwned(loop *captureLoop, store *kubechanges.Store
 			}
 		}
 	}()
+	usageDone := make(chan struct{})
+	go service.runUsageSampler(ownedContext, usageDone)
 	defer func() {
 		cancelOwned()
 		<-renewDone
+		<-usageDone
 		loop.mu.Lock()
 		loop.owned = false
 		loop.ownedContext = nil

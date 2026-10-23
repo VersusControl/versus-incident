@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as dotenv from "dotenv";
+import { harnessImagesDir, harnessResultsDir } from "./support/capture";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -42,12 +43,19 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
-  reporter: [["list"], ["html", { open: "never" }]],
+  // Binding standard (plans/harness-run/README.md): artifacts live under the
+  // run's images/results dirs (HARNESS_*), or `_adhoc` when run outside run.sh.
+  outputDir: path.join(harnessImagesDir(), "_playwright"),
+  reporter: [
+    ["list"],
+    ["html", { open: "never", outputFolder: path.join(harnessResultsDir(), "playwright", "html") }],
+    ["json", { outputFile: path.join(harnessResultsDir(), "playwright", "results.json") }],
+  ],
   use: {
     baseURL,
     headless: !headful,
     trace: "on-first-retry",
-    screenshot: "only-on-failure",
+    screenshot: process.env.E2E_KUBERNETES_READONLY_ACCEPTANCE === "1" ? "off" : "only-on-failure",
     video: "on-first-retry",
     actionTimeout: 15_000,
     navigationTimeout: 30_000,

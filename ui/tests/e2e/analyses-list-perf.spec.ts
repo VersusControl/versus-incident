@@ -1,7 +1,7 @@
 import { test, expect, type Response } from "@playwright/test";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { openApp } from "./helpers";
+import { captureDir } from "./support/capture";
 
 // ---------------------------------------------------------------------------
 // Analyses list-perf browser e2e. Drives the REAL running OSS SPA
@@ -18,8 +18,7 @@ import { openApp } from "./helpers";
 // rows, and run via `plans/harness-run/harness.sh e2e ui analyses-list-perf`.
 // ---------------------------------------------------------------------------
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SHOTS = path.resolve(__dirname, "screenshots", "analyses-perf");
+const SHOTS = captureDir();
 
 // The server's default page size for the analyses index endpoint — the first
 // page is bounded to this, never the whole table.

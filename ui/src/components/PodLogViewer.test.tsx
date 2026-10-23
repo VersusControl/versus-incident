@@ -9,6 +9,103 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.use
 const resource = { resource_id: "core~v1~pods", kind: "Pod", namespace: "shop", name: "api", summary: { log_containers: [{ name: "app", type: "regular" }, { name: "setup", type: "init" }, { name: "debug", type: "ephemeral" }] } };
 
 describe("Pod log viewer", () => {
+  it("counts retained error and warning lines and changes presentation without restarting the stream", async () => {
+    const stream = vi.spyOn(api, "kubernetesPodLogStream").mockImplementation((_namespace, _pod, _options, emit, signal) => {
+      ["INFO served", "ERROR refused", "WARN slow", "ERROR timeout"].forEach((text, index) => emit({ event: "line", text, container: "app", ordinal: index + 1, timestamp: "2026-10-21T08:00:00Z" }));
+      return new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    });
+    render(<PodLogViewer resource={resource} />);
+    await screen.findByRole("button", { name: "Errors 2" });
+    expect(screen.getByRole("button", { name: "Warnings 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Current" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(screen.getByLabelText("Timestamps"));
+    fireEvent.click(screen.getByLabelText("Wrap lines"));
+    fireEvent.change(screen.getByLabelText("Log filter"), { target: { value: "timeout" } });
+    expect(stream).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText("Pod log output").textContent).toContain("ERROR timeout");
+    fireEvent.click(screen.getByRole("button", { name: "Previous container logs" }));
+    await waitFor(() => expect(stream).toHaveBeenCalledTimes(2));
+    expect(stream.mock.calls[1][2].previous).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Current", exact: true }));
+    await waitFor(() => expect(stream).toHaveBeenCalledTimes(3));
+    expect(stream.mock.calls[2][2].previous).toBe(false);
+    expect(stream.mock.calls.every((call) => call[2].timestamps === false)).toBe(true);
+  });
+  it("shows the blocking unavailable reason when retained output contains only a neutral reconnect row", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(api, "kubernetesPodLogStream").mockImplementation(async (_namespace, _pod, options, emit) => {
+      if (options.previous) {
+        emit({ event: "heartbeat", text: "", container: "app", replay_uncertain: true });
+        emit({ event: "error", text: "", container: "app", code: "previous_unavailable", message: "Previous container logs are unavailable.", action: "Select current container logs." });
+      }
+      emit({ event: "end", text: "", container: "app" });
+    });
+    render(<PodLogViewer resource={resource} />);
+    fireEvent.click(screen.getByLabelText("Previous container logs"));
+    fireEvent.change(screen.getByLabelText("Log filter"), { target: { value: "missing" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    const output = screen.getByLabelText("Pod log output");
+    expect(output.textContent).toContain("previous_unavailable Previous container logs are unavailable. Select current container logs.");
+    expect(output.textContent).not.toMatch(/resumed after reconnect|No log lines match|Connecting/);
+    expect(output.querySelectorAll("[data-log-key]")).toHaveLength(0);
+    expect((screen.getByLabelText("Download scrubbed logs") as HTMLButtonElement).disabled).toBe(true);
+  });
+  it("opens a resumed read from the Pause and Resume buttons after a normal end", async () => {
+    vi.useFakeTimers();
+    const timestamp = "2026-10-21T08:00:00Z";
+    const stream = vi.spyOn(api, "kubernetesPodLogStream")
+      .mockImplementationOnce(async (_namespace, _pod, _options, emit) => {
+        emit({ event: "line", text: "first", container: "app", timestamp, ordinal: 1, cursor: "first-checkpoint" });
+        emit({ event: "end", text: "", container: "app", cursor: "first-checkpoint" });
+      })
+      .mockImplementation((_namespace, _pod, _options, emit, signal) => {
+        emit({ event: "line", text: "first", container: "app", timestamp, ordinal: 1, cursor: "first-checkpoint" });
+        emit({ event: "line", text: "second", container: "app", timestamp, ordinal: 2, cursor: "second-checkpoint" });
+        return new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      });
+    render(<PodLogViewer resource={resource} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    fireEvent.click(screen.getByLabelText("Pause logs"));
+    fireEvent.click(screen.getByLabelText("Resume logs"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(stream).toHaveBeenCalledTimes(2);
+    expect(stream.mock.calls[1][2]).toEqual({ container: "app", previous: false, timestamps: false, cursor: "first-checkpoint" });
+    const output = screen.getByLabelText("Pod log output");
+    const displayedTime = new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+    expect(output.textContent).toBe(`${displayedTime} first\n${displayedTime} second\n`);
+    expect(output.querySelectorAll("time")).toHaveLength(2);
+    expect(output.textContent).not.toMatch(/cannot resume|reconnect|uncertain/);
+  });
+  it("keeps compact container chips outside More and puts mobile filters and levels inside the controlled menu", () => {
+    vi.spyOn(api, "kubernetesPodLogStream").mockImplementation(async (_namespace, _pod, _options, emit) => emit({ event: "end", text: "", container: "app" }));
+    const { rerender } = render(<PodLogViewer resource={resource} compact />);
+    const more = screen.getByRole("button", { name: "More" });
+    const controls = document.getElementById(more.getAttribute("aria-controls")!)!;
+    const chips = screen.getByRole("group", { name: "Log containers" });
+    expect(controls.contains(chips)).toBe(false);
+    expect(chips.classList.contains("hidden")).toBe(false);
+    expect(controls.contains(screen.getByLabelText("Log filter"))).toBe(true);
+    expect(controls.classList.contains("hidden")).toBe(true);
+    fireEvent.click(more);
+    expect(more.getAttribute("aria-expanded")).toBe("true");
+    expect(controls.classList.contains("hidden")).toBe(false);
+    fireEvent.click(more);
+    rerender(<PodLogViewer resource={resource} compact={false} />);
+    expect(controls.contains(screen.getByRole("button", { name: "Errors 0", exact: true }))).toBe(true);
+    expect(controls.classList.contains("hidden")).toBe(true);
+    expect(screen.getByRole("group", { name: "Log containers" })).toBeTruthy();
+  });
+  it("opens the complete returned container catalog from the compact overflow chip", async () => {
+    vi.spyOn(api, "kubernetesPodLogStream").mockImplementation(async (_namespace, _pod, _options, emit) => emit({ event: "end", text: "", container: "app" }));
+    const names = Array.from({ length: 7 }, (_, index) => ({ name: `sidecar-${index}`, type: "regular" }));
+    render(<PodLogViewer resource={{ ...resource, summary: { log_containers: names, main_container: "sidecar-0" } }} compact />);
+    expect(screen.getByRole("button", { name: "+3" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "sidecar-6" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "+3" }));
+    fireEvent.click(screen.getByRole("button", { name: "sidecar-6" }));
+    await waitFor(() => expect(api.kubernetesPodLogStream).toHaveBeenLastCalledWith("shop", "api", expect.objectContaining({ container: "sidecar-6" }), expect.any(Function), expect.any(AbortSignal)));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
   it("distinguishes connecting, quiet, filtered, and failed empty output", async () => {
     vi.useFakeTimers();
     let emit: (event: KubernetesPodLogEvent) => void = () => undefined;
@@ -19,24 +116,24 @@ describe("Pod log viewer", () => {
     render(<PodLogViewer resource={resource} />);
     const output = screen.getByLabelText("Pod log output");
     expect(output.textContent).toContain("Connecting");
-    expect(screen.getByRole("option", { name: "1 hour", exact: true })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "1h", exact: true })).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Log filter"), { target: { value: "missing" } });
     act(() => emit({ event: "heartbeat", text: "", container: "app" }));
-    expect(output.textContent).toBe("Connected; no log lines received yet.");
+    expect(output.textContent).toBe("No log lines in the selected time");
     act(() => emit({ event: "line", text: "actual", container: "app", cursor: "one" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(50); });
     expect(output.textContent).toBe("No log lines match this filter.");
     fireEvent.click(screen.getByLabelText("Reload logs"));
     act(() => emit({ event: "error", text: "", container: "app", code: "forbidden", message: "Access denied", action: "Check RBAC" }));
-    expect(output.textContent).toContain("See the stream error");
-    expect(screen.getByRole("alert").textContent).toContain("forbidden Access denied Check RBAC");
+    expect(output.textContent).toContain("forbidden Access denied Check RBAC");
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("shows finite previous completion without a filter miss or reconnect", async () => {
     const stream = vi.spyOn(api, "kubernetesPodLogStream").mockImplementation(async (_namespace, _pod, _options, emit) => emit({ event: "end", text: "", container: "app" }));
     render(<PodLogViewer resource={resource} />);
     fireEvent.click(screen.getByLabelText("Previous container logs"));
-    await waitFor(() => expect(screen.getByLabelText("Pod log output").textContent).toBe("Previous container log read completed with no lines."));
+    await waitFor(() => expect(screen.getByLabelText("Pod log output").textContent).toBe("No log lines in the selected time"));
     expect(stream).toHaveBeenCalledTimes(2);
   });
 
@@ -59,7 +156,8 @@ describe("Pod log viewer", () => {
     act(() => emit({ event: "line", text: "next", container: "app", cursor: "two" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(50); });
     expect(output.scrollTop).toBe(100);
-    fireEvent.click(screen.getByLabelText("Scroll logs to bottom"));
+    expect((screen.getByLabelText("Follow") as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByLabelText("Scroll to latest"));
     expect(output.scrollTop).toBe(1000);
     fireEvent.click(screen.getByLabelText("Follow"));
     output.scrollTop = 800;
@@ -84,7 +182,8 @@ describe("Pod log viewer", () => {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     render(<PodLogViewer resource={resource} />);
     await waitFor(() => expect(screen.getByLabelText("Pod log output").textContent).toContain("axb"));
-    expect(screen.getByText(/Log replay is uncertain/)).toBeTruthy();
+    expect(screen.getByText(/resumed after reconnect at/)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
     expect(new URL(String(fetchMock.mock.calls[0][0]), "http://localhost").searchParams.get("timestamps")).toBe("false");
     expect(screen.getAllByRole("option").map((option) => option.textContent)).toContain("debug (ephemeral)");
     fireEvent.change(screen.getByLabelText("Log filter"), { target: { value: "a.b" } });
@@ -93,7 +192,10 @@ describe("Pod log viewer", () => {
       const toggle = screen.getByLabelText("Timestamps") as HTMLInputElement;
       if (toggle.checked !== enabled) fireEvent.click(toggle);
       const expected = `${enabled ? `${timestamp} ` : ""}token=[REDACTED] a.b`;
-      expect(screen.getByLabelText("Pod log output").textContent?.trim()).toBe(expected);
+      const displayed = `${enabled ? `${new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })} ` : ""}token=[REDACTED] a.b`;
+      expect(screen.getByLabelText("Pod log output").textContent?.trim()).toBe(displayed);
+      expect(screen.getByLabelText("Pod log output").querySelectorAll("time")).toHaveLength(enabled ? 1 : 0);
+      if (enabled) expect(screen.getByLabelText("Pod log output").querySelector("time")?.title).toBe(timestamp);
       fireEvent.click(screen.getByLabelText("Copy scrubbed logs"));
       await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(expected));
       fireEvent.click(screen.getByLabelText("Download scrubbed logs"));
@@ -117,19 +219,15 @@ describe("Pod log viewer", () => {
     });
     render(<PodLogViewer resource={resource} />);
     fireEvent.click(screen.getByLabelText("Previous container logs"));
-    expect(await screen.findByRole("alert")).toBeTruthy();
-    expect(screen.getByRole("alert").textContent).toContain("no previous container instance");
+    await waitFor(() => expect(screen.getByLabelText("Pod log output").textContent).toContain("no previous container instance"));
+    expect(screen.queryByRole("alert")).toBeNull();
     fireEvent.change(screen.getByLabelText("Log since seconds"), { target: { value: "86400" } });
-    fireEvent.change(screen.getByLabelText("Log tail lines"), { target: { value: "5000" } });
     await waitFor(() => expect(stream).toHaveBeenLastCalledWith("shop", "api", expect.objectContaining({ previous: true, since_seconds: 86400, tail_lines: 5000 }), expect.any(Function), expect.any(AbortSignal)));
   });
 
   it.each([
-    ["duration", "duration safety limit"],
-    ["bytes", "byte safety limit"],
-    ["byte_limit", "byte safety limit"],
-    ["private-unknown-reason", "safety limit"],
-  ])("shows an honest empty %s limit and keeps uncertainty until an explicit reload", async (reason, limitDescription) => {
+    "duration", "bytes", "byte_limit", "private-unknown-reason",
+  ])("silently rotates a %s limit using its checkpoint and keeps the Live session", async (reason) => {
     vi.useFakeTimers();
     let emit: (event: KubernetesPodLogEvent) => void = () => undefined;
     let finish: () => void = () => undefined;
@@ -138,47 +236,38 @@ describe("Pod log viewer", () => {
       return new Promise<void>((resolve) => { finish = resolve; signal.addEventListener("abort", () => resolve(), { once: true }); });
     });
     render(<PodLogViewer resource={resource} />);
-    fireEvent.change(screen.getByLabelText("Log filter"), { target: { value: "missing" } });
     act(() => {
       emit({ event: "heartbeat", text: "", container: "app", cursor: "quiet-checkpoint", replay_uncertain: true });
       emit({ event: "heartbeat", text: "", container: "app", replay_uncertain: false });
     });
-    expect(screen.getByLabelText("Pod log output").textContent).toBe("Connected; no log lines received yet.");
     act(() => {
       emit({ event: "limit", text: "private-log-payload", container: "app", cursor: "limit-checkpoint", reason, code: "private-code", message: "private-message", action: "private-action" });
       emit({ event: "end", text: "", container: "app", cursor: "end-checkpoint", replay_uncertain: false });
       finish();
     });
-    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-    expect(screen.getByLabelText("Log connection status").textContent).toBe("limited");
-    expect(screen.getByLabelText("Pod log output").textContent).toBe("Log read reached its safety limit before any lines were received.");
-    const limitMessage = `Log read reached its ${limitDescription}. Reload logs to start a new read.`;
-    expect(screen.getByText(limitMessage).getAttribute("role")).toBe("status");
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(stream).toHaveBeenCalledTimes(2);
+    expect(stream.mock.calls[1][2].cursor).toBe("end-checkpoint");
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByLabelText("Pod logs").textContent).not.toContain("private-");
-    expect(screen.getByText(/Log replay is uncertain/).getAttribute("role")).toBe("status");
-    expect(stream).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByLabelText("Pause logs"));
-    fireEvent.click(screen.getByLabelText("Resume logs"));
-    expect(screen.getByLabelText("Log connection status").textContent).toBe("limited");
-    expect(screen.getByText(limitMessage)).toBeTruthy();
-    expect(screen.getByText(/Log replay is uncertain/)).toBeTruthy();
-    expect(stream).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/resumed after reconnect at/)).toBeTruthy();
+    expect(screen.queryByText(/safety limit/)).toBeNull();
     fireEvent.click(screen.getByLabelText("Reload logs"));
-    expect(stream).toHaveBeenCalledTimes(2);
-    expect(stream.mock.calls[1][2]).not.toHaveProperty("cursor");
-    expect(screen.queryByText(/Log replay is uncertain/)).toBeNull();
+    expect(stream).toHaveBeenCalledTimes(3);
+    expect(stream.mock.calls[2][2]).not.toHaveProperty("cursor");
+    expect(screen.queryByText(/resumed after reconnect at/)).toBeNull();
     expect(screen.getByLabelText("Log connection status").textContent).toBe("connecting");
   });
 
-  it("shows buffer and replay-history cap warnings without hiding the restart action", async () => {
+  it("quietly evicts oldest lines and reports retained download scope in the footer", async () => {
     vi.spyOn(api, "kubernetesPodLogStream").mockImplementation(async (_namespace, _pod, _options, emit) => {
       for (let ordinal = 1; ordinal <= 10001; ordinal++) emit({ event: "line", text: "tiny", container: "app", timestamp: "2026-10-07T12:00:00Z", ordinal });
       emit({ event: "end", text: "", container: "app", cursor: "final" });
     });
     render(<PodLogViewer resource={resource} />);
-    await waitFor(() => expect(screen.getByText(/Browser buffer capped/).textContent).toContain("1 oldest lines dropped"));
-    expect(screen.getByText(/Log replay is uncertain/)).toBeTruthy();
+    await waitFor(() => expect(screen.getByText(/evicted/).textContent).toContain("1 evicted"));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/Log replay is uncertain/)).toBeNull();
     expect(screen.getByLabelText("Pod log output").querySelectorAll("[data-log-key]")).toHaveLength(10000);
     expect((screen.getByLabelText("Reload logs") as HTMLButtonElement).disabled).toBe(false);
   });

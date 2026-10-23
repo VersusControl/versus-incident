@@ -37,6 +37,7 @@ type generatedPodOwner struct {
 	Kind       string `json:"kind"`
 	Name       string `json:"name"`
 	UID        string `json:"uid"`
+	Controller bool   `json:"controller"`
 }
 
 type generatedPodSpec struct {
@@ -95,7 +96,7 @@ func Generate(store *Store, pods, namespaces int, seed int64) error {
 		deploymentName := fmt.Sprintf("app-%05d", deploymentIndex)
 		replicasetName := deploymentName + "-rs"
 		labels := map[string]string{"app.kubernetes.io/name": deploymentName, "app": deploymentName}
-		owner := []any{map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "name": deploymentName, "uid": "uid-" + deploymentName}}
+		owner := []any{map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "name": deploymentName, "uid": "uid-" + deploymentName, "controller": true}}
 		if err := putObject(store, "deployments", namespace, deploymentName, map[string]any{"kind": "Deployment", "metadata": map[string]any{"labels": labels, "uid": "uid-" + deploymentName, "generation": 1}, "spec": map[string]any{"replicas": min(25, pods-deploymentIndex*25), "selector": map[string]any{"matchLabels": labels}}, "status": map[string]any{"replicas": min(25, pods-deploymentIndex*25), "readyReplicas": min(25, pods-deploymentIndex*25), "availableReplicas": min(25, pods-deploymentIndex*25), "observedGeneration": 1}}); err != nil {
 			return err
 		}
@@ -103,7 +104,7 @@ func Generate(store *Store, pods, namespaces int, seed int64) error {
 			return err
 		}
 		count := min(25, pods-deploymentIndex*25)
-		podOwners := []generatedPodOwner{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: replicasetName, UID: "uid-" + replicasetName}}
+		podOwners := []generatedPodOwner{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: replicasetName, UID: "uid-" + replicasetName, Controller: true}}
 		for podIndex := 0; podIndex < count; podIndex++ {
 			globalIndex := deploymentIndex*25 + podIndex
 			podName := fmt.Sprintf("%s-%02d", replicasetName, podIndex)
@@ -151,7 +152,8 @@ func SeedScenario(store *Store, name string, seed int64) error {
 			{"namespaces", "", "inventory-only", map[string]any{"kind": "Namespace", "metadata": map[string]any{}}},
 			{"services", "payments", "checkout-api", map[string]any{"kind": "Service", "metadata": map[string]any{}, "spec": map[string]any{"selector": map[string]string{"app": "checkout"}, "ports": []any{map[string]any{"port": 80}}}}},
 			{"deployments", "payments", "checkout-api", map[string]any{"kind": "Deployment", "metadata": map[string]any{"labels": map[string]string{"app.kubernetes.io/name": "checkout"}, "uid": "deployment-checkout"}, "spec": map[string]any{"replicas": 3, "selector": map[string]any{"matchLabels": map[string]string{"app": "checkout"}}}, "status": map[string]any{"replicas": 3, "readyReplicas": 1, "availableReplicas": 1, "observedGeneration": 1, "conditions": []any{map[string]any{"type": "Progressing", "status": "False", "reason": "ProgressDeadlineExceeded"}}}}},
-			{"pods", "payments", "checkout-api-0", map[string]any{"kind": "Pod", "metadata": map[string]any{"labels": map[string]string{"app": "checkout"}, "uid": "pod-checkout-0", "ownerReferences": []any{map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "name": "checkout-api", "uid": "deployment-checkout"}}}, "spec": map[string]any{"nodeName": "node-a", "containers": []any{map[string]any{"name": "api", "image": "example.invalid/checkout:v1", "env": []any{map[string]any{"name": "TOKEN", "value": "secret-token"}}, "envFrom": []any{map[string]any{"secretRef": map[string]any{"name": "api-secret"}}, map[string]any{"configMapRef": map[string]any{"name": "api-config"}}}}}}, "status": map[string]any{"phase": "Running", "containerStatuses": []any{map[string]any{"name": "api", "ready": false, "restartCount": 9, "state": map[string]any{"waiting": map[string]any{"reason": "CrashLoopBackOff"}}}}}}},
+			{"replicasets", "payments", "checkout-api-rs", map[string]any{"kind": "ReplicaSet", "metadata": map[string]any{"labels": map[string]string{"app": "checkout"}, "uid": "replicaset-checkout", "ownerReferences": []any{map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "name": "checkout-api", "uid": "deployment-checkout", "controller": true}}}, "spec": map[string]any{"replicas": 3, "selector": map[string]any{"matchLabels": map[string]string{"app": "checkout"}}}}},
+			{"pods", "payments", "checkout-api-0", map[string]any{"kind": "Pod", "metadata": map[string]any{"labels": map[string]string{"app": "checkout"}, "uid": "pod-checkout-0", "ownerReferences": []any{map[string]any{"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "checkout-api-rs", "uid": "replicaset-checkout", "controller": true}}}, "spec": map[string]any{"nodeName": "node-a", "containers": []any{map[string]any{"name": "api", "image": "example.invalid/checkout:v1", "env": []any{map[string]any{"name": "TOKEN", "value": "secret-token"}}, "envFrom": []any{map[string]any{"secretRef": map[string]any{"name": "api-secret"}}, map[string]any{"configMapRef": map[string]any{"name": "api-config"}}}}}}, "status": map[string]any{"phase": "Running", "containerStatuses": []any{map[string]any{"name": "api", "ready": false, "restartCount": 9, "state": map[string]any{"waiting": map[string]any{"reason": "CrashLoopBackOff"}}}}}}},
 			{"secrets", "payments", "api-secret", map[string]any{"kind": "Secret", "type": "Opaque", "metadata": map[string]any{}, "data": map[string]string{"token": "c2VjcmV0LXRva2Vu"}}},
 			{"configmaps", "payments", "api-config", map[string]any{"kind": "ConfigMap", "metadata": map[string]any{}, "data": map[string]string{"config.yaml": "token: must-not-cross"}}},
 			{"jobs", "payments", "settlement", map[string]any{"kind": "Job", "metadata": map[string]any{}, "status": map[string]any{"failed": 1, "conditions": []any{map[string]any{"type": "Failed", "status": "True"}}}}},

@@ -1,9 +1,9 @@
 import { expect, test, type TestInfo } from "@playwright/test";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { openApp, primaryNav } from "./helpers";
+import { captureDir } from "./support/capture";
 
-const screenshotDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "screenshots", "agent-tools");
+const screenshotDir = captureDir();
 
 type AgentKind = "chat" | "analyze";
 type ToolSetting = { group: string; name: string; enabled: boolean };

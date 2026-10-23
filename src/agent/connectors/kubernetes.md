@@ -1,13 +1,8 @@
-# Kubernetes Connector and Dashboard
+# Kubernetes Connector
 
-Explore your Kubernetes environment in one place: cluster health and capacity,
-workloads, resource relationships, recent changes, Helm releases, and GitOps
-status. Open a resource to inspect its events, logs, metrics, and deployment
-context without switching between tools.
+Explore your Kubernetes environment in one place: cluster health and capacity, workloads, resource relationships, recent changes, Helm releases, and GitOps status.
 
-The AI SRE can use the same cluster context in Chat and Analyze. Start with the
-dashboard to understand a workload, then investigate it in chat with the
-resource already attached.
+This Kubernetes Connector supports the Harness dashboard and AI, enabling Site Reliability Engineers (SREs) to use the same cluster context within the DevOps Chat Agent. Begin with the dashboard to gain insights into a workload, and then go deeper into the details by engaging in the chat with the resource already attached.
 
 ## Harness Dashboard
 
@@ -75,6 +70,25 @@ DaemonSets, Jobs, CronJobs, and Pods. Select a row to open its details. The list
 scrolls within the panel and loads additional pages as requested.
 
 ![Kubernetes resource inventory with name and kind filters](../../docs/images/kubernetes-harness-resources.png)
+
+### Live logs
+
+Deployment and StatefulSet details merge arriving logs across their owned Pods,
+with **All pods** selected by default. Pod-name prefixes identify each line's
+source; use the Pod picker to focus on one Pod and the text filter to narrow
+the displayed lines. Newly owned Pods join the live view automatically, within
+the stream's source limits. **Previous logs** reads a finite set of logs from
+previous container instances, not a live stream. **Download** saves the retained
+lines currently displayed, including active filters, rather than a complete log
+archive.
+
+![Deployment merged live logs](../../docs/images/kubernetes-deployment-live-logs.png)
+
+*Deployment live logs captured from a real local kind cluster with synthetic workloads.*
+
+![StatefulSet merged live logs](../../docs/images/kubernetes-statefulset-live-logs.png)
+
+*StatefulSet live logs captured from a real local kind cluster with synthetic workloads.*
 
 ### Nodes
 

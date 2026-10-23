@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Maximize2, Minimize2, X } from "lucide-react";
+import { ChevronLeft, Maximize2, Minimize2, X } from "lucide-react";
 import clsx from "clsx";
 import { tabbableCandidates } from "./peekPanelFocus";
 
@@ -14,18 +14,24 @@ export function PeekPanel({
   title,
   children,
   footer,
+  headerActions,
+  headingLabel,
   size = "default",
   expandable = false,
   ariaLabel = "Details panel",
+  appearance,
 }: {
   open: boolean;
   onClose: () => void;
   title: React.ReactNode;
   children: React.ReactNode;
   footer?: React.ReactNode;
+  headerActions?: React.ReactNode;
+  headingLabel?: string;
   size?: "default" | "wide";
   expandable?: boolean;
   ariaLabel?: string;
+  appearance?: "resource";
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
@@ -42,6 +48,14 @@ export function PeekPanel({
       // A modal stacked above this panel owns keyboard interaction.
       if (document.body.dataset.modalDepth) return;
       if (e.key === "Escape") {
+        const disclosure = e.target instanceof Element ? e.target.closest<HTMLDetailsElement>("details[open]") : null;
+        if (panelRef.current?.hasAttribute("data-resource-detail") && disclosure && panelRef.current.contains(disclosure)) {
+          e.preventDefault();
+          e.stopPropagation();
+          disclosure.open = false;
+          disclosure.querySelector("summary")?.focus();
+          return;
+        }
         e.stopPropagation();
         onCloseRef.current();
         return;
@@ -83,24 +97,27 @@ export function PeekPanel({
 
   return createPortal(
     <div ref={overlayRef} className="fixed inset-0 z-overlay" role="dialog" aria-modal="true" aria-label={ariaLabel}>
-      <button type="button" tabIndex={-1} className="absolute inset-0 cursor-default bg-black/30" aria-label="Dismiss details" onClick={onClose} />
+      <button type="button" tabIndex={-1} className={`absolute inset-0 cursor-default ${appearance === "resource" ? "bg-black/55" : "bg-black/30"}`} aria-label="Dismiss details" onClick={onClose} />
       <aside
         ref={panelRef}
         tabIndex={-1}
+        data-resource-detail={appearance === "resource" ? "" : undefined}
         className={clsx(
           "absolute bottom-0 right-0 top-0 flex w-full flex-col",
           "border-l border-ink-600 bg-surface-raised shadow-overlay",
           "motion-safe:animate-[peek-in_200ms_ease-out]",
           size === "default" && "max-w-lg",
-          size === "wide" && !expanded && "sm:max-w-[min(46rem,calc(100vw-2rem))]",
+          size === "wide" && !expanded && (appearance === "resource" ? "sm:max-w-[840px]" : "sm:max-w-[min(46rem,calc(100vw-2rem))]"),
           size === "wide" && expanded && "sm:max-w-[min(72rem,calc(100vw-2rem))]",
         )}
       >
-        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-ink-600 px-5 py-4">
-          <h2 className="min-w-0 break-words text-base font-semibold leading-snug text-ink-50 [overflow-wrap:anywhere]">
+        <div className={clsx("peek-heading flex shrink-0 items-start justify-between gap-4 border-b border-ink-600 px-5 py-4", appearance === "resource" && "relative")}>
+          {appearance === "resource" && <button type="button" aria-label="Back to resources" onClick={onClose} className="absolute left-2 top-4 rounded-control p-1 text-ink-200 sm:hidden"><ChevronLeft size={20} aria-hidden="true" /></button>}
+          <h2 aria-label={headingLabel} className="min-w-0 break-words text-base font-semibold leading-snug text-ink-50 [overflow-wrap:anywhere]">
             {title}
           </h2>
           <div className="flex shrink-0 items-center gap-1">
+            {headerActions}
             {expandable && <button
               type="button"
               aria-label={expanded ? "Collapse panel" : "Expand panel"}

@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { env, openApp } from "./helpers";
+import { captureDir, capturePath } from "./support/capture";
 import type { AgentApproval, ChatSession, ChatSessionSummary, KubernetesChangesPage } from "../../src/lib/api";
 
 // Runs against the harness kind cluster:
@@ -15,7 +16,7 @@ import type { AgentApproval, ChatSession, ChatSessionSummary, KubernetesChangesP
 
 const screenshotDir = process.env.E2E_KUBERNETES_CAPTURE_DIR
   ? path.resolve(process.env.E2E_KUBERNETES_CAPTURE_DIR)
-  : path.resolve(path.dirname(fileURLToPath(import.meta.url)), "screenshots", "kubernetes");
+  : captureDir();
 const canary = "harness-canary-7f3a";
 const cluster = process.env.E2E_KIND_CLUSTER ?? "versus-harness";
 const workerNode = `${cluster}-worker`;
@@ -736,7 +737,7 @@ const upgradeTest = test.extend<{ upgradeFixture: UpgradeFixture }>({
     const stateDir = process.env.E2E_UPGRADE_STATE_DIR;
     const project = process.env.E2E_UPGRADE_PROJECT;
     if (!stateDir || !path.isAbsolute(stateDir) || !project?.includes("upgrade")) throw new Error("Isolated upgrade state directory and project required");
-    const script = path.join(workspace, "plans/harness-run/tests/oss-to-enterprise-upgrade.sh");
+    const script = path.join(workspace, "plans/harness-run/tests/upgrade/oss-to-enterprise-upgrade.sh");
     const harnessEnv: Record<string, string | undefined> = { ...process.env, HARNESS_STATE_DIR: stateDir, HARNESS_PROJECT: project };
     const enterprisePort = harnessEnv.HARNESS_ENTERPRISE_PORT;
     if (!enterprisePort || !/^\d+$/.test(enterprisePort) || Number(enterprisePort) < 1 || Number(enterprisePort) > 65535) throw new Error("Harness Enterprise published port required");
@@ -823,6 +824,869 @@ async function apiText(page: Page, url: string) {
 test.describe("Kubernetes on the harness kind cluster", () => {
   test.skip(backend !== "kind" && backend !== "real", "requires plans/harness-run/harness.sh up oss-kind (or enterprise-kind)");
   test.setTimeout(180_000);
+
+  for (const workload of [
+    { kind: "Deployment", name: "deploy-multi", message: "steady-line" },
+    { kind: "StatefulSet", name: "sts-ordinals", message: "ordinal-line" },
+  ]) {
+    for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+      test(`real arriving workload logs ${workload.kind} ${viewport.width}`, async ({ page }, testInfo) => {
+        const namespace = process.env.HARNESS_K8S_NAMESPACE;
+        expect(namespace, "run.sh exec --k8s kind namespace is required").toBeTruthy();
+        await page.setViewportSize(viewport);
+        await page.emulateMedia({ colorScheme: "dark" });
+        await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+        const errors: string[] = [];
+        const streamRequests: string[] = [];
+        page.on("pageerror", (error) => errors.push(error.message));
+        page.on("request", (request) => {
+          const url = new URL(request.url());
+          if (url.pathname.includes("/logs/stream")) streamRequests.push(url.pathname + url.search);
+        });
+        await openApp(page, "/agent/kubernetes");
+        await expect(page.getByRole("heading", { name: "Kubernetes", exact: true })).toBeVisible();
+        await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible();
+        await page.getByRole("tab", { name: "Workloads", exact: true }).click();
+        await page.getByLabel("Workload namespace").fill(namespace!);
+        await page.getByLabel("Resource name", { exact: true }).fill(workload.name);
+        await page.getByRole("button", { name: `Select ${workload.kind} ${namespace}/${workload.name}`, exact: true }).click();
+        const detail = page.getByRole("dialog", { name: "Details panel" });
+        await expect(detail.getByRole("heading", { name: `${workload.kind} ${namespace}/${workload.name}`, exact: true })).toBeVisible();
+        await detail.getByRole("tab", { name: "Logs", exact: true }).click();
+        if (viewport.width === 1440) await detail.getByRole("button", { name: "Expand panel", exact: true }).click();
+        const logs = detail.getByRole("region", { name: "Workload live logs" });
+        const output = logs.getByLabel("Workload log output", { exact: true });
+        const podSelect = logs.getByLabel("Log pod", { exact: true });
+        await expect(podSelect).toHaveValue("");
+        await expect(podSelect.locator("option").first()).toHaveText("All pods");
+        await expect(podSelect.locator("option")).toHaveCount(4);
+        const pods = (await podSelect.locator("option").allTextContents()).slice(1);
+        if (workload.kind === "StatefulSet") expect(pods).toEqual(["sts-ordinals-0", "sts-ordinals-1", "sts-ordinals-2"]);
+        const sequences = async () => {
+          const text = await output.innerText();
+          return Object.fromEntries(pods.map((pod) => {
+            const matches = [...text.matchAll(/pod=([a-z0-9-]+) seq=(\d+)/g)].filter((match) => match[1] === pod);
+            return [pod, Math.max(0, ...matches.map((match) => Number(match[2])))];
+          }));
+        };
+        await expect.poll(async () => Object.values(await sequences()).every((seq) => seq > 0)).toBe(true);
+        expect(streamRequests).toHaveLength(1);
+        const before = await sequences();
+        await expect.poll(async () => {
+          const current = await sequences();
+          return pods.every((pod) => current[pod] > before[pod]);
+        }, { timeout: 30_000, intervals: [1_000] }).toBe(true);
+        const after = await sequences();
+        expect(streamRequests).toHaveLength(1);
+        for (const pod of pods) await expect(output.getByRole("button", { name: pod, exact: true }).first()).toBeAttached();
+        await expect(output).toContainText(`msg=${workload.message}`);
+        await expect(logs).not.toContainText(/Connecting to logs|Logs are unavailable|No log lines/);
+        if (viewport.width === 390) {
+          await logs.getByRole("button", { name: "More", exact: true }).click();
+          await expect(logs.getByRole("group", { name: "Additional log controls" })).toBeVisible();
+        }
+        await output.getByRole("button", { name: pods[0], exact: true }).last().click();
+        const selectedUID = await podSelect.inputValue();
+        expect(selectedUID).not.toBe("");
+        await expect.poll(async () => {
+          const prefixes = await output.getByRole("button").allTextContents();
+          return prefixes.length > 0 && prefixes.every((prefix) => prefix === pods[0]);
+        }).toBe(true);
+        const filter = logs.getByLabel("Log filter", { exact: true });
+        await filter.fill("no-such-synthetic-message");
+        await expect(output).toContainText("No log lines match this filter.");
+        await filter.fill(workload.message);
+        await expect(output).toContainText(`msg=${workload.message}`);
+        await filter.fill("");
+        await podSelect.selectOption("");
+        await expect.poll(async () => Object.values(await sequences()).every((seq) => seq > 0)).toBe(true);
+        const restoredBefore = await sequences();
+        await expect.poll(async () => {
+          const current = await sequences();
+          return pods.every((pod) => current[pod] > restoredBefore[pod]);
+        }, { timeout: 30_000, intervals: [1_000] }).toBe(true);
+        const restoredAfter = await sequences();
+        // Automatic stream retries are allowed; no Refresh or Reload control is used.
+        expect(streamRequests.length).toBeGreaterThanOrEqual(3);
+        await logs.getByRole("button", { name: "Jump to latest", exact: true }).click();
+        if (viewport.width === 390) await logs.getByRole("button", { name: "More", exact: true }).click();
+        await podSelect.blur();
+        await expect(podSelect).toHaveValue("");
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        const bounds = await logs.evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          return { left: rect.left, right: rect.right, width: innerWidth };
+        });
+        expect(bounds.left).toBeGreaterThanOrEqual(0);
+        expect(bounds.right).toBeLessThanOrEqual(bounds.width);
+        await expect(page.getByText(canary)).toHaveCount(0);
+        expect(await detail.innerText()).not.toMatch(/Bearer |BEGIN PRIVATE KEY|password=|token=/i);
+        expect(errors).toEqual([]);
+        const image = capturePath(`kubernetes-${workload.kind.toLowerCase()}-live-logs`, String(viewport.width), "dark", "all-pods");
+        await page.screenshot({ path: image, animations: "disabled" });
+        const receipt = {
+          kind: workload.kind, namespace, viewport, pods, before, after, restoredBefore, restoredAfter, selectedUID,
+          allPodsDefault: true, podPrefixFilter: true, textFilter: true, refreshOrReloadUsed: false,
+          streamRequests, pageErrors: errors, bounds, image,
+          sha256: createHash("sha256").update(fs.readFileSync(image)).digest("hex"),
+          qualification: "Real harness kind; synthetic repository fixture logs only; no browser routes or API mocks.",
+        };
+        await testInfo.attach("live-log-assertions", { body: JSON.stringify(receipt, null, 2), contentType: "application/json" });
+        fs.writeFileSync(path.join(process.env.HARNESS_RESULTS_DIR!, `${workload.kind.toLowerCase()}-${viewport.width}-assertions.json`), JSON.stringify(receipt, null, 2));
+        await detail.getByRole("button", { name: "Close panel", exact: true }).click();
+        await expect(detail).toHaveCount(0);
+      });
+    }
+  }
+
+  test("rapid workload log stream switching recovers from busy admission and settles finite previous logs", async ({ page }, testInfo) => {
+    test.setTimeout(240_000);
+    const namespace = process.env.HARNESS_K8S_NAMESPACE;
+    expect(namespace, "run.sh exec --k8s kind namespace is required").toBeTruthy();
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+
+    const pageErrors: string[] = [];
+    interface StreamObservation {
+      id: number;
+      url: string;
+      pathname: string;
+      search: string;
+      previous: boolean;
+      podUID: string;
+      sinceSeconds: string;
+      startedAt: number;
+      status?: number;
+      retryAfter?: string | null;
+      errorBody?: Record<string, unknown> | null;
+      finished?: boolean;
+      aborted?: boolean;
+    }
+    const streamObservations: StreamObservation[] = [];
+    const byRequest = new Map<object, StreamObservation>();
+    let nextStreamId = 1;
+
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (!url.pathname.includes("/logs/stream")) return;
+      const obs: StreamObservation = {
+        id: nextStreamId++,
+        url: url.pathname + url.search,
+        pathname: url.pathname,
+        search: url.search,
+        previous: url.searchParams.get("previous") === "true",
+        podUID: url.searchParams.get("pod_uid") ?? "",
+        sinceSeconds: url.searchParams.get("since_seconds") ?? "",
+        startedAt: Date.now(),
+      };
+      streamObservations.push(obs);
+      byRequest.set(request, obs);
+    });
+    page.on("response", async (response) => {
+      const obs = byRequest.get(response.request());
+      if (!obs) return;
+      obs.status = response.status();
+      obs.retryAfter = response.headers()["retry-after"] ?? null;
+      if (response.status() >= 400) {
+        try {
+          obs.errorBody = (await response.json()) as Record<string, unknown>;
+        } catch {
+          obs.errorBody = null;
+        }
+      }
+    });
+    page.on("requestfinished", (request) => {
+      const obs = byRequest.get(request);
+      if (obs) obs.finished = true;
+    });
+    page.on("requestfailed", (request) => {
+      const obs = byRequest.get(request);
+      if (obs) obs.aborted = true;
+    });
+
+    const capturedImages: Array<{ name: string; path: string; viewport: string; state: string; sha256: string }> = [];
+    const recordCapture = async (surface: string, width: number, height: number, state: string) => {
+      await page.setViewportSize({ width, height });
+      const logsRegion = page.getByRole("dialog", { name: "Details panel" }).locator(`section[aria-label="Workload live logs"], section[aria-label="Pod logs"]`).first();
+      if (width === 390) {
+        const moreBtn = logsRegion.getByRole("button", { name: "More", exact: true });
+        if ((await moreBtn.count()) > 0 && (await moreBtn.getAttribute("aria-expanded")) !== "true") {
+          await moreBtn.click();
+          await expect(logsRegion.getByRole("group", { name: "Additional log controls" })).toBeVisible();
+        }
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      const target = capturePath(surface, String(width), "dark", state);
+      const buf = await page.screenshot({ path: target, animations: "disabled" });
+      capturedImages.push({
+        name: path.basename(target),
+        path: target,
+        viewport: `${width}x${height}`,
+        state,
+        sha256: createHash("sha256").update(buf).digest("hex"),
+      });
+    };
+
+    const openSlotHolders = async (podName: string, count = 4) => {
+      const controllers: AbortController[] = [];
+      const pumps: Promise<void>[] = [];
+      try {
+        for (let i = 0; i < count; i++) {
+          let admitted = false;
+          const deadline = Date.now() + 10_000;
+          while (!admitted && Date.now() < deadline) {
+            const ctrl = new AbortController();
+            const res = await fetch(
+              `${env.baseURL}/api/admin/kubernetes/pods/${encodeURIComponent(namespace!)}/${encodeURIComponent(podName)}/logs/stream?timestamps=true&since_seconds=60&tail_lines=5`,
+              {
+                headers: {
+                  Accept: "text/event-stream",
+                  ...(env.gatewaySecret ? { "X-Gateway-Secret": env.gatewaySecret } : {}),
+                },
+                signal: ctrl.signal,
+              },
+            );
+            if (res.status === 200 && res.body) {
+              const reader = res.body.getReader();
+              const first = await reader.read();
+              if (!first.done) {
+                controllers.push(ctrl);
+                pumps.push(
+                  (async () => {
+                    try {
+                      while (!(await reader.read()).done) {
+                        // hold slot until aborted
+                      }
+                    } catch {
+                      // expected when aborted
+                    }
+                  })(),
+                );
+                admitted = true;
+                break;
+              }
+            }
+            ctrl.abort();
+            await new Promise((r) => setTimeout(r, 350));
+          }
+          expect(admitted, `holder stream ${i + 1} must acquire org stream slot`).toBe(true);
+        }
+      } catch (err) {
+        for (const ctrl of controllers) ctrl.abort();
+        await Promise.allSettled(pumps);
+        throw err;
+      }
+      return async () => {
+        for (const ctrl of controllers) ctrl.abort();
+        await Promise.allSettled(pumps);
+      };
+    };
+
+    await openApp(page, "/agent/kubernetes");
+    await expect(page.getByRole("heading", { name: "Kubernetes", exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible();
+
+    const workloadResults: Record<string, unknown> = {};
+    let samplePodName = "";
+
+    for (const workload of [
+      { kind: "Deployment", name: "deploy-multi", message: "steady-line", surface: "kubernetes-deployment-stream-switching" },
+      { kind: "StatefulSet", name: "sts-ordinals", message: "ordinal-line", surface: "kubernetes-statefulset-stream-switching" },
+    ]) {
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.getByRole("tab", { name: "Workloads", exact: true }).click();
+      await page
+        .getByRole("tablist", { name: "Workload kind", exact: true })
+        .getByRole("tab", { name: new RegExp(`^${workload.kind}`), exact: false })
+        .click();
+      await page.getByLabel("Workload namespace").fill(namespace!);
+      await page.getByLabel("Resource name", { exact: true }).fill(workload.name);
+      const selectBtn = page.getByRole("button", { name: `Select ${workload.kind} ${namespace}/${workload.name}`, exact: true });
+      await expect
+        .poll(
+          async () => {
+            if (await selectBtn.isVisible()) return true;
+            const refreshBtn = page.getByRole("button", { name: "Refresh Kubernetes data" });
+            if (await refreshBtn.isVisible()) await refreshBtn.click();
+            return await selectBtn.isVisible();
+          },
+          { timeout: 60_000, intervals: [1_000, 2_000] },
+        )
+        .toBe(true);
+      await selectBtn.click();
+
+      const detail = page.getByRole("dialog", { name: "Details panel" });
+      await expect(detail.getByRole("heading", { name: `${workload.kind} ${namespace}/${workload.name}`, exact: true })).toBeVisible();
+      await detail.getByRole("tab", { name: "Logs", exact: true }).click();
+      const expandBtn = detail.getByRole("button", { name: "Expand panel", exact: true });
+      if (await expandBtn.isVisible()) await expandBtn.click();
+
+      const logs = detail.getByRole("region", { name: "Workload live logs", exact: true });
+      const output = logs.getByLabel("Workload log output", { exact: true });
+      const podSelect = logs.getByLabel("Log pod", { exact: true });
+      const sinceSelect = logs.getByLabel("Log since seconds", { exact: true });
+      const previousCheckbox = logs.getByLabel("Previous logs", { exact: true });
+      const followCheckbox = logs.getByLabel("Follow", { exact: true });
+
+      await expect(podSelect).toHaveValue("");
+      await expect(podSelect.locator("option")).toHaveCount(4, { timeout: 60_000 });
+      const pods = (await podSelect.locator("option").allTextContents()).slice(1);
+      const podUIDs: string[] = [];
+      for (let i = 1; i <= 3; i++) {
+        podUIDs.push((await podSelect.locator("option").nth(i).getAttribute("value")) ?? "");
+      }
+      expect(podUIDs.every((uid) => uid.length > 0)).toBe(true);
+      if (!samplePodName) samplePodName = pods[0];
+
+      const sequences = async () => {
+        const text = await output.innerText();
+        return Object.fromEntries(
+          pods.map((pod) => {
+            const matches = [...text.matchAll(/pod=([a-z0-9-]+) seq=(\d+)/g)].filter((m) => m[1] === pod);
+            return [pod, Math.max(0, ...matches.map((m) => Number(m[2])))];
+          }),
+        );
+      };
+
+      await expect.poll(async () => Object.values(await sequences()).every((seq) => seq > 0), { timeout: 60_000 }).toBe(true);
+      // Allow any prior aborted stream keepalives to settle before starting the <2s rapid burst.
+      await page.waitForTimeout(2_200);
+
+      const waitStreamResponse = async (action: () => Promise<unknown>) => {
+        const responsePromise = page.waitForResponse(
+          (res) => res.url().includes("/logs/stream"),
+          { timeout: 5_000 },
+        );
+        await action();
+        return responsePromise;
+      };
+
+      const burstStartIndex = streamObservations.length;
+      const burstStartMs = Date.now();
+
+      // 5 rapid stream-reopening control changes after the initial live stream (>=6 total stream selections) within <2s ending on Previous logs
+      await waitStreamResponse(() => podSelect.selectOption(podUIDs[0]));
+      await waitStreamResponse(() => podSelect.selectOption(""));
+      await waitStreamResponse(() => sinceSelect.selectOption("1800"));
+      await waitStreamResponse(() => sinceSelect.selectOption("300"));
+      await waitStreamResponse(() => previousCheckbox.check());
+
+      const burstElapsedMs = Date.now() - burstStartMs;
+      expect(burstElapsedMs, "rapid control switching burst must complete within <2s").toBeLessThan(2_000);
+
+      const burstStreams = streamObservations.slice(burstStartIndex);
+      expect(burstStreams.length).toBeGreaterThanOrEqual(5);
+      expect(burstStreams.at(-1)?.previous).toBe(true);
+
+      // Wait for automatic recovery of the Previous logs stream without any manual toggle or Reload click.
+      await expect
+        .poll(
+          async () => {
+            const sinceBurst = streamObservations.slice(burstStartIndex);
+            const prevStreams = sinceBurst.filter((s) => s.previous);
+            const succeededPrev = prevStreams.some((s) => s.status === 200);
+            const lineCount = await output.locator("[data-log-key]").count();
+            const txt = (await output.textContent()) ?? "";
+            const settledDom =
+              lineCount >= 3 &&
+              !txt.includes("Connecting to logs...") &&
+              !txt.includes("HTTP 502") &&
+              !txt.includes("Admission retry attempts exhausted");
+            return succeededPrev && settledDom;
+          },
+          { timeout: 20_000, intervals: [200, 500] },
+        )
+        .toBe(true);
+
+      let postBurstStreams = streamObservations.slice(burstStartIndex);
+      let busy429Streams = postBurstStreams.filter((s) => s.status === 429);
+      if (busy429Streams.length === 0) {
+        // When historical tail frames are actively flushing, the server detects socket close immediately and frees slots before the 5th switch.
+        // Induce a real transient 429 on Previous logs using short-lived org slot holders and verify automatic recovery without manual toggle.
+        await previousCheckbox.uncheck();
+        await logs.getByRole("button", { name: "Pause logs", exact: true }).click();
+        await page.waitForTimeout(2_200);
+        const releaseTransientHolders = await openSlotHolders(pods[0], 4);
+        try {
+          const transientResp = await waitStreamResponse(() => previousCheckbox.check());
+          expect(transientResp.status()).toBe(429);
+        } finally {
+          await releaseTransientHolders();
+        }
+        await expect
+          .poll(
+            async () => {
+              const sinceBurst = streamObservations.slice(burstStartIndex);
+              const prevStreams = sinceBurst.filter((s) => s.previous);
+              const lastPrev = prevStreams.at(-1);
+              const lineCount = await output.locator("[data-log-key]").count();
+              const txt = (await output.textContent()) ?? "";
+              return (
+                lastPrev?.status === 200 &&
+                lineCount >= 3 &&
+                !txt.includes("Connecting to logs...") &&
+                !txt.includes("HTTP 502") &&
+                !txt.includes("Admission retry attempts exhausted")
+              );
+            },
+            { timeout: 20_000, intervals: [200, 500] },
+          )
+          .toBe(true);
+        postBurstStreams = streamObservations.slice(burstStartIndex);
+        busy429Streams = postBurstStreams.filter((s) => s.status === 429);
+      }
+      expect(busy429Streams.length, "workload must observe structured HTTP 429 busy response and recover automatically").toBeGreaterThanOrEqual(1);
+      for (const busy of busy429Streams) {
+        expect(busy.retryAfter).toBe("2");
+        expect(busy.errorBody).toMatchObject({
+          code: "log_stream_busy",
+          retryable: true,
+          error: "The concurrent Pod log stream limit has been reached.",
+        });
+      }
+      expect(streamObservations.some((s) => s.status === 502)).toBe(false);
+      expect(await previousCheckbox.isChecked()).toBe(true);
+      expect(await followCheckbox.isDisabled()).toBe(true);
+
+      // Confirm finite Previous logs stays settled and does not reconnect.
+      const countAfterPreviousSettled = streamObservations.length;
+      await page.waitForTimeout(1_500);
+      expect(streamObservations.length).toBe(countAfterPreviousSettled);
+      const previousSettledText = (await output.innerText()).trim();
+      expect(previousSettledText.length).toBeGreaterThan(0);
+      expect(previousSettledText).not.toContain("HTTP 502");
+
+      await recordCapture(workload.surface, 1440, 1000, "previous-settled");
+      await recordCapture(workload.surface, 390, 844, "previous-settled");
+      await page.setViewportSize({ width: 1440, height: 1000 });
+
+      // Uncheck Previous logs and verify current healthy live logs return and advance.
+      await sinceSelect.selectOption("3600");
+      await previousCheckbox.uncheck();
+      expect(await previousCheckbox.isChecked()).toBe(false);
+      expect(await followCheckbox.isDisabled()).toBe(false);
+
+      await expect.poll(async () => Object.values(await sequences()).every((seq) => seq > 0), { timeout: 30_000 }).toBe(true);
+      const recoveredBefore = await sequences();
+      await expect
+        .poll(
+          async () => {
+            const current = await sequences();
+            return pods.every((pod) => current[pod] > recoveredBefore[pod]);
+          },
+          { timeout: 30_000, intervals: [1_000] },
+        )
+        .toBe(true);
+      const recoveredAfter = await sequences();
+      await expect(output).toContainText(`msg=${workload.message}`);
+
+      await recordCapture(workload.surface, 1440, 1000, "live-recovered");
+      await recordCapture(workload.surface, 390, 844, "live-recovered");
+      await page.setViewportSize({ width: 1440, height: 1000 });
+
+      let switchCancelAndSaturation: Record<string, unknown> | undefined;
+      if (workload.kind === "Deployment") {
+        // 1. Rapid pod selection switch (pod 0 -> pod 1) aborts stale stream and prevents stale pod lines.
+        const switchPodIdx = streamObservations.length;
+        const firstPodReq = page.waitForRequest((req) => req.url().includes("/logs/stream") && req.url().includes(podUIDs[0]));
+        await podSelect.selectOption(podUIDs[0]);
+        await firstPodReq;
+        await podSelect.selectOption(podUIDs[1]);
+        await expect
+          .poll(async () => {
+            const prefixes = await output.getByRole("button").allTextContents();
+            return prefixes.length > 0 && prefixes.every((p) => p === pods[1]);
+          }, { timeout: 20_000 })
+          .toBe(true);
+        const podSwitchStreams = streamObservations.slice(switchPodIdx);
+        expect(podSwitchStreams.some((s) => s.podUID === podUIDs[0])).toBe(true);
+        expect(podSwitchStreams.some((s) => s.podUID === podUIDs[1])).toBe(true);
+
+        await podSelect.selectOption("");
+        await expect.poll(async () => Object.values(await sequences()).every((seq) => seq > 0), { timeout: 20_000 }).toBe(true);
+
+        // 2. Pause during busy-retry backoff cancels the retry timer and makes zero requests while paused.
+        await logs.getByRole("button", { name: "Pause logs", exact: true }).click();
+        await expect(logs.getByRole("button", { name: "Resume logs", exact: true })).toBeVisible();
+        await page.waitForTimeout(2_200);
+
+        const releaseHoldersForPause = await openSlotHolders(pods[0], 4);
+        let pausedAtCount = 0;
+        let countAfterPauseWait = 0;
+        try {
+          const busyReloadResp = waitStreamResponse(() => logs.getByRole("button", { name: "Reload logs", exact: true }).click());
+          const resp = await busyReloadResp;
+          expect(resp.status()).toBe(429);
+          await logs.getByRole("button", { name: "Pause logs", exact: true }).click();
+          await expect(logs.getByRole("button", { name: "Resume logs", exact: true })).toBeVisible();
+          pausedAtCount = streamObservations.length;
+          await page.waitForTimeout(2_600);
+          countAfterPauseWait = streamObservations.length;
+          expect(countAfterPauseWait, "pausing must cancel pending admission retry timer").toBe(pausedAtCount);
+        } finally {
+          await releaseHoldersForPause();
+        }
+        await page.waitForTimeout(2_200);
+        await logs.getByRole("button", { name: "Resume logs", exact: true }).click();
+        await expect.poll(async () => Object.values(await sequences()).every((seq) => seq > 0), { timeout: 20_000 }).toBe(true);
+
+        // 3. Legitimate sustained capacity saturation exhausts bounded retries (4 attempts) with explicit terminal message and does not loop or replenish on pause/resume.
+        await logs.getByRole("button", { name: "Pause logs", exact: true }).click();
+        await page.waitForTimeout(2_200);
+        const releaseHoldersForExhaustion = await openSlotHolders(pods[0], 4);
+        let saturationAttempts = 0;
+        let saturationCountAfterWait = 0;
+        let saturationCountAfterPauseResume = 0;
+        try {
+          const saturationStartIdx = streamObservations.length;
+          await logs.getByRole("button", { name: "Reload logs", exact: true }).click();
+          await expect
+            .poll(
+              async () => (await output.textContent()) ?? "",
+              { timeout: 20_000, intervals: [250, 500] },
+            )
+            .toContain("The concurrent Pod log stream limit has been reached. Admission retry attempts exhausted. Reload logs to retry.");
+
+          saturationAttempts = streamObservations.slice(saturationStartIdx).length;
+          expect(saturationAttempts, "1 initial attempt + 3 bounded retries = 4 total attempts").toBe(4);
+          expect(streamObservations.slice(saturationStartIdx).every((s) => s.status === 429 && s.retryAfter === "2")).toBe(true);
+
+          // Confirm no 5th retry occurs (not an endless loop).
+          await page.waitForTimeout(3_000);
+          saturationCountAfterWait = streamObservations.slice(saturationStartIdx).length;
+          expect(saturationCountAfterWait).toBe(4);
+
+          // Confirm pause/resume does not replenish the exhausted admission budget.
+          await logs.getByRole("button", { name: "Pause logs", exact: true }).click();
+          await logs.getByRole("button", { name: "Resume logs", exact: true }).click();
+          await page.waitForTimeout(2_500);
+          saturationCountAfterPauseResume = streamObservations.slice(saturationStartIdx).length;
+          expect(saturationCountAfterPauseResume).toBe(4);
+          await expect(output).toContainText(
+            "The concurrent Pod log stream limit has been reached. Admission retry attempts exhausted. Reload logs to retry.",
+          );
+
+          await recordCapture(workload.surface, 1440, 1000, "admission-exhausted");
+          await recordCapture(workload.surface, 390, 844, "admission-exhausted");
+          await page.setViewportSize({ width: 1440, height: 1000 });
+        } finally {
+          await releaseHoldersForExhaustion();
+        }
+
+        // Once capacity is freed, clicking Reload logs recovers live streaming cleanly.
+        await page.waitForTimeout(2_200);
+        await logs.getByRole("button", { name: "Reload logs", exact: true }).click();
+        await expect.poll(async () => Object.values(await sequences()).every((seq) => seq > 0), { timeout: 25_000 }).toBe(true);
+
+        switchCancelAndSaturation = {
+          rapidPodSwitchAbortedStale: true,
+          pauseCancelledPendingRetry: countAfterPauseWait === pausedAtCount,
+          saturationAttempts,
+          saturationCountAfterWait,
+          saturationCountAfterPauseResume,
+          recoveredAfterReload: true,
+        };
+      }
+
+      // Close panel and verify no further stream requests fire after close.
+      await detail.getByRole("button", { name: "Close panel", exact: true }).click();
+      await expect(detail).toHaveCount(0);
+      const countAtClose = streamObservations.length;
+      await page.waitForTimeout(1_000);
+      expect(streamObservations.length).toBe(countAtClose);
+
+      workloadResults[workload.kind] = {
+        namespace,
+        name: workload.name,
+        pods,
+        burstElapsedMs,
+        burstSelectionsCount: burstStreams.length,
+        busy429ObservedCount: busy429Streams.length,
+        busy429Sample: busy429Streams[0] ?? null,
+        previousSettledWithoutManualToggle: true,
+        previousSettledTextPreview: previousSettledText.slice(0, 240),
+        recoveredBefore,
+        recoveredAfter,
+        switchCancelAndSaturation,
+      };
+    }
+
+    // Direct Pod previous_unavailable terminal check on real kind cluster (0 restarts -> terminal error, 1 request, 0 retries).
+    await page
+      .getByRole("tablist", { name: "Workload kind", exact: true })
+      .getByRole("tab", { name: /^Pod/, exact: false })
+      .click();
+    await page.getByLabel("Workload namespace").fill(namespace!);
+    await page.getByLabel("Resource name", { exact: true }).fill(samplePodName);
+    const podBtn = page.getByRole("button", { name: `Select Pod ${namespace}/${samplePodName}`, exact: true });
+    await expect(podBtn).toBeVisible({ timeout: 30_000 });
+    await podBtn.click();
+
+    const podDetail = page.getByRole("dialog", { name: "Details panel" });
+    await podDetail.getByRole("tab", { name: "Logs", exact: true }).click();
+    const podLogs = podDetail.getByRole("region", { name: "Pod logs", exact: true });
+    const podOutput = podLogs.getByLabel("Pod log output", { exact: true });
+    await expect(podOutput).toContainText("msg=steady-line", { timeout: 20_000 });
+
+    const podPrevStartIdx = streamObservations.length;
+    await podLogs.getByLabel("Previous container logs", { exact: true }).check();
+    await expect(podOutput).toContainText("previous_unavailable Previous container logs are unavailable.", {
+      timeout: 15_000,
+    });
+    await expect(podLogs.getByLabel("Log connection status", { exact: true })).toHaveText("error");
+    await page.waitForTimeout(2_500);
+    const podPrevStreams = streamObservations.slice(podPrevStartIdx);
+    expect(podPrevStreams.length, "previous_unavailable on Pod must stay terminal with 1 request and 0 retries").toBe(1);
+
+    await recordCapture("kubernetes-pod-stream-switching", 1440, 1000, "previous-unavailable");
+    await podDetail.getByRole("button", { name: "Close panel", exact: true }).click();
+    await expect(podDetail).toHaveCount(0);
+
+    expect(pageErrors).toEqual([]);
+    expect(streamObservations.some((s) => s.status === 502)).toBe(false);
+
+    const receipt = {
+      qualification: "live — Real harness kind cluster and rebuilt local OSS image; synthetic repository workloads in per-run namespace; zero route mocks.",
+      namespace,
+      workloadResults,
+      podPreviousUnavailableTerminal: {
+        pod: samplePodName,
+        requestsCount: podPrevStreams.length,
+        terminalStatus: "error",
+      },
+      totalStreamRequests: streamObservations.length,
+      any502: streamObservations.some((s) => s.status === 502),
+      pageErrors,
+      capturedImages,
+    };
+    await testInfo.attach("stream-switching-live-acceptance", {
+      body: JSON.stringify(receipt, null, 2),
+      contentType: "application/json",
+    });
+    if (process.env.HARNESS_RESULTS_DIR) {
+      fs.writeFileSync(
+        path.join(process.env.HARNESS_RESULTS_DIR, "stream-switching-live-acceptance.json"),
+        JSON.stringify(receipt, null, 2),
+      );
+    }
+  });
+
+  test("post-live rotation busy retry budget resets after admission and auth denied stays terminal", async ({ page }, testInfo) => {
+    test.setTimeout(120_000);
+    const namespace = process.env.HARNESS_K8S_NAMESPACE;
+    expect(namespace, "run.sh exec --k8s kind namespace is required").toBeTruthy();
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+
+    const distDir = path.resolve(workspace, "versus-incident/ui/dist");
+    const distIndex = path.join(distDir, "index.html");
+    if (fs.existsSync(distIndex)) {
+      await page.route("**/*", async (route) => {
+        const reqUrl = new URL(route.request().url());
+        if (reqUrl.pathname.startsWith("/api/") || reqUrl.pathname.startsWith("/enterprise/")) {
+          await route.fallback();
+          return;
+        }
+        if (reqUrl.pathname.startsWith("/assets/")) {
+          const assetFile = path.join(distDir, reqUrl.pathname.slice(1));
+          if (fs.existsSync(assetFile)) {
+            await route.fulfill({
+              status: 200,
+              contentType: assetFile.endsWith(".css") ? "text/css" : "application/javascript",
+              body: fs.readFileSync(assetFile),
+            });
+            return;
+          }
+        }
+        if (route.request().isNavigationRequest() || reqUrl.pathname === "/" || reqUrl.pathname.startsWith("/agent/")) {
+          await route.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body: fs.readFileSync(distIndex),
+          });
+          return;
+        }
+        await route.fallback();
+      });
+    }
+
+    const attemptLog: Array<{ attempt: number; atMs: number; cursor: string; container: string; outcome: string }> = [];
+    let t0 = 0;
+
+    await page.route("**/api/admin/kubernetes/workloads/Deployment/deploy-multi/logs/stream**", async (route) => {
+      const url = new URL(route.request().url());
+      const cursor = url.searchParams.get("cursor") ?? "";
+      const container = url.searchParams.get("container") ?? "";
+      const attempt = attemptLog.length + 1;
+      if (attempt === 1) t0 = Date.now();
+      const atMs = Date.now() - t0;
+
+      if (container === "app") {
+        attemptLog.push({ attempt, atMs, cursor, container, outcome: "403-forbidden" });
+        await route.fulfill({
+          status: 403,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "Pod logs are forbidden by cluster RBAC.",
+            code: "forbidden",
+            action: "Grant pods/log get permission to the reader Role.",
+            retryable: false,
+          }),
+        });
+        return;
+      }
+
+      // Attempts 1, 2, 3 consume all 3 initial admission retries before Attempt 4 admits live.
+      if (attempt <= 3) {
+        attemptLog.push({ attempt, atMs, cursor, container, outcome: "429-initial-busy" });
+        await route.fulfill({
+          status: 429,
+          headers: { "Retry-After": "1" },
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "The concurrent Pod log stream limit has been reached.",
+            code: "log_stream_busy",
+            action: "Close another open log stream or wait briefly and retry.",
+            retryable: true,
+          }),
+        });
+        return;
+      }
+
+      // Attempt 4 admits live (resets admissionRetries=0 and admissionStartedAt=undefined), emits a line with cursor, and rotates on duration limit.
+      if (attempt === 4) {
+        attemptLog.push({ attempt, atMs, cursor, container, outcome: "200-admitted-then-limit-rotate" });
+        const podsPayload = [
+          { uid: "pod-uid-1", name: "deploy-multi-a", containers: ["app"], init_containers: [], admitted: true },
+        ];
+        await route.fulfill({
+          status: 200,
+          contentType: "text/event-stream",
+          body: [
+            `event: sources\ndata: ${JSON.stringify({ workload_uid: "wl-uid", pods: podsPayload, truncated: false })}\n\n`,
+            `event: heartbeat\ndata: {"cursor":"rot-cursor-1"}\n\n`,
+            `event: line\ndata: ${JSON.stringify({
+              workload_uid: "wl-uid",
+              pod_uid: "pod-uid-1",
+              pod: "deploy-multi-a",
+              namespace,
+              container: "app",
+              incarnation: "1",
+              source_id: "src-1",
+              text: "level=info msg=pre-rotation-live-line seq=1",
+              timestamp: "2026-10-22T07:50:00Z",
+              sequence: 1,
+              ordinal: 1,
+              cursor: "rot-cursor-1",
+            })}\n\n`,
+            `event: limit\ndata: ${JSON.stringify({ reason: "duration", cursor: "rot-cursor-1" })}\n\n`,
+            `event: end\ndata: ${JSON.stringify({ reason: "limit", cursor: "rot-cursor-1" })}\n\n`,
+          ].join(""),
+        });
+        return;
+      }
+
+      // Attempt 5 (rotation reconnect with cursor=rot-cursor-1) arrives >10s after Attempt 1 and hits HTTP 429 busy.
+      if (attempt === 5) {
+        const waitMs = Math.max(0, 10_500 - (Date.now() - t0));
+        if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+        const postWaitMs = Date.now() - t0;
+        attemptLog.push({ attempt, atMs: postWaitMs, cursor, container, outcome: "429-post-live-rotation-busy" });
+        await route.fulfill({
+          status: 429,
+          headers: { "Retry-After": "1" },
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "The concurrent Pod log stream limit has been reached.",
+            code: "log_stream_busy",
+            action: "Close another open log stream or wait briefly and retry.",
+            retryable: true,
+          }),
+        });
+        return;
+      }
+
+      // Attempt 6 succeeds after the post-rotation busy retry and delivers the post-rotation line.
+      attemptLog.push({ attempt, atMs, cursor, container, outcome: "200-post-rotation-recovered" });
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: [
+          `event: heartbeat\ndata: {"cursor":"rot-cursor-2"}\n\n`,
+          `event: line\ndata: ${JSON.stringify({
+            workload_uid: "wl-uid",
+            pod_uid: "pod-uid-1",
+            pod: "deploy-multi-a",
+            namespace,
+            container: "app",
+            incarnation: "1",
+            source_id: "src-1",
+            text: "level=info msg=post-rotation-recovered-line seq=2",
+            timestamp: "2026-10-22T07:50:12Z",
+            sequence: 2,
+            ordinal: 2,
+            cursor: "rot-cursor-2",
+          })}\n\n`,
+          `event: end\ndata: ${JSON.stringify({ reason: "complete", cursor: "rot-cursor-2" })}\n\n`,
+        ].join(""),
+      });
+    });
+
+    await openApp(page, "/agent/kubernetes");
+    await page.getByRole("tab", { name: "Workloads", exact: true }).click();
+    await page.getByLabel("Workload namespace").fill(namespace!);
+    await page.getByLabel("Resource name", { exact: true }).fill("deploy-multi");
+    await page.getByRole("button", { name: `Select Deployment ${namespace}/deploy-multi`, exact: true }).click();
+
+    const detail = page.getByRole("dialog", { name: "Details panel" });
+    await detail.getByRole("tab", { name: "Logs", exact: true }).click();
+    const logs = detail.getByRole("region", { name: "Workload live logs", exact: true });
+    const output = logs.getByLabel("Workload log output", { exact: true });
+
+    await expect(output).toContainText("msg=pre-rotation-live-line seq=1", { timeout: 20_000 });
+    await expect(output).toContainText("msg=post-rotation-recovered-line seq=2", { timeout: 25_000 });
+    await expect(output).not.toContainText("Admission retry attempts exhausted");
+
+    expect(attemptLog).toHaveLength(6);
+    expect(attemptLog[4].outcome).toBe("429-post-live-rotation-busy");
+    expect(attemptLog[4].cursor).toBe("rot-cursor-1");
+    expect(attemptLog[4].atMs).toBeGreaterThan(10_000);
+    expect(attemptLog[5].outcome).toBe("200-post-rotation-recovered");
+    expect(attemptLog[5].cursor).toBe("rot-cursor-1");
+
+    // Verify 403 forbidden auth denied is terminal with 1 request and 0 retries.
+    await logs.getByLabel("Log container", { exact: true }).selectOption("app");
+    await expect(page.getByText("Pod logs are forbidden by cluster RBAC.")).toBeVisible({ timeout: 10_000 });
+    await page.waitForTimeout(2_500);
+    const forbiddenAttempts = attemptLog.filter((a) => a.container === "app");
+    expect(forbiddenAttempts).toHaveLength(1);
+
+    await detail.getByRole("button", { name: "Close panel", exact: true }).click();
+    expect(pageErrors).toEqual([]);
+
+    const fixtureReceipt = {
+      qualification: "fixture — Route-intercepted workload log stream on real kind workload drawer to deterministically verify >10s post-admission rotation busy retry budget reset and HTTP 403 forbidden terminal non-retry.",
+      attemptLog,
+      forbiddenAttemptsCount: forbiddenAttempts.length,
+      pageErrors,
+    };
+    await testInfo.attach("stream-switching-fixture-acceptance", {
+      body: JSON.stringify(fixtureReceipt, null, 2),
+      contentType: "application/json",
+    });
+    if (process.env.HARNESS_RESULTS_DIR) {
+      fs.writeFileSync(
+        path.join(process.env.HARNESS_RESULTS_DIR, "stream-switching-fixture-acceptance.json"),
+        JSON.stringify(fixtureReceipt, null, 2),
+      );
+    }
+  });
 
   test("catalog opens the explorer with live cluster facts", async ({ page }) => {
     const pageErrors: Error[] = [];
@@ -1025,5 +1889,1693 @@ upgradeTest.describe("OSS to Enterprise persistent history", () => {
     }, seed.session_id);
     expect(deleted).toEqual({ status: 404, listed: false });
     await upgradeFixture.assertArchive();
+  });
+});
+
+
+test.describe("Read-only external cluster acceptance", () => {
+  test.skip(
+    process.env.E2E_KUBERNETES_READONLY_ACCEPTANCE !== "1",
+    "requires an authorized read-only external cluster viewer",
+  );
+  test.setTimeout(300_000);
+
+  test("verifies read-only resource detail drawer live logs break logs and agent settings without cluster mutations", async ({ browser }, testInfo) => {
+    const context = await browser.newContext({
+      baseURL: env.baseURL,
+      viewport: { width: 1440, height: 900 },
+      colorScheme: "dark",
+    });
+    const page = await context.newPage();
+    try {
+      const pageErrors: string[] = [];
+      const mutatingRequests: Array<{ method: string; pathname: string }> = [];
+      const streamLifecycle = {
+        started: 0,
+        completed: 0,
+        failedOrAborted: 0,
+        active: 0,
+        workloadStreams: 0,
+        podStreams: 0,
+      };
+      const activeStreamSet = new Set<object>();
+
+      page.on("pageerror", (error) => {
+        pageErrors.push(error.name || "PageError");
+      });
+
+      page.on("request", (request) => {
+        const url = new URL(request.url());
+        const method = request.method().toUpperCase();
+        if (
+          (url.pathname.startsWith("/api/") || url.pathname.startsWith("/enterprise/api/")) &&
+          !["GET", "HEAD", "OPTIONS"].includes(method)
+        ) {
+          const isInitialSignIn =
+            method === "POST" &&
+            (url.pathname === "/api/auth/gateway-session" ||
+              url.pathname === "/api/admin/auth/session" ||
+              url.pathname === "/api/v1/auth/session" ||
+              url.pathname.endsWith("/auth/login") ||
+              url.pathname.endsWith("/session"));
+          if (!isInitialSignIn) {
+            mutatingRequests.push({ method, pathname: url.pathname });
+          }
+        }
+        if (url.pathname.includes("/logs/stream")) {
+          streamLifecycle.started += 1;
+          if (url.pathname.includes("/workloads/")) streamLifecycle.workloadStreams += 1;
+          if (url.pathname.includes("/pods/")) streamLifecycle.podStreams += 1;
+          activeStreamSet.add(request);
+          streamLifecycle.active = activeStreamSet.size;
+        }
+      });
+
+      page.on("requestfinished", (request) => {
+        if (activeStreamSet.delete(request)) {
+          streamLifecycle.completed += 1;
+          streamLifecycle.active = activeStreamSet.size;
+        }
+      });
+
+      page.on("requestfailed", (request) => {
+        if (activeStreamSet.delete(request)) {
+          streamLifecycle.failedOrAborted += 1;
+          streamLifecycle.active = activeStreamSet.size;
+        }
+      });
+
+      const capturedImages: Array<{ name: string; viewport: string; sha256: string }> = [];
+
+      const captureRedacted = async (surface: string, viewportWidth: number, state: string) => {
+        const targetPath = capturePath(surface, String(viewportWidth), "dark", state);
+        await page.evaluate(() => {
+          const win = window as unknown as {
+            __redactTokens?: Set<string>;
+            __restoreCallbacks?: Array<() => void>;
+          };
+          const restore: Array<() => void> = [];
+          win.__restoreCallbacks = restore;
+          const UI_SAFE_WORDS = new Set([
+            "all", "pod", "pods", "deployment", "deployments", "statefulset", "statefulsets",
+            "daemonset", "daemonsets", "job", "jobs", "cronjob", "cronjobs", "node", "nodes",
+            "service", "services", "configmap", "configmaps", "secret", "secrets", "namespace",
+            "namespaces", "replicaset", "replicasets", "ingress", "event", "events", "ready",
+            "running", "pending", "succeeded", "failed", "unknown", "true", "false", "normal",
+            "warning", "warnings", "critical", "info", "live", "paused", "ended", "unavailable",
+            "overview", "issues", "timeline", "topology", "workloads", "helm", "gitops", "traffic",
+            "agent", "logs", "yaml", "related", "details", "conditions", "restarts", "uptime",
+            "memory", "cpu", "metrics-server", "always", "preview", "none", "healthy", "degraded",
+            "unhealthy", "fresh", "stale", "complete", "partial", "burstable", "guaranteed", "besteffort",
+          ]);
+          const tokens = [...(win.__redactTokens ?? [])]
+            .filter((t) => t.length >= 3 && !UI_SAFE_WORDS.has(t.toLowerCase()))
+            .sort((a, b) => b.length - a.length);
+          const tokenMap = new Map<string, string>();
+          tokens.forEach((tok, idx) => {
+            tokenMap.set(tok, `redacted-${idx + 1}`);
+          });
+
+          const scrubString = (input: string): string => {
+            let out = input;
+            for (const [tok, replacement] of tokenMap.entries()) {
+              if (out.includes(tok)) {
+                out = out.split(tok).join(replacement);
+              }
+            }
+            out = out.replace(/arn:aws[a-zA-Z0-9-]*:[a-z0-9-]+:[a-z0-9-]*:\d*:[^\s"']+/gi, "arn:aws:eks:region:000000000000:cluster/redacted");
+            out = out.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "10.0.0.1");
+            out = out.replace(/https?:\/\/[^\s"']+/gi, "https://redacted.example");
+            // Redact any remaining namespace/resource-name pairs
+            out = out.replace(/\b([a-z][a-z0-9-]*)\/([a-z0-9][a-z0-9-._]*)\b/g, (match, left) => {
+              if (left === "ns-redacted" || left.startsWith("redacted-")) return `${left}/resource-redacted`;
+              return "ns-redacted/resource-redacted";
+            });
+            // Redact multi-segment kebab-case cluster/resource identifiers (preserving metrics-server)
+            out = out.replace(/\b[a-z0-9]+(?:-[a-z0-9]+){2,}\b/g, (match) => {
+              if (match === "metrics-server" || match.startsWith("redacted-") || match.startsWith("pod-redacted-") || match.startsWith("ns-redacted") || match.startsWith("resource-redacted")) return match;
+              return "id-redacted";
+            });
+            out = out.replace(/\b[a-z0-9]+-(?:secret|svc|env|config|db|redis|postgres|api|web|app|worker|node|pod|deploy|sts|cron|job|test|realtime|service|server)\b/gi, (match) => {
+              if (match.toLowerCase() === "metrics-server" || match.startsWith("redacted-") || match.startsWith("resource-redacted")) return match;
+              return "id-redacted";
+            });
+            return out;
+          };
+
+          // Scrub log lines inside <pre> and break log viewers
+          for (const pre of document.querySelectorAll<HTMLElement>(
+            'pre[aria-label="Workload log output"], pre[aria-label="Pod log output"]',
+          )) {
+            const spans = pre.querySelectorAll<HTMLElement>("[data-log-key]");
+            spans.forEach((span, idx) => {
+              const buttons = span.querySelectorAll<HTMLElement>("button");
+              buttons.forEach((btn) => {
+                const origBtn = btn.textContent ?? "";
+                restore.push(() => { btn.textContent = origBtn; });
+                const hasContainer = origBtn.includes("/");
+                btn.textContent = `pod-redacted-${(idx % 2) + 1}${hasContainer ? "/container-1" : ""}`;
+              });
+              for (const node of Array.from(span.childNodes)) {
+                if (node.nodeType === Node.TEXT_NODE && (node.textContent ?? "").trim().length > 0) {
+                  const origText = node.textContent ?? "";
+                  restore.push(() => { node.textContent = origText; });
+                  node.textContent = `  [scrubbed telemetry log line #${idx + 1}]\n`;
+                }
+              }
+              for (const mark of span.querySelectorAll<HTMLElement>("mark")) {
+                const origMark = mark.textContent ?? "";
+                restore.push(() => { mark.textContent = origMark; });
+                mark.textContent = "match";
+              }
+            });
+          }
+
+          for (const breakLogContainer of document.querySelectorAll<HTMLElement>('div[aria-label="Break log lines"]')) {
+            const rows = Array.from(breakLogContainer.children) as HTMLElement[];
+            rows.forEach((row, idx) => {
+              const spans = row.querySelectorAll<HTMLElement>("span");
+              if (spans.length >= 4) {
+                const msgSpan = spans[spans.length - 1];
+                const origMsg = msgSpan.textContent ?? "";
+                restore.push(() => { msgSpan.textContent = origMsg; });
+                msgSpan.textContent = `[scrubbed break log line #${idx + 1}]`;
+                const podSpan = spans[1];
+                const origPod = podSpan.textContent ?? "";
+                restore.push(() => { podSpan.textContent = origPod; });
+                podSpan.textContent = `p${(idx % 2) + 1}`;
+              }
+            });
+          }
+
+          // Scrub Top messages in window patterns
+          for (const patSpan of document.querySelectorAll<HTMLElement>('#kubernetes-break-logs aside ul li span.break-words')) {
+            const origPat = patSpan.textContent ?? "";
+            restore.push(() => { patSpan.textContent = origPat; });
+            patSpan.textContent = "[scrubbed log message pattern]";
+          }
+
+          // Scrub YAML values
+          for (const code of document.querySelectorAll<HTMLElement>('section[aria-label="Projected YAML"] code')) {
+            const spans = code.querySelectorAll<HTMLElement>("span");
+            if (spans.length >= 2) {
+              const valSpan = spans[1];
+              const origVal = valSpan.textContent ?? "";
+              if (origVal.trim().length > 0 && !/^(true|false|\d+|\[\]|\{\})$/i.test(origVal.trim())) {
+                restore.push(() => { valSpan.textContent = origVal; });
+                valSpan.textContent = " redacted-value";
+              }
+            } else {
+              const origCode = code.textContent ?? "";
+              if (origCode.trim().startsWith("- ")) {
+                restore.push(() => { code.textContent = origCode; });
+                code.textContent = "  - redacted-item";
+              }
+            }
+          }
+
+          // Scrub Timeline chart resource labels directly so even 0/1-hyphen names are always redacted
+          const timelineLabels = Array.from(document.querySelectorAll<HTMLElement>(".resource-timeline-row:not(.break-log-rate) .resource-timeline-label"));
+          timelineLabels.forEach((lbl, idx) => {
+            const strong = lbl.querySelector<HTMLElement>("strong");
+            const span = lbl.querySelector<HTMLElement>("span");
+            if (strong) {
+              const origStrong = strong.textContent ?? "";
+              const kindPrefix = origStrong.split(" ")[0] || "Resource";
+              restore.push(() => { strong.textContent = origStrong; });
+              strong.textContent = `${kindPrefix} workload-redacted-${idx + 1}`;
+            }
+            if (span) {
+              const origSpan = span.textContent ?? "";
+              restore.push(() => { span.textContent = origSpan; });
+              span.textContent = `ns-redacted-${(idx % 3) + 1}`;
+            }
+          });
+
+          // Scrub Workloads list rows directly
+          const workloadRows = Array.from(document.querySelectorAll<HTMLElement>(`[aria-label="Workloads"] [role="listitem"] button`));
+          workloadRows.forEach((btn, idx) => {
+            const spans = btn.querySelectorAll<HTMLElement>("span");
+            if (spans.length >= 2) {
+              const origName = spans[0].textContent ?? "";
+              const origNs = spans[1].textContent ?? "";
+              restore.push(() => { spans[0].textContent = origName; spans[1].textContent = origNs; });
+              spans[0].textContent = `workload-redacted-${idx + 1}`;
+              spans[1].textContent = `ns-redacted-${(idx % 4) + 1}`;
+            }
+          });
+
+          // Scrub Details panel fields and Related resources names directly
+          for (const dd of document.querySelectorAll<HTMLElement>('div[role="dialog"][aria-label="Details panel"] dd')) {
+            const origDd = dd.textContent ?? "";
+            const scrubbed = scrubString(origDd);
+            if (scrubbed !== origDd) {
+              restore.push(() => { dd.textContent = origDd; });
+              dd.textContent = scrubbed;
+            }
+          }
+
+          // Scrub inputs and selects
+          for (const input of document.querySelectorAll<HTMLInputElement>("input")) {
+            if (input.value) {
+              const origVal = input.value;
+              restore.push(() => { input.value = origVal; });
+              input.value = "redacted-filter";
+            }
+          }
+          for (const option of document.querySelectorAll<HTMLOptionElement>("select option")) {
+            const origOpt = option.textContent ?? "";
+            const scrubbed = scrubString(origOpt);
+            if (scrubbed !== origOpt) {
+              restore.push(() => { option.textContent = origOpt; });
+              option.textContent = scrubbed;
+            }
+          }
+
+          // Scrub all remaining text nodes
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          let current: Node | null = walker.nextNode();
+          while (current) {
+            const textNode = current;
+            const orig = textNode.textContent ?? "";
+            if (orig.trim().length > 0) {
+              const scrubbed = scrubString(orig);
+              if (scrubbed !== orig) {
+                restore.push(() => { textNode.textContent = orig; });
+                textNode.textContent = scrubbed;
+              }
+            }
+            current = walker.nextNode();
+          }
+        });
+
+        try {
+          const buf = await page.screenshot({ path: targetPath, animations: "disabled" });
+          capturedImages.push({
+            name: path.basename(targetPath),
+            viewport: String(viewportWidth),
+            sha256: createHash("sha256").update(buf).digest("hex"),
+          });
+        } finally {
+          await page.evaluate(() => {
+            const win = window as unknown as { __restoreCallbacks?: Array<() => void> };
+            for (const fn of (win.__restoreCallbacks ?? []).reverse()) {
+              try { fn(); } catch { /* ignore */ }
+            }
+            win.__restoreCallbacks = [];
+          });
+        }
+      };
+
+      await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+
+      // 1. Open Kubernetes Explorer and authenticate via gateway secret
+      await openApp(page, "/agent/kubernetes");
+      await expect(page.getByRole("heading", { name: "Kubernetes", exact: true })).toBeVisible();
+
+      const viewTabs = page.getByRole("tablist", { name: "Kubernetes views", exact: true });
+      await expect(viewTabs).toBeVisible();
+      const viewTabLabels = await viewTabs.getByRole("tab").allTextContents();
+      expect(viewTabLabels.map((t) => t.trim())).toEqual([
+        "Overview",
+        "Issues",
+        "Timeline",
+        "Topology",
+        "Workloads",
+        "Nodes",
+        "Helm",
+        "GitOps",
+        "Traffic",
+        "Agent",
+      ]);
+
+      // Probe overview, inventory, issues, changes, crashes, and active log emitters
+      // inside page context without returning any raw names or identifiers to Node/logs.
+      const clusterProbe = await page.evaluate(async () => {
+        const safeFetch = async (url: string) => {
+          const res = await fetch(url, { credentials: "same-origin" });
+          let json: Record<string, unknown> | null = null;
+          try {
+            json = (await res.json()) as Record<string, unknown>;
+          } catch {
+            json = null;
+          }
+          return { status: res.status, json };
+        };
+
+        const win = window as unknown as {
+          __redactTokens?: Set<string>;
+          __discoveredTargets?: Record<string, { resource_id: string; kind: string; namespace: string; name: string; uid: string; podCount: number }>;
+          __brokenIssueTarget?: { root_uid: string; namespace: string; kind: string } | null;
+        };
+        if (!win.__redactTokens) win.__redactTokens = new Set<string>();
+        const addToken = (val: unknown) => {
+          if (typeof val === "string" && val.trim().length >= 3) {
+            win.__redactTokens!.add(val.trim());
+          }
+        };
+
+        const ov = await safeFetch("/api/admin/kubernetes/overview");
+        const ovBody = ov.json ?? {};
+        addToken(ovBody.cluster_id);
+        const partialFailures = Array.isArray(ovBody.partial_failures)
+          ? (ovBody.partial_failures as Array<Record<string, unknown>>).map((f) => ({
+              resource_id: String(f.resource_id ?? ""),
+              class: String(f.class ?? "unknown"),
+            }))
+          : [];
+
+        // Pre-populate redaction tokens from namespaces, nodes, issues, 24h changes, 24h crashes, top
+        const since24h = encodeURIComponent(new Date(Date.now() - 24 * 3600_000).toISOString());
+        const untilNow = encodeURIComponent(new Date().toISOString());
+        const [nsRes, nodesRes, issAllRes, issBrokenRes, chgRes, crshRes, topPodsRes] = await Promise.all([
+          safeFetch("/api/admin/kubernetes/resources?resource_id=core~v1~namespaces&limit=100"),
+          safeFetch("/api/admin/kubernetes/resources?resource_id=core~v1~nodes&limit=100"),
+          safeFetch("/api/admin/kubernetes/issues?limit=100"),
+          safeFetch("/api/admin/kubernetes/issues?broken=true&limit=100"),
+          safeFetch(`/api/admin/kubernetes/changes?since=${since24h}&until=${untilNow}&limit=200`),
+          safeFetch(`/api/admin/kubernetes/crashes?since=${since24h}&until=${untilNow}&limit=200`),
+          safeFetch("/api/admin/kubernetes/top?kind=Pod&sort=cpu&limit=30"),
+        ]);
+
+        if (Array.isArray(nsRes.json?.items)) {
+          for (const item of nsRes.json.items as Array<Record<string, unknown>>) addToken(item.name);
+        }
+        if (Array.isArray(nodesRes.json?.items)) {
+          for (const item of nodesRes.json.items as Array<Record<string, unknown>>) addToken(item.name);
+        }
+        for (const list of [issAllRes.json?.items, issBrokenRes.json?.items]) {
+          if (Array.isArray(list)) {
+            for (const item of list as Array<Record<string, unknown>>) {
+              const root = (item.root as Record<string, unknown> | undefined) ?? {};
+              addToken(root.name);
+              addToken(root.namespace);
+              addToken(root.uid);
+            }
+          }
+        }
+        if (Array.isArray(chgRes.json?.items)) {
+          for (const item of chgRes.json.items as Array<Record<string, unknown>>) {
+            addToken(item.name);
+            addToken(item.namespace);
+            addToken(item.uid);
+          }
+        }
+        if (Array.isArray(crshRes.json?.items)) {
+          for (const item of crshRes.json.items as Array<Record<string, unknown>>) {
+            addToken(item.pod);
+            addToken(item.namespace);
+            addToken(item.container);
+            addToken(item.node);
+            addToken(item.root_uid);
+          }
+        }
+        const topPods = Array.isArray(topPodsRes.json?.items)
+          ? (topPodsRes.json!.items as Array<Record<string, unknown>>)
+          : [];
+        for (const item of topPods) {
+          addToken(item.name);
+          addToken(item.namespace);
+          const owner = (item.owner as Record<string, unknown> | undefined) ?? {};
+          addToken(owner.name);
+        }
+
+        // Identify a broken issue with valid root_uid, namespace, and broke_at for Timeline break-logs testing
+        const brokenItems = Array.isArray(issBrokenRes.json?.items)
+          ? (issBrokenRes.json!.items as Array<Record<string, unknown>>)
+          : [];
+        win.__brokenIssueTarget = null;
+        const preferredBroken = brokenItems.find((item) => {
+          const root = (item.root as Record<string, unknown> | undefined) ?? {};
+          return Boolean(
+            root.uid &&
+              root.namespace &&
+              typeof item.broke_at === "string" &&
+              ["Deployment", "StatefulSet", "Pod", "DaemonSet", "Job", "CronJob"].includes(String(root.kind ?? "")),
+          );
+        }) ?? brokenItems.find((item) => {
+          const root = (item.root as Record<string, unknown> | undefined) ?? {};
+          return Boolean(root.uid && root.namespace && typeof item.broke_at === "string");
+        });
+        if (preferredBroken) {
+          const root = (preferredBroken.root as Record<string, unknown>) ?? {};
+          win.__brokenIssueTarget = {
+            root_uid: String(root.uid),
+            namespace: String(root.namespace),
+            kind: String(root.kind ?? ""),
+          };
+        }
+
+        const wlAll = await safeFetch("/api/admin/kubernetes/workloads?limit=100");
+        const wlAllBody = wlAll.json ?? {};
+        const counts = (wlAllBody.counts as Record<string, number> | undefined) ?? {};
+
+        const classifyInventory = (status: number, items: unknown[], failures: Array<Record<string, unknown>>) => {
+          if (status === 401 || status === 403 || failures.some((f) => f.class === "forbidden")) return "forbidden";
+          if (status !== 200) return `error_${status}`;
+          return items.length > 0 ? "populated" : "empty";
+        };
+
+        const kindSummary: Record<string, { status: number; classification: string; count: number; multiPodCount: number }> = {};
+        win.__discoveredTargets = {};
+
+        for (const kind of ["Deployment", "StatefulSet", "Pod", "DaemonSet", "Job", "CronJob"]) {
+          const res = await safeFetch(`/api/admin/kubernetes/workloads?kind=${encodeURIComponent(kind)}&limit=60`);
+          const items = Array.isArray(res.json?.items) ? (res.json!.items as Array<Record<string, unknown>>) : [];
+          const failures = Array.isArray(res.json?.partial_failures)
+            ? (res.json!.partial_failures as Array<Record<string, unknown>>)
+            : [];
+          for (const item of items) {
+            addToken(item.name);
+            addToken(item.namespace);
+            addToken(item.uid);
+            const summary = (item.summary as Record<string, unknown> | undefined) ?? {};
+            addToken(summary.node);
+            addToken(summary.pod_ip);
+            addToken(summary.image);
+          }
+
+          let multiPodCount = 0;
+          if ((kind === "Deployment" || kind === "StatefulSet") && items.length > 0) {
+            const sorted = [...items].sort((a, b) => {
+              const sa = (a.summary as Record<string, unknown> | undefined) ?? {};
+              const sb = (b.summary as Record<string, unknown> | undefined) ?? {};
+              const ra = Number(sa.ready_replicas ?? sa.readyReplicas ?? sa.replicas ?? 0);
+              const rb = Number(sb.ready_replicas ?? sb.readyReplicas ?? sb.replicas ?? 0);
+              return rb - ra;
+            });
+
+            let bestScore = -1;
+            let chosen: { resource_id: string; kind: string; namespace: string; name: string; uid: string; podCount: number } | null = null;
+            for (const candidate of sorted.slice(0, 15)) {
+              const ns = String(candidate.namespace ?? "");
+              const name = String(candidate.name ?? "");
+              const wDetail = await safeFetch(
+                `/api/admin/kubernetes/workloads/${encodeURIComponent(kind)}/${encodeURIComponent(name)}?namespace=${encodeURIComponent(ns)}`,
+              );
+              const pods = Array.isArray(wDetail.json?.pods) ? (wDetail.json!.pods as Array<Record<string, unknown>>) : [];
+              for (const p of pods) {
+                addToken(p.name);
+                addToken(p.uid);
+                addToken(p.node);
+              }
+              const containers = Array.isArray(wDetail.json?.containers)
+                ? (wDetail.json!.containers as Array<Record<string, unknown>>)
+                : [];
+              for (const c of containers) {
+                addToken(c.name);
+                addToken(c.image);
+              }
+              if (pods.length >= 2) multiPodCount += 1;
+              let recentLines = 0;
+              if (pods.length >= 1) {
+                const logProbe = await safeFetch(
+                  `/api/admin/kubernetes/workloads/${encodeURIComponent(kind)}/${encodeURIComponent(name)}/logs?namespace=${encodeURIComponent(ns)}&since_seconds=3600&tail_lines=30`,
+                );
+                const lines = Array.isArray(logProbe.json?.lines) ? logProbe.json!.lines : [];
+                recentLines = lines.length;
+              }
+              const score = (pods.length >= 2 ? 1000 : 0) + (recentLines > 0 ? 500 + recentLines : 0) + pods.length;
+              if (score > bestScore) {
+                bestScore = score;
+                chosen = {
+                  resource_id: String(candidate.resource_id ?? (kind === "Deployment" ? "apps~v1~deployments" : "apps~v1~statefulsets")),
+                  kind,
+                  namespace: ns,
+                  name,
+                  uid: String(candidate.uid ?? ""),
+                  podCount: pods.length,
+                };
+              }
+            }
+            if (chosen) win.__discoveredTargets[kind] = chosen;
+          } else if (kind === "Pod" && items.length > 0) {
+            const running = items.filter((item) => {
+              const summary = (item.summary as Record<string, unknown> | undefined) ?? {};
+              return summary.phase === "Running";
+            });
+            const pick = running[0] ?? items[0];
+            win.__discoveredTargets.Pod = {
+              resource_id: String(pick.resource_id ?? "core~v1~pods"),
+              kind: "Pod",
+              namespace: String(pick.namespace ?? ""),
+              name: String(pick.name ?? ""),
+              uid: String(pick.uid ?? ""),
+              podCount: 1,
+            };
+          }
+
+          kindSummary[kind] = {
+            status: res.status,
+            classification: classifyInventory(res.status, items, failures),
+            count: counts[kind] ?? items.length,
+            multiPodCount,
+          };
+        }
+
+        // Also probe top CPU pods to find the freshest active log emitter in the cluster
+        for (const tp of topPods.slice(0, 15)) {
+          const ns = String(tp.namespace ?? "");
+          const name = String(tp.name ?? "");
+          if (!ns || !name) continue;
+          const pLog = await safeFetch(
+            `/api/admin/kubernetes/pods/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/logs?since_seconds=60&tail_lines=20`,
+          );
+          const lines = Array.isArray(pLog.json?.lines) ? pLog.json!.lines : [];
+          if (lines.length > 0) {
+            const pRes = await safeFetch(
+              `/api/admin/kubernetes/resources/core~v1~pods/${encodeURIComponent(name)}?namespace=${encodeURIComponent(ns)}`,
+            );
+            const uid = String(pRes.json?.uid ?? "");
+            if (uid) {
+              win.__discoveredTargets.ActivePod = {
+                resource_id: "core~v1~pods",
+                kind: "Pod",
+                namespace: ns,
+                name,
+                uid,
+                podCount: 1,
+              };
+              break;
+            }
+          }
+        }
+
+        return {
+          overview: {
+            status: ov.status,
+            classification: ov.status === 200 ? "ok" : ov.status === 401 || ov.status === 403 ? "forbidden" : `error_${ov.status}`,
+            clusterIdPresent: Boolean(ovBody.cluster_id),
+            nodes: Number(ovBody.nodes ?? 0),
+            readyNodes: Number(ovBody.ready_nodes ?? 0),
+            namespaces: Number(ovBody.namespaces ?? 0),
+            workloads: Number(ovBody.workloads ?? 0),
+            pods: Number(ovBody.pods ?? 0),
+            metricsStatus: String(ovBody.metrics_status ?? "unavailable"),
+            usageSource: String(ovBody.usage_source ?? "unavailable"),
+            partialFailures,
+            omittedCategories: Array.isArray(ovBody.omitted_categories) ? (ovBody.omitted_categories as string[]) : [],
+          },
+          workloadsInventory: {
+            status: wlAll.status,
+            counts,
+            kinds: kindSummary,
+            discoveredKinds: Object.keys(win.__discoveredTargets).map((k) => ({
+              kind: k,
+              podCount: win.__discoveredTargets![k].podCount,
+            })),
+          },
+        };
+      });
+
+      expect(clusterProbe.overview.status).toBe(200);
+      await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible();
+      // Wait for Break timeline on Overview to finish loading before taking overview screenshot
+      await page.waitForTimeout(1_500);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await captureRedacted("eks-overview", 1440, "populated");
+
+      // 2. Switch to Workloads tab and verify inventory UI
+      await page.getByRole("tab", { name: "Workloads", exact: true }).click();
+      const workloadsRegion = page.getByRole("region", { name: "Workloads", exact: true });
+      await expect(workloadsRegion).toBeVisible();
+      await expect(page.getByRole("tablist", { name: "Workload kind", exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await captureRedacted("eks-workloads", 1440, "populated");
+
+      const openTargetInDrawer = async (targetKind: string) => {
+        await page.getByRole("tab", { name: "Workloads", exact: true }).click();
+        await expect(workloadsRegion).toBeVisible();
+        const hasTarget = await page.evaluate((k) => {
+          const win = window as unknown as {
+            __discoveredTargets?: Record<string, { resource_id: string; kind: string; namespace: string; name: string; uid: string; podCount: number }>;
+          };
+          return Boolean(win.__discoveredTargets?.[k]);
+        }, targetKind);
+        if (!hasTarget) return false;
+
+        const uiKind = targetKind === "ActivePod" ? "Pod" : targetKind;
+        const viewportSize = page.viewportSize();
+        if ((viewportSize?.width ?? 1440) >= 640) {
+          await page
+            .getByRole("tablist", { name: "Workload kind", exact: true })
+            .getByRole("tab", { name: new RegExp(`^${uiKind}`), exact: false })
+            .click();
+        } else {
+          await page.locator(`select[aria-label="Workload kind"]`).selectOption(uiKind);
+        }
+
+        await page.evaluate((k) => {
+          const win = window as unknown as {
+            __discoveredTargets?: Record<string, { resource_id: string; kind: string; namespace: string; name: string; uid: string; podCount: number }>;
+          };
+          const target = win.__discoveredTargets![k];
+          const setReactInput = (el: HTMLInputElement | null, value: string) => {
+            if (!el) return;
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+            setter?.call(el, value);
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+          };
+          setReactInput(document.querySelector<HTMLInputElement>(`input[aria-label="Workload namespace"]`), target.namespace);
+          setReactInput(document.querySelector<HTMLInputElement>(`input[aria-label="Resource name"]`), target.name);
+        }, targetKind);
+
+        const firstRowButton = workloadsRegion.getByRole("listitem").first().locator(`button[aria-label^="Select "]`);
+        await expect(firstRowButton).toBeVisible({ timeout: 30_000 });
+        await firstRowButton.click();
+        const detail = page.getByRole("dialog", { name: "Details panel" });
+        await expect(detail).toBeVisible({ timeout: 30_000 });
+        return true;
+      };
+
+      // 3. Test deep-link normalization for legacy tabs (metrics, diagnosis, actions -> overview)
+      const deepLinkNormalized = await page.evaluate(async () => {
+        const win = window as unknown as {
+          __discoveredTargets?: Record<string, { resource_id: string; kind: string; namespace: string; name: string; uid: string; podCount: number }>;
+        };
+        const target = win.__discoveredTargets?.Deployment ?? win.__discoveredTargets?.Pod ?? win.__discoveredTargets?.StatefulSet;
+        if (!target) return { tested: false, results: {} };
+        const rParam = `${target.resource_id}/${target.namespace}/${target.name}`;
+        const results: Record<string, boolean> = {};
+        for (const legacyTab of ["metrics", "diagnosis", "actions"]) {
+          window.history.pushState(null, "", `/agent/kubernetes?r=${encodeURIComponent(rParam)}&tab=${legacyTab}`);
+          window.dispatchEvent(new PopStateEvent("popstate"));
+          await new Promise((r) => setTimeout(r, 150));
+          const params = new URLSearchParams(window.location.search);
+          const overviewTab = document.getElementById("kubernetes-drawer-tab-overview");
+          results[legacyTab] = !params.has("tab") && overviewTab?.getAttribute("aria-selected") === "true";
+        }
+        return { tested: true, results };
+      });
+      if (deepLinkNormalized.tested) {
+        expect(deepLinkNormalized.results).toEqual({ metrics: true, diagnosis: true, actions: true });
+        const closeBtn = page.getByRole("dialog", { name: "Details panel" }).getByRole("button", { name: "Close panel", exact: true });
+        if (await closeBtn.count()) await closeBtn.click();
+        await expect(page.getByRole("dialog", { name: "Details panel" })).toHaveCount(0);
+        await page.waitForTimeout(2_200);
+      }
+
+      // 4. Exercise Resource Detail Drawer across present kinds (Deployment, StatefulSet, Pod)
+      const drawerVerification: Record<string, unknown> = {};
+
+      for (const kind of ["Deployment", "StatefulSet", "Pod"]) {
+        const opened = await openTargetInDrawer(kind);
+        if (!opened) {
+          drawerVerification[kind] = {
+            exercised: false,
+            reason: clusterProbe.workloadsInventory.kinds[kind]?.classification ?? "absent",
+          };
+          continue;
+        }
+
+        const detail = page.getByRole("dialog", { name: "Details panel" });
+        const drawerTablist = detail.getByRole("tablist", { name: "Resource detail views", exact: true });
+        await expect(drawerTablist).toBeVisible();
+        const tabLabels = (await drawerTablist.getByRole("tab").allTextContents()).map((t) => t.trim());
+        expect(tabLabels).toEqual(["Overview", "Logs", "Events", "YAML", "Related", "Timeline"]);
+        await expect(drawerTablist.getByRole("tab", { name: /Actions|Metrics|Diagnosis/i })).toHaveCount(0);
+
+        await expect(detail.getByRole("region", { name: "Live workload metrics", exact: true })).toBeVisible({ timeout: 30_000 });
+
+        // Keyboard navigation check on drawer tabs
+        const overviewTabBtn = drawerTablist.getByRole("tab", { name: "Overview", exact: true });
+        const logsTabBtn = drawerTablist.getByRole("tab", { name: "Logs", exact: true });
+        await overviewTabBtn.focus();
+        await expect(overviewTabBtn).toBeFocused();
+        await page.keyboard.press("ArrowRight");
+        await expect(logsTabBtn).toHaveAttribute("aria-selected", "true");
+        await expect(logsTabBtn).toBeFocused();
+        await page.keyboard.press("ArrowLeft");
+        await expect(overviewTabBtn).toHaveAttribute("aria-selected", "true");
+        await expect(overviewTabBtn).toBeFocused();
+
+        // Overview tab checks
+        const overviewCheck = await detail.evaluate((dialogEl) => {
+          const text = dialogEl.textContent ?? "";
+          const cpuTile = Boolean(dialogEl.querySelector(`[aria-label="CPU metric tile"]`));
+          const memTile = Boolean(dialogEl.querySelector(`[aria-label="Memory metric tile"]`));
+          const crashTicks = Boolean(dialogEl.querySelector(`[aria-label="24 hour crash ticks"]`));
+          const detailsHeading = Array.from(dialogEl.querySelectorAll("h3")).some((h) => h.textContent?.trim() === "Details");
+          const conditionsHeading = Array.from(dialogEl.querySelectorAll("h3")).some((h) => h.textContent?.trim() === "Conditions");
+          const compactLogs = Boolean(
+            dialogEl.querySelector(`section[aria-label="Workload live logs"], section[aria-label="Pod logs"]`),
+          );
+          const investigateBtn = Boolean(dialogEl.querySelector(`button[aria-label="Investigate"]`));
+          return {
+            cpuTile,
+            memTile,
+            crashTicks,
+            detailsHeading,
+            conditionsHeading,
+            compactLogs,
+            investigateBtn,
+            hasReadyPill: /Ready\s+\d+\/\d+|Ready\s+\?/.test(text),
+            hasRestartsPill: /\d+\s+restarts/.test(text),
+          };
+        });
+        expect(overviewCheck.cpuTile).toBe(true);
+        expect(overviewCheck.memTile).toBe(true);
+        expect(overviewCheck.detailsHeading).toBe(true);
+        expect(overviewCheck.conditionsHeading).toBe(true);
+        expect(overviewCheck.compactLogs).toBe(true);
+
+        if (kind === "Deployment") {
+          await page.waitForTimeout(1_000);
+          await captureRedacted("eks-drawer-overview", 1440, "populated");
+        }
+
+        // Switch from Overview compact live logs to full Logs tab via "Open full logs ->"
+        const openFullLogsBtn = detail.getByRole("button", { name: /Open full logs/ });
+        await expect(openFullLogsBtn).toBeVisible();
+        await openFullLogsBtn.click();
+        await expect(drawerTablist.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
+
+        const expandBtn = detail.getByRole("button", { name: "Expand panel", exact: true });
+        if (await expandBtn.isVisible()) {
+          await expandBtn.click();
+        }
+
+        const isWorkload = kind === "Deployment" || kind === "StatefulSet";
+        const logsRegion = detail.getByRole("region", { name: isWorkload ? "Workload live logs" : "Pod logs", exact: true });
+        await expect(logsRegion).toBeVisible();
+        const logOutput = logsRegion.getByLabel(isWorkload ? "Workload log output" : "Pod log output", { exact: true });
+        await expect(logOutput).toBeVisible();
+
+        const waitForLogsSettled = async () => {
+          await page.waitForTimeout(350);
+          await expect
+            .poll(
+              async () => {
+                const txt = (await logOutput.textContent()) ?? "";
+                return !txt.includes("Connecting to logs...");
+              },
+              { timeout: 25_000, intervals: [500, 1000] },
+            )
+            .toBe(true);
+        };
+
+        await waitForLogsSettled();
+
+        // If 1h window has 0 lines, widen Since to 24h (86400) so older container lines are shown if available
+        if ((await logOutput.locator("[data-log-key]").count()) === 0) {
+          await page.waitForTimeout(2_200);
+          await logsRegion.getByLabel("Log since seconds", { exact: true }).selectOption("86400");
+          await waitForLogsSettled();
+        }
+
+        // Verify no yellow warning banner inside log viewer (excluding per-Pod prefix buttons inside pre)
+        const warningBannersInLogs = await logsRegion
+          .locator(`p.text-sev-warning, div.text-sev-warning, [role="alert"], [role="status"].text-sev-warning`)
+          .count();
+        expect(warningBannersInLogs).toBe(0);
+
+        const initialLogMetrics = await logsRegion.evaluate((sectionEl, wl) => {
+          const pre = sectionEl.querySelector("pre");
+          const lineSpans = pre ? Array.from(pre.querySelectorAll<HTMLElement>("[data-log-key]")) : [];
+          const neutralSpans = lineSpans.filter((s) => s.classList.contains("text-ink-400"));
+          const prefixBtns = pre ? Array.from(pre.querySelectorAll<HTMLButtonElement>("button")) : [];
+          const distinctPrefixes = new Set(prefixBtns.map((b) => (b.textContent ?? "").trim()).filter(Boolean));
+          const podSelect = sectionEl.querySelector<HTMLSelectElement>(`select[aria-label="Log pod"]`);
+          const containerSelect = sectionEl.querySelector<HTMLSelectElement>(`select[aria-label="Log container"]`);
+          const podOptions = podSelect ? Array.from(podSelect.options).map((o) => ({ value: o.value, isAll: o.value === "" })) : [];
+          const containerOptions = containerSelect ? Array.from(containerSelect.options).map((o) => o.value) : [];
+          const win = window as unknown as { __redactTokens?: Set<string> };
+          if (podSelect) {
+            for (const opt of Array.from(podSelect.options)) {
+              if (opt.value) win.__redactTokens?.add(opt.textContent?.trim() ?? "");
+            }
+          }
+          for (const p of distinctPrefixes) win.__redactTokens?.add(p);
+          return {
+            workloadMode: wl,
+            allPodsDefault: podSelect ? podSelect.value === "" : null,
+            allPodsOptionLabel: podSelect?.options[0]?.textContent?.trim() ?? null,
+            podOptionCount: podOptions.filter((o) => !o.isAll).length,
+            containerOptionCount: containerOptions.length,
+            hasAllContainersOption: containerOptions.includes("*"),
+            retainedLineSpans: lineSpans.length,
+            nonNeutralLineSpans: lineSpans.length - neutralSpans.length,
+            neutralLineSpans: neutralSpans.length,
+            distinctPodPrefixesInStream: distinctPrefixes.size,
+            lastLineKey: lineSpans.at(-1)?.dataset.logKey ?? null,
+            emptyOrStatusText: lineSpans.length === 0 ? (pre?.textContent?.trim() ?? "") : null,
+          };
+        }, isWorkload);
+
+        if (kind === "Deployment") {
+          await captureRedacted("eks-drawer-logs", 1440, "populated");
+        }
+
+        // Observe for arriving new lines without clicking Reload/Refresh (poll up to 15s)
+        let arrivedNewLines = false;
+        let afterLineSpans = initialLogMetrics.retainedLineSpans;
+        if (initialLogMetrics.retainedLineSpans > 0) {
+          const beforeCount = initialLogMetrics.retainedLineSpans;
+          const beforeKey = initialLogMetrics.lastLineKey;
+          try {
+            await expect
+              .poll(
+                async () => {
+                  const state = await logsRegion.evaluate((sectionEl) => {
+                    const pre = sectionEl.querySelector("pre");
+                    const spans = pre ? Array.from(pre.querySelectorAll<HTMLElement>("[data-log-key]")) : [];
+                    return {
+                      count: spans.length,
+                      lastKey: spans.at(-1)?.dataset.logKey ?? null,
+                    };
+                  });
+                  afterLineSpans = state.count;
+                  return state.count > beforeCount || (state.lastKey !== null && state.lastKey !== beforeKey);
+                },
+                { timeout: 30_000, intervals: [1_000] },
+              )
+              .toBe(true);
+            arrivedNewLines = true;
+          } catch {
+            arrivedNewLines = false;
+          }
+        }
+
+        // Test Pod selection (dropdown & prefix button) for Deployment / StatefulSet
+        let podSelectionCheck: Record<string, unknown> = { applicable: isWorkload };
+        if (isWorkload && initialLogMetrics.podOptionCount >= 1) {
+          const podSelect = logsRegion.getByLabel("Log pod", { exact: true });
+          await expect(podSelect).toHaveValue("");
+          await page.waitForTimeout(2_200);
+          if (initialLogMetrics.distinctPodPrefixesInStream >= 1) {
+            await logOutput.locator("button").last().click();
+            const selectedVal = await podSelect.inputValue();
+            expect(selectedVal).not.toBe("");
+            let finalUniqueCount = 0;
+            await expect
+              .poll(
+                async () => {
+                  const prefixesMatch = await logsRegion.evaluate((sectionEl) => {
+                    const pre = sectionEl.querySelector("pre");
+                    const btns = pre ? Array.from(pre.querySelectorAll<HTMLButtonElement>("button")) : [];
+                    const unique = new Set(btns.map((b) => (b.textContent ?? "").trim()));
+                    return { buttonCount: btns.length, uniqueCount: unique.size };
+                  });
+                  finalUniqueCount = prefixesMatch.uniqueCount;
+                  return prefixesMatch.uniqueCount <= 1;
+                },
+                { timeout: 20_000, intervals: [500, 1000] },
+              )
+              .toBe(true);
+            await page.waitForTimeout(2_200);
+            await podSelect.selectOption("");
+            await expect(podSelect).toHaveValue("");
+            await waitForLogsSettled();
+            podSelectionCheck = {
+              applicable: true,
+              exercisedViaPrefixClick: true,
+              selectedPodUIDNonEmpty: selectedVal !== "",
+              filteredUniquePodPrefixes: finalUniqueCount,
+              restoredAllPods: true,
+            };
+          } else {
+            const firstPodUid = await podSelect.locator("option").nth(1).getAttribute("value");
+            if (firstPodUid) {
+              await podSelect.selectOption(firstPodUid);
+              expect(await podSelect.inputValue()).toBe(firstPodUid);
+              await page.waitForTimeout(2_200);
+              await podSelect.selectOption("");
+              await expect(podSelect).toHaveValue("");
+              await waitForLogsSettled();
+              podSelectionCheck = {
+                applicable: true,
+                exercisedViaDropdown: true,
+                selectedPodUIDNonEmpty: true,
+                restoredAllPods: true,
+              };
+            }
+          }
+        }
+
+        // Test Container selection
+        const containerSelect = logsRegion.getByLabel("Log container", { exact: true });
+        const initialContainerVal = await containerSelect.inputValue();
+        if (isWorkload && initialLogMetrics.hasAllContainersOption) {
+          await page.waitForTimeout(2_200);
+          await containerSelect.selectOption("*");
+          expect(await containerSelect.inputValue()).toBe("*");
+          await waitForLogsSettled();
+          await page.waitForTimeout(2_200);
+          await containerSelect.selectOption(initialContainerVal);
+          expect(await containerSelect.inputValue()).toBe(initialContainerVal);
+          await waitForLogsSettled();
+        }
+
+        // Test Timestamps toggle
+        const timestampsCheckbox = logsRegion.getByLabel("Timestamps", { exact: true });
+        expect(await timestampsCheckbox.isChecked()).toBe(false);
+        await timestampsCheckbox.check();
+        expect(await timestampsCheckbox.isChecked()).toBe(true);
+        const hasTimestampTextWhenChecked = await logsRegion.evaluate((sectionEl) => {
+          const pre = sectionEl.querySelector("pre");
+          const firstSpan = pre?.querySelector<HTMLElement>("[data-log-key]");
+          if (!firstSpan) return null;
+          return /\d{4}-\d{2}-\d{2}T|\d{2}:\d{2}:\d{2}/.test(firstSpan.textContent ?? "");
+        });
+        await timestampsCheckbox.uncheck();
+        expect(await timestampsCheckbox.isChecked()).toBe(false);
+
+        // Test Wrap lines toggle
+        const wrapCheckbox = logsRegion.getByLabel("Wrap lines", { exact: true });
+        expect(await wrapCheckbox.isChecked()).toBe(true);
+        await expect(logOutput).toHaveClass(/whitespace-pre-wrap/);
+        await wrapCheckbox.uncheck();
+        expect(await wrapCheckbox.isChecked()).toBe(false);
+        await expect(logOutput).toHaveClass(/whitespace-pre/);
+        await wrapCheckbox.check();
+        await expect(logOutput).toHaveClass(/whitespace-pre-wrap/);
+
+        // Test Follow checkbox, Pause/Resume, and Jump to latest
+        const followCheckbox = logsRegion.getByLabel("Follow", { exact: true });
+        expect(await followCheckbox.isChecked()).toBe(true);
+        await followCheckbox.uncheck();
+        expect(await followCheckbox.isChecked()).toBe(false);
+        await logsRegion.getByRole("button", { name: "Jump to latest", exact: true }).first().click();
+        expect(await followCheckbox.isChecked()).toBe(true);
+
+        const pauseBtn = logsRegion.getByRole("button", { name: "Pause logs", exact: true });
+        await pauseBtn.click();
+        const resumeBtn = logsRegion.getByRole("button", { name: "Resume logs", exact: true });
+        await expect(resumeBtn).toBeVisible();
+        await resumeBtn.click();
+        await expect(pauseBtn).toBeVisible();
+
+        // Test Filter input
+        const currentRetainedCount = await logOutput.locator("[data-log-key]").count();
+        const filterInput = logsRegion.getByLabel("Log filter", { exact: true });
+        await filterInput.fill("__nonexistent_synthetic_filter_token_88421__");
+        if (currentRetainedCount > 0) {
+          await expect(logOutput).toContainText("No log lines match this filter.");
+        }
+        await filterInput.fill("");
+        let markCountOnMatch = 0;
+        if (currentRetainedCount > 0) {
+          markCountOnMatch = await logsRegion.evaluate((sectionEl) => {
+            const pre = sectionEl.querySelector("pre");
+            const firstSpan = pre?.querySelector<HTMLElement>("[data-log-key]");
+            const rawText = firstSpan?.textContent ?? "";
+            const tokenMatch = rawText.match(/[a-zA-Z]{3,6}/);
+            const token = tokenMatch ? tokenMatch[0] : "a";
+            const input = sectionEl.querySelector<HTMLInputElement>(`input[aria-label="Log filter"]`);
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+            if (input && setter) {
+              setter.call(input, token);
+              input.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+            const marks = pre ? pre.querySelectorAll("mark").length : 0;
+            if (input && setter) {
+              setter.call(input, "");
+              input.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+            return marks;
+          });
+        }
+
+        // Test Previous logs / Previous container logs finite read
+        await page.waitForTimeout(2_200);
+        const previousCheckbox = logsRegion.getByLabel(
+          isWorkload ? "Previous logs" : "Previous container logs",
+          { exact: true },
+        );
+        await previousCheckbox.check();
+        expect(await previousCheckbox.isChecked()).toBe(true);
+        expect(await followCheckbox.isDisabled()).toBe(true);
+        expect(await followCheckbox.isChecked()).toBe(false);
+        await waitForLogsSettled();
+        const previousReadState = await logsRegion.evaluate((sectionEl) => {
+          const pre = sectionEl.querySelector("pre");
+          const spans = pre ? Array.from(pre.querySelectorAll<HTMLElement>("[data-log-key]")) : [];
+          return {
+            lineSpans: spans.length,
+            emptyMessage: spans.length === 0 ? (pre?.textContent?.trim() ?? "") : null,
+          };
+        });
+        await page.waitForTimeout(2_200);
+        await previousCheckbox.uncheck();
+        expect(await previousCheckbox.isChecked()).toBe(false);
+        expect(await followCheckbox.isDisabled()).toBe(false);
+        await waitForLogsSettled();
+
+        // Tab 3: Events
+        await drawerTablist.getByRole("tab", { name: "Events", exact: true }).click();
+        const eventsSection = detail.getByRole("region", { name: "Object-scoped events", exact: true });
+        await expect(eventsSection).toBeVisible();
+        await expect(eventsSection.getByRole("img", { name: "Event histogram: warnings red, normal green", exact: true })).toBeVisible();
+        const eventsSummary = await eventsSection.evaluate((el) => {
+          const articles = el.querySelectorAll("article").length;
+          const buttons = Array.from(el.querySelectorAll("button")).map((b) => (b.textContent ?? "").trim());
+          const text = el.textContent ?? "";
+          const hasSecretLeak = /BEGIN [A-Z ]*PRIVATE KEY|Bearer\s+[A-Za-z0-9._-]{20,}/.test(text);
+          return { articles, filterButtonsCount: buttons.length, hasSecretLeak };
+        });
+        expect(eventsSummary.hasSecretLeak).toBe(false);
+        if (kind === "Deployment") {
+          await captureRedacted("eks-drawer-events", 1440, "populated");
+        }
+
+        // Tab 4: YAML
+        await drawerTablist.getByRole("tab", { name: "YAML", exact: true }).click();
+        const yamlSection = detail.getByRole("region", { name: "Projected YAML", exact: true });
+        await expect(yamlSection).toBeVisible();
+        await expect(yamlSection.getByText("Projected, read-only", { exact: true })).toBeVisible();
+        await expect(yamlSection.getByRole("navigation", { name: "YAML outline", exact: true })).toBeVisible();
+        await yamlSection.getByRole("button", { name: "Fold all", exact: true }).click();
+        const foldedCount = await yamlSection.evaluate((el) => {
+          return Array.from(el.querySelectorAll("code span")).filter((s) => /…\s+\d+\s+lines/.test(s.textContent ?? "")).length;
+        });
+        expect(foldedCount).toBeGreaterThan(0);
+        await yamlSection.getByRole("button", { name: "Unfold all", exact: true }).click();
+        await yamlSection.getByLabel("Find in YAML", { exact: true }).fill("metadata");
+        await expect(yamlSection.getByText(/\d+ matches/)).toBeVisible();
+        const yamlSafety = await yamlSection.evaluate((el) => {
+          const text = el.textContent ?? "";
+          const lineCount = el.querySelectorAll(`[id^="resource-yaml-"]`).length;
+          const outlineButtons = Array.from(el.querySelectorAll(`nav[aria-label="YAML outline"] button`)).map((b) => (b.textContent ?? "").trim());
+          const hasSecretLeak = /BEGIN [A-Z ]*PRIVATE KEY|aws_secret_access_key|X-Gateway-Secret/i.test(text);
+          return { lineCount, outlineButtons, hasSecretLeak };
+        });
+        expect(yamlSafety.lineCount).toBeGreaterThan(0);
+        expect(yamlSafety.hasSecretLeak).toBe(false);
+        await yamlSection.getByLabel("Find in YAML", { exact: true }).fill("");
+        if (kind === "Deployment") {
+          await captureRedacted("eks-drawer-yaml", 1440, "populated");
+        }
+
+        // Tab 5: Related
+        await drawerTablist.getByRole("tab", { name: "Related", exact: true }).click();
+        const relatedSection = detail.getByRole("region", { name: "Related resources", exact: true });
+        await expect(relatedSection).toBeVisible();
+        const relatedSummary = await relatedSection.evaluate((el) => {
+          const mapButtons = el.querySelectorAll(`[aria-label="Relationship map"] button`).length;
+          const headings = Array.from(el.querySelectorAll("section h3")).map((h) => (h.textContent ?? "").trim());
+          const secretPills = Array.from(el.querySelectorAll("span.pill")).filter((s) => s.textContent?.trim() === "Secret").length;
+          const contentNotShownCount = (el.textContent?.match(/content not shown/g) ?? []).length;
+          return {
+            mapButtons,
+            headings,
+            secretPills,
+            secretsRedactedProperly: secretPills === 0 || contentNotShownCount >= secretPills,
+          };
+        });
+        expect(relatedSummary.secretsRedactedProperly).toBe(true);
+        if (kind === "Deployment") {
+          await captureRedacted("eks-drawer-related", 1440, "populated");
+        }
+
+        // Tab 6: Timeline
+        await drawerTablist.getByRole("tab", { name: "Timeline", exact: true }).click();
+        const timelineSection = detail.getByRole("region", { name: "Resource change history", exact: true });
+        await expect(timelineSection).toBeVisible();
+        for (const h of ["1h", "6h", "24h"]) {
+          const btn = timelineSection.getByRole("button", { name: h, exact: true });
+          await expect(btn).toBeVisible();
+          await btn.click();
+          await expect(btn).toHaveAttribute("aria-pressed", "true");
+        }
+        const drawerTimelineSummary = await timelineSection.evaluate((el) => {
+          const items = el.querySelectorAll("ol li").length;
+          const text = el.textContent ?? "";
+          return {
+            historyItems: items,
+            hasCaptureStartedNote: /No history before .* \(capture started\)/.test(text),
+            hasEmptyNote: text.includes("No recorded changes or crashes in this range."),
+          };
+        });
+        if (kind === "Deployment") {
+          await captureRedacted("eks-drawer-timeline", 1440, "populated");
+        }
+
+        // Return to Logs tab briefly, then test Close cancellation of active log stream
+        await drawerTablist.getByRole("tab", { name: "Logs", exact: true }).click();
+        await page.waitForTimeout(600);
+        await detail.getByRole("button", { name: "Close panel", exact: true }).click();
+        await expect(detail).toHaveCount(0);
+        await expect.poll(() => streamLifecycle.active, { timeout: 10_000 }).toBe(0);
+        await page.waitForTimeout(2_200);
+
+        drawerVerification[kind] = {
+          exercised: true,
+          sixTabsVerified: true,
+          overview: overviewCheck,
+          logs: {
+            ...initialLogMetrics,
+            arrivedNewLines,
+            afterLineSpans,
+            podSelectionCheck,
+            hasTimestampTextWhenChecked,
+            markCountOnMatch,
+            previousReadState,
+            warningBannersInLogs,
+          },
+          events: eventsSummary,
+          yaml: yamlSafety,
+          related: relatedSummary,
+          timeline: drawerTimelineSummary,
+          closeCancelledActiveStreams: streamLifecycle.active === 0,
+        };
+      }
+
+      // 5. Probe active log emitter Pod if primary workloads were quiet during their observation window
+      const anyArrivedSoFar = Object.values(drawerVerification).some(
+        (v) => Boolean((v as { logs?: { arrivedNewLines?: boolean } })?.logs?.arrivedNewLines),
+      );
+      let activeEmitterProbe: Record<string, unknown> = { alreadyObservedInPrimary: anyArrivedSoFar };
+      if (!anyArrivedSoFar && (await openTargetInDrawer("ActivePod"))) {
+        const detail = page.getByRole("dialog", { name: "Details panel" });
+        await detail.getByRole("tab", { name: "Logs", exact: true }).click();
+        const logsRegion = detail.getByRole("region", { name: "Pod logs", exact: true });
+        const logOutput = logsRegion.getByLabel("Pod log output", { exact: true });
+        await expect
+          .poll(async () => !((await logOutput.textContent()) ?? "").includes("Connecting to logs..."), { timeout: 20_000 })
+          .toBe(true);
+        const before = await logsRegion.evaluate((el) => {
+          const spans = Array.from(el.querySelectorAll<HTMLElement>("pre [data-log-key]"));
+          return { count: spans.length, lastKey: spans.at(-1)?.dataset.logKey ?? null };
+        });
+        let arrived = false;
+        let after = before.count;
+        try {
+          await expect
+            .poll(
+              async () => {
+                const cur = await logsRegion.evaluate((el) => {
+                  const spans = Array.from(el.querySelectorAll<HTMLElement>("pre [data-log-key]"));
+                  return { count: spans.length, lastKey: spans.at(-1)?.dataset.logKey ?? null };
+                });
+                after = cur.count;
+                return cur.count > before.count || (cur.lastKey !== null && cur.lastKey !== before.lastKey);
+              },
+              { timeout: 20_000, intervals: [1_000] },
+            )
+            .toBe(true);
+          arrived = true;
+        } catch {
+          arrived = false;
+        }
+        await detail.getByRole("button", { name: "Close panel", exact: true }).click();
+        await expect(detail).toHaveCount(0);
+        await expect.poll(() => streamLifecycle.active, { timeout: 10_000 }).toBe(0);
+        await page.waitForTimeout(2_200);
+        activeEmitterProbe = {
+          probedBusyPod: true,
+          beforeLines: before.count,
+          afterLines: after,
+          arrivedNewLines: arrived,
+        };
+      }
+
+      // 6. Examine naturally existing Issues and Timeline break logs (Read-only, no manufactured faults)
+      await page.getByRole("tab", { name: "Issues", exact: true }).click();
+      const issuesRegion = page.getByRole("region", { name: "Kubernetes issues", exact: true });
+      await expect(issuesRegion).toBeVisible();
+      await expect(issuesRegion.getByRole("status", { name: "Loading grouped issues" })).toHaveCount(0, { timeout: 30_000 });
+
+      const breakAndAgentProbe = await page.evaluate(async () => {
+        const safeFetch = async (url: string) => {
+          const res = await fetch(url, { credentials: "same-origin" });
+          let json: Record<string, unknown> | null = null;
+          try { json = (await res.json()) as Record<string, unknown>; } catch { json = null; }
+          return { status: res.status, json };
+        };
+        const allIssues = await safeFetch("/api/admin/kubernetes/issues?limit=50");
+        const brokenIssues = await safeFetch("/api/admin/kubernetes/issues?broken=true&limit=50");
+        const changes = await safeFetch("/api/admin/kubernetes/changes?limit=50");
+        const crashes = await safeFetch("/api/admin/kubernetes/crashes?limit=50");
+        const agentSettings = await safeFetch("/api/admin/kubernetes/agent-settings");
+
+        const allItems = Array.isArray(allIssues.json?.items) ? (allIssues.json!.items as Array<Record<string, unknown>>) : [];
+        const brokenItems = Array.isArray(brokenIssues.json?.items) ? (brokenIssues.json!.items as Array<Record<string, unknown>>) : [];
+        const changeItems = Array.isArray(changes.json?.items) ? (changes.json!.items as Array<Record<string, unknown>>) : [];
+        const crashItems = Array.isArray(crashes.json?.items) ? (crashes.json!.items as Array<Record<string, unknown>>) : [];
+
+        const settingsBody = agentSettings.json ?? {};
+        const detected = (settingsBody.detected as Record<string, unknown> | undefined) ?? {};
+        const learning = (settingsBody.learning as Record<string, unknown> | undefined) ?? {};
+        const scope = (learning.scope as Record<string, unknown> | undefined) ?? {};
+        const breakLogs = (settingsBody.break_logs as Record<string, unknown> | undefined) ?? {};
+        const sources = Array.isArray(settingsBody.sources) ? (settingsBody.sources as Array<Record<string, unknown>>) : [];
+
+        const validBroken = brokenItems.filter((i) => {
+          const r = (i.root as Record<string, unknown> | undefined) ?? {};
+          return Boolean(r.uid && r.namespace && i.broke_at);
+        });
+        let rootsWithLines = 0;
+        const coverageStates: Record<string, number> = {};
+        const coverageReasons: Record<string, number> = {};
+        const sourceKinds: Record<string, number> = {};
+        const win = window as unknown as {
+          __populatedBreakRoot?: { uid: string; namespace: string; broke_at: string } | null;
+        };
+        win.__populatedBreakRoot = null;
+        for (const item of validBroken.slice(0, 14)) {
+          const r = (item.root as Record<string, unknown>) ?? {};
+          const brokeMs = Date.parse(String(item.broke_at));
+          if (!Number.isFinite(brokeMs)) continue;
+          const since = new Date(brokeMs - 5 * 60_000).toISOString();
+          const until = new Date(brokeMs + 2 * 60_000).toISOString();
+          const bl = await safeFetch(
+            `/api/admin/kubernetes/break-logs?namespace=${encodeURIComponent(String(r.namespace))}&root_uid=${encodeURIComponent(String(r.uid))}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}&limit=100`,
+          );
+          if (bl.status === 200 && bl.json) {
+            const cov = (bl.json.coverage as Record<string, unknown> | undefined) ?? {};
+            const st = String(cov.state ?? "unknown");
+            const rsn = String(cov.reason ?? "none");
+            coverageStates[st] = (coverageStates[st] ?? 0) + 1;
+            coverageReasons[rsn] = (coverageReasons[rsn] ?? 0) + 1;
+            const srcs = Array.isArray(bl.json.sources) ? (bl.json.sources as Array<Record<string, unknown>>) : [];
+            for (const s of srcs) {
+              const sk = String(s.kind ?? "unknown");
+              sourceKinds[sk] = (sourceKinds[sk] ?? 0) + 1;
+            }
+            const counts = (bl.json.counts as Record<string, number> | undefined) ?? {};
+            const linesArr = Array.isArray(bl.json.lines) ? bl.json.lines : [];
+            if ((counts.all ?? 0) > 0 || linesArr.length > 0) {
+              rootsWithLines += 1;
+              if (!win.__populatedBreakRoot) {
+                win.__populatedBreakRoot = {
+                  uid: String(r.uid),
+                  namespace: String(r.namespace),
+                  broke_at: String(item.broke_at),
+                };
+              }
+            }
+          }
+        }
+
+        return {
+          issues: {
+            status: allIssues.status,
+            classification: allIssues.status === 200 ? (allItems.length > 0 ? "populated" : "empty") : `status_${allIssues.status}`,
+            totalItems: allItems.length,
+            totals: (allIssues.json?.totals as Record<string, number> | undefined) ?? {},
+            brokenStatus: brokenIssues.status,
+            brokenItemsCount: brokenItems.length,
+            validBrokenRootsCount: validBroken.length,
+            rootsWithBreakLogLines: rootsWithLines,
+            coverageStates,
+            coverageReasons,
+            sourceKinds,
+          },
+          timelineData: {
+            changesStatus: changes.status,
+            changesCount: changeItems.length,
+            crashesStatus: crashes.status,
+            crashesCount: crashItems.length,
+          },
+          agentSettings: {
+            status: agentSettings.status,
+            canWrite: Boolean(settingsBody.can_write),
+            detected: {
+              workloads: Number(detected.workloads ?? 0),
+              namespaces: Number(detected.namespaces ?? 0),
+              metricsServer: Boolean(detected.metrics_server),
+              tracesKind: (detected.traces as Record<string, unknown> | null)?.kind ?? null,
+            },
+            learning: {
+              logs: Boolean(learning.logs),
+              metrics: Boolean(learning.metrics),
+              traces: Boolean(learning.traces),
+              includeCount: Array.isArray(scope.include) ? scope.include.length : 0,
+              excludeCount: Array.isArray(scope.exclude) ? scope.exclude.length : 0,
+            },
+            sourcesCount: sources.length,
+            sourceTypes: sources.map((s) => ({ type: String(s.type ?? ""), health: String(s.health ?? "") })),
+            linkedSourceConfigured: Boolean(breakLogs.linked_source),
+            linkedSourceMissing: Boolean(settingsBody.linked_source_missing),
+            fieldTypes: Object.keys((breakLogs.fields as Record<string, unknown> | undefined) ?? {}).sort(),
+          },
+        };
+      });
+
+      // Switch to Timeline view, select 24h window so all 24h breaks/crashes/brackets are in-window, and wait for queries to settle
+      await page.getByRole("tab", { name: "Timeline", exact: true }).click();
+      const timelineRegion = page.getByRole("region", { name: "Kubernetes change timeline", exact: true });
+      await expect(timelineRegion).toBeVisible();
+      const windowGroup = timelineRegion.getByRole("group", { name: "Timeline window", exact: true });
+      await expect(windowGroup).toBeVisible();
+      await windowGroup.getByRole("button", { name: "24h", exact: true }).click();
+      await expect(timelineRegion.getByRole("status", { name: /Loading/i })).toHaveCount(0, { timeout: 30_000 });
+
+      const breakLogsSection = page.locator("#kubernetes-break-logs");
+      // Wait up to 15s for broken issues query on Timeline to mount #kubernetes-break-logs if valid broken roots exist
+      if (breakAndAgentProbe.issues.validBrokenRootsCount > 0) {
+        await expect(breakLogsSection).toBeVisible({ timeout: 20_000 });
+      }
+      const breakLogsMounted = (await breakLogsSection.count()) > 0;
+      let breakLogsUiCheck: Record<string, unknown> = {
+        mounted: breakLogsMounted,
+        naturalBrokenIssuesCount: breakAndAgentProbe.issues.brokenItemsCount,
+        validBrokenRootsCount: breakAndAgentProbe.issues.validBrokenRootsCount,
+        naturalCrashesCount: breakAndAgentProbe.timelineData.crashesCount,
+      };
+
+      if (breakLogsMounted) {
+        // Wait for break logs query to finish loading
+        await expect(breakLogsSection.getByRole("status", { name: "Loading logs at break..." })).toHaveCount(0, { timeout: 25_000 });
+        const tipBtn = breakLogsSection.getByRole("button", { name: "Log coverage tip", exact: true });
+        const tipVisible = await tipBtn.isVisible();
+        let coverageTipDetails: Record<string, unknown> | null = null;
+        if (tipVisible) {
+          await tipBtn.click();
+          const tipPopover = breakLogsSection.getByRole("region", { name: "Log coverage tip", exact: true });
+          await expect(tipPopover).toBeVisible();
+          coverageTipDetails = await tipPopover.evaluate((el) => ({
+            heading: el.querySelector("h4")?.textContent?.trim() ?? null,
+            bodyText: el.querySelector("p")?.textContent?.trim() ?? null,
+            hasAgentLink: Boolean(el.querySelector(`a[href*="view=agent"]`)),
+          }));
+          await page.keyboard.press("Escape");
+        }
+        const panelDetails = await breakLogsSection.evaluate((el) => {
+          const podBtns = Array.from(el.querySelectorAll(`[role="group"][aria-label="Log pods"] button`));
+          const modeBtns = Array.from(el.querySelectorAll(`[role="group"][aria-label="Container log mode"] button`)).map((b) =>
+            (b.textContent ?? "").trim(),
+          );
+          const logLinesDiv = el.querySelector(`div[aria-label="Break log lines"]`);
+          const emptyStatus = logLinesDiv?.querySelector(`p[role="status"]`)?.textContent?.trim() ?? null;
+          const footerText = el.querySelector("footer span")?.textContent?.trim() ?? null;
+          const asideText = el.querySelector("aside")?.textContent ?? "";
+          const coverageMatch = asideText.match(/Coverage:\s*([a-z_]+)/i);
+          return {
+            podFilterButtonCount: podBtns.length,
+            modeButtons: modeBtns,
+            emptyStatus,
+            footerText,
+            coverageState: coverageMatch ? coverageMatch[1] : null,
+            hasNoLinkedSourceNote: asideText.includes("No linked-source lines in this window."),
+          };
+        });
+        const bracketVisible = await timelineRegion.getByLabel("Log window", { exact: true }).isVisible();
+        const startSliderVisible = await timelineRegion.getByRole("slider", { name: "Log window start", exact: true }).isVisible();
+        const endSliderVisible = await timelineRegion.getByRole("slider", { name: "Log window end", exact: true }).isVisible();
+
+        breakLogsUiCheck = {
+          ...breakLogsUiCheck,
+          exercised: true,
+          bracketVisible,
+          startSliderVisible,
+          endSliderVisible,
+          tipVisible,
+          coverageTipDetails,
+          panelDetails,
+          hasAskChatButton: await breakLogsSection.getByRole("button", { name: "Ask chat" }).first().isVisible(),
+          hasOpenLiveLogsButton: await breakLogsSection.getByRole("button", { name: "Open live logs" }).first().isVisible(),
+        };
+      } else {
+        breakLogsUiCheck = {
+          ...breakLogsUiCheck,
+          exercised: false,
+          verdict: "NOT_EXERCISED",
+          reason: "No naturally broken workloads with valid break timestamps mounted the panel.",
+        };
+      }
+
+      // Exercise Container log mode buttons and Log window slider keyboard adjustment if visible
+      if (breakLogsMounted) {
+        const modeGroup = breakLogsSection.getByRole("group", { name: "Container log mode", exact: true });
+        if (await modeGroup.isVisible()) {
+          for (const modeLabel of ["Previous container", "Current", "Merged"]) {
+            const btn = modeGroup.getByRole("button", { name: modeLabel, exact: true });
+            await btn.click();
+            await expect(btn).toHaveAttribute("aria-pressed", "true");
+          }
+        }
+        const startSlider = timelineRegion.getByRole("slider", { name: "Log window start", exact: true });
+        if (await startSlider.isVisible()) {
+          await startSlider.focus();
+          await page.keyboard.press("ArrowRight");
+          await expect.poll(() => new URL(page.url()).searchParams.has("logs_from")).toBe(true);
+        }
+      }
+
+      // Check Captured crash evidence journal on Timeline
+      const crashJournalCheck = await timelineRegion.evaluate((el) => {
+        const crashSection = el.querySelector(`section[aria-label="Captured crash evidence"]`);
+        const headerSpan = crashSection?.querySelector("header span")?.textContent?.trim() ?? null;
+        const rowsCount = crashSection ? crashSection.querySelectorAll("tbody tr, ul li, article").length : 0;
+        const chartCrashMarkers = el.querySelectorAll(`[data-marker="crash"]`).length;
+        const chartChangeMarkers = el.querySelectorAll(`[data-marker="change"]`).length;
+        return {
+          present: Boolean(crashSection),
+          headerSummary: headerSpan,
+          rowsCount,
+          chartCrashMarkers,
+          chartChangeMarkers,
+        };
+      });
+
+      // If a crash marker is present on the 24h chart, click it to verify the crash popover ("Logs before crash", "Open pod")
+      let crashPopoverCheck: Record<string, unknown> = { exercised: false };
+      const crashLabelBtn = timelineRegion.locator(".resource-timeline-crash-label").first();
+      if ((await crashLabelBtn.count()) > 0 && (await crashLabelBtn.isVisible())) {
+        await crashLabelBtn.click();
+        const crashActions = page.getByRole("region", { name: "Crash log actions" }).first();
+        if ((await crashActions.count()) > 0 && (await crashActions.isVisible())) {
+          crashPopoverCheck = {
+            exercised: true,
+            hasLogsBeforeCrashBtn: await crashActions.getByRole("button", { name: "Logs before crash", exact: true }).isVisible(),
+            hasOpenPodBtn: await crashActions.getByRole("button", { name: "Open pod", exact: true }).isVisible(),
+          };
+          await page.keyboard.press("Escape");
+        }
+      }
+
+      // Focus a broken root that has actual captured/Kubernetes break log lines (win.__populatedBreakRoot)
+      // so we also verify populated break log lines, source badges,LogWindowBracket sliders, and rate strip!
+      let populatedBreakLogsCheck: Record<string, unknown> = { exercised: false };
+      const hasPopulatedBreakRoot = await page.evaluate(() => {
+        const win = window as unknown as {
+          __populatedBreakRoot?: { uid: string; namespace: string; broke_at: string } | null;
+        };
+        if (!win.__populatedBreakRoot) return false;
+        const p = win.__populatedBreakRoot;
+        const q = new URLSearchParams({
+          view: "timeline",
+          root_uid: p.uid,
+          namespace: p.namespace,
+          center: p.broke_at,
+        });
+        window.history.pushState(null, "", `/agent/kubernetes?${q}`);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+        return true;
+      });
+      if (hasPopulatedBreakRoot) {
+        await expect(timelineRegion.getByRole("status", { name: /Loading/i })).toHaveCount(0, { timeout: 30_000 });
+        await expect(breakLogsSection).toBeVisible({ timeout: 25_000 });
+        await expect(breakLogsSection.getByRole("status", { name: "Loading logs at break..." })).toHaveCount(0, { timeout: 25_000 });
+        // Also wait until footer or empty status is rendered inside #kubernetes-break-logs
+        await expect
+          .poll(
+            async () =>
+              breakLogsSection.evaluate((el) => Boolean(el.querySelector("footer span") || el.querySelector(`p[role="alert"]`))),
+            { timeout: 20_000, intervals: [500, 1000] },
+          )
+          .toBe(true);
+
+        // Check crash marker popover on focused root timeline
+        const focusedCrashBtn = timelineRegion.locator(`.resource-timeline-crash-label, button[data-marker="crash"]`).first();
+        if ((await focusedCrashBtn.count()) > 0 && (await focusedCrashBtn.isVisible())) {
+          await focusedCrashBtn.click();
+          const eventDetails = page.getByRole("region", { name: "Timeline event details" }).first();
+          const crashActions = page.getByRole("region", { name: "Crash log actions" }).first();
+          const actionsVisible = (await crashActions.count()) > 0 && (await crashActions.isVisible());
+          const detailsVisible = (await eventDetails.count()) > 0 && (await eventDetails.isVisible());
+          if (actionsVisible || detailsVisible) {
+            crashPopoverCheck = {
+              exercised: true,
+              crashActionsPopoverVisible: actionsVisible,
+              eventDetailsVisible: detailsVisible,
+              hasLogsBeforeCrashBtn: actionsVisible
+                ? await crashActions.getByRole("button", { name: "Logs before crash", exact: true }).isVisible()
+                : false,
+              hasOpenPodBtn: actionsVisible
+                ? await crashActions.getByRole("button", { name: "Open pod", exact: true }).isVisible()
+                : false,
+            };
+            await page.keyboard.press("Escape");
+          }
+        }
+
+        const startSlider = timelineRegion.getByRole("slider", { name: "Log window start", exact: true });
+        const endSlider = timelineRegion.getByRole("slider", { name: "Log window end", exact: true });
+        const startVisible = await startSlider.isVisible();
+        const endVisible = await endSlider.isVisible();
+        populatedBreakLogsCheck = await breakLogsSection.evaluate(
+          (el, sliders) => {
+            const pills = Array.from(el.querySelectorAll("header .pill")).map((p) => (p.textContent ?? "").trim());
+            const footerText = el.querySelector("footer span")?.textContent?.trim() ?? null;
+            const patternItems = el.querySelectorAll("aside ul li").length;
+            const logRows = el.querySelectorAll(`div[aria-label="Break log lines"] > div`).length;
+            const asideText = el.querySelector("aside")?.textContent ?? "";
+            return {
+              exercised: true,
+              startSliderVisible: sliders.startVisible,
+              endSliderVisible: sliders.endVisible,
+              sliderKeyboardUpdatedUrl: sliders.startVisible,
+              sourceBadges: pills,
+              logRowsRendered: logRows,
+              footerText,
+              patternItemsCount: patternItems,
+              hasCapturedSource: pills.includes("Captured at break") || asideText.includes("Captured at break"),
+              hasKubernetesSource: pills.includes("Kubernetes container logs") || asideText.includes("Kubernetes container logs"),
+            };
+          },
+          { startVisible, endVisible },
+        );
+        if (startVisible) {
+          await startSlider.focus();
+          await page.keyboard.press("ArrowRight");
+          await expect.poll(() => new URL(page.url()).searchParams.has("logs_from")).toBe(true);
+          await page.keyboard.press("ArrowLeft");
+          await expect(breakLogsSection.getByRole("status", { name: "Loading logs at break..." })).toHaveCount(0, { timeout: 25_000 });
+        }
+      }
+
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await captureRedacted("eks-timeline", 1440, "observed");
+
+      // 7. Switch to Agent tab (Read-only inspection, zero saves or test-link calls)
+      await page.getByRole("tab", { name: "Agent", exact: true }).click();
+      const agentSection = page.getByRole("region", { name: "Kubernetes Agent", exact: true });
+      await expect(agentSection).toBeVisible();
+      const learningSection = agentSection.getByRole("region", { name: "Agent learning", exact: true });
+      await expect(learningSection).toBeVisible();
+      await expect(learningSection.getByText("Preview", { exact: true })).toBeVisible();
+
+      const captureSection = agentSection.getByRole("region", { name: "Log capture at break", exact: true });
+      await expect(captureSection).toBeVisible();
+      await expect(captureSection.getByText("Always on", { exact: true })).toBeVisible();
+
+      const agentUiState = await agentSection.evaluate((el) => {
+        const switches = Array.from(el.querySelectorAll<HTMLInputElement>(`input[role="switch"]`)).map((s) => ({
+          label: s.getAttribute("aria-label"),
+          checked: s.checked,
+          disabled: s.disabled,
+        }));
+        const text = el.textContent ?? "";
+        const hasNoSourceEmptyState = text.includes("No log data source is configured");
+        const saveBtn = Array.from(el.querySelectorAll<HTMLButtonElement>("button")).find((b) =>
+          (b.textContent ?? "").includes("Save settings"),
+        );
+        const discardBtn = Array.from(el.querySelectorAll<HTMLButtonElement>("button")).find((b) =>
+          (b.textContent ?? "").includes("Discard changes"),
+        );
+        return {
+          switches,
+          hasNoSourceEmptyState,
+          saveButtonDisabled: saveBtn ? saveBtn.disabled : null,
+          discardButtonDisabled: discardBtn ? discardBtn.disabled : null,
+        };
+      });
+      if (breakAndAgentProbe.agentSettings.canWrite) {
+        expect(agentUiState.saveButtonDisabled).toBe(true);
+        expect(agentUiState.discardButtonDisabled).toBe(true);
+      }
+
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await captureRedacted("eks-agent", 1440, "readonly");
+
+      // 8. Mobile viewport (390x844) responsive checks & captures
+      await page.setViewportSize({ width: 390, height: 844 });
+      await expect(agentSection).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await captureRedacted("eks-agent", 390, "readonly");
+
+      await page.getByRole("tab", { name: "Timeline", exact: true }).click();
+      await expect(timelineRegion).toBeVisible();
+      await expect(timelineRegion.getByRole("status", { name: /Loading/i })).toHaveCount(0, { timeout: 30_000 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await captureRedacted("eks-timeline", 390, "observed");
+
+      await page.getByRole("tab", { name: "Overview", exact: true }).click();
+      await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await captureRedacted("eks-overview", 390, "populated");
+
+      // Mobile drawer & Logs "More" controls check
+      let mobileDrawerCheck: Record<string, unknown> = { exercised: false };
+      if (await openTargetInDrawer("Deployment")) {
+        const detail = page.getByRole("dialog", { name: "Details panel" });
+        await expect(detail).toBeVisible();
+        await expect(detail.getByRole("region", { name: "Live workload metrics", exact: true })).toBeVisible({ timeout: 30_000 });
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        await captureRedacted("eks-drawer-overview", 390, "populated");
+
+        await detail.getByRole("tab", { name: "Logs", exact: true }).click();
+        const logsRegion = detail.getByRole("region", { name: "Workload live logs", exact: true });
+        await expect(logsRegion).toBeVisible();
+        const logOutput = logsRegion.getByLabel("Workload log output", { exact: true });
+        await page.waitForTimeout(350);
+        await expect
+          .poll(async () => !((await logOutput.textContent()) ?? "").includes("Connecting to logs..."), { timeout: 25_000 })
+          .toBe(true);
+        const moreBtn = logsRegion.getByRole("button", { name: "More", exact: true });
+        await expect(moreBtn).toBeVisible();
+        await moreBtn.click();
+        await expect(logsRegion.getByRole("group", { name: "Additional log controls" })).toBeVisible();
+        await moreBtn.click();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        await captureRedacted("eks-drawer-logs", 390, "populated");
+
+        await page.keyboard.press("Escape");
+        await expect(detail).toHaveCount(0);
+        await expect.poll(() => streamLifecycle.active, { timeout: 10_000 }).toBe(0);
+        mobileDrawerCheck = {
+          exercised: true,
+          moreControlsToggled: true,
+          escapeClosedDrawer: true,
+          activeStreamsAfterEscape: streamLifecycle.active,
+        };
+      }
+
+      expect(mutatingRequests).toEqual([]);
+      expect(pageErrors).toEqual([]);
+
+      const sanitizedReceipt = {
+        targetUrl: env.baseURL,
+        readOnlyGuard: {
+          mutatingApiRequestsCount: mutatingRequests.length,
+          pageErrorsCount: pageErrors.length,
+        },
+        streamLifecycle,
+        clusterOverview: clusterProbe.overview,
+        workloadsInventory: clusterProbe.workloadsInventory,
+        deepLinkNormalization: deepLinkNormalized,
+        drawerVerification,
+        activeEmitterProbe,
+        breakAndAgentInspection: {
+          ...breakAndAgentProbe,
+          breakLogsUiCheck,
+          populatedBreakLogsCheck,
+          crashPopoverCheck,
+          crashJournalCheck,
+          agentUiState,
+        },
+        mobileDrawerCheck,
+        capturedImages,
+        qualification:
+          "Real external EKS read-only viewer acceptance; all persisted screenshots DOM-redacted to generic identities; zero cluster or settings mutations.",
+      };
+
+      await testInfo.attach("eks-readonly-acceptance", {
+        body: JSON.stringify(sanitizedReceipt, null, 2),
+        contentType: "application/json",
+      });
+      if (process.env.HARNESS_RESULTS_DIR) {
+        fs.writeFileSync(
+          path.join(process.env.HARNESS_RESULTS_DIR, "eks-readonly-acceptance.json"),
+          JSON.stringify(sanitizedReceipt, null, 2),
+          { mode: 0o600 },
+        );
+      }
+    } finally {
+      await context.close();
+    }
   });
 });

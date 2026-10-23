@@ -1,10 +1,11 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ApiError, type KubernetesBreakLogQuery, type KubernetesCrashEvent, type KubernetesIssue, type KubernetesResource } from "./api";
 import { useKubernetesCluster } from "./useKubernetesCluster";
 
 export const maximumLogWindow = 2 * 60 * 60_000;
+export const CrashLogNavigationContext = createContext<{ current: ((event: KubernetesCrashEvent) => boolean) | null } | null>(null);
 
 export function breakLogWindow(params: URLSearchParams, brokeAt: string) {
   const broke = Date.parse(brokeAt);
@@ -20,6 +21,7 @@ export function useBreakLogsState(issue: KubernetesIssue | undefined, onSelectRe
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const navigation = useContext(CrashLogNavigationContext);
   const crashPod = params.get("logs_pod");
   const initialMode = params.get("logs_mode") === "previous" ? "previous" : "merged";
   const [pods, setPods] = useState<string[]>(() => crashPod ? [crashPod] : []);
@@ -36,6 +38,7 @@ export function useBreakLogsState(issue: KubernetesIssue | undefined, onSelectRe
   const options: KubernetesBreakLogQuery = { namespace: issue?.root.namespace ?? "", root_uid: issue?.root.uid ?? "", since: window?.from ?? "", until: window?.to ?? "", pods, mode, level, q: search, limit: 500 };
   const queryKey = key("kubernetes-break-logs", options);
   const query = useInfiniteQuery({ queryKey, queryFn: async ({ pageParam, signal }) => ({ ...await client.kubernetesBreakLogs({ ...options, cursor: pageParam }, signal), fetchedAt: Date.now() }), initialPageParam: undefined as string | undefined, getNextPageParam: (page) => page.next || undefined, enabled: validIssue, retry: false, staleTime: Infinity, refetchInterval: false, refetchOnWindowFocus: false });
+  type BreakLogData = typeof query.data;
   const pollingQuery = queryClient.getQueryCache().find({ queryKey, exact: true });
   const firstPageFetchedAt = query.data?.pages[0]?.fetchedAt;
   const broke = Date.parse(issue?.broke_at ?? "");
@@ -52,7 +55,7 @@ export function useBreakLogsState(issue: KubernetesIssue | undefined, onSelectRe
     };
     const refresh = () => {
       if (document.visibilityState !== "hidden" && !queryClient.isFetching({ queryKey, exact: true })) {
-        queryClient.setQueryData<typeof query.data>(queryKey, (data) => data && ({ ...data, pages: data.pages.slice(0, 1), pageParams: data.pageParams.slice(0, 1) }));
+        queryClient.setQueryData<BreakLogData>(queryKey, (data) => data && ({ ...data, pages: data.pages.slice(0, 1), pageParams: data.pageParams.slice(0, 1) }));
         void queryClient.refetchQueries({ queryKey, exact: true });
       }
       schedule();
@@ -81,11 +84,12 @@ export function useBreakLogsState(issue: KubernetesIssue | undefined, onSelectRe
     if (!namespace || !pod) return;
     onSelectResource({ resource_id: "core~v1~pods", kind: "Pod", namespace, name: pod, ...(uid ? { uid } : {}) }, tab);
   };
-  const beforeCrash = (event: KubernetesCrashEvent) => {
+  const beforeCrash = useCallback((event: KubernetesCrashEvent) => {
     const end = Date.parse(event.at);
     setPods([event.pod_uid || event.pod]); setMode("previous"); setLevel(undefined); setSearch("");
     setParams((current) => {
       const next = new URLSearchParams(current);
+      next.delete("r"); next.delete("tab");
       if (next.get("root_uid") !== event.root_uid) next.set("center", event.at);
       next.set("root_uid", event.root_uid); next.set("namespace", event.namespace);
       next.set("logs_from", new Date(end - 5 * 60_000).toISOString()); next.set("logs_to", new Date(end).toISOString());
@@ -93,7 +97,18 @@ export function useBreakLogsState(issue: KubernetesIssue | undefined, onSelectRe
       return next;
     }, { replace: true });
     document.getElementById("kubernetes-break-logs")?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
-  };
+  }, [setParams]);
+  const rootUID = issue?.root.uid;
+  useEffect(() => {
+    if (!navigation || !validIssue || !rootUID) return;
+    const open = (event: KubernetesCrashEvent) => {
+      if (event.root_uid !== rootUID) return false;
+      beforeCrash(event);
+      return true;
+    };
+    navigation.current = open;
+    return () => { if (navigation.current === open) navigation.current = null; };
+  }, [navigation, validIssue, rootUID, beforeCrash]);
   const liveAvailable = Boolean(issue && ["Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"].includes(issue.root.kind));
   const live = () => {
     if (!issue || !liveAvailable) return;

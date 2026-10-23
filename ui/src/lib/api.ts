@@ -73,14 +73,74 @@ export interface KubernetesPodLogOptions {
   cursor?: string;
 }
 
+export interface KubernetesWorkloadLogSource {
+  source_id: string;
+  pod_uid: string;
+  pod: string;
+  namespace: string;
+  container: string;
+  incarnation: string;
+  admitted: boolean;
+  reason?: string;
+}
+export interface KubernetesWorkloadLogPod {
+  uid: string;
+  name: string;
+  containers: string[];
+  init_containers: string[];
+  admitted: boolean;
+  all_pods_admitted?: boolean;
+  all_pods_reason?: "source_limit" | "container_unavailable";
+  main_container?: string;
+  truncated?: boolean;
+  reason?: string;
+}
+export type KubernetesWorkloadLogEvent = Omit<KubernetesPodLogEvent, "event"> & {
+  event: KubernetesPodLogEvent["event"] | "sources" | "source_status";
+  workload_uid?: string;
+  pod_uid?: string;
+  pod?: string;
+  namespace?: string;
+  incarnation?: string;
+  source_id?: string;
+  sources?: KubernetesWorkloadLogSource[];
+  pods?: KubernetesWorkloadLogPod[];
+  truncated?: boolean;
+};
+export interface KubernetesUsageHistory {
+  observed_at: string;
+  source: "capture";
+  availability: "available" | "unavailable";
+  live_since?: string;
+  samples: Array<{ timestamp: string; cpu_milli: number; memory_bytes: number }>;
+  retention_seconds: number;
+}
+
 export class ApiError extends Error {
   status: number;
   body?: unknown;
+  retryAfterMs?: number;
   constructor(status: number, message: string, body?: unknown) {
     super(message);
     this.status = status;
     this.body = body;
   }
+}
+
+async function logStreamError(response: Response, label: string): Promise<ApiError> {
+  const text = await response.text().catch(() => "");
+  let body: unknown = null;
+  try { body = text ? JSON.parse(text) : null; } catch { /* Non-JSON proxy errors use the HTTP fallback. */ }
+  const payload = body && typeof body === "object" && "error" in body ? body.error : undefined;
+  const message = typeof payload === "string" ? payload
+    : payload && typeof payload === "object" && "message" in payload && typeof payload.message === "string" ? payload.message
+    : "";
+  if (response.status === 401) notifyAuthExpired();
+  const failure = new ApiError(response.status, message || `${label} log stream failed (HTTP ${response.status}).`, body);
+  const retryAfter = response.headers.get("Retry-After");
+  // Accept only short delta-second hints; admission retries also have a session budget.
+  if (retryAfter && /^\d+$/.test(retryAfter)) failure.retryAfterMs = Math.min(Number(retryAfter) * 1000, 2000);
+  return failure;
 }
 
 export function getSecret(): string | null {
@@ -2091,9 +2151,11 @@ export interface KubernetesResource {
   namespace?: string;
   name: string;
   uid?: string;
+  created_at?: string;
+  owners?: Array<{ api_version?: string; kind: string; namespace?: string; name: string; uid?: string }>;
   labels?: Record<string, string>;
   summary?: Record<string, unknown> | null;
-  conditions?: Array<{ type: string; status: string; reason?: string }> | null;
+  conditions?: Array<{ type: string; status: string; reason?: string; last_transition_at?: string }> | null;
   projection_truncated?: string[] | null;
 }
 
@@ -2181,9 +2243,9 @@ export interface KubernetesWorkload {
   generation?: number;
   observed_generation?: number;
   update_strategy?: string;
-  conditions?: Array<{ type: string; status: string; reason?: string }>;
+  conditions?: Array<{ type: string; status: string; reason?: string; last_transition_at?: string }>;
   containers?: Array<{ name: string; image?: string; probes?: string[]; requests?: Record<string, string>; limits?: Record<string, string> }>;
-  pods?: Array<{ name: string; phase?: string; node?: string; restart_count: number }>;
+  pods?: Array<{ name: string; uid?: string; phase?: string; node?: string; restart_count: number; started_at?: string }>;
   usage?: Array<{ kind: "Pod"; namespace?: string; name: string; timestamp?: string; window?: string; cpu?: string; memory?: string }>;
   nodes?: string[];
   affinity?: string[];
@@ -2801,6 +2863,8 @@ export function createKubernetesApi(cluster?: string) {
   kubernetesNamespaces: () => listAllKubernetesNamespaces(cluster),
   kubernetesNodePods: (node: string, cursor?: string) => listKubernetesResources("core~v1~pods", "spec.nodeName=" + node, cursor, cluster),
   kubernetesUsage: (namespace = "") => request<KubernetesUsage>(`/api/admin/kubernetes/usage?namespace=${encodeURIComponent(namespace)}`),
+  kubernetesUsageHistory: (namespace: string, pod: string, signal?: AbortSignal) =>
+    request<KubernetesUsageHistory>(`/api/admin/kubernetes/usage-history?${new URLSearchParams({ namespace, pod })}`, { signal }),
   kubernetesWorkloads: async (options: { namespace?: string; kind?: string; q?: string; limit?: number; cursor?: string } = {}) => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(options)) {
@@ -2837,9 +2901,7 @@ export function createKubernetesApi(cluster?: string) {
     if (secret) headers.set("X-Gateway-Secret", secret);
     const response = await fetch(`${API_BASE}${kubernetesClusterPath(`/api/admin/kubernetes/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/logs/stream?${query}`, cluster)}`, { headers, credentials: "same-origin", cache: "no-store", signal });
     if (!response.ok || !response.body) {
-      await response.body?.cancel();
-      if (response.status === 401) notifyAuthExpired();
-      throw new ApiError(response.status, `Pod log stream failed (HTTP ${response.status}).`);
+      throw await logStreamError(response, "Pod");
     }
     if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("text/event-stream")) {
       await response.body.cancel();
@@ -2861,6 +2923,60 @@ export function createKubernetesApi(cluster?: string) {
       if (typeof payload.cursor === "string" && payload.cursor.length > 16 << 10 || typeof payload.timestamp === "string" && payload.timestamp.length > 64 || ["retryable", "replay_uncertain"].some((field) => payload[field] !== undefined && typeof payload[field] !== "boolean")) throw new ApiError(502, "Invalid Pod log stream event.");
       onEvent({ event, text: payload.text ?? "", container: payload.container ?? "", timestamp: payload.timestamp, sequence: payload.sequence, ordinal: payload.ordinal, cursor: payload.cursor, reason: payload.reason, code: payload.code, message: payload.message, action: payload.action, retryable: payload.retryable, replay_uncertain: payload.replay_uncertain ?? false } as KubernetesPodLogEvent);
     }, { maxLineBytes: 128 << 10, maxFrameBytes: 132 << 10, maxTotalBytes: 128 << 20, maxEvents: 1_000_000, maxDurationMs: 31 * 60 * 1000 });
+  },
+  kubernetesWorkloadLogStream: async (kind: string, namespace: string, name: string, uid: string, options: KubernetesPodLogOptions & { pod_uid?: string[] }, onEvent: (event: KubernetesWorkloadLogEvent) => void, signal: AbortSignal): Promise<void> => {
+    const query = new URLSearchParams({ namespace, uid });
+    for (const [key, value] of Object.entries(options)) {
+      if (options.cursor && (key === "since_seconds" || key === "tail_lines")) continue;
+      if (Array.isArray(value)) value.forEach((item) => query.append(key, item));
+      else if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    const headers = new Headers({ Accept: "text/event-stream" });
+    const secret = getSecret();
+    if (secret) headers.set("X-Gateway-Secret", secret);
+    const response = await fetch(`${API_BASE}${kubernetesClusterPath(`/api/admin/kubernetes/workloads/${encodeURIComponent(kind)}/${encodeURIComponent(name)}/logs/stream?${query}`, cluster)}`, { headers, credentials: "same-origin", cache: "no-store", signal });
+    if (!response.ok || !response.body) {
+      throw await logStreamError(response, "Workload");
+    }
+    if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("text/event-stream")) {
+      await response.body.cancel();
+      throw new ApiError(502, "Workload log stream returned an invalid content type.");
+    }
+    await readEventStream(response.body, ({ event, data }) => {
+      if (!["line", "sources", "source_status", "heartbeat", "limit", "error", "end"].includes(event)) return;
+      let value: unknown;
+      try { value = JSON.parse(data); } catch { throw new ApiError(502, "Invalid workload log stream event."); }
+      if (!value || typeof value !== "object") throw new ApiError(502, "Invalid workload log stream event.");
+      const payload = value as Record<string, unknown>;
+      for (const field of ["text", "container", "timestamp", "cursor", "reason", "code", "message", "action", "workload_uid", "pod_uid", "pod", "namespace", "incarnation", "source_id"]) {
+        if (payload[field] !== undefined && (typeof payload[field] !== "string" || String(payload[field]).length > (field === "cursor" ? 512 << 10 : field === "text" ? 16384 : 4096))) throw new ApiError(502, "Invalid workload log stream field.");
+      }
+      if (event === "line" && (typeof payload.text !== "string" || new TextEncoder().encode(payload.text).byteLength > 16 << 10 || typeof payload.container !== "string" || typeof payload.pod !== "string" || typeof payload.pod_uid !== "string" || typeof payload.source_id !== "string")) throw new ApiError(502, "Invalid workload log line.");
+      for (const field of ["sequence", "ordinal"]) {
+        if (payload[field] !== undefined && (typeof payload[field] !== "number" || !Number.isSafeInteger(payload[field]) || Number(payload[field]) < 1)) throw new ApiError(502, "Invalid workload log ordering.");
+      }
+      for (const field of ["retryable", "replay_uncertain", "truncated"]) {
+        if (payload[field] !== undefined && typeof payload[field] !== "boolean") throw new ApiError(502, "Invalid workload log flag.");
+      }
+      if (event === "sources") {
+        for (const field of ["sources", "pods"]) {
+          payload[field] ??= [];
+          if (!Array.isArray(payload[field]) || payload[field].length > (field === "pods" ? 200 : 40)) throw new ApiError(502, "Invalid workload source list.");
+          for (const raw of payload[field] as unknown[]) {
+            if (!raw || typeof raw !== "object") throw new ApiError(502, "Invalid workload source.");
+            const item = raw as Record<string, unknown>;
+            const keys = field === "pods" ? ["uid", "name"] : ["source_id", "pod_uid", "pod", "namespace", "container", "incarnation"];
+            if (keys.some((key) => typeof item[key] !== "string" || String(item[key]).length > 512) || typeof item.admitted !== "boolean") throw new ApiError(502, "Invalid workload source identity.");
+            if (field === "pods" && ["containers", "init_containers"].some((key) => {
+              const names = item[key];
+              return !Array.isArray(names) || names.length > 128 || names.some((name: unknown) => typeof name !== "string" || name.length > 63);
+            })) throw new ApiError(502, "Invalid workload containers.");
+            if (field === "pods" && (item.all_pods_admitted !== undefined && typeof item.all_pods_admitted !== "boolean" || item.all_pods_reason !== undefined && (typeof item.all_pods_reason !== "string" || item.all_pods_reason.length > 256))) throw new ApiError(502, "Invalid workload capacity metadata.");
+          }
+        }
+      }
+      onEvent({ ...payload, event, text: payload.text ?? "", container: payload.container ?? "" } as KubernetesWorkloadLogEvent);
+    }, { maxLineBytes: 1 << 20, maxFrameBytes: (1 << 20) + 4096, maxTotalBytes: 128 << 20, maxEvents: 1_000_000, maxDurationMs: 31 * 60 * 1000 });
   },
   kubernetesDiagnose: (resourceId: string, namespace: string, name: string, logTail = 40) => {
     const query = new URLSearchParams({ namespace, log_tail: String(logTail) });

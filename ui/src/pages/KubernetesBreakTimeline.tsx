@@ -212,13 +212,23 @@ const journalTime = (value: string) => Number.isFinite(Date.parse(value)) && !va
 
 export function CrashJournal({ journal }: { journal: ReturnType<typeof useKubernetesCrashes> }) {
   const page = journal.isError ? undefined : journal.data;
+  const podCoverage = page?.coverage?.Pod;
+  const windowLimited = page?.limitations?.some((limitation) =>
+    ["journal_not_started_for_full_window", "outside_retention", "journal_commit_failed"].includes(limitation),
+  );
+  // Baseline polling caveats apply to every page; ambiguity needs an actual observation.
+  const ambiguousEvidence = page?.items.some((event) =>
+    event.ancestry_partial || event.type === "termination" && event.time_source !== "finished_at",
+  );
+  const incomplete = page && (!podCoverage || !Number.isFinite(Date.parse(podCoverage.from)) || !Number.isFinite(Date.parse(podCoverage.to)) || Date.parse(podCoverage.from) > Date.parse(page.since) || Date.parse(podCoverage.to) < Date.parse(page.until) || page.sync.state !== "ready" || page.sync.partial || page.capture.mode !== "continuous" || page.capture.behind || page.gaps?.length || page.capture_gaps?.length || windowLimited || ambiguousEvidence);
   return <section aria-label="Captured crash evidence" className="min-w-0 border-t border-ink-700 text-xs">
-    <header className="flex flex-wrap items-center justify-between gap-2 px-4 py-3"><h3 className="font-semibold text-ink-100">Captured crash evidence</h3><span className="text-ink-400">{page ? `${page.items.length} observations on page ${journal.paging.page}` : "Journal"}</span></header>
-    <p className="px-4 pb-3 text-ink-300">Polling observations only. Events between polls may be unseen; repeated status states are coalesced. Restart counts are lifetime counters, not crash occurrence counts. Crash markers show only this page's terminations with event times inside the chart window.</p>
+    <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-3"><h3 className="font-semibold text-ink-100">Captured crash evidence</h3>{page && <span className={incomplete ? "text-sev-warning" : "text-ink-300"}>{page.items.length} observations · {incomplete ? "Partial history; crashes may be missing." : "Polling may miss crashes between checks."}</span>}</header>
     {journal.isPending && <p role="status" className="px-4 pb-3">Loading captured crash evidence...</p>}
     {journal.isError && <p role="alert" className="px-4 pb-3 text-sev-warning">Crash journal unavailable.<button type="button" className="ml-2 text-link underline" onClick={() => void journal.refetch()}>Retry crash journal</button></p>}
     {page && <>
-      <div className="space-y-1 px-4 pb-3 text-ink-400 [overflow-wrap:anywhere]" aria-label="Crash capture coverage">
+      <details className="px-4 pb-3 text-ink-400 [overflow-wrap:anywhere]"><summary className="cursor-pointer text-link">Capture details</summary>
+      <div className="space-y-1 pt-2" aria-label="Crash capture coverage">
+        <p>Polling observations only. Events between polls may be unseen; repeated status states are coalesced. Restart counts are lifetime counters, not crash occurrence counts. Crash markers show only this page's terminations with event times inside the chart window.</p>
         <p>Observed window: {journalTime(page.since)} - {journalTime(page.until)}</p>
         <p>Retained from {journalTime(page.retention_from)}; retention basis: {page.retention_basis}. Journal started: {journalTime(page.started_at)}.</p>
         <p>Capture: {page.capture.mode}{page.capture.reason ? ` (${page.capture.reason})` : ""}; sync: {page.sync.state}{page.sync.partial ? " (partial)" : ""}{page.capture.behind ? "; capture behind" : ""}. Last cycle: {page.capture.last_cycle_at ? journalTime(page.capture.last_cycle_at) : "unavailable"}.</p>
@@ -226,9 +236,9 @@ export function CrashJournal({ journal }: { journal: ReturnType<typeof useKubern
         {!page.coverage?.Pod && <p className="text-sev-warning">Pod capture coverage unavailable; absence of observations does not establish absence of crashes.</p>}
         {(page.gaps ?? []).map((gap, index) => <p className="text-sev-warning" key={`journal:${index}`}>Journal retention/capture gap: {journalTime(gap.from)} - {journalTime(gap.to)}</p>)}
         {(page.capture_gaps ?? []).map((gap, index) => <p className="text-sev-warning" key={`capture:${index}`}>Capture gap: {journalTime(gap.from)} - {journalTime(gap.to)}</p>)}
-        <details><summary className="cursor-pointer py-1 text-link">Capture limitations</summary><ul className="space-y-1">{(page.limitations ?? []).map((limitation) => <li key={limitation}>{limitation.replaceAll("_", " ")}</li>)}</ul></details>
-      </div>
-      {!page.items.length && <p role="status" className="px-4 pb-3 text-ink-300">No captured observations on this page. Polling and retention limits still apply.</p>}
+        <ul className="space-y-1">{(page.limitations ?? []).map((limitation) => <li key={limitation}>{limitation.replaceAll("_", " ")}</li>)}</ul>
+      </div></details>
+      {!page.items.length && <p role="status" className="px-4 pb-3 text-ink-300">No captured observations on this page.</p>}
       <ul className="divide-y divide-ink-700" aria-label="Crash observations">{page.items.map((event) => <li key={event.id} className="min-w-0 px-4 py-2 [overflow-wrap:anywhere]">
         <details><summary className="cursor-pointer py-1 text-ink-200"><span className="font-medium">{event.type === "termination" ? event.reason || "Terminated" : event.waiting_reason || "Status observation"}</span>{" - "}{event.namespace}/{event.pod}{" / "}{event.init ? "Init " : ""}{event.container}{" / "}Observed: <time dateTime={event.observed_at}>{journalTime(event.observed_at)}</time>{event.time_source === "finished_at" && (Date.parse(event.at) < Date.parse(page.since) || Date.parse(event.at) > Date.parse(page.until)) && <span className="ml-2 text-sev-warning">Reported finish outside observed window</span>}</summary>
           <div className="space-y-1 py-2 text-ink-300"><p>{crashObservationDetail(event)}</p><p>Root UID: {event.root_uid}; Pod UID: {event.pod_uid}</p><p>Event time: <time dateTime={event.at}>{journalTime(event.at)}</time> ({event.time_source === "finished_at" ? "reported finish time" : "observation time; finish time unknown"})</p><p>Observed: <time dateTime={event.observed_at}>{journalTime(event.observed_at)}</time></p>{event.ancestry_partial && <p className="text-sev-warning">Capture-time ancestry is incomplete.</p>}<p className="text-ink-400">Observation ID: {event.id}</p></div>

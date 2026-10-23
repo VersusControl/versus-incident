@@ -36,6 +36,16 @@ function OverlayHarness({ revision = 0 }: { revision?: number }) {
 }
 
 describe("PeekPanel", () => {
+  it("opts resource inspection into its own drawer appearance without changing other panels", () => {
+    const { rerender } = render(<PeekPanel open onClose={() => undefined} title="Pod" size="wide" appearance="resource">Details</PeekPanel>);
+    const resource = screen.getByRole("dialog").querySelector("aside")!;
+    expect(resource.hasAttribute("data-resource-detail")).toBe(true);
+    expect(resource.className).toContain("840px");
+    rerender(<PeekPanel open onClose={() => undefined} title="Service" size="wide">Details</PeekPanel>);
+    const service = screen.getByRole("dialog").querySelector("aside")!;
+    expect(service.hasAttribute("data-resource-detail")).toBe(false);
+    expect(service.className).toContain("46rem");
+  });
   it("excludes semantically hidden focus candidates without relying on layout", () => {
     const container = document.createElement("div");
     container.innerHTML = `

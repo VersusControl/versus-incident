@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { capturePath } from "./support/capture";
 
 type Theme = "dark" | "light";
 
@@ -482,7 +483,7 @@ for (const theme of ["dark", "light"] as const) {
 
         await assertViewportIntegrity(page);
         await page.screenshot({
-          path: `tests/e2e/screenshots/chat/${theme}/${viewport.name}/${visualState}.png`,
+          path: capturePath("chat", viewport.name, theme, visualState),
           fullPage: false,
         });
         if (visualState === "running") {

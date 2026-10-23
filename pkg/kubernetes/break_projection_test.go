@@ -13,6 +13,62 @@ import (
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 )
 
+func TestPodDetailsProjectOnlyValidAddressAndQoS(t *testing.T) {
+	service := NewService(nil, Scope{}, 0)
+	for _, test := range []struct{ ip, qos, wantIP, wantQoS string }{
+		{"10.0.0.1", "Burstable", "10.0.0.1", "Burstable"},
+		{"2001:db8::1", "Guaranteed", "2001:db8::1", "Guaranteed"},
+		{"not-an-address-secret", "secret", "", ""},
+		{"fe80::1%eth0", "BestEffort", "", "BestEffort"},
+	} {
+		summary := service.projectResource(ResourceDefinition{Kind: "Pod"}, map[string]any{"kind": "Pod", "metadata": map[string]any{"name": "api"}, "status": map[string]any{"podIP": test.ip, "qosClass": test.qos}}).Summary
+		if summaryString(summary, "pod_ip") != test.wantIP || summaryString(summary, "qos_class") != test.wantQoS {
+			t.Fatalf("unsafe Pod details: %+v", summary)
+		}
+	}
+}
+
+func TestRunningTimestampAndFullLogContainerCatalog(t *testing.T) {
+	started := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	service := NewService(nil, Scope{}, 0)
+	containers := []any{}
+	statuses := []any{}
+	for i := 0; i < 12; i++ {
+		name := "app-" + strconv.Itoa(i)
+		containers = append(containers, map[string]any{"name": name})
+		statuses = append(statuses, map[string]any{"name": name, "state": map[string]any{"running": map[string]any{"startedAt": started.Format(time.RFC3339Nano)}}})
+	}
+	raw := map[string]any{"kind": "Pod", "metadata": map[string]any{"name": "api", "uid": "pod", "annotations": map[string]any{"kubectl.kubernetes.io/default-container": "app-10"}}, "spec": map[string]any{"containers": containers}, "status": map[string]any{"containerStatuses": statuses}}
+	projected := service.projectResource(ResourceDefinition{Kind: "Pod"}, raw)
+	record := indexRecord(projected)
+	if len(record.Containers) != 8 || len(record.LogContainers) != 12 || record.MainContainer != "app-10" || !record.LogContainers[10].StartedAt.Equal(started) {
+		t.Fatalf("log catalog or uptime lost: %+v", record)
+	}
+	encoded, _ := json.Marshal(projected.Summary["log_container_states"])
+	var decoded any
+	if json.Unmarshal(encoded, &decoded) != nil || len(indexedLogContainers(decoded)) != 12 || !indexedLogContainers(decoded)[10].StartedAt.Equal(started) {
+		t.Fatal("timestamp lost in JSON round trip")
+	}
+}
+
+func TestEventSourceProjectionSafeFallbacks(t *testing.T) {
+	service := NewService(nil, Scope{}, 0)
+	for _, test := range []struct {
+		source                                   map[string]any
+		component, host, wantComponent, wantHost string
+	}{
+		{map[string]any{"component": "kubelet", "host": "node-1"}, "fallback", "fallback", "kubelet", "node-1"},
+		{nil, "deployment-controller", "controller-1", "deployment-controller", "controller-1"},
+		{nil, "kubernetes.io/kubelet", "node-1", "kubernetes.io/kubelet", "node-1"},
+		{map[string]any{"component": "bad\ncomponent", "host": "bad/host"}, "ignored", "ignored", "", ""},
+	} {
+		summary := service.projectResource(ResourceDefinition{Kind: "Event"}, map[string]any{"kind": "Event", "metadata": map[string]any{"name": "event"}, "source": test.source, "reportingController": test.component, "reportingInstance": test.host}).Summary
+		if summaryString(summary, "source_component") != test.wantComponent || summaryString(summary, "source_host") != test.wantHost {
+			t.Fatalf("unsafe event source: %+v", summary)
+		}
+	}
+}
+
 func TestProjectedCreatedAtSurvivesSummaryLoss(t *testing.T) {
 	created := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	service := NewService(nil, Scope{ClusterID: "cluster"}, 0)
