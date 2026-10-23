@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { env, openApp, primaryNav } from "./helpers";
+import { captureDir } from "./support/capture";
 
 // ui-refresh.spec.ts drives the Settings / Admin one-section layouts, the
 // Logs / Metrics / Traces filter panel and Flat / By service views, and the
@@ -9,11 +9,7 @@ import { env, openApp, primaryNav } from "./helpers";
 // `plans/harness-run/harness.sh e2e ui ui-refresh`; list cases skip, not pass, when
 // the stack has no learned rows yet (seed with `harness.sh gen ...`).
 
-const screenshotDir = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "screenshots",
-  "ui-refresh",
-);
+const screenshotDir = captureDir();
 const MOBILE = { width: 390, height: 844 };
 
 async function shot(page: Page, name: string): Promise<void> {

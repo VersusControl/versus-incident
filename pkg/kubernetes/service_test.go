@@ -648,6 +648,7 @@ func TestSearchPaginatesFiltersAndRanksAcrossKinds(t *testing.T) {
 }
 
 func TestGetWorkloadReturnsTypedBoundedRelatedFacts(t *testing.T) {
+	started := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/api":
@@ -671,8 +672,10 @@ func TestGetWorkloadReturnsTypedBoundedRelatedFacts(t *testing.T) {
 		case "/api/v1/namespaces/payments/pods":
 			pod := podFixture("api-1")
 			pod["metadata"].(map[string]any)["namespace"] = "payments"
+			pod["metadata"].(map[string]any)["uid"] = "pod-api-1"
 			pod["metadata"].(map[string]any)["labels"] = map[string]any{"app": "api"}
-			pod["status"].(map[string]any)["containerStatuses"] = []any{map[string]any{"restartCount": 3}}
+			pod["spec"].(map[string]any)["containers"] = []any{map[string]any{"name": "app"}}
+			pod["status"].(map[string]any)["containerStatuses"] = []any{map[string]any{"name": "app", "restartCount": 3, "state": map[string]any{"running": map[string]any{"startedAt": started.Format(time.RFC3339Nano)}}}}
 			writeJSON(writer, map[string]any{"items": []any{pod}})
 		case "/apis/autoscaling/v2/namespaces/payments/horizontalpodautoscalers":
 			writeJSON(writer, map[string]any{"items": []any{
@@ -702,6 +705,9 @@ func TestGetWorkloadReturnsTypedBoundedRelatedFacts(t *testing.T) {
 	}
 	if len(detail.Pods) != 1 || detail.Pods[0].RestartCount != 3 || detail.Pods[0].Node != "node-a" || len(detail.HPAs) != 1 || detail.HPAs[0].Name != "api-scale" || len(detail.PDBs) != 1 || detail.PDBs[0].Name != "api-budget" {
 		t.Fatalf("related facts = %#v", detail)
+	}
+	if !detail.Pods[0].StartedAt.Equal(started) || detail.Pods[0].UID == "" {
+		t.Fatalf("Pod uptime identity lost: %+v", detail.Pods[0])
 	}
 	if detail.TerminationGrace == nil || *detail.TerminationGrace != 45 || strings.Join(detail.Affinity, ",") != "pod_anti_affinity" || strings.Join(detail.TopologySpread, ",") != "zone:DoNotSchedule" {
 		t.Fatalf("scheduling facts = %#v", detail)
@@ -1624,6 +1630,34 @@ func TestPodLogStreamFramingResumeAndScope(t *testing.T) {
 	}
 }
 
+func TestPodLogResumeRebasesReadBudgetBeyondPriorOrdinal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("sinceTime") == "" {
+			t.Error("checkpoint was not used")
+		}
+		writer.Write([]byte("2026-10-01T00:00:01Z next\n"))
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{})
+	service.SetScrubber(replacingScrubber{})
+	options := PodLogStreamOptions{Namespace: "shop", Pod: "api"}
+	encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Ordinal: MaxLogStreamBytes + 1})
+	options.Cursor = base64.RawURLEncoding.EncodeToString(encoded)
+	if err := service.ValidatePodLogStream(options); err != nil {
+		t.Fatal("valid rotated ordinal rejected", err)
+	}
+	var lines int
+	err := service.streamPodLogs(context.Background(), options, func(event PodLogStreamEvent) error {
+		if event.Event == "line" {
+			lines++
+		}
+		return nil
+	}, time.Second, time.Second, time.Second, 4096)
+	if err != nil || lines != 1 {
+		t.Fatalf("fresh resumed budget unavailable lines=%d err=%v", lines, err)
+	}
+}
+
 func TestPodLogStreamLimitsAndPrevious(t *testing.T) {
 	for _, test := range []struct {
 		name, payload, reason string
@@ -1750,8 +1784,12 @@ func TestPodLogStreamOversizedMalformedRecordContinues(t *testing.T) {
 	service.SetScrubber(replacingScrubber{})
 	var events []PodLogStreamEvent
 	err := service.StreamPodLogs(logStreamTestContext(), PodLogStreamOptions{Namespace: "default", Pod: "pod"}, func(event PodLogStreamEvent) error { events = append(events, event); return nil })
-	if err != nil || len(events) != 3 || events[0].Text != "[oversized log line omitted]" || events[0].Cursor != "" || !events[0].ReplayUncertain || events[1].Text != "ordinary [redacted]" {
+	if err != nil || len(events) != 3 || events[0].Text != "[oversized log line omitted]" || events[0].Cursor == "" || !events[0].ReplayUncertain || events[1].Text != "ordinary [redacted]" {
 		t.Fatalf("malformed oversized record: %+v err=%v", events, err)
+	}
+	cursor, err := service.logCursor(PodLogStreamOptions{Namespace: "default", Pod: "pod", Cursor: events[0].Cursor})
+	if err != nil || !cursor.Quiet {
+		t.Fatal("unknown-position first line did not retain a bounded quiet cursor", err)
 	}
 }
 
@@ -1851,19 +1889,22 @@ func TestPodLogStreamRetainedResumeBoundary(t *testing.T) {
 			options := PodLogStreamOptions{Namespace: "default", Pod: "pod"}
 			var final PodLogStreamEvent
 			lines := 0
+			uncertain := false
 			collect := func(event PodLogStreamEvent) error {
 				final = event
+				uncertain = uncertain || event.ReplayUncertain
 				if event.Event == "line" {
 					lines++
 				}
 				return nil
 			}
-			if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || lines != 140 || final.ReplayUncertain != (spacing == time.Second) {
+			if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || lines != 140 || uncertain != (spacing == time.Second) || final.ReplayUncertain {
 				t.Fatalf("initial lines=%d final=%+v err=%v", lines, final, err)
 			}
 			options.Cursor = final.Cursor
 			lines = 0
-			if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || lines != 0 || final.ReplayUncertain {
+			uncertain = false
+			if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || lines != 0 || uncertain || final.ReplayUncertain {
 				t.Fatalf("resume lines=%d final=%+v err=%v", lines, final, err)
 			}
 		})
@@ -1896,7 +1937,7 @@ func TestPodLogStreamCheckpointBandwidth(t *testing.T) {
 			if event.Ordinal != 1 || event.Sequence != uint64(lines) {
 				t.Fatalf("incorrect line identity: %+v", event)
 			}
-			if (event.Cursor != "") != (lines%logCursorCheckpoint == 0) {
+			if (event.Cursor != "") != (lines == 1 || lines%logCursorCheckpoint == 0) {
 				t.Fatalf("incorrect checkpoint cadence at line %d", lines)
 			}
 			if event.Cursor != "" {
@@ -1909,7 +1950,7 @@ func TestPodLogStreamCheckpointBandwidth(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil || lines != lineCount || checkpoints != lineCount/logCursorCheckpoint || wireBytes > MaxLogStreamBytes || final.Event != "end" || final.Reason != "complete" || final.Cursor == "" {
+	if err != nil || lines != lineCount || checkpoints != 1+lineCount/logCursorCheckpoint || wireBytes > MaxLogStreamBytes || final.Event != "end" || final.Reason != "complete" || final.Cursor == "" {
 		t.Fatalf("lines=%d checkpoints=%d bytes=%d final=%+v err=%v", lines, checkpoints, wireBytes, final, err)
 	}
 	t.Logf("%d lines, %d line checkpoints, %d SSE bytes", lines, checkpoints, wireBytes)
@@ -2046,7 +2087,7 @@ func TestPodLogStreamQuietCheckpointAndDiscontinuousReplay(t *testing.T) {
 						}
 					}
 				}
-				if checkpoints != 1 || events[0].Event != "line" || events[0].Cursor != "" {
+				if checkpoints != 0 || events[0].Event != "line" || events[0].Cursor == "" || events[0].Cursor != final.Cursor {
 					t.Fatalf("quiet checkpoint count=%d events=%+v", checkpoints, events)
 				}
 			}
@@ -2338,6 +2379,49 @@ func TestPodLogStreamReadErrorContextTermination(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestPodLogSessionPreflightCloseAndReuse(t *testing.T) {
+	service := newTestService(t, "http://localhost", Scope{OrgID: "session"})
+	service.SetScrubber(replacingScrubber{})
+	options := PodLogStreamOptions{Namespace: "default", Pod: "pod"}
+	var sessions []*PodLogSession
+	defer func() {
+		for _, session := range sessions {
+			session.Close()
+		}
+	}()
+	for i := 0; i < MaxOrgLogStreams; i++ {
+		session, err := service.OpenPodLogStream(logStreamTestContext(), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sessions = append(sessions, session)
+	}
+	if _, err := service.OpenPodLogStream(logStreamTestContext(), options); !errors.Is(err, ErrLogStreamBusy) {
+		t.Fatal("preflight exceeded viewer limit", err)
+	}
+	if _, err := service.OpenPodLogStream(context.Background(), options); !errors.Is(err, ErrForbidden) {
+		t.Fatal("busy preflight overrode authorization", err)
+	}
+	invalid := options
+	invalid.TailLines = -1
+	if _, err := service.OpenPodLogStream(logStreamTestContext(), invalid); !errors.Is(err, ErrInvalidArguments) {
+		t.Fatal("busy preflight overrode validation", err)
+	}
+	sessions[0].Close()
+	sessions[0].Close()
+	if err := sessions[0].Stream(func(PodLogStreamEvent) error { return nil }); !errors.Is(err, ErrInvalidArguments) {
+		t.Fatal("closed session started a read", err)
+	}
+	replacement, err := service.OpenPodLogStream(logStreamTestContext(), options)
+	if err != nil {
+		t.Fatal("closed preflight did not release capacity", err)
+	}
+	sessions = append(sessions, replacement)
+	if _, err := service.OpenPodLogStream(logStreamTestContext(), options); !errors.Is(err, ErrLogStreamBusy) {
+		t.Fatal("idempotent close released capacity twice", err)
 	}
 }
 

@@ -350,6 +350,77 @@ describe("Break timeline", () => {
     return <><button onClick={() => setNamespace("other")}>Other namespace</button><ResourceTimelineChart issues={[{ ...issue, evidence: { ...issue.evidence!, partial: true } }]} changes={[]} crashes={journal.isError ? [] : journal.data?.items ?? []} since={journalPage.since} until={journalPage.until} onSelectChange={vi.fn()} /><CrashJournal journal={journal} /></>;
   }
 
+  const baselineLimitations = [
+    "polling_observations_only",
+    "restart_counts_are_lifetime_not_occurrences",
+    "summary_caps_do_not_limit_journal",
+    "ancestry_is_capture_time_uid_scoped",
+    "unknown_finished_at_uses_observation_time",
+    "duplicate_status_states_are_coalesced",
+    "unknown_termination_identity_is_ambiguous",
+  ];
+  const coveredJournalPage: KubernetesCrashPage = {
+    ...journalPage,
+    started_at: journalPage.since,
+    gaps: [],
+    capture_gaps: [],
+    coverage: { Pod: { from: journalPage.since, to: journalPage.until } },
+    limitations: baselineLimitations,
+    capture: { mode: "continuous", behind: false },
+    sync: { state: "ready", age_s: 0, partial: false },
+  };
+
+  it("keeps complete crash coverage neutral with the backend baseline polling limitations", async () => {
+    vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
+    mount(<JournalScenario />);
+    const journal = screen.getByRole("region", { name: "Captured crash evidence" });
+    await within(journal).findByText("1 observations · Polling may miss crashes between checks.");
+    const summary = journal.querySelector("header > span")!;
+    expect(summary.className).not.toContain("text-sev-warning");
+    expect(summary.textContent).not.toContain("Partial history");
+    const disclosure = within(journal).getByText("Capture details").closest("details")!;
+    expect(disclosure.open).toBe(false);
+    for (const caveat of baselineLimitations) expect(disclosure.textContent).toContain(caveat.replaceAll("_", " "));
+  });
+
+  it.each(["journal_not_started_for_full_window", "outside_retention", "journal_commit_failed"])("keeps the window-specific crash limitation %s visible beside the heading", async (limitation) => {
+    vi.spyOn(api, "kubernetesCrashes").mockResolvedValue({ ...coveredJournalPage, limitations: [...baselineLimitations, limitation] });
+    mount(<JournalScenario />);
+    const journal = screen.getByRole("region", { name: "Captured crash evidence" });
+    await within(journal).findByText("1 observations · Partial history; crashes may be missing.");
+    expect(journal.querySelector("header > span")?.className).toContain("text-sev-warning");
+    expect(journal.querySelector("header")?.textContent).not.toContain("Polling may miss crashes between checks.");
+    expect(within(journal).getByText("Capture details").closest("details")?.open).toBe(false);
+  });
+
+  it.each([
+    { ...observation, time_source: "observed_at" as const },
+    { ...observation, ancestry_partial: true },
+  ])("keeps actual ambiguous crash evidence visible despite otherwise complete coverage ($time_source, ancestry=$ancestry_partial)", async (event) => {
+    vi.spyOn(api, "kubernetesCrashes").mockResolvedValue({ ...coveredJournalPage, items: [event] });
+    mount(<JournalScenario />);
+    const journal = screen.getByRole("region", { name: "Captured crash evidence" });
+    await within(journal).findByText("1 observations · Partial history; crashes may be missing.");
+    expect(journal.querySelector("header > span")?.className).toContain("text-sev-warning");
+  });
+
+  it("keeps uncertainty beside the heading and technical coverage in one closed disclosure", async () => {
+    vi.spyOn(api, "kubernetesCrashes").mockResolvedValue({ ...journalPage, items: [], started_at: "0001-01-01T00:00:00Z", retention_from: "0001-01-01T00:00:00Z" });
+    mount(<JournalScenario />);
+    const journal = screen.getByRole("region", { name: "Captured crash evidence" });
+    await within(journal).findByText("No captured observations on this page.");
+    const header = journal.querySelector("header")!;
+    expect(header.textContent).toContain("0 observations · Partial history; crashes may be missing.");
+    const disclosure = within(journal).getByText("Capture details").closest("details")!;
+    expect(disclosure.open).toBe(false);
+    expect(disclosure.querySelector("details")).toBeNull();
+    expect(disclosure.textContent).toContain("Capture gap:");
+    expect(journal.textContent).not.toContain("0001-");
+    expect(within(journal).getAllByRole("status")).toHaveLength(1);
+    fireEvent.click(within(journal).getByText("Capture details"));
+    expect(disclosure.open).toBe(true);
+  });
+
   it("pages all journal observations without accumulating rendered rows and resets filters", async () => {
     const lookup = vi.spyOn(api, "kubernetesCrashes").mockImplementation(async (options) => ({ ...journalPage, items: options?.cursor ? [{ ...observation, id: options.cursor, pod: options.cursor === "final-page" ? "final-pod" : "last-pod", init: true, signal: 9 }] : Array.from({ length: 50 }, (_, index) => ({ ...observation, id: `event-${index}`, pod: `old-pod-${index}` })), next: options?.cursor === "final-page" ? undefined : options?.cursor ? "final-page" : "next-page" }));
     const { container } = mount(<JournalScenario />);

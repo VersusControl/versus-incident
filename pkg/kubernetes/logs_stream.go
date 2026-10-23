@@ -28,12 +28,35 @@ const (
 	MaxPreviousLogDuration = 30 * time.Second
 	MaxOrgLogStreams       = 4
 	MaxProcessLogStreams   = 20
+	MaxProcessLogReads     = 200
 	logResumeOverlap       = 2 * time.Minute
 	maxLogCursorTimestamps = 64
 	logCursorCheckpoint    = 32
 )
 
 var ErrLogStreamBusy = errors.New("kubernetes: log stream concurrency limit reached")
+
+var logReadAdmissions = struct {
+	sync.Mutex
+	total int
+}{}
+
+func acquireLogRead() (func(), error) {
+	logReadAdmissions.Lock()
+	defer logReadAdmissions.Unlock()
+	if logReadAdmissions.total >= MaxProcessLogReads {
+		return nil, ErrLogStreamBusy
+	}
+	logReadAdmissions.total++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			logReadAdmissions.Lock()
+			logReadAdmissions.total--
+			logReadAdmissions.Unlock()
+		})
+	}, nil
+}
 
 var podLogNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 var previousContainerMissingPattern = regexp.MustCompile(`^previous terminated container "[^"\r\n]{1,253}" in pod "[^"\r\n]{1,253}" not found$`)
@@ -59,6 +82,10 @@ type PodLogStreamOptions struct {
 	Timestamps   bool
 	Previous     bool
 	Cursor       string
+	// sourceIdentity binds a workload checkpoint to the Pod UID and incarnation.
+	sourceIdentity      string
+	checkpointEveryLine bool
+	finite              bool
 }
 
 type PodLogStreamEvent struct {
@@ -78,10 +105,29 @@ type PodLogStreamEvent struct {
 }
 
 type logResumeCursor struct {
-	Target      string            `json:"target"`
-	Timestamp   time.Time         `json:"timestamp"`
-	Ordinal     uint64            `json:"ordinal"`
-	Occurrences map[string]uint64 `json:"occurrences,omitempty"`
+	Target       string            `json:"target"`
+	Timestamp    time.Time         `json:"timestamp"`
+	Ordinal      uint64            `json:"ordinal"`
+	Occurrences  map[string]uint64 `json:"occurrences,omitempty"`
+	Quiet        bool              `json:"quiet,omitempty"`
+	SinceSeconds int               `json:"since_seconds,omitempty"`
+	TailLines    int               `json:"tail_lines,omitempty"`
+}
+
+func logBounds(since, tail int) (int, int) {
+	if since == 0 {
+		since = 3600
+	}
+	if tail == 0 {
+		tail = 500
+	}
+	return since, tail
+}
+
+func (service *Service) quietLogCursor(options PodLogStreamOptions, now time.Time) string {
+	since, tail := logBounds(options.SinceSeconds, options.TailLines)
+	encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: now.Add(-time.Duration(since) * time.Second), Quiet: true, SinceSeconds: since, TailLines: tail})
+	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
 var logStreamAdmissions = struct {
@@ -124,7 +170,11 @@ func (service *Service) ValidatePodLogStream(options PodLogStreamOptions) error 
 }
 
 func (service *Service) logTarget(options PodLogStreamOptions) string {
-	digest := sha256.Sum256([]byte(service.cacheKey() + "\x00" + options.Namespace + "\x00" + options.Pod + "\x00" + options.Container + "\x00" + strconv.FormatBool(options.Previous)))
+	target := service.cacheKey() + "\x00" + options.Namespace + "\x00" + options.Pod + "\x00" + options.Container + "\x00" + strconv.FormatBool(options.Previous)
+	if options.sourceIdentity != "" {
+		target += "\x00" + options.sourceIdentity
+	}
+	digest := sha256.Sum256([]byte(target))
 	return base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
@@ -140,7 +190,16 @@ func (service *Service) logCursor(options PodLogStreamOptions) (logResumeCursor,
 		return logResumeCursor{}, ErrInvalidArguments
 	}
 	var cursor logResumeCursor
-	if json.Unmarshal(raw, &cursor) != nil || cursor.Target != service.logTarget(options) || cursor.Timestamp.IsZero() || cursor.Ordinal == 0 || cursor.Ordinal > MaxLogStreamBytes || cursor.Timestamp.After(time.Now().Add(time.Minute)) {
+	if json.Unmarshal(raw, &cursor) != nil || cursor.Target != service.logTarget(options) || cursor.Timestamp.IsZero() || cursor.Ordinal > 1<<53 || cursor.Timestamp.After(time.Now().Add(time.Minute)) || cursor.SinceSeconds < 0 || cursor.SinceSeconds > 86400 || cursor.TailLines < 0 || cursor.TailLines > 5000 {
+		return logResumeCursor{}, ErrInvalidArguments
+	}
+	if cursor.Quiet {
+		if cursor.Ordinal != 0 || len(cursor.Occurrences) != 0 || cursor.SinceSeconds == 0 || cursor.TailLines == 0 {
+			return logResumeCursor{}, ErrInvalidArguments
+		}
+		return cursor, nil
+	}
+	if cursor.Ordinal == 0 {
 		return logResumeCursor{}, ErrInvalidArguments
 	}
 	if len(cursor.Occurrences) > maxLogCursorTimestamps {
@@ -148,7 +207,7 @@ func (service *Service) logCursor(options PodLogStreamOptions) (logResumeCursor,
 	}
 	for key, count := range cursor.Occurrences {
 		timestamp, err := time.Parse(time.RFC3339Nano, key)
-		if err != nil || count == 0 || count > MaxLogStreamBytes || timestamp.After(cursor.Timestamp) || timestamp.Before(cursor.Timestamp.Add(-logResumeOverlap)) {
+		if err != nil || count == 0 || count > 1<<53 || timestamp.After(cursor.Timestamp) || timestamp.Before(cursor.Timestamp.Add(-logResumeOverlap)) {
 			return logResumeCursor{}, ErrInvalidArguments
 		}
 	}
@@ -242,46 +301,122 @@ func (reader logActivityReader) Read(buffer []byte) (int, error) {
 }
 
 func (service *Service) StreamPodLogs(ctx context.Context, options PodLogStreamOptions, emit func(PodLogStreamEvent) error) error {
-	if !core.CallerAuthorized(ctx, core.PermissionInfrastructureView) {
-		return ErrForbidden
+	if emit == nil {
+		return errors.New("kubernetes: log stream emitter unavailable")
 	}
-	if err := service.ValidatePodLogStream(options); err != nil {
+	session, err := service.OpenPodLogStream(ctx, options)
+	if err != nil {
 		return err
 	}
-	if emit == nil || service.scrubber == nil {
-		return errors.New("kubernetes: log stream scrubber unavailable")
+	defer session.Close()
+	return session.Stream(emit)
+}
+
+// PodLogSession reserves viewer and upstream capacity before SSE headers are
+// committed. Close cancels an active reader; capacity is released after it exits.
+type PodLogSession struct {
+	service   *Service
+	options   PodLogStreamOptions
+	ctx       context.Context
+	cancel    context.CancelFunc
+	release   func()
+	mu        sync.Mutex
+	streaming bool
+	closed    bool
+}
+
+func (service *Service) OpenPodLogStream(ctx context.Context, options PodLogStreamOptions) (*PodLogSession, error) {
+	if !core.CallerAuthorized(ctx, core.PermissionInfrastructureView) {
+		return nil, ErrForbidden
+	}
+	if err := service.ValidatePodLogStream(options); err != nil {
+		return nil, err
+	}
+	if service.scrubber == nil {
+		return nil, errors.New("kubernetes: log stream scrubber unavailable")
+	}
+	ctx, stopAuthorization, err := service.logStreamAccessContext(ctx)
+	if err != nil {
+		return nil, err
 	}
 	release, err := acquireLogStream(service.scope.OrgID)
+	if err != nil {
+		stopAuthorization()
+		return nil, err
+	}
+	releaseRead, err := acquireLogRead()
+	if err != nil {
+		release()
+		stopAuthorization()
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	stopService := func() bool { return false }
+	if service.logStreamContext != nil {
+		stopService = context.AfterFunc(service.logStreamContext, cancel)
+	}
+	return &PodLogSession{
+		service: service, options: options, ctx: ctx,
+		cancel:  func() { stopService(); cancel(); stopAuthorization() },
+		release: func() { releaseRead(); release() },
+	}, nil
+}
+
+func (session *PodLogSession) Close() {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if !session.closed {
+		session.closed = true
+		session.cancel()
+		if !session.streaming {
+			session.release()
+		}
+	}
+}
+
+func (session *PodLogSession) Stream(emit func(PodLogStreamEvent) error) error {
+	session.mu.Lock()
+	if session.closed || session.streaming || emit == nil {
+		session.mu.Unlock()
+		return ErrInvalidArguments
+	}
+	session.streaming = true
+	session.mu.Unlock()
+	defer session.Close()
+	defer session.release()
+	return session.service.readPodLogs(session.ctx, session.options, emit, MaxLogStreamDuration, LogStreamIdleTimeout, LogStreamHeartbeat, MaxLogStreamBytes)
+}
+
+func (service *Service) streamPodLogs(parent context.Context, options PodLogStreamOptions, emit func(PodLogStreamEvent) error, duration, idleDuration, heartbeatDuration time.Duration, maxBytes int64) error {
+	release, err := acquireLogRead()
 	if err != nil {
 		return err
 	}
 	defer release()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	if service.logStreamContext != nil {
-		stop := context.AfterFunc(service.logStreamContext, cancel)
-		defer stop()
-	}
-	return service.streamPodLogs(ctx, options, emit, MaxLogStreamDuration, LogStreamIdleTimeout, LogStreamHeartbeat, MaxLogStreamBytes)
+	return service.readPodLogs(parent, options, emit, duration, idleDuration, heartbeatDuration, maxBytes)
 }
 
-func (service *Service) streamPodLogs(parent context.Context, options PodLogStreamOptions, emit func(PodLogStreamEvent) error, duration, idleDuration, heartbeatDuration time.Duration, maxBytes int64) error {
+// readPodLogs uses an already reserved upstream slot, without viewer admission.
+func (service *Service) readPodLogs(parent context.Context, options PodLogStreamOptions, emit func(PodLogStreamEvent) error, duration, idleDuration, heartbeatDuration time.Duration, maxBytes int64) error {
 	if err := service.validateCredential(parent); err != nil {
 		return err
 	}
 	parent, cancelCredential := service.credentialContext(parent)
 	defer cancelCredential()
-	if options.Previous && duration > MaxPreviousLogDuration {
+	if (options.Previous || options.finite) && duration > MaxPreviousLogDuration {
 		duration = MaxPreviousLogDuration
 	}
 	ctx, cancel := context.WithTimeout(parent, duration)
 	defer cancel()
 	cursor, _ := service.logCursor(options)
-	query := url.Values{"follow": {strconv.FormatBool(!options.Previous)}, "previous": {strconv.FormatBool(options.Previous)}, "timestamps": {"true"}}
+	query := url.Values{"follow": {strconv.FormatBool(!options.Previous && !options.finite)}, "previous": {strconv.FormatBool(options.Previous)}, "timestamps": {"true"}}
 	if options.Container != "" {
 		query.Set("container", options.Container)
 	}
-	if !cursor.Timestamp.IsZero() {
+	if cursor.Quiet {
+		query.Set("sinceTime", cursor.Timestamp.Format(time.RFC3339Nano))
+		query.Set("tailLines", strconv.Itoa(cursor.TailLines))
+	} else if !cursor.Timestamp.IsZero() {
 		oldest := cursor.Timestamp
 		for key := range cursor.Occurrences {
 			timestamp, _ := time.Parse(time.RFC3339Nano, key)
@@ -350,14 +485,18 @@ func (service *Service) streamPodLogs(parent context.Context, options PodLogStre
 	idle := time.NewTimer(idleDuration)
 	defer idle.Stop()
 	var idleDeadline <-chan time.Time
-	if options.Previous {
+	if options.Previous || options.finite {
 		idleDeadline = idle.C
 	}
 	lastCursor := options.Cursor
+	if lastCursor == "" {
+		lastCursor = service.quietLogCursor(options, time.Now().UTC())
+	}
 	replayUncertain := false
 	var emittedBytes int64
 	var sequence, checkpointSequence uint64
 	replaySeen := make(map[string]uint64)
+	cursorBoundsReported := false
 	eventBytes := func(event PodLogStreamEvent) int64 {
 		payload, _ := json.Marshal(event)
 		return int64(len(payload) + len(event.Event) + len("event: \ndata: \n\n"))
@@ -383,6 +522,7 @@ func (service *Service) streamPodLogs(parent context.Context, options PodLogStre
 			if err := emit(event); err != nil {
 				return err
 			}
+			replayUncertain = false
 		}
 		event := PodLogStreamEvent{Event: "end", Reason: reason, Cursor: lastCursor, ReplayUncertain: replayUncertain}
 		emittedBytes += eventBytes(event)
@@ -397,6 +537,7 @@ func (service *Service) streamPodLogs(parent context.Context, options PodLogStre
 		if err := emit(event); err != nil {
 			return false, err
 		}
+		replayUncertain = false
 		emittedBytes += eventBytes(event)
 		lastCursor = nextCursor
 		if event.Cursor != "" {
@@ -405,6 +546,9 @@ func (service *Service) streamPodLogs(parent context.Context, options PodLogStre
 		return false, nil
 	}
 	lastTimestamp := cursor.Timestamp
+	if cursor.Quiet {
+		lastTimestamp = time.Time{}
+	}
 	occurrences := make(map[string]uint64)
 	identities := make(map[string]uint64)
 	for key, count := range cursor.Occurrences {
@@ -429,7 +573,7 @@ func (service *Service) streamPodLogs(parent context.Context, options PodLogStre
 			idle.Reset(idleDuration)
 		case <-heartbeat.C:
 			event := PodLogStreamEvent{Event: "heartbeat", ReplayUncertain: replayUncertain}
-			if sequence > checkpointSequence {
+			if sequence > checkpointSequence || sequence == 0 {
 				event.Cursor = lastCursor
 			}
 			terminalReserve := eventBytes(PodLogStreamEvent{Event: "limit", Reason: "duration", Cursor: lastCursor, ReplayUncertain: true}) + eventBytes(PodLogStreamEvent{Event: "end", Reason: "duration", Cursor: lastCursor, ReplayUncertain: true})
@@ -439,6 +583,7 @@ func (service *Service) streamPodLogs(parent context.Context, options PodLogStre
 			if err := emit(event); err != nil {
 				return err
 			}
+			replayUncertain = false
 			emittedBytes += eventBytes(event)
 			checkpointSequence = sequence
 		case result, open := <-reads:
@@ -481,7 +626,7 @@ func (service *Service) streamPodLogs(parent context.Context, options PodLogStre
 					replayUncertain = true
 					sequence++
 					event := PodLogStreamEvent{Event: "line", Text: "[oversized log line omitted]", Container: options.Container, Sequence: sequence, ReplayUncertain: true}
-					if sequence%logCursorCheckpoint == 0 {
+					if sequence == 1 || sequence%logCursorCheckpoint == 0 {
 						event.Cursor = lastCursor
 					}
 					limited, err := emitLine(event, lastCursor)
@@ -529,7 +674,10 @@ func (service *Service) streamPodLogs(parent context.Context, options PodLogStre
 					}
 				}
 				delete(nextIdentities, oldestKey)
-				replayUncertain = true
+				if !cursorBoundsReported {
+					replayUncertain = true
+					cursorBoundsReported = true
+				}
 			}
 			text = service.scrubber.Scrub(strings.ToValidUTF8(text, ""))
 			if options.Timestamps {
@@ -539,10 +687,14 @@ func (service *Service) streamPodLogs(parent context.Context, options PodLogStre
 				text = "[oversized scrubbed log line omitted]"
 			}
 			sequence++
-			encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: nextTimestamp, Ordinal: nextIdentities[nextTimestamp.Format(time.RFC3339Nano)], Occurrences: nextIdentities})
+			since, tail := logBounds(options.SinceSeconds, options.TailLines)
+			if cursor.SinceSeconds != 0 {
+				since, tail = logBounds(cursor.SinceSeconds, cursor.TailLines)
+			}
+			encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: nextTimestamp, Ordinal: nextIdentities[nextTimestamp.Format(time.RFC3339Nano)], Occurrences: nextIdentities, SinceSeconds: since, TailLines: tail})
 			nextCursor := base64.RawURLEncoding.EncodeToString(encoded)
 			event := PodLogStreamEvent{Event: "line", Text: text, Container: options.Container, Timestamp: timestampText, Sequence: sequence, Ordinal: ordinal, ReplayUncertain: replayUncertain}
-			if sequence%logCursorCheckpoint == 0 {
+			if options.checkpointEveryLine || sequence == 1 || sequence%logCursorCheckpoint == 0 {
 				event.Cursor = nextCursor
 			}
 			if limited, err := emitLine(event, nextCursor); limited || err != nil {

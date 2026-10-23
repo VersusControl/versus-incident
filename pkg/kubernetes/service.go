@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math/big"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"sort"
@@ -30,6 +31,24 @@ const (
 	maxProjectionBytes = 64 << 10
 	maxResultBytes     = 1 << 20
 )
+
+var eventSourcePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,252}$`)
+
+func validEventSource(value string, qualified bool) bool {
+	if len(value) > 253 {
+		return false
+	}
+	parts := strings.Split(value, "/")
+	if len(parts) > 1 && (!qualified || len(parts) != 2) {
+		return false
+	}
+	for _, part := range parts {
+		if !eventSourcePattern.MatchString(part) {
+			return false
+		}
+	}
+	return true
+}
 
 // Scope isolates cached discovery and reads by organization, cluster, and credential.
 type Scope struct {
@@ -75,7 +94,7 @@ type ProjectedResource struct {
 	Namespace           string            `json:"namespace,omitempty"`
 	Name                string            `json:"name"`
 	UID                 string            `json:"uid,omitempty"`
-	CreatedAt           time.Time         `json:"created_at,omitempty"`
+	CreatedAt           time.Time         `json:"created_at,omitempty,omitzero"`
 	Labels              map[string]string `json:"labels,omitempty"`
 	Owners              []ObjectRef       `json:"owners,omitempty"`
 	Summary             map[string]any    `json:"summary,omitempty"`
@@ -98,7 +117,7 @@ type Condition struct {
 	Type         string    `json:"type"`
 	Status       string    `json:"status"`
 	Reason       string    `json:"reason,omitempty"`
-	TransitionAt time.Time `json:"last_transition_at,omitempty"`
+	TransitionAt time.Time `json:"last_transition_at,omitempty,omitzero"`
 }
 
 type ListOptions struct {
@@ -234,6 +253,7 @@ type Service struct {
 	identity               *credentialEpoch
 	configuredCredentialID string
 	logSources             func(string) []breaklogs.Source
+	usageHistory           *usageHistoryState
 }
 
 func (service *Service) SetLogStreamContext(ctx context.Context) {
@@ -263,6 +283,7 @@ func newService(parent context.Context, client *Client, scope Scope, discoveryTT
 	}
 	configured := scope.CredentialID
 	service := &Service{client: client, scope: scope, configuredCredentialID: configured, identity: &credentialEpoch{ctx: ctx, cancel: cancel}, ttl: discoveryTTL, mu: &sync.Mutex{}, cache: make(map[string]discoveryCacheEntry), discoveryCalls: map[string]*discoveryCall{}, indexes: kubeindex.NewRegistry(16, 60000), changes: newChangeStoreState(), traffic: &trafficProviderState{}}
+	service.usageHistory = newUsageHistoryState()
 	if client != nil && client.credentials != nil {
 		initialization, stop := context.WithTimeout(parent, 10*time.Second)
 		if service.validateCredential(initialization) == nil {
@@ -297,6 +318,7 @@ func (service *Service) Scoped(scope Scope) *Service {
 	}
 	scoped := &Service{client: service.client, scope: scope, identity: service.identity, configuredCredentialID: configured, readOrgs: readOrgs, ttl: service.ttl, mu: service.mu, cache: service.cache, discoveryCalls: service.discoveryCalls, scrubber: service.scrubber, indexes: service.indexes, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext, captureMode: service.captureMode, logSources: service.logSources}
 	scoped.issueAlertSink = service.issueAlertSink
+	scoped.usageHistory = service.usageHistory
 	if configured != service.configuredCredentialID && service.client != nil {
 		scoped.scope.CredentialID = scoped.captureCredentialID()
 	}
@@ -335,6 +357,7 @@ type ServiceRegistry struct {
 	closed         bool
 	closeDone      chan struct{}
 	resolveLocks   sync.Map
+	usageHistory   *usageHistoryState
 }
 
 func NewServiceRegistry(base *Service) *ServiceRegistry {
@@ -363,6 +386,13 @@ func NewClusterRegistry(multiple bool, entries []ClusterEntry) *ServiceRegistry 
 func NewClusterRegistryWithScope(multiple bool, entries []ClusterEntry, scope tenancy.OrgScope) *ServiceRegistry {
 	registry := &ServiceRegistry{multiple: multiple, entries: append([]ClusterEntry(nil), entries...), services: make(map[string]*Service), summaries: make(map[string]clusterSummaryCache), summarySlots: make(chan struct{}, 4), summaryTimeout: 5 * time.Second}
 	registry.bootScope = scope.Normalized()
+	registry.usageHistory = newUsageHistoryState()
+	for _, entry := range registry.entries {
+		if entry.Service != nil && entry.Service.usageHistory != nil {
+			registry.usageHistory = entry.Service.usageHistory
+			break
+		}
+	}
 	for index, entry := range registry.entries {
 		if entry.Info.ID == "" && entry.Service != nil {
 			registry.entries[index].Info.ID = entry.Service.Scope().ClusterID
@@ -371,6 +401,7 @@ func NewClusterRegistryWithScope(multiple bool, entries []ClusterEntry, scope te
 			registry.base = entry.Service
 		}
 		if entry.Service != nil {
+			entry.Service.usageHistory = registry.usageHistory
 			entry.Service.readOrgs = tenancy.TrustedOrgScope(registry.bootScope, entry.Service.scope.OrgID).OrgIDs()
 			registry.services[entry.Service.cacheKey()] = entry.Service
 		}
@@ -484,6 +515,7 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 		fresh.scrubber, fresh.captureMode, fresh.logStreamContext = previous.scrubber, previous.captureMode, previous.logStreamContext
 		fresh.issueAlertSink = previous.issueAlertSink
 		fresh.logSources = previous.logSources
+		fresh.usageHistory = previous.usageHistory
 		previous.changes.mu.Lock()
 		provider := previous.changes.provider
 		previous.changes.mu.Unlock()
@@ -1222,6 +1254,11 @@ func (service *Service) podLogs(ctx context.Context, namespace, pod, container s
 	if container != "" {
 		query.Set("container", container)
 	}
+	release, err := acquireLogRead()
+	if err != nil {
+		return PodLogs{}, err
+	}
+	defer release()
 	payload, truncated, err := service.client.getBounded(ctx, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/pods/"+url.PathEscape(pod)+"/log?"+query.Encode(), "*/*", int64(byteLimit))
 	if err != nil {
 		return PodLogs{}, err
@@ -1491,6 +1528,21 @@ func safeSummary(kind string, raw map[string]any, scrubber Scrubber) map[string]
 		summary["observed_generation"] = safeScalar(observedGeneration)
 	}
 	if kind == "Event" {
+		source, _ := raw["source"].(map[string]any)
+		for _, field := range []struct{ key, legacy, current string }{
+			{"source_component", "component", "reportingController"},
+			{"source_host", "host", "reportingInstance"},
+		} {
+			value := stringValue(source[field.legacy])
+			qualified := false
+			if value == "" {
+				value = stringValue(raw[field.current])
+				qualified = field.key == "source_component"
+			}
+			if validEventSource(value, qualified) {
+				summary[field.key] = value
+			}
+		}
 		if at := stringValue(raw["eventTime"]); at != "" {
 			summary["firstTimestamp"] = boundString(at)
 			summary["lastTimestamp"] = boundString(at)
@@ -1527,6 +1579,14 @@ func safeSummary(kind string, raw map[string]any, scrubber Scrubber) map[string]
 		summary["node"] = boundString(node)
 	}
 	if kind == "Pod" {
+		projectLogContainerSummary(metadata, spec, status, summary)
+		if address, err := netip.ParseAddr(stringValue(status["podIP"])); err == nil && address.Zone() == "" {
+			summary["pod_ip"] = address.String()
+		}
+		switch qos := stringValue(status["qosClass"]); qos {
+		case "Guaranteed", "Burstable", "BestEffort":
+			summary["qos_class"] = qos
+		}
 		resourceSummary(summary, mapSlice(spec["containers"]))
 		logContainers := make([]map[string]string, 0)
 		for _, group := range []struct{ field, kind string }{{"containers", "regular"}, {"initContainers", "init"}, {"ephemeralContainers", "ephemeral"}} {

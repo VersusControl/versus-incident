@@ -119,13 +119,28 @@ func TestSnapshotsAreDefensiveCopiesAndBounded(t *testing.T) {
 	index := New(1)
 	input := pod("uid-a", "a")
 	input.Labels = map[string]string{"app": "checkout"}
+	started := time.Now().UTC()
+	input.LogContainers = []ContainerState{{Name: "app", Running: true, StartedAt: started}}
 	if err := index.Ingest("Pod", []Record{input}, true, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	snapshot := index.Snapshot()
 	snapshot.Records[0].Labels["app"] = "changed"
+	snapshot.Records[0].LogContainers[0].Name = "changed"
+	input.LogContainers[0].StartedAt = time.Time{}
 	if index.Snapshot().Records[0].Labels["app"] != "checkout" {
 		t.Fatal("snapshot mutation changed index state")
+	}
+	retained := index.Snapshot().Records[0].LogContainers[0]
+	if retained.Name != "app" || !retained.StartedAt.Equal(started) {
+		t.Fatal("log container snapshots share caller memory")
+	}
+	invalid := pod("uid-overflow", "overflow")
+	for i := 0; i < 65; i++ {
+		invalid.LogContainers = append(invalid.LogContainers, ContainerState{Name: "app-" + strconv.Itoa(i)})
+	}
+	if err := index.Ingest("Pod", []Record{invalid}, true, time.Now()); !errors.Is(err, ErrInvalidRecord) {
+		t.Fatal("unbounded log container catalog accepted", err)
 	}
 	if err := index.Ingest("Pod", []Record{pod("uid-b", "b"), pod("uid-c", "c")}, false, time.Time{}); !errors.Is(err, ErrInvalidRecord) {
 		t.Fatalf("oversized input error=%v", err)

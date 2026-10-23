@@ -74,10 +74,12 @@ type WorkloadContainer struct {
 // WorkloadPod captures status and placement for one related pod.
 type WorkloadPod struct {
 	Name         string    `json:"name"`
+	UID          string    `json:"uid,omitempty"`
+	StartedAt    time.Time `json:"started_at,omitempty,omitzero"`
 	Phase        string    `json:"phase,omitempty"`
 	Node         string    `json:"node,omitempty"`
 	RestartCount int64     `json:"restart_count"`
-	CreatedAt    time.Time `json:"created_at,omitempty"`
+	CreatedAt    time.Time `json:"created_at,omitempty,omitzero"`
 }
 
 // WorkloadDetail is a dedicated bounded SRE view, not a generic resource projection.
@@ -849,6 +851,14 @@ func (service *Service) GetWorkload(ctx context.Context, namespace, kind, name s
 	for _, pod := range pods {
 		result.Pods = append(result.Pods, WorkloadPod{Name: pod.Name, Phase: summaryString(pod.Summary, "phase"), Node: summaryString(pod.Summary, "node"), RestartCount: summaryIntValue(pod.Summary, "restart_count")})
 		result.Pods[len(result.Pods)-1].CreatedAt = resourceTime(pod.Summary)
+		result.Pods[len(result.Pods)-1].UID = pod.UID
+		main := summaryString(pod.Summary, "main_container")
+		for _, container := range indexedLogContainers(pod.Summary["log_container_states"]) {
+			if container.Name == main && container.Running {
+				result.Pods[len(result.Pods)-1].StartedAt = container.StartedAt
+				break
+			}
+		}
 		if node := summaryString(pod.Summary, "node"); node != "" {
 			result.Nodes = append(result.Nodes, node)
 		}

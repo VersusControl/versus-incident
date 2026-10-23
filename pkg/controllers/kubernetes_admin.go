@@ -85,6 +85,8 @@ func (controller *KubernetesAdminController) Register(router fiber.Router) {
 	group.Get("/pods/:namespace/:name/logs", controller.logs)
 	group.Get("/pods/:namespace/:name/logs/stream", controller.podLogStream)
 	group.Get("/usage", controller.usage)
+	group.Get("/usage-history", controller.usageHistory)
+	group.Get("/workloads/:kind/:name/logs/stream", controller.workloadLogStream)
 }
 
 func (controller *KubernetesAdminController) requireInfrastructureView(ctx *fiber.Ctx) error {
@@ -499,6 +501,10 @@ func writeKubernetes(ctx *fiber.Ctx, value any, err error) error {
 		status = fiber.StatusRequestEntityTooLarge
 	case errors.Is(err, kubernetes.ErrIndexStreamBusy):
 		status = fiber.StatusTooManyRequests
+	case errors.Is(err, kubernetes.ErrLogStreamBusy):
+		status = fiber.StatusTooManyRequests
+		// A bounded backoff hint, not a guarantee that another viewer has closed.
+		ctx.Set(fiber.HeaderRetryAfter, "2")
 	case errors.Is(err, kubernetes.ErrClusterUnavailable):
 		status = fiber.StatusServiceUnavailable
 	case errors.Is(err, kubernetes.ErrGraphIncomplete):

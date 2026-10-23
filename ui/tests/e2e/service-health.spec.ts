@@ -1,8 +1,8 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { captureDir } from "./support/capture";
 
-const screenshotDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "screenshots", "service-health");
+const screenshotDir = captureDir();
 const fixedTime = "2026-09-10T12:00:00Z";
 
 type Snapshot = Record<string, unknown>;

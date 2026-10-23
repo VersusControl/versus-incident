@@ -6,12 +6,13 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { openApp } from "./helpers";
+import { captureDir, capturePath, harnessRuntimeStateDir } from "./support/capture";
 import type { KubernetesAgentSettings, KubernetesBreakLogPage, KubernetesClusters, KubernetesCrashEvent, KubernetesCrashPage, KubernetesGraph, KubernetesIssue, KubernetesOverview, KubernetesResourcePage, KubernetesTopPage, KubernetesTraffic, KubernetesUsage, RbacMe, SSOSession } from "../../src/lib/api";
 
 type StreamCounter = { path: string; container: string; previous: boolean; follow: boolean; requests: number; active: number; cancelled: number; completed: number; disconnected: number; unavailable: number; chunks: number; since_time?: string };
 
 const streamCounters = (cluster?: string) => new Promise<StreamCounter[]>((resolve, reject) => {
-  const state = process.env.HARNESS_STATE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/.state");
+  const state = harnessRuntimeStateDir();
   const port = Number(process.env.HARNESS_FAKEKUBE_PORT || 19443);
   const observerPort = cluster === "west" ? Number(process.env.HARNESS_FAKEKUBE_SECOND_PORT || port + 1) : port;
   const ca = path.join(state, cluster ? `fakekube-multi/${cluster}/ca.crt` : "fakekube/ca.crt");
@@ -53,7 +54,7 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
 
     test.beforeAll(async () => {
       const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
-      const state = process.env.HARNESS_STATE_DIR || path.join(root, "plans/harness-run/.state");
+      const state = harnessRuntimeStateDir();
       contract = JSON.parse(fs.readFileSync(path.join(state, "licensed-kubernetes.json"), "utf8"));
       expect(contract.configured, "a completed real Enterprise bootstrap is required").toBe(true);
       expect(contract.org).toBeTruthy();
@@ -203,6 +204,7 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
               await expect.poll(async () => (await current())?.active).toBe(1);
               const opened = (await current())!;
               expect(opened.requests).toBeGreaterThan(baseline?.requests ?? 0);
+              if (viewport.name === "mobile") await logs.getByRole("button", { name: "More", exact: true }).click();
               await logs.getByLabel("Pause logs").click();
               await expect(logs.getByLabel("Log connection status")).toHaveText("paused");
               await expectStreamCancelled(opened, current);
@@ -466,7 +468,7 @@ async function expectNoTopologyPagination(panel: Locator) {
   await expect(panel.getByText(/Bounded graph omitted|projected index is partial|Next page/i)).toHaveCount(0);
 }
 
-const screenshotDir = process.env.E2E_KUBERNETES_CAPTURE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "screenshots", "kubernetes", "fakekube");
+const screenshotDir = process.env.E2E_KUBERNETES_CAPTURE_DIR || captureDir();
 
 async function fitOverviewCapture(page: Page) {
   const measurements = [];
@@ -535,7 +537,7 @@ test.beforeEach(async ({ request }, testInfo) => {
   if (!timelineCapture && !trafficCapture) return;
   test.setTimeout(240_000);
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
-  const state = process.env.HARNESS_STATE_DIR || path.join(root, "plans/harness-run/.state");
+  const state = harnessRuntimeStateDir();
   const fakePort = Number(process.env.HARNESS_FAKEKUBE_PORT || 19443);
   const prometheusPort = Number(process.env.HARNESS_PROMETHEUS_PORT || 19090);
   const pushgatewayPort = Number(process.env.HARNESS_PUSHGATEWAY_PORT || 19091);
@@ -884,6 +886,33 @@ test.describe("Kubernetes documentation consumer", () => {
     { name: "desktop", width: 1440, height: 1000 },
     { name: "mobile", width: 390, height: 844 },
   ]) {
+    test(`loads kind workload live log documentation ${viewport.name}`, async ({ page }) => {
+      const target = new URL(docsURL!);
+      expect(["localhost", "127.0.0.1", "[::1]"]).toContain(target.hostname);
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto(`${target.origin}/#/agent/connectors/kubernetes`);
+      const article = page.locator(".markdown-section");
+      await expect(article.getByRole("heading", { name: "Live logs", exact: true })).toBeVisible();
+      for (const kind of ["deployment", "statefulset"]) {
+        const filename = `kubernetes-${kind}-live-logs.png`;
+        const image = article.locator(`img[src$="${filename}"]`);
+        await image.scrollIntoViewIfNeeded();
+        await expect(image).toBeVisible();
+        await expect.poll(() => image.evaluate((element) => {
+          const bitmap = element as HTMLImageElement;
+          const bounds = bitmap.getBoundingClientRect();
+          return bitmap.complete && bitmap.naturalWidth === 1440 && bounds.left >= 0 && bounds.right <= innerWidth;
+        })).toBe(true);
+        const response = await page.request.get(new URL((await image.getAttribute("src"))!, page.url()).href);
+        expect(response.status()).toBe(200);
+        expect(response.headers()["content-type"]).toContain("image/png");
+        const published = fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../src/docs/images", filename));
+        expect(createHash("sha256").update(await response.body()).digest("hex")).toBe(createHash("sha256").update(published).digest("hex"));
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        await page.screenshot({ path: capturePath(`kubernetes-${kind}-live-logs-docs`, viewport.width, "light", "consumer"), animations: "disabled" });
+      }
+    });
+
     test(`verifies refreshed issue-alert documentation assets ${viewport.name}`, async ({ page }) => {
       const target = new URL(docsURL!);
       expect(["localhost", "127.0.0.1", "[::1]"]).toContain(target.hostname);
@@ -1328,6 +1357,7 @@ test.describe("Live Kubernetes explorer captures", () => {
       await expect(workloadsTab).toHaveAttribute("aria-selected", "true");
       await page.getByLabel("Workload namespace").fill("payments");
       await page.getByLabel("Resource name").fill("checkout-api-0");
+      const streamResponse = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/logs/stream"));
       await page.getByRole("button", { name: "Select Pod payments/checkout-api-0", exact: true }).click();
       const detail = page.getByRole("dialog", { name: "Details panel" });
       await expect(detail).toBeVisible();
@@ -1336,7 +1366,6 @@ test.describe("Live Kubernetes explorer captures", () => {
       await expect(detail.getByText("No object-scoped events were returned.", { exact: true })).toBeVisible();
       fs.mkdirSync(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `drawer-events-${viewport.name}.png`), fullPage: true, animations: "disabled" });
-      const streamResponse = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/logs/stream"));
       await detail.getByRole("tab", { name: "Logs", exact: true }).click();
       const streamed = await streamResponse;
       expect(streamed.status()).toBe(200);
@@ -1346,6 +1375,7 @@ test.describe("Live Kubernetes explorer captures", () => {
       await expect(detail.getByLabel("Log connection status")).toHaveText("live");
       await expect(output).toContainText("REDACTED");
       await expect(detail).not.toContainText("super-secret-value");
+      if (viewport.name === "mobile") await detail.getByRole("button", { name: "More", exact: true }).click();
       await detail.getByLabel("Pause logs").click();
       const timestampPattern = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g;
       for (const enabled of [true, false, true]) {
@@ -1925,14 +1955,15 @@ test.describe("Kubernetes repaired snapshot delta", () => {
       const response = await route.fetch();
       await route.fulfill({ response, json: { ...await response.json(), events: [{ resource_id: "core~v1~events", kind: "Event", namespace: "payments", name: "checkout-backoff", uid: "synthetic-event", summary: { reason: "BackOff", message: "Synthetic checkout container restart delayed", count: 9, lastTimestamp: "2026-10-06T12:00:00Z" } }] } });
     });
-    await openApp(page, "/agent/kubernetes?view=overview");
+    await openApp(page, "/agent/kubernetes?view=resources");
     await page.getByRole("button", { name: "Select Pod payments/checkout-api-0", exact: true }).click();
     const detail = page.getByRole("dialog", { name: "Details panel", exact: true });
     await detail.getByRole("tab", { name: "Events", exact: true }).click();
     const events = detail.getByRole("region", { name: "Object-scoped events", exact: true });
     await expect(events.getByRole("heading", { name: "BackOff", exact: true })).toBeVisible();
     await expect(events).toContainText("Synthetic checkout container restart delayed");
-    await expect(events).toContainText("Count 9; 2026-10-06T12:00:00Z");
+    await expect(events).toContainText("9");
+    await expect(events).toContainText("2026-10-06T12:00:00Z");
     await expect(detail.getByText("No object-scoped events were returned.", { exact: true })).toHaveCount(0);
     fs.mkdirSync(screenshotDir, { recursive: true });
     await page.screenshot({ path: path.join(screenshotDir, "delta-drawer-populated-desktop.png"), fullPage: true, animations: "disabled" });
@@ -2023,7 +2054,7 @@ test.describe("Kubernetes repaired snapshot delta", () => {
 test.describe("Live Pod stream acceptance", () => {
   test.skip(process.env.E2E_KUBERNETES_BACKEND !== "fake", "requires the real harness fake Kubernetes backend");
   const logPath = "/api/v1/namespaces/payments/pods/checkout-api-0/log";
-  const state = process.env.HARNESS_STATE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/.state");
+  const state = harnessRuntimeStateDir();
   const ca = path.join(state, "fakekube/ca.crt");
   const counters = () => streamCounters();
   const current = async (container = "api", previous = false) => (await counters()).find((counter) => counter.path === logPath && counter.container === container && counter.previous === previous && counter.follow === !previous);
@@ -2061,6 +2092,16 @@ test.describe("Live Pod stream acceptance", () => {
       const output = detail.getByLabel("Pod log output");
       const lines = output.locator("[data-log-key]");
       await expect(output).toContainText("REDACTED");
+      await expect.poll(() => lines.count()).toBeGreaterThanOrEqual(1);
+      expect(await lines.count()).toBeLessThan(32);
+      const firstLinePause = await current();
+      expect(firstLinePause?.active).toBe(1);
+      if (viewport.name === "mobile") await detail.getByRole("button", { name: "More", exact: true }).click();
+      await detail.getByLabel("Pause logs").click();
+      await expect(detail.getByLabel("Log connection status")).toHaveText("paused");
+      await expectStreamCancelled(firstLinePause!, () => current());
+      await detail.getByLabel("Resume logs").click();
+      await expect.poll(() => requests.at(-1)?.searchParams.has("cursor")).toBe(true);
       await expect(output).toContainText("fakekube follow line 30");
       await expect(output).toContainText("[oversized log line omitted]");
       await expect(output).not.toContainText(rawSecrets);
@@ -2110,22 +2151,22 @@ test.describe("Live Pod stream acceptance", () => {
       await expect(output).toHaveText("No log lines match this filter.");
       await detail.getByLabel("Log filter").fill("");
       await detail.getByLabel("Follow", { exact: true }).check();
-      await detail.getByLabel("Scroll logs to bottom").click();
+      await detail.getByLabel("Jump to latest").click();
       await expect.poll(() => output.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThanOrEqual(48);
       await output.evaluate((element) => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll")); });
       const scrolledKeys = await lines.count();
       await expect.poll(() => lines.count()).toBeGreaterThan(scrolledKeys + 3);
       expect(await output.evaluate((element) => element.scrollTop)).toBeLessThanOrEqual(1);
-      await detail.getByLabel("Scroll logs to bottom").click();
+      await detail.getByLabel("Jump to latest").click();
       const beforeChange = (await current())!.cancelled;
       await detail.getByLabel("Log since seconds").selectOption("60");
       await expect.poll(() => requests.at(-1)?.searchParams.get("since_seconds")).toBe("60");
       await expect.poll(async () => (await current())!.cancelled).toBeGreaterThan(beforeChange);
-      await detail.getByLabel("Log tail lines").selectOption("100");
-      await expect.poll(() => requests.at(-1)?.searchParams.get("tail_lines")).toBe("100");
+      await detail.getByLabel("Log since seconds").selectOption("86401");
+      await expect.poll(() => requests.at(-1)?.searchParams.get("tail_lines")).toBe("5000");
       const containers = await detail.getByLabel("Log container").locator("option").evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value));
       expect(containers).toEqual(["api", "sidecar", "setup", "debug"]);
-      await expect(detail.getByLabel("Log container").locator("option")).toHaveText(["api (regular)", "sidecar (regular)", "setup (init)", "debug (ephemeral)"]);
+      await expect(detail.getByLabel("Log container").locator("option")).toHaveText(["api", "sidecar", "init:setup", "debug (ephemeral)"]);
       await expect.poll(async () => (await current())?.active).toBe(1);
       const switched = (await current())!;
       const alternative = "sidecar";
@@ -2171,7 +2212,8 @@ test.describe("Live Pod stream acceptance", () => {
         const previousRequestStart = requests.length;
         await detail.getByLabel("Previous container logs").check();
         await expect(detail.getByLabel("Log connection status")).toHaveText("error");
-        await expect(detail.getByRole("alert")).toContainText("previous_unavailable Previous container logs are unavailable. Select current container logs.");
+        await expect(output).toContainText("previous_unavailable Previous container logs are unavailable. Select current container logs.");
+        await expect(output).not.toContainText("resumed after reconnect at");
         const previousRequests = requests.slice(previousRequestStart);
         expect(previousRequests).toHaveLength(1);
         expect(previousRequests[0].searchParams.get("container")).toBe(container);
@@ -2230,14 +2272,18 @@ test.describe("Live Pod stream acceptance", () => {
       const detail = page.getByRole("dialog", { name: "Details panel" });
       const tabs = detail.getByRole("tablist", { name: "Resource detail views" });
       await expect(tabs.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
-      await expect(tabs.getByRole("tab", { name: /^(Logs|Actions)$/ })).toHaveCount(0);
+      await expect(tabs.getByRole("tab", { name: /^(Actions|Metrics|Diagnosis)$/ })).toHaveCount(0);
+      await expect(tabs.getByRole("tab")).toHaveText(["Overview", "Logs", "Events", "YAML", "Related", "Timeline"]);
       await expect(page).not.toHaveURL(/tab=actions/);
       await tabs.getByRole("tab", { name: "Events", exact: true }).focus();
       await page.keyboard.press("ArrowRight");
       await expect(tabs.getByRole("tab", { name: "YAML", exact: true })).toBeFocused();
-      await page.evaluate(() => { window.history.pushState(null, "", "/agent/kubernetes?r=apps~v1~deployments/payments/checkout-api&tab=logs"); window.dispatchEvent(new PopStateEvent("popstate")); });
+      await page.evaluate(() => { window.history.pushState(null, "", "/agent/kubernetes?r=apps~v1~deployments/payments/checkout-api&tab=metrics"); window.dispatchEvent(new PopStateEvent("popstate")); });
       await expect(tabs.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
-      await expect(page).not.toHaveURL(/tab=logs/);
+      await expect(page).not.toHaveURL(/tab=metrics/);
+      await page.evaluate(() => { window.history.pushState(null, "", "/agent/kubernetes?r=apps~v1~deployments/payments/checkout-api&tab=logs"); window.dispatchEvent(new PopStateEvent("popstate")); });
+      await expect(tabs.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
+      await expect(page).toHaveURL(/tab=logs/);
       await page.keyboard.press("Escape");
       await expect(detail).toHaveCount(0);
       await page.getByRole("tab", { name: "Topology", exact: true }).click();
@@ -2438,8 +2484,8 @@ test.describe("Pod log streaming fixtures", () => {
       roots[0].changes = linkedHistory.slice(0, 3).map((change) => ({ change, relation: "used_by", lead_seconds: 120 }));
       roots[0].more_changes = 21;
     }
-    const pod = { resource_id: "core~v1~pods", kind: "Pod", namespace: "payments", name: "checkout-api-0", summary: { phase: "Running", log_containers: [{ name: "app", type: "regular" }, { name: "setup", type: "init" }, { name: "debug", type: "ephemeral" }] } };
-    const deployment = { resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "payments", name: "checkout-api", summary: { ready_replicas: 1, desired_replicas: 1 } };
+    const pod = { resource_id: "core~v1~pods", kind: "Pod", namespace: "payments", name: "checkout-api-0", uid: "pod-checkout-api-0", summary: { phase: "Running", log_containers: [{ name: "app", type: "regular" }, { name: "setup", type: "init" }, { name: "debug", type: "ephemeral" }] } };
+    const deployment = { resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "payments", name: "checkout-api", uid: "deploy-checkout-api", summary: { ready_replicas: 1, desired_replicas: 1 } };
     await page.addInitScript((counts) => {
       const signals: Array<{ url: string; aborted: boolean }> = [];
       Object.defineProperty(window, "podStreamSignals", { value: signals });
@@ -2488,6 +2534,7 @@ test.describe("Pod log streaming fixtures", () => {
         if (pathname === "/api/admin/kubernetes/index/status") return route.fulfill({ json: sync });
       }
       if (pathname.endsWith("/logs/stream")) {
+        if (pathname.includes("/workloads/")) return route.fulfill({ contentType: "text/event-stream", body: `event: sources\ndata: ${JSON.stringify({ workload_uid: "checkout-uid", pods: [{ uid: "pod-live", name: "checkout-7d9f8c-p9m1z", containers: ["api"], init_containers: [], main_container: "api", admitted: true }], truncated: false })}\n\nevent: line\ndata: ${JSON.stringify({ workload_uid: "checkout-uid", pod_uid: "pod-live", pod: "checkout-7d9f8c-p9m1z", namespace: "shop", container: "api", incarnation: "1", source_id: "src-live", text: "live workload snapshot line", timestamp: "2026-10-07T12:00:00Z", sequence: 1, ordinal: 1 })}\n\nevent: end\ndata: {"reason":"complete"}\n\n` });
         if (url.searchParams.get("previous") === "true") return route.fulfill({ contentType: "text/event-stream", body: 'event: error\ndata: {"code":"previous_unavailable","message":"Previous logs unavailable"}\n\nevent: end\ndata: {"reason":"error"}\n\n' });
         const prefix = url.searchParams.get("timestamps") === "false" ? "" : "2026-10-07T12:00:00Z ";
         const lines = Array.from({ length: 300 }, (_, index) => `event: line\ndata: ${JSON.stringify({ text: prefix + (index % 2 ? "repeated token=[REDACTED] a.b" : "repeated axb"), container: url.searchParams.get("container") || "app", timestamp: "2026-10-07T12:00:00Z", sequence: index + 1, ordinal: index + 1, ...((index + 1) % 32 === 0 ? { cursor: `cursor-${index + 1}` } : {}) })}\n\n`).join("");
@@ -2556,8 +2603,8 @@ test.describe("Pod log streaming fixtures", () => {
       if (pathname === "/api/admin/kubernetes/workloads") return route.fulfill({ json: { items: [pod, deployment], counts: { Pod: 1, Deployment: 1 }, truncated: false } });
       if (overviewRefresh && pathname === "/api/admin/kubernetes/changes") return route.fulfill({ json: { items: [{ id: "synthetic-creation", cluster: "fixture", kind: "Pod", namespace: pod.namespace, name: pod.name, type: "created", at: changeAt }], gaps: [], sync: { state: "ready", partial: false, age_s: 0 } } });
       if (pathname.endsWith("/describe")) {
-        if (pathname.includes("checkout-removed-pod-0")) return route.fulfill({ json: { resource: { resource_id: "core~v1~pods", kind: "Pod", namespace: "shop", name: "checkout-removed-pod-0", summary: { phase: "Failed" } }, events: [] } });
-        if (pathname.includes("/deployments/checkout/")) return route.fulfill({ json: { resource: { resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "checkout", summary: { ready_replicas: 0, desired_replicas: 7 } }, events: [] } });
+        if (pathname.includes("checkout-removed-pod-0")) return route.fulfill({ json: { resource: { resource_id: "core~v1~pods", kind: "Pod", namespace: "shop", name: "checkout-removed-pod-0", uid: "removed-pod-uid-0", summary: { phase: "Failed" } }, events: [] } });
+        if (pathname.includes("/deployments/checkout/")) return route.fulfill({ json: { resource: { resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout-uid", summary: { ready_replicas: 0, desired_replicas: 7 } }, events: [] } });
         return route.fulfill({ json: { resource: pathname.includes("deployments") ? deployment : pod, events: [] } });
       }
       if (pathname.startsWith("/api/admin/kubernetes/workloads/") && pathname.endsWith("/logs")) return route.fulfill({ json: { lines: [{ at: at(1), pod: "checkout-7d9f8c-p9m1z", container: "api", text: "live workload snapshot line" }], truncated: false } });
@@ -2689,13 +2736,11 @@ test.describe("Pod log streaming fixtures", () => {
       }
       await logs.getByRole("link", { name: "Link a source in Agent tab" }).click();
       const agent = page.getByRole("region", { name: "Kubernetes Agent" });
-      await expect(agent.getByText("Preview", { exact: true })).toBeVisible();
+      await expect(agent.getByText("Not available yet.", { exact: true })).toBeVisible();
       await expect(agent.getByRole("switch", { name: "Logs learning" })).toBeChecked();
-      await agent.getByRole("button", { name: "Edit scope" }).click();
-      const scopeModal = page.getByRole("dialog", { name: "Log learning scope" });
-      await scopeModal.getByLabel("Include namespaces").fill("shop, payments");
-      await scopeModal.getByRole("button", { name: "Apply scope" }).click();
-      await expect(agent).toContainText("Include: shop, payments; exclude: sandbox");
+      await expect(agent.getByRole("switch", { name: "Logs learning" })).toBeDisabled();
+      await expect(agent.getByRole("button", { name: "Edit scope" })).toBeDisabled();
+      await expect(agent).toContainText("All namespaces; exclude: sandbox");
       await agent.scrollIntoViewIfNeeded();
       await captureBreakState(page, `break-agent-${viewport.name}.png`, "dark");
       const picker = page.getByLabel("Configured log sources");
@@ -2842,7 +2887,7 @@ test.describe("Pod log streaming fixtures", () => {
       await captureBreakState(page, `break-logs-light-${viewport.name}.png`, "light");
       await logs.getByRole("link", { name: "Link a source in Agent tab" }).click();
       const agent = page.getByRole("region", { name: "Kubernetes Agent" });
-      await expect(agent.getByText("Preview", { exact: true })).toBeVisible();
+      await expect(agent.getByText("Not available yet.", { exact: true })).toBeVisible();
       await agent.scrollIntoViewIfNeeded();
       await captureBreakState(page, `break-agent-light-${viewport.name}.png`, "light");
       await agent.getByRole("button", { name: "loki-prod" }).click();
@@ -2861,9 +2906,10 @@ test.describe("Pod log streaming fixtures", () => {
       await page.getByRole("tab", { name: "Timeline", exact: true }).click();
       await page.getByRole("tab", { name: "Agent", exact: true }).click();
       await expect(agent.getByText("Read only. An administrator can change these settings.", { exact: true })).toBeVisible();
-      await expect(agent.getByRole("switch")).toHaveCount(0);
+      await expect(agent.getByRole("switch", { name: "Logs learning" })).toBeDisabled();
       await expect(agent.getByRole("textbox")).toHaveCount(0);
-      await expect(agent.getByRole("button", { name: /^(Edit scope|Test link|Save|Use this source|Save settings)$/ })).toHaveCount(0);
+      await expect(agent.getByRole("button", { name: "Edit scope" })).toBeDisabled();
+      await expect(agent.getByRole("button", { name: /^(Test link|Save|Use this source|Save settings)$/ })).toHaveCount(0);
       await agent.scrollIntoViewIfNeeded();
       await captureBreakState(page, `break-agent-readonly-${viewport.name}.png`, "light");
 
@@ -3534,7 +3580,7 @@ test.describe("Pod log streaming fixtures", () => {
       await page.keyboard.press("Enter");
       const details = page.getByRole("region", { name: "Timeline event details", exact: true });
       await expect(details).toContainText("removed-pod-49");
-      await expect(details).toContainText("41 lifetime restarts");
+      await expect(details).toContainText("exit 137");
       await page.keyboard.press("Escape");
       await expect(marker).toBeFocused();
       const disclosure = list.getByRole("listitem").nth(1).locator("summary");
@@ -4244,11 +4290,12 @@ test.describe("Pod log streaming fixtures", () => {
       const output = detail.getByLabel("Pod log output");
       await expect(output).toContainText("[REDACTED]");
       await expect(detail.getByLabel("Log connection status")).toHaveText("ended");
-      await expect(detail.getByText("300 / 300 lines", { exact: true })).toBeVisible();
-      await expect(detail.getByLabel("Log container").locator("option")).toHaveText(["app (regular)", "setup (init)", "debug (ephemeral)"]);
+      await expect(detail.getByText("300 / 300 retained lines", { exact: true })).toBeVisible();
+      await expect(detail.getByLabel("Log container").locator("option")).toHaveText(["app", "init:setup", "debug (ephemeral)"]);
+      if (viewport.name === "mobile") await detail.getByRole("button", { name: "More", exact: true }).click();
       await detail.getByLabel("Log filter").fill("a.b");
       await expect(output).not.toContainText("axb");
-      await expect(detail.getByText("150 / 300 lines", { exact: true })).toBeVisible();
+      await expect(detail.getByText("150 / 300 retained lines", { exact: true })).toBeVisible();
       for (const enabled of [true, false, true]) {
         await detail.getByLabel("Timestamps").setChecked(enabled);
         const rendered = (await output.locator("[data-log-key]").allTextContents()).map((line) => line.replace(/\n$/, "")).join("\n");
@@ -4275,8 +4322,10 @@ test.describe("Pod log streaming fixtures", () => {
       expect(resumeQuery.has("tail_lines")).toBe(false);
       await detail.getByLabel("Log container").selectOption("setup");
       await expect.poll(() => page.evaluate(() => (window as unknown as { podStreamSignals: Array<{ url: string }> }).podStreamSignals.at(-1)?.url)).toContain("container=setup");
+      await detail.getByLabel("Log filter").fill("");
       await detail.getByLabel("Previous container logs").check();
-      await expect(detail.getByRole("alert")).toContainText("no previous container instance");
+      await expect(output).toContainText("previous_unavailable Previous logs unavailable");
+      await expect(output).not.toContainText("resumed after reconnect at");
       expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
       fs.mkdirSync(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `pod-stream-controls-${viewport.name}.png`), fullPage: true, animations: "disabled" });
@@ -4293,7 +4342,7 @@ test.describe("Pod log streaming fixtures", () => {
       await expect(tabs.getByRole("tab", { name: "Actions", exact: true })).toHaveCount(0);
       await expect(tabs.getByRole("tab", { name: "Logs", exact: true })).toHaveCount(1);
       await expect(page).not.toHaveURL(/tab=actions/);
-      await tabs.getByRole("tab", { name: "Events", exact: true }).focus();
+      await tabs.getByRole("tab", { name: "Overview", exact: true }).focus();
       await page.keyboard.press("ArrowRight");
       await expect(tabs.getByRole("tab", { name: "Logs", exact: true })).toBeFocused();
       await page.evaluate(() => { window.history.pushState(null, "", "/agent/kubernetes?r=apps~v1~deployments/payments/checkout-api&tab=logs"); window.dispatchEvent(new PopStateEvent("popstate")); });
@@ -4353,8 +4402,8 @@ test.describe("Kubernetes overview", () => {
     const resourceDetail = page.getByRole("dialog", { name: "Details panel" });
     await expect(resourceDetail).toBeVisible();
     await expect(resourceDetail.getByRole("heading", { name: "Pod payments/checkout-api-0" })).toBeVisible();
-    await expect(resourceDetail.getByText("restart count", { exact: true }).locator("..")).toContainText("9");
-    await expect(resourceDetail.getByText("Events", { exact: true }).and(resourceDetail.locator(":not([role=tab])")).locator("..")).toHaveText("Events0");
+    await expect(resourceDetail.getByText(/^\d+ restarts$/)).toBeVisible();
+    await expect(resourceDetail.getByRole("heading", { name: "Restarts", exact: true })).toBeVisible();
     await expect(page.getByText(/secret-token/)).toHaveCount(0);
 
     const logs = await page.evaluate(async () => {
@@ -4614,7 +4663,7 @@ test.describe("Live Break timeline logs and Agent tab acceptance", () => {
   let windowTo = "";
 
   test.beforeAll(async () => {
-    const state = process.env.HARNESS_STATE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/.state");
+    const state = harnessRuntimeStateDir();
     const fakePort = Number(process.env.HARNESS_FAKEKUBE_PORT || 19443);
     const lokiPort = Number(process.env.HARNESS_LOKI_PORT || 13100);
     const baseURL = process.env.E2E_BASE_URL || "http://127.0.0.1:18080";
@@ -4733,7 +4782,7 @@ test.describe("Live Break timeline logs and Agent tab acceptance", () => {
 
       await logs.getByRole("link", { name: "Link a source in Agent tab" }).click();
       const agent = page.getByRole("region", { name: "Kubernetes Agent" });
-      await expect(agent.getByText("Preview", { exact: true })).toBeVisible();
+      await expect(agent.getByText("Not available yet.", { exact: true })).toBeVisible();
       await agent.getByRole("button", { name: "None" }).click();
       const picker = page.getByLabel("Configured log sources");
       await expect(picker).toBeVisible();
@@ -4784,11 +4833,11 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     await page.emulateMedia({ colorScheme: "dark" });
     await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
 
-    const state = process.env.HARNESS_STATE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/.state");
+    const state = harnessRuntimeStateDir();
     const fakePort = Number(process.env.HARNESS_FAKEKUBE_PORT || 28643);
     const lokiPort = Number(process.env.HARNESS_LOKI_PORT || 28610);
     const receiverPort = Number(process.env.HARNESS_RECEIVER_HTTP_PORT || 28690);
-    const haScript = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/tests/kubernetes-ha.sh");
+    const haScript = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/tests/kubernetes/kubernetes-ha.sh");
     const ca = fs.readFileSync(path.join(state, "fakekube/ca.crt"));
 
     const upstream = (endpoint: string, body?: unknown) => new Promise<unknown>((resolve, reject) => {
@@ -4937,13 +4986,8 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     // 3. Edit Agent tab settings in UI and verify saving Agent settings does NOT clobber issue alerts.
     await page.getByRole("tab", { name: "Agent", exact: true }).click();
     const agentRegion = page.getByRole("region", { name: "Kubernetes Agent", exact: true });
-    await expect(agentRegion.getByText("Preview", { exact: true })).toBeVisible();
-    await agentRegion.getByRole("button", { name: "Edit scope", exact: true }).click();
-    const scopeDialog = page.getByRole("dialog", { name: "Log learning scope", exact: true });
-    await scopeDialog.getByLabel("Include namespaces").fill(`${ns}, shop`);
-    await scopeDialog.getByRole("button", { name: "Apply scope", exact: true }).click();
-    await agentRegion.getByRole("button", { name: "Save settings", exact: true }).click();
-    await expect(agentRegion.getByText("Agent settings saved.", { exact: true })).toBeVisible();
+    await expect(agentRegion.getByText("Not available yet.", { exact: true })).toBeVisible();
+    await expect(agentRegion.getByRole("button", { name: "Edit scope", exact: true })).toBeDisabled();
 
     await page.getByRole("tab", { name: "Issues", exact: true }).click();
     await page.reload();
@@ -5422,10 +5466,10 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     await page.emulateMedia({ colorScheme: "dark" });
     await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
 
-    const state = process.env.HARNESS_STATE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/.state");
+    const state = harnessRuntimeStateDir();
     const fakePort = Number(process.env.HARNESS_FAKEKUBE_PORT || 28643);
     const receiverPort = Number(process.env.HARNESS_RECEIVER_HTTP_PORT || 28690);
-    const haScript = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/tests/kubernetes-ha.sh");
+    const haScript = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/tests/kubernetes/kubernetes-ha.sh");
     const ca = fs.readFileSync(path.join(state, "fakekube/ca.crt"));
 
     const upstream = (endpoint: string, body?: unknown) => new Promise<unknown>((resolve, reject) => {
@@ -5934,7 +5978,7 @@ test.describe("Live Enterprise K15 user and receiver acceptance", () => {
     await page.emulateMedia({ colorScheme: "dark" });
     await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
 
-    const state = process.env.HARNESS_STATE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/.state");
+    const state = harnessRuntimeStateDir();
     const fakePort = Number(process.env.HARNESS_FAKEKUBE_PORT || 28743);
     const receiverPort = Number(process.env.HARNESS_RECEIVER_HTTP_PORT || 28690);
     const ca = fs.readFileSync(path.join(state, "fakekube/ca.crt"));
@@ -6118,5 +6162,1508 @@ test.describe("Live Enterprise K15 user and receiver acceptance", () => {
     await page.request.put("/api/admin/kubernetes/issue-alerts?cluster=fakekube", { headers: { Origin: origin }, data: { enabled: false, level: "critical" } });
     expect(errors).toEqual([]);
     await testInfo.attach("live-enterprise-k15-receipts", { body: JSON.stringify(entFinal, null, 2), contentType: "application/json" });
+  });
+});
+
+test.describe("Resource detail drawer and workload log streaming acceptance", () => {
+  test("fixture thresholds, usage history, quiet rotation, and crash handoff desktop and mobile", async ({ page, context }) => {
+    test.setTimeout(180_000);
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    const nowMs = Date.now();
+    const iso = (offsetMinutes: number) => new Date(nowMs - offsetMinutes * 60_000).toISOString();
+
+    let podStreamReadCount = 0;
+    const workloadStreamRequests: URL[] = [];
+
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+    await openApp(page, "/now");
+
+    await page.route("**/api/admin/kubernetes/**", (route) =>
+      route.fulfill({ json: { items: [], totals: {}, counts: {}, pods: [], nodes: [], edges: [], available: false, truncated: false, sync: { state: "ready", age_s: 1, partial: false } } }),
+    );
+    await page.route("**/api/admin/config/agent", (route) =>
+      route.fulfill({ json: { enable: true, mode: "shadow", sources: [], ai: { enable: true }, catalog: {}, miner: {}, regex: { rules: [] }, redaction: {}, service_patterns: [] } }),
+    );
+    await page.route("**/api/admin/kubernetes/clusters", (route) =>
+      route.fulfill({ json: { multiple: false, clusters: [{ id: "default", provider: "generic", health: "healthy", nodes: 2, ready_nodes: 2, pods: 6, running_pods: 6, warnings: 2 }] } }),
+    );
+    await page.route("**/api/admin/kubernetes/stream**", (route) =>
+      route.fulfill({ contentType: "text/event-stream", body: `event: sync\ndata: ${JSON.stringify({ state: "ready", age_s: 1, partial: false })}\n\nevent: heartbeat\ndata: {}\n\n` }),
+    );
+    await page.route("**/api/admin/kubernetes/overview**", (route) =>
+      route.fulfill({ json: { connector: "kubernetes", cluster_id: "default", observed_at: iso(0), nodes: 2, ready_nodes: 2, pods: 6, running_pods: 6, namespaces: 2, active_namespaces: 2, workloads: 3, warnings: 2, truncated: false } }),
+    );
+    await page.route("**/api/admin/kubernetes/usage-history**", (route) => {
+      const url = new URL(route.request().url());
+      const pod = url.searchParams.get("pod");
+      if (pod === "checkout-7d9f8c-x2k4q") {
+        return route.fulfill({
+          json: {
+            observed_at: iso(0),
+            source: "capture",
+            availability: "available",
+            live_since: iso(60),
+            retention_seconds: 21600,
+            samples: [
+              { timestamp: iso(20), cpu_milli: 410, memory_bytes: 360 * 1024 * 1024 },
+              { timestamp: iso(10), cpu_milli: 780, memory_bytes: 400 * 1024 * 1024 },
+              { timestamp: iso(2), cpu_milli: 820, memory_bytes: 480 * 1024 * 1024 },
+            ],
+          },
+        });
+      }
+      return route.fulfill({
+        json: { observed_at: iso(0), source: "capture", availability: "unavailable", live_since: iso(5), retention_seconds: 21600, samples: [] },
+      });
+    });
+    await page.route("**/api/admin/kubernetes/usage**", (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname.endsWith("/usage-history")) return route.fallback();
+      return route.fulfill({
+        json: {
+          observed_at: iso(0),
+          availability: "available",
+          fresh: true,
+          truncated: false,
+          pods: [{ kind: "Pod", namespace: "shop", name: "checkout-7d9f8c-x2k4q", cpu: "820m", memory: "480Mi", window: "30s" }],
+          nodes: [],
+        },
+      });
+    });
+    await page.route("**/api/admin/kubernetes/crashes**", (route) =>
+      route.fulfill({
+        json: {
+          items: [
+            {
+              id: "crash-oom-1",
+              sequence: 1,
+              cluster: "default",
+              namespace: "shop",
+              pod: "checkout-7d9f8c-x2k4q",
+              pod_uid: "pod-x2k4q",
+              root_uid: "deploy-checkout",
+              root_kind: "Deployment",
+              root_name: "checkout",
+              container: "api",
+              type: "termination",
+              termination_slot: "previous",
+              exit_code: 137,
+              reason: "OOMKilled",
+              restart_count: 6,
+              at: iso(8),
+              time_source: "finished_at",
+              observed_at: iso(8),
+            },
+          ],
+          since: iso(1440),
+          until: iso(0),
+          started_at: iso(120),
+          gaps: [{ from: iso(90), to: iso(85) }],
+          capture: { mode: "continuous", behind: false, last_cycle_at: iso(1) },
+          coverage: { Pod: { from: iso(120), to: iso(0) } },
+          sync: { state: "ready", age_s: 1, partial: false },
+        },
+      }),
+    );
+    await page.route("**/api/admin/kubernetes/changes**", (route) =>
+      route.fulfill({
+        json: {
+          items: [
+            {
+              id: "chg-image-42",
+              cluster: "default",
+              kind: "Pod",
+              namespace: "shop",
+              name: "checkout-7d9f8c-x2k4q",
+              uid: "pod-x2k4q",
+              type: "image_changed",
+              at: iso(12),
+              fields: [{ path: "image", from: "checkout:v41", to: "checkout:v42" }],
+            },
+          ],
+          gaps: [],
+          sync: { state: "ready", age_s: 1, partial: false },
+        },
+      }),
+    );
+    await page.route("**/api/admin/kubernetes/issues**", (route) =>
+      route.fulfill({
+        json: {
+          items: [
+            {
+              root: { kind: "Pod", namespace: "shop", name: "checkout-7d9f8c-x2k4q", uid: "pod-x2k4q" },
+              rule: "pod.crash_loop",
+              severity: "critical",
+              count: 1,
+              of: 1,
+              broken: true,
+              broke_at: iso(9),
+              history: "complete",
+            },
+          ],
+          totals: { critical: 1, warning: 0 },
+          broken: { total: 1, by_severity: { critical: 1 } },
+          truncated: false,
+          sync: { state: "ready", age_s: 1, partial: false },
+        },
+      }),
+    );
+    await page.route("**/api/admin/kubernetes/resources/core~v1~pods/checkout-7d9f8c-x2k4q/describe**", (route) =>
+      route.fulfill({
+        json: {
+          resource: {
+            resource_id: "core~v1~pods",
+            api_version: "v1",
+            kind: "Pod",
+            namespace: "shop",
+            name: "checkout-7d9f8c-x2k4q",
+            uid: "pod-x2k4q",
+            created_at: iso(180),
+            owners: [{ api_version: "apps/v1", kind: "ReplicaSet", namespace: "shop", name: "checkout-7d9f8c", uid: "rs-7d9f8c" }],
+            conditions: [
+              { type: "Ready", status: "True", reason: "ContainersReady", last_transition_at: iso(134) },
+              { type: "Initialized", status: "True", reason: "PodCompleted", last_transition_at: "0001-01-01T00:00:00Z" },
+            ],
+            summary: {
+              phase: "Running",
+              node: "node-a",
+              pod_ip: "10.42.1.17",
+              qos_class: "Burstable",
+              restart_count: 6,
+              main_container: "api",
+              containers: [
+                { name: "api", image: "checkout:v42", requests: { cpu: "500m", memory: "256Mi" }, limits: { cpu: "1000m", memory: "512Mi" } },
+              ],
+              log_containers: [
+                { name: "api", type: "regular" },
+                { name: "istio-proxy", type: "regular" },
+                { name: "migrate", type: "init" },
+                { name: "certs", type: "init" },
+                { name: "debug", type: "ephemeral" },
+              ],
+              log_container_states: [
+                {
+                  name: "api",
+                  ready: true,
+                  running: true,
+                  started_at: iso(134),
+                  restart_count: 6,
+                  last_terminated_reason: "OOMKilled",
+                  last_terminated_exit_code: 137,
+                  last_terminated_at: iso(8),
+                },
+                { name: "istio-proxy", ready: true, running: true, started_at: iso(180), restart_count: 0 },
+                { name: "migrate", init: true, ready: true, running: false, restart_count: 0, last_terminated_at: "0001-01-01T00:00:00Z" },
+                { name: "certs", init: true, ready: true, running: false, restart_count: 0 },
+                { name: "debug", ready: true, running: true, restart_count: 0 },
+              ],
+              config_maps: ["checkout-cfg"],
+              secrets: ["checkout-secret"],
+              env: [{ name: "DB_PASSWORD", value: "raw-secret-never-shown" }],
+            },
+          },
+          related_resources: [
+            { kind: "ReplicaSet", namespace: "shop", name: "checkout-7d9f8c", uid: "rs-7d9f8c" },
+            { kind: "Service", namespace: "shop", name: "checkout" },
+            { kind: "ConfigMap", namespace: "shop", name: "checkout-cfg" },
+            { kind: "Secret", namespace: "shop", name: "checkout-secret" },
+          ],
+          events: [
+            {
+              resource_id: "core~v1~events",
+              kind: "Event",
+              namespace: "shop",
+              name: "checkout-backoff",
+              uid: "evt-1",
+              summary: {
+                type: "Warning",
+                reason: "BackOff",
+                count: 9,
+                message: "Back-off restarting failed container api",
+                first_timestamp: iso(40),
+                last_timestamp: iso(3),
+                source_component: "kubelet",
+                source_host: "node-a",
+              },
+            },
+            {
+              resource_id: "core~v1~events",
+              kind: "Event",
+              namespace: "shop",
+              name: "checkout-pulled",
+              uid: "evt-2",
+              summary: {
+                type: "Normal",
+                reason: "Pulled",
+                count: 4,
+                message: "Container image checkout:v42 already present on node",
+                first_timestamp: iso(50),
+                last_timestamp: iso(10),
+                source_component: "kubelet",
+                source_host: "node-a",
+              },
+            },
+          ],
+        },
+      }),
+    );
+    await page.route("**/api/admin/kubernetes/workloads/Pod/checkout-7d9f8c-x2k4q**", (route) =>
+      route.fulfill({
+        json: {
+          uid: "pod-x2k4q",
+          resource_id: "core~v1~pods",
+          kind: "Pod",
+          namespace: "shop",
+          name: "checkout-7d9f8c-x2k4q",
+          containers: [
+            { name: "api", image: "checkout:v42", requests: { cpu: "500m", memory: "256Mi" }, limits: { cpu: "1000m", memory: "512Mi" } },
+          ],
+          pods: [
+            { name: "checkout-7d9f8c-x2k4q", uid: "pod-x2k4q", phase: "Running", node: "node-a", restart_count: 6, started_at: iso(134), created_at: "0001-01-01T00:00:00Z" },
+          ],
+          nodes: ["node-a"],
+          usage: [{ kind: "Pod", namespace: "shop", name: "checkout-7d9f8c-x2k4q", cpu: "820m", memory: "480Mi" }],
+          truncated: false,
+        },
+      }),
+    );
+    await page.route("**/api/admin/kubernetes/graph/neighborhood**", (route) => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.get("kind") === "Deployment") {
+        return route.fulfill({
+          json: {
+            nodes: [
+              { id: "hpa-checkout", kind: "HorizontalPodAutoscaler", namespace: "shop", name: "checkout-hpa", health: "healthy" },
+              { id: "deploy-checkout", kind: "Deployment", namespace: "shop", name: "checkout", health: "degraded" },
+              { id: "rs-7d9f8c", kind: "ReplicaSet", namespace: "shop", name: "checkout-7d9f8c", health: "healthy" },
+              { id: "pod-x2k4q", kind: "Pod", namespace: "shop", name: "checkout-7d9f8c-x2k4q", health: "degraded" },
+              { id: "svc-checkout", kind: "Service", namespace: "shop", name: "checkout", health: "healthy" },
+            ],
+            edges: [
+              { from: "hpa-checkout", to: "deploy-checkout", type: "scales" },
+              { from: "deploy-checkout", to: "rs-7d9f8c", type: "manages" },
+              { from: "rs-7d9f8c", to: "pod-x2k4q", type: "manages" },
+              { from: "svc-checkout", to: "pod-x2k4q", type: "exposes" },
+            ],
+            omitted: {},
+            sync: { state: "ready", age_s: 1, partial: false },
+          },
+        });
+      }
+      return route.fulfill({
+        json: {
+          nodes: [
+            { id: "deploy-checkout", kind: "Deployment", namespace: "shop", name: "checkout", health: "degraded" },
+            { id: "rs-7d9f8c", kind: "ReplicaSet", namespace: "shop", name: "checkout-7d9f8c", health: "healthy" },
+            { id: "pod-x2k4q", kind: "Pod", namespace: "shop", name: "checkout-7d9f8c-x2k4q", health: "degraded" },
+            { id: "svc-checkout", kind: "Service", namespace: "shop", name: "checkout", health: "healthy" },
+            { id: "cm-checkout", kind: "ConfigMap", namespace: "shop", name: "checkout-cfg", health: "healthy" },
+            { id: "sec-checkout", kind: "Secret", namespace: "shop", name: "checkout-secret", health: "healthy" },
+            { id: "node-a", kind: "Node", name: "node-a", health: "healthy" },
+          ],
+          edges: [
+            { from: "deploy-checkout", to: "rs-7d9f8c", type: "manages" },
+            { from: "rs-7d9f8c", to: "pod-x2k4q", type: "manages" },
+            { from: "svc-checkout", to: "pod-x2k4q", type: "exposes" },
+            { from: "pod-x2k4q", to: "cm-checkout", type: "uses" },
+            { from: "pod-x2k4q", to: "sec-checkout", type: "uses" },
+            { from: "pod-x2k4q", to: "node-a", type: "runs_on" },
+          ],
+          omitted: {},
+          sync: { state: "ready", age_s: 1, partial: false },
+        },
+      });
+    });
+    await page.route("**/api/admin/kubernetes/pods/shop/checkout-7d9f8c-x2k4q/logs/stream**", (route) => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.get("previous") === "true") {
+        return route.fulfill({
+          contentType: "text/event-stream",
+          body: [
+            `event: line\ndata: ${JSON.stringify({ text: "ERROR out of memory: cannot allocate 64 MiB", container: "api", timestamp: iso(9), sequence: 1, ordinal: 1 })}\n\n`,
+            `event: end\ndata: {"reason":"complete"}\n\n`,
+          ].join(""),
+        });
+      }
+      podStreamReadCount++;
+      if (podStreamReadCount === 1) {
+        // First read rotates quietly on limit with cursor-rot-1
+        return route.fulfill({
+          contentType: "text/event-stream",
+          body: [
+            `event: line\ndata: ${JSON.stringify({ text: "INFO GET /cart 200 18 ms", container: "api", timestamp: iso(2), sequence: 1, ordinal: 1, cursor: "cursor-rot-1" })}\n\n`,
+            `event: limit\ndata: ${JSON.stringify({ reason: "duration", cursor: "cursor-rot-1" })}\n\n`,
+          ].join(""),
+        });
+      }
+      return route.fulfill({
+        contentType: "text/event-stream",
+        body: [
+          `event: line\ndata: ${JSON.stringify({ text: "WARN slow query orders.find 812 ms", container: "api", timestamp: iso(1), sequence: 2, ordinal: 2, cursor: "cursor-rot-2", replay_uncertain: true })}\n\n`,
+          `event: line\ndata: ${JSON.stringify({ text: "ERROR payment client timeout after 5 s (ledger)", container: "api", timestamp: iso(0), sequence: 3, ordinal: 3, cursor: "cursor-rot-3" })}\n\n`,
+          `event: heartbeat\ndata: {"cursor":"cursor-rot-3"}\n\n`,
+          `event: end\ndata: {"reason":"complete","cursor":"cursor-rot-3"}\n\n`,
+        ].join(""),
+      });
+    });
+
+    // 25-Pod Deployment fixture for over-limit dropdown and focused Pod capacity preservation
+    const overLimitPods = Array.from({ length: 25 }, (_, i) => ({
+      uid: `pod-uid-${i}`,
+      name: `checkout-pod-${String(i).padStart(2, "0")}`,
+      containers: ["api", "istio-proxy"],
+      init_containers: ["migrate"],
+      main_container: "api",
+      admitted: i < 20,
+      ...(i >= 20 ? { reason: "source_limit" } : {}),
+      all_pods_admitted: i < 20,
+      ...(i >= 20 ? { all_pods_reason: "source_limit" } : {}),
+    }));
+    await page.route("**/api/admin/kubernetes/resources/apps~v1~deployments/checkout/describe**", (route) =>
+      route.fulfill({
+        json: {
+          resource: {
+            resource_id: "apps~v1~deployments",
+            api_version: "apps/v1",
+            kind: "Deployment",
+            namespace: "shop",
+            name: "checkout",
+            uid: "deploy-checkout",
+            created_at: "0001-01-01T00:00:00Z",
+            conditions: [{ type: "Available", status: "True", reason: "MinimumReplicasAvailable", last_transition_at: "0001-01-01T00:00:00Z" }],
+            summary: { ready_replicas: 3, desired_replicas: 4, containers: [{ name: "api", image: "checkout:v42" }] },
+          },
+          related_resources: [{ kind: "ReplicaSet", namespace: "shop", name: "checkout-7d9f8c", uid: "rs-7d9f8c" }],
+          events: [],
+        },
+      }),
+    );
+    await page.route("**/api/admin/kubernetes/workloads/Deployment/checkout**", (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname.endsWith("/logs/stream")) {
+        workloadStreamRequests.push(url);
+        const focusedUID = url.searchParams.get("pod_uid");
+        const isPrevious = url.searchParams.get("previous") === "true";
+        const isAllContainers = url.searchParams.get("container") === "*";
+        const podsPayload = overLimitPods.map((p, idx) => ({
+          ...p,
+          admitted: focusedUID ? p.uid === focusedUID : idx < 20,
+          reason: focusedUID ? (p.uid === focusedUID ? "" : "not_selected") : idx >= 20 ? "source_limit" : "",
+        }));
+        if (isPrevious) {
+          return route.fulfill({
+            contentType: "text/event-stream",
+            body: [
+              `event: sources\ndata: ${JSON.stringify({ workload_uid: "deploy-checkout", pods: podsPayload, truncated: false })}\n\n`,
+              `event: line\ndata: ${JSON.stringify({ workload_uid: "deploy-checkout", pod_uid: "pod-uid-0", pod: "checkout-pod-00", namespace: "shop", container: "api", incarnation: "1", source_id: "src-0", text: "previous crash panic: nil pointer", timestamp: iso(5), sequence: 1, ordinal: 1 })}\n\n`,
+              `event: end\ndata: {"reason":"complete"}\n\n`,
+            ].join(""),
+          });
+        }
+        return route.fulfill({
+          contentType: "text/event-stream",
+          body: [
+            `event: sources\ndata: ${JSON.stringify({ workload_uid: "deploy-checkout", pods: podsPayload, truncated: false })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ workload_uid: "deploy-checkout", pod_uid: "pod-uid-0", pod: "checkout-pod-00", namespace: "shop", container: "api", incarnation: "1", source_id: "src-0", text: "GET /cart 200 18 ms", timestamp: iso(2), sequence: 1, ordinal: 1, cursor: "wl-cur-1" })}\n\n`,
+            ...(focusedUID
+              ? [`event: line\ndata: ${JSON.stringify({ workload_uid: "deploy-checkout", pod_uid: focusedUID, pod: podsPayload.find((p) => p.uid === focusedUID)?.name ?? "checkout-pod-24", namespace: "shop", container: "api", incarnation: "1", source_id: "src-focus", text: "focused pod exclusive line", timestamp: iso(1), sequence: 2, ordinal: 2, cursor: "wl-cur-2" })}\n\n`]
+              : [
+                  `event: line\ndata: ${JSON.stringify({ workload_uid: "deploy-checkout", pod_uid: "pod-uid-1", pod: "checkout-pod-01", namespace: "shop", container: isAllContainers ? "istio-proxy" : "api", incarnation: "1", source_id: "src-1", text: "POST /checkout 201 311 ms", timestamp: iso(1), sequence: 2, ordinal: 2, cursor: "wl-cur-2" })}\n\n`,
+                  `event: source_status\ndata: ${JSON.stringify({ workload_uid: "deploy-checkout", pod_uid: "pod-uid-2", pod: "checkout-pod-02", namespace: "shop", container: "api", source_id: "src-2", code: "forbidden", message: "forbidden" })}\n\n`,
+                  `event: line\ndata: ${JSON.stringify({ workload_uid: "deploy-checkout", pod_uid: "pod-uid-0", pod: "checkout-pod-00", namespace: "shop", container: "api", incarnation: "1", source_id: "src-0", text: "GET /checkout/quote 200 42 ms", timestamp: iso(0), sequence: 3, ordinal: 3, cursor: "wl-cur-3", replay_uncertain: true })}\n\n`,
+                ]),
+            `event: heartbeat\ndata: {"cursor":"wl-cur-3"}\n\n`,
+            `event: end\ndata: {"reason":"complete","cursor":"wl-cur-3"}\n\n`,
+          ].join(""),
+        });
+      }
+      return route.fulfill({
+        json: {
+          uid: "deploy-checkout",
+          resource_id: "apps~v1~deployments",
+          kind: "Deployment",
+          namespace: "shop",
+          name: "checkout",
+          desired: 4,
+          ready: 3,
+          available: 3,
+          containers: [{ name: "api", image: "checkout:v42", requests: { cpu: "250m", memory: "256Mi" }, limits: { cpu: "500m", memory: "512Mi" } }],
+          pods: [
+            { name: "checkout-7d9f8c-x2k4q", uid: "pod-x2k4q", phase: "Running", node: "node-a", restart_count: 6, started_at: iso(134), created_at: "0001-01-01T00:00:00Z" },
+            { name: "checkout-8b6c9d-a6v2n", uid: "pod-a6v2n", phase: "Running", node: "node-b", restart_count: 0, started_at: iso(90), created_at: "0001-01-01T00:00:00Z" },
+          ],
+          nodes: ["node-a", "node-b"],
+          truncated: false,
+        },
+      });
+    });
+
+    // 1. Open Pod drawer via legacy tab=diagnosis -> normalizes to Overview
+    await page.goto("/agent/kubernetes?r=core~v1~pods/shop/checkout-7d9f8c-x2k4q&tab=diagnosis");
+    const detail = page.getByRole("dialog", { name: "Details panel" });
+    await expect(detail).toBeVisible();
+    await expect(page).not.toHaveURL(/tab=diagnosis/);
+    const tabs = detail.getByRole("tablist", { name: "Resource detail views" });
+    await expect(tabs.getByRole("tab")).toHaveText(["Overview", "Logs", "Events", "YAML", "Related", "Timeline"]);
+    await expect(tabs.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
+
+    // Verify CPU (>75% amber) and Memory (>90% critical red) thresholds, Restarts (6, OOMKilled), Uptime (2h 14m)
+    const cpuTile = detail.getByLabel("CPU metric tile", { exact: true });
+    const memTile = detail.getByLabel("Memory metric tile", { exact: true });
+    await expect(cpuTile).toContainText("820m");
+    await expect(cpuTile).toContainText("82%");
+    await expect(cpuTile.locator("p.text-sev-warning")).toBeVisible();
+    await expect(memTile).toContainText("480 MiB");
+    await expect(memTile).toContainText("94%");
+    await expect(memTile.locator("p.text-sev-critical")).toBeVisible();
+    await expect(detail.getByLabel("24 hour crash ticks").getByRole("button")).toHaveCount(1);
+    await expect(detail).toContainText("2h 14m");
+
+    // Verify Details & Conditions zero-time protection (Initialized has 0001-01-01T00:00:00Z -> no 1/1/1)
+    await expect(detail).toContainText("10.42.1.17");
+    await expect(detail).toContainText("Burstable");
+    await expect(detail).not.toContainText("739910d");
+    await expect(detail).not.toContainText("1/1/1");
+    await expect(detail).toContainText("Last state api: OOMKilled exit 137");
+
+    // Verify compact Pod container chips (+1 button for 5th container) and quiet rotation + neutral reconnect divider
+    const containerGroup = detail.getByRole("group", { name: "Log containers", exact: true });
+    await expect(containerGroup.getByRole("button", { name: "+1", exact: true })).toBeVisible();
+    await containerGroup.getByRole("button", { name: "+1", exact: true }).click();
+    await expect(containerGroup.getByRole("button", { name: "debug", exact: true })).toBeVisible();
+    const podLogOutput = detail.getByLabel("Pod log output");
+    await expect(podLogOutput).toContainText("GET /cart 200 18 ms");
+    await expect(podLogOutput).toContainText("resumed after reconnect at");
+    await expect(podLogOutput).toContainText("payment client timeout after 5 s (ledger)");
+    await expect(detail.getByRole("alert")).toHaveCount(0);
+    await captureBreakState(page, "k14-fixture-pod-overview-desktop-dark.png", "dark");
+
+    // Mobile 390x844 Pod Overview: verify 3x2 non-overflowing tab grid and visible container chips outside More
+    await page.setViewportSize({ width: 390, height: 844 });
+    await tabs.scrollIntoViewIfNeeded();
+    const mobileTabOverflow = await tabs.evaluate((el) => el.scrollWidth > el.clientWidth);
+    expect(mobileTabOverflow).toBe(false);
+    await expect(tabs.getByRole("tab", { name: "Timeline", exact: true })).toBeInViewport({ ratio: 1 });
+    await containerGroup.scrollIntoViewIfNeeded();
+    await expect(containerGroup).toBeVisible();
+    await tabs.scrollIntoViewIfNeeded();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await captureBreakState(page, "k14-fixture-pod-overview-mobile-dark.png", "dark");
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    // Switch to Logs tab via "Open full logs →": verify shared session (no extra stream read)
+    const readsBeforeFullLogs = podStreamReadCount;
+    await detail.getByRole("button", { name: "Open full logs", exact: true }).click();
+    await expect(tabs.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
+    expect(podStreamReadCount).toBe(readsBeforeFullLogs);
+    await expect(podLogOutput).toContainText("GET /cart 200 18 ms");
+    await captureBreakState(page, "k14-fixture-pod-logs-desktop-dark.png", "dark");
+
+    // Events tab: occurrence counts (All 13, Warnings 9, Normal 4), histogram, reason groups, source component/host
+    await tabs.getByRole("tab", { name: "Events", exact: true }).click();
+    const eventsRegion = detail.getByRole("region", { name: "Object-scoped events", exact: true });
+    await expect(eventsRegion.getByRole("button", { name: "All 13", exact: true })).toBeVisible();
+    await expect(eventsRegion.getByRole("button", { name: "Warnings 9", exact: true })).toBeVisible();
+    await expect(eventsRegion.getByRole("button", { name: "Normal 4", exact: true })).toBeVisible();
+    await expect(eventsRegion.getByRole("img", { name: "Event histogram: warnings red, normal gray", exact: true })).toBeVisible();
+    await expect(eventsRegion).toContainText("kubelet node-a");
+    await captureBreakState(page, "k14-fixture-pod-events-desktop-dark.png", "dark");
+
+    // YAML tab: Projected, read-only badge, Outline, Fold all / Unfold all, Find in YAML unfolding ancestor, redaction, zero-time stripped
+    await tabs.getByRole("tab", { name: "YAML", exact: true }).click();
+    const yamlRegion = detail.getByRole("region", { name: "Projected YAML", exact: true });
+    await expect(yamlRegion.getByText("Projected, read-only", { exact: true })).toBeVisible();
+    await yamlRegion.getByRole("button", { name: "Unfold all", exact: true }).click();
+    await expect(yamlRegion).toContainText("‹redacted›");
+    await expect(yamlRegion).not.toContainText("raw-secret-never-shown");
+    await expect(yamlRegion).not.toContainText("0001-01-01T00:00:00Z");
+    await expect(yamlRegion.getByRole("navigation", { name: "YAML outline", exact: true })).toContainText("metadata");
+    await expect(yamlRegion.getByRole("navigation", { name: "YAML outline", exact: true })).toContainText("spec");
+    await yamlRegion.getByRole("button", { name: "Fold all", exact: true }).click();
+    await expect(yamlRegion).toContainText(/▸ .+ \(\d+ lines\)/);
+    await yamlRegion.getByLabel("Find in YAML", { exact: true }).fill("10.42.1.17");
+    await yamlRegion.getByRole("button", { name: "Next match", exact: true }).click();
+    await expect(yamlRegion).toContainText("10.42.1.17");
+    await yamlRegion.getByRole("button", { name: "Unfold all", exact: true }).click();
+    await captureBreakState(page, "k14-fixture-pod-yaml-desktop-dark.png", "dark");
+
+    // Timeline tab: 1h/6h/24h, lane, field diff tokens (checkout:v41 → checkout:v42), crash item -> View logs before crash
+    await tabs.getByRole("tab", { name: "Timeline", exact: true }).click();
+    const timelineRegion = detail.getByRole("region", { name: "Resource change history", exact: true });
+    await expect(timelineRegion.getByLabel("Resource timeline lane", { exact: true })).toBeVisible();
+    await expect(timelineRegion).toContainText("checkout:v41");
+    await expect(timelineRegion).toContainText("checkout:v42");
+    await expect(timelineRegion).toContainText("Crash history starts");
+    await expect(timelineRegion).toContainText("Partial history; capture gaps or bounded results may omit events in this range.");
+    await captureBreakState(page, "k14-fixture-pod-timeline-desktop-dark.png", "dark");
+
+    await timelineRegion.getByRole("button", { name: "View logs before crash", exact: true }).click();
+    await expect(tabs.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(detail.getByLabel("Previous container logs")).toHaveAttribute("aria-pressed", "true");
+    await expect(podLogOutput).toContainText("out of memory: cannot allocate 64 MiB");
+
+    // Related tab: owner chain, Secret "content not shown", and Open navigation to Deployment checkout
+    await tabs.getByRole("tab", { name: "Related", exact: true }).click();
+    const relatedRegion = detail.getByRole("region", { name: "Related resources", exact: true });
+    await expect(relatedRegion.getByLabel("Relationship map", { exact: true })).toContainText("DEPLOYMENT");
+    await expect(relatedRegion.getByLabel("Relationship map", { exact: true })).toContainText("REPLICASET");
+    await expect(relatedRegion).toContainText("content not shown");
+    await captureBreakState(page, "k14-fixture-pod-related-desktop-dark.png", "dark");
+
+    // Navigate to Deployment checkout via Related -> Map button
+    await relatedRegion.getByLabel("Relationship map", { exact: true }).getByRole("button", { name: "Open Deployment checkout", exact: true }).click();
+    await expect(detail.getByRole("heading", { name: "Deployment shop/checkout", exact: true })).toBeVisible();
+
+    // Verify Deployment Overview: partial usage history ("Available samples · 1/2 tracked Pods", no fabricated 100%/0%), muted Unavailable Memory when incomplete
+    await expect(detail.getByLabel("CPU metric tile", { exact: true })).toContainText("Available samples · 1/2 tracked Pods");
+    await expect(detail).not.toContainText("739910d");
+    await expect(detail).not.toContainText("1/1/1");
+
+    // Verify Deployment Related tab classifiesReplicaSet/Pod under "Owns" and HPA under "Selected by"
+    await tabs.getByRole("tab", { name: "Related", exact: true }).click();
+    await expect(relatedRegion.getByRole("heading", { name: "Owns", exact: true })).toBeVisible();
+    await expect(relatedRegion.getByRole("heading", { name: "Selected by", exact: true })).toBeVisible();
+
+    // Verify Deployment Logs tab: 25-Pod over-limit dropdown ("All pods (first 20)") preserved when focusing pod-uid-24
+    await tabs.getByRole("tab", { name: "Logs", exact: true }).click();
+    const wlOutput = detail.getByLabel("Workload log output");
+    await expect(wlOutput).toContainText("checkout-pod-00");
+    await expect(wlOutput).toContainText("logs not available: forbidden");
+    await expect(wlOutput).toContainText("reconnected at");
+    const podSelect = detail.getByLabel("Log pod", { exact: true });
+    await expect(podSelect.locator("option").first()).toHaveText("All pods (first 20)");
+    await expect(podSelect.locator('option[value="pod-uid-24"]')).toHaveText("checkout-pod-24 (not in all pods)");
+    await captureBreakState(page, "k14-fixture-deployment-logs-desktop-dark.png", "dark");
+
+    // Select extra Pod #24 and verify "All pods (first 20)" and "(not in all pods)" remain intact!
+    await podSelect.selectOption("pod-uid-24");
+    await expect(wlOutput).toContainText("focused pod exclusive line");
+    await expect(podSelect.locator("option").first()).toHaveText("All pods (first 20)");
+    await expect(podSelect.locator('option[value="pod-uid-24"]')).toHaveText("checkout-pod-24 (not in all pods)");
+    expect(errors).toEqual([]);
+  });
+
+
+  test("captures and verifies all 12 K14 SVG-comparable frames plus CrashJournal R1 and Agent learning bottom disabled", async ({ page, context }, testInfo) => {
+    test.setTimeout(180_000);
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const pageErrors: string[] = [];
+    const consoleErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("console", (msg) => {
+      if (msg.type() === "error" && !msg.text().includes("404 (Not Found)")) consoleErrors.push(msg.text());
+    });
+
+    const nowMs = Date.now();
+    const iso = (offsetMinutes: number) => new Date(nowMs - offsetMinutes * 60_000).toISOString();
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+
+    // Authenticate properly via openApp so the browser context holds a valid gateway session cookie and never triggers 401 Session expired.
+    await openApp(page, "/now");
+    await expect(page.getByRole("dialog", { name: "Session expired" })).toHaveCount(0);
+    await page.route("**/api/agent/baselines**", (route) => route.fulfill({ json: { baselines: [] } }));
+    consoleErrors.length = 0;
+    page.on("response", (res) => {
+      if (res.status() >= 400 && !res.url().includes("/enterprise/api/sso/deployment")) {
+        consoleErrors.push(`HTTP ${res.status()} ${res.url()}`);
+      }
+    });
+
+    const podsPayload = [
+      { uid: "p1", name: "checkout-7d9f8c-x2k4q", containers: ["api", "istio-proxy"], init_containers: ["migrate"], main_container: "api", admitted: true },
+      { uid: "p2", name: "checkout-7d9f8c-p9m1z", containers: ["api", "istio-proxy"], init_containers: ["migrate"], main_container: "api", admitted: true },
+      { uid: "p3", name: "checkout-8b6c9d-a6v2n", containers: ["api", "istio-proxy"], init_containers: ["migrate"], main_container: "api", admitted: true },
+      { uid: "p4", name: "checkout-8b6c9d-b8r3s", containers: ["api", "istio-proxy"], init_containers: ["migrate"], main_container: "api", admitted: true },
+    ];
+    const stsPods = ["ledger-0", "ledger-1", "ledger-2"].map((name, i) => ({
+      uid: `sts-${i}`, name, containers: ["api"], init_containers: [], main_container: "api", admitted: true,
+    }));
+
+    await page.route("**/api/admin/kubernetes/**", (route) => {
+      const url = new URL(route.request().url());
+      const pathname = url.pathname;
+      if (pathname === "/api/admin/kubernetes/clusters") {
+        return route.fulfill({ json: { multiple: false, clusters: [{ id: "default", provider: "generic", health: "healthy", nodes: 2, ready_nodes: 2, pods: 6, running_pods: 6, warnings: 2 }] } });
+      }
+      if (pathname === "/api/admin/kubernetes/stream") {
+        return route.fulfill({ contentType: "text/event-stream", body: `event: sync\ndata: ${JSON.stringify({ state: "ready", age_s: 1, partial: false })}\n\nevent: heartbeat\ndata: {}\n\n` });
+      }
+      if (pathname === "/api/admin/kubernetes/overview") {
+        return route.fulfill({ json: { connector: "kubernetes", cluster_id: "default", observed_at: iso(0), nodes: 2, ready_nodes: 2, pods: 6, running_pods: 6, namespaces: 2, active_namespaces: 2, workloads: 3, warnings: 2, truncated: false } });
+      }
+      if (pathname === "/api/admin/kubernetes/usage-history") {
+        return route.fulfill({
+          json: {
+            observed_at: iso(0), source: "capture", availability: "available", live_since: iso(60), retention_seconds: 21600,
+            samples: [
+              { timestamp: iso(50), cpu_milli: 320, memory_bytes: 280 * 1024 * 1024 },
+              { timestamp: iso(35), cpu_milli: 360, memory_bytes: 320 * 1024 * 1024 },
+              { timestamp: iso(20), cpu_milli: 390, memory_bytes: 360 * 1024 * 1024 },
+              { timestamp: iso(10), cpu_milli: 450, memory_bytes: 490 * 1024 * 1024 },
+              { timestamp: iso(5), cpu_milli: 380, memory_bytes: 350 * 1024 * 1024 },
+              { timestamp: iso(1), cpu_milli: 412, memory_bytes: 389 * 1024 * 1024 },
+            ],
+          },
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/usage") {
+        return route.fulfill({ json: { observed_at: iso(0), availability: "available", fresh: true, truncated: false, pods: [{ kind: "Pod", namespace: "shop", name: "checkout-7d9f8c-x2k4q", cpu: "412m", memory: "389Mi", window: "30s" }], nodes: [] } });
+      }
+      if (pathname === "/api/admin/kubernetes/crashes") {
+        return route.fulfill({
+          json: {
+            items: [
+              { id: "c1", sequence: 1, cluster: "default", namespace: "shop", pod: "checkout-7d9f8c-x2k4q", pod_uid: "pod-x2k4q", root_uid: "deploy-checkout", root_kind: "Deployment", root_name: "checkout", container: "api", type: "termination", termination_slot: "previous", exit_code: 137, reason: "OOMKilled", restart_count: 6, at: iso(5), time_source: "finished_at", observed_at: iso(5) },
+              { id: "c2", sequence: 2, cluster: "default", namespace: "shop", pod: "checkout-7d9f8c-x2k4q", pod_uid: "pod-x2k4q", root_uid: "deploy-checkout", root_kind: "Deployment", root_name: "checkout", container: "api", type: "termination", termination_slot: "previous", exit_code: 137, reason: "OOMKilled", restart_count: 5, at: iso(134), time_source: "finished_at", observed_at: iso(134) },
+            ],
+            since: url.searchParams.get("since") || iso(1440),
+            until: url.searchParams.get("until") || iso(0),
+            retention_from: iso(1440),
+            retention_basis: "observed_at",
+            started_at: iso(170),
+            gaps: [],
+            capture_gaps: [],
+            limitations: ["polling_observations_only", "summary_caps_do_not_limit_journal", "unknown_termination_identity_is_ambiguous"],
+            sync: { state: "ready", age_s: 1, partial: false },
+            capture: { mode: "continuous", behind: false, last_cycle_at: iso(0) },
+            coverage: { Pod: { from: url.searchParams.get("since") || iso(1440), to: url.searchParams.get("until") || iso(0) } },
+          },
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/changes") {
+        return route.fulfill({
+          json: {
+            items: [
+              { id: "chg-1", cluster: "default", kind: "Pod", namespace: "shop", name: "checkout-7d9f8c-x2k4q", uid: "pod-x2k4q", type: "image_changed", at: iso(12), fields: [{ path: "image", from: "checkout:v41", to: "checkout:v42" }] },
+              { id: "chg-2", cluster: "default", kind: "Pod", namespace: "shop", name: "checkout-7d9f8c-x2k4q", uid: "pod-x2k4q", type: "referenced_config_changed", at: iso(30), fields: [{ path: "checkout-cfg revision", from: "11", to: "12" }] },
+            ],
+            gaps: [],
+            sync: { state: "ready", age_s: 1, partial: false },
+          },
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/issues") {
+        return route.fulfill({
+          json: {
+            items: [{ root: { kind: "Pod", namespace: "shop", name: "checkout-7d9f8c-x2k4q", uid: "pod-x2k4q" }, rule: "pod.crash_loop", severity: "critical", count: 1, of: 1, broken: true, broke_at: iso(6), history: "complete" }],
+            totals: { critical: 1, warning: 0 },
+            broken: { total: 1, by_severity: { critical: 1 } },
+            truncated: false,
+            sync: { state: "ready", age_s: 1, partial: false },
+          },
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/break-logs") {
+        return route.fulfill({
+          json: {
+            window: { from: url.searchParams.get("since") || iso(15), to: url.searchParams.get("until") || iso(0) },
+            pods: [{ name: "checkout-7d9f8c-x2k4q", uid: "pod-x2k4q", short: "x2k4q", state: "running" }],
+            lines: [{ at: iso(5), pod: "checkout-7d9f8c-x2k4q", pod_uid: "pod-x2k4q", container: "api", init: false, slot: "previous", level: "error", text: "payment client timeout after 5 s (ledger)", source: "captured" }],
+            markers: [{ type: "break", at: iso(6), label: "Pod checkout-7d9f8c-x2k4q crash looping" }],
+            counts: { all: 1, errors: 1, warnings: 0 },
+            rate: [{ minute: iso(5), total: 1, errors: 1 }],
+            patterns: [{ template: "payment client timeout", level: "error", count: 1 }],
+            sources: [{ kind: "captured", name: "default", at: iso(5) }],
+            coverage: { state: "complete", reason: "", tip: false, gaps: [] },
+          },
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/resources/core~v1~pods/checkout-7d9f8c-x2k4q/describe") {
+        return route.fulfill({
+          json: {
+            resource: {
+              resource_id: "core~v1~pods", api_version: "v1", kind: "Pod", namespace: "shop", name: "checkout-7d9f8c-x2k4q", uid: "pod-x2k4q", created_at: iso(4320),
+              owners: [{ api_version: "apps/v1", kind: "ReplicaSet", namespace: "shop", name: "checkout-7d9f8c", uid: "rs-7d9f8c" }],
+              conditions: [
+                { type: "Ready", status: "True", reason: "ContainersReady", last_transition_at: iso(5) },
+                { type: "ContainersReady", status: "True", reason: "ContainersReady", last_transition_at: iso(5) },
+                { type: "Initialized", status: "True", reason: "PodCompleted", last_transition_at: iso(4320) },
+                { type: "PodScheduled", status: "True", reason: "Scheduled", last_transition_at: iso(4320) },
+              ],
+              summary: {
+                phase: "Running", node: "node-a", pod_ip: "10.42.1.17", qos_class: "Burstable", restart_count: 6, main_container: "api",
+                containers: [{ name: "api", image: "checkout:v42", requests: { cpu: "500m", memory: "256Mi" }, limits: { cpu: "1000m", memory: "512Mi" } }],
+                log_containers: [{ name: "api", type: "regular" }, { name: "istio-proxy", type: "regular" }, { name: "migrate", type: "init" }],
+                log_container_states: [
+                  { name: "api", ready: true, running: true, started_at: iso(134), restart_count: 6, last_terminated_reason: "OOMKilled", last_terminated_exit_code: 137, last_terminated_at: iso(5) },
+                  { name: "istio-proxy", ready: true, running: true, started_at: iso(180), restart_count: 0 },
+                  { name: "migrate", init: true, ready: true, running: false, restart_count: 0 },
+                ],
+                config_maps: ["checkout-cfg"], secrets: ["checkout-db"],
+                env: [{ name: "LOG_LEVEL", value: "info" }, { name: "DB_PASSWORD", value: "secret" }, { name: "TRAILING_COLON", value: "prefix:" }],
+              },
+            },
+            related_resources: [
+              { kind: "ReplicaSet", namespace: "shop", name: "checkout-7d9f8c", uid: "rs-7d9f8c" },
+              { kind: "Service", namespace: "shop", name: "checkout" },
+              { kind: "ConfigMap", namespace: "shop", name: "checkout-cfg" },
+              { kind: "Secret", namespace: "shop", name: "checkout-db" },
+            ],
+            events: [
+              { resource_id: "core~v1~events", kind: "Event", namespace: "shop", name: "e1", uid: "e1", summary: { type: "Warning", reason: "BackOff", count: 12, message: "Back-off restarting failed container api", first_timestamp: iso(40), last_timestamp: iso(1), source_component: "kubelet", source_host: "node-a" } },
+              { resource_id: "core~v1~events", kind: "Event", namespace: "shop", name: "e2", uid: "e2", summary: { type: "Warning", reason: "OOMKilling", count: 6, message: "Container api was stopped for going over its 512 MiB memory limit", first_timestamp: iso(134), last_timestamp: iso(5), source_component: "kubelet", source_host: "node-a" } },
+              { resource_id: "core~v1~events", kind: "Event", namespace: "shop", name: "e3", uid: "e3", summary: { type: "Warning", reason: "Unhealthy", count: 4, message: "Readiness probe failed: HTTP 503 on /healthz", first_timestamp: iso(8), last_timestamp: iso(5), source_component: "kubelet", source_host: "node-a" } },
+              { resource_id: "core~v1~events", kind: "Event", namespace: "shop", name: "e4", uid: "e4", summary: { type: "Normal", reason: "Pulled", count: 6, message: "Container image checkout:v42 already present on node", first_timestamp: iso(170), last_timestamp: iso(5), source_component: "kubelet", source_host: "node-a" } },
+              { resource_id: "core~v1~events", kind: "Event", namespace: "shop", name: "e5", uid: "e5", summary: { type: "Normal", reason: "Started", count: 7, message: "Started container api", first_timestamp: iso(170), last_timestamp: iso(5), source_component: "kubelet", source_host: "node-a" } },
+              { resource_id: "core~v1~events", kind: "Event", namespace: "shop", name: "e6", uid: "e6", summary: { type: "Normal", reason: "Scheduled", count: 1, message: "Assigned shop/checkout-7d9f8c-x2k4q to node-a", first_timestamp: iso(170), last_timestamp: iso(170), source_component: "default-scheduler", source_host: "" } },
+            ],
+          },
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/workloads/Pod/checkout-7d9f8c-x2k4q") {
+        return route.fulfill({
+          json: {
+            uid: "pod-x2k4q", resource_id: "core~v1~pods", kind: "Pod", namespace: "shop", name: "checkout-7d9f8c-x2k4q",
+            containers: [{ name: "api", image: "checkout:v42", requests: { cpu: "500m", memory: "256Mi" }, limits: { cpu: "1000m", memory: "512Mi" } }],
+            pods: [{ name: "checkout-7d9f8c-x2k4q", uid: "pod-x2k4q", phase: "Running", node: "node-a", restart_count: 6, started_at: iso(134), created_at: iso(4320) }],
+            nodes: ["node-a"], usage: [{ kind: "Pod", namespace: "shop", name: "checkout-7d9f8c-x2k4q", cpu: "412m", memory: "389Mi" }], truncated: false,
+          },
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/graph/neighborhood") {
+        return route.fulfill({
+          json: {
+            nodes: [
+              { id: "hpa-checkout", kind: "HorizontalPodAutoscaler", namespace: "shop", name: "checkout-hpa", health: "healthy" },
+              { id: "deploy-checkout", kind: "Deployment", namespace: "shop", name: "checkout", health: "degraded" },
+              { id: "rs-7d9f8c", kind: "ReplicaSet", namespace: "shop", name: "checkout-7d9f8c", health: "healthy" },
+              { id: "pod-x2k4q", kind: "Pod", namespace: "shop", name: "checkout-7d9f8c-x2k4q", health: "degraded" },
+              { id: "svc-checkout", kind: "Service", namespace: "shop", name: "checkout", health: "healthy" },
+              { id: "cm-checkout", kind: "ConfigMap", namespace: "shop", name: "checkout-cfg", health: "unknown" },
+              { id: "sec-checkout", kind: "Secret", namespace: "shop", name: "checkout-db", health: "unknown" },
+              { id: "node-a", kind: "Node", name: "node-a", health: "healthy" },
+            ],
+            edges: [
+              { from: "hpa-checkout", to: "deploy-checkout", type: "scales" },
+              { from: "deploy-checkout", to: "rs-7d9f8c", type: "manages" },
+              { from: "rs-7d9f8c", to: "pod-x2k4q", type: "manages" },
+              { from: "svc-checkout", to: "pod-x2k4q", type: "exposes" },
+              { from: "pod-x2k4q", to: "cm-checkout", type: "uses" },
+              { from: "pod-x2k4q", to: "sec-checkout", type: "uses" },
+              { from: "pod-x2k4q", to: "node-a", type: "runs_on" },
+            ],
+            omitted: {}, sync: { state: "ready", age_s: 1, partial: false },
+          },
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/pods/shop/checkout-7d9f8c-x2k4q/logs/stream") {
+        return route.fulfill({
+          contentType: "text/event-stream",
+          body: [
+            `event: line\ndata: ${JSON.stringify({ text: "INFO GET /cart 200 18 ms", container: "api", timestamp: iso(0.2), sequence: 1, ordinal: 1, cursor: "c1" })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ text: "INFO GET /checkout/quote 200 42 ms", container: "api", timestamp: iso(0.18), sequence: 2, ordinal: 2, cursor: "c2" })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ text: "WARN slow query orders.find 812 ms", container: "api", timestamp: iso(0.15), sequence: 3, ordinal: 3, cursor: "c3" })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ text: "INFO GET /cart 200 16 ms", container: "api", timestamp: iso(0.12), sequence: 4, ordinal: 4, cursor: "c4", replay_uncertain: true })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ text: "ERROR payment client timeout after 5 s (ledger)", container: "api", timestamp: iso(0.08), sequence: 5, ordinal: 5, cursor: "c5" })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ text: "INFO retry 1 payment ok 230 ms", container: "api", timestamp: iso(0.05), sequence: 6, ordinal: 6, cursor: "c6" })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ text: "INFO POST /checkout 201 311 ms", container: "api", timestamp: iso(0.02), sequence: 7, ordinal: 7, cursor: "c7" })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ text: "INFO GET /cart 200 17 ms", container: "api", timestamp: iso(0), sequence: 8, ordinal: 8, cursor: "c8" })}\n\n`,
+            `event: heartbeat\ndata: {"cursor":"c8"}\n\n`,
+            `event: end\ndata: {"reason":"complete","cursor":"c8"}\n\n`,
+          ].join(""),
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/resources/apps~v1~deployments/checkout/describe") {
+        return route.fulfill({
+          json: {
+            resource: {
+              resource_id: "apps~v1~deployments", api_version: "apps/v1", kind: "Deployment", namespace: "shop", name: "checkout", uid: "deploy-checkout", created_at: iso(4320),
+              conditions: [{ type: "Available", status: "True", reason: "MinimumReplicasAvailable", last_transition_at: iso(134) }],
+              summary: { ready_replicas: 3, desired_replicas: 4, main_container: "api", containers: [{ name: "api", image: "checkout:v42" }] },
+            },
+            related_resources: [], events: [],
+          },
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/workloads/Deployment/checkout/logs/stream") {
+        return route.fulfill({
+          contentType: "text/event-stream",
+          body: [
+            `event: sources\ndata: ${JSON.stringify({ workload_uid: "deploy-checkout", pods: podsPayload, truncated: false })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ workload_uid: "deploy-checkout", pod_uid: "p1", pod: "checkout-7d9f8c-x2k4q", namespace: "shop", container: "api", incarnation: "1", source_id: "s1", text: "GET /cart 200 18 ms", timestamp: iso(0.2), sequence: 1, ordinal: 1, cursor: "wc1" })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ workload_uid: "deploy-checkout", pod_uid: "p3", pod: "checkout-8b6c9d-a6v2n", namespace: "shop", container: "api", incarnation: "1", source_id: "s3", text: "GET /checkout/quote 200 42 ms", timestamp: iso(0.18), sequence: 2, ordinal: 2, cursor: "wc2" })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ workload_uid: "deploy-checkout", pod_uid: "p4", pod: "checkout-8b6c9d-b8r3s", namespace: "shop", container: "api", incarnation: "1", source_id: "s4", text: "cache hit ratio 0.94", timestamp: iso(0.15), sequence: 3, ordinal: 3, cursor: "wc3" })}\n\n`,
+            `event: source_status\ndata: ${JSON.stringify({ workload_uid: "deploy-checkout", pod_uid: "p2", pod: "checkout-7d9f8c-p9m1z", namespace: "shop", container: "api", source_id: "s2", code: "forbidden", message: "forbidden" })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ workload_uid: "deploy-checkout", pod_uid: "p1", pod: "checkout-7d9f8c-x2k4q", namespace: "shop", container: "api", incarnation: "1", source_id: "s1", text: "GET /cart 200 17 ms", timestamp: iso(0.1), sequence: 4, ordinal: 4, cursor: "wc4", replay_uncertain: true })}\n\n`,
+            `event: heartbeat\ndata: {"cursor":"wc4"}\n\n`,
+            `event: end\ndata: {"reason":"complete","cursor":"wc4"}\n\n`,
+          ].join(""),
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/workloads/Deployment/checkout") {
+        return route.fulfill({
+          json: {
+            uid: "deploy-checkout", resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "checkout", desired: 4, ready: 3, available: 3,
+            containers: [{ name: "api", image: "checkout:v42", requests: { cpu: "250m", memory: "256Mi" }, limits: { cpu: "500m", memory: "512Mi" } }],
+            pods: podsPayload.map((p) => ({ name: p.name, uid: p.uid, phase: "Running", node: "node-a", restart_count: 1, started_at: iso(134), created_at: iso(4320) })),
+            nodes: ["node-a"], truncated: false,
+          },
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/resources/apps~v1~statefulsets/ledger/describe") {
+        return route.fulfill({
+          json: {
+            resource: {
+              resource_id: "apps~v1~statefulsets", api_version: "apps/v1", kind: "StatefulSet", namespace: "shop", name: "ledger", uid: "sts-ledger", created_at: iso(4320),
+              conditions: [], summary: { ready_replicas: 3, desired_replicas: 3, main_container: "api", containers: [{ name: "api", image: "ledger:v1" }] },
+            },
+            related_resources: [], events: [],
+          },
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/workloads/StatefulSet/ledger/logs/stream") {
+        return route.fulfill({
+          contentType: "text/event-stream",
+          body: [
+            `event: sources\ndata: ${JSON.stringify({ workload_uid: "sts-ledger", pods: stsPods, truncated: false })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ workload_uid: "sts-ledger", pod_uid: "sts-0", pod: "ledger-0", namespace: "shop", container: "api", incarnation: "1", source_id: "l0", text: "replaying wal segment 41", timestamp: iso(5), sequence: 1, ordinal: 1 })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ workload_uid: "sts-ledger", pod_uid: "sts-1", pod: "ledger-1", namespace: "shop", container: "api", incarnation: "1", source_id: "l1", text: "commit accepted 18 ms", timestamp: iso(4), sequence: 2, ordinal: 2 })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ workload_uid: "sts-ledger", pod_uid: "sts-2", pod: "ledger-2", namespace: "shop", container: "api", incarnation: "1", source_id: "l2", text: "replica caught up", timestamp: iso(3), sequence: 3, ordinal: 3 })}\n\n`,
+            `event: line\ndata: ${JSON.stringify({ workload_uid: "sts-ledger", pod_uid: "sts-1", pod: "ledger-1", namespace: "shop", container: "api", incarnation: "1", source_id: "l1", text: "out of memory: cannot allocate 64 MiB", timestamp: iso(2), sequence: 4, ordinal: 4 })}\n\n`,
+            `event: end\ndata: {"reason":"complete"}\n\n`,
+          ].join(""),
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/workloads/StatefulSet/ledger") {
+        return route.fulfill({
+          json: {
+            uid: "sts-ledger", resource_id: "apps~v1~statefulsets", kind: "StatefulSet", namespace: "shop", name: "ledger", desired: 3, ready: 3, available: 3,
+            containers: [{ name: "api", image: "ledger:v1" }],
+            pods: stsPods.map((p) => ({ name: p.name, uid: p.uid, phase: "Running", node: "node-a", restart_count: 1, started_at: iso(134), created_at: iso(4320) })),
+            nodes: ["node-a"], truncated: false,
+          },
+        });
+      }
+      if (pathname === "/api/admin/kubernetes/agent-settings") {
+        return route.fulfill({
+          json: {
+            learning: { logs: true, metrics: true, traces: false, scope: { include: ["shop"], exclude: ["sandbox"] } },
+            break_logs: { linked_source: "loki-prod", fields: { loki: { namespace: "namespace", pod: "pod", container: "container" }, elasticsearch: { namespace: "kubernetes.namespace_name", pod: "kubernetes.pod_name", container: "kubernetes.container_name" }, cloudwatchlogs: { namespace: "kubernetes.namespace_name", pod: "kubernetes.pod_name", container: "kubernetes.container_name" }, graylog: { namespace: "kubernetes_namespace_name", pod: "kubernetes_pod_name", container: "kubernetes_container_name" }, splunk: { namespace: "namespace", pod: "pod", container: "container_name" }, signoz: { namespace: "k8s.namespace.name", pod: "k8s.pod.name", container: "k8s.container.name" } } },
+            sources: [{ type: "loki", name: "loki-prod", scope: "{cluster=\"fixture\"}", health: "healthy" }],
+            detected: { workloads: 8, namespaces: 2, metrics_server: true, traces: { kind: "tempo", namespace: "telemetry" } },
+            can_write: true, linked_source_missing: false,
+          },
+        });
+      }
+      return route.fulfill({ json: { items: [], totals: {}, counts: {}, pods: [], nodes: [], edges: [], available: false, truncated: false, sync: { state: "ready", age_s: 1, partial: false } } });
+    });
+
+    const captures: Array<{ name: string; path: string; sha256: string; width: number; height: number }> = [];
+    const assertCleanAndSave = async (name: string, clip?: { x: number; y: number; width: number; height: number }) => {
+      await expect(page.getByRole("dialog", { name: "Session expired" })).toHaveCount(0);
+      await expect(page.getByText(/Couldn.t render this page/i)).toHaveCount(0);
+      await expect(page.getByText(/Loading/i)).toHaveCount(0);
+      expect(pageErrors, `pageErrors before ${name}`).toEqual([]);
+      expect(consoleErrors, `consoleErrors before ${name}`).toEqual([]);
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      const file = path.join(screenshotDir, name);
+      const buf = clip
+        ? await page.screenshot({ path: file, clip, animations: "disabled" })
+        : await page.screenshot({ path: file, animations: "disabled" });
+      captures.push({
+        name,
+        path: file,
+        sha256: createHash("sha256").update(buf).digest("hex"),
+        width: buf.readUInt32BE(16),
+        height: buf.readUInt32BE(20),
+      });
+    };
+
+    // 1. Pod Overview & 5 Tabs at 1440x900 (and 840x900 drawer crop)
+    await page.goto("/agent/kubernetes?r=core~v1~pods/shop/checkout-7d9f8c-x2k4q");
+    const detail = page.getByRole("dialog", { name: "Details panel" });
+    await expect(detail).toBeVisible();
+    const tabs = detail.getByRole("tablist", { name: "Resource detail views" });
+    await expect(detail.getByLabel("CPU metric tile", { exact: true })).toContainText("412m");
+    await expect(detail.getByLabel("Memory metric tile", { exact: true })).toContainText("389 MiB");
+    await expect(detail.getByLabel("Pod log output")).toContainText("GET /cart 200 18 ms");
+    await assertCleanAndSave("k14-pod-overview-1440-dark-full.png");
+    await assertCleanAndSave("k14-pod-overview-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+
+    await tabs.getByRole("tab", { name: "Logs", exact: true }).click();
+    await expect(detail.getByRole("group", { name: "Container instance" })).toBeVisible();
+    await expect(detail.getByRole("button", { name: "Errors 1", exact: true })).toBeVisible();
+    await assertCleanAndSave("k14-pod-logs-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+
+    await tabs.getByRole("tab", { name: "Events", exact: true }).click();
+    await expect(detail.getByRole("region", { name: "Object-scoped events", exact: true })).toContainText("BackOff");
+    await assertCleanAndSave("k14-pod-events-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+
+    await tabs.getByRole("tab", { name: "YAML", exact: true }).click();
+    await expect(detail.getByRole("region", { name: "Projected YAML", exact: true })).toContainText("apiVersion: v1");
+    await assertCleanAndSave("k14-pod-yaml-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+
+    await tabs.getByRole("tab", { name: "Related", exact: true }).click();
+    await expect(detail.getByRole("region", { name: "Related resources", exact: true })).toContainText("Scales Deployment checkout");
+    await assertCleanAndSave("k14-pod-related-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+
+    await tabs.getByRole("tab", { name: "Timeline", exact: true }).click();
+    await expect(detail.getByRole("region", { name: "Resource change history", exact: true })).toContainText("checkout:v41");
+    await assertCleanAndSave("k14-pod-timeline-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+
+    // Light sanity on Pod Overview
+    await tabs.getByRole("tab", { name: "Overview", exact: true }).click();
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.evaluate(() => {
+      localStorage.setItem("versus.theme", "light");
+      document.documentElement.setAttribute("data-theme", "light");
+    });
+    await assertCleanAndSave("k14-pod-overview-840-light-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.evaluate(() => {
+      localStorage.setItem("versus.theme", "dark");
+      document.documentElement.setAttribute("data-theme", "dark");
+    });
+
+    // Mobile 390x844 Pod Overview
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(detail.getByRole("button", { name: "Pause logs", exact: true })).toBeVisible();
+    await expect(detail.getByRole("button", { name: "Search log lines", exact: true })).toBeVisible();
+    await expect(detail.getByRole("button", { name: "Expand logs", exact: true })).toBeVisible();
+    await assertCleanAndSave("k14-pod-overview-390-dark-mobile.png");
+
+    // 2. Deployment Overview & Logs at 1440x900 (840x900 drawer) and 390x844
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/agent/kubernetes?r=apps~v1~deployments/shop/checkout");
+    await expect(detail.getByRole("heading", { name: "Deployment shop/checkout", exact: true })).toBeVisible();
+    await expect(detail.getByLabel("Workload log output")).toContainText("checkout-7d9f8c-x2k4q");
+    await assertCleanAndSave("k14-deployment-overview-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+
+    await tabs.getByRole("tab", { name: "Logs", exact: true }).click();
+    await expect(detail.getByLabel("Workload log output")).toContainText("logs not available: forbidden");
+    await assertCleanAndSave("k14-deployment-logs-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await tabs.getByRole("tab", { name: "Overview", exact: true }).click();
+    await expect(detail.getByLabel("Workload log output")).toContainText("checkout-7d9f8c-x2k4q");
+    await assertCleanAndSave("k14-deployment-overview-390-dark-mobile.png");
+
+    await tabs.getByRole("tab", { name: "Logs", exact: true }).click();
+    await expect(detail.getByLabel("Workload log output")).toContainText("checkout-7d9f8c-x2k4q");
+    await assertCleanAndSave("k14-deployment-logs-390-dark-mobile.png");
+
+    await detail.getByRole("button", { name: "More", exact: true }).click();
+    await expect(detail.getByRole("group", { name: "Additional log controls", exact: true })).toBeVisible();
+    await assertCleanAndSave("k14-deployment-logs-390-dark-more-open.png");
+
+    // 3. StatefulSet Previous logs at 1440x900 (840x900 drawer)
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/agent/kubernetes?r=apps~v1~statefulsets/shop/ledger&tab=logs");
+    await expect(detail.getByRole("heading", { name: "StatefulSet shop/ledger", exact: true })).toBeVisible();
+    await detail.getByLabel("Previous logs", { exact: true }).check();
+    await expect(detail.getByText("Previous logs (not followed)", { exact: true })).toBeVisible();
+    await expect(detail.getByLabel("Workload log output")).toContainText("replaying wal segment 41");
+    await assertCleanAndSave("k14-statefulset-logs-840-dark-previous.png", { x: 600, y: 0, width: 840, height: 900 });
+
+    // 4. CrashJournal on Timeline tab (verifying R1 neutral summary when baseline limitations present)
+    await page.goto("/agent/kubernetes?view=timeline");
+    const crashJournal = page.getByRole("region", { name: "Captured crash evidence", exact: true });
+    await expect(crashJournal).toBeVisible();
+    await expect(crashJournal).toContainText("2 observations · Polling may miss crashes between checks.");
+    await expect(crashJournal).not.toContainText("Partial history; crashes may be missing.");
+    await crashJournal.scrollIntoViewIfNeeded();
+    await assertCleanAndSave("k14-crash-journal-1440-dark-timeline.png");
+
+    // 5. Agent tab (verifying log capture without byte/line limits + Agent learning at bottom with disabled switches and disabled Edit scope)
+    await page.goto("/agent/kubernetes?view=agent");
+    const agentRegion = page.getByRole("region", { name: "Kubernetes Agent", exact: true });
+    await expect(agentRegion).toBeVisible();
+    const learningRegion = agentRegion.getByRole("region", { name: "Agent learning", exact: true });
+    await expect(learningRegion).toBeVisible();
+    await expect(learningRegion.getByText("Not available yet.", { exact: true })).toBeVisible();
+    await expect(learningRegion.getByRole("switch", { name: "Logs learning", exact: true })).toBeDisabled();
+    await expect(learningRegion.getByRole("switch", { name: "Metrics learning", exact: true })).toBeDisabled();
+    await expect(learningRegion.getByRole("switch", { name: "Traces learning", exact: true })).toBeDisabled();
+    await expect(learningRegion.getByRole("button", { name: "Edit scope", exact: true })).toBeDisabled();
+    await learningRegion.scrollIntoViewIfNeeded();
+    await assertCleanAndSave("k14-agent-tab-1440-dark-settings.png");
+
+    if (process.env.HARNESS_RESULTS_DIR) {
+      fs.writeFileSync(
+        path.join(process.env.HARNESS_RESULTS_DIR, "visual-delta-captures.json"),
+        JSON.stringify(captures, null, 2),
+      );
+    }
+    await testInfo.attach("k14-svg-captures", { body: JSON.stringify(captures, null, 2), contentType: "application/json" });
+  });
+
+  test("live stack Deployment and StatefulSet All pods streaming, tabs, and V1-V8 regressions desktop and mobile", async ({ page, context }, testInfo) => {
+    test.skip(process.env.E2E_KUBERNETES_BACKEND !== "fake", "requires the live fakekube backend");
+    test.setTimeout(300_000);
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+
+    const state = harnessRuntimeStateDir();
+    const fakePort = Number(process.env.HARNESS_FAKEKUBE_PORT || 19443);
+    const ca = fs.readFileSync(path.join(state, "fakekube/ca.crt"));
+
+    const upstream = (endpoint: string, body?: unknown) =>
+      new Promise<unknown>((resolve, reject) => {
+        const encoded = body === undefined ? undefined : JSON.stringify(body);
+        const call = https.request(
+          `https://localhost:${fakePort}${endpoint}`,
+          {
+            ca,
+            method: encoded ? "POST" : "GET",
+            headers: encoded ? { "Content-Type": "application/json" } : {},
+          },
+          (response) => {
+            let text = "";
+            response.on("data", (chunk) => {
+              text += chunk;
+            });
+            response.on("end", () =>
+              response.statusCode === 200
+                ? resolve(text ? JSON.parse(text) : {})
+                : reject(new Error(`fakekube ${endpoint} HTTP ${response.statusCode} ${text}`)),
+            );
+          },
+        );
+        call.on("error", reject);
+        call.end(encoded);
+      });
+
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+
+    // 1. Verify default triage Deployment payments/checkout-api streams live logs via repaired ReplicaSet -> Pod chain
+    await openApp(page, "/agent/kubernetes?r=apps~v1~deployments/payments/checkout-api");
+    const detail = page.getByRole("dialog", { name: "Details panel" });
+    await expect(detail).toBeVisible();
+    await expect(detail.getByRole("heading", { name: "Deployment payments/checkout-api", exact: true })).toBeVisible();
+    await expect(detail).not.toContainText("739910d");
+    await expect(detail).not.toContainText("1/1/1");
+    await expect(detail.getByLabel("CPU metric tile", { exact: true }).locator("p.text-ink-400").first()).toHaveText("Unavailable");
+    await expect(detail.getByLabel("Memory metric tile", { exact: true }).locator("p.text-ink-400").first()).toHaveText("Unavailable");
+
+    const triageWlLogs = detail.getByLabel("Workload log output");
+    await expect(triageWlLogs).toContainText("checkout-api-0", { timeout: 30_000 });
+    await expect(triageWlLogs).toContainText("fakekube follow line");
+    await expect(triageWlLogs).toContainText("REDACTED");
+    await expect(triageWlLogs).not.toContainText("super-secret-value");
+
+    // 2. Seed shop namespace with multi-ReplicaSet Deployment checkout (4 owned Pods + 1 unowned same-label Pod) and StatefulSet ledger (3 ordinals)
+    const nowMs = Math.floor(Date.now() / 1000) * 1000;
+    const iso = (ms: number) => new Date(ms).toISOString().replace(".000Z", "Z");
+    const startedISO = iso(nowMs - 8040_000);
+    const createdISO = iso(nowMs - 86400_000 * 3);
+
+    await upstream("/_fake/mutate", {
+      operation: "upsert",
+      resource: "namespaces",
+      namespace: "",
+      name: "shop",
+      object: { kind: "Namespace", metadata: { name: "shop" } },
+    });
+    await upstream("/_fake/mutate", {
+      operation: "upsert",
+      resource: "deployments",
+      namespace: "shop",
+      name: "checkout",
+      object: {
+        apiVersion: "apps/v1",
+        kind: "Deployment",
+        metadata: { name: "checkout", namespace: "shop", uid: "live-deploy-checkout", creationTimestamp: createdISO, generation: 2, labels: { app: "checkout" } },
+        spec: {
+          replicas: 4,
+          selector: { matchLabels: { app: "checkout" } },
+          template: {
+            metadata: { labels: { app: "checkout" } },
+            spec: {
+              containers: [
+                { name: "api", image: "checkout:v42", resources: { requests: { cpu: "250m", memory: "256Mi" }, limits: { cpu: "500m", memory: "512Mi" } } },
+                { name: "sidecar", image: "istio-proxy:v1" },
+              ],
+              initContainers: [{ name: "setup", image: "setup:v1" }],
+            },
+          },
+        },
+        status: {
+          observedGeneration: 2,
+          replicas: 4,
+          readyReplicas: 3,
+          availableReplicas: 3,
+          updatedReplicas: 2,
+          conditions: [{ type: "Available", status: "True", reason: "MinimumReplicasAvailable", lastTransitionTime: startedISO }],
+        },
+      },
+    });
+    for (const rs of [
+      { name: "checkout-7d9f8c", uid: "live-rs-old", replicas: 2 },
+      { name: "checkout-8b6c9d", uid: "live-rs-new", replicas: 2 },
+    ]) {
+      await upstream("/_fake/mutate", {
+        operation: "upsert",
+        resource: "replicasets",
+        namespace: "shop",
+        name: rs.name,
+        object: {
+          apiVersion: "apps/v1",
+          kind: "ReplicaSet",
+          metadata: {
+            name: rs.name,
+            namespace: "shop",
+            uid: rs.uid,
+            creationTimestamp: createdISO,
+            labels: { app: "checkout" },
+            ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "checkout", uid: "live-deploy-checkout", controller: true }],
+          },
+          spec: { replicas: rs.replicas, selector: { matchLabels: { app: "checkout" } } },
+          status: { replicas: rs.replicas, readyReplicas: rs.replicas },
+        },
+      });
+    }
+
+    const makeShopPod = (name: string, uid: string, ownerKind: "ReplicaSet" | "StatefulSet", ownerName: string, ownerUID: string, appLabel: string, withOwner = true) => ({
+      apiVersion: "v1",
+      kind: "Pod",
+      metadata: {
+        name,
+        namespace: "shop",
+        uid,
+        creationTimestamp: createdISO,
+        labels: { app: appLabel },
+        ...(withOwner
+          ? { ownerReferences: [{ apiVersion: "apps/v1", kind: ownerKind, name: ownerName, uid: ownerUID, controller: true }] }
+          : {}),
+      },
+      spec: {
+        nodeName: "node-a",
+        containers: [
+          { name: "api", image: "checkout:v42", resources: { requests: { cpu: "250m", memory: "256Mi" }, limits: { cpu: "500m", memory: "512Mi" } } },
+          { name: "sidecar", image: "istio-proxy:v1" },
+        ],
+        initContainers: [{ name: "setup", image: "setup:v1" }],
+      },
+      status: {
+        phase: "Running",
+        podIP: "10.42.1.17",
+        qosClass: "Burstable",
+        conditions: [{ type: "Ready", status: "True", reason: "ContainersReady", lastTransitionTime: startedISO }],
+        containerStatuses: [
+          { name: "api", ready: true, restartCount: 2, state: { running: { startedAt: startedISO } }, lastState: { terminated: { reason: "OOMKilled", exitCode: 137, finishedAt: iso(nowMs - 600_000) } } },
+          { name: "sidecar", ready: true, restartCount: 1, state: { running: { startedAt: startedISO } } },
+        ],
+        initContainerStatuses: [{ name: "setup", ready: true, restartCount: 0, state: { terminated: { exitCode: 0, reason: "Completed" } } }],
+      },
+    });
+
+    const checkoutPods = [
+      { name: "checkout-7d9f8c-x2k4q", uid: "live-pod-x2k4q", rsName: "checkout-7d9f8c", rsUID: "live-rs-old" },
+      { name: "checkout-7d9f8c-p9m1z", uid: "live-pod-p9m1z", rsName: "checkout-7d9f8c", rsUID: "live-rs-old" },
+      { name: "checkout-8b6c9d-a6v2n", uid: "live-pod-a6v2n", rsName: "checkout-8b6c9d", rsUID: "live-rs-new" },
+      { name: "checkout-8b6c9d-b8r3s", uid: "live-pod-b8r3s", rsName: "checkout-8b6c9d", rsUID: "live-rs-new" },
+    ];
+    for (const p of checkoutPods) {
+      await upstream("/_fake/mutate", {
+        operation: "upsert",
+        resource: "pods",
+        namespace: "shop",
+        name: p.name,
+        object: makeShopPod(p.name, p.uid, "ReplicaSet", p.rsName, p.rsUID, "checkout", true),
+      });
+    }
+    await upstream("/_fake/mutate", {
+      operation: "delete",
+      resource: "pods",
+      namespace: "shop",
+      name: "checkout-8b6c9d-c9z4k",
+    }).catch(() => {});
+    // Unowned same-label Pod in shop namespace that must NEVER be admitted to Deployment checkout stream
+    await upstream("/_fake/mutate", {
+      operation: "upsert",
+      resource: "pods",
+      namespace: "shop",
+      name: "checkout-unowned-same-label",
+      object: makeShopPod("checkout-unowned-same-label", "live-pod-unowned", "ReplicaSet", "other-rs", "other-rs-uid", "checkout", false),
+    });
+    // Configure checkout-7d9f8c-p9m1z api container to return HTTP 403 Forbidden on finite Previous logs read
+    await upstream("/_fake/log-fixtures", {
+      path: "/api/v1/namespaces/shop/pods/checkout-7d9f8c-p9m1z/log",
+      container: "api",
+      previous: true,
+      status: 403,
+    });
+
+    // Seed StatefulSet shop/ledger with 3 ordinals ledger-0, ledger-1, ledger-2
+    await upstream("/_fake/mutate", {
+      operation: "upsert",
+      resource: "statefulsets",
+      namespace: "shop",
+      name: "ledger",
+      object: {
+        apiVersion: "apps/v1",
+        kind: "StatefulSet",
+        metadata: { name: "ledger", namespace: "shop", uid: "live-sts-ledger", creationTimestamp: createdISO, generation: 1, labels: { app: "ledger" } },
+        spec: {
+          serviceName: "ledger",
+          replicas: 3,
+          selector: { matchLabels: { app: "ledger" } },
+          template: { metadata: { labels: { app: "ledger" } }, spec: { containers: [{ name: "api", image: "ledger:v1" }] } },
+        },
+        status: { observedGeneration: 1, replicas: 3, readyReplicas: 3, currentReplicas: 3, updatedReplicas: 3 },
+      },
+    });
+    for (let ord = 0; ord < 3; ord++) {
+      await upstream("/_fake/mutate", {
+        operation: "upsert",
+        resource: "pods",
+        namespace: "shop",
+        name: `ledger-${ord}`,
+        object: makeShopPod(`ledger-${ord}`, `live-pod-ledger-${ord}`, "StatefulSet", "ledger", "live-sts-ledger", "ledger", true),
+      });
+    }
+
+    // Refresh index and wait until Deployment shop/checkout and StatefulSet shop/ledger are indexed
+    await detail.getByRole("button", { name: "Close panel" }).click();
+    await expect.poll(async () => {
+      await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+      const res = await page.request.get("/api/admin/kubernetes/workloads?namespace=shop&limit=50");
+      if (res.status() !== 200) return false;
+      const body = await res.json();
+      const names = (body.items ?? []).map((item: { kind: string; name: string }) => `${item.kind}/${item.name}`);
+      return names.includes("Deployment/checkout") && names.includes("StatefulSet/ledger") && names.includes("Pod/checkout-8b6c9d-b8r3s");
+    }, { timeout: 45_000, intervals: [1000, 2000] }).toBe(true);
+
+    // 3. Open Deployment shop/checkout on Overview and verify shared Overview/Logs workload stream
+    const checkoutStreamRequests: URL[] = [];
+    page.on("request", (req) => {
+      const url = new URL(req.url());
+      if (url.pathname === "/api/admin/kubernetes/workloads/Deployment/checkout/logs/stream") {
+        checkoutStreamRequests.push(url);
+      }
+    });
+
+    await page.goto("/agent/kubernetes?r=apps~v1~deployments/shop/checkout");
+    await expect(detail.getByRole("heading", { name: "Deployment shop/checkout", exact: true })).toBeVisible();
+    await expect(detail).toContainText("Ready 3/4");
+    await expect(detail).not.toContainText("Partial coverage");
+    await expect(detail).not.toContainText(/Streaming \d+ of \d+/);
+    await expect(detail.getByRole("alert")).toHaveCount(0);
+
+    const wlOutput = detail.getByLabel("Workload log output");
+    for (const podName of ["checkout-7d9f8c-x2k4q", "checkout-7d9f8c-p9m1z", "checkout-8b6c9d-a6v2n", "checkout-8b6c9d-b8r3s"]) {
+      await expect(wlOutput).toContainText(podName, { timeout: 30_000 });
+    }
+    await expect(wlOutput).not.toContainText("checkout-unowned-same-label");
+    expect(checkoutStreamRequests).toHaveLength(1);
+    await captureBreakState(page, "k14-live-deployment-overview-desktop-dark.png", "dark", "L: live OSS + fakekube Deployment Overview compact All pods stream");
+
+    // Mobile 390x844 Deployment Overview compact card
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await captureBreakState(page, "k14-live-deployment-overview-mobile-dark.png", "dark", "L: live OSS + fakekube Deployment Overview mobile 390x844");
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    // Switch to Logs tab via "Open full logs →" and verify NO second stream request is opened!
+    await detail.getByRole("button", { name: "Open full logs", exact: true }).click();
+    const tabs = detail.getByRole("tablist", { name: "Resource detail views" });
+    await expect(tabs.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
+    expect(checkoutStreamRequests).toHaveLength(1);
+
+    // Switch to Events and back to Logs -> still the same single stream session!
+    await tabs.getByRole("tab", { name: "Events", exact: true }).click();
+    await tabs.getByRole("tab", { name: "Logs", exact: true }).click();
+    expect(checkoutStreamRequests).toHaveLength(1);
+
+    const podSelect = detail.getByLabel("Log pod", { exact: true });
+    await expect(podSelect.locator("option")).toHaveText([
+      "All pods",
+      "checkout-7d9f8c-p9m1z",
+      "checkout-7d9f8c-x2k4q",
+      "checkout-8b6c9d-a6v2n",
+      "checkout-8b6c9d-b8r3s",
+    ]);
+    await captureBreakState(page, "k14-live-deployment-logs-all-pods-desktop-dark.png", "dark", "L: live OSS + fakekube Deployment Logs All pods across old and new ReplicaSets");
+
+    // Mobile 390x844 Deployment Logs with More menu collapsed and expanded
+    await page.setViewportSize({ width: 390, height: 844 });
+    const moreBtn = detail.getByRole("button", { name: "More", exact: true });
+    await expect(moreBtn).toBeVisible();
+    await expect(moreBtn).toHaveAttribute("aria-expanded", "false");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await captureBreakState(page, "k14-live-deployment-logs-mobile-dark.png", "dark", "L: live OSS + fakekube Deployment Logs mobile 390x844");
+    await moreBtn.click();
+    await expect(moreBtn).toHaveAttribute("aria-expanded", "true");
+    await expect(detail.getByRole("group", { name: "Additional log controls", exact: true })).toBeVisible();
+    await captureBreakState(page, "k14-live-deployment-logs-more-mobile-dark.png", "dark", "L: live OSS + fakekube Deployment Logs mobile More menu expanded");
+    await moreBtn.click();
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    // 4. Click a Pod-name prefix in a log line to narrow the stream to that Pod, verify upstream cancellation of other Pods, and verify "All pods" is not mislabeled
+    await wlOutput.getByRole("button", { name: "checkout-8b6c9d-a6v2n" }).first().click();
+    await expect(podSelect).toHaveValue("live-pod-a6v2n");
+    await expect(podSelect.locator("option").first()).toHaveText("All pods");
+    await expect(podSelect.locator("option")).toHaveText([
+      "All pods",
+      "checkout-7d9f8c-p9m1z",
+      "checkout-7d9f8c-x2k4q",
+      "checkout-8b6c9d-a6v2n",
+      "checkout-8b6c9d-b8r3s",
+    ]);
+    await expect.poll(async () => {
+      const counters = await streamCounters();
+      const a6Active = counters.find((c) => c.path === "/api/v1/namespaces/shop/pods/checkout-8b6c9d-a6v2n/log" && c.container === "api" && c.follow)?.active ?? 0;
+      const x2Active = counters.find((c) => c.path === "/api/v1/namespaces/shop/pods/checkout-7d9f8c-x2k4q/log" && c.container === "api" && c.follow)?.active ?? 0;
+      return a6Active === 1 && x2Active === 0;
+    }, { timeout: 15_000 }).toBe(true);
+
+    // Switch back to All pods
+    await podSelect.selectOption("");
+    await expect.poll(async () => {
+      const counters = await streamCounters();
+      const a6Active = counters.find((c) => c.path === "/api/v1/namespaces/shop/pods/checkout-8b6c9d-a6v2n/log" && c.container === "api" && c.follow)?.active ?? 0;
+      const x2Active = counters.find((c) => c.path === "/api/v1/namespaces/shop/pods/checkout-7d9f8c-x2k4q/log" && c.container === "api" && c.follow)?.active ?? 0;
+      return a6Active === 1 && x2Active === 1;
+    }, { timeout: 15_000 }).toBe(true);
+
+    // 5. Container picker: All containers ("*") renders <pod>/<container> prefixes
+    const containerSelect = detail.getByLabel("Log container", { exact: true });
+    await expect(containerSelect.locator("option")).toHaveText(["Main container", "api", "sidecar", "init:setup", "All containers"]);
+    await containerSelect.selectOption("*");
+    await expect(wlOutput).toContainText("checkout-7d9f8c-x2k4q/api", { timeout: 20_000 });
+    await expect(wlOutput).toContainText("checkout-7d9f8c-x2k4q/sidecar", { timeout: 20_000 });
+    await containerSelect.selectOption("");
+    await expect(wlOutput).toContainText("checkout-7d9f8c-x2k4q");
+
+    // 6. Follow scroll vs network pause: uncheck Follow, verify lines still arrive over network without scrolling, then Pause logs cancels upstream
+    await detail.getByLabel("Follow", { exact: true }).uncheck();
+    await wlOutput.evaluate((el) => {
+      el.scrollTop = 0;
+      el.dispatchEvent(new Event("scroll"));
+    });
+    const countBeforeFollowWait = await wlOutput.locator("[data-log-key]").count();
+    await expect.poll(() => wlOutput.locator("[data-log-key]").count(), { timeout: 15_000 }).toBeGreaterThan(countBeforeFollowWait + 2);
+    expect(await wlOutput.evaluate((el) => el.scrollTop)).toBeLessThanOrEqual(1);
+    await detail.getByLabel("Jump to latest").click();
+    await expect(detail.getByLabel("Follow", { exact: true })).toBeChecked();
+    await expect.poll(() => wlOutput.locator("[data-log-key]").count(), { timeout: 25_000 }).toBeGreaterThanOrEqual(4);
+    expect(await wlOutput.locator("[data-log-key]").count()).toBeLessThan(32);
+
+    await detail.getByLabel("Pause logs").click();
+    await expect.poll(async () => {
+      const counters = await streamCounters();
+      return counters.filter((c) => c.path.startsWith("/api/v1/namespaces/shop/pods/checkout-")).reduce((sum, c) => sum + c.active, 0);
+    }, { timeout: 15_000 }).toBe(0);
+    await detail.getByLabel("Resume logs").click();
+    await expect.poll(() => checkoutStreamRequests.at(-1)?.searchParams.has("cursor")).toBe(true);
+
+    // Check Previous logs on Deployment checkout: checkout-7d9f8c-p9m1z returns 403 Forbidden (one dim inline line, no spurious reconnect divider spam) while the other 3 Pods stream previous lines!
+    await detail.getByLabel("Previous logs").check();
+    await expect(wlOutput).toContainText(/logs not available: (?:forbidden|Kubernetes denied access)/i, { timeout: 15_000 });
+    await expect(wlOutput).toContainText("checkout-7d9f8c-x2k4q");
+    await expect(wlOutput).toContainText("fakekube previous");
+    await page.waitForTimeout(6200);
+    await expect(wlOutput.locator("[data-log-key]").filter({ hasText: "logs not available:" })).toHaveCount(1);
+    await expect(wlOutput).not.toContainText("reconnected at");
+    await captureBreakState(page, "k14-live-deployment-previous-forbidden-inline-desktop-dark.png", "dark", "L: live OSS + fakekube Deployment Previous logs with one forbidden Pod inline row");
+    await detail.getByLabel("Previous logs").uncheck();
+    await expect(wlOutput).toContainText("fakekube follow line", { timeout: 20_000 });
+
+    // 7. Dynamic rollout join & deletion on live stream
+    await upstream("/_fake/mutate", {
+      operation: "upsert",
+      resource: "pods",
+      namespace: "shop",
+      name: "checkout-8b6c9d-c9z4k",
+      object: makeShopPod("checkout-8b6c9d-c9z4k", "live-pod-c9z4k", "ReplicaSet", "checkout-8b6c9d", "live-rs-new", "checkout", true),
+    });
+    expect((await page.request.get("/api/admin/kubernetes/workloads?namespace=shop&limit=50")).status()).toBe(200);
+    await expect(wlOutput).toContainText("checkout-8b6c9d-c9z4k", { timeout: 30_000 });
+    await upstream("/_fake/mutate", {
+      operation: "delete",
+      resource: "pods",
+      namespace: "shop",
+      name: "checkout-8b6c9d-c9z4k",
+    });
+    expect((await page.request.get("/api/admin/kubernetes/workloads?namespace=shop&limit=50")).status()).toBe(200);
+    await expect.poll(async () => {
+      const counters = await streamCounters();
+      return counters.find((c) => c.path === "/api/v1/namespaces/shop/pods/checkout-8b6c9d-c9z4k/log" && c.follow)?.active ?? 0;
+    }, { timeout: 20_000 }).toBe(0);
+    // Retained lines from deleted Pod remain visible in buffer
+    await expect(wlOutput).toContainText("checkout-8b6c9d-c9z4k");
+
+    // 8. StatefulSet shop/ledger live logs and Previous logs finite read
+    await page.goto("/agent/kubernetes?r=apps~v1~statefulsets/shop/ledger&tab=logs");
+    await expect(detail.getByRole("heading", { name: "StatefulSet shop/ledger", exact: true })).toBeVisible();
+    for (const ord of ["ledger-0", "ledger-1", "ledger-2"]) {
+      await expect(wlOutput).toContainText(ord, { timeout: 30_000 });
+    }
+    await detail.getByLabel("Previous logs").check();
+    await expect(detail.getByLabel("Follow", { exact: true })).toBeDisabled();
+    await expect(wlOutput).toContainText("fakekube previous");
+    await expect(wlOutput).toContainText("REDACTED");
+    await expect(wlOutput).not.toContainText("previous-secret-value");
+    await expect.poll(async () => {
+      const counters = await streamCounters();
+      return counters.filter((c) => c.path.startsWith("/api/v1/namespaces/shop/pods/ledger-")).reduce((sum, c) => sum + c.active, 0);
+    }, { timeout: 15_000 }).toBe(0);
+    await captureBreakState(page, "k14-live-statefulset-previous-logs-desktop-dark.png", "dark", "L: live OSS + fakekube StatefulSet Previous logs finite read");
+
+    // Light theme visual parity check on StatefulSet drawer
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.evaluate(() => {
+      localStorage.setItem("versus.theme", "light");
+      document.documentElement.setAttribute("data-theme", "light");
+    });
+    await captureBreakState(page, "k14-live-statefulset-previous-logs-desktop-light.png", "light", "L: live OSS + fakekube StatefulSet Previous logs light theme");
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.evaluate(() => {
+      localStorage.setItem("versus.theme", "dark");
+      document.documentElement.setAttribute("data-theme", "dark");
+    });
+
+    // Uncheck Previous logs -> resumes live follow, then test StatefulSet ordinal UID replacement (stale index before refresh vs fresh identity after refresh)
+    await detail.getByLabel("Previous logs").uncheck();
+    await expect(wlOutput).toContainText("fakekube follow line", { timeout: 20_000 });
+
+    // Close drawer so active streams stop, then replace ledger-2 in fakekube with a new UID BEFORE refreshing the shared index
+    await detail.getByRole("button", { name: "Close panel" }).click();
+    await expect(detail).toHaveCount(0);
+    await expect.poll(async () => {
+      const counters = await streamCounters();
+      return counters.reduce((sum, c) => sum + c.active, 0);
+    }, { timeout: 15_000 }).toBe(0);
+
+    const ledger2BeforeReplace = (await streamCounters()).find((c) => c.path === "/api/v1/namespaces/shop/pods/ledger-2/log" && c.container === "api" && c.follow)?.requests ?? 0;
+    await upstream("/_fake/mutate", {
+      operation: "upsert",
+      resource: "pods",
+      namespace: "shop",
+      name: "ledger-2",
+      object: makeShopPod("ledger-2", "live-pod-ledger-2-replaced", "StatefulSet", "ledger", "live-sts-ledger", "ledger", true),
+    });
+
+    // Open fresh StatefulSet stream while shared index still has old UID "live-pod-ledger-2": D3 live Pod GET rejects stale UID without opening a log read on ledger-2!
+    await page.goto("/agent/kubernetes?r=apps~v1~statefulsets/shop/ledger&tab=logs");
+    await expect(detail.getByRole("heading", { name: "StatefulSet shop/ledger", exact: true })).toBeVisible();
+    await expect(wlOutput).toContainText("ledger-0", { timeout: 20_000 });
+    await expect(wlOutput).toContainText("ledger-1", { timeout: 20_000 });
+    const ledger2DuringStaleIndex = (await streamCounters()).find((c) => c.path === "/api/v1/namespaces/shop/pods/ledger-2/log" && c.container === "api" && c.follow)?.requests ?? 0;
+    expect(ledger2DuringStaleIndex).toBe(ledger2BeforeReplace);
+
+    // Refresh shared index so new UID "live-pod-ledger-2-replaced" is discovered -> 5s reconcile admits ledger-2 with its new identity!
+    expect((await page.request.get("/api/admin/kubernetes/workloads?namespace=shop&limit=50")).status()).toBe(200);
+    await expect(wlOutput).toContainText("ledger-2", { timeout: 25_000 });
+    await expect(detail.getByLabel("Log pod", { exact: true }).locator('option[value="live-pod-ledger-2-replaced"]')).toHaveText("ledger-2");
+
+    await detail.getByRole("button", { name: "Close panel" }).click();
+    await expect(detail).toHaveCount(0);
+    await expect.poll(async () => {
+      const counters = await streamCounters();
+      return counters.reduce((sum, c) => sum + c.active, 0);
+    }, { timeout: 15_000 }).toBe(0);
+    expect(errors).toEqual([]);
+    await testInfo.attach("k14-live-upstream-counters", { body: JSON.stringify(await streamCounters(), null, 2), contentType: "application/json" });
   });
 });

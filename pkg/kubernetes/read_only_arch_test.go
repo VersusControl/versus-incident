@@ -114,11 +114,138 @@ func TestKubernetesProductionSurfaceIsReadOnly(t *testing.T) {
 			if filepath.Clean(name) == filepath.Join("breaklogs", "settings.go") && function.Name.Name == "UpdateSettings" && function.Recv == nil {
 				continue
 			}
+			if allowedUsageHistoryStorageFunction(name, function) {
+				continue
+			}
 			for _, prefix := range []string{"create", "update", "delete", "patch", "apply", "mutate", "proxy", "installhelm"} {
 				if strings.HasPrefix(method, prefix) {
 					t.Errorf("%s declares mutation method %s", name, function.Name.Name)
 				}
 			}
+		}
+	}
+}
+
+// The history bridge mutates only Versus storage, not the Kubernetes API.
+// This exception skips the mutation-name heuristic for exactly one signature;
+// file-wide transport prohibitions still run, and every body call is checked.
+func allowedUsageHistoryStorageFunction(name string, function *ast.FuncDecl) bool {
+	if filepath.Clean(name) != "usage_history_bridge.go" || function.Name.Name != "updateUsageManifest" || function.Recv == nil || len(function.Recv.List) != 1 || function.Body == nil {
+		return false
+	}
+	field := function.Recv.List[0]
+	if len(field.Names) != 1 || field.Names[0].Name != "service" {
+		return false
+	}
+	pointer, ok := field.Type.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	owner, ok := pointer.X.(*ast.Ident)
+	if !ok || owner.Name != "Service" {
+		return false
+	}
+	var signature bytes.Buffer
+	positions := token.NewFileSet()
+	if format.Node(&signature, positions, function.Type) != nil || signature.String() != "func(ctx context.Context, provider storage.Provider, updates []usageInterest, now time.Time) error" {
+		return false
+	}
+	allowed := map[string]bool{
+		"len": true, "make": true, "append": true, "delete": true,
+		"ctx.Err": true, "now.Sub": true, "old.Opened.After": true, "old.Touched.After": true,
+		"usageBridgePrefix": true, "usageRecordKey": true, "service.cacheKey": true, "readUsageManifest": true,
+		"json.Marshal": true, "json.Unmarshal": true, "bytes.Equal": true,
+		"service.guardedUsageCacheWrite": true, "cas.CompareAndSwapBlob": true, "provider.ReadBlob": true,
+	}
+	safe := true
+	protected := map[string]bool{"service": true, "ctx": true, "provider": true, "updates": true, "now": true, "cas": true, "len": true, "make": true, "append": true, "delete": true, "json": true, "bytes": true, "storage": true}
+	casBound, casCalled := false, false
+	ast.Inspect(function.Body, func(node ast.Node) bool {
+		switch value := node.(type) {
+		case *ast.AssignStmt:
+			for _, left := range value.Lhs {
+				id, ok := left.(*ast.Ident)
+				if !ok || !protected[id.Name] {
+					continue
+				}
+				validCAS := false
+				if id.Name == "cas" && value.Tok == token.DEFINE && len(value.Rhs) == 1 && !casBound {
+					assertion, ok := value.Rhs[0].(*ast.TypeAssertExpr)
+					if ok {
+						source, sourceOK := assertion.X.(*ast.Ident)
+						target, targetOK := assertion.Type.(*ast.SelectorExpr)
+						if sourceOK && source.Name == "provider" && targetOK {
+							pkg, pkgOK := target.X.(*ast.Ident)
+							validCAS = pkgOK && pkg.Name == "storage" && target.Sel.Name == "BlobCAS"
+						}
+					}
+				}
+				if validCAS {
+					casBound = true
+				} else {
+					safe = false
+				}
+			}
+		case *ast.ValueSpec:
+			for _, name := range value.Names {
+				if protected[name.Name] {
+					safe = false
+				}
+			}
+		case *ast.RangeStmt:
+			for _, expression := range []ast.Expr{value.Key, value.Value} {
+				if id, ok := expression.(*ast.Ident); ok && protected[id.Name] {
+					safe = false
+				}
+			}
+		}
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		var target bytes.Buffer
+		if format.Node(&target, positions, call.Fun) != nil || !allowed[target.String()] {
+			safe = false
+		}
+		if target.String() == "cas.CompareAndSwapBlob" {
+			casCalled = true
+		}
+		return true
+	})
+	return safe && (!casCalled || casBound)
+}
+
+func TestUsageHistoryStorageAllowanceRejectsKubernetesMutations(t *testing.T) {
+	for _, test := range []struct {
+		body    string
+		allowed bool
+	}{
+		{`cas := provider.(storage.BlobCAS); _, err := cas.CompareAndSwapBlob("history", nil, nil); return err`, true},
+		{`cas := provider.(storage.BlobCAS); return service.guardedUsageCacheWrite(ctx, func() error { _, err := cas.CompareAndSwapBlob("history", nil, nil); return err })`, true},
+		{`return service.client.DeletePod(ctx, "shop", "api")`, false},
+		{`_, err := http.NewRequest(http.MethodPost, "/pods", nil); return err`, false},
+		{`return client.Put("/pods")`, false},
+		{`return service.guardedUsageCacheWrite(ctx, func() error { return client.Delete("/pods") })`, false},
+		{`return service.client.GetJSON(ctx, "/pods", nil)`, false},
+		{`return applyWorkload(ctx)`, false},
+		{`delete := service.client.Delete; delete(ctx); return nil`, false},
+		{`return cas.CompareAndSwapBlob("pods", nil, nil)`, false},
+	} {
+		source := `package kubernetes; func(service *Service) updateUsageManifest(ctx context.Context, provider storage.Provider, updates []usageInterest, now time.Time) error {` + test.body + `}`
+		parsed, err := parser.ParseFile(token.NewFileSet(), "usage_history_bridge.go", source, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		function := parsed.Decls[0].(*ast.FuncDecl)
+		if got := allowedUsageHistoryStorageFunction("usage_history_bridge.go", function); got != test.allowed {
+			t.Errorf("body %s allowed=%v want=%v", test.body, got, test.allowed)
+		}
+		if allowedUsageHistoryStorageFunction("client.go", function) || allowedUsageHistoryStorageFunction(filepath.Join("nested", "usage_history_bridge.go"), function) {
+			t.Fatal("storage allowance escaped its exact file")
+		}
+		function.Name = ast.NewIdent("updateDeployment")
+		if allowedUsageHistoryStorageFunction("usage_history_bridge.go", function) {
+			t.Fatal("storage allowance escaped its exact function")
 		}
 	}
 }

@@ -1,7 +1,7 @@
 import { test, expect, type ConsoleMessage, type Response } from "@playwright/test";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { openApp } from "./helpers";
+import { captureDir } from "./support/capture";
 
 // ---------------------------------------------------------------------------
 // Incident list-perf + typed-columns browser e2e (Part C of the incident
@@ -19,8 +19,7 @@ import { openApp } from "./helpers";
 // `plans/harness-run/harness.sh e2e ui incidents-list-perf`.
 // ---------------------------------------------------------------------------
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SHOTS = path.resolve(__dirname, "screenshots", "list-perf");
+const SHOTS = captureDir();
 
 // The seeded fixture (run-harness Postgres) holds ~25k incidents, only a
 // fraction unresolved. The unresolved counts are derived from the live API at

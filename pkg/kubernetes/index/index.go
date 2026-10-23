@@ -46,6 +46,7 @@ type OwnerRef struct {
 type ContainerState struct {
 	Ready              bool      `json:"ready"`
 	Running            bool      `json:"running"`
+	StartedAt          time.Time `json:"started_at,omitempty,omitzero"`
 	StateKnown         bool      `json:"state_known,omitempty"`
 	Name               string    `json:"name"`
 	Init               bool      `json:"init,omitempty"`
@@ -54,7 +55,7 @@ type ContainerState struct {
 	TerminatedReason   string    `json:"last_terminated_reason,omitempty"`
 	ExitCode           int32     `json:"last_terminated_exit_code,omitempty"`
 	Signal             int32     `json:"last_terminated_signal,omitempty"`
-	TerminatedAt       time.Time `json:"last_terminated_at,omitempty"`
+	TerminatedAt       time.Time `json:"last_terminated_at,omitempty,omitzero"`
 	RestartCount       int32     `json:"restart_count"`
 }
 
@@ -91,6 +92,9 @@ type Record struct {
 	AllocatableMemory       int64
 	Health                  string
 	Containers              []ContainerState
+	LogContainers           []ContainerState
+	MainContainer           string
+	LogContainersPartial    bool
 	ReadyStatus             string
 	ReadyTransitionAt       time.Time
 	ProgressingStatus       string
@@ -502,12 +506,14 @@ func validRecord(record Record) bool {
 	if len(record.Labels) > maxLabels || len(record.Selector) > maxLabels || len(record.References) > 8 || len(record.Summary) > maxSummaryFields || len(record.Owners) > maxOwners || len(record.Images) > maxImages {
 		return false
 	}
-	if len(record.Containers) > 8 {
+	if len(record.Containers) > 8 || len(record.LogContainers) > 64 || !validOptionalText(record.MainContainer, 63) {
 		return false
 	}
-	for _, container := range record.Containers {
-		if !validText(container.Name, 63) || !validOptionalText(container.WaitingReason, 64) || !validOptionalText(container.TerminatedReason, 64) || container.RestartCount < 0 || container.Signal < 0 || container.Signal > 64 {
-			return false
+	for _, containers := range [][]ContainerState{record.Containers, record.LogContainers} {
+		for _, container := range containers {
+			if !validText(container.Name, 63) || !validOptionalText(container.WaitingReason, 64) || !validOptionalText(container.TerminatedReason, 64) || container.RestartCount < 0 || container.Signal < 0 || container.Signal > 64 {
+				return false
+			}
 		}
 	}
 	for _, value := range []string{record.ReadyStatus, record.ProgressingStatus, record.ProgressingReason, record.AvailableStatus, record.UpdateRevision, record.CurrentRevision, record.Revision} {
@@ -556,14 +562,27 @@ func validRecord(record Record) bool {
 			return false
 		}
 	}
-	return estimatedRecordBytes(record) <= maxRecordBytes
+	limit := maxRecordBytes
+	if len(record.LogContainers) > 0 {
+		base := record
+		base.LogContainers = nil
+		if estimatedRecordBytes(base) > maxRecordBytes {
+			return false
+		}
+		limit += 16 << 10
+	}
+	return estimatedRecordBytes(record) <= limit
 }
 
 func estimatedRecordBytes(record Record) int {
 	size := len(record.APIVersion) + len(record.UID) + len(record.Kind) + len(record.Namespace) + len(record.Name) + len(record.ResourceVersion) + len(record.Phase) + len(record.EventType) + len(record.NodeName) + len(record.Health) + 128
 	size += len(record.UpdateRevision) + len(record.CurrentRevision) + len(record.Revision) + len(record.ProgressingReason) + 128
+	size += len(record.MainContainer)
 	for _, container := range record.Containers {
 		size += len(container.Name) + len(container.WaitingReason) + len(container.TerminatedReason) + 72
+	}
+	for _, container := range record.LogContainers {
+		size += len(container.Name) + len(container.WaitingReason) + len(container.TerminatedReason) + 160
 	}
 	for key, value := range record.Labels {
 		size += len(key) + len(value) + 64
@@ -604,6 +623,7 @@ func kindRecordCount(records map[string]Record, kind string) int {
 
 func cloneRecord(record Record) Record {
 	record.Containers = append([]ContainerState(nil), record.Containers...)
+	record.LogContainers = append([]ContainerState(nil), record.LogContainers...)
 	if record.Labels != nil {
 		labels := make(map[string]string, len(record.Labels))
 		for key, value := range record.Labels {

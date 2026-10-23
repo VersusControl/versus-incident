@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -627,12 +628,15 @@ func TestKubernetesPodLogSSEContract(t *testing.T) {
 				if test.name == "previous-unavailable" {
 					code = "previous_unavailable"
 				}
+				if test.name == "previous-unavailable" && bytes.Contains(body, []byte(`"replay_uncertain":true`)) {
+					t.Fatalf("fresh unavailable Previous logs fabricated a reconnect gap: %s", body)
+				}
 				if !bytes.Contains(body, []byte(`"code":"`+code+`"`)) || !bytes.Contains(body, []byte(`"reason":"error"`)) || bytes.Contains(body, []byte(`"retryable":true`)) {
 					t.Fatalf("incorrect safe Status envelope: %s", body)
 				}
 			}
-			if test.name == "read-error" && (!bytes.Contains(body, []byte("event: error")) || !bytes.Contains(body, []byte(`"reason":"error","replay_uncertain":true`))) {
-				t.Fatalf("missing error checkpoint or uncertainty: %s", body)
+			if test.name == "read-error" && (!bytes.Contains(body, []byte("event: error")) || !bytes.Contains(body, []byte(`"reason":"error"`)) || bytes.Count(body, []byte(`"replay_uncertain":true`)) != 1 || bytes.Contains(body, []byte(`"reason":"error","replay_uncertain":true`))) {
+				t.Fatalf("missing checkpoint or repeated uncertainty occurrence: %s", body)
 			}
 		})
 	}
@@ -794,13 +798,41 @@ func TestKubernetesPodLogSSEOverlapResumeContract(t *testing.T) {
 	if cursor == "" {
 		t.Fatal("initial stream has no cursor")
 	}
+	type checkpointView struct {
+		Target      string            `json:"target"`
+		Timestamp   time.Time         `json:"timestamp"`
+		Ordinal     uint64            `json:"ordinal"`
+		Occurrences map[string]uint64 `json:"occurrences"`
+	}
+	decodeCheckpoint := func(encoded string) checkpointView {
+		t.Helper()
+		raw, err := base64.RawURLEncoding.DecodeString(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var checkpoint checkpointView
+		if err := json.Unmarshal(raw, &checkpoint); err != nil {
+			t.Fatal(err)
+		}
+		return checkpoint
+	}
+	originalCheckpoint := decodeCheckpoint(cursor)
 	resumed := readEvents(cursor)
 	var lines int
 	for _, event := range resumed {
 		if event.Event == "line" {
 			lines++
-			if event.ReplayUncertain || strings.Contains(event.Text, "secret") || event.Ordinal < 2 || event.Cursor != "" {
+			if event.ReplayUncertain || strings.Contains(event.Text, "secret") || event.Ordinal < 2 {
 				t.Fatalf("unsafe or unqualified replay: %+v", event)
+			}
+			if (event.Cursor != "") != (event.Sequence == 1 || event.Sequence%32 == 0) {
+				t.Fatalf("resumed first/every32 checkpoint cadence changed: %+v", event)
+			}
+			if event.Cursor != "" {
+				checkpoint := decodeCheckpoint(event.Cursor)
+				if checkpoint.Target != originalCheckpoint.Target || checkpoint.Occurrences[event.Timestamp] != event.Ordinal || checkpoint.Occurrences[checkpoint.Timestamp.Format(time.RFC3339Nano)] != checkpoint.Ordinal {
+					t.Fatalf("resumed checkpoint lost scoped overlap identity: %+v event=%+v", checkpoint, event)
+				}
 			}
 		}
 	}
