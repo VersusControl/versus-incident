@@ -68,7 +68,7 @@ describe("Preparing your cluster panel", () => {
     expect(within(panel).getByText(/First sync of prod-eks/)).toBeTruthy();
     expect(within(screen.getByRole("list", { name: "Cluster facts" })).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["Kubernetes v1.30", "12 nodes"]);
     const steps = screen.getByRole("list", { name: "First sync steps" });
-    expect(steps.getAttribute("aria-live")).toBe("polite");
+    expect(steps.hasAttribute("aria-live")).toBe(false);
     const states = within(steps).getAllByRole("listitem").map((item) => [item.getAttribute("data-step"), item.getAttribute("data-state")]);
     expect(states).toEqual([["connected", "done"], ["listing", "active"], ["building", "waiting"], ["metrics", "waiting"]]);
     expect(within(steps).getByText("Kubernetes v1.30")).toBeTruthy();
@@ -77,15 +77,26 @@ describe("Preparing your cluster panel", () => {
     expect(listingCounts().text).not.toMatch(/[.·•]/);
     // The spacing-only chips read back as one phrase, not as a run-on word.
     expect(screen.getByRole("group", { name: "Pods 3,214, Deployments 412, Namespaces 27" })).toBeTruthy();
-    const bar = screen.getByRole("progressbar", { name: "First sync progress" });
-    expect(bar.getAttribute("aria-valuetext")).toBe("Step 2 of 4");
-    expect(screen.getByText("Usually under a minute for clusters this size")).toBeTruthy();
+    const bar = screen.getByRole("progressbar", { name: "Listing resource types: 3 / 6" });
+    expect(bar.getAttribute("aria-valuetext")).toBe("3 / 6 resource types checked");
+    expect(screen.queryByText(/Usually under/)).toBeNull();
 
     rerender(<KubernetesPreparingPanel progress={{ ...progress, step: "building", step_index: 3, steps_done: ["connected", "listing"], counts: { ...progress.counts, Pod: 4100 } }} cluster="prod-eks" />);
     expect(listingCounts().chips).toEqual(["Pods 4,100", "Deployments 412", "Namespaces 27"]);
     expect(listingCounts().text).toBe("Pods 4,100Deployments 412Namespaces 27");
     expect(within(steps).getAllByRole("listitem").map((item) => item.getAttribute("data-state"))).toEqual(["done", "done", "active", "waiting"]);
-    expect(bar.getAttribute("aria-valuetext")).toBe("Step 3 of 4");
+    expect(bar.getAttribute("aria-valuenow")).toBe("3");
+    expect(bar.getAttribute("aria-label")).toBe("Listing resource types: 3 / 6");
+  });
+
+  it("retains completed phases and names remaining types after core publication", () => {
+    render(<KubernetesPreparingPanel progress={{ ...progress, step: "listing", steps_done: ["connected", "building"], kinds_done: 12, kinds_total: 20, remaining_kinds: ["ConfigMap", "Secret"], kind_status: { ConfigMap: "pending", Secret: "timeout" }, phase_status: { metrics: "unavailable (optional)" } }} />);
+    expect(screen.getAllByRole("progressbar")).toHaveLength(1);
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("12");
+    expect(screen.getByText("Remaining: ConfigMap (pending), Secret (timeout)")).toBeTruthy();
+    expect(screen.getByText("unavailable (optional)")).toBeTruthy();
+    expect([...document.querySelectorAll("[data-state=done]")].map((item) => item.getAttribute("data-step"))).toEqual(["connected", "building"]);
+    expect(screen.queryByText(/unknown/i)).toBeNull();
   });
 
   it("keeps every step label free of separator characters", () => {
@@ -95,13 +106,15 @@ describe("Preparing your cluster panel", () => {
     for (const label of labels) expect(label.textContent).not.toMatch(/[.·•]/);
   });
 
-  it("starts at the first step with no counts or time hint when progress is absent", () => {
+  it("keeps all four steps waiting without invented successes without counts or time estimates before worker progress", () => {
     render(<KubernetesPreparingPanel />);
     const steps = within(screen.getByRole("list", { name: "First sync steps" })).getAllByRole("listitem");
-    expect(steps.map((item) => item.getAttribute("data-state"))).toEqual(["active", "waiting", "waiting", "waiting"]);
+    expect(steps.map((item) => item.getAttribute("data-state"))).toEqual(["waiting", "waiting", "waiting", "waiting"]);
     expect(screen.queryByRole("list", { name: "Cluster facts" })).toBeNull();
+    expect(screen.queryByText(/unknown/i)).toBeNull();
+    expect(document.querySelectorAll("[data-state=done]")).toHaveLength(0);
     expect(screen.queryByText("Usually under a minute for clusters this size")).toBeNull();
-    expect(screen.getByText("Step 1 of 4")).toBeTruthy();
+    expect(screen.getByRole("progressbar", { name: "Waiting for preparation progress" }).hasAttribute("aria-valuenow")).toBe(false);
   });
 
   it("stops every animated glyph under prefers-reduced-motion", () => {

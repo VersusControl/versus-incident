@@ -4,6 +4,7 @@ import { NamespaceSelect } from "@/components/NamespaceSelect";
 import { ResourceLogsButton } from "@/components/ResourceLogsButton";
 import { KubernetesFilterField, filterFieldControlClass, filterRowClass } from "@/components/KubernetesFilterField";
 import { isZeroTime } from "@/lib/kubernetesSyncHealth";
+import { counted } from "@/lib/kubernetesEvidence";
 import { Activity, AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Boxes, Cpu, Eye, EyeOff, GitBranch, History, Layers3, Loader2, Maximize2, Minus, Network, Plus, RotateCcw, Waypoints, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
@@ -1001,7 +1002,7 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
       content: <Link aria-describedby={description} className="block h-full w-full" to={focusedLink(crash.root_uid || crash.pod_uid, entry.at, crash.namespace)}>Open crash details</Link> };
   });
   return <section className="card overflow-clip transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Kubernetes change timeline">
-    <ExplorerHeader icon={<History size={15} />} title="Breaks and changes" trailing={<span className="flex flex-wrap items-center gap-2">{data && <span className="text-2xs text-ink-400">{breaksOnly ? `${data.counts?.break ?? data.total} ${(data.counts?.break ?? data.total) === 1 ? "break" : "breaks"} in ${timelineRanges.find(([value]) => value === minutes)?.[1]}` : `${data.total} events and ${data.crash_count} crashes`}</span>}<SegmentedControl param="breaks" aria-label="Timeline events" defaultValue="all" options={[{ value: "all", label: "All" }, { value: "1", label: "Breaks only" }]} /></span>} />
+    <ExplorerHeader icon={<History size={15} />} title="Breaks and changes" trailing={<span className="flex flex-wrap items-center gap-2">{data && <span className="text-2xs text-ink-400">{breaksOnly ? `${data.counts?.break ?? data.total} ${(data.counts?.break ?? data.total) === 1 ? "break" : "breaks"} in ${timelineRanges.find(([value]) => value === minutes)?.[1]}` : `${counted(data.total, "event")} and ${counted(data.crash_count, "crash")}`}</span>}<SegmentedControl param="breaks" aria-label="Timeline events" defaultValue="all" options={[{ value: "all", label: "All" }, { value: "1", label: "Breaks only" }]} /></span>} />
     <div className="flex flex-wrap items-end justify-between gap-3 border-b border-ink-700 p-3">
       <TimelineRangeControl minutes={minutes} onChange={setMinutes} loading={rangeLoading} />
       <div className={filterRowClass}><KubernetesFilterField label="Namespace"><NamespaceSelect label="Timeline namespace" value={namespace} onChange={setNamespace} className={filterFieldControlClass} /></KubernetesFilterField><KubernetesFilterField label="Kind"><select aria-label="Timeline kind" className={filterFieldControlClass} value={kind} onChange={(event) => setKind(event.target.value)}><option value="">All kinds</option>{["Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "Node"].map((value) => <option key={value}>{value}</option>)}</select></KubernetesFilterField></div>

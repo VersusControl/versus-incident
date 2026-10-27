@@ -1128,7 +1128,7 @@ test.describe("Kubernetes on the harness kind cluster", () => {
       const podSelect = logs.getByLabel("Log pod", { exact: true });
       const sinceSelect = logs.getByLabel("Log since seconds", { exact: true });
       const previousCheckbox = logs.getByLabel("Previous logs", { exact: true });
-      const followCheckbox = logs.getByLabel("Follow", { exact: true });
+      const logStatusPill = logs.getByLabel("Log connection status", { exact: true });
 
       await expect(podSelect).toHaveValue("");
       await expect(podSelect.locator("option")).toHaveCount(4, { timeout: 60_000 });
@@ -1248,7 +1248,9 @@ test.describe("Kubernetes on the harness kind cluster", () => {
       }
       expect(streamObservations.some((s) => s.status === 502)).toBe(false);
       expect(await previousCheckbox.isChecked()).toBe(true);
-      expect(await followCheckbox.isDisabled()).toBe(true);
+      // Previous logs is one bounded read, and the status pill names it: there is
+      // no live follow to disable.
+      await expect(logStatusPill).toHaveText("Previous");
 
       // Confirm finite Previous logs stays settled and does not reconnect.
       const countAfterPreviousSettled = streamObservations.length;
@@ -1266,7 +1268,7 @@ test.describe("Kubernetes on the harness kind cluster", () => {
       await sinceSelect.selectOption("3600");
       await previousCheckbox.uncheck();
       expect(await previousCheckbox.isChecked()).toBe(false);
-      expect(await followCheckbox.isDisabled()).toBe(false);
+      await expect(logStatusPill).toHaveText("Live", { timeout: 30_000 });
 
       await expect.poll(async () => Object.values(await sequences()).every((seq) => seq > 0), { timeout: 30_000 }).toBe(true);
       const recoveredBefore = await sequences();
@@ -2851,13 +2853,12 @@ test.describe("Read-only external cluster acceptance", () => {
         await wrapCheckbox.check();
         await expect(logOutput).toHaveClass(/whitespace-pre-wrap/);
 
-        // Test Follow checkbox, Pause/Resume, and Jump to latest
-        const followCheckbox = logsRegion.getByLabel("Follow", { exact: true });
-        expect(await followCheckbox.isChecked()).toBe(true);
-        await followCheckbox.uncheck();
-        expect(await followCheckbox.isChecked()).toBe(false);
-        await logsRegion.getByRole("button", { name: "Jump to latest", exact: true }).first().click();
-        expect(await followCheckbox.isChecked()).toBe(true);
+        // Test the live read, Pause/Resume, and Jump to latest. Following is
+        // automatic: the status pill names the read, and Jump exists only while
+        // the reader is away from the newest line.
+        const liveStatusPill = logsRegion.getByLabel("Log connection status", { exact: true });
+        await expect(liveStatusPill).toHaveText("Live");
+        await expect(logsRegion.getByRole("button", { name: "Jump to latest", exact: true })).toHaveCount(0);
 
         const pauseBtn = logsRegion.getByRole("button", { name: "Pause logs", exact: true });
         await pauseBtn.click();
@@ -2905,8 +2906,8 @@ test.describe("Read-only external cluster acceptance", () => {
         );
         await previousCheckbox.check();
         expect(await previousCheckbox.isChecked()).toBe(true);
-        expect(await followCheckbox.isDisabled()).toBe(true);
-        expect(await followCheckbox.isChecked()).toBe(false);
+        // A bounded previous read never follows, and the pill says so.
+        await expect(liveStatusPill).toHaveText("Previous");
         await waitForLogsSettled();
         const previousReadState = await logsRegion.evaluate((sectionEl) => {
           const pre = sectionEl.querySelector("pre");
@@ -2919,7 +2920,7 @@ test.describe("Read-only external cluster acceptance", () => {
         await page.waitForTimeout(2_200);
         await previousCheckbox.uncheck();
         expect(await previousCheckbox.isChecked()).toBe(false);
-        expect(await followCheckbox.isDisabled()).toBe(false);
+        await expect(liveStatusPill).toHaveText("Live", { timeout: 30_000 });
         await waitForLogsSettled();
 
         // Tab 3: Events

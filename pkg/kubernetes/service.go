@@ -446,6 +446,43 @@ func (registry *ServiceRegistry) Each(visit func(*Service)) {
 	}
 }
 
+// LocalReportService resolves only local report scope, without validating a
+// credential or starting capture. Read orgs use the same trusted deployment
+// policy as normal resolution; this does not authorize inventory reads.
+func (registry *ServiceRegistry) LocalReportService(orgID, clusterID string) (*Service, error) {
+	if registry == nil {
+		return nil, ErrClusterNotFound
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if registry.closed {
+		return nil, ErrClusterUnavailable
+	}
+	if clusterID == "" {
+		if registry.multiple {
+			return nil, ErrClusterRequired
+		}
+		if len(registry.entries) == 0 {
+			return nil, ErrClusterNotFound
+		}
+		clusterID = registry.entries[0].Info.ID
+	}
+	for _, entry := range registry.entries {
+		if entry.Info.ID != clusterID {
+			continue
+		}
+		if entry.Err != nil || entry.Service == nil {
+			return nil, ErrClusterUnavailable
+		}
+		scope := entry.Service.scope
+		scope.OrgID = orgID
+		service := entry.Service.Scoped(scope)
+		service.readOrgs = tenancy.TrustedOrgScope(registry.bootScope, orgID).OrgIDs()
+		return service, nil
+	}
+	return nil, ErrClusterNotFound
+}
+
 func (registry *ServiceRegistry) ResolveCluster(orgID, clusterID string) (*Service, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -989,6 +1026,9 @@ func (service *Service) Overview(ctx context.Context) (Overview, error) {
 			result.Pods++
 			if item.Summary["phase"] == "Running" {
 				result.RunningPods++
+			}
+			if item.Summary["phase"] == "Succeeded" || item.Summary["phase"] == "Failed" {
+				return
 			}
 			addSummaryQuantity(requestedCPU, item.Summary, "requested_cpu")
 			addSummaryQuantity(limitedCPU, item.Summary, "limited_cpu")
@@ -1699,13 +1739,11 @@ func dropNonControllerOwner(result *ProjectedResource) bool {
 
 // droppableSummaryFields are the summary values that inform a display without
 // being read back into a record field or a correlation. Everything else in the
-// summary is protected: unknown keys are kept, so a field added later cannot be
-// lost by a bound nobody re-checked.
+// summary is protected, including capacity quantities used in overview totals.
+// Unknown keys are kept, so a field added later cannot be lost by a bound nobody
+// re-checked.
 var droppableSummaryFields = map[string]bool{
 	"reason": true, "restart_count": true,
-	"allocatable_cpu": true, "allocatable_memory": true,
-	"requested_cpu": true, "requested_memory": true,
-	"limited_cpu": true, "limited_memory": true,
 	"pod_reason": true, "scheduled_status": true, "scheduled_reason": true, "scheduled_transition_at": true,
 	"disruption_status": true, "disruption_reason": true, "disruption_transition_at": true,
 	"job_failed_status": true, "job_failed_reason": true, "job_failed_transition_at": true,

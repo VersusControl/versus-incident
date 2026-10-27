@@ -4,7 +4,12 @@ type Evidence = NonNullable<KubernetesIssue["evidence"]>;
 type Termination = NonNullable<Evidence["terminations"]>[number];
 export type EvidencePill = { key: string; text: string; tone: "bad" | "warn" };
 
-export const counted = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+/** A noun's regular plural: the sibilants take -es (crash → crashes). */
+function pluralSuffix(noun: string): string {
+  return /(?:s|x|z|ch|sh)$/i.test(noun) ? "es" : "s";
+}
+
+export const counted = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : pluralSuffix(noun)}`;
 const pods = (count: number) => `on ${counted(count, "pod")}`;
 const hintLabels: Record<string, string> = { not_executable: "not executable", not_found: "command not found" };
 

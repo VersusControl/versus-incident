@@ -18,15 +18,16 @@ const syncing: Record<KubernetesStreamState, string> = {
  * so a narrow viewport never leaves an operator with a coloured dot alone. The
  * dot only repeats what the words already say.
  */
-export function KubernetesSyncStateIndicator({ state, streamState, ageSeconds, title }: {
-  state: KubernetesSyncHealthState;
+export function KubernetesSyncStateIndicator({ state, streamState, ageSeconds, title, firstReadyAt }: {
+  firstReadyAt?: string;
+  state: KubernetesSyncHealthState | "loading";
   streamState: KubernetesStreamState;
   ageSeconds?: number;
   title?: string;
 }) {
-  const label = state === "ready"
+  const label = state === "loading" ? "Loading" : state === "ready"
     ? `${syncing[streamState]}${streamState === "live" && ageSeconds !== undefined ? ` (${Math.round(ageSeconds)}s)` : ""}`
-    : state === "preparing" ? "Preparing" : state === "degraded" ? "Degraded" : "Failed";
+    : state === "preparing" ? firstReadyAt ? "Syncing" : "Preparing" : state === "degraded" ? "Degraded" : "Failed";
   const ink = state === "failed" ? "text-sev-critical"
     : state === "degraded" ? "text-sev-warning"
       : state === "preparing" ? "text-ink-300"

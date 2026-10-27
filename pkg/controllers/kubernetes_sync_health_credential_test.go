@@ -2,9 +2,12 @@ package controllers
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +20,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -202,5 +206,308 @@ func TestKubernetesSyncHealthDeadCredentialNeverFabricatesFirstReady(t *testing.
 	}
 	if status, body := cluster.read(t, "cluster=cluster", "deny"); status != fiber.StatusForbidden {
 		t.Fatalf("missing permission status=%d body=%s", status, body)
+	}
+}
+
+// kubernetesPermissionApp is the admin surface behind an authenticated caller
+// whose infrastructure:view permission the test decides with the X-View header.
+func kubernetesPermissionApp(t *testing.T, controller *KubernetesAdminController) *fiber.App {
+	t.Helper()
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), ctx.Get("X-View") != "deny")
+		ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), core.CallerAuthorization{
+			Authenticated: true,
+			Permissions:   map[core.Permission]bool{core.PermissionInfrastructureView: true},
+			Clusters:      &core.ClusterScope{IDs: []string{"cluster"}},
+		}))
+		return ctx.Next()
+	})
+	controller.Register(app.Group("/api"))
+	return app
+}
+
+// kubernetesRouteProbes lists every route the admin surface serves, with its
+// parameters filled in, so a permission answer can be checked across the whole
+// group instead of on a sample of it.
+func kubernetesRouteProbes(t *testing.T, app *fiber.App) []kubernetesRouteProbe {
+	t.Helper()
+	var probes []kubernetesRouteProbe
+	for _, routes := range app.Stack() {
+		for _, route := range routes {
+			if route.Method == "USE" || !strings.HasPrefix(route.Path, "/api/admin/kubernetes/") {
+				continue
+			}
+			segments := strings.Split(route.Path, "/")
+			for index, segment := range segments {
+				if strings.HasPrefix(segment, ":") {
+					segments[index] = "probe"
+				}
+			}
+			probes = append(probes, kubernetesRouteProbe{method: route.Method, path: strings.Join(segments, "/")})
+		}
+	}
+	return probes
+}
+
+type kubernetesRouteProbe struct {
+	method string
+	path   string
+}
+
+func kubernetesAnswer(t *testing.T, app *fiber.App, method, path, view string) (int, []byte) {
+	t.Helper()
+	request := httptest.NewRequest(method, path, nil)
+	if view != "" {
+		request.Header.Set("X-View", view)
+	}
+	response, err := app.Test(request, -1)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	return response.StatusCode, body
+}
+
+func kubernetesAnswerCode(t *testing.T, body []byte) string {
+	t.Helper()
+	var answer struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(body, &answer); err != nil {
+		t.Fatalf("body %s: %v", body, err)
+	}
+	return answer.Code
+}
+
+// Presence and credential state belong to the deployment, so a caller that lacks
+// the permission must get the same refusal whatever they are: one answer for a
+// missing connector, a live one, and one whose identity died, on every route of
+// the surface including the health report.
+func TestKubernetesPermissionIsAnsweredBeforeConnectorState(t *testing.T) {
+	noConnector := kubernetesPermissionApp(t, NewKubernetesAdminController(nil))
+	live := newSyncHealthCluster(t, "", NewKubernetesAdminController)
+	dead := newSyncHealthCluster(t, "", NewKubernetesAdminController)
+	dead.credential.dead.Store(true)
+
+	for _, deployment := range []struct {
+		name string
+		app  *fiber.App
+	}{
+		{name: "no connector configured", app: noConnector},
+		{name: "configured with a live credential", app: live.app},
+		{name: "configured with a dead credential", app: dead.app},
+	} {
+		t.Run(deployment.name, func(t *testing.T) {
+			probes := kubernetesRouteProbes(t, deployment.app)
+			covered := map[string]bool{}
+			for _, probe := range probes {
+				covered[probe.path] = true
+			}
+			for _, required := range []string{"/api/admin/kubernetes/sync", "/api/admin/kubernetes/clusters", "/api/admin/kubernetes/overview", "/api/admin/kubernetes/resources/probe/probe", "/api/admin/kubernetes/workloads/probe/probe/logs"} {
+				if !covered[required] {
+					t.Fatalf("%s is not in the enumerated surface, so the sweep does not prove the group", required)
+				}
+			}
+			for _, probe := range probes {
+				for _, cluster := range []string{"", "?cluster=cluster", "?cluster=other"} {
+					path := probe.path + cluster
+					status, body := kubernetesAnswer(t, deployment.app, probe.method, path, "deny")
+					if status != fiber.StatusForbidden {
+						t.Errorf("%s %s without the permission status=%d body=%s, want %d", probe.method, path, status, body, fiber.StatusForbidden)
+						continue
+					}
+					for _, leak := range []string{"connector_not_configured", "connector_credential_unresolved", "cluster_not_found"} {
+						if strings.Contains(string(body), leak) {
+							t.Errorf("%s %s without the permission answered %q: %s", probe.method, path, leak, body)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// The gate order only changes the answer for a caller that is refused: every
+// answer a permitted caller gets stays what it was, including the report across
+// a dead credential.
+func TestKubernetesPermittedCallerStatusesAreUnchanged(t *testing.T) {
+	noConnector := kubernetesPermissionApp(t, NewKubernetesAdminController(nil))
+	for _, path := range []string{"/api/admin/kubernetes/clusters", "/api/admin/kubernetes/overview", "/api/admin/kubernetes/sync"} {
+		status, body := kubernetesAnswer(t, noConnector, http.MethodGet, path, "")
+		if status != fiber.StatusServiceUnavailable || kubernetesAnswerCode(t, body) != "connector_not_configured" {
+			t.Errorf("%s with no connector status=%d code=%q body=%s", path, status, kubernetesAnswerCode(t, body), body)
+		}
+	}
+
+	stamped := time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC)
+	live := newSyncHealthCluster(t, `{"FirstReadyAt":"`+stamped.Format(time.RFC3339Nano)+`"}`, NewKubernetesAdminController)
+	status, body := kubernetesAnswer(t, live.app, http.MethodGet, "/api/admin/kubernetes/sync?cluster=cluster", "")
+	if status != fiber.StatusOK {
+		t.Errorf("sync with a live credential status=%d body=%s", status, body)
+	}
+	for _, path := range []string{"/api/admin/kubernetes/overview?cluster=other", "/api/admin/kubernetes/sync?cluster=other"} {
+		status, body := kubernetesAnswer(t, live.app, http.MethodGet, path, "")
+		if status != fiber.StatusNotFound {
+			t.Errorf("%s outside the allow-list status=%d body=%s", path, status, body)
+		}
+	}
+
+	// The registry constructor validates the credential during resolution, so the
+	// report has to come from the configured-service fallback rather than from a
+	// resolution that never looks at the identity.
+	dead := newSyncHealthCluster(t, "", func(service *kubernetes.Service) *KubernetesAdminController {
+		return NewKubernetesAdminControllerWithRegistry(kubernetes.NewServiceRegistry(service))
+	})
+	dead.credential.dead.Store(true)
+	status, body = kubernetesAnswer(t, dead.app, http.MethodGet, "/api/admin/kubernetes/overview?cluster=cluster", "")
+	if status != fiber.StatusServiceUnavailable || kubernetesAnswerCode(t, body) != "connector_credential_unresolved" {
+		t.Errorf("overview with a dead credential status=%d code=%q body=%s", status, kubernetesAnswerCode(t, body), body)
+	}
+	status, body = kubernetesAnswer(t, dead.app, http.MethodGet, "/api/admin/kubernetes/sync?cluster=cluster", "")
+	if status != fiber.StatusOK {
+		t.Fatalf("sync with a dead credential status=%d body=%s, want the report", status, body)
+	}
+	if report := decodeSyncHealthReport(t, body); report.State != "error" || report.Class != "unauthorized" {
+		t.Errorf("sync with a dead credential report = %+v, want an unauthorized error", report)
+	}
+	if status, body := kubernetesAnswer(t, dead.app, http.MethodGet, "/api/admin/kubernetes/sync?cluster=other", ""); status != fiber.StatusNotFound {
+		t.Errorf("sync outside the allow-list status=%d body=%s", status, body)
+	}
+
+	// A cluster the caller's scope excludes stays not found even though the
+	// deployment has it configured and its credential is fine: the allow-list is
+	// answered before the report is.
+	scopedClient, err := kubernetes.NewClient(kubernetes.Config{Endpoint: "https://cluster.example.invalid:6443", Credentials: &flippedCredential{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := kubernetes.NewService(scopedClient, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	visible.SetChangeStorage(inventoryRecordProvider{Provider: storage.NewMemory(), record: `{"FirstReadyAt":"` + stamped.Format(time.RFC3339Nano) + `"}`})
+	hiddenService := kubernetes.NewService(scopedClient, kubernetes.Scope{OrgID: "default", ClusterID: "hidden"}, 0)
+	hiddenService.SetChangeStorage(storage.NewMemory())
+	scoped := kubernetesPermissionApp(t, NewKubernetesAdminControllerWithRegistry(kubernetes.NewClusterRegistry(true, []kubernetes.ClusterEntry{
+		{Info: kubernetes.ClusterInfo{ID: "cluster"}, Service: visible},
+		{Info: kubernetes.ClusterInfo{ID: "hidden"}, Service: hiddenService},
+	})))
+	status, body = kubernetesAnswer(t, scoped, http.MethodGet, "/api/admin/kubernetes/sync?cluster=hidden", "")
+	if status != fiber.StatusNotFound || kubernetesAnswerCode(t, body) != "cluster_not_found" {
+		t.Errorf("configured cluster outside the scope status=%d code=%q body=%s", status, kubernetesAnswerCode(t, body), body)
+	}
+	status, body = kubernetesAnswer(t, scoped, http.MethodGet, "/api/admin/kubernetes/sync?cluster=cluster", "")
+	if status != fiber.StatusOK {
+		t.Errorf("in-scope cluster status=%d body=%s", status, body)
+	}
+}
+
+func TestKubernetesSyncHealthRevokedCredentialKeepsRequestOrg(t *testing.T) {
+	for _, query := range []string{"", "cluster=cluster"} {
+		for _, publications := range []struct{ base, own bool }{{true, false}, {true, true}, {false, false}} {
+			t.Run(query+"/publications="+fmt.Sprint(publications), func(t *testing.T) {
+				credential := &flippedCredential{}
+				client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: "https://cluster.example.invalid:6443", Credentials: credential})
+				if err != nil {
+					t.Fatal(err)
+				}
+				base := kubernetes.NewService(client, kubernetes.Scope{OrgID: "org-a", ClusterID: "cluster"}, 0)
+				provider := storage.NewMemory()
+				base.SetChangeStorage(provider)
+				stamped := time.Now().UTC().Add(-2 * time.Hour)
+				own := stamped.Add(time.Hour)
+				seed := func(org string, at time.Time) {
+					scope := base.ActiveScope()
+					hash := sha256.Sum256([]byte(org + "\x00" + scope.ClusterID + "\x00" + scope.CredentialID))
+					// An existing snapshot supplies both the publication and age.
+					raw, err := json.Marshal(map[string]any{"FirstReadyAt": at, "View": map[string]any{"Kinds": map[string]any{"Pod": map[string]any{"observed_at": at}}}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := provider.WriteBlob("kubernetes/inventory/"+base64.RawURLEncoding.EncodeToString(hash[:]), raw); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if publications.base {
+					seed("org-a", stamped)
+				}
+				seed("default", stamped.Add(-time.Hour))
+				if publications.own {
+					seed("org-b", own)
+				}
+				registry := kubernetes.NewClusterRegistryWithScope(false, []kubernetes.ClusterEntry{{Info: kubernetes.ClusterInfo{ID: "cluster"}, Service: base}}, tenancy.NewOrgScope("org-a", "default"))
+				app := fiber.New(fiber.Config{Immutable: true})
+				app.Use(func(ctx *fiber.Ctx) error {
+					middleware.MarkAuthorized(ctx)
+					ctx.Locals(middleware.OrgContextKey, strings.Clone(ctx.Get("X-Test-Org")))
+					middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), ctx.Get("X-View") != "deny")
+					// A request context cannot grant itself the deployment's upgrade fallback.
+					ctx.SetUserContext(tenancy.WithOrgScope(ctx.UserContext(), tenancy.NewOrgScope("org-b", "org-a", "default")))
+					ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}, Clusters: &core.ClusterScope{IDs: []string{"cluster"}}}))
+					return ctx.Next()
+				})
+				NewKubernetesAdminControllerWithRegistry(registry).Register(app.Group("/api"))
+				credential.dead.Store(true)
+				read := func(org, path, view string) (int, []byte) {
+					request := httptest.NewRequest(http.MethodGet, path, nil)
+					request.Header.Set("X-Test-Org", org)
+					request.Header.Set("X-View", view)
+					response, err := app.Test(request, -1)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer response.Body.Close()
+					body, err := io.ReadAll(response.Body)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return response.StatusCode, body
+				}
+				for _, org := range []string{"org-a", "org-b"} {
+					status, body := read(org, "/api/admin/kubernetes/sync?"+query, "")
+					if status != fiber.StatusOK {
+						t.Fatalf("%s status=%d body=%s", org, status, body)
+					}
+					var report kubernetes.SyncHealth
+					if err := json.Unmarshal(body, &report); err != nil {
+						t.Fatal(err)
+					}
+					if report.Class != "unauthorized" || report.State != "error" {
+						t.Fatalf("unclosed fault: %s", body)
+					}
+					want := stamped
+					if !publications.base {
+						want = stamped.Add(-time.Hour)
+					}
+					if org == "org-b" {
+						want = own
+					}
+					if org == "org-b" && !publications.own {
+						if !report.FirstReadyAt.IsZero() || report.AgeSeconds != nil {
+							t.Fatalf("foreign publication/age leaked: %s", body)
+						}
+					} else if !report.FirstReadyAt.Equal(want) || report.AgeSeconds == nil || *report.AgeSeconds < time.Since(want).Seconds()-2 || *report.AgeSeconds > time.Since(want).Seconds()+2 {
+						t.Fatalf("%s publication/age is not its own: %s", org, body)
+					}
+				}
+				for _, path := range []string{"/api/admin/kubernetes/overview?" + query, "/api/admin/kubernetes/workloads?" + query} {
+					status, body := read("org-b", path, "")
+					if status != fiber.StatusServiceUnavailable || kubernetesAnswerCode(t, body) != "connector_credential_unresolved" {
+						t.Fatalf("inventory widened: %d %s", status, body)
+					}
+				}
+				status, body := read("org-b", "/api/admin/kubernetes/sync?"+query, "deny")
+				if status != fiber.StatusForbidden {
+					t.Fatalf("permission bypass: %d %s", status, body)
+				}
+				status, body = read("org-b", "/api/admin/kubernetes/sync?cluster=other", "")
+				if status != fiber.StatusNotFound {
+					t.Fatalf("allow-list bypass: %d %s", status, body)
+				}
+			})
+		}
 	}
 }

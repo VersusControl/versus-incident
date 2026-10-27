@@ -456,6 +456,16 @@ describe("Resource detail surfaces", () => {
   ] as const)("uses precise tile threshold %s", (percent, expected) => {
     expect(metricThreshold(percent)).toBe(expected);
   });
+  it.each([
+    ["9181/1000", 9.181], ["18669/200", 93.345], ["196/25", 7.84],
+    ["9181m", 9.181], ["9181000u", 9.181], ["9181000000n", 9.181],
+    ["9.181", 9.181], ["9.181e0", 9.181], [" 9181m ", 9.181],
+    ["256Mi", 256 * 1024 ** 2], ["200.55Gi", 200.55 * 1024 ** 3],
+    ["1/0", null], ["0/0", null], ["invalid", null], ["9cores", null],
+  ] as const)("parses capacity quantity %s in base units", (input, expected) => {
+    if (expected === null) expect(quantity(input)).toBeNull();
+    else expect(quantity(input)).toBeCloseTo(expected, 8);
+  });
   it("aggregates available aligned usage samples and parses projected rational quantities", () => {
     expect(quantity("1/2")).toBe(0.5);
     expect(quantity("256Mi")).toBe(256 * 1024 ** 2);
@@ -853,6 +863,14 @@ describe("Resource detail surfaces", () => {
     expect(screen.queryByRole("button", { name: "Next page" })).toBeNull();
   });
 
+  it("says one captured crash in the singular", async () => {
+    const page = { items: [crash], crash_count: 1, since: "2026-10-20T08:00:00Z", until: now, started_at: now, retention_from: now, retention_basis: "capture", gaps: [], capture_gaps: [], coverage: {}, limitations: [], capture: { mode: "continuous", behind: false }, sync: { state: "ready", age_s: 0, partial: false } };
+    vi.mocked(api.kubernetesCrashes).mockResolvedValue(page as never);
+    mount(<ResourceMetrics resource={pod} liveSamples={[]} onCrash={vi.fn()} />);
+    expect(await screen.findByText("1 captured crash in the last 24h")).toBeTruthy();
+    expect(screen.queryByText("1 captured crashes in the last 24h")).toBeNull();
+  });
+
   it("keeps missing projected facts honest", () => {
     mount(<ResourceFacts resource={pod} onOpen={vi.fn()} />);
     expect(screen.getByText("Details")).toBeTruthy();
@@ -1123,7 +1141,7 @@ describe("Resource detail sync gates", () => {
   // A background resync is not a reason to take the graph away from an operator
   // who is on it: the last generation is still the best answer they have.
   it("keeps the relationship map through a background resync", async () => {
-    vi.mocked(api.kubernetesRelated).mockResolvedValue({ nodes: [podNode], edges: [], omitted: {}, sync: { state: "syncing", age_s: 4, partial: false } });
+    vi.mocked(api.kubernetesRelated).mockResolvedValue({ nodes: [podNode], edges: [], omitted: {}, sync: { state: "syncing", age_s: 4, partial: false, pending: ["Pod"] } });
     mount(
       <KubernetesFirstReadyContext.Provider value={published}>
         <ResourceRelations resource={pod} related={[{ kind: "ConfigMap", name: "checkout-config" }]} onOpen={vi.fn()} />
@@ -1133,6 +1151,7 @@ describe("Resource detail sync gates", () => {
     await waitFor(() => expect(section.querySelector('[data-relationship-node="pod"]')).toBeTruthy());
     expect(within(section).queryByLabelText("Loading related resources")).toBeNull();
     expect(within(section).queryByRole("region", { name: "Preparing your cluster" })).toBeNull();
+    expect(section.textContent).not.toMatch(/Loading.*resource types/);
   });
 
   // Before this cluster has published anything there is nothing to keep, so the
@@ -1147,8 +1166,23 @@ describe("Resource detail sync gates", () => {
 
   it("counts events and crashes in words rather than with a dot", async () => {
     mount(<ResourceTimeline resource={pod} onCrash={vi.fn()} />);
-    const summary = await screen.findByText(/^\d+ events and \d+ crashes$/);
-    expect(summary.textContent).toBe("2 events and 1 crashes");
+    const summary = await screen.findByText(/^\d+ events? and \d+ crash(?:es)?$/);
+    expect(summary.textContent).toBe("2 events and 1 crash");
     expect(summary.textContent).not.toMatch(/[·•]/);
   });
+
+  it("singularizes a one-event one-crash summary", async () => {
+    vi.mocked(api.kubernetesTimeline).mockResolvedValue(timelinePage([{ type: "crash", id: crash.id, at: crash.at, crash }]));
+    mount(<ResourceTimeline resource={pod} onCrash={vi.fn()} />);
+    const summary = await screen.findByText(/^\d+ events? and \d+ crash(?:es)?$/);
+    expect(summary.textContent).toBe("1 event and 1 crash");
+  });
+});
+
+it("retains published resource history without a routine sync loading banner", async () => {
+  const data = timelinePage([{ type: "crash", id: crash.id, at: crash.at, crash }]);
+  vi.mocked(api.kubernetesTimeline).mockResolvedValue({ ...data, sync: { state: "syncing", age_s: 4, partial: false } });
+  mount(<KubernetesFirstReadyContext.Provider value="2026-10-27T08:00:00Z"><ResourceTimeline resource={pod} onCrash={vi.fn()} /></KubernetesFirstReadyContext.Provider>);
+  await screen.findByText(/^1 event and 1 crash$/);
+  expect(screen.queryByText("Loading resource history.")).toBeNull();
 });

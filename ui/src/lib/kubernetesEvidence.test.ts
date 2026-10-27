@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { KubernetesIssue } from "@/lib/api";
-import { crashDetail, evidencePills, terminationKey, warningSummary } from "./kubernetesEvidence";
+import { counted, crashDetail, evidencePills, terminationKey, warningSummary } from "./kubernetesEvidence";
 
 const evidence: NonNullable<KubernetesIssue["evidence"]> = { warning_events: 0, from: "", to: "" };
 const termination = { reason: "Error", exit_code: 137, count: 1, last: "2026-10-16T12:00:00Z" };
@@ -46,5 +46,16 @@ describe("Kubernetes evidence", () => {
     expect(warningSummary({ ...evidence, warning_events: 1 })).toBe("1 warning event");
     expect(warningSummary(evidence)).toBe("0 warning events");
     expect(evidencePills(evidence)).toEqual([]);
+  });
+
+  it("pluralizes a count the way English does, including the sibilants", () => {
+    expect(counted(1, "event")).toBe("1 event");
+    expect(counted(2, "event")).toBe("2 events");
+    expect(counted(0, "crash")).toBe("0 crashes");
+    expect(counted(1, "crash")).toBe("1 crash");
+    expect(counted(2, "crash")).toBe("2 crashes");
+    expect(counted(1, "captured crash")).toBe("1 captured crash");
+    expect(counted(2400, "captured crash")).toBe("2400 captured crashes");
+    expect(counted(1, "pod")).toBe("1 pod");
   });
 });

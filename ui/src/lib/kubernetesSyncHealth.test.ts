@@ -386,3 +386,12 @@ describe("Cluster sync health", () => {
     expect(syncFailureReport("bad gateway")).toEqual({});
   });
 });
+
+it("prefers authoritative progress to an older overview progress envelope", () => {
+ const progress = { step: "listing" as const, step_index: 2, step_total: 4, steps_done: ["connected", "building"], counts: { Pod: 12 }, kinds_done: 12, kinds_total: 20, started_at: "2026-10-27T08:00:00Z", updated_at: "2026-10-27T08:00:16Z" };
+ const report = { state: "syncing", partial: false, age_s: 16, kinds: { Pod: kind() }, ready_kinds: 12, pending_kinds: 8, total_kinds: 20, failing_kinds: 0, truncated: false, progress };
+ const health = reportSyncHealth(report, { ...progress, kinds_done: 1 });
+ expect(health.progress).toBe(progress);
+ expect(health.loadingCount).toBe(8);
+ expect(health.firstReadyAt).toBeUndefined();
+});

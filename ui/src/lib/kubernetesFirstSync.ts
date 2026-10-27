@@ -16,8 +16,8 @@ export function isPreparing(cluster: PreparingSignals): boolean {
 }
 
 // The four first-sync steps, in the order the background worker runs them.
-// Usage is read after the first generation publishes, so the preparing panel
-// usually disappears while "building" is still the current step.
+// Usage is optional. The preparing panel stays until the authoritative report
+// records a first ready publication, not merely a core-only publication.
 export const firstSyncSteps = [
   { id: "connected", label: "Connected to the cluster", active: "Connecting to the cluster" },
   { id: "listing", label: "Listing resources", active: "Listing resources" },
@@ -38,24 +38,33 @@ const plural = (kind: string) => (kind.endsWith("s") ? `${kind}es` : kind.endsWi
 /** One count as a phrase, e.g. "Pods 3,214". */
 export const firstSyncCountLabel = (kind: string, value: number) => `${plural(kind)} ${firstSyncCount(value)}`;
 
-// Zero-based index of the step currently running. The server index never
-// decreases; fall back to the step id when an older payload lacks it.
+// Zero-based current worker phase, which can revisit listing while more kinds
+// fill in. Completion comes only from steps_done, never from this index.
 export function firstSyncStepIndex(progress?: KubernetesSyncProgress) {
-  if (!progress) return 0;
+  if (!progress) return -1;
   const byIndex = Number.isInteger(progress.step_index) ? progress.step_index - 1 : -1;
-  const index = byIndex >= 0 && byIndex < firstSyncSteps.length ? byIndex : firstSyncSteps.findIndex((step) => step.id === progress.step);
-  return index < 0 ? 0 : index;
+  const byStep = firstSyncSteps.findIndex((step) => step.id === progress.step);
+  if (byStep < 0 || (byIndex >= 0 && byIndex !== byStep)) return -1;
+  return byStep;
 }
 
-/** The step currently running, carrying both its finished and in-progress wording. */
-export function firstSyncStep(progress?: KubernetesSyncProgress): FirstSyncStep {
+/** The step currently running, only when the worker identifies a known phase. */
+export function firstSyncStep(progress?: KubernetesSyncProgress): FirstSyncStep | undefined {
   return firstSyncSteps[firstSyncStepIndex(progress)];
+}
+
+/** Listing counts measure resource types, never a fraction of overall startup. */
+export function firstSyncListingProgress(progress?: KubernetesSyncProgress) {
+  if (!progress || firstSyncStepIndex(progress) < 0) return undefined;
+  const { kinds_done: done, kinds_total: total } = progress;
+  if (!Number.isSafeInteger(done) || !Number.isSafeInteger(total) || done < 0 || total <= 0 || done > total) return undefined;
+  return { done, total };
 }
 
 /** Record counts listed so far, in display order, dropping values that are not real counts. */
 export function firstSyncCounts(progress?: KubernetesSyncProgress) {
   return Object.entries(progress?.counts ?? {})
-    .filter(([, value]) => Number.isFinite(value) && value >= 0)
+    .filter(([, value]) => Number.isSafeInteger(value) && value >= 0)
     .map(([kind, value]) => [kind, value] as const)
     .sort(([left], [right]) => {
       const a = countOrder.indexOf(left), b = countOrder.indexOf(right);
@@ -86,8 +95,9 @@ export interface FirstSyncProgressParts {
 }
 
 export function firstSyncProgress(progress?: KubernetesSyncProgress, limit = 3): FirstSyncProgressParts | undefined {
-  if (!progress) return undefined;
-  return { step: firstSyncStep(progress).active, counts: firstSyncCountParts(progress, limit) };
+  const step = firstSyncStep(progress);
+  if (!step) return undefined;
+  return { step: step.active, counts: firstSyncCountParts(progress, limit) };
 }
 
 /**

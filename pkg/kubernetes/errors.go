@@ -29,6 +29,19 @@ var ErrInventoryNotReady = errors.New("kubernetes: inventory not ready")
 // oversized request can never disappear into an intermediary's header limit.
 var ErrRequestTooLarge = errors.New("kubernetes: request too large")
 
+// ErrConnectorNotConfigured reports that this deployment has no Kubernetes
+// connector at all. It is one half of a pair: the other half is
+// ErrConnectorCredentialUnresolved, and answering one with the other is how a
+// surface renders a setup card over a cluster that published data yesterday.
+var ErrConnectorNotConfigured = errors.New("kubernetes: connector not configured")
+
+// ErrConnectorCredentialUnresolved reports a connector that is configured but
+// whose credential cannot be resolved right now — the cluster is known, its
+// published data is still on disk, and only the identity that reads it is gone.
+// Its cause stays attached for classification and never renders: the message a
+// caller sees names no identity, path, or endpoint.
+var ErrConnectorCredentialUnresolved = errors.New("kubernetes: connector credential cannot be resolved")
+
 const (
 	// inventoryFreshness is how old the newest listing of a kind may be before
 	// a read that depends on it waits for the next cycle.
@@ -352,6 +365,15 @@ func DiagnoseError(err error) ErrorDetail {
 	var notReady *inventoryNotReadyError
 	var denied *permissionDeniedError
 	switch {
+	// The two connector states are answered before any credential or network
+	// class, because a configured connector whose credential is gone still
+	// unwraps to a credential fault and must not be named as one: a surface has
+	// to be able to tell "nothing is configured" from "configured, credential
+	// gone" to decide between a setup card and an error over the data it has.
+	case errors.Is(err, ErrConnectorNotConfigured):
+		return ErrorDetail{Code: "connector_not_configured", Message: "Kubernetes connector is not configured", Action: "Configure a Kubernetes connector for this deployment.", Retryable: false}
+	case errors.Is(err, ErrConnectorCredentialUnresolved):
+		return ErrorDetail{Code: "connector_credential_unresolved", Message: "The Kubernetes connector is configured, but its credential cannot be resolved.", Action: "Restore or rotate the connector credential, then retry. The connector recovers on the next request.", Retryable: true}
 	case errors.As(err, &notReady):
 		return ErrorDetail{Code: "inventory_not_ready", Message: notReady.Summary() + "; retry once the inventory finishes.", Action: "Wait for the Kubernetes inventory to finish syncing and retry.", Retryable: true}
 	case errors.Is(err, ErrInventoryNotReady):

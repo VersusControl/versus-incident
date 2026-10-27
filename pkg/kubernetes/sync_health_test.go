@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -884,10 +885,12 @@ func TestSyncHealthFirstReadySurvivesRestartWithTheWorkerRunning(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !health.FirstReadyAt.IsZero() {
-			if health.State != "ready" || !health.FirstReadyAt.Equal(stamped) {
-				t.Fatalf("restarted report = state %q first ready %s, want ready at %s", health.State, health.FirstReadyAt, stamped)
-			}
+		if !health.FirstReadyAt.IsZero() && !health.FirstReadyAt.Equal(stamped) {
+			t.Fatalf("restarted report reset first publication: %s, want %s", health.FirstReadyAt, stamped)
+		}
+		// Durable publication is known before the worker has restored its data.
+		// Keep waiting for that independent ready-generation contract as well.
+		if health.State == "ready" && health.FirstReadyAt.Equal(stamped) {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -1063,5 +1066,308 @@ func TestSyncHealthReadyReportCarriesNoFailureClass(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), `"class"`) {
 		t.Fatalf("a healthy report carried a failure class: %s", encoded)
+	}
+}
+
+// syncReportAge is the age a report carries, or nil when it carries none.
+func syncReportAge(health SyncHealth) *float64 { return health.AgeSeconds }
+
+// A failure report describes the snapshot it still stands behind, so its age is
+// the age of that snapshot — not of the failed request, which would print "just
+// now" over data that could be an hour old.
+func TestSyncHealthFailureReportCarriesTheStoredSnapshotAge(t *testing.T) {
+	observed := time.Now().UTC().Add(-10 * time.Minute)
+	cluster := newDurableSyncCluster(t)
+	cluster.publish(t, inventoryGeneration{View: kubeindex.Snapshot{Kinds: fullySyncedKinds(observed)}})
+
+	revoked := revokedCredentialService(t, cluster.scope)
+	revoked.SetChangeStorage(cluster.provider)
+	_, err := revoked.SyncHealth(t.Context())
+	report, ok := SyncHealthReport(err)
+	if !ok {
+		t.Fatalf("dead credential error = %v, want a report", err)
+	}
+	if report.State != "error" || report.Class != "unauthorized" {
+		t.Fatalf("report = state %q class %q, want an unauthorized error", report.State, report.Class)
+	}
+	age := syncReportAge(report)
+	if age == nil {
+		t.Fatal("a cluster with a stored snapshot reported no age")
+	}
+	if *age < 590 || *age > 620 {
+		t.Fatalf("failure report age = %.0fs, want the stored snapshot's ~600s", *age)
+	}
+	// Every failing row names when the data behind it was last observed, because
+	// that is the only moment it can honestly point at.
+	for _, problem := range report.Failing {
+		if !problem.ObservedAt.Equal(observed) {
+			t.Fatalf("%s observed_at = %s, want the stored %s", problem.Kind, problem.ObservedAt, observed)
+		}
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"age_s":`) {
+		t.Fatalf("a report about a stored snapshot carried no age: %s", encoded)
+	}
+	assertBoundedNonSensitiveSyncReport(t, report)
+}
+
+// A cluster that never published a snapshot has no age to give. Zero seconds
+// would present an empty screen as current data, so the field is absent.
+func TestSyncHealthFailureReportWithoutASnapshotOmitsTheAge(t *testing.T) {
+	cluster := newDurableSyncCluster(t)
+
+	revoked := revokedCredentialService(t, cluster.scope)
+	revoked.SetChangeStorage(cluster.provider)
+	_, err := revoked.SyncHealth(t.Context())
+	report, ok := SyncHealthReport(err)
+	if !ok {
+		t.Fatalf("dead credential error = %v, want a report", err)
+	}
+	if syncReportAge(report) != nil {
+		t.Fatalf("a cluster that never published reported an age of %.0fs", *report.AgeSeconds)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "age_s") {
+		t.Fatalf("a never published cluster rendered an age: %s", encoded)
+	}
+}
+
+// A cluster with no store keeps its published generation in memory only, so that
+// is where the age has to come from when the credential dies mid-session.
+func TestSyncHealthFailureReportReadsTheAgeFromMemory(t *testing.T) {
+	observed := time.Now().UTC().Add(-5 * time.Minute)
+	service := revokedCredentialService(t, Scope{OrgID: "default", ClusterID: "cluster"})
+	done := make(chan struct{})
+	close(done)
+	service.changes.inventories[service.indexScope()] = &inventoryCache{
+		generation: inventoryGeneration{View: kubeindex.Snapshot{Kinds: fullySyncedKinds(observed)}},
+		done:       done, cancel: func() {},
+	}
+
+	_, err := service.SyncHealth(t.Context())
+	report, ok := SyncHealthReport(err)
+	if !ok {
+		t.Fatalf("dead credential error = %v, want a report", err)
+	}
+	age := syncReportAge(report)
+	if age == nil || *age < 290 || *age > 320 {
+		t.Fatalf("in-memory failure report age = %v, want the published snapshot's ~300s", age)
+	}
+}
+
+// A readable cluster keeps reporting the age of its data: carrying the age in a
+// failure report must not turn the ordinary report into a field-less one.
+func TestSyncHealthReadyReportKeepsTheSnapshotAge(t *testing.T) {
+	observed := time.Now().UTC().Add(-2 * time.Minute)
+	cluster := newDurableSyncCluster(t)
+	cluster.publish(t, inventoryGeneration{View: kubeindex.Snapshot{Kinds: fullySyncedKinds(observed)}})
+
+	health := cluster.report(t)
+	if health.State != "ready" {
+		t.Fatalf("report state = %q, want ready", health.State)
+	}
+	age := syncReportAge(health)
+	if age == nil || *age < 110 || *age > 140 {
+		t.Fatalf("ready report age = %v, want the published snapshot's ~120s", age)
+	}
+}
+
+func TestSyncHealthFirstReadySurvivesCredentialRenewal(t *testing.T) {
+	cluster := newDurableSyncCluster(t)
+	stamped := cluster.publish(t, inventoryGeneration{View: kubeindex.Snapshot{Kinds: fullySyncedKinds(time.Now().UTC())}}).FirstReadyAt
+	for _, credential := range []string{"renewed", "renewed-again"} {
+		scope := cluster.scope
+		scope.CredentialID = credential
+		reader := NewService(nil, scope, 0)
+		reader.SetChangeStorage(cluster.provider)
+		if got := reader.recordedFirstReadyAt(); !got.Equal(stamped) {
+			t.Fatalf("renewed credential lost first publication: got %s, want %s", got, stamped)
+		}
+		revoked := revokedCredentialService(t, scope)
+		revoked.SetChangeStorage(cluster.provider)
+		_, err := revoked.SyncHealth(t.Context())
+		report, ok := SyncHealthReport(err)
+		if !ok || !report.FirstReadyAt.Equal(stamped) || report.State != "error" {
+			t.Fatalf("renewed unavailable credential lost publication or fault: %+v", report)
+		}
+		generation, _, err := readInventoryGeneration(cluster.provider, scope, "")
+		if err != nil || generation.Revision != "" || !generation.FirstReadyAt.IsZero() {
+			t.Fatalf("renewal broadened inventory access: revision=%q err=%v", generation.Revision, err)
+		}
+		published := publishDurableGeneration(t, cluster.provider, reader, "renewed-owner", inventoryGeneration{View: kubeindex.Snapshot{Kinds: fullySyncedKinds(time.Now().UTC())}})
+		if !published.FirstReadyAt.Equal(stamped) {
+			t.Fatalf("renewed publication reset original time: %s, want %s", published.FirstReadyAt, stamped)
+		}
+
+	}
+	for _, scope := range []Scope{
+		{OrgID: "other", ClusterID: cluster.scope.ClusterID},
+		{OrgID: cluster.scope.OrgID, ClusterID: "other"},
+	} {
+		reader := NewService(nil, scope, 0)
+		reader.SetChangeStorage(cluster.provider)
+		if got := reader.recordedFirstReadyAt(); !got.IsZero() {
+			t.Fatalf("different org or cluster inherited publication: %s", got)
+		}
+	}
+}
+
+func TestFirstPublicationStorageIsSetOnceAndNeverInvented(t *testing.T) {
+	provider := storage.NewMemory()
+	scope := Scope{OrgID: "org", ClusterID: "cluster", CredentialID: "old"}
+	if at, err := rememberFirstPublication(provider, scope, time.Time{}); err != nil || !at.IsZero() {
+		t.Fatalf("absent publication was invented: %s %v", at, err)
+	}
+	original := time.Now().UTC().Add(-time.Hour)
+	if at, err := rememberFirstPublication(provider, scope, original); err != nil || !at.Equal(original) {
+		t.Fatalf("first publication not stored: %s %v", at, err)
+	}
+	scope.CredentialID = "renewed"
+	if at, err := rememberFirstPublication(provider, scope, time.Now().UTC()); err != nil || !at.Equal(original) {
+		t.Fatalf("original publication overwritten: %s %v", at, err)
+	}
+	if err := provider.WriteBlob(publicationKey(scope), []byte("invalid")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rememberFirstPublication(provider, scope, original); err == nil {
+		t.Fatal("corrupt marker was silently overwritten")
+	}
+}
+
+func TestSyncHealthMigratesExistingPublicationMetadata(t *testing.T) {
+	cluster := newDurableSyncCluster(t)
+	original := time.Now().UTC().Add(-time.Hour)
+	// Model an existing installation using only the old credential-scoped record.
+	raw, err := json.Marshal(inventoryLeaseRecord{FirstReadyAt: original})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cluster.provider.WriteBlob(inventoryKey(cluster.scope), raw); err != nil {
+		t.Fatal(err)
+	}
+	revoked := revokedCredentialService(t, cluster.scope)
+	revoked.SetChangeStorage(cluster.provider)
+	_, failure := revoked.SyncHealth(t.Context())
+	if report, ok := SyncHealthReport(failure); !ok || !report.FirstReadyAt.Equal(original) {
+		t.Fatal("existing publication was lost during credential resolution failure")
+	}
+	renewedScope := cluster.scope
+	renewedScope.CredentialID = "renewed-before-successful-read"
+	renewed := NewService(nil, renewedScope, 0)
+	renewed.SetChangeStorage(cluster.provider)
+	if got := renewed.recordedFirstReadyAt(); !got.Equal(original) {
+		t.Fatalf("failed legacy read did not preserve publication for renewal: %s", got)
+	}
+	health := cluster.report(t)
+	if !health.FirstReadyAt.Equal(original) {
+		t.Fatalf("existing timestamp reset: %+v", health)
+	}
+	scope := cluster.scope
+	scope.CredentialID = "renewed"
+	reader := NewService(nil, scope, 0)
+	reader.SetChangeStorage(cluster.provider)
+	if got := reader.recordedFirstReadyAt(); !got.Equal(original) {
+		t.Fatalf("migration lost existing publication after renewal: %s", got)
+	}
+}
+
+func TestFirstPublicationResolvesEachOrgBeforeFallback(t *testing.T) {
+	for _, layout := range []string{"new", "cache", "legacy", "fallback"} {
+		t.Run(layout, func(t *testing.T) {
+			provider := storage.NewMemory()
+			scope := Scope{OrgID: "active", ClusterID: "cluster", CredentialID: "credential"}
+			service := NewService(nil, scope, 0)
+			service.SetChangeStorage(provider)
+			service.readOrgs = []string{"active", "default"}
+			original := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+			fallback := original.Add(-time.Hour)
+			fallbackScope := scope
+			fallbackScope.OrgID = "default"
+			if _, err := rememberFirstPublication(provider, fallbackScope, fallback); err != nil {
+				t.Fatal(err)
+			}
+			switch layout {
+			case "new":
+				if _, err := rememberFirstPublication(provider, scope, original); err != nil {
+					t.Fatal(err)
+				}
+			case "cache":
+				publishInventoryKinds(t, service, nil, nil)
+				service.changes.inventories[service.indexScope()].generation.FirstReadyAt = original
+			case "legacy":
+				raw, err := json.Marshal(inventoryLeaseRecord{FirstReadyAt: original})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := provider.WriteBlob(inventoryKey(scope), raw); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := original
+			if layout == "fallback" {
+				want = fallback
+			}
+			if got := service.recordedFirstReadyAt(); !got.Equal(want) {
+				t.Fatalf("%s marker priority: got %s want %s", layout, got, want)
+			}
+			if layout != "fallback" {
+				if got, err := readFirstPublication(provider, scope); err != nil || !got.Equal(original) {
+					t.Fatalf("active marker not preserved/migrated: %s %v", got, err)
+				}
+			}
+		})
+	}
+}
+
+// Hold every writer at CAS so the loser-reread path is exercised, rather than
+// letting later writers merely read a marker the first writer already saved.
+type publicationCASBarrier struct {
+	storage.Provider
+	arrived sync.WaitGroup
+	release chan struct{}
+}
+
+func (provider *publicationCASBarrier) CompareAndSwapBlob(name string, old, next []byte) (bool, error) {
+	provider.arrived.Done()
+	<-provider.release
+	return provider.Provider.(storage.BlobCAS).CompareAndSwapBlob(name, old, next)
+}
+
+func TestFirstPublicationConcurrentWritersAgree(t *testing.T) {
+	const writers = 16
+	provider := &publicationCASBarrier{Provider: storage.NewMemory(), release: make(chan struct{})}
+	provider.arrived.Add(writers)
+	results := make(chan time.Time, writers)
+	var workers sync.WaitGroup
+	for i := range writers {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			scope := Scope{OrgID: "org", ClusterID: "cluster", CredentialID: strconv.Itoa(i)}
+			at, err := rememberFirstPublication(provider, scope, time.Unix(1700000000+int64(i), 0).UTC())
+			if err != nil {
+				t.Error(err)
+			}
+			results <- at
+		}()
+	}
+	provider.arrived.Wait()
+	close(provider.release)
+	workers.Wait()
+	close(results)
+	winner, err := readFirstPublication(provider, Scope{OrgID: "org", ClusterID: "cluster"})
+	if err != nil || winner.IsZero() {
+		t.Fatalf("no winner: %s %v", winner, err)
+	}
+	for at := range results {
+		if !at.Equal(winner) {
+			t.Fatalf("writer returned %s, persisted winner %s", at, winner)
+		}
 	}
 }

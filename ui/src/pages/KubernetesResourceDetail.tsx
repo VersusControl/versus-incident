@@ -28,6 +28,7 @@ import {
   resourceStart,
   resourceRestarts,
 } from "@/lib/kubernetesResourceDetail";
+import { counted } from "@/lib/kubernetesEvidence";
 
 function elapsed(at: unknown) {
   if (!isKnownKubernetesTime(at)) return "Unavailable";
@@ -681,7 +682,7 @@ export function ResourceRelations({
   return (
     <section aria-label="Related resources" className="resource-related space-y-4">
       <CoverageMarker reasons={failureWarnings(graph.data?.partial_failures).map((warning) => warning.content)} />
-      <KubernetesPendingNote kinds={graph.isError ? undefined : [...pendingKindNames(graph.data?.sync.pending)]} />
+      {!firstReadyAt && <KubernetesPendingNote kinds={graph.isError ? undefined : [...pendingKindNames(graph.data?.sync.pending)]} />}
       <div
         className="relationship-map min-w-0 rounded-control border border-ink-700 bg-surface-sunken p-4"
         aria-label="Relationship map"
@@ -814,6 +815,7 @@ export function ResourceTimeline({
   onCrash: (crash: KubernetesCrashEvent) => void;
 }) {
   const { client, key } = useKubernetesCluster();
+  const firstReadyAt = useKubernetesFirstReady();
   const [hours, setHours] = useState(6);
   const [now] = useState(Date.now);
   const [generation, setGeneration] = useState(0);
@@ -856,7 +858,7 @@ export function ResourceTimeline({
     ...(!resource.uid ? ["Resource identity could not be read"] : []),
     ...(timeline.isError ? ["History could not be read"] : []),
   ];
-  const syncing = timeline.isPending && timeline.isFetching || data?.sync.state === "syncing";
+  const syncing = timeline.isPending && timeline.isFetching || (!firstReadyAt && data?.sync.state === "syncing");
   return (
     <section aria-label="Resource change history" className="resource-history space-y-3">
       <div className="flex items-center gap-2">
@@ -955,7 +957,7 @@ export function ResourceTimeline({
           No changes or crashes in this range.
         </p>
       )}
-      {data && data.total > 0 && <p className="text-2xs text-ink-400">{data.total} events and {data.crash_count} crashes</p>}
+      {data && data.total > 0 && <p className="text-2xs text-ink-400">{counted(data.total, "event")} and {counted(data.crash_count, "crash")}</p>}
       {timeline.isError && <button type="button" className="btn text-link" onClick={() => { paging.resetPage(); setGeneration((value) => value + 1); }}>{paging.cursor ? "Restart history" : "Retry history"}</button>}
       <CursorPagination state={paging} busy={timeline.isFetching} next={data?.next} />
     </section>

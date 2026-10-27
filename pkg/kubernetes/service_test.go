@@ -21,6 +21,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/core"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 func TestServiceActiveScopePreservesCredentialEpoch(t *testing.T) {
@@ -2702,6 +2703,38 @@ func budgetFixture(labels int, labelValue int, droppable int, droppableValue int
 	return projected
 }
 
+func TestRecordBudgetKeepsCapacityQuantities(t *testing.T) {
+	for _, kind := range []string{"Node", "Pod"} {
+		t.Run(kind, func(t *testing.T) {
+			projected := budgetFixture(50, 30, 0, 0, 0, 0, 0, 0)
+			projected.Kind = kind
+			quantities := map[string]any{
+				"requested_cpu": "5/2", "requested_memory": "4294967296",
+				"limited_cpu": "4", "limited_memory": "8589934592",
+			}
+			if kind == "Node" {
+				quantities = map[string]any{"allocatable_cpu": "396/25", "allocatable_memory": "64424509440"}
+			}
+			for key, value := range quantities {
+				projected.Summary[key] = value
+			}
+			if kubeindex.RecordWithinBudget(indexRecord(projected)) {
+				t.Fatal("fixture must exercise the record byte budget")
+			}
+			bounded := enforceIndexedRecordBudget(projected)
+			record := indexRecord(bounded)
+			if !kubeindex.RecordWithinBudget(record) || !containsString(bounded.ProjectionTruncated, "labels") {
+				t.Fatalf("labels must pay the capacity record budget: %+v", record)
+			}
+			for key, value := range quantities {
+				if record.Summary[key] != value {
+					t.Errorf("%s = %q, want %q", key, record.Summary[key], value)
+				}
+			}
+		})
+	}
+}
+
 // The record budget is paid by informational summary values first. Labels, the
 // node, the selector, the controller owner and the container images are what
 // topology, ownership, and log membership read, so a wide record must keep them
@@ -2852,5 +2885,50 @@ func TestTruncatedLabelsAreVisibleOnTheServedResource(t *testing.T) {
 	untouched := projectedIndexRecord(indexRecord(budgetFixture(4, 10, 0, 0, 1, 20, 2, 5)))
 	if containsString(untouched.ProjectionTruncated, "labels") {
 		t.Fatalf("an untrimmed record claims trimmed labels: %v", untouched.ProjectionTruncated)
+	}
+}
+
+func TestLocalReportServiceUsesTrustedScopeWithoutCredentialResolution(t *testing.T) {
+	base := revokedCredentialService(t, Scope{OrgID: "org-a", ClusterID: "cluster"})
+	registry := NewClusterRegistryWithScope(false, []ClusterEntry{{Info: ClusterInfo{ID: "cluster"}, Service: base}}, tenancy.NewOrgScope("org-a", "default"))
+	for _, org := range []string{"org-a", "org-b"} {
+		for _, cluster := range []string{"", "cluster"} {
+			service, err := registry.LocalReportService(org, cluster)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{org}
+			if org == "org-a" {
+				want = append(want, "default")
+			}
+			if service.scope.OrgID != org || service.scope.CredentialID != base.scope.CredentialID || !reflect.DeepEqual(service.inventoryReadOrgs(), want) {
+				t.Fatalf("report scope=%+v reads=%v want=%v", service.scope, service.inventoryReadOrgs(), want)
+			}
+			if _, err := registry.ResolveCluster(org, cluster); err == nil {
+				t.Fatal("report resolution made revoked inventory readable")
+			}
+		}
+	}
+	if base.scope.OrgID != "org-a" || !reflect.DeepEqual(base.inventoryReadOrgs(), []string{"org-a", "default"}) {
+		t.Fatal("report resolution mutated base scope")
+	}
+	for _, test := range []struct {
+		registry *ServiceRegistry
+		cluster  string
+		want     error
+	}{
+		{nil, "", ErrClusterNotFound},
+		{NewClusterRegistry(false, nil), "", ErrClusterNotFound},
+		{registry, "missing", ErrClusterNotFound},
+		{NewClusterRegistry(true, []ClusterEntry{{Info: ClusterInfo{ID: "cluster"}, Service: base}}), "", ErrClusterRequired},
+		{NewClusterRegistry(false, []ClusterEntry{{Info: ClusterInfo{ID: "broken"}, Err: ErrUnauthorized}}), "broken", ErrClusterUnavailable},
+	} {
+		if _, err := test.registry.LocalReportService("org-b", test.cluster); !errors.Is(err, test.want) {
+			t.Fatalf("got %v want %v", err, test.want)
+		}
+	}
+	registry.closed = true
+	if _, err := registry.LocalReportService("org-b", "cluster"); !errors.Is(err, ErrClusterUnavailable) {
+		t.Fatalf("closed registry: %v", err)
 	}
 }

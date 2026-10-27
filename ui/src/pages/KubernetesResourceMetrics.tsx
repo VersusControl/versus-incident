@@ -19,6 +19,7 @@ import {
   type ResourceMetricSample,
   resourceRestarts,
 } from "@/lib/kubernetesResourceDetail";
+import { counted } from "@/lib/kubernetesEvidence";
 function metricValue(value: number | null, field: "cpu" | "memory") {
   if (value === null) return "Unavailable";
   if (field === "cpu") return `${Math.round(value * 1000)} mCPU`;
@@ -216,7 +217,7 @@ export function ResourceMetrics({
         </div>
       </div>
       {!crashesQuery.isError && crashesQuery.data && (crashesQuery.data.crash_count ?? 0) > 0 && <nav aria-label="Captured crash pages" className="text-2xs text-ink-400">
-        <p>{`${crashesQuery.data.crash_count} captured crashes in the last 24h`}</p>
+        <p>{`${counted(crashesQuery.data.crash_count ?? 0, "captured crash")} in the last 24h`}</p>
         {(crashesQuery.data.next || crashesQuery.paging.canPrevious) && <CursorPagination state={crashesQuery.paging} busy={crashesQuery.isFetching} next={crashesQuery.data.next} />}
       </nav>}
       <section

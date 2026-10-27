@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { KubernetesClusterSummary, KubernetesClusters, KubernetesSyncProgress } from "./api";
 import {
+  firstSyncListingProgress,
+  firstSyncStepIndex,
   firstSyncProgress,
   firstSyncProgressText,
   firstSyncStep,
@@ -45,9 +47,9 @@ describe("first sync wording", () => {
   });
 
   it("follows the server step index and falls back to the step id", () => {
-    expect(firstSyncStep(progress({ step: "building", step_index: 3 })).active).toBe("Building issues and timeline");
-    expect(firstSyncStep(progress({ step: "metrics", step_index: 0 })).active).toBe("Reading CPU and memory usage");
-    expect(firstSyncStep(undefined).active).toBe("Connecting to the cluster");
+    expect(firstSyncStep(progress({ step: "building", step_index: 3 }))?.active).toBe("Building issues and timeline");
+    expect(firstSyncStep(progress({ step: "metrics", step_index: 0 }))?.active).toBe("Reading CPU and memory usage");
+    expect(firstSyncStep(undefined)).toBeUndefined();
   });
 
   it("returns progress as parts, not as a joined string", () => {
@@ -103,5 +105,32 @@ describe("catalog refresh while preparing", () => {
     expect(kubernetesCatalogRefreshInterval(catalog([cluster("syncing")], false))).toBe(false);
     expect(kubernetesCatalogRefreshInterval(catalog([], false))).toBe(false);
     expect(kubernetesCatalogRefreshInterval(undefined)).toBe(false);
+  });
+});
+
+describe("honest listing progress", () => {
+  it("counts resource types without claiming overall startup completion", () => {
+    expect(firstSyncListingProgress(progress({ kinds_done: 12, kinds_total: 20 }))).toEqual({ done: 12, total: 20 });
+  });
+  it.each([
+    undefined,
+    progress({ step: "unknown" }),
+    progress({ kinds_done: 21 }),
+    progress({ kinds_done: -1 }),
+    progress({ kinds_done: 1.5 }),
+    progress({ kinds_total: 0 }),
+    progress({ kinds_total: Number.NaN }),
+  ])("rejects unknown or incoherent listing counts", (value) => {
+    expect(firstSyncListingProgress(value)).toBeUndefined();
+  });
+  it("retains listing counts during projection and metrics phases", () => {
+    expect(firstSyncListingProgress(progress({ step: "building", step_index: 3 }))).toEqual({ done: 4, total: 20 });
+    expect(firstSyncListingProgress(progress({ step: "metrics", step_index: 4 }))).toEqual({ done: 4, total: 20 });
+  });
+  it("does not invent a phase from missing or contradictory worker data", () => {
+    expect(firstSyncStepIndex()).toBe(-1);
+    expect(firstSyncStepIndex(progress({ step: "unknown" }))).toBe(-1);
+    expect(firstSyncStepIndex(progress({ step_index: 3 }))).toBe(-1);
+    expect(firstSyncProgress(progress({ step: "unknown" }))).toBeUndefined();
   });
 });

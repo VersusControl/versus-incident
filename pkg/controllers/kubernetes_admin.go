@@ -127,14 +127,15 @@ func (controller *KubernetesAdminController) requireClusterView(ctx *fiber.Ctx, 
 	if err != nil {
 		credentialFault := errors.Is(err, kubernetes.ErrCredentialUnavailable) || errors.Is(err, kubernetes.ErrUnauthorized)
 		if !reportable || !credentialFault {
-			return writeKubernetes(ctx, nil, err)
+			return writeKubernetes(ctx, nil, connectorResolutionError(err))
 		}
-		if service = controller.configuredService(clusterID); service == nil {
-			return writeKubernetes(ctx, nil, err)
+		service, err = controller.registry.LocalReportService(middleware.OrgFromContext(ctx), clusterID)
+		if err != nil {
+			return writeKubernetes(ctx, nil, connectorResolutionError(err))
 		}
 	}
 	if service == nil {
-		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Kubernetes connector is not configured"})
+		return writeKubernetes(ctx, nil, kubernetes.ErrConnectorNotConfigured)
 	}
 	if !core.CallerClusterAllowed(ctx.UserContext(), service.Scope().ClusterID) {
 		return writeKubernetes(ctx, nil, kubernetes.ErrClusterNotFound)
@@ -144,29 +145,27 @@ func (controller *KubernetesAdminController) requireClusterView(ctx *fiber.Ctx, 
 	return ctx.Next()
 }
 
-// configuredService is the cluster's service as configured, whether or not its
-// credential still validates.
-func (controller *KubernetesAdminController) configuredService(clusterID string) *kubernetes.Service {
-	if controller == nil || controller.registry == nil {
-		return nil
-	}
-	var found *kubernetes.Service
-	controller.registry.Each(func(service *kubernetes.Service) {
-		if found == nil && (clusterID == "" || service.Scope().ClusterID == clusterID) {
-			found = service
-		}
-	})
-	return found
-}
-
 func (controller *KubernetesAdminController) requirePermission(ctx *fiber.Ctx) error {
+	// The permission is answered before anything about the connector is looked
+	// up. Whether a connector exists and whether its credential still works are
+	// facts about the deployment, so reading them first would tell a caller
+	// without the permission which of them it is looking at.
+	if !callerCanViewInfrastructure(ctx) {
+		return refuseCallerInfrastructureView(ctx)
+	}
 	if controller == nil || controller.registry == nil || len(controller.registry.Clusters()) == 0 {
-		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Kubernetes connector is not configured"})
+		return writeKubernetes(ctx, nil, kubernetes.ErrConnectorNotConfigured)
 	}
-	if !controller.registry.Multiple() && controller.registry.ResolveOrg(middleware.OrgFromContext(ctx)) == nil {
-		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Kubernetes connector is not configured"})
+	if !controller.registry.Multiple() {
+		// Resolving the org is where the credential is validated, so it is also
+		// where a configured cluster with a dead credential fails. That answer has
+		// to name the fault: "not configured" would send a surface to the setup
+		// card over a cluster that has data.
+		if _, err := controller.registry.ResolveCluster(middleware.OrgFromContext(ctx), ""); err != nil {
+			return writeKubernetes(ctx, nil, connectorResolutionError(err))
+		}
 	}
-	return controller.authorizeInfrastructureView(ctx)
+	return ctx.Next()
 }
 
 // requireReportPermission is the permission gate for a route whose answer is a
@@ -174,22 +173,59 @@ func (controller *KubernetesAdminController) requirePermission(ctx *fiber.Ctx) e
 // connector is configured. Resolving an org validates the credential, and the
 // report has to be answerable exactly when that validation fails.
 func (controller *KubernetesAdminController) requireReportPermission(ctx *fiber.Ctx) error {
-	if controller == nil || controller.registry == nil || len(controller.registry.Clusters()) == 0 {
-		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Kubernetes connector is not configured"})
+	// Same order as every other route in the group: the permission comes first,
+	// so a caller without it learns nothing about whether a connector exists, and
+	// a caller with it still gets the report across a dead credential.
+	if !callerCanViewInfrastructure(ctx) {
+		return refuseCallerInfrastructureView(ctx)
 	}
-	return controller.authorizeInfrastructureView(ctx)
+	if controller == nil || controller.registry == nil || len(controller.registry.Clusters()) == 0 {
+		return writeKubernetes(ctx, nil, kubernetes.ErrConnectorNotConfigured)
+	}
+	return ctx.Next()
+}
+
+// connectorResolutionError names a failed resolution of a connector this
+// deployment has configured. Only a credential fault is renamed: it becomes the
+// pair of "not configured" — the cluster is known and its stored data is still
+// there, only the identity that reads it is gone — while every other resolution
+// failure keeps the code its own fault already has.
+func connectorResolutionError(err error) error {
+	if !errors.Is(err, kubernetes.ErrCredentialUnavailable) && !errors.Is(err, kubernetes.ErrUnauthorized) {
+		return err
+	}
+	// The cause stays attached for classification and logging; the answer a client
+	// gets is rendered from the closed vocabulary, never from this text.
+	return fmt.Errorf("%w: %w", kubernetes.ErrConnectorCredentialUnresolved, err)
 }
 
 func (controller *KubernetesAdminController) authorizeInfrastructureView(ctx *fiber.Ctx) error {
+	if !callerCanViewInfrastructure(ctx) {
+		return refuseCallerInfrastructureView(ctx)
+	}
+	return ctx.Next()
+}
+
+// callerCanViewInfrastructure answers the permission itself and records the
+// caller's authorization, but does not write a response or advance the chain. A
+// gate that still has to look at the deployment asks this first, so the answer it
+// gives an unauthorized caller cannot depend on what it would have found.
+func callerCanViewInfrastructure(ctx *fiber.Ctx) bool {
 	allowed, explicit := middleware.RequestPermission(ctx, string(core.PermissionInfrastructureView))
 	if !explicit || !allowed {
-		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "infrastructure:view permission is required"})
+		return false
 	}
 	authorization := core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}}
 	if !core.CallerAuthorizationPresent(ctx.UserContext()) {
 		ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), authorization))
 	}
-	return ctx.Next()
+	return true
+}
+
+// refuseCallerInfrastructureView is the one refusal every gated route gives a
+// caller without the permission: it names the permission, not the deployment.
+func refuseCallerInfrastructureView(ctx *fiber.Ctx) error {
+	return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "infrastructure:view permission is required"})
 }
 
 func (controller *KubernetesAdminController) clusters(ctx *fiber.Ctx) error {
@@ -634,6 +670,13 @@ func writeKubernetes(ctx *fiber.Ctx, value any, err error) error {
 		// A bounded backoff hint, not a guarantee that another viewer has closed.
 		ctx.Set(fiber.HeaderRetryAfter, "2")
 	case errors.Is(err, kubernetes.ErrClusterUnavailable):
+		status = fiber.StatusServiceUnavailable
+	case errors.Is(err, kubernetes.ErrConnectorNotConfigured):
+		status = fiber.StatusServiceUnavailable
+	case errors.Is(err, kubernetes.ErrConnectorCredentialUnresolved):
+		// A configured connector whose credential cannot be resolved is a state of
+		// this server, not of the upstream API: 503 says the request can be retried
+		// once the identity is restored, where 502 would blame a gateway.
 		status = fiber.StatusServiceUnavailable
 	case errors.Is(err, kubernetes.ErrTimelineContention):
 		status = fiber.StatusServiceUnavailable
