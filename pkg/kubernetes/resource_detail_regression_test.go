@@ -2,7 +2,6 @@ package kubernetes
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,7 +39,7 @@ func TestUnknownResourceTimestampsAreOmittedButKnownTimesSurvive(t *testing.T) {
 func TestFocusedPodKeepsUnfilteredCapacityMetadata(t *testing.T) {
 	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
 	records := workloadStreamRecords("StatefulSet", 25, 1)[1:]
-	session := &WorkloadLogSession{service: service, options: WorkloadLogStreamOptions{Kind: "StatefulSet", Name: "api", Namespace: "shop", UID: "root", PodUIDs: []string{"pod-24"}}, workers: map[string]*workloadSourceWorker{}, cursor: workloadLogCursor{Sources: map[string]string{}}}
+	session := &WorkloadLogSession{service: service, options: WorkloadLogStreamOptions{Kind: "StatefulSet", Name: "api", Namespace: "shop", UID: "root", PodUIDs: []string{"pod-24"}}, workers: map[string]*workloadSourceWorker{}, resume: map[string]string{}}
 	if err := session.reconcile(records); err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +210,7 @@ func TestConfirmedGoneWorkloadSourceStaysQuietUntilMembershipChanges(t *testing.
 	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
 	record := workloadStreamRecords("StatefulSet", 1, 1)[1]
 	options := WorkloadLogStreamOptions{Kind: "StatefulSet", Name: "api", Namespace: "shop", UID: "root"}
-	session := &WorkloadLogSession{service: service, options: options, workers: map[string]*workloadSourceWorker{}, cursor: workloadLogCursor{Sources: map[string]string{}}}
+	session := &WorkloadLogSession{service: service, options: options, workers: map[string]*workloadSourceWorker{}, resume: map[string]string{}}
 	if err := session.reconcile([]kubeindex.Record{record}); err != nil {
 		t.Fatal(err)
 	}
@@ -236,45 +235,42 @@ func TestConfirmedGoneWorkloadSourceStaysQuietUntilMembershipChanges(t *testing.
 	}
 }
 
-func TestWorkloadResumePreservesQuietSourcesAndSelectedWindow(t *testing.T) {
+// A viewer that reconnects with a timestamp gives up nothing: every source
+// starts at that timestamp backed off by the replay overlap, and a viewer that
+// resumes with window bounds gets exactly those bounds.
+func TestWorkloadResumeStartsEverySourceAtTheViewerWatermark(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "cluster"})
 	service.SetScrubber(replacingScrubber{})
 	seedWorkloadStreamIndex(t, service, workloadStreamRecords("Deployment", 2, 1))
-	options := WorkloadLogStreamOptions{Kind: "Deployment", Name: "api", Namespace: "shop", UID: "root", SinceSeconds: 60, TailLines: 123}
-	first, err := service.OpenWorkloadLogStream(logStreamTestContext(), options)
+
+	watermark := time.Now().UTC().Add(-time.Minute)
+	resumed, err := service.OpenWorkloadLogStream(logStreamTestContext(), WorkloadLogStreamOptions{Kind: "Deployment", Name: "api", Namespace: "shop", UID: "root", SinceTime: watermark})
 	if err != nil {
 		t.Fatal(err)
 	}
-	options.Cursor = first.checkpoint()
-	options.SinceSeconds, options.TailLines = 0, 0
-	first.Close()
-	resumed, err := service.OpenWorkloadLogStream(logStreamTestContext(), options)
+	defer resumed.Close()
+	if resumed.uncertain || len(resumed.workers) != 2 {
+		t.Fatalf("timestamp resume unsure=%v or incomplete=%d", resumed.uncertain, len(resumed.workers))
+	}
+	for _, worker := range resumed.workers {
+		if !worker.options.SinceTime.Equal(watermark.Add(-sinceTimeOverlap)) || worker.options.SinceSeconds != 0 || worker.options.TailLines != 0 || worker.options.Cursor != "" {
+			t.Fatalf("source did not resume at the watermark: %+v", worker.options)
+		}
+	}
+
+	windowed, err := service.OpenWorkloadLogStream(logStreamTestContext(), WorkloadLogStreamOptions{Kind: "Deployment", Name: "api", Namespace: "shop", UID: "root", SinceSeconds: 60, TailLines: 123})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resumed.uncertain {
-		t.Fatal("quiet source without lines was falsely uncertain")
+	defer windowed.Close()
+	if windowed.uncertain || len(windowed.workers) != 2 {
+		t.Fatalf("windowed open unsure=%v", windowed.uncertain)
 	}
-	resumed.Close()
-	var token workloadLogCursor
-	raw, _ := base64.RawURLEncoding.DecodeString(options.Cursor)
-	_ = json.Unmarshal(raw, &token)
-	workloadCheckpoints.Lock()
-	removeWorkloadCheckpoint(token.Reference)
-	workloadCheckpoints.Unlock()
-	fallback, err := service.OpenWorkloadLogStream(logStreamTestContext(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer fallback.Close()
-	if !fallback.uncertain || fallback.options.SinceSeconds != 60 || fallback.options.TailLines != 123 {
-		t.Fatalf("fallback lost selected window: %+v", fallback.options)
-	}
-	for _, worker := range fallback.workers {
-		if worker.options.SinceSeconds != 60 || worker.options.TailLines != 123 {
-			t.Fatal("source fallback hardcoded a new window")
+	for _, worker := range windowed.workers {
+		if worker.options.SinceSeconds != 60 || worker.options.TailLines != 123 || !worker.options.SinceTime.IsZero() {
+			t.Fatalf("window bounds lost: %+v", worker.options)
 		}
 	}
 }
@@ -292,45 +288,6 @@ func TestWorkloadMembershipOnlyEmitsChanges(t *testing.T) {
 	session.pods[0].Reason = "source_limit"
 	if _, changed := session.membershipChange(); !changed {
 		t.Fatal("changed admission catalog suppressed")
-	}
-}
-
-func TestBusyCheckpointViewerCannotEvictQuietViewer(t *testing.T) {
-	quietOwner := registerWorkloadCheckpointOwner()
-	fastOwner := registerWorkloadCheckpointOwner()
-	defer releaseWorkloadCheckpointOwner(quietOwner)
-	defer releaseWorkloadCheckpointOwner(fastOwner)
-	quiet := workloadLogCursor{Owner: quietOwner, Target: "quiet-target", Process: workloadStreamProcess, Sources: map[string]string{"quiet": "checkpoint"}}
-	reference, err := retainWorkloadCheckpoint(quiet)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 100; i++ {
-		reused, err := retainWorkloadCheckpoint(quiet)
-		if err != nil || reused != reference {
-			t.Fatal("unchanged heartbeat churned references", err)
-		}
-	}
-	fast := workloadLogCursor{Owner: fastOwner, Target: "fast-target", Process: workloadStreamProcess, Sources: map[string]string{}}
-	for i := 0; i < 1000; i++ {
-		fast.Sources["fast"] = strconv.Itoa(i)
-		if _, err := retainWorkloadCheckpoint(fast); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, exists := restoreWorkloadCheckpoint(reference); !exists {
-		t.Fatal("busy viewer evicted quiet active viewer")
-	}
-	workloadCheckpoints.Lock()
-	owned := 0
-	for _, entry := range workloadCheckpoints.entries {
-		if entry.owner == fastOwner {
-			owned++
-		}
-	}
-	workloadCheckpoints.Unlock()
-	if owned > 4 {
-		t.Fatal("busy viewer monopolized checkpoint cache", owned)
 	}
 }
 
@@ -387,13 +344,51 @@ func TestReplayUncertaintyIsAnOccurrenceNotStickyState(t *testing.T) {
 	if len(flags) != 5 || !flags[0] || flags[1] || !flags[2] || flags[3] || flags[4] {
 		t.Fatalf("gap notice leaked into ordinary events: %v", flags)
 	}
-	session := &WorkloadLogSession{ctx: context.Background(), cancel: func() {}, release: func() {}, options: WorkloadLogStreamOptions{UID: "root", Previous: true}, workers: map[string]*workloadSourceWorker{}, cursor: workloadLogCursor{Target: "target", Sources: map[string]string{}}, uncertain: true}
+	session := &WorkloadLogSession{ctx: context.Background(), cancel: func() {}, release: func() {}, options: WorkloadLogStreamOptions{UID: "root", Previous: true}, workers: map[string]*workloadSourceWorker{}, resume: map[string]string{}, uncertain: true}
 	flags = nil
 	if err := session.Stream(func(event WorkloadLogStreamEvent) error { flags = append(flags, event.ReplayUncertain); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if len(flags) != 2 || !flags[0] || flags[1] {
 		t.Fatalf("workload inherited gap forever: %v", flags)
+	}
+}
+
+func TestInventoryCorePublicationDoesNotWaitForUsageCollection(t *testing.T) {
+	metrics := make(chan struct{})
+	var once sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/apis/metrics.k8s.io/") {
+			once.Do(func() { close(metrics) })
+			<-r.Context().Done()
+			return
+		}
+		writeJSON(w, map[string]any{"items": []any{}})
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster"})
+	seedInventoryDiscovery(service)
+	entry := service.cache[service.cacheKey()]
+	entry.discovery.Resources = append(entry.discovery.Resources, ResourceDefinition{ID: "metrics.k8s.io~v1beta1~pods", Group: "metrics.k8s.io", Version: "v1beta1", Resource: "pods", Kind: "PodMetrics", Namespaced: true, Available: true})
+	service.cache[service.cacheKey()] = entry
+	service.SetChangeStorage(storage.NewMemory())
+	service.startInventory(t.Context())
+	defer service.StopCapture()
+	select {
+	case <-metrics:
+	case <-time.After(time.Second):
+		t.Fatal("usage collection did not start")
+	}
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for {
+		_, status, err := service.CachedIndexSnapshot(t.Context(), "Pod")
+		if err == nil && status.State == "ready" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("completed inventory remained blocked behind usage: %+v %v", status, err)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -438,6 +433,7 @@ func TestCaptureProgressDoesNotWaitForMetricsSampler(t *testing.T) {
 	waitUsageInterestCount(t, service, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	service.startInventory(ctx)
 	loop := &captureLoop{ctx: ctx, owner: "sampler-owner", next: map[string]time.Time{}, success: map[string]time.Time{}, completed: map[string]time.Time{}, gapFrom: map[string]time.Time{}, status: CaptureStatus{Mode: "continuous"}}
 	for kind := range captureCadences {
 		loop.next[kind] = now.Add(time.Hour)
@@ -460,20 +456,60 @@ func TestCaptureProgressDoesNotWaitForMetricsSampler(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Error("owner sampler did not join on cancellation")
 		}
+		service.changes.mu.Lock()
+		inventory := service.changes.inventories[service.indexScope()]
+		service.changes.mu.Unlock()
+		select {
+		case <-inventory.done:
+		case <-time.After(3 * time.Second):
+			t.Error("inventory sampler did not join")
+		}
 	}()
 	select {
 	case <-metricsStarted:
 	case <-time.After(2 * time.Second):
 		t.Fatal("metrics sampler never started")
 	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		view, _, err := service.CachedIndexSnapshot(context.WithValue(t.Context(), cachedCaptureContextKey{}, true), "Pod")
+		if err == nil && !view.Kinds["Pod"].ObservedAt.IsZero() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("inventory publication waited for slow usage")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-podRead:
+	default:
+	}
 	loop.mu.Lock()
 	loop.next["Pod"] = now.Add(-time.Second)
 	loop.mu.Unlock()
 	ticks <- time.Now()
+	deadline = time.Now().Add(time.Second)
+	for {
+		loop.mu.Lock()
+		completed := !loop.completed["Pod"].IsZero()
+		loop.mu.Unlock()
+		if completed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("slow metrics API blocked cached capture coverage")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	page, err := store.ReadWindow(now.Add(-time.Minute), time.Now().UTC(), time.Now().UTC())
+	if err != nil || page.Coverage["Pod"].To.IsZero() {
+		t.Fatalf("main capture did not commit coverage: %+v %v", page, err)
+	}
 	select {
 	case <-podRead:
-	case <-time.After(time.Second):
-		t.Fatal("slow metrics API blocked the main capture cycle")
+		t.Fatal("cached capture duplicated upstream inventory read")
+	default:
 	}
 }
 

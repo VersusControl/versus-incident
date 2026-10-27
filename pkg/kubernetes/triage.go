@@ -16,9 +16,16 @@ type SyncStatus struct {
 	State      string  `json:"state"`
 	AgeSeconds float64 `json:"age_s"`
 	Partial    bool    `json:"partial"`
+	// Progress is present only during a cluster's first sync.
+	Progress *SyncProgress `json:"progress,omitempty"`
+	// Pending lists resource IDs this view needs that are still loading after
+	// the core generation; PendingKinds counts all resource types still loading.
+	Pending      []string `json:"pending,omitempty"`
+	PendingKinds int      `json:"pending_kinds,omitempty"`
 }
 
 type IssueOptions struct {
+	unpaged        bool
 	Namespace      string
 	Severity       string
 	Kind           string
@@ -50,6 +57,9 @@ type Issue struct {
 	Rebuilt       []string                  `json:"rebuilt,omitempty"`
 	Untracked     []string                  `json:"untracked,omitempty"`
 	Partial       bool                      `json:"partial,omitempty"`
+	// Pending lists resource IDs whose evidence is still loading; History
+	// and Changes may fill in once they are listed.
+	Pending []string `json:"pending,omitempty"`
 }
 
 type BrokenTotals struct {
@@ -110,7 +120,7 @@ func (service *Service) Top(ctx context.Context, options TopOptions) (TopPage, e
 	if options.Limit <= 0 || options.Limit > 50 {
 		options.Limit = 20
 	}
-	usage, err := service.Usage(ctx, options.Namespace, maxPageSize)
+	usage, err := service.cachedUsage(ctx, options.Namespace, true)
 	if err != nil {
 		return TopPage{}, err
 	}
@@ -121,12 +131,16 @@ func (service *Service) Top(ctx context.Context, options TopOptions) (TopPage, e
 		status = usage.NodeMetrics
 	}
 	result := TopPage{Availability: status.Availability, Fresh: status.Fresh, Partial: append([]PartialFailure(nil), usage.Partial...), Sync: SyncStatus{State: "direct", Partial: !status.Fresh || len(usage.Partial) > 0}}
+	if usage.Availability == "syncing" {
+		result.Availability, result.Sync = "syncing", service.withSyncProgress(SyncStatus{State: "syncing"})
+		return result, nil
+	}
 	result.Total = len(items)
 	for _, item := range items {
 		result.Items = append(result.Items, TopItem{ResourceUsage: item})
 	}
 	if options.Kind == "pod" && len(result.Items) > 0 {
-		pods, listErr := service.listAll(ctx, ListOptions{ResourceID: "core~v1~pods", Namespace: options.Namespace})
+		pods, listErr := service.cachedList(ctx, ListOptions{ResourceID: "core~v1~pods", Namespace: options.Namespace})
 		if listErr != nil {
 			result.Partial = append(result.Partial, PartialFailure{ResourceID: "core~v1~pods", Class: errorClass(listErr)})
 			result.Sync.Partial = true

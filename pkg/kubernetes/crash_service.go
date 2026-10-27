@@ -193,16 +193,11 @@ func (service *Service) Crashes(ctx context.Context, query kubechanges.CrashQuer
 		}
 	}
 	syncStatus := SyncStatus{State: "unavailable", Partial: true}
-	if query.Cursor == "" && service.client != nil {
-		_, status, err := service.IndexSnapshot(ctx, "Pod", "ReplicaSet", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
-		syncStatus = SyncStatus{State: status.State, AgeSeconds: status.AgeSeconds, Partial: status.Partial || err != nil}
+	if service.client != nil {
+		_, status, err := service.CachedIndexSnapshot(ctx, "Pod", "ReplicaSet", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
+		syncStatus = SyncStatus{State: status.State, AgeSeconds: status.AgeSeconds, Partial: status.Partial || err != nil, Progress: status.Progress, Pending: status.Pending, PendingKinds: status.PendingKinds}
 		if err != nil && ctx.Err() != nil {
 			return CrashPage{}, ctx.Err()
-		}
-	} else if service.client != nil && service.indexes != nil {
-		if index, err := service.indexes.ForScope(service.indexScope()); err == nil {
-			status := index.Status(time.Now().UTC())
-			syncStatus = SyncStatus{State: status.State, AgeSeconds: status.AgeSeconds, Partial: status.Partial}
 		}
 	}
 	page, err := store.QueryCrashes(query, time.Now().UTC())

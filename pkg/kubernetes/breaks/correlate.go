@@ -25,6 +25,18 @@ type Result struct {
 }
 
 func Correlate(item Break, records []index.Record, edges graph.Graph, history changes.Page, partial bool, deniedKinds ...map[string]bool) Result {
+	denied := map[string]bool{}
+	if len(deniedKinds) > 0 {
+		denied = deniedKinds[0]
+	}
+	return CorrelateLoading(item, records, edges, history, partial, denied, nil)
+}
+
+// CorrelateLoading correlates while some kinds are still loading. A reference
+// to a loading kind that is not listed yet is a loading gap, not a coverage
+// failure: it keeps the history from being reported complete without marking
+// the result partial, so real partial causes stay distinguishable.
+func CorrelateLoading(item Break, records []index.Record, edges graph.Graph, history changes.Page, partial bool, denied map[string]bool, loading map[string]bool) Result {
 	result := Result{Changes: []LinkedChange{}, History: "gap"}
 	from, to := item.BrokeAt.Add(-30*time.Minute), item.BrokeAt.Add(2*time.Minute)
 	byUID := map[string]index.Record{}
@@ -80,7 +92,10 @@ func Correlate(item Break, records []index.Record, edges graph.Graph, history ch
 					found = true
 				}
 				if !found && tracked {
-					if len(deniedKinds) > 0 && deniedKinds[0][kind] {
+					if loading[kind] {
+						continue
+					}
+					if denied[kind] {
 						untracked[kind] = true
 						delete(needed, kind)
 					} else {
@@ -97,7 +112,7 @@ func Correlate(item Break, records []index.Record, edges graph.Graph, history ch
 		}
 	}
 	needed["HorizontalPodAutoscaler"] = true
-	covered := !partial
+	covered := !partial && len(loading) == 0
 	result.Partial = partial
 	for kind := range needed {
 		interval, exists := history.Coverage[kind]

@@ -18,6 +18,7 @@ import {
 } from "@/lib/api";
 import { PodLogViewer } from "./PodLogViewer";
 import { podColour } from "@/lib/kubernetesResourceDetail";
+import { POD_LOG_WORKLOAD_EARLIER_TAIL } from "@/lib/usePodLogStream";
 
 const resource: KubernetesResource = {
   resource_id: "apps~v1~deployments",
@@ -118,8 +119,7 @@ describe("Basic workload log viewer", () => {
         container: "",
         previous: false,
         timestamps: false,
-        since_seconds: 3600,
-        tail_lines: 500,
+        tail_lines: 200,
       },
     ]);
     expect((screen.getByLabelText("Log pod") as HTMLSelectElement).value).toBe(
@@ -314,8 +314,17 @@ describe("Basic workload log viewer", () => {
     ).toContain("text-ink-400");
     expect(screen.queryByRole("alert")).toBeNull();
   });
-  it("uses all-container prefixes, init selections and bounded All time", async () => {
+  it("uses all-container prefixes, init selections and a bounded earlier window", async () => {
     const live = connection();
+    const earlier = vi
+      .spyOn(api, "kubernetesWorkloadLogs")
+      .mockResolvedValue({
+        pods: ["checkout-a"],
+        lines: [
+          { pod: "checkout-a", container: "app", at: "2026-10-21T07:00:00Z", text: "yesterday" },
+        ],
+        truncated: false,
+      });
     render(<PodLogViewer resource={resource} />);
     live.emit(membership([firstPod]));
     expect(screen.getByRole("option", { name: "init:setup" })).toBeTruthy();
@@ -329,13 +338,28 @@ describe("Basic workload log viewer", () => {
         screen.getByRole("button", { name: "checkout-a/app" }),
       ).toBeTruthy(),
     );
-    fireEvent.change(screen.getByLabelText("Log since seconds"), {
-      target: { value: "86401" },
+    const calls = live.stream.mock.calls.length;
+    fireEvent.change(screen.getByLabelText("Since window"), {
+      target: { value: "86400" },
     });
-    expect(live.stream.mock.calls.at(-1)![4]).toMatchObject({
-      since_seconds: 86400,
-      tail_lines: 5000,
-    });
+    fireEvent.click(screen.getByRole("button", { name: "Load logs since that window" }));
+    await waitFor(() =>
+      expect(earlier).toHaveBeenCalledWith(
+        "Deployment",
+        "shop",
+        "checkout",
+        // One workload page covers every Pod at once, and the backend refuses
+        // more than a thousand lines of it.
+        expect.objectContaining({ since_seconds: 86400, tail_lines: POD_LOG_WORKLOAD_EARLIER_TAIL }),
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByLabelText("Workload log output").textContent,
+      ).toContain("yesterday"),
+    );
+    // Loading history never restarts the live follow.
+    expect(live.stream.mock.calls.length).toBe(calls);
     expect(
       (screen.getByLabelText("Timestamps") as HTMLInputElement).checked,
     ).toBe(false);
@@ -351,9 +375,9 @@ describe("Basic workload log viewer", () => {
     await waitFor(() =>
       expect(screen.getByText("served request")).toBeTruthy(),
     );
-    fireEvent.change(screen.getByLabelText("Log filter"), {
-      target: { value: "request" },
-    });
+    // The compact card holds the title, the connection word and one container
+    // selector; the filter belongs to the full panel.
+    expect(screen.queryByLabelText("Log filter")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open full logs" }));
     expect(onOpenFull).toHaveBeenCalledOnce();
     rerender(
@@ -364,6 +388,9 @@ describe("Basic workload log viewer", () => {
       />,
     );
     expect(live.stream).toHaveBeenCalledOnce();
+    fireEvent.change(screen.getByLabelText("Log filter"), {
+      target: { value: "request" },
+    });
     expect(
       (screen.getByLabelText("Log filter") as HTMLInputElement).value,
     ).toBe("request");
@@ -382,12 +409,8 @@ describe("Basic workload log viewer", () => {
       );
     render(<PodLogViewer resource={resource} />);
     fireEvent.click(screen.getByLabelText("Previous logs"));
-    expect((screen.getByLabelText("Follow") as HTMLInputElement).disabled).toBe(
-      true,
-    );
-    expect((screen.getByLabelText("Follow") as HTMLInputElement).checked).toBe(
-      false,
-    );
+    expect(screen.queryByLabelText("Follow")).toBeNull();
+    expect(screen.getByRole("button", { name: "Current", exact: true }).getAttribute("aria-pressed")).toBe("false");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60000);
     });
@@ -410,8 +433,12 @@ describe("Basic workload log viewer", () => {
       await vi.advanceTimersByTimeAsync(1);
     });
     expect(live.stream).toHaveBeenCalledTimes(2);
-    expect(live.stream.mock.calls[1][4]).toMatchObject({
-      cursor: "aggregate-checkpoint",
+    // A workload resumes on a wall clock, never on a cursor.
+    expect(live.stream.mock.calls[1][4]).toEqual({
+      container: "",
+      previous: false,
+      timestamps: false,
+      tail_lines: 200,
     });
     live.emit({
       event: "heartbeat",
@@ -448,16 +475,17 @@ describe("Basic workload log viewer", () => {
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByText(/safety limit|Partial coverage/)).toBeNull();
   });
-  it("does not admit missing resource identity and does not reconnect revoked access", async () => {
+  it("waits for a missing resource identity and does not reconnect revoked access", async () => {
     const stream = vi
       .spyOn(api, "kubernetesWorkloadLogStream")
       .mockRejectedValue(new ApiError(403, "Access denied"));
     const { rerender } = render(
       <PodLogViewer resource={{ ...resource, uid: undefined }} />,
     );
+    // A row read from a link has no uid yet; the read waits for it.
     expect(stream).not.toHaveBeenCalled();
-    expect(screen.getByLabelText("Workload log output").textContent).toContain(
-      "Resource identity is unavailable",
+    expect(screen.getByLabelText("Workload log output").textContent).toBe(
+      "Waiting for the first log line…",
     );
     rerender(<PodLogViewer key="identified" resource={resource} />);
     await waitFor(() =>

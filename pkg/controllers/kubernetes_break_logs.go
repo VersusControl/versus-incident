@@ -51,7 +51,7 @@ func (controller *KubernetesAdminController) requireSettingsWrite(ctx *fiber.Ctx
 }
 
 func (controller *KubernetesAdminController) breakLogs(ctx *fiber.Ctx) error {
-	for _, key := range []string{"cluster", "namespace", "root_uid", "since", "until", "mode", "level", "q", "cursor", "limit"} {
+	for _, key := range []string{"cluster", "namespace", "root_uid", "since", "until", "mode", "level", "q", "cursor", "limit", "container"} {
 		if len(ctx.Context().QueryArgs().PeekMulti(key)) > 1 {
 			return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
 		}
@@ -77,7 +77,7 @@ func (controller *KubernetesAdminController) breakLogs(ctx *fiber.Ctx) error {
 			pods = append(pods, strings.Clone(string(value)))
 		}
 	}
-	query := breaklogs.Query{Namespace: strings.Clone(ctx.Query("namespace")), RootUID: strings.Clone(ctx.Query("root_uid")), From: from, To: to, Mode: strings.Clone(ctx.Query("mode")), Level: strings.Clone(ctx.Query("level")), Search: strings.Clone(ctx.Query("q")), Cursor: strings.Clone(ctx.Query("cursor")), Limit: limit, Pods: pods}
+	query := breaklogs.Query{Namespace: strings.Clone(ctx.Query("namespace")), RootUID: strings.Clone(ctx.Query("root_uid")), From: from, To: to, Mode: strings.Clone(ctx.Query("mode")), Level: strings.Clone(ctx.Query("level")), Search: strings.Clone(ctx.Query("q")), Container: strings.Clone(ctx.Query("container")), Cursor: strings.Clone(ctx.Query("cursor")), Limit: limit, Pods: pods}
 	value, err := requestKubernetesService(ctx).BreakLogs(ctx.UserContext(), query)
 	if err == nil {
 		value.Patterns = breakLogPatterns(value.PatternInput)

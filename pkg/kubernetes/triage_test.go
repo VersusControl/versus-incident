@@ -169,8 +169,9 @@ func TestIssuesCursorRoundTripReturnsStableNonNullItems(t *testing.T) {
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	warmTestInventory(t, service, "shop")
 	page, err := service.Issues(t.Context(), IssueOptions{Namespace: "shop", Limit: 1})
-	if err != nil || page.Items == nil || len(page.Items) != 1 || page.Items[0].Root.Name != "api-a" || page.Next != "1" || !page.Truncated {
+	if err != nil || page.Items == nil || len(page.Items) != 1 || page.Items[0].Root.Name != "api-a" || page.Next != "1" || page.Truncated {
 		t.Fatalf("first issue page = %#v err=%v", page, err)
 	}
 	page, err = service.Issues(t.Context(), IssueOptions{Namespace: "shop", Limit: 1, Cursor: page.Next})
@@ -198,6 +199,7 @@ func TestIssuesNamespaceOnlyReadScope(t *testing.T) {
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster"})
+	warmTestInventory(t, service, "shop")
 	page, err := service.Issues(context.Background(), IssueOptions{Namespace: "shop", Broken: true})
 	if err != nil || len(page.Items) != 1 || page.Items[0].Root.Name != "api" || page.Broken.Total != 1 || !page.Sync.Partial {
 		t.Fatalf("namespace-only findings: %+v %v", page, err)

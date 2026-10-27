@@ -27,6 +27,11 @@ func (service *Service) clusterVersion(ctx context.Context) string {
 	if !clusterVersionPattern.MatchString(version.GitVersion) {
 		return ""
 	}
+	// A version read for the cluster list also feeds first-sync progress, so
+	// the sync itself never needs its own version read.
+	if cache := service.inventoryCacheEntry(); cache != nil {
+		cache.progress.clusterVersion(version.GitVersion)
+	}
 	return version.GitVersion
 }
 
@@ -115,11 +120,23 @@ func (registry *ServiceRegistry) Summaries(ctx context.Context, orgID string, al
 			}
 			value := unreachable
 			overview, readErr := service.Overview(readCtx)
+			if readErr == nil && overview.Sync.State == "error" && overview.Sync.AgeSeconds == 0 {
+				permissionFailure := false
+				for _, failure := range overview.Partial {
+					permissionFailure = permissionFailure || failure.Class == "forbidden" || failure.Class == "unauthorized"
+				}
+				if !permissionFailure {
+					readErr = ErrClusterUnavailable
+				}
+			}
 			if readErr == nil && readCtx.Err() == nil {
 				value = ClusterSummary{ClusterInfo: info, Health: ClusterHealth(overview), Nodes: overview.Nodes, ReadyNodes: overview.ReadyNodes, Pods: overview.Pods, RunningPods: overview.RunningPods, Warnings: overview.Warnings, Sync: overview.Sync, ObservedAt: overview.ObservedAt}
+				if overview.Sync.State == "syncing" {
+					value.Health = "syncing"
+				}
 				value.Version = service.clusterVersion(readCtx)
 				issues, issueErr := service.Issues(readCtx, IssueOptions{Limit: minimumPageSize})
-				if issueErr == nil && readCtx.Err() == nil && !issues.Sync.Partial && len(issues.Partial) == 0 {
+				if issueErr == nil && readCtx.Err() == nil && issues.Sync.State != "syncing" && !issues.Sync.Partial && len(issues.Partial) == 0 {
 					count := 0
 					for _, total := range issues.Totals {
 						count += total
@@ -142,7 +159,7 @@ func (registry *ServiceRegistry) Summaries(ctx context.Context, orgID string, al
 				result[index] = unreachable
 				return
 			}
-			if ctx.Err() == nil && value.Error == nil {
+			if ctx.Err() == nil && value.Error == nil && value.Sync.State != "syncing" {
 				registry.mu.Lock()
 				if len(registry.summaries) >= 256 {
 					for cacheKey, entry := range registry.summaries {

@@ -14,6 +14,11 @@ var (
 	ErrInvalidRecord = errors.New("kubernetes index: invalid record")
 	ErrRecordLimit   = errors.New("kubernetes index: record limit exceeded")
 	ErrScopeLimit    = errors.New("kubernetes index: scope limit exceeded")
+	// ErrKindNotServed reports that the cluster does not serve this kind, so a
+	// caller never claims a listing that did not happen. The kind is still
+	// recorded as known and empty; its first real listing later is a baseline,
+	// not a wave of created changes.
+	ErrKindNotServed = errors.New("kubernetes index: kind not served by the cluster")
 )
 
 const (
@@ -25,6 +30,18 @@ const (
 	maxSummaryFields  = 64
 	maxOwners         = 8
 	maxImages         = 16
+	maxImageBytes     = 512
+)
+
+// The per-record bounds every projection must respect. A projection that keeps
+// more than these would hand the index a record it has to reject, so the
+// projection reads these instead of guessing a larger size.
+const (
+	MaxLabels        = maxLabels
+	MaxSummaryFields = maxSummaryFields
+	MaxOwners        = maxOwners
+	MaxImages        = maxImages
+	MaxImageBytes    = maxImageBytes
 )
 
 type Scope struct {
@@ -112,15 +129,35 @@ type Record struct {
 }
 
 type KindStatus struct {
-	State      string    `json:"state"`
-	ObservedAt time.Time `json:"observed_at,omitempty"`
+	State string `json:"state"`
+	// A time that was never observed is omitted rather than serialized as
+	// 0001-01-01T00:00:00Z, so no client can render it as a date.
+	ObservedAt time.Time `json:"observed_at,omitzero"`
 	// CompletedAt bounds when records from the latest successful (possibly
 	// partial) load became visible. ObservedAt is the LIST start, not its end.
-	CompletedAt     time.Time `json:"completed_at,omitempty"`
-	LastAttemptAt   time.Time `json:"last_attempt_at,omitempty"`
-	Records         int       `json:"records"`
-	Partial         bool      `json:"partial"`
-	Error           string    `json:"error,omitempty"`
+	CompletedAt   time.Time `json:"completed_at,omitzero"`
+	LastAttemptAt time.Time `json:"last_attempt_at,omitzero"`
+	Records       int       `json:"records"`
+	Partial       bool      `json:"partial"`
+	Error         string    `json:"error,omitempty"`
+	// FailingSince is when this failure began. It is set on the transition into
+	// a failing state or class and kept until the kind recovers, so a surface can
+	// say how long a kind has been failing instead of how long ago it retried.
+	FailingSince time.Time `json:"failing_since,omitzero"`
+	// Skipped counts records the latest listing could not keep. It is never
+	// zero for an incomplete report: a dropped record is always counted, so a
+	// kind that lost data says so instead of looking complete.
+	Skipped int `json:"skipped,omitempty"`
+	// Absent marks a kind the cluster does not serve: it was never listed, so
+	// the first listing that comes back later is a baseline rather than a wave
+	// of created changes.
+	Absent bool `json:"absent,omitempty"`
+	// CycleFailure marks a state that came from the failure of a whole inventory
+	// cycle rather than from this kind's own listing. A cycle that cannot run
+	// says the connector could not read anything at all, so it stays a fault even
+	// when its class is a permission class: a per-kind capability gap and a dead
+	// credential are different problems with different remedies.
+	CycleFailure    bool `json:"cycle_failure,omitempty"`
 	hasCompleteSync bool
 }
 
@@ -160,6 +197,11 @@ type Status struct {
 	Partial    bool                  `json:"partial"`
 	Kinds      map[string]KindStatus `json:"kinds"`
 	Capture    *CaptureStatus        `json:"capture,omitempty"`
+	Progress   *SyncProgress         `json:"progress,omitempty"`
+	// Pending lists requested resource IDs not listed yet; PendingKinds counts
+	// every resource type the cluster's published inventory still lacks.
+	Pending      []string `json:"pending,omitempty"`
+	PendingKinds int      `json:"pending_kinds,omitempty"`
 }
 
 type CaptureStatus struct {
@@ -186,7 +228,69 @@ func New(maxRecords int) *Index {
 	if maxRecords <= 0 || maxRecords > maxScopeRecords {
 		maxRecords = defaultMaxRecords
 	}
+
 	return &Index{records: make(map[string]Record), kinds: make(map[string]KindStatus), refreshes: make(map[string]*refreshCall), subscribers: make(map[uint64]chan Delta), maxRecords: maxRecords}
+}
+
+// NewUnbounded retains the per-record validation budget without limiting the
+// number of safe projections in a complete background inventory.
+func NewUnbounded() *Index {
+	index := New(1)
+	index.maxRecords = 0
+	return index
+}
+
+// NewUnboundedRegistry scopes inventories without limiting their record count.
+func NewUnboundedRegistry(maxScopes int) *Registry {
+	registry := NewRegistry(maxScopes, 1)
+	registry.maxRecords = 0
+	return registry
+}
+
+// Restore validates a persisted projected generation without turning a failed
+// refresh into a successful observation or resetting owner evidence timestamps.
+func Restore(snapshot Snapshot) (*Index, error) {
+	index := NewUnbounded()
+	byKind := make(map[string][]Record, len(snapshot.Kinds))
+	seen := make(map[string]bool, len(snapshot.Records))
+	for _, record := range snapshot.Records {
+		if seen[record.UID] {
+			return nil, ErrInvalidRecord
+		}
+		seen[record.UID] = true
+		if _, exists := snapshot.Kinds[record.Kind]; !exists {
+			return nil, ErrInvalidRecord
+		}
+		// A stored generation is integrity-checked, not repaired: a record that
+		// no longer validates means the payload is corrupt, so the whole
+		// snapshot is refused instead of silently losing part of it.
+		if !validRecord(record) {
+			return nil, ErrInvalidRecord
+		}
+		byKind[record.Kind] = append(byKind[record.Kind], record)
+	}
+	for kind, state := range snapshot.Kinds {
+		if !validText(kind, 128) || !validOptionalText(state.Error, 128) {
+			return nil, ErrInvalidRecord
+		}
+		switch state.State {
+		case "ready", "partial", "error", "stale", "warming":
+		default:
+			return nil, ErrInvalidRecord
+		}
+		if err := index.Ingest(kind, byKind[kind], true, state.ObservedAt); err != nil {
+			return nil, err
+		}
+		state.Records = len(byKind[kind])
+		state.hasCompleteSync = !state.ObservedAt.IsZero()
+		index.kinds[kind] = state
+	}
+	for _, record := range snapshot.Records {
+		stored := index.records[record.UID]
+		stored.OwnerObservedAt = record.OwnerObservedAt
+		index.records[record.UID] = stored
+	}
+	return index, nil
 }
 
 func NewRegistry(maxScopes, maxRecords int) *Registry {
@@ -212,24 +316,54 @@ func (registry *Registry) ForScope(scope Scope) (*Index, error) {
 		return nil, ErrScopeLimit
 	}
 	created := New(registry.maxRecords)
+	if registry.maxRecords == 0 {
+		created = NewUnbounded()
+	}
 	registry.indexes[scope] = created
 	return created, nil
 }
 
 func (index *Index) Ingest(kind string, records []Record, complete bool, observedAt time.Time) error {
-	if index == nil || !validText(kind, 128) || len(records) > index.maxRecords {
+	return index.ingest(kind, records, complete, observedAt, false)
+}
+
+// ingest commits one listing of a kind the cluster serves, or — with absent —
+// records that the cluster does not serve this kind at all. An absent kind stays
+// known and empty for readers, and any listing that does come back from the
+// cluster clears the mark, so the kind's first real listing is a baseline
+// instead of a wave of created changes.
+//
+// A single record the index cannot hold never fails the whole kind: the record
+// is skipped, every other record is kept, and the kind reports the count. A
+// record we already know keeps its last good copy, because a listing we could
+// not read is not evidence that the object was deleted.
+func (index *Index) ingest(kind string, records []Record, complete bool, observedAt time.Time, absent bool) error {
+	if index == nil || !validText(kind, 128) {
 		return ErrInvalidRecord
+	}
+	if index.maxRecords > 0 && len(records) > index.maxRecords {
+		return ErrRecordLimit
 	}
 	if observedAt.IsZero() {
 		observedAt = time.Now().UTC()
 	}
 	prepared := make(map[string]Record, len(records))
+	// skipped names the records this listing could not read, so a complete
+	// listing keeps their last good copy instead of reporting them as deleted.
+	skipped := make(map[string]bool)
+	rejected := 0
 	for _, record := range records {
 		if record.Kind != kind || !validRecord(record) {
-			return ErrInvalidRecord
+			rejected++
+			if record.UID != "" {
+				skipped[record.UID] = true
+			}
+			continue
 		}
 		if _, duplicate := prepared[record.UID]; duplicate {
-			return ErrInvalidRecord
+			rejected++
+			skipped[record.UID] = true
+			continue
 		}
 		prepared[record.UID] = cloneRecord(record)
 	}
@@ -255,21 +389,32 @@ func (index *Index) Ingest(kind string, records []Record, complete bool, observe
 			}
 		}
 	}
-	if newCount > index.maxRecords {
+	if index.maxRecords > 0 && newCount > index.maxRecords {
 		return ErrRecordLimit
 	}
-	emitDeltas := index.kinds[kind].hasCompleteSync
+	// A kind the cluster did not serve has no history to compare against, so its
+	// first listing is a baseline. This reads the state before the new listing:
+	// a served kind that stops being served still reports what it dropped.
+	emitDeltas := index.kinds[kind].hasCompleteSync && !index.kinds[kind].Absent
 	deltas := make([]Delta, 0, len(prepared))
 	if complete {
 		for uid, current := range index.records {
-			if current.Kind == kind {
-				if _, seen := prepared[uid]; !seen {
-					delete(index.records, uid)
-					if emitDeltas {
-						previous := cloneRecord(current)
-						deltas = append(deltas, Delta{Kind: kind, Op: "delete", Old: &previous})
-					}
-				}
+			if current.Kind != kind {
+				continue
+			}
+			if _, seen := prepared[uid]; seen {
+				continue
+			}
+			// A record this listing could not read keeps its last good copy: the
+			// kind reports the skip, so a rejected record never turns into a
+			// silent deletion.
+			if skipped[uid] {
+				continue
+			}
+			delete(index.records, uid)
+			if emitDeltas {
+				previous := cloneRecord(current)
+				deltas = append(deltas, Delta{Kind: kind, Op: "delete", Old: &previous})
 			}
 		}
 	}
@@ -295,6 +440,9 @@ func (index *Index) Ingest(kind string, records []Record, complete bool, observe
 		}
 	}
 	status := index.kinds[kind]
+	// The failure start is carried forward so a retry of the same failure keeps
+	// the time an operator cares about: when it began, not when it retried last.
+	previousSince, previousClass := status.FailingSince, status.Error
 	status.State = map[bool]string{true: "ready", false: "partial"}[complete]
 	status.LastAttemptAt = observedAt.UTC()
 	status.CompletedAt = completedAt
@@ -304,7 +452,25 @@ func (index *Index) Ingest(kind string, records []Record, complete bool, observe
 	status.Records = kindRecordCount(index.records, kind)
 	status.Partial = !complete
 	status.Error = ""
+	status.Skipped = rejected
+	// A clean listing ends any failure; a new failure class starts its clock now.
+	status.FailingSince = time.Time{}
+	if rejected > 0 {
+		// The listing finished but kept less than the cluster served. The kind
+		// stays readable and says how much it lost.
+		status.State = "partial"
+		status.Partial = true
+		status.Error = "record_rejected"
+		status.FailingSince = completedAt
+		if previousClass == "record_rejected" && !previousSince.IsZero() {
+			// The same failure continuing is not a new one.
+			status.FailingSince = previousSince
+		}
+	}
 	status.hasCompleteSync = status.hasCompleteSync || complete
+	// The mark survives only a listing that reports the kind as not served; a
+	// listing that came back from the cluster — even an empty one — clears it.
+	status.Absent = absent
 	index.kinds[kind] = status
 	for _, delta := range deltas {
 		index.publishLocked(delta)
@@ -390,6 +556,13 @@ func (index *Index) RefreshGuarded(ctx context.Context, kind string, interval ti
 	index.mu.Unlock()
 
 	records, complete, err := load(ctx)
+	// A kind the cluster does not serve is recorded as known and empty, and
+	// marked so its first real listing later is a baseline instead of a wave of
+	// created changes.
+	absent := errors.Is(err, ErrKindNotServed)
+	if absent {
+		records, complete, err = nil, true, nil
+	}
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}
@@ -398,7 +571,7 @@ func (index *Index) RefreshGuarded(ctx context.Context, kind string, interval ti
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			return index.Ingest(kind, records, complete, now)
+			return index.ingest(kind, records, complete, now, absent)
 		}
 		if guard == nil {
 			err = commit()
@@ -412,12 +585,14 @@ func (index *Index) RefreshGuarded(ctx context.Context, kind string, interval ti
 		status.State = "error"
 		status.LastAttemptAt = now.UTC()
 		status.Partial = true
-		status.Error = "sync_failed"
-		if classified, ok := err.(interface{ Class() string }); ok {
-			if value := classified.Class(); validText(value, 64) {
-				status.Error = value
-			}
+		// Every failure names its own class, so an operator reading the status
+		// or the log can tell a permission problem from a timeout, a size limit,
+		// a record the index refused, or a listing it could not page through.
+		class := inventoryFailureClass(err)
+		if status.Error != class || status.FailingSince.IsZero() {
+			status.FailingSince = now.UTC()
 		}
+		status.Error = class
 		status.Records = kindRecordCount(index.records, kind)
 		index.kinds[kind] = status
 	}
@@ -426,6 +601,27 @@ func (index *Index) RefreshGuarded(ctx context.Context, kind string, interval ti
 	close(call.done)
 	index.mu.Unlock()
 	return err
+}
+
+// inventoryFailureClass names why a kind's listing failed. A loader may supply
+// its own class; anything else falls back to the classes the index can prove
+// from the error itself.
+func inventoryFailureClass(err error) string {
+	var classified interface{ Class() string }
+	if errors.As(err, &classified) {
+		if value := classified.Class(); validText(value, 64) {
+			return value
+		}
+	}
+	switch {
+	case errors.Is(err, ErrRecordLimit), errors.Is(err, ErrScopeLimit):
+		return "record_limit"
+	case errors.Is(err, ErrInvalidRecord):
+		return "record_rejected"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	}
+	return "unavailable"
 }
 
 // Status returns bounded freshness information for the current indexed view.
@@ -496,6 +692,13 @@ func (index *Index) KindStatus(kind string) (KindStatus, bool) {
 	return status, exists
 }
 
+// RecordFits reports whether the index can hold this record, so a caller can
+// check one record without ingesting it and without asking the index to reject a
+// whole listing.
+func RecordFits(record Record) bool {
+	return validRecord(record)
+}
+
 func validRecord(record Record) bool {
 	if !validOptionalText(record.APIVersion, 256) {
 		return false
@@ -558,10 +761,17 @@ func validRecord(record Record) bool {
 		return false
 	}
 	for _, image := range record.Images {
-		if len(image) > 512 {
+		if len(image) > maxImageBytes {
 			return false
 		}
 	}
+	return RecordWithinBudget(record)
+}
+
+// RecordWithinBudget reports whether a record fits the per-record byte budget,
+// including the allowance for container log metadata. A projection uses it to
+// bound itself, because a record the index refuses costs the whole kind.
+func RecordWithinBudget(record Record) bool {
 	limit := maxRecordBytes
 	if len(record.LogContainers) > 0 {
 		base := record

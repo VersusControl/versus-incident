@@ -196,7 +196,7 @@ func TestProjectCrashEvidenceRoundTrip(t *testing.T) {
 	}
 	job := map[string]any{}
 	projectBreakSummary("Job", nil, map[string]any{"conditions": conditions}, job)
-	if safeIndexedSummary(job)["job_failed_reason"] != "Evicted" {
+	if indexed, _ := safeIndexedSummary(job); indexed["job_failed_reason"] != "Evicted" {
 		t.Fatal("job condition lost")
 	}
 	if podStatusReason("OutOf secret value") != "" {

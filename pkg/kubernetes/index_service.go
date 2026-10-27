@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,16 +20,15 @@ import (
 )
 
 const kubernetesIndexRefreshInterval = 15 * time.Second
-const kubernetesIndexRefreshTimeout = 2 * time.Minute
+const inventoryLoadTimeout = 5 * time.Minute
 const kubernetesIndexReadinessWait = 2 * time.Second
 const kubernetesIndexPageSize = 500
-const kubernetesIndexMaxPages = 100
-const kubernetesIndexMaxRecords = 50000
 
 const MaxOrgIndexStreams = 8
 const MaxProcessIndexStreams = 64
 
 var ErrIndexStreamBusy = errors.New("kubernetes: index stream concurrency limit reached")
+var ErrIncompleteInventory = errors.New("kubernetes: incomplete inventory continuation")
 
 var indexStreamAdmissions = struct {
 	sync.Mutex
@@ -83,6 +83,8 @@ var indexedResourceIDs = map[string]string{
 	"ConfigMap":               "core~v1~configmaps",
 	"Secret":                  "core~v1~secrets",
 	"ServiceAccount":          "core~v1~serviceaccounts",
+	"HTTPRoute":               "gateway.networking.k8s.io~v1~httproutes",
+	"Gateway":                 "gateway.networking.k8s.io~v1~gateways",
 }
 
 // IndexSnapshot polls requested kinds within the normal operation budget and
@@ -123,7 +125,8 @@ func (service *Service) IndexSnapshot(ctx context.Context, kinds ...string) (kub
 	sort.Strings(uniqueKinds)
 	changeStore := service.changeStore()
 	_, background := ctx.Value(captureReadContextKey{}).(string)
-	key := indexRefreshKey{scope: scope, background: background}
+	cached, _ := ctx.Value(cachedCaptureContextKey{}).(bool)
+	key := indexRefreshKey{scope: scope, background: background, cached: cached}
 	call := &indexRefreshCall{done: make(chan struct{}), requested: make(map[string]struct{}, len(uniqueKinds))}
 	startRefresh := true
 	if service.changes != nil {
@@ -223,12 +226,9 @@ func (service *Service) runIndexRefresh(requestContext context.Context, key inde
 		if background {
 			parent = captureReadContext(parent, owner)
 		}
-		refreshContext, cancelRefresh := context.WithTimeout(parent, kubernetesIndexRefreshTimeout)
+		refreshContext, cancelRefresh := context.WithCancel(parent)
 		refreshContext = context.WithValue(refreshContext, credentialEpochContextKey{}, service)
 		cancelBudget := func() {}
-		if !background {
-			refreshContext, cancelBudget = ensureOperationBudgetRequests(refreshContext, overviewOperationRequests)
-		}
 		stopLifetime := func() bool { return false }
 		stopOwnership := func() bool { return false }
 		refreshOwner := ""
@@ -249,12 +249,26 @@ func (service *Service) runIndexRefresh(requestContext context.Context, key inde
 		started := time.Now().UTC()
 		crashes := &crashCaptureBatch{}
 		refreshContext = context.WithValue(refreshContext, crashCaptureContextKey{}, crashes)
+		var cached inventoryGeneration
+		var cachedErr error
+		if key.cached {
+			cached, cachedErr = service.readInventory(context.WithValue(refreshContext, cachedCaptureContextKey{}, true))
+			if !cached.PodSampledAt.IsZero() {
+				crashes.events = append([]kubechanges.CrashEvent(nil), cached.Crashes...)
+				crashes.pods = make(map[string]kubeindex.Record)
+				for _, record := range cached.View.Records {
+					if record.Kind == "Pod" {
+						crashes.pods[record.UID] = record
+					}
+				}
+				crashes.read, crashes.attempted = true, true
+			}
+		}
 		var deltas <-chan kubeindex.Delta
-		unsubscribe := func() {}
+		previous := index.Snapshot()
 		var captureLock *sync.Mutex
 		if changeStore != nil && service.changes != nil {
 			captureLock = service.changes.captureLock(key.scope)
-			deltas, unsubscribe = index.Subscribe(1024)
 		}
 		semaphore := make(chan struct{}, 4)
 		var workers sync.WaitGroup
@@ -277,8 +291,45 @@ func (service *Service) runIndexRefresh(requestContext context.Context, key inde
 						return
 					}
 				}
-				refreshErr := index.RefreshGuarded(refreshContext, kind, kubernetesIndexRefreshInterval, time.Now().UTC(), func(loadContext context.Context) ([]kubeindex.Record, bool, error) {
-					return service.loadIndexKind(loadContext, kind)
+				if key.cached && cached.View.Kinds[kind].ObservedAt.IsZero() {
+					return
+				}
+				observed := time.Now().UTC()
+				if key.cached && !cached.View.Kinds[kind].ObservedAt.IsZero() {
+					observed = cached.View.Kinds[kind].ObservedAt
+				}
+				refreshErr := index.RefreshGuarded(refreshContext, kind, kubernetesIndexRefreshInterval, observed, func(loadContext context.Context) ([]kubeindex.Record, bool, error) {
+					if key.cached {
+						if cachedErr != nil {
+							return nil, false, cachedErr
+						}
+						state := cached.View.Kinds[kind]
+						if state.ObservedAt.IsZero() {
+							return nil, false, indexReadError{error: inventorySyncError(), class: "syncing"}
+						}
+						if state.Error != "" && state.Error != "namespace_scope" {
+							return nil, false, indexReadError{error: inventorySyncError(), class: state.Error}
+						}
+						if state.Absent {
+							// The mirror relays a listing the cluster never gave:
+							// the kind is not served, so this is not a listing with
+							// no objects in it. Claiming otherwise would make the
+							// kind's first real listing read as created objects.
+							return nil, false, kubeindex.ErrKindNotServed
+						}
+						records := []kubeindex.Record{}
+						for _, record := range cached.View.Records {
+							if record.Kind == kind {
+								records = append(records, record)
+							}
+						}
+						return records, true, nil
+					}
+					records, complete, err := service.loadIndexKind(loadContext, kind)
+					if err == nil && !complete {
+						err = errors.New("kubernetes: incomplete inventory page chain")
+					}
+					return records, complete, err
 				}, func(commit func() error) error {
 					return service.commitCredential(refreshContext, commit)
 				})
@@ -294,6 +345,9 @@ func (service *Service) runIndexRefresh(requestContext context.Context, key inde
 			}()
 		}
 		workers.Wait()
+		if changeStore != nil {
+			deltas = inventoryDeltas(previous, index.Snapshot(), kinds)
+		}
 		if captureLock != nil {
 			captureLock.Lock()
 		}
@@ -302,7 +356,17 @@ func (service *Service) runIndexRefresh(requestContext context.Context, key inde
 			crashes.omitted = crashes.omitted || service.changes.journalFailed[key.scope]
 			service.changes.mu.Unlock()
 			commitErr := service.commitCredential(refreshContext, func() error {
-				return service.captureCycleWithCrashes(changeStore, deltas, index.Snapshot(), kinds, started, crashes, refreshOwner)
+				snapshot := index.Snapshot()
+				if key.cached {
+					for _, kind := range kinds {
+						state, exists := cached.View.Kinds[kind]
+						if !exists {
+							state = kubeindex.KindStatus{State: "warming", Error: "syncing"}
+						}
+						snapshot.Kinds[kind] = state
+					}
+				}
+				return service.captureCycleWithCrashes(changeStore, deltas, snapshot, kinds, started, crashes, refreshOwner)
 			})
 			if !errors.Is(commitErr, kubechanges.ErrLeaseLost) {
 				service.changes.mu.Lock()
@@ -321,15 +385,51 @@ func (service *Service) runIndexRefresh(requestContext context.Context, key inde
 				}
 			}
 		}
-		unsubscribe()
 		if captureLock != nil {
 			captureLock.Unlock()
 		}
+
 		cancelBudget()
 		cancelRefresh()
 		stopLifetime()
 		stopOwnership()
 	}
+}
+
+func inventoryDeltas(previous, current kubeindex.Snapshot, kinds []string) <-chan kubeindex.Delta {
+	requested := make(map[string]bool, len(kinds))
+	for _, kind := range kinds {
+		// A kind the cluster did not serve was never listed: its first listing
+		// with content is a baseline, not a creation.
+		requested[kind] = !previous.Kinds[kind].ObservedAt.IsZero() && !previous.Kinds[kind].Absent && current.Kinds[kind].State == "ready"
+	}
+	old := make(map[string]kubeindex.Record, len(previous.Records))
+	for _, record := range previous.Records {
+		old[record.UID] = record
+	}
+	deltas := make(chan kubeindex.Delta, len(previous.Records)+len(current.Records))
+	for _, record := range current.Records {
+		before, exists := old[record.UID]
+		delete(old, record.UID)
+		if !requested[record.Kind] || exists && reflect.DeepEqual(before, record) {
+			continue
+		}
+		updated := record
+		delta := kubeindex.Delta{Kind: record.Kind, Op: "upsert", New: &updated}
+		if exists {
+			copy := before
+			delta.Old = &copy
+		}
+		deltas <- delta
+	}
+	for _, record := range old {
+		if requested[record.Kind] {
+			before := record
+			deltas <- kubeindex.Delta{Kind: record.Kind, Op: "delete", Old: &before}
+		}
+	}
+	close(deltas)
+	return deltas
 }
 
 func scopedIndexStatus(status kubeindex.Status, requested []string) kubeindex.Status {
@@ -379,9 +479,15 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 	}
 	ctx, cancelIdentity := service.credentialContext(ctx)
 	defer cancelIdentity()
-	metadataScope := kind
+	ctx, cancelLoad := context.WithTimeout(ctx, inventoryLoadTimeout)
+	defer cancelLoad()
+	// A permission memo is scoped to this tenant's own read of this kind, so one
+	// organization's denial can never silence another's, and a credential change
+	// is a fresh question for the cluster.
+	scope := service.indexScope()
+	denyKey := metadataDenyKey{OrgID: scope.OrgID, ClusterID: scope.ClusterID, CredentialID: scope.CredentialID, Kind: kind}
 	if len(namespaces) > 0 {
-		metadataScope += "\x00" + namespaces[0]
+		denyKey.Namespace = namespaces[0]
 	}
 	defer func() {
 		if resultErr != nil {
@@ -389,17 +495,33 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 		}
 	}()
 	if metadataOnlyIndexKinds[kind] {
-		service.client.metadataMu.Lock()
-		denied := service.client.metadataDenied[metadataScope]
-		service.client.metadataMu.Unlock()
-		if time.Now().Before(denied) {
-			return nil, false, ErrForbidden
+		if denial, denied := service.client.metadataDenial(denyKey); denied {
+			return nil, false, denial
 		}
 	}
-	ctx, cancel := withOperationBudget(ctx, kubernetesIndexRefreshTimeout, kubernetesIndexMaxPages+32, 64<<20, kubernetesIndexMaxRecords)
-	defer cancel()
-	definition, err := service.resolve(ctx, indexedResourceIDs[kind])
+	// Each page has its own transport bound. Inventory size is not an operation
+	// budget: only cancellation and bounded individual responses stop a sync.
+	ctx = context.WithValue(ctx, operationBudgetKey{}, (*operationBudget)(nil))
+	definitions, _ := ctx.Value(indexDefinitionContextKey{}).(map[string]ResourceDefinition)
+	definition, preferred := definitions[kind]
+	var resolved Discovery
+	var err error
+	if !preferred {
+		// The resolution and the per-version outcome that decides whether this
+		// kind is unserved come from one discovery read: a version that could
+		// not be read is a failure, never an empty kind.
+		definition, resolved, err = service.resolveWithDiscovery(ctx, indexedResourceIDs[kind])
+	}
 	if err != nil {
+		if errors.Is(err, ErrNotFound) && kind != "Pod" && kind != "Node" && kind != "Namespace" {
+			discovery, _ := ctx.Value(inventoryDiscoveryContextKey{}).(Discovery)
+			if discoveryVersionFailed(discovery, indexedResourceIDs[kind]) || discoveryVersionFailed(resolved, indexedResourceIDs[kind]) {
+				// The API version this kind is pinned to could not be read, so
+				// its absence is unproven: a failure, never an empty kind.
+				return nil, false, err
+			}
+			return nil, false, kubeindex.ErrKindNotServed
+		}
 		return nil, false, err
 	}
 	namespace := ""
@@ -417,11 +539,7 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 	seenTokens := make(map[string]bool)
 	continueToken := ""
 	pageLimit := kubernetesIndexPageSize
-	var revisionValidator *kubeindex.Index
-	if kind == "ControllerRevision" {
-		revisionValidator = kubeindex.New(1)
-	}
-	for pageNumber := 0; pageNumber < kubernetesIndexMaxPages; pageNumber++ {
+	for {
 		query := url.Values{"limit": {strconv.Itoa(pageLimit)}}
 		if kind == "Event" {
 			query.Set("fieldSelector", "type=Warning")
@@ -452,16 +570,18 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 					Continue string `json:"continue"`
 				} `json:"metadata"`
 			}
-			if err := service.client.GetJSON(ctx, pagePath, &page); err != nil {
+			if err := service.inventoryRead(ctx, pagePath, &page, false); err != nil {
 				if errors.Is(err, ErrResponseTooLarge) && pageLimit > minimumPageSize {
 					pageLimit = max(minimumPageSize, pageLimit/2)
-					pageNumber--
 					continue
 				}
 				return nil, false, err
 			}
 			for _, item := range page.Items {
 				record := kubeindex.Record{Kind: kind, UID: item.Metadata.UID, Name: item.Metadata.Name, Namespace: item.Metadata.Namespace, CreatedAt: item.Metadata.CreatedAt, Revision: strconv.FormatInt(item.Revision, 10)}
+				if definition.Namespaced && (!safeSegment(record.Namespace) || namespace != "" && namespace != record.Namespace) {
+					return nil, false, ErrGraphIncomplete
+				}
 				for _, owner := range item.Metadata.Owners {
 					if (owner.Kind == "StatefulSet" || owner.Kind == "DaemonSet") && (owner.Controller == nil || *owner.Controller) {
 						record.Owners = append(record.Owners, kubeindex.OwnerRef{Kind: owner.Kind, Name: owner.Name, Namespace: record.Namespace, UID: owner.UID, ControllerKnown: owner.Controller != nil, Controller: owner.Controller != nil && *owner.Controller})
@@ -476,7 +596,9 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 					record.Summary = map[string]string{"revision_history_partial": "true"}
 				} else {
 					record.Images = images
-					if err := revisionValidator.Ingest(kind, []kubeindex.Record{record}, true, time.Now().UTC()); err != nil {
+					// A revision whose images the index cannot hold keeps its
+					// history mark instead of a record the index would refuse.
+					if !kubeindex.RecordFits(record) {
 						record.Images = nil
 						record.Summary = map[string]string{"revision_history_partial": "true"}
 					}
@@ -486,25 +608,28 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 			continueToken = page.Metadata.Continue
 		} else if metadataOnlyIndexKinds[kind] {
 			var page metadataIndexPage
-			if err := service.client.GetMetadataJSON(ctx, pagePath, &page); err != nil {
-				if errors.Is(err, ErrForbidden) && kind == "Secret" {
-					service.client.metadataMu.Lock()
-					service.client.metadataDenied[metadataScope] = time.Now().Add(time.Hour)
-					service.client.metadataMu.Unlock()
+			if err := service.inventoryRead(ctx, pagePath, &page, true); err != nil {
+				if errors.Is(err, ErrForbidden) || errors.Is(err, ErrUnauthorized) {
+					// Any denial on a metadata-only kind is memoized for a bounded
+					// time, so a grant becomes visible on the next probe instead of
+					// hammering a resource the identity cannot read. The memo keeps
+					// the class it saw, so a credential failure stays one.
+					service.client.memoMetadataDenial(denyKey, err)
 				}
 				if errors.Is(err, ErrResponseTooLarge) && pageLimit > minimumPageSize {
 					pageLimit = max(minimumPageSize, pageLimit/2)
-					pageNumber--
 					continue
 				}
 				return nil, false, err
 			}
 			for _, item := range page.Items {
-				records = append(records, item.record(kind))
+				record := item.record(kind)
+				if definition.Namespaced && (!safeSegment(record.Namespace) || namespace != "" && namespace != record.Namespace) {
+					return nil, false, ErrGraphIncomplete
+				}
+				records = append(records, record)
 			}
-			service.client.metadataMu.Lock()
-			delete(service.client.metadataDenied, metadataScope)
-			service.client.metadataMu.Unlock()
+			service.client.clearMetadataDenial(denyKey)
 			continueToken = page.Metadata.Continue
 		} else {
 			var page struct {
@@ -513,10 +638,9 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 					Continue string `json:"continue"`
 				} `json:"metadata"`
 			}
-			if err := service.client.GetJSON(ctx, pagePath, &page); err != nil {
+			if err := service.inventoryRead(ctx, pagePath, &page, false); err != nil {
 				if errors.Is(err, ErrResponseTooLarge) && pageLimit > minimumPageSize {
 					pageLimit = max(minimumPageSize, pageLimit/2)
-					pageNumber--
 					continue
 				}
 				return nil, false, err
@@ -527,7 +651,10 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 				}
 			}
 			for _, item := range page.Items {
-				record := indexRecord(service.projectResource(definition, item))
+				record := service.projectIndexRecord(definition, item)
+				if definition.Namespaced && (!safeSegment(record.Namespace) || namespace != "" && namespace != record.Namespace) {
+					return nil, false, ErrGraphIncomplete
+				}
 				if kind == "Pod" {
 					if batch, ok := ctx.Value(crashCaptureContextKey{}).(*crashCaptureBatch); ok {
 						status, _ := item["status"].(map[string]any)
@@ -538,23 +665,14 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 			}
 			continueToken = page.Metadata.Continue
 		}
-		if len(records) >= kubernetesIndexMaxRecords {
-			if continueToken != "" {
-				return records[:kubernetesIndexMaxRecords], false, nil
-			}
-			if len(records) > kubernetesIndexMaxRecords {
-				return records[:kubernetesIndexMaxRecords], false, nil
-			}
-		}
 		if continueToken == "" {
 			return records, true, nil
 		}
 		if len(continueToken) > 4096 || seenTokens[continueToken] {
-			return records, false, nil
+			return nil, false, ErrIncompleteInventory
 		}
 		seenTokens[continueToken] = true
 	}
-	return records, false, nil
 }
 
 type indexReadError struct {
@@ -562,6 +680,7 @@ type indexReadError struct {
 	class string
 }
 type indexReadinessContextKey struct{}
+type cachedCaptureContextKey struct{}
 
 func (err indexReadError) Unwrap() error { return err.error }
 func (err indexReadError) Class() string { return err.class }
@@ -630,8 +749,14 @@ func (service *Service) namespaceIssueSnapshot(ctx context.Context, namespace st
 			observed := time.Now().UTC()
 			records, complete, err := service.loadIndexKind(ctx, kind, namespace)
 			state := kubeindex.KindStatus{State: "ready", ObservedAt: observed, Records: len(records), Partial: !complete}
-			if err != nil {
+			if errors.Is(err, kubeindex.ErrKindNotServed) {
+				// Not served here: known and empty, exactly as a whole-cluster
+				// listing of an absent kind reports it.
+				records, err = nil, nil
+				state = kubeindex.KindStatus{State: "ready", ObservedAt: observed, Absent: true}
+			} else if err != nil {
 				state.State, state.Error, state.Partial = "error", errorClass(err), true
+				state.ObservedAt = time.Time{}
 				records = nil
 			} else if !complete {
 				state.State = "partial"
@@ -689,7 +814,7 @@ func (item metadataIndexItem) record(kind string) kubeindex.Record {
 		}
 		projected.Owners = append(projected.Owners, ref)
 	}
-	return indexRecord(projected)
+	return indexRecord(enforceIndexedRecordBudget(projected))
 }
 
 func persistIndexDeltas(store *kubechanges.Store, cluster string, deltas <-chan kubeindex.Delta, now time.Time) error {
@@ -735,7 +860,7 @@ func (service *Service) SubscribeIndex(ctx context.Context, buffer int, kinds ..
 	if admissionErr != nil {
 		return nil, func() {}, kubeindex.Status{}, admissionErr
 	}
-	_, status, err := service.IndexSnapshot(ctx, kinds...)
+	_, status, err := service.CachedIndexSnapshot(ctx, kinds...)
 	if err != nil {
 		release()
 		return nil, func() {}, status, err
@@ -750,10 +875,19 @@ func (service *Service) SubscribeIndex(ctx context.Context, buffer int, kinds ..
 }
 
 func indexRecord(resource ProjectedResource) kubeindex.Record {
-	summary := safeIndexedSummary(resource.Summary)
-	for _, category := range resource.ProjectionTruncated {
+	summary, summaryTruncated := safeIndexedSummary(resource.Summary)
+	truncated := resource.ProjectionTruncated
+	if summaryTruncated {
+		truncated = appendUnique(truncated, "summary")
+	}
+	for _, category := range truncated {
 		if category == "references" || category == "summary" || category == "owners" {
 			summary["references_partial"] = "true"
+		}
+		if category == "labels" {
+			// A record kept fewer labels than the object has, and the served
+			// resource has to be able to say so.
+			summary["labels_partial"] = "true"
 		}
 	}
 	uid := resource.UID
@@ -828,14 +962,27 @@ func indexRecord(resource ProjectedResource) kubeindex.Record {
 		containers = mapSlice(resource.Summary["containers"])
 	}
 	for _, container := range containers {
-		if image := boundString(stringValue(container["image"])); image != "" && len(record.Images) < 32 {
+		if image := boundString(stringValue(container["image"])); image != "" {
+			if len(image) > kubeindex.MaxImageBytes {
+				// An image reference longer than the index can hold is a partial
+				// image list, not a reason to refuse the whole object.
+				summary["references_partial"] = "true"
+				continue
+			}
+			if len(record.Images) == kubeindex.MaxImages {
+				// The index keeps fewer images than the projection does.
+				summary["references_partial"] = "true"
+				break
+			}
 			record.Images = append(record.Images, image)
 		}
 	}
 	return record
 }
 
-func safeIndexedSummary(summary map[string]any) map[string]string {
+// safeIndexedSummary keeps only the summary keys the index can hold, and reports
+// when the per-record field budget dropped a key it could otherwise have kept.
+func safeIndexedSummary(summary map[string]any) (map[string]string, bool) {
 	allowed := map[string]bool{
 		"phase": true, "type": true, "reason": true, "generation": true,
 		"observed_generation": true, "desired_replicas": true, "replicas": true,
@@ -851,10 +998,16 @@ func safeIndexedSummary(summary map[string]any) map[string]string {
 		"node_pressure":          true,
 		"break_evidence_partial": true,
 		"references_partial":     true,
+		"labels_partial":         true,
 	}
 	result := make(map[string]string)
+	truncated := false
 	for key, value := range summary {
-		if !allowed[key] || len(result) >= 64 {
+		if !allowed[key] {
+			continue
+		}
+		if len(result) >= kubeindex.MaxSummaryFields {
+			truncated = true
 			continue
 		}
 		var text string
@@ -877,7 +1030,7 @@ func safeIndexedSummary(summary map[string]any) map[string]string {
 			result[key] = text
 		}
 	}
-	return result
+	return result, truncated
 }
 
 func summaryInt32(summary map[string]string, key string) int32 {
@@ -894,14 +1047,14 @@ func indexStringMap(value any) map[string]string {
 	switch values := value.(type) {
 	case map[string]string:
 		for key, item := range values {
-			if len(result) < 128 && key != "" && len(key) <= 253 && len(item) <= 256 {
+			if len(result) < kubeindex.MaxLabels && key != "" && len(key) <= 253 && len(item) <= 256 {
 				result[key] = item
 			}
 		}
 	case map[string]any:
 		for key, item := range values {
 			text, ok := item.(string)
-			if ok && len(result) < 128 && key != "" && len(key) <= 253 && len(text) <= 256 {
+			if ok && len(result) < kubeindex.MaxLabels && key != "" && len(key) <= 253 && len(text) <= 256 {
 				result[key] = text
 			}
 		}

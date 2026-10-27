@@ -7,11 +7,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -82,7 +84,7 @@ func TestKubernetesBreakLogHTTPStoredPagesSettingsAndPermissions(t *testing.T) {
 	}
 	defer response.Body.Close()
 	var page kubernetes.BreakLogPage
-	if json.NewDecoder(response.Body).Decode(&page) != nil || response.StatusCode != 200 || len(page.Lines) != 1 || page.Next == "" || page.Counts.All != 3 || page.Counts.Errors != 1 || page.Counts.Warnings != 1 || len(page.Patterns) == 0 {
+	if json.NewDecoder(response.Body).Decode(&page) != nil || response.StatusCode != 200 || len(page.Lines) != 1 || page.Next == "" || page.Counts.All != 3 || page.Counts.Errors != 1 || page.Counts.Warnings != 1 || len(page.Patterns) == 0 || page.Container != "app" || page.MainContainer != "app" || len(page.Containers) != 1 {
 		t.Fatalf("page=%+v status=%d", page, response.StatusCode)
 	}
 	request = httptest.NewRequest(http.MethodGet, base+"&cursor="+page.Next, nil)
@@ -106,12 +108,19 @@ func TestKubernetesBreakLogHTTPStoredPagesSettingsAndPermissions(t *testing.T) {
 		{http.MethodGet, base, "", "deny", "", 403},
 		{http.MethodGet, base + "&mode=invalid", "", "", "", 400},
 		{http.MethodGet, base + "&limit=501", "", "", "", 400},
+		{http.MethodGet, base + "&container=app", "", "", "", 200},
+		{http.MethodGet, base + "&container=*", "", "", "", 200},
+		{http.MethodGet, base + "&container=not-a-container", "", "", "", 400},
+		{http.MethodGet, base + "&container=app&container=app", "", "", "", 400},
+		{http.MethodGet, "/api/admin/kubernetes/timeline?cluster=cluster&breaks=1", "", "", "", 200},
+		{http.MethodGet, "/api/admin/kubernetes/timeline?cluster=cluster&breaks=yes", "", "", "", 400},
+		{http.MethodGet, "/api/admin/kubernetes/timeline?cluster=cluster&breaks=1&breaks=0", "", "", "", 400},
 		{http.MethodGet, "/api/admin/kubernetes/agent-settings?cluster=cluster", "", "", "", 200},
 		{http.MethodGet, "/api/admin/kubernetes/issue-alerts?cluster=cluster", "", "", "", 200},
 		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":true,"level":"warning"}`, "", "", 403},
 		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":true,"level":"invalid"}`, "", "allow", 400},
 		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":true,"level":"warning","extra":true}`, "", "allow", 400},
-		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":true,"level":"warning"}`, "", "allow", 200},
+		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":true,"level":"warning"}`, "", "allow", 400},
 		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":false,"level":"critical"}`, "deny", "allow", 403},
 		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":false,"level":"critical"}`, "unauthenticated", "allow", 401},
 		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"learning":{"logs":true},"break_logs":{"linked_source":""}}`, "", "", 403},
@@ -238,6 +247,9 @@ func TestChatCrashEvidenceServerDerivedAttachment(t *testing.T) {
 	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
 	service.SetChangeStorage(storage.NewMemory())
 	SetChatKubernetesServiceResolver(func(orgID, clusterID string) *kubernetes.Service { return service })
+	if _, _, err := service.IndexSnapshot(t.Context(), "Pod", "ReplicaSet", "Deployment", "StatefulSet", "DaemonSet", "Job", "Node", "Event", "HorizontalPodAutoscaler", "ConfigMap", "Secret", "PersistentVolumeClaim", "ServiceAccount", "ControllerRevision"); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { SetChatKubernetesServiceResolver(nil) })
 	app := fiber.New(fiber.Config{Immutable: true})
 	app.Use(func(ctx *fiber.Ctx) error {
@@ -337,6 +349,9 @@ func TestKubernetesIssuesQueryValidationAndInvestigate(t *testing.T) {
 	}
 	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
 	service.SetChangeStorage(storage.NewMemory())
+	if _, _, err := service.IndexSnapshot(t.Context(), "Pod", "ReplicaSet", "Deployment", "StatefulSet", "DaemonSet", "Job", "Node", "Event", "HorizontalPodAutoscaler", "ConfigMap", "Secret", "PersistentVolumeClaim", "ServiceAccount", "ControllerRevision"); err != nil {
+		t.Fatal(err)
+	}
 	app := fiber.New(fiber.Config{Immutable: true})
 	app.Use(func(ctx *fiber.Ctx) error {
 		middleware.MarkAuthorized(ctx)
@@ -645,6 +660,7 @@ func TestKubernetesPodLogSSEContract(t *testing.T) {
 func TestKubernetesPodLogSSEClusterRouting(t *testing.T) {
 	var reads atomic.Int32
 	var entries []kubernetes.ClusterEntry
+	base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	for _, cluster := range []string{"east", "west"} {
 		upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			reads.Add(1)
@@ -658,7 +674,7 @@ func TestKubernetesPodLogSSEClusterRouting(t *testing.T) {
 					t.Errorf("unexpected upstream query key = %q", key)
 				}
 			}
-			_, _ = io.WriteString(writer, "2026-10-01T00:00:00Z "+cluster+" secret\n")
+			_, _ = io.WriteString(writer, base.Format(time.RFC3339Nano)+" "+cluster+" secret\n")
 		}))
 		t.Cleanup(upstream.Close)
 		client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
@@ -733,13 +749,15 @@ func TestKubernetesPodLogSSEClusterRouting(t *testing.T) {
 }
 
 func TestKubernetesPodLogSSEOverlapResumeContract(t *testing.T) {
+	base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	at0, at1 := base.Format(time.RFC3339Nano), base.Add(time.Second).Format(time.RFC3339Nano)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Query().Has("sinceTime") && request.URL.Query().Get("sinceTime") != "2026-09-30T23:59:59.999999999Z" {
+		if request.URL.Query().Has("sinceTime") && request.URL.Query().Get("sinceTime") != base.Add(-time.Nanosecond).Format(time.RFC3339Nano) {
 			t.Errorf("resume overlap: %v", request.URL.Query())
 		}
-		writer.Write([]byte("2026-10-01T00:00:01Z secret\n2026-10-01T00:00:00Z secret\n2026-10-01T00:00:01Z secret\n"))
+		writer.Write([]byte(at1 + " secret\n" + at0 + " secret\n" + at1 + " secret\n"))
 		if request.URL.Query().Has("sinceTime") {
-			writer.Write([]byte("2026-10-01T00:00:00Z secret\n2026-10-01T00:00:01Z secret\n"))
+			writer.Write([]byte(at0 + " secret\n" + at1 + " secret\n"))
 		}
 	}))
 	defer upstream.Close()
@@ -1046,7 +1064,7 @@ func TestKubernetesChangesRouteReturnsBoundedDTOAndRejectsInvalidTime(t *testing
 		Truncated bool                `json:"truncated"`
 		Gaps      []any               `json:"gaps"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&body); err != nil || body.Items == nil || body.Gaps == nil || len(body.Items) != 1 || body.Next == "" || !body.Truncated {
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil || body.Items == nil || body.Gaps == nil || len(body.Items) != 1 || body.Next == "" || body.Truncated {
 		t.Fatalf("changes DTO=%#v decode err=%v", body, err)
 	}
 	response.Body.Close()
@@ -1367,7 +1385,7 @@ func TestKubernetesAIAndHTTPAdaptersReturnEquivalentResourceFacts(t *testing.T) 
 			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
 		case "/apis":
 			_ = json.NewEncoder(writer).Encode(map[string]any{"groups": []any{}})
-		case "/api/v1/namespaces/payments/pods":
+		case "/api/v1/namespaces/payments/pods", "/api/v1/pods":
 			_ = json.NewEncoder(writer).Encode(map[string]any{"items": []any{map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": map[string]any{"namespace": "payments", "name": "api"}, "spec": map[string]any{"nodeName": "node-a"}, "status": map[string]any{"phase": "Running"}}}})
 		default:
 			http.NotFound(writer, request)
@@ -1379,6 +1397,9 @@ func TestKubernetesAIAndHTTPAdaptersReturnEquivalentResourceFacts(t *testing.T) 
 		t.Fatal(err)
 	}
 	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "test"}, 0)
+	if _, _, err := service.IndexSnapshot(t.Context(), "Pod"); err != nil {
+		t.Fatal(err)
+	}
 	app := fiber.New()
 	app.Use(func(ctx *fiber.Ctx) error {
 		middleware.MarkAuthorized(ctx)
@@ -1477,5 +1498,136 @@ func TestKubernetesPodLogsReturnsBadRequestForMultiContainerPodWithoutContainer(
 	response, requestErr = app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/pods/default/multi/logs?container=sidecar", nil), -1)
 	if requestErr != nil || response.StatusCode != fiber.StatusOK {
 		t.Fatalf("explicit container status=%d err=%v", response.StatusCode, requestErr)
+	}
+}
+
+// A not-ready inventory is answered as a retryable server state, so the client
+// retries instead of sending an operator after RBAC that is not the problem.
+func TestInventoryNotReadyIsRetryableServiceUnavailable(t *testing.T) {
+	app := fiber.New()
+	app.Get("/", func(ctx *fiber.Ctx) error {
+		return writeKubernetes(ctx, nil, fmt.Errorf("workload logs unavailable: %w", kubernetes.ErrInventoryNotReady))
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != fiber.StatusServiceUnavailable || response.Header.Get("Retry-After") == "" {
+		t.Fatalf("status=%d retry-after=%q", response.StatusCode, response.Header.Get("Retry-After"))
+	}
+	if retryAfter, parseErr := strconv.Atoi(response.Header.Get("Retry-After")); parseErr != nil || retryAfter <= 0 || retryAfter > 60 {
+		t.Fatalf("retry-after=%q", response.Header.Get("Retry-After"))
+	}
+	var body struct {
+		Error     string `json:"error"`
+		Code      string `json:"code"`
+		Action    string `json:"action"`
+		Retryable bool   `json:"retryable"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != "inventory_not_ready" || !body.Retryable || body.Error == "" || body.Action == "" {
+		t.Fatalf("body = %+v", body)
+	}
+}
+
+// The complete sync health is readable over the admin API, is authorized like
+// every other Kubernetes route, names a kind no view asked about, and needs no
+// cluster traffic once the inventory is published.
+func TestKubernetesSyncHealthIsCompleteAndAuthorized(t *testing.T) {
+	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "fault-forbidden-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(fixture)
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	// Secret LIST answers 403 in this scenario while Pod answers normally.
+	if _, _, err := service.IndexSnapshot(t.Context(), "Secret", "Pod"); err != nil {
+		t.Fatal(err)
+	}
+	// The status must not depend on the cluster being reachable: every field is
+	// published already.
+	upstream.Close()
+
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), ctx.Get("X-View") != "deny")
+		ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}, Clusters: &core.ClusterScope{IDs: []string{"cluster"}}}))
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	get := func(path, view string) (*http.Response, []byte) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		if view != "" {
+			request.Header.Set("X-View", view)
+		}
+		response, err := app.Test(request, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return response, body
+	}
+	if response, body := get("/api/admin/kubernetes/sync?cluster=cluster", "deny"); response.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("missing permission status=%d body=%s", response.StatusCode, body)
+	}
+	if response, body := get("/api/admin/kubernetes/sync?cluster=other", ""); response.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("cluster outside the allow-list status=%d body=%s", response.StatusCode, body)
+	}
+	response, body := get("/api/admin/kubernetes/sync?cluster=cluster", "")
+	if response.StatusCode != fiber.StatusOK {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	var health struct {
+		State   string                                `json:"state"`
+		Partial bool                                  `json:"partial"`
+		Kinds   map[string]map[string]json.RawMessage `json:"kinds"`
+		Failing []struct {
+			Kind  string `json:"kind"`
+			Class string `json:"class"`
+		} `json:"failing"`
+		Unreadable []struct {
+			Kind  string `json:"kind"`
+			Class string `json:"class"`
+			Since string `json:"since"`
+		} `json:"unreadable"`
+		TotalKinds      int `json:"total_kinds"`
+		FailingKinds    int `json:"failing_kinds"`
+		UnreadableKinds int `json:"unreadable_kinds"`
+	}
+	if err := json.Unmarshal(body, &health); err != nil {
+		t.Fatal(err)
+	}
+	secret, known := health.Kinds["Secret"]
+	if !known || string(secret["error"]) != `"forbidden"` || string(secret["state"]) != `"error"` {
+		t.Fatalf("failing Secret missing from the complete status: %s", body)
+	}
+	if pod, known := health.Kinds["Pod"]; !known || string(pod["state"]) != `"ready"` {
+		t.Fatalf("ready Pod missing from the complete status: %s", body)
+	}
+	// A permission gap is a capability limit, not a sync fault: it is named in
+	// the non-blocking group and cannot make the aggregate an error.
+	if health.State == "error" || health.FailingKinds != 0 || len(health.Failing) != 0 {
+		t.Fatalf("a permission gap became a blocking fault: %+v", health)
+	}
+	if health.UnreadableKinds != 1 || len(health.Unreadable) != 1 || health.Unreadable[0].Kind != "Secret" || health.Unreadable[0].Class != "forbidden" || health.Unreadable[0].Since == "" {
+		t.Fatalf("permission gap rows = %+v", health.Unreadable)
+	}
+	if now := string(body); !strings.Contains(now, `"unreadable":[`) || !strings.Contains(now, `"failing":[]`) {
+		t.Fatalf("problem rows incomplete: %s", body)
+	}
+	t.Logf("complete sync health: %s", body)
+	// Reading it again must not touch the cluster, which is already closed.
+	if response, body := get("/api/admin/kubernetes/sync?cluster=cluster", ""); response.StatusCode != fiber.StatusOK || !strings.Contains(string(body), `"forbidden"`) {
+		t.Fatalf("repeat read status=%d body=%s", response.StatusCode, body)
 	}
 }

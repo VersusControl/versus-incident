@@ -84,7 +84,7 @@ export function usePagination<T>(
   return { ...slice, setPage, pageItems };
 }
 
-export function useCursorPagination(resetKey: string): CursorPaginationState {
+export function useCursorPagination(resetKey: string): CursorPaginationState & { resetPage: () => void } {
   const [state, setState] = useState<{ resetKey: string; cursors: string[]; page: number }>({
     resetKey,
     cursors: [],
@@ -98,6 +98,7 @@ export function useCursorPagination(resetKey: string): CursorPaginationState {
     page: current.page,
     cursor: current.cursors[current.page - 2],
     canPrevious: current.page > 1,
+    resetPage: () => setState({ resetKey, cursors: [], page: 1 }),
     previousPage: () => setState((value) => value.resetKey === resetKey && value.page > 1
       ? { ...value, page: value.page - 1 }
       : value),

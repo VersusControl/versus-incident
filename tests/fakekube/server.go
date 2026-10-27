@@ -21,6 +21,10 @@ type Config struct {
 	Namespaces int
 	Seed       int64
 	Faults     map[string]Fault
+	// ForbidLists makes every Kubernetes LIST answer 403 while discovery and
+	// item reads keep working, so a connector can attach and then record a
+	// permission failure for the whole inventory.
+	ForbidLists bool
 }
 
 type Fault struct {
@@ -65,6 +69,33 @@ type logStreamKey struct {
 	Follow    bool   `json:"follow"`
 }
 
+// quiesceState is a test-only request barrier. While it is active every
+// Kubernetes API request is held before it is handled or counted, so a caller
+// can attribute any arrival during a probe window to the request it just made.
+// It is off unless a test explicitly turns it on.
+type quiesceArrival struct {
+	Seq    int64  `json:"seq"`
+	Path   string `json:"path"`
+	Verb   string `json:"verb"`
+	Accept string `json:"accept"`
+}
+
+type quiesceState struct {
+	active   bool
+	arrivals int64
+	blocked  int64
+	release  chan struct{}
+	recent   []quiesceArrival
+}
+
+// QuiesceStatus is the observable side of the request barrier.
+type QuiesceStatus struct {
+	Active   bool             `json:"active"`
+	Arrivals int64            `json:"arrivals"`
+	Blocked  int64            `json:"blocked"`
+	Recent   []quiesceArrival `json:"recent,omitempty"`
+}
+
 type LogStreamCounter struct {
 	logStreamKey
 	Requests     int64  `json:"requests"`
@@ -100,23 +131,26 @@ type logFixture struct {
 }
 
 type Server struct {
-	store          *Store
-	scenario       string
-	startedAt      time.Time
-	mu             sync.Mutex
-	faults         map[string]Fault
-	counters       map[requestKey]requestCount
-	logStreams     map[logStreamKey]LogStreamCounter
-	logControls    map[logStreamKey]logControl
-	logFixtures    map[logStreamKey]logFixture
-	listHolds      map[string]*listHold
-	projectedKey   *ecdsa.PrivateKey
-	projectedKeyID string
+	store            *Store
+	generatedMetrics bool
+	scenario         string
+	startedAt        time.Time
+	mu               sync.Mutex
+	faults           map[string]Fault
+	counters         map[requestKey]requestCount
+	logStreams       map[logStreamKey]LogStreamCounter
+	logControls      map[logStreamKey]logControl
+	logFixtures      map[logStreamKey]logFixture
+	listHolds        map[string]*listHold
+	quiesce          quiesceState
+	projectedKey     *ecdsa.PrivateKey
+	projectedKeyID   string
+	forbidLists      bool
 }
 
 func NewServer(config Config) (*Server, error) {
 	store := NewStore()
-	server := &Server{store: store, scenario: config.Scenario, startedAt: time.Now(), faults: make(map[string]Fault), counters: make(map[requestKey]requestCount), logStreams: make(map[logStreamKey]LogStreamCounter), logControls: make(map[logStreamKey]logControl), logFixtures: make(map[logStreamKey]logFixture), listHolds: make(map[string]*listHold)}
+	server := &Server{store: store, scenario: config.Scenario, startedAt: time.Now(), faults: make(map[string]Fault), counters: make(map[requestKey]requestCount), logStreams: make(map[logStreamKey]LogStreamCounter), logControls: make(map[logStreamKey]logControl), logFixtures: make(map[logStreamKey]logFixture), listHolds: make(map[string]*listHold), forbidLists: config.ForbidLists}
 	for resource, fault := range config.Faults {
 		server.faults[resource] = fault
 	}
@@ -137,6 +171,7 @@ func NewServer(config Config) (*Server, error) {
 		}
 	}
 	if config.Pods > 0 {
+		server.generatedMetrics = true
 		namespaces := config.Namespaces
 		if namespaces <= 0 {
 			namespaces = max(1, config.Pods/25)
@@ -149,6 +184,10 @@ func NewServer(config Config) (*Server, error) {
 }
 
 func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if !server.awaitQuiesce(request) {
+		http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		return
+	}
 	counting := &countingWriter{ResponseWriter: writer}
 	key := requestKey{path: request.URL.Path, verb: request.Method, accept: request.Header.Get("Accept")}
 	server.recordRequest(key, 0)
@@ -159,6 +198,10 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		if !server.awaitListRelease(request, resource) {
 			return
 		}
+	}
+	if server.forbidLists && request.Method == http.MethodGet && resource != "" && !isItemPath(request.URL.Path) {
+		http.Error(counting, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
 	}
 	if resource != "" {
 		if fault, ok := server.takeFault(resource, request.URL.Query().Get("continue") != ""); ok {
@@ -197,6 +240,8 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 		server.mutate(counting, request)
 	case request.URL.Path == "/_fake/list-holds":
 		server.controlListHolds(counting, request)
+	case request.URL.Path == "/_fake/quiesce":
+		server.controlQuiesce(counting, request)
 	case request.URL.Path == "/_fake/verification-fault":
 		server.controlVerificationFault(counting, request)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/apis/metrics.k8s.io/"):
@@ -387,6 +432,72 @@ func (server *Server) controlListHolds(writer http.ResponseWriter, request *http
 	writeJSON(writer, server.listHolds)
 }
 
+// quiesceHoldLimit bounds a held request so a caller that forgets to release
+// cannot pin a client forever. It is test tooling only.
+const quiesceHoldLimit = 30 * time.Second
+
+func (server *Server) controlQuiesce(writer http.ResponseWriter, request *http.Request) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if request.Method == http.MethodPost {
+		defer request.Body.Close()
+		var input struct {
+			Hold bool `json:"hold"`
+		}
+		if json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1024)).Decode(&input) != nil {
+			http.Error(writer, "invalid quiesce control", http.StatusBadRequest)
+			return
+		}
+		switch {
+		case input.Hold && !server.quiesce.active:
+			server.quiesce = quiesceState{active: true, release: make(chan struct{})}
+		case !input.Hold && server.quiesce.active:
+			server.quiesce.active = false
+			close(server.quiesce.release)
+			server.quiesce.release = nil
+		}
+	} else if request.Method != http.MethodGet {
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(writer, QuiesceStatus{Active: server.quiesce.active, Arrivals: server.quiesce.arrivals, Blocked: server.quiesce.blocked, Recent: server.quiesce.recent})
+}
+
+// awaitQuiesce holds a Kubernetes API request while the barrier is active. The
+// test control endpoints themselves are never held, so a caller can always
+// observe and release the barrier.
+func (server *Server) awaitQuiesce(request *http.Request) bool {
+	if strings.HasPrefix(request.URL.Path, "/_fake/") {
+		return true
+	}
+	server.mu.Lock()
+	if !server.quiesce.active {
+		server.mu.Unlock()
+		return true
+	}
+	server.quiesce.arrivals++
+	server.quiesce.blocked++
+	if len(server.quiesce.recent) == 64 {
+		server.quiesce.recent = server.quiesce.recent[1:]
+	}
+	server.quiesce.recent = append(server.quiesce.recent, quiesceArrival{Seq: server.quiesce.arrivals, Path: request.URL.Path, Verb: request.Method, Accept: request.Header.Get("Accept")})
+	release := server.quiesce.release
+	server.mu.Unlock()
+	timer := time.NewTimer(quiesceHoldLimit)
+	defer timer.Stop()
+	completed := false
+	select {
+	case <-release:
+		completed = true
+	case <-request.Context().Done():
+	case <-timer.C:
+	}
+	server.mu.Lock()
+	server.quiesce.blocked--
+	server.mu.Unlock()
+	return completed
+}
+
 func (server *Server) awaitListRelease(request *http.Request, resource string) bool {
 	server.mu.Lock()
 	hold := server.listHolds[resource]
@@ -494,12 +605,52 @@ func (server *Server) mutate(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (server *Server) metrics(writer http.ResponseWriter, request *http.Request) {
-	if strings.HasSuffix(request.URL.Path, "/pods") {
-		writeJSON(writer, map[string]any{"kind": "PodMetricsList", "apiVersion": "metrics.k8s.io/v1beta1", "metadata": map[string]any{}, "items": []any{}})
-		return
-	}
-	if strings.HasSuffix(request.URL.Path, "/nodes") {
-		writeJSON(writer, map[string]any{"kind": "NodeMetricsList", "apiVersion": "metrics.k8s.io/v1beta1", "metadata": map[string]any{}, "items": []any{}})
+	for _, source := range []struct{ resource, kind string }{{"pods", "PodMetricsList"}, {"nodes", "NodeMetricsList"}} {
+		if !strings.HasSuffix(request.URL.Path, "/"+source.resource) {
+			continue
+		}
+		if !server.generatedMetrics {
+			writeJSON(writer, map[string]any{"kind": source.kind, "apiVersion": "metrics.k8s.io/v1beta1", "metadata": map[string]any{}, "items": []any{}})
+			return
+		}
+		namespace := ""
+		parts := splitPath(request.URL.Path)
+		for index := range parts {
+			if parts[index] == "namespaces" && index+1 < len(parts) {
+				namespace = parts[index+1]
+			}
+		}
+		page, err := server.store.List(source.resource, namespace, request.URL.Query())
+		if err != nil {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
+			return
+		}
+		items := make([]any, 0, len(page.Items))
+		for _, raw := range page.Items {
+			var object struct {
+				Metadata struct {
+					Name      string `json:"name"`
+					Namespace string `json:"namespace"`
+				} `json:"metadata"`
+			}
+			if json.Unmarshal(raw, &object) != nil {
+				http.Error(writer, "invalid metric source", http.StatusInternalServerError)
+				return
+			}
+			item := map[string]any{
+				"metadata":  map[string]any{"name": object.Metadata.Name, "namespace": object.Metadata.Namespace},
+				"timestamp": time.Now().UTC().Format(time.RFC3339Nano), "window": "30s",
+			}
+			usage := map[string]string{"cpu": "10m", "memory": "1Mi"}
+			if source.resource == "pods" {
+				item["containers"] = []any{map[string]any{"name": "app", "usage": usage}}
+			} else {
+				item["usage"] = usage
+			}
+			items = append(items, item)
+		}
+		writeJSON(writer, map[string]any{"kind": source.kind, "apiVersion": "metrics.k8s.io/v1beta1",
+			"metadata": map[string]any{"resourceVersion": page.ResourceVersion, "continue": page.Continue}, "items": items})
 		return
 	}
 	http.NotFound(writer, request)
@@ -999,7 +1150,7 @@ func discoveryForPath(path, scenario string) map[string]any {
 	} else if strings.HasPrefix(path, "/apis/autoscaling/") {
 		group = "autoscaling"
 		resources = []map[string]any{{"name": "horizontalpodautoscalers", "kind": "HorizontalPodAutoscaler", "namespaced": true, "verbs": []string{"get", "list"}}}
-	} else if (scenario == "fleet-east" || scenario == "fleet-west") && strings.HasPrefix(path, "/apis/metrics.k8s.io/") {
+	} else if (scenario == "fleet-east" || scenario == "fleet-west" || scenario == "scale") && strings.HasPrefix(path, "/apis/metrics.k8s.io/") {
 		group = "metrics.k8s.io"
 		resources = []map[string]any{{"name": "pods", "kind": "PodMetrics", "namespaced": true, "verbs": []string{"get", "list"}}, {"name": "nodes", "kind": "NodeMetrics", "namespaced": false, "verbs": []string{"get", "list"}}}
 	} else if (scenario == "gitops" || scenario == "populated") && strings.HasPrefix(path, "/apis/argoproj.io/") {
@@ -1034,7 +1185,7 @@ func discoveryForPath(path, scenario string) map[string]any {
 func apiGroups(scenario string) map[string]any {
 	groups := []map[string]any{}
 	groupVersions := map[string]string{"apps": "v1", "batch": "v1", "networking.k8s.io": "v1", "autoscaling": "v2"}
-	if scenario == "fleet-east" || scenario == "fleet-west" {
+	if scenario == "fleet-east" || scenario == "fleet-west" || scenario == "scale" {
 		groupVersions["metrics.k8s.io"] = "v1beta1"
 	}
 	if scenario == "gitops" || scenario == "populated" {

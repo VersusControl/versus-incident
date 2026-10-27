@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/tests/fakekube"
 	"golang.org/x/time/rate"
 )
 
@@ -396,5 +398,126 @@ func TestBreakLogCaptureDualSlotAndStopDrainsJob(t *testing.T) {
 	other.captureBreakLogs(t.Context(), snapshot, "")
 	if previous.Load() != 2 || current.Load() != 1 {
 		t.Fatal("running unready container did not capture both slots")
+	}
+}
+
+func TestBreakLogContainersPickTheMainContainer(t *testing.T) {
+	pod := func(main string, containers ...kubeindex.ContainerState) kubeindex.Record {
+		return kubeindex.Record{Kind: "Pod", UID: "pod", MainContainer: main, LogContainers: containers}
+	}
+	cases := []struct {
+		name string
+		pods []kubeindex.Record
+		want string
+	}{
+		{"declared default container wins over spec order", []kubeindex.Record{pod("app", kubeindex.ContainerState{Name: "proxy"}, kubeindex.ContainerState{Name: "app"})}, "app"},
+		{"native sidecars and init containers are never main", []kubeindex.Record{pod("", kubeindex.ContainerState{Name: "mesh", Init: true}, kubeindex.ContainerState{Name: "worker"})}, "worker"},
+		{"an init-only main hint falls back to the first app container", []kubeindex.Record{pod("migrate", kubeindex.ContainerState{Name: "migrate", Init: true}, kubeindex.ContainerState{Name: "web"}, kubeindex.ContainerState{Name: "cache"})}, "web"},
+		{"only init containers leaves no main", []kubeindex.Record{pod("", kubeindex.ContainerState{Name: "migrate", Init: true})}, ""},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			listed, main := breakLogContainers(test.pods, nil)
+			if main != test.want {
+				t.Fatalf("main=%q want %q (listed %+v)", main, test.want, listed)
+			}
+			mains := 0
+			for position, container := range listed {
+				if container.Main {
+					mains++
+				}
+				if position > 0 && listed[position-1].Init && !container.Init {
+					t.Fatalf("init container listed before an app container: %+v", listed)
+				}
+			}
+			if test.want != "" && mains != 1 || test.want == "" && mains != 0 {
+				t.Fatalf("main flags=%d listed=%+v", mains, listed)
+			}
+		})
+	}
+}
+
+func TestBreakLogContainerFilterSelectsOneContainerAndRejectsUnknownNames(t *testing.T) {
+	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "crash-evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "org", ClusterID: "cluster"})
+	service.SetScrubber(breakLogScrubber{})
+	service.SetChangeStorage(storage.NewMemory())
+	defer service.StopCapture()
+	now := time.Now().UTC()
+	from := now.Add(-5 * time.Minute)
+	snapshots := []breaklogs.Snapshot{}
+	for _, container := range []struct {
+		name string
+		init bool
+	}{{"sidecar", false}, {"app", false}, {"migrate", true}} {
+		item := breaklogs.Snapshot{Cluster: "cluster", Namespace: "deleted", RootUID: "deleted-root", Pod: "api-1", PodUID: "pod", Container: container.name, Init: container.init, Slot: "previous", CapturedAt: now, From: from, To: now, TerminationAt: now.Add(-time.Minute), Lines: []breaklogs.Line{{At: now.Add(-2 * time.Minute), Text: container.name + " MESSAGE_CANARY"}}}
+		item.PodCreatedAt = from.Add(-time.Minute)
+		item.ID = breaklogs.Identity(item)
+		snapshots = append(snapshots, item)
+	}
+	if err := service.changeStore().CommitBreakLogs(snapshots, nil, "job", "", now); err != nil {
+		t.Fatal(err)
+	}
+	read := func(container string) (BreakLogPage, error) {
+		return service.BreakLogs(t.Context(), breaklogs.Query{Namespace: "deleted", RootUID: "deleted-root", From: from, To: now, Container: container})
+	}
+	only := func(page BreakLogPage, want ...string) {
+		t.Helper()
+		got := map[string]bool{}
+		for _, line := range page.Lines {
+			got[line.Container] = true
+			if strings.Contains(line.Text, "MESSAGE_CANARY") {
+				t.Fatal("container-filtered line escaped redaction")
+			}
+		}
+		if len(got) != len(want) {
+			t.Fatalf("lines from %v, want %v", got, want)
+		}
+		for _, name := range want {
+			if !got[name] {
+				t.Fatalf("lines from %v, want %v", got, want)
+			}
+		}
+		for _, marker := range page.Markers {
+			if marker.Type == "crash" && len(want) == 1 && !strings.HasPrefix(marker.Label, want[0]+" ") {
+				t.Fatalf("termination marker %q from another container", marker.Label)
+			}
+		}
+	}
+	defaultPage, err := read("")
+	if err != nil || defaultPage.Container != "app" || defaultPage.MainContainer != "app" {
+		t.Fatalf("default page container=%q main=%q err=%v", defaultPage.Container, defaultPage.MainContainer, err)
+	}
+	only(defaultPage, "app")
+	if len(defaultPage.Containers) != 3 || defaultPage.Containers[0] != (BreakLogContainer{Name: "app", Main: true}) || defaultPage.Containers[1] != (BreakLogContainer{Name: "sidecar"}) || defaultPage.Containers[2] != (BreakLogContainer{Name: "migrate", Init: true}) {
+		t.Fatalf("containers=%+v", defaultPage.Containers)
+	}
+	if defaultPage.Counts.All != 1 || defaultPage.Coverage.State != "complete" {
+		t.Fatalf("default page counts=%+v coverage=%+v", defaultPage.Counts, defaultPage.Coverage)
+	}
+	sidecar, err := read("sidecar")
+	if err != nil || sidecar.Container != "sidecar" || len(sidecar.Containers) != 3 {
+		t.Fatalf("sidecar page=%+v err=%v", sidecar, err)
+	}
+	only(sidecar, "sidecar")
+	all, err := read(breaklogs.AllContainers)
+	if err != nil || all.Container != breaklogs.AllContainers || all.Counts.All != 3 {
+		t.Fatalf("all containers page=%+v err=%v", all, err)
+	}
+	only(all, "app", "sidecar", "migrate")
+	if _, err := read("not-a-container"); !errors.Is(err, ErrInvalidArguments) {
+		t.Fatalf("unknown container accepted: %v", err)
+	}
+	paged, err := service.BreakLogs(t.Context(), breaklogs.Query{Namespace: "deleted", RootUID: "deleted-root", From: from, To: now, Container: breaklogs.AllContainers, Limit: 1})
+	if err != nil || paged.Next == "" {
+		t.Fatalf("paged=%+v err=%v", paged, err)
+	}
+	if _, err := service.BreakLogs(t.Context(), breaklogs.Query{Namespace: "deleted", RootUID: "deleted-root", From: from, To: now, Container: "app", Limit: 1, Cursor: paged.Next}); !errors.Is(err, ErrInvalidArguments) {
+		t.Fatalf("cursor crossed container filters: %v", err)
 	}
 }

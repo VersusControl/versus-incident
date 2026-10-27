@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
+	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 )
 
 func TestServiceActiveScopePreservesCredentialEpoch(t *testing.T) {
@@ -381,8 +382,9 @@ func TestWorkloadsFiltersCountsAndPaginatesSharedIndex(t *testing.T) {
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	warmTestInventory(t, service, "shop")
 	page, err := service.Workloads(t.Context(), WorkloadListOptions{Namespace: "shop", Query: "CHECK", Limit: 1})
-	if err != nil || len(page.Items) != 1 || page.Items[0].Kind != "Deployment" || page.Items[0].Name != "checkout-a" || page.Next != "1" || !page.Truncated {
+	if err != nil || len(page.Items) != 1 || page.Items[0].Kind != "Deployment" || page.Items[0].Name != "checkout-a" || page.Next != "1" || page.Truncated {
 		t.Fatalf("first workload page = %#v err=%v", page, err)
 	}
 	wantCounts := map[string]int{"Deployment": 2, "StatefulSet": 0, "DaemonSet": 0, "Job": 0, "CronJob": 0, "Pod": 1}
@@ -776,6 +778,7 @@ func TestUsageAndOverviewExposeMetricsAvailabilityFreshnessAndExactQuantities(t 
 			defer server.Close()
 
 			service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+			warmTestInventory(t, service)
 			usage, err := service.Usage(context.Background(), "payments", 10)
 			wantNodes := 0
 			if test.nodeMetrics {
@@ -823,7 +826,7 @@ func TestOverviewUsesFullPreCapMetricsFreshnessAndTotals(t *testing.T) {
 		case "/apis/metrics.k8s.io/v1beta1":
 			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "nodes", "kind": "NodeMetrics", "verbs": []string{"get", "list"}}}})
 		case "/apis/metrics.k8s.io/v1beta1/nodes":
-			if request.URL.Query().Get("limit") != strconv.Itoa(listAllPageSize) {
+			if request.URL.Query().Get("limit") != strconv.Itoa(kubernetesIndexPageSize) {
 				t.Errorf("metrics page limit = %q", request.URL.Query().Get("limit"))
 			}
 			start := 0
@@ -842,12 +845,13 @@ func TestOverviewUsesFullPreCapMetricsFreshnessAndTotals(t *testing.T) {
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	warmTestInventory(t, service)
 	usage, err := service.Usage(context.Background(), "", 500)
-	if err != nil || !usage.Truncated || len(usage.Nodes) != 500 || usage.NodeMetrics.Total != 501 || !usage.NodeMetrics.Complete || usage.NodeMetrics.Fresh || usage.NodeMetrics.Availability != "stale" || usage.NodeMetrics.CPU != "501" || !containsString(usage.Omitted, "metrics.k8s.io~v1beta1~nodes") || len(usage.Partial) != 1 {
+	if err != nil || !usage.Truncated || usage.Next == "" || len(usage.Nodes) != 500 || usage.NodeMetrics.Total != 501 || !usage.NodeMetrics.Complete || usage.NodeMetrics.Fresh || usage.NodeMetrics.Availability != "stale" || usage.NodeMetrics.CPU != "501" || len(usage.Partial) != 0 {
 		t.Fatalf("usage = %#v err=%v", usage, err)
 	}
 	overview, err := service.Overview(context.Background())
-	if err != nil || overview.UsageSource != "node_metrics" || overview.MetricsFresh || overview.MetricsStatus != "stale" || overview.UsageCPU != "501" || !overview.Truncated || !containsString(overview.Omitted, "metrics.k8s.io~v1beta1~nodes") {
+	if err != nil || overview.UsageSource != "node_metrics" || overview.MetricsFresh || overview.MetricsStatus != "stale" || overview.UsageCPU != "501" || overview.Truncated || containsString(overview.Omitted, "metrics.k8s.io~v1beta1~nodes") {
 		t.Fatalf("overview = %#v err=%v", overview, err)
 	}
 }
@@ -869,7 +873,7 @@ func TestOverviewDoesNotAggregateIncompleteMetrics(t *testing.T) {
 		case "/apis/metrics.k8s.io/v1beta1":
 			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "PodMetrics", "namespaced": true, "verbs": []string{"get", "list"}}}})
 		case "/apis/metrics.k8s.io/v1beta1/pods":
-			writeJSON(writer, map[string]any{"items": metrics})
+			writeJSON(writer, map[string]any{"items": metrics, "metadata": map[string]string{"continue": "repeat"}})
 		default:
 			http.NotFound(writer, request)
 		}
@@ -879,6 +883,7 @@ func TestOverviewDoesNotAggregateIncompleteMetrics(t *testing.T) {
 	if _, err := service.Discover(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	warmTestInventory(t, service)
 	ctx, cancel := withOperationBudget(context.Background(), time.Second, 256, 32<<20, 1)
 	defer cancel()
 	overview, err := service.Overview(ctx)
@@ -900,14 +905,14 @@ func TestOverviewCountsPodsAcrossSafeInternalPages(t *testing.T) {
 			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
 		case "/api/v1/pods":
 			podRequests.Add(1)
-			if request.URL.Query().Get("limit") != strconv.Itoa(listAllPageSize) {
+			if request.URL.Query().Get("limit") != strconv.Itoa(kubernetesIndexPageSize) {
 				t.Errorf("pod page limit = %q", request.URL.Query().Get("limit"))
 			}
 			start := 0
 			if continuation := request.URL.Query().Get("continue"); continuation != "" {
 				start, _ = strconv.Atoi(continuation)
 			}
-			end := min(start+listAllPageSize, podCount)
+			end := min(start+kubernetesIndexPageSize, podCount)
 			items := make([]any, 0, end-start)
 			for index := start; index < end; index++ {
 				items = append(items, podFixture("pod-"+strconv.Itoa(index)))
@@ -925,8 +930,9 @@ func TestOverviewCountsPodsAcrossSafeInternalPages(t *testing.T) {
 
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
 	service.indexes = nil
+	warmTestInventory(t, service)
 	overview, err := service.Overview(context.Background())
-	if err != nil || overview.Pods != podCount || podRequests.Load() != 66 || containsString(overview.Omitted, "core~v1~pods") || containsString(overview.Omitted, "budget_exhausted") {
+	if err != nil || overview.Pods != podCount || podRequests.Load() != (podCount+kubernetesIndexPageSize-1)/kubernetesIndexPageSize || containsString(overview.Omitted, "core~v1~pods") || containsString(overview.Omitted, "budget_exhausted") {
 		t.Fatalf("overview=%#v pod requests=%d err=%v", overview, podRequests.Load(), err)
 	}
 	for _, partial := range overview.Partial {
@@ -955,8 +961,10 @@ func TestOverviewMarksFailedPodCollectionUnavailableAndPreservesDiscoveryPartial
 	}))
 	defer server.Close()
 
-	overview, err := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"}).Overview(context.Background())
-	if err != nil || overview.Pods != 0 || !overview.Truncated || !overview.Sync.Partial || overview.Sync.State != "direct" || !containsString(overview.Omitted, "core~v1~pods") {
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	warmTestInventory(t, service)
+	overview, err := service.Overview(context.Background())
+	if err != nil || overview.Pods != 0 || overview.Truncated || !overview.Sync.Partial || overview.Sync.State != "error" {
 		t.Fatalf("overview=%#v err=%v", overview, err)
 	}
 	foundPodFailure, foundDiscoveryFailure := false, false
@@ -1019,24 +1027,26 @@ func TestOverviewReadsMetricsBeforeInventoryBudgetIsExhausted(t *testing.T) {
 	if _, err := service.Discover(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	warmTestInventory(t, service)
+	beforeMetrics, beforeEvents := podMetricRequests.Load(), eventRequests.Load()
 	ctx, cancel := withOperationBudget(context.Background(), time.Second, 4, 1<<20, 100)
 	defer cancel()
 	overview, err := service.Overview(ctx)
 	if err != nil || overview.MetricsStatus != "available" || !overview.MetricsFresh || overview.UsageSource != "node_metrics" || overview.UsageCPU != "2" {
 		t.Fatalf("overview metrics=%+v err=%v", overview, err)
 	}
-	if podMetricRequests.Load() != 3 {
-		t.Fatalf("pod metrics requests=%d; node metrics should be read before the constrained pod collection", podMetricRequests.Load())
+	if podMetricRequests.Load() != beforeMetrics || beforeMetrics != 2 {
+		t.Fatalf("cached overview repeated metrics reads=%d before=%d", podMetricRequests.Load(), beforeMetrics)
 	}
-	if overview.Warnings != 0 || eventRequests.Load() != 0 {
+	if overview.Warnings != 0 || eventRequests.Load() != beforeEvents {
 		t.Fatalf("overview warnings=%d event requests=%d; dashboard must not fetch duplicate Events", overview.Warnings, eventRequests.Load())
 	}
 	budgetExhausted := false
 	for _, partial := range overview.Partial {
 		budgetExhausted = budgetExhausted || partial.Class == "budget_exhausted"
 	}
-	if !overview.Truncated || !budgetExhausted {
-		t.Fatalf("inventory budget exhaustion was not surfaced: %+v", overview)
+	if overview.Truncated || budgetExhausted || !overview.Sync.Partial {
+		t.Fatalf("cache reads consumed request inventory budget or hid source failure: %+v", overview)
 	}
 }
 
@@ -1054,7 +1064,9 @@ func TestUsageMarksMissingMetricsAPIUnavailable(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	usage, err := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"}).Usage(context.Background(), "", 10)
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	warmTestInventory(t, service)
+	usage, err := service.Usage(context.Background(), "", 10)
 	if err != nil || usage.Availability != "unavailable" || usage.Fresh || len(usage.Omitted) != 2 {
 		t.Fatalf("usage = %#v err=%v", usage, err)
 	}
@@ -1136,10 +1148,12 @@ func TestAggregateEncodedTrimAttributesDroppedTailWithoutDuplicateOmissions(t *t
 
 func TestTerminalEncodedSizeTruncationPropagatesThroughAggregates(t *testing.T) {
 	var continuationRequests atomic.Int32
-	items := make([]any, 0, 20)
-	for itemIndex := 0; itemIndex < 20; itemIndex++ {
-		labels := make(map[string]any, maxProjectionItems)
-		for labelIndex := 0; labelIndex < maxProjectionItems; labelIndex++ {
+	// The projection keeps at most the index label bound, so each object is
+	// wider than one aggregate page only once the page holds enough of them.
+	items := make([]any, 0, 40)
+	for itemIndex := 0; itemIndex < 40; itemIndex++ {
+		labels := make(map[string]any, kubeindex.MaxLabels)
+		for labelIndex := 0; labelIndex < kubeindex.MaxLabels; labelIndex++ {
 			labels[strings.Repeat("k", 300)+strconv.Itoa(labelIndex)] = strings.Repeat("v", 300)
 		}
 		pod := podFixture("needle-" + strconv.Itoa(itemIndex))
@@ -1176,6 +1190,8 @@ func TestTerminalEncodedSizeTruncationPropagatesThroughAggregates(t *testing.T) 
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "test"})
 	service.indexes = nil
+	warmTestInventory(t, service)
+	continuationRequests.Store(0)
 	direct, err := service.List(context.Background(), ListOptions{ResourceID: "core~v1~pods", Namespace: "default"})
 	if err != nil || !direct.Truncated || !direct.EncodedTruncated || direct.Continue != "" || len(direct.Partial) != 1 {
 		t.Fatalf("direct list = %#v err=%v", direct, err)
@@ -1193,7 +1209,7 @@ func TestTerminalEncodedSizeTruncationPropagatesThroughAggregates(t *testing.T) 
 		t.Fatalf("search = %#v err=%v", search, err)
 	}
 	overview, err := service.Overview(context.Background())
-	if err != nil || !overview.Truncated || overview.UsageSource != "unavailable" || !containsString(overview.Omitted, "core~v1~pods") || len(overview.Partial) == 0 {
+	if err != nil || overview.Truncated || !overview.Sync.Partial || overview.UsageSource != "unavailable" || len(overview.Partial) == 0 {
 		t.Fatalf("overview = %#v err=%v", overview, err)
 	}
 	workload, err := service.GetWorkload(context.Background(), "default", "Pod", "needle-0")
@@ -1249,6 +1265,11 @@ func TestServiceSafeProjectionPartialOverviewAndLogs(t *testing.T) {
 			writeJSON(writer, map[string]any{"apiVersion": "v1", "kind": "Secret", "type": "Opaque", "metadata": map[string]any{"namespace": "default", "name": "db", "managedFields": []any{"secret"}, "annotations": map[string]any{"kubectl.kubernetes.io/last-applied-configuration": "secret"}}, "data": map[string]any{"token": "c2VjcmV0LXRva2Vu"}})
 		case "/api/v1/namespaces/default/secrets":
 			writeJSON(writer, map[string]any{"items": []any{map[string]any{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]any{"namespace": "default", "name": "db"}, "data": map[string]any{"password": "c2VjcmV0"}}}})
+		case "/api/v1/secrets":
+			if !strings.Contains(request.Header.Get("Accept"), "PartialObjectMetadataList") {
+				t.Error("background Secret read requested full values")
+			}
+			writeJSON(writer, map[string]any{"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList", "items": []any{map[string]any{"metadata": map[string]any{"name": "db", "namespace": "default", "uid": "secret"}}}})
 		case "/api/v1/namespaces/default/pods", "/api/v1/pods":
 			writeJSON(writer, map[string]any{"items": []any{podFixture("api-1")}})
 		case "/api/v1/nodes":
@@ -1269,6 +1290,7 @@ func TestServiceSafeProjectionPartialOverviewAndLogs(t *testing.T) {
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	warmTestInventory(t, service)
 	secret, err := service.Get(context.Background(), "core~v1~secrets", "default", "db")
 	if err != nil {
 		t.Fatal(err)
@@ -1310,6 +1332,38 @@ func TestPodLogsCaptureBounds(t *testing.T) {
 	}
 	if requests != 1 {
 		t.Fatalf("invalid bounds reached transport: %d", requests)
+	}
+}
+
+// A capture resumed from a container clock slightly ahead of the server asks the
+// cluster for now, not for a future timestamp, and a timestamp beyond the
+// tolerated skew never reaches the cluster at all.
+func TestPodLogsClampsSmallFutureClockSkew(t *testing.T) {
+	var requests []url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests = append(requests, request.URL.Query())
+		_, _ = writer.Write([]byte("log line"))
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	ahead := time.Now().UTC().Add(5 * time.Second)
+	if _, err := service.podLogs(t.Context(), "default", "api-1", "api", false, 0, 500, true, podLogBounds{SinceTime: ahead}); err != nil {
+		t.Fatalf("skewed resume refused: %v", err)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("capture requests = %d", len(requests))
+	}
+	requested, err := time.Parse(time.RFC3339Nano, requests[0].Get("sinceTime"))
+	if err != nil || requested.After(time.Now()) || !requested.Before(ahead) {
+		t.Fatalf("skewed capture asked for %q instead of a clamp to now", requests[0].Get("sinceTime"))
+	}
+	for _, since := range []time.Time{time.Now().Add(MaxLogClockSkew + time.Minute), time.Now().Add(-25 * time.Hour)} {
+		if _, err := service.podLogs(t.Context(), "default", "api-1", "api", false, 0, 500, true, podLogBounds{SinceTime: since}); !errors.Is(err, ErrInvalidArguments) {
+			t.Fatalf("out-of-window resume accepted: %v", err)
+		}
+	}
+	if len(requests) != 1 {
+		t.Fatalf("refused resume reached the transport: %d", len(requests))
 	}
 }
 
@@ -1592,9 +1646,11 @@ func logStreamTestContext() context.Context {
 
 func TestPodLogStreamFramingResumeAndScope(t *testing.T) {
 	var queries []url.Values
+	base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	first, second := base.Format(time.RFC3339Nano), base.Add(time.Second).Format(time.RFC3339Nano)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		queries = append(queries, request.URL.Query())
-		for _, chunk := range []string{"2026-10-01T00:00:00Z token=sec", "ret\n2026-10-01T00:00:00Z repeated\n", "2026-10-01T00:00:00Z repeated\n2026-10-01T00:00:01Z final"} {
+		for _, chunk := range []string{first + " token=sec", "ret\n" + first + " repeated\n", first + " repeated\n" + second + " final"} {
 			writer.Write([]byte(chunk))
 			writer.(http.Flusher).Flush()
 		}
@@ -1611,7 +1667,7 @@ func TestPodLogStreamFramingResumeAndScope(t *testing.T) {
 	if len(events) != 5 || strings.Contains(events[0].Text, "secret") || events[1].Text != events[2].Text || events[2].Ordinal != 3 || events[4].Event != "end" || queries[0].Get("follow") != "true" || queries[0].Get("timestamps") != "true" || queries[0].Get("tailLines") != "500" {
 		t.Fatalf("events=%+v queries=%v", events, queries)
 	}
-	encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Ordinal: 2})
+	encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: base, Ordinal: 2})
 	options.Cursor = base64.RawURLEncoding.EncodeToString(encoded)
 	events = nil
 	if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil {
@@ -1641,7 +1697,7 @@ func TestPodLogResumeRebasesReadBudgetBeyondPriorOrdinal(t *testing.T) {
 	service := newTestService(t, server.URL, Scope{})
 	service.SetScrubber(replacingScrubber{})
 	options := PodLogStreamOptions{Namespace: "shop", Pod: "api"}
-	encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Ordinal: MaxLogStreamBytes + 1})
+	encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: time.Now().UTC().Add(-time.Minute), Ordinal: MaxLogStreamBytes + 1})
 	options.Cursor = base64.RawURLEncoding.EncodeToString(encoded)
 	if err := service.ValidatePodLogStream(options); err != nil {
 		t.Fatal("valid rotated ordinal rejected", err)
@@ -1742,7 +1798,7 @@ func TestPodLogStreamOversizedRecordsContinue(t *testing.T) {
 
 func TestPodLogStreamExactLineBoundaryAndLimitCursor(t *testing.T) {
 	for _, size := range []int{MaxLogStreamLineBytes, MaxLogStreamLineBytes + 1} {
-		prefix := "2026-10-01T00:00:00Z "
+		prefix := time.Now().UTC().Add(-time.Minute).Truncate(time.Second).Format(time.RFC3339Nano) + " "
 		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			writer.Write([]byte(prefix + strings.Repeat("x", size-len(prefix)-1) + "\n"))
 		}))
@@ -1759,7 +1815,8 @@ func TestPodLogStreamExactLineBoundaryAndLimitCursor(t *testing.T) {
 		}
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.Write([]byte("2026-10-01T00:00:00Z safe\n2026-10-01T00:00:01Z " + strings.Repeat("x", 2000) + "\n"))
+		base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+		writer.Write([]byte(base.Format(time.RFC3339Nano) + " safe\n" + base.Add(time.Second).Format(time.RFC3339Nano) + " " + strings.Repeat("x", 2000) + "\n"))
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{})
@@ -1840,9 +1897,11 @@ func TestPodLogStreamDiscardBudgetAndCancellation(t *testing.T) {
 
 func TestPodLogStreamInterleavedOccurrenceResume(t *testing.T) {
 	var queries []url.Values
+	base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	at0, at1, at2 := base.Format(time.RFC3339Nano), base.Add(time.Second).Format(time.RFC3339Nano), base.Add(2*time.Second).Format(time.RFC3339Nano)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		queries = append(queries, request.URL.Query())
-		writer.Write([]byte("2026-10-01T00:00:01Z repeated\n2026-10-01T00:00:00Z repeated\n2026-10-01T00:00:01Z repeated\n2026-10-01T00:00:00Z repeated\n2026-10-01T00:00:02Z final\n"))
+		writer.Write([]byte(at1 + " repeated\n" + at0 + " repeated\n" + at1 + " repeated\n" + at0 + " repeated\n" + at2 + " final\n"))
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{})
@@ -1853,13 +1912,13 @@ func TestPodLogStreamInterleavedOccurrenceResume(t *testing.T) {
 	if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || len(events) != 6 || events[2].Ordinal != 2 || events[3].Ordinal != 2 {
 		t.Fatalf("interleaved: %+v err=%v", events, err)
 	}
-	encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: time.Date(2026, 10, 1, 0, 0, 1, 0, time.UTC), Ordinal: 2, Occurrences: map[string]uint64{"2026-10-01T00:00:00Z": 1, "2026-10-01T00:00:01Z": 2}})
+	encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: base.Add(time.Second), Ordinal: 2, Occurrences: map[string]uint64{at0: 1, at1: 2}})
 	options.Cursor = base64.RawURLEncoding.EncodeToString(encoded)
 	events = nil
-	if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || len(events) != 3 || events[0].Timestamp != "2026-10-01T00:00:00Z" || events[0].Ordinal != 2 || events[0].Text != "repeated" || events[0].ReplayUncertain || events[2].ReplayUncertain {
+	if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || len(events) != 3 || events[0].Timestamp != at0 || events[0].Ordinal != 2 || events[0].Text != "repeated" || events[0].ReplayUncertain || events[2].ReplayUncertain {
 		t.Fatalf("interleaved resume: %+v err=%v", events, err)
 	}
-	if queries[1].Get("sinceTime") != "2026-09-30T23:59:59.999999999Z" || queries[1].Has("tailLines") {
+	if queries[1].Get("sinceTime") != base.Add(-time.Nanosecond).Format(time.RFC3339Nano) || queries[1].Has("tailLines") {
 		t.Fatalf("overlap query: %v", queries[1])
 	}
 	options.Cursor = events[2].Cursor
@@ -1869,51 +1928,52 @@ func TestPodLogStreamInterleavedOccurrenceResume(t *testing.T) {
 	}
 }
 
+// A resume state that fits the request keeps its exact line identities, so a
+// resume inside the retained window replays nothing and reports no gap.
 func TestPodLogStreamRetainedResumeBoundary(t *testing.T) {
-	for _, spacing := range []time.Duration{time.Second, 3 * time.Second} {
-		t.Run(spacing.String(), func(t *testing.T) {
-			base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-				since, _ := time.Parse(time.RFC3339Nano, request.URL.Query().Get("sinceTime"))
-				for index := 0; index < 140; index++ {
-					timestamp := base.Add(time.Duration(index) * spacing)
-					if timestamp.Before(since) {
-						continue
-					}
-					writer.Write([]byte(timestamp.Format(time.RFC3339Nano) + " repeated\n"))
-				}
-			}))
-			defer server.Close()
-			service := newTestService(t, server.URL, Scope{})
-			service.SetScrubber(replacingScrubber{})
-			options := PodLogStreamOptions{Namespace: "default", Pod: "pod"}
-			var final PodLogStreamEvent
-			lines := 0
-			uncertain := false
-			collect := func(event PodLogStreamEvent) error {
-				final = event
-				uncertain = uncertain || event.ReplayUncertain
-				if event.Event == "line" {
-					lines++
-				}
-				return nil
+	base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		since, _ := time.Parse(time.RFC3339Nano, request.URL.Query().Get("sinceTime"))
+		for index := 0; index < 6; index++ {
+			timestamp := base.Add(time.Duration(index) * time.Second)
+			if timestamp.Before(since) {
+				continue
 			}
-			if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || lines != 140 || uncertain != (spacing == time.Second) || final.ReplayUncertain {
-				t.Fatalf("initial lines=%d final=%+v err=%v", lines, final, err)
-			}
-			options.Cursor = final.Cursor
-			lines = 0
-			uncertain = false
-			if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || lines != 0 || uncertain || final.ReplayUncertain {
-				t.Fatalf("resume lines=%d final=%+v err=%v", lines, final, err)
-			}
-		})
+			writer.Write([]byte(timestamp.Format(time.RFC3339Nano) + " repeated\n"))
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{})
+	service.SetScrubber(replacingScrubber{})
+	options := PodLogStreamOptions{Namespace: "default", Pod: "pod"}
+	var final PodLogStreamEvent
+	lines := 0
+	uncertain := false
+	collect := func(event PodLogStreamEvent) error {
+		final = event
+		uncertain = uncertain || event.ReplayUncertain
+		if event.Event == "line" {
+			lines++
+		}
+		return nil
+	}
+	if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || lines != 6 || uncertain || final.ReplayUncertain {
+		t.Fatalf("initial lines=%d final=%+v err=%v", lines, final, err)
+	}
+	if final.Cursor == "" || len(final.Cursor) > maxStreamCursorBytes {
+		t.Fatalf("retained boundary cursor=%d bytes", len(final.Cursor))
+	}
+	options.Cursor = final.Cursor
+	lines = 0
+	uncertain = false
+	if err := service.StreamPodLogs(logStreamTestContext(), options, collect); err != nil || lines != 0 || uncertain || final.ReplayUncertain {
+		t.Fatalf("resume lines=%d final=%+v err=%v", lines, final, err)
 	}
 }
 
 func TestPodLogStreamCheckpointBandwidth(t *testing.T) {
 	const lineCount = 10000
-	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		for index := 0; index < lineCount; index++ {
 			writer.Write([]byte(base.Add(time.Duration(index)*time.Millisecond).Format(time.RFC3339Nano) + " x\n"))
@@ -1923,8 +1983,10 @@ func TestPodLogStreamCheckpointBandwidth(t *testing.T) {
 	service := newTestService(t, server.URL, Scope{})
 	service.SetScrubber(replacingScrubber{})
 	options := PodLogStreamOptions{Namespace: "default", Pod: "pod"}
-	lines, checkpoints, wireBytes := 0, 0, 0
+	lines, checkpoints, cursorless, wireBytes := 0, 0, 0, 0
 	var final PodLogStreamEvent
+	var lastResume string
+	var lastLine time.Time
 	err := service.StreamPodLogs(logStreamTestContext(), options, func(event PodLogStreamEvent) error {
 		payload, _ := json.Marshal(event)
 		wireBytes += len(payload) + len(event.Event) + len("event: \ndata: \n\n")
@@ -1937,29 +1999,66 @@ func TestPodLogStreamCheckpointBandwidth(t *testing.T) {
 			if event.Ordinal != 1 || event.Sequence != uint64(lines) {
 				t.Fatalf("incorrect line identity: %+v", event)
 			}
-			if (event.Cursor != "") != (lines == 1 || lines%logCursorCheckpoint == 0) {
-				t.Fatalf("incorrect checkpoint cadence at line %d", lines)
+			// Every line can start a resume on its own, which is what a viewer
+			// holds once the cursor no longer fits in its request.
+			timestamp, parseErr := time.Parse(time.RFC3339Nano, event.Timestamp)
+			if parseErr != nil {
+				t.Fatalf("line %d carries no usable timestamp: %+v", lines, event)
 			}
-			if event.Cursor != "" {
+			lastLine = timestamp
+			if event.Cursor == "" {
+				cursorless++
+			} else {
 				checkpoints++
-				options.Cursor = event.Cursor
-				if _, err := service.logCursor(options); err != nil {
+				if len(event.Cursor) > maxStreamCursorBytes {
+					t.Fatalf("checkpoint of %d bytes at line %d", len(event.Cursor), lines)
+				}
+				if _, err := service.logCursor(PodLogStreamOptions{Namespace: "default", Pod: "pod", Cursor: event.Cursor}); err != nil {
 					t.Fatalf("invalid checkpoint: %v", err)
 				}
 			}
 		}
+		if event.Cursor != "" {
+			lastResume = event.Cursor
+		}
 		return nil
 	})
-	if err != nil || lines != lineCount || checkpoints != 1+lineCount/logCursorCheckpoint || wireBytes > MaxLogStreamBytes || final.Event != "end" || final.Reason != "complete" || final.Cursor == "" {
-		t.Fatalf("lines=%d checkpoints=%d bytes=%d final=%+v err=%v", lines, checkpoints, wireBytes, final, err)
+	// Once the resume state outgrows the request budget the stream stops issuing
+	// it on lines, and the last position it did issue survives into the terminal
+	// event: a rotation needs a cursor, and every line's timestamp is only the
+	// fallback for when that cursor is behind the tail.
+	if err != nil || lines != lineCount || checkpoints == 0 || checkpoints >= 1+lineCount/logCursorCheckpoint || cursorless == 0 || wireBytes > MaxLogStreamBytes || final.Event != "end" || final.Reason != "complete" {
+		t.Fatalf("lines=%d checkpoints=%d cursorless=%d bytes=%d final=%+v err=%v", lines, checkpoints, cursorless, wireBytes, final, err)
 	}
-	t.Logf("%d lines, %d line checkpoints, %d SSE bytes", lines, checkpoints, wireBytes)
+	if final.Cursor == "" || final.Cursor != lastResume {
+		t.Fatalf("terminal event dropped the last resume point: %+v last=%q", final, lastResume)
+	}
+	tail := PodLogStreamOptions{Namespace: "default", Pod: "pod", Cursor: final.Cursor}
+	if _, cursorErr := service.logCursor(tail); cursorErr != nil {
+		t.Fatalf("terminal cursor unusable: %v", cursorErr)
+	}
+	if !lastLine.Equal(base.Add((lineCount - 1) * time.Millisecond)) {
+		t.Fatalf("last line timestamp = %s", lastLine)
+	}
+	// Rotating from the surviving cursor resumes the read instead of ending it.
+	var rotatedFinal PodLogStreamEvent
+	resumed := 0
+	if err := service.StreamPodLogs(logStreamTestContext(), tail, func(event PodLogStreamEvent) error {
+		rotatedFinal = event
+		if event.Event == "line" {
+			resumed++
+		}
+		return nil
+	}); err != nil || resumed == 0 || rotatedFinal.Event != "end" || rotatedFinal.Cursor == "" {
+		t.Fatalf("rotation lines=%d final=%+v err=%v", resumed, rotatedFinal, err)
+	}
+	t.Logf("%d lines, %d line checkpoints inside the request budget, %d cursorless lines, %d SSE bytes, last line timestamp %s", lines, checkpoints, cursorless, wireBytes, lastLine.Format(time.RFC3339Nano))
 }
 
 func TestPodLogStreamCheckpointWireQuota(t *testing.T) {
 	const budget = 12000
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.Write([]byte(strings.Repeat("2026-10-01T00:00:00Z repeated\n", 1000)))
+		writer.Write([]byte(strings.Repeat(time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)+" repeated\n", 1000)))
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{})
@@ -1987,11 +2086,16 @@ func TestPodLogStreamCheckpointWireQuota(t *testing.T) {
 	if err != nil || cursorErr != nil || lines < 32 || lines >= 1000 || checkpoints == 0 || wireBytes > budget || final.Event != "end" || limit.Reason != "bytes" || limit.Cursor != final.Cursor || cursor.Ordinal != uint64(lines) {
 		t.Fatalf("lines=%d checkpoints=%d bytes=%d cursor=%+v limit=%+v final=%+v err=%v cursorErr=%v", lines, checkpoints, wireBytes, cursor, limit, final, err, cursorErr)
 	}
+	// This rotation kept its cursor current, so it reports no lag: a viewer
+	// resumes from the cursor it was given without a fallback position.
+	if limit.CursorLagging || limit.NewestTimestamp != "" {
+		t.Fatalf("current cursor reported as lagging: %+v", limit)
+	}
 }
 
 func TestPodLogStreamInterruptedCheckpointOccurrences(t *testing.T) {
 	const lineCount = 96
-	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		since, _ := time.Parse(time.RFC3339Nano, request.URL.Query().Get("sinceTime"))
 		for index := 0; index < lineCount; index++ {
@@ -2062,7 +2166,7 @@ func TestPodLogStreamQuietCheckpointAndDiscontinuousReplay(t *testing.T) {
 			service.SetScrubber(replacingScrubber{})
 			options := PodLogStreamOptions{Namespace: "default", Pod: "pod"}
 			if discontinuous {
-				encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Ordinal: 2})
+				encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: time.Now().UTC().Add(-time.Minute), Ordinal: 2})
 				options.Cursor = base64.RawURLEncoding.EncodeToString(encoded)
 			}
 			var events []PodLogStreamEvent
@@ -2097,7 +2201,7 @@ func TestPodLogStreamQuietCheckpointAndDiscontinuousReplay(t *testing.T) {
 
 func TestPodLogStreamCursorHistoryIsBounded(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+		base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 		for index := 0; index < 140; index++ {
 			writer.Write([]byte(base.Add(time.Duration(index)*time.Second).Format(time.RFC3339Nano) + " repeated\n"))
 		}
@@ -2528,5 +2632,225 @@ func TestServiceTruncatesOversizedPodLogsAtCallerCap(t *testing.T) {
 	logs, err := service.PodLogs(context.Background(), "default", "pod", "app", false, 60, 10)
 	if err != nil || !logs.Truncated || len(logs.Text) != maxPodLogBytes {
 		t.Fatalf("logs bytes=%d truncated=%v err=%v", len(logs.Text), logs.Truncated, err)
+	}
+}
+
+// A Node carrying the labels a managed node group and its topology spread add is
+// wider than the index per-record budget. The projection has to bound itself:
+// one wide object must never take a whole kind of records with it.
+func TestWideNodeProjectionStaysInsideEveryIndexBound(t *testing.T) {
+	labels := make(map[string]any, 100)
+	for index := 0; index < 100; index++ {
+		labels["topology.kubernetes.io/zone-"+strconv.Itoa(index)] = "eu-west-1a"
+	}
+	owners := make([]any, 0, 12)
+	for index := 0; index < 12; index++ {
+		owners = append(owners, map[string]any{"apiVersion": "v1", "kind": "Machine", "name": "machine-" + strconv.Itoa(index), "uid": "machine-uid-" + strconv.Itoa(index), "controller": true})
+	}
+	raw := map[string]any{
+		"apiVersion": "v1", "kind": "Node",
+		"metadata": map[string]any{"name": "ip-10-0-0-1", "uid": "node-1", "labels": labels, "ownerReferences": owners},
+		"status":   map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}},
+	}
+	service := &Service{}
+	projected := enforceIndexedRecordBudget(service.projectResource(ResourceDefinition{ID: "core~v1~nodes", Kind: "Node"}, raw))
+	record := indexRecord(projected)
+	if len(record.Labels) > kubeindex.MaxLabels || len(record.Owners) > kubeindex.MaxOwners || len(record.Summary) > kubeindex.MaxSummaryFields || len(record.Images) > kubeindex.MaxImages {
+		t.Fatalf("projection exceeded an index bound: labels=%d owners=%d summary=%d images=%d", len(record.Labels), len(record.Owners), len(record.Summary), len(record.Images))
+	}
+	if !kubeindex.RecordWithinBudget(record) {
+		t.Fatal("projection handed the index a record over its byte budget")
+	}
+	if len(record.Labels) == 0 || !containsString(projected.ProjectionTruncated, "labels") || !containsString(projected.ProjectionTruncated, "owners") {
+		t.Fatalf("truncation unmarked: labels=%d truncated=%v", len(record.Labels), projected.ProjectionTruncated)
+	}
+	store := kubeindex.New(10)
+	if err := store.Ingest("Node", []kubeindex.Record{record}, true, time.Now().UTC()); err != nil {
+		t.Fatalf("index refused the projected node: %v", err)
+	}
+	status, _ := store.KindStatus("Node")
+	if status.State != "ready" || status.Error != "" || status.Skipped != 0 || status.Records != 1 {
+		t.Fatalf("node kind status: %+v", status)
+	}
+}
+
+// budgetFixture builds one projected workload wide enough to exercise the record
+// budget ladder directly, so the order it gives up content in can be asserted.
+func budgetFixture(labels int, labelValue int, droppable int, droppableValue int, containers int, imageValue int, selectorKeys int, selectorValue int) ProjectedResource {
+	projected := ProjectedResource{ResourceID: "apps~v1~deployments", Kind: "Deployment", Name: "api", UID: "uid-api", Namespace: "shop"}
+	projected.Labels = make(map[string]string, labels)
+	for index := 0; index < labels; index++ {
+		projected.Labels["app.example.com/label-"+strconv.Itoa(index)] = strings.Repeat("v", labelValue)
+	}
+	projected.Owners = append(projected.Owners, ObjectRef{Kind: "StatefulSet", Name: "owner", UID: "uid-owner", controller: true, controllerKnown: true})
+	for index := 0; index < 7; index++ {
+		projected.Owners = append(projected.Owners, ObjectRef{Kind: "ConfigMap", Name: "ref-" + strconv.Itoa(index), UID: "uid-ref-" + strconv.Itoa(index)})
+	}
+	selector := map[string]string{}
+	for index := 0; index < selectorKeys; index++ {
+		selector["app.example.com/sel-"+strconv.Itoa(index)] = strings.Repeat("s", min(max(selectorValue, 1), 256)) + strconv.Itoa(index)
+	}
+	projected.Summary = map[string]any{"node": "node-a", "phase": "Running", "resource_version": "42", "selector": selector}
+	projected.Summary["containers"] = make([]map[string]any, 0, containers)
+	for index := 0; index < containers; index++ {
+		projected.Summary["containers"] = append(projected.Summary["containers"].([]map[string]any), map[string]any{"name": "app-" + strconv.Itoa(index), "image": "example.invalid/app:" + strings.Repeat("i", imageValue)})
+	}
+	droppableFields := []string{"reason", "pod_reason", "scheduled_reason", "disruption_reason", "job_failed_reason", "node_pressure", "failed", "restart_count"}
+	for index := 0; index < droppable && index < len(droppableFields); index++ {
+		projected.Summary[droppableFields[index]] = strings.Repeat("s", droppableValue)
+	}
+	return projected
+}
+
+// The record budget is paid by informational summary values first. Labels, the
+// node, the selector, the controller owner and the container images are what
+// topology, ownership, and log membership read, so a wide record must keep them
+// and mark the loss that actually happened.
+func TestRecordBudgetKeepsStructuralContent(t *testing.T) {
+	projected := enforceIndexedRecordBudget(budgetFixture(10, 20, 8, 500, 2, 20, 5, 5))
+	record := indexRecord(projected)
+	if !kubeindex.RecordWithinBudget(record) {
+		t.Fatal("the ladder did not bring the record inside its budget")
+	}
+	if !containsString(projected.ProjectionTruncated, "summary") {
+		t.Fatalf("fixture did not need the ladder: %v", projected.ProjectionTruncated)
+	}
+	if len(record.Labels) != 10 || containsString(projected.ProjectionTruncated, "labels") {
+		t.Fatalf("labels paid for a summary overrun: labels=%d truncated=%v", len(record.Labels), projected.ProjectionTruncated)
+	}
+	if len(record.Owners) != 8 || containsString(projected.ProjectionTruncated, "owners") {
+		t.Fatalf("owners paid for a summary overrun: owners=%d truncated=%v", len(record.Owners), projected.ProjectionTruncated)
+	}
+	if record.NodeName != "node-a" || len(record.Selector) != 5 || len(record.Images) != 2 {
+		t.Fatalf("structural content dropped: node=%q selector=%d images=%d", record.NodeName, len(record.Selector), len(record.Images))
+	}
+	if containsString(projected.ProjectionTruncated, "containers") || containsString(projected.ProjectionTruncated, "images") {
+		t.Fatalf("images paid for a summary overrun: %v", projected.ProjectionTruncated)
+	}
+}
+
+// A selector large enough to overrun the budget on its own is correlation data:
+// it gives way only after labels, owners, and images, and never silently. Whatever
+// is left, the record the index receives must fit.
+func TestRecordBudgetTrimsCorrelationDataLastAndStillFits(t *testing.T) {
+	projected := enforceIndexedRecordBudget(budgetFixture(10, 20, 0, 0, 4, 400, 64, 250))
+	record := indexRecord(projected)
+	if !kubeindex.RecordWithinBudget(record) {
+		t.Fatalf("the ladder handed over a record the index must refuse: labels=%d selector=%d", len(record.Labels), len(record.Selector))
+	}
+	if len(record.Labels) != 0 || !containsString(projected.ProjectionTruncated, "labels") {
+		t.Fatalf("labels did not give way first: labels=%d truncated=%v", len(record.Labels), projected.ProjectionTruncated)
+	}
+	controller := false
+	for _, owner := range record.Owners {
+		if owner.UID == "uid-owner" && owner.Controller && owner.ControllerKnown {
+			controller = true
+		}
+	}
+	if !controller {
+		t.Fatalf("the controller owner was dropped: %+v", record.Owners)
+	}
+	if len(record.Images) != 0 || !containsString(projected.ProjectionTruncated, "containers") || !containsString(projected.ProjectionTruncated, "images") {
+		t.Fatalf("images dropped without their own mark: images=%d truncated=%v", len(record.Images), projected.ProjectionTruncated)
+	}
+	if len(record.Selector) == 64 || !containsString(projected.ProjectionTruncated, "selector") {
+		t.Fatalf("selector trimmed without its own mark: selector=%d truncated=%v", len(record.Selector), projected.ProjectionTruncated)
+	}
+}
+
+// referencesFixture is a workload that references 64 objects with full-length
+// names, the shape that used to end over budget and cost the whole kind.
+func referencesFixture(names int, nameLength int) ProjectedResource {
+	projected := budgetFixture(10, 20, 0, 0, 1, 20, 2, 5)
+	secrets := make([]string, 0, names/2)
+	configMaps := make([]string, 0, names/2)
+	for index := 0; index < names; index++ {
+		prefix := "ref-" + strconv.Itoa(index) + "-"
+		name := prefix + strings.Repeat("n", max(0, nameLength-len(prefix)))
+		if index%2 == 0 {
+			secrets = append(secrets, name)
+			continue
+		}
+		configMaps = append(configMaps, name)
+	}
+	projected.Summary["secrets"] = secrets
+	projected.Summary["config_maps"] = configMaps
+	return projected
+}
+
+// Every hostile shape must end with a record the index can hold. An over-budget
+// record is refused by the index, which marks its kind partial and, under the
+// blocking rule, takes the cluster down for every view and for live logs.
+func TestRecordBudgetAlwaysEndsWithinTheIndexBudget(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		projected ProjectedResource
+	}{
+		{name: "many labels", projected: budgetFixture(64, 200, 0, 0, 1, 20, 2, 5)},
+		{name: "many owners", projected: budgetFixture(4, 20, 0, 0, 1, 20, 2, 5)},
+		{name: "many summary fields", projected: budgetFixture(4, 20, 8, 500, 1, 20, 2, 5)},
+		{name: "many references", projected: referencesFixture(64, 63)},
+		{name: "references and labels", projected: referencesFixture(64, 63)},
+		{name: "long images", projected: budgetFixture(4, 20, 0, 0, 16, 500, 2, 5)},
+		{name: "everything wide", projected: budgetFixture(64, 200, 8, 500, 16, 500, 64, 250)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.name == "references and labels" {
+				test.projected = referencesFixture(64, 63)
+				test.projected.Labels = map[string]string{}
+				for index := 0; index < 64; index++ {
+					test.projected.Labels["app.example.com/l-"+strconv.Itoa(index)] = strings.Repeat("v", 200)
+				}
+			}
+			bounded := enforceIndexedRecordBudget(test.projected)
+			record := indexRecord(bounded)
+			if test.name == "long images" && record.Summary["references_partial"] != "true" {
+				t.Fatalf("an unindexable image reference went unmarked: %+v", record.Images)
+			}
+			if !kubeindex.RecordWithinBudget(record) {
+				t.Fatalf("record over budget after every rung: labels=%d owners=%d refs=%d selector=%d truncated=%v", len(record.Labels), len(record.Owners), referenceSummaryBytes(record), len(record.Selector), bounded.ProjectionTruncated)
+			}
+			if !kubeindex.RecordFits(record) {
+				t.Fatalf("record still invalid after every rung: labels=%d owners=%d images=%d summary=%d references=%d containers=%d truncated=%v", len(record.Labels), len(record.Owners), len(record.Images), len(record.Summary), len(record.References), len(record.Containers), bounded.ProjectionTruncated)
+			}
+		})
+	}
+	// The references shape specifically must report which category was trimmed.
+	bounded := enforceIndexedRecordBudget(referencesFixture(64, 63))
+	record := indexRecord(bounded)
+	if !containsString(bounded.ProjectionTruncated, "references") || record.Summary["references_partial"] != "true" {
+		t.Fatalf("reference trimming unmarked: truncated=%v partial=%q", bounded.ProjectionTruncated, record.Summary["references_partial"])
+	}
+}
+
+func referenceSummaryBytes(record kubeindex.Record) int {
+	bytes := 0
+	for _, names := range record.References {
+		for _, name := range names {
+			bytes += len(name)
+		}
+	}
+	return bytes
+}
+
+// A record that kept fewer labels than the object has must say so on the served
+// resource, or a user cannot tell that a label filter is looking at a subset.
+func TestTruncatedLabelsAreVisibleOnTheServedResource(t *testing.T) {
+	projected := enforceIndexedRecordBudget(budgetFixture(64, 200, 0, 0, 1, 20, 2, 5))
+	if !containsString(projected.ProjectionTruncated, "labels") {
+		t.Fatalf("fixture did not need a label trim: %v", projected.ProjectionTruncated)
+	}
+	record := indexRecord(projected)
+	if record.Summary["labels_partial"] != "true" {
+		t.Fatalf("the record lost the label-trim fact: %+v", record.Summary)
+	}
+	served := projectedIndexRecord(record)
+	if !containsString(served.ProjectionTruncated, "labels") {
+		t.Fatalf("the served resource does not report its trimmed labels: %v", served.ProjectionTruncated)
+	}
+	// A record that kept every label must not claim otherwise.
+	untouched := projectedIndexRecord(indexRecord(budgetFixture(4, 10, 0, 0, 1, 20, 2, 5)))
+	if containsString(untouched.ProjectionTruncated, "labels") {
+		t.Fatalf("an untrimmed record claims trimmed labels: %v", untouched.ProjectionTruncated)
 	}
 }

@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { useQueries } from "@tanstack/react-query";
 import type {
   KubernetesCrashEvent,
@@ -6,6 +6,7 @@ import type {
   KubernetesWorkload,
 } from "@/lib/api";
 import { useKubernetesCluster } from "@/lib/useKubernetesCluster";
+import { CursorPagination } from "@/components/Pagination";
 import {
   detailText,
   quantity,
@@ -94,13 +95,6 @@ export function ResourceMetrics({
       sample.observedAt >= now - range * 60000 && sample.observedAt <= now,
   );
   const last = samples.at(-1);
-  const partialHistory = samples.some(
-    (sample) =>
-      sample.coverage &&
-      (sample.coverage.cpu < sample.coverage.total ||
-        sample.coverage.memory < sample.coverage.total ||
-        sample.coverage.total !== podNames.length),
-  );
   const currentValue = (field: "cpu" | "memory") => {
     if (last?.[field] !== undefined && last[field] !== null) return last[field];
     const usage = workload?.usage ?? [];
@@ -115,7 +109,7 @@ export function ResourceMetrics({
   const crashes = scopedCrashes(
     crashesQuery.isError ? undefined : crashesQuery.data,
     resource,
-  );
+  ).filter((crash) => crash.type === "termination");
   const lastCrash = [...crashes].sort(
     (a, b) => Date.parse(b.at) - Date.parse(a.at),
   )[0];
@@ -160,7 +154,7 @@ export function ResourceMetrics({
               </p>
               {partial && (
                 <p className="text-2xs text-ink-400">
-                  Available samples · {coverage[field]}/{coverage.total} tracked
+                  Available samples {coverage[field]} of {coverage.total} tracked
                   Pods
                 </p>
               )}
@@ -182,7 +176,7 @@ export function ResourceMetrics({
             className={`mt-2 text-lg font-semibold ${restarts === null ? "text-ink-400" : "text-ink-50"}`}
           >
             {restarts ?? "Unavailable"}
-            <span className="metric-restart-description">{lastCrash ? `last ${lastCrash.reason || lastCrash.waiting_reason || "Termination"} ${new Date(lastCrash.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}` : "No captured crash"}</span>
+            <span className="metric-restart-description">{crashesQuery.isError ? "Crash evidence unavailable" : lastCrash ? `shown ${lastCrash.reason || lastCrash.waiting_reason || "Termination"} ${new Date(lastCrash.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}` : crashesQuery.isFetching && !crashesQuery.data ? "Loading captured crashes" : "No captured crash on this page"}</span>
           </p>
           <div
             className="relative mt-3 h-6 border-b border-ink-700"
@@ -207,7 +201,7 @@ export function ResourceMetrics({
         </div>
         <div aria-label="Uptime metric tile" className="metric-tile rounded-control border border-ink-700 bg-surface-sunken p-3">
           <h3 className="text-2xs text-ink-300">Uptime</h3>
-          {mainContainer && <span className="metric-corner text-ink-400">{mainContainer}</span>}
+          {resource.kind === "Pod" && mainContainer && <span title={mainContainer} className="metric-container-label block max-w-full truncate text-2xs text-ink-400">{mainContainer}</span>}
           <p className="mt-2 text-lg font-semibold">
             {elapsedMinutes !== null && Number.isFinite(elapsedMinutes)
               ? `${Math.floor(elapsedMinutes / 60)}h ${elapsedMinutes % 60}m`
@@ -221,14 +215,19 @@ export function ResourceMetrics({
           </p>
         </div>
       </div>
+      {!crashesQuery.isError && crashesQuery.data && (crashesQuery.data.crash_count ?? 0) > 0 && <nav aria-label="Captured crash pages" className="text-2xs text-ink-400">
+        <p>{`${crashesQuery.data.crash_count} captured crashes in the last 24h`}</p>
+        {(crashesQuery.data.next || crashesQuery.paging.canPrevious) && <CursorPagination state={crashesQuery.paging} busy={crashesQuery.isFetching} next={crashesQuery.data.next} />}
+      </nav>}
       <section
         id="resource-usage-chart"
         data-mobile-open={chartVisible}
         className="resource-usage-chart rounded-control border border-ink-700 bg-surface-sunken p-3"
         aria-label="CPU and memory history"
       >
-        <div className="flex flex-wrap items-center gap-2">
-          <h3 className="mr-auto text-xs font-semibold">CPU and memory</h3>
+        <div className="mt-2">
+            <UsageChart
+              rangeControl={<div role="group" aria-label="Usage history range" className="mt-2 flex min-w-0 flex-wrap items-center justify-end gap-2">
           {[15, 60, 360].map((minutes) => (
             <button
               className="btn"
@@ -243,9 +242,7 @@ export function ResourceMetrics({
           {!merged.length && (
             <span className="text-2xs text-ink-400">since opened</span>
           )}
-        </div>
-        <div className="mt-2">
-            <UsageChart
+          </div>}
               samples={samples}
               start={
                 merged.length
@@ -261,15 +258,8 @@ export function ResourceMetrics({
               onCrash={onCrash}
               gapMs={merged.length ? 150000 : 37500}
               containers={workload?.containers}
-              coverageNote={resource.kind !== "Pod" ? `History includes ${historyNames.length} tracked Pod series (${podNames.length} currently indexed)${workload?.truncated ? " · indexed Pod list is bounded" : ""}. Missing samples are not zero usage.` : undefined}
             />
         </div>
-        {partialHistory && (
-          <p role="status" className="mt-2 text-2xs text-ink-400">
-            Partial history · points sum available Pod samples only; missing
-            samples are not zero usage.
-          </p>
-        )}
         {!samples.length && (
           <p role="status" className="py-3 text-xs text-ink-400">
             {history.some((query) => query.isPending)
@@ -335,7 +325,7 @@ function UsageChart({
   onCrash,
   gapMs,
   containers,
-  coverageNote,
+  rangeControl,
 }: {
   samples: ResourceMetricSample[];
   start: number;
@@ -345,7 +335,7 @@ function UsageChart({
   onCrash: (crash: KubernetesCrashEvent) => void;
   gapMs: number;
   containers?: KubernetesWorkload["containers"];
-  coverageNote?: string;
+  rangeControl: ReactNode;
 }) {
   const [field, setField] = useState<"cpu" | "memory">("memory");
   const gradient = useId();
@@ -391,15 +381,17 @@ function UsageChart({
   }
   const title = field === "cpu" ? "CPU" : "Memory";
   const activeDescription = active
-    ? `${new Date(active.observedAt).toLocaleTimeString()}: ${metricValue(active[field], field)}${active.coverage ? ` · ${active.coverage[field]}/${active.coverage.total} tracked Pods sampled` : ""}`
+    ? `${new Date(active.observedAt).toLocaleTimeString()}: ${metricValue(active[field], field)}${active.coverage ? ` with ${active.coverage[field]} of ${active.coverage.total} tracked Pods sampled` : ""}`
     : "Use arrow keys or hover to inspect usage samples.";
   return (
     <figure aria-label="CPU and memory usage chart">
       <figcaption className="flex flex-wrap items-center gap-x-3 text-2xs text-ink-400">
+        <h3 className="min-w-0 text-xs font-semibold text-ink-100">CPU and memory</h3>
         {(["cpu", "memory"] as const).map((metric) => <button key={metric} type="button" aria-label={`Inspect ${metric === "cpu" ? "CPU" : "Memory"} history`} aria-pressed={metric === field} onClick={() => setField(metric)} className={metric === "cpu" ? "text-link" : "text-sev-warning"}>━ {metric === "cpu" ? "CPU" : "Memory"}</button>)}
         <span className="ml-auto">┄ Request</span><span className="text-sev-critical">┄ Limit</span><span className="text-sev-critical">× crash</span>
         <span className="sr-only">Request {metricValue(request, field)}; Limit {metricValue(limit, field)}. Each series uses its own scale.</span>
       </figcaption>
+      {rangeControl}
       <div
         tabIndex={0}
         aria-label={`Inspect ${title} samples`}
@@ -528,7 +520,7 @@ function UsageChart({
               fill="currentColor"
             >
               <title>
-                {new Date(sample.observedAt).toLocaleTimeString()} ·{" "}
+                {new Date(sample.observedAt).toLocaleTimeString()}{" "}
                 {metricValue(sample[metric], metric)}
               </title>
             </circle>
@@ -641,7 +633,6 @@ function UsageChart({
         </table>
       </details>)}
       {containers?.length ? <details className="resource-container-resources"><summary>Container resources</summary>{containers.map((container) => <p key={container.name} className="break-all">{container.name} {detailText(container.image)} CPU {container.requests?.cpu ?? "no request"} / {container.limits?.cpu ?? "no limit"} Memory {container.requests?.memory ?? "no request"} / {container.limits?.memory ?? "no limit"}</p>)}</details> : null}
-      {coverageNote && <p className="mt-2 text-2xs text-ink-300">{coverageNote}</p>}
       </div></details>
     </figure>
   );

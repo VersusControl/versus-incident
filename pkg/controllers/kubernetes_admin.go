@@ -48,12 +48,19 @@ func NewKubernetesAdminControllerWithRegistry(registry *kubernetes.ServiceRegist
 }
 
 func (controller *KubernetesAdminController) Register(router fiber.Router) {
+	// The health report is the one Kubernetes answer that has to survive a dead
+	// credential: it carries the cluster's durable first ready moment, which is
+	// local state recorded before the fault. It is registered ahead of the strict
+	// chain below, which keeps its exact behaviour for every other route.
+	router.Get("/admin/kubernetes/sync", auditKubernetesSettings, adminGatewayGuard, controller.requireReportPermission, controller.requireSyncHealthView, controller.syncHealth)
 	group := router.Group("/admin/kubernetes", auditKubernetesSettings, adminGatewayGuard, controller.requirePermission)
 	group.Get("/clusters", controller.clusters)
 	group.Use(controller.requireInfrastructureView)
 	group.Get("/overview", controller.overview)
+	group.Get("/namespaces", controller.namespaces)
 	group.Get("/stream", controller.stream)
 	group.Get("/changes", controller.changes)
+	group.Get("/timeline", controller.timeline)
 	group.Get("/crashes", controller.crashes)
 	group.Get("/break-logs", controller.breakLogs)
 	group.Get("/agent-settings", controller.agentSettings)
@@ -64,6 +71,7 @@ func (controller *KubernetesAdminController) Register(router fiber.Router) {
 	group.Get("/graph", controller.graph)
 	group.Get("/graph/overview", controller.overviewGraph)
 	group.Get("/graph/neighborhood", controller.neighborhood)
+	group.Get("/graph/related", controller.related)
 	group.Get("/issues", controller.issues)
 	group.Get("/top", controller.top)
 	group.Get("/gitops/apps", controller.gitOpsApps)
@@ -90,17 +98,40 @@ func (controller *KubernetesAdminController) Register(router fiber.Router) {
 }
 
 func (controller *KubernetesAdminController) requireInfrastructureView(ctx *fiber.Ctx) error {
-	var service *kubernetes.Service
-	var err error
+	return controller.requireClusterView(ctx, false)
+}
+
+// requireSyncHealthView installs the cluster a health report is about. It answers
+// the one question that survives a dead credential, so a credential fault falls
+// back to the cluster's configured service instead of failing the request.
+func (controller *KubernetesAdminController) requireSyncHealthView(ctx *fiber.Ctx) error {
+	return controller.requireClusterView(ctx, true)
+}
+
+// requireClusterView installs the resolved cluster for a route. A report route
+// (reportable) is answered even when the credential is dead: resolution is strict
+// first, and only a credential fault falls back to the cluster's configured
+// service, which the report uses for local state alone — the published generation
+// and the inventory record — and never for a cluster read. Every other fault, and
+// every non-report route, keeps its existing answer.
+func (controller *KubernetesAdminController) requireClusterView(ctx *fiber.Ctx, reportable bool) error {
 	clusterID := strings.Clone(ctx.Query("cluster"))
 	if clusterID != "" && !core.CallerClusterAllowed(ctx.UserContext(), clusterID) {
 		return writeKubernetes(ctx, nil, kubernetes.ErrClusterNotFound)
 	}
+	var service *kubernetes.Service
+	var err error
 	if controller != nil && controller.resolve != nil {
 		service, err = controller.resolve(middleware.OrgFromContext(ctx), clusterID)
 	}
 	if err != nil {
-		return writeKubernetes(ctx, nil, err)
+		credentialFault := errors.Is(err, kubernetes.ErrCredentialUnavailable) || errors.Is(err, kubernetes.ErrUnauthorized)
+		if !reportable || !credentialFault {
+			return writeKubernetes(ctx, nil, err)
+		}
+		if service = controller.configuredService(clusterID); service == nil {
+			return writeKubernetes(ctx, nil, err)
+		}
 	}
 	if service == nil {
 		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Kubernetes connector is not configured"})
@@ -113,6 +144,21 @@ func (controller *KubernetesAdminController) requireInfrastructureView(ctx *fibe
 	return ctx.Next()
 }
 
+// configuredService is the cluster's service as configured, whether or not its
+// credential still validates.
+func (controller *KubernetesAdminController) configuredService(clusterID string) *kubernetes.Service {
+	if controller == nil || controller.registry == nil {
+		return nil
+	}
+	var found *kubernetes.Service
+	controller.registry.Each(func(service *kubernetes.Service) {
+		if found == nil && (clusterID == "" || service.Scope().ClusterID == clusterID) {
+			found = service
+		}
+	})
+	return found
+}
+
 func (controller *KubernetesAdminController) requirePermission(ctx *fiber.Ctx) error {
 	if controller == nil || controller.registry == nil || len(controller.registry.Clusters()) == 0 {
 		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Kubernetes connector is not configured"})
@@ -120,6 +166,21 @@ func (controller *KubernetesAdminController) requirePermission(ctx *fiber.Ctx) e
 	if !controller.registry.Multiple() && controller.registry.ResolveOrg(middleware.OrgFromContext(ctx)) == nil {
 		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Kubernetes connector is not configured"})
 	}
+	return controller.authorizeInfrastructureView(ctx)
+}
+
+// requireReportPermission is the permission gate for a route whose answer is a
+// report about the cluster rather than a read of it, so it asks only that a
+// connector is configured. Resolving an org validates the credential, and the
+// report has to be answerable exactly when that validation fails.
+func (controller *KubernetesAdminController) requireReportPermission(ctx *fiber.Ctx) error {
+	if controller == nil || controller.registry == nil || len(controller.registry.Clusters()) == 0 {
+		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Kubernetes connector is not configured"})
+	}
+	return controller.authorizeInfrastructureView(ctx)
+}
+
+func (controller *KubernetesAdminController) authorizeInfrastructureView(ctx *fiber.Ctx) error {
 	allowed, explicit := middleware.RequestPermission(ctx, string(core.PermissionInfrastructureView))
 	if !explicit || !allowed {
 		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "infrastructure:view permission is required"})
@@ -145,6 +206,39 @@ func (controller *KubernetesAdminController) overview(ctx *fiber.Ctx) error {
 	return writeKubernetes(ctx, value, err)
 }
 
+func (controller *KubernetesAdminController) timeline(ctx *fiber.Ctx) error {
+	since, err := parseKubernetesTime(ctx.Query("since"))
+	if err != nil {
+		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+	}
+	until, err := parseKubernetesTime(ctx.Query("until"))
+	if err != nil {
+		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+	}
+	limit := 0
+	if raw := ctx.Query("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 200 {
+			return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+		}
+	}
+	breaksOnly := false
+	switch ctx.Query("breaks") {
+	case "", "0", "false":
+	case "1", "true":
+		breaksOnly = true
+	default:
+		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+	}
+	if len(ctx.Context().QueryArgs().PeekMulti("breaks")) > 1 {
+		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+	}
+	value, err := requestKubernetesService(ctx).Timeline(ctx.UserContext(), kubernetes.TimelineQuery{
+		Since: since, Until: until, Namespace: ctx.Query("namespace"), Kind: ctx.Query("kind"), RootUID: ctx.Query("root_uid"), PodUID: ctx.Query("pod_uid"), ResourceUID: ctx.Query("resource_uid"), Limit: limit, Cursor: ctx.Query("cursor"), BreaksOnly: breaksOnly,
+	})
+	return writeKubernetes(ctx, value, err)
+}
+
 func (controller *KubernetesAdminController) changes(ctx *fiber.Ctx) error {
 	since, err := parseKubernetesTime(ctx.Query("since"))
 	if err != nil {
@@ -156,7 +250,8 @@ func (controller *KubernetesAdminController) changes(ctx *fiber.Ctx) error {
 	}
 	value, err := requestKubernetesService(ctx).Changes(ctx.UserContext(), kubernetes.ChangeQuery{
 		Since: since, Until: until, Namespace: ctx.Query("namespace"), Kind: ctx.Query("kind"), Name: ctx.Query("name"),
-		Type: kubernetes.ChangeType(ctx.Query("type")), Limit: queryInt(ctx, "limit"), Cursor: ctx.Query("cursor"),
+		RootUID: ctx.Query("root_uid"),
+		Type:    kubernetes.ChangeType(ctx.Query("type")), Limit: queryInt(ctx, "limit"), Cursor: ctx.Query("cursor"),
 	})
 	return writeKubernetes(ctx, value, err)
 }
@@ -177,7 +272,7 @@ func (controller *KubernetesAdminController) crashes(ctx *fiber.Ctx) error {
 			return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
 		}
 	}
-	value, err := requestKubernetesService(ctx).Crashes(ctx.UserContext(), kuberneteschanges.CrashQuery{Since: since, Until: until, Namespace: strings.Clone(ctx.Query("namespace")), RootUID: strings.Clone(ctx.Query("root_uid")), Limit: limit, Cursor: strings.Clone(ctx.Query("cursor"))})
+	value, err := requestKubernetesService(ctx).Crashes(ctx.UserContext(), kuberneteschanges.CrashQuery{Since: since, Until: until, Namespace: strings.Clone(ctx.Query("namespace")), RootUID: strings.Clone(ctx.Query("root_uid")), PodUID: strings.Clone(ctx.Query("pod_uid")), Limit: limit, Cursor: strings.Clone(ctx.Query("cursor"))})
 	if errors.Is(err, kuberneteschanges.ErrInvalidQuery) {
 		err = kubernetes.ErrInvalidArguments
 	}
@@ -231,6 +326,18 @@ func (controller *KubernetesAdminController) neighborhood(ctx *fiber.Ctx) error 
 	value, err := requestKubernetesService(ctx).Neighborhood(ctx.UserContext(), kubernetes.NeighborhoodQuery{
 		ResourceID: ctx.Query("resource_id"), Kind: ctx.Query("kind"), Namespace: ctx.Query("namespace"), Name: ctx.Query("name"),
 		Hops: queryInt(ctx, "hops"), MaxNodes: queryInt(ctx, "max_nodes"),
+	})
+	return writeKubernetes(ctx, value, err)
+}
+
+func (controller *KubernetesAdminController) namespaces(ctx *fiber.Ctx) error {
+	value, err := requestKubernetesService(ctx).Namespaces(ctx.UserContext(), ctx.Query("namespace"))
+	return writeKubernetes(ctx, value, err)
+}
+
+func (controller *KubernetesAdminController) related(ctx *fiber.Ctx) error {
+	value, err := requestKubernetesService(ctx).Related(ctx.UserContext(), kubernetes.NeighborhoodQuery{
+		ResourceID: ctx.Query("resource_id"), Namespace: ctx.Query("namespace"), Name: ctx.Query("name"),
 	})
 	return writeKubernetes(ctx, value, err)
 }
@@ -310,7 +417,7 @@ func (controller *KubernetesAdminController) stream(ctx *fiber.Ctx) error {
 					return
 				}
 			case <-poll.C:
-				_, refreshed, refreshErr := service.IndexSnapshot(streamContext, kinds...)
+				_, refreshed, refreshErr := service.CachedIndexSnapshot(streamContext, kinds...)
 				if refreshErr == nil && !write("sync", refreshed) {
 					return
 				}
@@ -417,7 +524,7 @@ func (controller *KubernetesAdminController) discovery(ctx *fiber.Ctx) error {
 	return writeKubernetes(ctx, value, err)
 }
 func (controller *KubernetesAdminController) list(ctx *fiber.Ctx) error {
-	value, err := requestKubernetesService(ctx).List(ctx.UserContext(), listOptions(ctx))
+	value, err := requestKubernetesService(ctx).CachedResources(ctx.UserContext(), listOptions(ctx))
 	return writeKubernetes(ctx, value, err)
 }
 func (controller *KubernetesAdminController) search(ctx *fiber.Ctx) error {
@@ -454,6 +561,13 @@ func (controller *KubernetesAdminController) workloadLogs(ctx *fiber.Ctx) error 
 	})
 	return writeKubernetes(ctx, value, err)
 }
+
+// syncHealth reports the complete inventory health of the cluster: every known
+// kind, not only the kinds one view asked for, so a gate can rely on it.
+func (controller *KubernetesAdminController) syncHealth(ctx *fiber.Ctx) error {
+	value, err := requestKubernetesService(ctx).SyncHealth(ctx.UserContext())
+	return writeKubernetes(ctx, value, err)
+}
 func (controller *KubernetesAdminController) events(ctx *fiber.Ctx) error {
 	typeFilter := ctx.Query("type")
 	if typeFilter == "" {
@@ -467,7 +581,7 @@ func (controller *KubernetesAdminController) logs(ctx *fiber.Ctx) error {
 	return writeKubernetes(ctx, value, err)
 }
 func (controller *KubernetesAdminController) usage(ctx *fiber.Ctx) error {
-	value, err := requestKubernetesService(ctx).Usage(ctx.UserContext(), ctx.Query("namespace"), queryInt(ctx, "limit"))
+	value, err := requestKubernetesService(ctx).UsagePage(ctx.UserContext(), ctx.Query("namespace"), queryInt(ctx, "limit"), ctx.Query("cursor"))
 	return writeKubernetes(ctx, value, err)
 }
 
@@ -489,6 +603,16 @@ func writeKubernetes(ctx *fiber.Ctx, value any, err error) error {
 	}
 	detail := kubernetes.DiagnoseClusterError(err, multiple, clusterID)
 	log.Printf("kubernetes admin failure: code=%s retryable=%t", detail.Code, detail.Retryable)
+	// A connector fault can still have a report to give. The cluster's durable
+	// first ready moment is local state, so it survives the credential that wrote
+	// it, and a surface needs it exactly when every cluster read is failing. The
+	// route asked what this cluster's inventory state is and the report answers
+	// error, so it is served as that answer: a failure status makes the one field
+	// that says whether the cluster ever worked unreachable to a client that
+	// discards error bodies.
+	if report, ok := kubernetes.SyncHealthReport(err); ok {
+		return ctx.JSON(report)
+	}
 	status := fiber.StatusBadGateway
 	var throttled *kubernetes.ErrThrottled
 	switch {
@@ -496,6 +620,10 @@ func writeKubernetes(ctx *fiber.Ctx, value any, err error) error {
 		status = fiber.StatusTooManyRequests
 		ctx.Set(fiber.HeaderRetryAfter, strconv.Itoa(max(1, int(throttled.RetryAfter.Seconds()))))
 	case errors.Is(err, kubernetes.ErrInvalidArguments), errors.Is(err, kubernetes.ErrInvalidEndpoint), errors.Is(err, kubernetes.ErrClusterRequired):
+		status = fiber.StatusBadRequest
+	case errors.Is(err, kubernetes.ErrRequestTooLarge):
+		// Explicit and bounded: the request is refused before anything is parsed,
+		// so an intermediary's header limit can never answer in silence instead.
 		status = fiber.StatusBadRequest
 	case errors.Is(err, kubernetes.ErrCompleteGraphLimit):
 		status = fiber.StatusRequestEntityTooLarge
@@ -507,6 +635,14 @@ func writeKubernetes(ctx *fiber.Ctx, value any, err error) error {
 		ctx.Set(fiber.HeaderRetryAfter, "2")
 	case errors.Is(err, kubernetes.ErrClusterUnavailable):
 		status = fiber.StatusServiceUnavailable
+	case errors.Is(err, kubernetes.ErrTimelineContention):
+		status = fiber.StatusServiceUnavailable
+		ctx.Set(fiber.HeaderRetryAfter, "1")
+	case errors.Is(err, kubernetes.ErrInventoryNotReady):
+		// A stale or incomplete index is a retryable state of Versus, so it is
+		// never reported as a permission problem.
+		status = fiber.StatusServiceUnavailable
+		ctx.Set(fiber.HeaderRetryAfter, strconv.Itoa(max(1, int(kubernetes.InventoryRetryAfter(err).Seconds()))))
 	case errors.Is(err, kubernetes.ErrGraphIncomplete):
 		status = fiber.StatusServiceUnavailable
 	case errors.Is(err, kubernetes.ErrForbidden):

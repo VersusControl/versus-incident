@@ -19,15 +19,16 @@ import (
 )
 
 const (
-	MaxWorkloadLogPods     = 20
-	MaxWorkloadLogSources  = 40
-	maxWorkloadCursorBytes = 512 << 10
-	maxWorkloadListedPods  = 200
+	MaxWorkloadLogPods    = 20
+	MaxWorkloadLogSources = 40
+	maxWorkloadListedPods = 200
+	// maxStreamEventReserve bounds the framing a terminal event can still add, so
+	// the byte budget is never overrun by the last events of a stream.
+	maxStreamEventReserve = 4 << 10
 )
 
 var errWorkloadByteLimit = errors.New("kubernetes: aggregate log byte limit")
 var errWorkloadSourceGone = errors.New("kubernetes: log source ended or replaced")
-var workloadStreamProcess = logIdentity(strconv.FormatInt(time.Now().UnixNano(), 10))
 var logUIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$`)
 
 type WorkloadLogStreamOptions struct {
@@ -35,8 +36,12 @@ type WorkloadLogStreamOptions struct {
 	PodUIDs                    []string
 	Container                  string
 	SinceSeconds, TailLines    int
-	Previous, Timestamps       bool
-	Cursor                     string
+	// SinceTime resumes every source from a caller's timestamp, the way
+	// kubectl logs -f does. It replaces the resume cursor: a reconnect carries a
+	// timestamp, so a request stays small no matter how many sources a workload
+	// has.
+	SinceTime            time.Time
+	Previous, Timestamps bool
 }
 
 type WorkloadLogSource struct {
@@ -76,17 +81,6 @@ type WorkloadLogStreamEvent struct {
 	Truncated   bool                `json:"truncated,omitempty"`
 }
 
-type workloadLogCursor struct {
-	Target       string            `json:"target"`
-	Process      string            `json:"process"`
-	Sources      map[string]string `json:"sources"`
-	Reference    string            `json:"reference,omitempty"`
-	Uncertain    bool              `json:"uncertain,omitempty"`
-	SinceSeconds int               `json:"since_seconds,omitempty"`
-	TailLines    int               `json:"tail_lines,omitempty"`
-	Owner        string            `json:"-"`
-}
-
 func logIdentity(value string) string {
 	hash := sha256.Sum256([]byte(value))
 	return base64.RawURLEncoding.EncodeToString(hash[:])
@@ -96,54 +90,6 @@ func (service *Service) workloadLogTarget(options WorkloadLogStreamOptions) stri
 	pods := append([]string(nil), options.PodUIDs...)
 	sort.Strings(pods)
 	return logIdentity(service.cacheKey() + "\x00" + options.Kind + "\x00" + options.Namespace + "\x00" + options.Name + "\x00" + options.UID + "\x00" + options.Container + "\x00" + strconv.FormatBool(options.Previous) + "\x00" + strings.Join(pods, "\x00"))
-}
-
-func (service *Service) workloadCursor(options WorkloadLogStreamOptions) (workloadLogCursor, error) {
-	result := workloadLogCursor{Target: service.workloadLogTarget(options), Process: workloadStreamProcess, Sources: map[string]string{}}
-	if options.Cursor == "" {
-		return result, nil
-	}
-	if len(options.Cursor) > maxWorkloadCursorBytes || options.SinceSeconds != 0 || options.TailLines != 0 {
-		return result, ErrInvalidArguments
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(options.Cursor)
-	if err != nil || json.Unmarshal(raw, &result) != nil || result.Target != service.workloadLogTarget(options) || len(result.Sources) > MaxWorkloadLogSources || len(result.Process) != 43 || result.SinceSeconds < 0 || result.SinceSeconds > 86400 || result.TailLines < 0 || result.TailLines > 5000 {
-		return result, ErrInvalidArguments
-	}
-	if result.Reference != "" {
-		if len(result.Reference) != 24 || len(result.Sources) != 0 {
-			return result, ErrInvalidArguments
-		}
-		retained, exists := restoreWorkloadCheckpoint(result.Reference)
-		if exists {
-			if retained.Target != result.Target || retained.Process != result.Process {
-				return result, ErrInvalidArguments
-			}
-			result = retained
-		} else {
-			result.Sources = map[string]string{}
-			result.Uncertain = true
-		}
-	}
-	for source, cursor := range result.Sources {
-		if len(source) != 43 || len(cursor) > 16<<10 || cursor == "" {
-			return result, ErrInvalidArguments
-		}
-		// Validate the complete Pod checkpoint before it can influence a read.
-		var checkpoint logResumeCursor
-		decoded, decodeErr := base64.RawURLEncoding.DecodeString(cursor)
-		if decodeErr != nil || json.Unmarshal(decoded, &checkpoint) != nil {
-			return result, ErrInvalidArguments
-		}
-		// Pod targets are validated against actual source identities on admission.
-		if checkpoint.Timestamp.IsZero() || !checkpoint.Quiet && checkpoint.Ordinal == 0 || checkpoint.Ordinal > 1<<53 || len(checkpoint.Target) != 43 || len(checkpoint.Occurrences) > maxLogCursorTimestamps {
-			return result, ErrInvalidArguments
-		}
-	}
-	if result.Sources == nil {
-		result.Sources = map[string]string{}
-	}
-	return result, nil
 }
 
 func (service *Service) validateWorkloadLogOptions(ctx context.Context, options WorkloadLogStreamOptions) error {
@@ -156,6 +102,18 @@ func (service *Service) validateWorkloadLogOptions(ctx context.Context, options 
 	if options.Kind != "Deployment" && options.Kind != "StatefulSet" || !validPodLogName(options.Name, 253, true) || !validPodLogName(options.Namespace, 63, false) || !logUIDPattern.MatchString(options.UID) || len(options.PodUIDs) > MaxWorkloadLogPods || options.Container != "" && options.Container != "*" && !validPodLogName(options.Container, 63, false) || options.SinceSeconds < 0 || options.SinceSeconds > 86400 || options.TailLines < 0 || options.TailLines > 5000 {
 		return ErrInvalidArguments
 	}
+	// A resume timestamp is the whole resume state, so it may not be combined
+	// with the window bounds it replaces, and it has to be one the connector can
+	// still serve. A few seconds of container clock skew is a resumable read, not
+	// a refusal.
+	if !options.SinceTime.IsZero() {
+		if options.SinceSeconds != 0 || options.TailLines != 0 {
+			return ErrInvalidArguments
+		}
+		if _, ok := boundedSinceTime(options.SinceTime, time.Now()); !ok {
+			return ErrInvalidArguments
+		}
+	}
 	seen := make(map[string]bool)
 	for _, uid := range options.PodUIDs {
 		if !logUIDPattern.MatchString(uid) || seen[uid] {
@@ -163,8 +121,7 @@ func (service *Service) validateWorkloadLogOptions(ctx context.Context, options 
 		}
 		seen[uid] = true
 	}
-	_, err := service.workloadCursor(options)
-	return err
+	return nil
 }
 
 func workloadOwnedBy(record kubeindex.Record, kind, uid string) bool {
@@ -182,11 +139,22 @@ func workloadLogPods(snapshot kubeindex.Snapshot, options WorkloadLogStreamOptio
 	if options.Kind == "Deployment" {
 		kinds = append(kinds, "ReplicaSet")
 	}
+	// A kind that is missing, stale, or incomplete is a reason to wait, not a
+	// permission problem: the cluster may allow this read perfectly well.
+	waiting := make([]inventoryKindState, 0, len(kinds))
 	for _, kind := range kinds {
 		status, exists := snapshot.Kinds[kind]
-		if !exists || status.State != "ready" || status.Partial || time.Since(status.ObservedAt) > 2*time.Minute {
-			return nil, ErrForbidden
+		if !exists || status.ObservedAt.IsZero() {
+			waiting = append(waiting, inventoryKindState{Kind: kind})
+			continue
 		}
+		age := time.Since(status.ObservedAt)
+		if status.State != "ready" || status.Partial || age > inventoryFreshness {
+			waiting = append(waiting, inventoryKindState{Kind: kind, Age: age, Listed: true, Complete: status.State == "ready" && !status.Partial})
+		}
+	}
+	if len(waiting) > 0 {
+		return nil, &inventoryNotReadyError{Kinds: waiting}
 	}
 	found := false
 	for _, record := range snapshot.Records {
@@ -286,17 +254,22 @@ type workloadSourceMessage struct {
 // WorkloadLogSession owns one viewer admission and every source reservation.
 // Close is idempotent; Stream must have a single caller.
 type WorkloadLogSession struct {
-	service     *Service
-	options     WorkloadLogStreamOptions
-	ctx         context.Context
-	cancel      context.CancelFunc
-	release     func()
-	once        sync.Once
-	mu          sync.Mutex
-	streaming   bool
-	closed      bool
-	workers     map[string]*workloadSourceWorker
-	cursor      workloadLogCursor
+	service   *Service
+	options   WorkloadLogStreamOptions
+	ctx       context.Context
+	cancel    context.CancelFunc
+	release   func()
+	once      sync.Once
+	mu        sync.Mutex
+	streaming bool
+	closed    bool
+	workers   map[string]*workloadSourceWorker
+	// resume holds each source's own line checkpoint. It never leaves this
+	// process: a viewer that reconnects resumes from its timestamps instead.
+	resume map[string]string
+	// resumeTime is where every source starts on a fresh connection, already
+	// backed off by the replay overlap. Zero means "use the window bounds".
+	resumeTime  time.Time
 	uncertain   bool
 	queue       chan workloadSourceMessage
 	pods        []WorkloadLogPod
@@ -330,15 +303,10 @@ func (service *Service) OpenWorkloadLogStream(ctx context.Context, options Workl
 	if service.logStreamContext != nil {
 		stopService = context.AfterFunc(service.logStreamContext, cancel)
 	}
-	cursor, _ := service.workloadCursor(options)
-	if cursor.SinceSeconds > 0 {
-		options.SinceSeconds, options.TailLines = cursor.SinceSeconds, cursor.TailLines
+	if options.SinceTime.IsZero() {
+		options.SinceSeconds, options.TailLines = logBounds(options.SinceSeconds, options.TailLines)
 	}
-	options.SinceSeconds, options.TailLines = logBounds(options.SinceSeconds, options.TailLines)
-	cursor.SinceSeconds, cursor.TailLines = options.SinceSeconds, options.TailLines
-	cursor.Owner = registerWorkloadCheckpointOwner()
-	session := &WorkloadLogSession{service: service, options: options, ctx: parent, cancel: func() { stopService(); cancel(); stopCredential(); stopAuthorization() }, release: release, workers: map[string]*workloadSourceWorker{}, cursor: cursor, uncertain: cursor.Uncertain || cursor.Process != workloadStreamProcess, queue: make(chan workloadSourceMessage, 64), statuses: make(map[string]bool)}
-	cursor.Process = workloadStreamProcess
+	session := &WorkloadLogSession{service: service, options: options, ctx: parent, cancel: func() { stopService(); cancel(); stopCredential(); stopAuthorization() }, release: release, workers: map[string]*workloadSourceWorker{}, resume: map[string]string{}, resumeTime: workloadResumeTime(options), queue: make(chan workloadSourceMessage, 64), statuses: make(map[string]bool)}
 	if err := session.reconcile(pods); err != nil {
 		session.Close()
 		return nil, err
@@ -360,7 +328,6 @@ func (session *WorkloadLogSession) Close() {
 	session.closed = true
 	session.once.Do(func() {
 		session.cancel()
-		releaseWorkloadCheckpointOwner(session.cursor.Owner)
 		if !session.streaming {
 			for _, worker := range session.workers {
 				worker.release()
@@ -479,7 +446,7 @@ func (session *WorkloadLogSession) initCompletionCheckpoint(record kubeindex.Rec
 				if old.Name != current.Name || !old.Init || !old.StateKnown || !old.Running || old.CurrentTermination || old.StartedAt.IsZero() || old.RestartCount != current.RestartCount || current.TerminatedAt.Before(old.StartedAt) || !current.StartedAt.IsZero() && !current.StartedAt.Equal(old.StartedAt) {
 					continue
 				}
-				checkpoint := session.cursor.Sources[id]
+				checkpoint := session.resume[id]
 				if checkpoint == "" {
 					continue
 				}
@@ -614,29 +581,36 @@ func (session *WorkloadLogSession) reconcile(records []kubeindex.Record) error {
 						pod.Reason = "source_limit"
 						continue
 					}
-					checkpoint := session.cursor.Sources[id]
+					checkpoint := session.resume[id]
 					if checkpoint == "" {
 						checkpoint = migrated
 					}
-					if checkpoint != "" {
-						options.Cursor, options.SinceSeconds, options.TailLines = checkpoint, 0, 0
+					// A source that is already running keeps its own line position,
+					// so a restart inside this connection does not replay what it
+					// already sent. A fresh one starts at the viewer's timestamp.
+					position, startFrom := workloadSourcePosition(checkpoint, session.resumeTime)
+					options.Cursor, options.SinceTime = position, startFrom
+					// A fresh source starts at the start this connector derived
+					// from the viewer's watermark, which the read bounds to the
+					// window floor rather than comparing as if the viewer sent it.
+					options.derivedSince = !startFrom.IsZero()
+					if position != "" {
+						options.SinceSeconds, options.TailLines = 0, 0
 						if _, err := session.service.logCursor(options); err != nil {
 							release()
 							return err
 						}
-						session.cursor.Sources[id] = checkpoint
-					}
-					if session.cursor.Sources[id] == "" {
-						session.cursor.Sources[id] = session.service.quietLogCursor(options, time.Now().UTC())
+						session.resume[id] = position
+					} else if startFrom.IsZero() {
+						// The window a source starts at is fixed once, so a
+						// replaced source cannot silently start a newer one.
+						session.resume[id] = session.service.quietLogCursor(options, time.Now().UTC())
 					}
 					worker = &workloadSourceWorker{source: WorkloadLogSource{SourceID: id, PodUID: record.UID, Pod: record.Name, Namespace: record.Namespace, Container: container.Name, Incarnation: incarnation, Admitted: true}, options: options, release: release, done: make(chan struct{}), expected: record, observation: observation}
 				}
 				wanted[id] = worker
 				pod.Admitted = true
 				pod.Reason = ""
-				if session.options.Cursor != "" && !worker.started && (!container.StateKnown || container.Running && container.StartedAt.IsZero()) {
-					session.uncertain = true
-				}
 			}
 			if pod.Admitted {
 				podCount++
@@ -654,13 +628,13 @@ func (session *WorkloadLogSession) reconcile(records []kubeindex.Record) error {
 			} else {
 				worker.release()
 			}
-			delete(session.cursor.Sources, id)
+			delete(session.resume, id)
 		}
 	}
 	session.workers, session.pods, session.truncated = wanted, pods, len(records) > len(pods)
-	for id := range session.cursor.Sources {
+	for id := range session.resume {
 		if wanted[id] == nil {
-			delete(session.cursor.Sources, id)
+			delete(session.resume, id)
 			session.uncertain = true
 		}
 		for id := range session.failures {
@@ -684,7 +658,7 @@ func (service *Service) validateWorkloadSource(ctx context.Context, worker *work
 		}
 		return err
 	}
-	actual := indexRecord(service.projectResource(ResourceDefinition{ID: "core~v1~pods", Kind: "Pod"}, raw))
+	actual := service.projectIndexRecord(ResourceDefinition{ID: "core~v1~pods", Kind: "Pod"}, raw)
 	if actual.UID != worker.source.PodUID || actual.Namespace != worker.source.Namespace || actual.Name != worker.source.Pod {
 		return errWorkloadSourceGone
 	}
@@ -746,22 +720,6 @@ func (session *WorkloadLogSession) startWorkers() {
 	}
 }
 
-func (session *WorkloadLogSession) checkpoint() string {
-	session.cursor.Process = workloadStreamProcess
-	session.cursor.Reference = ""
-	session.cursor.Uncertain = false
-	if session.cursor.Owner == "" {
-		session.cursor.Owner = registerWorkloadCheckpointOwner()
-	}
-	reference, err := retainWorkloadCheckpoint(session.cursor)
-	if err != nil {
-		session.uncertain = true
-	}
-	token := workloadLogCursor{Target: session.cursor.Target, Process: session.cursor.Process, Reference: reference, Uncertain: err != nil, SinceSeconds: session.cursor.SinceSeconds, TailLines: session.cursor.TailLines}
-	encoded, _ := json.Marshal(token)
-	return base64.RawURLEncoding.EncodeToString(encoded)
-}
-
 func (session *WorkloadLogSession) membershipChange() (WorkloadLogStreamEvent, bool) {
 	list := []WorkloadLogSource{}
 	for _, worker := range session.workers {
@@ -818,7 +776,7 @@ func (session *WorkloadLogSession) Stream(emit func(WorkloadLogStreamEvent) erro
 		if len(raw) > 1<<20 {
 			return ErrInvalidArguments
 		}
-		if event.Event != "limit" && event.Event != "end" && bytes+len(raw)+2*maxWorkloadCursorBytes+4096 > MaxLogStreamBytes {
+		if event.Event != "limit" && event.Event != "end" && bytes+len(raw)+2*maxStreamEventReserve > MaxLogStreamBytes {
 			return errWorkloadByteLimit
 		}
 		bytes += len(raw) + len(event.Event) + 16
@@ -829,7 +787,7 @@ func (session *WorkloadLogSession) Stream(emit func(WorkloadLogStreamEvent) erro
 		return err
 	}
 	finish := func(reason string, limited bool) error {
-		event := WorkloadLogStreamEvent{PodLogStreamEvent: PodLogStreamEvent{Event: "end", Reason: reason, Cursor: session.checkpoint()}}
+		event := WorkloadLogStreamEvent{PodLogStreamEvent: PodLogStreamEvent{Event: "end", Reason: reason}}
 		if limited {
 			event.Event = "limit"
 			if err := send(event); err != nil {
@@ -880,7 +838,7 @@ func (session *WorkloadLogSession) Stream(emit func(WorkloadLogStreamEvent) erro
 		case <-start.C:
 			return finish("duration", true)
 		case <-heartbeat.C:
-			if err := send(WorkloadLogStreamEvent{PodLogStreamEvent: PodLogStreamEvent{Event: "heartbeat", Cursor: session.checkpoint()}}); err != nil {
+			if err := send(WorkloadLogStreamEvent{PodLogStreamEvent: PodLogStreamEvent{Event: "heartbeat"}}); err != nil {
 				return err
 			}
 		case <-reconcile.C:
@@ -939,10 +897,12 @@ func (session *WorkloadLogSession) Stream(emit func(WorkloadLogStreamEvent) erro
 				}
 				continue
 			}
-			oldCursor := session.cursor.Sources[message.id]
+			// The source's own line checkpoint is bookkeeping for this connection:
+			// it is never forwarded, because a viewer resumes by timestamp.
 			if event.Cursor != "" {
-				session.cursor.Sources[message.id] = event.Cursor
+				session.resume[message.id] = event.Cursor
 			}
+			event.Cursor = ""
 			if event.Event == "end" || event.Event == "heartbeat" {
 				if event.ReplayUncertain {
 					session.uncertain = true
@@ -957,17 +917,8 @@ func (session *WorkloadLogSession) Stream(emit func(WorkloadLogStreamEvent) erro
 				delete(session.failures, message.id)
 				sequence++
 				event.Sequence = sequence
-				event.Cursor = ""
-				if sequence == 1 || sequence%logCursorCheckpoint == 0 {
-					event.Cursor = session.checkpoint()
-				}
 			}
 			if err := send(event); err != nil {
-				if oldCursor == "" {
-					delete(session.cursor.Sources, message.id)
-				} else {
-					session.cursor.Sources[message.id] = oldCursor
-				}
 				return err
 			}
 		}

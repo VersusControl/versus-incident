@@ -47,6 +47,7 @@ var (
 // Config defines one Kubernetes API connection. Credentials are read from
 // TokenFile for every request so projected service-account rotation is honored.
 type Config struct {
+	Namespace            string
 	Endpoint             string
 	TokenFile            string
 	CAFile               string
@@ -77,6 +78,7 @@ type contextDialer interface {
 
 // Client is a read-only, bounded Kubernetes API transport.
 type Client struct {
+	namespace      string
 	base           *url.URL
 	credentials    CredentialSource
 	timeout        time.Duration
@@ -85,7 +87,8 @@ type Client struct {
 	streamHTTP     *http.Client
 	indexLimiter   *rate.Limiter
 	metadataMu     sync.Mutex
-	metadataDenied map[string]time.Time
+	metadataDenied map[metadataDenyKey]metadataDenyMemo
+	now            func() time.Time
 	backoffMu      sync.Mutex
 	backoffUntil   time.Time
 	authMu         sync.Mutex
@@ -121,6 +124,9 @@ func captureReadContext(ctx context.Context, owner string) context.Context {
 
 // NewClient validates transport policy and constructs a read-only API client.
 func NewClient(config Config) (*Client, error) {
+	if config.Namespace != "" && (!safeSegment(config.Namespace) || len(config.Namespace) > 63) {
+		return nil, ErrInvalidArguments
+	}
 	policy, err := newEndpointPolicy(config)
 	if err != nil {
 		return nil, err
@@ -178,8 +184,9 @@ func NewClient(config Config) (*Client, error) {
 	streamTransport.ResponseHeaderTimeout = 10 * time.Second
 	streamTransport.MaxResponseHeaderBytes = 64 << 10
 	client := &Client{
-		base: base, credentials: credentials, timeout: timeout, maxBodyBytes: maxBodyBytes,
-		indexLimiter: rate.NewLimiter(2, 4), metadataDenied: map[string]time.Time{},
+		namespace: config.Namespace,
+		base:      base, credentials: credentials, timeout: timeout, maxBodyBytes: maxBodyBytes,
+		indexLimiter: rate.NewLimiter(2, 4), metadataDenied: map[metadataDenyKey]metadataDenyMemo{},
 		http:       &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrRedirect }},
 		streamHTTP: &http.Client{Transport: streamTransport, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrRedirect }},
 	}
@@ -348,6 +355,17 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 				return nil, false, errPreviousUnavailable
 			}
 		}
+		if response.StatusCode == http.StatusForbidden {
+			// Only the denied verb, resource, namespace and user are kept; the
+			// body itself never leaves this function.
+			body, readErr := io.ReadAll(io.LimitReader(response.Body, forbiddenStatusLimit+1))
+			if readErr == nil {
+				if denied := permissionDeniedFromStatus(body); denied != nil {
+					return nil, false, denied
+				}
+			}
+			return nil, false, ErrForbidden
+		}
 		return nil, false, classifyStatus(response.StatusCode)
 	}
 	if maxBytes <= 0 || maxBytes > client.maxBodyBytes {
@@ -493,6 +511,81 @@ func classifyStatus(status int) error {
 	default:
 		return fmt.Errorf("kubernetes: API status %d", status)
 	}
+}
+
+// metadataDenyKey scopes a permission memo to one organization, cluster,
+// credential epoch, kind, and namespace, so a denial observed for one tenant can
+// never suppress a read for another.
+type metadataDenyKey struct {
+	OrgID        string
+	ClusterID    string
+	CredentialID string
+	Kind         string
+	Namespace    string
+}
+
+// metadataDenyMemo is how long a metadata permission memo keeps its answer. It
+// is always bounded: a granted permission has to become visible without waiting
+// for a restart, and a denied one must not be re-attempted on every retry cycle.
+type metadataDenyMemo struct {
+	Until time.Time
+	// Err is the denial the memo remembered. It is replayed as-is, so a dead
+	// credential is never re-reported as a missing permission.
+	Err error
+}
+
+const (
+	// metadataDenyTTL is the longest a denial suppresses a retry. It is four
+	// retry cycles, so a grant is picked up within a minute while a persistent
+	// denial costs at most one cluster request per kind per minute.
+	metadataDenyTTL = time.Minute
+	// maxMetadataDenyEntries bounds the memo map itself.
+	maxMetadataDenyEntries = 512
+)
+
+// clock returns the client's time source, so a test can move time.
+func (client *Client) clock() time.Time {
+	if client != nil && client.now != nil {
+		return client.now()
+	}
+	return time.Now()
+}
+
+// metadataDenial reports the denial a memo still honours, and whether it
+// applies. The remembered error keeps its own class.
+func (client *Client) metadataDenial(key metadataDenyKey) (error, bool) {
+	client.metadataMu.Lock()
+	defer client.metadataMu.Unlock()
+	memo, exists := client.metadataDenied[key]
+	if !exists || !client.clock().Before(memo.Until) {
+		return nil, false
+	}
+	if memo.Err == nil {
+		return ErrForbidden, true
+	}
+	return memo.Err, true
+}
+
+// memoMetadataDenial records a denial for a bounded time.
+func (client *Client) memoMetadataDenial(key metadataDenyKey, denial error) {
+	client.metadataMu.Lock()
+	defer client.metadataMu.Unlock()
+	if client.metadataDenied == nil {
+		client.metadataDenied = map[metadataDenyKey]metadataDenyMemo{}
+	}
+	if len(client.metadataDenied) >= maxMetadataDenyEntries {
+		// Bounded bookkeeping: forgetting every memo costs at most one probe per
+		// key, which is exactly what the next retry cycle does anyway.
+		clear(client.metadataDenied)
+	}
+	client.metadataDenied[key] = metadataDenyMemo{Until: client.clock().Add(metadataDenyTTL), Err: denial}
+}
+
+// clearMetadataDenial forgets a denial once a read succeeds.
+func (client *Client) clearMetadataDenial(key metadataDenyKey) {
+	client.metadataMu.Lock()
+	defer client.metadataMu.Unlock()
+	delete(client.metadataDenied, key)
 }
 
 type ErrThrottled struct{ RetryAfter time.Duration }

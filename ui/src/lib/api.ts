@@ -62,6 +62,9 @@ export type KubernetesPodLogEvent = KubernetesPodLogLine & {
   action?: string;
   retryable?: boolean;
   replay_uncertain?: boolean;
+  // The server's own word that the cursor on a terminal limit is behind the
+  // newest retained line and cannot serve as the next resume point.
+  cursor_lagging?: boolean;
 };
 
 export interface KubernetesPodLogOptions {
@@ -71,7 +74,13 @@ export interface KubernetesPodLogOptions {
   tail_lines?: number;
   timestamps?: boolean;
   cursor?: string;
+  since_time?: string;
 }
+
+// The workload stream resumes from a wall-clock time instead of a cursor: one
+// cursor covering every source Pod grows with the Deployment and overflows the
+// request line, while a timestamp stays small no matter how wide the workload is.
+export type KubernetesWorkloadLogOptions = Omit<KubernetesPodLogOptions, "cursor"> & { pod_uid?: string[] };
 
 export interface KubernetesWorkloadLogSource {
   source_id: string;
@@ -1648,7 +1657,12 @@ export interface KubernetesClusterSummary {
   display_name?: string;
   provider: string;
   version?: string;
-  health: "healthy" | "attention" | "partial" | "unreachable" | "unknown";
+  /**
+   * "syncing" marks a cluster whose first sync is still running: its node,
+   * pod and issue numbers are placeholders until the first generation
+   * publishes, so surfaces must present them as pending rather than as facts.
+   */
+  health: "healthy" | "attention" | "partial" | "unreachable" | "unknown" | "syncing";
   nodes: number;
   ready_nodes: number;
   pods: number;
@@ -1657,7 +1671,8 @@ export interface KubernetesClusterSummary {
   issues?: number;
   broken?: number;
   last_change_at?: string;
-  sync: { state: string };
+  /** Same freshness envelope as every other Kubernetes view, including first-sync progress. */
+  sync: KubernetesSync;
   observed_at: string;
   error?: { code: string; message: string };
 }
@@ -2115,7 +2130,36 @@ export interface AgentToolsetAvailability {
   health?: string;
 }
 
+/** First-sync progress; present only while `sync.state` is "syncing" and the first generation has not published. */
+export interface KubernetesSyncProgress {
+  step: "connected" | "listing" | "building" | "metrics";
+  step_index: number;
+  step_total: number;
+  steps_done: string[];
+  /** Records listed so far, keyed by singular Kubernetes Kind ("Pod", "Deployment"). */
+  counts: Record<string, number>;
+  kinds_done: number;
+  kinds_total: number;
+  cluster_version?: string;
+  node_count?: number;
+  started_at: string;
+  updated_at: string;
+}
+
+/** Freshness of a Kubernetes view, shared by every explorer response. */
+export interface KubernetesSync {
+  state: string;
+  age_s: number;
+  partial: boolean;
+  progress?: KubernetesSyncProgress;
+  /** Cluster-wide count of resource types still loading after the core set published; omitted when none. */
+  pending_kinds?: number;
+  /** Resource ids this response depends on that are not listed yet; omitted when none. */
+  pending?: string[];
+}
+
 export interface KubernetesOverview {
+  sync?: KubernetesSync;
   connector: string;
   cluster_id: string;
   observed_at: string;
@@ -2175,35 +2219,6 @@ async function listKubernetesResources(resourceId: string, fields = "", continua
   return { ...page, items: page.items ?? [] };
 }
 
-async function listAllKubernetesNamespaces(cluster?: string): Promise<KubernetesResourcePage> {
-  const items: KubernetesResource[] = [];
-  const partial_failures: NonNullable<KubernetesResourcePage["partial_failures"]> = [];
-  const omitted_categories = new Set<string>();
-  const seenContinuations = new Set<string>();
-  let continuation = "";
-  let truncated = false;
-
-  do {
-    const page = await listKubernetesResources("core~v1~namespaces", "", continuation, cluster);
-    items.push(...page.items ?? []);
-    partial_failures.push(...page.partial_failures ?? []);
-    page.omitted_categories?.forEach((category) => omitted_categories.add(category));
-    continuation = page.continue ?? "";
-    truncated = page.truncated && !continuation;
-    if (continuation && seenContinuations.has(continuation)) {
-      throw new Error("Namespace listing returned a repeated continuation token.");
-    }
-    if (continuation) seenContinuations.add(continuation);
-  } while (continuation);
-
-  return {
-    items,
-    truncated,
-    ...(omitted_categories.size ? { omitted_categories: [...omitted_categories] } : {}),
-    ...(partial_failures.length ? { partial_failures } : {}),
-  };
-}
-
 export interface KubernetesMetricsSourceStatus {
   availability: "available" | "stale" | "unavailable";
   fresh: boolean;
@@ -2256,6 +2271,7 @@ export interface KubernetesWorkload {
 }
 
 export interface KubernetesWorkloadPage {
+  sync?: KubernetesSync;
   items: KubernetesResource[];
   counts?: Record<string, number>;
   next?: string;
@@ -2303,7 +2319,10 @@ export interface KubernetesIssue {
   gaps?: Array<{ from: string; to: string }>;
   rebuilt?: string[];
   untracked?: string[];
+  /** True only for real evidence failures, never for evidence that is still loading. */
   partial?: boolean;
+  /** Evidence resource ids still loading; history and changes may be incomplete for that reason only. */
+  pending?: string[];
 }
 
 export interface KubernetesIssuePage {
@@ -2313,7 +2332,7 @@ export interface KubernetesIssuePage {
   truncated: boolean;
   next?: string;
   partial_failures?: Array<{ resource_id?: string; class: string }>;
-  sync: { state: string; age_s: number; partial: boolean };
+  sync: KubernetesSync;
 }
 
 export type KubernetesChangeType = "created" | "deleted" | "image_changed" | "replicas_changed" | "spec_changed" | "rollout_started" | "rollout_completed" | "rollout_stalled" | "config_ref_changed" | "config_changed" | "warning_burst";
@@ -2360,6 +2379,7 @@ export interface KubernetesCrashEvent {
 export interface KubernetesCrashQuery {
   namespace?: string;
   root_uid?: string;
+  pod_uid?: string;
   since?: string;
   until?: string;
   limit?: number;
@@ -2367,6 +2387,7 @@ export interface KubernetesCrashQuery {
 }
 
 export interface KubernetesCrashPage {
+  crash_count?: number;
   items: KubernetesCrashEvent[];
   next?: string;
   since: string;
@@ -2379,7 +2400,7 @@ export interface KubernetesCrashPage {
   coverage: Record<string, { from: string; to: string }>;
   limitations: string[];
   capture: { mode: string; reason?: string; last_cycle_at?: string; behind: boolean; verification?: { stage: string; http_status?: number } };
-  sync: { state: string; age_s: number; partial: boolean };
+  sync: KubernetesSync;
 }
 
 export interface KubernetesChangesPage {
@@ -2388,7 +2409,41 @@ export interface KubernetesChangesPage {
   truncated?: boolean;
   partial_failures?: Array<{ resource_id?: string; class: string }>;
   gaps?: Array<{ from: string; to: string }>;
-  sync: { state: string; age_s: number; partial: boolean };
+  sync: KubernetesSync;
+}
+
+export type KubernetesTimelineEntry =
+  | { type: "change"; id: string; at: string; change: KubernetesChange }
+  | { type: "crash"; id: string; at: string; crash: KubernetesCrashEvent }
+  | { type: "break"; id: string; at: string; issue: KubernetesIssue };
+
+export interface KubernetesTimelinePage {
+  items: KubernetesTimelineEntry[];
+  next?: string;
+  sync: KubernetesSync;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+  gaps: Array<{ from: string; to: string }>;
+  crash_count: number;
+  total: number;
+  counts: { change: number; crash: number; break: number };
+  /** Echoed when the server filtered to breaks only. */
+  breaks_only?: boolean;
+  since: string;
+  until: string;
+}
+
+export interface KubernetesTimelineQuery {
+  since: string;
+  until: string;
+  namespace?: string;
+  kind?: string;
+  root_uid?: string;
+  pod_uid?: string;
+  resource_uid?: string;
+  /** 1 returns only break entries; the server filters so paging and counts match. */
+  breaks?: 1;
+  limit?: number;
+  cursor?: string;
 }
 
 export interface KubernetesGraphNode {
@@ -2413,7 +2468,7 @@ export interface KubernetesGraph {
   next?: string;
   truncated?: boolean;
   partial_failures?: Array<{ resource_id?: string; class: string }>;
-  sync: { state: string; age_s: number; partial: boolean };
+  sync: KubernetesSync;
 }
 
 export interface KubernetesTrafficEdge {
@@ -2437,11 +2492,104 @@ export interface KubernetesTraffic {
   truncated: boolean;
 }
 
+/**
+ * Index state of one resource kind, exactly as the index reports it.
+ * `observed_at` and `completed_at` are always present, and the zero time
+ * ("0001-01-01T00:00:00Z") means the kind was never observed, so it is never
+ * rendered as a date. `error` is the failure class, present only when the kind
+ * is not clean; `skipped` is the number of records this listing could not keep.
+ * `absent` marks a kind the cluster does not serve; `pending` a known kind that
+ * has no listing yet.
+ */
+export interface KubernetesKindStatus {
+  state: "ready" | "partial" | "error" | "warming" | "stale" | "pending";
+  observed_at?: string;
+  completed_at?: string;
+  last_attempt_at?: string;
+  records: number;
+  partial: boolean;
+  error?: string;
+  skipped?: number;
+  /**
+   * When this kind's failure began, kept until its state or class changes, so
+   * "since" does not move with every retry. Present only on a failing or
+   * unreadable kind.
+   */
+  failing_since?: string;
+  /** The cluster does not serve this kind, so it is known, empty and not failing. */
+  absent?: boolean;
+}
+
 export interface KubernetesIndexStatus {
   state: string;
   age_s: number;
   partial: boolean;
-  kinds?: Record<string, { state: string; observed_at?: string; last_attempt_at?: string; records: number; partial: boolean; error?: string }>;
+  kinds?: Record<string, KubernetesKindStatus>;
+}
+
+/**
+ * Cluster-wide sync health: every kind the index knows for this cluster, not
+ * only the kinds one view asked for. This is the single authoritative source
+ * for the blocking gate, the sync health surface and the top bar.
+ */
+/** One kind the index could not use, with the class that explains it. */
+export interface KubernetesFailingKind {
+  kind: string;
+  state?: string;
+  /** Failure class, e.g. "record_rejected" or "forbidden". */
+  class?: string;
+  skipped?: number;
+  records?: number;
+  /** When the failure began; the same time until the kind's state changes. */
+  since?: string;
+  observed_at?: string;
+}
+
+/**
+ * A kind the connector identity is not allowed to read. That is a capability
+ * gap rather than a sync fault, so it is excluded from `failing` and from the
+ * aggregate state and never closes a view. Same row shape as a failing kind.
+ */
+export type KubernetesUnreadableKind = KubernetesFailingKind;
+
+export interface KubernetesSyncHealthReport {
+  /** ready | syncing | partial | stale | error, worst state first. */
+  state: string;
+  partial: boolean;
+  age_s: number;
+  kinds: Record<string, KubernetesKindStatus>;
+  total_kinds: number;
+  ready_kinds: number;
+  failing_kinds: number;
+  pending_kinds: number;
+  /** Kinds the connector identity may not read; excluded from every other count. */
+  unreadable_kinds?: number;
+  truncated: boolean;
+  omitted_kinds?: string[] | null;
+  /** Rows for the kinds that made the sync unusable, with a stable failure time. */
+  failing?: KubernetesFailingKind[] | null;
+  /** Kinds the connector identity may not read; never part of `failing`. */
+  unreadable?: KubernetesUnreadableKind[] | null;
+  /**
+   * When this cluster first published a ready generation, as RFC3339. A
+   * property of the cluster rather than of the process: it is absent until the
+   * first publication and is never cleared by a later failure or restart, so
+   * the UI can tell a first boot from a background resync.
+   */
+  first_ready_at?: string;
+}
+
+/**
+ * The body a failed sync-health answer carries. The request itself could not be
+ * served — a revoked credential, a gateway failure — but when this cluster first
+ * published and how old its last snapshot is describe the cluster, not the
+ * request, so they are sent with the failure and the UI can keep naming what is
+ * on screen instead of going blank.
+ */
+export interface KubernetesSyncFailureReport {
+  error: string;
+  first_ready_at?: string;
+  age_s?: number;
 }
 
 export interface KubernetesTopPage {
@@ -2463,7 +2611,7 @@ export interface KubernetesTopPage {
   availability: "available" | "stale" | "unavailable";
   fresh: boolean;
   partial_failures?: Array<{ resource_id?: string; class: string }>;
-  sync: { state: string; age_s: number; partial: boolean };
+  sync: KubernetesSync;
 }
 
 type KubernetesTopPageDto = Omit<KubernetesTopPage, "items" | "items_available"> & {
@@ -2507,7 +2655,7 @@ export interface KubernetesDiagnosis {
   partial_failures?: Array<{ resource_id?: string; scope?: string; class: string }>;
   omitted_categories?: string[];
   truncated: boolean;
-  sync: { state: string; age_s: number; partial: boolean };
+  sync: KubernetesSync;
 }
 
 export interface KubernetesHelmRevision {
@@ -2774,7 +2922,10 @@ export interface KubernetesIssueAlertsSettings extends KubernetesIssueAlertsInpu
 export interface KubernetesBreakLogQuery {
   namespace: string; root_uid: string; since: string; until: string; pods?: string[];
   mode?: "merged" | "previous" | "current"; level?: "error" | "warning" | "info" | "debug"; q?: string; cursor?: string; limit?: number;
+  /** One container name, or `kubernetesAllContainers`; omitted lets the server pick the main container. */
+  container?: string;
 }
+export const kubernetesAllContainers = "*";
 export interface KubernetesBreakLogPage {
   window: { from: string; to: string };
   pods: Array<{ name: string; uid: string; state: string; short: string }>;
@@ -2786,12 +2937,23 @@ export interface KubernetesBreakLogPage {
   sources: Array<{ kind: string; name: string; type?: string; at: string }>;
   coverage: { state: "complete" | "partial" | "none"; gaps: Array<{ from: string; to: string }>; reason: string; tip: boolean };
   next?: string;
+  /** Applied container filter: a name, or `kubernetesAllContainers`. */
+  container?: string;
+  main_container?: string;
+  /** Every container seen for the break, independent of the filter. */
+  containers?: Array<{ name: string; init?: boolean; main?: boolean }>;
 }
 
 export function createKubernetesApi(cluster?: string) {
   const request: typeof unscopedRequest = (path, options) => unscopedRequest(kubernetesClusterPath(path, cluster), options);
   return {
   kubernetesOverview: () => request<KubernetesOverview>("/api/admin/kubernetes/overview"),
+  /**
+   * Every kind the index knows, with its own state. The per-view `sync`
+   * envelope cannot answer "is anything failing anywhere", so the gate, the
+   * surface and the top bar read this instead.
+   */
+  kubernetesSyncHealth: () => request<KubernetesSyncHealthReport>("/api/admin/kubernetes/sync"),
   kubernetesBreakLogs: (options: KubernetesBreakLogQuery, signal?: AbortSignal) => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(options)) {
@@ -2813,12 +2975,12 @@ export function createKubernetesApi(cluster?: string) {
     }
     return request<KubernetesIssuePage>(`/api/admin/kubernetes/issues?${query}`);
   },
-  kubernetesChanges: (options: { since?: string; until?: string; namespace?: string; kind?: string; name?: string; type?: KubernetesChangeType; limit?: number; cursor?: string } = {}) => {
+  kubernetesChanges: (options: { since?: string; until?: string; namespace?: string; kind?: string; name?: string; root_uid?: string; type?: KubernetesChangeType; limit?: number; cursor?: string } = {}, signal?: AbortSignal) => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(options)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
-    return request<KubernetesChangesPage>(`/api/admin/kubernetes/changes?${query}`);
+    return request<KubernetesChangesPage>(`/api/admin/kubernetes/changes?${query}`, { signal });
   },
   kubernetesCrashes: (options: KubernetesCrashQuery = {}, signal?: AbortSignal) => {
     const query = new URLSearchParams();
@@ -2826,6 +2988,13 @@ export function createKubernetesApi(cluster?: string) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
     return request<KubernetesCrashPage>(`/api/admin/kubernetes/crashes?${query}`, { signal });
+  },
+  kubernetesTimeline: (options: KubernetesTimelineQuery, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesTimelinePage>(`/api/admin/kubernetes/timeline?${query}`, { signal });
   },
   kubernetesGraph: (options: { namespace?: string; group_by?: "namespace" | "app"; max_nodes?: number; connected_only?: boolean; complete?: boolean; limit?: number; cursor?: string } = {}) => {
     const query = new URLSearchParams();
@@ -2840,6 +3009,11 @@ export function createKubernetesApi(cluster?: string) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
     return request<KubernetesGraph>(`/api/admin/kubernetes/graph/neighborhood?${query}`);
+  },
+  kubernetesRelated: (options: { resource_id: string; namespace?: string; name: string }, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ resource_id: options.resource_id, name: options.name });
+    if (options.namespace) query.set("namespace", options.namespace);
+    return request<KubernetesGraph>(`/api/admin/kubernetes/graph/related?${query}`, { signal });
   },
   kubernetesTraffic: (options: { namespace?: string; source?: string; window?: "5m" | "15m" | "1h" } = {}) => {
     const query = new URLSearchParams({ window: options.window ?? "15m" });
@@ -2860,7 +3034,7 @@ export function createKubernetesApi(cluster?: string) {
       }));
   },
   kubernetesNodes: (cursor?: string) => listKubernetesResources("core~v1~nodes", "", cursor, cluster),
-  kubernetesNamespaces: () => listAllKubernetesNamespaces(cluster),
+  kubernetesNamespaces: (namespace?: string) => request<{ items: string[]; sync: KubernetesSync; partial_failures?: Array<{ resource_id?: string; class: string }> }>(`/api/admin/kubernetes/namespaces${namespace ? `?${new URLSearchParams({ namespace })}` : ""}`),
   kubernetesNodePods: (node: string, cursor?: string) => listKubernetesResources("core~v1~pods", "spec.nodeName=" + node, cursor, cluster),
   kubernetesUsage: (namespace = "") => request<KubernetesUsage>(`/api/admin/kubernetes/usage?namespace=${encodeURIComponent(namespace)}`),
   kubernetesUsageHistory: (namespace: string, pod: string, signal?: AbortSignal) =>
@@ -2920,14 +3094,16 @@ export function createKubernetesApi(cluster?: string) {
       for (const field of ["sequence", "ordinal"]) {
         if (payload[field] !== undefined && (typeof payload[field] !== "number" || !Number.isSafeInteger(payload[field]) || Number(payload[field]) < 1)) throw new ApiError(502, "Invalid Pod log ordering.");
       }
-      if (typeof payload.cursor === "string" && payload.cursor.length > 16 << 10 || typeof payload.timestamp === "string" && payload.timestamp.length > 64 || ["retryable", "replay_uncertain"].some((field) => payload[field] !== undefined && typeof payload[field] !== "boolean")) throw new ApiError(502, "Invalid Pod log stream event.");
-      onEvent({ event, text: payload.text ?? "", container: payload.container ?? "", timestamp: payload.timestamp, sequence: payload.sequence, ordinal: payload.ordinal, cursor: payload.cursor, reason: payload.reason, code: payload.code, message: payload.message, action: payload.action, retryable: payload.retryable, replay_uncertain: payload.replay_uncertain ?? false } as KubernetesPodLogEvent);
+      if (typeof payload.cursor === "string" && payload.cursor.length > 16 << 10 || typeof payload.timestamp === "string" && payload.timestamp.length > 64 || ["retryable", "replay_uncertain", "cursor_lagging"].some((field) => payload[field] !== undefined && typeof payload[field] !== "boolean")) throw new ApiError(502, "Invalid Pod log stream event.");
+      onEvent({ event, text: payload.text ?? "", container: payload.container ?? "", timestamp: payload.timestamp, sequence: payload.sequence, ordinal: payload.ordinal, cursor: payload.cursor, reason: payload.reason, code: payload.code, message: payload.message, action: payload.action, retryable: payload.retryable, replay_uncertain: payload.replay_uncertain ?? false, cursor_lagging: payload.cursor_lagging ?? false } as KubernetesPodLogEvent);
     }, { maxLineBytes: 128 << 10, maxFrameBytes: 132 << 10, maxTotalBytes: 128 << 20, maxEvents: 1_000_000, maxDurationMs: 31 * 60 * 1000 });
   },
-  kubernetesWorkloadLogStream: async (kind: string, namespace: string, name: string, uid: string, options: KubernetesPodLogOptions & { pod_uid?: string[] }, onEvent: (event: KubernetesWorkloadLogEvent) => void, signal: AbortSignal): Promise<void> => {
+  kubernetesWorkloadLogStream: async (kind: string, namespace: string, name: string, uid: string, options: KubernetesWorkloadLogOptions, onEvent: (event: KubernetesWorkloadLogEvent) => void, signal: AbortSignal): Promise<void> => {
     const query = new URLSearchParams({ namespace, uid });
     for (const [key, value] of Object.entries(options)) {
-      if (options.cursor && (key === "since_seconds" || key === "tail_lines")) continue;
+      // A resume reads forward from the newest line the reader holds, so the
+      // opening tail and the wall-clock window are mutually exclusive.
+      if (options.since_time && (key === "since_seconds" || key === "tail_lines")) continue;
       if (Array.isArray(value)) value.forEach((item) => query.append(key, item));
       else if (value !== undefined && value !== "") query.set(key, String(value));
     }
@@ -2948,14 +3124,14 @@ export function createKubernetesApi(cluster?: string) {
       try { value = JSON.parse(data); } catch { throw new ApiError(502, "Invalid workload log stream event."); }
       if (!value || typeof value !== "object") throw new ApiError(502, "Invalid workload log stream event.");
       const payload = value as Record<string, unknown>;
-      for (const field of ["text", "container", "timestamp", "cursor", "reason", "code", "message", "action", "workload_uid", "pod_uid", "pod", "namespace", "incarnation", "source_id"]) {
-        if (payload[field] !== undefined && (typeof payload[field] !== "string" || String(payload[field]).length > (field === "cursor" ? 512 << 10 : field === "text" ? 16384 : 4096))) throw new ApiError(502, "Invalid workload log stream field.");
+      for (const field of ["text", "container", "timestamp", "reason", "code", "message", "action", "workload_uid", "pod_uid", "pod", "namespace", "incarnation", "source_id"]) {
+        if (payload[field] !== undefined && (typeof payload[field] !== "string" || String(payload[field]).length > (field === "text" ? 16384 : 4096))) throw new ApiError(502, "Invalid workload log stream field.");
       }
       if (event === "line" && (typeof payload.text !== "string" || new TextEncoder().encode(payload.text).byteLength > 16 << 10 || typeof payload.container !== "string" || typeof payload.pod !== "string" || typeof payload.pod_uid !== "string" || typeof payload.source_id !== "string")) throw new ApiError(502, "Invalid workload log line.");
       for (const field of ["sequence", "ordinal"]) {
         if (payload[field] !== undefined && (typeof payload[field] !== "number" || !Number.isSafeInteger(payload[field]) || Number(payload[field]) < 1)) throw new ApiError(502, "Invalid workload log ordering.");
       }
-      for (const field of ["retryable", "replay_uncertain", "truncated"]) {
+      for (const field of ["retryable", "replay_uncertain", "truncated", "cursor_lagging"]) {
         if (payload[field] !== undefined && typeof payload[field] !== "boolean") throw new ApiError(502, "Invalid workload log flag.");
       }
       if (event === "sources") {
@@ -2975,6 +3151,8 @@ export function createKubernetesApi(cluster?: string) {
           }
         }
       }
+      // No cursor crosses this boundary: a workload read resumes from a time.
+      delete payload.cursor;
       onEvent({ ...payload, event, text: payload.text ?? "", container: payload.container ?? "" } as KubernetesWorkloadLogEvent);
     }, { maxLineBytes: 1 << 20, maxFrameBytes: (1 << 20) + 4096, maxTotalBytes: 128 << 20, maxEvents: 1_000_000, maxDurationMs: 31 * 60 * 1000 });
   },
@@ -3002,6 +3180,10 @@ export function createKubernetesApi(cluster?: string) {
     const headers = new Headers({ Accept: "text/event-stream" });
     const secret = getSecret() ?? "";
     if (secret) headers.set("X-Gateway-Secret", secret);
+    // The record feed for the pods, deployments and nodes views. Its `sync`
+    // envelope only covers the kinds this request names, so nothing here
+    // decides whether a cluster is healthy: sync health reads the cluster-wide
+    // report.
     const response = await fetch(`${API_BASE}${kubernetesClusterPath("/api/admin/kubernetes/stream?kinds=Node,Pod,Deployment", cluster)}`, {
       headers,
       credentials: "same-origin",
@@ -3051,6 +3233,11 @@ export const api = {
   ...agentCapabilitiesApi,
   ...createKubernetesApi(),
   kubernetesClusters: () => request<KubernetesClusters>("/api/admin/kubernetes/clusters"),
+  /**
+   * The cluster-wide sync report for one named cluster, for surfaces that show
+   * several clusters at once and therefore cannot use the scoped client.
+   */
+  kubernetesClusterSyncHealth: (cluster: string) => request<KubernetesSyncHealthReport>(kubernetesClusterPath("/api/admin/kubernetes/sync", cluster)),
   status: () => request<Status>("/api/agent/status"),
   listPatterns: () =>
     request<{ patterns: Pattern[] }>("/api/agent/patterns").then(

@@ -1,14 +1,16 @@
 import {
   useEffect,
+  useCallback,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type Ref,
   type ReactNode,
 } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { useBrokenIssues, useKubernetesCluster, useKubernetesQuery } from "@/lib/useKubernetesCluster";
+import { KubernetesFirstReadyContext, useBrokenIssues, useKubernetesCluster, useKubernetesQuery } from "@/lib/useKubernetesCluster";
 import { KubernetesClusterProvider } from "@/components/KubernetesClusterProvider";
 import { KubernetesFleet } from "./KubernetesFleet";
 import {
@@ -24,6 +26,7 @@ import {
   History,
   Layers3,
   LayoutDashboard,
+  Loader2,
   Network,
   RefreshCw,
   Search,
@@ -32,12 +35,23 @@ import {
   Waypoints,
   X,
 } from "lucide-react";
-import { api, ApiError, type KubernetesCrashEvent, type KubernetesIndexStatus, type KubernetesOverview, type KubernetesResource, type KubernetesUsage } from "@/lib/api";
+import { api, ApiError, type KubernetesChangesPage, type KubernetesCrashEvent, type KubernetesIndexStatus, type KubernetesOverview, type KubernetesSyncHealthReport, type KubernetesResource, type KubernetesUsage } from "@/lib/api";
+import { kubernetesCatalogRefreshInterval } from "@/lib/kubernetesFirstSync";
 import { PodLogViewer } from "@/components/PodLogViewer";
+import { ResourceLogsButton } from "@/components/ResourceLogsButton";
+import { canStreamLogs } from "@/lib/kubernetesLogTargets";
+import { NamespaceSelect } from "@/components/NamespaceSelect";
+import { CoverageMarker } from "@/components/CoverageMarker";
 import { CursorPagination } from "@/components/Pagination";
 import { PeekPanel } from "@/components/PeekPanel";
 import { RetryableError } from "@/components/RetryableError";
 import { SkCard } from "@/components/Skeleton";
+import { KubernetesSyncHealthSurface } from "@/components/KubernetesSyncHealth";
+import { KubernetesUnreadableNote } from "@/components/KubernetesUnreadableNote";
+import { KubernetesPreparingPanel } from "@/components/KubernetesPreparingPanel";
+import { KubernetesSyncStateIndicator, type KubernetesStreamState } from "@/components/KubernetesSyncStateIndicator";
+import { clusterSyncEnvelope, firstReadyAt, isZeroTime, reportSyncHealth, syncFailureReport, syncHealth, syncPollIntervalMs, syncReportPollIntervalMs } from "@/lib/kubernetesSyncHealth";
+import { settledSync } from "@/lib/kubernetesPending";
 import { TopBar } from "@/components/TopBar";
 import { useCursorPagination, type CursorPaginationState } from "@/lib/pagination";
 import { ResourceEvents, ResourceFacts, ResourceHeader, ResourceRelations, ResourceTimeline, ResourceYaml } from "./KubernetesResourceDetail";
@@ -53,8 +67,7 @@ import {
 } from "./KubernetesExplorerViews";
 import { kubernetesExplorerTabs, type KubernetesExplorerTab } from "./kubernetesExplorerTabs";
 import { StateBadge, ToolIcon } from "./AgentToolsPage";
-import { KubernetesWarnings } from "./KubernetesWarnings";
-import { failureWarnings, type KubernetesWarning } from "./kubernetesWarningItems";
+import { failureWarnings, timelineWarnings } from "./kubernetesWarningItems";
 
 type KubernetesDrawerTab = ResourceDetailTab;
 
@@ -71,6 +84,10 @@ function parseDrawerTab(value: string | null, resource: KubernetesResource | nul
   return drawerTabs.some((item) => item.id === value)
     ? (value as KubernetesDrawerTab)
     : "overview";
+}
+
+function resourceSelectionKey(resource: KubernetesResource) {
+  return `${resource.resource_id}/${resource.namespace ?? ""}/${resource.name}`;
 }
 
 function parseResourceSelection(search: string): KubernetesResource | null {
@@ -90,16 +107,21 @@ function parseResourceSelection(search: string): KubernetesResource | null {
   return { resource_id, kind, namespace: namespace || undefined, name };
 }
 
-function writeExplorerLocation(options: {
+type ExplorerLocation = {
   view?: KubernetesExplorerTab;
   resource?: KubernetesResource | null;
   drawerTab?: KubernetesDrawerTab;
-}) {
-  const query = new URLSearchParams(window.location.search);
+};
+
+// Builds the next explorer query from the router's current one. Writes go
+// through React Router so every reader (useSearchParams, useLocation) sees
+// the same URL.
+function explorerSearch(search: string, options: ExplorerLocation) {
+  const query = new URLSearchParams(search);
   if (options.view) {
     if (options.view !== "timeline") {
       query.delete("logs_from"); query.delete("logs_to");
-      query.delete("logs_mode"); query.delete("logs_pod");
+      query.delete("logs_mode"); query.delete("logs_pod"); query.delete("logs_container");
     }
     if (options.view !== "timeline" && query.has("root_uid")) {
       query.delete("root_uid");
@@ -111,7 +133,7 @@ function writeExplorerLocation(options: {
   }
   if (options.resource !== undefined) {
     if (options.resource) {
-      query.set("r", `${options.resource.resource_id}/${options.resource.namespace ?? ""}/${options.resource.name}`);
+      query.set("r", resourceSelectionKey(options.resource));
     } else {
       query.delete("r");
       query.delete("tab");
@@ -122,7 +144,7 @@ function writeExplorerLocation(options: {
     else query.set("tab", options.drawerTab);
   }
   const suffix = query.toString();
-  window.history.pushState(null, "", `${window.location.pathname}${suffix ? `?${suffix}` : ""}`);
+  return suffix ? `?${suffix}` : "";
 }
 
 const explorerTabIcons: Record<KubernetesExplorerTab, typeof Cpu> = {
@@ -155,6 +177,39 @@ const usagePodSampleLimit = 500;
 
 function asArray<T>(value: T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [];
+}
+
+// A resource opened from a row carries the list projection, which holds the
+// identity and status fields but no container summary, so a Pod read from its
+// row would start with no container chips at all. The describe answer for the
+// same resource has them; adopt its container fields once it names that
+// resource, and keep whatever the row already knew.
+const logSummaryFields = [
+  "log_containers",
+  "log_container_states",
+  "main_container",
+] as const;
+
+function logViewResource(
+  selected: KubernetesResource,
+  described?: KubernetesResource,
+): KubernetesResource {
+  if (
+    !described ||
+    described.resource_id !== selected.resource_id ||
+    described.namespace !== selected.namespace ||
+    described.name !== selected.name ||
+    // A recreated Pod keeps its name and resource id but not its uid, so the
+    // describe answer can belong to the Pod that replaced the row's instance.
+    (selected.uid !== undefined && described.uid !== selected.uid)
+  )
+    return selected;
+  const summary: Record<string, unknown> = { ...selected.summary };
+  for (const field of logSummaryFields) {
+    const value = described.summary?.[field];
+    if (value !== undefined) summary[field] = value;
+  }
+  return { ...selected, uid: selected.uid ?? described.uid, summary };
 }
 
 function formatAmount(value: number, maximumFractionDigits = 2): string {
@@ -220,9 +275,28 @@ function usageAggregate(usage?: KubernetesUsage, overview?: KubernetesOverview) 
 export function KubernetesPage() {
   const [params, setParams] = useSearchParams();
   const [notice, setNotice] = useState("");
-  const catalog = useQuery({ queryKey: ["kubernetes-clusters"], queryFn: api.kubernetesClusters, retry: false, refetchInterval: (query) => query.state.data?.multiple ? 30_000 : false, refetchIntervalInBackground: false });
+  const catalog = useQuery({ queryKey: ["kubernetes-clusters"], queryFn: api.kubernetesClusters, retry: false, refetchInterval: (query) => kubernetesCatalogRefreshInterval(query.state.data), refetchIntervalInBackground: false });
   const cluster = params.get("cluster") || undefined;
   const missing = Boolean(catalog.data?.multiple && cluster && !catalog.data.clusters.some((entry) => entry.id === cluster));
+  // The fleet lists several clusters at once, so each row's sync state has to
+  // come from that cluster's own complete report rather than the catalog's
+  // eight-kind envelope. Only the fleet needs these reads.
+  const fleetClusters = useMemo(
+    () => catalog.data?.multiple && (!cluster || missing) ? catalog.data.clusters : [],
+    [catalog.data, cluster, missing],
+  );
+  const fleetReports = useQueries({
+    queries: fleetClusters.map((entry) => ({
+      queryKey: ["kubernetes-sync-health", entry.id],
+      queryFn: () => api.kubernetesClusterSyncHealth(entry.id),
+      retry: false,
+      refetchInterval: (query: { state: { data?: KubernetesSyncHealthReport } }) => syncReportPollIntervalMs(clusterSyncEnvelope(query.state.data)),
+    })),
+  });
+  const reports = useMemo(
+    () => Object.fromEntries(fleetClusters.map((entry, index) => [entry.id, fleetReports[index]?.data])),
+    [fleetClusters, fleetReports],
+  );
   useEffect(() => {
     if (!missing) return;
     setNotice("This cluster is no longer available.");
@@ -234,7 +308,13 @@ export function KubernetesPage() {
     if (catalog.error instanceof ApiError && [401, 403].includes(catalog.error.status)) return <main className="min-w-0 flex-1"><TopBar title="Kubernetes" /><div className="p-4"><RetryableError error={catalog.error} onRetry={() => catalog.refetch()} retrying={catalog.isFetching} context="Couldn't load Kubernetes overview" /></div></main>;
     return <main className="min-w-0 flex-1 p-4"><RetryableError error={catalog.error} onRetry={() => catalog.refetch()} retrying={catalog.isFetching} context="Couldn't load clusters" /></main>;
   }
-  if (catalog.data.multiple && (!cluster || missing)) return <KubernetesFleet clusters={catalog.data.clusters} notice={notice || (params.get("notice") === "unavailable" ? "This cluster is no longer available." : undefined)} retry={() => void catalog.refetch()} retrying={catalog.isFetching} />;
+  if (catalog.data.multiple && (!cluster || missing)) return <KubernetesFleet
+    clusters={catalog.data.clusters}
+    reports={reports}
+    notice={notice || (params.get("notice") === "unavailable" ? "This cluster is no longer available." : undefined)}
+    retry={() => { void catalog.refetch(); for (const report of fleetReports) void report.refetch(); }}
+    retrying={catalog.isFetching}
+  />;
   const activeCluster = catalog.data.multiple ? cluster : undefined;
   return <KubernetesClusterProvider catalog={catalog.data} cluster={activeCluster}><KubernetesDashboard key={activeCluster ?? "_"} /></KubernetesClusterProvider>;
 }
@@ -244,18 +324,26 @@ function KubernetesDashboard() {
   const useQuery = useKubernetesQuery;
   const navigate = useNavigate();
   const location = useLocation();
+  // The URL is the only source of truth for the explorer view, the selected
+  // resource identity (r) and the drawer tab. Everything below is derived
+  // from the router location; each user action is exactly one navigate.
+  const urlQuery = useMemo(() => new URLSearchParams(location.search), [location.search]);
+  const view = parseExplorerTab(urlQuery.get("view"));
+  const selectionKey = urlQuery.get("r");
+  const urlResource = useMemo(() => parseResourceSelection(location.search), [location.search]);
+  // Only a cache of the full resource object (uid, summary) for the r the
+  // URL names; it is ignored unless the URL currently selects that key.
+  const [resourceCache, setResourceCache] = useState<{ key: string; resource: KubernetesResource } | null>(null);
+  const selected = useMemo(() => urlResource && selectionKey
+    ? resourceCache?.key === selectionKey ? resourceCache.resource : urlResource
+    : null, [urlResource, selectionKey, resourceCache]);
+  const drawerTab = parseDrawerTab(urlQuery.get("tab"), selected);
+  const writeExplorerLocation = useCallback((options: ExplorerLocation) => {
+    navigate({ pathname: location.pathname, search: explorerSearch(location.search, options) });
+  }, [navigate, location.pathname, location.search]);
   const queryClient = useQueryClient();
-  const [view, setView] = useState<KubernetesExplorerTab>(() =>
-    parseExplorerTab(new URLSearchParams(window.location.search).get("view")),
-  );
   const [name, setName] = useState("");
   const [workloadNamespace, setWorkloadNamespace] = useState("All");
-  const [selected, setSelected] = useState<KubernetesResource | null>(() =>
-    parseResourceSelection(window.location.search),
-  );
-  const [drawerTab, setDrawerTab] = useState<KubernetesDrawerTab>(() =>
-    parseDrawerTab(new URLSearchParams(window.location.search).get("tab"), parseResourceSelection(window.location.search)),
-  );
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [debouncedPaletteQuery, setDebouncedPaletteQuery] = useState("");
@@ -267,7 +355,7 @@ function KubernetesDashboard() {
       return [];
     }
   });
-  const [streamState, setStreamState] = useState<"connecting" | "live" | "reconnecting" | "resyncing">("connecting");
+  const [streamState, setStreamState] = useState<KubernetesStreamState>("connecting");
   const [indexStatus, setIndexStatus] = useState<KubernetesIndexStatus | null>(null);
   const resourceFilterRef = useRef<HTMLInputElement>(null);
   const paletteInputRef = useRef<HTMLInputElement>(null);
@@ -284,14 +372,84 @@ function KubernetesDashboard() {
     queryKey: ["kubernetes-overview"],
     queryFn: api.kubernetesOverview,
     retry: false,
+    // Follow the first sync closely, and keep asking while the sync cannot
+    // finish so the blocking surface and its Retry clear on their own.
+    refetchInterval: (query) => syncPollIntervalMs(query.state.data?.sync),
   });
   const connectorMissing = overview.error instanceof ApiError
     && overview.error.status === 503
     && overview.error.message === "Kubernetes connector is not configured";
   const overviewAccessDenied = overview.error instanceof ApiError && [401, 403].includes(overview.error.status);
   const clusterUnavailable = multiple && overview.error instanceof ApiError && overview.error.status === 404;
-  const clusterQueriesEnabled = !overview.isPending && !connectorMissing && (!multiple || !overviewAccessDenied) && !clusterUnavailable;
+  const clusterReachable = !overview.isPending && !connectorMissing && (!multiple || !overviewAccessDenied) && !clusterUnavailable;
+  /**
+   * The one authority for the blocking gate: every kind the index knows for
+   * this cluster, each with its own state. The per-view `sync` envelope only
+   * covers the kinds a view asked for, so a failing kind outside that set would
+   * otherwise neither block the views nor be named in the surface.
+   */
+  const syncReport = useQuery({
+    queryKey: ["kubernetes-sync-health"],
+    queryFn: api.kubernetesSyncHealth,
+    enabled: clusterReachable,
+    retry: false,
+    // Always bounded: a kind that fails after a healthy report must re-block the
+    // views, and a blocked report must clear, both without a user action.
+    refetchInterval: (query) => syncReportPollIntervalMs(clusterSyncEnvelope(query.state.data)),
+  });
+  // One classification for the whole explorer. The blocking surface, the top
+  // bar and every cluster query read it, so no view can render partial data.
+  /**
+   * What a failed report still knows about the cluster. A cached report is never
+   * preferred over a failing one: it keeps saying ready while every read answers
+   * 502, which leaves the indicator green and the strip empty. The failure body
+   * carries the durable facts instead, so the failure can be named over the data
+   * that is on screen rather than the screen going blank.
+   */
+  const reportFailure = useMemo(
+    () => syncFailureReport(syncReport.isError && syncReport.error instanceof ApiError ? syncReport.error.body : undefined),
+    [syncReport.isError, syncReport.error],
+  );
+  const health = useMemo(
+    () => {
+      if (syncReport.isError) {
+        const age = reportFailure.ageSeconds ?? syncReport.data?.age_s ?? 0;
+        return syncHealth({
+          sync: clusterReachable ? { state: "error", age_s: age, partial: true } : undefined,
+          kinds: null,
+          firstReadyAt: reportFailure.firstReadyAt ?? firstReadyAt(syncReport.data),
+        });
+      }
+      const envelope = clusterSyncEnvelope(syncReport.data);
+      if (!envelope) {
+        // Sync health has exactly one authority. While it is unknown the cluster
+        // stays closed: a view-scoped envelope can read healthy while a kind
+        // outside that view is failing, which is the failure this gate exists to
+        // prevent.
+        return syncHealth({ sync: clusterReachable ? { state: "syncing", age_s: 0, partial: false } : undefined, kinds: null });
+      }
+      // First-sync progress is cluster-wide and only the overview carries it;
+      // the aggregate state itself always comes from the report, and the gate
+      // reads only the blocking group: a kind the connector identity may not
+      // read is a capability gap, never a reason to hide the cluster.
+      const progress = envelope.state === "syncing" ? overview.data?.sync?.progress : undefined;
+      return reportSyncHealth(syncReport.data, progress);
+    },
+    [clusterReachable, reportFailure, syncReport.data, syncReport.isError, overview.data?.sync],
+  );
+  /**
+   * The gate opens on the first publication, not on the current state. Before
+   * this cluster has ever published, a non-ready report closes every view
+   * because there is nothing to show; afterwards a background resync, a partial
+   * cycle or a stale snapshot keeps the last data on screen and is reported as
+   * a strip, so an operator never loses the screen they are working on.
+   */
+  const clusterQueriesEnabled = clusterReachable && (health.state === "ready" || health.firstReadyAt !== undefined);
   const brokenIssues = useBrokenIssues(view === "overview" && clusterQueriesEnabled && !overviewAccessDenied);
+  const overviewChangesKey = useMemo(() => key("kubernetes-changes", "overview", overview.data?.cluster_id), [key, overview.data?.cluster_id]);
+  const subscribeOverviewChanges = useCallback((notify: () => void) => queryClient.getQueryCache().subscribe(notify), [queryClient]);
+  const getOverviewChanges = useCallback(() => queryClient.getQueryData<KubernetesChangesPage>(overviewChangesKey), [queryClient, overviewChangesKey]);
+  const overviewChanges = useSyncExternalStore(subscribeOverviewChanges, getOverviewChanges, getOverviewChanges);
 
   useEffect(() => {
     if (!clusterUnavailable) return;
@@ -373,7 +531,8 @@ function KubernetesDashboard() {
   const [previousLogRequest, setPreviousLogRequest] = useState<{ id: string; container: string; podUID?: string }>();
   const crashLogNavigation = useRef<((event: KubernetesCrashEvent) => boolean) | null>(null);
   const openCrashLogs = (crash: KubernetesCrashEvent) => {
-    if (crashLogNavigation.current?.(crash)) { setPreviousLogRequest(undefined); setSelected(null); setDrawerTab("overview"); return; }
+    // The timeline's own URL write removes r and tab, which closes the drawer.
+    if (crashLogNavigation.current?.(crash)) { setPreviousLogRequest(undefined); return; }
     if (selected?.kind !== "Pod" && !["Deployment", "StatefulSet"].includes(selected?.kind ?? "")) {
       selectResource({ resource_id: "core~v1~pods", kind: "Pod", namespace: crash.namespace, name: crash.pod, uid: crash.pod_uid }, "logs");
       setPreviousLogRequest({ id: crash.id, container: crash.container, podUID: crash.pod_uid });
@@ -394,35 +553,16 @@ function KubernetesDashboard() {
     return () => window.clearTimeout(timer);
   }, [paletteQuery]);
 
-  useEffect(() => {
-    const onPopState = () => {
-      const query = new URLSearchParams(window.location.search);
-      const resource = parseResourceSelection(window.location.search);
-      setView(parseExplorerTab(query.get("view")));
-      setSelected(resource);
-      setDrawerTab(parseDrawerTab(query.get("tab"), resource));
-    };
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, []);
-
+  // Drop a drawer tab the URL cannot honour (no resource, or an obsolete
+  // tab). Validity comes only from the r and tab in this same URL.
   useEffect(() => {
     const query = new URLSearchParams(location.search);
-    const resource = parseResourceSelection(location.search);
-    setView(parseExplorerTab(query.get("view")));
-    setSelected(resource);
-    setDrawerTab(parseDrawerTab(query.get("tab"), resource));
-  }, [location.search]);
-
-  useEffect(() => {
-    const query = new URLSearchParams(window.location.search);
     const requested = query.get("tab");
-    if (requested && parseDrawerTab(requested, selected) === "overview") {
-      query.delete("tab");
-      const suffix = query.toString();
-      window.history.replaceState(null, "", `${window.location.pathname}${suffix ? `?${suffix}` : ""}${window.location.hash}`);
-    }
-  }, [selected, drawerTab]);
+    if (!requested || parseDrawerTab(requested, parseResourceSelection(location.search)) !== "overview") return;
+    query.delete("tab");
+    const suffix = query.toString();
+    navigate({ pathname: location.pathname, search: suffix ? `?${suffix}` : "", hash: location.hash }, { replace: true });
+  }, [location.pathname, location.search, location.hash, navigate]);
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -436,7 +576,6 @@ function KubernetesDashboard() {
       if (editing) return;
       if (event.key === "/") {
         event.preventDefault();
-        setView("resources");
         writeExplorerLocation({ view: "resources" });
         window.requestAnimationFrame(() => resourceFilterRef.current?.focus());
         return;
@@ -446,7 +585,6 @@ function KubernetesDashboard() {
         const next = tabs[event.key.toLowerCase()];
         if (next) {
           event.preventDefault();
-          setView(next);
           writeExplorerLocation({ view: next });
         }
         gShortcutPending.current = false;
@@ -457,7 +595,7 @@ function KubernetesDashboard() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [writeExplorerLocation]);
 
   useEffect(() => {
     if (paletteOpen) window.requestAnimationFrame(() => paletteInputRef.current?.focus());
@@ -476,7 +614,7 @@ function KubernetesDashboard() {
   }, [paletteOpen]);
 
   useEffect(() => {
-    if (!clusterQueriesEnabled) return;
+    if (!clusterReachable) return;
     const controller = new AbortController();
     let disposed = false;
     let reconnectTimer: number | undefined;
@@ -486,7 +624,7 @@ function KubernetesDashboard() {
       if (invalidateTimer) return;
       invalidateTimer = window.setTimeout(() => {
         invalidateTimer = undefined;
-        for (const queryKey of [["kubernetes-overview"], ["kubernetes-graph"], ["kubernetes-namespaces"], ["kubernetes-workloads"], ["kubernetes-nodes"], ["kubernetes-issues"], ["kubernetes-top"], ["kubernetes-diagnosis"], ["kubernetes-drawer-changes"], ["kubernetes-changes"]]) {
+        for (const queryKey of [["kubernetes-overview"], ["kubernetes-sync-health"], ["kubernetes-graph"], ["kubernetes-namespaces"], ["kubernetes-workloads"], ["kubernetes-nodes"], ["kubernetes-issues"], ["kubernetes-top"], ["kubernetes-diagnosis"], ["kubernetes-drawer-changes"], ["kubernetes-changes"]]) {
           void queryClient.invalidateQueries({ queryKey: key(...queryKey) });
         }
       }, 750);
@@ -538,12 +676,11 @@ function KubernetesDashboard() {
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       if (invalidateTimer) window.clearTimeout(invalidateTimer);
     };
-  }, [queryClient, clusterQueriesEnabled, api, key, multiple, navigate]);
+  }, [queryClient, clusterReachable, api, key, multiple, navigate]);
 
   const selectResource = (resource: KubernetesResource, initialTab?: "timeline" | "logs") => {
     setPreviousLogRequest(undefined);
-    setSelected(resource);
-    setDrawerTab(initialTab ?? "overview");
+    setResourceCache({ key: resourceSelectionKey(resource), resource });
     writeExplorerLocation({ resource, drawerTab: initialTab ?? "overview" });
     const recent = `${resource.kind}:${resource.namespace ? `${resource.namespace}/` : ""}${resource.name}`;
     setRecentResources((current) => {
@@ -555,18 +692,13 @@ function KubernetesDashboard() {
   };
   const closeResource = () => {
     setPreviousLogRequest(undefined);
-    setSelected(null);
-    setDrawerTab("overview");
     writeExplorerLocation({ resource: null });
   };
   const selectView = (next: KubernetesExplorerTab) => {
-    setView(next);
     writeExplorerLocation({ view: next });
   };
   const selectDrawerTab = (next: KubernetesDrawerTab) => {
-    const available = parseDrawerTab(next, selected);
-    setDrawerTab(available);
-    if (selected) writeExplorerLocation({ resource: selected, drawerTab: available });
+    if (selected) writeExplorerLocation({ resource: selected, drawerTab: parseDrawerTab(next, selected) });
   };
   const visibleDrawerTabs = drawerTabs;
   const visibleResources = asArray(workloads.data?.items);
@@ -629,6 +761,7 @@ function KubernetesDashboard() {
   );
   const refreshAll = () => {
     overview.refetch();
+    syncReport.refetch();
     if (!clusterQueriesEnabled) return;
     usage.refetch();
     workloads.refetch();
@@ -644,26 +777,20 @@ function KubernetesDashboard() {
   const nodesUnavailable = overview.data
     ? categoryUnavailable(overview.data, ["core~v1~nodes"])
     : false;
+  // When the reader may not list nodes, say so instead of blaming the nodes.
+  const allocatableReason = nodesUnavailable && asArray(overview.data?.partial_failures).some((failure) => failure.resource_id === "core~v1~nodes" && ["forbidden", "unauthorized"].includes(failure.class))
+    ? nodeAccessReason
+    : undefined;
   const usageAccessDenied = usage.error instanceof ApiError && [401, 403].includes(usage.error.status);
   const workloadsAccessDenied = overviewAccessDenied || workloads.error instanceof ApiError && [401, 403].includes(workloads.error.status);
   const nodesAccessDenied = overviewAccessDenied || nodes.error instanceof ApiError && [401, 403].includes(nodes.error.status);
   const aggregateUsage = usageAggregate(usageAccessDenied ? undefined : usage.data, overview.data);
-  const overviewWarningMessages = overview.data
-    ? [
-        ...(overview.data.partial_failures?.length
-          ? [
-              `Partial cluster visibility: ${[
-                ...new Set(
-                  overview.data.partial_failures.map((failure) => failure.class),
-                ),
-              ].join(", ")}`,
-            ]
-          : []),
-        ...(overview.data.truncated
-          ? ["Overview reached its collection bound. Some categories are omitted."]
-          : []),
-      ]
-    : [];
+  // The coverage marker explains data that is on screen. While the sync is not
+  // healthy nothing is on screen, and the blocking surface names the failures.
+  const overviewWarningMessages = view === "overview" && clusterQueriesEnabled ? [
+    ...failureWarnings(overview.data?.partial_failures).map((warning) => warning.content),
+    ...timelineWarnings(overviewAccessDenied ? undefined : brokenIssues.data, overviewAccessDenied ? undefined : overviewChanges).map((warning) => warning.content),
+  ] : [];
   if (clusterUnavailable) return <p role="status" className="p-4 text-sm text-sev-warning">This cluster is no longer available.</p>;
   if (connectorMissing) {
     return (
@@ -687,6 +814,7 @@ function KubernetesDashboard() {
     );
   }
   return (
+    <KubernetesFirstReadyContext.Provider value={health.firstReadyAt}>
     <CrashLogNavigationContext.Provider value={crashLogNavigation}>
     <main className="relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
       <TopBar
@@ -699,12 +827,13 @@ function KubernetesDashboard() {
               for (const parameter of ["r", "tab", "namespace", "root_uid", "center"]) next.delete(parameter);
               navigate(`/agent/kubernetes?${next}`);
             }}>{clusters.map((entry) => <option key={entry.id} value={entry.id}>{entry.display_name || entry.id}</option>)}</select></>}
-            <span role="status" aria-live="polite" title={indexStatus ? `Index ${indexStatus.state}${indexStatus.partial ? ", partial" : ""}` : "Kubernetes index status unavailable"} className={`hidden text-2xs sm:inline ${streamState === "live" ? "text-sev-ok" : "text-ink-400"}`}>
-              {streamState === "live" ? `Live${indexStatus ? ` (${Math.round(indexStatus.age_s)}s)` : ""}` : streamState === "resyncing" ? "Resyncing" : streamState === "connecting" ? "Connecting" : "Reconnecting"}
-            </span>
-            {overviewWarningMessages.length > 0 && (
-              <OverviewWarningIndicator messages={overviewWarningMessages} />
-            )}
+            <KubernetesSyncStateIndicator
+              state={health.state}
+              streamState={streamState}
+              ageSeconds={indexStatus?.age_s}
+              title={syncReport.data ? `Cluster sync ${syncReport.data.state} across ${syncReport.data.total_kinds} resource types` : "Kubernetes index status unavailable"}
+            />
+            <CoverageMarker reasons={overviewWarningMessages} />
             <button
               type="button"
               onClick={refreshAll}
@@ -721,7 +850,7 @@ function KubernetesDashboard() {
           </div>
         }
       />
-      <div className="mx-auto min-w-0 max-w-7xl space-y-3 overflow-x-hidden p-3 sm:space-y-5 sm:p-6">
+      <div className="kubernetes-explorer-content mx-auto min-w-0 max-w-7xl space-y-3 overflow-x-hidden p-3 sm:space-y-5 sm:p-6" data-drawer={clusterReachable && selected !== null ? "open" : undefined}>
         {multiple && <nav aria-label="Cluster breadcrumb" className="flex min-w-0 items-center gap-2 text-xs text-ink-400"><Link to="/agent/kubernetes" className="text-link">Clusters</Link><ChevronRight size={12} className="shrink-0" /><span className="truncate text-ink-200">{clusters.find((entry) => entry.id === cluster)?.display_name || cluster}</span></nav>}
         <nav role="tablist" aria-label="Kubernetes views" className="flex min-w-0 gap-1 overflow-x-auto rounded-card border border-ink-500/60 bg-surface p-1 shadow-card" onKeyDown={(event) => {
           if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
@@ -744,11 +873,21 @@ function KubernetesDashboard() {
           })}
         </nav>
         <div role="tabpanel" id="kubernetes-view-panel" aria-labelledby={`kubernetes-tab-${view}`} className="space-y-3 sm:space-y-5">
-        {view === "overview" && overview.isPending && !overview.data && (
+        {overview.isPending && (
           <div aria-label="Loading Kubernetes overview">
             <SkCard lines={4} />
           </div>
         )}
+        {/* The sync state is named on every view and on every failure, with or
+            without an overview: a read that cannot answer must never leave the
+            tab blank. */}
+        {!overview.isPending && <KubernetesUnreadableNote kinds={health.unreadable} />}
+        {!overview.isPending && <KubernetesSyncHealthSurface
+          health={health}
+          onRetry={refreshAll}
+          retrying={overview.isRefetching}
+          cluster={clusters.find((entry) => entry.id === cluster)?.display_name || cluster || overview.data?.cluster_id}
+        />}
         {view === "overview" && overview.isError && (!overview.data || overviewAccessDenied) && (
           <RetryableError
             error={overview.error}
@@ -758,7 +897,7 @@ function KubernetesDashboard() {
           />
         )}
 
-        {view === "overview" && overview.data && (
+        {view === "overview" && clusterQueriesEnabled && overview.data && (
           <>
             <section
               aria-label="Cluster health"
@@ -768,7 +907,7 @@ function KubernetesDashboard() {
               <ClusterHealthHeader
                 overview={overview.data}
                 broken={brokenIssues.error instanceof ApiError && [401, 403].includes(brokenIssues.error.status) ? undefined : brokenIssues.data?.broken?.total}
-                sync={brokenIssues.error instanceof ApiError && [401, 403].includes(brokenIssues.error.status) ? undefined : brokenIssues.data?.sync}
+                sync={brokenIssues.error instanceof ApiError && [401, 403].includes(brokenIssues.error.status) ? undefined : settledSync(brokenIssues.data?.sync, brokenIssues.data?.partial_failures)}
                 onOpenIssues={() => selectView("issues")}
               />
             </section>
@@ -785,7 +924,9 @@ function KubernetesDashboard() {
                   aggregateUsage.cpu,
                   podsUnavailable ? undefined : overview.data.requested_cpu,
                   nodesUnavailable ? undefined : overview.data.allocatable_cpu,
+                  allocatableReason,
                 )}
+                unavailable={allocatableReason ? { Allocatable: allocatableReason } : undefined}
                 values={[
                   [
                     "Requested",
@@ -811,7 +952,9 @@ function KubernetesDashboard() {
                   aggregateUsage.memory,
                   podsUnavailable ? undefined : overview.data.requested_memory,
                   nodesUnavailable ? undefined : overview.data.allocatable_memory,
+                  allocatableReason,
                 )}
+                unavailable={allocatableReason ? { Allocatable: allocatableReason } : undefined}
                 values={[
                   [
                     "Requested",
@@ -863,7 +1006,7 @@ function KubernetesDashboard() {
         )}
 
         {view === "overview" && clusterQueriesEnabled && <>
-        {overview.data && <KubernetesOverviewInsights overview={overview.data} indexStatus={indexStatus} indexLive={streamState === "live" && !overview.isError} unavailable={overviewAccessDenied} onSelectView={selectView} />}
+        {overview.data && <KubernetesOverviewInsights overview={overview.data} indexStatus={indexStatus} unavailable={overviewAccessDenied} onSelectView={selectView} />}
         </>}
         {view === "resources" && clusterQueriesEnabled && (
         <div className="min-w-0 w-full">
@@ -876,7 +1019,7 @@ function KubernetesDashboard() {
               </span>
             }
           >
-            <div className="grid gap-2 border-b border-ink-700 p-3 sm:grid-cols-[minmax(0,1fr)_14rem]">
+            <div className="kubernetes-list-toolbar grid gap-2 border-b border-ink-700 p-3">
               <div className="relative min-w-0 flex-1">
                 <Search
                   size={14}
@@ -894,19 +1037,18 @@ function KubernetesDashboard() {
               </div>
               <label className="text-2xs text-ink-400">
                 <span className="sr-only">Workload namespace</span>
-                <input
-                  aria-label="Workload namespace"
-                  className="input h-full w-full"
-                  value={workloadNamespace === "All" ? "" : workloadNamespace}
-                  onChange={(event) => setWorkloadNamespace(event.target.value || "All")}
-                  placeholder="All namespaces"
-                />
+                <NamespaceSelect label="Workload namespace" value={workloadNamespace === "All" ? "" : workloadNamespace} onChange={(namespace) => setWorkloadNamespace(namespace || "All")} />
               </label>
             </div>
             <KindTabs label="Workload kind" kinds={workloadKindOptions} counts={workloadsAccessDenied ? {} : workloadCounts} selected={workloadKind} onSelect={setWorkloadKind} />
-            {workloads.isPending && !workloads.data && (
+            {workloads.isPending && (
               <div className="p-4">
                 <SkCard lines={4} />
+              </div>
+            )}
+            {workloads.data?.sync?.state === "syncing" && !health.firstReadyAt && (
+              <div className="p-3">
+                <KubernetesPreparingPanel progress={workloads.data.sync.progress} />
               </div>
             )}
             {(workloadsAccessDenied || workloads.isError && !workloads.data) && (
@@ -914,10 +1056,13 @@ function KubernetesDashboard() {
                 Resource inventory is unavailable.
               </p>
             )}
-            {workloads.data && !workloadsAccessDenied && (
+            {/* The rows already in hand survive a background resync: once this
+                cluster has published, only a cluster that never has anything to
+                show is replaced by the preparing surface. */}
+            {workloads.data && (Boolean(health.firstReadyAt) || workloads.data.sync?.state !== "syncing") && !workloadsAccessDenied && (
                 <div className="overflow-hidden">
                   {visibleResources.length > 0 && (
-                    <div className="hidden grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_7rem_minmax(7rem,1fr)_1.5rem] gap-3 border-b border-ink-700 bg-ink-900/40 px-4 py-2 text-2xs font-medium uppercase text-ink-400 sm:grid">
+                    <div className="kubernetes-list-head border-b border-ink-700 bg-ink-900/40 px-4 py-2 text-2xs font-medium uppercase text-ink-400">
                       <span>Name</span>
                       <span>Namespace</span>
                       <span>Kind</span>
@@ -939,6 +1084,7 @@ function KubernetesDashboard() {
                           selected?.name === item.name
                         }
                         onSelect={() => selectResource(item)}
+                        onLogs={selectResource}
                       />
                     ))}
                   </div>
@@ -950,15 +1096,6 @@ function KubernetesDashboard() {
                   <CursorPagination state={workloadPaging} next={workloads.data?.next} />
                 </div>
               )}
-            {!workloadsAccessDenied && (workloads.data?.truncated ||
-            workloads.data?.partial_failures?.length) ? (
-              <p
-                role="status"
-                className="min-w-0 break-words border-t border-ink-700 px-4 py-2 text-xs text-sev-warning"
-              >
-                Inventory is bounded or partially available.
-              </p>
-            ) : null}
             <PartialFailuresDisclosure failures={workloadsAccessDenied ? undefined : workloads.data?.partial_failures} />
           </SectionFrame>
 
@@ -987,6 +1124,7 @@ function KubernetesDashboard() {
               pagination={nodePodPaging}
               next={nodePods.data?.continue}
               onClose={() => setSelectedNode(null)}
+              onLogs={selectResource}
             />
           ) : (
             <>
@@ -1017,21 +1155,6 @@ function KubernetesDashboard() {
                   <CursorPagination state={nodePaging} next={nodes.data.continue} />
                 </div>
               )}
-              {!nodesAccessDenied && (nodes.data?.truncated ||
-                nodes.data?.partial_failures?.length) && (
-                <p
-                  role="status"
-                  className="min-w-0 break-words border-t border-ink-700 px-4 py-2 text-xs text-sev-warning"
-                >
-                  Node inventory is partial
-                  {nodes.data.partial_failures?.some(
-                    (failure) => failure.class === "forbidden",
-                  )
-                    ? " because nodes are forbidden"
-                    : ""}
-                  .
-                </p>
-              )}
               <PartialFailuresDisclosure failures={nodesAccessDenied ? undefined : asArray(nodes.data?.partial_failures)} />
             </>
           )}
@@ -1044,7 +1167,7 @@ function KubernetesDashboard() {
       </div>
 
       <PeekPanel
-        open={clusterQueriesEnabled && selected !== null}
+        open={clusterReachable && selected !== null}
         onClose={closeResource}
         size="wide"
         appearance="resource"
@@ -1068,6 +1191,12 @@ function KubernetesDashboard() {
             : "Resource detail"
         }
       >
+        {!clusterQueriesEnabled && selected && <div className="p-3"><KubernetesSyncHealthSurface
+          health={health}
+          onRetry={refreshAll}
+          retrying={overview.isRefetching}
+          cluster={clusters.find((entry) => entry.id === cluster)?.display_name || cluster || overview.data?.cluster_id}
+        /></div>}
         {clusterQueriesEnabled && selected && <div className="resource-detail-content" data-workload={["Deployment", "StatefulSet"].includes(selected.kind)}>
           <div className="resource-navigation">
           <div role="tablist" aria-label="Resource detail views" className="resource-tabs flex min-w-0 gap-0 overflow-x-auto border-b border-ink-700" onKeyDown={(event) => {
@@ -1094,19 +1223,21 @@ function KubernetesDashboard() {
           }}>{visibleDrawerTabs.slice(3).map((item) => <button type="button" role="menuitem" key={item.id} onClick={(event) => { selectDrawerTab(item.id); const details = event.currentTarget.closest("details"); details?.removeAttribute("open"); details?.querySelector("summary")?.focus(); }}>{item.label}</button>)}</div></details>}
           </div>
           <div role="tabpanel" className="resource-tabpanel" data-view={drawerTab} id="kubernetes-drawer-panel" aria-labelledby={`kubernetes-drawer-tab-${drawerTab}`}>
-          {detail.isPending && <SkCard lines={5} />}
+          {(detail.isPending || (workloadDetailEnabled && workloadDetail.isPending)) && <ResourcePreparing resource={selected} readingRelated={!detail.isPending} />}
           {detail.isError && <RetryableError error={detail.error} onRetry={() => detail.refetch()} retrying={detail.isRefetching} context="Couldn't load resource detail" />}
           {detail.data && !detail.isError && <>
             <div hidden={drawerTab !== "overview"} className="resource-overview space-y-4">
               <ResourceMetrics resource={detail.data.resource} workload={workloadDetail.isError ? undefined : workloadDetail.data} liveSamples={liveMetrics} onCrash={openCrashLogs} />
               <ResourceFacts resource={detail.data.resource} workload={workloadDetail.isError ? undefined : workloadDetail.data} onOpen={selectResource} />
             </div>
-            {["Pod", "Deployment", "StatefulSet"].includes(selected.kind) ? <div hidden={drawerTab !== "overview" && drawerTab !== "logs"} className="resource-log-slot" data-full={drawerTab === "logs"}><PodLogViewer key={`${cluster}:${selected.resource_id}/${selected.namespace}/${selected.name}/${detail.data.resource.uid}`} resource={detail.data.resource} compact={drawerTab !== "logs"} onOpenFull={() => selectDrawerTab("logs")} previousRequest={previousLogRequest} /></div> : drawerTab === "logs" && <p className="text-xs text-ink-400">Live logs are available for Pods, Deployments and StatefulSets.</p>}
             {drawerTab === "events" && <ResourceEvents events={detail.data.events ?? []} />}
             {drawerTab === "yaml" && <ResourceYaml resource={detail.data.resource} />}
             {drawerTab === "related" && <ResourceRelations resource={detail.data.resource} related={detail.data.related_resources} onOpen={selectResource} />}
             {drawerTab === "timeline" && <ResourceTimeline resource={detail.data.resource} onCrash={openCrashLogs} />}
           </>}
+          {/* Logs read straight from the list row, so the tab paints without
+              waiting for the describe call to finish. */}
+          {canStreamLogs(selected) ? <div hidden={drawerTab !== "overview" && drawerTab !== "logs"} className="resource-log-slot" data-full={drawerTab === "logs"}><PodLogViewer key={`${cluster}:${selected.resource_id}/${selected.namespace}/${selected.name}/${selected.uid ?? ""}`} resource={logViewResource(selected, detail.data?.resource)} compact={drawerTab !== "logs"} onOpenFull={() => selectDrawerTab("logs")} previousRequest={previousLogRequest} /></div> : drawerTab === "logs" && <p className="text-xs text-ink-400">Live logs are available for Pods, Deployments and StatefulSets.</p>}
           </div>
         </div>}
       </PeekPanel>
@@ -1125,6 +1256,7 @@ function KubernetesDashboard() {
       />}
     </main>
     </CrashLogNavigationContext.Provider>
+    </KubernetesFirstReadyContext.Provider>
   );
 }
 
@@ -1134,7 +1266,6 @@ function CommandPalette({
   onQueryChange,
   results,
   loading,
-  partial,
   recent,
   onRecent,
   onSelectResource,
@@ -1163,7 +1294,6 @@ function CommandPalette({
         {loading && <p role="status" className="p-4 text-xs text-ink-400">Searching discovered resources.</p>}
         {results.map((resource) => <button type="button" role="option" aria-selected="false" className="flex w-full items-center justify-between gap-3 border-b border-ink-700 px-4 py-3 text-left hover:bg-ink-800" onClick={() => onSelectResource(resource)} key={`${resource.resource_id}:${resource.namespace}:${resource.name}`}><span className="min-w-0"><span className="block truncate text-sm text-ink-100">{resource.name}</span><span className="block truncate text-2xs text-ink-400">{resource.kind} {resource.namespace || "Cluster scope"}</span></span><span className="pill">Open</span></button>)}
         {query.trim() && !loading && results.length === 0 && <p role="status" className="p-4 text-xs text-ink-400">No matching resources found.</p>}
-        {partial && <p role="status" className="border-t border-ink-700 px-4 py-2 text-2xs text-sev-warning">Search results are bounded or partial.</p>}
       </div>
       <p className="border-t border-ink-700 px-4 py-2 text-2xs text-ink-400">Search uses projected names and metadata only.</p>
     </section>
@@ -1182,7 +1312,7 @@ function CommandPalette({
   children: ReactNode;
 }) {
   return (
-    <section className="rise-in card min-w-0 overflow-hidden" aria-label={title}>
+    <section className="rise-in card kubernetes-list-surface min-w-0 overflow-hidden" aria-label={title}>
       <header className="card-header min-w-0">
         <h2 className="card-title flex min-w-0 items-center gap-2">
           <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-control bg-accent/10 text-link [&>svg]:size-3.5">
@@ -1291,26 +1421,30 @@ function capacityPercent(
   return Number.isFinite(percent) ? percent : null;
 }
 
+const nodeAccessReason = "Needs node read access (list nodes)";
+
 function capacityMeters(
   resource: "CPU" | "Memory",
   usage: string | undefined,
   requested: string | undefined,
   allocatable: string | undefined,
+  allocatableReason?: string,
 ): CapacityMeterValue[] {
   const total = parseQuantity(allocatable);
   const allocatableMissing = total === null || total <= 0;
+  const noAllocatable = allocatableReason ?? "Needs allocatable capacity";
   return [
     {
       label: "In use",
       name: `${resource} in use`,
       percent: capacityPercent(usage, allocatable),
-      missing: allocatableMissing ? "Needs allocatable capacity" : "Needs usage metrics",
+      missing: allocatableMissing ? noAllocatable : "Needs usage metrics",
     },
     {
       label: "Reserved by requests",
       name: `${resource} reserved by requests`,
       percent: capacityPercent(requested, allocatable),
-      missing: allocatableMissing ? "Needs allocatable capacity" : "Needs pod requests",
+      missing: allocatableMissing ? noAllocatable : "Needs pod requests",
     },
   ];
 }
@@ -1375,13 +1509,7 @@ function ClusterHealthHeader({
   broken?: number;
   sync?: { state: string; age_s: number; partial: boolean };
 }) {
-  const { cluster } = useKubernetesCluster();
-  const warnings: KubernetesWarning[] = failureWarnings(overview.partial_failures);
-  for (const category of [...new Set(overview.omitted_categories ?? [])].sort()) {
-    if (!overview.partial_failures?.some((failure) => failure.resource_id === category)) warnings.push({ id: `omitted:${category}`, content: `Coverage unavailable: ${category}.` });
-  }
-  if (overview.truncated) warnings.push({ id: "overview-cap", content: "Overview inventory is bounded; coverage is incomplete." });
-  const partial = overview.truncated || Boolean(warnings.length) || Boolean(sync?.partial);
+  const partial = Boolean(failureWarnings(overview.partial_failures).length) || Boolean(sync?.partial);
   const syncLabel = !partial && sync?.state === "ready" ? `Synced ${Math.round(sync.age_s)}s` : sync?.state === "ready" || sync?.state === "stale" ? `Snapshot ${Math.round(sync.age_s)}s ago` : "Sync unknown";
   const observed = Date.parse(overview.observed_at);
   return (
@@ -1399,7 +1527,7 @@ function ClusterHealthHeader({
           </h2>
           <p className="mt-0.5 text-2xs text-ink-400">
             {Number.isFinite(observed)
-              ? `Snapshot ${new Date(observed).toLocaleTimeString([], { hour12: false })}`
+              ? isZeroTime(overview.observed_at) ? "Snapshot unavailable" : `Snapshot ${new Date(observed).toLocaleTimeString([], { hour12: false })}`
               : "Snapshot time not reported"}
           </p>
         </div>
@@ -1413,7 +1541,6 @@ function ClusterHealthHeader({
         <ChevronRight size={13} aria-hidden="true" className="hidden sm:block" />
       </button>
       </div>
-      {warnings.length > 0 && <div className="col-span-2"><KubernetesWarnings warnings={warnings} scope={JSON.stringify([cluster])} /></div>}
     </header>
   );
 }
@@ -1424,12 +1551,14 @@ function CapacityPanel({
   values,
   meters,
   formatter,
+  unavailable,
 }: {
   icon: typeof Cpu;
   title: string;
   values: Array<[string, string | undefined]>;
   meters: CapacityMeterValue[];
   formatter: (value: string | undefined) => string;
+  unavailable?: Record<string, string>;
 }) {
   return (
     <section className="rise-in card relative overflow-hidden transition-colors duration-200 hover:border-ink-400/60">
@@ -1449,12 +1578,13 @@ function CapacityPanel({
       </div>
       <dl className="grid grid-cols-2 divide-x divide-y divide-ink-700 sm:grid-cols-4 sm:divide-y-0">
         {values.map(([label, value]) => {
-          const formatted = formatter(value);
+          const formatted = value === undefined && unavailable?.[label] ? unavailable[label] : formatter(value);
+          const missing = formatted === "Unavailable" || formatted === unavailable?.[label];
           return (
             <div className="min-w-0 p-3" key={label}>
               <dt className="text-2xs uppercase tracking-wider text-ink-400">{label}</dt>
               <dd
-                className={`mt-1 truncate text-sm font-semibold tabular-nums ${formatted === "Unavailable" ? "text-ink-400" : "text-ink-100"}`}
+                className={`mt-1 truncate text-sm font-semibold tabular-nums ${missing ? "text-ink-400" : "text-ink-100"}`}
                 title={formatted}
               >
                 {formatted}
@@ -1467,14 +1597,46 @@ function CapacityPanel({
   );
 }
 
+// The drawer's own waiting state: it names what is being read from the list row
+// instead of showing a bare skeleton, and only appears once the read has taken
+// long enough to be worth reporting.
+function ResourcePreparing({ resource, readingRelated }: { resource: KubernetesResource; readingRelated: boolean }) {
+  const [visible, setVisible] = useState(false);
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const reveal = setTimeout(() => setVisible(true), 300);
+    const tick = setInterval(() => setSeconds((value) => value + 1), 1000);
+    return () => { clearTimeout(reveal); clearInterval(tick); };
+  }, []);
+  if (!visible) return null;
+  const step = readingRelated ? "Reading related resources" : "Reading resource";
+  return (
+    <section data-resource-preparing aria-label={`Preparing ${resource.kind} ${resource.name}`} className="card p-4">
+      <div className="flex min-w-0 items-center gap-3">
+        <Loader2 size={16} aria-hidden="true" className="shrink-0 animate-spin text-link motion-reduce:animate-none" />
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-ink-100" title={resource.name}>{resource.name}</p>
+          <p className="truncate text-2xs text-ink-400">{resource.kind}{resource.namespace ? ` in ${resource.namespace}` : ""}</p>
+        </div>
+      </div>
+      <p role="status" className="mt-3 flex flex-wrap items-center gap-x-2 text-xs text-ink-300">
+        <span>{step}</span>
+        {seconds >= 2 && <span className="tabular-nums text-ink-400">{seconds}s</span>}
+      </p>
+    </section>
+  );
+}
+
 function ResourceRow({
   item,
   selected,
   onSelect,
+  onLogs,
 }: {
   item: KubernetesResource;
   selected: boolean;
   onSelect: () => void;
+  onLogs?: (resource: KubernetesResource, tab: "logs") => void;
 }) {
   const condition = asArray(item.conditions).find(
     (entry) => entry.type === "Ready" || entry.status === "False",
@@ -1482,27 +1644,27 @@ function ResourceRow({
   const unhealthy = condition?.status === "False";
   const status = workloadStatus(item);
   return (
-    <div role="listitem">
+    <div role="listitem" className="flex min-w-0 items-center">
       <button
         type="button"
         onClick={onSelect}
         aria-label={`Select ${item.kind} ${item.namespace ? `${item.namespace}/` : ""}${item.name}`}
-        className={`grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-left hover:bg-ink-800/60 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_7rem_minmax(7rem,1fr)_1.5rem] ${selected ? "bg-ink-800" : ""}`}
+        className={`kubernetes-list-row kubernetes-list-row--workload w-full min-w-0 flex-1 px-4 py-3 text-left hover:bg-ink-800/60 ${selected ? "bg-ink-800" : ""}`}
       >
         <div className="min-w-0">
           <span className="block truncate text-sm font-medium text-ink-50">
             {item.name}
           </span>
-          <p className="mt-1 truncate text-2xs text-ink-400 sm:hidden">
+          <p className="kubernetes-list-inline-meta mt-1 truncate text-2xs text-ink-400">
             {item.namespace || "cluster scope"}
           </p>
         </div>
-        <span className="hidden truncate text-xs text-ink-300 sm:block">
+        <span className="kubernetes-list-namespace truncate text-xs text-ink-300">
           {item.namespace || "cluster scope"}
         </span>
         <span className="pill w-fit">{item.kind}</span>
         <span
-          className={`col-span-2 flex min-w-0 items-center gap-1.5 text-xs sm:col-span-1 ${unhealthy ? "text-sev-warning" : "text-ink-300"}`}
+          className={`kubernetes-list-status flex min-w-0 items-center gap-1.5 text-xs ${unhealthy ? "text-sev-warning" : "text-ink-300"}`}
         >
           {unhealthy && (
             <AlertTriangle size={13} className="shrink-0" aria-hidden="true" />
@@ -1511,39 +1673,11 @@ function ResourceRow({
         </span>
         <ChevronRight
           size={14}
-          className="hidden text-ink-500 sm:block"
+          className="kubernetes-list-chevron text-ink-500"
           aria-hidden="true"
         />
       </button>
-    </div>
-  );
-}
-
-function OverviewWarningIndicator({ messages }: { messages: string[] }) {
-  return (
-    <div className="group relative">
-      <button
-        type="button"
-        aria-label={`${messages.length} Kubernetes overview ${messages.length === 1 ? "warning" : "warnings"}`}
-        aria-describedby="kubernetes-overview-warnings"
-        className="inline-flex size-9 items-center justify-center rounded-control text-sev-warning hover:bg-sev-warning/10 focus-visible:bg-sev-warning/10"
-      >
-        <AlertTriangle size={16} />
-      </button>
-      <div
-        id="kubernetes-overview-warnings"
-        role="tooltip"
-        className="pointer-events-none absolute right-0 top-full z-tooltip mt-1 hidden w-72 max-w-[calc(100vw-1rem)] border border-ink-600 bg-ink-900 p-3 text-xs text-ink-100 shadow-xl group-hover:block group-focus-within:block"
-      >
-        <p className="font-semibold text-sev-warning">Cluster visibility warning</p>
-        <ul className="mt-2 space-y-1.5">
-          {messages.map((message) => (
-            <li className="break-words" key={message}>
-              {message}
-            </li>
-          ))}
-        </ul>
-      </div>
+      {onLogs && <div className="px-2"><ResourceLogsButton resource={item} onSelect={onLogs} /></div>}
     </div>
   );
 }
@@ -1608,7 +1742,7 @@ function NodeRow({
         type="button"
         aria-label={`View pods on ${node.name}`}
         onClick={onSelect}
-        className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-left hover:bg-ink-800/60 sm:grid-cols-[minmax(0,1.4fr)_minmax(7rem,0.7fr)_minmax(8rem,1fr)_minmax(8rem,1fr)_1rem]"
+        className="kubernetes-list-row kubernetes-list-row--nodes w-full min-w-0 px-4 py-3 text-left hover:bg-ink-800/60"
       >
         <span
           className="truncate text-sm font-medium text-ink-50"
@@ -1625,21 +1759,21 @@ function NodeRow({
         >
           {status}
         </span>
-        <span className="hidden truncate text-xs text-ink-300 sm:block">
+        <span className="kubernetes-list-metric truncate text-xs text-ink-300">
           {formatCPU(
             typeof summary.allocatable_cpu === "string"
               ? summary.allocatable_cpu
               : undefined,
           )}
         </span>
-        <span className="hidden truncate text-xs text-ink-300 sm:block">
+        <span className="kubernetes-list-metric truncate text-xs text-ink-300">
           {formatMemory(
             typeof summary.allocatable_memory === "string"
               ? summary.allocatable_memory
               : undefined,
           )}
         </span>
-        <ChevronRight size={14} className="text-ink-500" aria-hidden="true" />
+        <ChevronRight size={14} className="kubernetes-list-chevron text-ink-500" aria-hidden="true" />
       </button>
     </div>
   );
@@ -1649,12 +1783,12 @@ function NodePods({
   node,
   isPending,
   isError,
-  truncated,
   partialFailures,
   items,
   pagination,
   next,
   onClose,
+  onLogs,
 }: {
   node: KubernetesResource;
   isPending: boolean;
@@ -1665,6 +1799,7 @@ function NodePods({
   pagination: CursorPaginationState;
   next?: string;
   onClose: () => void;
+  onLogs: (resource: KubernetesResource, tab: "logs") => void;
 }) {
   return (
     <div className="min-w-0">
@@ -1705,6 +1840,7 @@ function NodePods({
               <NodePodRow
                 pod={pod}
                 key={`${pod.namespace ?? ""}:${pod.name}`}
+                onLogs={onLogs}
               />
             ))}
           </div>
@@ -1714,24 +1850,12 @@ function NodePods({
           <CursorPagination state={pagination} next={next} />
         </>
       )}
-      {truncated || partialFailures?.length ? (
-        <p
-          role="status"
-          className="min-w-0 break-words border-t border-ink-700 px-4 py-2 text-xs text-sev-warning"
-        >
-          Scheduled pod inventory is partial
-          {partialFailures?.some((failure) => failure.class === "forbidden")
-            ? " because some pods are forbidden"
-            : ""}
-          .
-        </p>
-      ) : null}
       <PartialFailuresDisclosure failures={asArray(partialFailures)} />
     </div>
   );
 }
 
-function NodePodRow({ pod }: { pod: KubernetesResource }) {
+function NodePodRow({ pod, onLogs }: { pod: KubernetesResource; onLogs: (resource: KubernetesResource, tab: "logs") => void }) {
   const summary = pod.summary ?? {};
   const phase =
     typeof summary.phase === "string" ? summary.phase : workloadStatus(pod);
@@ -1742,19 +1866,22 @@ function NodePodRow({ pod }: { pod: KubernetesResource }) {
   return (
     <div
       role="listitem"
-      className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-3 px-4 py-3 text-xs sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_7rem_6rem]"
+      className="flex min-w-0 items-center"
     >
-      <span
-        className="truncate text-ink-300"
-        title={pod.namespace || "cluster scope"}
-      >
-        {pod.namespace || "cluster scope"}
-      </span>
-      <span className="truncate font-medium text-ink-100" title={pod.name}>
-        {pod.name}
-      </span>
-      <span className="text-ink-300">{phase}</span>
-      <span className="text-right tabular-nums text-ink-300">{restarts}</span>
+      <div className="kubernetes-list-row kubernetes-list-row--pods min-w-0 flex-1 px-4 py-3 text-xs">
+        <span
+          className="truncate text-ink-300"
+          title={pod.namespace || "cluster scope"}
+        >
+          {pod.namespace || "cluster scope"}
+        </span>
+        <span className="truncate font-medium text-ink-100" title={pod.name}>
+          {pod.name}
+        </span>
+        <span className="text-ink-300">{phase}</span>
+        <span className="text-right tabular-nums text-ink-300">{restarts}</span>
+      </div>
+      <div className="px-2"><ResourceLogsButton resource={pod} onSelect={onLogs} /></div>
     </div>
   );
 }

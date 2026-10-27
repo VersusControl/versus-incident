@@ -493,10 +493,12 @@ func TestIndependentCaptureFailoverAndForegroundReads(t *testing.T) {
 		service.changes.lifecycle = t.Context()
 		service.changes.captures[service.indexScope()] = loop
 		service.changes.mu.Unlock()
+		service.startInventory(ctx)
 		go service.capture(loop)
 		t.Cleanup(service.StopCapture)
 		return loop
 	}
+	var diagnose func()
 	wait := func(check func() bool) {
 		t.Helper()
 		timer := time.NewTimer(4 * time.Second)
@@ -506,6 +508,9 @@ func TestIndependentCaptureFailoverAndForegroundReads(t *testing.T) {
 		for !check() {
 			select {
 			case <-timer.C:
+				if diagnose != nil {
+					diagnose()
+				}
 				t.Fatal("capture ownership or commit did not settle")
 			case <-ticker.C:
 			}
@@ -520,6 +525,7 @@ func TestIndependentCaptureFailoverAndForegroundReads(t *testing.T) {
 		go func() {
 			snapshot, status, err := service.IndexSnapshot(t.Context(), "Pod")
 			if err == nil && (status.State != "ready" || len(snapshot.Records) != 1) {
+				t.Logf("foreground isolation diagnostic: status=%+v records=%d", status, len(snapshot.Records))
 				err = errors.New("foreground did not read its independent index")
 			}
 			results <- err
@@ -564,6 +570,22 @@ func TestIndependentCaptureFailoverAndForegroundReads(t *testing.T) {
 	staleOwner := loops[owner].owner
 	loops[owner].mu.Unlock()
 	leader.StopCapture()
+	diagnose = func() {
+		for position, service := range services {
+			loop := loops[position]
+			loop.mu.Lock()
+			t.Logf("capture handoff diagnostic replica=%d owned=%v behind=%v next=%v success=%v completed=%v ctx=%v", position, loop.owned, loop.status.Behind, loop.next["Pod"], loop.success["Pod"], loop.completed["Pod"], loop.ctx.Err())
+			loop.mu.Unlock()
+			service.changes.mu.Lock()
+			inventory := service.changes.inventories[service.indexScope()]
+			service.changes.mu.Unlock()
+			if inventory != nil {
+				inventory.mu.RLock()
+				t.Logf("inventory replica=%d failed=%v pod=%+v", position, inventory.failed, inventory.generation.View.Kinds["Pod"])
+				inventory.mu.RUnlock()
+			}
+		}
+	}
 	wait(func() bool {
 		loop := loops[1-owner]
 		loop.mu.Lock()
@@ -686,10 +708,12 @@ func TestUnavailableCaptureCredentialCannotAcquireOrPublish(t *testing.T) {
 
 func TestUnknownPrincipalRenewalRetiresCaptureScope(t *testing.T) {
 	now := time.Now().UTC()
+	var clock atomic.Int64
+	clock.Store(now.UnixNano())
 	refreshes := 0
-	source := &expiringBearerSource{now: func() time.Time { return now }, refresh: func(context.Context) (string, time.Time, error) {
+	source := &expiringBearerSource{now: func() time.Time { return time.Unix(0, clock.Load()).UTC() }, refresh: func(context.Context) (string, time.Time, error) {
 		refreshes++
-		return "unknown-renewal-canary-" + strconv.Itoa(refreshes), now.Add(time.Minute), nil
+		return "unknown-renewal-canary-" + strconv.Itoa(refreshes), time.Unix(0, clock.Load()).UTC().Add(time.Minute), nil
 	}}
 	client, err := NewClient(Config{Endpoint: "http://127.0.0.1:12345", Credentials: source, AllowLoopbackHTTP: true})
 	if err != nil {
@@ -712,6 +736,7 @@ func TestUnknownPrincipalRenewalRetiresCaptureScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = now.Add(2 * time.Minute)
+	clock.Store(now.UnixNano())
 	if err := old.validateCredential(t.Context()); !errors.Is(err, ErrCredentialUnavailable) || old.identity.ctx.Err() == nil {
 		t.Fatal("unknown-principal renewal retained the old authorization context")
 	}
@@ -803,6 +828,9 @@ type namespaceFallbackTransport struct {
 }
 
 func (transport namespaceFallbackTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.URL.Path != "/api/v1/namespaces/default/pods" {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"items":[]}`)), Request: request}, nil
+	}
 	close(transport.started)
 	<-request.Context().Done()
 	close(transport.canceled)
@@ -816,7 +844,6 @@ func TestNamespaceFallbackScopeCancellationDrainsBeforeReturn(t *testing.T) {
 			service := newTestService(t, "http://127.0.0.1:12345", Scope{ClusterID: "cluster"})
 			_ = service.SetCaptureMode("demand")
 			registry := NewServiceRegistry(service)
-			registry.StartCapture(t.Context())
 			transport := namespaceFallbackTransport{started: make(chan struct{}), canceled: make(chan struct{}), drain: make(chan struct{})}
 			var drainOnce sync.Once
 			drain := func() { drainOnce.Do(func() { close(transport.drain) }) }
@@ -824,6 +851,7 @@ func TestNamespaceFallbackScopeCancellationDrainsBeforeReturn(t *testing.T) {
 			defer drain()
 			service.client.http.Transport = transport
 			service.cache[service.cacheKey()] = discoveryCacheEntry{expires: time.Now().Add(time.Minute), discovery: Discovery{Resources: []ResourceDefinition{{ID: "core~v1~pods", Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true, Verbs: []string{"get", "list"}}}}}
+			registry.StartCapture(t.Context())
 			loop := service.captureState()
 			owned, cancelOwned := context.WithCancel(loop.ctx)
 			loop.mu.Lock()
@@ -1238,6 +1266,7 @@ func TestCaptureLeaseRenewalIndependentOfLongScan(t *testing.T) {
 	defer cancel()
 	loop := &captureLoop{ctx: ctx, cancel: cancel, done: make(chan struct{}), owner: "owner", leaseTTL: 300 * time.Millisecond, renewInterval: 50 * time.Millisecond, next: map[string]time.Time{}, success: map[string]time.Time{}, gapFrom: map[string]time.Time{}, status: CaptureStatus{Mode: "continuous", Behind: true}}
 	service.changes.captures[service.indexScope()] = loop
+	service.startInventory(ctx)
 	go service.capture(loop)
 	select {
 	case <-started:
@@ -1312,13 +1341,22 @@ func TestMetadataNegotiationFailsClosedAndSecretReprobeCoalesces(t *testing.T) {
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster"})
-	for _, scoped := range []*Service{service, service.Scoped(Scope{ClusterID: "cluster", OrgID: "other"})} {
+	// The same tenant asking twice is coalesced into one probe.
+	for _, scoped := range []*Service{service, service.Scoped(Scope{ClusterID: "cluster"})} {
 		if _, _, err := scoped.loadIndexKind(t.Context(), "Secret"); !errors.Is(err, ErrForbidden) {
 			t.Fatal(err)
 		}
 	}
 	if reads.Load() != 1 {
-		t.Fatalf("Secret denial not coalesced: %d", reads.Load())
+		t.Fatalf("Secret denial not coalesced for one tenant: %d", reads.Load())
+	}
+	// Another tenant on the same cluster asks its own question: one organization's
+	// denial must never silence another's read.
+	if _, _, err := service.Scoped(Scope{ClusterID: "cluster", OrgID: "other"}).loadIndexKind(t.Context(), "Secret"); !errors.Is(err, ErrForbidden) {
+		t.Fatal(err)
+	}
+	if reads.Load() != 2 {
+		t.Fatalf("one tenant's denial silenced another: %d", reads.Load())
 	}
 	full := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writeJSON(writer, map[string]any{"kind": "SecretList", "items": []any{map[string]any{"data": map[string]any{"token": "CANARY_SECRET"}}}})
@@ -1868,6 +1906,33 @@ func TestCaptureRenewFailureAllowsInteractiveRefreshAndReclaim(t *testing.T) {
 			service.changes.lifecycle = ctx
 			go service.capture(loop)
 			defer service.StopCapture()
+			// Continuous capture consumes published inventory. Exercise the live
+			// read seam explicitly under its current ownership context instead.
+			ownershipDeadline := time.NewTimer(3 * time.Second)
+			defer ownershipDeadline.Stop()
+			ownershipTicker := time.NewTicker(10 * time.Millisecond)
+			defer ownershipTicker.Stop()
+			var owned context.Context
+			for owned == nil {
+				loop.mu.Lock()
+				owned = loop.ownedContext
+				loop.mu.Unlock()
+				if owned != nil {
+					break
+				}
+				select {
+				case <-ownershipDeadline.C:
+					t.Fatal("capture did not acquire ownership")
+				case <-ownershipTicker.C:
+				}
+			}
+			if _, _, err := service.IndexSnapshot(context.WithValue(owned, cachedCaptureContextKey{}, true), "Pod"); err != nil {
+				t.Fatal(err)
+			}
+			if first.Load() {
+				t.Fatal("cached capture performed a live inventory read")
+			}
+			go service.IndexSnapshot(owned, "Pod")
 			select {
 			case <-canceled:
 			case <-time.After(3 * time.Second):
@@ -1875,6 +1940,9 @@ func TestCaptureRenewFailureAllowsInteractiveRefreshAndReclaim(t *testing.T) {
 			}
 			if ctx.Err() != nil {
 				t.Fatal("renewal failure canceled capture lifetime")
+			}
+			if !errors.Is(owned.Err(), context.Canceled) {
+				t.Fatal("renewal failure did not cancel ownership context")
 			}
 			other := kubechanges.NewStore(provider, service.indexScope())
 			if takeover {

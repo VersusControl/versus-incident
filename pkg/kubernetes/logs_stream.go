@@ -32,6 +32,20 @@ const (
 	logResumeOverlap       = 2 * time.Minute
 	maxLogCursorTimestamps = 64
 	logCursorCheckpoint    = 32
+	// MaxStreamRequestQueryBytes bounds one log stream request's query. A resume
+	// no longer has to carry a whole workload's state, so a request that needs
+	// more is refused with an explicit answer instead of being left to an
+	// intermediary's header limit.
+	MaxStreamRequestQueryBytes = 2 << 10
+	// maxStreamCursorBytes keeps an issued Pod cursor small enough to come back
+	// in a request that still fits the query bound, with room for the other
+	// parameters. A resume state that does not fit becomes a line timestamp,
+	// which every line already carries.
+	maxStreamCursorBytes = MaxStreamRequestQueryBytes - 512
+	// maxRetainedCursorBytes bounds a cursor that stays inside this process. A
+	// workload source's position is never sent anywhere, so it keeps the line
+	// identity a viewer's request could not carry.
+	maxRetainedCursorBytes = 16 << 10
 )
 
 var ErrLogStreamBusy = errors.New("kubernetes: log stream concurrency limit reached")
@@ -79,13 +93,21 @@ type PodLogStreamOptions struct {
 	Container    string
 	SinceSeconds int
 	TailLines    int
-	Timestamps   bool
-	Previous     bool
-	Cursor       string
+	// SinceTime resumes from a timestamp instead of a cursor, the way kubectl
+	// logs -f does. It is the resume a client keeps when the line-level cursor
+	// would not fit in the request budget.
+	SinceTime  time.Time
+	Timestamps bool
+	Previous   bool
+	Cursor     string
 	// sourceIdentity binds a workload checkpoint to the Pod UID and incarnation.
 	sourceIdentity      string
 	checkpointEveryLine bool
 	finite              bool
+	// derivedSince marks a start this connector computed from the viewer's
+	// watermark instead of one the viewer sent, so the read pulls it back to the
+	// window floor rather than refusing it.
+	derivedSince bool
 }
 
 type PodLogStreamEvent struct {
@@ -102,6 +124,14 @@ type PodLogStreamEvent struct {
 	Action          string `json:"action,omitempty"`
 	Retryable       bool   `json:"retryable,omitempty"`
 	ReplayUncertain bool   `json:"replay_uncertain,omitempty"`
+	// CursorLagging marks a terminal limit event whose cursor never caught up
+	// with the newest line this stream sent: rotating from that cursor alone
+	// replays the same bytes and stops at the same limit. NewestTimestamp is the
+	// newest emitted line's timestamp, bounded and free of line text, so a viewer
+	// resumes from the line instead of guessing. Both are absent when the cursor
+	// is current.
+	CursorLagging   bool   `json:"cursor_lagging,omitempty"`
+	NewestTimestamp string `json:"newest_timestamp,omitempty"`
 }
 
 type logResumeCursor struct {
@@ -165,6 +195,17 @@ func (service *Service) ValidatePodLogStream(options PodLogStreamOptions) error 
 	if !validPodLogName(options.Namespace, 63, false) || !validPodLogName(options.Pod, 253, true) || options.Container != "" && !validPodLogName(options.Container, 63, false) || options.SinceSeconds < 0 || options.SinceSeconds > 86400 || options.TailLines < 0 || options.TailLines > 5000 {
 		return ErrInvalidArguments
 	}
+	// A cursor and a timestamp are two answers to the same question, so only one
+	// of them may set the resume point, and the timestamp has to be one this
+	// connector can still serve.
+	if !options.SinceTime.IsZero() {
+		if options.Cursor != "" || options.SinceSeconds != 0 || options.TailLines != 0 {
+			return ErrInvalidArguments
+		}
+		if _, ok := boundedSinceTime(options.SinceTime, time.Now()); !ok {
+			return ErrInvalidArguments
+		}
+	}
 	_, err := service.logCursor(options)
 	return err
 }
@@ -182,7 +223,7 @@ func (service *Service) logCursor(options PodLogStreamOptions) (logResumeCursor,
 	if options.Cursor == "" {
 		return logResumeCursor{}, nil
 	}
-	if len(options.Cursor) > 16<<10 || options.SinceSeconds != 0 || options.TailLines != 0 {
+	if len(options.Cursor) > maxRetainedCursorBytes || options.SinceSeconds != 0 || options.TailLines != 0 {
 		return logResumeCursor{}, ErrInvalidArguments
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(options.Cursor)
@@ -190,7 +231,16 @@ func (service *Service) logCursor(options PodLogStreamOptions) (logResumeCursor,
 		return logResumeCursor{}, ErrInvalidArguments
 	}
 	var cursor logResumeCursor
-	if json.Unmarshal(raw, &cursor) != nil || cursor.Target != service.logTarget(options) || cursor.Timestamp.IsZero() || cursor.Ordinal > 1<<53 || cursor.Timestamp.After(time.Now().Add(time.Minute)) || cursor.SinceSeconds < 0 || cursor.SinceSeconds > 86400 || cursor.TailLines < 0 || cursor.TailLines > 5000 {
+	// The cursor is unsigned, so everything in it is untrusted input: it names
+	// the target it resumes, and its watermark has to be a real position this
+	// connector can resume at. The window is not enforced here: a watermark is
+	// the timestamp of a line the Pod wrote, and a Pod that has been quiet for
+	// longer than the window legitimately issues one. What the window bounds is
+	// how far back the read starts, which is applied when the request is built,
+	// so an aged watermark is clamped there instead of refusing a resume of the
+	// same target.
+	now := time.Now()
+	if json.Unmarshal(raw, &cursor) != nil || cursor.Target != service.logTarget(options) || cursor.Timestamp.IsZero() || cursor.Ordinal > 1<<53 || cursor.Timestamp.After(now.Add(MaxLogClockSkew)) || cursor.SinceSeconds < 0 || cursor.SinceSeconds > 86400 || cursor.TailLines < 0 || cursor.TailLines > 5000 {
 		return logResumeCursor{}, ErrInvalidArguments
 	}
 	if cursor.Quiet {
@@ -205,6 +255,12 @@ func (service *Service) logCursor(options PodLogStreamOptions) (logResumeCursor,
 	if len(cursor.Occurrences) > maxLogCursorTimestamps {
 		return logResumeCursor{}, ErrInvalidArguments
 	}
+	// Line positions are identities within the watermark's own resume overlap,
+	// not read starts, so they are measured against the watermark and never
+	// against the window. An occurrence older than the floor is therefore a
+	// normal part of a quiet Pod's cursor: it fails nothing, and because a read
+	// clamped to the floor cannot reach a line that old, it cannot hide a line
+	// the clamped window does return.
 	for key, count := range cursor.Occurrences {
 		timestamp, err := time.Parse(time.RFC3339Nano, key)
 		if err != nil || count == 0 || count > 1<<53 || timestamp.After(cursor.Timestamp) || timestamp.Before(cursor.Timestamp.Add(-logResumeOverlap)) {
@@ -271,6 +327,16 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 			if readErr == nil && len(body) <= 4096 && json.Unmarshal(body, &status) == nil && status.Kind == "Status" && status.APIVersion == "v1" && status.Status == "Failure" && status.Reason == "BadRequest" && status.Code == http.StatusBadRequest && previousContainerMissingPattern.MatchString(status.Message) {
 				return nil, errPreviousUnavailable
 			}
+		}
+		if response.StatusCode == http.StatusForbidden {
+			// A real cluster 403 names what it denied; keep only those fields.
+			body, readErr := io.ReadAll(io.LimitReader(response.Body, forbiddenStatusLimit+1))
+			if readErr == nil {
+				if denied := permissionDeniedFromStatus(body); denied != nil {
+					return nil, denied
+				}
+			}
+			return nil, ErrForbidden
 		}
 		return nil, classifyStatus(response.StatusCode)
 	}
@@ -409,12 +475,39 @@ func (service *Service) readPodLogs(parent context.Context, options PodLogStream
 	ctx, cancel := context.WithTimeout(parent, duration)
 	defer cancel()
 	cursor, _ := service.logCursor(options)
+	// A cursor can ask to resume from a line older than the window, because a
+	// quiet Pod's last line still carries the position its viewer holds. The
+	// read starts at the floor instead, which is the most the window allows; a
+	// start the clamp moved is reported as an uncertain replay so the viewer can
+	// say a gap may exist between what it holds and what this read can return.
+	replayUncertain := false
 	query := url.Values{"follow": {strconv.FormatBool(!options.Previous && !options.finite)}, "previous": {strconv.FormatBool(options.Previous)}, "timestamps": {"true"}}
 	if options.Container != "" {
 		query.Set("container", options.Container)
 	}
-	if cursor.Quiet {
-		query.Set("sinceTime", cursor.Timestamp.Format(time.RFC3339Nano))
+	if !options.SinceTime.IsZero() {
+		// Resuming by timestamp, the way kubectl logs -f does: the boundary lines
+		// are replayed rather than lost, and the client drops exact duplicates by
+		// line identity. A timestamp the caller's clock put a little ahead of this
+		// server is clamped, so the read resumes instead of ending. One that falls
+		// outside the window is refused: a caller does not get to widen it. A start
+		// this connector derived itself is the one exception, and it is pulled back
+		// to the floor rather than refused.
+		now := time.Now()
+		since := options.SinceTime
+		if options.derivedSince {
+			since = clampDerivedSinceTime(since, now)
+		}
+		clamped, ok := boundedSinceTime(since, now)
+		if !ok {
+			return ErrInvalidArguments
+		}
+		options.SinceTime = clamped
+		query.Set("sinceTime", clamped.UTC().Format(time.RFC3339Nano))
+	} else if cursor.Quiet {
+		start, clamped := clampCursorStart(cursor.Timestamp, time.Now())
+		replayUncertain = replayUncertain || clamped
+		query.Set("sinceTime", start.Format(time.RFC3339Nano))
 		query.Set("tailLines", strconv.Itoa(cursor.TailLines))
 	} else if !cursor.Timestamp.IsZero() {
 		oldest := cursor.Timestamp
@@ -424,7 +517,9 @@ func (service *Service) readPodLogs(parent context.Context, options PodLogStream
 				oldest = timestamp
 			}
 		}
-		query.Set("sinceTime", oldest.Add(-time.Nanosecond).Format(time.RFC3339Nano))
+		start, clamped := clampCursorStart(oldest.Add(-time.Nanosecond), time.Now())
+		replayUncertain = replayUncertain || clamped
+		query.Set("sinceTime", start.Format(time.RFC3339Nano))
 	} else {
 		since, tail := options.SinceSeconds, options.TailLines
 		if since == 0 {
@@ -492,7 +587,15 @@ func (service *Service) readPodLogs(parent context.Context, options PodLogStream
 	if lastCursor == "" {
 		lastCursor = service.quietLogCursor(options, time.Now().UTC())
 	}
-	replayUncertain := false
+	// A resume state that outgrows the request budget is not handed to the
+	// viewer, and the stream keeps the last position it held: a terminal event
+	// without any cursor leaves the viewer unable to rotate at all. That position
+	// can be behind the newest line this stream sent, which the limit event
+	// reports explicitly instead of leaving the viewer to guess.
+	cursorLagging := false
+	// newestEmitted is the newest line this stream has handed the viewer. It is
+	// what a lagging rotation point is measured against.
+	var newestEmitted time.Time
 	var emittedBytes int64
 	var sequence, checkpointSequence uint64
 	replaySeen := make(map[string]uint64)
@@ -500,6 +603,15 @@ func (service *Service) readPodLogs(parent context.Context, options PodLogStream
 	eventBytes := func(event PodLogStreamEvent) int64 {
 		payload, _ := json.Marshal(event)
 		return int64(len(payload) + len(event.Event) + len("event: \ndata: \n\n"))
+	}
+	// widestNewestTimestamp is as long as an RFC3339Nano timestamp with a numeric
+	// offset can be, so the budget keeps room for the whole lag report before the
+	// terminal events are sized.
+	const widestNewestTimestamp = "2026-10-26T23:59:59.999999999+07:00"
+	terminalReserve := func(cursor string) int64 {
+		limit := PodLogStreamEvent{Event: "limit", Reason: "duration", Cursor: cursor, ReplayUncertain: true, CursorLagging: true, NewestTimestamp: widestNewestTimestamp}
+		end := PodLogStreamEvent{Event: "end", Reason: "duration", Cursor: cursor, ReplayUncertain: true}
+		return eventBytes(limit) + eventBytes(end)
 	}
 	emittedBytes = eventBytes(PodLogStreamEvent{Event: "heartbeat"})
 	readFailure := func(failure error) error {
@@ -518,6 +630,14 @@ func (service *Service) readPodLogs(parent context.Context, options PodLogStream
 		}
 		if limited {
 			event := PodLogStreamEvent{Event: "limit", Reason: reason, Cursor: lastCursor, ReplayUncertain: replayUncertain}
+			// A rotation point that stopped advancing cannot carry a viewer past
+			// what it already sent: resuming from the cursor replays the same
+			// bytes and stops at the same limit. The event says so and names the
+			// newest line it did send, which every line already timestamps.
+			if cursorLagging && !newestEmitted.IsZero() {
+				event.CursorLagging = true
+				event.NewestTimestamp = newestEmitted.Format(time.RFC3339Nano)
+			}
 			emittedBytes += eventBytes(event)
 			if err := emit(event); err != nil {
 				return err
@@ -530,8 +650,16 @@ func (service *Service) readPodLogs(parent context.Context, options PodLogStream
 	}
 	var total int64
 	emitLine := func(event PodLogStreamEvent, nextCursor string) (bool, error) {
-		terminalReserve := eventBytes(PodLogStreamEvent{Event: "limit", Reason: "duration", Cursor: nextCursor, ReplayUncertain: true}) + eventBytes(PodLogStreamEvent{Event: "end", Reason: "duration", Cursor: nextCursor, ReplayUncertain: true})
-		if emittedBytes+eventBytes(event)+terminalReserve > maxBytes {
+		// The closing limit event carries whichever cursor the stream holds when
+		// it stops: the position this line would advance to, or the one already
+		// held if this line is the one that does not fit. Room is kept for the
+		// larger of the two, so the reserve does not shrink with a resume state
+		// that has stopped fitting.
+		reserve := terminalReserve(nextCursor)
+		if held := terminalReserve(lastCursor); held > reserve {
+			reserve = held
+		}
+		if emittedBytes+eventBytes(event)+reserve > maxBytes {
 			return true, finish("bytes", true)
 		}
 		if err := emit(event); err != nil {
@@ -539,7 +667,12 @@ func (service *Service) readPodLogs(parent context.Context, options PodLogStream
 		}
 		replayUncertain = false
 		emittedBytes += eventBytes(event)
-		lastCursor = nextCursor
+		if nextCursor != "" {
+			lastCursor = nextCursor
+			cursorLagging = false
+		} else {
+			cursorLagging = true
+		}
 		if event.Cursor != "" {
 			checkpointSequence = sequence
 		}
@@ -573,11 +706,15 @@ func (service *Service) readPodLogs(parent context.Context, options PodLogStream
 			idle.Reset(idleDuration)
 		case <-heartbeat.C:
 			event := PodLogStreamEvent{Event: "heartbeat", ReplayUncertain: replayUncertain}
-			if sequence > checkpointSequence || sequence == 0 {
+			// A heartbeat repeats the position the viewer already holds only when
+			// that position is still the stream's position; once the resume state
+			// has moved past it, repeating it would announce a stale rotation
+			// point.
+			if !cursorLagging && (sequence > checkpointSequence || sequence == 0) {
 				event.Cursor = lastCursor
 			}
-			terminalReserve := eventBytes(PodLogStreamEvent{Event: "limit", Reason: "duration", Cursor: lastCursor, ReplayUncertain: true}) + eventBytes(PodLogStreamEvent{Event: "end", Reason: "duration", Cursor: lastCursor, ReplayUncertain: true})
-			if emittedBytes+eventBytes(event)+terminalReserve > maxBytes {
+			reserve := terminalReserve(lastCursor)
+			if emittedBytes+eventBytes(event)+reserve > maxBytes {
 				return finish("bytes", true)
 			}
 			if err := emit(event); err != nil {
@@ -693,12 +830,26 @@ func (service *Service) readPodLogs(parent context.Context, options PodLogStream
 			}
 			encoded, _ := json.Marshal(logResumeCursor{Target: service.logTarget(options), Timestamp: nextTimestamp, Ordinal: nextIdentities[nextTimestamp.Format(time.RFC3339Nano)], Occurrences: nextIdentities, SinceSeconds: since, TailLines: tail})
 			nextCursor := base64.RawURLEncoding.EncodeToString(encoded)
+			// A cursor that is sent to the viewer has to fit the request the viewer
+			// sends back; a workload source's position stays in this process and
+			// keeps its line identity. Either way a viewer can always resume from
+			// the line timestamp it already holds.
+			cursorBudget := maxStreamCursorBytes
+			if options.checkpointEveryLine {
+				cursorBudget = maxRetainedCursorBytes
+			}
+			if len(nextCursor) > cursorBudget {
+				nextCursor = ""
+			}
 			event := PodLogStreamEvent{Event: "line", Text: text, Container: options.Container, Timestamp: timestampText, Sequence: sequence, Ordinal: ordinal, ReplayUncertain: replayUncertain}
-			if options.checkpointEveryLine || sequence == 1 || sequence%logCursorCheckpoint == 0 {
+			if nextCursor != "" && (options.checkpointEveryLine || sequence == 1 || sequence%logCursorCheckpoint == 0) {
 				event.Cursor = nextCursor
 			}
 			if limited, err := emitLine(event, nextCursor); limited || err != nil {
 				return err
+			}
+			if newestEmitted.Before(timestamp) {
+				newestEmitted = timestamp
 			}
 			lastTimestamp, identities = nextTimestamp, nextIdentities
 			if errors.Is(result.err, io.EOF) {

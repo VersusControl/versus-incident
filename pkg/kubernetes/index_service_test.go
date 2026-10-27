@@ -641,3 +641,280 @@ func TestPersistIndexDeltasAndResyncGap(t *testing.T) {
 		t.Fatalf("resync gaps=%#v err=%v", page.Gaps, err)
 	}
 }
+
+// A kind the cluster serves but that holds nothing yet is a listed kind: the
+// first object created after that empty generation is exactly one created
+// change, not a suppressed one.
+func TestServedEmptyGenerationThenCreationReportsExactlyOneCreatedChange(t *testing.T) {
+	index := kubeindex.New(10)
+	now := time.Now().UTC()
+	if err := index.Refresh(t.Context(), "ConfigMap", 0, now, func(context.Context) ([]kubeindex.Record, bool, error) {
+		return nil, false, kubeindex.ErrKindNotServed
+	}); err != nil {
+		t.Fatal(err)
+	}
+	unserved := index.Snapshot()
+	if err := index.Ingest("ConfigMap", nil, true, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	servedEmpty := index.Snapshot()
+	created := kubeindex.Record{Kind: "ConfigMap", UID: "inventory", Namespace: "shop", Name: "inventory"}
+	if err := index.Ingest("ConfigMap", []kubeindex.Record{created}, true, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	afterCreation := index.Snapshot()
+	empty := indexDeltas(inventoryDeltas(unserved, servedEmpty, []string{"ConfigMap"}))
+	if len(empty) != 0 {
+		t.Fatalf("an empty generation of a served kind reported %d changes", len(empty))
+	}
+	deltas := indexDeltas(inventoryDeltas(servedEmpty, afterCreation, []string{"ConfigMap"}))
+	if len(deltas) != 1 || deltas[0].Op != "upsert" || deltas[0].Old != nil || deltas[0].New == nil || deltas[0].New.UID != created.UID {
+		t.Fatalf("the first object created after a served empty generation reported %d changes: %#v", len(deltas), deltas)
+	}
+}
+
+// An API group that answers on another version is still discovered, but a kind
+// pinned to a version that could not be read is a failure: the group's answer
+// elsewhere says nothing about that version's contents.
+func TestKindPinnedToAnUnreadableDiscoveryVersionFailsInsteadOfReadingEmpty(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		writeJSON(writer, map[string]any{"items": []any{}})
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "acme", ClusterID: "cluster"})
+	failed := Discovery{
+		Resources: []ResourceDefinition{{ID: "networking.k8s.io~v1beta1~ingresses", Group: "networking.k8s.io", Version: "v1beta1", Resource: "ingresses", Kind: "Ingress", Namespaced: true, Available: true}},
+		unlisted:  []PartialFailure{{Scope: "discovery", GroupVersion: "networking.k8s.io~v1", Class: "unavailable"}},
+	}
+	ctx := context.WithValue(t.Context(), discoveryContextKey{}, failed)
+	ctx = context.WithValue(ctx, inventoryDiscoveryContextKey{}, failed)
+	ctx = context.WithValue(ctx, indexDefinitionContextKey{}, map[string]ResourceDefinition{})
+	if _, _, err := service.loadIndexKind(ctx, "Ingress"); err == nil || errors.Is(err, kubeindex.ErrKindNotServed) {
+		t.Fatalf("a kind pinned to an unreadable API version read as an absent kind: %v", err)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("the loader issued %d requests for a version discovery could not read", requests.Load())
+	}
+	served := Discovery{ObservedAt: failed.ObservedAt, Resources: failed.Resources}
+	ctx = context.WithValue(t.Context(), discoveryContextKey{}, served)
+	ctx = context.WithValue(ctx, inventoryDiscoveryContextKey{}, served)
+	ctx = context.WithValue(ctx, indexDefinitionContextKey{}, map[string]ResourceDefinition{})
+	if _, _, err := service.loadIndexKind(ctx, "Ingress"); !errors.Is(err, kubeindex.ErrKindNotServed) {
+		t.Fatalf("a discovered group that serves another version did not read as absent: %v", err)
+	}
+}
+
+// Discovery keeps the failure of a version that could not be read even after
+// another version of the same group answered, so a resource pinned to it is not
+// silently published as empty.
+func TestDiscoveryKeepsAnUnreadableVersionFailureForPinnedResources(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{map[string]any{
+				"name":             "networking.k8s.io",
+				"versions":         []any{map[string]any{"groupVersion": "networking.k8s.io/v1", "version": "v1"}, map[string]any{"groupVersion": "networking.k8s.io/v1beta1", "version": "v1beta1"}},
+				"preferredVersion": map[string]any{"groupVersion": "networking.k8s.io/v1", "version": "v1"},
+			}}})
+		case "/apis/networking.k8s.io/v1":
+			writer.WriteHeader(http.StatusInternalServerError)
+			_, _ = writer.Write([]byte(`{"kind":"Status","status":"Failure","reason":"InternalError","code":500}`))
+		case "/apis/networking.k8s.io/v1beta1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "ingresses", "kind": "Ingress", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "acme", ClusterID: "cluster"})
+	discovery, err := service.Discover(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Partial) != 0 {
+		t.Fatalf("a group that answered on another version reported partial discovery: %#v", discovery.Partial)
+	}
+	if !discoveryVersionFailed(discovery, indexedResourceIDs["Ingress"]) {
+		t.Fatalf("the failure of the version Ingress is pinned to was dropped: %#v", discovery)
+	}
+	if discoveryVersionFailed(discovery, "networking.k8s.io~v1beta1~ingresses") {
+		t.Fatal("a version that answered was reported as unreadable")
+	}
+}
+
+// A live refresh resolves the kind through a discovery read of its own. The
+// failure of the version the kind is pinned to must still read as a failure
+// there: that path holds no pre-fetched discovery in its context.
+func TestOnDemandRefreshKeepsAPinnedVersionFailureAsAnError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{map[string]any{
+				"name":             "networking.k8s.io",
+				"versions":         []any{map[string]any{"groupVersion": "networking.k8s.io/v1", "version": "v1"}, map[string]any{"groupVersion": "networking.k8s.io/v1beta1", "version": "v1beta1"}},
+				"preferredVersion": map[string]any{"groupVersion": "networking.k8s.io/v1", "version": "v1"},
+			}}})
+		case "/apis/networking.k8s.io/v1":
+			writer.WriteHeader(http.StatusInternalServerError)
+			_, _ = writer.Write([]byte(`{"kind":"Status","status":"Failure","reason":"InternalError","code":500}`))
+		case "/apis/networking.k8s.io/v1beta1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "ingresses", "kind": "Ingress", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "acme", ClusterID: "cluster"})
+	if _, status, err := service.IndexSnapshot(t.Context(), "Ingress"); err != nil {
+		t.Fatalf("ingress refresh: %v", err)
+	} else if state := status.Kinds["Ingress"]; state.State != "error" || state.Absent {
+		t.Fatalf("a kind pinned to an unreadable API version read as %+v", state)
+	}
+}
+
+func indexDeltas(deltas <-chan kubeindex.Delta) []kubeindex.Delta {
+	collected := []kubeindex.Delta{}
+	for delta := range deltas {
+		collected = append(collected, delta)
+	}
+	return collected
+}
+
+// A denial is memoized only for a bounded time and only for its own tenant, so a
+// granted permission becomes visible on the next probe instead of an hour later,
+// and one organization's denial cannot silence another's read.
+func TestMetadataDenialExpiresAndIsScopedPerTenant(t *testing.T) {
+	// The window is part of the contract, not an implementation detail: a grant
+	// has to become visible within a bounded time, so the memo may never grow
+	// past a minute.
+	if metadataDenyTTL <= 0 || metadataDenyTTL > time.Minute {
+		t.Fatalf("denial memo window %s is not bounded to a minute", metadataDenyTTL)
+	}
+	var listRequests atomic.Int32
+	var denied atomic.Bool
+	denied.Store(true)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{
+				map[string]any{"name": "secrets", "kind": "Secret", "namespaced": true, "verbs": []string{"get", "list"}},
+				map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}},
+			}})
+		case "/api/v1/secrets":
+			listRequests.Add(1)
+			if denied.Load() {
+				http.Error(writer, "forbidden", http.StatusForbidden)
+				return
+			}
+			writeJSON(writer, map[string]any{"kind": "PartialObjectMetadataList", "apiVersion": "meta.k8s.io/v1", "items": []any{}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "org-a", ClusterID: "cluster-a"})
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	service.client.now = func() time.Time { return now }
+
+	if _, _, err := service.loadIndexKind(context.Background(), "Secret"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("first read error=%v", err)
+	}
+	if listRequests.Load() != 1 {
+		t.Fatalf("first read requests=%d", listRequests.Load())
+	}
+	// Inside the memo window the retry must not reach the cluster at all: a
+	// persistent denial costs one probe per window, not one per retry cycle.
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, _, err := service.loadIndexKind(context.Background(), "Secret"); !errors.Is(err, ErrForbidden) {
+			t.Fatalf("memoized read error=%v", err)
+		}
+	}
+	if listRequests.Load() != 1 {
+		t.Fatalf("memoized retries reached the cluster: requests=%d", listRequests.Load())
+	}
+	// The denial is scoped to org-a: another tenant on the same cluster is not
+	// blocked by it.
+	other := service.Scoped(Scope{OrgID: "org-b", ClusterID: "cluster-a"})
+	other.client.now = func() time.Time { return now }
+	if _, _, err := other.loadIndexKind(context.Background(), "Secret"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("other tenant error=%v", err)
+	}
+	if listRequests.Load() != 2 {
+		t.Fatalf("another tenant was silenced by the first tenant's denial: requests=%d", listRequests.Load())
+	}
+	// A grant is invisible only until the bounded window ends.
+	now = now.Add(metadataDenyTTL + time.Second)
+	denied.Store(false)
+	records, complete, err := service.loadIndexKind(context.Background(), "Secret")
+	if err != nil || !complete || len(records) != 0 {
+		t.Fatalf("recovery: records=%d complete=%v err=%v", len(records), complete, err)
+	}
+	if listRequests.Load() != 3 {
+		t.Fatalf("recovery did not probe the cluster: requests=%d", listRequests.Load())
+	}
+	// And a success clears the memo, so the next read is a real read again.
+	if _, _, err := service.loadIndexKind(context.Background(), "Secret"); err != nil {
+		t.Fatal(err)
+	}
+	if listRequests.Load() != 4 {
+		t.Fatalf("cleared memo did not probe: requests=%d", listRequests.Load())
+	}
+}
+
+// A remembered credential failure is still a credential failure. Replaying the
+// memo as forbidden sends an operator to change RBAC for a token that is simply
+// invalid, and hides a revoked credential behind a missing permission.
+func TestMetadataDenialMemoKeepsItsClass(t *testing.T) {
+	var listRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "configmaps", "kind": "ConfigMap", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/api/v1/configmaps":
+			listRequests.Add(1)
+			http.Error(writer, "denied", http.StatusUnauthorized)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "org-a", ClusterID: "cluster-a"})
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	service.client.now = func() time.Time { return now }
+
+	if _, _, err := service.loadIndexKind(context.Background(), "ConfigMap"); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("first read error=%v", err)
+	}
+	// The memo answers the next reads without touching the cluster, and it has to
+	// answer with the class it remembered.
+	for attempt := 0; attempt < 3; attempt++ {
+		_, _, err := service.loadIndexKind(context.Background(), "ConfigMap")
+		if errors.Is(err, ErrForbidden) || !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("memoized credential failure reported as a missing permission: %v", err)
+		}
+		if class := errorClass(err); class != "unauthorized" {
+			t.Fatalf("memoized credential failure class = %q", class)
+		}
+	}
+	if listRequests.Load() != 1 {
+		t.Fatalf("memoized retries reached the cluster: requests=%d", listRequests.Load())
+	}
+}

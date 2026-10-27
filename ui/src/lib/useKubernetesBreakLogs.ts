@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ApiError, type KubernetesBreakLogQuery, type KubernetesCrashEvent, type KubernetesIssue, type KubernetesResource } from "./api";
+import { ApiError, kubernetesAllContainers, type KubernetesBreakLogQuery, type KubernetesCrashEvent, type KubernetesIssue, type KubernetesResource } from "./api";
 import { useKubernetesCluster } from "./useKubernetesCluster";
 
 export const maximumLogWindow = 2 * 60 * 60_000;
@@ -23,19 +23,21 @@ export function useBreakLogsState(issue: KubernetesIssue | undefined, onSelectRe
   const queryClient = useQueryClient();
   const navigation = useContext(CrashLogNavigationContext);
   const crashPod = params.get("logs_pod");
+  const crashContainer = params.get("logs_container") || undefined;
   const initialMode = params.get("logs_mode") === "previous" ? "previous" : "merged";
   const [pods, setPods] = useState<string[]>(() => crashPod ? [crashPod] : []);
   const [mode, setMode] = useState<KubernetesBreakLogQuery["mode"]>(initialMode);
   const [level, setLevel] = useState<KubernetesBreakLogQuery["level"]>();
   const [search, setSearch] = useState("");
+  const [container, setContainer] = useState<string | undefined>(crashContainer);
   const filterIdentity = JSON.stringify([cluster, issue?.root.uid, issue?.root.namespace]);
   const [filterScope, setFilterScope] = useState(filterIdentity);
   if (filterScope !== filterIdentity) {
-    setFilterScope(filterIdentity); setPods(crashPod ? [crashPod] : []); setMode(initialMode); setLevel(undefined); setSearch("");
+    setFilterScope(filterIdentity); setPods(crashPod ? [crashPod] : []); setMode(initialMode); setLevel(undefined); setSearch(""); setContainer(crashContainer);
   }
   const validIssue = Boolean(issue?.root.uid && issue.root.namespace && Number.isFinite(Date.parse(issue.broke_at ?? "")));
   const window = validIssue ? breakLogWindow(params, issue!.broke_at!) : undefined;
-  const options: KubernetesBreakLogQuery = { namespace: issue?.root.namespace ?? "", root_uid: issue?.root.uid ?? "", since: window?.from ?? "", until: window?.to ?? "", pods, mode, level, q: search, limit: 500 };
+  const options: KubernetesBreakLogQuery = { namespace: issue?.root.namespace ?? "", root_uid: issue?.root.uid ?? "", since: window?.from ?? "", until: window?.to ?? "", pods, mode, level, q: search, limit: 500, container };
   const queryKey = key("kubernetes-break-logs", options);
   const query = useInfiniteQuery({ queryKey, queryFn: async ({ pageParam, signal }) => ({ ...await client.kubernetesBreakLogs({ ...options, cursor: pageParam }, signal), fetchedAt: Date.now() }), initialPageParam: undefined as string | undefined, getNextPageParam: (page) => page.next || undefined, enabled: validIssue, retry: false, staleTime: Infinity, refetchInterval: false, refetchOnWindowFocus: false });
   type BreakLogData = typeof query.data;
@@ -86,7 +88,9 @@ export function useBreakLogsState(issue: KubernetesIssue | undefined, onSelectRe
   };
   const beforeCrash = useCallback((event: KubernetesCrashEvent) => {
     const end = Date.parse(event.at);
-    setPods([event.pod_uid || event.pod]); setMode("previous"); setLevel(undefined); setSearch("");
+    // A sidecar or init container crash must show that container's logs,
+    // not the main container the picker defaults to.
+    setPods([event.pod_uid || event.pod]); setMode("previous"); setLevel(undefined); setSearch(""); setContainer(event.container || undefined);
     setParams((current) => {
       const next = new URLSearchParams(current);
       next.delete("r"); next.delete("tab");
@@ -94,6 +98,7 @@ export function useBreakLogsState(issue: KubernetesIssue | undefined, onSelectRe
       next.set("root_uid", event.root_uid); next.set("namespace", event.namespace);
       next.set("logs_from", new Date(end - 5 * 60_000).toISOString()); next.set("logs_to", new Date(end).toISOString());
       next.set("logs_mode", "previous"); next.set("logs_pod", event.pod_uid || event.pod);
+      if (event.container) next.set("logs_container", event.container); else next.delete("logs_container");
       return next;
     }, { replace: true });
     document.getElementById("kubernetes-break-logs")?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
@@ -123,7 +128,17 @@ export function useBreakLogsState(issue: KubernetesIssue | undefined, onSelectRe
     const query = new URLSearchParams({ provider: "kubernetes", cluster: cluster ?? "", resource_id: resourceID, namespace: issue.root.namespace ?? "", name: issue.root.name, uid: issue.root.uid ?? "", include_changes: "true", logs_from: window.from, logs_to: window.to });
     navigate(`/agent/chat?${query}`);
   };
-  return { issue, window, validIssue, query: { ...query, fetchNextPage: () => queryClient.isFetching({ queryKey, exact: true }) ? Promise.resolve() : query.fetchNextPage() }, page, lines, pods, setPods, mode, setMode, level, setLevel, search, setSearch, setWindow, beforeCrash, openPod, live, liveAvailable, ask, restart: () => queryClient.resetQueries({ queryKey, exact: true }) };
+  // The container list does not depend on the filter, so keep the last one
+  // while another container's page loads; the picker never empties.
+  const [known, setKnown] = useState<{ scope: string; containers: NonNullable<typeof page>["containers"]; main?: string }>({ scope: filterIdentity, containers: [] });
+  if (page?.containers?.length && (known.scope !== filterIdentity || known.containers !== page.containers)) setKnown({ scope: filterIdentity, containers: page.containers, main: page.main_container });
+  const remembered = known.scope === filterIdentity ? known : undefined;
+  const containers = page?.containers ?? remembered?.containers ?? [];
+  // Main container first, then the first non-init container when the server
+  // could not tell which one is the app.
+  const mainContainer = (page ? page.main_container : remembered?.main) ?? containers.find((item) => item.main)?.name ?? containers.find((item) => !item.init)?.name;
+  const selectedContainer = container ?? page?.container ?? mainContainer ?? kubernetesAllContainers;
+  return { issue, window, validIssue, containers, mainContainer, selectedContainer, setContainer, query: { ...query, fetchNextPage: () => queryClient.isFetching({ queryKey, exact: true }) ? Promise.resolve() : query.fetchNextPage() }, page, lines, pods, setPods, mode, setMode, level, setLevel, search, setSearch, setWindow, beforeCrash, openPod, live, liveAvailable, ask, restart: () => queryClient.resetQueries({ queryKey, exact: true }) };
 }
 
 export const BreakLogsContext = createContext<ReturnType<typeof useBreakLogsState> | null>(null);

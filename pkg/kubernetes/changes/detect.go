@@ -35,6 +35,7 @@ type FieldChange struct {
 }
 
 type Change struct {
+	RootUID         string        `json:"root_uid,omitempty"`
 	ID              string        `json:"id"`
 	Cluster         string        `json:"cluster"`
 	Kind            string        `json:"kind"`
@@ -99,6 +100,13 @@ func Detect(cluster string, delta index.Delta, at time.Time) (Change, bool) {
 		return Change{}, false
 	}
 	change.Kind, change.Namespace, change.Name, change.UID = record.Kind, record.Namespace, record.Name, record.UID
+	change.RootUID = record.UID
+	for _, owner := range record.Owners {
+		if owner.UID != "" && (!owner.ControllerKnown || owner.Controller) {
+			change.RootUID = owner.UID
+			break
+		}
+	}
 	if change.Type == ImageChanged {
 		change.Revision = record.Revision
 	}

@@ -107,37 +107,11 @@ func TestCompletedRegularCurrentStillRequiresLiveIncarnation(t *testing.T) {
 	}
 }
 
-func TestEmptyWorkloadCheckpointRetainsQuietResumeBounds(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	defer server.Close()
-	service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "cluster"})
-	service.SetScrubber(replacingScrubber{})
-	seedWorkloadStreamIndex(t, service, workloadStreamRecords("StatefulSet", 1, 1))
-	options := WorkloadLogStreamOptions{Kind: "StatefulSet", Name: "api", Namespace: "shop", UID: "root", SinceSeconds: 60, TailLines: 123}
-	session, err := service.OpenWorkloadLogStream(logStreamTestContext(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	options.Cursor = session.checkpoint()
-	session.Close()
-	options.SinceSeconds, options.TailLines = 0, 0
-	resumed, err := service.OpenWorkloadLogStream(logStreamTestContext(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resumed.Close()
-	if resumed.uncertain || resumed.options.SinceSeconds != 60 || resumed.options.TailLines != 123 {
-		t.Fatal("empty workload rotation lost its selection")
-	}
-	for _, worker := range resumed.workers {
-		cursor, err := service.logCursor(worker.options)
-		if err != nil || !cursor.Quiet {
-			t.Fatal("empty workload source cannot resume quietly", err)
-		}
-	}
-}
-
-func TestPartialLogBatchPauseHasCheckpointAndDeduplicatesResume(t *testing.T) {
+// A viewer that pauses mid-batch resumes with the resume its surface has: a Pod
+// stream keeps its line checkpoint, a workload stream resumes from the last
+// timestamp it rendered. Either way no line is lost, and the viewer's own dedupe
+// by line identity keeps the replay out of what it already shows.
+func TestPartialLogBatchPauseResumesWithoutLossOrDuplicates(t *testing.T) {
 	for _, kind := range []string{"Pod", "StatefulSet"} {
 		for _, pauseAt := range []int{1, 31} {
 			t.Run(kind+"/"+strconv.Itoa(pauseAt), func(t *testing.T) {
@@ -146,35 +120,41 @@ func TestPartialLogBatchPauseHasCheckpointAndDeduplicatesResume(t *testing.T) {
 					if serveStreamPodObject(writer, request, records) {
 						return
 					}
+					base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 					for i := 1; i <= 33; i++ {
-						fmt.Fprintf(writer, "2026-10-01T00:00:00Z line-%d\n", i)
+						fmt.Fprintf(writer, "%s line-%d\n", base.Format(time.RFC3339Nano), i)
 					}
 				}))
 				defer server.Close()
 				service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "cluster"})
 				service.SetScrubber(replacingScrubber{})
 				seedWorkloadStreamIndex(t, service, records)
-				run := func(cursor string, emit func(PodLogStreamEvent) error) error {
-					since, tail := 60, 123
-					if cursor != "" {
-						since, tail = 0, 0
-					}
+				cursor, watermark := "", ""
+				run := func(emit func(PodLogStreamEvent) error) error {
 					if kind == "Pod" {
-						return service.StreamPodLogs(logStreamTestContext(), PodLogStreamOptions{Namespace: "shop", Pod: "api-00", Container: "app-0", SinceSeconds: since, TailLines: tail, Cursor: cursor}, emit)
+						options := PodLogStreamOptions{Namespace: "shop", Pod: "api-00", Container: "app-0", SinceSeconds: 60, TailLines: 123}
+						if cursor != "" {
+							options.Cursor, options.SinceSeconds, options.TailLines = cursor, 0, 0
+						}
+						return service.StreamPodLogs(logStreamTestContext(), options, emit)
 					}
-					return service.StreamWorkloadLogs(logStreamTestContext(), WorkloadLogStreamOptions{Kind: "StatefulSet", Name: "api", Namespace: "shop", UID: "root", SinceSeconds: since, TailLines: tail, Cursor: cursor}, func(event WorkloadLogStreamEvent) error { return emit(event.PodLogStreamEvent) })
+					options := WorkloadLogStreamOptions{Kind: "StatefulSet", Name: "api", Namespace: "shop", UID: "root", SinceSeconds: 60, TailLines: 123}
+					if watermark != "" {
+						since, err := time.Parse(time.RFC3339Nano, watermark)
+						if err != nil {
+							t.Fatal(err)
+						}
+						options.SinceTime, options.SinceSeconds, options.TailLines = since, 0, 0
+					}
+					return service.StreamWorkloadLogs(logStreamTestContext(), options, func(event WorkloadLogStreamEvent) error { return emit(event.PodLogStreamEvent) })
 				}
 				paused := errors.New("viewer paused")
-				cursor := ""
 				lines := 0
 				retained := make(map[string]string)
 				key := func(event PodLogStreamEvent) string {
 					return event.Timestamp + "/" + strconv.FormatUint(event.Ordinal, 10)
 				}
-				err := run("", func(event PodLogStreamEvent) error {
-					if event.Cursor != "" {
-						cursor = event.Cursor
-					}
+				err := run(func(event PodLogStreamEvent) error {
 					if event.Event != "line" {
 						return nil
 					}
@@ -183,21 +163,29 @@ func TestPartialLogBatchPauseHasCheckpointAndDeduplicatesResume(t *testing.T) {
 					}
 					lines++
 					retained[key(event)] = event.Text
-					if lines == 1 && event.Cursor == "" {
-						t.Error("first line has no usable checkpoint")
+					watermark = event.Timestamp
+					if kind == "Pod" {
+						if lines == 1 && event.Cursor == "" {
+							t.Error("first line has no usable checkpoint")
+						}
+						if event.Cursor != "" {
+							cursor = event.Cursor
+						}
+					} else if event.Cursor != "" {
+						t.Fatalf("workload line carried resume state: %+v", event)
 					}
 					if lines == pauseAt {
 						return paused
 					}
 					return nil
 				})
-				if !errors.Is(err, paused) || cursor == "" {
-					t.Fatalf("partial batch cannot resume: lines=%d cursor=%t err=%v", lines, cursor != "", err)
+				if !errors.Is(err, paused) {
+					t.Fatalf("partial batch cannot pause: lines=%d err=%v", lines, err)
 				}
 				overlap := 0
-				err = run(cursor, func(event PodLogStreamEvent) error {
+				err = run(func(event PodLogStreamEvent) error {
 					if event.ReplayUncertain {
-						t.Fatal("valid retained resume claimed a gap")
+						t.Fatal("valid resume claimed a gap")
 					}
 					if event.Event != "line" {
 						return nil
@@ -210,13 +198,22 @@ func TestPartialLogBatchPauseHasCheckpointAndDeduplicatesResume(t *testing.T) {
 					} else {
 						retained[key(event)] = event.Text
 					}
+					watermark = event.Timestamp
 					if event.Ordinal == 33 {
 						return paused
 					}
 					return nil
 				})
-				if !errors.Is(err, paused) || len(retained) != 33 || overlap != pauseAt-1 {
-					t.Fatalf("partial batch lost or duplicated retained lines: unique=%d overlap=%d err=%v", len(retained), overlap, err)
+				// A cursor resumes exactly after the last retained line. A
+				// timestamp resume replays every line that shares the watermark
+				// timestamp, which is all of them here, so the viewer's dedupe
+				// carries the overlap instead.
+				wantOverlap := pauseAt
+				if kind == "Pod" {
+					wantOverlap = pauseAt - 1
+				}
+				if !errors.Is(err, paused) || len(retained) != 33 || overlap != wantOverlap {
+					t.Fatalf("partial batch lost or duplicated retained lines: unique=%d overlap=%d want=%d err=%v", len(retained), overlap, wantOverlap, err)
 				}
 			})
 		}

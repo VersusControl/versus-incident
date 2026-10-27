@@ -3,6 +3,7 @@ package changes
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -37,6 +38,8 @@ type Gap struct {
 }
 
 type Query struct {
+	RootUID   string
+	UIDs      map[string]bool
 	Since     time.Time
 	Until     time.Time
 	Namespace string
@@ -463,16 +466,40 @@ func (store *Store) ReleaseLease(owner string) error {
 	})
 }
 
-// Query returns at most 500 newest matching changes and a numeric offset cursor.
+type changeCursor struct {
+	Binding string
+	Since   time.Time
+	Until   time.Time
+	LastAt  time.Time
+	LastID  string
+}
+
+// Query returns a stable keyset page over the retained journal.
 func (store *Store) Query(query Query, now time.Time) (Page, error) {
 	if store == nil || store.provider == nil {
 		return Page{}, ErrStoreLimit
 	}
-	if query.Namespace != "" && !safeFilter(query.Namespace) || query.Kind != "" && !safeFilter(query.Kind) || query.Name != "" && !safeFilter(query.Name) || query.Type != "" && !validType(query.Type) {
+	if len(query.Cursor) > 4096 || query.Namespace != "" && !safeFilter(query.Namespace) || query.Kind != "" && !safeFilter(query.Kind) || query.Name != "" && !safeFilter(query.Name) || query.RootUID != "" && !safeFilter(query.RootUID) || query.Type != "" && !validType(query.Type) {
 		return Page{}, ErrInvalidQuery
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
+	}
+	requestedSince, requestedUntil := query.Since, query.Until
+	bindingBytes, _ := json.Marshal([]string{store.key, query.Namespace, query.Kind, query.Name, string(query.Type), query.RootUID})
+	bindingDigest := sha256.Sum256(bindingBytes)
+	binding := hex.EncodeToString(bindingDigest[:])
+	cursor := changeCursor{Binding: binding}
+	offset := 0
+	if query.Cursor != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(query.Cursor)
+		if err != nil || json.Unmarshal(raw, &cursor) != nil || cursor.Binding != binding || cursor.Since.IsZero() || cursor.Until.Before(cursor.Since) || cursor.LastAt.IsZero() || cursor.LastID == "" {
+			return Page{}, ErrInvalidQuery
+		}
+		if !requestedSince.IsZero() && !requestedSince.Equal(cursor.Since) || !requestedUntil.IsZero() && !requestedUntil.Equal(cursor.Until) {
+			return Page{}, ErrInvalidQuery
+		}
+		query.Since, query.Until = cursor.Since, cursor.Until
 	}
 	if query.Until.IsZero() {
 		query.Until = now
@@ -483,14 +510,7 @@ func (store *Store) Query(query Query, now time.Time) (Page, error) {
 	if query.Limit <= 0 || query.Limit > 500 {
 		query.Limit = 100
 	}
-	offset := 0
-	if query.Cursor != "" {
-		parsed, err := strconv.Atoi(query.Cursor)
-		if err != nil || parsed < 0 || parsed > maxChanges*(1+len(store.archives)) {
-			return Page{}, ErrInvalidQuery
-		}
-		offset = parsed
-	}
+	cursor.Since, cursor.Until = query.Since, query.Until
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	current, err := store.read()
@@ -527,6 +547,12 @@ func (store *Store) Query(query Query, now time.Time) (Page, error) {
 		if change.At.Before(query.Since) || change.At.After(query.Until) || query.Namespace != "" && change.Namespace != query.Namespace || query.Kind != "" && change.Kind != query.Kind || query.Name != "" && change.Name != query.Name || query.Type != "" && change.Type != query.Type {
 			continue
 		}
+		if query.RootUID != "" && change.UID != query.RootUID && change.RootUID != query.RootUID && !query.UIDs[change.UID] {
+			continue
+		}
+		if query.Cursor != "" && (change.At.After(cursor.LastAt) || change.At.Equal(cursor.LastAt) && change.ID >= cursor.LastID) {
+			continue
+		}
 		filtered = append(filtered, change)
 	}
 	sort.Slice(filtered, func(left, right int) bool {
@@ -541,7 +567,9 @@ func (store *Store) Query(query Query, now time.Time) (Page, error) {
 	end := min(offset+query.Limit, len(filtered))
 	page := Page{Items: append([]Change(nil), filtered[offset:end]...), Gaps: gapsInWindow(current.Gaps, query.Since, query.Until), Coverage: current.Coverage}
 	if end < len(filtered) {
-		page.Next = strconv.Itoa(end)
+		cursor.LastAt, cursor.LastID = filtered[end-1].At, filtered[end-1].ID
+		raw, _ := json.Marshal(cursor)
+		page.Next = base64.RawURLEncoding.EncodeToString(raw)
 	}
 	return page, nil
 }
@@ -629,7 +657,7 @@ func validChange(change Change) bool {
 	if change.Coalesced && (change.Kind != "Pod" || change.Type != Created && change.Type != Deleted) {
 		return false
 	}
-	if change.Source != "" && change.Source != "observed" && change.Source != "reconstructed" || len(change.Revision) > 256 {
+	if change.Source != "" && change.Source != "observed" && change.Source != "reconstructed" || len(change.Revision) > 256 || len(change.RootUID) > 256 || strings.ContainsAny(change.RootUID, "\x00\r\n") {
 		return false
 	}
 	if change.ID == "" || len(change.ID) > 128 || change.Cluster == "" || len(change.Cluster) > 256 || change.Kind == "" || len(change.Kind) > 128 || change.Name == "" || len(change.Name) > 253 || len(change.Namespace) > 253 || len(change.UID) > 256 || change.At.IsZero() || !validType(change.Type) || len(change.Fields) > maxChangeFields || len(change.Service) > 253 {

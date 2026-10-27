@@ -53,10 +53,12 @@ export function KubernetesIssueAlerts() {
   );
   if (!query.data) return <p role="status" className="border-b border-ink-700 p-3 text-xs text-ink-300">Loading issue alert settings…</p>;
   const settings = query.data;
-  const disabled = !settings.can_write || !settings.available || mutation.isPending;
+  const writeDisabled = !settings.can_write || mutation.isPending;
+  const enableDisabled = writeDisabled || !settings.available || !settings.channels_enabled;
+  const switchDisabled = writeDisabled || !settings.enabled && enableDisabled;
   const save = (input: KubernetesIssueAlertsInput) => {
     // Serialize writes so an older response cannot overwrite a newer choice.
-    if (disabled || saving.current) return;
+    if (writeDisabled || input.enabled && enableDisabled || saving.current) return;
     saving.current = true;
     mutation.mutate(input);
   };
@@ -68,7 +70,7 @@ export function KubernetesIssueAlerts() {
           <Bell size={15} aria-hidden className="shrink-0 text-ink-300" />
           <span className="text-xs font-medium text-ink-100">Alert on new issues</span>
           <button type="button" role="switch" aria-label="Alert on new issues" aria-checked={settings.enabled}
-            aria-describedby={descriptionId} disabled={disabled}
+            aria-describedby={descriptionId} disabled={switchDisabled}
             onClick={() => save({ enabled: !settings.enabled, level: settings.level })}
             className={`ml-auto inline-flex h-5 w-9 shrink-0 items-center rounded-full border p-0.5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 ${settings.enabled ? "border-accent bg-accent" : "border-ink-500 bg-ink-700"}`}>
             <span className={`h-3.5 w-3.5 rounded-full bg-ink-50 transition-transform motion-reduce:transition-none ${settings.enabled ? "translate-x-4" : "translate-x-0"}`} />
@@ -76,7 +78,7 @@ export function KubernetesIssueAlerts() {
         </div>
         {settings.enabled && <div role="group" aria-label="Issue alert level" className="flex w-full rounded border border-ink-500 p-0.5 sm:w-auto">
           {(["critical", "warning"] as const).map((level) => (
-            <button key={level} type="button" disabled={disabled} aria-pressed={settings.level === level}
+            <button key={level} type="button" disabled={enableDisabled} aria-pressed={settings.level === level}
               onClick={() => save({ enabled: true, level })}
               className={`flex-1 rounded px-3 py-1 text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 ${settings.level === level ? "bg-ink-600 font-medium text-ink-50" : "text-ink-300 hover:bg-ink-700"}`}>
               {level === "critical" ? "Critical" : "Warning"}
@@ -91,7 +93,7 @@ export function KubernetesIssueAlerts() {
         {settings.reason === "demand_capture" && <p>Alerts need continuous change capture</p>}
         {!settings.available && settings.reason !== "demand_capture" && <p>Issue alerts are unavailable for this cluster</p>}
         {!settings.channels_enabled && <p>No alert channel is on</p>}
-        {!settings.links_ready && <p>Set public_host to add Timeline and agent links</p>}
+        {!settings.links_ready && <p>Set public_host to add Timeline and DevOps Agent links on Alerts</p>}
       </div>
       <div className="flex flex-wrap items-center gap-2 text-2xs text-ink-300">
         <span>Sends through your alert channels</span>

@@ -25,26 +25,30 @@ type ChangePage struct {
 }
 
 type changeStoreState struct {
-	issueAlerts   map[kubeindex.Scope]*issueAlertWindow
-	mu            sync.Mutex
-	provider      storage.Provider
-	stores        map[kubeindex.Scope]*kubechanges.Store
-	captureLocks  map[kubeindex.Scope]*sync.Mutex
-	refreshes     map[indexRefreshKey]*indexRefreshCall
-	fallbacks     map[kubeindex.Scope]map[*indexRefreshCall]struct{}
-	stopped       map[kubeindex.Scope]bool
-	captures      map[kubeindex.Scope]*captureLoop
-	lifecycle     context.Context
-	firstSeen     map[kubeindex.Scope]map[string]time.Time
-	journalFailed map[kubeindex.Scope]bool
-	logActive     map[kubeindex.Scope]bool
-	logDone       map[kubeindex.Scope]chan struct{}
-	logCancel     map[kubeindex.Scope]context.CancelFunc
+	timelines         map[string]*timelineSnapshot
+	timelineManifests map[string]timelineManifest
+	inventories       map[kubeindex.Scope]*inventoryCache
+	issueAlerts       map[kubeindex.Scope]*issueAlertWindow
+	mu                sync.Mutex
+	provider          storage.Provider
+	stores            map[kubeindex.Scope]*kubechanges.Store
+	captureLocks      map[kubeindex.Scope]*sync.Mutex
+	refreshes         map[indexRefreshKey]*indexRefreshCall
+	fallbacks         map[kubeindex.Scope]map[*indexRefreshCall]struct{}
+	stopped           map[kubeindex.Scope]bool
+	captures          map[kubeindex.Scope]*captureLoop
+	lifecycle         context.Context
+	firstSeen         map[kubeindex.Scope]map[string]time.Time
+	journalFailed     map[kubeindex.Scope]bool
+	logActive         map[kubeindex.Scope]bool
+	logDone           map[kubeindex.Scope]chan struct{}
+	logCancel         map[kubeindex.Scope]context.CancelFunc
 }
 
 type indexRefreshKey struct {
 	scope      kubeindex.Scope
 	background bool
+	cached     bool
 }
 
 type indexRefreshCall struct {
@@ -56,17 +60,20 @@ type indexRefreshCall struct {
 
 func newChangeStoreState() *changeStoreState {
 	return &changeStoreState{
-		stores:        make(map[kubeindex.Scope]*kubechanges.Store),
-		captureLocks:  make(map[kubeindex.Scope]*sync.Mutex),
-		refreshes:     make(map[indexRefreshKey]*indexRefreshCall),
-		fallbacks:     make(map[kubeindex.Scope]map[*indexRefreshCall]struct{}),
-		stopped:       make(map[kubeindex.Scope]bool),
-		captures:      make(map[kubeindex.Scope]*captureLoop),
-		firstSeen:     map[kubeindex.Scope]map[string]time.Time{},
-		journalFailed: map[kubeindex.Scope]bool{},
-		logActive:     map[kubeindex.Scope]bool{},
-		logDone:       map[kubeindex.Scope]chan struct{}{},
-		logCancel:     map[kubeindex.Scope]context.CancelFunc{},
+		timelines:         make(map[string]*timelineSnapshot),
+		timelineManifests: make(map[string]timelineManifest),
+		inventories:       make(map[kubeindex.Scope]*inventoryCache),
+		stores:            make(map[kubeindex.Scope]*kubechanges.Store),
+		captureLocks:      make(map[kubeindex.Scope]*sync.Mutex),
+		refreshes:         make(map[indexRefreshKey]*indexRefreshCall),
+		fallbacks:         make(map[kubeindex.Scope]map[*indexRefreshCall]struct{}),
+		stopped:           make(map[kubeindex.Scope]bool),
+		captures:          make(map[kubeindex.Scope]*captureLoop),
+		firstSeen:         map[kubeindex.Scope]map[string]time.Time{},
+		journalFailed:     map[kubeindex.Scope]bool{},
+		logActive:         map[kubeindex.Scope]bool{},
+		logDone:           map[kubeindex.Scope]chan struct{}{},
+		logCancel:         map[kubeindex.Scope]context.CancelFunc{},
 	}
 }
 
@@ -129,9 +136,28 @@ func (service *Service) Changes(ctx context.Context, query ChangeQuery) (ChangeP
 		return ChangePage{}, err
 	}
 	query.Limit = normalizePageLimit(query.Limit)
+	if query.RootUID != "" {
+		if !safeSegment(query.RootUID) || len(query.RootUID) > 256 {
+			return ChangePage{}, ErrInvalidArguments
+		}
+		snapshot, _, err := service.CachedIndexSnapshot(ctx, graphIndexKinds...)
+		if err != nil {
+			return ChangePage{}, err
+		}
+		query.UIDs = map[string]bool{query.RootUID: true}
+		for _, record := range snapshot.Records {
+			if record.UID == query.RootUID {
+				related := directedRelated(snapshot, record.Kind, record.Namespace, record.Name)
+				for _, node := range related.Nodes {
+					query.UIDs[node.ID] = true
+				}
+				break
+			}
+		}
+	}
 	store := service.changeStore()
 	if store == nil {
-		return ChangePage{Items: []Change{}, Gaps: []kubechanges.Gap{}, Sync: SyncStatus{State: "warming", Partial: true}}, nil
+		return ChangePage{Items: []Change{}, Gaps: []kubechanges.Gap{}, Sync: service.withSyncProgress(SyncStatus{State: "syncing"})}, nil
 	}
 	if len(service.readOrgs) > 1 {
 		var err error
@@ -148,7 +174,7 @@ func (service *Service) Changes(ctx context.Context, query ChangeQuery) (ChangeP
 	if service.client == nil {
 		refreshed = kubeindex.Status{State: "unavailable", Partial: true}
 	} else {
-		_, refreshed, refreshErr = service.IndexSnapshot(ctx, "Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
+		_, refreshed, refreshErr = service.CachedIndexSnapshot(ctx, "Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
 	}
 	page, err := store.Query(query, time.Now().UTC())
 	if err != nil {
@@ -167,15 +193,9 @@ func (service *Service) Changes(ctx context.Context, query ChangeQuery) (ChangeP
 	if page.Gaps == nil {
 		page.Gaps = []kubechanges.Gap{}
 	}
-	result := ChangePage{Items: page.Items, Next: page.Next, Truncated: page.Next != "", Gaps: page.Gaps, Sync: SyncStatus{State: refreshed.State, AgeSeconds: refreshed.AgeSeconds, Partial: refreshed.Partial || refreshErr != nil}}
+	result := ChangePage{Items: page.Items, Next: page.Next, Gaps: page.Gaps, Sync: service.withSyncProgress(SyncStatus{State: refreshed.State, AgeSeconds: refreshed.AgeSeconds, Partial: refreshed.Partial || refreshErr != nil, Pending: refreshed.Pending, PendingKinds: refreshed.PendingKinds})}
 	if refreshErr != nil {
 		result.Partial = append(result.Partial, PartialFailure{ResourceID: "kubernetes.index", Class: errorClass(refreshErr)})
-	}
-	if service.client != nil && service.indexes != nil {
-		if index, indexErr := service.indexes.ForScope(kubeindex.Scope{OrgID: service.scope.OrgID, ClusterID: service.scope.ClusterID, CredentialID: service.scope.CredentialID}); indexErr == nil {
-			status := index.Status(time.Now().UTC())
-			result.Sync = SyncStatus{State: status.State, AgeSeconds: status.AgeSeconds, Partial: status.Partial}
-		}
 	}
 	return result, nil
 }
