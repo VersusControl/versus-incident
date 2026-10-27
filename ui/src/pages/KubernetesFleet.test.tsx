@@ -204,8 +204,8 @@ describe("Kubernetes fleet", () => {
     // Every bucket is its own chip, so the counts never run together into words.
     const header = fleetHeader();
     const chips = headerChips(header);
-    expect(chips.map((chip) => chip.getAttribute("data-bucket"))).toEqual(["failed", "degraded", "not-ready", "preparing", "ready"]);
-    expect(chips.map((chip) => chip.textContent)).toEqual(["1 failed", "0 degraded", "1 not ready", "1 preparing", "1 ready"]);
+    expect(chips.map((chip) => chip.getAttribute("data-bucket"))).toEqual(["failed", "degraded", "not-ready", "preparing", "syncing", "ready"]);
+    expect(chips.map((chip) => chip.textContent)).toEqual(["1 failed", "0 degraded", "1 not ready", "1 preparing", "0 syncing", "1 ready"]);
     expect(chips.every((chip) => chip.getAttribute("aria-hidden") === "true")).toBe(true);
     expect(chips[0].className).toContain("rounded");
     expect(chips[0].className).toContain("border");
@@ -215,7 +215,7 @@ describe("Kubernetes fleet", () => {
     // The buckets add up to the fleet size, and the sentence names each one.
     const shown = chips.map((element) => Number.parseInt(element.textContent ?? "", 10));
     expect(shown.reduce((sum, value) => sum + value, 0)).toBe(4);
-    expect(screen.getByRole("group", { name: "4 clusters, 1 failed, 0 degraded, 1 not ready, 1 preparing, 1 ready" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "4 clusters, 1 failed, 0 degraded, 1 not ready, 1 preparing, 0 syncing, 1 ready" })).toBeTruthy();
   });
 
   // The contradiction the review found: a green node-health field must not
@@ -227,7 +227,7 @@ describe("Kubernetes fleet", () => {
     expect(pill.textContent).toBe("Failed");
     expect(pill.className).toBe("pill pill-bad");
     expect(pill.className).not.toContain("pill-good");
-    expect(headerChips(fleetHeader()).map((chip) => chip.textContent)).toEqual(["1 failed", "0 degraded", "0 not ready", "0 preparing", "0 ready"]);
+    expect(headerChips(fleetHeader()).map((chip) => chip.textContent)).toEqual(["1 failed", "0 degraded", "0 not ready", "0 preparing", "0 syncing", "0 ready"]);
   });
 
   it("keeps a preparing cluster openable with its usual row actions", () => {
@@ -283,7 +283,7 @@ describe("Kubernetes fleet", () => {
     // A permission gap is not a sync fault: the row is ready and shows its counts.
     expect(row.querySelector("[data-sync-state-label]")?.textContent).toBe("Ready");
     expect(within(row).getAllByRole("meter")).toHaveLength(2);
-    expect(headerChips(fleetHeader()).map((chip) => chip.textContent)).toEqual(["0 failed", "0 degraded", "0 not ready", "0 preparing", "1 ready"]);
+    expect(headerChips(fleetHeader()).map((chip) => chip.textContent)).toEqual(["0 failed", "0 degraded", "0 not ready", "0 preparing", "0 syncing", "1 ready"]);
   });
 
   it("never renders a zero snapshot time as a clock reading", () => {
@@ -448,4 +448,19 @@ describe("Member cluster permissions", () => {
     expect(assignments).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Cluster permissions for alice" })).toBeNull();
   });
+});
+it("isolates first publication and quiet refresh classifications per fleet cluster", () => {
+  const fresh = syncing("new", firstProgress);
+  const used = { ...summary("used", "healthy"), sync: { state: "syncing", age_s: 20, partial: false } };
+  mount([fresh, used], {
+    new: reportFor(fresh),
+    used: { ...reportFor(used), first_ready_at: "2026-10-27T08:00:00Z" },
+  });
+  const newRow = screen.getByRole("article", { name: "Cluster new" });
+  const usedRow = screen.getByRole("article", { name: "Cluster used" });
+  expect(within(newRow).getByText("Preparing", { exact: true })).toBeTruthy();
+  expect(within(usedRow).getByText("Syncing", { exact: true })).toBeTruthy();
+  expect(usedRow.textContent).not.toMatch(/Preparing|Waiting for first data/);
+  expect(usedRow.querySelector("[data-first-sync]")).toBeNull();
+  expect(usedRow.textContent).toContain("2 / 2");
 });

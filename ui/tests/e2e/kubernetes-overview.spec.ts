@@ -2136,9 +2136,11 @@ test.describe("Live Pod stream acceptance", () => {
       await expect(repeated).toHaveCount(2);
       expect((await lines.evaluateAll((elements) => elements.map((element) => element.getAttribute("data-log-key")))).slice(0, pausedKeys.length)).toEqual(pausedKeys);
       expect((await current())!.since_time).toBeTruthy();
-      await detail.getByLabel("Follow", { exact: true }).uncheck();
-      await expect(detail.getByLabel("Follow", { exact: true })).not.toBeChecked();
+      // Following is automatic: there is no control to toggle, and leaving the
+      // newest line is what stops it. The way back is offered instead.
+      await expect(detail.getByRole("button", { name: "Jump to latest", exact: true })).toHaveCount(0);
       await output.evaluate((element) => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll")); });
+      await expect(detail.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
       const heldKeys = await lines.count();
       await expect.poll(() => lines.count()).toBeGreaterThan(heldKeys + 3);
       expect(await output.evaluate((element) => element.scrollTop)).toBeLessThanOrEqual(1);
@@ -2150,14 +2152,13 @@ test.describe("Live Pod stream acceptance", () => {
       await detail.getByLabel("Log filter").fill(".");
       await expect(output).toHaveText("No log lines match this filter.");
       await detail.getByLabel("Log filter").fill("");
-      await detail.getByLabel("Follow", { exact: true }).check();
-      await detail.getByLabel("Jump to latest").click();
+      await detail.getByRole("button", { name: "Jump to latest", exact: true }).click();
       await expect.poll(() => output.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThanOrEqual(48);
       await output.evaluate((element) => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll")); });
       const scrolledKeys = await lines.count();
       await expect.poll(() => lines.count()).toBeGreaterThan(scrolledKeys + 3);
       expect(await output.evaluate((element) => element.scrollTop)).toBeLessThanOrEqual(1);
-      await detail.getByLabel("Jump to latest").click();
+      await detail.getByRole("button", { name: "Jump to latest", exact: true }).click();
       const beforeChange = (await current())!.cancelled;
       await detail.getByLabel("Log since seconds").selectOption("60");
       await expect.poll(() => requests.at(-1)?.searchParams.get("since_seconds")).toBe("60");
@@ -2312,6 +2313,49 @@ test.describe("Live Pod stream acceptance", () => {
 
 test.describe("Pod log streaming fixtures", () => {
   test.use({ deviceScaleFactor: Number(process.env.E2E_KUBERNETES_CAPTURE_SCALE || "1") });
+
+  test("full Logs workload filter fills the left edge while Pod levels and mobile actions remain intact", async ({ page }, testInfo) => {
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+    await page.route("**/api/admin/kubernetes/clusters", (route) => route.fulfill({ json: { multiple: false, clusters: [] } }));
+    const measurements = [];
+    for (const width of [1440, 1024, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const [kind, resourceID] of [["Deployment", "apps~v1~deployments"], ["StatefulSet", "apps~v1~statefulsets"], ["Pod", "core~v1~pods"]] as const) {
+        await page.route("**/describe**", (route) => route.fulfill({ json: { resource: { kind, resource_id: resourceID, namespace: "payments", name: "filter-fixture", uid: "filter-fixture", summary: { log_containers: [{ name: "app", type: "regular" }] } }, events: [] } }));
+        await openApp(page, `/agent/kubernetes?r=${resourceID}/payments/filter-fixture&tab=logs`);
+        const viewer = page.getByRole("dialog", { name: "Details panel" }).locator('.resource-log-viewer[data-compact="false"]');
+        await expect(viewer.getByLabel("Log filter")).toBeVisible();
+        await expect(viewer.getByLabel("Pause logs")).toBeVisible();
+        const geometry = await viewer.evaluate((element) => {
+          const box = (selector: string) => {
+            const rect = element.querySelector(selector)!.getBoundingClientRect();
+            return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width };
+          };
+          return { row: box(".log-secondary"), filter: box(".log-filter-wrap"), actions: box(".log-actions"), levels: element.querySelector(".log-levels") ? box(".log-levels") : null, overflow: document.documentElement.scrollWidth > window.innerWidth };
+        });
+        measurements.push({ width, kind, ...geometry });
+        expect(geometry.overflow).toBe(false);
+        expect(geometry.actions.right).toBeLessThanOrEqual(geometry.row.right + 1);
+        if (kind !== "Pod" || width < 640) expect(Math.abs(geometry.filter.left - geometry.row.left)).toBeLessThanOrEqual(1);
+        if (width < 640) {
+          expect(Math.abs(geometry.filter.right - geometry.row.right)).toBeLessThanOrEqual(1);
+          expect(geometry.actions.top).toBeGreaterThanOrEqual(geometry.filter.bottom);
+        } else {
+          expect(geometry.actions.left - geometry.filter.right).toBeCloseTo(8, 0);
+          expect(Math.abs(geometry.actions.top - geometry.filter.top)).toBeLessThan(8);
+          if (kind !== "Pod") expect(geometry.filter.width).toBeGreaterThan(352);
+        }
+        if (kind === "Pod") {
+          expect(geometry.levels).not.toBeNull();
+          expect(Math.abs(geometry.levels!.left - geometry.row.left)).toBeLessThanOrEqual(1);
+          if (width >= 640) expect(geometry.filter.left).toBeGreaterThanOrEqual(geometry.levels!.right);
+        } else expect(geometry.levels).toBeNull();
+        await viewer.screenshot({ path: capturePath("log-filter", width, "dark", kind) });
+      }
+    }
+    await testInfo.attach("log-filter-geometry", { body: JSON.stringify(measurements, null, 2), contentType: "application/json" });
+  });
 
   for (const width of [390, 320]) for (const theme of ["dark", "light"] as const) {
     test(`Break timeline log caption bounds ${width} ${theme} theme`, async ({ page }, testInfo) => {
@@ -7545,8 +7589,9 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     const countBeforeFollowWait = await wlOutput.locator("[data-log-key]").count();
     await expect.poll(() => wlOutput.locator("[data-log-key]").count(), { timeout: 15_000 }).toBeGreaterThan(countBeforeFollowWait + 2);
     expect(await wlOutput.evaluate((el) => el.scrollTop)).toBeLessThanOrEqual(1);
-    await detail.getByLabel("Jump to latest").click();
-    await expect(detail.getByLabel("Follow", { exact: true })).toBeChecked();
+    await detail.getByRole("button", { name: "Jump to latest", exact: true }).click();
+    // At the newest line the control is gone: following is the state, not a toggle.
+    await expect(detail.getByRole("button", { name: "Jump to latest", exact: true })).toHaveCount(0);
     await expect.poll(() => wlOutput.locator("[data-log-key]").count(), { timeout: 25_000 }).toBeGreaterThanOrEqual(4);
     expect(await wlOutput.locator("[data-log-key]").count()).toBeLessThan(32);
 
@@ -7601,7 +7646,9 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
       await expect(wlOutput).toContainText(ord, { timeout: 30_000 });
     }
     await detail.getByLabel("Previous logs").check();
-    await expect(detail.getByLabel("Follow", { exact: true })).toBeDisabled();
+    // Previous logs is one bounded read: it never follows, and the status pill
+    // says which read is on screen.
+    await expect(detail.getByLabel("Log connection status")).toHaveText("Previous");
     await expect(wlOutput).toContainText("fakekube previous");
     await expect(wlOutput).toContainText("REDACTED");
     await expect(wlOutput).not.toContainText("previous-secret-value");

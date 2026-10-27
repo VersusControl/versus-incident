@@ -291,12 +291,31 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 			return false, nil
 		}
 	}
-	// Progress is reported only until the first generation publishes; later
-	// cycles refresh data that viewers already see.
+	// Keep reporting through the core-only publication until cluster-wide ready.
 	var progress *inventoryProgress
-	if cold {
+	if generation.FirstReadyAt.IsZero() {
 		progress = &cache.progress
-		progress.advance("connected", time.Now().UTC())
+		progress.due(len(indexedResourceIDs), now)
+		for kind, state := range generation.View.Kinds {
+			progress.kindObserved(kind, state, now)
+			if state.State == "ready" && !state.Absent {
+				progress.kindListed(kind, state.Records, now)
+			}
+		}
+		if !cold {
+			progress.complete("connected", now)
+			progress.complete("building", now)
+		}
+		if cold {
+			progress.advance("connected", time.Now().UTC())
+		} else {
+			progress.advance("listing", time.Now().UTC())
+		}
+		defer func() {
+			progress.pause(time.Now().UTC())
+			status := progress.snapshot()
+			log.Printf("kubernetes: first sync phase=%s elapsed_s=%.3f connected_s=%.3f listing_s=%.3f building_s=%.3f metrics_s=%.3f remaining=%s", status.Step, time.Since(status.StartedAt).Seconds(), status.PhaseSeconds["connected"], status.PhaseSeconds["listing"], status.PhaseSeconds["building"], status.PhaseSeconds["metrics"], strings.Join(status.RemainingKinds, ","))
+		}()
 	}
 	resources := make(map[string][]ProjectedResource, len(generation.Resources))
 	states := make(map[string]kubeindex.KindStatus, len(generation.ResourceStatus))
@@ -334,7 +353,7 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		}
 	}
 	if progress != nil {
-		progress.due(len(kinds), time.Now().UTC())
+		progress.complete("connected", time.Now().UTC())
 		progress.advance("listing", time.Now().UTC())
 	}
 	if cold {
@@ -375,8 +394,11 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 				return
 			}
 			if progress != nil {
-				if state, known := index.KindStatus(kind); known && refreshErr == nil {
-					progress.kindListed(kind, state.Records, time.Now().UTC())
+				if state, known := index.KindStatus(kind); known {
+					progress.kindObserved(kind, state, time.Now().UTC())
+					if refreshErr == nil && !state.Absent {
+						progress.kindListed(kind, state.Records, time.Now().UTC())
+					}
 				}
 			}
 		}()
@@ -420,6 +442,10 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		return false, err
 	}
 	if progress != nil {
+		status := progress.snapshot()
+		if len(status.RemainingKinds) == 0 {
+			progress.complete("listing", time.Now().UTC())
+		}
 		progress.advance("building", time.Now().UTC())
 	}
 	generation.View = index.Snapshot()
@@ -454,11 +480,14 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		events, _, _ := crashes.resolve(generation.View, time.Now().UTC())
 		generation.Crashes, generation.PodSampledAt = events, now
 	}
+	if progress != nil {
+		progress.complete("building", time.Now().UTC())
+	}
 	if metricsDue || discovered {
-		// Only the cold first sync publishes before reading usage, so viewers
-		// get data without waiting for metrics. Warm cycles already serve the
-		// last good generation and publish once, at the end of the cycle.
-		if cold && inventoryChanged && len(publishCore) > 0 {
+		// A first ready publication must not wait for optional usage reads, even
+		// when the cold core-only publication left other inventory kinds pending.
+		state, _, _, _, _ := summarizeSyncHealth(syncHealthKinds(*generation))
+		if inventoryChanged && (cold || generation.FirstReadyAt.IsZero() && state == "ready") && len(publishCore) > 0 {
 			if err := publishCore[0](generation); err != nil {
 				return false, err
 			}
@@ -475,6 +504,13 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		}
 		cache.mu.RUnlock()
 		generation.Usage = service.collectInventoryUsage(context.WithValue(ctx, inventoryNamespacesContextKey{}, namespaces), generation.Usage)
+		if progress != nil {
+			if generation.Usage.PodMetrics.Complete && generation.Usage.NodeMetrics.Complete {
+				progress.complete("metrics", time.Now().UTC())
+			} else {
+				progress.phaseResult("metrics", "unavailable (optional)")
+			}
+		}
 	}
 	return dirty, ctx.Err()
 }

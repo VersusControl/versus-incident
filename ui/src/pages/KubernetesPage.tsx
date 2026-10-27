@@ -8,7 +8,7 @@ import {
   type Ref,
   type ReactNode,
 } from "react";
-import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { KubernetesFirstReadyContext, useBrokenIssues, useKubernetesCluster, useKubernetesQuery } from "@/lib/useKubernetesCluster";
 import { KubernetesClusterProvider } from "@/components/KubernetesClusterProvider";
@@ -51,6 +51,7 @@ import { KubernetesUnreadableNote } from "@/components/KubernetesUnreadableNote"
 import { KubernetesPreparingPanel } from "@/components/KubernetesPreparingPanel";
 import { KubernetesSyncStateIndicator, type KubernetesStreamState } from "@/components/KubernetesSyncStateIndicator";
 import { clusterSyncEnvelope, firstReadyAt, isZeroTime, reportSyncHealth, syncFailureReport, syncHealth, syncPollIntervalMs, syncReportPollIntervalMs } from "@/lib/kubernetesSyncHealth";
+import { isNotConfiguredAnswer, reportProvesConfigured } from "@/lib/kubernetesConnector";
 import { settledSync } from "@/lib/kubernetesPending";
 import { TopBar } from "@/components/TopBar";
 import { useCursorPagination, type CursorPaginationState } from "@/lib/pagination";
@@ -304,9 +305,14 @@ export function KubernetesPage() {
   }, [missing, setParams]);
   if (catalog.isPending) return <main className="min-w-0 flex-1 p-4"><SkCard lines={5} /></main>;
   if (catalog.isError) {
-    if (catalog.error instanceof ApiError && catalog.error.status === 503 && catalog.error.message === "Kubernetes connector is not configured") return <KubernetesDashboard />;
+    // A reader who may not list clusters has nothing to be shown. Every other
+    // catalog failure — no connector configured, a connector whose credential
+    // died, an unreachable registry — is answered by the dashboard, which asks
+    // the cluster's own report and names the state it finds. Replacing the page
+    // with a generic error would hide exactly the failure an operator needs to
+    // see, because a dead credential fails this list and every other read alike.
     if (catalog.error instanceof ApiError && [401, 403].includes(catalog.error.status)) return <main className="min-w-0 flex-1"><TopBar title="Kubernetes" /><div className="p-4"><RetryableError error={catalog.error} onRetry={() => catalog.refetch()} retrying={catalog.isFetching} context="Couldn't load Kubernetes overview" /></div></main>;
-    return <main className="min-w-0 flex-1 p-4"><RetryableError error={catalog.error} onRetry={() => catalog.refetch()} retrying={catalog.isFetching} context="Couldn't load clusters" /></main>;
+    return <KubernetesDashboard />;
   }
   if (catalog.data.multiple && (!cluster || missing)) return <KubernetesFleet
     clusters={catalog.data.clusters}
@@ -376,27 +382,42 @@ function KubernetesDashboard() {
     // finish so the blocking surface and its Retry clear on their own.
     refetchInterval: (query) => syncPollIntervalMs(query.state.data?.sync),
   });
-  const connectorMissing = overview.error instanceof ApiError
-    && overview.error.status === 503
-    && overview.error.message === "Kubernetes connector is not configured";
+  const overviewNotConfigured = isNotConfiguredAnswer(overview.error);
   const overviewAccessDenied = overview.error instanceof ApiError && [401, 403].includes(overview.error.status);
   const clusterUnavailable = multiple && overview.error instanceof ApiError && overview.error.status === 404;
-  const clusterReachable = !overview.isPending && !connectorMissing && (!multiple || !overviewAccessDenied) && !clusterUnavailable;
   /**
    * The one authority for the blocking gate: every kind the index knows for
    * this cluster, each with its own state. The per-view `sync` envelope only
    * covers the kinds a view asked for, so a failing kind outside that set would
    * otherwise neither block the views nor be named in the surface.
+   *
+   * It is also asked whenever the overview says "not configured", because this
+   * is the one route that answers for a cluster whose credential died: a
+   * deployment with no connector never gets a report, so a report is the
+   * positive evidence that separates the two answers worded the same way.
    */
   const syncReport = useQuery({
     queryKey: ["kubernetes-sync-health"],
     queryFn: api.kubernetesSyncHealth,
-    enabled: clusterReachable,
+    enabled: !overview.isPending && !overviewAccessDenied && !clusterUnavailable,
     retry: false,
     // Always bounded: a kind that fails after a healthy report must re-block the
     // views, and a blocked report must clear, both without a user action.
     refetchInterval: (query) => syncReportPollIntervalMs(clusterSyncEnvelope(query.state.data)),
   });
+  /**
+   * A cluster is configured when its report answers. So the setup card is owed
+   * only to an answer that says nothing is configured *and* a report route that
+   * agrees nothing is configured: a dead credential fails the overview with the
+   * same words but still answers the report, and that cluster shows its failure
+   * instead of setup instructions for a product nobody connected.
+   */
+  const connectorConfigured = reportProvesConfigured(syncReport);
+  const connectorMissing = overviewNotConfigured && !connectorConfigured && !syncReport.isPending;
+  // The overview calls it not configured and the report has not spoken yet.
+  // Neither screen is honest until it does.
+  const connectorUndecided = overviewNotConfigured && syncReport.isPending;
+  const clusterReachable = !overview.isPending && !connectorMissing && !connectorUndecided && (!multiple || !overviewAccessDenied) && !clusterUnavailable;
   // One classification for the whole explorer. The blocking surface, the top
   // bar and every cluster query read it, so no view can render partial data.
   /**
@@ -428,23 +449,52 @@ function KubernetesDashboard() {
         // prevent.
         return syncHealth({ sync: clusterReachable ? { state: "syncing", age_s: 0, partial: false } : undefined, kinds: null });
       }
-      // First-sync progress is cluster-wide and only the overview carries it;
-      // the aggregate state itself always comes from the report, and the gate
-      // reads only the blocking group: a kind the connector identity may not
-      // read is a capability gap, never a reason to hide the cluster.
-      const progress = envelope.state === "syncing" ? overview.data?.sync?.progress : undefined;
-      return reportSyncHealth(syncReport.data, progress);
+      // Read progress and aggregate readiness from the same authoritative report.
+      return reportSyncHealth(syncReport.data);
     },
-    [clusterReachable, reportFailure, syncReport.data, syncReport.isError, overview.data?.sync],
+    [clusterReachable, reportFailure, syncReport.data, syncReport.isError],
   );
   /**
    * The gate opens on the first publication, not on the current state. Before
    * this cluster has ever published, a non-ready report closes every view
    * because there is nothing to show; afterwards a background resync, a partial
-   * cycle or a stale snapshot keeps the last data on screen and is reported as
-   * a strip, so an operator never loses the screen they are working on.
+   * cycle or a stale snapshot keeps the last data on screen. Only failures and
+   * degraded data need a strip; routine syncing uses the existing top bar.
    */
   const clusterQueriesEnabled = clusterReachable && (health.state === "ready" || health.firstReadyAt !== undefined);
+  useEffect(() => {
+    if (!clusterQueriesEnabled || health.state !== "ready" || !health.firstReadyAt) return;
+    // A pre-publication response may finish after readiness. Recheck scoped
+    // warming snapshots at most once a second until settled, including late
+    // completions, without cancelling in-flight reads or touching log streams.
+    const filters = {
+      queryKey: key(),
+      predicate: (query: Query) => query.isActive() && query.state.status === "success"
+        && query.state.fetchStatus === "idle"
+        && !["kubernetes-overview", "kubernetes-sync-health"].includes(String(query.queryKey[2]))
+        && (query.state.data as { sync?: { state?: string } } | undefined)?.sync?.state === "syncing",
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      if (!queryClient.getQueryCache().findAll(filters).length) {
+        clearTimeout(timer);
+        timer = undefined;
+      } else if (timer === undefined) {
+        timer = setTimeout(() => {
+          timer = undefined;
+          void queryClient.invalidateQueries(filters, { cancelRefetch: false });
+          schedule();
+        }, 1_000);
+      }
+    };
+    void queryClient.invalidateQueries(filters, { cancelRefetch: false });
+    const unsubscribe = queryClient.getQueryCache().subscribe(schedule);
+    schedule();
+    return () => {
+      unsubscribe();
+      clearTimeout(timer);
+    };
+  }, [clusterQueriesEnabled, health.state, health.firstReadyAt, key, queryClient]);
   const brokenIssues = useBrokenIssues(view === "overview" && clusterQueriesEnabled && !overviewAccessDenied);
   const overviewChangesKey = useMemo(() => key("kubernetes-changes", "overview", overview.data?.cluster_id), [key, overview.data?.cluster_id]);
   const subscribeOverviewChanges = useCallback((notify: () => void) => queryClient.getQueryCache().subscribe(notify), [queryClient]);
@@ -785,6 +835,10 @@ function KubernetesDashboard() {
   const workloadsAccessDenied = overviewAccessDenied || workloads.error instanceof ApiError && [401, 403].includes(workloads.error.status);
   const nodesAccessDenied = overviewAccessDenied || nodes.error instanceof ApiError && [401, 403].includes(nodes.error.status);
   const aggregateUsage = usageAggregate(usageAccessDenied ? undefined : usage.data, overview.data);
+  // The sync strip's age sentence describes the data in front of the reader. A
+  // cold reload has none — every read fails at once — so the page says whether
+  // anything was actually loaded for that sentence to be about.
+  const dataOnScreen = overview.data !== undefined;
   // The coverage marker explains data that is on screen. While the sync is not
   // healthy nothing is on screen, and the blocking surface names the failures.
   const overviewWarningMessages = view === "overview" && clusterQueriesEnabled ? [
@@ -792,6 +846,14 @@ function KubernetesDashboard() {
     ...timelineWarnings(overviewAccessDenied ? undefined : brokenIssues.data, overviewAccessDenied ? undefined : overviewChanges).map((warning) => warning.content),
   ] : [];
   if (clusterUnavailable) return <p role="status" className="p-4 text-sm text-sev-warning">This cluster is no longer available.</p>;
+  if (connectorUndecided) {
+    return (
+      <main className="min-w-0 flex-1 overflow-auto">
+        <TopBar title="Kubernetes" />
+        <div aria-label="Checking whether a connector is configured" className="mx-auto max-w-7xl p-4 sm:p-6"><SkCard lines={4} /></div>
+      </main>
+    );
+  }
   if (connectorMissing) {
     return (
       <main className="min-w-0 flex-1 overflow-auto">
@@ -805,7 +867,7 @@ function KubernetesDashboard() {
               <p className="mt-3 text-sm text-ink-300">Kubernetes connector is not configured.</p>
               <div className="mt-4 flex flex-wrap gap-2">
                 <a className="btn" href="https://docs.versusincident.com/#/agent/connectors/kubernetes" target="_blank" rel="noopener noreferrer">Documentation <ExternalLink size={13} aria-hidden="true" /></a>
-                <button type="button" className="btn" onClick={() => overview.refetch()} disabled={overview.isFetching}><RefreshCw size={13} aria-hidden="true" className={overview.isFetching ? "animate-spin" : undefined} />Check connection</button>
+                <button type="button" className="btn" onClick={refreshAll} disabled={overview.isFetching}><RefreshCw size={13} aria-hidden="true" className={overview.isFetching ? "animate-spin" : undefined} />Check connection</button>
               </div>
             </div>
           </article>
@@ -828,7 +890,8 @@ function KubernetesDashboard() {
               navigate(`/agent/kubernetes?${next}`);
             }}>{clusters.map((entry) => <option key={entry.id} value={entry.id}>{entry.display_name || entry.id}</option>)}</select></>}
             <KubernetesSyncStateIndicator
-              state={health.state}
+              state={syncReport.isPending ? "loading" : health.state}
+              firstReadyAt={health.firstReadyAt}
               streamState={streamState}
               ageSeconds={indexStatus?.age_s}
               title={syncReport.data ? `Cluster sync ${syncReport.data.state} across ${syncReport.data.total_kinds} resource types` : "Kubernetes index status unavailable"}
@@ -881,11 +944,13 @@ function KubernetesDashboard() {
         {/* The sync state is named on every view and on every failure, with or
             without an overview: a read that cannot answer must never leave the
             tab blank. */}
+        {!overview.isPending && syncReport.isPending && <div role="status" aria-label="Loading cluster sync status"><SkCard lines={4} /></div>}
         {!overview.isPending && <KubernetesUnreadableNote kinds={health.unreadable} />}
-        {!overview.isPending && <KubernetesSyncHealthSurface
+        {!overview.isPending && !syncReport.isPending && <KubernetesSyncHealthSurface
           health={health}
           onRetry={refreshAll}
           retrying={overview.isRefetching}
+          dataOnScreen={dataOnScreen}
           cluster={clusters.find((entry) => entry.id === cluster)?.display_name || cluster || overview.data?.cluster_id}
         />}
         {view === "overview" && overview.isError && (!overview.data || overviewAccessDenied) && (
@@ -1191,10 +1256,11 @@ function KubernetesDashboard() {
             : "Resource detail"
         }
       >
-        {!clusterQueriesEnabled && selected && <div className="p-3"><KubernetesSyncHealthSurface
+        {!clusterQueriesEnabled && !syncReport.isPending && selected && <div className="p-3"><KubernetesSyncHealthSurface
           health={health}
           onRetry={refreshAll}
           retrying={overview.isRefetching}
+          dataOnScreen={dataOnScreen}
           cluster={clusters.find((entry) => entry.id === cluster)?.display_name || cluster || overview.data?.cluster_id}
         /></div>}
         {clusterQueriesEnabled && selected && <div className="resource-detail-content" data-workload={["Deployment", "StatefulSet"].includes(selected.kind)}>
@@ -1510,7 +1576,7 @@ function ClusterHealthHeader({
   sync?: { state: string; age_s: number; partial: boolean };
 }) {
   const partial = Boolean(failureWarnings(overview.partial_failures).length) || Boolean(sync?.partial);
-  const syncLabel = !partial && sync?.state === "ready" ? `Synced ${Math.round(sync.age_s)}s` : sync?.state === "ready" || sync?.state === "stale" ? `Snapshot ${Math.round(sync.age_s)}s ago` : "Sync unknown";
+  const syncLabel = sync?.state === "ready" || sync?.state === "stale" ? `Snapshot ${Math.round(sync.age_s)}s ago` : "Sync unknown";
   const observed = Date.parse(overview.observed_at);
   return (
     <header className="relative grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 py-2 sm:flex sm:flex-wrap sm:justify-between sm:px-4 sm:py-3">

@@ -28,8 +28,12 @@ describe("Sync health surface", () => {
     render(<KubernetesSyncHealthSurface health={health} />);
     const block = document.querySelector('[data-sync-health="preparing"]')!;
     expect(block.textContent).toContain("Preparing");
-    expect(block.textContent).toContain("Listing the resource types this cluster serves");
-    expect(screen.getByText("Loading 7 more resource types")).toBeTruthy();
+    expect(block.querySelectorAll("[data-step]")).toHaveLength(4);
+    expect(Array.from(block.querySelectorAll("[data-step]"), row => row.getAttribute("data-state"))).toEqual(["unknown", "unknown", "unknown", "unknown"]);
+    const bar = screen.getByRole("progressbar", { name: "Waiting for preparation progress" });
+    expect(block.querySelectorAll("[role=progressbar]")).toHaveLength(1);
+    expect(bar.hasAttribute("aria-valuenow")).toBe(false);
+    expect(block.textContent).not.toMatch(/under a minute|Step 1|ETA|%/);
     expect(block.querySelector("[data-sync-problem]")).toBeNull();
   });
 
@@ -86,11 +90,9 @@ describe("Sync health surface", () => {
     expect(block.querySelectorAll("[data-sync-problem]")).toHaveLength(0);
   });
 
-  // K22 S4: from the first publication on, the same states are a strip. The data
-  // on screen stays, the state is named, and its age is stated.
+  // Published failures stay visible over the existing data.
   const published = "2026-10-26T08:00:00Z";
   it.each([
-    ["preparing", { state: "syncing", age_s: 30, partial: false }, "Cluster sync running"],
     ["degraded", { state: "partial", age_s: 90, partial: true }, "Cluster sync degraded"],
     ["failed", { state: "error", age_s: 600, partial: true }, "Cluster sync failed"],
   ])("reports %s as a strip once the cluster has published", (state, sync, headline) => {
@@ -129,10 +131,28 @@ describe("Sync health surface", () => {
     expect(strip.textContent).not.toMatch(/Preparing/);
   });
 
-  it("calls a snapshot from the last few seconds just now, not zero seconds ago", () => {
+  it("leaves a snapshot seconds old unlabelled instead of claiming freshness it cannot measure", () => {
     const health = syncHealth({ sync: { state: "partial", age_s: 2, partial: true }, kinds: { Node: { state: "partial", records: 1, partial: true, error: "record_rejected", observed_at: minutesAgo(1) } }, firstReadyAt: published });
     render(<KubernetesSyncHealthSurface health={health} />);
-    expect(document.querySelector("[data-sync-age]")!.textContent).toContain("Showing data loaded just now.");
+    expect(document.querySelector("[data-sync-age]")).toBeNull();
+  });
+
+  it("states no age for a failed report, whose zero is a placeholder rather than a measurement", () => {
+    const health = syncHealth({ sync: { state: "error", age_s: 0, partial: true }, kinds: { Secret: { state: "error", error: "unauthorized", records: 0, partial: true, observed_at: zero, last_attempt_at: minutesAgo(1) } }, firstReadyAt: published });
+    render(<KubernetesSyncHealthSurface health={health} />);
+    const strip = document.querySelector('[data-sync-strip="failed"]')!;
+    expect(strip.querySelector("[data-sync-age]")).toBeNull();
+    // The failure is still named; only the freshness claim is withheld.
+    expect(strip.textContent).toContain("Cluster sync failed");
+    expect(strip.textContent).not.toMatch(/Showing data|just now/);
+  });
+
+  it("states no age when there is no data on screen for it to describe", () => {
+    const health = syncHealth({ sync: { state: "error", age_s: 300, partial: true }, kinds: { Secret: { state: "error", error: "unauthorized", records: 0, partial: true, observed_at: zero, last_attempt_at: minutesAgo(1) } }, firstReadyAt: published });
+    render(<KubernetesSyncHealthSurface health={health} dataOnScreen={false} />);
+    const strip = document.querySelector('[data-sync-strip="failed"]')!;
+    expect(strip.querySelector("[data-sync-age]")).toBeNull();
+    expect(strip.textContent).not.toContain("Showing data");
   });
 
   it("counts the resource types a strip leaves out instead of hiding them", () => {
@@ -146,4 +166,23 @@ describe("Sync health surface", () => {
     expect(strip.querySelectorAll("[data-sync-problem]")).toHaveLength(3);
     expect(strip.textContent).toContain("2 more resource types");
   });
+});
+
+it("renders no additional loading surface during a published routine refresh", () => {
+  const health = syncHealth({ sync: { state: "syncing", age_s: 30, partial: false }, firstReadyAt: "2026-10-27T08:00:00Z" });
+  const { container } = render(<KubernetesSyncHealthSurface health={health} onRetry={vi.fn()} />);
+  expect(container.innerHTML).toBe("");
+});
+
+it("uses one listing bar measured in types, not overall startup percent", () => {
+  const health = syncHealth({ sync: { state: "syncing", age_s: 0, partial: false, progress: { step: "listing", step_index: 2, step_total: 4, steps_done: ["connected"], counts: {}, kinds_done: 12, kinds_total: 20, started_at: "2026-10-27T08:00:00Z", updated_at: "2026-10-27T08:00:01Z" } } });
+  const { container } = render(<KubernetesSyncHealthSurface health={health} />);
+  expect(container.querySelectorAll("[data-step]")).toHaveLength(4);
+  const bar = screen.getByRole("progressbar", { name: "Listing resource types: 12 / 20" });
+  expect(container.querySelectorAll("[role=progressbar]")).toHaveLength(1);
+  expect(bar.getAttribute("aria-valuenow")).toBe("12");
+  expect(bar.getAttribute("aria-valuemax")).toBe("20");
+  expect(bar.getAttribute("aria-valuetext")).toBe("12 / 20 resource types listed");
+  expect(container.textContent).not.toMatch(/60%|Usually under|ETA/);
+  expect(container.querySelector("ol")?.hasAttribute("aria-live")).toBe(false);
 });

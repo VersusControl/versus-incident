@@ -70,7 +70,11 @@ func TestToolCatalogGETDoesNotConstructDisabledAgentDependencies(t *testing.T) {
 				Auth:     config.KubernetesAuthConfig{Mode: "invalid"},
 			}}}
 			app := fiber.New()
-			app.Use(func(ctx *fiber.Ctx) error { middleware.MarkAuthorized(ctx); return ctx.Next() })
+			app.Use(func(ctx *fiber.Ctx) error {
+				middleware.MarkAuthorized(ctx)
+				middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+				return ctx.Next()
+			})
 			app.Use(middleware.OrgInjector())
 			availability := agent.NewToolAvailabilityService(cfg, storage.NewMemory(), connectors)
 			service, constructionErrors := agent.NewKubernetesRegistry(connectors.Kubernetes, tenancy.DefaultOrgScope())

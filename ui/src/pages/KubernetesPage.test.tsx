@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { BrowserRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "@/lib/api";
@@ -23,6 +23,16 @@ function renderWorkloads(client?: QueryClient) {
 	query.set("view", "resources");
 	window.history.replaceState(null, "", `/agent/kubernetes?${query}`);
 	return renderPage(client);
+}
+
+// A deployment that has never had a connector fails both reads that could name
+// it: the overview says nothing is configured, and the health report — the one
+// answer a configured cluster always gives, whatever its credential is doing —
+// says it too. That agreement is what the setup card is owed to.
+function mockNeverConfigured() {
+	const message = "Kubernetes connector is not configured";
+	vi.mocked(api.kubernetesOverview).mockRejectedValue(new ApiError(503, message, { error: message }));
+	vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(new ApiError(503, message, { error: message }));
 }
 
 function capacityCell(panelName: string, label: string) {
@@ -459,7 +469,7 @@ describe("KubernetesPage", () => {
 		"/agent/kubernetes?view=timeline&r=apps~v1~deployments/default/api&tab=timeline",
 	])("shows connector setup without cluster reads for missing configuration at %s", async (location) => {
 		window.history.replaceState(null, "", location);
-		vi.mocked(api.kubernetesOverview).mockRejectedValue(new ApiError(503, "Kubernetes connector is not configured", { error: "Kubernetes connector is not configured" }));
+		mockNeverConfigured();
 		renderPage();
 		const card = await screen.findByRole("article", { name: "Kubernetes connector" });
 		expect(within(card).getByText("Connection needed")).toBeTruthy();
@@ -492,6 +502,9 @@ describe("KubernetesPage", () => {
 
 	it("keeps loading distinct from missing setup and recovers after checking the connection", async () => {
 		let rejectOverview!: (error: Error) => void;
+		// Nothing is configured at first, so the report route says so too. Once a
+		// connector exists it answers again, and the page must follow it.
+		vi.mocked(api.kubernetesSyncHealth).mockRejectedValueOnce(new ApiError(503, "Kubernetes connector is not configured", { error: "Kubernetes connector is not configured" }));
 		vi.mocked(api.kubernetesOverview).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectOverview = reject; }));
 		renderPage();
 		expect(screen.getByLabelText("Loading Kubernetes overview")).toBeTruthy();
@@ -510,6 +523,7 @@ describe("KubernetesPage", () => {
 		await screen.findByRole("region", { name: "Cluster health" });
 		await waitFor(() => expect(api.kubernetesStream).toHaveBeenCalledOnce());
 		const signal = vi.mocked(api.kubernetesStream).mock.calls[0][1];
+		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(new ApiError(503, "Kubernetes connector is not configured", { error: "Kubernetes connector is not configured" }));
 		vi.mocked(api.kubernetesOverview).mockRejectedValueOnce(new ApiError(503, "Kubernetes connector is not configured"));
 		fireEvent.click(screen.getByRole("button", { name: "Refresh Kubernetes data" }));
 		await screen.findByRole("article", { name: "Kubernetes connector" });
@@ -1709,7 +1723,7 @@ describe("KubernetesPage", () => {
 		vi.mocked(api.kubernetesOverview).mockResolvedValue({ sync: { state: "syncing", age_s: 0, partial: false, progress: { step: "listing", step_index: 2, step_total: 4, steps_done: ["connected"], counts: { Pod: 3214, Deployment: 412, Namespace: 27 }, kinds_done: 3, kinds_total: 8, cluster_version: "v1.30.2", node_count: 12, started_at: "2026-10-23T10:00:00Z", updated_at: "2026-10-23T10:00:04Z" } }, connector: "kubernetes", cluster_id: "production", observed_at: "", nodes: 0, ready_nodes: 0, pods: 0, running_pods: 0, namespaces: 0, active_namespaces: 0, workloads: 0, warnings: 0 });
 		// The cluster-wide report has no published generation yet, so every kind
 		// is still to be listed.
-		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ state: "syncing", partial: false, age_s: 0, kinds: {}, total_kinds: 0, ready_kinds: 0, failing_kinds: 0, pending_kinds: 0, truncated: false });
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ state: "syncing", partial: false, age_s: 0, kinds: {}, total_kinds: 0, ready_kinds: 0, failing_kinds: 0, pending_kinds: 0, truncated: false, progress: (await api.kubernetesOverview()).sync?.progress });
 		renderPage();
 		const panel = await screen.findByRole("region", { name: "Preparing your cluster" });
 		const countsLine = panel.querySelector<HTMLElement>("[data-first-sync-counts]")!;
@@ -1735,6 +1749,21 @@ describe("KubernetesPage", () => {
 		expect(await screen.findByRole("region", { name: "Preparing your cluster" })).toBeTruthy();
 		await waitFor(() => expect(screen.queryByRole("region", { name: "Preparing your cluster" })).toBeNull(), { timeout: 3000 });
 		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
+	});
+
+	it.each(["9181/1000", "9181m", "9181000u", "9181000000n"])("preserves over-capacity percentages with CPU usage %s and rational server quantities", async (cpuUsage) => {
+		vi.mocked(api.kubernetesOverview).mockResolvedValue({ connector: "kubernetes", cluster_id: "production", observed_at: "2026-08-30T12:00:00Z", nodes: 1, ready_nodes: 1, pods: 4, running_pods: 4, namespaces: 2, active_namespaces: 2, workloads: 2, warnings: 0, requested_cpu: "18669/200", allocatable_cpu: "196/25", requested_memory: `${31393 * 1024 ** 3}/100`, allocatable_memory: "28.73Gi", truncated: false, sync: { state: "ready", age_s: 0, partial: false } });
+		vi.mocked(api.kubernetesUsage).mockResolvedValue({ observed_at: "2026-08-30T12:01:00Z", availability: "available", fresh: true, node_metrics: { availability: "available", fresh: true, complete: true, total: 1, cpu: cpuUsage, memory: `${20055 * 1024 ** 3}/100`, observed_at: "2026-08-30T12:01:00Z" }, pod_metrics: { availability: "unavailable", fresh: false, complete: false, total: 0 }, pods: [], nodes: [], truncated: false });
+		renderPage();
+		await screen.findByRole("meter", { name: "CPU in use" });
+		for (const [name, percent] of [["CPU in use", 117], ["CPU reserved by requests", 1191], ["Memory in use", 698], ["Memory reserved by requests", 1093]] as const) {
+			const meter = screen.getByRole("meter", { name });
+			const shown = `${percent.toLocaleString()}% of allocatable`;
+			expect(meter.getAttribute("aria-valuetext")).toBe(shown);
+			expect(screen.getByText(shown)).toBeTruthy();
+		}
+		expect(within(capacityCell("CPU capacity", "Allocatable")).getByText("7.84 cores")).toBeTruthy();
+		expect(within(capacityCell("Memory capacity", "Allocatable")).getByText("28.73 GiB")).toBeTruthy();
 	});
 
 	it("shows In use and Reserved percentages once nodes report allocatable capacity", async () => {
@@ -1770,7 +1799,7 @@ describe("KubernetesPage", () => {
 		expect(screen.queryByText("Needs node read access (list nodes)")).toBeNull();
 	});
 
-	it.each(["overview", "timeline"])("closes the Preparing panel once core kinds publish and shows one quiet pending note on the %s tab", async (view) => {
+	it.each(["overview", "timeline"])("keeps the four preparation rows until the complete report publishes on the %s tab", async (view) => {
 		window.history.replaceState(null, "", `/agent/kubernetes?view=${view}`);
 		const core = { connector: "kubernetes", cluster_id: "production", observed_at: "2026-08-30T12:00:00Z", nodes: 3, ready_nodes: 3, pods: 4, running_pods: 4, namespaces: 2, active_namespaces: 2, workloads: 2, warnings: 0 };
 		vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...core, sync: { state: "ready", age_s: 0, partial: false, pending_kinds: 7 } });
@@ -1778,13 +1807,14 @@ describe("KubernetesPage", () => {
 		const listed = { state: "ready", partial: false, age_s: 0, kinds: { Pod: { state: "ready", observed_at: "2026-08-30T12:00:00Z", records: 4, partial: false } }, total_kinds: 8, ready_kinds: 1, failing_kinds: 0, pending_kinds: 7, truncated: false };
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(listed);
 		const { container } = renderPage();
-		const note = await screen.findByText("Loading 7 more resource types");
-		expect(container.querySelectorAll("[data-pending-note]")).toHaveLength(1);
-		expect(note.closest("[data-pending-note]")?.className).not.toMatch(/warn|amber|sev-/);
-		expect(screen.queryByRole("region", { name: "Preparing your cluster" })).toBeNull();
+		await screen.findByRole("region", { name: "Preparing your cluster" });
+		expect(container.querySelectorAll("[data-step]")).toHaveLength(4);
+		expect(container.querySelectorAll("[role=progressbar]")).toHaveLength(1);
+		expect(container.querySelectorAll("[data-pending-note]")).toHaveLength(0);
 		vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...core, sync: { state: "ready", age_s: 0, partial: false } });
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...listed, total_kinds: 1, pending_kinds: 0 });
-		await waitFor(() => expect(screen.queryByText(/more resource types?$/)).toBeNull(), { timeout: 7000 });
+		await browserClick(screen.getByRole("button", { name: "Refresh Kubernetes data" }));
+		await waitFor(() => expect(container.querySelector("[data-preparing-panel]")).toBeNull(), { timeout: 7000 });
 	}, 10_000);
 
 	it("shows a pending topology kind as loading, never as zero", async () => {
@@ -1946,12 +1976,10 @@ describe("KubernetesPage sync gate", () => {
 		for (const query of [api.kubernetesWorkloads, api.kubernetesNodes, api.kubernetesIssues, api.kubernetesTimeline, api.kubernetesGraph, api.kubernetesTraffic, api.kubernetesUsage, api.kubernetesReleases, api.kubernetesGitOpsApps]) expect(vi.mocked(query)).not.toHaveBeenCalled();
 	});
 
-	// K22 S4: once a cluster has published a generation, the sync state is a
-	// strip. Preparing belongs to the first boot only, and no state may take the
-	// data away from an operator who is mid-incident.
+	// Published failures never take data away from an operator mid-incident.
 	const published = "2026-10-26T08:00:00Z";
 
-	it.each(["syncing", "partial", "stale", "error"])("keeps every view open and reports %s as a strip after the first publication", async (state) => {
+	it.each(["partial", "stale", "error"])("keeps every view open and reports %s as a strip after the first publication", async (state) => {
 		vi.mocked(api.kubernetesOverview).mockResolvedValue(healthyOverview);
 		const kinds = state === "error"
 			? { Node: { state: "error", observed_at: "0001-01-01T00:00:00Z", last_attempt_at: "2026-10-26T09:12:03Z", records: 0, partial: true, error: "forbidden" } }
@@ -2001,7 +2029,7 @@ describe("KubernetesPage sync gate", () => {
 		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
 	});
 
-	it("shows data plus the strip when the page is reloaded mid-resync", async () => {
+	it("shows data and only the existing top-bar indicator when reloaded mid-resync", async () => {
 		// A reload is a new mount: the very first report already carries the
 		// durable first-publication time.
 		vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...healthyOverview, sync: { state: "syncing", age_s: 30, partial: false } });
@@ -2011,8 +2039,90 @@ describe("KubernetesPage sync gate", () => {
 		});
 		const { container } = renderPage();
 		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
-		await waitFor(() => expect(container.querySelector('[data-sync-strip="preparing"]')).toBeTruthy());
+		await waitFor(() => expect(container.querySelector('[data-sync-state="preparing"]')?.textContent).toBe("Syncing"));
+		expect(container.querySelector("[data-sync-strip]")).toBeNull();
 		expect(screen.queryByRole("region", { name: "Preparing your cluster" })).toBeNull();
+	});
+
+	it("does not fabricate Preparing while the authoritative report is pending on reload", async () => {
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(healthyOverview);
+		let resolve!: (value: ReturnType<typeof report> & { first_ready_at: string }) => void;
+		vi.mocked(api.kubernetesSyncHealth).mockReturnValue(new Promise(done => { resolve = done; }));
+		const { container } = renderPage();
+		await screen.findByRole("status", { name: "Loading cluster sync status" });
+		expect(container.querySelector("[data-preparing-panel], [data-sync-strip]")).toBeNull();
+		expect(container.querySelector("[data-sync-state]")?.textContent).toBe("Loading");
+		await act(async () => { resolve({ ...report("syncing", { Node: readyKind }), first_ready_at: published }); });
+		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
+		expect(container.querySelector("[data-preparing-panel], [data-sync-strip]")).toBeNull();
+		expect(container.querySelector("[data-sync-state]")?.textContent).toBe("Syncing");
+	});
+
+	it("refetches a warming snapshot when a published cluster becomes ready after restart", async () => {
+		window.history.replaceState(null, "", "/agent/kubernetes?view=resources");
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(healthyOverview);
+		const warming = { ...report("syncing", { Pod: { ...readyKind, state: "pending" } }), first_ready_at: published };
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(warming);
+		vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ items: [], truncated: false, sync: { state: "syncing", age_s: 0, partial: false } });
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { container } = renderPage(client);
+		await screen.findByText("No workloads in this scope.");
+		vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "restored-api", uid: "restored-uid" }], truncated: false, sync: { state: "ready", age_s: 0, partial: false } });
+		const ready = { ...report("ready", { Pod: readyKind }), first_ready_at: published };
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(ready);
+		await act(async () => { client.setQueryData(["kubernetes", "_", "kubernetes-sync-health"], ready); });
+		expect(await screen.findByText("restored-api")).toBeTruthy();
+		expect(container.querySelector("[data-preparing-panel], [data-sync-strip]")).toBeNull();
+	});
+
+	it("settles late warming responses after readiness without overlapping or cross-scope refreshes", async () => {
+		window.history.replaceState(null, "", "/agent/kubernetes?view=resources");
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(healthyOverview);
+		const warming = { ...report("syncing", { Pod: { ...readyKind, state: "pending" } }), first_ready_at: published };
+		const ready = { ...report("ready", { Pod: readyKind }), first_ready_at: published };
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(warming);
+		let finish!: (value: Awaited<ReturnType<typeof api.kubernetesWorkloads>>) => void;
+		vi.mocked(api.kubernetesWorkloads).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { container } = renderPage(client);
+		await waitFor(() => expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(1));
+		const empty = { items: [], truncated: false, sync: { state: "syncing" as const, age_s: 0, partial: false } };
+		const otherKey = ["kubernetes", "other", "kubernetes-workloads"];
+		const inactiveKey = ["kubernetes", "_", "kubernetes-detail", "inactive"];
+		client.setQueryData(otherKey, empty);
+		client.setQueryData(inactiveKey, empty);
+		const otherFetch = vi.fn().mockResolvedValue(empty);
+		const otherObserver = new QueryObserver(client, { queryKey: otherKey, queryFn: otherFetch, staleTime: Infinity });
+		const stopOther = otherObserver.subscribe(() => {});
+		vi.useFakeTimers();
+		try {
+			vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(ready);
+			await act(async () => { client.setQueryData(["kubernetes", "_", "kubernetes-sync-health"], ready); await vi.advanceTimersByTimeAsync(20); });
+			// Ready arrives first, while the initial request still has no data.
+			await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+			expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(1);
+			let finishRetry!: typeof finish;
+			vi.mocked(api.kubernetesWorkloads).mockResolvedValueOnce(empty).mockReturnValueOnce(new Promise(resolve => { finishRetry = resolve; }));
+			await act(async () => { finish(empty); await vi.advanceTimersByTimeAsync(20); });
+			await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+			expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(2);
+			await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+			expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(3);
+			// A slow retry is not cancelled/restarted on each poll.
+			await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+			expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(3);
+			await act(async () => { finishRetry({ ...empty, items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "late-api", uid: "late-uid" }], sync: { state: "ready", age_s: 0, partial: false } }); await vi.advanceTimersByTimeAsync(20); });
+			expect(screen.getByText("late-api")).toBeTruthy();
+			await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+			expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(3);
+			expect(client.getQueryState(otherKey)?.isInvalidated).toBe(false);
+			expect(otherFetch).not.toHaveBeenCalled();
+			expect(client.getQueryState(inactiveKey)?.isInvalidated).toBe(false);
+			expect(container.querySelector("[data-preparing-panel], [data-sync-strip]")).toBeNull();
+		} finally {
+			stopOther();
+			vi.useRealTimers();
+		}
 	});
 
 	it("never reopens Preparing on a per-view refetch after the first publication", async () => {
@@ -2181,7 +2291,7 @@ describe("KubernetesPage sync gate", () => {
 			total_kinds: 2, ready_kinds: 1, failing_kinds: 0, pending_kinds: 1, truncated: false,
 		});
 		const { container } = renderPage();
-		await screen.findByText("Loading 1 more resource type");
+		await screen.findByRole("progressbar", { name: "Waiting for preparation progress" });
 		expect(container.querySelector('[data-sync-health="preparing"]')).toBeTruthy();
 		// A kind that is only waiting is never listed as a failure.
 		expect(container.querySelectorAll("[data-sync-problem]")).toHaveLength(0);
@@ -2201,7 +2311,7 @@ describe("KubernetesPage sync gate", () => {
 			total_kinds: known.length, ready_kinds: 0, failing_kinds: 0, pending_kinds: known.length, truncated: false,
 		});
 		const { container } = renderPage();
-		await screen.findByText("Loading 20 more resource types");
+		await screen.findByRole("progressbar", { name: "Waiting for preparation progress" });
 		expect(container.querySelector('[data-sync-health="preparing"]')).toBeTruthy();
 		expect(container.querySelector('[data-sync-health="ready"]')).toBeNull();
 		// No kind is failing, so nothing is named as a problem.
@@ -2214,7 +2324,8 @@ describe("KubernetesPage sync gate", () => {
 		vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...ready, sync: { state: "ready", age_s: 0, partial: false } });
 		vi.mocked(api.kubernetesSyncHealth).mockImplementation(() => new Promise(() => {}));
 		const { container } = renderPage();
-		await waitFor(() => expect(container.querySelector('[data-sync-health="preparing"]')).toBeTruthy());
+		await screen.findByRole("status", { name: "Loading cluster sync status" });
+		expect(container.querySelector("[data-preparing-panel]")).toBeNull();
 		// A ready envelope from the view is not evidence that the cluster is
 		// ready, so no cluster query opens before the report answers.
 		expect(screen.queryByRole("region", { name: "Cluster health" })).toBeNull();
@@ -2302,7 +2413,8 @@ describe("KubernetesPage sync gate", () => {
 
 	// F1: a dead credential must be named on whatever tab the operator is on. The
 	// last report that succeeded is never preferred over the failing one, and the
-	// failure still says when the cluster first published and how old its data is.
+	// failure still says when the cluster first published — but an age is only
+	// stated for data that is actually on screen, and this page loaded none.
 	it("names a revoked credential on a non-Overview view instead of leaving it blank", async () => {
 		window.history.replaceState(null, "", "/agent/kubernetes?view=resources");
 		vi.mocked(api.kubernetesOverview).mockRejectedValue(new ApiError(502, "credential revoked", { error: "credential revoked" }));
@@ -2311,7 +2423,7 @@ describe("KubernetesPage sync gate", () => {
 		const { container } = renderPage();
 		const strip = await screen.findByRole("region", { name: "Cluster sync status" });
 		expect(strip.getAttribute("data-sync-strip")).toBe("failed");
-		expect(strip.querySelector("[data-sync-age]")?.textContent).toContain("Showing data from 5 minutes ago.");
+		expect(strip.querySelector("[data-sync-age]")).toBeNull();
 		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
 		// Nothing is blank: the inventory names its own failure.
 		expect(await screen.findByText("Resource inventory is unavailable.")).toBeTruthy();
@@ -2340,6 +2452,88 @@ describe("KubernetesPage sync gate", () => {
 		// The data the operator was reading is still there, under the strip.
 		expect(screen.getByRole("region", { name: "Cluster health" })).toBeTruthy();
 	}, 15_000);
+
+	// QA-211: a published cluster whose credential was removed is not a product
+	// nobody configured. The overview words both the same way, so the page leans
+	// on the one read a dead credential cannot suppress — the health report.
+	const deadCredentialKinds = { Secret: { state: "error", observed_at: "0001-01-01T00:00:00Z", last_attempt_at: "2026-10-26T09:12:03Z", records: 0, partial: true, error: "unauthorized" } };
+
+	it("names a dead credential as a failure on a live session instead of showing connector setup", async () => {
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(healthyOverview);
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...report("ready", { Node: readyKind, Pod: readyKind }), first_ready_at: published, age_s: 180 });
+		const { container } = renderPage();
+		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
+
+		// The credential dies while the page is open. The overview answers with the
+		// same words a never-configured deployment gets, and the report still
+		// answers, which is what says this cluster exists.
+		vi.mocked(api.kubernetesOverview).mockRejectedValue(new ApiError(503, "Kubernetes connector is not configured"));
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...report("error", deadCredentialKinds, { failing: 1 }), first_ready_at: published, age_s: 180 });
+		fireEvent.click(screen.getByRole("button", { name: "Refresh Kubernetes data" }));
+
+		const strip = await screen.findByRole("region", { name: "Cluster sync status" });
+		expect(strip.getAttribute("data-sync-strip")).toBe("failed");
+		expect(strip.textContent).toContain("Cluster sync failed");
+		expect(within(strip).getByRole("button", { name: "Retry sync" })).toBeTruthy();
+		expect(strip.querySelector("[data-sync-age]")?.textContent).toContain("Showing data from 3 minutes ago.");
+		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
+		expect(screen.queryByRole("article", { name: "Kubernetes connector" })).toBeNull();
+		expect(screen.getByRole("tablist", { name: "Kubernetes views" })).toBeTruthy();
+		// Every view keeps the data it had.
+		expect(screen.getByRole("region", { name: "Cluster health" })).toBeTruthy();
+		expect(screen.queryByRole("alert")).toBeNull();
+	});
+
+	it("renders the tabs and the failure, never setup or a blank view, on a cold reload with a dead credential", async () => {
+		window.history.replaceState(null, "", "/agent/kubernetes?view=resources");
+		// The same setup wording, and no cluster read succeeds. Only the report
+		// answers, so this is a configured cluster with a dead credential. It even
+		// carries a real snapshot age, which still describes data this page never
+		// loaded.
+		vi.mocked(api.kubernetesOverview).mockRejectedValue(new ApiError(503, "Kubernetes connector is not configured"));
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...report("error", deadCredentialKinds, { failing: 1 }), first_ready_at: published, age_s: 240 });
+		vi.mocked(api.kubernetesWorkloads).mockRejectedValue(new ApiError(502, "credential revoked"));
+		const { container } = renderPage();
+		const strip = await screen.findByRole("region", { name: "Cluster sync status" });
+		expect(strip.getAttribute("data-sync-strip")).toBe("failed");
+		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
+		expect(screen.queryByRole("article", { name: "Kubernetes connector" })).toBeNull();
+		expect(screen.getByRole("tablist", { name: "Kubernetes views" })).toBeTruthy();
+		// Nothing is on screen, so the strip claims no age for it: a snapshot age is
+		// not a claim about data this page never loaded.
+		expect(strip.querySelector("[data-sync-age]")).toBeNull();
+		expect(strip.textContent).not.toContain("Showing data");
+		// The view names its own failure rather than going blank.
+		expect(await screen.findByText("Resource inventory is unavailable.")).toBeTruthy();
+	});
+
+	it("treats a coded credential answer as a fault even when it repeats the setup words", async () => {
+		const fault = { error: "Kubernetes connector is not configured", code: "credential_unavailable", action: "Configure a credential source.", retryable: false };
+		vi.mocked(api.kubernetesOverview).mockRejectedValue(new ApiError(503, fault.error, fault));
+		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(new ApiError(503, fault.error, fault));
+		const { container } = renderPage();
+		expect(await screen.findByRole("heading", { name: "Cluster sync failed" })).toBeTruthy();
+		expect(container.querySelector('[data-sync-health="failed"]')).toBeTruthy();
+		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
+		expect(screen.queryByRole("article", { name: "Kubernetes connector" })).toBeNull();
+	});
+
+	// The cluster list fails with the same credential fault as every other read,
+	// so it is not a reason to replace the page with a generic error: the report
+	// still answers, and the failure belongs on screen.
+	it("names the failure when the cluster list is the read that fails", async () => {
+		window.history.replaceState(null, "", "/agent/kubernetes");
+		const fault = { error: "Kubernetes connector is not configured", code: "credential_unavailable", retryable: false };
+		vi.mocked(api.kubernetesClusters).mockRejectedValue(new ApiError(503, fault.error, fault));
+		vi.mocked(api.kubernetesOverview).mockRejectedValue(new ApiError(503, "Kubernetes connector is not configured"));
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...report("error", deadCredentialKinds, { failing: 1 }), first_ready_at: published, age_s: 90 });
+		const { container } = renderPage(undefined, false);
+		const strip = await screen.findByRole("region", { name: "Cluster sync status" });
+		expect(strip.getAttribute("data-sync-strip")).toBe("failed");
+		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
+		expect(screen.queryByText(/Couldn't load clusters/)).toBeNull();
+		expect(screen.queryByRole("article", { name: "Kubernetes connector" })).toBeNull();
+	});
 });
 
 describe("Kubernetes unreadable kinds", () => {
@@ -2431,4 +2625,25 @@ describe("Kubernetes fleet sync health", () => {
 		expect(within(synced).queryByRole("meter")).toBeNull();
 		expect(within(synced).queryByText("0 warnings")).toBeNull();
 	});
+});
+
+describe("Preparation and snapshot age regressions", () => {
+ it("uses authoritative progress after a core-only overview becomes ready", async () => {
+  const report = await api.kubernetesSyncHealth();
+  vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...report, state: "syncing", pending_kinds: 8, first_ready_at: undefined, progress: { step: "listing", step_index: 2, step_total: 4, steps_done: ["connected", "building"], counts: { Pod: 18 }, kinds_done: 12, kinds_total: 20, remaining_kinds: ["ConfigMap"], kind_status: { ConfigMap: "pending" }, started_at: "2026-10-27T12:00:00Z", updated_at: "2026-10-27T12:00:16Z" } });
+  renderPage();
+  const panel = await screen.findByRole("region", { name: "Preparing your cluster" });
+  expect(within(panel).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("12");
+  expect(within(panel).getByText("Remaining: ConfigMap (pending)")).toBeTruthy();
+  expect(within(panel).queryByText(/unknown/i)).toBeNull();
+ });
+ it("labels the snapshot age rather than suggesting a sync duration", async () => {
+  const overview = await api.kubernetesOverview();
+  vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...overview, partial_failures: [], sync: { state: "ready", age_s: 261, partial: false } });
+  const issues = await api.kubernetesIssues();
+  vi.mocked(api.kubernetesIssues).mockResolvedValue({ ...issues, sync: { state: "ready", age_s: 261, partial: false } });
+  renderPage();
+  expect(await screen.findByText("Snapshot 261s ago")).toBeTruthy();
+  expect(screen.queryByText(/Synced 261s/)).toBeNull();
+ });
 });

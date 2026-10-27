@@ -235,6 +235,60 @@ func TestInventoryScopeUpgradeAndNamespaceDenial(t *testing.T) {
 }
 
 func TestInventoryOverviewReportsNodeAllocatableFromBackgroundCache(t *testing.T) {
+	labels := map[string]any{
+		"kubernetes.io/arch": "amd64", "kubernetes.io/os": "linux",
+		"node.kubernetes.io/instance-type": "m6i.4xlarge",
+		"topology.kubernetes.io/region":    "us-east-1", "topology.kubernetes.io/zone": "us-east-1a",
+		"eks.amazonaws.com/nodegroup":                   "production-general-purpose",
+		"eks.amazonaws.com/capacityType":                "ON_DEMAND",
+		"eks.amazonaws.com/nodegroup-image":             "ami-0123456789abcdef0",
+		"eks.amazonaws.com/sourceLaunchTemplateId":      "lt-0123456789abcdef0",
+		"eks.amazonaws.com/sourceLaunchTemplateVersion": "12",
+	}
+	for index := 0; index < 40; index++ {
+		labels["scheduling.example.com/production-workload-pool-"+strconv.Itoa(index)] = "general-purpose-on-demand-amd64"
+	}
+	nodes, pods, nodeMetrics := []any{}, []any{}, []any{}
+	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for index, allocatable := range []map[string]any{
+		{"cpu": "7840m", "memory": "28Gi"},
+		{"cpu": "15840m", "memory": "60Gi"},
+		{"cpu": "15840m", "memory": "60Gi"},
+	} {
+		name := "ip-10-0-0-" + strconv.Itoa(index+1) + ".ec2.internal"
+		metadata := map[string]any{"name": name, "uid": name + "-uid"}
+		if index > 0 {
+			metadata["labels"] = labels
+		}
+		node := map[string]any{"apiVersion": "v1", "kind": "Node", "metadata": metadata, "status": map[string]any{
+			"allocatable": allocatable,
+			"capacity":    map[string]any{"cpu": "16", "memory": "64Gi"},
+			"conditions":  []any{map[string]any{"type": "Ready", "status": "True"}},
+		}}
+		if index > 0 {
+			projected := (&Service{}).projectResource(ResourceDefinition{ID: "core~v1~nodes", Kind: "Node"}, node)
+			if len(projected.Labels) > kubeindex.MaxLabels || kubeindex.RecordWithinBudget(indexRecord(projected)) {
+				t.Fatal("wide EKS node must exercise the byte budget, not the label count bound")
+			}
+		}
+		nodes = append(nodes, node)
+		pods = append(pods, map[string]any{
+			"apiVersion": "v1", "kind": "Pod",
+			"metadata": map[string]any{"name": "api", "namespace": "namespace-" + strconv.Itoa(index)},
+			"spec": map[string]any{"nodeName": name, "containers": []any{map[string]any{
+				"name": "api", "resources": map[string]any{
+					"requests": map[string]any{"cpu": "6", "memory": "32Gi"},
+					"limits":   map[string]any{"cpu": "8", "memory": "40Gi"},
+				},
+			}}},
+			"status": map[string]any{"phase": "Running"},
+		})
+		nodeMetrics = append(nodeMetrics, map[string]any{
+			"apiVersion": "metrics.k8s.io/v1beta1", "kind": "NodeMetrics",
+			"metadata": map[string]any{"name": name}, "timestamp": timestamp, "window": "30s",
+			"usage": map[string]any{"cpu": []string{"181m", "4", "5"}[index], "memory": []string{"20Gi", "40Gi", "60Gi"}[index]},
+		})
+	}
 	var foreground atomic.Bool
 	var foregroundReads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -245,25 +299,20 @@ func TestInventoryOverviewReportsNodeAllocatableFromBackgroundCache(t *testing.T
 		case "/api":
 			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
 		case "/apis":
-			writeJSON(writer, map[string]any{"groups": []any{}})
+			writeJSON(writer, map[string]any{"groups": []any{map[string]any{"name": "metrics.k8s.io", "preferredVersion": map[string]any{"version": "v1beta1"}}}})
 		case "/api/v1":
 			writeJSON(writer, map[string]any{"resources": []any{
 				map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}},
 				map[string]any{"name": "nodes", "kind": "Node", "verbs": []string{"get", "list"}},
 			}})
+		case "/apis/metrics.k8s.io/v1beta1":
+			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "nodes", "kind": "NodeMetrics", "verbs": []string{"get", "list"}}}})
+		case "/apis/metrics.k8s.io/v1beta1/nodes":
+			writeJSON(writer, map[string]any{"items": nodeMetrics})
 		case "/api/v1/nodes":
-			nodes := []any{}
-			for index, allocatable := range []map[string]any{{"cpu": "4", "memory": "8Gi"}, {"cpu": "3500m", "memory": "4Gi"}} {
-				name := "node-" + strconv.Itoa(index)
-				nodes = append(nodes, map[string]any{"apiVersion": "v1", "kind": "Node", "metadata": map[string]any{"name": name, "uid": name + "-uid"}, "status": map[string]any{
-					"allocatable": allocatable,
-					"capacity":    map[string]any{"cpu": "8", "memory": "16Gi"},
-					"conditions":  []any{map[string]any{"type": "Ready", "status": "True"}},
-				}})
-			}
 			writeJSON(writer, map[string]any{"items": nodes})
 		case "/api/v1/pods":
-			writeJSON(writer, map[string]any{"items": []any{podFixture("api-1")}})
+			writeJSON(writer, map[string]any{"items": pods})
 		default:
 			http.NotFound(writer, request)
 		}
@@ -276,11 +325,45 @@ func TestInventoryOverviewReportsNodeAllocatableFromBackgroundCache(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if overview.Nodes != 2 || overview.AllocatableCPU != "15/2" || overview.AllocatableMemory != strconv.FormatInt(12<<30, 10) {
+	if overview.Nodes != 3 || overview.ReadyNodes != 3 || overview.AllocatableCPU != "988/25" || overview.AllocatableMemory != strconv.FormatInt(148<<30, 10) {
 		t.Fatalf("cached overview lost node allocatable: nodes=%d cpu=%q memory=%q", overview.Nodes, overview.AllocatableCPU, overview.AllocatableMemory)
+	}
+	if overview.Pods != 3 || overview.RequestedCPU != "18" || overview.LimitedCPU != "24" || overview.RequestedMemory != strconv.FormatInt(96<<30, 10) || overview.LimitedMemory != strconv.FormatInt(120<<30, 10) {
+		t.Fatalf("pod reservations must cover all nodes and namespaces: %+v", overview)
+	}
+	if overview.UsageSource != "node_metrics" || overview.MetricsStatus != "available" || !overview.MetricsFresh || overview.UsageCPU != "9181/1000" || overview.UsageMemory != strconv.FormatInt(120<<30, 10) {
+		t.Fatalf("usage must cover all nodes: %+v", overview)
 	}
 	if foregroundReads.Load() != 0 {
 		t.Fatalf("overview read the cluster %d times instead of serving the cache", foregroundReads.Load())
+	}
+}
+
+func TestInventoryOverviewExcludesTerminatedPodReservations(t *testing.T) {
+	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	records := []kubeindex.Record{}
+	for index, phase := range []string{"Running", "Pending", "Unknown", "", "Succeeded", "Failed"} {
+		records = append(records, kubeindex.Record{
+			UID: strconv.Itoa(index), Kind: "Pod", Namespace: "namespace-" + strconv.Itoa(index), Name: "pod", Phase: phase,
+			Summary: map[string]string{
+				"phase": phase, "requested_cpu": "1/4", "requested_memory": "1073741824",
+				"limited_cpu": "1/2", "limited_memory": "2147483648",
+			},
+		})
+	}
+	seedInventory(t, service, records)
+	overview, err := service.Overview(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overview.Pods != 6 || overview.RunningPods != 1 {
+		t.Fatalf("terminal pods must still be counted: %+v", overview)
+	}
+	if overview.RequestedCPU != "1" || overview.LimitedCPU != "2" || overview.RequestedMemory != strconv.FormatInt(4<<30, 10) || overview.LimitedMemory != strconv.FormatInt(8<<30, 10) {
+		t.Fatalf("reservations include terminated pods: %+v", overview)
+	}
+	if overview.AllocatableCPU != "" || overview.AllocatableMemory != "" || overview.UsageCPU != "" || overview.UsageMemory != "" {
+		t.Fatalf("unknown capacity and metrics must not be synthesized: %+v", overview)
 	}
 }
 
@@ -488,6 +571,17 @@ func TestInventoryPublishesCoreKindsBeforeSlowExtrasAndFillsThemInLater(t *testi
 	}
 	if overview.Sync.PendingKinds != len(core.Pending) || len(overview.Sync.Pending) != 0 {
 		t.Fatalf("overview pending=%v kinds=%d", overview.Sync.Pending, overview.Sync.PendingKinds)
+	}
+	health, err := service.SyncHealth(t.Context())
+	if err != nil || health.State != "syncing" || !health.FirstReadyAt.IsZero() || health.PendingKinds != len(core.Pending) || health.Progress == nil {
+		t.Fatalf("core-only health lost live progress: %+v err=%v", health, err)
+	}
+	progress := health.Progress
+	if progress.KindsTotal != len(indexedResourceIDs) || len(progress.RemainingKinds) != len(core.Pending) || !containsString(progress.StepsDone, "connected") || containsString(progress.StepsDone, "listing") {
+		t.Fatalf("core-only progress invented completion: %+v", progress)
+	}
+	if progress.KindStatus["PersistentVolumeClaim"] != "pending" || len(progress.PhaseSeconds) != len(kubeindex.SyncSteps) {
+		t.Fatalf("missing remaining kind status or bounded phase timing: %+v", progress)
 	}
 	claims, err := service.CachedResources(t.Context(), ListOptions{ResourceID: indexedResourceIDs["PersistentVolumeClaim"]})
 	if err != nil || len(claims.Items) != 0 || claims.Sync.State != "partial" || !claims.Sync.Partial || !containsString(claims.Sync.Pending, indexedResourceIDs["PersistentVolumeClaim"]) {
@@ -726,7 +820,7 @@ func TestPendingKindsNeverAppearAsFailuresInAnyView(t *testing.T) {
 	}
 }
 
-func TestInventoryPublishesEarlyOnlyOnTheColdFirstSync(t *testing.T) {
+func TestInventoryPublishesBeforeOptionalMetricsUntilFirstReady(t *testing.T) {
 	release := make(chan struct{})
 	close(release)
 	var extraDiscovery atomic.Int32
@@ -742,7 +836,7 @@ func TestInventoryPublishesEarlyOnlyOnTheColdFirstSync(t *testing.T) {
 	cache := &inventoryCache{namespaces: map[string]bool{"default": true}, wake: make(chan struct{}, 1)}
 	ctx := context.WithValue(captureReadContext(t.Context(), "owner"), credentialEpochContextKey{}, service)
 	early := 0
-	publish := func(*inventoryGeneration) error { early++; return nil }
+	publish := func(current *inventoryGeneration) error { early++; current.markFirstReady(time.Now()); return nil }
 	generation := inventoryGeneration{}
 	if dirty, err := service.collectInventoryCycle(ctx, cache, index, &generation, publish); err != nil || !dirty {
 		t.Fatalf("cold cycle dirty=%v err=%v", dirty, err)
@@ -750,15 +844,23 @@ func TestInventoryPublishesEarlyOnlyOnTheColdFirstSync(t *testing.T) {
 	if early != 1 {
 		t.Fatalf("cold first sync published early %d times, want once", early)
 	}
-	// A warm cycle with both inventory and usage due publishes only once, at
-	// the end of the cycle, so the full generation is not written twice.
+	// The first complete inventory publishes before optional usage on the warm
+	// cycle too, without falsely stamping the earlier core-only generation.
+	if !generation.FirstReadyAt.IsZero() {
+		t.Fatal("core-only generation claimed ready")
+	}
 	early = 0
 	generation.Usage.ObservedAt = time.Time{}
 	if dirty, err := service.collectInventoryCycle(ctx, cache, index, &generation, publish); err != nil || !dirty {
 		t.Fatalf("warm cycle dirty=%v err=%v", dirty, err)
 	}
-	if early != 0 {
-		t.Fatalf("warm cycle published early %d times", early)
+	if early != 1 || generation.FirstReadyAt.IsZero() {
+		t.Fatalf("first ready did not publish before optional usage: early=%d ready=%s", early, generation.FirstReadyAt)
+	}
+	early = 0
+	generation.Usage.ObservedAt = time.Time{}
+	if _, err := service.collectInventoryCycle(ctx, cache, index, &generation, publish); err != nil || early != 0 {
+		t.Fatalf("later cycle published early=%d err=%v", early, err)
 	}
 	if generation.PendingDiscovery || len(generation.Pending) != 0 || generation.Usage.ObservedAt.IsZero() {
 		t.Fatalf("warm cycle did not complete the inventory: pending=%v discovery=%v", generation.Pending, generation.PendingDiscovery)
@@ -830,5 +932,129 @@ func TestLoadingEvidenceKeepsRealCorrelationPartials(t *testing.T) {
 	}
 	if !found || !item.Partial || len(item.Pending) == 0 {
 		t.Fatalf("a truncated change was hidden behind loading evidence: found=%v partial=%v pending=%v", found, item.Partial, item.Pending)
+	}
+}
+
+func TestInventoryProgressRetainsFactsWithoutInventingCompletedPhases(t *testing.T) {
+	var progress inventoryProgress
+	now := time.Now().UTC().Add(-time.Second)
+	progress.advance("connected", now)
+	progress.due(len(indexedResourceIDs), now)
+	progress.complete("connected", now)
+	progress.advance("listing", now)
+	progress.kindObserved("Pod", kubeindex.KindStatus{State: "ready", Records: 2}, now)
+	progress.kindListed("Pod", 2, now)
+	progress.advance("building", now.Add(time.Millisecond))
+	progress.complete("building", now)
+	progress.advance("metrics", now.Add(2*time.Millisecond))
+	progress.phaseResult("metrics", "unavailable (optional)")
+	progress.advance("listing", now.Add(3*time.Millisecond))
+	result := progress.snapshot()
+	if !containsString(result.StepsDone, "connected") || !containsString(result.StepsDone, "building") || containsString(result.StepsDone, "listing") || containsString(result.StepsDone, "metrics") {
+		t.Fatalf("invented or lost completed phases: %+v", result)
+	}
+	if result.KindsDone != 1 || result.Counts["Pod"] != 2 || len(result.RemainingKinds) != len(indexedResourceIDs)-1 || result.PhaseSeconds["listing"] <= 0 || result.PhaseStatus["metrics"] != "unavailable (optional)" {
+		t.Fatalf("inconsistent progress: %+v", result)
+	}
+	progress.kindObserved("Deployment", kubeindex.KindStatus{State: "ready", Absent: true}, now)
+	progress.kindObserved("Namespace", kubeindex.KindStatus{State: "error", Error: "forbidden"}, now)
+	checked := progress.snapshot()
+	if checked.KindsDone != 3 || checked.KindsDone+len(checked.RemainingKinds) != checked.KindsTotal || len(checked.Counts) != 1 {
+		t.Fatalf("resolved API checks fabricated successful record counts: %+v", checked)
+	}
+	result.Counts["Pod"] = 99
+	result.KindStatus["Pod"] = "pending"
+	if next := progress.snapshot(); next.Counts["Pod"] != 2 || next.KindStatus["Pod"] != "ready" {
+		t.Fatalf("snapshot mutated worker facts: %+v", next)
+	}
+}
+
+func TestFirstReadyPublicationDoesNotWaitForOptionalUsage(t *testing.T) {
+	release := make(chan struct{})
+	var blockUsage atomic.Bool
+	metricsStarted := make(chan struct{}, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeJSON(writer, map[string]any{"groups": []any{map[string]any{"name": "metrics.k8s.io", "preferredVersion": map[string]any{"version": "v1beta1"}, "versions": []any{map[string]any{"version": "v1beta1"}}}}})
+		case "/api/v1":
+			writeJSON(writer, map[string]any{"resources": graphTestResources("pods", "nodes", "namespaces")})
+		case "/api/v1/pods", "/api/v1/nodes", "/api/v1/namespaces":
+			writeJSON(writer, map[string]any{"items": []any{}})
+		case "/apis/metrics.k8s.io/v1beta1":
+			writeJSON(writer, map[string]any{"resources": graphTestResources("pods", "nodes")})
+		case "/apis/metrics.k8s.io/v1beta1/pods", "/apis/metrics.k8s.io/v1beta1/nodes":
+			if blockUsage.Load() {
+				metricsStarted <- struct{}{}
+				select {
+				case <-release:
+				case <-request.Context().Done():
+					return
+				}
+			}
+			writeJSON(writer, map[string]any{"items": []any{}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "cluster"})
+	service.client.indexLimiter = nil
+	service.SetChangeStorage(storage.NewMemory())
+	index, err := hydrateInventory(kubeindex.Snapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &inventoryCache{namespaces: map[string]bool{}, wake: make(chan struct{}, 1)}
+	ctx := context.WithValue(captureReadContext(t.Context(), "owner"), credentialEpochContextKey{}, service)
+	generation := inventoryGeneration{}
+	if _, err := service.collectInventoryCycle(ctx, cache, index, &generation); err != nil {
+		t.Fatal(err)
+	}
+	// Make optional usage due again on the cycle that fills the pending kinds.
+	generation.Usage.ObservedAt = time.Time{}
+	blockUsage.Store(true)
+	ready := make(chan struct{})
+	finished := make(chan error, 1)
+	go func() {
+		_, err := service.collectInventoryCycle(ctx, cache, index, &generation, func(current *inventoryGeneration) error {
+			current.markFirstReady(time.Now())
+			if current.FirstReadyAt.IsZero() {
+				return errors.New("complete inventory did not qualify as ready")
+			}
+			close(ready)
+			return nil
+		})
+		finished <- err
+	}()
+	select {
+	case <-ready:
+	case err := <-finished:
+		t.Fatalf("usage finished without a first ready publication: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("first ready waited for blocked optional usage")
+	}
+	select {
+	case err := <-finished:
+		t.Fatalf("optional usage was not blocked: %v", err)
+	default:
+	}
+	select {
+	case <-metricsStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("optional usage read did not start")
+	}
+	close(release)
+	if err := <-finished; err != nil {
+		t.Fatal(err)
 	}
 }

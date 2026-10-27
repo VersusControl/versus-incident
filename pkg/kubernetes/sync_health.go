@@ -26,8 +26,9 @@ const (
 // on purpose; this is what a caller gates on, because a kind outside a view's own
 // request would otherwise fail without anyone noticing.
 type SyncHealth struct {
-	State   string `json:"state"`
-	Partial bool   `json:"partial"`
+	Progress *SyncProgress `json:"progress,omitempty"`
+	State    string        `json:"state"`
+	Partial  bool          `json:"partial"`
 	// FirstReadyAt is when this cluster first recorded a ready generation. It is
 	// recorded once, kept with the cluster's inventory metadata, and carried
 	// forward from then on, so a credential fault, a restart, a re-index, or any
@@ -39,8 +40,12 @@ type SyncHealth struct {
 	// Class names why the whole read failed, drawn from the same closed
 	// vocabulary a kind's own failure class uses, so a surface gets one word it
 	// already knows. It is set only on an error report and stays empty otherwise.
-	Class      string  `json:"class,omitempty"`
-	AgeSeconds float64 `json:"age_s"`
+	Class string `json:"class,omitempty"`
+	// AgeSeconds is how old the snapshot this report describes is, in seconds:
+	// the oldest observation it stands behind. It is absent when no snapshot has
+	// ever been published, because zero seconds would claim the empty screen is
+	// current data.
+	AgeSeconds *float64 `json:"age_s,omitempty"`
 	// Kinds carries one entry per known kind. A kind the cluster does not serve is
 	// present with Absent set, so it is never confused with a missing kind.
 	Kinds map[string]kubeindex.KindStatus `json:"kinds"`
@@ -96,7 +101,15 @@ func (service *Service) SyncHealth(ctx context.Context) (SyncHealth, error) {
 		}
 		return SyncHealth{}, &syncHealthFailure{Report: service.failedSyncHealth(err), cause: err}
 	}
-	return buildSyncHealth(syncHealthKinds(generation), generation.FirstReadyAt), nil
+	// The publication fact outlives credentials, unlike the inventory itself.
+	if at := service.recordedFirstReadyAt(); !at.IsZero() {
+		generation.FirstReadyAt = at
+	}
+	report := buildSyncHealth(syncHealthKinds(generation), generation.FirstReadyAt)
+	if generation.FirstReadyAt.IsZero() {
+		report.Progress = service.coldSyncProgress()
+	}
+	return report, nil
 }
 
 // syncHealthFailure reports a health read that could not reach the cluster while
@@ -137,9 +150,26 @@ func reportableSyncFailure(ctx context.Context, err error) bool {
 // read nothing has no per-kind capability gap to report, and the cluster's
 // durable first ready moment is read from local state, so a dead credential
 // cannot hide whether the cluster ever worked.
+//
+// The age is read from the same local state, so it describes the snapshot the
+// report stands behind rather than the request that failed: a surface that keeps
+// the last data on screen can say how old it is. A cluster that never published
+// a snapshot has no age to give, and the field is left out — zero seconds would
+// present an empty screen as current.
 func (service *Service) failedSyncHealth(err error) SyncHealth {
 	class := syncFailureClass(err)
-	report := buildSyncHealth(cycleFailureKinds(class), service.recordedFirstReadyAt())
+	observedAt := service.recordedSnapshotObservedAt()
+	kinds := cycleFailureKinds(class)
+	if !observedAt.IsZero() {
+		for kind, state := range kinds {
+			state.ObservedAt = observedAt
+			kinds[kind] = state
+		}
+	}
+	report := buildSyncHealth(kinds, service.recordedFirstReadyAt())
+	if observedAt.IsZero() {
+		report.AgeSeconds = nil
+	}
 	report.Class = class
 	return report
 }
@@ -223,7 +253,9 @@ func buildSyncHealth(all map[string]kubeindex.KindStatus, firstReadyAt time.Time
 		result.Truncated = true
 		result.OmittedKinds = omitted
 	}
-	result.State, result.Partial, result.AgeSeconds, result.ReadyKinds, result.PendingKinds = summarizeSyncHealth(all)
+	state, partial, ageSeconds, ready, pending := summarizeSyncHealth(all)
+	result.State, result.Partial, result.AgeSeconds = state, partial, &ageSeconds
+	result.ReadyKinds, result.PendingKinds = ready, pending
 	return result
 }
 

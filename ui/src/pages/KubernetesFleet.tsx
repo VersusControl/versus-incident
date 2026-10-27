@@ -11,7 +11,7 @@ import { TopBar } from "@/components/TopBar";
 // on, so the fleet can never read ready while the cluster view reads failed.
 // A cluster with no report yet is "Not ready": the catalog envelope it would
 // otherwise fall back on only covers eight core kinds.
-type FleetState = KubernetesSyncHealthState | "not-ready";
+type FleetState = KubernetesSyncHealthState | "not-ready" | "syncing";
 
 // Order: a cluster that needs action comes before one that only needs
 // patience, so a failing cluster leads and a healthy one trails.
@@ -21,6 +21,7 @@ const fleetStates: ReadonlyArray<{ state: FleetState; label: string; count: stri
   { state: "degraded", label: "Degraded", count: "degraded", pill: "pill pill-warn", headerTone: "warn" },
   { state: "not-ready", label: "Not ready", count: "not ready", pill: "pill", headerTone: "neutral" },
   { state: "preparing", label: "Preparing", count: "preparing", pill: "pill", headerTone: "neutral" },
+  { state: "syncing", label: "Syncing", count: "syncing", pill: "pill", headerTone: "neutral" },
   { state: "ready", label: "Ready", count: "ready", pill: "pill pill-good", headerTone: "ok" },
 ];
 // Header counts are small chips so the buckets read one at a time instead of
@@ -40,8 +41,10 @@ const rowSync = (cluster: KubernetesClusterSummary, reports: Record<string, Kube
   const report = reports[cluster.id];
   return report ? reportSyncHealth(report) : undefined;
 };
+const fleetSyncState = (sync: ReturnType<typeof rowSync>): FleetState =>
+  sync?.state === "preparing" && sync.firstReadyAt ? "syncing" : sync?.state ?? "not-ready";
 const fleetState = (cluster: KubernetesClusterSummary, reports: Record<string, KubernetesSyncHealthReport | undefined>): FleetState =>
-  rowSync(cluster, reports)?.state ?? "not-ready";
+  fleetSyncState(rowSync(cluster, reports));
 const fleetStateInfo = (state: FleetState) => fleetStates.find((entry) => entry.state === state)!;
 const stateRank = (state: FleetState) => fleetStates.findIndex((entry) => entry.state === state);
 const compareClusters = (reports: Record<string, KubernetesSyncHealthReport | undefined>) => (left: KubernetesClusterSummary, right: KubernetesClusterSummary) => {
@@ -82,9 +85,9 @@ export function KubernetesFleet({ clusters, reports = {}, notice, retry, retryin
           {visible.map((cluster) => {
             const report = reports[cluster.id];
             const sync = rowSync(cluster, reports);
-            const state = sync?.state ?? "not-ready";
+            const state = fleetSyncState(sync);
             const stateInfo = fleetStateInfo(state);
-            const ready = state === "ready";
+            const ready = state === "ready" || state === "syncing";
             const preparing = state === "preparing";
             const ratioState = ready ? "measured" : preparing ? "loading" : cluster.health === "unreachable" && !report ? "unavailable" : "not-ready";
             const open = `Open cluster ${cluster.display_name || cluster.id}`;

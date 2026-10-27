@@ -531,14 +531,16 @@ test.describe("Kubernetes UI polish K16 real kind live logs (U7) and Related (U1
         const previousBtn = instanceGroup.getByRole("button", { name: "Previous logs", exact: true });
         await expect(currentBtn).toHaveAttribute("aria-pressed", "true");
         await expect(previousBtn).toHaveAttribute("aria-pressed", "false");
-        await expect(logsRegion.getByRole("button", { name: "Follow", exact: true })).toBeVisible();
+        // Following is automatic in K22; the status pill names the live read.
+        const statusPill = logsRegion.getByLabel("Log connection status", { exact: true });
+        await expect(statusPill).toHaveText("Live");
         await saveCapture(page, "k16-kind-logs", vp.width, theme, "current");
 
         // Switch to Previous logs on real kind cluster
         await previousBtn.click();
         await expect(previousBtn).toHaveAttribute("aria-pressed", "true");
         await expect(currentBtn).toHaveAttribute("aria-pressed", "false");
-        await expect(logsRegion.getByRole("button", { name: "Follow", exact: true })).toHaveCount(0);
+        await expect(statusPill).toHaveText("Previous");
         await expect(logOutput).toContainText("previous-container-fatal", { timeout: 30_000 });
         await saveCapture(page, "k16-kind-logs", vp.width, theme, "previous");
 
@@ -546,7 +548,7 @@ test.describe("Kubernetes UI polish K16 real kind live logs (U7) and Related (U1
         await currentBtn.click();
         await expect(currentBtn).toHaveAttribute("aria-pressed", "true");
         await expect(previousBtn).toHaveAttribute("aria-pressed", "false");
-        await expect(logsRegion.getByRole("button", { name: "Follow", exact: true })).toBeVisible();
+        await expect(statusPill).toHaveText("Live", { timeout: 30_000 });
         await expect(logOutput).toContainText("current-live-stream", { timeout: 30_000 });
         await saveCapture(page, "k16-kind-logs", vp.width, theme, "returned-current");
 

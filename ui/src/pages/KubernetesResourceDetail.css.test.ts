@@ -106,6 +106,15 @@ describe("Log header layout contract", () => {
     expect(narrow.slice(0, narrow.indexOf("\n}\n"))).toContain(".log-primary { flex-wrap: wrap; row-gap: 8px; }");
   });
 
+  it("expands workload filters without changing the bounded Pod filter or mobile wrapping", () => {
+    expect(rule(".log-filter-group-workload")).toContain("justify-content: flex-start");
+    expect(rule(".log-filter-group-workload .log-filter-wrap")).toContain("max-width: none");
+    expect(firstRule(".log-filter-wrap")).toContain("flex: 1 1 12rem");
+    expect(firstRule(".log-filter-wrap")).toContain("max-width: 22rem");
+    expect(firstRule(".log-actions")).toContain("flex: none");
+    expect(rule(".log-filter-group")).toContain("flex-wrap: wrap");
+  });
+
   it("keeps row one to a bounded select, one segmented control and one Since group", () => {
     expect(rule(".resource-log-viewer .log-pod")).toContain("max-width: 9rem");
     expect(rule(".resource-log-viewer .log-container")).toContain("max-width: min(10rem, 40%)");

@@ -394,7 +394,7 @@ describe("Break timeline", () => {
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
     mount(<JournalScenario />);
     const journal = screen.getByRole("region", { name: "Captured crash evidence" });
-    await within(journal).findByText("1 crashes");
+    await within(journal).findByText("1 crash");
     const summary = journal.querySelector("header > span")!;
     expect(summary.className).not.toContain("text-sev-warning");
     expect(summary.textContent).not.toContain("Partial history");
@@ -412,7 +412,7 @@ describe("Break timeline", () => {
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue({ ...coveredJournalPage, limitations: [...baselineLimitations, limitation] });
     mount(<JournalScenario />);
     const journal = screen.getByRole("region", { name: "Captured crash evidence" });
-    await within(journal).findByText("1 crashes");
+    await within(journal).findByText("1 crash");
     const marker = within(journal).getByRole("button", { name: "Resource coverage" });
     expect(within(journal).getAllByRole("button", { name: "Resource coverage" })).toHaveLength(1);
     expect(marker.className).toContain("text-ink-400");
@@ -430,7 +430,7 @@ describe("Break timeline", () => {
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue({ ...coveredJournalPage, items: [event] });
     mount(<JournalScenario />);
     const journal = screen.getByRole("region", { name: "Captured crash evidence" });
-    await within(journal).findByText("1 crashes");
+    await within(journal).findByText("1 crash");
     fireEvent.click(within(journal).getByRole("button", { name: "Resource coverage" }));
     expect(screen.getByText("Crash capture does not cover the whole range")).toBeTruthy();
   });
@@ -516,7 +516,7 @@ describe("Break timeline", () => {
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue({ ...coveredJournalPage, items: [...(terminations ? [observation] : []), status] });
     const { container } = mount(<JournalScenario />);
     const journal = screen.getByRole("region", { name: "Captured crash evidence" });
-    await within(journal).findByText(`${terminations} crashes`);
+    await within(journal).findByText(`${terminations} ${terminations === 1 ? "crash" : "crashes"}`);
     expect(within(within(journal).getByRole("list", { name: "Crash observations" })).getAllByRole("listitem")).toHaveLength(terminations + 1);
     expect(container.querySelectorAll('[data-marker="crash"]')).toHaveLength(terminations);
   });

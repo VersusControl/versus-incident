@@ -261,7 +261,7 @@ export function syncFailureReport(body: unknown): KubernetesSyncFailure {
  */
 export function reportSyncHealth(report?: KubernetesSyncHealthReport, progress?: KubernetesSyncProgress): KubernetesSyncHealth {
   return syncHealth({
-    sync: report ? { ...clusterSyncEnvelope(report)!, progress } : undefined,
+    sync: report ? { ...clusterSyncEnvelope(report)!, progress: report.progress ?? progress } : undefined,
     kinds: report?.kinds,
     unreadable: report?.unreadable,
     failing: report?.failing,

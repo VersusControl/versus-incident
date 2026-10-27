@@ -9,6 +9,18 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.use
 const resource = { resource_id: "core~v1~pods", kind: "Pod", namespace: "shop", name: "api", summary: { log_containers: [{ name: "app", type: "regular" }, { name: "setup", type: "init" }, { name: "debug", type: "ephemeral" }] } };
 
 describe("Pod log viewer", () => {
+  it.each(["Deployment", "StatefulSet", "Pod"])("keeps the %s full Logs filter beside its actions and only expands workloads", (kind) => {
+    vi.spyOn(api, "kubernetesPodLogStream").mockResolvedValue();
+    vi.spyOn(api, "kubernetesWorkloadLogStream").mockResolvedValue();
+    const { container } = render(<PodLogViewer resource={{ ...resource, kind }} />);
+    const group = screen.getByLabelText("Log filter").closest(".log-filter-group")!;
+    expect(group.classList.contains("log-filter-group-workload")).toBe(kind !== "Pod");
+    expect(group.firstElementChild?.className).toBe("log-filter-wrap");
+    expect(group.lastElementChild?.className).toBe("log-actions");
+    expect(within(group as HTMLElement).getByLabelText("Download scrubbed logs")).toBeTruthy();
+    expect(within(group as HTMLElement).getByLabelText("Pause logs")).toBeTruthy();
+    expect(container.querySelector(".log-levels") !== null).toBe(kind === "Pod");
+  });
   it("counts retained error and warning lines and changes presentation without restarting the stream", async () => {
     const stream = vi.spyOn(api, "kubernetesPodLogStream").mockImplementation((_namespace, _pod, _options, emit, signal) => {
       ["INFO served", "ERROR refused", "WARN slow", "ERROR timeout"].forEach((text, index) => emit({ event: "line", text, container: "app", ordinal: index + 1, timestamp: "2026-10-21T08:00:00Z" }));
@@ -762,4 +774,21 @@ describe("Pod log viewer", () => {
     const select = (await screen.findByLabelText("Log container")) as HTMLSelectElement;
     await waitFor(() => expect([...select.options].map((option) => option.textContent)).toEqual(["All containers", "Main container", "app", "proxy"]));
   });
+});
+
+describe("Compact overview logs placement", () => {
+ it.each(["quiet", "populated", "ended", "error"] as const)("keeps the same layout placement for %s output", async (state) => {
+  vi.spyOn(api, "kubernetesPodLogStream").mockImplementation(async (_namespace, _pod, _options, emit, signal) => {
+   if (state === "populated") emit({ event: "line", text: "INFO served", container: "app", ordinal: 1 });
+   if (state === "error") throw new Error("read unavailable");
+   if (state === "ended") return;
+   return new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+  });
+  const { container } = render(<div className="resource-tabpanel" data-view="overview"><div className="resource-log-slot" data-full="false"><PodLogViewer resource={resource} compact /></div></div>);
+  await waitFor(() => expect(api.kubernetesPodLogStream).toHaveBeenCalled());
+  const card = container.querySelector(".resource-log-viewer")!;
+  expect(card.parentElement?.className).toBe("resource-log-slot");
+  expect(card.getAttribute("data-compact")).toBe("true");
+  expect(screen.getByText("Live logs")).toBeTruthy();
+ });
 });

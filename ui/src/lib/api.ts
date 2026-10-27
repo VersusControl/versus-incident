@@ -2130,7 +2130,7 @@ export interface AgentToolsetAvailability {
   health?: string;
 }
 
-/** First-sync progress; present only while `sync.state` is "syncing" and the first generation has not published. */
+/** First-sync progress; present until the first cluster-wide ready publication. */
 export interface KubernetesSyncProgress {
   step: "connected" | "listing" | "building" | "metrics";
   step_index: number;
@@ -2140,6 +2140,10 @@ export interface KubernetesSyncProgress {
   counts: Record<string, number>;
   kinds_done: number;
   kinds_total: number;
+  remaining_kinds?: string[];
+  kind_status?: Record<string, string>;
+  phase_seconds?: Record<string, number>;
+  phase_status?: Record<string, string>;
   cluster_version?: string;
   node_count?: number;
   started_at: string;
@@ -2553,6 +2557,7 @@ export interface KubernetesFailingKind {
 export type KubernetesUnreadableKind = KubernetesFailingKind;
 
 export interface KubernetesSyncHealthReport {
+  progress?: KubernetesSyncProgress;
   /** ready | syncing | partial | stale | error, worst state first. */
   state: string;
   partial: boolean;

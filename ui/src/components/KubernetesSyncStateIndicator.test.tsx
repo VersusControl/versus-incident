@@ -41,3 +41,8 @@ describe("Sync state indicator", () => {
     expect(indicator.getAttribute("role")).toBe("status");
   });
 });
+
+it.each(["preparing", "degraded", "failed"] as const)("names published %s without hiding faults", (state) => {
+  render(<KubernetesSyncStateIndicator state={state} firstReadyAt="2026-10-27T08:00:00Z" streamState="live" />);
+  expect(document.querySelector("[data-sync-state]")?.textContent).toBe(state === "preparing" ? "Syncing" : state === "degraded" ? "Degraded" : "Failed");
+});

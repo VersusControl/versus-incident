@@ -468,7 +468,7 @@ export function PodLogViewer({
                   ))}
                 </div>
               )}
-              <div className="log-filter-group">
+              <div className={`log-filter-group${workload ? " log-filter-group-workload" : ""}`}>
                 <label className="log-filter-wrap">
                   <Search size={13} aria-hidden="true" />
                   <input

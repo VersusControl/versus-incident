@@ -47,10 +47,69 @@ func withFirstReady(generation inventoryGeneration, record inventoryLeaseRecord)
 	return generation
 }
 
+// publicationKey addresses only the first-publication timestamp. Inventory and
+// leases remain credential-scoped; renewing credentials cannot grant data access.
+func publicationKey(scope Scope) string {
+	return "kubernetes/first-publication/" + logIdentity(scope.OrgID+"\x00"+scope.ClusterID)
+}
+
+func readFirstPublication(provider storage.Provider, scope Scope) (time.Time, error) {
+	raw, err := provider.ReadBlob(publicationKey(scope))
+	if err != nil || len(raw) == 0 {
+		return time.Time{}, err
+	}
+	var at time.Time
+	if err := json.Unmarshal(raw, &at); err != nil {
+		return time.Time{}, err
+	}
+	return at.UTC(), nil
+}
+
+// rememberFirstPublication only records an already committed ready generation.
+// A single CAS wins across credential renewals and workers; it never overwrites
+// the original timestamp with a later publication.
+func rememberFirstPublication(provider storage.Provider, scope Scope, at time.Time) (time.Time, error) {
+	if at.IsZero() || provider == nil {
+		return at, nil
+	}
+	if recorded, err := readFirstPublication(provider, scope); err != nil || !recorded.IsZero() {
+		return recorded, err
+	}
+	cas, ok := provider.(storage.BlobCAS)
+	if !ok {
+		return time.Time{}, errors.New("kubernetes: publication storage requires compare and swap")
+	}
+	raw, err := json.Marshal(at.UTC())
+	if err != nil {
+		return time.Time{}, err
+	}
+	won, err := cas.CompareAndSwapBlob(publicationKey(scope), nil, raw)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if won {
+		return at.UTC(), nil
+	}
+	return readFirstPublication(provider, scope)
+}
+
+// preserveFirstPublication migrates an existing, already recorded timestamp even
+// when the credential is unavailable. Persistence failure never erases that fact.
+func preserveFirstPublication(provider storage.Provider, scope Scope, at time.Time) time.Time {
+	recorded, err := rememberFirstPublication(provider, scope, at)
+	if err != nil {
+		log.Printf("kubernetes: first publication metadata persistence deferred")
+	}
+	if err == nil && !recorded.IsZero() {
+		return recorded
+	}
+	return at.UTC()
+}
+
 // recordedFirstReadyAt is the cluster's first ready moment, read from local state
-// only. The published generation in memory is asked first, because a cluster with
-// no store keeps nothing else, and the inventory metadata record is asked second,
-// because that is the copy that survives a restart.
+// only. Cluster-scoped publication metadata survives credential renewal. The
+// in-memory generation and legacy credential-scoped metadata provide fallback
+// for an in-memory deployment and an existing installation, respectively.
 //
 // No credential is validated on this path and no cluster is read: the marker is
 // Versus's own record of a past success, so it has to stay readable exactly when
@@ -62,43 +121,113 @@ func (service *Service) recordedFirstReadyAt() time.Time {
 		return time.Time{}
 	}
 	service.changes.mu.Lock()
-	cache := service.changes.inventories[service.indexScope()]
 	provider := service.changes.provider
 	service.changes.mu.Unlock()
-	if cache != nil {
-		cache.mu.RLock()
-		recorded := cache.generation.FirstReadyAt
-		cache.mu.RUnlock()
-		if !recorded.IsZero() {
-			return recorded.UTC()
-		}
-	}
-	if provider == nil {
-		return time.Time{}
-	}
-	orgs := service.readOrgs
-	if len(orgs) == 0 {
-		orgs = []string{service.scope.OrgID}
-	}
-	for _, org := range orgs {
+	for _, org := range service.inventoryReadOrgs() {
 		scope := service.scope
 		scope.OrgID = org
+		if provider != nil {
+			if at, err := readFirstPublication(provider, scope); err == nil && !at.IsZero() {
+				return at
+			}
+		}
+		// Finish this org's layouts before consulting an upgrade fallback org.
+		indexScope := service.indexScope()
+		indexScope.OrgID = org
+		service.changes.mu.Lock()
+		cache := service.changes.inventories[indexScope]
+		service.changes.mu.Unlock()
+		if cache != nil {
+			cache.mu.RLock()
+			recorded := cache.generation.FirstReadyAt
+			cache.mu.RUnlock()
+			if !recorded.IsZero() {
+				return preserveFirstPublication(provider, scope, recorded)
+			}
+		}
+		if provider == nil {
+			continue
+		}
 		raw, err := provider.ReadBlob(inventoryKey(scope))
 		if err != nil || len(raw) == 0 {
 			continue
 		}
-		// The record is the authority, and it is also where an install that has not
-		// upgraded to the small lease yet keeps the same field, so one struct reads
-		// both layouts.
+		// Both legacy inventory layouts carry this field on the record.
 		var record inventoryLeaseRecord
 		if json.Unmarshal(raw, &record) != nil {
 			continue
 		}
 		if recorded := record.FirstReadyAt; !recorded.IsZero() {
-			return recorded.UTC()
+			return preserveFirstPublication(provider, scope, recorded)
 		}
 	}
 	return time.Time{}
+}
+
+// recordedSnapshotObservedAt is when the cluster's stored snapshot was last
+// observed, read from local state only, along the same two-step path as
+// recordedFirstReadyAt: the published generation in memory first, then the copy
+// that survives a restart.
+//
+// No credential is validated and no cluster is read, so the age survives the very
+// credential fault that makes a read fail. A cluster that never published a
+// snapshot yields the zero time, and the caller omits the age instead of claiming
+// the data is current.
+func (service *Service) recordedSnapshotObservedAt() time.Time {
+	if service == nil || service.changes == nil {
+		return time.Time{}
+	}
+	service.changes.mu.Lock()
+	cache := service.changes.inventories[service.indexScope()]
+	provider := service.changes.provider
+	service.changes.mu.Unlock()
+	if cache != nil {
+		cache.mu.RLock()
+		generation := cache.generation
+		cache.mu.RUnlock()
+		if observed := snapshotObservedAt(generation); !observed.IsZero() {
+			return observed
+		}
+	}
+	if provider == nil {
+		return time.Time{}
+	}
+	for _, org := range service.inventoryReadOrgs() {
+		scope := service.scope
+		scope.OrgID = org
+		generation, _, err := readInventoryGeneration(provider, scope, "")
+		if err != nil {
+			continue
+		}
+		if observed := snapshotObservedAt(generation); !observed.IsZero() {
+			return observed
+		}
+	}
+	return time.Time{}
+}
+
+// snapshotObservedAt is the oldest observation in a generation: the age of the
+// data at its oldest, which is the age a surface can honestly show for it.
+func snapshotObservedAt(generation inventoryGeneration) time.Time {
+	oldest := time.Time{}
+	for _, state := range generation.View.Kinds {
+		if !state.ObservedAt.IsZero() && (oldest.IsZero() || state.ObservedAt.Before(oldest)) {
+			oldest = state.ObservedAt
+		}
+	}
+	if oldest.IsZero() {
+		return time.Time{}
+	}
+	return oldest.UTC()
+}
+
+// inventoryReadOrgs is the set of org scopes this service may read a stored
+// generation from, in precedence order.
+func (service *Service) inventoryReadOrgs() []string {
+	if len(service.readOrgs) > 0 {
+		return service.readOrgs
+	}
+	return []string{service.scope.OrgID}
 }
 
 type inventoryLease struct {
@@ -275,6 +404,15 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 	// The first ready moment is stamped on the generation being published, so it
 	// holds for an in-memory cluster too; with a store the record below makes it
 	// the cluster's durable copy.
+	if lease.provider != nil {
+		at, err := readFirstPublication(lease.provider, lease.scope)
+		if err != nil {
+			return err
+		}
+		if !at.IsZero() {
+			generation.FirstReadyAt = at
+		}
+	}
 	generation.markFirstReady(time.Now())
 	if lease.cas == nil {
 		return ctx.Err()
@@ -336,6 +474,9 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 	if err == nil {
 		lease.record, lease.expected = record, replacement
 		published = true
+		if _, markerErr := rememberFirstPublication(lease.provider, lease.scope, generation.FirstReadyAt); markerErr != nil {
+			return markerErr
+		}
 		if retiredOwner != "" && retiredOwner != record.DataOwner {
 			for slot := 0; slot < 2; slot++ {
 				if err := lease.cleanupUnreferenced(retiredOwner, slot); err != nil {

@@ -109,3 +109,15 @@ Use **Open live logs** to open the workload drawer's **Logs** tab. The workload 
 Use **Ask chat** from **Logs at break** to carry the workload and selected time window into an investigation. For example: "Compare checkout's OOMKilled evidence with the v41 to v42 image change and available logs in this window. What should I verify next, and what evidence is missing?" This supplies investigation context.
 
 Keep the distinction between what was observed, what may explain it, and what you verified after remediation. This makes the investigation useful even when some historical evidence is unavailable.
+
+### Preparation and snapshot freshness
+
+The first preparation panel follows cluster-wide sync progress, including resource
+types still pending after the core snapshot is published. Completed phases stay
+visible; absent progress means waiting, not successful work. The single bottom
+bar measures resolved resource-type checks (including absent APIs and permission
+gaps), not successful record counts or an estimated startup duration. Optional
+CPU/memory availability does not hold back the first ready publication. Reloads
+and restarts preserve the cluster’s first-ready marker; later syncs stay quiet.
+**Snapshot Ns ago** is the age of the data, not how long sync took. The Overview
+Live logs card occupies the full panel width even when no lines have arrived.
