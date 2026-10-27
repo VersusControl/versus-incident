@@ -41,6 +41,7 @@ type CrashEvent struct {
 
 // CrashQuery bounds observation time; CrashEvent.At remains the actual event time.
 type CrashQuery struct {
+	PodUID    string
 	Since     time.Time
 	Until     time.Time
 	Namespace string
@@ -50,6 +51,7 @@ type CrashQuery struct {
 }
 
 type CrashPage struct {
+	CrashCount     int            `json:"crash_count"`
 	Items          []CrashEvent   `json:"items"`
 	Next           string         `json:"next,omitempty"`
 	Since          time.Time      `json:"since"`
@@ -174,7 +176,7 @@ func (store *Store) QueryCrashes(query CrashQuery, now time.Time) (CrashPage, er
 	if store == nil || store.provider == nil {
 		return CrashPage{}, ErrStoreLimit
 	}
-	if !safeFilter(query.Namespace) || !safeFilter(query.RootUID) || len(query.Cursor) > 2048 || query.Limit < 0 || query.Limit > 100 {
+	if !safeFilter(query.Namespace) || !safeFilter(query.RootUID) || !safeFilter(query.PodUID) || len(query.Cursor) > 2048 || query.Limit < 0 || query.Limit > 100 {
 		return CrashPage{}, ErrInvalidQuery
 	}
 	if query.Limit == 0 {
@@ -183,7 +185,7 @@ func (store *Store) QueryCrashes(query CrashQuery, now time.Time) (CrashPage, er
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	bindingBytes, _ := json.Marshal([]string{store.key, query.Namespace, query.RootUID})
+	bindingBytes, _ := json.Marshal([]string{store.key, query.Namespace, query.RootUID, query.PodUID})
 	digest := sha256.Sum256(bindingBytes)
 	binding := hex.EncodeToString(digest[:])
 	cursor := crashCursor{Binding: binding, Since: query.Since, Until: query.Until}
@@ -235,6 +237,12 @@ func (store *Store) QueryCrashes(query CrashQuery, now time.Time) (CrashPage, er
 			seen[event.ID] = true
 			if event.ObservedAt.Before(page.RetentionFrom) || event.ObservedAt.Before(cursor.Since) || event.ObservedAt.After(cursor.Until) || query.Namespace != "" && event.Namespace != query.Namespace || query.RootUID != "" && event.RootUID != query.RootUID {
 				continue
+			}
+			if query.PodUID != "" && event.PodUID != query.PodUID {
+				continue
+			}
+			if event.Type == "termination" {
+				page.CrashCount++
 			}
 			if query.Cursor != "" && (event.ObservedAt.After(cursor.LastAt) || event.ObservedAt.Equal(cursor.LastAt) && event.ID >= cursor.LastID) {
 				continue

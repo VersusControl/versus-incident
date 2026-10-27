@@ -100,7 +100,7 @@ describe("Resource detail API transport", () => {
         timestamps: false,
         since_seconds: 3600,
         tail_lines: 500,
-        cursor: "opaque",
+        since_time: "2026-10-26T12:00:00.000Z",
       },
       onEvent,
       signal,
@@ -114,7 +114,9 @@ describe("Resource detail API transport", () => {
     expect(url.searchParams.get("uid")).toBe("workload-uid");
     expect(url.searchParams.get("timestamps")).toBe("false");
     expect(url.searchParams.get("container")).toBe("*");
-    expect(url.searchParams.get("cursor")).toBe("opaque");
+    // The workload resume is a wall clock, so no cursor travels in the URL.
+    expect(url.searchParams.has("cursor")).toBe(false);
+    expect(url.searchParams.get("since_time")).toBe("2026-10-26T12:00:00.000Z");
     expect(url.searchParams.has("since_seconds")).toBe(false);
     expect(url.searchParams.has("tail_lines")).toBe(false);
     expect(url.searchParams.has("token")).toBe(false);
@@ -127,8 +129,9 @@ describe("Resource detail API transport", () => {
       "text/event-stream",
     );
     expect(onEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ event: "end", cursor: "checkpoint" }),
+      expect.objectContaining({ event: "end" }),
     );
+    expect(onEvent.mock.calls[0][0]).not.toHaveProperty("cursor");
   });
   it("normalizes omitted empty membership from the bounded Go projection", async () => {
     serve(frame("sources", { workload_uid: "workload-uid" }));
@@ -184,7 +187,7 @@ describe("Resource detail API transport", () => {
       pod_uid: "pod-uid",
     });
   });
-  it("accepts bounded aggregate checkpoints larger than a Pod cursor without retaining transport identities as logs", async () => {
+  it("accepts an aggregate limit frame and keeps no resume token in the event", async () => {
     const cursor = "x".repeat(128 << 10);
     serve(frame("limit", { cursor, reason: "bytes" }));
     const onEvent = vi.fn();
@@ -197,7 +200,8 @@ describe("Resource detail API transport", () => {
       onEvent,
       new AbortController().signal,
     );
-    expect(onEvent.mock.calls[0][0].cursor).toBe(cursor);
+    expect(onEvent.mock.calls[0][0]).toMatchObject({ event: "limit", reason: "bytes" });
+    expect(onEvent.mock.calls[0][0]).not.toHaveProperty("cursor");
   });
   it.each([
     ["line", { text: "message", container: "app" }],
@@ -259,7 +263,6 @@ describe("Resource detail API transport", () => {
         ],
       },
     ],
-    ["heartbeat", { cursor: "x".repeat((512 << 10) + 1) }],
   ])("rejects malformed or over-bound %s frames", async (event, payload) => {
     serve(frame(event as string, payload));
     await expect(

@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -24,13 +25,22 @@ func TestKubernetesReaderRBACTemplateIsReadOnly(t *testing.T) {
 			t.Errorf("Kubernetes reader RBAC contains forbidden verb %q", forbidden)
 		}
 	}
-	for _, forbidden := range []string{"secrets", "endpoints"} {
-		if containsString(resources, forbidden) {
-			t.Errorf("Kubernetes reader RBAC contains forbidden resource %q", forbidden)
+	if containsString(resources, "endpoints") {
+		t.Error(`Kubernetes reader RBAC must not read "endpoints"; EndpointSlices replace them`)
+	}
+	for _, resource := range resources {
+		if resource == "pods/log" {
+			continue
+		}
+		if strings.Contains(resource, "/") {
+			t.Errorf("Kubernetes reader RBAC grants subresource %q; the role is metadata-only", resource)
 		}
 	}
 	if !containsString(verbs, "get") || !containsString(verbs, "list") {
 		t.Errorf("Kubernetes reader RBAC must preserve get/list access: %v", verbs)
+	}
+	if !regexp.MustCompile(`(?m)resources: \["nodes", "namespaces", "pods", "services", "events", "configmaps", "serviceaccounts", "secrets", "persistentvolumeclaims", "persistentvolumes"\]\s*\n\s*verbs: \["get", "list"\]`).MatchString(content) {
+		t.Error("core metadata reads missing or not read-only")
 	}
 	if !regexp.MustCompile(`(?m)resources: \["deployments", "statefulsets", "daemonsets", "replicasets", "controllerrevisions"\]\s*\n\s*verbs: \["get", "list"\]`).MatchString(content) {
 		t.Error("controller revision reads missing or not read-only")
@@ -93,4 +103,29 @@ func quotedTemplateFieldValues(t *testing.T, content, field string) []string {
 		t.Fatalf("no %s entries found in Kubernetes reader RBAC template", field)
 	}
 	return values
+}
+
+// Every metadata-only kind the inventory reads — Secret included — must be
+// granted by the shipped reader role, or a default install reports it
+// unreadable forever. Metadata is all the role reaches, so granting Secret
+// get/list exposes names and labels, never Secret contents.
+func TestKubernetesReaderRBACGrantsEveryMetadataKind(t *testing.T) {
+	template, err := os.ReadFile("../../helm/versus-incident/templates/kubernetes-reader-rbac.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources := quotedTemplateFieldValues(t, string(template), "resources")
+	granted := map[string]bool{}
+	for _, resource := range resources {
+		granted[resource] = true
+	}
+	for kind := range metadataOnlyIndexKinds {
+		resource := strings.ToLower(kind) + "s"
+		if !granted[resource] {
+			t.Fatalf("metadata-only kind %s needs %q get/list in the shipped reader role", kind, resource)
+		}
+	}
+	if !granted["secrets"] {
+		t.Fatal(`the shipped reader role must grant "secrets" get/list`)
+	}
 }

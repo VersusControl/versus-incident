@@ -220,7 +220,7 @@ describe("ChatPage", () => {
   });
 
   it("waits for a cluster selection before resource reads and keeps the attachment cluster", async () => {
-    const entry = { health: "healthy" as const, provider: "generic", nodes: 1, ready_nodes: 1, pods: 1, running_pods: 1, warnings: 0, sync: { state: "live" }, observed_at: "2026-10-09T12:00:00Z" };
+    const entry = { health: "healthy" as const, provider: "generic", nodes: 1, ready_nodes: 1, pods: 1, running_pods: 1, warnings: 0, sync: { state: "live", age_s: 0, partial: false }, observed_at: "2026-10-09T12:00:00Z" };
     vi.mocked(api.kubernetesClusters).mockResolvedValue({ multiple: true, clusters: [{ ...entry, id: "one" }, { ...entry, id: "two" }] });
     const client = { ...api, kubernetesOverview: vi.fn().mockResolvedValue({ cluster_id: "two" }), kubernetesSearch: vi.fn().mockResolvedValue({ items: [{ resource_id: "core~v1~pods", kind: "Pod", namespace: "shop", name: "api" }], truncated: false }) };
     const factory = vi.spyOn(apiModule, "createKubernetesApi").mockReturnValue(client);

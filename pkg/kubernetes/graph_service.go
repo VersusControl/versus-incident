@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/url"
 	"sort"
 	"strconv"
-	"strings"
 	"unicode/utf8"
 
 	kubegraph "github.com/VersusControl/versus-incident/pkg/kubernetes/graph"
@@ -25,9 +23,7 @@ type GraphQuery struct {
 	unpaged       bool
 }
 
-const maxCompleteGraphRecords = 10000
 const maxCompleteGraphEdges = 20000
-const maxCompleteGraphRelationshipChecks = 1000000
 const maxCompleteGraphResponseBytes = 8 << 20
 
 type NeighborhoodQuery struct {
@@ -43,6 +39,7 @@ var graphIndexKinds = []string{
 	"Node", "Namespace", "Pod", "Deployment", "ReplicaSet", "StatefulSet", "DaemonSet",
 	"Job", "CronJob", "Service", "Ingress", "ConfigMap", "Secret", "PersistentVolumeClaim",
 	"HorizontalPodAutoscaler",
+	"HTTPRoute", "Gateway",
 }
 
 // Graph builds a bounded topology graph from the shared projected index.
@@ -59,7 +56,7 @@ func (service *Service) Graph(ctx context.Context, query GraphQuery) (kubegraph.
 	if len(query.Cursor) > 4096 {
 		return kubegraph.Graph{}, ErrInvalidArguments
 	}
-	view, status, err := service.IndexSnapshot(ctx, graphIndexKinds...)
+	view, status, err := service.CachedIndexSnapshot(ctx, graphIndexKinds...)
 	if err != nil {
 		return kubegraph.Graph{}, err
 	}
@@ -95,14 +92,23 @@ func (service *Service) Graph(ctx context.Context, query GraphQuery) (kubegraph.
 			result.Nodes[position].Group = result.Nodes[position].Namespace
 		}
 	}
-	result.Sync = kubegraph.SyncStatus{State: status.State, AgeSeconds: status.AgeSeconds, Partial: status.Partial || result.Sync.Partial}
+	result.Sync = kubegraph.SyncStatus{State: status.State, AgeSeconds: status.AgeSeconds, Partial: status.Partial || result.Sync.Partial, Progress: status.Progress, Pending: status.Pending, PendingKinds: status.PendingKinds}
 	return result, nil
 }
 
 func (service *Service) completeGraph(ctx context.Context, query GraphQuery) (kubegraph.Graph, error) {
 	view, err := service.completeTopology(ctx, query.Namespace)
+	var pending graphPendingError
+	if errors.As(err, &pending) {
+		// A complete graph cannot be built until every kind it joins is listed;
+		// report the kinds still loading instead of an incomplete graph.
+		return kubegraph.Graph{Nodes: []kubegraph.Node{}, Edges: []kubegraph.Edge{}, Omitted: map[string]int{}, Sync: kubegraph.SyncStatus{State: "partial", Partial: true, Pending: pending.status.Pending, PendingKinds: pending.status.PendingKinds}}, nil
+	}
 	if err != nil {
 		return kubegraph.Graph{}, err
+	}
+	if status := scopedIndexStatus(kubeindex.Status{Kinds: view.Kinds}, graphIndexKinds); status.State == "warming" {
+		return kubegraph.Graph{Nodes: []kubegraph.Node{}, Edges: []kubegraph.Edge{}, Omitted: map[string]int{}, Sync: kubegraph.SyncStatus{State: "syncing", Progress: service.coldSyncProgress()}}, nil
 	}
 	result, withinEdgeLimit := kubegraph.BuildComplete(view, maxCompleteGraphEdges)
 	if !withinEdgeLimit {
@@ -131,116 +137,56 @@ func (service *Service) completeGraph(ctx context.Context, query GraphQuery) (ku
 }
 
 func (service *Service) OverviewGraph(ctx context.Context) (kubegraph.Graph, error) {
-	result, err := service.completeGraph(ctx, GraphQuery{ConnectedOnly: true, GroupBy: "namespace"})
-	if errors.Is(err, ErrOperationBudget) || errors.Is(err, ErrResponseTooLarge) {
-		return kubegraph.Graph{}, ErrCompleteGraphLimit
+	view, status, err := service.CachedIndexSnapshot(ctx, graphIndexKinds...)
+	if err != nil {
+		return kubegraph.Graph{}, err
 	}
-	return result, err
+	result, _ := kubegraph.BuildComplete(view, 0)
+	filterGraphConnectedWithoutOmitted(&result)
+	for position := range result.Nodes {
+		result.Nodes[position].Group = result.Nodes[position].Namespace
+	}
+	result.Sync = kubegraph.SyncStatus{State: status.State, AgeSeconds: status.AgeSeconds, Partial: status.Partial || result.Sync.Partial, Progress: status.Progress, Pending: status.Pending, PendingKinds: status.PendingKinds}
+	return result, nil
 }
 
 func (service *Service) completeTopology(ctx context.Context, namespace string) (kubeindex.Snapshot, error) {
-	ctx, cancel := withOperationBudget(ctx, kubernetesIndexRefreshTimeout, kubernetesIndexMaxPages*len(graphIndexKinds)+len(graphIndexKinds)+32, 64<<20, maxCompleteGraphRecords)
-	defer cancel()
-	ctx, discovery, err := service.withDiscovery(ctx)
+	kinds := []string{}
+	for _, kind := range graphIndexKinds {
+		if kind != "Node" && kind != "Namespace" {
+			kinds = append(kinds, kind)
+		}
+	}
+	view, status, err := service.CachedNamespaceSnapshot(ctx, namespace, kinds...)
 	if err != nil {
 		return kubeindex.Snapshot{}, err
 	}
-	graphGroups := make(map[string]bool)
-	for _, kind := range graphIndexKinds {
-		if kind == "Node" || kind == "Namespace" {
-			continue
-		}
-		parts := strings.SplitN(indexedResourceIDs[kind], "~", 2)
-		graphGroups[parts[0]] = true
+	if len(status.Pending) > 0 {
+		return kubeindex.Snapshot{}, graphPendingError{status: status}
 	}
-	for _, failure := range discovery.Partial {
-		group := strings.SplitN(failure.GroupVersion, "~", 2)[0]
-		if failure.GroupVersion == "" || graphGroups[group] {
-			return kubeindex.Snapshot{}, ErrGraphIncomplete
+	if status.Partial {
+		for _, state := range status.Kinds {
+			if state.Error == "forbidden" {
+				return kubeindex.Snapshot{}, ErrForbidden
+			}
+			if state.Error == "unauthorized" {
+				return kubeindex.Snapshot{}, ErrUnauthorized
+			}
 		}
+		return kubeindex.Snapshot{}, ErrGraphIncomplete
 	}
 	records := make([]kubeindex.Record, 0)
-	for _, kind := range graphIndexKinds {
-		if kind == "Node" || kind == "Namespace" {
-			continue
-		}
-		definition, available, definitionErr := completeGraphResourceDefinition(discovery.Resources, kind)
-		if definitionErr != nil {
-			return kubeindex.Snapshot{}, definitionErr
-		}
-		if !available {
-			continue
-		}
-		apiPath, pathErr := resourcePath(definition, namespace, "")
-		if pathErr != nil {
-			return kubeindex.Snapshot{}, pathErr
-		}
-		loaded, loadErr := service.loadCompleteGraphKind(ctx, definition, namespace, apiPath)
-		if loadErr != nil {
-			return kubeindex.Snapshot{}, loadErr
-		}
-		if len(records)+len(loaded) > maxCompleteGraphRecords {
-			return kubeindex.Snapshot{}, ErrCompleteGraphLimit
-		}
-		records = append(records, loaded...)
-	}
-	selectorCount := 0
-	for _, record := range records {
-		if record.Kind == "Service" && len(record.Selector) > 0 {
-			selectorCount++
+	for _, record := range view.Records {
+		if record.Kind != "Node" && record.Kind != "Namespace" && (namespace == "" || record.Namespace == namespace) {
+			records = append(records, record)
 		}
 	}
-	if len(records) > 0 && selectorCount > maxCompleteGraphRelationshipChecks/len(records) {
-		return kubeindex.Snapshot{}, ErrCompleteGraphLimit
-	}
-	return kubeindex.Snapshot{Records: records}, nil
+	return kubeindex.Snapshot{Records: records, Kinds: view.Kinds}, nil
 }
 
-func completeGraphResourceDefinition(definitions []ResourceDefinition, kind string) (ResourceDefinition, bool, error) {
-	canonicalID := indexedResourceIDs[kind]
-	parts := strings.SplitN(canonicalID, "~", 2)
-	if len(parts) != 2 {
-		return ResourceDefinition{}, false, ErrGraphIncomplete
-	}
-	expectedGroup := parts[0]
-	var exact *ResourceDefinition
-	var matches []ResourceDefinition
-	for index := range definitions {
-		definition := &definitions[index]
-		group := definition.Group
-		if group == "" {
-			group = "core"
-		}
-		if group != expectedGroup || definition.Kind != kind {
-			continue
-		}
-		matches = append(matches, *definition)
-		if definition.ID == canonicalID {
-			exact = definition
-		}
-	}
-	if exact != nil {
-		if !validCompleteGraphDefinition(*exact, expectedGroup, kind) {
-			return ResourceDefinition{}, false, ErrGraphIncomplete
-		}
-		return *exact, true, nil
-	}
-	if len(matches) == 0 {
-		return ResourceDefinition{}, false, nil
-	}
-	if len(matches) != 1 || !validCompleteGraphDefinition(matches[0], expectedGroup, kind) {
-		return ResourceDefinition{}, false, ErrGraphIncomplete
-	}
-	return matches[0], true, nil
-}
+type graphPendingError struct{ status kubeindex.Status }
 
-func validCompleteGraphDefinition(definition ResourceDefinition, expectedGroup, kind string) bool {
-	group := definition.Group
-	if group == "" {
-		group = "core"
-	}
-	return group == expectedGroup && definition.Kind == kind && definition.Namespaced && definition.Available && definition.Version != "" && definition.Resource != "" && definition.ID == resourceID(definition.Group, definition.Version, definition.Resource) && containsString(definition.Verbs, "get") && containsString(definition.Verbs, "list")
-}
+func (graphPendingError) Error() string { return "kubernetes: graph kinds are still loading" }
 
 func completeGraphResponseSize(graph kubegraph.Graph) (int, error) {
 	size := len(`{"nodes":[`)
@@ -336,71 +282,6 @@ func jsonStringEncodedSize(value string) int {
 		}
 	}
 	return size
-}
-
-func (service *Service) loadCompleteGraphKind(ctx context.Context, definition ResourceDefinition, namespace, apiPath string) ([]kubeindex.Record, error) {
-	records := make([]kubeindex.Record, 0)
-	seenTokens := make(map[string]bool)
-	continueToken := ""
-	pageLimit := kubernetesIndexPageSize
-	for pageNumber := 0; pageNumber < kubernetesIndexMaxPages; {
-		query := url.Values{"limit": {strconv.Itoa(pageLimit)}}
-		if continueToken != "" {
-			query.Set("continue", continueToken)
-		}
-		pagePath := apiPath + "?" + query.Encode()
-		pageRecords := make([]kubeindex.Record, 0)
-		if metadataOnlyIndexKinds[definition.Kind] {
-			var page metadataIndexPage
-			if err := service.client.GetMetadataJSON(ctx, pagePath, &page); err != nil {
-				if errors.Is(err, ErrResponseTooLarge) && pageLimit > minimumPageSize {
-					pageLimit = max(minimumPageSize, pageLimit/2)
-					continue
-				}
-				return nil, err
-			}
-			for _, item := range page.Items {
-				pageRecords = append(pageRecords, item.record(definition.Kind))
-			}
-			continueToken = page.Metadata.Continue
-		} else {
-			var page struct {
-				Items    []map[string]any `json:"items"`
-				Metadata struct {
-					Continue string `json:"continue"`
-				} `json:"metadata"`
-			}
-			if err := service.client.GetJSON(ctx, pagePath, &page); err != nil {
-				if errors.Is(err, ErrResponseTooLarge) && pageLimit > minimumPageSize {
-					pageLimit = max(minimumPageSize, pageLimit/2)
-					continue
-				}
-				return nil, err
-			}
-			for _, item := range page.Items {
-				pageRecords = append(pageRecords, indexRecord(service.projectResource(definition, item)))
-			}
-			continueToken = page.Metadata.Continue
-		}
-		for _, record := range pageRecords {
-			if namespace != "" && record.Namespace != namespace || namespace == "" && !safeSegment(record.Namespace) {
-				return nil, ErrGraphIncomplete
-			}
-		}
-		if len(records)+len(pageRecords) > maxCompleteGraphRecords {
-			return nil, ErrCompleteGraphLimit
-		}
-		records = append(records, pageRecords...)
-		pageNumber++
-		if continueToken == "" {
-			return records, nil
-		}
-		if len(continueToken) > 4096 || seenTokens[continueToken] {
-			return nil, ErrGraphIncomplete
-		}
-		seenTokens[continueToken] = true
-	}
-	return nil, ErrCompleteGraphLimit
 }
 
 // Neighborhood returns a capped BFS slice from the same shared graph view.

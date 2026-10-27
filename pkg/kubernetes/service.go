@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"math/big"
@@ -76,6 +77,12 @@ type Discovery struct {
 	ObservedAt time.Time            `json:"observed_at"`
 	Resources  []ResourceDefinition `json:"resources"`
 	Partial    []PartialFailure     `json:"partial_failures,omitempty"`
+	// unlisted keeps the failures of API versions that could not be read even
+	// though another version of the same group answered. They stay out of
+	// Partial because the group is served, but a resource pinned to such a
+	// version must be reported as a failure instead of as one the cluster does
+	// not serve. It never leaves the discovery call.
+	unlisted []PartialFailure
 }
 
 // PartialFailure is a bounded failure class with no raw Kubernetes Status text.
@@ -130,6 +137,7 @@ type ListOptions struct {
 }
 
 type ResourcePage struct {
+	Sync             SyncStatus          `json:"sync"`
 	Items            []ProjectedResource `json:"items"`
 	Continue         string              `json:"continue,omitempty"`
 	Truncated        bool                `json:"truncated"`
@@ -192,6 +200,7 @@ type MetricsSourceStatus struct {
 
 // Usage reports Metrics API availability separately from an empty metric set.
 type Usage struct {
+	Next         string              `json:"next,omitempty"`
 	ObservedAt   time.Time           `json:"observed_at"`
 	Availability string              `json:"availability"`
 	Fresh        bool                `json:"fresh"`
@@ -246,6 +255,7 @@ type Service struct {
 	discoveryCalls         map[string]*discoveryCall
 	scrubber               Scrubber
 	indexes                *kubeindex.Registry
+	inventoryLog           *inventoryKindLog
 	changes                *changeStoreState
 	traffic                *trafficProviderState
 	logStreamContext       context.Context
@@ -282,7 +292,7 @@ func newService(parent context.Context, client *Client, scope Scope, discoveryTT
 		ctx, cancel = client.credentialEpochContext()
 	}
 	configured := scope.CredentialID
-	service := &Service{client: client, scope: scope, configuredCredentialID: configured, identity: &credentialEpoch{ctx: ctx, cancel: cancel}, ttl: discoveryTTL, mu: &sync.Mutex{}, cache: make(map[string]discoveryCacheEntry), discoveryCalls: map[string]*discoveryCall{}, indexes: kubeindex.NewRegistry(16, 60000), changes: newChangeStoreState(), traffic: &trafficProviderState{}}
+	service := &Service{client: client, scope: scope, configuredCredentialID: configured, identity: &credentialEpoch{ctx: ctx, cancel: cancel}, ttl: discoveryTTL, mu: &sync.Mutex{}, cache: make(map[string]discoveryCacheEntry), discoveryCalls: map[string]*discoveryCall{}, indexes: kubeindex.NewUnboundedRegistry(16), inventoryLog: newInventoryKindLog(), changes: newChangeStoreState(), traffic: &trafficProviderState{}}
 	service.usageHistory = newUsageHistoryState()
 	if client != nil && client.credentials != nil {
 		initialization, stop := context.WithTimeout(parent, 10*time.Second)
@@ -316,7 +326,7 @@ func (service *Service) Scoped(scope Scope) *Service {
 		configured = service.configuredCredentialID
 		scope.CredentialID = service.scope.CredentialID
 	}
-	scoped := &Service{client: service.client, scope: scope, identity: service.identity, configuredCredentialID: configured, readOrgs: readOrgs, ttl: service.ttl, mu: service.mu, cache: service.cache, discoveryCalls: service.discoveryCalls, scrubber: service.scrubber, indexes: service.indexes, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext, captureMode: service.captureMode, logSources: service.logSources}
+	scoped := &Service{client: service.client, scope: scope, identity: service.identity, configuredCredentialID: configured, readOrgs: readOrgs, ttl: service.ttl, mu: service.mu, cache: service.cache, discoveryCalls: service.discoveryCalls, scrubber: service.scrubber, indexes: service.indexes, inventoryLog: service.inventoryLog, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext, captureMode: service.captureMode, logSources: service.logSources}
 	scoped.issueAlertSink = service.issueAlertSink
 	scoped.usageHistory = service.usageHistory
 	if configured != service.configuredCredentialID && service.client != nil {
@@ -709,7 +719,7 @@ func (service *Service) Discover(ctx context.Context) (result Discovery, resultE
 				before := len(discovery.Resources)
 				service.discoverVersion(ctx, group.Name, version.Version, "/apis/"+url.PathEscape(group.Name)+"/"+url.PathEscape(version.Version), &discovery)
 				if len(discovery.Resources) > before {
-					discovery.Partial = discovery.Partial[:groupPartialBefore]
+					retainUnreadableVersions(&discovery, groupPartialBefore)
 					break
 				}
 			}
@@ -746,6 +756,75 @@ func (service *Service) discoverVersion(ctx context.Context, group, version, api
 		}
 		output.Resources = append(output.Resources, ResourceDefinition{ID: resourceID(group, version, item.Name), Group: group, Version: version, Resource: item.Name, Kind: item.Kind, Namespaced: item.Namespaced, Aliases: append([]string(nil), item.ShortNames...), Verbs: append([]string(nil), item.Verbs...), Available: true})
 	}
+}
+
+// CachedResources serves display pages over the complete projected inventory.
+func (service *Service) CachedResources(ctx context.Context, options ListOptions) (ResourcePage, error) {
+	if options.ResourceID == "" || len(options.Continue) > 4096 || options.Namespace != "" && !safeSegment(options.Namespace) || !safeSelector(options.Labels) || !safeSelector(options.Fields) {
+		return ResourcePage{}, ErrInvalidArguments
+	}
+	var page ResourcePage
+	var err error
+	if indexedKind(options.ResourceID) != "" {
+		page, err = service.cachedList(ctx, options)
+	} else {
+		generation, readErr := service.readInventory(ctx)
+		if readErr != nil {
+			return page, readErr
+		}
+		page = ResourcePage{Items: []ProjectedResource{}, Sync: service.withSyncProgress(SyncStatus{State: "syncing"})}
+		if _, exists := generation.ResourceStatus[options.ResourceID]; !exists && len(generation.View.Kinds) > 0 && generation.PendingDiscovery {
+			// The core generation is published but other API groups are not
+			// discovered and listed yet: this type is loading, not empty.
+			page.Sync = SyncStatus{State: "partial", Partial: true, Pending: []string{options.ResourceID}, PendingKinds: generation.pendingKinds()}
+		}
+		if state, exists := generation.ResourceStatus[options.ResourceID]; exists {
+			page.Sync = SyncStatus{State: state.State, Partial: state.Partial}
+			if !state.ObservedAt.IsZero() {
+				page.Sync.AgeSeconds = max(0, time.Since(state.ObservedAt).Seconds())
+			}
+			if page.Sync.State == "ready" && page.Sync.AgeSeconds > (10*time.Minute).Seconds() {
+				page.Sync.State, page.Sync.Partial = "stale", true
+			}
+			if state.Error != "" {
+				page.Partial = append(page.Partial, PartialFailure{ResourceID: options.ResourceID, Class: state.Error})
+			}
+			if state.Error != "forbidden" && state.Error != "unauthorized" {
+				page.Items = append(page.Items, generation.Resources[options.ResourceID]...)
+			}
+		} else if len(generation.View.Kinds) > 0 && !generation.PendingDiscovery {
+			return page, ErrNotFound
+		}
+	}
+	if err != nil {
+		return page, err
+	}
+	filtered := make([]ProjectedResource, 0, len(page.Items))
+	for _, item := range page.Items {
+		matches, matchErr := cachedSelectorMatches(item, options.Labels, options.Fields)
+		if matchErr != nil {
+			return ResourcePage{}, matchErr
+		}
+		if matches && (options.Namespace == "" || item.Namespace == options.Namespace) {
+			filtered = append(filtered, item)
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].Namespace != filtered[j].Namespace {
+			return filtered[i].Namespace < filtered[j].Namespace
+		}
+		return filtered[i].Name < filtered[j].Name
+	})
+	limit := options.Limit
+	if limit <= 0 || limit > maxPageSize {
+		limit = defaultPageSize
+	}
+	start, end, next, err := pageWindow(options.Continue, limit, len(filtered))
+	if err != nil {
+		return ResourcePage{}, err
+	}
+	page.Items, page.Continue = filtered[start:end], next
+	return page, nil
 }
 
 // List reads one discovered resource page and safely projects every item.
@@ -851,14 +930,17 @@ func (service *Service) Overview(ctx context.Context) (Overview, error) {
 	ctx, cancel := ensureOperationBudgetRequests(ctx, overviewOperationRequests)
 	defer cancel()
 	result := Overview{Connector: "kubernetes", ClusterID: service.scope.ClusterID, ObservedAt: time.Now().UTC(), UsageSource: "unavailable", MetricsStatus: "unavailable", Sync: SyncStatus{State: "direct"}}
-	var err error
-	var discovery Discovery
-	ctx, discovery, err = service.withDiscovery(ctx)
+	view, status, err := service.CachedIndexSnapshot(ctx, "Node", "Pod", "Namespace", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
 	if err != nil {
 		return result, err
 	}
-	result.Partial = append(result.Partial, discovery.Partial...)
-	usage, usageErr := service.Usage(ctx, "", maxPageSize)
+	result.Sync = SyncStatus{State: status.State, AgeSeconds: status.AgeSeconds, Partial: status.Partial, Progress: status.Progress, Pending: status.Pending, PendingKinds: status.PendingKinds}
+	generation, generationErr := service.readInventory(ctx)
+	if generationErr != nil {
+		return result, generationErr
+	}
+	result.Partial = append(result.Partial, generation.DiscoveryPartial...)
+	usage, usageErr := service.cachedUsage(ctx, "", false)
 	if usageErr != nil {
 		result.Partial = append(result.Partial, PartialFailure{ResourceID: "metrics.k8s.io", Class: errorClass(usageErr)})
 	} else {
@@ -894,55 +976,16 @@ func (service *Service) Overview(ctx context.Context) (Overview, error) {
 	requestedCPU, limitedCPU := new(big.Rat), new(big.Rat)
 	requestedMemory, limitedMemory := new(big.Rat), new(big.Rat)
 	allocatableCPU, allocatableMemory := new(big.Rat), new(big.Rat)
-	availableResources := make(map[string]bool, len(discovery.Resources))
-	for _, resource := range discovery.Resources {
-		availableResources[resource.ID] = true
-	}
-	var indexKinds []string
-	for _, kind := range []string{"Node", "Pod"} {
-		if availableResources[indexedResourceIDs[kind]] {
-			indexKinds = append(indexKinds, kind)
-		}
-	}
-	indexedRecords := make(map[string][]kubeindex.Record)
-	readyIndexedKinds := make(map[string]bool)
-	if len(indexKinds) > 0 {
-		view, syncStatus, indexErr := service.IndexSnapshot(ctx, indexKinds...)
-		if indexErr == nil {
-			readyKinds := 0
-			for _, kind := range indexKinds {
-				if syncStatus.Kinds[kind].State == "ready" {
-					readyKinds++
-					readyIndexedKinds[kind] = true
-				}
-			}
-			for _, record := range view.Records {
-				if readyIndexedKinds[record.Kind] {
-					indexedRecords[record.Kind] = append(indexedRecords[record.Kind], record)
-				}
-			}
-			if readyKinds > 0 {
-				result.Sync = SyncStatus{State: "indexed", AgeSeconds: syncStatus.AgeSeconds, Partial: readyKinds != len(indexKinds) || syncStatus.Partial}
-				if readyKinds != len(indexKinds) {
-					result.Sync.State = "partial"
-				}
-			}
-		}
-	}
-	for _, request := range []struct {
-		id    string
-		kind  string
-		apply func(ProjectedResource)
-	}{
-		{"core~v1~nodes", "Node", func(item ProjectedResource) {
+	apply := map[string]func(ProjectedResource){
+		"Node": func(item ProjectedResource) {
 			result.Nodes++
 			if conditionTrue(item.Conditions, "Ready") {
 				result.ReadyNodes++
 			}
 			addSummaryQuantity(allocatableCPU, item.Summary, "allocatable_cpu")
 			addSummaryQuantity(allocatableMemory, item.Summary, "allocatable_memory")
-		}},
-		{"core~v1~pods", "Pod", func(item ProjectedResource) {
+		},
+		"Pod": func(item ProjectedResource) {
 			result.Pods++
 			if item.Summary["phase"] == "Running" {
 				result.RunningPods++
@@ -951,41 +994,27 @@ func (service *Service) Overview(ctx context.Context) (Overview, error) {
 			addSummaryQuantity(limitedCPU, item.Summary, "limited_cpu")
 			addSummaryQuantity(requestedMemory, item.Summary, "requested_memory")
 			addSummaryQuantity(limitedMemory, item.Summary, "limited_memory")
-		}},
-		{"core~v1~namespaces", "", func(item ProjectedResource) {
+		},
+		"Namespace": func(item ProjectedResource) {
 			result.Namespaces++
 			if phase := summaryString(item.Summary, "phase"); phase == "" || phase == "Active" {
 				result.ActiveNamespaces++
 			}
-		}},
-		{"apps~v1~deployments", "", func(ProjectedResource) { result.Workloads++ }},
-		{"apps~v1~statefulsets", "", func(ProjectedResource) { result.Workloads++ }},
-		{"apps~v1~daemonsets", "", func(ProjectedResource) { result.Workloads++ }},
-		{"batch~v1~jobs", "", func(ProjectedResource) { result.Workloads++ }},
-		{"batch~v1~cronjobs", "", func(ProjectedResource) { result.Workloads++ }},
-	} {
-		if request.kind != "" && readyIndexedKinds[request.kind] {
-			if records, ready := indexedRecords[request.kind]; ready {
-				for _, record := range records {
-					request.apply(projectedIndexRecord(record))
-				}
-				continue
-			}
+		},
+		"Deployment":  func(ProjectedResource) { result.Workloads++ },
+		"StatefulSet": func(ProjectedResource) { result.Workloads++ },
+		"DaemonSet":   func(ProjectedResource) { result.Workloads++ },
+		"Job":         func(ProjectedResource) { result.Workloads++ },
+		"CronJob":     func(ProjectedResource) { result.Workloads++ },
+	}
+	for _, record := range view.Records {
+		if consume := apply[record.Kind]; consume != nil {
+			consume(projectedIndexRecord(record))
 		}
-		page, err := service.listAll(ctx, ListOptions{ResourceID: request.id})
-		if err != nil {
-			result.Truncated = true
-			result.Omitted = appendUnique(result.Omitted, request.id)
-			result.Partial = append(result.Partial, PartialFailure{ResourceID: request.id, Class: errorClass(err)})
-			continue
-		}
-		for _, item := range page.Items {
-			request.apply(item)
-		}
-		result.Partial = append(result.Partial, page.Partial...)
-		if page.Truncated {
-			result.Truncated = true
-			result.Omitted = appendUnique(result.Omitted, request.id)
+	}
+	for kind, state := range status.Kinds {
+		if state.Error != "" {
+			result.Partial = append(result.Partial, PartialFailure{ResourceID: indexedResourceIDs[kind], Class: state.Error})
 		}
 	}
 	result.RequestedCPU, result.LimitedCPU, result.AllocatableCPU = rationalString(requestedCPU), rationalString(limitedCPU), rationalString(allocatableCPU)
@@ -1034,8 +1063,11 @@ func projectedIndexRecord(record kubeindex.Record) ProjectedResource {
 		conditions = append(conditions, Condition{Type: "Ready", Status: status})
 	}
 	result := ProjectedResource{Kind: record.Kind, Summary: summary, Conditions: conditions}
+	if record.Summary["labels_partial"] == "true" {
+		result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "labels")
+	}
 	if record.Summary["references_partial"] == "true" {
-		result.ProjectionTruncated = []string{"references"}
+		result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "references")
 	}
 	return result
 }
@@ -1043,7 +1075,11 @@ func projectedIndexRecord(record kubeindex.Record) ProjectedResource {
 func projectedWorkloadIndexRecord(record kubeindex.Record) ProjectedResource {
 	projected := projectedIndexRecord(record)
 	projected.ResourceID = indexedResourceIDs[record.Kind]
+	projected.APIVersion, projected.CreatedAt = record.APIVersion, record.CreatedAt
 	projected.Kind, projected.Namespace, projected.Name, projected.UID = record.Kind, record.Namespace, record.Name, record.UID
+	if record.NodeName != "" {
+		projected.Summary["node"] = record.NodeName
+	}
 	projected.Labels = record.Labels
 	for _, owner := range record.Owners {
 		projected.Owners = append(projected.Owners, ObjectRef{Kind: owner.Kind, Namespace: owner.Namespace, Name: owner.Name, UID: owner.UID})
@@ -1053,117 +1089,85 @@ func projectedWorkloadIndexRecord(record kubeindex.Record) ProjectedResource {
 
 // Usage returns bounded pod and node Metrics API samples with freshness metadata.
 func (service *Service) Usage(ctx context.Context, namespace string, limit int) (Usage, error) {
-	ctx, cancel := ensureOperationBudget(ctx)
-	defer cancel()
-	if namespace != "" && !safeSegment(namespace) {
-		return Usage{}, ErrInvalidArguments
+	result, err := service.UsagePage(ctx, namespace, limit, "")
+	result.Truncated = result.Next != ""
+	return result, err
+}
+
+// UsagePage applies display paging without changing complete cached totals.
+func (service *Service) UsagePage(ctx context.Context, namespace string, limit int, cursor string) (Usage, error) {
+	result, err := service.cachedUsage(ctx, namespace, true)
+	if err != nil {
+		return result, err
 	}
 	if limit <= 0 || limit > maxPageSize {
 		limit = maxPageSize
 	}
-	result := Usage{
-		ObservedAt: time.Now().UTC(), Availability: "unavailable",
-		PodMetrics:  MetricsSourceStatus{Availability: "unavailable"},
-		NodeMetrics: MetricsSourceStatus{Availability: "unavailable"},
+	var continuation struct {
+		ObservedAt time.Time
+		Namespace  string
+		Offset     int
 	}
-	ctx, discovery, err := service.withDiscovery(ctx)
+	offset := ""
+	if cursor != "" {
+		if len(cursor) > 4096 {
+			return Usage{}, ErrInvalidArguments
+		}
+		raw, decodeErr := base64.RawURLEncoding.DecodeString(cursor)
+		if decodeErr != nil || json.Unmarshal(raw, &continuation) != nil || continuation.Namespace != namespace || !continuation.ObservedAt.Equal(result.ObservedAt) || continuation.Offset < 0 {
+			return Usage{}, ErrInvalidArguments
+		}
+		offset = strconv.Itoa(continuation.Offset)
+	}
+	start, end, next, err := pageWindow(offset, limit, max(len(result.Pods), len(result.Nodes)))
 	if err != nil {
-		return result, err
+		return Usage{}, err
 	}
-	available := make(map[string]bool, len(discovery.Resources))
-	for _, definition := range discovery.Resources {
-		available[definition.ID] = true
+	result.Pods = result.Pods[min(start, len(result.Pods)):min(end, len(result.Pods))]
+	result.Nodes = result.Nodes[min(start, len(result.Nodes)):min(end, len(result.Nodes))]
+	if next != "" {
+		continuation.ObservedAt, continuation.Namespace, continuation.Offset = result.ObservedAt, namespace, end
+		raw, _ := json.Marshal(continuation)
+		result.Next = base64.RawURLEncoding.EncodeToString(raw)
 	}
-	collectionIncomplete := false
-	for _, request := range []struct {
-		id   string
-		kind string
-	}{
-		{"metrics.k8s.io~v1beta1~nodes", "Node"},
-		{"metrics.k8s.io~v1beta1~pods", "Pod"},
-	} {
-		if !available[request.id] {
-			result.Omitted = appendUnique(result.Omitted, request.id)
-			continue
-		}
-		metricNamespace := namespace
-		if request.kind == "Node" {
-			metricNamespace = ""
-		}
-		page, listErr := service.listAll(ctx, ListOptions{ResourceID: request.id, Namespace: metricNamespace})
-		if listErr != nil {
-			collectionIncomplete = true
-			result.Partial = append(result.Partial, PartialFailure{ResourceID: request.id, Class: errorClass(listErr)})
-			continue
-		}
-		if page.Truncated {
-			result.Truncated = true
-			result.Omitted = appendUnique(result.Omitted, request.id)
-		}
-		result.Partial = append(result.Partial, page.Partial...)
-		complete := !page.Truncated && len(page.Partial) == 0
-		validSamples := true
-		var metrics []ResourceUsage
-		for _, item := range page.Items {
-			validSamples = validSamples && item.metricsValid
-			metric := ResourceUsage{Kind: request.kind, Namespace: item.Namespace, Name: item.Name, Window: summaryString(item.Summary, "window"), CPU: summaryString(item.Summary, "usage_cpu"), Memory: summaryString(item.Summary, "usage_memory")}
-			if timestamp := summaryString(item.Summary, "timestamp"); timestamp != "" {
-				metric.Timestamp, _ = time.Parse(time.RFC3339Nano, timestamp)
-			}
-			if request.kind == "Pod" {
-				result.Pods = append(result.Pods, metric)
-			} else {
-				result.Nodes = append(result.Nodes, metric)
-			}
-			metrics = append(metrics, metric)
-		}
-		status := summarizeMetricsSource(metrics, result.ObservedAt)
-		status.Complete = complete && validSamples
-		if !status.Complete {
-			collectionIncomplete = true
-			status.Fresh = false
-			if status.Total > 0 {
-				status.Availability = "partial"
+	return result, nil
+}
+
+func (service *Service) cachedUsage(ctx context.Context, namespace string, includeSamples bool) (Usage, error) {
+	if namespace != "" && !safeSegment(namespace) {
+		return Usage{}, ErrInvalidArguments
+	}
+	generation, err := service.readInventory(ctx)
+	if err != nil {
+		return Usage{}, err
+	}
+	result := generation.Usage
+	if result.Availability == "" {
+		result.Availability = "syncing"
+	}
+	if includeSamples {
+		result.Pods = append([]ResourceUsage(nil), result.Pods...)
+		result.Nodes = append([]ResourceUsage(nil), result.Nodes...)
+	} else {
+		result.Pods, result.Nodes = nil, nil
+	}
+	if namespace != "" && (generation.Usage.PodMetrics.Total > 0 || generation.Usage.PodMetrics.Complete) {
+		filtered := result.Pods[:0]
+		for _, sample := range result.Pods {
+			if sample.Namespace == namespace {
+				filtered = append(filtered, sample)
 			}
 		}
-		if request.kind == "Pod" {
-			result.PodMetrics = status
-		} else {
-			result.NodeMetrics = status
+		result.Pods = filtered
+		result.PodMetrics = summarizeMetricsSource(filtered, time.Now().UTC())
+		result.PodMetrics.Complete = generation.Usage.PodMetrics.Complete
+		if !result.PodMetrics.Complete {
+			result.PodMetrics.Availability, result.PodMetrics.Fresh = "partial", false
 		}
 	}
-	if len(result.Pods)+len(result.Nodes) == 0 {
-		if collectionIncomplete {
-			result.Availability = "partial"
-		}
-		return result, nil
-	}
-	result.Availability = "available"
-	result.Fresh = true
-	if collectionIncomplete {
-		result.Availability = "partial"
-		result.Fresh = false
-	}
-	cutoff := result.ObservedAt.Add(-5 * time.Minute)
-	for _, metric := range append(append([]ResourceUsage(nil), result.Pods...), result.Nodes...) {
-		if metric.Timestamp.IsZero() || metric.Timestamp.Before(cutoff) {
-			result.Fresh = false
-			result.Availability = "stale"
-			break
-		}
-	}
-	if len(result.Pods) > limit {
-		result.Pods = result.Pods[:limit]
-		result.Truncated = true
-		result.Omitted = appendUnique(result.Omitted, "metrics.k8s.io~v1beta1~pods")
-		result.Partial = append(result.Partial, PartialFailure{ResourceID: "metrics.k8s.io~v1beta1~pods", Class: "item_limit"})
-	}
-	if len(result.Nodes) > limit {
-		result.Nodes = result.Nodes[:limit]
-		result.Truncated = true
-		result.Omitted = appendUnique(result.Omitted, "metrics.k8s.io~v1beta1~nodes")
-		result.Partial = append(result.Partial, PartialFailure{ResourceID: "metrics.k8s.io~v1beta1~nodes", Class: "item_limit"})
-	}
+	result.PodMetrics.Fresh = result.PodMetrics.Fresh && (result.PodMetrics.ObservedAt == nil || time.Since(*result.PodMetrics.ObservedAt) < 5*time.Minute)
+	result.NodeMetrics.Fresh = result.NodeMetrics.Fresh && (result.NodeMetrics.ObservedAt == nil || time.Since(*result.NodeMetrics.ObservedAt) < 5*time.Minute)
+	result.Fresh = result.Fresh && (result.PodMetrics.Total == 0 || result.PodMetrics.Fresh) && (result.NodeMetrics.Total == 0 || result.NodeMetrics.Fresh)
 	return result, nil
 }
 
@@ -1202,6 +1206,74 @@ type podLogBounds struct {
 	LimitBytes int
 }
 
+// MaxLogClockSkew bounds how far ahead of this server a log timestamp may be
+// before it is refused. A container's clock runs a little ahead of the server's
+// often enough that a resume a few seconds in the future is a clock difference,
+// not a request for logs that cannot exist yet; anything further ahead is.
+const MaxLogClockSkew = 2 * time.Minute
+
+// logReadWindow is how far back this connector reads logs. Every resume point,
+// whichever shape it arrives in, is measured against this floor before it is
+// used, so a caller can neither ask for logs older than the window nor widen it
+// by handing back an edited resume state.
+const logReadWindow = 24 * time.Hour
+
+// logReadFloor is the oldest time a read may start from. A resume state that
+// carries line positions can lag the watermark it is anchored to by the resume
+// overlap, so the floor allows that overlap before a start is clamped.
+func logReadFloor(now time.Time) time.Time {
+	return now.Add(-logReadWindow - logResumeOverlap)
+}
+
+// clampCursorStart pulls a resume point a cursor asks its read to start from
+// back inside the read window. A Pod that has been quiet for longer than the
+// window still issued the cursor its viewer holds, so the resume is served
+// rather than refused; the read itself starts no earlier than the floor, which
+// is what the window bounds. The second result reports that the clamp dropped
+// part of the span the cursor asked for, so the stream can say the replay may
+// have a gap. A resume timestamp the viewer sent directly is not clamped here
+// and is still refused when it falls outside the window.
+func clampCursorStart(start time.Time, now time.Time) (time.Time, bool) {
+	if floor := logReadFloor(now); start.Before(floor) {
+		return floor, true
+	}
+	return start, false
+}
+
+// boundedSinceTime clamps a caller-supplied resume timestamp into the window
+// this connector serves. A timestamp inside the window is used as given, one a
+// little ahead of the server is clamped to now so the read still resumes, and a
+// timestamp further ahead than the tolerated skew or older than the window is
+// refused. Clamping never widens the window: the result is never after now and
+// never more than a day before it.
+func boundedSinceTime(value time.Time, now time.Time) (time.Time, bool) {
+	if value.IsZero() || now.Sub(value) > logReadWindow {
+		return time.Time{}, false
+	}
+	if value.After(now) {
+		if value.Sub(now) > MaxLogClockSkew {
+			return time.Time{}, false
+		}
+		return now, true
+	}
+	return value, true
+}
+
+// clampDerivedSinceTime pulls a start this connector derived itself back inside
+// the read window. A workload source starts just before the viewer's watermark
+// so a line written across the reconnect boundary is replayed instead of lost;
+// a viewer resuming at the very edge of the window therefore derives a start a
+// little before the floor. That start is clamped to the floor, and the read
+// serves the whole window, instead of failing a request validation already
+// accepted. The floor does not move: the result is never older than a day, and a
+// timestamp the viewer sent directly is still held to the window as it was.
+func clampDerivedSinceTime(value time.Time, now time.Time) time.Time {
+	if floor := now.Add(-logReadWindow); value.Before(floor) {
+		return floor
+	}
+	return value
+}
+
 func (service *Service) podLogs(ctx context.Context, namespace, pod, container string, previous bool, sinceSeconds, tailLines int, timestamps bool, bounds ...podLogBounds) (PodLogs, error) {
 	ctx, cancel := ensureOperationBudget(ctx)
 	defer cancel()
@@ -1212,8 +1284,21 @@ func (service *Service) podLogs(ctx context.Context, namespace, pod, container s
 	if len(bounds) == 1 {
 		options = bounds[0]
 	}
-	if options.LimitBytes < 0 || options.LimitBytes > maxPodLogBytes || !options.SinceTime.IsZero() && (sinceSeconds != 0 || options.SinceTime.After(time.Now()) || time.Since(options.SinceTime) > 24*time.Hour) {
+	if options.LimitBytes < 0 || options.LimitBytes > maxPodLogBytes {
 		return PodLogs{}, ErrInvalidArguments
+	}
+	if !options.SinceTime.IsZero() {
+		if sinceSeconds != 0 {
+			return PodLogs{}, ErrInvalidArguments
+		}
+		// A resume timestamp a little ahead of this server is a container clock
+		// difference, so it is clamped rather than refused; the query carries the
+		// clamped value, never the future one.
+		clamped, ok := boundedSinceTime(options.SinceTime, time.Now())
+		if !ok {
+			return PodLogs{}, ErrInvalidArguments
+		}
+		options.SinceTime = clamped
 	}
 	for _, value := range []string{namespace, pod} {
 		if !safeSegment(value) {
@@ -1333,20 +1418,30 @@ func abs(value int) int {
 }
 
 func (service *Service) resolve(ctx context.Context, id string) (ResourceDefinition, error) {
+	definition, _, err := service.resolveWithDiscovery(ctx, id)
+	return definition, err
+}
+
+// resolveWithDiscovery also returns the discovery it resolved against, so a
+// caller can tell a resource discovery could not read from one the cluster does
+// not serve. Failures for a version that could not be read are kept out of the
+// discovery's partial failures when another version of the group answered, and
+// they only travel with the discovery value itself.
+func (service *Service) resolveWithDiscovery(ctx context.Context, id string) (ResourceDefinition, Discovery, error) {
 	discovery, ok := ctx.Value(discoveryContextKey{}).(Discovery)
 	if !ok {
 		var err error
 		discovery, err = service.Discover(ctx)
 		if err != nil {
-			return ResourceDefinition{}, err
+			return ResourceDefinition{}, Discovery{}, err
 		}
 	}
 	for _, resource := range discovery.Resources {
 		if resource.ID == id {
-			return resource, nil
+			return resource, discovery, nil
 		}
 	}
-	return ResourceDefinition{}, ErrNotFound
+	return ResourceDefinition{}, discovery, ErrNotFound
 }
 
 func (service *Service) withDiscovery(ctx context.Context) (context.Context, Discovery, error) {
@@ -1390,7 +1485,7 @@ func resourcePath(definition ResourceDefinition, namespace, name string) (string
 
 func (service *Service) projectResource(definition ResourceDefinition, raw map[string]any) ProjectedResource {
 	metadata, _ := raw["metadata"].(map[string]any)
-	labels, labelsTruncated := boundedStringMap(metadata["labels"], maxProjectionItems)
+	labels, labelsTruncated := boundedStringMap(metadata["labels"], kubeindex.MaxLabels)
 	result := ProjectedResource{ResourceID: definition.ID, APIVersion: boundString(stringValue(raw["apiVersion"])), Kind: boundString(stringValue(raw["kind"])), Namespace: boundString(stringValue(metadata["namespace"])), Name: boundString(stringValue(metadata["name"])), UID: boundString(stringValue(metadata["uid"])), Labels: labels}
 	result.CreatedAt, _ = time.Parse(time.RFC3339Nano, stringValue(metadata["creationTimestamp"]))
 	if definition.Kind == "PodMetrics" || definition.Kind == "NodeMetrics" {
@@ -1400,8 +1495,8 @@ func (service *Service) projectResource(definition ResourceDefinition, raw map[s
 		result.ProjectionTruncated = append(result.ProjectionTruncated, "labels")
 	}
 	owners := mapSlice(metadata["ownerReferences"])
-	if len(owners) > maxProjectionItems {
-		owners = owners[:maxProjectionItems]
+	if len(owners) > kubeindex.MaxOwners {
+		owners = owners[:kubeindex.MaxOwners]
 		result.ProjectionTruncated = append(result.ProjectionTruncated, "owners")
 	}
 	for _, owner := range owners {
@@ -1437,6 +1532,11 @@ func (service *Service) projectResource(definition ResourceDefinition, raw map[s
 	if len(mapSlice(podSpec["containers"])) > maxProjectionItems {
 		result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "containers")
 	}
+	if len(mapSlice(podSpec["containers"])) > kubeindex.MaxImages {
+		// The index keeps fewer container images than the projection does, so
+		// the image list is reported as partial rather than silently shortened.
+		result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "images")
+	}
 	if len(mapSlice(spec["rules"])) > maxProjectionItems {
 		result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "rbac_rules")
 	}
@@ -1449,6 +1549,15 @@ func (service *Service) projectResource(definition ResourceDefinition, raw map[s
 	return enforceProjectionSize(result)
 }
 
+// projectIndexRecord projects one object for the index. It applies the index's
+// per-record bounds on top of the response bounds, so the record the index
+// receives is always one the index can hold.
+func (service *Service) projectIndexRecord(definition ResourceDefinition, raw map[string]any) kubeindex.Record {
+	return indexRecord(enforceIndexedRecordBudget(service.projectResource(definition, raw)))
+}
+
+// enforceProjectionSize keeps one projected resource inside the response size
+// bounds used by list, search, and detail reads.
 func enforceProjectionSize(result ProjectedResource) ProjectedResource {
 	encodedSize := func() int { encoded, _ := json.Marshal(result); return len(encoded) }
 	if encodedSize() <= maxProjectionBytes {
@@ -1488,6 +1597,293 @@ func enforceProjectionSize(result ProjectedResource) ProjectedResource {
 		result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "owners")
 	}
 	return result
+}
+
+// enforceIndexedRecordBudget keeps the projected resource inside the index's
+// per-record byte budget. It is a contract, not a best effort: the index refusing
+// a record marks its whole kind partial, which under the blocking rule takes the
+// cluster down for every view and for live logs, so a projection must always hand
+// over a record the index can hold.
+//
+// Fields give way in one fixed order, from the least load-bearing to the most:
+// informational summary values, reference names, labels, non-controller owners,
+// container images, selector keys, the remaining summary values, container
+// states, and finally container log states. Content that other features
+// correlate on is protected while the record can still fit; it is trimmed only
+// when nothing else is left, and every field that loses content is marked
+// truncated so the loss is visible instead of silent.
+func enforceIndexedRecordBudget(result ProjectedResource) ProjectedResource {
+	if len(result.Labels) > kubeindex.MaxLabels {
+		result = dropLabelsToBound(result)
+	}
+	if len(result.Owners) > kubeindex.MaxOwners {
+		result.Owners = result.Owners[:kubeindex.MaxOwners]
+		result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "owners")
+	}
+	if kubeindex.RecordWithinBudget(indexRecord(result)) {
+		return result
+	}
+	// Content that other features correlate on gives way last: a pod's node, a
+	// workload's selector, its controller, and its images all drive topology,
+	// ownership, and log membership, so the budget is paid first by labels and
+	// informational summary fields instead.
+	for _, drop := range []func(*ProjectedResource) bool{
+		dropInformationalSummaryField,
+		dropLastReferenceName,
+		dropLastLabel,
+		dropNonControllerOwner,
+		dropLastImageContainer,
+		dropLastSelectorKey,
+		dropLastProtectedSummaryField,
+		dropLastContainerState,
+		dropLastLogContainerState,
+	} {
+		for drop(&result) {
+			if kubeindex.RecordWithinBudget(indexRecord(result)) {
+				return result
+			}
+		}
+	}
+	return result
+}
+
+// dropLabelsToBound keeps the lowest-sorting labels up to the index bound, so the
+// retained set is the same on every cycle.
+func dropLabelsToBound(result ProjectedResource) ProjectedResource {
+	keys := make([]string, 0, len(result.Labels))
+	for key := range result.Labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	kept := make(map[string]string, kubeindex.MaxLabels)
+	for _, key := range keys[:kubeindex.MaxLabels] {
+		kept[key] = result.Labels[key]
+	}
+	result.Labels = kept
+	result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "labels")
+	return result
+}
+
+// dropLastLabel removes the highest-sorting label and marks the label list as
+// partial. Sorted order keeps the retained set stable between cycles.
+func dropLastLabel(result *ProjectedResource) bool {
+	if len(result.Labels) == 0 {
+		return false
+	}
+	keys := make([]string, 0, len(result.Labels))
+	for key := range result.Labels {
+		keys = append(keys, key)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(keys)))
+	delete(result.Labels, keys[0])
+	result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "labels")
+	return true
+}
+
+// dropNonControllerOwner removes an owner that does not establish control. The
+// controller reference is what ownership chains are built from, so it is never
+// dropped for size: a record without it would lose its place in the topology and
+// in workload log membership.
+func dropNonControllerOwner(result *ProjectedResource) bool {
+	for index := len(result.Owners) - 1; index >= 0; index-- {
+		owner := result.Owners[index]
+		if owner.controller && owner.controllerKnown {
+			continue
+		}
+		result.Owners = append(result.Owners[:index], result.Owners[index+1:]...)
+		result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "owners")
+		return true
+	}
+	return false
+}
+
+// droppableSummaryFields are the summary values that inform a display without
+// being read back into a record field or a correlation. Everything else in the
+// summary is protected: unknown keys are kept, so a field added later cannot be
+// lost by a bound nobody re-checked.
+var droppableSummaryFields = map[string]bool{
+	"reason": true, "restart_count": true,
+	"allocatable_cpu": true, "allocatable_memory": true,
+	"requested_cpu": true, "requested_memory": true,
+	"limited_cpu": true, "limited_memory": true,
+	"pod_reason": true, "scheduled_status": true, "scheduled_reason": true, "scheduled_transition_at": true,
+	"disruption_status": true, "disruption_reason": true, "disruption_transition_at": true,
+	"job_failed_status": true, "job_failed_reason": true, "job_failed_transition_at": true,
+	"node_pressure": true, "failed": true,
+}
+
+// dropInformationalSummaryField removes the highest-sorting summary value that
+// nothing correlates on. It runs before labels and owners so a wide record keeps
+// the fields the rest of the product reads.
+func dropInformationalSummaryField(result *ProjectedResource) bool {
+	keys := make([]string, 0, len(result.Summary))
+	for key := range result.Summary {
+		if droppableSummaryFields[key] {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return false
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(keys)))
+	delete(result.Summary, keys[0])
+	result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "summary")
+	return true
+}
+
+func dropLastImageContainer(result *ProjectedResource) bool {
+	containers, ok := result.Summary["containers"].([]map[string]any)
+	if !ok || len(containers) == 0 {
+		return false
+	}
+	result.Summary["containers"] = containers[:len(containers)-1]
+	result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "containers")
+	result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "images")
+	return true
+}
+
+// referenceSummaryFields are the summary keys that hold object references. They
+// are the largest repeatable contributor to a record: seven categories of up to
+// thirty-two names each, so they give way before labels do.
+var referenceSummaryFields = []string{"services", "gateways", "config_maps", "secrets", "persistent_volume_claims", "pods", "service_accounts"}
+
+// dropLastReferenceName removes one name from the reference category that holds
+// the most, and marks the reference list as partial.
+func dropLastReferenceName(result *ProjectedResource) bool {
+	largestKey, largest := "", 0
+	for _, key := range referenceSummaryFields {
+		if names := referenceNames(result.Summary[key]); len(names) > largest {
+			largestKey, largest = key, len(names)
+		}
+	}
+	if largestKey == "" {
+		return false
+	}
+	names := referenceNames(result.Summary[largestKey])
+	names = names[:len(names)-1]
+	if len(names) == 0 {
+		delete(result.Summary, largestKey)
+	} else if _, typed := result.Summary[largestKey].([]string); typed {
+		result.Summary[largestKey] = names
+	} else {
+		values := make([]any, 0, len(names))
+		for _, name := range names {
+			values = append(values, name)
+		}
+		result.Summary[largestKey] = values
+	}
+	result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "references")
+	return true
+}
+
+func referenceNames(value any) []string {
+	switch names := value.(type) {
+	case []string:
+		return names
+	case []any:
+		result := make([]string, 0, len(names))
+		for _, name := range names {
+			if text, ok := name.(string); ok {
+				result = append(result, text)
+			}
+		}
+		return result
+	}
+	return nil
+}
+
+// dropLastSelectorKey removes the highest-sorting selector key. A selector is
+// correlation data, so it is only trimmed once labels, owners, and images are
+// gone and the record still does not fit.
+func dropLastSelectorKey(result *ProjectedResource) bool {
+	selector, ok := result.Summary["selector"].(map[string]string)
+	if !ok || len(selector) == 0 {
+		return false
+	}
+	keys := make([]string, 0, len(selector))
+	for key := range selector {
+		keys = append(keys, key)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(keys)))
+	delete(selector, keys[0])
+	if len(selector) == 0 {
+		delete(result.Summary, "selector")
+	} else {
+		result.Summary["selector"] = selector
+	}
+	result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "selector")
+	return true
+}
+
+// protectedSummaryFields keep their own rung, so the general summary rung never
+// hides which category actually lost content.
+var protectedSummaryFields = map[string]bool{
+	"selector": true, "containers": true, "container_states": true, "log_container_states": true,
+	"references_partial": true, "break_evidence_partial": true, "log_container_states_partial": true,
+}
+
+// dropLastProtectedSummaryField removes the highest-sorting summary value that
+// no other rung owns. It runs only when the record cannot fit any other way.
+func dropLastProtectedSummaryField(result *ProjectedResource) bool {
+	owned := map[string]bool{}
+	for _, key := range referenceSummaryFields {
+		owned[key] = true
+	}
+	keys := make([]string, 0, len(result.Summary))
+	for key := range result.Summary {
+		if protectedSummaryFields[key] || owned[key] {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return false
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(keys)))
+	delete(result.Summary, keys[0])
+	result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, "summary")
+	return true
+}
+
+// dropLastContainerState removes one container state, the last resort before the
+// log container states. Both are marked with their own category.
+func dropLastContainerState(result *ProjectedResource) bool {
+	return dropLastContainerEntry(result, "container_states", "containers")
+}
+
+func dropLastLogContainerState(result *ProjectedResource) bool {
+	if !dropLastContainerEntry(result, "log_container_states", "logs") {
+		return false
+	}
+	result.Summary["log_container_states_partial"] = true
+	return true
+}
+
+func dropLastContainerEntry(result *ProjectedResource, key, category string) bool {
+	switch containers := result.Summary[key].(type) {
+	case []kubeindex.ContainerState:
+		if len(containers) == 0 {
+			return false
+		}
+		if len(containers) == 1 {
+			delete(result.Summary, key)
+		} else {
+			result.Summary[key] = containers[:len(containers)-1]
+		}
+	case []map[string]any:
+		if len(containers) == 0 {
+			return false
+		}
+		if len(containers) == 1 {
+			delete(result.Summary, key)
+		} else {
+			result.Summary[key] = containers[:len(containers)-1]
+		}
+	default:
+		return false
+	}
+	result.ProjectionTruncated = appendUnique(result.ProjectionTruncated, category)
+	return true
 }
 
 func appendUnique(values []string, value string) []string {
@@ -1901,14 +2297,51 @@ func (service *Service) cacheKey() string {
 func cloneDiscovery(value Discovery) Discovery {
 	value.Resources = append([]ResourceDefinition(nil), value.Resources...)
 	value.Partial = append([]PartialFailure(nil), value.Partial...)
+	value.unlisted = append([]PartialFailure(nil), value.unlisted...)
 	return value
+}
+
+// retainUnreadableVersions keeps the discovery failures recorded for one group
+// out of Partial while another version of that group answered, so the group is
+// still reported as discovered. A resource pinned to a version that failed is
+// then visibly unreadable rather than silently missing.
+func retainUnreadableVersions(discovery *Discovery, from int) {
+	discovery.unlisted = append(discovery.unlisted, discovery.Partial[from:]...)
+	discovery.Partial = discovery.Partial[:from]
+}
+
+// discoveryVersionFailed reports whether discovery could not read the API
+// version the given resource ID is pinned to. A failure for that exact
+// group-version, or for /apis itself, leaves the group-version's contents
+// unknown, so a caller must report an error instead of an absent resource.
+func discoveryVersionFailed(discovery Discovery, resourceID string) bool {
+	pinned := pinnedGroupVersion(resourceID)
+	for _, failures := range [][]PartialFailure{discovery.Partial, discovery.unlisted} {
+		for _, failure := range failures {
+			if failure.GroupVersion == "" || failure.GroupVersion == pinned {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pinnedGroupVersion(resourceID string) string {
+	parts := strings.SplitN(resourceID, "~", 3)
+	if len(parts) < 3 {
+		return ""
+	}
+	return parts[0] + "~" + parts[1]
 }
 func errorClass(err error) string {
 	var throttled *ErrThrottled
 	if errors.As(err, &throttled) {
 		return "throttled"
 	}
+	var conflict commitConflictError
 	switch {
+	case errors.As(err, &conflict):
+		return "commit_conflict"
 	case errors.Is(err, ErrOperationBudget):
 		return "budget_exhausted"
 	case errors.Is(err, errPreviousUnavailable):
@@ -1919,6 +2352,12 @@ func errorClass(err error) string {
 		return "unauthorized"
 	case errors.Is(err, ErrNotFound):
 		return "unsupported"
+	case errors.Is(err, ErrIncompleteInventory):
+		return "incomplete_pages"
+	case errors.Is(err, kubeindex.ErrRecordLimit):
+		return "record_limit"
+	case errors.Is(err, kubeindex.ErrInvalidRecord):
+		return "record_rejected"
 	case errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "deadline"):
 		return "timeout"
 	default:

@@ -126,6 +126,17 @@ func (service *Service) acceptCredential(ctx context.Context, header string) err
 	return service.acceptCredentialLocked(ctx, header)
 }
 
+// commitConflictError reports that a listing could not be committed because the
+// credential epoch changed while it was being read. The listing was not wrong;
+// it belongs to a retired identity, so the next cycle has to read it again.
+type commitConflictError struct{ cause error }
+
+func (err commitConflictError) Error() string {
+	return "kubernetes: credential epoch changed before commit"
+}
+func (err commitConflictError) Unwrap() error { return err.cause }
+func (err commitConflictError) Class() string { return "commit_conflict" }
+
 func (service *Service) commitCredential(ctx context.Context, commit func() error) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -134,7 +145,7 @@ func (service *Service) commitCredential(ctx context.Context, commit func() erro
 	epoch.mu.Lock()
 	defer epoch.mu.Unlock()
 	if epoch.retired || epoch.ctx.Err() != nil {
-		return ErrCredentialUnavailable
+		return commitConflictError{cause: ErrCredentialUnavailable}
 	}
 	if service.client != nil && service.client.credentials != nil {
 		header, err := service.client.credentials.Authorization(ctx)
@@ -149,7 +160,7 @@ func (service *Service) commitCredential(ctx context.Context, commit func() erro
 		service.client.authMu.Lock()
 		defer service.client.authMu.Unlock()
 		if epoch.ctx.Err() != nil {
-			return ErrCredentialUnavailable
+			return commitConflictError{cause: ErrCredentialUnavailable}
 		}
 	}
 	if err := ctx.Err(); err != nil {

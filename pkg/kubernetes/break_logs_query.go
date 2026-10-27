@@ -13,6 +13,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
 	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
+	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 )
 
 type BreakLogWindow struct {
@@ -63,17 +64,83 @@ type BreakLogSource struct {
 	At   time.Time `json:"at"`
 }
 type BreakLogPage struct {
-	Window       BreakLogWindow     `json:"window"`
-	Pods         []BreakLogPod      `json:"pods"`
-	Lines        []BreakLogLine     `json:"lines"`
-	Markers      []BreakLogMarker   `json:"markers"`
-	Counts       BreakLogCounts     `json:"counts"`
-	Rate         []BreakLogRate     `json:"rate"`
-	Patterns     []BreakLogPattern  `json:"patterns"`
-	Sources      []BreakLogSource   `json:"sources"`
-	Coverage     breaklogs.Coverage `json:"coverage"`
-	Next         string             `json:"next,omitempty"`
-	PatternInput []BreakLogLine     `json:"-"`
+	Window   BreakLogWindow     `json:"window"`
+	Pods     []BreakLogPod      `json:"pods"`
+	Lines    []BreakLogLine     `json:"lines"`
+	Markers  []BreakLogMarker   `json:"markers"`
+	Counts   BreakLogCounts     `json:"counts"`
+	Rate     []BreakLogRate     `json:"rate"`
+	Patterns []BreakLogPattern  `json:"patterns"`
+	Sources  []BreakLogSource   `json:"sources"`
+	Coverage breaklogs.Coverage `json:"coverage"`
+	Next     string             `json:"next,omitempty"`
+	// Container is the applied filter: a container name, or "*" for all.
+	Container     string              `json:"container"`
+	MainContainer string              `json:"main_container,omitempty"`
+	Containers    []BreakLogContainer `json:"containers"`
+	PatternInput  []BreakLogLine      `json:"-"`
+}
+
+// BreakLogContainer lists one container of the break's pods so a viewer can
+// choose which container's logs to read.
+type BreakLogContainer struct {
+	Name string `json:"name"`
+	Init bool   `json:"init,omitempty"`
+	Main bool   `json:"main,omitempty"`
+}
+
+// breakLogContainers lists the break's containers in spec order (app
+// containers before init containers) and picks the main one: the pod's
+// declared default container, else the first app container. Captured
+// snapshots fill in containers of pods that no longer exist.
+func breakLogContainers(pods []kubeindex.Record, snapshots []breaklogs.Snapshot) ([]BreakLogContainer, string) {
+	seen := map[string]int{}
+	listed := []BreakLogContainer{}
+	add := func(name string, init bool) {
+		if name == "" {
+			return
+		}
+		if position, exists := seen[name]; exists {
+			listed[position].Init = listed[position].Init && init
+			return
+		}
+		seen[name] = len(listed)
+		listed = append(listed, BreakLogContainer{Name: name, Init: init})
+	}
+	main := ""
+	for _, pod := range pods {
+		containers := pod.LogContainers
+		if len(containers) == 0 {
+			containers = pod.Containers
+		}
+		for _, container := range containers {
+			add(container.Name, container.Init)
+		}
+		for _, container := range pod.Containers {
+			add(container.Name, container.Init)
+		}
+		if main == "" && pod.MainContainer != "" {
+			main = pod.MainContainer
+		}
+	}
+	// Captures carry no spec order, so containers known only from them are
+	// listed by name to keep the default stable across requests.
+	captured := append([]breaklogs.Snapshot(nil), snapshots...)
+	sort.SliceStable(captured, func(left, right int) bool { return captured[left].Container < captured[right].Container })
+	for _, item := range captured {
+		add(item.Container, item.Init)
+	}
+	if position, exists := seen[main]; !exists || listed[position].Init {
+		main = ""
+	}
+	sort.SliceStable(listed, func(left, right int) bool { return !listed[left].Init && listed[right].Init })
+	for position := range listed {
+		if main == "" && !listed[position].Init {
+			main = listed[position].Name
+		}
+		listed[position].Main = listed[position].Name == main && main != ""
+	}
+	return listed, main
 }
 
 func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (BreakLogPage, error) {
@@ -102,6 +169,33 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 	}
 	page := BreakLogPage{Window: BreakLogWindow{query.From, query.To}, Pods: []BreakLogPod{}, Lines: []BreakLogLine{}, Markers: []BreakLogMarker{}, Rate: []BreakLogRate{}, Patterns: []BreakLogPattern{}, Sources: []BreakLogSource{}}
 	pods := breakLogPods(snapshot.Records, query.Namespace, query.RootUID)
+	rootSnapshots := []breaklogs.Snapshot{}
+	for _, item := range state.Snapshots {
+		if item.Namespace == query.Namespace && item.RootUID == query.RootUID {
+			rootSnapshots = append(rootSnapshots, item)
+		}
+	}
+	page.Containers, page.MainContainer = breakLogContainers(pods, rootSnapshots)
+	switch query.Container {
+	case "":
+		query.Container = page.MainContainer
+		if query.Container == "" {
+			query.Container = breaklogs.AllContainers
+		}
+	case breaklogs.AllContainers:
+	default:
+		known := false
+		for _, container := range page.Containers {
+			known = known || container.Name == query.Container
+		}
+		if !known {
+			return BreakLogPage{}, ErrInvalidArguments
+		}
+	}
+	page.Container = query.Container
+	selectedContainer := func(name string) bool {
+		return query.Container == breaklogs.AllContainers || name == query.Container
+	}
 	selected := map[string]bool{}
 	for _, pod := range query.Pods {
 		if !safeSegment(pod) {
@@ -135,7 +229,7 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 		page.Pods = append(page.Pods, BreakLogPod{Name: name, UID: uid, State: status, Short: short})
 	}
 	addSnapshot := func(item breaklogs.Snapshot, source string) {
-		if query.Mode != "" && query.Mode != "merged" && query.Mode != item.Slot {
+		if query.Mode != "" && query.Mode != "merged" && query.Mode != item.Slot || !selectedContainer(item.Container) {
 			return
 		}
 		for _, line := range item.Lines {
@@ -153,14 +247,21 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 		page.Sources = append(page.Sources, BreakLogSource{Kind: source, Name: service.scope.ClusterID, At: item.CapturedAt})
 	}
 	matching := []breaklogs.Snapshot{}
+	// podSnapshots are the captures of the selected pods in the window, before
+	// the container filter; pod identity facts come from any container.
+	podSnapshots := []breaklogs.Snapshot{}
 	observations := []breaklogs.Snapshot{}
 	for _, item := range state.Snapshots {
 		if item.Namespace != query.Namespace || item.RootUID != query.RootUID || !selectedPod(item.Pod, item.PodUID) || item.To.Before(query.From) || item.From.After(query.To) {
 			continue
 		}
+		addPod(item.Pod, item.PodUID, "crashed")
+		podSnapshots = append(podSnapshots, item)
+		if !selectedContainer(item.Container) {
+			continue
+		}
 		matching = append(matching, item)
 		observations = append(observations, item)
-		addPod(item.Pod, item.PodUID, "crashed")
 		addSnapshot(item, "captured")
 	}
 	if len(pods) > 5 {
@@ -187,6 +288,16 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 			}
 		}
 		containers := pod.Containers
+		if query.Container != breaklogs.AllContainers {
+			containers = nil
+			for _, candidates := range [][]kubeindex.ContainerState{pod.Containers, pod.LogContainers} {
+				for _, container := range candidates {
+					if len(containers) == 0 && container.Name == query.Container {
+						containers = append(containers, container)
+					}
+				}
+			}
+		}
 		if len(containers) > 3 {
 			failures = append(failures, breaklogs.Gap{From: query.From, To: query.To, Reason: "budget"})
 			containers = containers[:3]
@@ -289,7 +400,7 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 			byName := map[string]string{}
 			createdAt := map[string]time.Time{}
 			ambiguousNames := map[string]bool{}
-			for _, item := range matching {
+			for _, item := range podSnapshots {
 				if !item.PodCreatedAt.IsZero() {
 					createdAt[item.PodUID] = item.PodCreatedAt
 					if item.PodCreatedAt.After(linkedQuery.From) {
@@ -334,7 +445,7 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 			}
 			accepted := []BreakLogLine{}
 			for _, line := range result.Lines {
-				if line.At.Before(linkedQuery.From) || line.At.After(linkedQuery.To) || line.Container == "" {
+				if line.At.Before(linkedQuery.From) || line.At.After(linkedQuery.To) || line.Container == "" || !selectedContainer(line.Container) {
 					continue
 				}
 				inGap := false
@@ -401,7 +512,7 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 	}
 	crashMarkers := map[string]bool{}
 	for _, crash := range crashes.Items {
-		if crash.Type == "termination" && !crash.At.Before(query.From) && !crash.At.After(query.To) {
+		if crash.Type == "termination" && selectedContainer(crash.Container) && !crash.At.Before(query.From) && !crash.At.After(query.To) {
 			page.Markers = append(page.Markers, BreakLogMarker{Type: "crash", At: crash.At, Label: crash.Container + " " + crash.Reason + " exit " + strconv.FormatInt(int64(crash.ExitCode), 10)})
 			crashMarkers[crash.PodUID+"\x00"+crash.Container+"\x00"+crash.At.Format(time.RFC3339Nano)] = true
 		}
@@ -412,13 +523,15 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 			hasBreak = true
 		}
 	}
-	for _, item := range matching {
+	// The break marker belongs to the whole break, so any container's capture
+	// may place it; termination markers follow the container filter.
+	for _, item := range podSnapshots {
 		if !hasBreak && !item.BreakAt.IsZero() && !item.BreakAt.Before(query.From) && !item.BreakAt.After(query.To) {
 			page.Markers = append(page.Markers, BreakLogMarker{Type: "break", At: item.BreakAt, Label: "Break"})
 			hasBreak = true
 		}
 		key := item.PodUID + "\x00" + item.Container + "\x00" + item.TerminationAt.Format(time.RFC3339Nano)
-		if !crashMarkers[key] && !item.TerminationAt.IsZero() && !item.TerminationAt.Before(query.From) && !item.TerminationAt.After(query.To) {
+		if selectedContainer(item.Container) && !crashMarkers[key] && !item.TerminationAt.IsZero() && !item.TerminationAt.Before(query.From) && !item.TerminationAt.After(query.To) {
 			page.Markers = append(page.Markers, BreakLogMarker{Type: "crash", At: item.TerminationAt, Label: item.Container + " previous termination"})
 			crashMarkers[key] = true
 		}

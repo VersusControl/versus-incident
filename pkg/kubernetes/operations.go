@@ -46,6 +46,7 @@ type SearchResult struct {
 
 // WorkloadPage aggregates the supported workload kinds.
 type WorkloadPage struct {
+	Sync      SyncStatus          `json:"sync"`
 	Items     []ProjectedResource `json:"items"`
 	Counts    map[string]int      `json:"counts,omitempty"`
 	Next      string              `json:"next,omitempty"`
@@ -694,7 +695,8 @@ func (service *Service) Workloads(ctx context.Context, options WorkloadListOptio
 	for _, candidate := range workloadResources {
 		indexKinds = append(indexKinds, candidate.Kind)
 	}
-	view, status, indexErr := service.IndexSnapshot(ctx, indexKinds...)
+	view, status, indexErr := service.CachedNamespaceSnapshot(ctx, options.Namespace, indexKinds...)
+	result.Sync = SyncStatus{State: status.State, Partial: status.Partial, AgeSeconds: status.AgeSeconds, Progress: status.Progress, Pending: status.Pending, PendingKinds: status.PendingKinds}
 	indexReady := indexErr == nil
 	if indexReady {
 		for _, candidate := range workloadResources {
@@ -713,7 +715,7 @@ func (service *Service) Workloads(ctx context.Context, options WorkloadListOptio
 		}
 	} else {
 		for _, candidate := range workloadResources {
-			page, listErr := service.listAll(ctx, ListOptions{ResourceID: candidate.ResourceID, Namespace: options.Namespace})
+			page, listErr := service.cachedList(ctx, ListOptions{ResourceID: candidate.ResourceID, Namespace: options.Namespace})
 			if listErr != nil {
 				class := errorClass(listErr)
 				if errors.Is(listErr, ErrNotFound) {
@@ -755,7 +757,6 @@ func (service *Service) Workloads(ctx context.Context, options WorkloadListOptio
 	}
 	result.Items = append(result.Items, filtered[start:end]...)
 	result.Next = next
-	result.Truncated = result.Truncated || next != ""
 	var sizeTruncated bool
 	result.Items, result.Omitted, sizeTruncated = trimAggregateItems(result.Items, result.Omitted)
 	result.Truncated = result.Truncated || sizeTruncated

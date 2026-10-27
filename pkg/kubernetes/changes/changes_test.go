@@ -380,9 +380,10 @@ func TestUpgradeTimelineVisible(t *testing.T) {
 		t.Fatal(err)
 	}
 	page, err := view.Query(Query{Limit: 1}, now)
-	if err != nil || len(page.Items) != 1 || page.Items[0].ID != "new" || page.Next != "1" {
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != "new" || page.Next == "" {
 		t.Fatalf("page=%+v err=%v", page, err)
 	}
+
 	page, err = view.Query(Query{Limit: 1, Cursor: page.Next}, now)
 	if err != nil || len(page.Items) != 1 || page.Items[0].Name != "after" || page.Next != "" || len(page.Gaps) != 1 {
 		t.Fatalf("deduplicated page=%+v err=%v", page, err)

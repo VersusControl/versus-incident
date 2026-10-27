@@ -89,6 +89,7 @@ func TestListK8sIssuesBrokenView(t *testing.T) {
 	}
 	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
 	service.SetChangeStorage(storage.NewMemory())
+	warmToolInventory(t, service)
 	ctx := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
 	for _, tool := range NewForRegistry(kubernetes.NewServiceRegistry(service)) {
 		if tool.Name() != "list_k8s_issues" {
@@ -120,6 +121,7 @@ func TestListK8sIssuesCrashEvidence(t *testing.T) {
 	}
 	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
 	service.SetChangeStorage(storage.NewMemory())
+	warmToolInventory(t, service)
 	ctx := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
 	for _, tool := range New(service) {
 		if tool.Name() != "list_k8s_issues" {
@@ -142,6 +144,33 @@ func TestListK8sIssuesCrashEvidence(t *testing.T) {
 		return
 	}
 	t.Fatal("issue tool missing")
+}
+
+// Warm the producer explicitly; tool invocations only consume published inventory.
+func warmToolInventory(t *testing.T, service *kubernetes.Service) {
+	t.Helper()
+	service.StartCapture(t.Context())
+	t.Cleanup(service.StopCapture)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		overview, err := service.Overview(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		capture := service.CaptureStatus()
+		// Warm means the full inventory, not just the core generation.
+		if overview.Sync.State == "ready" && overview.Sync.PendingKinds == 0 && (capture.Mode != "continuous" || capture.LastCycleAt != nil) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("background inventory did not become ready: %+v", overview.Sync)
+		case <-ticker.C:
+		}
+	}
 }
 
 func TestNewReturnsSpecCatalogReadOnlyToolsAndAuthorizationFailsClosed(t *testing.T) {

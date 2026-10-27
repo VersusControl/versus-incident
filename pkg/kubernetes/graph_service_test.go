@@ -15,6 +15,9 @@ import (
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 )
 
+const graphFixtureRecords = 10000
+const graphFixturePages = 100
+
 func TestGraphServiceUsesSharedIndexAndBoundsNeighborhood(t *testing.T) {
 	scope := Scope{OrgID: "org-a", ClusterID: "cluster-a", CredentialID: "cred-a"}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -112,13 +115,19 @@ func TestCompleteGraphReturnsAllConnectedNamespaceRecordsWithoutPaging(t *testin
 	defer server.Close()
 	scope := Scope{OrgID: "org-a", ClusterID: "cluster-a", CredentialID: "cred-a"}
 	service := newTestService(t, server.URL, scope)
+	warmTestInventory(t, service)
+	defer service.StopCapture()
+	before := len(requestedPaths())
 	graph, err := service.Graph(context.Background(), GraphQuery{Namespace: "shop", ConnectedOnly: true, Complete: true})
 	if err != nil || len(graph.Nodes) != 502 || len(graph.Edges) != 251 || graph.Next != "" || graph.Truncated || len(graph.Omitted) != 0 || graph.Sync.Partial || graph.Sync.State != "ready" {
 		t.Fatalf("complete graph nodes=%d edges=%d next=%q truncated=%v omitted=%v sync=%+v err=%v", len(graph.Nodes), len(graph.Edges), graph.Next, graph.Truncated, graph.Omitted, graph.Sync, err)
 	}
+	if len(requestedPaths()) != before {
+		t.Fatal("complete graph triggered a cluster read instead of using background inventory")
+	}
 	for _, path := range requestedPaths() {
-		if !strings.Contains(path, "/namespaces/shop/") {
-			t.Fatalf("complete graph made an unscoped or unrelated namespace request: %s", path)
+		if strings.Contains(path, "/namespaces/") {
+			t.Fatalf("background inventory unexpectedly used a namespace-only fallback: %s", path)
 		}
 	}
 }
@@ -127,6 +136,9 @@ func TestOverviewGraphReturnsAllConnectedNamespacesWithoutPaging(t *testing.T) {
 	server, requestedPaths := completeGraphTestServerMode(t, 251, 0, "", false, true)
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{OrgID: "org-a", ClusterID: "cluster-a", CredentialID: "cred-a"})
+	warmTestInventory(t, service)
+	defer service.StopCapture()
+	before := len(requestedPaths())
 	graph, err := service.OverviewGraph(context.Background())
 	if err != nil || len(graph.Nodes) != 502 || len(graph.Edges) != 251 || graph.Next != "" || graph.Truncated || len(graph.Omitted) != 0 || graph.Sync.Partial || graph.Sync.State != "ready" {
 		t.Fatalf("overview nodes=%d edges=%d next=%q truncated=%v omitted=%v sync=%+v err=%v", len(graph.Nodes), len(graph.Edges), graph.Next, graph.Truncated, graph.Omitted, graph.Sync, err)
@@ -142,13 +154,18 @@ func TestOverviewGraphReturnsAllConnectedNamespacesWithoutPaging(t *testing.T) {
 		t.Fatalf("namespace counts=%v", counts)
 	}
 	paths := requestedPaths()
-	if len(paths) != len(graphIndexKinds)-2+1 {
-		t.Fatalf("collection requests=%v; want one per kind plus one pod continuation", paths)
+	if len(paths) != before {
+		t.Fatal("overview graph triggered a cluster read")
 	}
+	countsByPath := make(map[string]int)
 	for _, path := range paths {
-		if strings.Contains(path, "/namespaces/") || strings.HasSuffix(path, "/nodes") || strings.HasSuffix(path, "/namespaces") {
-			t.Fatalf("overview made unrelated or namespace-scoped request: %s", path)
+		countsByPath[path]++
+		if strings.Contains(path, "/namespaces/") {
+			t.Fatalf("background inventory unexpectedly made a namespace-scoped request: %s", path)
 		}
+	}
+	if countsByPath["/api/v1/pods"] != 2 || countsByPath["/api/v1/services"] != 1 {
+		t.Fatalf("background collection did not consume exactly both Pod pages and one Service page: %v", countsByPath)
 	}
 	encoded, err := json.Marshal(graph)
 	if err != nil || strings.Contains(string(encoded), "private-payload") {
@@ -163,21 +180,35 @@ func TestOverviewGraphFailsClosed(t *testing.T) {
 		pods      int
 		forbidden string
 		overlap   bool
-		want      error
+		partial   bool
+		nodes     int
+		edges     int
 	}{
-		{"denied kind", 1, 0, "/api/v1/pods", false, ErrForbidden},
-		{"denied metadata kind", 1, 0, "/api/v1/secrets", false, ErrForbidden},
-		{"record cap", 0, maxCompleteGraphRecords + 1, "", false, ErrCompleteGraphLimit},
-		{"edge cap", 300, 0, "", true, ErrCompleteGraphLimit},
-		{"relationship work cap", 1001, 0, "", false, ErrCompleteGraphLimit},
+		{"denied kind", 1, 0, "/api/v1/pods", false, true, 0, 0},
+		{"denied metadata kind", 1, 0, "/api/v1/secrets", false, true, 2, 1},
+		{"large inventory", graphFixtureRecords/2 + 1, 0, "", false, false, graphFixtureRecords + 2, graphFixtureRecords/2 + 1},
+		{"above explicit edge cap", 300, 0, "", true, false, 600, 45000},
+		{"above former relationship work cap", 1001, 0, "", false, false, 2002, 1001},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server, _ := completeGraphTestServerMode(t, test.pairs, test.pods, test.forbidden, test.overlap, true)
 			defer server.Close()
 			service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+			warmTestInventory(t, service)
+			defer service.StopCapture()
 			graph, err := service.OverviewGraph(context.Background())
-			if err != test.want || len(graph.Nodes) != 0 || graph.Next != "" || graph.Truncated {
-				t.Fatalf("overview returned partial graph=%+v err=%v; want %v", graph, err, test.want)
+			if err != nil || len(graph.Nodes) != test.nodes || len(graph.Edges) != test.edges || graph.Next != "" || graph.Truncated || graph.Sync.Partial != test.partial {
+				t.Fatalf("overview nodes=%d edges=%d next=%q truncated=%v sync=%+v err=%v; want nodes=%d edges=%d partial=%v", len(graph.Nodes), len(graph.Edges), graph.Next, graph.Truncated, graph.Sync, err, test.nodes, test.edges, test.partial)
+			}
+			if test.partial {
+				kind := "Pod"
+				if strings.HasSuffix(test.forbidden, "/secrets") {
+					kind = "Secret"
+				}
+				view, status, err := service.CachedIndexSnapshot(t.Context(), kind)
+				if err != nil || status.Kinds[kind].State != "error" || len(view.Records) != 0 {
+					t.Fatalf("unreadable kind was presented as complete: kind=%s records=%d status=%+v err=%v", kind, len(view.Records), status, err)
+				}
 			}
 		})
 	}
@@ -197,8 +228,8 @@ func TestCompleteTopologyValidatesEveryPageAndResponseSize(t *testing.T) {
 		{name: "overview rejects unsafe namespace", secondNS: "bad/name", pages: 2, want: ErrGraphIncomplete},
 		{name: "namespace rejects second page escape", namespace: "shop", secondNS: "other", pages: 2, want: ErrGraphIncomplete},
 		{name: "overview rejects repeated continuation", secondNS: "other", pages: 3, repeat: true, want: ErrGraphIncomplete},
-		{name: "overview rejects page cap", secondNS: "other", pages: kubernetesIndexMaxPages + 1, want: ErrCompleteGraphLimit},
-		{name: "overview rejects encoded byte cap", secondNS: "other", pages: 30, large: true, want: ErrCompleteGraphLimit},
+		{name: "complete pagination", secondNS: "other", pages: graphFixturePages + 1},
+		{name: "overview exceeds explicit response cap", secondNS: "shop", pages: 110, large: true},
 		{name: "overview preserves UID owners across namespaces", secondNS: "other", pages: 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -209,8 +240,14 @@ func TestCompleteTopologyValidatesEveryPageAndResponseSize(t *testing.T) {
 				case "/apis":
 					writeJSON(writer, map[string]any{"groups": []any{}})
 				case "/api/v1":
-					writeJSON(writer, map[string]any{"resources": graphTestResources("pods")})
+					writeJSON(writer, map[string]any{"resources": graphTestResources("pods", "nodes", "namespaces")})
+				case "/api/v1/nodes", "/api/v1/namespaces":
+					writeJSON(writer, map[string]any{"items": []any{}})
 				case "/api/v1/pods", "/api/v1/namespaces/shop/pods":
+					if test.namespace != "" && request.URL.Path == "/api/v1/pods" {
+						http.Error(writer, "namespace-only access", http.StatusForbidden)
+						return
+					}
 					page := 0
 					if token := request.URL.Query().Get("continue"); token != "" {
 						if _, err := fmt.Sscanf(token, "page-%d", &page); err != nil {
@@ -224,7 +261,7 @@ func TestCompleteTopologyValidatesEveryPageAndResponseSize(t *testing.T) {
 					prefix := "pod-"
 					pageSize := 1
 					if test.large {
-						prefix = strings.Repeat("x", 1024)
+						prefix = strings.Repeat("x", 200)
 						pageSize = 100
 					}
 					items := make([]any, 0, pageSize)
@@ -246,27 +283,62 @@ func TestCompleteTopologyValidatesEveryPageAndResponseSize(t *testing.T) {
 					}
 					writeJSON(writer, map[string]any{"items": items, "metadata": map[string]any{"continue": continuation}})
 				default:
+					if strings.HasPrefix(request.URL.Path, "/apis/metrics.k8s.io/") {
+						writeJSON(writer, map[string]any{"items": []any{}})
+						return
+					}
+					if strings.Contains(request.URL.Path, "/namespaces/") {
+						http.Error(writer, "namespace-only access", http.StatusForbidden)
+						return
+					}
 					t.Errorf("unexpected collection path: %s", request.URL.Path)
 					http.NotFound(writer, request)
 				}
 			}))
 			defer server.Close()
 			service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
-			var graph kubegraph.Graph
-			var err error
 			if test.namespace != "" {
-				graph, err = service.Graph(context.Background(), GraphQuery{Namespace: test.namespace, Complete: true})
-			} else {
-				graph, err = service.OverviewGraph(context.Background())
+				service.client.namespace = test.namespace
 			}
-			if err != test.want {
-				t.Fatalf("graph nodes=%d edges=%d err=%v; want %v", len(graph.Nodes), len(graph.Edges), err, test.want)
+			warmTestInventory(t, service)
+			defer service.StopCapture()
+			view, status, err := service.CachedNamespaceSnapshot(t.Context(), test.namespace, "Pod")
+			if err != nil {
+				t.Fatal(err)
 			}
-			if test.want != nil && (len(graph.Nodes) != 0 || graph.Next != "" || graph.Truncated) {
-				t.Fatalf("failure returned partial graph: %+v", graph)
+			if test.want != nil {
+				if status.Kinds["Pod"].State != "error" || !status.Partial || len(view.Records) != 0 {
+					t.Fatalf("malformed page published a partial Pod generation: records=%d status=%+v", len(view.Records), status)
+				}
+				graph, err := service.OverviewGraph(t.Context())
+				if err != nil || !graph.Sync.Partial || len(graph.Nodes) != 0 || graph.Next != "" || graph.Truncated {
+					t.Fatalf("overview concealed invalid inventory: nodes=%d sync=%+v err=%v", len(graph.Nodes), graph.Sync, err)
+				}
+				complete, err := service.Graph(t.Context(), GraphQuery{Namespace: "shop", Complete: true})
+				if err != test.want || len(complete.Nodes) != 0 || complete.Next != "" || complete.Truncated {
+					t.Fatalf("explicit complete graph accepted malformed inventory: nodes=%d err=%v; want %v", len(complete.Nodes), err, test.want)
+				}
+				return
 			}
-			if test.want == nil && (len(graph.Nodes) != 2 || len(graph.Edges) != 2 || graph.Next != "" || graph.Truncated) {
-				t.Fatalf("UID ownership graph=%+v", graph)
+			wantRecords := test.pages
+			if test.large {
+				wantRecords *= 100
+			}
+			if status.State != "ready" || status.Partial || len(view.Records) != wantRecords {
+				t.Fatalf("valid background pages were bounded: records=%d status=%+v; want %d", len(view.Records), status, wantRecords)
+			}
+			graph, err := service.OverviewGraph(t.Context())
+			if err != nil || len(graph.Nodes) != wantRecords || len(graph.Edges) != wantRecords || graph.Next != "" || graph.Truncated || graph.Sync.Partial {
+				t.Fatalf("UID ownership overview nodes=%d edges=%d sync=%+v err=%v; want %d", len(graph.Nodes), len(graph.Edges), graph.Sync, err, wantRecords)
+			}
+			if test.large {
+				size, err := completeGraphResponseSize(graph)
+				if err != nil || size <= maxCompleteGraphResponseBytes {
+					t.Fatalf("fixture did not exceed explicit response safety bound: bytes=%d err=%v", size, err)
+				}
+				if _, err := service.Graph(t.Context(), GraphQuery{Namespace: "shop", Complete: true}); err != ErrCompleteGraphLimit {
+					t.Fatalf("explicit complete graph dropped its response safety bound: %v", err)
+				}
 			}
 		})
 	}
@@ -285,9 +357,9 @@ func TestCompleteGraphUsesDiscoveredAlternateVersion(t *testing.T) {
 			writeJSON(writer, map[string]any{"resources": graphTestResources("pods")})
 		case "/apis/apps/v2":
 			writeJSON(writer, map[string]any{"resources": graphTestResources("deployments")})
-		case "/api/v1/namespaces/shop/pods":
+		case "/api/v1/pods":
 			writeJSON(writer, map[string]any{"items": []any{}})
-		case "/apis/apps/v2/namespaces/shop/deployments":
+		case "/apis/apps/v2/deployments":
 			pathMu.Lock()
 			deploymentPath = request.URL.Path
 			pathMu.Unlock()
@@ -302,13 +374,15 @@ func TestCompleteGraphUsesDiscoveredAlternateVersion(t *testing.T) {
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+	warmTestInventory(t, service)
+	defer service.StopCapture()
 	if _, err := service.Graph(context.Background(), GraphQuery{Namespace: "shop", Complete: true}); err != nil {
 		t.Fatal(err)
 	}
 	pathMu.Lock()
 	defer pathMu.Unlock()
-	if deploymentPath != "/apis/apps/v2/namespaces/shop/deployments" {
-		t.Fatalf("deployment path = %q; complete graph should use the discovered matching version", deploymentPath)
+	if deploymentPath != "/apis/apps/v2/deployments" {
+		t.Fatalf("deployment path = %q; background inventory should use the discovered preferred version", deploymentPath)
 	}
 }
 
@@ -326,7 +400,7 @@ func TestCompleteGraphResponseSizeIsCountedWithoutBuildingPayload(t *testing.T) 
 	if err != nil || size != len(encoded) {
 		t.Fatalf("counted graph size=%d encoded size=%d err=%v", size, len(encoded), err)
 	}
-	large := kubegraph.Graph{Nodes: make([]kubegraph.Node, maxCompleteGraphRecords), Edges: []kubegraph.Edge{}, Omitted: map[string]int{}, Sync: kubegraph.SyncStatus{State: "ready"}}
+	large := kubegraph.Graph{Nodes: make([]kubegraph.Node, graphFixtureRecords), Edges: []kubegraph.Edge{}, Omitted: map[string]int{}, Sync: kubegraph.SyncStatus{State: "ready"}}
 	for index := range large.Nodes {
 		large.Nodes[index] = kubegraph.Node{ID: fmt.Sprintf("pod-%d", index), Kind: "Pod", Name: strings.Repeat("x", 1024), Group: "shop"}
 	}
@@ -338,25 +412,38 @@ func TestCompleteGraphResponseSizeIsCountedWithoutBuildingPayload(t *testing.T) 
 
 func TestCompleteGraphRejectsIncompleteReadsAndSafetyLimits(t *testing.T) {
 	t.Run("permission denied", func(t *testing.T) {
-		server, _ := completeGraphTestServer(t, 1, 0, "/api/v1/namespaces/shop/pods")
+		server, _ := completeGraphTestServer(t, 1, 0, "/api/v1/pods")
 		defer server.Close()
 		service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+		warmTestInventory(t, service, "shop")
+		defer service.StopCapture()
 		if _, err := service.Graph(context.Background(), GraphQuery{Namespace: "shop", Complete: true}); err != ErrForbidden {
 			t.Fatalf("complete graph permission error=%v", err)
 		}
 	})
-	t.Run("record limit", func(t *testing.T) {
-		server, _ := completeGraphTestServer(t, 0, maxCompleteGraphRecords+1, "")
+	t.Run("large inventory", func(t *testing.T) {
+		server, _ := completeGraphTestServer(t, 0, graphFixtureRecords+1, "")
 		defer server.Close()
 		service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
-		if _, err := service.Graph(context.Background(), GraphQuery{Namespace: "shop", Complete: true}); err != ErrCompleteGraphLimit {
-			t.Fatalf("complete graph limit error=%v", err)
+		warmTestInventory(t, service)
+		defer service.StopCapture()
+		graph, err := service.Graph(context.Background(), GraphQuery{Namespace: "shop", Complete: true})
+		pods := 0
+		for _, node := range graph.Nodes {
+			if node.Kind == "Pod" {
+				pods++
+			}
+		}
+		if err != nil || pods != graphFixtureRecords+1 || graph.Truncated || graph.Next != "" || graph.Sync.Partial {
+			t.Fatalf("complete graph did not cover inventory: pods=%d sync=%+v err=%v", pods, graph.Sync, err)
 		}
 	})
 	t.Run("edge limit", func(t *testing.T) {
 		server, _ := completeGraphTestServerMode(t, 150, 150, "", true)
 		defer server.Close()
 		service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
+		warmTestInventory(t, service)
+		defer service.StopCapture()
 		if _, err := service.Graph(context.Background(), GraphQuery{Namespace: "shop", Complete: true}); err != ErrCompleteGraphLimit {
 			t.Fatalf("complete graph edge limit error=%v", err)
 		}
@@ -415,15 +502,12 @@ func completeGraphTestServerMode(t *testing.T, connectedPairs, podCount int, for
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		path := request.URL.Path
-		if strings.Contains(path, "/namespaces/") || allNamespaces && strings.HasPrefix(path, "/api/v1/") || allNamespaces && strings.HasPrefix(path, "/apis/") && strings.Count(path, "/") == 4 {
+		if strings.Contains(path, "/namespaces/") || strings.HasPrefix(path, "/api/v1/") || strings.HasPrefix(path, "/apis/") && strings.Count(path, "/") == 4 {
 			mu.Lock()
 			paths = append(paths, path)
 			mu.Unlock()
-			if !allNamespaces && path != forbiddenPath && !strings.Contains(path, "/namespaces/shop/") {
-				t.Errorf("namespace graph read escaped selected namespace: %s", path)
-			}
 		}
-		if path == forbiddenPath {
+		if path == forbiddenPath || forbiddenPath == "/api/v1/pods" && strings.HasSuffix(path, "/pods") || forbiddenPath == "/api/v1/secrets" && strings.HasSuffix(path, "/secrets") {
 			writer.WriteHeader(http.StatusForbidden)
 			return
 		}

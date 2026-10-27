@@ -4,10 +4,8 @@ import type {
   KubernetesResource,
   KubernetesWorkload,
 } from "./api";
-import {
-  useKubernetesCluster,
-  useKubernetesQuery,
-} from "./useKubernetesCluster";
+import { useEffect, useState } from "react";
+import { useKubernetesCrashes } from "./useKubernetesCluster";
 import { isKnownKubernetesTime } from "./kubernetesTime";
 
 export type ResourceDetailTab =
@@ -123,28 +121,19 @@ export function downloadText(text: string, name: string, type = "text/plain") {
   URL.revokeObjectURL(url);
 }
 export function useResourceCrashes(resource: KubernetesResource) {
-  const { client } = useKubernetesCluster();
-  return useKubernetesQuery({
-    queryKey: [
-      "resource-detail-crashes",
-      resource.uid,
-      resource.namespace,
-      resource.name,
-    ],
-    queryFn: () =>
-      client.kubernetesCrashes({
-        namespace: resource.namespace,
-        ...(resource.kind !== "Pod" && resource.uid
-          ? { root_uid: resource.uid }
-          : {}),
-        since: new Date(Date.now() - 86400000).toISOString(),
-        until: new Date().toISOString(),
-        limit: 200,
-      }),
-    enabled: Boolean(resource.uid),
-    retry: false,
-    refetchInterval: 30000,
-  });
+  const [windowEnd, setWindowEnd] = useState(Date.now);
+  const query = useKubernetesCrashes({
+    namespace: resource.namespace,
+    ...(resource.kind === "Pod" ? { pod_uid: resource.uid } : { root_uid: resource.uid }),
+    since: new Date(windowEnd - 86400000).toISOString(),
+    until: new Date(windowEnd).toISOString(),
+  }, Boolean(resource.uid));
+  useEffect(() => {
+    if (!resource.uid || query.paging.page !== 1) return;
+    const timer = window.setInterval(() => setWindowEnd(Date.now()), 30000);
+    return () => window.clearInterval(timer);
+  }, [resource.uid, query.paging.page]);
+  return query;
 }
 export function scopedCrashes(
   page: KubernetesCrashPage | undefined,

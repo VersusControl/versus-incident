@@ -8,13 +8,7 @@ fleet navigation, see [Multi-Cluster](/agent/kubernetes/multi-cluster).
 
 Configure `connectors.kubernetes` at the root of `config.yaml`, or in an optional
 `connectors.yaml` file beside it. The examples below use the same root
-`connectors:` wrapper in either file. Tool execution settings remain in
-`tools.yaml`. Reader credentials belong in `connectors.kubernetes.auth`; action
-credentials are configured separately in `connectors.kubernetes.actions.auth`.
-
-Omit `multiple` or set `multiple: false` for the single-cluster form below.
-Do not include `clusters` in that form. With `multiple: true`, put all connection,
-auth, and action settings inside each `clusters` entry instead.
+`connectors:` wrapper in either file.
 
 ## Authentication
 
@@ -262,7 +256,7 @@ kind: ClusterRole
 metadata: {name: versus-kubernetes-reader}
 rules:
 - apiGroups: [""]
-  resources: [nodes, namespaces, pods, services, events, configmaps, persistentvolumeclaims, persistentvolumes]
+  resources: [nodes, namespaces, pods, services, events, configmaps, serviceaccounts, secrets, persistentvolumeclaims, persistentvolumes]
   verbs: [get, list]
 - apiGroups: [""]
   resources: [pods/log]
@@ -309,12 +303,13 @@ roleRef:
   name: versus-kubernetes-reader
 ```
 
-Secrets are deliberately omitted by default. Resource reports project only
-referenced Secret key names; grant `get,list` on core `secrets` separately only
-when that projection is required. Gateway API reads are also optional: add
-`get,list` for `gateway.networking.k8s.io` `gateways` and `httproutes`, or set
-`kubernetesReaderRBAC.gatewayAPI=true` in the chart, only on clusters where
-those CRDs are installed.
+The shipped role reads Secret metadata only. Resource reports project Secret
+names, labels, and referenced key names; Secret values are never projected. The
+grant is part of the role above, so remove `secrets` from your own role or
+binding if you want Secrets invisible to Versus. Gateway API reads are also
+optional: add `get,list` for `gateway.networking.k8s.io` `gateways` and
+`httproutes`, or set `kubernetesReaderRBAC.gatewayAPI=true` in the chart, only on
+clusters where those CRDs are installed.
 
 For least privilege, replace `ClusterRole`/`ClusterRoleBinding` with a `Role`
 and `RoleBinding` in each observed namespace, remove nodes/namespaces and node
@@ -407,10 +402,11 @@ kubernetesReaderRBAC:
 
 The chart defaults include `clusterID: default`, `timeout: 10s`,
 `discoveryTTL: 5m`, `actions.enable: false`, `actions.maxReplicas: 20`, and
-`actions.timeout: 15s`. Manage Secret-name projection grants separately;
-Gateway API grants use `kubernetesReaderRBAC.gatewayAPI: true` and must be
-enabled deliberately. Keep credential values
-in Secrets or mounted files, not committed values files. See
+`actions.timeout: 15s`. Secret reads are metadata-only and already part of the
+shipped reader role; remove the `secrets` grant to exclude them. Gateway API
+grants use `kubernetesReaderRBAC.gatewayAPI: true` and must be enabled
+deliberately. Keep credential values in Secrets or mounted files, not committed
+values files. See
 [Installing with Helm](/configuration/helm) and the complete
 [EKS with IRSA example](/examples/eks-irsa-kubernetes-reader).
 

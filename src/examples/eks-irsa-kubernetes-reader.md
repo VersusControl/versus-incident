@@ -302,7 +302,7 @@ metadata:
   name: versus-kubernetes-reader
 rules:
   - apiGroups: [""]
-    resources: [nodes, namespaces, pods, services, events, configmaps, persistentvolumeclaims, persistentvolumes]
+    resources: [nodes, namespaces, pods, services, events, configmaps, serviceaccounts, secrets, persistentvolumeclaims, persistentvolumes]
     verbs: [get, list]
   - apiGroups: [""]
     resources: [pods/log]
@@ -358,10 +358,10 @@ kubectl apply -f versus-kubernetes-rbac.yaml
 The role grants only `get` and `list`, plus `get` on `pods/log`. It grants no
 create, update, patch, delete, exec, proxy, rollout, or Helm permission.
 
-Secrets are deliberately omitted. ConfigMaps are readable, but Versus projects
-only key names and metadata, never values. Add Secret reads only if referenced
-Secret key names are required in resource reports. Add Gateway API `gateways` and
-`httproutes` only when those CRDs are installed.
+Secrets are included in the role above and read as metadata only: Versus
+projects names, labels, and referenced key names, never values. Remove the
+`secrets` grant from your own role or binding if you want Secrets invisible.
+Add Gateway API `gateways` and `httproutes` only when those CRDs are installed.
 
 For namespace-only access, replace the ClusterRoleBinding with RoleBindings in
 approved namespaces and remove cluster-scoped resources. Versus reports denied

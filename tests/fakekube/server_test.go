@@ -38,6 +38,7 @@ func TestCrashEvidenceScenarioConsumers(t *testing.T) {
 	}
 	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
 	service.SetChangeStorage(storage.NewMemory())
+	warmScenarioInventory(t, service)
 	page, err := service.Issues(t.Context(), kubernetes.IssueOptions{Broken: true, IncludeChanges: true})
 	if err != nil || len(page.Items) != 6 {
 		t.Fatalf("six fixture roots: %+v %v", page, err)
@@ -84,6 +85,34 @@ func TestCrashEvidenceScenarioConsumers(t *testing.T) {
 	encoded, err := json.Marshal([]any{page, ordinary, diagnosis})
 	if err != nil || strings.Contains(string(encoded), "CANARY_") {
 		t.Fatal("fixture message leaked through shared consumer")
+	}
+}
+
+// Match production startup rather than relying on consumer requests to LIST.
+func warmScenarioInventory(t *testing.T, service *kubernetes.Service) {
+	t.Helper()
+	service.StartCapture(t.Context())
+	t.Cleanup(service.StopCapture)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		overview, err := service.Overview(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		capture := service.CaptureStatus()
+		// Warm means the full inventory: the core generation is ready first and
+		// the remaining kinds fill in on the next cycle.
+		if overview.Sync.State == "ready" && overview.Sync.PendingKinds == 0 && (capture.Mode != "continuous" || capture.LastCycleAt != nil) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("background inventory did not become ready: %+v", overview.Sync)
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -345,7 +374,9 @@ func TestFleetSummaryVersionAndIssues(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		entries = append(entries, kubernetes.ClusterEntry{Info: kubernetes.ClusterInfo{ID: id, Provider: "generic"}, Service: kubernetes.NewService(client, kubernetes.Scope{ClusterID: id}, time.Minute)})
+		service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: id}, time.Minute)
+		warmScenarioInventory(t, service)
+		entries = append(entries, kubernetes.ClusterEntry{Info: kubernetes.ClusterInfo{ID: id, Provider: "generic"}, Service: service})
 	}
 	summaries := kubernetes.NewClusterRegistry(true, entries).Summaries(t.Context(), "default", nil)
 	for index, summary := range summaries {
@@ -1010,6 +1041,7 @@ func TestAutoscalingDiscoveryAndBadRolloutIndex(t *testing.T) {
 		if err != nil || status.Partial || len(snapshot.Records) != 1 || snapshot.Records[0].UID != "checkout-hpa" || snapshot.Records[0].Kind != "HorizontalPodAutoscaler" {
 			t.Fatalf("HPA snapshot=%+v status=%+v err=%v", snapshot, status, err)
 		}
+		warmScenarioInventory(t, service)
 		root, err := service.Issues(t.Context(), kubernetes.IssueOptions{RootUID: "deployment-checkout", IncludeChanges: true, Namespace: "shop"})
 		if err != nil || len(root.Items) != 1 || len(root.Partial) != 0 {
 			t.Fatalf("root query=%+v err=%v", root, err)
@@ -1089,26 +1121,77 @@ func TestServerDiscoveryMetadataAndFaultCounters(t *testing.T) {
 	}
 }
 
+const (
+	// The two fixture sizes this test compares, and the bounds it applies. The
+	// generator is linear, so the larger fixture costs about ten times the
+	// smaller one whatever else the machine is doing: that ratio is the property
+	// worth guarding, while an absolute number measured the host's load instead
+	// and failed whenever the suite ran on a busy machine.
+	scalingGeneratePods = 5000
+	fullGeneratePods    = 50000
+	// maxGenerateScaling leaves more than twice the tenfold a linear generator
+	// needs for garbage collection and cache noise, and a quadratic generator
+	// still lands near a hundredfold.
+	maxGenerateScaling = 25
+	// generateScalingFloor keeps a machine that generates the small fixture in a
+	// few milliseconds from setting an allowance tighter than the clock and the
+	// scheduler can measure.
+	generateScalingFloor = 50 * time.Millisecond
+	// maxGenerateCeiling only trips on pathology: a hang, or a generator whose
+	// cost per pod grew by orders of magnitude.
+	maxGenerateCeiling = 60 * time.Second
+)
+
 func TestGenerateFiftyThousandPodsWithinBounds(t *testing.T) {
+	// Measure the small fixture twice in the same run and keep the slower of the
+	// two, so a load spike widens the allowance instead of shrinking it. A
+	// quadratic generator trips the bound either way: its larger fixture costs
+	// about a hundred times its own small one, not ten.
+	firstScaling, scalingStore := measureGenerate(t, scalingGeneratePods)
+	if count := scalingStore.Count("pods"); count != scalingGeneratePods {
+		t.Fatalf("generated scaling fixture count=%d", count)
+	}
+	scalingStore = nil
+	secondScaling, _ := measureGenerate(t, scalingGeneratePods)
+	scaling := max(firstScaling, secondScaling)
+
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	started := time.Now()
 	store := NewStore()
-	if err := Generate(store, 50000, 2000, 23); err != nil {
+	if err := Generate(store, fullGeneratePods, 2000, 23); err != nil {
 		t.Fatal(err)
 	}
 	elapsed := time.Since(started)
 	runtime.ReadMemStats(&after)
-	if count := store.Count("pods"); count != 50000 {
+	if count := store.Count("pods"); count != fullGeneratePods {
 		t.Fatalf("generated pod count=%d", count)
 	}
-	if elapsed >= 5*time.Second {
-		t.Fatalf("50k pod generation took %s, want less than 5s", elapsed)
+	allowance := time.Duration(maxGenerateScaling) * max(scaling, generateScalingFloor)
+	t.Logf("fixture generation: %d pods in %s (measured %s and %s), %d pods in %s, allowance %s", fullGeneratePods, elapsed, firstScaling, secondScaling, scalingGeneratePods, scaling, allowance)
+	if elapsed > allowance {
+		t.Fatalf("50k pod generation took %s, %.1fx the %s and %s the %d-pod fixture took in this run; want at most %dx (a linear generator needs about 10x)", elapsed, float64(elapsed)/float64(max(scaling, generateScalingFloor)), firstScaling, secondScaling, scalingGeneratePods, maxGenerateScaling)
+	}
+	if elapsed >= maxGenerateCeiling {
+		t.Fatalf("50k pod generation took %s, above the %s safety ceiling", elapsed, maxGenerateCeiling)
 	}
 	if after.HeapAlloc < before.HeapAlloc || after.HeapAlloc-before.HeapAlloc >= 500<<20 {
 		t.Fatalf("50k pod fixture retained %d bytes, want less than 500 MiB", after.HeapAlloc-before.HeapAlloc)
 	}
+}
+
+// measureGenerate times one fixture size from a freshly collected heap, so both
+// sizes are measured under the same conditions.
+func measureGenerate(t *testing.T, pods int) (time.Duration, *Store) {
+	t.Helper()
+	runtime.GC()
+	store := NewStore()
+	started := time.Now()
+	if err := Generate(store, pods, 2000, 23); err != nil {
+		t.Fatal(err)
+	}
+	return time.Since(started), store
 }
 
 func TestPopulatedScenarioTimelineMutationBoundary(t *testing.T) {
@@ -1585,5 +1668,55 @@ func TestTableAcceptReturnsKubernetesTable(t *testing.T) {
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"kind":"Table"`) {
 		t.Fatalf("table response status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestQuiesceBarrierAttributesArrivalsAndDefaultsOff(t *testing.T) {
+	server, err := NewServer(Config{Scenario: "triage"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Off by default: a normal read is not held.
+	open := httptest.NewRecorder()
+	server.ServeHTTP(open, httptest.NewRequest(http.MethodGet, "/api", nil))
+	if open.Code != http.StatusOK {
+		t.Fatalf("default read status=%d", open.Code)
+	}
+	hold := httptest.NewRecorder()
+	server.ServeHTTP(hold, httptest.NewRequest(http.MethodPost, "/_fake/quiesce", strings.NewReader(`{"hold":true}`)))
+	if hold.Code != http.StatusOK {
+		t.Fatalf("quiesce on status=%d body=%s", hold.Code, hold.Body.String())
+	}
+	done := make(chan int, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/namespaces/payments/pods", nil))
+		done <- response.Code
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	var status QuiesceStatus
+	for time.Now().Before(deadline) {
+		probe := httptest.NewRecorder()
+		server.ServeHTTP(probe, httptest.NewRequest(http.MethodGet, "/_fake/quiesce", nil))
+		if json.Unmarshal(probe.Body.Bytes(), &status) == nil && status.Arrivals == 1 && status.Blocked == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if status.Arrivals != 1 || status.Blocked != 1 || !status.Active {
+		t.Fatalf("barrier did not hold the request: %+v", status)
+	}
+	release := httptest.NewRecorder()
+	server.ServeHTTP(release, httptest.NewRequest(http.MethodPost, "/_fake/quiesce", strings.NewReader(`{"hold":false}`)))
+	if release.Code != http.StatusOK {
+		t.Fatalf("quiesce off status=%d", release.Code)
+	}
+	if code := <-done; code != http.StatusOK {
+		t.Fatalf("released request status=%d", code)
+	}
+	final := httptest.NewRecorder()
+	server.ServeHTTP(final, httptest.NewRequest(http.MethodGet, "/_fake/quiesce", nil))
+	if json.Unmarshal(final.Body.Bytes(), &status) != nil || status.Active || status.Arrivals != 1 || status.Blocked != 0 {
+		t.Fatalf("final barrier status=%s", final.Body.String())
 	}
 }

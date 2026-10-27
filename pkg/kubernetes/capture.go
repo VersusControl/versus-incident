@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
@@ -85,6 +86,7 @@ func (service *Service) StartCapture(parent context.Context) {
 	if service == nil || service.client == nil || service.changes == nil || parent == nil {
 		return
 	}
+	service.startInventory(parent)
 	validation, stopValidation := context.WithTimeout(parent, 10*time.Second)
 	err := service.validateCredential(validation)
 	stopValidation()
@@ -162,6 +164,10 @@ func (service *Service) StopCapture() {
 	service.changes.mu.Lock()
 	scope := service.indexScope()
 	service.changes.stopped[scope] = true
+	inventory := service.changes.inventories[scope]
+	if inventory != nil && inventory.cancel != nil {
+		inventory.cancel()
+	}
 	loop := service.changes.captures[scope]
 	logDone := service.changes.logDone[scope]
 	var alertDone chan struct{}
@@ -186,6 +192,9 @@ func (service *Service) StopCapture() {
 		refreshes = append(refreshes, call)
 	}
 	service.changes.mu.Unlock()
+	if inventory != nil && inventory.done != nil {
+		<-inventory.done
+	}
 	if loop != nil {
 		loop.cancel()
 	}
@@ -403,7 +412,7 @@ func (service *Service) captureOwned(loop *captureLoop, store *kubechanges.Store
 		}
 		loop.mu.Unlock()
 		if len(due) > 0 {
-			_, _, err := service.IndexSnapshot(ownedContext, due...)
+			_, _, err := service.IndexSnapshot(context.WithValue(ownedContext, cachedCaptureContextKey{}, true), due...)
 			if err != nil && !errors.Is(err, context.Canceled) {
 				loop.mu.Lock()
 				loop.status.Behind = true
@@ -442,6 +451,19 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 	}
 	collected, gaps := drainIndexChanges(service.scope.ClusterID, deltas, started, now, continuous)
 	collected = append(collected, kubechanges.Reconstruct(service.scope.ClusterID, snapshot.Records, now)...)
+	byUID := make(map[string]kubeindex.Record, len(snapshot.Records))
+	for _, record := range snapshot.Records {
+		byUID[record.UID] = record
+	}
+	for i := range collected {
+		record, exists := byUID[collected[i].UID]
+		if !exists {
+			record, exists = byUID[collected[i].RootUID]
+		}
+		if exists {
+			collected[i].RootUID = kubebreaks.Root(record, byUID).UID
+		}
+	}
 	partial := false
 	for kind, state := range snapshot.Kinds {
 		if state.Partial && !(kind == "Secret" || kind == "ControllerRevision") {
@@ -466,6 +488,18 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 	coverage := map[string]kubechanges.Gap{}
 	success := map[string]time.Time{}
 	behind := false
+	if loop.next == nil {
+		loop.next = map[string]time.Time{}
+	}
+	if loop.success == nil {
+		loop.success = map[string]time.Time{}
+	}
+	if loop.completed == nil {
+		loop.completed = map[string]time.Time{}
+	}
+	if loop.gapFrom == nil {
+		loop.gapFrom = map[string]time.Time{}
+	}
 	for _, kind := range kinds {
 		cadence, tracked := captureCadences[kind]
 		if !tracked {
@@ -481,6 +515,9 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 				behind = true
 			}
 			loop.next[kind] = now.Add(cadence)
+			if state.Error == "syncing" || state.State == "" || state.State == "warming" {
+				loop.next[kind] = now.Add(250 * time.Millisecond)
+			}
 			continue
 		}
 		observed := state.ObservedAt
@@ -488,7 +525,12 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 			observed = now
 		}
 		previous := loop.success[kind]
-		if !previous.IsZero() && !observed.After(previous) {
+		checkpoint := maxTime(previous, loop.gapFrom[kind])
+		if !checkpoint.IsZero() && !observed.After(checkpoint) {
+			if previous.IsZero() || checkpoint.After(previous) {
+				success[kind] = checkpoint
+				loop.next[kind] = now.Add(cadence)
+			}
 			continue
 		}
 		loop.next[kind] = now.Add(cadence)

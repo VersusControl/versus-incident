@@ -84,6 +84,7 @@ func TestClusterListFiltersBeforeReadsAndCachesByOrg(t *testing.T) {
 	if result := registry.Summaries(context.Background(), "default", func(string) bool { return false }); len(result) != 0 || reads.Load() != 0 {
 		t.Fatal("denied cluster fetched")
 	}
+	warmTestInventory(t, base)
 	result := registry.Summaries(context.Background(), "default", nil)
 	before := reads.Load()
 	registry.Summaries(context.Background(), "default", nil)
@@ -200,13 +201,35 @@ func TestClusterSummaryRetriesUnreachableWithoutCachingFailure(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	registry := NewServiceRegistry(newTestService(t, server.URL, Scope{ClusterID: "one"}))
+	base := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "one"})
+	warmTestInventory(t, base)
+	registry := NewServiceRegistry(base)
 	first := registry.Summaries(context.Background(), "default", nil)
 	if len(first) != 1 || first[0].Health != "unreachable" || len(registry.summaries) != 0 {
 		t.Fatalf("failure summary=%+v cache=%v", first, registry.summaries)
 	}
 	before := reads.Load()
 	unavailable.Store(false)
+	base.changes.mu.Lock()
+	cache := base.changes.inventories[base.indexScope()]
+	base.changes.mu.Unlock()
+	select {
+	case cache.wake <- struct{}{}:
+	default:
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		cache.mu.RLock()
+		recovered := !cache.failed && len(cache.generation.View.Kinds) > 0
+		cache.mu.RUnlock()
+		if recovered {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background reader did not retry upstream failure")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	second := registry.Summaries(context.Background(), "default", nil)
 	if len(second) != 1 || second[0].Health == "unreachable" || reads.Load() <= before {
 		t.Fatalf("immediate retry summary=%+v reads=%d", second, reads.Load())
@@ -256,7 +279,8 @@ func TestClusterSummaryIncludesActualVersionAndIssueTotals(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	base := newTestService(t, server.URL, Scope{ClusterID: "one"})
+	base := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "one"})
+	warmTestInventory(t, base)
 	registry := NewServiceRegistry(base)
 	result := registry.Summaries(context.Background(), "default", nil)
 	if len(result) != 1 || result[0].Version != "v1.33.2-eks.123" || result[0].Issues == nil || *result[0].Issues != 12 {
@@ -268,7 +292,9 @@ func TestClusterSummaryIncludesActualVersionAndIssueTotals(t *testing.T) {
 	}
 	denyIssues.Store(true)
 	version.Store("v1.33.2\nprivate-token")
-	result = NewServiceRegistry(newTestService(t, server.URL, Scope{ClusterID: "one"})).Summaries(context.Background(), "default", nil)
+	denied := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "one"})
+	warmTestInventory(t, denied)
+	result = NewServiceRegistry(denied).Summaries(context.Background(), "default", nil)
 	if result[0].Version != "" || result[0].Issues != nil {
 		t.Fatalf("unsafe version or incomplete issues exposed: %+v", result)
 	}

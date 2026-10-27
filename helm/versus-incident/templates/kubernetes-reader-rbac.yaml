@@ -9,7 +9,7 @@ rules:
   - nonResourceURLs: ["/.well-known/openid-configuration", "/openid/v1/jwks"]
     verbs: ["get"]
   - apiGroups: [""]
-    resources: ["nodes", "namespaces", "pods", "services", "events", "configmaps", "persistentvolumeclaims", "persistentvolumes"]
+    resources: ["nodes", "namespaces", "pods", "services", "events", "configmaps", "serviceaccounts", "secrets", "persistentvolumeclaims", "persistentvolumes"]
     verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["pods/log"]

@@ -67,7 +67,6 @@ describe("Kubernetes issue alerts", () => {
 
   it.each([
     [{ can_write: false }, "Ask an admin to change alerts"],
-    [{ available: false, reason: "demand_capture" }, "Alerts need continuous change capture"],
   ] as const)("disables inputs with an explanation: %s", async (settings, reason) => {
     renderControl({ ...settings, enabled: true });
     const toggle = await screen.findByRole("switch");
@@ -79,12 +78,41 @@ describe("Kubernetes issue alerts", () => {
     expect(api.kubernetesSaveIssueAlerts).not.toHaveBeenCalled();
   });
 
-  it("shows channel and public-host tips without disabling valid writes", async () => {
+  it("blocks writes without an effective alert channel", async () => {
     renderControl({ channels_enabled: false, links_ready: false });
-    expect((await screen.findByRole("switch")).hasAttribute("disabled")).toBe(false);
+    expect((await screen.findByRole("switch")).hasAttribute("disabled")).toBe(true);
+    fireEvent.click(screen.getByRole("switch"));
+    expect(api.kubernetesSaveIssueAlerts).not.toHaveBeenCalled();
     expect(screen.getByText("No alert channel is on")).toBeTruthy();
-    expect(screen.getByText("Set public_host to add Timeline and agent links")).toBeTruthy();
+    expect(screen.getByText("Set public_host to add Timeline and DevOps Agent links on Alerts")).toBeTruthy();
     expect(screen.getAllByRole("link", { name: "Channel settings" })).toHaveLength(1);
+  });
+
+  it("allows delivery without public-host links", async () => {
+    renderControl({ links_ready: false });
+    expect((await screen.findByRole("switch")).hasAttribute("disabled")).toBe(false);
+    fireEvent.click(screen.getByRole("switch"));
+    await waitFor(() => expect(api.kubernetesSaveIssueAlerts).toHaveBeenCalledWith({ enabled: true, level: "critical" }));
+  });
+
+  it.each([
+    { channels_enabled: false },
+    { available: false, reason: "demand_capture" as const },
+    { channels_enabled: false, available: false, reason: "demand_capture" as const },
+  ])("allows an authorized user to turn existing alerts off despite delivery restrictions: %s", async (restrictions) => {
+    renderControl({ enabled: true, ...restrictions });
+    const toggle = await screen.findByRole("switch");
+    expect(toggle.hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "Warning" }).hasAttribute("disabled")).toBe(true);
+    const link = screen.getByRole("link", { name: "Channel settings" });
+    expect(link.getAttribute("href")).toBe("https://docs.versusincident.com/#/agent/channels");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    fireEvent.click(toggle);
+    await waitFor(() => expect(api.kubernetesSaveIssueAlerts).toHaveBeenCalledWith({ enabled: false, level: "critical" }));
+    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
+    await waitFor(() => expect(toggle.hasAttribute("disabled")).toBe(true));
+    fireEvent.click(toggle);
+    expect(api.kubernetesSaveIssueAlerts).toHaveBeenCalledTimes(1);
   });
 
   it.each(["switch", "level"] as const)("optimistically updates %s, serializes writes and rolls back on failure", async (change) => {

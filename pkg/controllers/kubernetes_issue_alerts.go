@@ -3,6 +3,7 @@ package controllers
 import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/gofiber/fiber/v2"
 	"strings"
@@ -27,6 +28,15 @@ func (controller *KubernetesAdminController) saveIssueAlerts(ctx *fiber.Ctx) err
 	}
 	if err := decodeKubernetesSettings(ctx, &request); err != nil {
 		return writeKubernetes(ctx, nil, err)
+	}
+	if request.Enabled {
+		if config.GetConfigOrNil() == nil {
+			return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+		}
+		cfg := config.GetConfigForAlert(ctx.UserContext(), nil)
+		if !(cfg.Alert.Slack.Enable || cfg.Alert.Telegram.Enable || cfg.Alert.Viber.Enable || cfg.Alert.Email.Enable || cfg.Alert.MSTeams.Enable || cfg.Alert.Lark.Enable) {
+			return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Enable an alert channel before enabling issue alerts."})
+		}
 	}
 	err := requestKubernetesService(ctx).SaveIssueAlertSettings(ctx.UserContext(), request.Enabled, request.Level, strings.Clone(middleware.RequestActor(ctx)))
 	if err != nil {

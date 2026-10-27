@@ -249,7 +249,10 @@ func loadKubeconfig(path, selectedContext string) (Config, error) {
 		return Config{}, errors.New("kubernetes: unsupported kubeconfig authentication")
 	}
 	base := filepath.Dir(path)
-	result := Config{Endpoint: cluster.Server, ServerName: cluster.TLSServerName}
+	if contextEntry.Namespace != "" && (!safeSegment(contextEntry.Namespace) || len(contextEntry.Namespace) > 63) {
+		return Config{}, ErrInvalidArguments
+	}
+	result := Config{Endpoint: cluster.Server, ServerName: cluster.TLSServerName, Namespace: contextEntry.Namespace}
 	if cluster.CAData != "" {
 		result.CAData, err = decodeCredentialData(cluster.CAData)
 		if err != nil {

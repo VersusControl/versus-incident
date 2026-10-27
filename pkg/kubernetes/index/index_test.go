@@ -2,6 +2,7 @@ package index
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -139,10 +140,15 @@ func TestSnapshotsAreDefensiveCopiesAndBounded(t *testing.T) {
 	for i := 0; i < 65; i++ {
 		invalid.LogContainers = append(invalid.LogContainers, ContainerState{Name: "app-" + strconv.Itoa(i)})
 	}
-	if err := index.Ingest("Pod", []Record{invalid}, true, time.Now()); !errors.Is(err, ErrInvalidRecord) {
+	// One record over the log container bound is skipped, not fatal: the kind
+	// keeps everything else it already holds and reports what it could not.
+	if err := index.Ingest("Pod", []Record{invalid}, false, time.Now()); err != nil {
 		t.Fatal("unbounded log container catalog accepted", err)
 	}
-	if err := index.Ingest("Pod", []Record{pod("uid-b", "b"), pod("uid-c", "c")}, false, time.Time{}); !errors.Is(err, ErrInvalidRecord) {
+	if status, _ := index.KindStatus("Pod"); status.Skipped != 1 || status.Error != "record_rejected" || status.State != "partial" || !status.Partial {
+		t.Fatalf("skipped record not reported: %+v", status)
+	}
+	if err := index.Ingest("Pod", []Record{pod("uid-b", "b"), pod("uid-c", "c")}, false, time.Time{}); !errors.Is(err, ErrRecordLimit) {
 		t.Fatalf("oversized input error=%v", err)
 	}
 	if len(index.Snapshot().Records) != 1 {
@@ -167,11 +173,14 @@ func TestIndexDefaultsAndRecordSizeAreBounded(t *testing.T) {
 	for index := 0; index < maxLabels; index++ {
 		oversized.Labels[strconv.Itoa(index)] = strings.Repeat("x", 256)
 	}
-	if err := index.Ingest("Pod", []Record{oversized}, true, time.Now()); !errors.Is(err, ErrInvalidRecord) {
+	if err := index.Ingest("Pod", []Record{oversized}, true, time.Now()); err != nil {
 		t.Fatalf("oversized record error=%v", err)
 	}
 	if len(index.Snapshot().Records) != 0 {
 		t.Fatal("oversized record changed index state")
+	}
+	if status, _ := index.KindStatus("Pod"); status.Skipped != 1 || status.Error != "record_rejected" {
+		t.Fatalf("record size budget went unreported: %+v", status)
 	}
 }
 
@@ -182,8 +191,16 @@ func TestContainerEvidenceSignalBoundsAndCopies(t *testing.T) {
 		record.Containers = []ContainerState{{Name: "setup", Init: true, Signal: signal, TerminatedReason: "Error", RestartCount: 3}}
 		err := store.Ingest("Pod", []Record{record}, true, time.Now())
 		if signal < 0 || signal > 64 {
-			if !errors.Is(err, ErrInvalidRecord) {
-				t.Fatalf("accepted signal %d", signal)
+			// An out-of-range signal makes the record unindexable; the record is
+			// skipped and counted instead of failing its whole kind.
+			if err != nil {
+				t.Fatalf("signal %d failed the kind: %v", signal, err)
+			}
+			if len(store.Snapshot().Records) != 0 {
+				t.Fatalf("signal %d stored an unindexable record", signal)
+			}
+			if status, _ := store.KindStatus("Pod"); status.Skipped != 1 || status.Error != "record_rejected" {
+				t.Fatalf("signal %d went unreported: %+v", signal, status)
 			}
 			continue
 		}
@@ -265,7 +282,7 @@ func TestRefreshCoalescesPollingAndPreservesLastGoodRecords(t *testing.T) {
 		t.Fatalf("failed refresh discarded last-good records: %#v", snapshot.Records)
 	}
 	status := index.Status(now.Add(3 * time.Minute))
-	if status.State != "error" || !status.Partial || status.AgeSeconds != 180 || status.Kinds["Pod"].Error != "sync_failed" {
+	if status.State != "error" || !status.Partial || status.AgeSeconds != 180 || status.Kinds["Pod"].Error != "unavailable" {
 		t.Fatalf("unexpected status: %#v", status)
 	}
 }
@@ -389,4 +406,272 @@ func receiveDelta(t *testing.T, deltas <-chan Delta) Delta {
 
 func pod(uid, name string) Record {
 	return Record{UID: uid, Kind: "Pod", Namespace: "shop", Name: name}
+}
+
+// A kind that becomes served while still holding nothing clears the
+// never-listed mark, so the object created after that is reported as a
+// creation. Clearing it only on a listing with content would swallow exactly
+// that first object.
+func TestServedEmptyListingClearsTheAbsentBaseline(t *testing.T) {
+	index := New(10)
+	deltas, unsubscribe := index.Subscribe(8)
+	defer unsubscribe()
+	now := time.Now().UTC()
+	if err := index.Refresh(t.Context(), "ConfigMap", 0, now, func(context.Context) ([]Record, bool, error) {
+		return nil, false, ErrKindNotServed
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if status := index.Snapshot().Kinds["ConfigMap"]; !status.Absent || status.State != "ready" || status.Records != 0 {
+		t.Fatalf("a kind the cluster does not serve is not known and empty: %+v", status)
+	}
+	// The cluster serves the kind now but holds nothing yet.
+	if err := index.Ingest("ConfigMap", nil, true, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if status := index.Snapshot().Kinds["ConfigMap"]; status.Absent {
+		t.Fatalf("an empty listing from a served kind left the kind marked unlisted: %+v", status)
+	}
+	if len(deltas) != 0 {
+		t.Fatal("an empty listing reported a change")
+	}
+	created := Record{Kind: "ConfigMap", UID: "shop-config", Namespace: "shop", Name: "shop-config"}
+	if err := index.Ingest("ConfigMap", []Record{created}, true, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	delta := receiveDelta(t, deltas)
+	if delta.Op != "upsert" || delta.Old != nil || delta.New == nil || delta.New.UID != created.UID {
+		t.Fatalf("the first creation after a served empty generation was not reported as one creation: %#v", delta)
+	}
+	if len(deltas) != 0 {
+		t.Fatal("the first creation was reported more than once")
+	}
+}
+
+// A kind first listed with content after the cluster did not serve it is a
+// baseline: that generation reports nothing, and the deltas after it resume.
+func TestFirstContentListingOfAnAbsentKindIsABaselineThenDeltasResume(t *testing.T) {
+	index := New(10)
+	now := time.Now().UTC()
+	if err := index.Refresh(t.Context(), "ConfigMap", 0, now, func(context.Context) ([]Record, bool, error) {
+		return nil, false, ErrKindNotServed
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deltas, unsubscribe := index.Subscribe(8)
+	defer unsubscribe()
+	first := Record{Kind: "ConfigMap", UID: "late", Namespace: "shop", Name: "late-config"}
+	if err := index.Ingest("ConfigMap", []Record{first}, true, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if len(deltas) != 0 {
+		t.Fatal("the first listing of a kind the cluster did not serve reported a change")
+	}
+	if status := index.Snapshot().Kinds["ConfigMap"]; status.Absent || status.Records != 1 {
+		t.Fatalf("the baseline listing did not become a listed kind: %+v", status)
+	}
+	second := Record{Kind: "ConfigMap", UID: "next", Namespace: "shop", Name: "next-config"}
+	if err := index.Ingest("ConfigMap", []Record{first, second}, true, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	delta := receiveDelta(t, deltas)
+	if delta.Op != "upsert" || delta.Old != nil || delta.New == nil || delta.New.UID != second.UID {
+		t.Fatalf("deltas did not resume after the baseline listing: %#v", delta)
+	}
+}
+
+// A served kind that stops being served still reports the records that
+// disappeared; only the arrival of a kind is a baseline, never its loss.
+func TestServedKindBecomingUnservedReportsItsRecordsAsDeleted(t *testing.T) {
+	index := New(10)
+	now := time.Now().UTC()
+	if err := index.Ingest("ConfigMap", []Record{{Kind: "ConfigMap", UID: "shop-config", Namespace: "shop", Name: "shop-config"}}, true, now); err != nil {
+		t.Fatal(err)
+	}
+	deltas, unsubscribe := index.Subscribe(8)
+	defer unsubscribe()
+	if err := index.Refresh(t.Context(), "ConfigMap", 0, now.Add(time.Second), func(context.Context) ([]Record, bool, error) {
+		return nil, false, ErrKindNotServed
+	}); err != nil {
+		t.Fatal(err)
+	}
+	delta := receiveDelta(t, deltas)
+	if delta.Op != "delete" || delta.Old == nil || delta.Old.UID != "shop-config" {
+		t.Fatalf("a kind that stopped being served hid the record it dropped: %#v", delta)
+	}
+	snapshot := index.Snapshot()
+	if len(snapshot.Records) != 0 || !snapshot.Kinds["ConfigMap"].Absent {
+		t.Fatalf("an unserved kind kept records or lost its mark: %+v", snapshot)
+	}
+}
+
+// One unindexable record costs only itself: the rest of the kind is kept, the
+// known copy of the rejected record survives, and the kind reports the count so
+// a partial kind can never look complete.
+func TestOneRejectedRecordKeepsTheRestOfTheKind(t *testing.T) {
+	index := New(100)
+	now := time.Now().UTC()
+	if err := index.Ingest("Pod", []Record{pod("uid-a", "a"), pod("uid-b", "b")}, true, now); err != nil {
+		t.Fatal(err)
+	}
+	rejected := pod("uid-b", "b")
+	rejected.Name = ""
+	if err := index.Ingest("Pod", []Record{pod("uid-a", "a"), rejected, pod("uid-c", "c")}, true, now.Add(time.Minute)); err != nil {
+		t.Fatalf("one rejected record failed its kind: %v", err)
+	}
+	snapshot := index.Snapshot()
+	names := make([]string, 0, len(snapshot.Records))
+	for _, record := range snapshot.Records {
+		names = append(names, record.Name)
+	}
+	// uid-b keeps its last good copy: a record we could not read is not a delete.
+	if strings.Join(names, ",") != "a,b,c" {
+		t.Fatalf("records after a rejected entry: %v", names)
+	}
+	status := snapshot.Kinds["Pod"]
+	if status.State != "partial" || !status.Partial || status.Error != "record_rejected" || status.Skipped != 1 || status.Records != 3 {
+		t.Fatalf("partial kind status: %+v", status)
+	}
+	// The contract a client reads: the skipped count and the class are part of
+	// the kind status, never only a log line.
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"state":"partial"`, `"partial":true`, `"error":"record_rejected"`, `"skipped":1`, `"records":3`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("kind status JSON %s lacks %s", encoded, want)
+		}
+	}
+	// A clean listing clears the class and the count.
+	if err := index.Ingest("Pod", []Record{pod("uid-a", "a"), pod("uid-b", "b"), pod("uid-c", "c")}, true, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if status := index.Snapshot().Kinds["Pod"]; status.Error != "" || status.Skipped != 0 || status.State != "ready" || status.Partial {
+		t.Fatalf("a clean listing kept the failure: %+v", status)
+	}
+}
+
+// Every failure names its class, so no kind ever reports the generic
+// sync_failed and an operator can tell a limit from a permission problem.
+func TestRefreshNamesTheClassOfEveryFailure(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		fail  error
+		class string
+	}{
+		{name: "record limit", fail: ErrRecordLimit, class: "record_limit"},
+		{name: "record rejected", fail: ErrInvalidRecord, class: "record_rejected"},
+		{name: "deadline", fail: context.DeadlineExceeded, class: "timeout"},
+		{name: "loader class", fail: classifiedFailure("incomplete_pages"), class: "incomplete_pages"},
+		{name: "unclassified", fail: errors.New("boom"), class: "unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			index := New(10)
+			if err := index.Refresh(context.Background(), "Pod", 0, time.Now().UTC(), func(context.Context) ([]Record, bool, error) {
+				return nil, false, test.fail
+			}); err == nil {
+				t.Fatal("failed refresh reported success")
+			}
+			status := index.Snapshot().Kinds["Pod"]
+			if status.State != "error" || !status.Partial || status.Error != test.class || status.Error == "sync_failed" {
+				t.Fatalf("failure class: %+v", status)
+			}
+		})
+	}
+}
+
+type classifiedFailure string
+
+func (fail classifiedFailure) Error() string { return "classified: " + string(fail) }
+func (fail classifiedFailure) Class() string { return string(fail) }
+
+// A kind that keeps failing reports when the failure began, not when it last
+// retried, and the start moves only when it recovers and fails again.
+func TestKindStatusKeepsTheFirstFailureTime(t *testing.T) {
+	index := New(10)
+	started := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	load := func(context.Context) ([]Record, bool, error) { return nil, false, errors.New("boom") }
+	if err := index.Refresh(context.Background(), "Pod", 0, started, load); err == nil {
+		t.Fatal("failed refresh reported success")
+	}
+	first, _ := index.KindStatus("Pod")
+	if !first.FailingSince.Equal(started) {
+		t.Fatalf("first failure start = %s", first.FailingSince)
+	}
+	// The same class failing again keeps the original start.
+	if err := index.Refresh(context.Background(), "Pod", 0, started.Add(2*time.Minute), load); err == nil {
+		t.Fatal("failed refresh reported success")
+	}
+	retried, _ := index.KindStatus("Pod")
+	if !retried.FailingSince.Equal(started) || !retried.LastAttemptAt.Equal(started.Add(2*time.Minute)) {
+		t.Fatalf("failure start moved to a retry: since=%s attempt=%s", retried.FailingSince, retried.LastAttemptAt)
+	}
+	// Recovery clears it, and the next failure starts a new clock.
+	if err := index.Ingest("Pod", []Record{pod("uid-a", "a")}, true, started.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if recovered, _ := index.KindStatus("Pod"); !recovered.FailingSince.IsZero() {
+		t.Fatalf("recovery kept the failure start: %s", recovered.FailingSince)
+	}
+	if err := index.Refresh(context.Background(), "Pod", 0, started.Add(4*time.Minute), load); err == nil {
+		t.Fatal("failed refresh reported success")
+	}
+	if again, _ := index.KindStatus("Pod"); !again.FailingSince.Equal(started.Add(4 * time.Minute)) {
+		t.Fatalf("second failure start = %s", again.FailingSince)
+	}
+	// A different class on an already-failing kind is a new failure.
+	classified := func(context.Context) ([]Record, bool, error) { return nil, false, ErrRecordLimit }
+	if err := index.Refresh(context.Background(), "Pod", 0, started.Add(6*time.Minute), classified); err == nil {
+		t.Fatal("failed refresh reported success")
+	}
+	if changed, _ := index.KindStatus("Pod"); !changed.FailingSince.Equal(started.Add(6*time.Minute)) || changed.Error != "record_limit" {
+		t.Fatalf("class change kept the old start: since=%s class=%s", changed.FailingSince, changed.Error)
+	}
+}
+
+// A listing that finishes but keeps less than the cluster served keeps the same
+// failure start across retries, exactly like a listing that fails outright. Only
+// recovery, or a different failure class, moves the clock.
+func TestRejectedRecordsKeepTheFirstFailureTime(t *testing.T) {
+	index := New(10)
+	// One record over the log container bound is skipped and counted, so the
+	// kind reports record_rejected without failing as a whole.
+	rejected := pod("uid-a", "a")
+	for i := 0; i < 65; i++ {
+		rejected.LogContainers = append(rejected.LogContainers, ContainerState{Name: "app-" + strconv.Itoa(i)})
+	}
+	if err := index.Ingest("Pod", []Record{rejected}, false, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := index.KindStatus("Pod")
+	if first.Error != "record_rejected" || first.State != "partial" || first.FailingSince.IsZero() {
+		t.Fatalf("rejected records not reported: %+v", first)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if err := index.Ingest("Pod", []Record{rejected}, false, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	retried, _ := index.KindStatus("Pod")
+	if !retried.FailingSince.Equal(first.FailingSince) {
+		t.Fatalf("failure start moved to a retry: first=%s retried=%s", first.FailingSince, retried.FailingSince)
+	}
+	if !retried.CompletedAt.After(first.CompletedAt) {
+		t.Fatalf("retry did not complete later: first=%s retried=%s", first.CompletedAt, retried.CompletedAt)
+	}
+	// A clean listing ends the failure.
+	if err := index.Ingest("Pod", []Record{pod("uid-a", "a")}, true, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if recovered, _ := index.KindStatus("Pod"); !recovered.FailingSince.IsZero() || recovered.Error != "" {
+		t.Fatalf("recovery kept the failure: %+v", recovered)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if err := index.Ingest("Pod", []Record{rejected}, false, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := index.KindStatus("Pod")
+	if !again.FailingSince.After(first.FailingSince) {
+		t.Fatalf("new failure did not start its own clock: first=%s again=%s", first.FailingSince, again.FailingSince)
+	}
 }

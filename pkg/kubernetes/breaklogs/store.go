@@ -237,13 +237,19 @@ func compactGaps(state *State, now time.Time) {
 
 type Query struct {
 	Namespace, RootUID, Mode, Level, Search, Cursor string
-	Pods                                            []string
-	From, To                                        time.Time
-	Limit                                           int
+	// Container selects one container by name. Empty asks for the break's main
+	// container and AllContainers merges every container.
+	Container string
+	Pods      []string
+	From, To  time.Time
+	Limit     int
 }
 
+// AllContainers is the Container value that merges every container's lines.
+const AllContainers = "*"
+
 func (query Query) Validate() error {
-	if query.Namespace == "" || query.RootUID == "" || len(query.Namespace) > 253 || len(query.RootUID) > 256 || strings.ContainsAny(query.Namespace+query.RootUID, "\x00\r\n\t /\\") || query.From.IsZero() || !query.To.After(query.From) || query.To.Sub(query.From) > 2*time.Hour || query.Limit < 0 || query.Limit > 500 || len(query.Search) > 256 || len(query.Cursor) > 2048 || len(query.Pods) > 100 {
+	if query.Namespace == "" || query.RootUID == "" || len(query.Namespace) > 253 || len(query.RootUID) > 256 || strings.ContainsAny(query.Namespace+query.RootUID, "\x00\r\n\t /\\") || query.From.IsZero() || !query.To.After(query.From) || query.To.Sub(query.From) > 2*time.Hour || query.Limit < 0 || query.Limit > 500 || len(query.Search) > 256 || len(query.Cursor) > 2048 || len(query.Pods) > 100 || len(query.Container) > 63 || strings.ContainsAny(query.Container, "\x00\r\n\t /\\") {
 		return ErrInvalid
 	}
 	if query.Mode != "" && query.Mode != "merged" && query.Mode != "previous" && query.Mode != "current" {

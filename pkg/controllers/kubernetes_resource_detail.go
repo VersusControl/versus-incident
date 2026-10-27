@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	"github.com/gofiber/fiber/v2"
@@ -26,6 +27,9 @@ func (controller *KubernetesAdminController) usageHistory(ctx *fiber.Ctx) error 
 }
 
 func (controller *KubernetesAdminController) workloadLogStream(ctx *fiber.Ctx) error {
+	if streamQueryTooLarge(ctx) {
+		return writeKubernetes(ctx, nil, kubernetes.ErrRequestTooLarge)
+	}
 	options := kubernetes.WorkloadLogStreamOptions{Kind: strings.Clone(ctx.Params("kind")), Name: strings.Clone(ctx.Params("name")), Timestamps: true}
 	arguments := ctx.Context().QueryArgs()
 	invalid := false
@@ -45,8 +49,8 @@ func (controller *KubernetesAdminController) workloadLogStream(ctx *fiber.Ctx) e
 			options.PodUIDs = append(options.PodUIDs, strings.Clone(string(value)))
 		case "container":
 			options.Container = strings.Clone(string(value))
-		case "cursor":
-			options.Cursor = strings.Clone(string(value))
+		case "since_time":
+			options.SinceTime, err = time.Parse(time.RFC3339Nano, string(value))
 		case "previous":
 			options.Previous, err = strconv.ParseBool(string(value))
 		case "timestamps":
@@ -71,7 +75,7 @@ func (controller *KubernetesAdminController) workloadLogStream(ctx *fiber.Ctx) e
 	if err != nil {
 		return writeKubernetes(ctx, nil, err)
 	}
-	return serveKubernetesLogSSE(ctx, options.Cursor, func(streamContext context.Context, emit func(string, any) error) error {
+	return serveKubernetesLogSSE(ctx, "", func(streamContext context.Context, emit func(string, any) error) error {
 		stop := context.AfterFunc(streamContext, session.Close)
 		defer stop()
 		return session.Stream(func(event kubernetes.WorkloadLogStreamEvent) error {

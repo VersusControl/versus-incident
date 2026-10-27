@@ -195,8 +195,26 @@ func TestBreakLogLinkedGapClosesOnlyOnCompleteRead(t *testing.T) {
 	}
 	query.To = now
 	tail = false
+	// An independent capture may commit after the query window was chosen.
+	service.changes.mu.Lock()
+	logDone := service.changes.logDone[service.indexScope()]
+	service.changes.mu.Unlock()
+	if logDone != nil {
+		select {
+		case <-logDone:
+		case <-time.After(3 * time.Second):
+			t.Fatal("capture did not drain for clock isolation")
+		}
+	}
+	concurrent := item
+	concurrent.RootUID, concurrent.PodUID, concurrent.Pod = "independent-root", "independent-pod", "independent"
+	concurrent.CapturedAt = time.Now().UTC()
+	concurrent.ID = breaklogs.Identity(concurrent)
+	if err := service.changeStore().CommitBreakLogs([]breaklogs.Snapshot{concurrent}, nil, "independent", "", concurrent.CapturedAt); err != nil {
+		t.Fatal(err)
+	}
 	for _, reason := range []string{"forbidden", "pod_deleted", "restarted_since"} {
-		if err := service.changeStore().CommitBreakLogs(nil, []breaklogs.Gap{{From: from, To: now, Namespace: "deleted", RootUID: "deleted-root", PodUID: "pod", Container: "app", Reason: reason}}, "", "", now); err != nil {
+		if err := service.changeStore().CommitBreakLogs(nil, []breaklogs.Gap{{From: from, To: now, Namespace: "deleted", RootUID: "deleted-root", PodUID: "pod", Container: "app", Reason: reason}}, "", "", time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 		for _, unrelated := range []bool{false, true} {

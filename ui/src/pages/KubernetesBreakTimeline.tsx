@@ -1,15 +1,19 @@
-import { useId, useLayoutEffect, useRef, useState } from "react";
+import { useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import { Activity, ArrowRight, ChevronDown, ChevronLeft, ChevronRight, Clock, History, TriangleAlert, X } from "lucide-react";
+import { CoverageMarker } from "@/components/CoverageMarker";
 import { ApiError, type KubernetesChange, type KubernetesChangesPage, type KubernetesCrashEvent, type KubernetesIssue, type KubernetesResource } from "@/lib/api";
 import { counted, crashDetail, evidencePills, terminationKey, warningSummary } from "@/lib/kubernetesEvidence";
 import { useBrokenIssues, useKubernetesCluster, useKubernetesCrashes, useKubernetesQuery } from "@/lib/useKubernetesCluster";
 import { KubernetesWarnings } from "./KubernetesWarnings";
-import { failureWarnings, issueWarnings, type KubernetesWarning } from "./kubernetesWarningItems";
+import { issueWarnings, timelineWarnings } from "./kubernetesWarningItems";
 import "./KubernetesResourceTimeline.css";
 import { BreakLogRateStrip, LogWindowBracket } from "./KubernetesBreakLogs";
 import { useBreakLogs } from "@/lib/useKubernetesBreakLogs";
+import { evidenceLoading, settledSync } from "@/lib/kubernetesPending";
+import { KubernetesPendingNote } from "@/components/KubernetesPendingNote";
+import { ResourceLogsButton } from "@/components/ResourceLogsButton";
 
 function breakRule(issue: KubernetesIssue) {
   const names: Record<string, string> = { "pod.crash_loop": "CrashLoopBackOff", "pod.image_pull": "ImagePullBackOff", "pod.config_error": "Container config error", "pod.evicted": "Evicted", "pod.unschedulable": "Unschedulable", "pod.failed": "Pod failed", "workload.rollout_stalled": "Rollout stalled (ProgressDeadlineExceeded)", "workload.unavailable": "Pods unavailable", "job.failed": "Job failed", "node.not_ready": "NotReady" };
@@ -210,7 +214,7 @@ function crashObservationDetail(event: KubernetesCrashEvent) {
 
 const journalTime = (value: string) => Number.isFinite(Date.parse(value)) && !value.startsWith("0001-") ? new Date(value).toLocaleString() : "unavailable";
 
-export function CrashJournal({ journal }: { journal: ReturnType<typeof useKubernetesCrashes> }) {
+export function CrashJournal({ journal, reasons = [] }: { journal: ReturnType<typeof useKubernetesCrashes>; reasons?: ReactNode[] }) {
   const page = journal.isError ? undefined : journal.data;
   const podCoverage = page?.coverage?.Pod;
   const windowLimited = page?.limitations?.some((limitation) =>
@@ -222,21 +226,14 @@ export function CrashJournal({ journal }: { journal: ReturnType<typeof useKubern
   );
   const incomplete = page && (!podCoverage || !Number.isFinite(Date.parse(podCoverage.from)) || !Number.isFinite(Date.parse(podCoverage.to)) || Date.parse(podCoverage.from) > Date.parse(page.since) || Date.parse(podCoverage.to) < Date.parse(page.until) || page.sync.state !== "ready" || page.sync.partial || page.capture.mode !== "continuous" || page.capture.behind || page.gaps?.length || page.capture_gaps?.length || windowLimited || ambiguousEvidence);
   return <section aria-label="Captured crash evidence" className="min-w-0 border-t border-ink-700 text-xs">
-    <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-3"><h3 className="font-semibold text-ink-100">Captured crash evidence</h3>{page && <span className={incomplete ? "text-sev-warning" : "text-ink-300"}>{page.items.length} observations · {incomplete ? "Partial history; crashes may be missing." : "Polling may miss crashes between checks."}</span>}</header>
+    <header className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3"><h3 className="font-semibold text-ink-100">Captured crash evidence</h3>{page && <span className="text-ink-300">{page.crash_count ?? page.items.filter((event) => event.type === "termination").length} crashes</span>}<CoverageMarker reasons={[...reasons, ...(incomplete ? ["Crash capture does not cover the whole range"] : [])]} /></header>
     {journal.isPending && <p role="status" className="px-4 pb-3">Loading captured crash evidence...</p>}
     {journal.isError && <p role="alert" className="px-4 pb-3 text-sev-warning">Crash journal unavailable.<button type="button" className="ml-2 text-link underline" onClick={() => void journal.refetch()}>Retry crash journal</button></p>}
     {page && <>
       <details className="px-4 pb-3 text-ink-400 [overflow-wrap:anywhere]"><summary className="cursor-pointer text-link">Capture details</summary>
       <div className="space-y-1 pt-2" aria-label="Crash capture coverage">
-        <p>Polling observations only. Events between polls may be unseen; repeated status states are coalesced. Restart counts are lifetime counters, not crash occurrence counts. Crash markers show only this page's terminations with event times inside the chart window.</p>
-        <p>Observed window: {journalTime(page.since)} - {journalTime(page.until)}</p>
-        <p>Retained from {journalTime(page.retention_from)}; retention basis: {page.retention_basis}. Journal started: {journalTime(page.started_at)}.</p>
-        <p>Capture: {page.capture.mode}{page.capture.reason ? ` (${page.capture.reason})` : ""}; sync: {page.sync.state}{page.sync.partial ? " (partial)" : ""}{page.capture.behind ? "; capture behind" : ""}. Last cycle: {page.capture.last_cycle_at ? journalTime(page.capture.last_cycle_at) : "unavailable"}.</p>
-        {Object.entries(page.coverage ?? {}).map(([kind, gap]) => <p key={kind}>{kind} coverage: {journalTime(gap.from)} - {journalTime(gap.to)}</p>)}
-        {!page.coverage?.Pod && <p className="text-sev-warning">Pod capture coverage unavailable; absence of observations does not establish absence of crashes.</p>}
-        {(page.gaps ?? []).map((gap, index) => <p className="text-sev-warning" key={`journal:${index}`}>Journal retention/capture gap: {journalTime(gap.from)} - {journalTime(gap.to)}</p>)}
-        {(page.capture_gaps ?? []).map((gap, index) => <p className="text-sev-warning" key={`capture:${index}`}>Capture gap: {journalTime(gap.from)} - {journalTime(gap.to)}</p>)}
-        <ul className="space-y-1">{(page.limitations ?? []).map((limitation) => <li key={limitation}>{limitation.replaceAll("_", " ")}</li>)}</ul>
+        <p>Window: {journalTime(page.since)} – {journalTime(page.until)}</p>
+        <p>Capture started: {journalTime(page.started_at)}</p>
       </div></details>
       {!page.items.length && <p role="status" className="px-4 pb-3 text-ink-300">No captured observations on this page.</p>}
       <ul className="divide-y divide-ink-700" aria-label="Crash observations">{page.items.map((event) => <li key={event.id} className="min-w-0 px-4 py-2 [overflow-wrap:anywhere]">
@@ -254,12 +251,12 @@ function lead(seconds: number) {
   return seconds === 0 ? "at break" : `${duration} ${seconds > 0 ? "before" : "after"}`;
 }
 
-export function BreakRow({ issue, resource, onSelectResource, collapsed = false, clusterId, warningScope = "", sourceSync }: { issue: KubernetesIssue; resource: KubernetesResource | null; onSelectResource: (resource: KubernetesResource) => void; collapsed?: boolean; clusterId?: string; warningScope?: string; sourceSync?: KubernetesChangesPage["sync"] }) {
+export function BreakRow({ issue, resource, onSelectResource, collapsed = false, clusterId, warningScope = "", sourceSync, sourceFailures, warningsOwned = false }: { issue: KubernetesIssue; resource: KubernetesResource | null; onSelectResource: (resource: KubernetesResource, drawerTab?: "timeline" | "logs") => void; collapsed?: boolean; clusterId?: string; warningScope?: string; sourceSync?: KubernetesChangesPage["sync"]; sourceFailures?: readonly unknown[] | null; warningsOwned?: boolean }) {
   const { client, cluster } = useKubernetesCluster();
   const navigate = useNavigate();
   const [expanded, setExpanded] = useState(!collapsed);
   const [evidenceScope, setEvidenceScope] = useState<string | null>(null);
-  const enrichment = useKubernetesQuery({ queryKey: ["kubernetes-issues", "root", issue.root.namespace ?? "", issue.root.uid], queryFn: () => client.kubernetesIssues({ root_uid: issue.root.uid, include: "changes", namespace: issue.root.namespace }), enabled: collapsed && expanded && Boolean(issue.root.uid), staleTime: 30_000, retry: false });
+  const enrichment = useKubernetesQuery({ queryKey: ["kubernetes-issues", "root", issue.root.namespace ?? "", issue.root.uid], queryFn: () => client.kubernetesIssues({ root_uid: issue.root.uid, include: "changes", namespace: issue.root.namespace }), enabled: collapsed && expanded && Boolean(issue.root.uid), staleTime: 30_000, retry: false, refetchInterval: (query) => query.state.data?.sync.pending?.length ? 5000 : false });
   const denied = enrichment.error instanceof ApiError && [401, 403, 404].includes(enrichment.error.status);
   const detail = collapsed ? denied ? undefined : enrichment.data?.items.find((item) => item.root.uid === issue.root.uid && item.rule === issue.rule) ?? enrichment.data?.items.find((item) => item.root.uid === issue.root.uid) : issue;
   const changes = [...(detail?.changes ?? [])].sort((left, right) => Date.parse(right.change.at) - Date.parse(left.change.at));
@@ -270,6 +267,7 @@ export function BreakRow({ issue, resource, onSelectResource, collapsed = false,
     query.delete("logs_to");
     query.delete("logs_mode");
     query.delete("logs_pod");
+    query.delete("logs_container");
     query.delete("r");
     query.delete("tab");
     if (issue.root.uid) query.set("root_uid", issue.root.uid);
@@ -278,7 +276,6 @@ export function BreakRow({ issue, resource, onSelectResource, collapsed = false,
     if (issue.broke_at) query.set("center", issue.broke_at);
     else query.delete("center");
     navigate(`/agent/kubernetes?${query}`);
-    window.dispatchEvent(new PopStateEvent("popstate"));
   };
   const investigate = () => {
     if (!resource) return;
@@ -295,25 +292,29 @@ export function BreakRow({ issue, resource, onSelectResource, collapsed = false,
   const pills = evidence ? evidencePills(evidence) : [];
   const allEvidence = expanded && evidenceScope === scope;
   const warnings = issueWarnings(denied ? issue : detail ?? issue);
+  if (evidence?.partial) warnings.push({ id: "crash-capture", content: "Some crash evidence could not be captured" });
   if (denied) warnings.push({ id: "root-history-unavailable", content: "Root history unavailable" });
-  const sync = collapsed ? enrichment.data?.sync : sourceSync;
-  const complete = sourceSync?.state === "ready" && !sourceSync.partial && sync?.state === "ready" && !sync.partial && !enrichment.isError && !enrichment.data?.truncated && !enrichment.data?.partial_failures?.length;
+  const settledSource = settledSync(sourceSync, sourceFailures);
+  const sync = settledSync(collapsed ? enrichment.data?.sync : sourceSync, collapsed ? enrichment.data?.partial_failures : undefined);
+  // Evidence kinds still loading leave history incomplete; that is not a
+  // coverage failure, so say so instead of hedging about available evidence.
+  const loadingEvidence = !denied && evidenceLoading(detail?.pending, collapsed ? enrichment.data?.sync.pending : undefined);
+  const complete = settledSource?.state === "ready" && !settledSource.partial && sync?.state === "ready" && !sync.partial && !enrichment.isError && !enrichment.data?.truncated && !enrichment.data?.partial_failures?.length;
   const more = Math.max(0, changes.length - 1) + (detail?.more_changes ?? 0);
-  const iconButton = "inline-flex size-8 shrink-0 items-center justify-center rounded-control focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent sm:btn sm:w-auto";
+  const rowButton = "btn h-8 w-8 shrink-0 justify-center px-0 py-0 sm:w-auto sm:px-2.5";
   return <article aria-label={`${issue.root.kind} ${issue.root.name}`} className={`relative min-w-0 border-l-2 px-3 py-1 sm:px-4 sm:py-3 ${issue.severity === "critical" ? "border-l-sev-critical-solid" : "border-l-sev-warn-solid"}`}>
-    {collapsed && <button type="button" aria-expanded={expanded} aria-controls={id} aria-label={`${expanded ? "Collapse" : "Expand"} ${issue.root.name}`} title={`${expanded ? "Collapse" : "Expand"} issue`} className="btn-icon absolute left-1 top-2 shrink-0" onClick={() => { setExpanded((value) => !value); setEvidenceScope(null); }}>{expanded ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}</button>}
-    <div className={`grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 lg:grid-cols-[minmax(0,1fr)_auto_auto] ${collapsed ? "pl-7" : ""}`}>
-      <div className="col-span-2 min-w-0 lg:col-span-1">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1 text-xs sm:gap-x-2">
-          <span className={`pill ${issue.severity === "critical" ? "pill-bad" : issue.severity === "warning" ? "pill-warn" : "pill-accent"}`}>{issue.severity}</span>
-          <span className="pill text-2xs text-ink-300">{issue.root.kind}</span>
-          <button type="button" disabled={!resource} onClick={() => resource && onSelectResource(resource)} className="min-w-0 break-all text-left text-xs font-semibold text-link" aria-label={`Open resource ${issue.root.name}`}>{issue.root.namespace ? `${issue.root.namespace}/` : ""}{issue.root.name}</button>
-        </div>
+    <div data-issue-row className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs lg:flex-nowrap">
+      {collapsed && <button type="button" aria-expanded={expanded} aria-controls={id} aria-label={`${expanded ? "Collapse" : "Expand"} ${issue.root.name}`} title={`${expanded ? "Collapse" : "Expand"} issue`} className="btn-icon shrink-0" onClick={() => { setExpanded((value) => !value); setEvidenceScope(null); }}>{expanded ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}</button>}
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1 gap-y-1 sm:gap-x-2">
+        <span className={`pill ${issue.severity === "critical" ? "pill-bad" : issue.severity === "warning" ? "pill-warn" : "pill-accent"}`}>{issue.severity}</span>
+        <span className="pill text-2xs text-ink-300">{issue.root.kind}</span>
+        <button type="button" data-issue-subject disabled={!resource} onClick={() => resource && onSelectResource(resource)} className="min-w-0 max-w-full truncate text-left text-xs font-semibold text-link" title={`${issue.root.namespace ? `${issue.root.namespace}/` : ""}${issue.root.name}`} aria-label={`Open resource ${issue.root.name}`}>{issue.root.namespace ? `${issue.root.namespace}/` : ""}{issue.root.name}</button>
       </div>
-      <div className="col-start-1 row-start-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-300 lg:col-start-2 lg:row-start-1"><span title={breakRule(issue)} aria-label={breakRule(issue)}>{issue.rule === "workload.rollout_stalled" ? <><span className="sm:hidden">Rollout stalled</span><span className="hidden sm:inline">{breakRule(issue)}</span></> : breakRule(issue)}</span><span>{issue.count}{issue.of ? ` of ${issue.of}` : ""} {issue.broken ? `${issue.root.kind === "Node" ? "node" : "pod"}${(issue.of || issue.count) === 1 ? "" : "s"} affected` : "affected"}</span><span className="inline-flex items-center gap-1 whitespace-nowrap font-mono text-ink-400"><Clock size={12} aria-hidden="true" />{issue.broken ? "Broke" : "First seen"} {clock(issue.broken ? issue.broke_at : issue.first_seen)}</span></div>
-      <div className="col-start-2 row-start-2 flex shrink-0 gap-1 lg:col-start-3 lg:row-start-1">
-        <button type="button" className={`${iconButton} hover:bg-ink-600`} aria-label={`Timeline for ${issue.root.name}`} title="Timeline" onClick={timeline}><History size={14} aria-hidden="true" /><span className="hidden sm:inline">Timeline</span></button>
-        <button type="button" className={`${iconButton} bg-accent text-white hover:bg-accent-hover sm:btn-primary`} aria-label={`Investigate ${issue.root.name}`} title="Investigate" disabled={!resource} onClick={investigate}><Activity size={14} aria-hidden="true" /><span className="hidden sm:inline">Investigate</span></button>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-ink-300"><span title={breakRule(issue)} aria-label={breakRule(issue)}>{issue.rule === "workload.rollout_stalled" ? <><span className="sm:hidden">Rollout stalled</span><span className="hidden sm:inline">{breakRule(issue)}</span></> : breakRule(issue)}</span><span>{issue.count}{issue.of ? ` of ${issue.of}` : ""} {issue.broken ? `${issue.root.kind === "Node" ? "node" : "pod"}${(issue.of || issue.count) === 1 ? "" : "s"} affected` : "affected"}</span><span className="inline-flex items-center gap-1 whitespace-nowrap font-mono text-ink-400"><Clock size={12} aria-hidden="true" />{issue.broken ? "Broke" : "First seen"} {clock(issue.broken ? issue.broke_at : issue.first_seen)}</span></div>
+      <div className="ml-auto flex shrink-0 items-center gap-1">
+        {resource && <ResourceLogsButton resource={resource} onSelect={onSelectResource} label={issue.root.name} />}
+        <button type="button" data-row-action className={rowButton} aria-label={`Timeline for ${issue.root.name}`} title="Timeline" onClick={timeline}><History size={14} aria-hidden="true" /><span className="hidden sm:inline">Timeline</span></button>
+        <button type="button" data-row-action className={`${rowButton} btn-primary`} aria-label={`Investigate ${issue.root.name}`} title="Investigate" disabled={!resource} onClick={investigate}><Activity size={14} aria-hidden="true" /><span className="hidden sm:inline">Investigate</span></button>
       </div>
     </div>
     <div id={id} hidden={!expanded} className="mt-1 space-y-1 text-xs sm:mt-2 sm:pl-[4.5rem]">
@@ -323,7 +324,8 @@ export function BreakRow({ issue, resource, onSelectResource, collapsed = false,
       {collapsed && !issue.root.uid && <p className="text-ink-400">Root history unavailable.</p>}
       {changes.map((item, index) => <div key={item.change.id} className={`grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 sm:grid-cols-[minmax(0,1fr)_6rem_5rem] ${index > 0 ? "hidden sm:grid" : ""}`}><span className="min-w-0 break-words text-ink-200"><span className="text-ink-400">{item.change.kind} </span>{item.change.name} <span className="font-mono">{changeDescription(item.change)}</span></span><span className="col-span-2 col-start-1 row-start-2 flex flex-wrap items-center gap-x-3 text-ink-400 sm:col-span-1 sm:col-start-2 sm:row-start-1">{lead(item.lead_seconds)}{index === 0 && more > 0 && <button type="button" className="min-h-6 text-link sm:hidden" onClick={timeline}>+{more} more changes</button>}</span><time className="col-start-2 row-start-1 whitespace-nowrap text-right font-mono text-ink-400 sm:col-start-3" dateTime={item.change.at}>{clock(item.change.at)}</time></div>)}
       {(detail?.more_changes ?? 0) > 0 && <button type="button" onClick={timeline} className={`${changes.length ? "hidden sm:block" : ""} text-link`}>+{detail?.more_changes} more changes</button>}
-      {detail && changes.length === 0 && <p className="text-ink-400">{complete && detail.history === "complete" && !detail.gaps?.length && !detail.partial ? detail.untracked?.length ? "No recorded change in tracked resources." : "No change on it, its config or its nodes" : "No recorded change in available evidence"}</p>}
+      {loadingEvidence && <KubernetesPendingNote label="Evidence loading" />}
+      {detail && changes.length === 0 && !loadingEvidence && <p className="text-ink-400">{complete && detail.history === "complete" && !detail.gaps?.length && !detail.partial ? detail.untracked?.length ? "No recorded change in tracked resources." : "No change on it, its config or its nodes" : "No recorded change in available evidence"}</p>}
       {collapsed && issue.examples?.length ? <p className="text-ink-400">Examples: {issue.examples.map((item) => item.name).join(", ")}</p> : null}
       </>}
     </div>
@@ -333,26 +335,18 @@ export function BreakRow({ issue, resource, onSelectResource, collapsed = false,
       {pills.length > 3 && <button type="button" className="inline-flex min-h-8 items-center gap-1 text-link sm:hidden" aria-expanded={allEvidence} aria-controls={evidenceID} aria-label={allEvidence ? `Show less evidence for ${issue.root.name}` : `+${pills.length - 3} more evidence for ${issue.root.name}`} onClick={() => { setExpanded(true); setEvidenceScope(allEvidence ? null : scope); }}><ChevronDown size={14} aria-hidden="true" className={allEvidence ? "rotate-180" : ""} />{allEvidence ? "Show less" : `+${pills.length - 3} more`}</button>}
       {evidence.restarts !== undefined && <span className="text-ink-400">{counted(evidence.restarts, "lifetime restart")}</span>}
       <span className="min-w-0 [overflow-wrap:anywhere] text-ink-400">{warningSummary(evidence)}</span>
-      {evidence.partial && <span role="status" className="inline-flex items-center gap-1 text-sev-warning"><TriangleAlert size={12} aria-hidden="true" />Partial crash evidence</span>}
       {expanded && <span className="ml-auto hidden whitespace-nowrap text-right font-mono text-ink-400 sm:inline">{range(evidence.from, evidence.to)}</span>}
     </div>}
-    <div className={`flex flex-wrap items-center justify-between gap-x-2 text-xs ${warnings.length || expanded && detail?.evidence ? "mt-1" : ""} ${warnings.length ? "" : "sm:hidden"} ${collapsed ? "pl-7" : "sm:pl-[4.5rem]"}`}><KubernetesWarnings warnings={warnings} scope={JSON.stringify([cluster ?? clusterId, issue.root.uid, issue.root.kind, issue.root.namespace, issue.root.name, issue.rule, warningScope, denied])} />{expanded && detail?.evidence && <span className="ml-auto whitespace-nowrap text-right font-mono text-ink-400 sm:hidden">{range(detail.evidence.from, detail.evidence.to)}</span>}</div>
+    <div className={`flex flex-wrap items-center justify-between gap-x-2 text-xs ${warnings.length || expanded && detail?.evidence ? "mt-1" : ""} ${warnings.length ? "" : "sm:hidden"} ${collapsed ? "pl-7" : "sm:pl-[4.5rem]"}`}>{!collapsed && !warningsOwned && <KubernetesWarnings warnings={warnings} scope={JSON.stringify([cluster ?? clusterId, issue.root.uid, issue.root.kind, issue.root.namespace, issue.root.name, issue.rule, warningScope, denied])} />}{expanded && detail?.evidence && <span className="ml-auto whitespace-nowrap text-right font-mono text-ink-400 sm:hidden">{range(detail.evidence.from, detail.evidence.to)}</span>}</div>
   </article>;
 }
 
-export function TimelineCard({ changes, windowEnd, clusterId, onSelectView, onSelectResource, resourceFor }: { changes?: KubernetesChangesPage; windowEnd: number; clusterId: string; onSelectView: (view: "issues" | "timeline") => void; onSelectResource: (resource: KubernetesResource) => void; resourceFor: (issue: KubernetesIssue) => KubernetesResource | null }) {
+export function TimelineCard({ changes, windowEnd, clusterId, onSelectView, onSelectResource, resourceFor, warningsOwned = false }: { changes?: KubernetesChangesPage; windowEnd: number; clusterId: string; onSelectView: (view: "issues" | "timeline") => void; onSelectResource: (resource: KubernetesResource) => void; resourceFor: (issue: KubernetesIssue) => KubernetesResource | null; warningsOwned?: boolean }) {
   const issues = useBrokenIssues();
   const blocked = issues.error instanceof ApiError && [401, 403].includes(issues.error.status);
-  const data = blocked ? undefined : issues.data;
-  const warnings: KubernetesWarning[] = failureWarnings(data?.partial_failures);
-  if (data?.truncated) warnings.push({ id: "break-cap", content: "Break evidence is bounded; additional roots may not be shown." });
+  const data = blocked || !issues.data ? undefined : { ...issues.data, sync: settledSync(issues.data.sync, issues.data.partial_failures) ?? issues.data.sync };
+  const warnings = timelineWarnings(data, changes);
   if (data && (issues.isError || data.sync.state === "stale")) warnings.push({ id: "break-stale", content: "Break evidence is stale." });
-  if (data?.sync.partial && !data.partial_failures?.length && !data.truncated) warnings.push({ id: "break-partial", content: "Break evidence is partial." });
-  for (const gap of changes?.gaps ?? []) warnings.push({ id: `gap:${gap.from}:${gap.to}`, content: `Change history gap: ${range(gap.from, gap.to)}` });
-  if (changes?.truncated) warnings.push({ id: "changes-cap", content: "Change history scan is bounded; additional changes may not be shown." });
-  if (changes?.sync.state === "stale") warnings.push({ id: "changes-stale", content: "Change activity is stale." });
-  if (changes?.sync.partial && !changes.gaps?.length && !changes.partial_failures?.length) warnings.push({ id: "changes-partial", content: "Change activity reflects incomplete history." });
-  warnings.push(...failureWarnings(changes?.partial_failures));
   const buckets = Array.from({ length: 12 }, () => 0);
   for (const change of changes?.items ?? []) {
     const offset = windowEnd - Date.parse(change.at);
@@ -367,8 +361,8 @@ export function TimelineCard({ changes, windowEnd, clusterId, onSelectView, onSe
     {data && <><div className="grid grid-cols-2 gap-2 border-b border-ink-700 px-2 py-1 sm:p-3 [&>button]:py-1.5 sm:[&>button]:py-2 [&_strong]:leading-none sm:[&_strong]:leading-7 [&_button>span:nth-child(2)]:mt-0 sm:[&_button>span:nth-child(2)]:mt-1">
       <button type="button" className="min-w-0 rounded-control border border-ink-500/50 bg-surface-raised/60 px-3 py-2 text-left" onClick={() => onSelectView("issues")}><span className="flex items-center justify-between text-2xs text-ink-400 sm:block">Broken<strong className="text-xl tabular-nums text-ink-50 sm:hidden">{data.broken?.total ?? "Unknown"}</strong></span><span className="mt-1 flex flex-wrap items-center gap-1 sm:gap-2"><strong className="hidden text-xl tabular-nums text-ink-50 sm:inline">{data.broken?.total ?? "Unknown"}</strong>{Object.entries(data.broken?.by_severity ?? {}).filter(([, count]) => count > 0).map(([severity, count]) => <span key={severity} className={`pill ${severity === "critical" ? "pill-bad" : "pill-warn"}`}>{count} {severity}</span>)}</span>{data.broken?.total === 0 && <span className="text-xs text-ink-400">{data.sync.state === "stale" || data.sync.partial || data.truncated || data.partial_failures?.length || issues.isError ? "No broken workloads in available evidence" : "No broken workloads"}</span>}</button>
       <button type="button" className="min-w-0 rounded-control border border-ink-500/50 bg-surface-raised/60 px-3 py-2 text-left" onClick={() => onSelectView("timeline")}><span className="block text-2xs text-ink-400">Changes in 60 min</span><span className="mt-1 flex items-end justify-between gap-2"><strong className="text-xl tabular-nums text-ink-50">{changes ? `${changes.items.length}${changes.next || changes.truncated ? "+" : ""}` : "Unknown"}</strong><span role="img" aria-label="Change activity in twelve five-minute intervals" className="flex h-7 w-1/2 items-end gap-1">{buckets.map((count, index) => <span key={index} className={`min-w-0 flex-1 rounded-t-sm ${count ? "bg-accent" : "bg-ink-600"}`} style={{ height: `${count ? Math.max(12, count / peak * 100) : 8}%` }} />)}</span></span></button>
-    </div><div className="divide-y divide-ink-700">{data.items.slice(0, 5).map((issue) => <BreakRow key={issue.root.uid ?? issue.root.name} issue={issue} resource={resourceFor(issue)} onSelectResource={onSelectResource} clusterId={clusterId} sourceSync={issues.isError ? undefined : data.sync} />)}</div>{(data.broken?.total ?? 0) > data.items.length && <button type="button" className="flex w-full items-center gap-2 border-t border-ink-700 px-4 py-2 text-xs text-link" onClick={() => onSelectView("issues")}>{data.broken!.total - data.items.length} more<ArrowRight size={12} aria-hidden="true" />Issues</button>}
+    </div><div className="divide-y divide-ink-700">{data.items.slice(0, 5).map((issue) => <BreakRow key={issue.root.uid ?? issue.root.name} issue={issue} resource={resourceFor(issue)} onSelectResource={onSelectResource} clusterId={clusterId} sourceSync={issues.isError ? undefined : data.sync} sourceFailures={data.partial_failures} warningsOwned />)}</div>{(data.broken?.total ?? 0) > data.items.length && <button type="button" className="flex w-full items-center gap-2 border-t border-ink-700 px-4 py-2 text-xs text-link" onClick={() => onSelectView("issues")}>{data.broken!.total - data.items.length} more<ArrowRight size={12} aria-hidden="true" />Issues</button>}
     </>}
-    {data && <div className="px-2"><KubernetesWarnings warnings={warnings} scope={JSON.stringify([clusterId, blocked])} /></div>}
+    {data && !warningsOwned && <div className="px-2"><KubernetesWarnings warnings={warnings} scope={JSON.stringify([clusterId, blocked])} /></div>}
   </section>;
 }

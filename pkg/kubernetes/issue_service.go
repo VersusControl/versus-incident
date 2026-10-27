@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"time"
@@ -32,16 +33,22 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 	if options.IncludeChanges {
 		kinds = append(kinds, "HorizontalPodAutoscaler", "ConfigMap", "Secret", "PersistentVolumeClaim", "ServiceAccount", "ControllerRevision")
 	}
-	snapshot, status, err := service.IndexSnapshot(context.WithValue(ctx, indexReadinessContextKey{}, 15*time.Second), kinds...)
+	snapshot, status, err := service.CachedNamespaceSnapshot(ctx, options.Namespace, kinds...)
 	if err != nil {
 		return IssuePage{}, err
 	}
-	if options.Namespace != "" && snapshot.Kinds["Pod"].Error == "forbidden" {
-		snapshot, status = service.namespaceIssueSnapshot(ctx, options.Namespace, kinds)
-	}
-	page := IssuePage{Items: []Issue{}, Totals: map[string]int{}, Broken: BrokenTotals{BySeverity: map[string]int{}}, Sync: SyncStatus{State: status.State, AgeSeconds: status.AgeSeconds}}
+	page := IssuePage{Items: []Issue{}, Totals: map[string]int{}, Broken: BrokenTotals{BySeverity: map[string]int{}}, Sync: SyncStatus{State: status.State, AgeSeconds: status.AgeSeconds, Progress: status.Progress, Pending: status.Pending, PendingKinds: status.PendingKinds}}
+	// failed tracks real coverage failures; kinds still loading keep the page
+	// partial (so nothing is resolved or claimed complete) but are not failures.
+	failed := false
+	page.Sync.Partial = len(status.Pending) > 0
 	for _, kind := range kinds {
 		state, exists := status.Kinds[kind]
+		if !exists && status.State == "syncing" || state.State == "pending" {
+			// A kind still loading after the core generation is reported in
+			// sync.pending, never as a failure.
+			continue
+		}
 		if !exists || state.State != "ready" || state.Partial {
 			if (kind == "Secret" || kind == "ServiceAccount" || kind == "ConfigMap" || kind == "PersistentVolumeClaim") && state.Error == "forbidden" || kind == "ControllerRevision" && (state.Error == "forbidden" || state.Error == "not_found") {
 				continue
@@ -52,6 +59,7 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 			}
 			page.Partial = append(page.Partial, PartialFailure{ResourceID: indexedResourceIDs[kind], Class: class})
 			page.Sync.Partial = true
+			failed = true
 		}
 	}
 	now := time.Now().UTC()
@@ -88,12 +96,18 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 			}
 		}
 		if options.RootUID == "" {
+			if status.State == "syncing" {
+				return page, nil
+			}
 			return IssuePage{}, ErrNotFound
 		}
 	}
 	if options.RootUID != "" {
 		root, exists := byUID[options.RootUID]
 		if !exists || options.Namespace != "" && root.Namespace != options.Namespace {
+			if status.State == "syncing" {
+				return page, nil
+			}
 			return IssuePage{}, ErrNotFound
 		}
 	}
@@ -196,21 +210,25 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 		}
 		return first.Rule < second.Rule
 	})
-	start, end, next, err := pageWindow(options.Cursor, normalizePageLimit(options.Limit), len(page.Items))
-	if err != nil {
-		return IssuePage{}, err
+	start, end, next := 0, len(page.Items), ""
+	if !options.unpaged {
+		var err error
+		start, end, next, err = pageWindow(options.Cursor, normalizePageLimit(options.Limit), len(page.Items))
+		if err != nil {
+			return IssuePage{}, err
+		}
 	}
 	page.Items, page.Next = page.Items[start:end], next
 	if options.RootUID != "" && len(page.Items) > 1 {
 		page.Items = page.Items[:1]
 		page.Next = ""
 	}
-	page.Truncated = page.Sync.Partial || next != ""
+	page.Truncated = false
 	if !page.Sync.Partial && page.Sync.State == "error" {
 		page.Sync.State = "ready"
 	}
 	if options.IncludeChanges && len(page.Items) > 0 {
-		edges, complete := kubegraph.BuildComplete(kubeindex.Snapshot{Records: records}, 200000)
+		edges, complete := kubegraph.BuildComplete(kubeindex.Snapshot{Records: records}, 0)
 		earliest := now
 		for _, issue := range page.Items[:min(5, len(page.Items))] {
 			if issue.BrokeAt != nil && issue.BrokeAt.Before(earliest) {
@@ -224,14 +242,18 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 		if store := service.changeStore(); store != nil {
 			if err := service.commitCredential(ctx, func() error {
 				return store.Append(kubechanges.Reconstruct(service.scope.ClusterID, records, now), now)
-			}); err != nil {
+			}); err != nil && !errors.Is(err, kubechanges.ErrLeaseLost) {
 				page.Partial = append(page.Partial, PartialFailure{ResourceID: "kubernetes.history", Class: errorClass(err)})
 				page.Sync.Partial = true
+				failed = true
 			}
+			// A continuous owner fences demand reconstruction writes, not
+			// history reads. Its stored coverage still governs completeness.
 			history, err = store.ReadWindow(earliest.Add(-30*time.Minute), now.Add(2*time.Minute), now)
 			if err != nil {
 				page.Partial = append(page.Partial, PartialFailure{ResourceID: "kubernetes.history", Class: errorClass(err)})
 				page.Sync.Partial = true
+				failed = true
 			}
 		}
 		for position := range page.Items[:min(5, len(page.Items))] {
@@ -244,9 +266,23 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 			for _, kind := range []string{"Secret", "ConfigMap", "ServiceAccount", "PersistentVolumeClaim"} {
 				denied[kind] = snapshot.Kinds[kind].Error == "forbidden"
 			}
-			linked := kubebreaks.Correlate(item, records, edges, history, issue.Partial || page.Sync.Partial || !complete, denied)
-			issue.Changes, issue.MoreChanges, issue.History, issue.Gaps, issue.Rebuilt, issue.Untracked = linked.Changes, linked.MoreChanges, linked.History, linked.Gaps, linked.Rebuilt, linked.Untracked
-			issue.Partial = issue.Partial || page.Sync.Partial || !complete || linked.Partial
+			if len(page.Sync.Pending) > 0 {
+				// Evidence from kinds that are still loading is a loading gap,
+				// not a coverage failure; real partial causes (failed reads,
+				// truncated change fields, partial projections) still count.
+				loading := map[string]bool{}
+				for kind, id := range indexedResourceIDs {
+					loading[kind] = containsString(page.Sync.Pending, id)
+				}
+				linked := kubebreaks.CorrelateLoading(item, records, edges, history, issue.Partial || failed || !complete, denied, loading)
+				issue.Changes, issue.MoreChanges, issue.History, issue.Gaps, issue.Rebuilt, issue.Untracked = linked.Changes, linked.MoreChanges, linked.History, linked.Gaps, linked.Rebuilt, linked.Untracked
+				issue.Pending = page.Sync.Pending
+				issue.Partial = issue.Partial || failed || !complete || linked.Partial
+			} else {
+				linked := kubebreaks.Correlate(item, records, edges, history, issue.Partial || page.Sync.Partial || !complete, denied)
+				issue.Changes, issue.MoreChanges, issue.History, issue.Gaps, issue.Rebuilt, issue.Untracked = linked.Changes, linked.MoreChanges, linked.History, linked.Gaps, linked.Rebuilt, linked.Untracked
+				issue.Partial = issue.Partial || page.Sync.Partial || !complete || linked.Partial
+			}
 		}
 	}
 	if err := service.validateCredential(ctx); err != nil {
@@ -339,9 +375,7 @@ func (service *Service) rememberBreaks(items []kubebreaks.Break, namespace strin
 		first, exists := seen[key]
 		if !exists {
 			first = observed
-			if len(seen) < kubernetesIndexMaxRecords {
-				seen[key] = first
-			}
+			seen[key] = first
 		}
 		item.FirstSeen = first
 		if item.Source == "first_seen" {

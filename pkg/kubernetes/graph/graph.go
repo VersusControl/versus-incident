@@ -46,6 +46,12 @@ type SyncStatus struct {
 	State      string  `json:"state"`
 	AgeSeconds float64 `json:"age_s"`
 	Partial    bool    `json:"partial"`
+	// Progress is present only during a cluster's first sync.
+	Progress *index.SyncProgress `json:"progress,omitempty"`
+	// Pending lists resource IDs this view needs that are still loading after
+	// the core generation; PendingKinds counts all resource types still loading.
+	Pending      []string `json:"pending,omitempty"`
+	PendingKinds int      `json:"pending_kinds,omitempty"`
 }
 
 type Ref struct {

@@ -78,7 +78,7 @@ describe("Kubernetes resource API", () => {
     expect(url.searchParams.getAll("cluster")).toEqual(["prod/eu+one"]);
   });
 
-  it("scopes every Kubernetes JSON route including all namespace continuation pages", async () => {
+  it("scopes every Kubernetes JSON route including cached namespaces and directed relations", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
       const url = new URL(String(input), "http://localhost");
       return Promise.resolve(new Response(JSON.stringify({ items: [], pods: [], lines: [], truncated: false, ...(url.searchParams.get("resource_id") === "core~v1~namespaces" && !url.searchParams.has("continue") ? { continue: "page-two" } : {}) })));
@@ -86,7 +86,7 @@ describe("Kubernetes resource API", () => {
     const scoped = createKubernetesApi("prod-eu");
     await Promise.all([
       scoped.kubernetesOverview(), scoped.kubernetesOverviewGraph(), scoped.kubernetesIssues(), scoped.kubernetesChanges(), scoped.kubernetesCrashes(), scoped.kubernetesGraph(),
-      scoped.kubernetesNeighborhood({ kind: "Pod", name: "api" }), scoped.kubernetesTraffic(), scoped.kubernetesTop({ kind: "pod" }),
+      scoped.kubernetesNeighborhood({ kind: "Pod", name: "api" }), scoped.kubernetesRelated({ resource_id: "core~v1~pods", name: "api" }), scoped.kubernetesTraffic(), scoped.kubernetesTop({ kind: "pod" }),
       scoped.kubernetesNodes(), scoped.kubernetesNamespaces(), scoped.kubernetesNodePods("node-a"), scoped.kubernetesUsage(), scoped.kubernetesWorkloads(),
       scoped.kubernetesWorkload("Pod", "shop", "api"), scoped.kubernetesWorkloadLogs("Pod", "shop", "api"), scoped.kubernetesPodLogs("shop", "api"),
       scoped.kubernetesDiagnose("core~v1~pods", "shop", "api"), scoped.kubernetesReleases(), scoped.kubernetesRelease("shop", "api"), scoped.kubernetesGitOpsApps(),
@@ -198,24 +198,53 @@ describe("Kubernetes resource API", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/admin/kubernetes/resources?resource_id=core%7Ev1%7Enodes&limit=20&continue=next-token", expect.any(Object));
   });
 
-  it("collects every namespace continuation page and retains partial failures", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
-      const url = String(input);
-      const page = url.includes("continue=")
-        ? { items: [{ resource_id: "core~v1~namespaces", kind: "Namespace", name: "payments" }], truncated: false, partial_failures: [{ class: "forbidden" }] }
-        : { items: [{ resource_id: "core~v1~namespaces", kind: "Namespace", name: "platform" }], continue: "namespace-next", truncated: true };
-      return Promise.resolve(new Response(JSON.stringify(page), { status: 200 }));
-    });
+  it("reads namespace names and honest sync status from the scoped cache endpoint", async () => {
+    const payload = { items: ["platform", "payments"], sync: { state: "ready", age_s: 1, partial: true }, partial_failures: [{ class: "forbidden" }] };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 }));
+    expect(await createKubernetesApi("east").kubernetesNamespaces()).toEqual(payload);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/admin/kubernetes/namespaces?cluster=east"]);
+  });
 
-    const result = await api.kubernetesNamespaces();
+  it("requests directed resource relationships without a neighborhood depth or node cap", async () => {
+    const graph = { nodes: [], edges: [], omitted: {}, sync: { state: "ready", age_s: 0, partial: false } };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(graph), { status: 200 }));
+    expect(await createKubernetesApi("east").kubernetesRelated({ resource_id: "apps~v1~deployments", namespace: "shop", name: "checkout" })).toEqual(graph);
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/admin/kubernetes/graph/related?resource_id=apps%7Ev1%7Edeployments&name=checkout&namespace=shop&cluster=east");
+  });
 
-    expect(result.items?.map((item) => item.name)).toEqual(["platform", "payments"]);
-    expect(result.truncated).toBe(false);
-    expect(result.partial_failures).toEqual([{ class: "forbidden" }]);
-    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
-      "/api/admin/kubernetes/resources?resource_id=core%7Ev1%7Enamespaces&limit=20",
-      "/api/admin/kubernetes/resources?resource_id=core%7Ev1%7Enamespaces&limit=20&continue=namespace-next",
-    ]);
+  it("preserves root filtering on every changes cursor", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ items: [], sync: { state: "ready", age_s: 0, partial: false } }), { status: 200 }));
+    await api.kubernetesChanges({ root_uid: "workload", namespace: "shop", cursor: "page-two" });
+    const query = new URL(String(fetchMock.mock.calls[0][0]), "http://localhost").searchParams;
+    expect(query.get("root_uid")).toBe("workload");
+    expect(query.get("cursor")).toBe("page-two");
+  });
+
+  it("requests one scoped Timeline snapshot with exact resource identity and an unchanged opaque cursor", async () => {
+    const payload = { items: [], next: "snapshot.cursor", total: 2400, crash_count: 600, counts: { change: 1600, crash: 600, break: 200 }, since: "2026-10-23T07:00:00Z", until: "2026-10-23T08:00:00Z", gaps: [], sync: { state: "ready", age_s: 0, partial: false } };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify(payload), { status: 200 }));
+    const client = createKubernetesApi("east");
+    const signal = new AbortController().signal;
+    const options = { since: payload.since, until: payload.until, namespace: "shop", resource_uid: "pod-uid", limit: 100 };
+    expect(await client.kubernetesTimeline(options, signal)).toEqual(payload);
+    await client.kubernetesTimeline({ ...options, cursor: payload.next }, signal);
+    const urls = fetchMock.mock.calls.map(([input]) => new URL(String(input), "http://localhost"));
+    expect(urls.every((url) => url.pathname === "/api/admin/kubernetes/timeline")).toBe(true);
+    expect(Object.fromEntries(urls[0].searchParams)).toEqual({ ...options, limit: "100", cluster: "east" });
+    expect(Object.fromEntries(urls[1].searchParams)).toEqual({ ...Object.fromEntries(urls[0].searchParams), cursor: "snapshot.cursor" });
+    expect(fetchMock.mock.calls[1][1]?.signal).toBe(signal);
+  });
+
+  it("scopes Pod crash totals and paging by Pod UID rather than namespace-wide client filtering", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ items: [], crash_count: 400 }), { status: 200 }));
+    await createKubernetesApi("east").kubernetesCrashes({ namespace: "shop", pod_uid: "pod-uid", cursor: "opaque" });
+    const query = new URL(String(fetchMock.mock.calls[0][0]), "http://localhost").searchParams;
+    expect(Object.fromEntries(query)).toEqual({ namespace: "shop", pod_uid: "pod-uid", cursor: "opaque", cluster: "east" });
+  });
+  it("encodes the saved namespace interest without changing cluster authorization scope", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ items: [], sync: { state: "syncing", age_s: 0, partial: false } }), { status: 200 }));
+    await createKubernetesApi("east").kubernetesNamespaces("payments");
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/admin/kubernetes/namespaces?namespace=payments&cluster=east");
   });
 
   it("serializes workload filters and cursor without fetching a client-side 500-row inventory", async () => {

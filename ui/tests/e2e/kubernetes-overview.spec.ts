@@ -7526,17 +7526,18 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
       return a6Active === 1 && x2Active === 1;
     }, { timeout: 15_000 }).toBe(true);
 
-    // 5. Container picker: All containers ("*") renders <pod>/<container> prefixes
+    // 5. Container picker: All containers ("*") is first and renders <pod>/<container> prefixes
     const containerSelect = detail.getByLabel("Log container", { exact: true });
-    await expect(containerSelect.locator("option")).toHaveText(["Main container", "api", "sidecar", "init:setup", "All containers"]);
+    await expect(containerSelect.locator("option")).toHaveText(["All containers", "Main container", "api", "sidecar", "init:setup"]);
     await containerSelect.selectOption("*");
     await expect(wlOutput).toContainText("checkout-7d9f8c-x2k4q/api", { timeout: 20_000 });
     await expect(wlOutput).toContainText("checkout-7d9f8c-x2k4q/sidecar", { timeout: 20_000 });
     await containerSelect.selectOption("");
     await expect(wlOutput).toContainText("checkout-7d9f8c-x2k4q");
 
-    // 6. Follow scroll vs network pause: uncheck Follow, verify lines still arrive over network without scrolling, then Pause logs cancels upstream
-    await detail.getByLabel("Follow", { exact: true }).uncheck();
+    // 6. Scroll position vs network pause: scrolling away from the newest line
+    // stops the follow while lines keep arriving over the network, then Pause
+    // logs cancels upstream
     await wlOutput.evaluate((el) => {
       el.scrollTop = 0;
       el.dispatchEvent(new Event("scroll"));

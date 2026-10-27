@@ -5,7 +5,6 @@ package kubernetes
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -217,7 +216,11 @@ func TestNativeByteAndDurationRotationPreservesWindow(t *testing.T) {
 			var terminal []PodLogStreamEvent
 			for read := 0; read < 2; read++ {
 				terminal = nil
+				var lastLine time.Time
 				if err := service.streamPodLogs(logStreamTestContext(), options, func(event PodLogStreamEvent) error {
+					if event.Event == "line" {
+						lastLine, _ = time.Parse(time.RFC3339Nano, event.Timestamp)
+					}
 					if event.Event == "limit" || event.Event == "end" {
 						terminal = append(terminal, event)
 					}
@@ -225,13 +228,22 @@ func TestNativeByteAndDurationRotationPreservesWindow(t *testing.T) {
 				}, duration, time.Minute, time.Minute, budget); err != nil {
 					t.Fatal(err)
 				}
-				if len(terminal) != 2 || terminal[0].Reason != mode || terminal[0].Cursor == "" || terminal[0].Cursor != terminal[1].Cursor {
+				if len(terminal) != 2 || terminal[0].Reason != mode || terminal[0].Cursor != terminal[1].Cursor {
 					t.Fatalf("rotation read=%d events=%+v", read, terminal)
 				}
-				if mode == "duration" && (terminal[0].ReplayUncertain || terminal[1].ReplayUncertain) {
-					t.Fatalf("empty retained rotation fabricated a replay gap: %+v", terminal)
+				if mode == "duration" && (terminal[0].Cursor == "" || terminal[0].ReplayUncertain || terminal[1].ReplayUncertain) {
+					t.Fatalf("empty retained rotation lost its cursor or fabricated a replay gap: %+v", terminal)
 				}
-				options.Cursor, options.SinceSeconds, options.TailLines = terminal[0].Cursor, 0, 0
+				if terminal[0].Cursor != "" {
+					options.Cursor, options.SinceSeconds, options.TailLines, options.SinceTime = terminal[0].Cursor, 0, 0, time.Time{}
+					continue
+				}
+				// A batch this dense outgrows the cursor the viewer could send back,
+				// so the rotation hands it the last line's own timestamp instead.
+				if lastLine.IsZero() {
+					t.Fatalf("rotation read=%d lost every resume form: %+v", read, terminal)
+				}
+				options.Cursor, options.SinceSeconds, options.TailLines, options.SinceTime = "", 0, 0, lastLine
 			}
 			waitNativeCount(t, &backend.active, 0)
 			backend.mu.Lock()
@@ -240,84 +252,59 @@ func TestNativeByteAndDurationRotationPreservesWindow(t *testing.T) {
 			if query.Get("sinceTime") == "" || mode == "duration" && query.Get("tailLines") != "123" {
 				t.Fatalf("resume window lost: %v", query)
 			}
-			t.Logf("%s: two real HTTP reads rotate with reusable cursor; production byte budget=%d; duration seam=%s", mode, budget, duration)
+			t.Logf("%s: two real HTTP reads rotate; production byte budget=%d; duration seam=%s", mode, budget, duration)
 		})
 	}
 }
 
-func TestNativeWorkloadQuietReferencesAndFallbackWindow(t *testing.T) {
+// A workload viewer resumes the way kubectl does: the first read uses its window
+// bounds, and a reconnect carries a timestamp. Every reopened source asks the
+// backend for that timestamp and nothing else, so a request never grows with the
+// number of sources.
+func TestNativeWorkloadWindowBoundsAndTimestampResume(t *testing.T) {
 	backend := &nativeResourceBackend{records: workloadStreamRecords("StatefulSet", 3, 1)}
 	service := nativeResourceService(t, backend)
 	seedWorkloadStreamIndex(t, service, backend.records)
 	options := WorkloadLogStreamOptions{Kind: "StatefulSet", Name: "api", Namespace: "shop", UID: "root", SinceSeconds: 60, TailLines: 123}
-	quiet, err := service.OpenWorkloadLogStream(logStreamTestContext(), options)
+	windowed, err := service.OpenWorkloadLogStream(logStreamTestContext(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer quiet.Close()
-	token := quiet.checkpoint()
-	first := token
-	for i := 0; i < 300; i++ {
-		if quiet.checkpoint() != token {
-			t.Fatal("unchanged quiet checkpoint churned references")
-		}
+	defer windowed.Close()
+	if windowed.uncertain || len(windowed.workers) != 3 {
+		t.Fatalf("windowed open: workers=%d uncertain=%v", len(windowed.workers), windowed.uncertain)
 	}
-	busy, err := service.OpenWorkloadLogStream(logStreamTestContext(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer busy.Close()
-	for i := 0; i < 300; i++ {
-		for id := range busy.cursor.Sources {
-			busy.cursor.Sources[id] = fmt.Sprintf("changing-%d", i)
-			break
-		}
-		busy.checkpoint()
-	}
-	options.Cursor, options.SinceSeconds, options.TailLines = first, 0, 0
-	restored, err := service.workloadCursor(options)
-	if err != nil || restored.Uncertain || len(restored.Sources) != 3 {
-		t.Fatalf("busy viewer evicted quiet viewer: %+v %v", restored, err)
-	}
-	var decoded workloadLogCursor
-	raw, _ := base64.RawURLEncoding.DecodeString(first)
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	workloadCheckpoints.Lock()
-	removeWorkloadCheckpoint(decoded.Reference)
-	workloadCheckpoints.Unlock()
-	quiet.Close()
-	busy.Close()
-	fallback, err := service.OpenWorkloadLogStream(logStreamTestContext(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer fallback.Close()
-	if !fallback.uncertain || fallback.options.SinceSeconds != 60 || fallback.options.TailLines != 123 {
-		t.Fatalf("reference fallback changed bounds: %+v", fallback.options)
-	}
-	ctx, cancel := context.WithTimeout(logStreamTestContext(), 100*time.Millisecond)
+	windowed.Close()
+
+	watermark := time.Now().UTC().Add(-time.Minute)
+	resumed := options
+	resumed.SinceSeconds, resumed.TailLines, resumed.SinceTime = 0, 0, watermark
+	ctx, cancel := context.WithTimeout(logStreamTestContext(), 400*time.Millisecond)
 	defer cancel()
-	// Exercise the actual reopened HTTP readers, not just cursor decoding.
-	fallback.cancel()
-	fallback.Close()
-	err = service.StreamWorkloadLogs(ctx, options, func(WorkloadLogStreamEvent) error { return nil })
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("bounded quiet stream=%v", err)
+	session, err := service.OpenWorkloadLogStream(ctx, resumed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if len(session.workers) != 3 || session.uncertain {
+		t.Fatalf("timestamp resume: workers=%d uncertain=%v", len(session.workers), session.uncertain)
+	}
+	if err := session.Stream(func(WorkloadLogStreamEvent) error { return nil }); !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("bounded stream=%v", err)
 	}
 	waitNativeCount(t, &backend.active, 0)
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
 	if len(backend.queries) != 3 {
-		t.Fatalf("fallback reads=%d", len(backend.queries))
+		t.Fatalf("source reads=%d", len(backend.queries))
 	}
+	want := watermark.Add(-sinceTimeOverlap).UTC().Format(time.RFC3339Nano)
 	for _, query := range backend.queries {
-		if query.Get("sinceSeconds") != "60" || query.Get("tailLines") != "123" {
-			t.Errorf("source fallback window=%v", query)
+		if query.Get("sinceTime") != want || query.Get("sinceSeconds") != "" || query.Get("tailLines") != "" {
+			t.Errorf("source did not resume from the viewer timestamp: %v", query)
 		}
 	}
-	t.Log("quiet refs stable; busy viewer cannot evict active quiet latest; missing ref marks uncertainty and all three real requests retain60s/123")
+	t.Log("window bounds on the first read; every reopened source resumed from the viewer timestamp with no resume state in the stream")
 }
 
 func awaitNativeHistory(t *testing.T, service *Service, samples int) UsageHistory {

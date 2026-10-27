@@ -62,15 +62,19 @@ export function Pagination({
   );
 }
 
-export function CursorPagination({ state, next, className }: { state: CursorPaginationState; next?: string; className?: string }) {
+export function CursorPagination({ state, next, className, busy = false }: { state: CursorPaginationState; next?: string; className?: string; busy?: boolean }) {
+  // A list with one page has nowhere to go: "Page 1" beside two disabled
+  // buttons is a control that cannot act, so the pager only appears once
+  // another page exists in either direction.
+  if (!next && !state.canPrevious) return null;
   return (
     <nav aria-label="Page navigation" className={clsx("flex items-center justify-between gap-2 border-t border-ink-500/40 px-3 py-2 text-2xs text-ink-300", className)}>
       <span className="tabular-nums">Page {state.page}</span>
       <div className="flex items-center gap-1">
-        <button type="button" className="btn px-2 py-1" disabled={!state.canPrevious} onClick={state.previousPage} aria-label="Previous page">
+        <button type="button" className="btn px-2 py-1" disabled={busy || !state.canPrevious} onClick={state.previousPage} aria-label="Previous page">
           <ChevronLeft size={12} aria-hidden /> Prev
         </button>
-        <button type="button" className="btn px-2 py-1" disabled={!next} onClick={() => state.nextPage(next)} aria-label="Next page">
+        <button type="button" className="btn px-2 py-1" disabled={busy || !next || next === state.cursor} onClick={() => state.nextPage(next)} aria-label="Next page">
           Next <ChevronRight size={12} aria-hidden />
         </button>
       </div>

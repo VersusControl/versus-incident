@@ -15,6 +15,9 @@ import (
 )
 
 func (controller *KubernetesAdminController) podLogStream(ctx *fiber.Ctx) error {
+	if streamQueryTooLarge(ctx) {
+		return writeKubernetes(ctx, nil, kubernetes.ErrRequestTooLarge)
+	}
 	options := kubernetes.PodLogStreamOptions{Namespace: strings.Clone(ctx.Params("namespace")), Pod: strings.Clone(ctx.Params("name")), Timestamps: true}
 	arguments := ctx.Context().QueryArgs()
 	var invalid bool
@@ -31,6 +34,8 @@ func (controller *KubernetesAdminController) podLogStream(ctx *fiber.Ctx) error 
 			options.Container = strings.Clone(string(value))
 		case "cursor":
 			options.Cursor = strings.Clone(string(value))
+		case "since_time":
+			options.SinceTime, err = time.Parse(time.RFC3339Nano, string(value))
 		case "since_seconds":
 			options.SinceSeconds, err = strconv.Atoi(string(value))
 			if options.SinceSeconds == 0 {
@@ -67,6 +72,14 @@ func (controller *KubernetesAdminController) podLogStream(ctx *fiber.Ctx) error 
 			return emit(event.Event, event)
 		})
 	}, session.Close, nil)
+}
+
+// streamQueryTooLarge reports a stream request whose query exceeds the bound
+// this surface accepts. It is refused before anything is parsed, and the answer
+// never echoes the input, so an oversized resume can never be swallowed by an
+// intermediary's header limit.
+func streamQueryTooLarge(ctx *fiber.Ctx) bool {
+	return len(ctx.Request().URI().QueryString()) > kubernetes.MaxStreamRequestQueryBytes
 }
 
 type kubernetesSSEMessage struct {

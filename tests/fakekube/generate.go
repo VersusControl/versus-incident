@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const maxGeneratedPods = 50000
+const maxGeneratedPods = 60000
 
 type generatedPod struct {
 	Kind     string               `json:"kind"`
@@ -132,9 +132,16 @@ func SeedScenario(store *Store, name string, seed int64) error {
 	if store == nil {
 		return ErrInvalidRequest
 	}
+	if name == "scale" {
+		return nil
+	}
+	if name == "shared-config" {
+		return seedSharedConfiguration(store)
+	}
 	if name == "fleet-east" || name == "fleet-west" {
 		return seedFleetScenario(store, name)
 	}
+
 	if name == "bad-rollout" || name == "bad-rollout-before" {
 		return seedBadRollout(store, time.Now().UTC().Truncate(time.Second), name == "bad-rollout")
 	}

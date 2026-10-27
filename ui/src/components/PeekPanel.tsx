@@ -102,6 +102,7 @@ export function PeekPanel({
         ref={panelRef}
         tabIndex={-1}
         data-resource-detail={appearance === "resource" ? "" : undefined}
+        data-expanded={expanded ? "true" : undefined}
         className={clsx(
           "absolute bottom-0 right-0 top-0 flex w-full flex-col",
           "border-l border-ink-600 bg-surface-raised shadow-overlay",

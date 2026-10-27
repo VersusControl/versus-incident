@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 )
 
 type resolverSequence struct {
@@ -438,4 +439,144 @@ func encodeBase64Lines(data []byte) string {
 		}
 	}
 	return strings.TrimSuffix(builder.String(), "\n")
+}
+
+// A real cluster 403 names what it denied, and nothing else. The bounded Status
+// body is read for the denied verb, resource and namespace only: the identity is
+// classified rather than quoted, because a cloud ARN carries the account id, and
+// no token, URL, address, or payload text can reach the message.
+func TestClusterForbiddenNamesTheDeniedRequestWithoutLeakingTheBody(t *testing.T) {
+	statusBody := `{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"pods \"api-7d9f\" is forbidden: User \"arn:aws:sts::111122223333:assumed-role/versus-prod/versus\" cannot get resource \"pods/log\" in API group \"\" in the namespace \"vikki-mobile-dev\"","reason":"Forbidden","details":{"name":"api-7d9f","kind":"pods"},"code":403}`
+	hostileBody := `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Forbidden","code":403,"message":"pods \"x\" is forbidden: User \"Bearer eyJhbGciOiJIUzI1NiJ9.T0K3N\" cannot get resource \"https://169.254.169.254/latest/meta-data?token=abc%\" in API group \"\" in the namespace \"\u001b[31mPwned_Bad\"","details":{"kind":"http://evil.example/pods?token=abc","namespace":"..%s"}}`
+	oversized := `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Forbidden","code":403,"message":"` + strings.Repeat("x", forbiddenStatusLimit) + `"}`
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/denied":
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusForbidden)
+			_, _ = writer.Write([]byte(statusBody))
+		case "/hostile":
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusForbidden)
+			_, _ = writer.Write([]byte(hostileBody))
+		case "/denied-huge":
+			writer.WriteHeader(http.StatusForbidden)
+			_, _ = writer.Write([]byte(oversized))
+		default:
+			http.Error(writer, `{"error":"no body, no secret-token"}`, http.StatusForbidden)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output map[string]any
+	err = client.GetJSON(t.Context(), "/denied", &output)
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("a real cluster denial must stay a permission answer: %v", err)
+	}
+	var denied *permissionDeniedError
+	if !errors.As(err, &denied) || denied.Verb != "get" || denied.Resource != "pods/log" || denied.Namespace != "vikki-mobile-dev" || denied.Principal != "an assumed role" {
+		t.Fatalf("denied request lost: %#v", denied)
+	}
+	detail := DiagnoseError(err)
+	if detail.Code != "cluster_permission_denied" || detail.Retryable || !strings.Contains(detail.Message, "get on pods/log in namespace vikki-mobile-dev") || !strings.Contains(detail.Message, "an assumed role") {
+		t.Fatalf("diagnosis = %+v", detail)
+	}
+	// The identity is an input to a classification, never an output: an ARN names
+	// the cloud account, so none of it may appear.
+	for _, leaked := range []string{"111122223333", "arn:aws", "assumed-role", "versus-prod", "api-7d9f", `"details"`, "secret-token"} {
+		if strings.Contains(detail.Message, leaked) || strings.Contains(detail.Action, leaked) || strings.Contains(err.Error(), leaked) {
+			t.Fatalf("denial detail leaked %q: %+v", leaked, detail)
+		}
+	}
+	// A hostile Status body cannot smuggle a token, a URL, an address, a query
+	// string, a terminal escape, or a format verb into the answer.
+	hostile := client.GetJSON(t.Context(), "/hostile", &output)
+	hostileDetail := DiagnoseError(hostile)
+	for _, canary := range []string{"eyJhbGciOiJIUzI1NiJ9", "T0K3N", "169.254.169.254", "http://", "https://", "token=abc", "%s", "%25", "\u001b", "Pwned", "evil.example", ".."} {
+		for _, surface := range []string{hostileDetail.Message, hostileDetail.Action, hostile.Error()} {
+			if strings.Contains(surface, canary) {
+				t.Fatalf("hostile denial body leaked %q: %+v", canary, hostileDetail)
+			}
+		}
+	}
+	if !errors.Is(hostile, ErrForbidden) {
+		t.Fatalf("hostile denial stopped being a permission answer: %v", hostile)
+	}
+	if err := client.GetJSON(t.Context(), "/denied-huge", &output); !errors.Is(err, ErrForbidden) || errors.As(err, &denied) {
+		t.Fatalf("an oversized forbidden body produced detail: %v", err)
+	}
+	if err := client.GetJSON(t.Context(), "/denied-plain", &output); !errors.Is(err, ErrForbidden) || errors.As(err, &denied) || strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("a forbidden body without a Status kept detail: %v", err)
+	}
+}
+
+// Every field the denial parser keeps is allowlisted, so a text value that only
+// happens to look printable is still refused rather than echoed.
+func TestDeniedFieldsAreAllowlisted(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		kind  string
+		want  string
+	}{
+		{name: "resource", value: "pods/log", kind: "resource", want: "pods/log"},
+		{name: "resource with dot", value: "controllerrevisions", kind: "resource", want: "controllerrevisions"},
+		{name: "resource url", value: "https://evil.example/pods", kind: "resource", want: ""},
+		{name: "resource query", value: "pods?token=abc", kind: "resource", want: ""},
+		{name: "resource two segments", value: "pods/log/exec", kind: "resource", want: ""},
+		{name: "resource upper case", value: "Pods", kind: "resource", want: ""},
+		{name: "resource ip", value: "169.254.169.254", kind: "resource", want: ""},
+		{name: "namespace", value: "vikki-mobile-dev", kind: "namespace", want: "vikki-mobile-dev"},
+		{name: "namespace underscore", value: "Bad_NS", kind: "namespace", want: ""},
+		{name: "namespace escape", value: "\u001b[31m", kind: "namespace", want: ""},
+		{name: "namespace format verb", value: "%s", kind: "namespace", want: ""},
+		{name: "namespace dots", value: "..", kind: "namespace", want: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := test.want
+			switch test.kind {
+			case "resource":
+				got = deniedResource(test.value)
+			case "namespace":
+				got = deniedNamespace(test.value)
+			}
+			if got != test.want {
+				t.Fatalf("kind=%s value=%q got %q want %q", test.kind, test.value, got, test.want)
+			}
+		})
+	}
+	for _, verb := range []string{"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"} {
+		if deniedVerb(verb) != verb {
+			t.Fatalf("known verb %q refused", verb)
+		}
+	}
+	for _, verb := range []string{"", "list pods", "GET", "exec", "%s", "get;rm"} {
+		if deniedVerb(verb) != "" {
+			t.Fatalf("verb %q accepted", verb)
+		}
+	}
+}
+
+// safeDeniedField drops anything that could steer a terminal or a format string.
+func TestSafeDeniedFieldRejectsControlAndFormatText(t *testing.T) {
+	for _, value := range []string{"\u001b[31mPwned", "bell\u0007x", "del\u007fx", "c1\u0085x", "%s", "%x%n", "quote\"d", "back\\slash", "tab\there", "line\nbreak"} {
+		if got := safeDeniedField(value, 253); got != "" {
+			t.Fatalf("value %q accepted as %q", value, got)
+		}
+	}
+	// A control rune that is also Unicode whitespace is trimmed, never echoed.
+	for _, value := range []string{"c1\u0085", "\u000bvt\u000b"} {
+		if got := safeDeniedField(value, 253); strings.ContainsFunc(got, unicode.IsControl) {
+			t.Fatalf("value %q kept a control rune as %q", value, got)
+		}
+	}
+	if got := safeDeniedField("  arn:aws:sts::1:assumed-role/x  ", 253); got != "arn:aws:sts::1:assumed-role/x" {
+		t.Fatalf("a plain value was altered: %q", got)
+	}
+	if got := safeDeniedField(strings.Repeat("a", 254), 253); got != "" {
+		t.Fatal("an oversized value was kept")
+	}
 }

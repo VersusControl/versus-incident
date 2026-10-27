@@ -127,7 +127,7 @@ func TestInitCompletionKeepsCheckpointWhenProcessSlotIsContended(t *testing.T) {
 	for id, worker := range session.workers {
 		oldID = id
 		raw, _ := json.Marshal(logResumeCursor{Target: service.logTarget(worker.options), Timestamp: time.Now().UTC().Add(-time.Second), Ordinal: 2})
-		session.cursor.Sources[id] = base64.RawURLEncoding.EncodeToString(raw)
+		session.resume[id] = base64.RawURLEncoding.EncodeToString(raw)
 		release := worker.release
 		var once sync.Once
 		worker.release = func() {
@@ -156,7 +156,7 @@ func TestInitCompletionKeepsCheckpointWhenProcessSlotIsContended(t *testing.T) {
 		t.Fatal(err)
 	}
 	anchor := session.workers[oldID]
-	if anchor == nil || !anchor.retiredForCompletion || session.cursor.Sources[oldID] == "" {
+	if anchor == nil || !anchor.retiredForCompletion || session.resume[oldID] == "" {
 		t.Fatal("contended transition lost its bounded checkpoint anchor")
 	}
 	session.startWorkers()
@@ -199,7 +199,7 @@ func TestInitCompletionCannotBorrowOtherUIDOrRestartCheckpoint(t *testing.T) {
 			defer session.Close()
 			for id, worker := range session.workers {
 				raw, _ := json.Marshal(logResumeCursor{Target: service.logTarget(worker.options), Timestamp: time.Now().UTC().Add(-time.Second), Ordinal: 2})
-				session.cursor.Sources[id] = base64.RawURLEncoding.EncodeToString(raw)
+				session.resume[id] = base64.RawURLEncoding.EncodeToString(raw)
 			}
 			current := records[1]
 			current.LogContainers = append([]kubeindex.ContainerState(nil), records[1].LogContainers...)

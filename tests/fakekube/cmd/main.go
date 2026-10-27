@@ -28,35 +28,47 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:9443", "TLS listen address")
 	stateDir := flag.String("state-dir", "", "directory for CA and readiness state")
 	scenario := flag.String("scenario", "triage", "fixture scenario")
-	pods := flag.Int("pods", 0, "synthetic pod count (up to 50000)")
+	pods := flag.Int("pods", 0, "synthetic pod count (up to 60000)")
 	namespaces := flag.Int("namespaces", 0, "synthetic namespace count")
 	seed := flag.Int64("seed", 1, "deterministic fixture seed")
+	reuseTLS := flag.Bool("reuse-tls", false, "reuse existing local TLS material for a bounded backend-resume check")
+	forbidLists := flag.Bool("forbid-lists", false, "answer every Kubernetes LIST with 403 while discovery stays available")
 	flag.Parse()
 	if *stateDir == "" {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(*listen, *stateDir, *scenario, *pods, *namespaces, *seed); err != nil {
+	if err := run(*listen, *stateDir, *scenario, *pods, *namespaces, *seed, *reuseTLS, *forbidLists); err != nil {
 		_, _ = os.Stderr.WriteString("fakekube: startup failed\n")
 		os.Exit(1)
 	}
 }
 
-func run(address, stateDir, scenario string, pods, namespaces int, seed int64) error {
+func run(address, stateDir, scenario string, pods, namespaces int, seed int64, reuseTLS, forbidLists bool) error {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return errors.New("state directory unavailable")
 	}
-	server, err := fakekube.NewServer(fakekube.Config{Scenario: scenario, Pods: pods, Namespaces: namespaces, Seed: seed})
+	server, err := fakekube.NewServer(fakekube.Config{Scenario: scenario, Pods: pods, Namespaces: namespaces, Seed: seed, ForbidLists: forbidLists})
 	if err != nil {
 		return err
-	}
-	certificate, privateKey, err := makeCertificate(address)
-	if err != nil {
-		return errors.New("TLS certificate unavailable")
 	}
 	certificatePath := filepath.Join(stateDir, "server.crt")
 	keyPath := filepath.Join(stateDir, "server.key")
 	caPath := filepath.Join(stateDir, "ca.crt")
+	var certificate, privateKey []byte
+	if reuseTLS {
+		var certificateErr, keyErr error
+		certificate, certificateErr = os.ReadFile(certificatePath)
+		privateKey, keyErr = os.ReadFile(keyPath)
+		if certificateErr != nil || keyErr != nil {
+			return errors.New("existing local TLS material unavailable")
+		}
+	} else {
+		certificate, privateKey, err = makeCertificate(address)
+		if err != nil {
+			return errors.New("TLS certificate unavailable")
+		}
+	}
 	for path, data := range map[string][]byte{certificatePath: certificate, keyPath: privateKey, caPath: certificate} {
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			return errors.New("TLS state unavailable")

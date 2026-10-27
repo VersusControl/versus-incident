@@ -306,58 +306,66 @@ func TestWorkloadBackendHistoryFallbackAndAdmissionDeny(t *testing.T) {
 	t.Logf("default deny, foreign UID rejection before reads, explicit 6h empty-history live fallback: %+v", history)
 }
 
-func TestWorkloadBackendCheckpointReconnect(t *testing.T) {
+// A viewer that reconnects carries a timestamp, not resume state. Every source
+// reopens from that timestamp, the backend filters on it, and the stream itself
+// never carries resume state back.
+func TestWorkloadBackendTimestampReconnect(t *testing.T) {
 	api, service, authorized := workloadBackend(t, "Deployment", 3)
 	options := kubernetes.WorkloadLogStreamOptions{
 		Kind: "Deployment", Name: "orders", Namespace: "shop", UID: "root", Timestamps: true,
 	}
-	stopped := errors.New("checkpoint collected")
+	stopped := errors.New("watermark collected")
 	ctx, cancel := context.WithTimeout(authorized, 18*time.Second)
 	defer cancel()
-	checkpoint := ""
+	lines := 0
 	err := service.StreamWorkloadLogs(ctx, options, func(event kubernetes.WorkloadLogStreamEvent) error {
-		if event.Event == "line" && event.Sequence >= 128 && event.Cursor != "" {
-			checkpoint = event.Cursor
-			return stopped
+		if event.Cursor != "" {
+			t.Errorf("workload event carried resume state: %+v", event)
 		}
-		return nil
-	})
-	if !errors.Is(err, stopped) || checkpoint == "" || len(checkpoint) > 512 {
-		t.Fatalf("bounded checkpoint: err=%v bytes=%d", err, len(checkpoint))
-	}
-	awaitNoWorkloadReads(t, api)
-	options.Cursor = checkpoint
-	// The fixture restarts its deterministic clock on each read, then skips to
-	// sinceTime. Give reconnect its own bound rather than the first read's budget.
-	resumeContext, stopResume := context.WithTimeout(authorized, 18*time.Second)
-	defer stopResume()
-	seen := map[string]bool{}
-	err = service.StreamWorkloadLogs(resumeContext, options, func(event kubernetes.WorkloadLogStreamEvent) error {
 		if event.Event != "line" {
 			return nil
 		}
-		if event.ReplayUncertain {
-			t.Error("retained same-target checkpoint unexpectedly uncertain")
+		if _, parseErr := time.Parse(time.RFC3339Nano, event.Timestamp); parseErr != nil {
+			t.Fatalf("line timestamp: %v", parseErr)
 		}
-		if event.PodUID == "stranger" || event.Container != "app" {
-			t.Errorf("reconnect changed target: %+v", event)
-		}
-		seen[event.PodUID] = true
-		if len(seen) == 3 {
+		lines++
+		if lines >= 128 {
 			return stopped
 		}
 		return nil
 	})
-	if !errors.Is(err, stopped) || len(seen) != 3 {
-		t.Fatalf("reconnect: err=%v sources=%v", err, seen)
+	if !errors.Is(err, stopped) {
+		t.Fatalf("first read: err=%v lines=%d", err, lines)
 	}
 	awaitNoWorkloadReads(t, api)
-	for _, counter := range api.logStreamCounters() {
-		if counter.Requests != 2 || counter.SinceTime == "" {
-			t.Errorf("source did not resume via sinceTime: %+v", counter)
+	// The viewer resumes from the last line it rendered, backed off by the replay
+	// overlap. The fixture serves its own synthetic clock, so the reconnect is
+	// asserted on what reached the backend rather than on new lines.
+	watermark := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	options.SinceTime = watermark
+	resumeContext, stopResume := context.WithTimeout(authorized, 3*time.Second)
+	defer stopResume()
+	err = service.StreamWorkloadLogs(resumeContext, options, func(event kubernetes.WorkloadLogStreamEvent) error {
+		if event.Cursor != "" {
+			t.Errorf("reconnect emitted resume state: %+v", event)
+		}
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("reconnect: err=%v", err)
+	}
+	awaitNoWorkloadReads(t, api)
+	want := watermark.Add(-2 * time.Second).UTC().Format(time.RFC3339Nano)
+	counters := api.logStreamCounters()
+	if len(counters) != 3 {
+		t.Fatalf("sources=%d, want one read per Pod", len(counters))
+	}
+	for _, counter := range counters {
+		if counter.Requests != 2 || counter.SinceTime != want {
+			t.Errorf("source did not resume from the viewer timestamp: %+v want %s", counter, want)
 		}
 	}
-	t.Logf("checkpoint bytes=%d; three sources resumed using backend sinceTime; all reads canceled", len(checkpoint))
+	t.Logf("viewer watermark %s; three sources reopened at sinceTime=%s; no resume state in the stream", watermark.Format(time.RFC3339Nano), want)
 }
 
 func TestWorkloadBackendSlowConsumerPreservesTailAndCancels(t *testing.T) {

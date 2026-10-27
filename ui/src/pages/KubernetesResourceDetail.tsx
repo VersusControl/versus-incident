@@ -1,17 +1,24 @@
 import { useId, useMemo, useState, type ReactNode } from "react";
-import { Box, CheckCircle2, ChevronRight, Clock3, Copy, Download, Search } from "lucide-react";
+import { Box, CheckCircle2, ChevronRight, Copy, Download, Search } from "lucide-react";
 import type {
-  KubernetesChangesPage,
+  KubernetesChange,
   KubernetesCrashEvent,
-  KubernetesCrashPage,
   KubernetesGraph,
   KubernetesResource,
   KubernetesWorkload,
 } from "@/lib/api";
 import { projectedResourceYaml, yamlKeyEnd } from "@/lib/kubernetesProjection";
+import { CoverageMarker } from "@/components/CoverageMarker";
+import { KubernetesPendingNote } from "@/components/KubernetesPendingNote";
+import { KubernetesPreparingPanel } from "@/components/KubernetesPreparingPanel";
+import { pendingKindNames } from "@/lib/kubernetesPending";
+import { failureWarnings } from "./kubernetesWarningItems";
+import { CursorPagination } from "@/components/Pagination";
+import { useCursorPagination } from "@/lib/pagination";
 import { isKnownKubernetesTime } from "@/lib/kubernetesTime";
 import {
   useKubernetesCluster,
+  useKubernetesFirstReady,
   useKubernetesQuery,
 } from "@/lib/useKubernetesCluster";
 import {
@@ -19,8 +26,6 @@ import {
   downloadText,
   resourceContainerStates,
   resourceStart,
-  scopedCrashes,
-  useResourceCrashes,
   resourceRestarts,
 } from "@/lib/kubernetesResourceDetail";
 
@@ -484,6 +489,7 @@ export function ResourceRelations({
   onOpen: (resource: KubernetesResource) => void;
 }) {
   const mapId = useId();
+  const firstReadyAt = useKubernetesFirstReady();
   const { client } = useKubernetesCluster();
   const graph = useKubernetesQuery({
     queryKey: [
@@ -493,15 +499,14 @@ export function ResourceRelations({
       resource.namespace,
       resource.name,
     ],
-    queryFn: () =>
-      client.kubernetesNeighborhood({
+    queryFn: ({ signal }) =>
+      client.kubernetesRelated({
+        resource_id: resource.resource_id,
         namespace: resource.namespace,
-        kind: resource.kind,
         name: resource.name,
-        hops: 2,
-        max_nodes: 50,
-      }),
+      }, signal),
     retry: false,
+    refetchInterval: (query) => query.state.data?.sync.state === "syncing" ? 1000 : query.state.data?.sync.pending?.length ? 5000 : false,
   });
   const nodes = graph.isError ? [] : (graph.data?.nodes ?? []);
   const namespaceFor = (item: Related) => ["Node", "Namespace"].includes(item.kind) ? "" : item.namespace || resource.namespace || "";
@@ -572,9 +577,12 @@ export function ResourceRelations({
     if (edges.some((edge) => edge.from === current?.id && edge.to === node?.id && (edge.type === "uses" || edge.type === "configures"))) return "Uses";
     return "References";
   };
+  const pendingRelatedKinds = graph.isError ? new Set<string>() : pendingKindNames(graph.data?.sync.pending);
   const all = new Map<string, Related>();
   [
-    ...(related ?? []),
+    // Graph health confirms projected references; without a graph (failed
+    // request) or for kinds the graph has not listed yet, keep them as-is.
+    ...(related ?? []).filter((item) => graph.isError || nodeFor(item) || pendingRelatedKinds.has(item.kind)),
     ...(resource.owners ?? []).map((owner) => ({
       ...owner,
       namespace:
@@ -625,38 +633,67 @@ export function ResourceRelations({
   };
   const top = [...owners, resource];
   const dependencies = [...all.values()].filter((item) => groupFor(item) !== "Owned by");
-  const width = Math.max(760, top.length * 144 + (top.length - 1) * 36 + 32);
-  const nodeWidth = 144;
-  const topX = (index: number) => 16 + index * (width - 32 - nodeWidth) / Math.max(1, top.length - 1);
-  const columns = Math.max(1, Math.min(5, dependencies.length));
-  const bottomX = (index: number) => 16 + index % columns * (width - 32 - nodeWidth) / Math.max(1, columns - 1);
-  const bottomY = (index: number) => 188 + Math.floor(index / columns) * 88;
+  // Layout: the ownership chain sits on one row; dependencies form a grid
+  // below it. Every dependency edge reaches a shared bus line between the two,
+  // and edges from lower grid rows climb through the gutter left of their
+  // column so they never pass through another node.
+  const nodeWidth = 200;
+  const nodeHeight = 44;
+  const margin = 16;
+  const columnGap = 40;
+  const rowGap = 72;
+  const chainGap = 64;
+  const chainY = 16;
+  const chainBottom = chainY + nodeHeight;
+  const busY = chainBottom + 28;
+  const firstRowY = chainBottom + 76;
+  const columns = Math.max(1, Math.min(3, dependencies.length));
+  const rows = Math.ceil(dependencies.length / columns);
+  const width = Math.max(
+    760,
+    columnGap + columns * nodeWidth + (columns - 1) * columnGap + margin,
+    2 * margin + top.length * nodeWidth + (top.length - 1) * chainGap,
+  );
+  const topX = (index: number) => margin + index * (width - 2 * margin - nodeWidth) / Math.max(1, top.length - 1);
+  const columnStep = columns > 1 ? (width - columnGap - margin - nodeWidth) / (columns - 1) : 0;
+  const bottomX = (index: number) => columnGap + index % columns * columnStep;
+  const bottomY = (index: number) => firstRowY + Math.floor(index / columns) * (nodeHeight + rowGap);
+  // Up to four rows get their own lane per gutter; taller maps share one trunk
+  // per gutter (every dependency edge ends at the same root anyway).
+  const laneStep = rows <= 4 ? 8 : 0;
+  const nameLimit = Math.floor((nodeWidth - 24) / 6.2);
+  const mapHeight = dependencies.length ? bottomY(dependencies.length - 1) + nodeHeight + margin : chainBottom + 40;
   const mapNode = (item: Related, x: number, y: number, selected = false) => {
     const health = nodeFor(item)?.health;
     const enabled = !selected && Boolean(item.resource_id || resourceIDs[item.kind]);
     const kind = item.kind === "HorizontalPodAutoscaler" ? "HPA" : item.kind === "PersistentVolumeClaim" ? "PVC" : item.kind;
-    return <g key={`${item.kind}:${namespaceFor(item)}:${item.name}`} transform={`translate(${x} ${y})`} role={enabled ? "button" : undefined} tabIndex={enabled ? 0 : undefined} aria-label={enabled ? `Open ${item.kind} ${item.name}` : `${item.kind} ${item.name}`} onClick={enabled ? () => open(item) : undefined} onKeyDown={(event) => { if (enabled && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); open(item); } }} className={`relationship-node ${selected ? "relationship-current" : ""}`}>
+    return <g key={`${item.kind}:${namespaceFor(item)}:${item.name}`} transform={`translate(${x} ${y})`} role={enabled ? "button" : undefined} tabIndex={enabled ? 0 : undefined} aria-label={enabled ? `Open ${item.kind} ${item.name}` : `${item.kind} ${item.name}`} onClick={enabled ? () => open(item) : undefined} onKeyDown={(event) => { if (enabled && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); open(item); } }} className={`relationship-node ${selected ? "relationship-current" : ""}`} data-relationship-node={nodeFor(item)?.id}>
       <title>{item.kind} {item.name}: {statusFor(item)}</title>
-      <rect width={nodeWidth} height="44" rx="6" />
+      <rect width={nodeWidth} height={nodeHeight} rx="6" />
       <text x="12" y="16" className="relationship-kind">{selected ? `THIS ${kind.toUpperCase()}` : kind.toUpperCase()}</text>
-      <text x="12" y="33" className="relationship-name">{item.name.length > 21 ? `${item.name.slice(0, 20)}…` : item.name}</text>
+      <text x="12" y="33" className="relationship-name">{item.name.length > nameLimit ? `${item.name.slice(0, nameLimit - 1)}…` : item.name}</text>
       <circle cx={nodeWidth - 10} cy="12" r="3.5" className={health === "healthy" ? "fill-sev-ok" : health === "degraded" || health === "unhealthy" ? "fill-sev-warning" : "fill-ink-400"} />
     </g>;
   };
+  // A background resync after the first publication keeps the graph the reader
+  // is on; only a cluster that has never published has nothing to keep.
+  if (graph.isPending || (graph.data?.sync.state === "syncing" && !firstReadyAt)) return <section aria-label="Related resources">{graph.isPending ? <div role="status" aria-label="Loading related resources" className="space-y-2 p-4"><div className="sk h-12" /><div className="sk h-20" /></div> : <div className="p-3"><KubernetesPreparingPanel progress={graph.data?.sync.progress} /></div>}</section>;
   return (
     <section aria-label="Related resources" className="resource-related space-y-4">
+      <CoverageMarker reasons={failureWarnings(graph.data?.partial_failures).map((warning) => warning.content)} />
+      <KubernetesPendingNote kinds={graph.isError ? undefined : [...pendingKindNames(graph.data?.sync.pending)]} />
       <div
         className="relationship-map min-w-0 rounded-control border border-ink-700 bg-surface-sunken p-4"
         aria-label="Relationship map"
       >
         <header className="mb-4 flex flex-wrap items-center justify-between gap-2"><h3 className="text-xs font-semibold">Relationship map</h3><span className="flex gap-3 text-2xs text-ink-400"><span><span className="text-sev-ok">●</span> Healthy</span><span><span className="text-sev-warning">●</span> Degraded</span><span>● No status</span></span></header>
-        <div className="relationship-canvas"><svg viewBox={`0 0 ${width} ${dependencies.length ? bottomY(dependencies.length - 1) + 74 : 100}`} style={{ minWidth: width }} aria-label="Directed resource relationships">
+        <div className="relationship-canvas"><svg viewBox={`0 0 ${width} ${mapHeight}`} style={{ minWidth: width }} aria-label="Directed resource relationships">
           <defs><marker id={mapId} markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0 0L6 3L0 6" className="fill-ink-500" /></marker></defs>
           {top.slice(0, -1).map((item, index) => {
             const next = top[index + 1];
             const edge = edges.find((candidate) => candidate.from === nodeFor(item)?.id && candidate.to === nodeFor(next)?.id && ["manages", "scales"].includes(candidate.type));
             const projectedOwner = next === resource && resource.owners?.some((owner) => owner.kind === item.kind && owner.name === item.name);
-            return edge || projectedOwner ? <g key={`chain-${index}`} data-relationship-from={edge?.from} data-relationship-to={edge?.to}><path d={`M${topX(index) + nodeWidth} 38H${topX(index + 1)}`} markerEnd={`url(#${mapId})`} /><text x={(topX(index) + nodeWidth + topX(index + 1)) / 2} y="30" textAnchor="middle">{edge?.type === "scales" ? "scales" : "owns"}</text></g> : null;
+            return edge || projectedOwner ? <g key={`chain-${index}`} data-relationship-from={edge?.from} data-relationship-to={edge?.to}><path d={`M${topX(index) + nodeWidth} ${chainY + 22}H${topX(index + 1)}`} markerEnd={`url(#${mapId})`} /><text x={(topX(index) + nodeWidth + topX(index + 1)) / 2} y={chainY + 14} textAnchor="middle">{edge?.type === "scales" ? "scales" : "owns"}</text></g> : null;
           })}
           {dependencies.map((item, index) => {
             const rootId = nodeFor(resource)?.id;
@@ -667,8 +704,21 @@ export function ResourceRelations({
             const x = bottomX(index) + nodeWidth / 2, y = bottomY(index);
             if (!edge && !(group === "Runs on" && resource.summary?.node === item.name)) return null;
             const inbound = edge?.to === rootId;
-            const path = inbound ? `M${x} ${y}V134H${rootX}V60` : `M${rootX} 60V134H${x}V${y}`;
-            return <g key={`branch-${index}`} data-relationship-from={edge?.from} data-relationship-to={edge?.to}><path d={path} markerEnd={`url(#${mapId})`} /><text x={x} y={y - 12} textAnchor="middle">{group.toLowerCase()}</text></g>;
+            const row = Math.floor(index / columns);
+            // First-row nodes rise straight to the bus. Lower rows step into the
+            // gap just above themselves, cross to their own lane in the column
+            // gutter (deeper rows use lanes further from the column), and climb.
+            const lane = bottomX(index) - 12 - (row - 1) * laneStep;
+            const jogY = y - 16;
+            const route = row === 0
+              ? [[x, y], [x, busY], [rootX, busY], [rootX, chainBottom]]
+              : [[x, y], [x, jogY], [lane, jogY], [lane, busY], [rootX, busY], [rootX, chainBottom]];
+            const points = inbound ? route : [...route].reverse();
+            const path = points.map(([px, py], step) => `${step ? "L" : "M"}${px} ${py}`).join("");
+            const label = row === 0
+              ? { x: x + 6, y: y - 20, anchor: "start" as const }
+              : { x: (x + lane) / 2, y: jogY - 5, anchor: "middle" as const };
+            return <g key={`branch-${index}`} data-relationship-from={edge?.from} data-relationship-to={edge?.to} data-relationship-node-ref={nodeFor(item)?.id}><path d={path} markerEnd={`url(#${mapId})`} /><text x={label.x} y={label.y} textAnchor={label.anchor}>{group.toLowerCase()}</text></g>;
           })}
           {top.map((item, index) => mapNode(item, topX(index), 16, index === top.length - 1))}
           {dependencies.map((item, index) => mapNode(item, bottomX(index), bottomY(index)))}
@@ -763,85 +813,50 @@ export function ResourceTimeline({
   resource: KubernetesResource;
   onCrash: (crash: KubernetesCrashEvent) => void;
 }) {
-  const { client } = useKubernetesCluster();
+  const { client, key } = useKubernetesCluster();
   const [hours, setHours] = useState(6);
-  const now = Date.now();
-  const changes = useKubernetesQuery({
+  const [now] = useState(Date.now);
+  const [generation, setGeneration] = useState(0);
+  const paging = useCursorPagination(JSON.stringify([resource.uid, resource.kind, resource.namespace, resource.name, hours, generation]));
+  const timeline = useKubernetesQuery({
     queryKey: [
-      "resource-detail-changes",
+      "resource-detail-timeline",
       resource.uid,
       resource.kind,
       resource.namespace,
       resource.name,
       hours,
+      generation,
+      paging.cursor,
     ],
-    queryFn: () =>
-      client.kubernetesChanges({
+    queryFn: ({ signal }) =>
+      client.kubernetesTimeline({
         namespace: resource.namespace,
-        kind: resource.kind,
-        name: resource.name,
-        since: new Date(Date.now() - hours * 3600000).toISOString(),
-        until: new Date().toISOString(),
+        resource_uid: resource.uid,
+        since: new Date(now - hours * 3600000).toISOString(),
+        until: new Date(now).toISOString(),
         limit: 100,
-      }),
-    retry: false,
-  });
-  const crashes = useResourceCrashes(resource);
-  const issues = useKubernetesQuery({
-    queryKey: ["resource-detail-breaks", resource.namespace, resource.uid],
-    queryFn: () =>
-      client.kubernetesIssues({
-        namespace: resource.namespace,
-        root_uid: resource.uid,
-        broken: true,
-        limit: 100,
-      }),
+        cursor: paging.cursor,
+      }, signal),
+    placeholderData: (previous, query) => JSON.stringify(query?.queryKey.slice(0, -1)) === JSON.stringify(key("resource-detail-timeline", resource.uid, resource.kind, resource.namespace, resource.name, hours, generation)) ? previous : undefined,
     enabled: Boolean(resource.uid),
     retry: false,
+    refetchInterval: (query) => query.state.data?.sync.state === "syncing" ? 1000 : false,
   });
-  const breaks = new Map(
-    (issues.isError ? [] : (issues.data?.items ?? []))
-      .filter((issue) => issue.root.uid === resource.uid && issue.broke_at)
-      .map((issue) => [issue.broke_at!, issue]),
+  const data = timeline.isError ? undefined : timeline.data;
+  const history = (data?.items ?? []).map<{ id: string; at: string; type: string; fields?: KubernetesChange["fields"]; crash?: KubernetesCrashEvent }>((entry) =>
+    entry.type === "change" ? { id: entry.id, at: entry.at, type: entry.change.type, fields: entry.change.fields }
+      : entry.type === "crash" ? { id: entry.id, at: entry.at, type: "crash", crash: entry.crash }
+        : { id: entry.id, at: entry.at, type: "break" },
   );
-  const history = [
-    ...(changes.isError ? [] : (changes.data?.items ?? []))
-      .filter((item) => !resource.uid || !item.uid || item.uid === resource.uid)
-      .map((item) => ({
-        id: item.id,
-        at: item.at,
-        type: item.type,
-        fields: item.fields,
-        crash: undefined as KubernetesCrashEvent | undefined,
-      })),
-    ...scopedCrashes(crashes.isError ? undefined : crashes.data, resource).map(
-      (crash) => ({
-        id: crash.id,
-        at: crash.at,
-        type: "crash",
-        fields: undefined,
-        crash,
-      }),
-    ),
-    ...[...breaks].map(([at]) => ({
-      id: `break-${resource.uid}-${at}`,
-      at,
-      type: "break",
-      fields: undefined,
-      crash: undefined,
-    })),
-  ]
-    .filter(
-      (item) =>
-        Date.parse(item.at) >= now - hours * 3600000 &&
-        Date.parse(item.at) <= now,
-    )
-    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
-  const crashPage = crashes.isError ? undefined : crashes.data;
-  const captureStart = isKnownKubernetesTime(crashPage?.started_at) ? Date.parse(crashPage.started_at) : null;
-  const unrecordedWidth = captureStart === null ? 0 : Math.max(0, Math.min(100, (captureStart - (now - hours * 3600000)) / (hours * 3600000) * 100));
-  const podCoverage = crashPage?.coverage?.Pod;
-  const partialHistory = Boolean(changes.data?.next || changes.data?.truncated || changes.data?.sync.partial || changes.data?.partial_failures?.length || crashPage?.next || crashPage?.sync.partial || crashPage?.capture.behind || crashPage?.capture.mode && crashPage.capture.mode !== "continuous" || crashPage && (!podCoverage || !isKnownKubernetesTime(podCoverage.from) || !isKnownKubernetesTime(podCoverage.to) || Date.parse(podCoverage.from) > now - hours * 3600000 || Date.parse(podCoverage.to) < now - 60000) || hasHistoryGaps(changes.data, crashPage));
+  const coverageReasons = [
+    ...failureWarnings(data?.partial_failures).map((warning) => warning.content),
+    ...(data?.gaps?.length ? ["History capture does not cover the whole range"] : []),
+    ...(["stale", "error", "partial"].includes(data?.sync.state ?? "") ? ["Some history could not be read"] : []),
+    ...(!resource.uid ? ["Resource identity could not be read"] : []),
+    ...(timeline.isError ? ["History could not be read"] : []),
+  ];
+  const syncing = timeline.isPending && timeline.isFetching || data?.sync.state === "syncing";
   return (
     <section aria-label="Resource change history" className="resource-history space-y-3">
       <div className="flex items-center gap-2">
@@ -858,16 +873,16 @@ export function ResourceTimeline({
           </button>
         ))}
         </div>
+        <CoverageMarker reasons={coverageReasons} />
         <span className="sr-only">
           {resource.name}
         </span>
       </div>
-      <div className="flex flex-wrap justify-end gap-3 text-2xs text-ink-400" aria-label="History legend"><span><span className="text-link">●</span> change</span><span><span className="text-sev-critical">│</span> break</span><span><span className="text-sev-critical">×</span> crash</span><span>░ no history</span></div>
+      {history.length > 0 && <><div className="flex flex-wrap justify-end gap-3 text-2xs text-ink-400" aria-label="History legend"><span><span className="text-link">●</span> change</span><span><span className="text-sev-critical">│</span> break</span><span><span className="text-sev-critical">×</span> crash</span></div>
       <div
         className="relative h-[86px] rounded-control border border-ink-700 bg-surface-sunken px-4"
         aria-label="Resource timeline lane"
       >
-        {unrecordedWidth > 0 && <div data-history-coverage="uncaptured-crashes" className="history-uncaptured" style={{ width: `calc((100% - 32px) * ${unrecordedWidth / 100})` }} title="Before the crash journal started; change history may still be present"><span>No crash capture</span></div>}
         <span className="absolute left-4 top-3 text-2xs uppercase tracking-wide text-ink-400">This {resource.kind}</span>
         <div className="absolute inset-x-4 top-12 border-t border-ink-600" />
         {history.map((item) => (
@@ -888,15 +903,10 @@ export function ResourceTimeline({
           >{item.crash ? "×" : item.type === "break" ? "│" : "●"}</button>
         ))}
         <div className="absolute inset-x-4 bottom-2 flex justify-between text-2xs text-ink-400">{[0, 1, 2, 3].map((tick) => <span key={tick}>{tick === 3 ? "now" : new Date(now - hours * 3600000 * (1 - tick / 3)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>)}</div>
-      </div>
-      {(changes.isPending || (crashes.isPending && crashes.isFetching)) && (
+      </div></>}
+      {syncing && (
         <p role="status" className="text-xs text-ink-400">
           Loading resource history.
-        </p>
-      )}
-      {(changes.isError || crashes.isError || issues.isError) && (
-        <p role="status" className="text-xs text-ink-400">
-          Some resource history is unavailable.
         </p>
       )}
       <ol className="space-y-3">
@@ -940,32 +950,15 @@ export function ResourceTimeline({
           </li>
         ))}
       </ol>
-      {!history.length && !changes.isPending && (
+      {!history.length && !timeline.isFetching && !syncing && (
         <p className="py-4 text-xs text-ink-400">
-          No recorded changes or crashes in this range.
+          No changes or crashes in this range.
         </p>
       )}
-      {isKnownKubernetesTime(crashes.data?.started_at) && (
-        <p className="rounded-control border border-dashed border-ink-600 px-3 py-2 text-2xs text-ink-400">
-          <Clock3 size={12} aria-hidden="true" />Crash history starts <time dateTime={crashes.data!.started_at} title={new Date(crashes.data!.started_at).toLocaleString()}>{clock(crashes.data!.started_at).slice(0, 5)}</time> (capture started)
-        </p>
-      )}
-      {partialHistory && (
-        <p className="text-2xs text-ink-400">
-          Partial history; capture gaps or bounded results may omit events in this range.
-        </p>
-      )}
+      {data && data.total > 0 && <p className="text-2xs text-ink-400">{data.total} events and {data.crash_count} crashes</p>}
+      {timeline.isError && <button type="button" className="btn text-link" onClick={() => { paging.resetPage(); setGeneration((value) => value + 1); }}>{paging.cursor ? "Restart history" : "Retry history"}</button>}
+      <CursorPagination state={paging} busy={timeline.isFetching} next={data?.next} />
     </section>
-  );
-}
-function hasHistoryGaps(
-  changes?: KubernetesChangesPage,
-  crashes?: KubernetesCrashPage,
-) {
-  return Boolean(
-    changes?.gaps?.length ||
-      crashes?.gaps?.length ||
-      crashes?.capture_gaps?.length,
   );
 }
 
